@@ -410,3 +410,58 @@ func TestAnnounceCompletionTool_DrivesCallback(t *testing.T) {
 		t.Fatalf("callback got (%q, %q)", gotOutcome, gotUnverified)
 	}
 }
+
+func TestAnnouncePlan_AcceptsStructuredContext(t *testing.T) {
+	orig := planStateCallback
+	origProgress := planProgressCallback
+	t.Cleanup(func() {
+		planStateCallback = orig
+		planProgressCallback = origProgress
+	})
+
+	var gotDoc agent.PlanDocumentInfo
+	SetPlanStateCallback(func(goal string, doc agent.PlanDocumentInfo, steps []agent.PlanStepInfo) bool {
+		gotDoc = doc
+		return true
+	})
+	SetPlanProgressCallback(nil)
+
+	context := "## Problem\nSomething is wrong.\n\n" +
+		"```\n" +
+		"## inside fenced diagram A -> B -> C\n" +
+		"```\n\n" +
+		"| A | B |\n| - | - |\n| 1 | 2 |\n"
+
+	args := AnnouncePlanArgs{
+		Goal:         "Structured context plan",
+		Context:      context,
+		WhatNotToDo:  "Do not change the Backend interface.",
+		Verification: "go test ./pkg/tools/...",
+		Steps: []PlanStepInput{
+			{
+				Name:        "step-one",
+				Description: "desc one",
+				Details:     "do x then y",
+				Summary:     "user sees the thing",
+				Outcome:     "the thing is done",
+				Files:       []PlanFileChangeInput{{Path: "pkg/x/y.go", Kind: "modify"}},
+				Verify:      "go test ./pkg/tools/ -run TestAnnouncePlan",
+				VerifyKind:  "unit",
+			},
+		},
+	}
+
+	res, err := announcePlan(nil, args)
+	if err != nil {
+		t.Fatalf("announcePlan error: %v", err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("status = %q, want ok (message: %q)", res.Status, res.Message)
+	}
+	if !strings.Contains(gotDoc.Context, "## inside fenced diagram A -> B -> C") {
+		t.Errorf("doc.Context missing fenced diagram line, got:\n%s", gotDoc.Context)
+	}
+	if !strings.Contains(gotDoc.Context, "| 1 | 2 |") {
+		t.Errorf("doc.Context missing table row, got:\n%s", gotDoc.Context)
+	}
+}

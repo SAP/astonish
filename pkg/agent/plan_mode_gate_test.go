@@ -260,3 +260,16 @@ func TestPlanModeSystemContext_StrategySummary(t *testing.T) {
 		t.Error("PlanModeSystemContext should NOT contain 'WITHOUT any preceding prose' (replaced by strategy summary)")
 	}
 }
+
+func TestGraphPlanModeSystemContext_UnderstandFirst(t *testing.T) {
+	ctx := GraphPlanModeSystemContext
+	for _, want := range []string{
+		"UNDERSTAND BEFORE YOU SHAPE THE CHANGE",
+		"not merely to locate the files you will edit",
+		"surface A-vs-B options to the user",
+	} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("GraphPlanModeSystemContext should mention %q (understand-first discipline)", want)
+		}
+	}
+}

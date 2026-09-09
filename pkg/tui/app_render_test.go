@@ -72,8 +72,11 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 	if !strings.Contains(out, "✓ Search kubernetes") {
 		t.Fatalf("missing search preview row: %q", out)
 	}
-	if !strings.Contains(out, "✓ Run command `kubectl get clusters`") {
-		t.Fatalf("missing command preview row: %q", out)
+	if !strings.Contains(out, "✓ Run command kubectl get clusters") {
+		t.Fatalf("collapsed command should share one line with the label: %q", out)
+	}
+	if strings.Contains(out, "command:") {
+		t.Fatalf("collapsed activity should not use a separate command: body: %q", out)
 	}
 	if !strings.Contains(out, "✓ Read file README.md") {
 		t.Fatalf("collapsed activity should show every tool row: %q", out)
@@ -86,30 +89,42 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 	}
 }
 
-func TestRenderActivityCollapsedCommandRowsStaySingleLine(t *testing.T) {
+func TestRenderActivityCollapsedShowsFullCommand(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 100}
+	short := "kubectl get clusters"
 	item := events.Item{
 		Kind: events.ItemActivity,
 		Steps: []events.ToolStep{
-			{Name: "run_terminal_command", Args: map[string]any{"command": "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"}, Status: "complete"},
+			{Name: "run_terminal_command", Args: map[string]any{"command": short}, Status: "running"},
 		},
 	}
-	out := stripANSI(m.renderActivity(item, 56))
-	lines := strings.Split(out, "\n")
-	toolRows := 0
-	for _, line := range lines {
-		if strings.Contains(line, "Run command") {
-			toolRows++
-			if strings.Contains(line, "APP_CREDENTIAL") {
-				t.Fatalf("collapsed command row should truncate before wrapping command continuation: %q", line)
-			}
-			if got := lipgloss.Width(line); got > 56 {
-				t.Fatalf("collapsed command row width=%d want <=56: %q", got, line)
-			}
-		}
+	out := stripANSI(m.renderActivity(item, 80))
+	if !strings.Contains(out, "Run command kubectl get clusters") {
+		t.Fatalf("short command should share one line with the label when collapsed: %q", out)
 	}
-	if toolRows != 1 {
-		t.Fatalf("expected one single-line command row, got %d in %q", toolRows, out)
+	if strings.Contains(out, "command:") {
+		t.Fatalf("collapsed short command should not use a separate command: body: %q", out)
+	}
+	if strings.Contains(out, "Running `") {
+		t.Fatalf("must not use 40-char liveHint command clip: %q", out)
+	}
+
+	long := "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"
+	item.Steps[0].Args = map[string]any{"command": long}
+	collapsed := stripANSI(m.renderActivity(item, 56))
+	if strings.Contains(collapsed, "command:") {
+		t.Fatalf("collapsed command should stay on the Run command row, got %q", collapsed)
+	}
+	if strings.Contains(collapsed, "echo done") {
+		t.Fatalf("long collapsed command should truncate before the end of the command: %q", collapsed)
+	}
+	if !strings.Contains(collapsed, "Run command") {
+		t.Fatalf("long collapsed command should still show the Run command row: %q", collapsed)
+	}
+	item.Expanded = true
+	expanded := stripANSI(m.renderActivity(item, 56))
+	if !strings.Contains(expanded, "APP_CREDENTIAL") || !strings.Contains(expanded, "echo done") {
+		t.Fatalf("expanded view should show the full command, got %q", expanded)
 	}
 }
 

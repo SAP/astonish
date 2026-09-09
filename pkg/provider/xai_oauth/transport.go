@@ -1,11 +1,19 @@
 package xai_oauth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 )
+
+// ErrReauthRequired is a sentinel error indicating that the xAI OAuth tokens
+// can no longer be renewed automatically and the user must re-authenticate
+// (run the device-code flow again). Callers detect it with errors.Is; it is
+// wrapped around both the refresh-failure case and the case where the access
+// token is expired with no usable refresh token.
+var ErrReauthRequired = errors.New("xai oauth: re-authentication required")
 
 // oauthTransport is an http.RoundTripper that automatically manages OAuth
 // access tokens, refreshing them when they are about to expire.
@@ -54,7 +62,7 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tokenResp, err := refreshAccessTokenFromURL(req.Context(), t.clientID, t.refreshToken, endpoint)
 		if err != nil {
 			t.mu.Unlock()
-			return nil, fmt.Errorf("refresh xAI OAuth token: %w", err)
+			return nil, fmt.Errorf("%w: refresh xAI OAuth token: %v", ErrReauthRequired, err)
 		}
 		t.accessToken = tokenResp.AccessToken
 		if tokenResp.RefreshToken != "" {
@@ -69,6 +77,13 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	expiresAt := t.expiresAt
 	onTokenRefresh := t.onTokenRefresh
 	t.mu.Unlock()
+
+	// Terminal case: the access token is expired and there is no refresh token
+	// to renew it (e.g. the refresh token was never present or was cleared).
+	// No automatic recovery is possible — signal that the user must re-auth.
+	if !expiresAt.IsZero() && time.Until(expiresAt) < 0 && refreshToken == "" {
+		return nil, fmt.Errorf("%w: xAI access token expired and no refresh token available", ErrReauthRequired)
+	}
 
 	if refreshed && onTokenRefresh != nil {
 		onTokenRefresh(token, refreshToken, expiresAt)

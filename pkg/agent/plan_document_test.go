@@ -819,3 +819,52 @@ func TestDowngradeHeadings(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanDocument_RoundTrip_StructuredContext(t *testing.T) {
+	orig := planClock
+	planClock = func() time.Time { return time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC) }
+	defer func() { planClock = orig }()
+
+	context := "## Problem\n" +
+		"We need to preserve fenced content verbatim.\n\n" +
+		"```text\n" +
+		"## inside-fence comment\n" +
+		"A --> B --> C\n" +
+		"```\n\n" +
+		"| A | B |\n" +
+		"| - | - |\n" +
+		"| 1 | 2 |\n"
+
+	doc := PlanDocumentInfo{
+		Context:      context,
+		Verification: "run go test ./pkg/agent/...",
+	}
+	steps := []PlanStepInfo{
+		{Name: "explore", Description: "look around", Summary: "understand the code", Outcome: "map exists", Verify: "go test ./pkg/agent/...", VerifyKind: "unit"},
+		{Name: "implement", Description: "make changes", Summary: "apply the fix", Outcome: "tests pass", Verify: "go test ./pkg/agent/...", VerifyKind: "unit"},
+	}
+
+	rendered := RenderPlanFromInfoWithDoc("Some goal", doc, steps)
+
+	parsedDoc, parsedGoal, parsedSteps, err := ParsePlanDocument(rendered)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument returned error: %v\n---\n%s", err, rendered)
+	}
+
+	if !strings.Contains(parsedDoc.Context, "## inside-fence comment") {
+		t.Errorf("parsed Context missing verbatim in-fence line\n---\n%s", parsedDoc.Context)
+	}
+	if !strings.Contains(parsedDoc.Context, "| 1 | 2 |") {
+		t.Errorf("parsed Context missing table row\n---\n%s", parsedDoc.Context)
+	}
+
+	// Idempotency: render again from parsed doc/steps, parse, compare context.
+	rendered2 := RenderPlanFromInfoWithDoc(parsedGoal, parsedDoc, parsedSteps)
+	parsedDoc2, _, _, err := ParsePlanDocument(rendered2)
+	if err != nil {
+		t.Fatalf("ParsePlanDocument (2nd) returned error: %v\n---\n%s", err, rendered2)
+	}
+	if parsedDoc2.Context != parsedDoc.Context {
+		t.Errorf("round-trip not stable:\nfirst:\n%s\nsecond:\n%s", parsedDoc.Context, parsedDoc2.Context)
+	}
+}

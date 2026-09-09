@@ -192,8 +192,11 @@ go test ./pkg/tui -count=1
 	if !strings.Contains(plain, "$ go test ./pkg/tui") {
 		t.Fatalf("expected verify command:\n%s", plain)
 	}
-	if !strings.Contains(plain, "CONTEXT") {
-		t.Fatalf("expected CONTEXT band:\n%s", plain)
+	if strings.Contains(plain, "CONTEXT") {
+		t.Fatalf("CONTEXT band label should be dropped (overview renders label-free):\n%s", plain)
+	}
+	if !strings.Contains(plain, "Why this change is needed") {
+		t.Fatalf("expected context overview content rendered without a label:\n%s", plain)
 	}
 	if !strings.Contains(plain, "WHAT NOT TO CHANGE") {
 		t.Fatalf("expected WHAT NOT TO CHANGE band:\n%s", plain)
@@ -580,4 +583,153 @@ func TestRenderPlanDocumentCodeBlockFrameAlignment(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanCard_TitleUsesPlanTitleStyle verifies the plan card's title line is
+// rendered with the distinct PlanTitle accent (orange 208 in code mode), not
+// the band-label PlanHeader style. In NO_COLOR mode the title text is present.
+func TestPlanCard_TitleUsesPlanTitleStyle(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+	// Ensure the code-mode (orange) theme is active for the color assertion.
+	m.theme = DefaultTheme()
+
+	content := `# Execution Plan
+
+**Goal:** Distinct title styling
+
+_Last updated: 2025-01-01T00:00:00Z_
+
+## Phases
+
+- [ ] **phase-one** — First step
+
+Legend: ` + "`[ ]`" + ` pending
+`
+	out := m.renderPlanDocument(events.Item{Content: content}, 80)
+
+	// The title text must appear (icon + goal).
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Distinct title styling") {
+		t.Fatalf("expected plan title text in output:\n%s", plain)
+	}
+
+	// The title line must carry the PlanTitle accent (orange 208). Find the
+	// rendered line containing the title and assert it uses the 208 foreground.
+	var titleLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(stripANSI(l), "Distinct title styling") {
+			titleLine = l
+			break
+		}
+	}
+	if titleLine == "" {
+		t.Fatalf("could not find rendered title line in output:\n%s", out)
+	}
+	if !strings.Contains(titleLine, "38;5;208") {
+		t.Fatalf("expected PlanTitle accent (208) on the title line, got:\n%q", titleLine)
+	}
+
+	// NO_COLOR: title text still present, no ANSI escapes.
+	m.theme = plainTheme()
+	plainOut := m.renderPlanDocument(events.Item{Content: content}, 80)
+	if !strings.Contains(plainOut, "Distinct title styling") {
+		t.Fatalf("expected title text in NO_COLOR output:\n%s", plainOut)
+	}
+}
+
+// TestPlanCard_RichOverview_EndToEnd renders a plan whose Context carries a
+// structured overview (Problem heading, a fenced flow diagram, a files table,
+// and a Boundaries heading) and asserts the two tracks combine: a colored
+// PlanTitle, the table rendered inside the CONTEXT band, the fenced block, and
+// at least two visually distinct heading styles.
+func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	m.ready = true
+	m.layout()
+	m.theme = DefaultTheme()
+
+	content := "# Execution Plan\n\n" +
+		"**Goal:** Rich overview end to end\n\n" +
+		"_Last updated: 2025-01-01T00:00:00Z_\n\n" +
+		"## Context\n\n" +
+		"## Problem\n\nThe overview is too flat.\n\n" +
+		"```text\nrequest --> transport --> refresh --> persist\n```\n\n" +
+		"| Component | Change |\n| --- | --- |\n| renderer | tiered headings |\n| theme | plan title |\n\n" +
+		"## Boundaries\n\nDo not change the parser grammar.\n\n" +
+		"## Phases\n\n" +
+		"- [ ] **phase-one** — First step\n\n" +
+		"Legend: `[ ]` pending\n"
+
+	out := m.renderPlanDocument(events.Item{Content: content}, 80)
+	plain := stripANSI(out)
+
+	// (a) colored plan title.
+	var titleLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(stripANSI(l), "Rich overview end to end") {
+			titleLine = l
+			break
+		}
+	}
+	if titleLine == "" || !strings.Contains(titleLine, "38;5;208") {
+		t.Fatalf("expected colored PlanTitle (208) on the title line, got:\n%q", titleLine)
+	}
+
+	// (b) NO "CONTEXT" band label — the overview flows straight from the title.
+	if strings.Contains(plain, "CONTEXT") {
+		t.Fatalf("did not expect a CONTEXT band label; overview should be label-free:\n%s", plain)
+	}
+
+	// (c) the overview content renders: the table rows and the fenced flow block.
+	if !strings.Contains(plain, "tiered headings") || !strings.Contains(plain, "plan title") {
+		t.Fatalf("expected the markdown table rows rendered in the overview:\n%s", plain)
+	}
+	if !strings.Contains(plain, "request --> transport --> refresh --> persist") {
+		t.Fatalf("expected the fenced flow diagram rendered in the overview:\n%s", plain)
+	}
+
+	// (d) section headings (Problem / Boundaries) render in the code-mode accent
+	// (orange 208), matching the reference's colored section titles.
+	if !strings.Contains(plain, "Problem") || !strings.Contains(plain, "Boundaries") {
+		t.Fatalf("expected Problem and Boundaries section headings in the overview:\n%s", plain)
+	}
+	var problemLine string
+	for _, l := range strings.Split(out, "\n") {
+		s := stripANSI(l)
+		if strings.Contains(s, "Problem") && !strings.Contains(s, "too flat") {
+			problemLine = l
+			break
+		}
+	}
+	if problemLine == "" || !strings.Contains(problemLine, "38;5;208") {
+		t.Fatalf("expected the 'Problem' section heading to render in the accent color (208), got:\n%q", problemLine)
+	}
+
+	// (e) vertical pace: a full-width heading bar under Problem, then a blank
+	// line, then the body — so the section reads as a room, not a packed wall.
+	var problemIdx = -1
+	plainLines := strings.Split(plain, "\n")
+	for i, l := range plainLines {
+		if strings.Contains(l, "Problem") && !strings.Contains(l, "too flat") {
+			problemIdx = i
+			break
+		}
+	}
+	if problemIdx < 0 || problemIdx+2 >= len(plainLines) {
+		t.Fatalf("expected Problem heading plus a rule and a blank line after it:\n%s", plain)
+	}
+	if !strings.Contains(plainLines[problemIdx+1], "─") {
+		t.Fatalf("expected a heading bar under Problem, got %q", plainLines[problemIdx+1])
+	}
+	blankInterior := strings.Trim(strings.ReplaceAll(plainLines[problemIdx+2], "│", ""), " ─")
+	if blankInterior != "" {
+		t.Fatalf("expected a blank line after the Problem heading bar, got %q", plainLines[problemIdx+2])
+	}
+	if !strings.Contains(plainLines[problemIdx+3], "too flat") {
+		t.Fatalf("expected the Problem body after the blank line, got %q", plainLines[problemIdx+3])
+	}
+}
+
+
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"os"
@@ -19,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/SAP/astonish/pkg/tui/render"
@@ -145,6 +147,16 @@ type model struct {
 	turnCancel context.CancelFunc
 	// eventCh is drained via tea.Cmds while a turn is active.
 	eventCh <-chan events.Event
+	// reauthProvider holds the name of the provider instance awaiting an
+	// xAI OAuth re-authentication confirmation. Empty means no prompt is
+	// pending. When non-empty, the idle key handler intercepts Enter (launch
+	// device-code re-auth) and Esc (dismiss); all other keys are ignored so
+	// the prompt persists until the user acts.
+	reauthProvider string
+	// reauthLaunched is true from the moment the user confirms re-auth until
+	// the resulting AddProvider completes, so the device-code overlay text and
+	// success confirmation render outside the model picker.
+	reauthLaunched bool
 	// planApprovalPending prevents duplicate approval turns while persistence and
 	// RunTurn execute asynchronously outside Bubble Tea's update loop.
 	planApprovalPending bool
@@ -470,6 +482,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.rollback.open {
 			return m.handleRollbackKey(msg)
+		}
+
+		// xAI OAuth re-authentication prompt: when pending, intercept Enter
+		// (launch the device-code flow) and Esc (dismiss). All other keys are
+		// ignored so the prompt persists until the user acts. Overlays above
+		// take precedence; this only runs when none is open.
+		if m.reauthProvider != "" {
+			switch msg.String() {
+			case "enter":
+				name := m.reauthProvider
+				m.reauthProvider = ""
+				m.reauthLaunched = true
+				m.tr.Apply(events.NewSystem("Re-authenticating xAI OAuth…"))
+				m.refreshViewport()
+				return m, m.startXAIOAuthCmd(name, map[string]string{})
+			case "esc":
+				m.reauthProvider = ""
+				m.tr.Apply(events.NewError("xAI OAuth re-authentication dismissed."))
+				m.refreshViewport()
+				return m, nil
+			default:
+				return m, nil
+			}
 		}
 
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
@@ -828,6 +863,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turnCancel = nil
 		m.userScrolledUp = false
 		m.timerReset()
+		if errors.Is(msg.err, xai_oauth.ErrReauthRequired) {
+			if m.xaiOAuth() != nil {
+				// Code mode: offer an interactive re-authentication. The prompt
+				// persists until the user acts (Enter/Esc), so a user whose
+				// attention is elsewhere can launch it when they return.
+				m.reauthProvider = m.info.Provider
+				m.tr.Apply(events.NewSystem("xAI OAuth session expired. Press Enter to re-authenticate, Esc to dismiss."))
+			} else {
+				// Platform mode: no local device-code flow. Point the user to
+				// where they can re-authenticate.
+				m.tr.Apply(events.NewError("xAI OAuth session expired — re-authenticate this provider in Settings."))
+			}
+			m.refreshViewport()
+			return m, nil
+		}
 		m.tr.Apply(events.NewError(msg.err.Error()))
 		m.refreshViewport()
 		return m, nil
@@ -3616,9 +3666,9 @@ func (m model) renderActivityCollapsedPreview(steps []events.ToolStep, width int
 		line := collapsedToolLine("  "+render.ToolDetailLine(step), width)
 		if steps[i].Status == "error" {
 			b.WriteString(m.theme.Error.Width(width).Render(line))
-			continue
+		} else {
+			b.WriteString(m.theme.Muted.Width(width).Render(line))
 		}
-		b.WriteString(m.theme.Muted.Width(width).Render(line))
 	}
 	b.WriteByte('\n')
 	b.WriteString(m.theme.Hint.Width(width).Render("  click to expand details"))

@@ -62,9 +62,11 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 
 	var body []string
 
-	// Context band (overview / motivation).
+	// Context band (overview / motivation). Rendered WITHOUT a "CONTEXT" label so
+	// the plan title flows straight into the overview; the model's own section
+	// headings (Problem / Root causes / Boundaries) provide the accent structure.
 	if ctx := strings.TrimSpace(doc.Context); ctx != "" {
-		body = append(body, m.planBand("CONTEXT", ctx, inner)...)
+		body = append(body, m.planContextLines(ctx, inner)...)
 		body = append(body, "")
 	}
 
@@ -209,7 +211,7 @@ func (m model) planPhaseBlock(n int, s agent.PlanStepInfo, inner int) []string {
 		if detailWidth < 20 {
 			detailWidth = 20
 		}
-		md := render.Markdown(d, detailWidth, th.RenderStyles())
+		md := render.Markdown(d, detailWidth, th.planRenderStyles())
 		if md == "" {
 			// Fallback: plain text if markdown rendering produces nothing.
 			md = th.PlanDetail.Width(detailWidth).Render(d)
@@ -279,9 +281,13 @@ func (m model) planExecutionOrder(steps []agent.PlanStepInfo, inner int) []strin
 func (m model) planBand(label, body string, inner int) []string {
 	th := m.theme
 	lines := []string{th.PlanHeader.Render(label)}
+	if inner >= 8 {
+		lines = append(lines, th.PlanMuted.Render(strings.Repeat("─", inner)))
+	}
+	lines = append(lines, "")
 	// Render band body as markdown for proper formatting (inline code,
 	// bold, lists) instead of plain muted text.
-	md := render.Markdown(body, inner, th.RenderStyles())
+	md := render.Markdown(body, inner, th.planRenderStyles())
 	if md == "" {
 		// Fallback: plain wrapped text.
 		for _, para := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
@@ -297,6 +303,27 @@ func (m model) planBand(label, body string, inner int) []string {
 		}
 	}
 	return lines
+}
+
+// planContextLines renders the plan Context as markdown with NO section label,
+// so the overview reads as a clean design-doc opening. The model's own accent
+// headings (## Problem / ## Root causes / ## Boundaries) supply the structure,
+// and blank lines between paragraphs are preserved for scannability.
+func (m model) planContextLines(body string, inner int) []string {
+	th := m.theme
+	md := render.Markdown(body, inner, th.planRenderStyles())
+	if md == "" {
+		var lines []string
+		for _, para := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+			if strings.TrimSpace(para) == "" {
+				lines = append(lines, "")
+				continue
+			}
+			lines = append(lines, wrapPrefixed("", para, inner, th.PlanMuted)...)
+		}
+		return lines
+	}
+	return strings.Split(md, "\n")
 }
 
 func (m model) planApprovalLines(it events.Item, inner int) []string {
@@ -406,7 +433,7 @@ func (m model) paintPlanFrame(title, meta string, body []string, footer string, 
 		title = truncateToWidth(title, maxTitle)
 		titleText = " ✦ " + title + " "
 	}
-	titleRendered := th.PlanHeader.Render(titleText)
+	titleRendered := th.PlanTitle.Render(titleText)
 	metaRendered := ""
 	if meta != "" {
 		metaRendered = th.PlanMuted.Render(" " + meta + " ")
@@ -509,7 +536,7 @@ func (m model) renderPlanDocumentMarkdown(content string, it events.Item, width 
 	}
 	body = strings.TrimSpace(body)
 
-	md := render.Markdown(body, inner, th.RenderStyles())
+	md := render.Markdown(body, inner, th.planRenderStyles())
 	if md == "" {
 		md = th.Text.Width(inner).Render(body)
 	}

@@ -79,7 +79,7 @@ type PlanStepInput struct {
 type AnnouncePlanArgs struct {
 	Goal         string          `json:"goal" jsonschema:"A concise title for the overall plan (e.g., 'Source-Level GitHub Comparison: astonish vs openclaw'). Displayed as the plan header."`
 	Steps        []PlanStepInput `json:"steps" jsonschema:"Ordered list of steps to complete the goal. Each step represents a distinct phase of work. Keep it to 3-7 phases; put concrete per-phase detail in the 'details' field."`
-	Context      string          `json:"context,omitempty" jsonschema:"REQUIRED narrative section explaining WHY this change is happening: the problem, the approach, user flows, and design decisions. Plans without context are rejected."`
+	Context      string          `json:"context,omitempty" jsonschema:"REQUIRED design-document preamble. Structure it with these markdown sub-sections (use '## ' — they are preserved as content, not parsed as plan sections): '## Problem' (what's wrong in the user's terms), '## Root causes' (bulleted, cite files as path:line), '## Approach' (architectural decisions, not file lists), an optional fenced flow diagram (triple-backtick block) showing the end-to-end path, an optional markdown | Component | Change | table distributing the work across files, and '## Boundaries' (what stays unchanged). Aim for the richness of a short design doc. Plans without context are rejected."`
 	WhatNotToDo  string          `json:"what_not_to_do,omitempty" jsonschema:"REQUIRED scope guard listing what must NOT change during this plan. Name the specific interfaces, files, and behaviors that must remain untouched. Persisted to PLAN.md."`
 	Verification string          `json:"verification,omitempty" jsonschema:"REQUIRED end-to-end command sequence that proves the user-visible outcome after all phases complete. Must include the acceptance sequence recorded at gplan_finalize when Graph-Optimized Plan was used. Persisted to PLAN.md."`
 }
@@ -179,7 +179,7 @@ func NewAnnouncePlanTool() (tool.Tool, error) {
 		Description: `Announce a structured execution plan before starting multi-step work. The plan appears as a visible checklist in the UI and is persisted to a session PLAN.md that survives context compaction. Keep phases high-level (3-7) — each phase is a distinct chunk of work, not an individual tool call. Order phases dependency-first (shared types/interfaces before their consumers).
 
 Document-level sections (set once for the whole plan):
-- 'context': REQUIRED — plans without context are rejected. Write the problem, approach, user flows (for UI changes), and design decisions. This is a design document preamble, not a one-liner.
+- 'context': REQUIRED — plans without context are rejected. Write it as a short design doc using markdown sub-sections: '## Problem', '## Root causes' (cite files as path:line), '## Approach', an optional fenced flow diagram, an optional markdown | Component | Change | table, and '## Boundaries'. These '## ' sub-headings are preserved as content, not parsed as plan sections.
 - 'what_not_to_do': REQUIRED scope guard — name the specific interfaces, files, and behaviors that must NOT change.
 - 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 

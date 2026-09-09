@@ -232,3 +232,149 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+// TestProse_HeadingLevelsDistinct verifies that #, ##, and ### render with
+// three visually distinct styles (not all the same brand+bold) and that a blank
+// spacer line precedes the second and third headings.
+// TestProse_HeadingLevelsDistinct verifies headings render in the accent color
+// (distinct from plain body text) and that a blank spacer line precedes the
+// second and third headings. H1/H2 share the accent+bold section style; H3 is
+// accent without bold, so headings are accent-colored and H3 differs from H2.
+func TestProse_HeadingLevelsDistinct(t *testing.T) {
+	// Mimic the tui theme's RenderStyles heading mapping: accent-colored (208)
+	// H1/H2 bold, H3 accent without bold; body text plain (252).
+	st := DefaultStyles()
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	st.Heading1 = accent.Bold(true)
+	st.Heading2 = accent.Bold(true)
+	st.Heading3 = accent
+	out := prose("# H1 title\n## H2 section\n### H3 sub\n\nplain body line", 80, st)
+
+	// All heading texts + body must be present (strip per-glyph ANSI first).
+	plainOut := stripTestANSI(out)
+	for _, want := range []string{"H1 title", "H2 section", "H3 sub", "plain body line"} {
+		if !strings.Contains(plainOut, want) {
+			t.Fatalf("text %q missing from output:\n%s", want, plainOut)
+		}
+	}
+
+	lines := strings.Split(out, "\n")
+	var h2, h3, body string
+	for _, l := range lines {
+		switch {
+		case strings.Contains(stripTestANSI(l), "H2 section"):
+			h2 = l
+		case strings.Contains(stripTestANSI(l), "H3 sub"):
+			h3 = l
+		case strings.Contains(stripTestANSI(l), "plain body line"):
+			body = l
+		}
+	}
+	// Headings must carry the code-mode accent (orange 208), body must not.
+	if !strings.Contains(h2, "38;5;208") {
+		t.Fatalf("expected accent-colored H2 heading, got:\n%q", h2)
+	}
+	if strings.Contains(body, "38;5;208") {
+		t.Fatalf("plain body should not carry the heading accent, got:\n%q", body)
+	}
+	// H3 (accent, no bold) must differ from H2 (accent + bold).
+	if h2 == h3 {
+		t.Fatalf("expected H2 and H3 to render with different weights:\nH2=%q\nH3=%q", h2, h3)
+	}
+
+	// NO_COLOR path: text preserved and a blank line precedes H2 and H3.
+	plainSt := DefaultStyles()
+	plainSt.NoColor = true
+	plain := prose("# H1 title\n## H2 section\n### H3 sub", 80, plainSt.Effective())
+	if strings.Contains(plain, "\x1b[") {
+		t.Fatalf("NO_COLOR output should carry no ANSI escapes:\n%q", plain)
+	}
+	if !strings.Contains(plain, "H1 title\n\nH2 section\n\nH3 sub") {
+		t.Fatalf("expected blank spacer lines between headings in NO_COLOR output:\n%q", plain)
+	}
+}
+
+// stripTestANSI removes ANSI escape sequences for stable text assertions in
+// this test file.
+func stripTestANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) {
+				c := s[i]
+				i++
+				if c >= '@' && c <= '~' {
+					break
+				}
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestProse_BlankLineBeforeHeading verifies a spacer line is inserted before a
+// heading that follows a paragraph, but NOT when the heading is the first line
+// of a block (block start).
+func TestProse_BlankLineBeforeHeading(t *testing.T) {
+	st := DefaultStyles()
+	st.NoColor = true
+	st = st.Effective() // NO_COLOR for stable text assertions
+
+	// Heading at block start: no leading blank line.
+	atStart := prose("# Title\nbody text", 80, st)
+	if strings.HasPrefix(atStart, "\n") {
+		t.Fatalf("heading at block start should not be preceded by a blank line:\n%q", atStart)
+	}
+
+	// Heading after a paragraph: a blank spacer line must be inserted.
+	afterPara := prose("some paragraph text\n## Section", 80, st)
+	if !strings.Contains(afterPara, "some paragraph text\n\nSection") {
+		t.Fatalf("expected a blank spacer line before a heading that follows a paragraph:\n%q", afterPara)
+	}
+}
+
+func TestProse_HeadingBarCarvesRooms(t *testing.T) {
+	st := DefaultStyles()
+	st.NoColor = true
+	st.HeadingBar = true
+	st = st.Effective()
+
+	rule := strings.Repeat("─", 40)
+	want := "Problem\n" + rule + "\n\nThe overview is too flat.\n\nRoot causes\n" + rule + "\n\nA packed wall of text."
+
+	// Source with and without a blank after the heading must both produce one
+	// trailing spacer — the bar already owns that room, so extra source blanks
+	// must not stack a second empty row.
+	for _, src := range []string{
+		"## Problem\nThe overview is too flat.\n## Root causes\nA packed wall of text.",
+		"## Problem\n\nThe overview is too flat.\n\n## Root causes\n\nA packed wall of text.",
+	} {
+		plain := stripTestANSI(prose(src, 40, st))
+		if plain != want {
+			t.Fatalf("heading bars should carve rooms (title, full-width rule, blank, body):\nsrc %q\n got %q\nwant %q", src, plain, want)
+		}
+	}
+}
+
+func TestProse_HeadingBarOffLeavesHeadingsAsWords(t *testing.T) {
+	st := DefaultStyles()
+	st.NoColor = true
+	st = st.Effective()
+	if st.HeadingBar {
+		t.Fatal("chat markdown must leave HeadingBar off")
+	}
+
+	out := prose("## Problem\nThe overview is too flat.", 40, st)
+	plain := stripTestANSI(out)
+	if strings.Contains(plain, "─") {
+		t.Fatalf("chat markdown must not draw a heading bar:\n%q", plain)
+	}
+	if !strings.Contains(plain, "Problem\nThe overview is too flat.") {
+		t.Fatalf("expected heading glued to the next paragraph without a bar:\n%q", plain)
+	}
+}
+

@@ -72,11 +72,11 @@ func TestRenderActivityCollapsedPreviewShowsToolRows(t *testing.T) {
 	if !strings.Contains(out, "✓ Search kubernetes") {
 		t.Fatalf("missing search preview row: %q", out)
 	}
-	if !strings.Contains(out, "✓ Run command") {
-		t.Fatalf("missing command preview row: %q", out)
+	if !strings.Contains(out, "✓ Run command kubectl get clusters") {
+		t.Fatalf("collapsed command should share one line with the label: %q", out)
 	}
-	if !strings.Contains(out, "command: kubectl get clusters") {
-		t.Fatalf("collapsed activity should show the full command: %q", out)
+	if strings.Contains(out, "command:") {
+		t.Fatalf("collapsed activity should not use a separate command: body: %q", out)
 	}
 	if !strings.Contains(out, "✓ Read file README.md") {
 		t.Fatalf("collapsed activity should show every tool row: %q", out)
@@ -99,8 +99,11 @@ func TestRenderActivityCollapsedShowsFullCommand(t *testing.T) {
 		},
 	}
 	out := stripANSI(m.renderActivity(item, 80))
-	if !strings.Contains(out, "command: kubectl get clusters") {
-		t.Fatalf("short command should be fully visible when collapsed: %q", out)
+	if !strings.Contains(out, "Run command kubectl get clusters") {
+		t.Fatalf("short command should share one line with the label when collapsed: %q", out)
+	}
+	if strings.Contains(out, "command:") {
+		t.Fatalf("collapsed short command should not use a separate command: body: %q", out)
 	}
 	if strings.Contains(out, "Running `") {
 		t.Fatalf("must not use 40-char liveHint command clip: %q", out)
@@ -109,14 +112,14 @@ func TestRenderActivityCollapsedShowsFullCommand(t *testing.T) {
 	long := "# Step 1: Assign credentials to variables\nAPP_CREDENTIAL=$(cat /tmp/very-long-file-name.json)\necho done"
 	item.Steps[0].Args = map[string]any{"command": long}
 	collapsed := stripANSI(m.renderActivity(item, 56))
-	if strings.Count(collapsed, "command:") != 1 {
-		t.Fatalf("long collapsed command should be a single preview line, got %q", collapsed)
+	if strings.Contains(collapsed, "command:") {
+		t.Fatalf("collapsed command should stay on the Run command row, got %q", collapsed)
 	}
 	if strings.Contains(collapsed, "echo done") {
 		t.Fatalf("long collapsed command should truncate before the end of the command: %q", collapsed)
 	}
-	if !strings.Contains(collapsed, "command:") {
-		t.Fatalf("long collapsed command should still show a command preview: %q", collapsed)
+	if !strings.Contains(collapsed, "Run command") {
+		t.Fatalf("long collapsed command should still show the Run command row: %q", collapsed)
 	}
 	item.Expanded = true
 	expanded := stripANSI(m.renderActivity(item, 56))

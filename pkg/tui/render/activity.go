@@ -416,6 +416,11 @@ func ToolSubject(s ToolStep) string {
 	if q := firstArg(s.Args, "query", "pattern"); q != "" {
 		return truncate(q, 48)
 	}
+	if cmd := firstArg(s.Args, "command"); cmd != "" {
+		// Flatten newlines so the collapsed row stays one line; width clipping
+		// happens in collapsedToolLine. Do not hard-cut at 40/48 characters.
+		return strings.Join(strings.Fields(cmd), " ")
+	}
 	return ""
 }
 

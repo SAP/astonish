@@ -74,7 +74,7 @@ func TestToolDetailLineAndPreview(t *testing.T) {
 		Status: "complete",
 	}
 	line := ToolDetailLine(step)
-	if !strings.Contains(line, "✓") || !strings.Contains(line, "Run command") {
+	if !strings.Contains(line, "✓") || !strings.Contains(line, "Run command") || !strings.Contains(line, "go test") {
 		t.Fatalf("detail line: %q", line)
 	}
 	body := ToolDetailBody(step, 80)

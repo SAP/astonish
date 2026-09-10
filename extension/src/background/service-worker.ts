@@ -88,18 +88,19 @@ async function getAllFrameIds(tabId: number): Promise<number[]> {
 function mergeFrameResults(
   name: string,
   frameResults: Array<FrameToolResult | null>,
+  frameIds: number[],
 ): PageToolResult {
-  const validResults = frameResults.filter((r): r is FrameToolResult => r !== null);
+  const validResults = frameResults.map((r, i) => ({ r, frameId: frameIds[i] ?? 0 })).filter((x): x is { r: FrameToolResult; frameId: number } => x.r !== null);
   if (!validResults.length) {
     return { ok: false, name, error: 'No frames responded.' };
   }
 
   if (name === 'page_snapshot' || name === 'page_query') {
     const interactiveParts = validResults
-      .map((r) => r.interactive)
+      .map((x) => x.r.interactive)
       .filter(Boolean);
     const headingParts = validResults
-      .map((r) => r.headings)
+      .map((x) => x.r.headings)
       .filter(Boolean);
 
     let result = interactiveParts.join('\n') || '(none)';
@@ -116,12 +117,12 @@ function mergeFrameResults(
   }
 
   // For click/fill/scroll: first success wins; if none, return last error.
-  for (const r of validResults) {
+  for (const { r, frameId } of validResults) {
     if (!r.error) {
-      return { ok: true, name, result: r.result, href: r.href, rect: r.rect };
+      return { ok: true, name, result: r.result, href: r.href, rect: r.rect, frameId };
     }
   }
-  return { ok: false, name, error: validResults[validResults.length - 1].error };
+  return { ok: false, name, error: validResults[validResults.length - 1].r.error };
 }
 
 /**
@@ -146,7 +147,7 @@ async function runPageToolAllFrames(
     refOffset += result?.refCount ?? 0;
   }
 
-  const merged = mergeFrameResults(name, frameResults);
+  const merged = mergeFrameResults(name, frameResults, frameIds);
 
   // For page_snapshot, prepend the URL/title line from the tab.
   if (name === 'page_snapshot' && merged.ok) {
@@ -297,11 +298,78 @@ async function runPageToolInTab(
     result.rect.height > 0
   ) {
     try {
+      let cdpRect = result.rect;
+
+      // Cross-origin iframe coordinate fix:
+      // The content script's getElementTabRect() cannot traverse frameElement for cross-origin
+      // iframes (SecurityError), so it returns only iframe-local coords. We must add the
+      // iframe's offset (as seen from the top frame) to get tab-absolute coordinates.
+      const winningFrameId = result.frameId ?? 0;
+      if (winningFrameId !== 0) {
+        try {
+          // Find the iframe element in the top frame whose src URL matches the winning frame.
+          const frames = await chrome.webNavigation.getAllFrames({ tabId });
+          const winningFrame = (frames ?? []).find((f) => f.frameId === winningFrameId);
+          const frameUrl = winningFrame?.url ?? '';
+
+          if (frameUrl) {
+            const iframeOffsets = await chrome.scripting.executeScript({
+              target: { tabId, frameIds: [0] },
+              func: (targetUrl: string) => {
+                // Find the iframe in the top document whose src matches the target frame URL.
+                // We compare by origin+pathname to handle query-param differences.
+                const iframes = Array.from(document.querySelectorAll('iframe'));
+                let bestMatch: { x: number; y: number } | null = null;
+                let bestScore = 0;
+                for (const iframe of iframes) {
+                  const src = (iframe as HTMLIFrameElement).src;
+                  if (!src) continue;
+                  const r = (iframe as HTMLIFrameElement).getBoundingClientRect();
+                  if (r.width === 0 && r.height === 0) continue;
+                  // Score the match: exact > origin+path > origin only
+                  let score = 0;
+                  try {
+                    const srcU = new URL(src);
+                    const tgtU = new URL(targetUrl);
+                    if (src === targetUrl) {
+                      score = 3;
+                    } else if (srcU.origin === tgtU.origin && srcU.pathname === tgtU.pathname) {
+                      score = 2;
+                    } else if (srcU.origin === tgtU.origin) {
+                      score = 1;
+                    }
+                  } catch {
+                    if (targetUrl.startsWith(src.replace(/\/$/, ''))) score = 1;
+                  }
+                  if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = { x: r.x, y: r.y };
+                  }
+                }
+                return bestMatch;
+              },
+              args: [frameUrl],
+            });
+            const offset = iframeOffsets?.[0]?.result as { x: number; y: number } | null;
+            if (offset) {
+              cdpRect = {
+                x: cdpRect.x + offset.x,
+                y: cdpRect.y + offset.y,
+                width: cdpRect.width,
+                height: cdpRect.height,
+              };
+            }
+          }
+        } catch {
+          // If we can't get the iframe offset, proceed with existing coords (best effort).
+        }
+      }
+
       if (name === 'page_click') {
-        await cdpClick(tabId, result.rect);
+        await cdpClick(tabId, cdpRect);
       } else {
         const text = typeof args.text === 'string' ? args.text : '';
-        await cdpFill(tabId, result.rect, text);
+        await cdpFill(tabId, cdpRect, text);
       }
     } catch {
       // CDP unavailable (policy-blocked, DevTools open, etc.).

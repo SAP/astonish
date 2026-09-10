@@ -43,6 +43,8 @@ export type PageToolResult = {
   href?: string;
   /** Bounding rect for CDP input dispatch (tab-absolute coordinates). Internal to extension. */
   rect?: { x: number; y: number; width: number; height: number };
+  /** Frame ID that produced the winning result (0 = top frame). Internal to extension. */
+  frameId?: number;
 };
 
 /** Sent by the coordinator (top frame) to worker frames via chrome.tabs.sendMessage. */

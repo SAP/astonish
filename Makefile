@@ -112,7 +112,7 @@ build-extension:
 	@echo "Chrome extension built successfully: extension/dist"
 
 # Build everything: UI first, then Go binary
-build-all: setup-hooks ent-generate build-ui build
+build-all: setup-hooks ent-generate build-ui build-extension build
 	@echo "Full build complete!"
 
 # Setup git hooks (runs automatically on first build). Uses core.hooksPath so

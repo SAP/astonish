@@ -430,7 +430,14 @@ async function runPageToolInTab(
   return result;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only handle messages from this extension's own contexts (side panel, content scripts).
+  // This guards against future onMessageExternal registrations accidentally forwarding
+  // external-page messages to the CDP dispatch path.
+  if (sender.id !== chrome.runtime.id) {
+    sendResponse({ ok: false, error: 'not implemented' });
+    return false;
+  }
   const type = message && typeof message === 'object' ? (message as { type?: unknown }).type : undefined;
   if (type !== MSG_GET_CONTEXT && type !== MSG_APPLY && type !== MSG_PAGE_TOOL) {
     sendResponse({ ok: false, error: 'not implemented' });

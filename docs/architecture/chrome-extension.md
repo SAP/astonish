@@ -164,3 +164,39 @@ No install-time `host_permissions`, no `<all_urls>`, no remotely hosted code.
 - Fleet, drills, apps, slides, report harness
 - Chrome Web Store publication
 - Automated GitHub form clicks
+
+## Security and trust model
+
+### Model-driven input and auto-run limit
+
+Once the user grants host access to a tab's origin, the model can invoke `page_click` / `page_fill` / `page_navigate` against the live tab using CDP input events (`chrome.debugger`). These actions run without per-action user confirmation, up to `MAX_PAGE_TOOL_ROUNDS = 15` consecutive rounds. The user sees the results in the transcript but does not approve each individual action.
+
+Acceptance criteria for this design:
+- The user explicitly grants host access on a per-turn basis via `requestActiveTabHostPermission` (a gesture-gated `chrome.permissions.request`).
+- Chrome's "started debugging this browser" banner is displayed for the duration of each CDP session.
+- `isUnreadableUrl` blocks `chrome:`, `chrome-extension:`, Web Store, and `.pdf` targets.
+- `withDebugger` always detaches in a `finally` block.
+- The 15-round limit caps runaway tool loops.
+
+### Host permission scope (`https://*/*`)
+
+`https://*/*` is listed in `optional_host_permissions` — it is **not** granted at install time. The extension requests it in two situations:
+
+1. **Studio origin** — requested during login so it can reach the configured Studio URL (which may be any HTTPS host).
+2. **Active tab** — requested from a user gesture when the user clicks Send and the model needs page context or page tools.
+
+The breadth (`https://*/*`) is required because the Studio host and the active tab host are both user-configurable and not known at build time. Narrowing to a fixed set of origins would block valid use cases. The optional / gesture-driven pattern is the correct mitigation; per-origin grants on each Send would be more restrictive but would require a permission prompt on every tab switch.
+
+### `chrome.debugger` permission
+
+`debugger` is declared as an install-time permission because `chrome.permissions.request` cannot add the `debugger` permission dynamically (Chrome enforces this). Its use is narrowly scoped: `cdpClick()` and `cdpFill()` in `cdp-input.ts` open an ephemeral session, dispatch the input events, and detach in a `finally`. CDP is only invoked after the user has already granted host access to the tab.
+
+### Token storage
+
+The `AuthSession` (including `accessToken` and `refreshToken`) is persisted to `chrome.storage.local` (persistent, unencrypted on disk). The `accessToken` is additionally mirrored to `chrome.storage.session` (cleared on browser close). `clearSession()` removes both.
+
+Trade-off: the refresh token survives browser restarts so the user does not need to log in again, at the cost of the token being at rest unencrypted in the Chrome profile directory. This is the standard extension authentication pattern. The threat model is a compromised local user account or a malicious extension update — not a web page (web page JavaScript cannot read `chrome.storage` belonging to another extension).
+
+### Service worker message sender validation
+
+`chrome.runtime.onMessage` only receives messages from contexts inside this extension (side panel, content scripts). It does not register `chrome.runtime.onMessageExternal`, so web pages cannot reach the listener. As a defence-in-depth measure the listener validates `sender.id === chrome.runtime.id` at the top and rejects any message from an unexpected sender before touching the CDP dispatch path.

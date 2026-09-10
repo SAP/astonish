@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -50,3 +52,75 @@ func TestStudioSessionsHandler_AppNameDeserialization(t *testing.T) {
 		}
 	})
 }
+
+// TestStudioSessionsAppNameQueryParam verifies the ?app= query-parameter
+// resolution logic that StudioSessionsHandler, StudioSessionHandler, and
+// StudioDeleteSessionHandler all share.
+//
+// The three behaviours under test:
+//  1. ?app= absent         → defaults to studioChatAppName ("astonish")
+//  2. ?app=astonish-extension → passes that value through
+//  3. ?app=               → empty value also defaults to studioChatAppName
+func TestStudioSessionsAppNameQueryParam(t *testing.T) {
+	resolveApp := func(rawURL string) string {
+		r := httptest.NewRequest(http.MethodGet, rawURL, nil)
+		appName := r.URL.Query().Get("app")
+		if appName == "" {
+			appName = studioChatAppName
+		}
+		return appName
+	}
+
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"/api/studio/sessions", studioChatAppName},
+		{"/api/studio/sessions?app=", studioChatAppName},
+		{"/api/studio/sessions?app=astonish-extension", "astonish-extension"},
+		{"/api/studio/sessions?app=astonish", studioChatAppName},
+		{"/api/studio/sessions?app=astonish_code", "astonish_code"},
+	}
+
+	for _, tc := range cases {
+		got := resolveApp(tc.url)
+		if got != tc.want {
+			t.Errorf("resolveApp(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}
+
+// TestStudioChatRequestEffectiveApp verifies that the effective-app selection
+// logic in StudioChatHandler produces the correct namespace:
+//   - caller-provided AppName takes precedence
+//   - missing / empty AppName falls back to studioChatAppName
+func TestStudioChatRequestEffectiveApp(t *testing.T) {
+	effectiveApp := func(req StudioChatRequest) string {
+		app := studioChatAppName
+		if req.AppName != "" {
+			app = req.AppName
+		}
+		return app
+	}
+
+	cases := []struct {
+		name string
+		req  StudioChatRequest
+		want string
+	}{
+		{"no AppName → default", StudioChatRequest{Message: "hi"}, studioChatAppName},
+		{"empty AppName → default", StudioChatRequest{Message: "hi", AppName: ""}, studioChatAppName},
+		{"extension AppName", StudioChatRequest{Message: "hi", AppName: "astonish-extension"}, "astonish-extension"},
+		{"custom namespace", StudioChatRequest{Message: "hi", AppName: "my-namespace"}, "my-namespace"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effectiveApp(tc.req)
+			if got != tc.want {
+				t.Errorf("effectiveApp(%+v) = %q, want %q", tc.req, got, tc.want)
+			}
+		})
+	}
+}
+

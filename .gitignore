@@ -51,6 +51,9 @@ astonish-sandbox-entrypoint
 # Node modules (for docs)
 node_modules/
 
+# Extension build output (generated, never commit)
+extension/dist/
+
 # MCP server directories (runtime)
 mcp_servers/
 

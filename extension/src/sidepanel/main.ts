@@ -457,7 +457,7 @@ function showApplyBlocked(message: string): void {
 }
 
 async function requestContext(): Promise<ContextResult> {
-  return chrome.runtime.sendMessage({ type: MSG_GET_CONTEXT }) as Promise<ContextResult>;
+  return chrome.runtime.sendMessage({ type: MSG_GET_CONTEXT, tabId: currentTabId }) as Promise<ContextResult>;
 }
 
 async function runPageToolCalls(calls: PageToolCall[]): Promise<PageToolResult[]> {
@@ -468,6 +468,7 @@ async function runPageToolCalls(calls: PageToolCall[]): Promise<PageToolResult[]
         type: MSG_PAGE_TOOL,
         name: call.name,
         args: call.args,
+        tabId: currentTabId,
       })) as PageToolResult;
       const entry: PageToolResult = {
         ok: !!result?.ok,
@@ -898,6 +899,7 @@ applyButton?.addEventListener('click', () => {
         type: MSG_APPLY,
         text,
         mode: 'replace',
+        tabId: currentTabId,
       })) as ApplyResult;
       if (result?.ok) {
         if (statusLine) {

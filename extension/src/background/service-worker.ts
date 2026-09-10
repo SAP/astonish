@@ -439,7 +439,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   void (async () => {
     try {
-      const tab = await activeTab();
+      // Use the tabId from the message (sent by the side panel) when available,
+      // so page tools always target the tab the side panel belongs to — even when
+      // the user has switched to a different tab. Fall back to activeTab() for
+      // backwards compatibility (e.g. messages from other extension contexts).
+      const msgTabId =
+        message && typeof message === 'object' ? (message as { tabId?: unknown }).tabId : undefined;
+      const tab =
+        typeof msgTabId === 'number' && msgTabId > 0
+          ? await chrome.tabs.get(msgTabId)
+          : await activeTab();
       if (isUnreadableUrl(tab.url)) {
         sendResponse({ ok: false, error: UNREADABLE } satisfies ContextResult | ApplyResult | PageToolResult);
         return;

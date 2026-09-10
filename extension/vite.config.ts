@@ -16,9 +16,12 @@ function chromeExtensionAssets(): Plugin {
 
       const nestedHtml = resolve(dist, 'src/sidepanel/index.html');
       if (existsSync(nestedHtml)) {
-        const html = readFileSync(nestedHtml, 'utf8')
+        let html = readFileSync(nestedHtml, 'utf8')
           .replaceAll('../../assets/', './assets/')
           .replaceAll('../assets/', './assets/');
+        // Remove modulepreload links for extension chunks. Chrome MV3 flags these as
+        // "cross-world extension resource mismatch". Dynamic imports still work fine.
+        html = html.replace(/<link rel="modulepreload"[^>]*>/g, '');
         writeFileSync(resolve(dist, 'sidepanel.html'), html);
       }
 
@@ -75,15 +78,6 @@ export default defineConfig({
           chunk.name === 'service-worker' ? 'service-worker.js' : 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
-        // Prevent Vite/Rollup from splitting extension-sessions into a separate chunk.
-        // Chrome MV3 generates a modulepreload for it that it then flags as a
-        // "cross-world extension resource mismatch" warning. Routing it into the
-        // sidepanel entry keeps the bundle self-contained and silences the warning.
-        manualChunks(id) {
-          if (id.includes('extension-sessions') || id.includes('messages')) {
-            return 'sidepanel';
-          }
-        },
       },
     },
   },

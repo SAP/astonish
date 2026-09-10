@@ -412,10 +412,15 @@ async function runPageToolInTab(
   return result;
 }
 
-// Handle tab ID requests from the side panel
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+// Handle tab ID requests from the side panel.
+// sender.tab is undefined for side panels (they are extension pages, not content scripts),
+// so we query the active tab in the last focused window — same as activeTab() used for
+// page tools. This is reliable because the user must be looking at a tab to have its panel open.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === MSG_GET_TAB_ID) {
-    sendResponse({ tabId: sender.tab?.id ?? 0 });
+    void chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+      sendResponse({ tabId: tab?.id ?? 0 });
+    });
     return true;
   }
   return false;

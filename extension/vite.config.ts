@@ -75,6 +75,15 @@ export default defineConfig({
           chunk.name === 'service-worker' ? 'service-worker.js' : 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
+        // Prevent Vite/Rollup from splitting extension-sessions into a separate chunk.
+        // Chrome MV3 generates a modulepreload for it that it then flags as a
+        // "cross-world extension resource mismatch" warning. Routing it into the
+        // sidepanel entry keeps the bundle self-contained and silences the warning.
+        manualChunks(id) {
+          if (id.includes('extension-sessions') || id.includes('messages')) {
+            return 'sidepanel';
+          }
+        },
       },
     },
   },

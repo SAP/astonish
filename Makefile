@@ -108,7 +108,7 @@ build-ui:
 # Build the Chrome MV3 side-panel extension
 build-extension:
 	@echo "Building Chrome extension..."
-	cd extension && npm install && npm run build
+	cd extension && npm ci && npm run build
 	@echo "Chrome extension built successfully: extension/dist"
 
 # Build everything: UI first, then Go binary

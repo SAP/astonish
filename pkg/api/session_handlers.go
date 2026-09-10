@@ -173,6 +173,13 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("Session not found: %v", err))
 			return
 		}
+		// Defense-in-depth: verify the session belongs to the requested app namespace.
+		// GetSessionMeta looks up by globally-unique ID without appName scoping, so
+		// we confirm the match here rather than leaking sessions across namespaces.
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
 
 		// Fleet sessions: read transcript events from store
 		if meta.FleetKey != "" {
@@ -248,10 +255,15 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("Session not found: %v", err))
 		return
 	}
+	// Defense-in-depth: verify the session belongs to the requested app namespace.
+	if meta.AppName != appName {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
 
 	// Fleet sessions: read transcript and return fleet-style messages
 	if meta.FleetKey != "" {
-		transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, sessionID+".jsonl")
+		transcriptPath := filepath.Join(fs.BaseDir(), appName, userID, sessionID+".jsonl")
 		transcript := persistentsession.NewTranscript(transcriptPath)
 		events, readErr := transcript.ReadEvents()
 
@@ -282,7 +294,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Get session transcript
 	getResp, err := fs.Get(r.Context(), &session.GetRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
@@ -700,9 +712,16 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Clean up per-session workspace directory if one was recorded.
-		if meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID); metaErr == nil && meta.WorkspaceDir != "" {
-			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
-				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
+		if meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID); metaErr == nil {
+			// Defense-in-depth: verify the session belongs to the requested app namespace.
+			if meta.AppName != appName {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			if meta.WorkspaceDir != "" {
+				if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
+					slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
+				}
 			}
 		}
 

@@ -156,6 +156,7 @@ export default withMermaid(defineConfig({
             { text: 'Settings', link: '/docs/studio/settings' },
             { text: 'Running & Debugging', link: '/docs/studio/running-debugging' },
             { text: 'Keyboard Shortcuts', link: '/docs/studio/keyboard-shortcuts' },
+            { text: 'Chrome Extension', link: '/docs/studio/chrome-extension' },
           ]
         },
         {

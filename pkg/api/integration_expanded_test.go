@@ -21,7 +21,7 @@ import (
 // TestIntegration_X11_StateDelta_Approval verifies that a state delta with
 // approval_options and approval_tool emits an "approval" SSE event.
 func TestIntegration_X11_StateDelta_Approval(t *testing.T) {
-	runner := newChatRunner("test-approval", studioChatUserID, true)
+	runner := newChatRunner("test-approval", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -56,7 +56,7 @@ func TestIntegration_X11_StateDelta_Approval(t *testing.T) {
 // TestIntegration_X11b_StateDelta_ApprovalWithInterfaceSlice verifies that
 // approval_options as []interface{} (from JSON unmarshaling) works correctly.
 func TestIntegration_X11b_StateDelta_ApprovalWithInterfaceSlice(t *testing.T) {
-	runner := newChatRunner("test-approval-iface", studioChatUserID, true)
+	runner := newChatRunner("test-approval-iface", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -83,7 +83,7 @@ func TestIntegration_X11b_StateDelta_ApprovalWithInterfaceSlice(t *testing.T) {
 // TestIntegration_X12_StateDelta_AutoApproved verifies that a state delta
 // with auto_approved=true emits an "auto_approved" SSE event.
 func TestIntegration_X12_StateDelta_AutoApproved(t *testing.T) {
-	runner := newChatRunner("test-auto-approved", studioChatUserID, true)
+	runner := newChatRunner("test-auto-approved", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -106,7 +106,7 @@ func TestIntegration_X12_StateDelta_AutoApproved(t *testing.T) {
 // TestIntegration_X12b_StateDelta_AutoApprovedFalse verifies that
 // auto_approved=false does NOT emit an auto_approved event.
 func TestIntegration_X12b_StateDelta_AutoApprovedFalse(t *testing.T) {
-	runner := newChatRunner("test-auto-approved-false", studioChatUserID, true)
+	runner := newChatRunner("test-auto-approved-false", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -126,7 +126,7 @@ func TestIntegration_X12b_StateDelta_AutoApprovedFalse(t *testing.T) {
 // TestIntegration_X13_StateDelta_RetryInfo verifies that a state delta with
 // _retry_info emits a "retry" SSE event with attempt/maxRetries/reason.
 func TestIntegration_X13_StateDelta_RetryInfo(t *testing.T) {
-	runner := newChatRunner("test-retry", studioChatUserID, true)
+	runner := newChatRunner("test-retry", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -154,7 +154,7 @@ func TestIntegration_X13_StateDelta_RetryInfo(t *testing.T) {
 // TestIntegration_X14_StateDelta_FailureInfo verifies that a state delta with
 // _failure_info emits an "error_info" SSE event.
 func TestIntegration_X14_StateDelta_FailureInfo(t *testing.T) {
-	runner := newChatRunner("test-failure", studioChatUserID, true)
+	runner := newChatRunner("test-failure", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -184,7 +184,7 @@ func TestIntegration_X14_StateDelta_FailureInfo(t *testing.T) {
 // TestIntegration_X15_StateDelta_Thinking verifies that a state delta with
 // _spinner_text emits a "thinking" SSE event.
 func TestIntegration_X15_StateDelta_Thinking(t *testing.T) {
-	runner := newChatRunner("test-thinking", studioChatUserID, true)
+	runner := newChatRunner("test-thinking", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -206,7 +206,7 @@ func TestIntegration_X15_StateDelta_Thinking(t *testing.T) {
 // TestIntegration_X15b_StateDelta_MultipleKeys verifies that a state delta
 // with multiple keys produces multiple events.
 func TestIntegration_X15b_StateDelta_MultipleKeys(t *testing.T) {
-	runner := newChatRunner("test-multi-delta", studioChatUserID, true)
+	runner := newChatRunner("test-multi-delta", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -252,7 +252,7 @@ done:
 // TestIntegration_X15c_StateDelta_EmptyDelta verifies that an empty delta
 // produces no events.
 func TestIntegration_X15c_StateDelta_EmptyDelta(t *testing.T) {
-	runner := newChatRunner("test-empty-delta", studioChatUserID, true)
+	runner := newChatRunner("test-empty-delta", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -269,7 +269,7 @@ func TestIntegration_X15c_StateDelta_EmptyDelta(t *testing.T) {
 // TestIntegration_X15d_StateDelta_UnknownKeys verifies that unknown delta
 // keys are silently ignored (no events, no panics).
 func TestIntegration_X15d_StateDelta_UnknownKeys(t *testing.T) {
-	runner := newChatRunner("test-unknown-delta", studioChatUserID, true)
+	runner := newChatRunner("test-unknown-delta", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -374,7 +374,7 @@ func TestIntegration_X17_MultiTurn(t *testing.T) {
 	assertHasEvent(t, events1, "text")
 
 	// Turn 2 — create a new runner for the same session (mirrors production behavior)
-	runner2 := newChatRunner(env.Runner.SessionID, studioChatUserID, false) // isNew=false for second turn
+	runner2 := newChatRunner(env.Runner.SessionID, studioChatUserID, studioChatAppName, false) // isNew=false for second turn
 	ch2 := runner2.Subscribe("test")
 	t.Cleanup(func() {
 		runner2.Stop()

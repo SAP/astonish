@@ -1079,7 +1079,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Launch background runner — the agent runs independently of this HTTP request.
-	runner := newChatRunner(sessionID, userID, isNew)
+	runner := newChatRunner(sessionID, userID, effectiveApp, isNew)
 	runner.ctx = store.WithDebugEnabled(runner.ctx, req.Debug)
 	if req.Debug {
 		if diagnosticsStore, ok := sessionService.(store.SessionStore); ok {

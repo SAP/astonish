@@ -45,13 +45,13 @@ func TestIntegration_MT1_TwoTeamsDifferentModels(t *testing.T) {
 
 	// Simulate User A (Team Alpha)
 	sessionA := createTestSession(t, sessionService)
-	runnerA := newChatRunner(sessionA, studioChatUserID, true)
+	runnerA := newChatRunner(sessionA, studioChatUserID, studioChatAppName, true)
 	chA := runnerA.Subscribe("test-alpha")
 	runnerA.InjectLLM(teamAlphaLLM) // Inject team-specific LLM
 
 	// Simulate User B (Team Beta)
 	sessionB := createTestSession(t, sessionService)
-	runnerB := newChatRunner(sessionB, studioChatUserID, true)
+	runnerB := newChatRunner(sessionB, studioChatUserID, studioChatAppName, true)
 	chB := runnerB.Subscribe("test-beta")
 	runnerB.InjectLLM(teamBetaLLM) // Inject team-specific LLM
 
@@ -109,7 +109,7 @@ func TestIntegration_MT2_NoTeamOverrideFallsBackToDefault(t *testing.T) {
 	chatAgent := agent.NewChatAgent(defaultLLM, nil, nil, sessionService, promptBuilder, false, true)
 
 	sessionID := createTestSession(t, sessionService)
-	runner := newChatRunner(sessionID, studioChatUserID, true)
+	runner := newChatRunner(sessionID, studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test-default")
 	// Deliberately NOT calling runner.InjectLLM() — should fall back to default
 
@@ -293,7 +293,7 @@ func TestIntegration_MT5_OrgOverrideWithoutTeam(t *testing.T) {
 
 	// User with org override (no team override)
 	sessionID := createTestSession(t, sessionService)
-	runner := newChatRunner(sessionID, studioChatUserID, true)
+	runner := newChatRunner(sessionID, studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test-org")
 	runner.InjectLLM(orgLLM) // Simulates what handler does after resolving org-level config
 
@@ -354,7 +354,7 @@ func TestIntegration_MT6_IsolationUnderLoad(t *testing.T) {
 				localAgent := agent.NewChatAgent(defaultLLM, nil, nil, sessionService, promptBuilder, false, true)
 
 				sessionID := createTestSession(t, sessionService)
-				runner := newChatRunner(sessionID, studioChatUserID, true)
+				runner := newChatRunner(sessionID, studioChatUserID, studioChatAppName, true)
 				ch := runner.Subscribe("test")
 				runner.InjectLLM(teamLLM)
 

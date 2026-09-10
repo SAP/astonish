@@ -22,7 +22,7 @@ func TestStudioChatDebugRequiresSuperadmin(t *testing.T) {
 }
 
 func TestChatRunnerDebugContext(t *testing.T) {
-	runner := newChatRunner("session", "user", true)
+	runner := newChatRunner("session", "user", studioChatAppName, true)
 	if store.DebugEnabledFromContext(runner.ctx) {
 		t.Fatal("debug unexpectedly enabled")
 	}
@@ -34,7 +34,7 @@ func TestChatRunnerDebugContext(t *testing.T) {
 
 func TestChatRunnerCacheDiagnosticRecorder(t *testing.T) {
 	sessionStore := &diagnosticSessionStore{}
-	runner := newChatRunner("session", "user", true)
+	runner := newChatRunner("session", "user", studioChatAppName, true)
 	runner.ctx = store.WithCacheDiagnosticRecorder(runner.ctx, func(ctx context.Context, diagnostic store.CacheDiagnostic) error {
 		return sessionStore.AppendCacheDiagnostic(ctx, runner.SessionID, diagnostic)
 	})

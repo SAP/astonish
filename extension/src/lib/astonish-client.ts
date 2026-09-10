@@ -78,7 +78,9 @@ export async function fetchSessions(): Promise<StudioSession[]> {
 }
 
 export async function fetchSessionHistory(id: string): Promise<SessionHistory> {
-  const response = await studioFetch(`/api/studio/sessions/${encodeURIComponent(id)}`);
+  const response = await studioFetch(
+    `/api/studio/sessions/${encodeURIComponent(id)}?app=${encodeURIComponent(EXTENSION_APP_NAME)}`,
+  );
   if (!response.ok) {
     throw new Error(`Failed to fetch session: ${response.status}`);
   }
@@ -206,6 +208,21 @@ export function connectChat({
 
   void run();
   return controller;
+}
+
+/**
+ * Delete an extension session on the server.
+ * Sends DELETE /api/studio/sessions/{id}?app=astonish-extension.
+ * Throws if the server returns a non-OK status.
+ */
+export async function deleteSession(sid: string): Promise<void> {
+  const response = await studioFetch(
+    `/api/studio/sessions/${encodeURIComponent(sid)}?app=${encodeURIComponent(EXTENSION_APP_NAME)}`,
+    { method: 'DELETE' },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to delete session: ${response.status}`);
+  }
 }
 
 /**

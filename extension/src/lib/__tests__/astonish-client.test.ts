@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { persistSession } from '../auth';
 import {
   connectChat,
+  deleteSession,
   fetchSessionHistory,
   fetchSessions,
   historyMessageKind,
@@ -165,7 +166,7 @@ describe('astonish-client', () => {
     expect(url).toBe('http://localhost:9393/api/studio/sessions?app=astonish-extension');
   });
 
-  it('fetchSessionHistory returns messages for restore', async () => {
+  it('fetchSessionHistory returns messages for restore with ?app= param', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -187,6 +188,10 @@ describe('astonish-client', () => {
         { type: 'agent', content: 'hello' },
       ],
     });
+    const url = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toBe(
+      'http://localhost:9393/api/studio/sessions/ext-1?app=astonish-extension',
+    );
   });
 
   it('fetchSessionHistory keeps Studio role/content messages', async () => {
@@ -212,6 +217,29 @@ describe('astonish-client', () => {
         { role: 'assistant', content: 'hello' },
       ],
     });
+  });
+
+  it('deleteSession sends DELETE with ?app= param', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 204,
+    });
+
+    await expect(deleteSession('ext-1')).resolves.toBeUndefined();
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe(
+      'http://localhost:9393/api/studio/sessions/ext-1?app=astonish-extension',
+    );
+    expect(init.method).toBe('DELETE');
+  });
+
+  it('deleteSession throws on non-OK response', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+    });
+
+    await expect(deleteSession('gone')).rejects.toThrow('Failed to delete session: 404');
   });
 
   it('connectChat reuses a stored sessionId on follow-up turns', async () => {

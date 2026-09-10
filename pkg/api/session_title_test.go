@@ -168,7 +168,7 @@ func TestSessionNeedsTitle(t *testing.T) {
 func TestStartSessionTitle_EmitsProvisionalThenRefine(t *testing.T) {
 	t.Parallel()
 	store := newMemoryTitleStore()
-	cr := newChatRunner("sess-start", "user-1", true)
+	cr := newChatRunner("sess-start", "user-1", studioChatAppName, true)
 	_ = cr.Subscribe("sub-1")
 
 	llm := NewMockLLM(TextTurn("Polished Title"))

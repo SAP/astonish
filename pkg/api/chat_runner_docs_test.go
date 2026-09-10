@@ -18,9 +18,9 @@ func TestChatRunnerInjectRequestToolsIsSessionScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := newChatRunner("first", "user", false)
+	first := newChatRunner("first", "user", studioChatAppName, false)
 	defer first.cancel()
-	second := newChatRunner("second", "user", false)
+	second := newChatRunner("second", "user", studioChatAppName, false)
 	defer second.cancel()
 
 	first.InjectRequestTools(requestTool)
@@ -77,7 +77,7 @@ func TestRequestDocsStoresInjectedIntoChatRunner(t *testing.T) {
 	svc := &store.Services{PersonalDocs: personal, Docs: team}
 	req := httptest.NewRequest("POST", "/api/studio/chat", nil)
 	req = req.WithContext(store.WithServices(req.Context(), svc))
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 
 	gotSvc := injectRequestDocsStores(runner, req)
 
@@ -97,7 +97,7 @@ func TestRequestDocsStoresInjectedIntoChatRunner(t *testing.T) {
 }
 
 func TestRequestDocsStoresInjectNilServicesIsNoOp(t *testing.T) {
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 	req := httptest.NewRequest("POST", "/api/studio/chat", nil)
 
 	if got := injectRequestDocsStores(runner, req); got != nil {
@@ -119,7 +119,7 @@ func TestChatRunnerInjectDocsStoresPreservesServicesWithoutMutatingSharedValue(t
 		Docs:         originalTeam,
 	}
 
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 	runner.ctx = store.WithServices(runner.ctx, shared)
 	runner.InjectDocsStores(personal, team)
 
@@ -147,7 +147,7 @@ func TestChatRunnerInjectDocsStoresPreservesServicesWithoutMutatingSharedValue(t
 func TestChatRunnerInjectDocsStoresCreatesServices(t *testing.T) {
 	personal := &chatRunnerDocsStore{}
 	team := &chatRunnerDocsStore{}
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 
 	runner.InjectDocsStores(personal, team)
 
@@ -167,7 +167,7 @@ func TestChatRunnerInjectSlideTemplateStoresPopulatesServices(t *testing.T) {
 	platStore := &store.MemorySlideTemplateStore{}
 	orgStore := &store.MemorySlideTemplateStore{}
 
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 	runner.InjectDocsStores(&chatRunnerDocsStore{}, &chatRunnerDocsStore{})
 	runner.InjectSlideTemplateStores(platStore, orgStore)
 
@@ -199,7 +199,7 @@ func TestInjectRequestDocsStoresCarriesSlideTemplateStores(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/studio/chat", nil)
 	r = r.WithContext(store.WithServices(r.Context(), svc))
 
-	runner := newChatRunner("session", "user", false)
+	runner := newChatRunner("session", "user", studioChatAppName, false)
 	injectRequestDocsStores(runner, r)
 
 	got := store.FromContext(runner.Context())

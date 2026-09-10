@@ -102,11 +102,14 @@ type ChatRunner struct {
 // titleWaitTimeout controls how long to wait for the title-refine goroutine
 // after the "done" event before closing subscribers. Zero means close
 // immediately (used in tests).
-func newChatRunner(sessionID, userID string, isNew bool) *ChatRunner {
+func newChatRunner(sessionID, userID, appName string, isNew bool) *ChatRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Inject session ID into context so tool functions (e.g., memory_save)
 	// can tag entries with the session that created them.
 	ctx = store.WithSessionID(ctx, sessionID)
+	// Inject the effective app name into the context so persist helpers
+	// (persistRunError, persistSessionMessage) route to the correct namespace.
+	ctx = context.WithValue(ctx, appNameContextKey, appName)
 	return &ChatRunner{
 		SessionID:              sessionID,
 		UserID:                 userID,
@@ -631,7 +634,7 @@ func (cr *ChatRunner) Run(
 	}
 
 	rnr, err := runner.New(runner.Config{
-		AppName:        studioChatAppName,
+		AppName:        getAppNameFromContext(cr.ctx),
 		Agent:          adkAgent,
 		SessionService: sessionService,
 	})

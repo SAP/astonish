@@ -7,7 +7,7 @@ import (
 )
 
 func TestMaybeEmitTutorialBlueprint_ReturnsTrueOnAwaitingApproval(t *testing.T) {
-	cr := newChatRunner("sess-bp", "user1", false)
+	cr := newChatRunner("sess-bp", "user1", studioChatAppName, false)
 	chatAgent := &agent.ChatAgent{}
 
 	resp := map[string]any{
@@ -44,7 +44,7 @@ func TestMaybeEmitTutorialBlueprint_ReturnsTrueOnAwaitingApproval(t *testing.T) 
 }
 
 func TestMaybeEmitTutorialBlueprint_ReturnsFalseOtherwise(t *testing.T) {
-	cr := newChatRunner("sess-bp2", "user1", false)
+	cr := newChatRunner("sess-bp2", "user1", studioChatAppName, false)
 	chatAgent := &agent.ChatAgent{}
 
 	cases := []struct {
@@ -68,7 +68,7 @@ func TestMaybeEmitTutorialBlueprint_ReturnsFalseOtherwise(t *testing.T) {
 }
 
 func TestMaybeEmitTutorialBlueprint_AcceptsLegacyOkStatus(t *testing.T) {
-	cr := newChatRunner("sess-bp3", "user1", false)
+	cr := newChatRunner("sess-bp3", "user1", studioChatAppName, false)
 	chatAgent := &agent.ChatAgent{}
 	resp := map[string]any{
 		"status":                     "ok",

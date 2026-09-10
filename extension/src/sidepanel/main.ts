@@ -1,5 +1,6 @@
 import {
   connectChat,
+  deleteSession,
   fetchSessionHistory,
   fetchSessions,
   historyMessageKind,
@@ -949,6 +950,13 @@ deleteSessionButton?.addEventListener('click', async () => {
   const confirmed = confirm(`Delete this session?`);
   if (!confirmed) {
     return;
+  }
+  // Delete from server first; fall through to local cleanup even on failure
+  // (the session will be pruned on next sync if the server call fails).
+  try {
+    await deleteSession(sessionId);
+  } catch {
+    // Best-effort — remove from local state regardless.
   }
   const state = await deleteExtensionSession(currentTabId, sessionId);
   sessionId = state.currentSessionId;

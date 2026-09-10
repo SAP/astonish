@@ -47,7 +47,7 @@ func setupIntegrationTest(t *testing.T, mockLLM *MockLLM, tools []tool.Tool) *in
 	}
 	sessionID := createResp.Session.ID()
 
-	runner := newChatRunner(sessionID, studioChatUserID, true)
+	runner := newChatRunner(sessionID, studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 
 	t.Cleanup(func() {

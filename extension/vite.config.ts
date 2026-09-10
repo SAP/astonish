@@ -16,12 +16,9 @@ function chromeExtensionAssets(): Plugin {
 
       const nestedHtml = resolve(dist, 'src/sidepanel/index.html');
       if (existsSync(nestedHtml)) {
-        let html = readFileSync(nestedHtml, 'utf8')
+        const html = readFileSync(nestedHtml, 'utf8')
           .replaceAll('../../assets/', './assets/')
           .replaceAll('../assets/', './assets/');
-        // Remove modulepreload links for extension chunks. Chrome MV3 flags these as
-        // "cross-world extension resource mismatch". Dynamic imports still work fine.
-        html = html.replace(/<link rel="modulepreload"[^>]*>/g, '');
         writeFileSync(resolve(dist, 'sidepanel.html'), html);
       }
 

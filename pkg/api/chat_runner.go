@@ -879,7 +879,7 @@ runLoop:
 		if runErr != nil {
 			lastRunErr = runErr
 			cr.emitEvent("error", map[string]any{"error": runErr.Error()})
-			persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, runErr)
+			persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
 			break
 		}
 
@@ -1115,7 +1115,7 @@ runLoop:
 			}
 			if runErr != nil {
 				cr.emitEvent("error", map[string]any{"error": fmt.Sprintf("Retry also failed: %v", runErr)})
-				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, runErr)
+				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
 				break
 			}
 			if event.Actions.StateDelta != nil {

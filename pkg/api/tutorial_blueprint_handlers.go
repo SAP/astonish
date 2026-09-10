@@ -39,7 +39,7 @@ func handleTutorialBlueprintIntent(
 			chatAgent.CancelPendingTutorialBlueprint(sessionID)
 			errText := fmt.Sprintf("Failed to convert blueprint: %v", err)
 			SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-			persistSessionMessage(r.Context(), sessionService, userID, sessionID, "model", errText)
+			persistSessionMessage(r.Context(), sessionService, userID, sessionID, "model", errText, "")
 			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 			return true, ""
 		}
@@ -87,12 +87,12 @@ func handleTutorialBlueprintIntent(
 		return false, rewriteMsg
 
 	case trimmed == "__tutorial_blueprint_cancel__":
-		persistSessionMessage(r.Context(), sessionService, userID, sessionID, "user", "Cancel blueprint")
+		persistSessionMessage(r.Context(), sessionService, userID, sessionID, "user", "Cancel blueprint", "")
 		chatAgent.ClearTutorialBlueprintApproved(sessionID)
 		chatAgent.CancelPendingTutorialBlueprint(sessionID)
 		responseText := "Tutorial blueprint review cancelled."
 		SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
-		persistSessionMessage(r.Context(), sessionService, userID, sessionID, "model", responseText)
+		persistSessionMessage(r.Context(), sessionService, userID, sessionID, "model", responseText, "")
 		SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 		return true, ""
 

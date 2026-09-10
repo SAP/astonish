@@ -136,6 +136,13 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := mux.Vars(r)["id"]
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+
 	// Platform mode: try personal session store first, fall back to team
 	// (for fleet sub-sessions or pre-migration data).
 	svc := store.FromRequest(r)
@@ -155,7 +162,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Fleet sessions: read transcript events from store
 		if meta.FleetKey != "" {
-			events, readErr := sessionStore.ReadTranscriptEvents(r.Context(), studioChatAppName, userID, sessionID)
+			events, readErr := sessionStore.ReadTranscriptEvents(r.Context(), appName, userID, sessionID)
 			var fleetMessages []FleetMessageSummary
 			if readErr == nil && len(events) > 0 {
 				fleetMessages = fleetEventsToMessages(events)
@@ -172,7 +179,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Regular session: get full session with events
 		getResp, err := sessionStore.Get(r.Context(), &session.GetRequest{
-			AppName:   studioChatAppName,
+			AppName:   appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
@@ -645,6 +652,13 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+
 	// Load app config once for backend-agnostic sandbox cleanup.
 	appCfg, _ := config.LoadAppConfig()
 
@@ -675,7 +689,7 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		err := sessionStore.Delete(r.Context(), &session.DeleteRequest{
-			AppName:   studioChatAppName,
+			AppName:   appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})

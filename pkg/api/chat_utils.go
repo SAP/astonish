@@ -1082,9 +1082,12 @@ func toInt(v interface{}) int {
 // returns an error. Without this, errors are only sent as transient SSE events
 // and disappear on page reload — the user sees their message but no indication
 // that the model failed.
-func persistRunError(ctx context.Context, svc session.Service, userID, sessionID string, runErr error) {
+func persistRunError(ctx context.Context, svc session.Service, userID, sessionID, appName string, runErr error) {
+	if appName == "" {
+		appName = getAppNameFromContext(ctx)
+	}
 	resp, err := svc.Get(ctx, &session.GetRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
@@ -1113,12 +1116,15 @@ func persistRunError(ctx context.Context, svc session.Service, userID, sessionID
 // persistSessionMessage appends a user or model text message to the session.
 // This is used for interactions that bypass runner.Run() (like slash commands)
 // so they appear in the persisted session history.
-func persistSessionMessage(ctx context.Context, svc session.Service, userID, sessionID, role, text string) {
+func persistSessionMessage(ctx context.Context, svc session.Service, userID, sessionID, role, text, appName string) {
 	if svc == nil || sessionID == "" || text == "" {
 		return
 	}
+	if appName == "" {
+		appName = getAppNameFromContext(ctx)
+	}
 	resp, err := svc.Get(ctx, &session.GetRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
@@ -1379,7 +1385,7 @@ func persistDistillPreview(ctx context.Context, svc session.Service, userID, ses
 		slog.Error("failed to marshal distill preview", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", distillPreviewPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", distillPreviewPrefix+string(data), "")
 }
 
 // persistDistillSaved serializes a distill-saved result as a structured text event.
@@ -1396,7 +1402,7 @@ func persistDistillSaved(ctx context.Context, svc session.Service, userID, sessi
 		slog.Error("failed to marshal distill saved", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", distillSavedPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", distillSavedPrefix+string(data), "")
 }
 
 // tryParseDistillMessage checks if a text starts with a distill marker prefix
@@ -1498,7 +1504,7 @@ func persistChatQuestion(ctx context.Context, svc session.Service, userID, sessi
 		slog.Error("failed to marshal chat question", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", chatQuestionPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", chatQuestionPrefix+string(data), "")
 }
 
 // tryParseChatQuestionMessage checks if a text starts with the chat_question
@@ -1550,7 +1556,7 @@ func persistTutorialBlueprintPreview(ctx context.Context, svc session.Service, u
 		slog.Error("failed to marshal tutorial blueprint preview", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialBlueprintPreviewPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialBlueprintPreviewPrefix+string(data), "")
 }
 
 func persistTutorialBlueprintApproved(ctx context.Context, svc session.Service, userID, sessionID string, payload map[string]any) {
@@ -1562,7 +1568,7 @@ func persistTutorialBlueprintApproved(ctx context.Context, svc session.Service, 
 		slog.Error("failed to marshal tutorial blueprint approved", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialBlueprintApprovedPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialBlueprintApprovedPrefix+string(data), "")
 }
 
 func tryParseTutorialBlueprintMessage(text string) *StudioMessage {
@@ -1624,7 +1630,7 @@ func persistTutorialSceneSlideshow(ctx context.Context, svc session.Service, use
 		slog.Error("failed to marshal tutorial scene slideshow", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialSceneSlideshowPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", tutorialSceneSlideshowPrefix+string(data), "")
 }
 
 func tryParseTutorialSceneSlideshowMessage(text string) *StudioMessage {
@@ -1833,7 +1839,7 @@ func persistAppPreview(ctx context.Context, svc session.Service, userID, session
 		slog.Error("failed to marshal app preview", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", appPreviewPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", appPreviewPrefix+string(data), "")
 }
 
 // tryParseAppPreviewMessage checks if a text starts with the app_preview marker prefix
@@ -1943,7 +1949,7 @@ func persistReportMarker(ctx context.Context, svc session.Service, userID, sessi
 		slog.Error("failed to marshal report marker", "component", "persistReportMarker", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", reportMarkerPrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", reportMarkerPrefix+string(data), "")
 }
 
 // collectReportMarkers walks a session's events and returns a map of
@@ -2022,7 +2028,7 @@ func persistDocsUpdate(ctx context.Context, svc session.Service, userID, session
 		slog.Error("failed to marshal docs update", "error", err)
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", docsUpdatePrefix+string(data))
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", docsUpdatePrefix+string(data), "")
 }
 
 func tryParseDocsUpdateMessage(text string) *StudioMessage {
@@ -2056,7 +2062,7 @@ func persistFlowOutput(ctx context.Context, svc session.Service, userID, session
 	if svc == nil || sessionID == "" || content == "" {
 		return
 	}
-	persistSessionMessage(ctx, svc, userID, sessionID, "model", flowOutputPrefix+content)
+	persistSessionMessage(ctx, svc, userID, sessionID, "model", flowOutputPrefix+content, "")
 }
 
 // tryParseFlowOutputMessage checks if a text starts with the flow_output marker

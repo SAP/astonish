@@ -710,7 +710,7 @@ function sendCurrentMessage(): void {
       const results = await runPageToolCalls(calls);
       message =
         'The Chrome extension ran those page tools in THIS browser tab. Use the results below. Stay in this tab: page_snapshot / page_click / page_navigate. Do not call web_fetch, http_request, browser_snapshot, browser_navigate, or search_tools unless the user explicitly asked for a backend fetch.';
-      context = `${formatPageToolResults(results)}\n\n${EXTENSION_PAGE_TOOLS_INSTRUCTIONS}`;
+      context = formatPageToolResults(results);
     }
 
     appendNotice('error', 'Stopped after too many page-tool rounds.');

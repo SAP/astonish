@@ -498,7 +498,7 @@ func TestIntegration_ApprovalFlow_AutoApproveFalse(t *testing.T) {
 // → state delta with auto_approved → runner emits "auto_approved" event.
 // This is more thorough than X11/X12 by testing the channel delivery end-to-end.
 func TestIntegration_ApprovalEvent_EmittedByStateDelta(t *testing.T) {
-	runner := newChatRunner("test-approval-flow", studioChatUserID, true)
+	runner := newChatRunner("test-approval-flow", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer func() {
 		runner.Unsubscribe("test")
@@ -550,7 +550,7 @@ func TestIntegration_ApprovalEvent_EmittedByStateDelta(t *testing.T) {
 // TestIntegration_ApprovalFlow_DenyStateDelta verifies that after an approval
 // event, a denial state delta is handled correctly.
 func TestIntegration_ApprovalFlow_DenyStateDelta(t *testing.T) {
-	runner := newChatRunner("test-deny", studioChatUserID, true)
+	runner := newChatRunner("test-deny", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer func() {
 		runner.Unsubscribe("test")

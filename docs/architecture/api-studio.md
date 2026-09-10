@@ -151,3 +151,10 @@ This avoids installing Node under QEMU on GitHub Actions multi-arch `linux/arm64
 - **Fleet**: Fleet endpoints manage sessions, stream agent activity, and handle human messages.
 - **MCP**: MCP endpoints manage server lifecycle and provide an inspector for debugging.
 - **Daemon**: The API server is started as part of daemon initialization.
+
+### Chrome extension client
+
+The unpacked Chrome extension (`extension/`) is another client of existing Studio APIs. It does not add routes.
+
+- `GET /api/auth/sso/providers`, `POST /api/auth/sso/init`, and `POST /api/auth/sso/poll` — the same CLI device-code SSO flow as `astonish login --sso`. Cookies (`astonish_access`) cannot be sent from `chrome-extension://`.
+- `POST /api/studio/chat` SSE with `Authorization: Bearer` and optional `systemContext` (current page URL/title/body). See `docs/architecture/chrome-extension.md`.

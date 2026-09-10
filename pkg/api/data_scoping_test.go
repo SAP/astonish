@@ -180,7 +180,7 @@ func TestCredentialResolverForRequest_IgnoresMCPScopeUsesPersonalFirst(t *testin
 // --- ChatRunner UserID tests ---
 
 func TestNewChatRunner_UserID(t *testing.T) {
-	runner := newChatRunner("session-1", "user-abc", true)
+	runner := newChatRunner("session-1", "user-abc", studioChatAppName, true)
 	if runner.UserID != "user-abc" {
 		t.Errorf("runner.UserID = %q, want %q", runner.UserID, "user-abc")
 	}

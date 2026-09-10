@@ -54,6 +54,7 @@ type StudioChatRequest struct {
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
 	MemoryScope      string           `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
+	AppName          string           `json:"appName,omitempty"`          // optional app name for session categorization (e.g. "astonish-extension")
 }
 
 // StudioSessionResponse is a single session in list responses.
@@ -360,6 +361,23 @@ const (
 	studioChatUserID  = "studio_user"
 )
 
+// contextKeyAppName is used to store the effective app name in the request context,
+// so that helper functions (like persistDistillPreview) can retrieve it without
+// requiring an explicit parameter.
+type contextKeyAppName struct{}
+
+var appNameContextKey contextKeyAppName
+
+// getAppNameFromContext retrieves the effective app name from the context.
+// If not set, defaults to studioChatAppName.
+func getAppNameFromContext(ctx context.Context) string {
+	appName, ok := ctx.Value(appNameContextKey).(string)
+	if !ok {
+		appName = studioChatAppName
+	}
+	return appName
+}
+
 // globalChatManager is the singleton for Studio chat.
 var globalChatManager *ChatManager
 var chatManagerOnce sync.Once
@@ -595,6 +613,18 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := effectiveUserID(r)
+	// Resolve the effective app name: use the caller-provided app name if present,
+	// otherwise default to the Studio chat app name. This allows the Chrome extension
+	// to categorize its sessions separately from Studio sessions.
+	effectiveApp := studioChatAppName
+	if req.AppName != "" {
+		effectiveApp = req.AppName
+	}
+	if !validAppName.MatchString(effectiveApp) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
+	}
+
 	if req.Debug && !IsPlatformAdmin(GetPlatformUser(r)) {
 		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")
 		return
@@ -765,8 +795,8 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.HasPrefix(msg, "/") {
-		// Use r.Context() for slash commands since they're lightweight
-		handleSlashCommand(r, w, flusher, cm, sessionService, msg, userID, req.SessionID)
+		// Use ctx for slash commands so they inherit the app name context
+		handleSlashCommand(r, w, flusher, cm, sessionService, msg, userID, req.SessionID, effectiveApp)
 		return
 	}
 
@@ -794,7 +824,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			if msg == "__distill_save__" {
 				userText = "Save Flow"
 			}
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText, "")
 
 			// Enrich context with composite FlowStore (personal-first) so
 			// SaveDistillReview persists to the user's personal store.
@@ -807,7 +837,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				errText := fmt.Sprintf("Failed to save flow: %v", err)
 				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText)
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
 			} else {
 				SendSSE(w, flusher, "distill_saved", map[string]interface{}{
 					"filePath":   filePath,
@@ -819,21 +849,21 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 
 		case agent.DistillIntentCancel:
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
 			chatAgent.CancelDistillReview(req.SessionID)
 			responseText := "Distill review cancelled."
 			SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText, "")
 			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 			return
 
 		case agent.DistillIntentTestRun:
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
 
 			if chatAgent.FlowRunner == nil {
 				errText := "Test run is not available — the flow runner is not configured in this environment."
 				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText)
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
 				SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 				return
 			}
@@ -879,18 +909,18 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			SendSSE(w, flusher, "text", map[string]interface{}{"text": analysisText})
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", analysisText)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", analysisText, "")
 			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 			return
 
 		default: // DistillIntentModify
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
 			SendSSE(w, flusher, "text", map[string]interface{}{"text": "Modifying flow...\n"})
 			review, err := chatAgent.ModifyDistillReview(r.Context(), req.SessionID, msg)
 			if err != nil {
 				errText := fmt.Sprintf("Failed to modify flow: %v\nYou can try another change, type `save` to save as-is, or `cancel` to abort.", err)
 				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText)
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
 			} else {
 				SendSSE(w, flusher, "distill_preview", map[string]interface{}{
 					"yaml":        review.YAML,
@@ -910,7 +940,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Handles the case where the server restarted and in-memory state was lost.
 	if req.SessionID != "" && !chatAgent.HasActiveApp(req.SessionID) {
 		getResp, err := sessionService.Get(r.Context(), &session.GetRequest{
-			AppName:   studioChatAppName,
+			AppName:   effectiveApp,
 			UserID:    userID,
 			SessionID: req.SessionID,
 		})
@@ -936,7 +966,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			if msg == "__app_save__" || msg == "__app_done__" || strings.HasPrefix(msg, "__app_save__:") {
 				userText = "Save"
 			}
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText, "")
 
 			// Save the app to disk
 			var savedPath, savedName string
@@ -979,7 +1009,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 				"name": savedName,
 				"path": savedPath,
 			})
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText)
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText, "")
 			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 			return
 
@@ -1012,7 +1042,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	isNew := false
 	if sessionID == "" {
 		resp, err := sessionService.Create(r.Context(), &session.CreateRequest{
-			AppName: studioChatAppName,
+			AppName: effectiveApp,
 			UserID:  userID,
 		})
 		if err != nil {
@@ -1053,7 +1083,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Launch background runner — the agent runs independently of this HTTP request.
-	runner := newChatRunner(sessionID, userID, isNew)
+	runner := newChatRunner(sessionID, userID, effectiveApp, isNew)
 	runner.ctx = store.WithDebugEnabled(runner.ctx, req.Debug)
 	if req.Debug {
 		if diagnosticsStore, ok := sessionService.(store.SessionStore); ok {
@@ -1580,8 +1610,12 @@ func streamRunnerEvents(w http.ResponseWriter, flusher http.Flusher, httpCtx con
 // The *http.Request is required so /status can resolve the per-session model
 // (personal pin → user default → team/org/platform cascade) instead of the
 // process-global ChatManager.ProviderName/ModelName.
-func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *ChatManager, sessionService session.Service, cmd, userID, sessionID string) {
-	ctx := r.Context()
+// The effectiveApp parameter ensures session creation commands use the correct app namespace.
+func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *ChatManager, sessionService session.Service, cmd, userID, sessionID, effectiveApp string) {
+	// Inject effectiveApp into context so persistSessionMessage and
+	// persistDistillPreview resolve the correct namespace without needing
+	// an explicit appName argument at every call site.
+	ctx := context.WithValue(r.Context(), appNameContextKey, effectiveApp)
 	comp := cm.components
 	chatAgent := comp.ChatAgent
 
@@ -1667,7 +1701,7 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 
 	case cmd == "/new":
 		resp, err := sessionService.Create(ctx, &session.CreateRequest{
-			AppName: studioChatAppName,
+			AppName: effectiveApp,
 			UserID:  userID,
 		})
 		if err != nil {
@@ -1680,12 +1714,12 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 
 	case cmd == "/distill":
 		// Persist the user's /distill command to the session
-		persistSessionMessage(ctx, sessionService, userID, sessionID, "user", "/distill")
+		persistSessionMessage(ctx, sessionService, userID, sessionID, "user", "/distill", "")
 
 		if sessionID == "" {
 			responseText := "No active session to distill."
 			SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
-			persistSessionMessage(ctx, sessionService, userID, sessionID, "model", responseText)
+			persistSessionMessage(ctx, sessionService, userID, sessionID, "model", responseText, "")
 		} else {
 			// Enrich context with SessionService and FlowStore so that
 			// PreviewDistill can reconstruct traces from PG (platform mode)
@@ -1702,7 +1736,7 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 
 			ds := agent.DistillSession{
 				SessionID: sessionID,
-				AppName:   studioChatAppName,
+				AppName:   effectiveApp,
 				UserID:    userID,
 			}
 			// Identify traces and immediately run distillation (no confirmation step)
@@ -1710,7 +1744,7 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 			if err != nil {
 				responseText := fmt.Sprintf("Cannot distill: %v", err)
 				SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
-				persistSessionMessage(ctx, sessionService, userID, sessionID, "model", responseText)
+				persistSessionMessage(ctx, sessionService, userID, sessionID, "model", responseText, "")
 			} else {
 				// Run distillation and send preview directly
 				review, distillErr := chatAgent.DistillToReview(distillCtx, ds, func(text string) {
@@ -1719,7 +1753,7 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 				if distillErr != nil {
 					errText := fmt.Sprintf("Distillation failed: %v", distillErr)
 					SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-					persistSessionMessage(ctx, sessionService, userID, sessionID, "model", errText)
+					persistSessionMessage(ctx, sessionService, userID, sessionID, "model", errText, "")
 				} else {
 					SendSSE(w, flusher, "distill_preview", map[string]interface{}{
 						"yaml":        review.YAML,
@@ -1734,7 +1768,7 @@ func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *
 					if chatAgent.FlowRunner != nil {
 						offerText := "\n**Should we run a test before saving?**"
 						SendSSE(w, flusher, "text", map[string]interface{}{"text": offerText})
-						persistSessionMessage(ctx, sessionService, userID, sessionID, "model", offerText)
+						persistSessionMessage(ctx, sessionService, userID, sessionID, "model", offerText, "")
 					}
 				}
 			}

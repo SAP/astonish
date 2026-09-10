@@ -81,7 +81,7 @@ func TestMaybeEmitDocsUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runner := newChatRunner("test-docs-update", studioChatUserID, true)
+			runner := newChatRunner("test-docs-update", studioChatUserID, studioChatAppName, true)
 			ch := runner.Subscribe("test")
 			defer runner.Unsubscribe("test")
 
@@ -104,7 +104,7 @@ func TestMaybeEmitDocsUpdate(t *testing.T) {
 }
 
 func TestMaybeEmitDocsUpdateIgnoresFailedToolResult(t *testing.T) {
-	runner := newChatRunner("test-docs-update-error", studioChatUserID, true)
+	runner := newChatRunner("test-docs-update-error", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 

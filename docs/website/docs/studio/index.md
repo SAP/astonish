@@ -57,3 +57,4 @@ Chat sessions and flow executions persist across browser refreshes. Studio store
 - [Settings](./settings.md)
 - [Running & Debugging](./running-debugging.md)
 - [Keyboard Shortcuts](./keyboard-shortcuts.md)
+- [Chrome Extension](./chrome-extension.md)

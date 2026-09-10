@@ -37,6 +37,12 @@ import (
 // Must start with an alphanumeric character (prevents leading - or . attacks).
 var validSessionID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,127}$`)
 
+// validAppName constrains the ?app= query parameter and StudioChatRequest.AppName.
+// App names are used as directory path components in the file store and as query
+// parameters in the Ent store, so they must be opaque, short identifiers.
+// Allowed: lowercase ASCII letters, digits, hyphens, and underscores, 1-64 chars.
+var validAppName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+
 // resolveSessionStore returns the session store that contains the given session.
 // It checks the personal store first (private-first model), then falls back to
 // the team store (for fleet sub-sessions and pre-migration data).
@@ -59,10 +65,21 @@ func resolveSessionStore(svc *store.Services, sessionID string) store.SessionSto
 func StudioSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter sessions by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
+	}
+
 	// Platform mode: list from personal session store (private-first).
 	// Sessions are always private — they don't change when switching teams.
 	if svc := store.FromRequest(r); svc != nil && svc.PersonalSessions != nil {
-		metas, err := svc.PersonalSessions.ListSessionMetas(r.Context(), studioChatAppName, userID)
+		metas, err := svc.PersonalSessions.ListSessionMetas(r.Context(), appName, userID)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -94,7 +111,7 @@ func StudioSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metas, err := fs.ListSessionMetas(studioChatAppName, userID)
+	metas, err := fs.ListSessionMetas(appName, userID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -129,6 +146,17 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := mux.Vars(r)["id"]
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
+	}
+
 	// Platform mode: try personal session store first, fall back to team
 	// (for fleet sub-sessions or pre-migration data).
 	svc := store.FromRequest(r)
@@ -145,10 +173,17 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("Session not found: %v", err))
 			return
 		}
+		// Defense-in-depth: verify the session belongs to the requested app namespace.
+		// GetSessionMeta looks up by globally-unique ID without appName scoping, so
+		// we confirm the match here rather than leaking sessions across namespaces.
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
 
 		// Fleet sessions: read transcript events from store
 		if meta.FleetKey != "" {
-			events, readErr := sessionStore.ReadTranscriptEvents(r.Context(), studioChatAppName, userID, sessionID)
+			events, readErr := sessionStore.ReadTranscriptEvents(r.Context(), appName, userID, sessionID)
 			var fleetMessages []FleetMessageSummary
 			if readErr == nil && len(events) > 0 {
 				fleetMessages = fleetEventsToMessages(events)
@@ -165,7 +200,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Regular session: get full session with events
 		getResp, err := sessionStore.Get(r.Context(), &session.GetRequest{
-			AppName:   studioChatAppName,
+			AppName:   appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
@@ -220,10 +255,15 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, fmt.Sprintf("Session not found: %v", err))
 		return
 	}
+	// Defense-in-depth: verify the session belongs to the requested app namespace.
+	if meta.AppName != appName {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	}
 
 	// Fleet sessions: read transcript and return fleet-style messages
 	if meta.FleetKey != "" {
-		transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, sessionID+".jsonl")
+		transcriptPath := filepath.Join(fs.BaseDir(), appName, userID, sessionID+".jsonl")
 		transcript := persistentsession.NewTranscript(transcriptPath)
 		events, readErr := transcript.ReadEvents()
 
@@ -254,7 +294,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Get session transcript
 	getResp, err := fs.Get(r.Context(), &session.GetRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
@@ -638,16 +678,19 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
+	}
+
 	// Load app config once for backend-agnostic sandbox cleanup.
 	appCfg, _ := config.LoadAppConfig()
-
-	// If this is an active fleet session, stop it and clean up sandbox
-	registry := getFleetSessionRegistry()
-	if fs := registry.Get(sessionID); fs != nil {
-		fs.Stop()
-		fs.Cleanup() // destroy sandbox container + clean session registry
-		registry.Unregister(sessionID)
-	}
 
 	// Platform mode: try personal session store first, fall back to team.
 	svc := store.FromRequest(r)
@@ -660,15 +703,36 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Clean up per-session workspace directory if one was recorded.
-		if meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID); metaErr == nil && meta.WorkspaceDir != "" {
+		// Defense-in-depth: verify the session belongs to the requested app
+		// namespace BEFORE any destructive action (fleet stop, workspace cleanup).
+		// Fail closed: if GetSessionMeta errors, treat as not found rather than
+		// skipping the namespace check.
+		meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID)
+		if metaErr != nil || meta == nil {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+
+		// Namespace verified — now safe to stop any active fleet session.
+		registry := getFleetSessionRegistry()
+		if fs := registry.Get(sessionID); fs != nil {
+			fs.Stop()
+			fs.Cleanup()
+			registry.Unregister(sessionID)
+		}
+
+		if meta.WorkspaceDir != "" {
 			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
 				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
 			}
 		}
 
 		err := sessionStore.Delete(r.Context(), &session.DeleteRequest{
-			AppName:   studioChatAppName,
+			AppName:   appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
@@ -706,9 +770,28 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up per-session workspace directory if one was recorded.
+	// Defense-in-depth: verify the session belongs to the requested app
+	// namespace via the file store metadata BEFORE any destructive action.
+	// Fail closed: if GetSessionMeta errors, treat as not found rather than
+	// skipping the namespace check (which would orphan fleet sandboxes/workspaces).
 	if fileStore := getFleetFileStore(); fileStore != nil {
-		if meta, metaErr := fileStore.GetSessionMeta(sessionID); metaErr == nil && meta.WorkspaceDir != "" {
+		meta, metaErr := fileStore.GetSessionMeta(sessionID)
+		if metaErr != nil || meta == nil {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		// Namespace verified — now safe to stop any active fleet session.
+		registry := getFleetSessionRegistry()
+		if fs := registry.Get(sessionID); fs != nil {
+			fs.Stop()
+			fs.Cleanup()
+			registry.Unregister(sessionID)
+		}
+		if meta.WorkspaceDir != "" {
 			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
 				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
 			}
@@ -717,7 +800,7 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	sessionService := cm.components.SessionService
 	err := sessionService.Delete(r.Context(), &session.DeleteRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})

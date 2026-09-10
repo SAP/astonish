@@ -1090,7 +1090,7 @@ func TestSlashCommand_Status_ReflectsSessionPin(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	handleSlashCommand(r, w, nil, cm, nil, "/status", "u1", "sess-1")
+	handleSlashCommand(r, w, nil, cm, nil, "/status", "u1", "sess-1", studioChatAppName)
 
 	body := w.Body.String()
 	if !strings.Contains(body, "openai") || !strings.Contains(body, "gpt-5") {

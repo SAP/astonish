@@ -117,7 +117,7 @@ func TestStripReportMarkerFences_Multiple(t *testing.T) {
 // matching ```astonish-report fence in the agent text, the runner must
 // emit exactly one report_marker event with path+title.
 func TestDetectAndEmitReportMarkers_HappyPath(t *testing.T) {
-	runner := newChatRunner("test-rm-happy", studioChatUserID, true)
+	runner := newChatRunner("test-rm-happy", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -162,7 +162,7 @@ func TestDetectAndEmitReportMarkers_HappyPath(t *testing.T) {
 // This is the safety property that prevents an LLM hallucinating a path
 // from fabricating a fake report card.
 func TestDetectAndEmitReportMarkers_PathMismatch(t *testing.T) {
-	runner := newChatRunner("test-rm-mismatch", studioChatUserID, true)
+	runner := newChatRunner("test-rm-mismatch", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 
@@ -190,7 +190,7 @@ func TestDetectAndEmitReportMarkers_PathMismatch(t *testing.T) {
 // path across multiple fences in one turn (a known LLM tic), only one
 // report_marker event must be sent. Prevents duplicate UI updates.
 func TestDetectAndEmitReportMarkers_Dedup(t *testing.T) {
-	runner := newChatRunner("test-rm-dedup", studioChatUserID, true)
+	runner := newChatRunner("test-rm-dedup", studioChatUserID, studioChatAppName, true)
 	ch := runner.Subscribe("test")
 	defer runner.Unsubscribe("test")
 

@@ -7,7 +7,7 @@ import (
 )
 
 func TestChatRunnerInjectFleetSetupStores(t *testing.T) {
-	runner := newChatRunner("session-setup", studioChatUserID, true)
+	runner := newChatRunner("session-setup", studioChatUserID, studioChatAppName, true)
 	profileStore := getSetupProfileStore(&store.Services{})
 	draftStore := getSetupDraftStore(&store.Services{})
 

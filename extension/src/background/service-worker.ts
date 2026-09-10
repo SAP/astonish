@@ -17,6 +17,7 @@ import {
   waitForPossibleNavigation,
 } from '../lib/page-navigate';
 import { cdpClick, cdpFill } from './cdp-input';
+import { removeTabState } from '../lib/extension-sessions';
 
 const CONTENT_SCRIPT = 'content-script.js';
 
@@ -163,6 +164,11 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+
+// Clean up per-tab session state when a tab is closed.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void removeTabState(tabId);
+});
 
 const UNREADABLE = 'This page cannot be read';
 

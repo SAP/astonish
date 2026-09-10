@@ -82,8 +82,17 @@ let studioUrl = '';
 let streaming = false;
 let pendingEdit: string | null = null;
 let currentAbort: AbortController | null = null;
+let currentTabId = 0;
 
 const MAX_PAGE_TOOL_ROUNDS = 15;
+
+async function resolveTabId(): Promise<number> {
+  if (typeof chrome === 'undefined' || !chrome.tabs?.query) {
+    return 0;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id ?? 0;
+}
 
 function showError(message: string): void {
   if (!loginError) {
@@ -324,7 +333,7 @@ function renderHistory(messages: HistoryMessage[]): void {
 }
 
 async function refreshExtensionSessions(): Promise<ExtensionChatState> {
-  const stored = await loadExtensionChat();
+  const stored = await loadExtensionChat(currentTabId);
   try {
     const listed = await fetchSessions();
     const extensionOnly = filterExtensionSessions(
@@ -336,6 +345,7 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
     const currentStillThere =
       !stored.currentSessionId || merged.some((session) => session.id === stored.currentSessionId);
     const saved = await replaceExtensionSessions(
+      currentTabId,
       merged,
       currentStillThere ? stored.currentSessionId : '',
     );
@@ -348,6 +358,7 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
 }
 
 async function restoreExtensionChat(): Promise<void> {
+  currentTabId = await resolveTabId();
   const state = await refreshExtensionSessions();
   sessionId = state.currentSessionId;
   if (!sessionId) {
@@ -359,7 +370,7 @@ async function restoreExtensionChat(): Promise<void> {
     const history = await fetchSessionHistory(sessionId);
     renderHistory(history.messages);
     if (history.title) {
-      const next = await updateExtensionSessionTitle(sessionId, history.title);
+      const next = await updateExtensionSessionTitle(currentTabId, sessionId, history.title);
       renderSessionPicker(next);
     }
   } catch (err) {
@@ -371,7 +382,7 @@ async function beginNewChat(): Promise<void> {
   if (streaming) {
     return;
   }
-  const state = await startNewExtensionSession();
+  const state = await startNewExtensionSession(currentTabId);
   sessionId = '';
   transcript?.replaceChildren();
   hideApplyBar();
@@ -387,12 +398,12 @@ async function selectStoredSession(id: string): Promise<void> {
     return;
   }
   sessionId = id;
-  await setCurrentSessionId(id);
+  await setCurrentSessionId(currentTabId, id);
   try {
     const history = await fetchSessionHistory(id);
     renderHistory(history.messages);
     const title = history.title || id;
-    const state = await rememberExtensionSession(id, title);
+    const state = await rememberExtensionSession(currentTabId, id, title);
     renderSessionPicker(state);
   } catch (err) {
     transcript?.replaceChildren();
@@ -405,7 +416,7 @@ function persistSessionId(id: string, title?: string): void {
     return;
   }
   sessionId = id;
-  void rememberExtensionSession(id, title).then(renderSessionPicker);
+  void rememberExtensionSession(currentTabId, id, title).then(renderSessionPicker);
 }
 
 function showApplyBar(text: string): void {
@@ -936,7 +947,7 @@ deleteSessionButton?.addEventListener('click', async () => {
   if (!confirmed) {
     return;
   }
-  const state = await deleteExtensionSession(sessionId);
+  const state = await deleteExtensionSession(currentTabId, sessionId);
   sessionId = state.currentSessionId;
   renderSessionPicker(state);
   if (state.currentSessionId) {

@@ -8,7 +8,10 @@ export type ExtensionChatState = {
   sessions: ExtensionSessionRef[];
 };
 
-const STORAGE_KEY = 'astonishExtensionChat';
+type TabStateMap = Record<number, ExtensionChatState>;
+
+const STORAGE_KEY = 'astonishExtensionChatByTab';
+const LEGACY_STORAGE_KEY = 'astonishExtensionChat';
 
 const emptyState = (): ExtensionChatState => ({
   currentSessionId: '',
@@ -35,27 +38,63 @@ function asState(value: unknown): ExtensionChatState {
   return { currentSessionId, sessions };
 }
 
-async function saveState(state: ExtensionChatState): Promise<void> {
+async function loadTabMap(): Promise<TabStateMap> {
+  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+    return {};
+  }
+  const result = await chrome.storage.local.get(STORAGE_KEY);
+  const raw = result[STORAGE_KEY];
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+  return raw as TabStateMap;
+}
+
+async function saveTabMap(map: TabStateMap): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     throw new Error('chrome.storage is not available');
   }
-  await chrome.storage.local.set({ [STORAGE_KEY]: state });
+  await chrome.storage.local.set({ [STORAGE_KEY]: map });
 }
 
-export async function loadExtensionChat(): Promise<ExtensionChatState> {
+async function saveTabState(tabId: number, state: ExtensionChatState): Promise<void> {
+  const map = await loadTabMap();
+  map[tabId] = state;
+  await saveTabMap(map);
+}
+
+export async function loadExtensionChat(tabId: number): Promise<ExtensionChatState> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     return emptyState();
   }
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  return asState(result[STORAGE_KEY]);
+  const result = await chrome.storage.local.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+  const map = result[STORAGE_KEY];
+  // If we have per-tab data, return the tab's state.
+  if (map && typeof map === 'object' && tabId in (map as TabStateMap)) {
+    return asState((map as TabStateMap)[tabId]);
+  }
+  // Migration: if legacy key exists, move it to this tab and remove legacy.
+  const legacy = result[LEGACY_STORAGE_KEY];
+  if (legacy && typeof legacy === 'object') {
+    const migrated = asState(legacy);
+    const newMap: TabStateMap = { ...(map as TabStateMap | undefined ?? {}), [tabId]: migrated };
+    await chrome.storage.local.set({ [STORAGE_KEY]: newMap });
+    await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
+    return migrated;
+  }
+  return emptyState();
 }
 
-export async function rememberExtensionSession(id: string, title?: string): Promise<ExtensionChatState> {
+export async function rememberExtensionSession(
+  tabId: number,
+  id: string,
+  title?: string,
+): Promise<ExtensionChatState> {
   const trimmed = id.trim();
   if (!trimmed) {
-    return loadExtensionChat();
+    return loadExtensionChat(tabId);
   }
-  const state = await loadExtensionChat();
+  const state = await loadExtensionChat(tabId);
   const existing = state.sessions.find((session) => session.id === trimmed);
   const next: ExtensionSessionRef = {
     id: trimmed,
@@ -63,58 +102,68 @@ export async function rememberExtensionSession(id: string, title?: string): Prom
   };
   const sessions = [next, ...state.sessions.filter((session) => session.id !== trimmed)];
   const saved: ExtensionChatState = { currentSessionId: trimmed, sessions };
-  await saveState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
-export async function setCurrentSessionId(id: string): Promise<ExtensionChatState> {
-  const state = await loadExtensionChat();
+export async function setCurrentSessionId(
+  tabId: number,
+  id: string,
+): Promise<ExtensionChatState> {
+  const state = await loadExtensionChat(tabId);
   const saved: ExtensionChatState = { ...state, currentSessionId: id.trim() };
-  await saveState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
-export async function updateExtensionSessionTitle(id: string, title: string): Promise<ExtensionChatState> {
+export async function updateExtensionSessionTitle(
+  tabId: number,
+  id: string,
+  title: string,
+): Promise<ExtensionChatState> {
   const trimmedTitle = title.trim();
   if (!id || !trimmedTitle) {
-    return loadExtensionChat();
+    return loadExtensionChat(tabId);
   }
-  const state = await loadExtensionChat();
+  const state = await loadExtensionChat(tabId);
   const sessions = state.sessions.map((session) =>
     session.id === id ? { ...session, title: trimmedTitle } : session,
   );
   const saved: ExtensionChatState = { ...state, sessions };
-  await saveState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
-export async function startNewExtensionSession(): Promise<ExtensionChatState> {
-  return setCurrentSessionId('');
+export async function startNewExtensionSession(tabId: number): Promise<ExtensionChatState> {
+  return setCurrentSessionId(tabId, '');
 }
 
 export async function replaceExtensionSessions(
+  tabId: number,
   sessions: ExtensionSessionRef[],
   currentSessionId: string,
 ): Promise<ExtensionChatState> {
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
-export async function deleteExtensionSession(id: string): Promise<ExtensionChatState> {
+export async function deleteExtensionSession(
+  tabId: number,
+  id: string,
+): Promise<ExtensionChatState> {
   const trimmed = id.trim();
   if (!trimmed) {
-    return loadExtensionChat();
+    return loadExtensionChat(tabId);
   }
-  const state = await loadExtensionChat();
+  const state = await loadExtensionChat(tabId);
   const sessions = state.sessions.filter((session) => session.id !== trimmed);
   let currentSessionId = state.currentSessionId;
-  // If we deleted the current session, switch to the first remaining one or empty string
   if (currentSessionId === trimmed) {
     currentSessionId = sessions.length > 0 ? sessions[0].id : '';
   }
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
@@ -122,7 +171,19 @@ export async function clearExtensionChat(): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     return;
   }
-  await chrome.storage.local.remove(STORAGE_KEY);
+  await chrome.storage.local.remove([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+}
+
+export async function removeTabState(tabId: number): Promise<void> {
+  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+    return;
+  }
+  const map = await loadTabMap();
+  if (!(tabId in map)) {
+    return;
+  }
+  delete map[tabId];
+  await saveTabMap(map);
 }
 
 export type ListedSession = {

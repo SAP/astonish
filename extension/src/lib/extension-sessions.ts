@@ -8,9 +8,9 @@ export type ExtensionChatState = {
   sessions: ExtensionSessionRef[];
 };
 
-type TabStateMap = Record<number, ExtensionChatState>;
-
-const STORAGE_KEY = 'astonishExtensionChatByTab';
+// Use a single key in session storage (automatically per-tab-isolated by Chrome).
+// chrome.storage.session is cleared when the tab closes, so each tab starts fresh.
+const SESSION_STORAGE_KEY = 'astonishExtensionChatState';
 const LEGACY_STORAGE_KEY = 'astonishExtensionChat';
 
 const emptyState = (): ExtensionChatState => ({
@@ -38,51 +38,42 @@ function asState(value: unknown): ExtensionChatState {
   return { currentSessionId, sessions };
 }
 
-async function loadTabMap(): Promise<TabStateMap> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-    return {};
-  }
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  const raw = result[STORAGE_KEY];
-  if (!raw || typeof raw !== 'object') {
-    return {};
-  }
-  return raw as TabStateMap;
-}
-
-async function saveTabMap(map: TabStateMap): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-    throw new Error('chrome.storage is not available');
-  }
-  await chrome.storage.local.set({ [STORAGE_KEY]: map });
-}
-
-async function saveTabState(tabId: number, state: ExtensionChatState): Promise<void> {
-  const map = await loadTabMap();
-  map[tabId] = state;
-  await saveTabMap(map);
-}
-
-export async function loadExtensionChat(tabId: number): Promise<ExtensionChatState> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+async function loadSessionState(): Promise<ExtensionChatState> {
+  if (typeof chrome === 'undefined' || !chrome.storage?.session) {
     return emptyState();
   }
-  const result = await chrome.storage.local.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
-  const map = result[STORAGE_KEY];
-  // If we have per-tab data, return the tab's state.
-  if (map && typeof map === 'object' && tabId in (map as TabStateMap)) {
-    return asState((map as TabStateMap)[tabId]);
+  const result = await chrome.storage.session.get(SESSION_STORAGE_KEY);
+  const raw = result[SESSION_STORAGE_KEY];
+  if (raw) {
+    return asState(raw);
   }
-  // Migration: if legacy key exists, move it to this tab and remove legacy.
-  const legacy = result[LEGACY_STORAGE_KEY];
-  if (legacy && typeof legacy === 'object') {
+  // No session state yet. Check for legacy local storage (one-time migration).
+  if (!chrome.storage?.local) {
+    return emptyState();
+  }
+  const legacyResult = await chrome.storage.local.get(LEGACY_STORAGE_KEY);
+  const legacy = legacyResult[LEGACY_STORAGE_KEY];
+  if (legacy) {
     const migrated = asState(legacy);
-    const newMap: TabStateMap = { ...(map as TabStateMap | undefined ?? {}), [tabId]: migrated };
-    await chrome.storage.local.set({ [STORAGE_KEY]: newMap });
+    // Save to session storage (per-tab) and remove legacy
+    await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: migrated });
     await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
     return migrated;
   }
   return emptyState();
+}
+
+async function saveSessionState(state: ExtensionChatState): Promise<void> {
+  if (typeof chrome === 'undefined' || !chrome.storage?.session) {
+    throw new Error('chrome.storage.session is not available');
+  }
+  await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: state });
+}
+
+export async function loadExtensionChat(tabId: number): Promise<ExtensionChatState> {
+  // Note: tabId parameter kept for API compatibility, but chrome.storage.session
+  // is automatically per-tab-isolated by Chrome, so we don't need to manually key by tabId.
+  return loadSessionState();
 }
 
 export async function rememberExtensionSession(
@@ -102,7 +93,7 @@ export async function rememberExtensionSession(
   };
   const sessions = [next, ...state.sessions.filter((session) => session.id !== trimmed)];
   const saved: ExtensionChatState = { currentSessionId: trimmed, sessions };
-  await saveTabState(tabId, saved);
+  await saveSessionState(saved);
   return saved;
 }
 
@@ -112,7 +103,7 @@ export async function setCurrentSessionId(
 ): Promise<ExtensionChatState> {
   const state = await loadExtensionChat(tabId);
   const saved: ExtensionChatState = { ...state, currentSessionId: id.trim() };
-  await saveTabState(tabId, saved);
+  await saveSessionState(saved);
   return saved;
 }
 
@@ -130,7 +121,7 @@ export async function updateExtensionSessionTitle(
     session.id === id ? { ...session, title: trimmedTitle } : session,
   );
   const saved: ExtensionChatState = { ...state, sessions };
-  await saveTabState(tabId, saved);
+  await saveSessionState(saved);
   return saved;
 }
 
@@ -144,7 +135,7 @@ export async function replaceExtensionSessions(
   currentSessionId: string,
 ): Promise<ExtensionChatState> {
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveTabState(tabId, saved);
+  await saveSessionState(saved);
   return saved;
 }
 
@@ -163,7 +154,7 @@ export async function deleteExtensionSession(
     currentSessionId = sessions.length > 0 ? sessions[0].id : '';
   }
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveTabState(tabId, saved);
+  await saveSessionState(saved);
   return saved;
 }
 
@@ -171,19 +162,13 @@ export async function clearExtensionChat(): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     return;
   }
-  await chrome.storage.local.remove([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+  // Clear legacy local storage (session storage is auto-cleared per tab)
+  await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
 }
 
 export async function removeTabState(tabId: number): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-    return;
-  }
-  const map = await loadTabMap();
-  if (!(tabId in map)) {
-    return;
-  }
-  delete map[tabId];
-  await saveTabMap(map);
+  // With session storage, no cleanup needed — it auto-clears when the tab closes.
+  // This function kept for API compatibility but is a no-op.
 }
 
 export type ListedSession = {

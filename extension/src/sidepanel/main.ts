@@ -4,6 +4,7 @@ import {
   fetchSessions,
   historyMessageKind,
   sessionIdFromEvent,
+  stopChat,
   type HistoryMessage,
 } from '../lib/astonish-client';
 import {
@@ -71,6 +72,7 @@ const applyMessage = document.querySelector<HTMLElement>('#apply-message');
 const applyButton = document.querySelector<HTMLButtonElement>('#apply');
 const dismissButton = document.querySelector<HTMLButtonElement>('#dismiss-apply');
 const logoutButton = document.querySelector<HTMLButtonElement>('#logout');
+const stopButton = document.querySelector<HTMLButtonElement>('#stop');
 const sessionPicker = document.querySelector<HTMLSelectElement>('#session-picker');
 const deleteSessionButton = document.querySelector<HTMLButtonElement>('#delete-session');
 
@@ -79,6 +81,7 @@ let sessionId = '';
 let studioUrl = '';
 let streaming = false;
 let pendingEdit: string | null = null;
+let currentAbort: AbortController | null = null;
 
 const MAX_PAGE_TOOL_ROUNDS = 15;
 
@@ -437,7 +440,7 @@ function streamOnce(params: {
 }): Promise<{ text: string; error?: string }> {
   return new Promise((resolve) => {
     let assistantText = '';
-    connectChat({
+    const controller = connectChat({
       sessionId,
       message: params.message,
       systemContext: params.systemContext,
@@ -492,11 +495,20 @@ function streamOnce(params: {
         resolve({ text: assistantText });
       },
     });
+    currentAbort = controller;
   });
 }
 
 function finishStreaming(status?: string): void {
   streaming = false;
+  currentAbort = null;
+  if (stopButton) {
+    stopButton.hidden = true;
+  }
+  if (messageInput) {
+    messageInput.disabled = false;
+    messageInput.placeholder = 'Say hi, or drop a task in here…';
+  }
   setLoggedIn(true);
   if (sessionPicker) {
     sessionPicker.disabled = false;
@@ -609,6 +621,13 @@ function sendCurrentMessage(): void {
   hideApplyBar();
   if (sendButton) {
     sendButton.disabled = true;
+  }
+  if (messageInput) {
+    messageInput.disabled = true;
+    messageInput.placeholder = 'Agent is responding…';
+  }
+  if (stopButton) {
+    stopButton.hidden = false;
   }
   if (sessionPicker) {
     sessionPicker.disabled = true;
@@ -743,6 +762,20 @@ loginForm?.addEventListener('submit', async (event) => {
 document.querySelector('#composer')?.addEventListener('submit', (event) => {
   event.preventDefault();
   sendCurrentMessage();
+});
+
+stopButton?.addEventListener('click', () => {
+  // Abort the SSE connection
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+  // Stop the backend runner
+  if (sessionId) {
+    void stopChat(sessionId);
+  }
+  appendNotice('error', 'Stopped by user.');
+  finishStreaming('Stopped.');
 });
 
 messageInput?.addEventListener('input', () => {

@@ -204,3 +204,17 @@ export function connectChat({
   void run();
   return controller;
 }
+
+/**
+ * Stop a running chat session via the Studio API.
+ * Sends POST /api/studio/sessions/{id}/stop.
+ */
+export async function stopChat(sid: string): Promise<void> {
+  try {
+    await studioFetch(`/api/studio/sessions/${encodeURIComponent(sid)}/stop`, {
+      method: 'POST',
+    });
+  } catch {
+    // Best-effort — the session may already be stopped.
+  }
+}

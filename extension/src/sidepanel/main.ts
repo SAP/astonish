@@ -80,7 +80,7 @@ let studioUrl = '';
 let streaming = false;
 let pendingEdit: string | null = null;
 
-const MAX_PAGE_TOOL_ROUNDS = 8;
+const MAX_PAGE_TOOL_ROUNDS = 15;
 
 function showError(message: string): void {
   if (!loginError) {

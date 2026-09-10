@@ -1,9 +1,11 @@
 import {
   connectChat,
+  deleteSession,
   fetchSessionHistory,
   fetchSessions,
   historyMessageKind,
   sessionIdFromEvent,
+  stopChat,
   type HistoryMessage,
 } from '../lib/astonish-client';
 import {
@@ -15,7 +17,7 @@ import {
   type SSOStatus,
 } from '../lib/auth';
 import {
-  filterExtensionSessions,
+  deleteExtensionSession,
   loadExtensionChat,
   mergeSessionTitles,
   pruneMissingSessionIds,
@@ -66,18 +68,31 @@ const pageMeta = document.querySelector<HTMLElement>('#page-meta');
 const captureBanner = document.querySelector<HTMLElement>('#capture-banner');
 const applyBar = document.querySelector<HTMLElement>('#apply-bar');
 const applyPreview = document.querySelector<HTMLElement>('#apply-preview');
+const applyMessage = document.querySelector<HTMLElement>('#apply-message');
 const applyButton = document.querySelector<HTMLButtonElement>('#apply');
 const dismissButton = document.querySelector<HTMLButtonElement>('#dismiss-apply');
 const logoutButton = document.querySelector<HTMLButtonElement>('#logout');
+const stopButton = document.querySelector<HTMLButtonElement>('#stop');
 const sessionPicker = document.querySelector<HTMLSelectElement>('#session-picker');
-const newSessionButton = document.querySelector<HTMLButtonElement>('#new-session');
+const deleteSessionButton = document.querySelector<HTMLButtonElement>('#delete-session');
+
 
 let sessionId = '';
 let studioUrl = '';
 let streaming = false;
 let pendingEdit: string | null = null;
+let currentAbort: AbortController | null = null;
+let currentTabId = 0;
 
-const MAX_PAGE_TOOL_ROUNDS = 8;
+const MAX_PAGE_TOOL_ROUNDS = 15;
+
+// Read the tab ID directly from the URL query parameter set by the service worker
+// when it opens this side panel. This is synchronous and 100% reliable.
+function resolveTabId(): number {
+  if (typeof location === 'undefined') return 0;
+  const params = new URLSearchParams(location.search);
+  return Number(params.get('tabId') ?? '0') || 0;
+}
 
 function showError(message: string): void {
   if (!loginError) {
@@ -175,6 +190,38 @@ function appendNotice(kind: 'tool' | 'approval' | 'error', text: string, extra?:
   return el;
 }
 
+/**
+ * Append a grouped tool-use section to the transcript. Renders a compact
+ * collapsible block showing how many tools were called, with a togglable
+ * list of individual tool names — matching the Studio chat's tool fold.
+ */
+function appendToolGroup(tools: string[]): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-tool-group';
+  const summary = document.createElement('div');
+  summary.className = 'tool-group-summary';
+  const count = tools.length;
+  summary.textContent = count === 1
+    ? `Used 1 tool`
+    : `Used ${count} tools`;
+  summary.addEventListener('click', () => {
+    wrap.classList.toggle('is-expanded');
+  });
+  wrap.appendChild(summary);
+  const details = document.createElement('div');
+  details.className = 'tool-group-details';
+  for (const name of tools) {
+    const item = document.createElement('div');
+    item.className = 'tool-group-item';
+    item.textContent = name;
+    details.appendChild(item);
+  }
+  wrap.appendChild(details);
+  transcript?.appendChild(wrap);
+  scrollTranscript();
+  return wrap;
+}
+
 function setPageMeta(ctx: PageContext | null, error?: string): void {
   if (!pageMeta) {
     return;
@@ -210,9 +257,17 @@ function hideApplyBar(): void {
   pendingEdit = null;
   if (applyBar) {
     applyBar.hidden = true;
+    applyBar.classList.remove('is-blocked');
   }
   if (applyPreview) {
     applyPreview.textContent = '';
+  }
+  if (applyMessage) {
+    applyMessage.textContent = '';
+    applyMessage.hidden = true;
+  }
+  if (applyButton) {
+    applyButton.textContent = 'Apply';
   }
 }
 
@@ -258,12 +313,12 @@ function renderHistory(messages: HistoryMessage[]): void {
     }
     if (kind === 'tool_call') {
       const toolName = message.toolName || 'tool';
-      const args = message.toolArgs;
+      const args = (message as { toolArgs?: unknown }).toolArgs;
       currentToolGroup = appendOrUpdateToolGroup(currentToolGroup, toolName, args);
       continue;
     }
     if (kind === 'tool_result') {
-      // Mark the last tool item in the current group as done.
+      // Mark the last tool in the current group as done.
       if (currentToolGroup) {
         const details = currentToolGroup.querySelector('.tool-group-details');
         if (details && details.children.length > 1) {
@@ -275,25 +330,31 @@ function renderHistory(messages: HistoryMessage[]): void {
           }
         }
       }
+      continue;
     }
+    // Any other kind resets tool group context.
+    currentToolGroup = null;
   }
   scrollTranscript();
 }
 
 async function refreshExtensionSessions(): Promise<ExtensionChatState> {
-  const stored = await loadExtensionChat();
+  const stored = await loadExtensionChat(currentTabId);
   try {
     const listed = await fetchSessions();
-    const extensionOnly = filterExtensionSessions(
-      listed,
-      stored.sessions.map((session) => session.id),
-    );
-    const pruned = pruneMissingSessionIds(stored.sessions, extensionOnly);
-    const merged = mergeSessionTitles(pruned, extensionOnly);
+    const pruned = pruneMissingSessionIds(stored.sessions, listed);
+    const merged = mergeSessionTitles(pruned, listed);
+    // Add server sessions not yet in local storage (e.g. sessions created in another tab)
+    const localIds = new Set(merged.map((s) => s.id));
+    const newSessions = listed
+      .filter((s) => !localIds.has(s.id))
+      .map((s) => ({ id: s.id, title: s.title || 'New chat' }));
+    const allSessions = [...merged, ...newSessions];
     const currentStillThere =
-      !stored.currentSessionId || merged.some((session) => session.id === stored.currentSessionId);
+      !stored.currentSessionId || allSessions.some((session) => session.id === stored.currentSessionId);
     const saved = await replaceExtensionSessions(
-      merged,
+      currentTabId,
+      allSessions,
       currentStillThere ? stored.currentSessionId : '',
     );
     renderSessionPicker(saved);
@@ -305,6 +366,7 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
 }
 
 async function restoreExtensionChat(): Promise<void> {
+  currentTabId = resolveTabId();
   const state = await refreshExtensionSessions();
   sessionId = state.currentSessionId;
   if (!sessionId) {
@@ -316,7 +378,7 @@ async function restoreExtensionChat(): Promise<void> {
     const history = await fetchSessionHistory(sessionId);
     renderHistory(history.messages);
     if (history.title) {
-      const next = await updateExtensionSessionTitle(sessionId, history.title);
+      const next = await updateExtensionSessionTitle(currentTabId, sessionId, history.title);
       renderSessionPicker(next);
     }
   } catch (err) {
@@ -328,7 +390,7 @@ async function beginNewChat(): Promise<void> {
   if (streaming) {
     return;
   }
-  const state = await startNewExtensionSession();
+  const state = await startNewExtensionSession(currentTabId);
   sessionId = '';
   transcript?.replaceChildren();
   hideApplyBar();
@@ -344,12 +406,12 @@ async function selectStoredSession(id: string): Promise<void> {
     return;
   }
   sessionId = id;
-  await setCurrentSessionId(id);
+  await setCurrentSessionId(currentTabId, id);
   try {
     const history = await fetchSessionHistory(id);
     renderHistory(history.messages);
     const title = history.title || id;
-    const state = await rememberExtensionSession(id, title);
+    const state = await rememberExtensionSession(currentTabId, id, title);
     renderSessionPicker(state);
   } catch (err) {
     transcript?.replaceChildren();
@@ -362,7 +424,7 @@ function persistSessionId(id: string, title?: string): void {
     return;
   }
   sessionId = id;
-  void rememberExtensionSession(id, title).then(renderSessionPicker);
+  void rememberExtensionSession(currentTabId, id, title).then(renderSessionPicker);
 }
 
 function showApplyBar(text: string): void {
@@ -370,13 +432,40 @@ function showApplyBar(text: string): void {
   if (applyPreview) {
     applyPreview.textContent = text.length > 400 ? `${text.slice(0, 400)}…` : text;
   }
+  if (applyMessage) {
+    applyMessage.textContent = '';
+    applyMessage.hidden = true;
+  }
+  if (applyButton) {
+    applyButton.textContent = 'Apply';
+  }
   if (applyBar) {
+    applyBar.classList.remove('is-blocked');
     applyBar.hidden = false;
   }
 }
 
+function showApplyBlocked(message: string): void {
+  // Keep pendingEdit unchanged so the proposed content stays pinned.
+  if (applyMessage) {
+    applyMessage.textContent = message;
+    applyMessage.hidden = false;
+  } else if (statusLine) {
+    // Defensive fallback when the message element is missing.
+    statusLine.textContent = message;
+  }
+  if (applyButton) {
+    applyButton.textContent = 'Apply again';
+  }
+  if (applyBar) {
+    applyBar.classList.add('is-blocked');
+    applyBar.hidden = false;
+  }
+  applyButton?.focus();
+}
+
 async function requestContext(): Promise<ContextResult> {
-  return chrome.runtime.sendMessage({ type: MSG_GET_CONTEXT }) as Promise<ContextResult>;
+  return chrome.runtime.sendMessage({ type: MSG_GET_CONTEXT, tabId: currentTabId }) as Promise<ContextResult>;
 }
 
 async function runPageToolCalls(calls: PageToolCall[]): Promise<PageToolResult[]> {
@@ -387,6 +476,7 @@ async function runPageToolCalls(calls: PageToolCall[]): Promise<PageToolResult[]
         type: MSG_PAGE_TOOL,
         name: call.name,
         args: call.args,
+        tabId: currentTabId,
       })) as PageToolResult;
       const entry: PageToolResult = {
         ok: !!result?.ok,
@@ -447,13 +537,11 @@ function appendOrUpdateToolGroup(
   item.appendChild(nameEl);
 
   if (args != null) {
-    const argsStr =
-      typeof args === 'string' ? args : JSON.stringify(args);
+    const argsStr = typeof args === 'string' ? args : JSON.stringify(args);
     if (argsStr && argsStr !== '{}' && argsStr !== 'null') {
       const preview = document.createElement('span');
       preview.className = 'tool-args-preview';
-      preview.textContent =
-        argsStr.length > 120 ? argsStr.slice(0, 120) + '…' : argsStr;
+      preview.textContent = argsStr.length > 120 ? argsStr.slice(0, 120) + '…' : argsStr;
       item.appendChild(preview);
     }
   }
@@ -465,8 +553,8 @@ function appendOrUpdateToolGroup(
 
   details.appendChild(item);
 
-  // Update the summary count
-  const count = details.children.length - 1; // minus the <summary>
+  // Update the summary count (children minus the <summary> element)
+  const count = details.children.length - 1;
   summary.textContent = count === 1 ? 'Used 1 tool' : `Used ${count} tools`;
 
   scrollTranscript();
@@ -482,12 +570,12 @@ function streamOnce(params: {
     let assistantText = '';
     // Offset into assistantText where the current visual segment started.
     let segmentStart = 0;
-    // The current collapsible tool group element (null when no consecutive tools).
+    // The current live tool-group element (null when not in a tool batch).
     let currentToolGroup: HTMLElement | null = null;
     // True when at least one tool_call has fired since the last text chunk.
     let hadToolsSinceText = false;
 
-    connectChat({
+    const controller = connectChat({
       sessionId,
       message: params.message,
       systemContext: params.systemContext,
@@ -517,7 +605,7 @@ function streamOnce(params: {
             }
             hadToolsSinceText = false;
             currentToolGroup = null;
-            // Pass only this segment's text to the callback.
+            // Pass only this segment's text so each bubble shows only its portion.
             params.onText(assistantText.slice(segmentStart), isNewSegment);
           }
         }
@@ -567,17 +655,27 @@ function streamOnce(params: {
         resolve({ text: assistantText });
       },
     });
+    currentAbort = controller;
+    return controller;
   });
 }
 
 function finishStreaming(status?: string): void {
   streaming = false;
+  currentAbort = null;
+  if (stopButton) {
+    stopButton.hidden = true;
+  }
+  if (messageInput) {
+    messageInput.disabled = false;
+    messageInput.placeholder = 'Say hi, or drop a task in here…';
+  }
   setLoggedIn(true);
   if (sessionPicker) {
     sessionPicker.disabled = false;
   }
-  if (newSessionButton) {
-    newSessionButton.disabled = false;
+  if (deleteSessionButton) {
+    deleteSessionButton.disabled = false;
   }
   if (statusLine && status) {
     statusLine.textContent = status;
@@ -685,11 +783,18 @@ function sendCurrentMessage(): void {
   if (sendButton) {
     sendButton.disabled = true;
   }
+  if (messageInput) {
+    messageInput.disabled = true;
+    messageInput.placeholder = 'Agent is responding…';
+  }
+  if (stopButton) {
+    stopButton.hidden = false;
+  }
   if (sessionPicker) {
     sessionPicker.disabled = true;
   }
-  if (newSessionButton) {
-    newSessionButton.disabled = true;
+  if (deleteSessionButton) {
+    deleteSessionButton.disabled = true;
   }
   if (statusLine) {
     statusLine.textContent = 'Thinking…';
@@ -698,6 +803,10 @@ function sendCurrentMessage(): void {
   void (async () => {
     const access = await requestActiveTabHostPermission();
     let systemContext = EXTENSION_PAGE_TOOLS_INSTRUCTIONS;
+    // When the page is a read-only GitHub issue/PR (no open description editor),
+    // page-tool calls are pointless — the model should just emit a fence. Skip
+    // the tool loop entirely to prevent the model from kebab-hunting in circles.
+    let skipPageTools = false;
     if (!access.ok) {
       setPageMeta(null, access.error);
       showCaptureBanner(`${access.error}. Sending without page context.`);
@@ -708,6 +817,9 @@ function sendCurrentMessage(): void {
           systemContext = buildSystemContext(captured.context);
           setPageMeta(captured.context);
           showCaptureBanner(null);
+          if (captured.context.adapter === 'github' && !captured.context.editorPresent) {
+            skipPageTools = true;
+          }
         } else {
           const error = captured.error || 'This page cannot be read';
           setPageMeta(null, error);
@@ -748,7 +860,7 @@ function sendCurrentMessage(): void {
       }
 
       const calls = extractPageTools(assistantText);
-      if (!calls.length) {
+      if (!calls.length || skipPageTools) {
         const edit = extractPageEdit(assistantText);
         if (edit !== null) {
           showApplyBar(edit);
@@ -763,7 +875,7 @@ function sendCurrentMessage(): void {
       const results = await runPageToolCalls(calls);
       message =
         'The Chrome extension ran those page tools in THIS browser tab. Use the results below. Stay in this tab: page_snapshot / page_click / page_navigate. Do not call web_fetch, http_request, browser_snapshot, browser_navigate, or search_tools unless the user explicitly asked for a backend fetch.';
-      context = `${formatPageToolResults(results)}\n\n${EXTENSION_PAGE_TOOLS_INSTRUCTIONS}`;
+      context = formatPageToolResults(results);
     }
 
     appendNotice('error', 'Stopped after too many page-tool rounds.');
@@ -817,6 +929,20 @@ document.querySelector('#composer')?.addEventListener('submit', (event) => {
   sendCurrentMessage();
 });
 
+stopButton?.addEventListener('click', () => {
+  // Abort the SSE connection
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+  }
+  // Stop the backend runner
+  if (sessionId) {
+    void stopChat(sessionId);
+  }
+  appendNotice('error', 'Stopped by user.');
+  finishStreaming('Stopped.');
+});
+
 messageInput?.addEventListener('input', () => {
   resizeComposer();
 });
@@ -856,6 +982,7 @@ applyButton?.addEventListener('click', () => {
         type: MSG_APPLY,
         text,
         mode: 'replace',
+        tabId: currentTabId,
       })) as ApplyResult;
       if (result?.ok) {
         if (statusLine) {
@@ -865,6 +992,12 @@ applyButton?.addEventListener('click', () => {
         return;
       }
       const error = result?.error || 'Apply failed';
+      if (result?.reason === 'not-editable') {
+        // Loud, iterative handshake: keep pendingEdit pinned, prompt the user
+        // to open the editor, and require a second Apply. No clipboard copy.
+        showApplyBlocked(error);
+        return;
+      }
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
       }
@@ -890,8 +1023,31 @@ sessionPicker?.addEventListener('change', () => {
   void selectStoredSession(sessionPicker.value);
 });
 
-newSessionButton?.addEventListener('click', () => {
-  void beginNewChat();
+deleteSessionButton?.addEventListener('click', async () => {
+  if (!sessionId) {
+    // Can't delete "New chat" (empty session)
+    return;
+  }
+  const confirmed = confirm(`Delete this session?`);
+  if (!confirmed) {
+    return;
+  }
+  // Delete from server first; fall through to local cleanup even on failure
+  // (the session will be pruned on next sync if the server call fails).
+  try {
+    await deleteSession(sessionId);
+  } catch {
+    // Best-effort — remove from local state regardless.
+  }
+  const state = await deleteExtensionSession(currentTabId, sessionId);
+  sessionId = state.currentSessionId;
+  renderSessionPicker(state);
+  if (state.currentSessionId) {
+    void selectStoredSession(state.currentSessionId);
+  } else {
+    // Switched to "New chat"
+    void beginNewChat();
+  }
 });
 
 void loadSession().then(async (session) => {

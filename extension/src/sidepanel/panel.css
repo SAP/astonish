@@ -266,6 +266,55 @@ button:disabled {
   width: fit-content;
 }
 
+.msg-tool-group {
+  border: 1px solid color-mix(in oklab, var(--info) 18%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--tool-background);
+  overflow: hidden;
+}
+
+.tool-group-summary {
+  font-size: 0.75rem;
+  color: var(--info);
+  padding: 0.4rem 0.65rem;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tool-group-summary::before {
+  content: '▸';
+  font-size: 0.6rem;
+  transition: transform 0.15s ease;
+}
+
+.msg-tool-group.is-expanded .tool-group-summary::before {
+  transform: rotate(90deg);
+}
+
+.tool-group-details {
+  display: none;
+  border-top: 1px solid color-mix(in oklab, var(--info) 14%, transparent);
+  padding: 0.3rem 0.65rem;
+}
+
+.msg-tool-group.is-expanded .tool-group-details {
+  display: block;
+}
+
+.tool-group-item {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0;
+}
+
+.tool-group-item::before {
+  content: '→ ';
+  opacity: 0.5;
+}
+
 .msg-approval {
   font-size: 0.82rem;
   color: var(--brand-strong);
@@ -542,6 +591,20 @@ button.secondary {
   border-collapse: collapse;
   margin-bottom: 1em;
   width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+.markdown-body table thead {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.markdown-body table tbody {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
 }
 
 .markdown-body table th,

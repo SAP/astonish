@@ -181,6 +181,38 @@ function appendNotice(kind: 'tool' | 'approval' | 'error', text: string, extra?:
   return el;
 }
 
+/**
+ * Append a grouped tool-use section to the transcript. Renders a compact
+ * collapsible block showing how many tools were called, with a togglable
+ * list of individual tool names — matching the Studio chat's tool fold.
+ */
+function appendToolGroup(tools: string[]): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-tool-group';
+  const summary = document.createElement('div');
+  summary.className = 'tool-group-summary';
+  const count = tools.length;
+  summary.textContent = count === 1
+    ? `Used 1 tool`
+    : `Used ${count} tools`;
+  summary.addEventListener('click', () => {
+    wrap.classList.toggle('is-expanded');
+  });
+  wrap.appendChild(summary);
+  const details = document.createElement('div');
+  details.className = 'tool-group-details';
+  for (const name of tools) {
+    const item = document.createElement('div');
+    item.className = 'tool-group-item';
+    item.textContent = name;
+    details.appendChild(item);
+  }
+  wrap.appendChild(details);
+  transcript?.appendChild(wrap);
+  scrollTranscript();
+  return wrap;
+}
+
 function setPageMeta(ctx: PageContext | null, error?: string): void {
   if (!pageMeta) {
     return;
@@ -251,16 +283,25 @@ function renderSessionPicker(state: ExtensionChatState): void {
 function renderHistory(messages: HistoryMessage[]): void {
   transcript?.replaceChildren();
   hideApplyBar();
+  let toolBatch: string[] = [];
+  const flushTools = (): void => {
+    if (toolBatch.length) {
+      appendToolGroup(toolBatch);
+      toolBatch = [];
+    }
+  };
   for (const message of messages) {
     const kind = historyMessageKind(message);
     const content = typeof message.content === 'string' ? message.content : '';
     if (kind === 'user') {
+      flushTools();
       if (content) {
         appendUser(content);
       }
       continue;
     }
     if (kind === 'agent' || kind === 'assistant') {
+      flushTools();
       if (content) {
         const { body } = appendAssistant();
         setAssistantMarkdown(body, stripPageToolFences(content));
@@ -268,13 +309,17 @@ function renderHistory(messages: HistoryMessage[]): void {
       continue;
     }
     if (kind === 'tool_call') {
-      appendNotice('tool', `Studio tool: ${message.toolName || 'tool'}`);
+      toolBatch.push(message.toolName || 'tool');
       continue;
     }
     if (kind === 'tool_result') {
-      appendNotice('tool', 'Studio tool result');
+      // tool_result pairs with the preceding tool_call — don't double-count.
+      continue;
     }
+    // Any other kind flushes the tool batch.
+    flushTools();
   }
+  flushTools();
   scrollTranscript();
 }
 
@@ -440,6 +485,22 @@ function streamOnce(params: {
 }): Promise<{ text: string; error?: string }> {
   return new Promise((resolve) => {
     let assistantText = '';
+    const toolBatch: string[] = [];
+    let toolGroupEl: HTMLElement | null = null;
+    const flushToolBatch = (): void => {
+      if (toolBatch.length) {
+        // Remove the live tool-group element and replace with a final one.
+        toolGroupEl?.remove();
+        toolGroupEl = appendToolGroup([...toolBatch]);
+      }
+    };
+    const updateLiveToolGroup = (): void => {
+      // Show a live, updating tool group as tools stream in.
+      if (toolGroupEl) {
+        toolGroupEl.remove();
+      }
+      toolGroupEl = appendToolGroup([...toolBatch]);
+    };
     const controller = connectChat({
       sessionId,
       message: params.message,
@@ -460,18 +521,24 @@ function streamOnce(params: {
           }
         }
         if (type === 'text') {
+          // Text arriving means the tool batch (if any) is done — flush it.
+          flushToolBatch();
           const chunk = typeof data.text === 'string' ? data.text : '';
           assistantText += chunk;
           params.onText(assistantText);
         }
         if (type === 'tool_call') {
           const name = typeof data.name === 'string' ? data.name : 'tool';
-          appendNotice('tool', `Studio tool: ${name}`);
+          toolBatch.push(name);
+          updateLiveToolGroup();
         }
         if (type === 'tool_result') {
-          appendNotice('tool', 'Studio tool result');
+          // Paired with tool_call — the live group already shows the name.
+          // Just update so the count stays accurate.
+          updateLiveToolGroup();
         }
         if (type === 'approval') {
+          flushToolBatch();
           const notice = document.createElement('a');
           notice.href = studioUrl || '#';
           notice.target = '_blank';
@@ -480,6 +547,7 @@ function streamOnce(params: {
           appendNotice('approval', 'Approval needed. ', notice);
         }
         if (type === 'error' || type === 'error_info') {
+          flushToolBatch();
           const message =
             (typeof data.message === 'string' && data.message) ||
             (typeof data.error === 'string' && data.error) ||
@@ -488,10 +556,12 @@ function streamOnce(params: {
         }
       },
       onError: (err) => {
+        flushToolBatch();
         appendNotice('error', err.message);
         resolve({ text: assistantText, error: err.message });
       },
       onDone: () => {
+        flushToolBatch();
         resolve({ text: assistantText });
       },
     });

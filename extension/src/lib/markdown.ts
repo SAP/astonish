@@ -57,6 +57,8 @@ export function renderMarkdown(markdown: string): string {
   let codeBuffer: string[] = [];
   let listType: 'ul' | 'ol' | null = null;
   let paragraph: string[] = [];
+  let inTable = false;
+  let tableHasHeader = false;
 
   const flushParagraph = (): void => {
     if (paragraph.length) {
@@ -70,6 +72,30 @@ export function renderMarkdown(markdown: string): string {
       listType = null;
     }
   };
+  const closeTable = (): void => {
+    if (inTable) {
+      html.push('</tbody></table>');
+      inTable = false;
+      tableHasHeader = false;
+    }
+  };
+
+  const isTableRow = (line: string): boolean => {
+    const trimmed = line.trim();
+    return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 1;
+  };
+
+  const isSeparatorRow = (line: string): boolean =>
+    /^\|[\s:]*-{2,}[\s:]*(\|[\s:]*-{2,}[\s:]*)*\|$/.test(line.trim());
+
+  const parseTableCells = (line: string): string[] => {
+    const trimmed = line.trim();
+    // Strip leading and trailing pipes, then split on pipes.
+    return trimmed
+      .slice(1, -1)
+      .split('|')
+      .map((c) => c.trim());
+  };
 
   for (const line of lines) {
     const fence = line.match(/^```/);
@@ -81,6 +107,7 @@ export function renderMarkdown(markdown: string): string {
       } else {
         flushParagraph();
         closeList();
+        closeTable();
         inCode = true;
       }
       continue;
@@ -89,6 +116,41 @@ export function renderMarkdown(markdown: string): string {
       codeBuffer.push(line);
       continue;
     }
+
+    // --- Table handling ---
+    if (isTableRow(line)) {
+      if (isSeparatorRow(line)) {
+        // Separator row after header — mark that the previous row was a header.
+        if (inTable && !tableHasHeader) {
+          tableHasHeader = true;
+        }
+        continue;
+      }
+      if (!inTable) {
+        flushParagraph();
+        closeList();
+        inTable = true;
+        tableHasHeader = false;
+        const cells = parseTableCells(line);
+        // Emit the header row; we'll convert to <thead> if a separator follows.
+        html.push('<table><thead><tr>');
+        for (const cell of cells) {
+          html.push(`<th>${renderInline(escapeHtml(cell))}</th>`);
+        }
+        html.push('</tr></thead><tbody>');
+        continue;
+      }
+      // Subsequent data rows.
+      const cells = parseTableCells(line);
+      html.push('<tr>');
+      for (const cell of cells) {
+        html.push(`<td>${renderInline(escapeHtml(cell))}</td>`);
+      }
+      html.push('</tr>');
+      continue;
+    }
+    // Non-table line while in a table — close the table.
+    closeTable();
 
     if (line.trim() === '') {
       flushParagraph();
@@ -129,6 +191,7 @@ export function renderMarkdown(markdown: string): string {
   }
   flushParagraph();
   closeList();
+  closeTable();
 
   return html.join('\n');
 }

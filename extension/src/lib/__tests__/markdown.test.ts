@@ -33,4 +33,26 @@ describe('renderMarkdown', () => {
     const unsafe = renderMarkdown('[x](javascript:alert(1))');
     expect(unsafe).not.toContain('<a ');
   });
+
+  it('renders markdown tables with header and data rows', () => {
+    const md = '| Name | Status |\n| --- | --- |\n| vm-1 | ACTIVE |\n| vm-2 | STOPPED |';
+    const html = renderMarkdown(md);
+    expect(html).toContain('<table>');
+    expect(html).toContain('<thead>');
+    expect(html).toContain('<th>Name</th>');
+    expect(html).toContain('<th>Status</th>');
+    expect(html).toContain('<tbody>');
+    expect(html).toContain('<td>vm-1</td>');
+    expect(html).toContain('<td>ACTIVE</td>');
+    expect(html).toContain('<td>vm-2</td>');
+    expect(html).toContain('<td>STOPPED</td>');
+    expect(html).toContain('</table>');
+  });
+
+  it('closes a table when a non-table line follows', () => {
+    const md = '| A | B |\n| - | - |\n| 1 | 2 |\n\nSome paragraph.';
+    const html = renderMarkdown(md);
+    expect(html).toContain('</table>');
+    expect(html).toContain('<p>Some paragraph.</p>');
+  });
 });

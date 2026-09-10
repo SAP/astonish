@@ -4,8 +4,6 @@ export type SSEEventCallback = (eventType: string, data: Record<string, unknown>
 export type ErrorCallback = (error: Error) => void;
 export type DoneCallback = () => void;
 
-export const EXTENSION_APP_NAME = 'astonish-extension';
-
 const HANDLED_EVENTS = new Set([
   'session',
   'session_title',
@@ -42,6 +40,7 @@ export type HistoryMessage = {
   role?: string;
   content?: string;
   toolName?: string;
+  toolArgs?: unknown;
 };
 
 export function historyMessageKind(message: HistoryMessage): string {
@@ -64,7 +63,7 @@ export type SessionHistory = {
 };
 
 export async function fetchSessions(): Promise<StudioSession[]> {
-  const response = await studioFetch(`/api/studio/sessions?app=${encodeURIComponent(EXTENSION_APP_NAME)}`);
+  const response = await studioFetch('/api/studio/sessions');
   if (!response.ok) {
     throw new Error(`Failed to fetch sessions: ${response.status}`);
   }
@@ -78,9 +77,7 @@ export async function fetchSessions(): Promise<StudioSession[]> {
 }
 
 export async function fetchSessionHistory(id: string): Promise<SessionHistory> {
-  const response = await studioFetch(
-    `/api/studio/sessions/${encodeURIComponent(id)}?app=${encodeURIComponent(EXTENSION_APP_NAME)}`,
-  );
+  const response = await studioFetch(`/api/studio/sessions/${encodeURIComponent(id)}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch session: ${response.status}`);
   }
@@ -134,7 +131,6 @@ export function connectChat({
         sessionId: sessionId || '',
         message: message || '',
         autoApprove: !!autoApprove,
-        appName: EXTENSION_APP_NAME,
       };
       if (systemContext) {
         body.systemContext = systemContext;
@@ -208,21 +204,6 @@ export function connectChat({
 
   void run();
   return controller;
-}
-
-/**
- * Delete an extension session on the server.
- * Sends DELETE /api/studio/sessions/{id}?app=astonish-extension.
- * Throws if the server returns a non-OK status.
- */
-export async function deleteSession(sid: string): Promise<void> {
-  const response = await studioFetch(
-    `/api/studio/sessions/${encodeURIComponent(sid)}?app=${encodeURIComponent(EXTENSION_APP_NAME)}`,
-    { method: 'DELETE' },
-  );
-  if (!response.ok) {
-    throw new Error(`Failed to delete session: ${response.status}`);
-  }
 }
 
 /**

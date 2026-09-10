@@ -108,12 +108,46 @@ jobs:
           path: astonish-${{ matrix.suffix }}
           retention-days: 7
 
+  build-extension:
+    name: Build Extension
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: extension
+
+      - name: Build
+        run: npm run build
+        working-directory: extension
+
+      - name: Package extension
+        run: cd extension/dist && zip -r ../../astonish-extension.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: astonish-extension
+          path: astonish-extension.zip
+          retention-days: 7
+
   # --------------------------------------------------------------------------
   # Create GitHub prerelease
   # --------------------------------------------------------------------------
   release:
     name: Create Prerelease
-    needs: [prepare, build]
+    needs: [prepare, build, build-extension]
     runs-on: ubuntu-latest
     if: github.repository == 'SAP/astonish'
 

@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Astonish",
+  "version": "0.1.0",
+  "description": "Chat with Astonish from the current page.",
+  "minimum_chrome_version": "114",
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting"],
+  "optional_host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://localhost/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_title": "Open Astonish"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  }
+}

@@ -1,0 +1,422 @@
+import { formatPageMap } from '../lib/page-context';
+import { unwrapEditorPayload } from '../lib/page-edit';
+import {
+  findGitHubIssueEditor,
+  isGitHubCommentField,
+  isGitHubIssueBodyField,
+  isGitHubIssueOrPull,
+} from './adapters/github';
+import { capturePage } from './capture';
+
+const INTERACTIVE = [
+  'a[href]',
+  'button',
+  'input',
+  'textarea',
+  'select',
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="link"]',
+  '[role="textbox"]',
+  '[role="menuitem"]',
+].join(',');
+
+const MAX_REFS = 400;
+const QUERY_MAX = 30;
+const RESULT_CAP = 20_000;
+
+type RefEntry = { ref: string; el: HTMLElement };
+
+let refs: RefEntry[] = [];
+
+function cap(text: string, limit = RESULT_CAP): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n…(truncated)`;
+}
+
+function isVisible(el: Element): boolean {
+  const html = el as HTMLElement;
+  if (html.hidden) {
+    return false;
+  }
+  if (html.getAttribute('aria-hidden') === 'true') {
+    return false;
+  }
+  const style = window.getComputedStyle?.(html);
+  if (style && (style.display === 'none' || style.visibility === 'hidden')) {
+    return false;
+  }
+  return true;
+}
+
+function accessibleName(el: HTMLElement): string {
+  const labelled = el.getAttribute('aria-label');
+  if (labelled?.trim()) {
+    return labelled.trim();
+  }
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    const placeholder = el.getAttribute('placeholder');
+    if (el.value.trim()) {
+      return el.value.trim().slice(0, 80);
+    }
+    if (placeholder?.trim()) {
+      return placeholder.trim();
+    }
+  }
+  const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 80);
+}
+
+function tagLabel(el: HTMLElement): string {
+  const role = el.getAttribute('role');
+  if (role) {
+    return role;
+  }
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'a') {
+    return 'link';
+  }
+  if (tag === 'input') {
+    return (el as HTMLInputElement).type || 'input';
+  }
+  return tag;
+}
+
+function resolveRef(ref: string): HTMLElement | null {
+  const entry = refs.find((item) => item.ref === ref);
+  return entry?.el ?? null;
+}
+
+function githubClickBlocked(el: HTMLElement): string | null {
+  if (window.location.hostname !== 'github.com') {
+    return null;
+  }
+  const name = accessibleName(el).toLowerCase();
+  if (
+    name === 'comment' ||
+    name === 'close comment' ||
+    name === 'comment on this issue' ||
+    name === 'comment on this pull request' ||
+    name === 'add comment' ||
+    name === 'submit comment'
+  ) {
+    return 'Refusing to click GitHub Comment. That submits or opens a comment, not the issue description. Click Edit on the page to open the editor, then Apply again, or ask the user if they want a comment instead.';
+  }
+  // Do not let the model drive edit mode on the user's behalf. When the
+  // description editor is not already open, refuse clicks on the Edit button
+  // and the "Issue body actions" (…) kebab menu. Opening Edit is the user's job;
+  // the model should emit an astonish-page-edit fence and stop. Once the editor
+  // is open, these clicks are allowed (findGitHubIssueEditor() is truthy).
+  if (isGitHubIssueOrPull(window.location) && !findGitHubIssueEditor()) {
+    if (
+      name === 'edit' ||
+      name === 'edit issue' ||
+      name === 'edit comment' ||
+      name === 'issue body actions' ||
+      name === 'edit issue description'
+    ) {
+      return 'Refusing to open GitHub edit mode for you. Do not click Edit or the "Issue body actions" (…) kebab menu. Emit the complete updated description in ONE astonish-page-edit fence and stop — opening Edit and pressing Apply is the user\'s job.';
+    }
+  }
+  return null;
+}
+
+function dispatchEditorEvents(el: HTMLElement): void {
+  el.dispatchEvent(
+    new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText' }),
+  );
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function inViewport(el: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  return rect.bottom > 0 && rect.top < (window.innerHeight || 0) && rect.right > 0 && rect.left < (window.innerWidth || 0);
+}
+
+function preferViewport(els: HTMLElement[]): HTMLElement[] {
+  const inView: HTMLElement[] = [];
+  const rest: HTMLElement[] = [];
+  for (const el of els) {
+    if (inViewport(el)) {
+      inView.push(el);
+    } else {
+      rest.push(el);
+    }
+  }
+  return inView.concat(rest);
+}
+
+function collectCandidates(args: Record<string, unknown>): HTMLElement[] | string {
+  const selector = typeof args.selector === 'string' ? args.selector : '';
+  const text = typeof args.text === 'string' ? args.text.trim().toLowerCase() : '';
+  let candidates: HTMLElement[] = [];
+  if (selector) {
+    try {
+      candidates = [...document.querySelectorAll(selector)].filter(
+        (el): el is HTMLElement => el instanceof HTMLElement && isVisible(el),
+      );
+    } catch {
+      return `Invalid selector: ${selector}`;
+    }
+  } else {
+    candidates = [...document.querySelectorAll(INTERACTIVE)].filter(
+      (el): el is HTMLElement => el instanceof HTMLElement && isVisible(el),
+    );
+  }
+  if (text) {
+    candidates = candidates.filter((el) => {
+      const name = accessibleName(el).toLowerCase();
+      const href = el instanceof HTMLAnchorElement ? el.href.toLowerCase() : '';
+      return name.includes(text) || href.includes(text);
+    });
+  }
+  return candidates;
+}
+
+function githubFieldRole(el: HTMLElement): string {
+  if (!isGitHubIssueOrPull(window.location)) {
+    return '';
+  }
+  if (isGitHubIssueBodyField(el)) {
+    return ' issue-description';
+  }
+  if (isGitHubCommentField(el)) {
+    return ' comment-box';
+  }
+  return '';
+}
+
+function editorKindHint(el: HTMLElement): string {
+  if (!(el instanceof HTMLTextAreaElement) && !el.isContentEditable) {
+    return '';
+  }
+  let kind = ' text';
+  if (isGitHubIssueOrPull(window.location)) {
+    kind = ' markdown';
+  } else {
+    const hint = `${el.getAttribute('name') || ''} ${el.id} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+    if (/markdown|issue\[body\]|comment\[body\]|pull_request\[body\]/.test(hint)) {
+      kind = ' markdown';
+    }
+  }
+  return `${kind}${githubFieldRole(el)}`;
+}
+
+function formatInteractive(els: HTMLElement[], max: number): string {
+  refs = [];
+  const lines: string[] = [];
+  const shown = els.slice(0, max);
+  for (const [i, el] of shown.entries()) {
+    const ref = `ref${i + 1}`;
+    refs.push({ ref, el });
+    const name = accessibleName(el) || '(unnamed)';
+    const href = el instanceof HTMLAnchorElement ? el.href : '';
+    const extra = href ? ` href=${href}` : '';
+    const kind = editorKindHint(el);
+    lines.push(`[${ref}] ${tagLabel(el)}${kind} "${name}"${extra}`);
+  }
+  if (!shown.length) {
+    lines.push('(none)');
+  } else if (els.length > max) {
+    lines.push(`… ${els.length - max} more omitted`);
+  }
+  return lines.join('\n');
+}
+
+function snapshot(args: Record<string, unknown> = {}): string {
+  const filtered = collectCandidates(args);
+  if (typeof filtered === 'string') {
+    return filtered;
+  }
+  const ordered = args.selector || args.text ? filtered : preferViewport(filtered);
+  const map = formatPageMap(capturePage().pageMap);
+  const lines: string[] = [`URL: ${window.location.href}`, `Title: ${document.title}`];
+  if (map) {
+    lines.push('', map);
+  }
+  lines.push('', 'Interactive:', formatInteractive(ordered, MAX_REFS));
+  const headings = [...document.querySelectorAll('h1, h2, h3')]
+    .map((el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  if (headings.length) {
+    lines.push('', 'Headings:', ...headings.map((h) => `- ${h}`));
+  }
+  return cap(lines.join('\n'));
+}
+
+function query(args: Record<string, unknown>): string {
+  const filtered = collectCandidates(args);
+  if (typeof filtered === 'string') {
+    return filtered;
+  }
+  if (!filtered.length) {
+    return 'No matching elements.';
+  }
+  return cap(formatInteractive(filtered, QUERY_MAX));
+}
+
+type ClickOutcome = { ok: boolean; result: string; href?: string };
+
+function click(args: Record<string, unknown>): ClickOutcome {
+  const ref = typeof args.ref === 'string' ? args.ref : '';
+  const el = resolveRef(ref);
+  if (!el) {
+    return { ok: false, result: `Unknown ref ${ref || '(missing)'}. Run page_snapshot or page_query first.` };
+  }
+  const blocked = githubClickBlocked(el);
+  if (blocked) {
+    return { ok: false, result: blocked };
+  }
+  const anchor = el instanceof HTMLAnchorElement ? el : el.closest('a[href]');
+  if (anchor instanceof HTMLAnchorElement && (anchor.target === '_blank' || anchor.getAttribute('target') === '_blank')) {
+    anchor.setAttribute('target', '_self');
+  }
+  const href = anchor instanceof HTMLAnchorElement ? anchor.href : undefined;
+  const clickable = anchor instanceof HTMLAnchorElement ? anchor : el;
+  try {
+    clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
+  } catch {
+    // jsdom and some frames omit scrollIntoView.
+  }
+  for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click'] as const) {
+    try {
+      clickable.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, buttons: 1 }),
+      );
+    } catch {
+      // Pointer/mouse events are best-effort; HTMLElement.click still runs.
+    }
+  }
+  clickable.click();
+  return {
+    ok: true,
+    result: `Clicked ${ref} (${tagLabel(el)} "${accessibleName(el) || '(unnamed)'}"${href ? ` href=${href}` : ''}).`,
+    href,
+  };
+}
+
+function fill(args: Record<string, unknown>): string {
+  const ref = typeof args.ref === 'string' ? args.ref : '';
+  const text = unwrapEditorPayload(args.text);
+  const el = resolveRef(ref);
+  if (!el) {
+    return `Unknown ref ${ref || '(missing)'}. Run page_snapshot or page_query first.`;
+  }
+  if (
+    isGitHubIssueOrPull(window.location) &&
+    isGitHubCommentField(el) &&
+    !isGitHubIssueBodyField(el)
+  ) {
+    return 'Refusing to fill the GitHub comment box. The issue description is not in edit mode. Click Edit on the description first, then page_fill that editor. Only fill this field if the user asked to add a comment.';
+  }
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.focus();
+    el.value = text;
+    dispatchEditorEvents(el);
+    return `Filled ${ref}.`;
+  }
+  if (el.isContentEditable) {
+    el.focus();
+    el.textContent = text;
+    dispatchEditorEvents(el);
+    return `Filled ${ref}.`;
+  }
+  return `${ref} is not an editable field.`;
+}
+
+function selectOption(args: Record<string, unknown>): string {
+  const ref = typeof args.ref === 'string' ? args.ref : '';
+  const el = resolveRef(ref);
+  if (!(el instanceof HTMLSelectElement)) {
+    return `Unknown select ref ${ref || '(missing)'}. Run page_snapshot or page_query first.`;
+  }
+  const values = Array.isArray(args.values)
+    ? args.values.map((v) => String(v))
+    : typeof args.values === 'string'
+      ? [args.values]
+      : typeof args.value === 'string'
+        ? [args.value]
+        : [];
+  if (!values.length) {
+    return 'values is required.';
+  }
+  for (const option of el.options) {
+    option.selected = values.includes(option.value) || values.includes(option.text);
+  }
+  dispatchEditorEvents(el);
+  return `Selected ${values.join(', ')} on ${ref}.`;
+}
+
+function scroll(args: Record<string, unknown>): string {
+  const ref = typeof args.ref === 'string' ? args.ref : '';
+  if (ref) {
+    const el = resolveRef(ref);
+    if (!el) {
+      return `Unknown ref ${ref}. Run page_snapshot or page_query first.`;
+    }
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    return `Scrolled ${ref} into view.`;
+  }
+  const y = typeof args.y === 'number' ? args.y : Number(args.y);
+  if (Number.isFinite(y)) {
+    window.scrollTo({ top: y, behavior: 'instant' in window ? 'instant' : 'auto' } as ScrollToOptions);
+    return `Scrolled to y=${y}.`;
+  }
+  window.scrollBy({ top: window.innerHeight * 0.8, behavior: 'instant' as ScrollBehavior });
+  return 'Scrolled down one viewport.';
+}
+
+export type PageToolRun = { ok: boolean; name: string; result?: string; error?: string; href?: string };
+
+export function runPageTool(name: string, args: Record<string, unknown> = {}): PageToolRun {
+  try {
+    switch (name) {
+      case 'page_snapshot':
+        return { ok: true, name, result: snapshot(args) };
+      case 'page_query':
+        return { ok: true, name, result: query(args) };
+      case 'page_click': {
+        const outcome = click(args);
+        return outcome.ok
+          ? { ok: true, name, result: outcome.result, href: outcome.href }
+          : { ok: false, name, error: outcome.result };
+      }
+      case 'page_navigate':
+        return {
+          ok: false,
+          name,
+          error: 'page_navigate is handled by the extension service worker so this tab can stay in the user session.',
+        };
+      case 'page_fill': {
+        const result = fill(args);
+        return result.startsWith('Filled')
+          ? { ok: true, name, result }
+          : { ok: false, name, error: result };
+      }
+      case 'page_select': {
+        const result = selectOption(args);
+        return result.startsWith('Selected')
+          ? { ok: true, name, result }
+          : { ok: false, name, error: result };
+      }
+      case 'page_scroll':
+        return { ok: true, name, result: scroll(args) };
+      default:
+        return {
+          ok: false,
+          name,
+          error: `Unknown page tool "${name}". Use page_snapshot, page_query, page_click, page_navigate, page_fill, page_select, or page_scroll.`,
+        };
+    }
+  } catch (err) {
+    return { ok: false, name, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Test helper: current snapshot refs. */
+export function snapshotRefCount(): number {
+  return refs.length;
+}

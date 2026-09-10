@@ -159,19 +159,23 @@ async function runPageToolAllFrames(
   return merged;
 }
 
+// Disable the side panel globally. Each tab must be explicitly enabled via
+// action.onClicked. This makes the panel behave like DevTools — it only shows
+// on the tab where you opened it, and switching tabs hides it.
 chrome.runtime.onInstalled.addListener(() => {
-  // Do NOT use openPanelOnActionClick — it prevents us from embedding the tabId
-  // in the panel URL. Instead we open it explicitly via action.onClicked.
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+  void chrome.sidePanel.setOptions({ enabled: false });
 });
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+void chrome.sidePanel.setOptions({ enabled: false });
 
-// Open the side panel for the clicked tab, embedding the tabId in the URL so the
-// panel page can read it synchronously from location.search without any message passing.
+// Open the side panel for the clicked tab only. The tabId is embedded in the URL
+// so the panel page can read it synchronously from location.search.
 chrome.action.onClicked.addListener((tab) => {
   if (!tab.id) return;
   const tabId = tab.id;
+  // Enable panel for this specific tab with the tabId in the URL
   void chrome.sidePanel.setOptions({
     tabId,
     path: `sidepanel.html?tabId=${tabId}`,
@@ -186,7 +190,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 const UNREADABLE = 'This page cannot be read';
-const MSG_GET_TAB_ID = 'MSG_GET_TAB_ID';
 
 function isUnreadableUrl(url: string | undefined): boolean {
   if (!url) {
@@ -426,20 +429,6 @@ async function runPageToolInTab(
 
   return result;
 }
-
-// Handle tab ID requests from the side panel.
-// sender.tab is undefined for side panels (they are extension pages, not content scripts),
-// so we query the active tab in the last focused window — same as activeTab() used for
-// page tools. This is reliable because the user must be looking at a tab to have its panel open.
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === MSG_GET_TAB_ID) {
-    void chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
-      sendResponse({ tabId: tab?.id ?? 0 });
-    });
-    return true;
-  }
-  return false;
-});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const type = message && typeof message === 'object' ? (message as { type?: unknown }).type : undefined;

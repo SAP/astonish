@@ -43,10 +43,41 @@ export type PageToolResult = {
   href?: string;
 };
 
+/** Sent by the coordinator (top frame) to worker frames via chrome.tabs.sendMessage. */
+export const MSG_FRAME_TOOL = 'astonish.frameTool' as const;
+
+/**
+ * Payload sent to a specific child frame to execute a page tool in that frame's
+ * document context and return a partial PageToolResult.
+ */
+export type FrameToolPayload = {
+  type: typeof MSG_FRAME_TOOL;
+  name: string;
+  args: Record<string, unknown>;
+  /** Sequential ref offset so the child frame's ref numbers don't collide with the top frame's. */
+  refOffset: number;
+};
+
+/** Response from a child frame for MSG_FRAME_TOOL. */
+export type FrameToolResult = {
+  ok: boolean;
+  /** Serialized interactive-elements text from this frame (may be empty). */
+  interactive: string;
+  /** Serialized headings from this frame (may be empty). */
+  headings: string;
+  /** If the tool was page_click or page_fill, this is the outcome string. */
+  result?: string;
+  error?: string;
+  href?: string;
+  /** How many refs were registered in this frame (so the next frame can offset). */
+  refCount: number;
+};
+
 export type MessageType =
   | typeof MSG_GET_CONTEXT
   | typeof MSG_CONTEXT
   | typeof MSG_APPLY
   | typeof MSG_APPLY_RESULT
   | typeof MSG_PAGE_TOOL
+  | typeof MSG_FRAME_TOOL
   | typeof MSG_PING;

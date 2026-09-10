@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { runPageTool, snapshotRefCount } from '../dom-tools';
+import { accessibleDocumentCount, runPageTool, snapshotRefCount } from '../dom-tools';
 
 describe('dom-tools', () => {
   afterEach(() => {
@@ -266,5 +266,99 @@ describe('dom-tools', () => {
     expect(filled.error).toMatch(/comment/i);
     expect(filled.error).toMatch(/edit/i);
     expect(composer?.textContent).toBe('leave a comment');
+  });
+
+  describe('iframe support', () => {
+    function createSameOriginIframe(html: string): HTMLIFrameElement {
+      const iframe = document.createElement('iframe');
+      document.body.appendChild(iframe);
+      const doc = iframe.contentDocument!;
+      doc.open();
+      doc.write(`<html><body>${html}</body></html>`);
+      doc.close();
+      return iframe;
+    }
+
+    it('page_snapshot includes interactive elements from same-origin iframes', () => {
+      document.body.innerHTML = '<button type="button">Top Button</button>';
+      createSameOriginIframe('<button type="button">Iframe Button</button>');
+      const out = runPageTool('page_snapshot');
+      expect(out.ok).toBe(true);
+      // If jsdom supports iframe.contentDocument, both buttons appear.
+      // If not (contentDocument null), only Top Button appears — still ok.
+      expect(out.result).toContain('Top Button');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      if (iframeDoc) {
+        expect(out.result).toContain('Iframe Button');
+        expect(out.result).toContain('(iframe');
+        expect(snapshotRefCount()).toBeGreaterThanOrEqual(2);
+      }
+    });
+
+    it('page_click works on a ref inside an iframe', () => {
+      let iframeClicks = 0;
+      createSameOriginIframe('<button id="inner" type="button">Inner</button>');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      if (!iframeDoc) return; // skip if jsdom doesn't support iframe.contentDocument
+      const innerBtn = iframeDoc.querySelector('#inner')!;
+      innerBtn.addEventListener('click', () => { iframeClicks += 1; });
+      runPageTool('page_snapshot');
+      const snap = runPageTool('page_query', { text: 'Inner' });
+      expect(snap.ok).toBe(true);
+      const clicked = runPageTool('page_click', { ref: 'ref1' });
+      expect(clicked.ok).toBe(true);
+      expect(iframeClicks).toBeGreaterThanOrEqual(1);
+    });
+
+    it('page_fill works on an input inside an iframe', () => {
+      createSameOriginIframe('<input id="inner-input" placeholder="Search" />');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      if (!iframeDoc) return; // skip if jsdom doesn't support iframe.contentDocument
+      runPageTool('page_snapshot');
+      const snap = runPageTool('page_query', { text: 'Search' });
+      expect(snap.ok).toBe(true);
+      const filled = runPageTool('page_fill', { ref: 'ref1', text: 'hello iframe' });
+      expect(filled.ok).toBe(true);
+      const input = iframeDoc.querySelector<HTMLInputElement>('#inner-input');
+      expect(input?.value).toBe('hello iframe');
+    });
+
+    it('page_query with selector works across iframes', () => {
+      document.body.innerHTML = '<a href="/top">Top Link</a>';
+      createSameOriginIframe('<a href="/inner">Inner Link</a>');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      const out = runPageTool('page_query', { selector: 'a[href]' });
+      expect(out.ok).toBe(true);
+      expect(out.result).toContain('Top Link');
+      if (iframeDoc) {
+        expect(out.result).toContain('Inner Link');
+      }
+    });
+
+    it('snapshot headings include iframe headings', () => {
+      document.body.innerHTML = '<h1>Top Heading</h1>';
+      createSameOriginIframe('<h2>Iframe Heading</h2>');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      const out = runPageTool('page_snapshot');
+      expect(out.ok).toBe(true);
+      expect(out.result).toContain('Top Heading');
+      if (iframeDoc) {
+        expect(out.result).toContain('Iframe Heading');
+      }
+    });
+
+    it('accessibleDocumentCount reflects iframe presence', () => {
+      // Without any iframes, only the top document.
+      expect(accessibleDocumentCount()).toBe(1);
+      createSameOriginIframe('<p>hi</p>');
+      const iframeDoc = document.querySelector('iframe')?.contentDocument;
+      if (iframeDoc) {
+        // jsdom supports contentDocument: should count 2.
+        expect(accessibleDocumentCount()).toBe(2);
+      } else {
+        // jsdom returns null contentDocument: still 1.
+        expect(accessibleDocumentCount()).toBe(1);
+      }
+    });
   });
 });

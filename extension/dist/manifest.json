@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Chat with Astonish from the current page.",
   "minimum_chrome_version": "114",
-  "permissions": ["sidePanel", "storage", "activeTab", "scripting"],
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "webNavigation"],
   "optional_host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",

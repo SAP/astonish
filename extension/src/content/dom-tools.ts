@@ -19,6 +19,11 @@ const INTERACTIVE = [
   '[role="link"]',
   '[role="textbox"]',
   '[role="menuitem"]',
+  '[role="option"]',
+  '[role="gridcell"]',
+  '[role="row"]',
+  '[role="listitem"]',
+  '[tabindex="0"]',
 ].join(',');
 
 const MAX_REFS = 400;
@@ -36,15 +41,54 @@ function cap(text: string, limit = RESULT_CAP): string {
   return `${text.slice(0, limit)}\n…(truncated)`;
 }
 
-function isVisible(el: Element): boolean {
-  const html = el as HTMLElement;
+/** Recursively collect the top document plus all same-origin iframe contentDocuments. */
+function getAccessibleDocuments(root: Document = document): Document[] {
+  const docs: Document[] = [root];
+  try {
+    const iframes = root.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      try {
+        const iframeDoc = (iframe as HTMLIFrameElement).contentDocument;
+        if (iframeDoc) {
+          docs.push(...getAccessibleDocuments(iframeDoc));
+        }
+      } catch {
+        // Cross-origin iframe — skip silently.
+      }
+    }
+  } catch {
+    // Defensive: root.querySelectorAll may fail on detached documents.
+  }
+  return docs;
+}
+
+/** If el lives inside an iframe, return a display label like ' (iframe: /path)'. */
+function iframeSource(el: HTMLElement): string {
+  const ownerDoc = el.ownerDocument;
+  if (ownerDoc === document) return '';
+  try {
+    const frameEl = ownerDoc.defaultView?.frameElement as HTMLIFrameElement | null;
+    if (frameEl) {
+      const src = frameEl.getAttribute('src') || frameEl.id || '(embedded)';
+      return ` (iframe: ${src})`;
+    }
+  } catch {
+    // Cross-origin frameElement access.
+  }
+  return ' (iframe)';
+}
+
+function isVisible(el: HTMLElement): boolean {
+  const html = el;
   if (html.hidden) {
     return false;
   }
   if (html.getAttribute('aria-hidden') === 'true') {
     return false;
   }
-  const style = window.getComputedStyle?.(html);
+  // Use the element's own window for getComputedStyle — cross-origin safe.
+  const win = (html.ownerDocument?.defaultView ?? window) as Window & typeof globalThis;
+  const style = win.getComputedStyle?.(html);
   if (style && (style.display === 'none' || style.visibility === 'hidden')) {
     return false;
   }
@@ -56,10 +100,11 @@ function accessibleName(el: HTMLElement): string {
   if (labelled?.trim()) {
     return labelled.trim();
   }
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+  if (isInputOrTextarea(el)) {
+    const input = el as HTMLInputElement | HTMLTextAreaElement;
     const placeholder = el.getAttribute('placeholder');
-    if (el.value.trim()) {
-      return el.value.trim().slice(0, 80);
+    if (input.value.trim()) {
+      return input.value.trim().slice(0, 80);
     }
     if (placeholder?.trim()) {
       return placeholder.trim();
@@ -148,22 +193,42 @@ function preferViewport(els: HTMLElement[]): HTMLElement[] {
   return inView.concat(rest);
 }
 
+function isHTMLElement(el: Element): el is HTMLElement {
+  // Cross-window safe: elements from iframe documents have a different HTMLElement
+  // constructor than the top frame, so `instanceof HTMLElement` returns false for them.
+  // Check using the element's own window context instead.
+  const win = el.ownerDocument?.defaultView as (Window & { HTMLElement?: typeof HTMLElement }) | null;
+  if (win?.HTMLElement) {
+    return el instanceof win.HTMLElement;
+  }
+  return el instanceof HTMLElement;
+}
+
 function collectCandidates(args: Record<string, unknown>): HTMLElement[] | string {
   const selector = typeof args.selector === 'string' ? args.selector : '';
   const text = typeof args.text === 'string' ? args.text.trim().toLowerCase() : '';
   let candidates: HTMLElement[] = [];
+  const docs = getAccessibleDocuments();
   if (selector) {
     try {
-      candidates = [...document.querySelectorAll(selector)].filter(
-        (el): el is HTMLElement => el instanceof HTMLElement && isVisible(el),
-      );
+      for (const doc of docs) {
+        candidates.push(
+          ...[...doc.querySelectorAll(selector)].filter(
+            (el): el is HTMLElement => isHTMLElement(el) && isVisible(el as HTMLElement),
+          ),
+        );
+      }
     } catch {
       return `Invalid selector: ${selector}`;
     }
   } else {
-    candidates = [...document.querySelectorAll(INTERACTIVE)].filter(
-      (el): el is HTMLElement => el instanceof HTMLElement && isVisible(el),
-    );
+    for (const doc of docs) {
+      candidates.push(
+        ...[...doc.querySelectorAll(INTERACTIVE)].filter(
+          (el): el is HTMLElement => isHTMLElement(el) && isVisible(el as HTMLElement),
+        ),
+      );
+    }
   }
   if (text) {
     candidates = candidates.filter((el) => {
@@ -215,6 +280,95 @@ function formatInteractive(els: HTMLElement[], max: number): string {
     const href = el instanceof HTMLAnchorElement ? el.href : '';
     const extra = href ? ` href=${href}` : '';
     const kind = editorKindHint(el);
+    lines.push(`[${ref}] ${tagLabel(el)}${kind} "${name}"${extra}${iframeSource(el)}`);
+  }
+  if (!shown.length) {
+    lines.push('(none)');
+  } else if (els.length > max) {
+    lines.push(`… ${els.length - max} more omitted`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Collect interactive elements from the current document only (no iframe traversal).
+ * Used by child-frame executions via MSG_FRAME_TOOL.
+ * The refOffset ensures refs from this frame don't collide with the top frame's refs.
+ */
+function collectCandidatesFrameLocal(
+  args: Record<string, unknown>,
+  refOffset: number,
+): HTMLElement[] | string {
+  const selector = typeof args.selector === 'string' ? args.selector : '';
+  const text = typeof args.text === 'string' ? args.text.trim().toLowerCase() : '';
+  let candidates: HTMLElement[] = [];
+  if (selector) {
+    try {
+      candidates = [...document.querySelectorAll(selector)].filter(
+        (el): el is HTMLElement => isHTMLElement(el) && isVisible(el as HTMLElement),
+      );
+    } catch {
+      return `Invalid selector: ${selector}`;
+    }
+  } else {
+    candidates = [...document.querySelectorAll(INTERACTIVE)].filter(
+      (el): el is HTMLElement => isHTMLElement(el) && isVisible(el as HTMLElement),
+    );
+  }
+  if (text) {
+    candidates = candidates.filter((el) => {
+      const name = accessibleName(el).toLowerCase();
+      const href = el instanceof HTMLAnchorElement ? el.href.toLowerCase() : '';
+      return name.includes(text) || href.includes(text);
+    });
+  }
+  // Populate refs with offset so resolveRef works for click/fill calls.
+  refs = [];
+  const max = MAX_REFS;
+  const shown = candidates.slice(0, max);
+  for (const [i, el] of shown.entries()) {
+    refs.push({ ref: `ref${refOffset + i + 1}`, el });
+  }
+  return candidates;
+}
+
+/** Render interactive elements for frame-local execution, returning a string. */
+function snapshotFrameInteractive(args: Record<string, unknown>): string {
+  const refOffset = typeof args._refOffset === 'number' ? args._refOffset : 0;
+  const candidates = collectCandidatesFrameLocal(args, refOffset);
+  if (typeof candidates === 'string') return candidates;
+  const ordered = args.selector || args.text ? candidates : preferViewport(candidates);
+  return formatInteractiveWithOffset(ordered, MAX_REFS, refOffset);
+}
+
+/** Collect headings from the current document only. */
+function snapshotFrameHeadings(): string {
+  return [...document.querySelectorAll('h1, h2, h3')]
+    .map((el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .join('\n');
+}
+
+/** Run page_query scoped to the current frame only. */
+function queryFrame(args: Record<string, unknown>): string {
+  const refOffset = typeof args._refOffset === 'number' ? args._refOffset : 0;
+  const candidates = collectCandidatesFrameLocal(args, refOffset);
+  if (typeof candidates === 'string') return candidates;
+  if (!candidates.length) return 'No matching elements.';
+  return cap(formatInteractiveWithOffset(candidates, QUERY_MAX, refOffset));
+}
+
+/** Like formatInteractive but applies a ref offset (for child-frame refs). */
+function formatInteractiveWithOffset(els: HTMLElement[], max: number, refOffset: number): string {
+  const lines: string[] = [];
+  const shown = els.slice(0, max);
+  for (const [i, el] of shown.entries()) {
+    const ref = `ref${refOffset + i + 1}`;
+    const name = accessibleName(el) || '(unnamed)';
+    const href = el instanceof HTMLAnchorElement ? el.href : '';
+    const extra = href ? ` href=${href}` : '';
+    const kind = editorKindHint(el);
     lines.push(`[${ref}] ${tagLabel(el)}${kind} "${name}"${extra}`);
   }
   if (!shown.length) {
@@ -237,7 +391,9 @@ function snapshot(args: Record<string, unknown> = {}): string {
     lines.push('', map);
   }
   lines.push('', 'Interactive:', formatInteractive(ordered, MAX_REFS));
-  const headings = [...document.querySelectorAll('h1, h2, h3')]
+  const allDocs = getAccessibleDocuments();
+  const headings = allDocs
+    .flatMap((doc) => [...doc.querySelectorAll('h1, h2, h3')])
     .map((el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim())
     .filter(Boolean)
     .slice(0, 20);
@@ -298,6 +454,12 @@ function click(args: Record<string, unknown>): ClickOutcome {
   };
 }
 
+function isInputOrTextarea(el: HTMLElement): el is HTMLInputElement | HTMLTextAreaElement {
+  // Cross-window safe check — el may come from an iframe document.
+  const tag = el.tagName?.toLowerCase();
+  return tag === 'input' || tag === 'textarea';
+}
+
 function fill(args: Record<string, unknown>): string {
   const ref = typeof args.ref === 'string' ? args.ref : '';
   const text = unwrapEditorPayload(args.text);
@@ -312,9 +474,9 @@ function fill(args: Record<string, unknown>): string {
   ) {
     return 'Refusing to fill the GitHub comment box. The issue description is not in edit mode. Click Edit on the description first, then page_fill that editor. Only fill this field if the user asked to add a comment.';
   }
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+  if (isInputOrTextarea(el)) {
     el.focus();
-    el.value = text;
+    (el as HTMLInputElement | HTMLTextAreaElement).value = text;
     dispatchEditorEvents(el);
     return `Filled ${ref}.`;
   }
@@ -371,6 +533,83 @@ function scroll(args: Record<string, unknown>): string {
 
 export type PageToolRun = { ok: boolean; name: string; result?: string; error?: string; href?: string };
 
+/**
+ * Execute a page tool scoped to only this frame's own document (no same-origin iframe traversal).
+ * Used when this content script is running in a child frame and the top-frame coordinator has
+ * delegated the query here via MSG_FRAME_TOOL.
+ *
+ * @param name   The page tool name (page_snapshot, page_query, page_click, etc.)
+ * @param args   The tool arguments.
+ * @param refOffset  Starting ref number so ref IDs don't collide across frames
+ *                   (e.g. top frame used ref1–ref10, so pass 10 here to get ref11–refN).
+ */
+export function runPageToolInFrame(
+  name: string,
+  args: Record<string, unknown>,
+  refOffset: number,
+): { interactive: string; headings: string; result?: string; error?: string; href?: string; refCount: number } {
+  try {
+    // Temporarily override document querying to be frame-local only.
+    // We do this by passing a flag through the args.
+    const frameArgs = { ...args, _frameLocal: true, _refOffset: refOffset };
+
+    switch (name) {
+      case 'page_snapshot': {
+        const interactiveText = snapshotFrameInteractive(frameArgs);
+        const headingText = snapshotFrameHeadings();
+        return { interactive: interactiveText, headings: headingText, refCount: refs.length };
+      }
+      case 'page_query': {
+        const interactiveText = queryFrame(frameArgs);
+        return { interactive: interactiveText, headings: '', refCount: refs.length };
+      }
+      case 'page_click': {
+        // First populate refs for this frame so resolveRef works.
+        snapshotFrameInteractive({ ...args, _frameLocal: true, _refOffset: refOffset });
+        const outcome = click(args);
+        return {
+          interactive: '',
+          headings: '',
+          result: outcome.result,
+          href: outcome.href,
+          refCount: refs.length,
+          ...(outcome.ok ? {} : { error: outcome.result }),
+        };
+      }
+      case 'page_fill': {
+        snapshotFrameInteractive({ ...args, _frameLocal: true, _refOffset: refOffset });
+        const result = fill(args);
+        return {
+          interactive: '',
+          headings: '',
+          result,
+          refCount: refs.length,
+          ...(result.startsWith('Filled') ? {} : { error: result }),
+        };
+      }
+      case 'page_scroll': {
+        snapshotFrameInteractive({ ...args, _frameLocal: true, _refOffset: refOffset });
+        const result = scroll(args);
+        return { interactive: '', headings: '', result, refCount: refs.length };
+      }
+      default:
+        return { interactive: '', headings: '', error: `Unknown tool: ${name}`, refCount: 0 };
+    }
+  } catch (err) {
+    return {
+      interactive: '',
+      headings: '',
+      error: err instanceof Error ? err.message : String(err),
+      refCount: 0,
+    };
+  }
+}
+
+/** How many refs are currently registered (test helper + frame relay). */
+export function frameRefCount(): number {
+  return refs.length;
+}
+
 export function runPageTool(name: string, args: Record<string, unknown> = {}): PageToolRun {
   try {
     switch (name) {
@@ -419,4 +658,9 @@ export function runPageTool(name: string, args: Record<string, unknown> = {}): P
 /** Test helper: current snapshot refs. */
 export function snapshotRefCount(): number {
   return refs.length;
+}
+
+/** Test helper: accessible document count (top frame + same-origin iframes). */
+export function accessibleDocumentCount(): number {
+  return getAccessibleDocuments().length;
 }

@@ -78,6 +78,43 @@ After `page_click` / `page_navigate`, the tool result includes the new page snap
 
 Results are returned as a hidden follow-up turn (`systemContext` + a short continuation `message`), up to 8 rounds. Fences are stripped from the transcript the user sees.
 
+### Iframe support
+
+Page tools support both same-origin and **cross-origin** iframes via a frame coordinator architecture.
+
+#### Same-origin iframes (direct document access)
+
+For same-origin iframes, the top-frame content script accesses `iframe.contentDocument` directly via `getAccessibleDocuments()` in `dom-tools.ts`. Interactive elements from same-origin iframes appear in `page_snapshot` and `page_query` results tagged with `(iframe: <src>)`. Cross-origin `contentDocument` access throws `SecurityError` and is silently skipped at this level.
+
+#### Cross-origin iframes (frame coordinator pattern)
+
+Cross-origin iframes require a different approach since `contentDocument` is inaccessible. The extension uses a **coordinator/worker** pattern:
+
+1. **Injection:** The content script is injected into every frame (`allFrames: true` in `chrome.scripting.executeScript` and the manifest) including cross-origin iframes.
+
+2. **Frame detection:** Each content script instance checks `window.self === window.top` to determine if it's the coordinator (top frame) or a worker (child frame).
+
+3. **Message relay:** The service worker fans out `MSG_FRAME_TOOL` messages to each frame individually using `chrome.tabs.sendMessage(tabId, ..., { frameId })`. Each frame executes the page tool against its own `document` via `runPageToolInFrame()` and returns a `FrameToolResult`.
+
+4. **Ref offsets:** Each frame receives a `refOffset` so its ref numbers don't collide with other frames (e.g. top frame uses ref1–ref10, child frame uses ref11–refN).
+
+5. **Result aggregation:** The service worker's `mergeFrameResults()` combines interactive elements and headings from all frames. For action tools (`page_click`, `page_fill`), the first successful result is used.
+
+6. **Timeout handling:** Frames that don't respond within 5 seconds are silently skipped.
+
+**Example on the SAP Fiori CAT2 calendar page:**
+- Top frame = SAP Launchpad shell (header, navigation buttons)
+- Child frame (`sapit-finance-prod-eagle.launchpad.cfapps.eu10.hana.ondemand.com/cat2ui/...`) = Activity Recording calendar
+
+When `page_snapshot` runs, the service worker sends `MSG_FRAME_TOOL` to both the top frame and the CAT2 iframe. The CAT2 frame's content script queries its own document for calendar cells and returns them. The merged snapshot includes both the launchpad controls and the calendar day cells with sequential ref IDs.
+
+**Key files:**
+- `extension/src/background/service-worker.ts` — `getAllFrameIds()`, `sendToFrame()`, `mergeFrameResults()`, `runPageToolAllFrames()`
+- `extension/src/content/dom-tools.ts` — `runPageToolInFrame()`, `collectCandidatesFrameLocal()`, `snapshotFrameInteractive()`, `snapshotFrameHeadings()`
+- `extension/src/content/content-script.ts` — frame detection (`isTopFrame`), `MSG_FRAME_TOOL` handler
+- `extension/src/lib/messages.ts` — `MSG_FRAME_TOOL`, `FrameToolPayload`, `FrameToolResult` types
+- `extension/manifest.json` — `webNavigation` permission (for `getAllFrames`)
+
 ## Confirmed apply
 
 The model may propose a page rewrite in a fenced block with language id `astonish-page-edit` (`PAGE_EDIT_FENCE`). The panel parses the latest agent text (`extractPageEdit`) and shows **Apply** / **Dismiss**. DOM writes never run on stream complete.

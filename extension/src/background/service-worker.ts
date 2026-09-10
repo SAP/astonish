@@ -1,10 +1,12 @@
 import {
   MSG_APPLY,
+  MSG_FRAME_TOOL,
   MSG_GET_CONTEXT,
   MSG_PAGE_TOOL,
   MSG_PING,
   type ApplyResult,
   type ContextResult,
+  type FrameToolResult,
   type PageToolResult,
 } from '../lib/messages';
 import {
@@ -16,6 +18,143 @@ import {
 } from '../lib/page-navigate';
 
 const CONTENT_SCRIPT = 'content-script.js';
+
+const FRAME_TOOL_TIMEOUT_MS = 5000;
+
+/**
+ * Send MSG_FRAME_TOOL to a specific frame (by frameId) and wait for its FrameToolResult.
+ * Returns null if the frame times out or is unreachable.
+ */
+async function sendToFrame(
+  tabId: number,
+  frameId: number,
+  name: string,
+  args: Record<string, unknown>,
+  refOffset: number,
+): Promise<FrameToolResult | null> {
+  // Retry up to 3 times — child frame content scripts may not have finished
+  // registering their chrome.runtime.onMessage listener yet after injection.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await new Promise<FrameToolResult | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), FRAME_TOOL_TIMEOUT_MS);
+      try {
+        chrome.tabs.sendMessage(
+          tabId,
+          { type: MSG_FRAME_TOOL, name, args, refOffset },
+          { frameId },
+          (response: FrameToolResult | undefined) => {
+            clearTimeout(timer);
+            if (chrome.runtime.lastError || !response) {
+              resolve(null);
+            } else {
+              resolve(response);
+            }
+          },
+        );
+      } catch {
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+    if (result) return result;
+    // Brief delay before retry to let the content script finish loading.
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  return null;
+}
+
+/**
+ * Collect all frame IDs in the tab that have the content script loaded.
+ * Returns the top frame (frameId 0) plus any child frames.
+ */
+async function getAllFrameIds(tabId: number): Promise<number[]> {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    return (frames ?? []).map((f) => f.frameId);
+  } catch {
+    // webNavigation not available or tab not ready — fall back to top frame only.
+    return [0];
+  }
+}
+
+/**
+ * Merge partial FrameToolResults from multiple frames into a single PageToolResult.
+ * For snapshot/query: concatenate interactive lines + headings from all frames.
+ * For click/fill/scroll: return the first successful result.
+ */
+function mergeFrameResults(
+  name: string,
+  frameResults: Array<FrameToolResult | null>,
+): PageToolResult {
+  const validResults = frameResults.filter((r): r is FrameToolResult => r !== null);
+  if (!validResults.length) {
+    return { ok: false, name, error: 'No frames responded.' };
+  }
+
+  if (name === 'page_snapshot' || name === 'page_query') {
+    const interactiveParts = validResults
+      .map((r) => r.interactive)
+      .filter(Boolean);
+    const headingParts = validResults
+      .map((r) => r.headings)
+      .filter(Boolean);
+
+    let result = interactiveParts.join('\n') || '(none)';
+
+    // For snapshot, include URL/title/headings from the first (top) frame.
+    if (name === 'page_snapshot') {
+      const headingsText = headingParts.join('\n');
+      if (headingsText) {
+        result += '\n\nHeadings:\n' + headingParts.map((h) => h.split('\n').map((l) => `- ${l}`).join('\n')).join('\n');
+      }
+    }
+
+    return { ok: true, name, result };
+  }
+
+  // For click/fill/scroll: first success wins; if none, return last error.
+  for (const r of validResults) {
+    if (!r.error) {
+      return { ok: true, name, result: r.result, href: r.href };
+    }
+  }
+  return { ok: false, name, error: validResults[validResults.length - 1].error };
+}
+
+/**
+ * Run a page tool by injecting into all frames and aggregating results.
+ * For snapshot/query: fans out to all frames.
+ * For action tools (click/fill/scroll): fans out to all frames, uses first success.
+ */
+async function runPageToolAllFrames(
+  tab: chrome.tabs.Tab,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<PageToolResult> {
+  const tabId = tab.id as number;
+  const frameIds = await getAllFrameIds(tabId);
+
+  // Fan out to each frame sequentially so ref offsets accumulate correctly.
+  const frameResults: Array<FrameToolResult | null> = [];
+  let refOffset = 0;
+  for (const frameId of frameIds) {
+    const result = await sendToFrame(tabId, frameId, name, args, refOffset);
+    frameResults.push(result);
+    refOffset += result?.refCount ?? 0;
+  }
+
+  const merged = mergeFrameResults(name, frameResults);
+
+  // For page_snapshot, prepend the URL/title line from the tab.
+  if (name === 'page_snapshot' && merged.ok) {
+    const urlLine = `URL: ${tab.url ?? '(unknown)'}\nTitle: ${tab.title ?? '(unknown)'}`;
+    merged.result = `${urlLine}\n\nInteractive:\n${merged.result}`;
+  }
+
+  return merged;
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -55,16 +194,23 @@ async function activeTab(): Promise<chrome.tabs.Tab> {
 }
 
 async function ensureContentScript(tabId: number): Promise<void> {
+  // Always inject into all frames. The top frame may already have the script
+  // (which is fine — module-level state resets on re-inject), but child frames
+  // (especially cross-origin iframes that loaded after the initial injection)
+  // may not have it yet. Chrome silently handles injection into frames where the
+  // script is already present.
   try {
-    await chrome.tabs.sendMessage(tabId, { type: MSG_PING });
-    return;
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: [CONTENT_SCRIPT],
+    });
   } catch {
-    // Not injected yet.
+    // Some frames may refuse injection (e.g. chrome:// iframes). Try top-frame only.
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [CONTENT_SCRIPT],
+    });
   }
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: [CONTENT_SCRIPT],
-  });
 }
 
 function sendToTab<T>(tabId: number, message: unknown): Promise<T> {
@@ -73,11 +219,8 @@ function sendToTab<T>(tabId: number, message: unknown): Promise<T> {
 
 async function snapshotTab(tabId: number): Promise<PageToolResult> {
   await ensureContentScript(tabId);
-  return sendToTab<PageToolResult>(tabId, {
-    type: MSG_PAGE_TOOL,
-    name: 'page_snapshot',
-    args: {},
-  });
+  const tab = await chrome.tabs.get(tabId);
+  return runPageToolAllFrames(tab, 'page_snapshot', {});
 }
 
 async function settleThenSnapshot(
@@ -131,13 +274,10 @@ async function runPageToolInTab(
     return { ...settled, name: 'page_navigate' };
   }
 
+  // For all other page tools, fan out to all frames (including cross-origin iframes).
   let result: PageToolResult;
   try {
-    result = await sendToTab<PageToolResult>(tabId, {
-      type: MSG_PAGE_TOOL,
-      name,
-      args,
-    });
+    result = await runPageToolAllFrames(tab, name, args);
   } catch (err) {
     if (name === 'page_click') {
       const action = `Clicked in this tab; the page started navigating (${err instanceof Error ? err.message : 'frame gone'}).`;

@@ -26,6 +26,7 @@ help:
 	@echo "  make build           - Build the Go binary only"
 	@echo "  make build-treesitter-lib - Build native tree-sitter shared library"
 	@echo "  make build-ui        - Build the React UI (web/dist)"
+	@echo "  make build-extension - Build the Chrome MV3 extension (extension/dist)"
 	@echo "  make build-all       - Build UI first, then Go binary"
 	@echo "  make run             - Run the Go application"
 	@echo "  make studio          - Run Astonish Studio (dev mode)"
@@ -103,6 +104,12 @@ build-ui:
 	cd $(WEB_DIR) && npm install && npm run build
 	@touch $(WEB_DIR)/embed.go
 	@echo "React UI built successfully: $(WEB_DIR)/dist"
+
+# Build the Chrome MV3 side-panel extension
+build-extension:
+	@echo "Building Chrome extension..."
+	cd extension && npm install && npm run build
+	@echo "Chrome extension built successfully: extension/dist"
 
 # Build everything: UI first, then Go binary
 build-all: setup-hooks ent-generate build-ui build
@@ -549,7 +556,7 @@ update-mcp-stars:
 	GITHUB_TOKEN=$$(gh auth token) python3 scripts/update-mcp-stars.py
 	@echo "Star counts updated!"
 
-.PHONY: all help build build-ui build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
+.PHONY: all help build build-ui build-extension build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
 
 # Docker Test Environment - isolated environment for running integration/E2E tests
 e2e-env-up:

@@ -24,7 +24,9 @@
     "48": "public/icons/icon-48.png",
     "128": "public/icons/icon-128.png"
   },
-  "side_panel": {},
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"

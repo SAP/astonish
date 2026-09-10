@@ -6,6 +6,7 @@ import {
   mergeSessionTitles,
   pruneMissingSessionIds,
   rememberExtensionSession,
+  removeTabState,
   startNewExtensionSession,
   updateExtensionSessionTitle,
 } from '../extension-sessions';
@@ -54,7 +55,7 @@ function installChromeMock() {
   };
 
   // Return the local store so tests can write legacy data directly.
-  return { local };
+  return { local, session };
 }
 
 describe('extension-sessions', () => {
@@ -115,24 +116,33 @@ describe('extension-sessions', () => {
     expect(state.sessions[0].title).toBe('Renamed');
   });
 
-  it('session storage is cleared per-tab automatically', async () => {
-    // When using chrome.storage.session, each tab gets its own isolated storage
-    // and it's auto-cleared when the tab closes. There's no explicit cleanup needed.
-    await rememberExtensionSession(42, 'ext-1', 'First');
-    let state = await loadExtensionChat(42);
-    expect(state.currentSessionId).toBe('ext-1');
-    
-    // clearExtensionChat is now a no-op for session storage (auto-cleared per tab).
-    // It only removes legacy local storage if present.
-    await clearExtensionChat();
-    // Session storage still has the data (it's per-tab and auto-cleared on tab close)
-    state = await loadExtensionChat(42);
-    expect(state.currentSessionId).toBe('ext-1');
+  it('different tabs have independent session state', async () => {
+    await rememberExtensionSession(42, 'ext-1', 'Tab A session');
+    await rememberExtensionSession(99, 'ext-2', 'Tab B session');
+    const stateA = await loadExtensionChat(42);
+    const stateB = await loadExtensionChat(99);
+    expect(stateA.currentSessionId).toBe('ext-1');
+    expect(stateB.currentSessionId).toBe('ext-2');
   });
 
-  it('migrates legacy global state to the session', async () => {
+  it('removeTabState cleans up a closed tab', async () => {
+    await rememberExtensionSession(42, 'ext-1', 'Will be removed');
+    await removeTabState(42);
+    const state = await loadExtensionChat(42);
+    expect(state).toEqual({ currentSessionId: '', sessions: [] });
+  });
+
+  it('clearExtensionChat removes all stored state', async () => {
+    await rememberExtensionSession(42, 'ext-1', 'First');
+    await clearExtensionChat();
+    const state = await loadExtensionChat(42);
+    expect(state).toEqual({ currentSessionId: '', sessions: [] });
+  });
+
+  it('migrates legacy global state to the requesting tab', async () => {
     // Manually write legacy format into the mock local store
-    await (chrome.storage.local as any).set({
+    await (chromeMock.local as unknown as { astonishExtensionChat: unknown } & Store & { [key: string]: unknown });
+    await chrome.storage.local.set({
       astonishExtensionChat: {
         currentSessionId: 'old-1',
         sessions: [{ id: 'old-1', title: 'Legacy session' }],
@@ -142,7 +152,7 @@ describe('extension-sessions', () => {
     expect(state.currentSessionId).toBe('old-1');
     expect(state.sessions[0].title).toBe('Legacy session');
     // Legacy key should be removed after migration
-    const legacy = await (chrome.storage.local as any).get('astonishExtensionChat');
+    const legacy = await chrome.storage.local.get('astonishExtensionChat');
     expect(legacy.astonishExtensionChat).toBeUndefined();
   });
 });

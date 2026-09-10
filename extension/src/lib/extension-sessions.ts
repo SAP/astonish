@@ -8,10 +8,14 @@ export type ExtensionChatState = {
   sessions: ExtensionSessionRef[];
 };
 
-// Use a single key in session storage (automatically per-tab-isolated by Chrome).
-// chrome.storage.session is cleared when the tab closes, so each tab starts fresh.
-const SESSION_STORAGE_KEY = 'astonishExtensionChatState';
+// Per-tab map stored in session storage (in-memory, cleared on browser restart).
+// Session storage is shared across all extension contexts, so we key by tabId.
+// The tabId is embedded in the side panel URL by the service worker when it opens
+// the panel, so it is always available synchronously from location.search.
+const STORAGE_KEY = 'astonishExtensionChatByTab';
 const LEGACY_STORAGE_KEY = 'astonishExtensionChat';
+
+type TabStateMap = Record<number, ExtensionChatState>;
 
 const emptyState = (): ExtensionChatState => ({
   currentSessionId: '',
@@ -38,42 +42,56 @@ function asState(value: unknown): ExtensionChatState {
   return { currentSessionId, sessions };
 }
 
-async function loadSessionState(): Promise<ExtensionChatState> {
+async function loadTabMap(): Promise<TabStateMap> {
   if (typeof chrome === 'undefined' || !chrome.storage?.session) {
-    return emptyState();
+    // Fall back to local storage if session is not available
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return {};
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    const raw = result[STORAGE_KEY];
+    return (!raw || typeof raw !== 'object') ? {} : raw as TabStateMap;
   }
-  const result = await chrome.storage.session.get(SESSION_STORAGE_KEY);
-  const raw = result[SESSION_STORAGE_KEY];
-  if (raw) {
-    return asState(raw);
-  }
-  // No session state yet. Check for legacy local storage (one-time migration).
-  if (!chrome.storage?.local) {
-    return emptyState();
-  }
-  const legacyResult = await chrome.storage.local.get(LEGACY_STORAGE_KEY);
-  const legacy = legacyResult[LEGACY_STORAGE_KEY];
-  if (legacy) {
-    const migrated = asState(legacy);
-    // Save to session storage (per-tab) and remove legacy
-    await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: migrated });
-    await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
-    return migrated;
-  }
-  return emptyState();
+  const result = await chrome.storage.session.get(STORAGE_KEY);
+  const raw = result[STORAGE_KEY];
+  return (!raw || typeof raw !== 'object') ? {} : raw as TabStateMap;
 }
 
-async function saveSessionState(state: ExtensionChatState): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.session) {
-    throw new Error('chrome.storage.session is not available');
+async function saveTabMap(map: TabStateMap): Promise<void> {
+  if (typeof chrome === 'undefined') throw new Error('chrome is not available');
+  if (chrome.storage?.session) {
+    await chrome.storage.session.set({ [STORAGE_KEY]: map });
+  } else if (chrome.storage?.local) {
+    await chrome.storage.local.set({ [STORAGE_KEY]: map });
   }
-  await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: state });
+}
+
+async function saveTabState(tabId: number, state: ExtensionChatState): Promise<void> {
+  const map = await loadTabMap();
+  map[tabId] = state;
+  await saveTabMap(map);
 }
 
 export async function loadExtensionChat(tabId: number): Promise<ExtensionChatState> {
-  // Note: tabId parameter kept for API compatibility, but chrome.storage.session
-  // is automatically per-tab-isolated by Chrome, so we don't need to manually key by tabId.
-  return loadSessionState();
+  if (typeof chrome === 'undefined') return emptyState();
+
+  const map = await loadTabMap();
+  if (tabId in map) {
+    return asState(map[tabId]);
+  }
+
+  // Migration: if legacy local key exists, move it to this tab and remove legacy.
+  if (chrome.storage?.local) {
+    const legacyResult = await chrome.storage.local.get(LEGACY_STORAGE_KEY);
+    const legacy = legacyResult[LEGACY_STORAGE_KEY];
+    if (legacy && typeof legacy === 'object') {
+      const migrated = asState(legacy);
+      const newMap: TabStateMap = { ...map, [tabId]: migrated };
+      await saveTabMap(newMap);
+      await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
+      return migrated;
+    }
+  }
+
+  return emptyState();
 }
 
 export async function rememberExtensionSession(
@@ -93,7 +111,7 @@ export async function rememberExtensionSession(
   };
   const sessions = [next, ...state.sessions.filter((session) => session.id !== trimmed)];
   const saved: ExtensionChatState = { currentSessionId: trimmed, sessions };
-  await saveSessionState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
@@ -103,7 +121,7 @@ export async function setCurrentSessionId(
 ): Promise<ExtensionChatState> {
   const state = await loadExtensionChat(tabId);
   const saved: ExtensionChatState = { ...state, currentSessionId: id.trim() };
-  await saveSessionState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
@@ -121,7 +139,7 @@ export async function updateExtensionSessionTitle(
     session.id === id ? { ...session, title: trimmedTitle } : session,
   );
   const saved: ExtensionChatState = { ...state, sessions };
-  await saveSessionState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
@@ -135,7 +153,7 @@ export async function replaceExtensionSessions(
   currentSessionId: string,
 ): Promise<ExtensionChatState> {
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveSessionState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
@@ -154,21 +172,26 @@ export async function deleteExtensionSession(
     currentSessionId = sessions.length > 0 ? sessions[0].id : '';
   }
   const saved: ExtensionChatState = { currentSessionId, sessions };
-  await saveSessionState(saved);
+  await saveTabState(tabId, saved);
   return saved;
 }
 
 export async function clearExtensionChat(): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-    return;
+  if (typeof chrome === 'undefined') return;
+  if (chrome.storage?.session) {
+    await chrome.storage.session.remove(STORAGE_KEY);
   }
-  // Clear legacy local storage (session storage is auto-cleared per tab)
-  await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
+  if (chrome.storage?.local) {
+    await chrome.storage.local.remove([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+  }
 }
 
 export async function removeTabState(tabId: number): Promise<void> {
-  // With session storage, no cleanup needed — it auto-clears when the tab closes.
-  // This function kept for API compatibility but is a no-op.
+  if (typeof chrome === 'undefined') return;
+  const map = await loadTabMap();
+  if (!(tabId in map)) return;
+  delete map[tabId];
+  await saveTabMap(map);
 }
 
 export type ListedSession = {

@@ -160,10 +160,25 @@ async function runPageToolAllFrames(
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  // Do NOT use openPanelOnActionClick — it prevents us from embedding the tabId
+  // in the panel URL. Instead we open it explicitly via action.onClicked.
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 });
 
-void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+
+// Open the side panel for the clicked tab, embedding the tabId in the URL so the
+// panel page can read it synchronously from location.search without any message passing.
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id) return;
+  const tabId = tab.id;
+  void chrome.sidePanel.setOptions({
+    tabId,
+    path: `sidepanel.html?tabId=${tabId}`,
+    enabled: true,
+  });
+  void chrome.sidePanel.open({ tabId });
+});
 
 // Clean up per-tab session state when a tab is closed.
 chrome.tabs.onRemoved.addListener((tabId) => {

@@ -86,16 +86,12 @@ let currentTabId = 0;
 
 const MAX_PAGE_TOOL_ROUNDS = 15;
 
-async function resolveTabId(): Promise<number> {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
-    return 0;
-  }
-  try {
-    const response = (await chrome.runtime.sendMessage({ type: 'MSG_GET_TAB_ID' })) as { tabId?: number };
-    return response?.tabId ?? 0;
-  } catch {
-    return 0;
-  }
+// Read the tab ID directly from the URL query parameter set by the service worker
+// when it opens this side panel. This is synchronous and 100% reliable.
+function resolveTabId(): number {
+  if (typeof location === 'undefined') return 0;
+  const params = new URLSearchParams(location.search);
+  return Number(params.get('tabId') ?? '0') || 0;
 }
 
 function showError(message: string): void {
@@ -362,7 +358,7 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
 }
 
 async function restoreExtensionChat(): Promise<void> {
-  currentTabId = await resolveTabId();
+  currentTabId = resolveTabId();
   const state = await refreshExtensionSessions();
   sessionId = state.currentSessionId;
   if (!sessionId) {

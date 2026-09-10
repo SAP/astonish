@@ -87,11 +87,15 @@ let currentTabId = 0;
 const MAX_PAGE_TOOL_ROUNDS = 15;
 
 async function resolveTabId(): Promise<number> {
-  if (typeof chrome === 'undefined' || !chrome.tabs?.query) {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
     return 0;
   }
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab?.id ?? 0;
+  try {
+    const response = (await chrome.runtime.sendMessage({ type: 'MSG_GET_TAB_ID' })) as { tabId?: number };
+    return response?.tabId ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 function showError(message: string): void {

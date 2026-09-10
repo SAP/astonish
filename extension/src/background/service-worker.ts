@@ -171,6 +171,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 const UNREADABLE = 'This page cannot be read';
+const MSG_GET_TAB_ID = 'MSG_GET_TAB_ID';
 
 function isUnreadableUrl(url: string | undefined): boolean {
   if (!url) {
@@ -410,6 +411,15 @@ async function runPageToolInTab(
 
   return result;
 }
+
+// Handle tab ID requests from the side panel
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === MSG_GET_TAB_ID) {
+    sendResponse({ tabId: sender.tab?.id ?? 0 });
+    return true;
+  }
+  return false;
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const type = message && typeof message === 'object' ? (message as { type?: unknown }).type : undefined;

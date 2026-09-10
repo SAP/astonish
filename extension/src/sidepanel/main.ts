@@ -17,7 +17,6 @@ import {
 } from '../lib/auth';
 import {
   deleteExtensionSession,
-  filterExtensionSessions,
   loadExtensionChat,
   mergeSessionTitles,
   pruneMissingSessionIds,
@@ -336,17 +335,19 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
   const stored = await loadExtensionChat(currentTabId);
   try {
     const listed = await fetchSessions();
-    const extensionOnly = filterExtensionSessions(
-      listed,
-      stored.sessions.map((session) => session.id),
-    );
-    const pruned = pruneMissingSessionIds(stored.sessions, extensionOnly);
-    const merged = mergeSessionTitles(pruned, extensionOnly);
+    const pruned = pruneMissingSessionIds(stored.sessions, listed);
+    const merged = mergeSessionTitles(pruned, listed);
+    // Add server sessions not yet in local storage (e.g. sessions created in another tab)
+    const localIds = new Set(merged.map((s) => s.id));
+    const newSessions = listed
+      .filter((s) => !localIds.has(s.id))
+      .map((s) => ({ id: s.id, title: s.title || 'New chat' }));
+    const allSessions = [...merged, ...newSessions];
     const currentStillThere =
-      !stored.currentSessionId || merged.some((session) => session.id === stored.currentSessionId);
+      !stored.currentSessionId || allSessions.some((session) => session.id === stored.currentSessionId);
     const saved = await replaceExtensionSessions(
       currentTabId,
-      merged,
+      allSessions,
       currentStillThere ? stored.currentSessionId : '',
     );
     renderSessionPicker(saved);

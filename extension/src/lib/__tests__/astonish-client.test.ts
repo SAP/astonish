@@ -126,6 +126,7 @@ describe('astonish-client', () => {
       sessionId: '',
       message: 'hello',
       autoApprove: false,
+      appName: 'astonish-extension',
       systemContext: '## Browser page context\nURL: https://example.com\nTitle: Example',
     });
     expect(payload.systemContext).toContain('URL:');
@@ -146,23 +147,22 @@ describe('astonish-client', () => {
     expect(historyMessageKind({})).toBe('');
   });
 
-  it('fetchSessions lists Studio chats for the picker to filter', async () => {
+  it('fetchSessions fetches extension sessions filtered by app name', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => [
-        { id: 'studio-1', title: 'Studio chat' },
         { id: 'ext-1', title: 'Extension chat' },
+        { id: 'ext-2', title: 'Another extension chat' },
       ],
     });
 
     await expect(fetchSessions()).resolves.toEqual([
-      { id: 'studio-1', title: 'Studio chat' },
       { id: 'ext-1', title: 'Extension chat' },
+      { id: 'ext-2', title: 'Another extension chat' },
     ]);
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
-      'http://localhost:9393/api/studio/sessions',
-    );
+    const url = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(url).toBe('http://localhost:9393/api/studio/sessions?app=astonish-extension');
   });
 
   it('fetchSessionHistory returns messages for restore', async () => {
@@ -240,8 +240,9 @@ describe('astonish-client', () => {
     });
 
     const [, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    const payload = JSON.parse(init.body as string) as { sessionId: string; message: string };
+    const payload = JSON.parse(init.body as string) as { sessionId: string; message: string; appName: string };
     expect(payload.sessionId).toBe('ext-1');
     expect(payload.message).toBe('follow up');
+    expect(payload.appName).toBe('astonish-extension');
   });
 });

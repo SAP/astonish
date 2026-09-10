@@ -59,10 +59,17 @@ func resolveSessionStore(svc *store.Services, sessionID string) store.SessionSto
 func StudioSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := effectiveUserID(r)
 
+	// Optional ?app= query parameter to filter sessions by app name.
+	// Defaults to studioChatAppName for backward compatibility.
+	appName := r.URL.Query().Get("app")
+	if appName == "" {
+		appName = studioChatAppName
+	}
+
 	// Platform mode: list from personal session store (private-first).
 	// Sessions are always private — they don't change when switching teams.
 	if svc := store.FromRequest(r); svc != nil && svc.PersonalSessions != nil {
-		metas, err := svc.PersonalSessions.ListSessionMetas(r.Context(), studioChatAppName, userID)
+		metas, err := svc.PersonalSessions.ListSessionMetas(r.Context(), appName, userID)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -94,7 +101,7 @@ func StudioSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metas, err := fs.ListSessionMetas(studioChatAppName, userID)
+	metas, err := fs.ListSessionMetas(appName, userID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return

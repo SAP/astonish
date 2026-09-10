@@ -54,6 +54,7 @@ type StudioChatRequest struct {
 	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
 	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
 	MemoryScope      string           `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
+	AppName          string           `json:"appName,omitempty"`          // optional app name for session categorization (e.g. "astonish-extension")
 }
 
 // StudioSessionResponse is a single session in list responses.
@@ -595,6 +596,13 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := effectiveUserID(r)
+	// Resolve the effective app name: use the caller-provided app name if present,
+	// otherwise default to the Studio chat app name. This allows the Chrome extension
+	// to categorize its sessions separately from Studio sessions.
+	effectiveApp := studioChatAppName
+	if req.AppName != "" {
+		effectiveApp = req.AppName
+	}
 	if req.Debug && !IsPlatformAdmin(GetPlatformUser(r)) {
 		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")
 		return
@@ -910,7 +918,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Handles the case where the server restarted and in-memory state was lost.
 	if req.SessionID != "" && !chatAgent.HasActiveApp(req.SessionID) {
 		getResp, err := sessionService.Get(r.Context(), &session.GetRequest{
-			AppName:   studioChatAppName,
+			AppName:   effectiveApp,
 			UserID:    userID,
 			SessionID: req.SessionID,
 		})
@@ -1012,7 +1020,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	isNew := false
 	if sessionID == "" {
 		resp, err := sessionService.Create(r.Context(), &session.CreateRequest{
-			AppName: studioChatAppName,
+			AppName: effectiveApp,
 			UserID:  userID,
 		})
 		if err != nil {

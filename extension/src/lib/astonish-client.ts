@@ -4,6 +4,8 @@ export type SSEEventCallback = (eventType: string, data: Record<string, unknown>
 export type ErrorCallback = (error: Error) => void;
 export type DoneCallback = () => void;
 
+export const EXTENSION_APP_NAME = 'astonish-extension';
+
 const HANDLED_EVENTS = new Set([
   'session',
   'session_title',
@@ -62,7 +64,7 @@ export type SessionHistory = {
 };
 
 export async function fetchSessions(): Promise<StudioSession[]> {
-  const response = await studioFetch('/api/studio/sessions');
+  const response = await studioFetch(`/api/studio/sessions?app=${encodeURIComponent(EXTENSION_APP_NAME)}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch sessions: ${response.status}`);
   }
@@ -130,6 +132,7 @@ export function connectChat({
         sessionId: sessionId || '',
         message: message || '',
         autoApprove: !!autoApprove,
+        appName: EXTENSION_APP_NAME,
       };
       if (systemContext) {
         body.systemContext = systemContext;

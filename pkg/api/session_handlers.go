@@ -692,14 +692,6 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	// Load app config once for backend-agnostic sandbox cleanup.
 	appCfg, _ := config.LoadAppConfig()
 
-	// If this is an active fleet session, stop it and clean up sandbox
-	registry := getFleetSessionRegistry()
-	if fs := registry.Get(sessionID); fs != nil {
-		fs.Stop()
-		fs.Cleanup() // destroy sandbox container + clean session registry
-		registry.Unregister(sessionID)
-	}
-
 	// Platform mode: try personal session store first, fall back to team.
 	svc := store.FromRequest(r)
 	if svc != nil && (svc.PersonalSessions != nil || svc.Sessions != nil) {
@@ -711,17 +703,31 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Clean up per-session workspace directory if one was recorded.
-		if meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID); metaErr == nil {
-			// Defense-in-depth: verify the session belongs to the requested app namespace.
-			if meta.AppName != appName {
-				respondError(w, http.StatusNotFound, "Session not found")
-				return
-			}
-			if meta.WorkspaceDir != "" {
-				if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
-					slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
-				}
+		// Defense-in-depth: verify the session belongs to the requested app
+		// namespace BEFORE any destructive action (fleet stop, workspace cleanup).
+		// Fail closed: if GetSessionMeta errors, treat as not found rather than
+		// skipping the namespace check.
+		meta, metaErr := sessionStore.GetSessionMeta(r.Context(), sessionID)
+		if metaErr != nil || meta == nil {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+
+		// Namespace verified — now safe to stop any active fleet session.
+		registry := getFleetSessionRegistry()
+		if fs := registry.Get(sessionID); fs != nil {
+			fs.Stop()
+			fs.Cleanup()
+			registry.Unregister(sessionID)
+		}
+
+		if meta.WorkspaceDir != "" {
+			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
+				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
 			}
 		}
 
@@ -764,18 +770,34 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up per-session workspace directory if one was recorded.
+	// Defense-in-depth: verify the session belongs to the requested app
+	// namespace via the file store metadata BEFORE any destructive action.
 	if fileStore := getFleetFileStore(); fileStore != nil {
-		if meta, metaErr := fileStore.GetSessionMeta(sessionID); metaErr == nil && meta.WorkspaceDir != "" {
-			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
-				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
+		if meta, metaErr := fileStore.GetSessionMeta(sessionID); metaErr == nil {
+			if meta.AppName != appName {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			// Namespace verified — now safe to stop any active fleet session.
+			registry := getFleetSessionRegistry()
+			if fs := registry.Get(sessionID); fs != nil {
+				fs.Stop()
+				fs.Cleanup()
+				registry.Unregister(sessionID)
+			}
+			if meta.WorkspaceDir != "" {
+				if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
+					slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
+				}
 			}
 		}
+		// If GetSessionMeta errors, the session likely doesn't exist in the
+		// index — proceed to Delete which will handle the not-found case.
 	}
 
 	sessionService := cm.components.SessionService
 	err := sessionService.Delete(r.Context(), &session.DeleteRequest{
-		AppName:   studioChatAppName,
+		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})

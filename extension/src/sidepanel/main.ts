@@ -88,12 +88,16 @@ const MAX_PAGE_TOOL_ROUNDS = 15;
 
 async function resolveTabId(): Promise<number> {
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    console.warn('[Astonish] chrome.runtime.sendMessage unavailable');
     return 0;
   }
   try {
     const response = (await chrome.runtime.sendMessage({ type: 'MSG_GET_TAB_ID' })) as { tabId?: number };
-    return response?.tabId ?? 0;
-  } catch {
+    const tabId = response?.tabId ?? 0;
+    console.log('[Astonish] Resolved tabId:', tabId);
+    return tabId;
+  } catch (err) {
+    console.error('[Astonish] Failed to resolve tabId:', err);
     return 0;
   }
 }
@@ -363,6 +367,7 @@ async function refreshExtensionSessions(): Promise<ExtensionChatState> {
 
 async function restoreExtensionChat(): Promise<void> {
   currentTabId = await resolveTabId();
+  console.log('[Astonish] restoreExtensionChat: currentTabId =', currentTabId);
   const state = await refreshExtensionSessions();
   sessionId = state.currentSessionId;
   if (!sessionId) {

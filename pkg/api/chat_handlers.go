@@ -1612,7 +1612,10 @@ func streamRunnerEvents(w http.ResponseWriter, flusher http.Flusher, httpCtx con
 // process-global ChatManager.ProviderName/ModelName.
 // The effectiveApp parameter ensures session creation commands use the correct app namespace.
 func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *ChatManager, sessionService session.Service, cmd, userID, sessionID, effectiveApp string) {
-	ctx := r.Context()
+	// Inject effectiveApp into context so persistSessionMessage and
+	// persistDistillPreview resolve the correct namespace without needing
+	// an explicit appName argument at every call site.
+	ctx := context.WithValue(r.Context(), appNameContextKey, effectiveApp)
 	comp := cm.components
 	chatAgent := comp.ChatAgent
 

@@ -772,27 +772,30 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Defense-in-depth: verify the session belongs to the requested app
 	// namespace via the file store metadata BEFORE any destructive action.
+	// Fail closed: if GetSessionMeta errors, treat as not found rather than
+	// skipping the namespace check (which would orphan fleet sandboxes/workspaces).
 	if fileStore := getFleetFileStore(); fileStore != nil {
-		if meta, metaErr := fileStore.GetSessionMeta(sessionID); metaErr == nil {
-			if meta.AppName != appName {
-				respondError(w, http.StatusNotFound, "Session not found")
-				return
-			}
-			// Namespace verified — now safe to stop any active fleet session.
-			registry := getFleetSessionRegistry()
-			if fs := registry.Get(sessionID); fs != nil {
-				fs.Stop()
-				fs.Cleanup()
-				registry.Unregister(sessionID)
-			}
-			if meta.WorkspaceDir != "" {
-				if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
-					slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
-				}
+		meta, metaErr := fileStore.GetSessionMeta(sessionID)
+		if metaErr != nil || meta == nil {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		if meta.AppName != appName {
+			respondError(w, http.StatusNotFound, "Session not found")
+			return
+		}
+		// Namespace verified — now safe to stop any active fleet session.
+		registry := getFleetSessionRegistry()
+		if fs := registry.Get(sessionID); fs != nil {
+			fs.Stop()
+			fs.Cleanup()
+			registry.Unregister(sessionID)
+		}
+		if meta.WorkspaceDir != "" {
+			if cleanErr := fleet.CleanupSessionWorkspace(meta.WorkspaceDir); cleanErr != nil {
+				slog.Warn("could not clean up workspace", "component", "fleet", "workspace", meta.WorkspaceDir, "error", cleanErr)
 			}
 		}
-		// If GetSessionMeta errors, the session likely doesn't exist in the
-		// index — proceed to Delete which will handle the not-found case.
 	}
 
 	sessionService := cm.components.SessionService

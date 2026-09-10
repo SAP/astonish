@@ -726,6 +726,10 @@ function sendCurrentMessage(): void {
   void (async () => {
     const access = await requestActiveTabHostPermission();
     let systemContext = EXTENSION_PAGE_TOOLS_INSTRUCTIONS;
+    // When the page is a read-only GitHub issue/PR (no open description editor),
+    // page-tool calls are pointless — the model should just emit a fence. Skip
+    // the tool loop entirely to prevent the model from kebab-hunting in circles.
+    let skipPageTools = false;
     if (!access.ok) {
       setPageMeta(null, access.error);
       showCaptureBanner(`${access.error}. Sending without page context.`);
@@ -753,10 +757,6 @@ function sendCurrentMessage(): void {
     let message = text;
     let context: string | undefined = systemContext;
     let lastAssistant = '';
-    // When the page is a read-only GitHub issue/PR (no open description editor),
-    // page-tool calls are pointless — the model should just emit a fence. Skip
-    // the tool loop entirely to prevent the model from kebab-hunting in circles.
-    let skipPageTools = false;
 
     for (let round = 0; round < MAX_PAGE_TOOL_ROUNDS; round += 1) {
       let assistantBody: HTMLElement | null = null;

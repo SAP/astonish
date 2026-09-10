@@ -620,6 +620,10 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	if req.AppName != "" {
 		effectiveApp = req.AppName
 	}
+	if !validAppName.MatchString(effectiveApp) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
+	}
 
 	if req.Debug && !IsPlatformAdmin(GetPlatformUser(r)) {
 		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")

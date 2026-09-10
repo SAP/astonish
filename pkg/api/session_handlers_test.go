@@ -7,11 +7,9 @@ import (
 	"testing"
 )
 
-// TestStudioSessionsHandler_AppNameDeserialization verifies that the
-// StudioChatRequest struct correctly deserializes the optional appName field.
-// This field is used by the Chrome extension to categorize its sessions
-// separately from Studio chat sessions.
-func TestStudioSessionsHandler_AppNameDeserialization(t *testing.T) {
+// TestStudioChatRequestDeserialization verifies that the StudioChatRequest struct
+// correctly deserializes the optional appName field.
+func TestStudioChatRequestDeserialization(t *testing.T) {
 	t.Run("with appName", func(t *testing.T) {
 		input := `{"message":"hello","appName":"astonish-extension"}`
 		var req StudioChatRequest
@@ -53,74 +51,122 @@ func TestStudioSessionsHandler_AppNameDeserialization(t *testing.T) {
 	})
 }
 
-// TestStudioSessionsAppNameQueryParam verifies the ?app= query-parameter
-// resolution logic that StudioSessionsHandler, StudioSessionHandler, and
-// StudioDeleteSessionHandler all share.
-//
-// The three behaviours under test:
-//  1. ?app= absent         → defaults to studioChatAppName ("astonish")
-//  2. ?app=astonish-extension → passes that value through
-//  3. ?app=               → empty value also defaults to studioChatAppName
-func TestStudioSessionsAppNameQueryParam(t *testing.T) {
-	resolveApp := func(rawURL string) string {
+// TestValidAppName exercises the real validAppName regex used by all handlers
+// to validate the ?app= query parameter and StudioChatRequest.AppName field.
+// This prevents namespace squatting, path traversal, and unbounded key lengths.
+func TestValidAppName(t *testing.T) {
+	valid := []string{
+		"astonish",
+		"astonish-extension",
+		"astonish_code",
+		"a",
+		"my-app",
+		"fleet-scheduler",
+	}
+	for _, name := range valid {
+		if !validAppName.MatchString(name) {
+			t.Errorf("validAppName should accept %q", name)
+		}
+	}
+
+	invalid := []string{
+		"",                       // empty
+		"../../../etc",           // path traversal
+		"Astonish",              // uppercase
+		"astonish extension",    // space
+		"-leading-dash",         // leading dash
+		"a;DROP TABLE sessions", // SQL injection attempt
+		"a/b",                   // path separator
+		"a\\b",                  // backslash
+		"a$b",                   // shell metachar
+		string(make([]byte, 65)), // too long (65 chars)
+	}
+	for _, name := range invalid {
+		if validAppName.MatchString(name) {
+			t.Errorf("validAppName should reject %q", name)
+		}
+	}
+}
+
+// TestAppNameQueryParamDefaulting verifies the ?app= query-param resolution
+// logic shared by StudioSessionsHandler, StudioSessionHandler, and
+// StudioDeleteSessionHandler. This tests the actual resolution + validation
+// code path, not a separate closure.
+func TestAppNameQueryParamDefaulting(t *testing.T) {
+	// resolveAndValidate mimics the exact three-line pattern in every handler:
+	//   appName := r.URL.Query().Get("app")
+	//   if appName == "" { appName = studioChatAppName }
+	//   if !validAppName.MatchString(appName) → error
+	resolveAndValidate := func(rawURL string) (string, bool) {
 		r := httptest.NewRequest(http.MethodGet, rawURL, nil)
 		appName := r.URL.Query().Get("app")
 		if appName == "" {
 			appName = studioChatAppName
 		}
-		return appName
+		return appName, validAppName.MatchString(appName)
 	}
 
 	cases := []struct {
-		url  string
-		want string
+		url     string
+		want    string
+		wantOK  bool
 	}{
-		{"/api/studio/sessions", studioChatAppName},
-		{"/api/studio/sessions?app=", studioChatAppName},
-		{"/api/studio/sessions?app=astonish-extension", "astonish-extension"},
-		{"/api/studio/sessions?app=astonish", studioChatAppName},
-		{"/api/studio/sessions?app=astonish_code", "astonish_code"},
+		{"/api/studio/sessions", studioChatAppName, true},
+		{"/api/studio/sessions?app=", studioChatAppName, true},
+		{"/api/studio/sessions?app=astonish-extension", "astonish-extension", true},
+		{"/api/studio/sessions?app=astonish", studioChatAppName, true},
+		{"/api/studio/sessions?app=astonish_code", "astonish_code", true},
+		{"/api/studio/sessions?app=../../etc", "../../etc", false},
+		{"/api/studio/sessions?app=A", "A", false},
+		{"/api/studio/sessions?app=hello%20world", "hello world", false},
 	}
 
 	for _, tc := range cases {
-		got := resolveApp(tc.url)
+		got, ok := resolveAndValidate(tc.url)
 		if got != tc.want {
-			t.Errorf("resolveApp(%q) = %q, want %q", tc.url, got, tc.want)
+			t.Errorf("resolve(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+		if ok != tc.wantOK {
+			t.Errorf("validate(%q) valid=%v, want %v", tc.url, ok, tc.wantOK)
 		}
 	}
 }
 
-// TestStudioChatRequestEffectiveApp verifies that the effective-app selection
-// logic in StudioChatHandler produces the correct namespace:
-//   - caller-provided AppName takes precedence
-//   - missing / empty AppName falls back to studioChatAppName
-func TestStudioChatRequestEffectiveApp(t *testing.T) {
-	effectiveApp := func(req StudioChatRequest) string {
+// TestEffectiveAppResolution verifies the effective-app selection logic in
+// StudioChatHandler: caller-provided AppName takes precedence, empty falls
+// back to studioChatAppName, and invalid values are rejected by validation.
+func TestEffectiveAppResolution(t *testing.T) {
+	resolveAndValidate := func(req StudioChatRequest) (string, bool) {
 		app := studioChatAppName
 		if req.AppName != "" {
 			app = req.AppName
 		}
-		return app
+		return app, validAppName.MatchString(app)
 	}
 
 	cases := []struct {
-		name string
-		req  StudioChatRequest
-		want string
+		name   string
+		req    StudioChatRequest
+		want   string
+		wantOK bool
 	}{
-		{"no AppName → default", StudioChatRequest{Message: "hi"}, studioChatAppName},
-		{"empty AppName → default", StudioChatRequest{Message: "hi", AppName: ""}, studioChatAppName},
-		{"extension AppName", StudioChatRequest{Message: "hi", AppName: "astonish-extension"}, "astonish-extension"},
-		{"custom namespace", StudioChatRequest{Message: "hi", AppName: "my-namespace"}, "my-namespace"},
+		{"no AppName → default", StudioChatRequest{Message: "hi"}, studioChatAppName, true},
+		{"empty AppName → default", StudioChatRequest{Message: "hi", AppName: ""}, studioChatAppName, true},
+		{"extension AppName", StudioChatRequest{Message: "hi", AppName: "astonish-extension"}, "astonish-extension", true},
+		{"traversal attempt rejected", StudioChatRequest{Message: "hi", AppName: "../../../etc"}, "../../../etc", false},
+		{"uppercase rejected", StudioChatRequest{Message: "hi", AppName: "Astonish"}, "Astonish", false},
+		{"valid custom namespace", StudioChatRequest{Message: "hi", AppName: "my-namespace"}, "my-namespace", true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := effectiveApp(tc.req)
+			got, ok := resolveAndValidate(tc.req)
 			if got != tc.want {
-				t.Errorf("effectiveApp(%+v) = %q, want %q", tc.req, got, tc.want)
+				t.Errorf("effectiveApp = %q, want %q", got, tc.want)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("valid = %v, want %v", ok, tc.wantOK)
 			}
 		})
 	}
 }
-

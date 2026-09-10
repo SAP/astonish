@@ -37,6 +37,12 @@ import (
 // Must start with an alphanumeric character (prevents leading - or . attacks).
 var validSessionID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:@-]{0,127}$`)
 
+// validAppName constrains the ?app= query parameter and StudioChatRequest.AppName.
+// App names are used as directory path components in the file store and as query
+// parameters in the Ent store, so they must be opaque, short identifiers.
+// Allowed: lowercase ASCII letters, digits, hyphens, and underscores, 1-64 chars.
+var validAppName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+
 // resolveSessionStore returns the session store that contains the given session.
 // It checks the personal store first (private-first model), then falls back to
 // the team store (for fleet sub-sessions and pre-migration data).
@@ -64,6 +70,10 @@ func StudioSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	if appName == "" {
 		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
 	}
 
 	// Platform mode: list from personal session store (private-first).
@@ -141,6 +151,10 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	if appName == "" {
 		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
 	}
 
 	// Platform mode: try personal session store first, fall back to team
@@ -657,6 +671,10 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	if appName == "" {
 		appName = studioChatAppName
+	}
+	if !validAppName.MatchString(appName) {
+		respondError(w, http.StatusBadRequest, "invalid app name")
+		return
 	}
 
 	// Load app config once for backend-agnostic sandbox cleanup.

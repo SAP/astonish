@@ -91,7 +91,7 @@ jobs:
         working-directory: extension
 
       - name: Typecheck
-        run: npx tsc --noEmit -p tsconfig.json
+        run: npm run typecheck
         working-directory: extension
 
       - name: Run tests

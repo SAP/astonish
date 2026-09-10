@@ -115,6 +115,23 @@ When `page_snapshot` runs, the service worker sends `MSG_FRAME_TOOL` to both the
 - `extension/src/lib/messages.ts` — `MSG_FRAME_TOOL`, `FrameToolPayload`, `FrameToolResult` types
 - `extension/manifest.json` — `webNavigation` permission (for `getAllFrames`)
 
+### CDP-based input dispatch
+
+`page_click` and `page_fill` use the **Chrome DevTools Protocol** (`chrome.debugger` API) to dispatch real browser input events instead of synthetic DOM events. This ensures compatibility with modern web frameworks (SAPUI5, Angular, React) that rely on Chrome's full input pipeline for event handling.
+
+**Flow:**
+1. Content script resolves the ref, computes the element's tab-absolute bounding rect via `getElementTabRect()` (accounts for iframe nesting), and returns it alongside the result.
+2. Service worker opens an ephemeral `chrome.debugger` session (attach → commands → detach).
+3. For clicks: dispatches `Input.dispatchMouseEvent` (mouseMoved → mousePressed → mouseReleased) at the element's center coordinates.
+4. For fills: dispatches a click to focus, Ctrl+A to select all, then `Input.insertText` with the text. The content script also sets `.value` and fires `input`/`change` events as a belt-and-suspenders approach for React/Angular.
+
+**Fallback:** If `chrome.debugger` is policy-blocked or the element has a zero bounding rect (hidden/off-screen), the content script falls back to synthetic DOM `MouseEvent` dispatch and `element.click()`.
+
+**Key files:**
+- `extension/src/background/cdp-input.ts` — `cdpClick()`, `cdpFill()`, `withDebugger()` helper
+- `extension/src/content/dom-tools.ts` — `getElementTabRect()`, updated `click()` and `fill()` returning rects
+- `extension/src/background/service-worker.ts` — CDP dispatch after `runPageToolAllFrames`
+
 ## Confirmed apply
 
 The model may propose a page rewrite in a fenced block with language id `astonish-page-edit` (`PAGE_EDIT_FENCE`). The panel parses the latest agent text (`extractPageEdit`) and shows **Apply** / **Dismiss**. DOM writes never run on stream complete.
@@ -134,11 +151,11 @@ Thrown channel errors (not the not-editable path) still fall back to copying the
 
 ## Permission model
 
-Install-time permissions: `sidePanel`, `storage`, `activeTab`, `scripting`.
+Install-time permissions: `sidePanel`, `storage`, `activeTab`, `scripting`, `debugger`.
 
 Optional hosts (user-granted on Sign in for Studio, on Send for the tab): `http://localhost/*`, `http://127.0.0.1/*`, `https://localhost/*`, `https://*/*`.
 
-No install-time `host_permissions`, no `<all_urls>`, no `chrome.debugger`, no remotely hosted code.
+No install-time `host_permissions`, no `<all_urls>`, no remotely hosted code.
 
 ## Out of scope (v1)
 

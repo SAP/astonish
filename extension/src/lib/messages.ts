@@ -41,6 +41,8 @@ export type PageToolResult = {
   result?: string;
   error?: string;
   href?: string;
+  /** Bounding rect for CDP input dispatch (tab-absolute coordinates). Internal to extension. */
+  rect?: { x: number; y: number; width: number; height: number };
 };
 
 /** Sent by the coordinator (top frame) to worker frames via chrome.tabs.sendMessage. */
@@ -60,7 +62,7 @@ export type FrameToolPayload = {
 
 /** Response from a child frame for MSG_FRAME_TOOL. */
 export type FrameToolResult = {
-  ok: boolean;
+  ok?: boolean;
   /** Serialized interactive-elements text from this frame (may be empty). */
   interactive: string;
   /** Serialized headings from this frame (may be empty). */
@@ -71,6 +73,8 @@ export type FrameToolResult = {
   href?: string;
   /** How many refs were registered in this frame (so the next frame can offset). */
   refCount: number;
+  /** Bounding rect for CDP input dispatch (tab-absolute coordinates). */
+  rect?: { x: number; y: number; width: number; height: number };
 };
 
 export type MessageType =

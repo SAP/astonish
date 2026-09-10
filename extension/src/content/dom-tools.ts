@@ -78,6 +78,24 @@ function iframeSource(el: HTMLElement): string {
   return ' (iframe)';
 }
 
+/** Get an element's bounding rect in tab-absolute coordinates (accounting for iframe nesting). */
+function getElementTabRect(el: HTMLElement): { x: number; y: number; width: number; height: number } {
+  const r = el.getBoundingClientRect();
+  let x = r.x, y = r.y;
+  let doc = el.ownerDocument;
+  while (doc !== document) {
+    try {
+      const frameEl = doc.defaultView?.frameElement as HTMLIFrameElement | null;
+      if (!frameEl) break;
+      const fr = frameEl.getBoundingClientRect();
+      x += fr.x;
+      y += fr.y;
+      doc = frameEl.ownerDocument;
+    } catch { break; }
+  }
+  return { x, y, width: r.width, height: r.height };
+}
+
 function isVisible(el: HTMLElement): boolean {
   const html = el;
   if (html.hidden) {
@@ -414,7 +432,7 @@ function query(args: Record<string, unknown>): string {
   return cap(formatInteractive(filtered, QUERY_MAX));
 }
 
-type ClickOutcome = { ok: boolean; result: string; href?: string };
+type ClickOutcome = { ok: boolean; result: string; href?: string; rect?: { x: number; y: number; width: number; height: number } };
 
 function click(args: Record<string, unknown>): ClickOutcome {
   const ref = typeof args.ref === 'string' ? args.ref : '';
@@ -437,20 +455,26 @@ function click(args: Record<string, unknown>): ClickOutcome {
   } catch {
     // jsdom and some frames omit scrollIntoView.
   }
-  for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click'] as const) {
-    try {
-      clickable.dispatchEvent(
-        new MouseEvent(type, { bubbles: true, cancelable: true, buttons: 1 }),
-      );
-    } catch {
-      // Pointer/mouse events are best-effort; HTMLElement.click still runs.
+  const rect = getElementTabRect(clickable);
+  // If the element has a real bounding rect, return it for CDP dispatch by the service worker.
+  // If rect is zero (hidden, off-screen, or jsdom), fall back to DOM synthetic events.
+  if (!rect.width && !rect.height) {
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click'] as const) {
+      try {
+        clickable.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, buttons: 1 }),
+        );
+      } catch {
+        // Pointer/mouse events are best-effort; HTMLElement.click still runs.
+      }
     }
+    clickable.click();
   }
-  clickable.click();
   return {
     ok: true,
     result: `Clicked ${ref} (${tagLabel(el)} "${accessibleName(el) || '(unnamed)'}"${href ? ` href=${href}` : ''}).`,
     href,
+    rect,
   };
 }
 
@@ -460,33 +484,36 @@ function isInputOrTextarea(el: HTMLElement): el is HTMLInputElement | HTMLTextAr
   return tag === 'input' || tag === 'textarea';
 }
 
-function fill(args: Record<string, unknown>): string {
+type FillOutcome = { ok: boolean; result: string; rect?: { x: number; y: number; width: number; height: number } };
+
+function fill(args: Record<string, unknown>): FillOutcome {
   const ref = typeof args.ref === 'string' ? args.ref : '';
   const text = unwrapEditorPayload(args.text);
   const el = resolveRef(ref);
   if (!el) {
-    return `Unknown ref ${ref || '(missing)'}. Run page_snapshot or page_query first.`;
+    return { ok: false, result: `Unknown ref ${ref || '(missing)'}. Run page_snapshot or page_query first.` };
   }
   if (
     isGitHubIssueOrPull(window.location) &&
     isGitHubCommentField(el) &&
     !isGitHubIssueBodyField(el)
   ) {
-    return 'Refusing to fill the GitHub comment box. The issue description is not in edit mode. Click Edit on the description first, then page_fill that editor. Only fill this field if the user asked to add a comment.';
+    return { ok: false, result: 'Refusing to fill the GitHub comment box. The issue description is not in edit mode. Click Edit on the description first, then page_fill that editor. Only fill this field if the user asked to add a comment.' };
   }
+  const rect = getElementTabRect(el);
   if (isInputOrTextarea(el)) {
     el.focus();
     (el as HTMLInputElement | HTMLTextAreaElement).value = text;
     dispatchEditorEvents(el);
-    return `Filled ${ref}.`;
+    return { ok: true, result: `Filled ${ref}.`, rect };
   }
   if (el.isContentEditable) {
     el.focus();
     el.textContent = text;
     dispatchEditorEvents(el);
-    return `Filled ${ref}.`;
+    return { ok: true, result: `Filled ${ref}.`, rect };
   }
-  return `${ref} is not an editable field.`;
+  return { ok: false, result: `${ref} is not an editable field.` };
 }
 
 function selectOption(args: Record<string, unknown>): string {
@@ -531,7 +558,7 @@ function scroll(args: Record<string, unknown>): string {
   return 'Scrolled down one viewport.';
 }
 
-export type PageToolRun = { ok: boolean; name: string; result?: string; error?: string; href?: string };
+export type PageToolRun = { ok: boolean; name: string; result?: string; error?: string; href?: string; rect?: { x: number; y: number; width: number; height: number } };
 
 /**
  * Execute a page tool scoped to only this frame's own document (no same-origin iframe traversal).
@@ -547,7 +574,7 @@ export function runPageToolInFrame(
   name: string,
   args: Record<string, unknown>,
   refOffset: number,
-): { interactive: string; headings: string; result?: string; error?: string; href?: string; refCount: number } {
+): { interactive: string; headings: string; result?: string; error?: string; href?: string; rect?: { x: number; y: number; width: number; height: number }; refCount: number } {
   try {
     // Temporarily override document querying to be frame-local only.
     // We do this by passing a flag through the args.
@@ -572,19 +599,21 @@ export function runPageToolInFrame(
           headings: '',
           result: outcome.result,
           href: outcome.href,
+          rect: outcome.rect,
           refCount: refs.length,
           ...(outcome.ok ? {} : { error: outcome.result }),
         };
       }
       case 'page_fill': {
         snapshotFrameInteractive({ ...args, _frameLocal: true, _refOffset: refOffset });
-        const result = fill(args);
+        const outcome = fill(args);
         return {
           interactive: '',
           headings: '',
-          result,
+          result: outcome.result,
+          rect: outcome.rect,
           refCount: refs.length,
-          ...(result.startsWith('Filled') ? {} : { error: result }),
+          ...(outcome.ok ? {} : { error: outcome.result }),
         };
       }
       case 'page_scroll': {
@@ -620,7 +649,7 @@ export function runPageTool(name: string, args: Record<string, unknown> = {}): P
       case 'page_click': {
         const outcome = click(args);
         return outcome.ok
-          ? { ok: true, name, result: outcome.result, href: outcome.href }
+          ? { ok: true, name, result: outcome.result, href: outcome.href, rect: outcome.rect }
           : { ok: false, name, error: outcome.result };
       }
       case 'page_navigate':
@@ -630,10 +659,10 @@ export function runPageTool(name: string, args: Record<string, unknown> = {}): P
           error: 'page_navigate is handled by the extension service worker so this tab can stay in the user session.',
         };
       case 'page_fill': {
-        const result = fill(args);
-        return result.startsWith('Filled')
-          ? { ok: true, name, result }
-          : { ok: false, name, error: result };
+        const outcome = fill(args);
+        return outcome.ok
+          ? { ok: true, name, result: outcome.result, rect: outcome.rect }
+          : { ok: false, name, error: outcome.result };
       }
       case 'page_select': {
         const result = selectOption(args);

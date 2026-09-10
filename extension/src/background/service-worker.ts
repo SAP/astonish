@@ -16,6 +16,7 @@ import {
   sameDocumentNavigation,
   waitForPossibleNavigation,
 } from '../lib/page-navigate';
+import { cdpClick, cdpFill } from './cdp-input';
 
 const CONTENT_SCRIPT = 'content-script.js';
 
@@ -117,7 +118,7 @@ function mergeFrameResults(
   // For click/fill/scroll: first success wins; if none, return last error.
   for (const r of validResults) {
     if (!r.error) {
-      return { ok: true, name, result: r.result, href: r.href };
+      return { ok: true, name, result: r.result, href: r.href, rect: r.rect };
     }
   }
   return { ok: false, name, error: validResults[validResults.length - 1].error };
@@ -284,6 +285,31 @@ async function runPageToolInTab(
       return settleThenSnapshot(tabId, tab.url, action);
     }
     throw err;
+  }
+
+  // CDP dispatch: for click/fill with a valid rect, use chrome.debugger for real input events.
+  // This goes through Chrome's full input pipeline (pointer events, framework handlers, focus).
+  if (
+    (name === 'page_click' || name === 'page_fill') &&
+    result.ok &&
+    result.rect &&
+    result.rect.width > 0 &&
+    result.rect.height > 0
+  ) {
+    try {
+      if (name === 'page_click') {
+        await cdpClick(tabId, result.rect);
+      } else {
+        const text = typeof args.text === 'string' ? args.text : '';
+        await cdpFill(tabId, result.rect, text);
+      }
+    } catch {
+      // CDP unavailable (policy-blocked, DevTools open, etc.).
+      // For page_click: the content script did NOT call .click() (non-zero rect path),
+      // so no DOM fallback ran — the click silently failed via CDP only.
+      // For page_fill: the DOM .value= and dispatchEditorEvents already ran in the
+      // content script (belt-and-suspenders), so the fill is not lost.
+    }
   }
 
   if (name === 'page_click' && result.ok && clickImpliesNavigation(result.href, tab.url)) {

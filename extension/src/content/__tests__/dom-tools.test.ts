@@ -36,6 +36,23 @@ describe('dom-tools', () => {
     runPageTool('page_snapshot');
     const clicked = runPageTool('page_click', { ref: 'ref1' });
     expect(clicked.ok).toBe(true);
+    // jsdom returns zero rect → DOM fallback runs → click handler fires
+    expect(clicks).toBeGreaterThanOrEqual(1);
+    // rect is always returned (zero in jsdom since it has no layout engine)
+    expect(clicked.rect).toBeDefined();
+    expect(typeof clicked.rect?.x).toBe('number');
+  });
+
+  it('page_click returns zero rect for zero-rect elements and falls back to DOM click', () => {
+    document.body.innerHTML = '<button id="go" type="button">Go</button>';
+    let clicks = 0;
+    document.querySelector('#go')?.addEventListener('click', () => { clicks += 1; });
+    runPageTool('page_snapshot');
+    const clicked = runPageTool('page_click', { ref: 'ref1' });
+    expect(clicked.ok).toBe(true);
+    // jsdom always returns zero rect, so DOM fallback should have run
+    expect(clicked.rect).toBeDefined();
+    expect(clicked.rect?.width).toBe(0);
     expect(clicks).toBeGreaterThanOrEqual(1);
   });
 
@@ -47,6 +64,7 @@ describe('dom-tools', () => {
     expect(clicked.href).toContain('cnn.com/us');
     expect(clicked.result).toContain('href=');
     expect(document.querySelector('#us')?.getAttribute('target')).toBe('_self');
+    expect(clicked.rect).toBeDefined();
   });
 
   it('page_navigate is not executed in the content script', () => {
@@ -68,6 +86,7 @@ describe('dom-tools', () => {
     expect(filled.ok).toBe(true);
     expect(input?.value).toBe('Maine polls');
     expect(events).toEqual(['input']);
+    expect(filled.rect).toBeDefined();
   });
 
   it('page_fill unwraps a JSON envelope so a markdown textarea gets markdown', () => {

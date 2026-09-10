@@ -22,11 +22,11 @@ function chromeExtensionAssets(): Plugin {
         writeFileSync(resolve(dist, 'sidepanel.html'), html);
       }
 
-      const iconsSrc = resolve(root, 'icons');
-      const iconsDest = resolve(dist, 'icons');
+      const iconsSrc = resolve(root, 'public/icons');
+      const iconsDest = resolve(dist, 'public/icons');
       if (existsSync(iconsSrc)) {
         mkdirSync(iconsDest, { recursive: true });
-        for (const name of ['icon16.png', 'icon48.png', 'icon128.png', 'icon.svg']) {
+        for (const name of ['icon-16.png', 'icon-48.png', 'icon-128.png', 'icon.svg']) {
           const from = resolve(iconsSrc, name);
           if (existsSync(from)) {
             copyFileSync(from, resolve(iconsDest, name));

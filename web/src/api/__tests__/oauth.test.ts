@@ -4,8 +4,8 @@ import { createOAuthClient, getOAuthDiscovery, listOAuthClients, listOAuthContex
 
 const originalFetch = globalThis.fetch
 
-function mockFetch(data: unknown, ok = true) {
-  return vi.fn().mockResolvedValue({ ok, statusText: 'error', json: () => Promise.resolve(data) })
+function mockFetch(data: unknown, ok = true, status = ok ? 200 : 500) {
+  return vi.fn().mockResolvedValue({ ok, status, statusText: 'error', json: () => Promise.resolve(data) })
 }
 
 afterEach(() => { globalThis.fetch = originalFetch })
@@ -23,6 +23,11 @@ describe('personal OAuth API', () => {
     globalThis.fetch = mockFetch({ clients: [{ client_id: 'ast_client', active: true }] })
     await expect(listOAuthClients()).resolves.toEqual([{ client_id: 'ast_client', active: true }])
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients', expect.objectContaining({ credentials: 'include' }))
+  })
+
+  it('explains when a server restart expires the current session', async () => {
+    globalThis.fetch = mockFetch({ error: 'not authenticated' }, false, 401)
+    await expect(getOAuthDiscovery()).rejects.toThrow('Your session expired after the server restart. Sign in again, then reopen OAuth settings.')
   })
 
   it('creates and rotates clients through owner-scoped personal routes', async () => {

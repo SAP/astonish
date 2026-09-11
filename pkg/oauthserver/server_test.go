@@ -190,6 +190,26 @@ func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
 	}
 }
 
+func TestOAuthAuthorizationCodeAcceptsProtocolAndGrantedCapabilityScopes(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "public", Active: true, OrgID: "org", TeamID: "team", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{ScopeToolExecute, ScopeChat}, Resources: []string{"https://api.example"}}}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) { return Subject{ID: "user", OrgID: "org"}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id=client&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge_method=S256&code_challenge=test&scope=openid+offline_access+tool%3Aexecute+chat&resource=https%3A%2F%2Fapi.example", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, request)
+	if result.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+	for _, authorization := range backend.codes {
+		if got, want := strings.Join(authorization.Scopes, " "), "openid offline_access tool:execute chat"; got != want {
+			t.Fatalf("authorization scopes = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestOAuthRejectsMissingPKCEAndWrongRedirect(t *testing.T) {
 	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "public", Active: true, OrgID: "org", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}}}, codes: map[string]store.OAuthAuthorization{}}
 	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) { return Subject{ID: "user", OrgID: "org"}, nil })

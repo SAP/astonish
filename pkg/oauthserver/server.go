@@ -122,7 +122,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	// session proves the subject belongs to the assigned organization; it must not
 	// be allowed to select or omit the team embedded in the resulting token.
 	orgID, teamID := client.OrgID, client.TeamID
-	scopes, ok := permittedSubset(strings.Fields(q.Get("scope")), client.Scopes)
+	scopes, ok := permittedSubset(strings.Fields(q.Get("scope")), authorizationScopes(client.Scopes))
 	if !ok {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
 		return
@@ -395,6 +395,16 @@ func allowed(requested, permitted []string) []string {
 	}
 	return out
 }
+func authorizationScopes(clientScopes []string) []string {
+	// openid and offline_access are protocol scopes for interactive authorization
+	// code clients. They do not grant an Astonish capability and therefore are
+	// intentionally not configurable in the client-permission selector.
+	out := make([]string, 0, len(clientScopes)+2)
+	out = append(out, "openid", "offline_access")
+	out = append(out, clientScopes...)
+	return out
+}
+
 func permittedSubset(requested, permitted []string) ([]string, bool) {
 	if len(requested) == 0 {
 		return nil, true

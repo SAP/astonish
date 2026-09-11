@@ -190,6 +190,46 @@ func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
 	}
 }
 
+func TestOAuthAuthorizationCodeDefaultsAudienceToProtectedResource(t *testing.T) {
+	secret, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "confidential", SecretHash: string(secret), Active: true, OrgID: "org", TeamID: "team", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{ScopeToolExecute}}}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://issuer.example/api/mcp"}, backend, func(context.Context, *http.Request) (Subject, error) { return Subject{ID: "user", OrgID: "org"}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verifier := "a-long-pkce-verifier"
+	authorize := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id=client&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge_method=S256&code_challenge="+url.QueryEscape(pkceS256(verifier))+"&scope=tool%3Aexecute", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, authorize)
+	if result.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+
+	form := url.Values{"grant_type": {GrantAuthorizationCode}, "code": {mustCode(t, result.Header().Get("Location"))}, "redirect_uri": {"https://client.example/callback"}, "code_verifier": {verifier}}
+	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRequest.SetBasicAuth("client", "secret")
+	result = httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, tokenRequest)
+	if result.Code != http.StatusOK {
+		t.Fatalf("token status = %d, body=%s", result.Code, result.Body.String())
+	}
+
+	var response struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(result.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.ValidateBearer(context.Background(), "Bearer "+response.AccessToken, "", []string{ScopeToolExecute}, "mcp"); err != nil {
+		t.Fatalf("MCP bearer validation after authorization code exchange: %v", err)
+	}
+}
+
 func TestOAuthAuthorizationCodeAcceptsProtocolAndGrantedCapabilityScopes(t *testing.T) {
 	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "public", Active: true, OrgID: "org", TeamID: "team", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{ScopeToolExecute, ScopeChat}, Resources: []string{"https://api.example"}}}, codes: map[string]store.OAuthAuthorization{}}
 	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) { return Subject{ID: "user", OrgID: "org"}, nil })

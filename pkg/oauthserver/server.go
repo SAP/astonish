@@ -258,7 +258,10 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request, requ
 func (s *Server) writeTokens(w http.ResponseWriter, ctx context.Context, client *store.OAuthClient, subject, actor, orgID, teamID string, scopes, resources []string, refresh bool, familyID string) {
 	now := time.Now().UTC()
 	exp := now.Add(s.config.AccessTokenTTL)
-	claims := jwt.MapClaims{"iss": s.config.Issuer, "aud": audience(resources, client.ClientID), "exp": exp.Unix(), "iat": now.Unix(), "client_id": client.ClientID, "scope": strings.Join(scopes, " "), "org_id": orgID}
+	// MCP clients are permitted to omit the optional RFC 8707 resource parameter.
+	// In that case, issue for this server's advertised protected resource rather
+	// than the client ID so the bearer is accepted at the MCP endpoint.
+	claims := jwt.MapClaims{"iss": s.config.Issuer, "aud": audience(resources, s.config.Resource), "exp": exp.Unix(), "iat": now.Unix(), "client_id": client.ClientID, "scope": strings.Join(scopes, " "), "org_id": orgID}
 	if subject != "" {
 		claims["sub"] = subject
 	}

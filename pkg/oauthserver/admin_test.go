@@ -24,11 +24,11 @@ func TestDiscovery_UsesOAuthJSONFieldNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got map[string]string
+	var got map[string]any
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
+	want := map[string]any{
 		"issuer":                 "https://issuer.example",
 		"resource":               "https://api.example",
 		"authorization_endpoint": "https://issuer.example/oauth/authorize",
@@ -36,6 +36,10 @@ func TestDiscovery_UsesOAuthJSONFieldNames(t *testing.T) {
 		"jwks_uri":               "https://issuer.example/oauth/jwks",
 		"revocation_endpoint":    "https://issuer.example/oauth/revoke",
 		"introspection_endpoint": "https://issuer.example/oauth/introspect",
+		"scopes": []any{
+			map[string]any{"value": ScopeToolExecute, "label": "MCP access", "description": "Allows access to the protected MCP tool endpoint."},
+			map[string]any{"value": ScopeChat, "label": "Chat access", "description": "Allows conversational access to Astonish chat."},
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("discovery JSON = %#v, want %#v", got, want)

@@ -104,28 +104,6 @@ func mcpBearerMiddleware(validator BearerPrincipalValidator, resolveTenant MCPTe
 func newMCPServer(principal execution.Principal) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "astonish", Version: "1.0"}, nil)
 	server.AddTool(&mcp.Tool{
-		Name:        "astonish_identity",
-		Title:       "Astonish identity",
-		Description: "Returns the authenticated Astonish principal for this MCP request.",
-		InputSchema: map[string]any{"type": "object", "additionalProperties": false},
-	}, func(_ context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		identity, err := json.Marshal(map[string]any{
-			"kind":      principal.Kind,
-			"subject":   principal.Subject,
-			"client_id": principal.ClientID,
-			"actor":     principal.Actor,
-			"issuer":    principal.Issuer,
-			"org_slug":  principal.OrgSlug,
-			"team_slug": principal.TeamSlug,
-			"surface":   principal.Surface,
-			"scopes":    principal.Scopes,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(identity)}}}, nil
-	})
-	server.AddTool(&mcp.Tool{
 		Name:        "astonish_chat",
 		Title:       "Astonish chat",
 		Description: "Runs a conversational request through Astonish using the authenticated principal.",

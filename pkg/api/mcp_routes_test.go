@@ -192,4 +192,7 @@ func TestMCPRoutesListsAstonishChatTool(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"name":"astonish_chat"`) {
 		t.Fatalf("tools/list does not expose astonish_chat: %s", rec.Body.String())
 	}
+	if strings.Contains(rec.Body.String(), `"name":"astonish_identity"`) {
+		t.Fatalf("tools/list exposes internal identity tool: %s", rec.Body.String())
+	}
 }

@@ -14,12 +14,12 @@ func publicTestNotifier(t *testing.T, server *httptest.Server) *PushNotifier {
 	t.Helper()
 	notifier := NewPushNotifier(nil)
 	notifier.baseDelay = time.Millisecond
-	notifier.client = server.Client()
-	notifier.client.Timeout = 30 * time.Second
-	notifier.client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	notifier.resolveHost = func(context.Context, string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("93.184.216.34")}, nil
 	}
+	notifier.client = server.Client()
+	notifier.client.Timeout = 30 * time.Second
+	notifier.client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return notifier
 }
 
@@ -89,6 +89,20 @@ func TestPushNotifierRejectsNonPublicAndNonHTTPSURLs(t *testing.T) {
 	notifier.resolveHost = func(context.Context, string) ([]net.IP, error) { return []net.IP{net.ParseIP("127.0.0.1")}, nil }
 	if err := notifier.ValidatePushURL(context.Background(), "https://example.com/hook"); err == nil {
 		t.Fatal("expected loopback target to be rejected")
+	}
+}
+
+func TestSafePushTransportRejectsNonPublicAddressFromResolver(t *testing.T) {
+	transport := safePushTransport(func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	})
+
+	conn, err := transport.DialContext(context.Background(), "tcp", "example.com:443")
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatal("expected dial-time resolver result to reject a loopback address")
 	}
 }
 

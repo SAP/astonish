@@ -26,27 +26,32 @@ func NewPushNotifier(logger *log.Logger) *PushNotifier {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &PushNotifier{
-		client: &http.Client{
-			Timeout:       30 * time.Second,
-			Transport:     safePushTransport(),
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-		},
+	notifier := &PushNotifier{
 		maxRetries:  3,
 		baseDelay:   5 * time.Second,
 		logger:      logger,
 		resolveHost: defaultResolveHost,
 	}
+	notifier.client = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: safePushTransport(func(ctx context.Context, host string) ([]net.IP, error) {
+			return notifier.resolveHost(ctx, host)
+		}),
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return notifier
 }
 
-func safePushTransport() *http.Transport {
+// safePushTransport re-resolves each connection using the same resolver used by
+// ValidatePushURL, so custom resolvers and production DNS receive identical SSRF checks.
+func safePushTransport(resolveHost func(context.Context, string) ([]net.IP, error)) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		ips, err := defaultResolveHost(ctx, host)
+		ips, err := resolveHost(ctx, host)
 		if err != nil {
 			return nil, err
 		}

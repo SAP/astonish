@@ -228,6 +228,8 @@ Revocation follows the non-disclosure behavior of RFC 7009: an unknown token ret
 
 Introspection reports inactive for unknown, expired, consumed, revoked, replay-detected, or foreign-client credentials. It must not turn JWT parsing without signature and claim validation into an authorization decision. Execution surfaces validate access tokens directly through the strict bearer validator and apply live capability/tenant policy afterward.
 
+Access-token validation intentionally does not query organization or team membership on every request. A user removed from a tenant can therefore use an already issued access token until its bounded `AccessTokenTTL` expires; if that grant includes `offline_access`, operational de-provisioning must also revoke its refresh-token family so no replacement access token can be minted. This bounded revocation-latency trade-off keeps protected protocol requests independent of a token-store lookup. Administrators requiring immediate containment must revoke the affected token family or client and, where necessary, retire the signing key; removal from a team alone does not invalidate an already signed access token.
+
 Client deactivation blocks new issuance. Whether already issued short-lived access tokens remain valid until expiry is governed by validator and operational policy; emergency invalidation requiring immediate effect must use key/client/token-family controls rather than relying on UI state alone.
 
 ## Configuration and startup

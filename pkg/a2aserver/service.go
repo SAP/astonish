@@ -27,6 +27,11 @@ type Identity struct {
 	AgentID string
 	UserID  string
 	OrgID   string
+	TeamID  string
+}
+
+func (i Identity) ownerKey() string {
+	return i.OrgID + "\x00" + i.TeamID + "\x00" + i.AgentID
 }
 
 // Config supplies the task and execution dependencies for Service.
@@ -54,6 +59,7 @@ type Service struct {
 	activeMu        sync.Mutex
 	active          map[string]int
 	released        map[string]struct{}
+	owners          map[string]Identity
 }
 
 // New creates an endpoint-owned A2A service.
@@ -79,7 +85,7 @@ func New(cfg Config) (*Service, error) {
 	return &Service{
 		store: cfg.TaskStore, dispatch: cfg.Dispatcher, push: cfg.PushNotifier, baseURL: cfg.BaseURL, logger: cfg.Logger,
 		maxActiveTasks: cfg.MaxActiveTasks, synchronousWait: cfg.SynchronousWait,
-		waiters: make(map[string]chan channels.OutboundMessage), active: make(map[string]int), released: make(map[string]struct{}),
+		waiters: make(map[string]chan channels.OutboundMessage), active: make(map[string]int), released: make(map[string]struct{}), owners: make(map[string]Identity),
 	}, nil
 }
 
@@ -88,7 +94,8 @@ func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a
 	if identity.AgentID == "" {
 		return nil, fmt.Errorf("a2a agent identity is required")
 	}
-	if !s.acquire(identity.AgentID) {
+	ownerKey := identity.ownerKey()
+	if !s.acquire(ownerKey) {
 		return nil, ErrActiveTaskLimit
 	}
 	contextID := ""
@@ -99,6 +106,9 @@ func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a
 		contextID = uuid.NewString()
 	}
 	task := s.store.Create(identity.AgentID, contextID)
+	s.activeMu.Lock()
+	s.owners[task.ID] = identity
+	s.activeMu.Unlock()
 	_ = s.store.UpdateState(task.ID, a2a.TaskStateWorking, &params.Message)
 	inbound := channels.InboundMessage{
 		ID: task.ID, ChannelID: "a2a", SenderID: identity.UserID, SenderName: identity.AgentID,
@@ -126,7 +136,7 @@ func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a
 		s.complete(task.ID, reply)
 	case <-ctx.Done():
 		_ = s.store.UpdateState(task.ID, a2a.TaskStateCanceled, nil)
-		s.release(task.ID, identity.AgentID)
+		s.release(task.ID)
 	case <-time.After(s.synchronousWait):
 		s.fail(task.ID, fmt.Errorf("request timed out"))
 	}
@@ -143,18 +153,23 @@ func (s *Service) acquire(agentID string) bool {
 	return true
 }
 
-func (s *Service) release(taskID, agentID string) {
+func (s *Service) release(taskID string) {
 	s.activeMu.Lock()
 	defer s.activeMu.Unlock()
 	if _, alreadyReleased := s.released[taskID]; alreadyReleased {
 		return
 	}
 	s.released[taskID] = struct{}{}
-	if s.active[agentID] <= 1 {
-		delete(s.active, agentID)
+	owner, ok := s.owners[taskID]
+	if !ok {
 		return
 	}
-	s.active[agentID]--
+	ownerKey := owner.ownerKey()
+	if s.active[ownerKey] <= 1 {
+		delete(s.active, ownerKey)
+		return
+	}
+	s.active[ownerKey]--
 }
 
 func (s *Service) dispatchAsync(ctx context.Context, taskID string, inbound channels.InboundMessage) {
@@ -196,7 +211,7 @@ func (s *Service) complete(taskID string, msg channels.OutboundMessage) {
 	if task, err := s.store.Get(taskID); err == nil && !task.Status.State.IsTerminal() {
 		_ = s.store.UpdateState(taskID, a2a.TaskStateCompleted, response)
 		_ = s.store.AddArtifact(taskID, a2a.Artifact{Name: "response", Parts: response.Parts, LastChunk: true})
-		s.release(taskID, task.AgentID)
+		s.release(taskID)
 	}
 	if cfg := s.store.GetPushConfig(taskID); cfg != nil {
 		go func() {
@@ -209,29 +224,35 @@ func (s *Service) complete(taskID string, msg channels.OutboundMessage) {
 func (s *Service) fail(taskID string, err error) {
 	if task, getErr := s.store.Get(taskID); getErr == nil && !task.Status.State.IsTerminal() {
 		_ = s.store.UpdateState(taskID, a2a.TaskStateFailed, &a2a.Message{Role: "agent", Parts: []a2a.Part{a2a.TextPart{Text: err.Error()}}})
-		s.release(taskID, task.AgentID)
+		s.release(taskID)
 	}
 }
 
 // GetTask returns a task only when the identity owns it.
-func (s *Service) GetTask(agentID, taskID string) (*a2a.Task, error) {
+func (s *Service) GetTask(identity Identity, taskID string) (*a2a.Task, error) {
 	task, err := s.store.Get(taskID)
-	if err != nil || task.AgentID != agentID {
+	if err != nil || !s.owns(taskID, identity) {
 		return nil, fmt.Errorf("task %s not found", taskID)
 	}
 	return task, nil
 }
 
+func (s *Service) owns(taskID string, identity Identity) bool {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	owner, ok := s.owners[taskID]
+	return ok && owner.ownerKey() == identity.ownerKey()
+}
+
 // CancelTask cancels an owned task.
-func (s *Service) CancelTask(agentID, taskID string) error {
-	task, err := s.GetTask(agentID, taskID)
-	if err != nil {
+func (s *Service) CancelTask(identity Identity, taskID string) error {
+	if _, err := s.GetTask(identity, taskID); err != nil {
 		return err
 	}
 	if err := s.store.Cancel(taskID); err != nil {
 		return err
 	}
-	s.release(taskID, task.AgentID)
+	s.release(taskID)
 	return nil
 }
 

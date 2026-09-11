@@ -641,6 +641,14 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(executionCtx)
+	requestedMemoryScope := req.MemoryScope
+	if requestedMemoryScope == "" {
+		requestedMemoryScope = r.Header.Get("X-Astonish-Memory-Mode")
+	}
+	if requestedMemoryScope == "personal" && principal.Kind == execution.PrincipalKindService {
+		respondError(w, http.StatusForbidden, "service principals cannot access personal memory")
+		return
+	}
 	userID := principal.Subject
 
 	cm := GetChatManager()
@@ -1156,10 +1164,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		memoryScope := store.MemoryScopeTeam
 		// Determine memory scope: body field takes precedence, then header (deprecated fallback).
 		// Default is "team" — personal mode must be explicitly requested per-session.
-		requestedScope := req.MemoryScope
-		if requestedScope == "" {
-			requestedScope = r.Header.Get("X-Astonish-Memory-Mode") // deprecated: prefer body field
-		}
+		requestedScope := requestedMemoryScope
 		// If personal memory mode is active, the memory_save tool should
 		// write to the user's personal store instead of team.
 		// The ThreeTierSearcher remains unchanged (always searches all tiers).
@@ -1170,7 +1175,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		runner.InjectMemoryStoresWithScope(memStore, memoryScope, svc.MemorySearcher)
-		if svc.TenantRouter != nil {
+		if svc.TenantRouter != nil && principal.Kind != execution.PrincipalKindService && principal.Subject != "" {
 			if orgStore, err := svc.TenantRouter.ForOrg(principal.OrgSlug); err == nil {
 				runner.InjectMemoryStoresByScope(store.MemoryStoresByScope{
 					Personal: orgStore.ForUser(principal.Subject).Memories(),

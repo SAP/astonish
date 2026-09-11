@@ -61,7 +61,7 @@ OAuth validation produces the same canonical principal contract as other protect
 - user grants retain the effective subject and optional delegated actor;
 - client-credentials grants produce a service principal identified by client ID;
 - organization and team come from validated grant state and cannot be overridden by JSON-RPC parameters;
-- task ownership is bound to the authenticated principal, preventing retrieval, cancellation, or push configuration across principals.
+- task ownership is bound to the authenticated principal **and resolved organization/team**, preventing retrieval, cancellation, or push configuration across principals or tenants.
 
 Task sessions remain isolated from messaging-channel sessions. Service principals cannot gain personal-memory access through the A2A scope.
 
@@ -92,7 +92,7 @@ The public Agent Card advertises the server endpoint and bearer security. Client
 2. Every protocol call requires an Astonish-issued bearer token with exact `a2a` scope.
 3. External IdP/JWKS tokens are not direct A2A credentials.
 4. Tenant identity comes from validated OAuth grant state, never request data.
-5. Task read, cancel, stream, and push operations enforce principal ownership.
+5. Task read, cancel, stream, and push operations enforce principal-and-tenant ownership.
 6. A2A scope is independent from `chat` and `tool:execute`.
 7. Request-size limits and SSE flushing behavior remain enforced.
 8. Outbound A2A-agent configuration is independent and unchanged.

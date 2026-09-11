@@ -80,7 +80,7 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	agentID := a2aAgentID(principal)
+	identity := a2aIdentity(principal)
 	switch req.Method {
 	case "message/send":
 		var params a2a.SendMessageParams
@@ -88,7 +88,7 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 			return
 		}
-		task, err := service.SendMessage(r.Context(), a2aserver.Identity{AgentID: agentID, UserID: principal.Subject, OrgID: principal.OrgSlug}, params)
+		task, err := service.SendMessage(r.Context(), identity, params)
 		if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
 			return
@@ -104,7 +104,7 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 			return
 		}
-		task, err := service.GetTask(agentID, params.TaskID)
+		task, err := service.GetTask(identity, params.TaskID)
 		if err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 			return
@@ -116,13 +116,13 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 			return
 		}
-		if err := service.CancelTask(agentID, params.TaskID); err != nil {
+		if err := service.CancelTask(identity, params.TaskID); err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 			return
 		}
 		writeJSONRPCResult(w, req.ID, map[string]string{"status": "canceled"})
 	case "pushNotification/set", "pushNotification/get", "pushNotification/delete":
-		handlePushNotification(w, r, service, agentID, req)
+		handlePushNotification(w, r, service, identity, req)
 	default:
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, fmt.Sprintf("Unknown method: %s", req.Method))
 	}
@@ -153,7 +153,7 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	task, err := service.SendMessage(r.Context(), a2aserver.Identity{AgentID: a2aAgentID(principal), UserID: principal.Subject, OrgID: principal.OrgSlug}, params)
+	task, err := service.SendMessage(r.Context(), a2aIdentity(principal), params)
 	if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
 		return
@@ -203,7 +203,11 @@ func a2aAgentID(p execution.Principal) string {
 	}
 	return p.ClientID
 }
-func handlePushNotification(w http.ResponseWriter, r *http.Request, service *a2aserver.Service, agentID string, req a2a.JSONRPCRequest) {
+func a2aIdentity(p execution.Principal) a2aserver.Identity {
+	return a2aserver.Identity{AgentID: a2aAgentID(p), UserID: p.Subject, OrgID: p.OrgSlug, TeamID: p.TeamSlug}
+}
+
+func handlePushNotification(w http.ResponseWriter, r *http.Request, service *a2aserver.Service, identity a2aserver.Identity, req a2a.JSONRPCRequest) {
 	var params a2a.GetTaskParams
 	if req.Method == "pushNotification/set" {
 		var set a2a.SetPushNotificationParams
@@ -211,7 +215,7 @@ func handlePushNotification(w http.ResponseWriter, r *http.Request, service *a2a
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 			return
 		}
-		if _, err := service.GetTask(agentID, set.TaskID); err != nil {
+		if _, err := service.GetTask(identity, set.TaskID); err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 			return
 		}
@@ -230,7 +234,7 @@ func handlePushNotification(w http.ResponseWriter, r *http.Request, service *a2a
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
 	}
-	if _, err := service.GetTask(agentID, params.TaskID); err != nil {
+	if _, err := service.GetTask(identity, params.TaskID); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
 		return
 	}

@@ -102,6 +102,39 @@ func TestA2AHandlerRejectsInvalidBearerBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestA2APushConfigurationRejectsSameAgentAcrossTenants(t *testing.T) {
+	store := a2a.NewInMemoryTaskStore(time.Hour)
+	t.Cleanup(store.Close)
+	service, err := a2aserver.New(a2aserver.Config{TaskStore: store, Dispatcher: a2aTestDispatcher{}.dispatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetA2AService(service)
+	t.Cleanup(func() { SetA2AService(nil) })
+	task, err := service.SendMessage(context.Background(), a2aserver.Identity{AgentID: "same-agent", OrgID: "org-a", TeamID: "team-a"}, a2a.SendMessageParams{Message: a2a.Message{Role: "user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceA2A, Subject: "same-agent", OrgSlug: "org-b", TeamSlug: "team-b", Scopes: []string{a2aScope}, Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := json.Marshal(a2a.SetPushNotificationParams{TaskID: task.ID, Config: a2a.PushNotificationConfig{URL: "https://example.com/hook"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(a2a.JSONRPCRequest{JSONRPC: "2.0", ID: 1, Method: "pushNotification/set", Params: params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	A2AHandler(w, httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(body)).WithContext(principal))
+	var response a2a.JSONRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error == nil || response.Error.Code != a2a.ErrCodeTaskNotFound {
+		t.Fatalf("expected cross-tenant task-not-found, got %s", w.Body.String())
+	}
+}
+
 func TestA2APushConfigurationRejectsCrossPrincipalAccess(t *testing.T) {
 	store := a2a.NewInMemoryTaskStore(time.Hour)
 	t.Cleanup(store.Close)

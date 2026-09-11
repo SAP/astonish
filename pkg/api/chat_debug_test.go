@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -28,6 +29,33 @@ func TestStudioChatRequiresExecutionPrincipal(t *testing.T) {
 	StudioChatHandler(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestStudioChatRejectsServicePrincipalPersonalMemory(t *testing.T) {
+	principal := execution.Principal{
+		Kind:           execution.PrincipalKindService,
+		Authentication: execution.AuthMethodOAuth,
+		Surface:        execution.SurfaceMCP,
+		ClientID:       "service-client",
+		OrgSlug:        "org",
+		TeamSlug:       "team",
+		Scopes:         []string{string(execution.CapabilityChat)},
+		Authenticated:  true,
+	}
+	ctx, err := execution.WithPrincipal(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/chat", strings.NewReader(`{"message":"hello","memoryScope":"personal"}`)).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	StudioChatHandler(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if !strings.Contains(w.Body.String(), "service principals cannot access personal memory") {
+		t.Fatalf("unexpected response: %s", w.Body.String())
 	}
 }
 

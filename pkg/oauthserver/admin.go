@@ -25,13 +25,14 @@ type ClientInput struct {
 
 // Discovery describes the stable public endpoints for an Astonish issuer.
 type Discovery struct {
-	Issuer                string `json:"issuer"`
-	Resource              string `json:"resource"`
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	JWKSURI               string `json:"jwks_uri"`
-	RevocationEndpoint    string `json:"revocation_endpoint"`
-	IntrospectionEndpoint string `json:"introspection_endpoint"`
+	Issuer                string            `json:"issuer"`
+	Resource              string            `json:"resource"`
+	AuthorizationEndpoint string            `json:"authorization_endpoint"`
+	TokenEndpoint         string            `json:"token_endpoint"`
+	JWKSURI               string            `json:"jwks_uri"`
+	RevocationEndpoint    string            `json:"revocation_endpoint"`
+	IntrospectionEndpoint string            `json:"introspection_endpoint"`
+	Scopes                []ScopeDefinition `json:"scopes"`
 }
 
 func (s *Server) Discovery() Discovery {
@@ -42,6 +43,7 @@ func (s *Server) Discovery() Discovery {
 		JWKSURI:               s.config.Issuer + "/oauth/jwks",
 		RevocationEndpoint:    s.config.Issuer + "/oauth/revoke",
 		IntrospectionEndpoint: s.config.Issuer + "/oauth/introspect",
+		Scopes:                ScopeDefinitions(),
 	}
 }
 

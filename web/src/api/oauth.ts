@@ -6,6 +6,13 @@ export interface OAuthDiscovery {
   jwks_uri: string
   revocation_endpoint: string
   introspection_endpoint: string
+  scopes: OAuthScopeOption[]
+}
+
+export interface OAuthScopeOption {
+  value: string
+  label: string
+  description: string
 }
 
 export interface OAuthClient {

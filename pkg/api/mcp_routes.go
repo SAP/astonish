@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -123,5 +125,56 @@ func newMCPServer(principal execution.Principal) *mcp.Server {
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(identity)}}}, nil
 	})
+	server.AddTool(&mcp.Tool{
+		Name:        "astonish_chat",
+		Title:       "Astonish chat",
+		Description: "Runs a conversational request through Astonish using the authenticated principal.",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"message": map[string]any{"type": "string", "description": "The request to send to Astonish."},
+			},
+			"required": []string{"message"},
+		},
+	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(request.Params.Arguments, &args); err != nil {
+			return mcpToolError("invalid astonish_chat arguments"), nil
+		}
+		args.Message = strings.TrimSpace(args.Message)
+		if args.Message == "" {
+			return mcpToolError("message is required"), nil
+		}
+		if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityChat); err != nil {
+			return mcpToolError(err.Error()), nil
+		}
+		return runMCPChat(ctx, args.Message)
+	})
 	return server
+}
+
+func runMCPChat(ctx context.Context, message string) (*mcp.CallToolResult, error) {
+	request := httptest.NewRequest(http.MethodPost, "/api/studio/chat", strings.NewReader(mustJSON(StudioChatRequest{Message: message}))).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	StudioChatHandler(recorder, request)
+	if recorder.Code >= http.StatusBadRequest {
+		return mcpToolError(strings.TrimSpace(recorder.Body.String())), nil
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: recorder.Body.String()}}}, nil
+}
+
+func mcpToolError(message string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}, IsError: true}
+}
+
+func mustJSON(value any) string {
+	body, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
 }

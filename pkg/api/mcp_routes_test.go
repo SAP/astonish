@@ -169,3 +169,27 @@ func TestMCPRoutesInitializesForAuthorizedPrincipal(t *testing.T) {
 		t.Fatalf("validator received resource=%q scopes=%v surface=%q", validator.resource, validator.scopes, validator.surface)
 	}
 }
+
+func TestMCPRoutesListsAstonishChatTool(t *testing.T) {
+	validator := &mcpValidatorStub{principal: execution.Principal{
+		Kind: execution.PrincipalKindService, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceMCP,
+		ClientID: "client-1", Issuer: "https://issuer.example", OrgSlug: "org", TeamSlug: "team",
+		Scopes: []string{string(execution.CapabilityToolExecute)}, Authenticated: true,
+	}}
+	router := mux.NewRouter()
+	RegisterMCPRoutes(router, validator, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	req.Header.Set("Authorization", "Bearer valid")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"name":"astonish_chat"`) {
+		t.Fatalf("tools/list does not expose astonish_chat: %s", rec.Body.String())
+	}
+}

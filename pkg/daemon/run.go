@@ -1713,7 +1713,7 @@ func Run(cfg RunConfig) error {
 		studioOpts = append(studioOpts, launcher.WithTenantMiddleware(entstore.TenantMiddleware(entStore)))
 		api.SetPlatformBackend(entStore)
 		api.SetPlatformSecrets(entStore.Secrets())
-		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.Enabled {
+		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.IsEnabled() {
 			server, serverErr := oauthserver.New(oauthserver.Config{
 				Issuer: oauthCfg.Issuer, Resource: oauthCfg.Resource,
 				AccessTokenTTL:  time.Duration(oauthCfg.AccessTokenTTLMinutes) * time.Minute,

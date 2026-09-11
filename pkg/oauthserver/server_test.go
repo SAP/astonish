@@ -22,6 +22,7 @@ type memoryStore struct {
 	clients map[string]*store.OAuthClient
 	codes   map[string]store.OAuthAuthorization
 	tokens  []store.OAuthToken
+	keys    []store.OAuthSigningKey
 }
 
 func (m *memoryStore) CreateOAuthClient(_ context.Context, client store.OAuthClient) error {
@@ -30,6 +31,45 @@ func (m *memoryStore) CreateOAuthClient(_ context.Context, client store.OAuthCli
 }
 func (m *memoryStore) GetOAuthClient(_ context.Context, id string) (*store.OAuthClient, error) {
 	return m.clients[id], nil
+}
+func (m *memoryStore) ListOAuthClients(_ context.Context) ([]store.OAuthClient, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clients := make([]store.OAuthClient, 0, len(m.clients))
+	for _, client := range m.clients {
+		clients = append(clients, *client)
+	}
+	return clients, nil
+}
+func (m *memoryStore) ListOAuthClientsForOwner(_ context.Context, ownerID string) ([]store.OAuthClient, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clients := make([]store.OAuthClient, 0)
+	for _, client := range m.clients {
+		if client.OwnerUserID == ownerID {
+			clients = append(clients, *client)
+		}
+	}
+	return clients, nil
+}
+func (m *memoryStore) UpdateOAuthClient(_ context.Context, updated store.OAuthClient) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current := m.clients[updated.ClientID]
+	if current == nil {
+		return nil
+	}
+	if updated.SecretHash == "" {
+		updated.SecretHash = current.SecretHash
+	}
+	m.clients[updated.ClientID] = &updated
+	return nil
+}
+func (m *memoryStore) DeleteOAuthClient(_ context.Context, clientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.clients, clientID)
+	return nil
 }
 func (m *memoryStore) SaveOAuthAuthorization(_ context.Context, auth store.OAuthAuthorization) error {
 	m.mu.Lock()
@@ -54,7 +94,29 @@ func (m *memoryStore) SaveOAuthToken(_ context.Context, token store.OAuthToken) 
 	m.tokens = append(m.tokens, token)
 	return nil
 }
-func (m *memoryStore) ConsumeOAuthRefreshToken(context.Context, string, time.Time) (*store.OAuthToken, error) {
+func (m *memoryStore) GetOAuthRefreshToken(_ context.Context, handleHash string) (*store.OAuthToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.tokens {
+		if m.tokens[i].HandleHash == handleHash {
+			token := m.tokens[i]
+			return &token, nil
+		}
+	}
+	return nil, nil
+}
+func (m *memoryStore) ConsumeOAuthRefreshToken(_ context.Context, handleHash string, now time.Time) (*store.OAuthToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.tokens {
+		token := &m.tokens[i]
+		if token.HandleHash != handleHash || !token.RevokedAt.IsZero() || !token.ExpiresAt.After(now) {
+			continue
+		}
+		token.RevokedAt = now
+		out := *token
+		return &out, nil
+	}
 	return nil, nil
 }
 func (m *memoryStore) RevokeOAuthTokenFamily(context.Context, string, time.Time) error { return nil }
@@ -62,9 +124,16 @@ func (m *memoryStore) SaveOAuthConsent(context.Context, store.OAuthConsent) erro
 func (m *memoryStore) RevokeOAuthConsent(context.Context, string, string, string, time.Time) error {
 	return nil
 }
-func (m *memoryStore) SaveOAuthSigningKey(context.Context, store.OAuthSigningKey) error { return nil }
-func (m *memoryStore) ListOAuthSigningKeys(context.Context) ([]store.OAuthSigningKey, error) {
-	return nil, nil
+func (m *memoryStore) SaveOAuthSigningKey(_ context.Context, key store.OAuthSigningKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keys = append(m.keys, key)
+	return nil
+}
+func (m *memoryStore) ListOAuthSigningKeys(_ context.Context) ([]store.OAuthSigningKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]store.OAuthSigningKey(nil), m.keys...), nil
 }
 
 func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
@@ -72,7 +141,7 @@ func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "confidential", SecretHash: string(secret), Active: true, OrgID: "org", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{"tool:execute"}, Resources: []string{"https://api.example"}}}, codes: map[string]store.OAuthAuthorization{}}
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{"client": {ClientID: "client", ClientType: "confidential", SecretHash: string(secret), Active: true, OrgID: "org", TeamID: "team", RedirectURIs: []string{"https://client.example/callback"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{"tool:execute", "offline_access"}, Resources: []string{"https://api.example"}}}, codes: map[string]store.OAuthAuthorization{}}
 	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {
 		return Subject{ID: "user", OrgID: "org", TeamID: "team"}, nil
 	})
@@ -81,7 +150,7 @@ func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
 	}
 
 	verifier := "a-long-pkce-verifier"
-	authorize := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id=client&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge_method=S256&code_challenge="+url.QueryEscape(pkceS256(verifier))+"&scope=tool%3Aexecute&resource=https%3A%2F%2Fapi.example&state=state", nil)
+	authorize := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id=client&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge_method=S256&code_challenge="+url.QueryEscape(pkceS256(verifier))+"&scope=tool%3Aexecute%20offline_access&resource=https%3A%2F%2Fapi.example&state=state", nil)
 	result := httptest.NewRecorder()
 	server.Handler().ServeHTTP(result, authorize)
 	if result.Code != http.StatusFound {

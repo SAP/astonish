@@ -20,6 +20,7 @@ This directory is the **authoritative reference** for cross-cutting design decis
 
 ### API + Generative UI
 - `api-studio.md` — REST + SSE surface reference.
+- `oauth-authorization.md` — built-in OAuth authorization server, token/key trust boundary, canonical principals, MCP enforcement, client/grant persistence, and coexistence with IAS, Keycloak, OIDC, and future SAML authentication.
 - `chrome-extension.md` — Manifest V3 side panel client of Studio chat: Bearer `client_type=cli` auth, page capture via `systemContext`, confirmed Apply. Does not add routes.
 - `generative-ui.md` — App preview pipeline, iframe sandbox, `useAppData` / `useAppAI` / `useAppState`, SSRF-protected proxy.
 - `studio-ui-system.md` — Studio design system: dual-axis brand packs (mode × `data-theme`), shadcn vs custom surfaces, token rules (no hard-coded brand colors), preference cascade, App Canvas, and Flow/Chat/terminal boundaries.

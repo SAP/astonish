@@ -87,6 +87,11 @@ func NewPlatformServices(ctx context.Context, cfg Config) (*store.Services, *Sto
 		}
 	} else {
 		migrateTables := []*schema.Table{
+			platformmigrate.OauthAuthorizationsTable,
+			platformmigrate.OauthClientsTable,
+			platformmigrate.OauthConsentsTable,
+			platformmigrate.OauthSigningKeysTable,
+			platformmigrate.OauthTokensTable,
 			platformmigrate.PlatformSkillsTable,
 			platformmigrate.PlatformSkillFilesTable,
 			platformmigrate.PlatformSlideTemplatesTable,

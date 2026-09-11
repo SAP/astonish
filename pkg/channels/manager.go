@@ -649,17 +649,16 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 		enrichedCtx, platformUserID, _, resolveErr := m.platformResolver.ResolveChannelUserWithHint(ctx, msg.ChannelID, msg.SenderID, msg.RoutingHint)
 		if resolveErr != nil {
 			m.logger.Printf("[channels] Platform resolver failed for %s/%s: %v", msg.ChannelID, msg.SenderID, resolveErr)
-			// Continue with unenriched context — agent will run without team stores
-		} else {
-			ctx = enrichedCtx
-			userID = platformUserID
+			return fmt.Errorf("resolve authenticated channel user: %w", resolveErr)
+		}
+		ctx = enrichedCtx
+		userID = platformUserID
 
-			// Hydrate the shared Redactor from the resolved credential store
-			// so tool output redaction catches PG-backed credentials.
-			if m.redactor != nil {
-				if cs := store.CredentialStoreFromContext(ctx); cs != nil {
-					m.redactor.HydrateFromStore(cs)
-				}
+		// Hydrate the shared Redactor from the resolved credential store
+		// so tool output redaction catches PG-backed credentials.
+		if m.redactor != nil {
+			if cs := store.CredentialStoreFromContext(ctx); cs != nil {
+				m.redactor.HydrateFromStore(cs)
 			}
 		}
 	}
@@ -981,12 +980,12 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 		enrichedCtx, platformUserID, _, resolveErr := m.platformResolver.ResolveChannelUserWithHint(ctx, msg.ChannelID, msg.SenderID, msg.RoutingHint)
 		if resolveErr != nil {
 			m.logger.Printf("[channels] Platform resolver failed for command %s/%s: %v", msg.ChannelID, msg.SenderID, resolveErr)
-		} else {
-			ctx = enrichedCtx
-			userID = platformUserID
-			if ctxSvc := sessionServiceFromContext(ctx); ctxSvc != nil {
-				sessSvc = ctxSvc
-			}
+			return fmt.Errorf("resolve authenticated channel user: %w", resolveErr)
+		}
+		ctx = enrichedCtx
+		userID = platformUserID
+		if ctxSvc := sessionServiceFromContext(ctx); ctxSvc != nil {
+			sessSvc = ctxSvc
 		}
 	}
 

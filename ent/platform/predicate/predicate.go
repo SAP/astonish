@@ -15,6 +15,21 @@ type EmailThreadIndex func(*sql.Selector)
 // LoginSession is the predicate function for loginsession builders.
 type LoginSession func(*sql.Selector)
 
+// OAuthAuthorization is the predicate function for oauthauthorization builders.
+type OAuthAuthorization func(*sql.Selector)
+
+// OAuthClient is the predicate function for oauthclient builders.
+type OAuthClient func(*sql.Selector)
+
+// OAuthConsent is the predicate function for oauthconsent builders.
+type OAuthConsent func(*sql.Selector)
+
+// OAuthSigningKey is the predicate function for oauthsigningkey builders.
+type OAuthSigningKey func(*sql.Selector)
+
+// OAuthToken is the predicate function for oauthtoken builders.
+type OAuthToken func(*sql.Selector)
+
 // OIDCProvider is the predicate function for oidcprovider builders.
 type OIDCProvider func(*sql.Selector)
 

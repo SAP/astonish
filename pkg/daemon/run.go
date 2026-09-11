@@ -29,10 +29,12 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	emailpkg "github.com/SAP/astonish/pkg/email"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/fleet"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/mailer"
 	"github.com/SAP/astonish/pkg/memory"
+	"github.com/SAP/astonish/pkg/oauthserver"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	k8sbackend "github.com/SAP/astonish/pkg/sandbox/k8s"
@@ -643,6 +645,8 @@ func Run(cfg RunConfig) error {
 					JWKSURL:   ti.JWKSURL,
 					Audience:  audience,
 					UserClaim: userClaim,
+					OrgID:     ti.OrgSlug,
+					TeamID:    ti.TeamSlug,
 				})
 			}
 			var agents []a2apkg.AllowedAgent
@@ -671,6 +675,47 @@ func Run(cfg RunConfig) error {
 				RequireActorClaim: chCfg.A2A.RequireActorClaim,
 			})
 			api.SetA2ATokenValidator(validator)
+			api.SetA2APrincipalResolver(func(requestCtx context.Context, claims *a2apkg.A2ATokenClaims) (execution.Principal, error) {
+				if backend == nil || claims == nil || claims.OrgID == "" || claims.TeamID == "" {
+					return execution.Principal{}, fmt.Errorf("A2A tenant resolution is unavailable")
+				}
+				user, err := backend.Users().GetByOIDC(requestCtx, claims.Issuer, claims.UserIdentifier)
+				if err != nil || user == nil {
+					user, err = backend.Users().GetByEmail(requestCtx, claims.UserIdentifier)
+				}
+				if err != nil || user == nil || user.Status != "active" {
+					return execution.Principal{}, fmt.Errorf("A2A user is not active")
+				}
+				org, err := backend.Organizations().GetBySlug(requestCtx, claims.OrgID)
+				if err != nil || org == nil || org.Status != "active" {
+					return execution.Principal{}, fmt.Errorf("A2A organization is not active")
+				}
+				role, err := backend.Organizations().GetMemberRole(requestCtx, user.ID, org.ID)
+				if err != nil || role == "" {
+					return execution.Principal{}, fmt.Errorf("A2A user is not an organization member")
+				}
+				orgStore, err := backend.ForOrg(org.ID)
+				if err != nil {
+					return execution.Principal{}, fmt.Errorf("open A2A organization: %w", err)
+				}
+				isMember, err := orgStore.Teams().IsTeamMember(requestCtx, user.ID, claims.TeamID)
+				if err != nil || !isMember {
+					return execution.Principal{}, fmt.Errorf("A2A user is not a team member")
+				}
+				return execution.Principal{
+					Kind:           execution.PrincipalKindUser,
+					Authentication: execution.AuthMethodOAuth,
+					Surface:        execution.SurfaceA2A,
+					Subject:        user.ID,
+					Actor:          claims.ActorIdentifier,
+					Issuer:         claims.Issuer,
+					OrgSlug:        claims.OrgID,
+					TeamSlug:       claims.TeamID,
+					Roles:          []string{role},
+					Scopes:         []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)},
+					Authenticated:  true,
+				}, nil
+			})
 			logger.Printf("A2A authentication: %d trusted issuers, %d allowed agents", len(issuers), len(agents))
 
 			// Wire per-agent rate limiter from allowed agents config.
@@ -1668,6 +1713,21 @@ func Run(cfg RunConfig) error {
 		studioOpts = append(studioOpts, launcher.WithTenantMiddleware(entstore.TenantMiddleware(entStore)))
 		api.SetPlatformBackend(entStore)
 		api.SetPlatformSecrets(entStore.Secrets())
+		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.IsEnabled() {
+			issuer := oauthCfg.EffectiveIssuer(port)
+			resource := oauthCfg.EffectiveResource(issuer)
+			server, serverErr := oauthserver.New(oauthserver.Config{
+				Issuer: issuer, Resource: resource,
+				AccessTokenTTL:  time.Duration(oauthCfg.AccessTokenTTLMinutes) * time.Minute,
+				RefreshTokenTTL: time.Duration(oauthCfg.RefreshTokenTTLDays) * 24 * time.Hour,
+				Development:     appCfg.Storage.Auth.IsBuiltinAuth() && strings.HasPrefix(issuer, "http://"),
+			}, entStore.OAuthServer(), api.NewOAuthSessionValidator(platformAuth, entStore))
+			if serverErr != nil {
+				return fmt.Errorf("initialize OAuth server: %w", serverErr)
+			}
+			studioOpts = append(studioOpts, launcher.WithOAuthServer(server))
+			api.SetA2AOAuthServer(server)
+		}
 	}
 	studio, err := launcher.NewStudioServer(port, studioOpts...)
 	if err != nil {
@@ -1676,6 +1736,19 @@ func Run(cfg RunConfig) error {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
 	logStartupPhase("studio-server", "complete", studioServerStarted)
+
+	// Start serving before optional chat initialization. Platform administration,
+	// authentication, and OAuth endpoints must remain available while the chat
+	// factory performs potentially expensive embedding/model initialization.
+	logger.Printf("%s backend=%s mode=%s", startupPhaseRecord("serve-handoff", "complete", time.Since(startupStarted)), appCfg.Storage.Backend, daemonMode)
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Printf("HTTP server listening on http://localhost:%d", port)
+		if err := studio.Serve(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+		close(errCh)
+	}()
 
 	// Pre-warm the Studio chat agent in the background so the first web request is fast.
 	// Also register the context builder so that Reset() can auto-PreWarm after settings changes.
@@ -1732,17 +1805,6 @@ func Run(cfg RunConfig) error {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
-	// Start serving in a goroutine
-	logger.Printf("%s backend=%s mode=%s", startupPhaseRecord("serve-handoff", "complete", time.Since(startupStarted)), appCfg.Storage.Backend, daemonMode)
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Printf("HTTP server listening on http://localhost:%d", port)
-		if err := studio.Serve(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
 
 	// Optional inbound channels must not delay HTTP readiness. Build their
 	// shared ChatAgent and register adapters only after the listener is live.

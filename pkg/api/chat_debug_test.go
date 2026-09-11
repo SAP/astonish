@@ -21,6 +21,16 @@ func TestStudioChatDebugRequiresSuperadmin(t *testing.T) {
 	}
 }
 
+func TestStudioChatRequiresExecutionPrincipal(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/chat", strings.NewReader(`{"message":"hello"}`))
+	w := httptest.NewRecorder()
+
+	StudioChatHandler(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestChatRunnerDebugContext(t *testing.T) {
 	runner := newChatRunner("session", "user", studioChatAppName, true)
 	if store.DebugEnabledFromContext(runner.ctx) {

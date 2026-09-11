@@ -134,7 +134,7 @@ func TestExportPlatformBackup(t *testing.T) {
 	assertArchiveContains(t, files, "orgs/acme/teams/sre/drill_reports.jsonl", "backup-drill")
 }
 
-func TestExportPlatformBackupRedactSecrets(t *testing.T) {
+func TestBackupOAuthRedaction(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	dsn := "file:" + filepath.Join(dataDir, "platform.db")
@@ -147,12 +147,19 @@ func TestExportPlatformBackupRedactSecrets(t *testing.T) {
 	}
 	defer es.Close()
 
-	if err := es.Users().Create(ctx, &store.User{ID: uuid.NewString(), Email: "bob@example.com", DisplayName: "Bob", PasswordHash: "secret-hash", Status: "active"}); err != nil {
+	userID := uuid.NewString()
+	if err := es.Users().Create(ctx, &store.User{ID: userID, Email: "bob@example.com", DisplayName: "Bob", PasswordHash: "secret-hash", Status: "active"}); err != nil {
 		t.Fatalf("Create user error = %v", err)
 	}
 	provider := &store.OIDCProvider{Name: "SSO", IssuerURL: "https://issuer.example.com", ClientID: "client-id", ClientSecret: "plain-secret", Enabled: true}
 	if err := es.OIDCProviders().Create(ctx, provider); err != nil {
 		t.Fatalf("Create OIDC provider error = %v", err)
+	}
+	if err := es.OAuthServer().CreateOAuthClient(ctx, store.OAuthClient{OwnerUserID: userID, OrgID: uuid.NewString(), TeamID: "team", ClientID: "backup-client", Name: "Backup client", ClientType: "confidential", SecretHash: "oauth-secret-hash", Active: true}); err != nil {
+		t.Fatalf("Create OAuth client error = %v", err)
+	}
+	if err := es.OAuthServer().SaveOAuthSigningKey(ctx, store.OAuthSigningKey{KeyID: "backup-key", Algorithm: "RS256", Status: "active", PublicJWK: map[string]any{"kty": "RSA"}, EncryptedPrivateKey: []byte("private-key-ciphertext")}); err != nil {
+		t.Fatalf("Create OAuth signing key error = %v", err)
 	}
 
 	archivePath := filepath.Join(t.TempDir(), "redacted.astonish-backup")
@@ -171,6 +178,12 @@ func TestExportPlatformBackupRedactSecrets(t *testing.T) {
 	}
 	if !strings.Contains(string(files["platform/oidc_providers.jsonl"]), "[REDACTED]") {
 		t.Fatal("redacted backup does not mark OIDC client secret")
+	}
+	if strings.Contains(string(files["platform/oauth_clients.jsonl"]), "oauth-secret-hash") {
+		t.Fatal("redacted backup contains OAuth client verifier hash")
+	}
+	if strings.Contains(string(files["platform/oauth_signing_keys.jsonl"]), "private-key-ciphertext") {
+		t.Fatal("redacted backup contains OAuth private key material")
 	}
 }
 

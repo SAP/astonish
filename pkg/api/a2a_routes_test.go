@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/channels"
 	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 )
@@ -114,6 +115,7 @@ func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
 				Audience:  "astonish-a2a",
 				UserClaim: "sub",
 				OrgID:     "org-1",
+				TeamID:    "team-1",
 			},
 		},
 		Agents: []a2a.AllowedAgent{
@@ -130,9 +132,39 @@ func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
 	})
 
 	SetA2ATokenValidator(validator)
+	SetA2APrincipalResolver(func(_ context.Context, claims *a2a.A2ATokenClaims) (execution.Principal, error) {
+		return execution.Principal{
+			Kind:           execution.PrincipalKindUser,
+			Authentication: execution.AuthMethodOAuth,
+			Surface:        execution.SurfaceA2A,
+			Subject:        claims.UserIdentifier,
+			Actor:          claims.ActorIdentifier,
+			Issuer:         claims.Issuer,
+			OrgSlug:        claims.OrgID,
+			TeamSlug:       claims.TeamID,
+			Scopes:         []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)},
+			Authenticated:  true,
+		}, nil
+	})
 	t.Cleanup(func() { SetA2ATokenValidator(nil) })
+	t.Cleanup(func() { SetA2APrincipalResolver(nil) })
 
 	return ch
+}
+
+func TestA2AClaimsFromPrincipal(t *testing.T) {
+	claims := a2aClaimsFromPrincipal(execution.Principal{
+		Subject: "user-1", Actor: "worker-1", Issuer: "https://issuer.example",
+		OrgSlug: "org-1", TeamSlug: "team-1",
+	})
+	if claims.UserIdentifier != "user-1" || claims.ActorIdentifier != "worker-1" || claims.OrgID != "org-1" || claims.TeamID != "team-1" {
+		t.Fatalf("unexpected user claims: %#v", claims)
+	}
+
+	claims = a2aClaimsFromPrincipal(execution.Principal{ClientID: "client-1"})
+	if claims.UserIdentifier != "client-1" {
+		t.Fatalf("service client must own its A2A tasks, got %#v", claims)
+	}
 }
 
 func TestA2AAgentCardHandler(t *testing.T) {
@@ -756,6 +788,18 @@ func injectA2AClaims(ctx context.Context, token string) context.Context {
 	if err != nil {
 		return ctx
 	}
+	resolver := getA2APrincipalResolver()
+	if resolver == nil {
+		return ctx
+	}
+	principal, err := resolver(ctx, claims)
+	if err != nil {
+		return context.WithValue(ctx, a2aClaimsContextKey{}, claims)
+	}
+	ctx, err = execution.WithPrincipal(ctx, principal)
+	if err != nil {
+		return ctx
+	}
 	return context.WithValue(ctx, a2aClaimsContextKey{}, claims)
 }
 
@@ -786,8 +830,8 @@ func TestA2AHandler_UserNotProvisioned(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != a2a.ErrCodeForbidden {
 		t.Fatalf("expected forbidden error for unprovisioned user, got: %+v", resp)
 	}
-	if resp.Error.Message != "User not provisioned" {
-		t.Fatalf("expected 'User not provisioned' message, got: %q", resp.Error.Message)
+	if resp.Error.Message != "A2A identity is not authorized" {
+		t.Fatalf("expected authorization denial message, got: %q", resp.Error.Message)
 	}
 }
 

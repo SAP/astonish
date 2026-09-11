@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"os"
 	"os/user"
@@ -828,6 +829,11 @@ type PlatformAuthConfig struct {
 	// OIDC holds OpenID Connect provider settings. Only used when mode is "oidc".
 	OIDC OIDCConfig `yaml:"oidc,omitempty" json:"oidc,omitempty"`
 
+	// OAuthServer configures Astonish as an OAuth/OIDC authorization server for
+	// MCP hosts and other relying parties. It authenticates users through the
+	// configured built-in or external identity flow; it never forwards IdP tokens.
+	OAuthServer OAuthServerConfig `yaml:"oauth_server,omitempty" json:"oauth_server,omitempty"`
+
 	// LoopbackBypass controls how requests from 127.0.0.1/::1 are authenticated.
 	// Values:
 	//   "always"     — loopback requests pass without any token (personal mode default)
@@ -835,6 +841,44 @@ type PlatformAuthConfig struct {
 	//   "never"      — loopback requests go through full auth like remote requests
 	// Default: "with_token" in platform mode, "always" in personal mode.
 	LoopbackBypass string `yaml:"loopback_bypass,omitempty" json:"loopback_bypass,omitempty"`
+}
+
+// OAuthServerConfig configures Astonish-issued OAuth/OIDC tokens. The issuer
+// must be the stable public URL of this Astonish instance; upstream OIDC/SAML
+// systems remain authentication providers and are not token issuers here.
+type OAuthServerConfig struct {
+	// Enabled defaults to true. Set explicitly to false to remove the built-in
+	// Astonish authorization server and its administration/protocol routes.
+	Enabled               *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Issuer                string `yaml:"issuer,omitempty" json:"issuer,omitempty"`
+	Resource              string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	AccessTokenTTLMinutes int    `yaml:"access_token_ttl_minutes,omitempty" json:"access_token_ttl_minutes,omitempty"`
+	RefreshTokenTTLDays   int    `yaml:"refresh_token_ttl_days,omitempty" json:"refresh_token_ttl_days,omitempty"`
+}
+
+// IsEnabled reports whether Astonish's built-in OAuth authorization server is
+// enabled. It is available by default so its superadmin Settings destination
+// always has a matching backend; deployments can explicitly opt out.
+func (c OAuthServerConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveIssuer returns the configured public issuer or a loopback default
+// suitable for a local Studio daemon.
+func (c OAuthServerConfig) EffectiveIssuer(port int) string {
+	if c.Issuer != "" {
+		return c.Issuer
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// EffectiveResource returns the configured protected resource identifier or
+// the local Studio MCP endpoint beneath issuer.
+func (c OAuthServerConfig) EffectiveResource(issuer string) string {
+	if c.Resource != "" {
+		return c.Resource
+	}
+	return strings.TrimRight(issuer, "/") + "/api/mcp"
 }
 
 // OIDCConfig holds settings for an external OpenID Connect identity provider.
@@ -1616,10 +1660,14 @@ type A2AConfig struct {
 
 // TrustedIssuerConfig holds YAML configuration for a trusted A2A token issuer.
 type TrustedIssuerConfig struct {
-	Name      string `yaml:"name" json:"name"`
-	Issuer    string `yaml:"issuer" json:"issuer"`
-	JWKSURL   string `yaml:"jwks_url" json:"jwks_url"`
-	Audience  string `yaml:"audience" json:"audience"`
+	Name     string `yaml:"name" json:"name"`
+	Issuer   string `yaml:"issuer" json:"issuer"`
+	JWKSURL  string `yaml:"jwks_url" json:"jwks_url"`
+	Audience string `yaml:"audience" json:"audience"`
+	// OrgSlug identifies the Astonish organization that accepts this issuer.
+	OrgSlug string `yaml:"org_slug" json:"org_slug"`
+	// TeamSlug identifies the Astonish team that receives this issuer's A2A requests.
+	TeamSlug  string `yaml:"team_slug" json:"team_slug"`
 	UserClaim string `yaml:"user_claim,omitempty" json:"user_claim,omitempty"` // default: "sub"
 }
 

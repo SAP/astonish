@@ -24,6 +24,7 @@ import (
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/gitutil"
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
@@ -75,6 +76,18 @@ func codeUserIDForDir(workingDir string) string {
 	}
 	sum := sha256.Sum256([]byte(dir))
 	return codeUserID + "_" + hex.EncodeToString(sum[:8])
+}
+
+// localExecutionContext marks code mode as an authenticated local-OS execution
+// without assigning a platform tenant or changing interactive approvals.
+func localExecutionContext(ctx context.Context, userID string) (context.Context, error) {
+	return execution.WithPrincipal(ctx, execution.Principal{
+		Kind:           execution.PrincipalKindLocal,
+		Authentication: execution.AuthMethodLocalOS,
+		Surface:        execution.SurfaceCode,
+		Subject:        userID,
+		Authenticated:  true,
+	})
 }
 
 // CodeConfig configures the local, in-process code-mode TUI.
@@ -219,6 +232,10 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	// Per-directory session scope: sessions created in this working directory
 	// are stored under this userID and only listed here.
 	scopedUserID := codeUserIDForDir(workingDir)
+	ctx, err = localExecutionContext(ctx, scopedUserID)
+	if err != nil {
+		return err
+	}
 
 	result, err := NewWiredChatAgent(ctx, &ChatFactoryConfig{
 		AppConfig:            appConfig,
@@ -372,6 +389,10 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	}
 
 	scopedUserID := codeUserIDForDir(workingDir)
+	ctx, err = localExecutionContext(ctx, scopedUserID)
+	if err != nil {
+		return nil, err
+	}
 
 	result, err := NewWiredChatAgent(ctx, &ChatFactoryConfig{
 		AppConfig:            appConfig,

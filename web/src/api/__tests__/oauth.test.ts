@@ -1,0 +1,44 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { createOAuthClient, deleteOAuthClient, getOAuthDiscovery, listOAuthClients, listOAuthContexts, updateOAuthClient } from '../oauth'
+
+const originalFetch = globalThis.fetch
+
+function mockFetch(data: unknown, ok = true) {
+  return vi.fn().mockResolvedValue({ ok, statusText: 'error', json: () => Promise.resolve(data) })
+}
+
+afterEach(() => { globalThis.fetch = originalFetch })
+
+describe('personal OAuth API', () => {
+  it('loads discovery, contexts, and secret-free clients through authenticated personal routes', async () => {
+    globalThis.fetch = mockFetch({ issuer: 'https://issuer.example', resource: 'https://api.example' })
+    await expect(getOAuthDiscovery()).resolves.toEqual(expect.objectContaining({ issuer: 'https://issuer.example', resource: 'https://api.example' }))
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/discovery', expect.objectContaining({ credentials: 'include' }))
+
+    globalThis.fetch = mockFetch({ organizations: [{ id: 'org-1', teams: [{ id: 'team-1' }] }] })
+    await expect(listOAuthContexts()).resolves.toEqual([{ id: 'org-1', teams: [{ id: 'team-1' }] }])
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/contexts', expect.objectContaining({ credentials: 'include' }))
+
+    globalThis.fetch = mockFetch({ clients: [{ client_id: 'ast_client', active: true }] })
+    await expect(listOAuthClients()).resolves.toEqual([{ client_id: 'ast_client', active: true }])
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients', expect.objectContaining({ credentials: 'include' }))
+  })
+
+  it('creates and rotates clients through owner-scoped personal routes', async () => {
+    const input = { name: 'MCP', client_type: 'confidential' as const, org_id: 'org-1', team_id: 'team-1', redirect_uris: [], grant_types: ['client_credentials'], resources: ['https://api.example'], scopes: ['tool:execute'], active: true }
+    globalThis.fetch = mockFetch({ client: { client_id: 'ast_client' }, client_secret: 'shown-once' })
+    await expect(createOAuthClient(input)).resolves.toMatchObject({ client_secret: 'shown-once' })
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients', expect.objectContaining({ method: 'POST', body: JSON.stringify(input) }))
+
+    const rotate = { ...input, rotate_secret: true }
+    globalThis.fetch = mockFetch({ client: { client_id: 'ast_client' }, client_secret: 'rotated-once' })
+    await expect(updateOAuthClient('ast_client', rotate)).resolves.toMatchObject({ client_secret: 'rotated-once' })
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients/ast_client', expect.objectContaining({ method: 'PATCH', body: JSON.stringify(rotate) }))
+  })
+  it('deletes an OAuth client through its owner-scoped route', async () => {
+    globalThis.fetch = mockFetch({})
+    await expect(deleteOAuthClient('ast/client')).resolves.toBeUndefined()
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients/ast%2Fclient', expect.objectContaining({ method: 'DELETE', credentials: 'include' }))
+  })
+})

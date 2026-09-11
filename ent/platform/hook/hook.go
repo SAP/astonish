@@ -45,6 +45,66 @@ func (f LoginSessionFunc) Mutate(ctx context.Context, m platform.Mutation) (plat
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.LoginSessionMutation", m)
 }
 
+// The OAuthAuthorizationFunc type is an adapter to allow the use of ordinary
+// function as OAuthAuthorization mutator.
+type OAuthAuthorizationFunc func(context.Context, *platform.OAuthAuthorizationMutation) (platform.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OAuthAuthorizationFunc) Mutate(ctx context.Context, m platform.Mutation) (platform.Value, error) {
+	if mv, ok := m.(*platform.OAuthAuthorizationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.OAuthAuthorizationMutation", m)
+}
+
+// The OAuthClientFunc type is an adapter to allow the use of ordinary
+// function as OAuthClient mutator.
+type OAuthClientFunc func(context.Context, *platform.OAuthClientMutation) (platform.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OAuthClientFunc) Mutate(ctx context.Context, m platform.Mutation) (platform.Value, error) {
+	if mv, ok := m.(*platform.OAuthClientMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.OAuthClientMutation", m)
+}
+
+// The OAuthConsentFunc type is an adapter to allow the use of ordinary
+// function as OAuthConsent mutator.
+type OAuthConsentFunc func(context.Context, *platform.OAuthConsentMutation) (platform.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OAuthConsentFunc) Mutate(ctx context.Context, m platform.Mutation) (platform.Value, error) {
+	if mv, ok := m.(*platform.OAuthConsentMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.OAuthConsentMutation", m)
+}
+
+// The OAuthSigningKeyFunc type is an adapter to allow the use of ordinary
+// function as OAuthSigningKey mutator.
+type OAuthSigningKeyFunc func(context.Context, *platform.OAuthSigningKeyMutation) (platform.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OAuthSigningKeyFunc) Mutate(ctx context.Context, m platform.Mutation) (platform.Value, error) {
+	if mv, ok := m.(*platform.OAuthSigningKeyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.OAuthSigningKeyMutation", m)
+}
+
+// The OAuthTokenFunc type is an adapter to allow the use of ordinary
+// function as OAuthToken mutator.
+type OAuthTokenFunc func(context.Context, *platform.OAuthTokenMutation) (platform.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OAuthTokenFunc) Mutate(ctx context.Context, m platform.Mutation) (platform.Value, error) {
+	if mv, ok := m.(*platform.OAuthTokenMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *platform.OAuthTokenMutation", m)
+}
+
 // The OIDCProviderFunc type is an adapter to allow the use of ordinary
 // function as OIDCProvider mutator.
 type OIDCProviderFunc func(context.Context, *platform.OIDCProviderMutation) (platform.Value, error)

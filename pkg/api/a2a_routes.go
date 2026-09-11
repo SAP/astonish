@@ -10,6 +10,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/a2a"
 	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/gorilla/mux"
 )
 
@@ -84,17 +85,18 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := A2AClaimsFromContext(r.Context())
+	principal, ok := execution.PrincipalFromContext(r.Context())
 	if claims == nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required")
 		return
 	}
-
-	// Fail-closed: reject if user is not provisioned in the platform
-	if resolver := getA2AUserResolver(); resolver != nil {
-		if !resolver(r.Context(), claims.UserIdentifier, claims.OrgID) {
-			writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "User not provisioned")
-			return
-		}
+	if !ok {
+		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
+		return
+	}
+	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityToolExecute); err != nil {
+		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
+		return
 	}
 
 	// Read and parse JSON-RPC request
@@ -272,17 +274,18 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := A2AClaimsFromContext(r.Context())
+	principal, ok := execution.PrincipalFromContext(r.Context())
 	if claims == nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeAuthRequired, "Authentication required")
 		return
 	}
-
-	// Fail-closed: reject if user is not provisioned in the platform
-	if resolver := getA2AUserResolver(); resolver != nil {
-		if !resolver(r.Context(), claims.UserIdentifier, claims.OrgID) {
-			writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "User not provisioned")
-			return
-		}
+	if !ok {
+		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
+		return
+	}
+	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityToolExecute); err != nil {
+		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
+		return
 	}
 
 	// Read and parse JSON-RPC request

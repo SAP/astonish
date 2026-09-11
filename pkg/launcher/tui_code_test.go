@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -50,6 +51,20 @@ func TestContentsToSessionEventsPreservesTurnContextMarker(t *testing.T) {
 	events := contentsToSessionEvents([]*genai.Content{contextContent})
 	if len(events) != 1 || !agent.IsTurnContextEvent(events[0]) {
 		t.Fatalf("compacted context event lost hidden marker: %#v", events)
+	}
+}
+
+func TestLocalExecutionContext(t *testing.T) {
+	ctx, err := localExecutionContext(context.Background(), "local-user")
+	if err != nil {
+		t.Fatalf("localExecutionContext() error = %v", err)
+	}
+	principal, ok := execution.PrincipalFromContext(ctx)
+	if !ok {
+		t.Fatal("local execution principal missing")
+	}
+	if principal.Kind != execution.PrincipalKindLocal || principal.Subject != "local-user" || principal.Surface != execution.SurfaceCode {
+		t.Fatalf("local principal = %#v", principal)
 	}
 }
 

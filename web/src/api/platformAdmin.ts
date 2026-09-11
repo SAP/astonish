@@ -19,6 +19,9 @@ async function adminFetch(input: string, init?: Parameters<typeof fetch>[1]): Pr
 async function throwIfNotOk(res: Response, fallbackMsg: string): Promise<void> {
   if (res.ok) return
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
+  if (res.status === 401) {
+    throw new Error('Your session expired after the server restart. Sign in again, then reopen OAuth settings.')
+  }
   throw new Error((body.error as string) || fallbackMsg)
 }
 

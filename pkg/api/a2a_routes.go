@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -88,6 +89,10 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		task, err := service.SendMessage(r.Context(), a2aserver.Identity{AgentID: agentID, UserID: principal.Subject, OrgID: principal.OrgSlug}, params)
+		if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
+			return
+		}
 		if err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInternal, err.Error())
 			return
@@ -117,7 +122,7 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONRPCResult(w, req.ID, map[string]string{"status": "canceled"})
 	case "pushNotification/set", "pushNotification/get", "pushNotification/delete":
-		handlePushNotification(w, service, agentID, req)
+		handlePushNotification(w, r, service, agentID, req)
 	default:
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, fmt.Sprintf("Unknown method: %s", req.Method))
 	}
@@ -149,6 +154,10 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	task, err := service.SendMessage(r.Context(), a2aserver.Identity{AgentID: a2aAgentID(principal), UserID: principal.Subject, OrgID: principal.OrgSlug}, params)
+	if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
+		writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
+		return
+	}
 	resp := a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: task}
 	if err != nil {
 		resp.Result = nil
@@ -194,7 +203,7 @@ func a2aAgentID(p execution.Principal) string {
 	}
 	return p.ClientID
 }
-func handlePushNotification(w http.ResponseWriter, service *a2aserver.Service, agentID string, req a2a.JSONRPCRequest) {
+func handlePushNotification(w http.ResponseWriter, r *http.Request, service *a2aserver.Service, agentID string, req a2a.JSONRPCRequest) {
 	var params a2a.GetTaskParams
 	if req.Method == "pushNotification/set" {
 		var set a2a.SetPushNotificationParams
@@ -204,6 +213,10 @@ func handlePushNotification(w http.ResponseWriter, service *a2aserver.Service, a
 		}
 		if _, err := service.GetTask(agentID, set.TaskID); err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeTaskNotFound, "Task not found")
+			return
+		}
+		if err := service.PushNotifier().ValidatePushURL(r.Context(), set.Config.URL); err != nil {
+			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid push URL: "+err.Error())
 			return
 		}
 		if err := service.TaskStore().SetPushConfig(set.TaskID, set.Config); err != nil {

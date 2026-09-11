@@ -3,6 +3,7 @@ package a2aserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -14,11 +15,14 @@ import (
 	"github.com/google/uuid"
 )
 
+const defaultMaxActiveTasks = 20
+
+var ErrActiveTaskLimit = errors.New("a2a active task limit reached")
+
 // DispatchFunc executes a normalized inbound message and receives complete turns.
 type DispatchFunc func(context.Context, channels.InboundMessage, func(context.Context, channels.OutboundMessage) error) error
 
-// Identity identifies the OAuth principal submitting an A2A task. The API layer
-// will construct it from canonical Astonish OAuth claims in the next phase.
+// Identity identifies the OAuth principal submitting an A2A task.
 type Identity struct {
 	AgentID string
 	UserID  string
@@ -27,22 +31,29 @@ type Identity struct {
 
 // Config supplies the task and execution dependencies for Service.
 type Config struct {
-	TaskStore    a2a.TaskStore
-	PushNotifier *a2a.PushNotifier
-	Dispatcher   DispatchFunc
-	BaseURL      string
-	Logger       *log.Logger
+	TaskStore       a2a.TaskStore
+	PushNotifier    *a2a.PushNotifier
+	Dispatcher      DispatchFunc
+	BaseURL         string
+	Logger          *log.Logger
+	MaxActiveTasks  int
+	SynchronousWait time.Duration
 }
 
 // Service owns task correlation, task state, and protocol-specific delivery.
 type Service struct {
-	store     a2a.TaskStore
-	dispatch  DispatchFunc
-	push      *a2a.PushNotifier
-	baseURL   string
-	logger    *log.Logger
-	waitersMu sync.Mutex
-	waiters   map[string]chan channels.OutboundMessage
+	store           a2a.TaskStore
+	dispatch        DispatchFunc
+	push            *a2a.PushNotifier
+	baseURL         string
+	logger          *log.Logger
+	maxActiveTasks  int
+	synchronousWait time.Duration
+	waitersMu       sync.Mutex
+	waiters         map[string]chan channels.OutboundMessage
+	activeMu        sync.Mutex
+	active          map[string]int
+	released        map[string]struct{}
 }
 
 // New creates an endpoint-owned A2A service.
@@ -59,13 +70,26 @@ func New(cfg Config) (*Service, error) {
 	if cfg.PushNotifier == nil {
 		cfg.PushNotifier = a2a.NewPushNotifier(cfg.Logger)
 	}
-	return &Service{store: cfg.TaskStore, dispatch: cfg.Dispatcher, push: cfg.PushNotifier, baseURL: cfg.BaseURL, logger: cfg.Logger, waiters: make(map[string]chan channels.OutboundMessage)}, nil
+	if cfg.MaxActiveTasks <= 0 {
+		cfg.MaxActiveTasks = defaultMaxActiveTasks
+	}
+	if cfg.SynchronousWait <= 0 {
+		cfg.SynchronousWait = 5 * time.Minute
+	}
+	return &Service{
+		store: cfg.TaskStore, dispatch: cfg.Dispatcher, push: cfg.PushNotifier, baseURL: cfg.BaseURL, logger: cfg.Logger,
+		maxActiveTasks: cfg.MaxActiveTasks, synchronousWait: cfg.SynchronousWait,
+		waiters: make(map[string]chan channels.OutboundMessage), active: make(map[string]int), released: make(map[string]struct{}),
+	}, nil
 }
 
 // SendMessage creates, dispatches, and optionally waits for an A2A task.
 func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a.SendMessageParams) (*a2a.Task, error) {
 	if identity.AgentID == "" {
 		return nil, fmt.Errorf("a2a agent identity is required")
+	}
+	if !s.acquire(identity.AgentID) {
+		return nil, ErrActiveTaskLimit
 	}
 	contextID := ""
 	if params.Configuration != nil {
@@ -102,10 +126,35 @@ func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a
 		s.complete(task.ID, reply)
 	case <-ctx.Done():
 		_ = s.store.UpdateState(task.ID, a2a.TaskStateCanceled, nil)
-	case <-time.After(5 * time.Minute):
+		s.release(task.ID, identity.AgentID)
+	case <-time.After(s.synchronousWait):
 		s.fail(task.ID, fmt.Errorf("request timed out"))
 	}
 	return s.store.Get(task.ID)
+}
+
+func (s *Service) acquire(agentID string) bool {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.active[agentID] >= s.maxActiveTasks {
+		return false
+	}
+	s.active[agentID]++
+	return true
+}
+
+func (s *Service) release(taskID, agentID string) {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if _, alreadyReleased := s.released[taskID]; alreadyReleased {
+		return
+	}
+	s.released[taskID] = struct{}{}
+	if s.active[agentID] <= 1 {
+		delete(s.active, agentID)
+		return
+	}
+	s.active[agentID]--
 }
 
 func (s *Service) dispatchAsync(ctx context.Context, taskID string, inbound channels.InboundMessage) {
@@ -147,6 +196,7 @@ func (s *Service) complete(taskID string, msg channels.OutboundMessage) {
 	if task, err := s.store.Get(taskID); err == nil && !task.Status.State.IsTerminal() {
 		_ = s.store.UpdateState(taskID, a2a.TaskStateCompleted, response)
 		_ = s.store.AddArtifact(taskID, a2a.Artifact{Name: "response", Parts: response.Parts, LastChunk: true})
+		s.release(taskID, task.AgentID)
 	}
 	if cfg := s.store.GetPushConfig(taskID); cfg != nil {
 		go func() {
@@ -157,7 +207,10 @@ func (s *Service) complete(taskID string, msg channels.OutboundMessage) {
 	}
 }
 func (s *Service) fail(taskID string, err error) {
-	_ = s.store.UpdateState(taskID, a2a.TaskStateFailed, &a2a.Message{Role: "agent", Parts: []a2a.Part{a2a.TextPart{Text: err.Error()}}})
+	if task, getErr := s.store.Get(taskID); getErr == nil && !task.Status.State.IsTerminal() {
+		_ = s.store.UpdateState(taskID, a2a.TaskStateFailed, &a2a.Message{Role: "agent", Parts: []a2a.Part{a2a.TextPart{Text: err.Error()}}})
+		s.release(taskID, task.AgentID)
+	}
 }
 
 // GetTask returns a task only when the identity owns it.
@@ -171,10 +224,15 @@ func (s *Service) GetTask(agentID, taskID string) (*a2a.Task, error) {
 
 // CancelTask cancels an owned task.
 func (s *Service) CancelTask(agentID, taskID string) error {
-	if _, err := s.GetTask(agentID, taskID); err != nil {
+	task, err := s.GetTask(agentID, taskID)
+	if err != nil {
 		return err
 	}
-	return s.store.Cancel(taskID)
+	if err := s.store.Cancel(taskID); err != nil {
+		return err
+	}
+	s.release(taskID, task.AgentID)
+	return nil
 }
 
 // TaskStore exposes protocol push configuration operations to the route layer.
@@ -183,7 +241,7 @@ func (s *Service) TaskStore() a2a.TaskStore { return s.store }
 // BaseURL returns the public endpoint base used in the agent card.
 func (s *Service) BaseURL() string { return s.baseURL }
 
-// PushNotifier exposes the existing notifier to the route layer.
+// PushNotifier exposes the notifier for route-layer push URL validation.
 func (s *Service) PushNotifier() *a2a.PushNotifier { return s.push }
 
 // SessionKey scopes continuity to the user where available, otherwise to the agent.

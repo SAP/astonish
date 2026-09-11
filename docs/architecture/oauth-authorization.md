@@ -19,7 +19,7 @@ flowchart LR
     IdP[Built-in auth / IAS / Keycloak / future SAML] --> Login
     Login --> SessionValidator[OAuth session validator]
 
-    Admin[Superadmin] --> AdminAPI[OAuth administration API]
+    Admin[Organization admin or owner] --> AdminAPI[OAuth administration API]
     AdminAPI --> OAuthStore[(Platform OAuth store)]
 
     Client[OAuth client / MCP host / agent] --> Protocol[OAuth protocol endpoints]
@@ -51,6 +51,10 @@ flowchart LR
 | Studio administration UI | `web/src/components/platformAdmin/OAuthTab.tsx` |
 
 `pkg/oauthserver` must not import provider-specific authentication logic. It receives a `SessionValidator` and an `OAuthServerStore`, keeping upstream identity and persistence replaceable at the composition root.
+
+### OAuth client administration
+
+OAuth clients bind a machine credential to a specific organization and team. Creating a client that can grant `chat`, `tool:execute`, or `a2a` is therefore an organization-administration operation: only an organization `owner` or `admin` who is also a member of the target team may create a client. Client ownership and the organization/team binding are immutable after creation; the owner may update or delete only their own client. Ordinary members can use OAuth applications that have been issued to their team but cannot mint new tenant-capable credentials.
 
 ## Trust model
 

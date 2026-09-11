@@ -218,7 +218,7 @@ func canUseOAuthContext(r *http.Request, backend oauthClientBackend, userID, org
 		return false
 	}
 	role, err := backend.Organizations().GetMemberRole(r.Context(), userID, orgID)
-	if err != nil || role == "" {
+	if err != nil || (role != "owner" && role != "admin") {
 		return false
 	}
 	orgStore, err := backend.ForOrg(org.Slug)

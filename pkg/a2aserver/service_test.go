@@ -13,12 +13,16 @@ type testDispatcher struct {
 	messages []channels.InboundMessage
 	reply    string
 	err      error
+	block    <-chan struct{}
 }
 
 func (d *testDispatcher) dispatch(ctx context.Context, msg channels.InboundMessage, reply func(context.Context, channels.OutboundMessage) error) error {
 	d.messages = append(d.messages, msg)
 	if d.err != nil {
 		return d.err
+	}
+	if d.block != nil {
+		<-d.block
 	}
 	return reply(ctx, channels.OutboundMessage{Text: d.reply})
 }
@@ -70,6 +74,33 @@ func TestA2AServiceAsyncCompletionAndOwnership(t *testing.T) {
 	if err := svc.CancelTask("other", task.ID); err == nil {
 		t.Fatal("cross-principal cancellation succeeded")
 	}
+}
+
+func TestA2AServiceLimitsActiveTasksAndReleasesOnCompletion(t *testing.T) {
+	blocked := make(chan struct{})
+	d := &testDispatcher{reply: "done", block: blocked}
+	store := a2a.NewInMemoryTaskStore(time.Hour)
+	t.Cleanup(store.Close)
+	svc, err := New(Config{TaskStore: store, Dispatcher: d.dispatch, MaxActiveTasks: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := a2a.SendMessageParams{Message: a2a.Message{Role: "user"}, Configuration: &a2a.TaskConfig{ReturnImmediately: true}}
+	if _, err := svc.SendMessage(context.Background(), Identity{AgentID: "owner"}, params); err != nil {
+		t.Fatalf("first task: %v", err)
+	}
+	if _, err := svc.SendMessage(context.Background(), Identity{AgentID: "owner"}, params); err == nil {
+		t.Fatal("expected active task limit rejection")
+	}
+	close(blocked)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := svc.SendMessage(context.Background(), Identity{AgentID: "owner"}, params); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("capacity was not released after completion")
 }
 
 func TestA2AServiceNormalizeParts(t *testing.T) {

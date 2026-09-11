@@ -78,6 +78,8 @@ The service supports:
 - principal-scoped task access;
 - push delivery for configured tasks.
 
+Push targets must use HTTPS and resolve only to public addresses. The service validates a target when it is configured and immediately before delivery, rejects redirects, and rechecks the target at dial time to prevent DNS rebinding. A bounded per-principal active-task limit applies to synchronous and return-immediately work so A2A cannot exhaust daemon resources.
+
 ## Configuration and administration
 
 Inbound A2A has no `channels.a2a` configuration. It is available with the OAuth-enabled API surface and uses the OAuth installation issuer/base URL to derive `/api/a2a`. Platform Channels lists only Telegram, Email, and Slack. Persisted legacy `channels.a2a` JSON is ignored, has no runtime effect, and is removed when channel settings are next saved; no database migration is required because the setting is generic JSON.

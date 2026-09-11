@@ -101,3 +101,42 @@ func TestA2AHandlerRejectsInvalidBearerBeforeDispatch(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
+
+func TestA2APushConfigurationRejectsCrossPrincipalAccess(t *testing.T) {
+	store := a2a.NewInMemoryTaskStore(time.Hour)
+	t.Cleanup(store.Close)
+	service, err := a2aserver.New(a2aserver.Config{TaskStore: store, Dispatcher: a2aTestDispatcher{}.dispatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetA2AService(service)
+	t.Cleanup(func() { SetA2AService(nil) })
+	task, err := service.SendMessage(context.Background(), a2aserver.Identity{AgentID: "owner"}, a2a.SendMessageParams{Message: a2a.Message{Role: "user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceA2A, Subject: "other", OrgSlug: "org", TeamSlug: "team", Scopes: []string{a2aScope}, Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"pushNotification/set", "pushNotification/get", "pushNotification/delete"} {
+		var params any = a2a.GetTaskParams{TaskID: task.ID}
+		if method == "pushNotification/set" {
+			params = a2a.SetPushNotificationParams{TaskID: task.ID, Config: a2a.PushNotificationConfig{URL: "https://example.com/hook"}}
+		}
+		raw, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(a2a.JSONRPCRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: raw})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		A2AHandler(w, httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(body)).WithContext(principal))
+		var response a2a.JSONRPCResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error == nil || response.Error.Code != a2a.ErrCodeTaskNotFound {
+			t.Fatalf("%s: expected task-not-found, got %s", method, w.Body.String())
+		}
+	}
+}

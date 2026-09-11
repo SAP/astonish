@@ -214,6 +214,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		api.SetPlatformSSOHandler(ssoHandler)
 		api.RegisterSSORoutes(router, ssoHandler)
 		api.RegisterOAuthServerRoutes(router, s.oauthServer)
+		api.RegisterOAuthAdminRoutes(router, s.oauthServer, s.backend)
 		api.RegisterMCPRoutes(router, s.oauthServer, s.tenantMW)
 	}
 
@@ -229,9 +230,12 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		// Wrap router + SPA into a single handler
 		spaHandler := spaFileServer(http.FS(webFS))
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Let mux handle /api/* and /.well-known/* routes
+			// OAuth protocol paths are intentionally outside /api. They must reach
+			// the mux rather than being treated as SPA routes, or /oauth/token
+			// returns Studio's index.html instead of an OAuth JSON response.
 			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
-				strings.HasPrefix(r.URL.Path, "/.well-known/") {
+				strings.HasPrefix(r.URL.Path, "/.well-known/") ||
+				strings.HasPrefix(r.URL.Path, "/oauth/") {
 				router.ServeHTTP(w, r)
 				return
 			}
@@ -243,7 +247,8 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		fallback := noAssetsHandler()
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
-				strings.HasPrefix(r.URL.Path, "/.well-known/") {
+				strings.HasPrefix(r.URL.Path, "/.well-known/") ||
+				strings.HasPrefix(r.URL.Path, "/oauth/") {
 				router.ServeHTTP(w, r)
 				return
 			}

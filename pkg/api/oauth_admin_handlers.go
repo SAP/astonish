@@ -209,6 +209,10 @@ func accessibleOAuthContexts(r *http.Request, backend oauthClientBackend, userID
 	return contexts, nil
 }
 
+func canAdministerOAuthClients(role string) bool {
+	return role == "owner" || role == "admin"
+}
+
 func canUseOAuthContext(r *http.Request, backend oauthClientBackend, userID, orgID, teamID string) bool {
 	if orgID == "" || teamID == "" {
 		return false
@@ -218,7 +222,7 @@ func canUseOAuthContext(r *http.Request, backend oauthClientBackend, userID, org
 		return false
 	}
 	role, err := backend.Organizations().GetMemberRole(r.Context(), userID, orgID)
-	if err != nil || (role != "owner" && role != "admin") {
+	if err != nil || !canAdministerOAuthClients(role) {
 		return false
 	}
 	orgStore, err := backend.ForOrg(org.Slug)

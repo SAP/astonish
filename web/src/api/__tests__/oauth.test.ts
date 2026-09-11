@@ -25,9 +25,22 @@ describe('personal OAuth API', () => {
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients', expect.objectContaining({ credentials: 'include' }))
   })
 
-  it('explains when a server restart expires the current session', async () => {
-    globalThis.fetch = mockFetch({ error: 'not authenticated' }, false, 401)
-    await expect(getOAuthDiscovery()).rejects.toThrow('Your session expired after the server restart. Sign in again, then reopen OAuth settings.')
+  it('refreshes an expired access session and retries the OAuth request once', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'unauthorized', json: () => Promise.resolve({ error: 'unauthorized' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: 'ok', json: () => Promise.resolve({}) })
+      .mockResolvedValueOnce({ ok: true, status: 200, statusText: 'ok', json: () => Promise.resolve({ issuer: 'https://issuer.example' }) })
+
+    await expect(getOAuthDiscovery()).resolves.toEqual(expect.objectContaining({ issuer: 'https://issuer.example' }))
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(2, '/api/auth/refresh', expect.objectContaining({ method: 'POST', credentials: 'include' }))
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(3, '/api/oauth/discovery', expect.objectContaining({ credentials: 'include' }))
+  })
+
+  it('asks the user to sign in when both the access and refresh sessions are invalid', async () => {
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'unauthorized', json: () => Promise.resolve({ error: 'unauthorized' }) })
+      .mockResolvedValueOnce({ ok: false, status: 401, statusText: 'unauthorized', json: () => Promise.resolve({ error: 'unauthorized' }) })
+    await expect(getOAuthDiscovery()).rejects.toThrow('Your session expired. Sign in again, then reopen OAuth settings.')
   })
 
   it('creates and rotates clients through owner-scoped personal routes', async () => {

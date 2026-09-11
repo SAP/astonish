@@ -11,7 +11,19 @@ async function adminFetch(input: string, init?: Parameters<typeof fetch>[1]): Pr
   if (!headers.has('X-Requested-With')) {
     headers.set('X-Requested-With', 'XMLHttpRequest')
   }
-  return fetch(input, { credentials: 'include', ...init, headers })
+  const request = { credentials: 'include' as const, ...init, headers }
+  let response = await fetch(input, request)
+  if (response.status !== 401) return response
+
+  const refresh = await fetch('/api/auth/refresh', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+  })
+  if (!refresh.ok) return response
+
+  response = await fetch(input, request)
+  return response
 }
 
 // Throw a descriptive error if the response is not ok.
@@ -20,7 +32,7 @@ async function throwIfNotOk(res: Response, fallbackMsg: string): Promise<void> {
   if (res.ok) return
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
   if (res.status === 401) {
-    throw new Error('Your session expired after the server restart. Sign in again, then reopen OAuth settings.')
+    throw new Error('Your session expired. Sign in again, then reopen OAuth settings.')
   }
   throw new Error((body.error as string) || fallbackMsg)
 }

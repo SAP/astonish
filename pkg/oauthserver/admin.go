@@ -32,6 +32,7 @@ type Discovery struct {
 	JWKSURI               string            `json:"jwks_uri"`
 	RevocationEndpoint    string            `json:"revocation_endpoint"`
 	IntrospectionEndpoint string            `json:"introspection_endpoint"`
+	A2AEndpoint           string            `json:"a2a_endpoint"`
 	Scopes                []ScopeDefinition `json:"scopes"`
 }
 
@@ -43,6 +44,7 @@ func (s *Server) Discovery() Discovery {
 		JWKSURI:               s.config.Issuer + "/oauth/jwks",
 		RevocationEndpoint:    s.config.Issuer + "/oauth/revoke",
 		IntrospectionEndpoint: s.config.Issuer + "/oauth/introspect",
+		A2AEndpoint:           s.config.Issuer + "/api/a2a",
 		Scopes:                ScopeDefinitions(),
 	}
 }

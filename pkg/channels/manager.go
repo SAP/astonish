@@ -617,6 +617,42 @@ func (m *ChannelManager) consumePinnedToolGroups(sessionKey string) []string {
 	return groups
 }
 
+func providerStoresFromContext(ctx context.Context) *store.ProviderStores {
+	if providers := store.ProviderStoresFromContext(ctx); providers != nil {
+		return providers
+	}
+	services := store.FromContext(ctx)
+	if services == nil {
+		return nil
+	}
+	return &store.ProviderStores{
+		Platform: services.PlatformSettings,
+		Org:      services.OrgSettings,
+		Team:     services.Settings,
+	}
+}
+
+func (m *ChannelManager) resolveInboundUser(ctx context.Context, msg InboundMessage) (context.Context, string, error) {
+	userID := fmt.Sprintf("channel_%s_%s", msg.ChannelID, msg.SenderID)
+	if !strings.HasPrefix(msg.ChannelID, "a2a-dispatch-") {
+		if m.platformResolver == nil {
+			return ctx, userID, nil
+		}
+		enrichedCtx, platformUserID, _, err := m.platformResolver.ResolveChannelUserWithHint(ctx, msg.ChannelID, msg.SenderID, msg.RoutingHint)
+		if err != nil {
+			m.logger.Printf("[channels] Platform resolver failed for %s/%s: %v", msg.ChannelID, msg.SenderID, err)
+			return nil, "", fmt.Errorf("resolve authenticated channel user: %w", err)
+		}
+		return enrichedCtx, platformUserID, nil
+	}
+
+	tenant := store.TenantContextFrom(ctx)
+	if tenant == nil || tenant.UserID == "" {
+		return nil, "", fmt.Errorf("A2A dispatch is missing an authenticated tenant user")
+	}
+	return ctx, tenant.UserID, nil
+}
+
 // handleInbound processes an inbound message from any channel.
 // It routes the message to the appropriate session, runs the ChatAgent,
 // collects the response, handles auto-distillation, and sends the reply.
@@ -638,28 +674,20 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 		return m.handleFleetMessage(ctx, msg, route, fleetSessionID)
 	}
 
-	// Get or create persistent session
-	userID := fmt.Sprintf("channel_%s_%s", msg.ChannelID, msg.SenderID)
+	// Platform mode normally resolves a messaging-channel identity. Endpoint-owned
+	// dispatches instead carry an OAuth-authenticated tenant context, so they must
+	// never be translated through UserChannel links.
+	ctx, userID, err := m.resolveInboundUser(ctx, msg)
+	if err != nil {
+		return err
+	}
 	appName := "astonish"
 
-	// Platform mode: resolve the channel sender to a platform user and inject
-	// team-scoped stores into the context. This gives the agent access to the
-	// user's team credentials, flows, skills, and MCP servers.
-	if m.platformResolver != nil {
-		enrichedCtx, platformUserID, _, resolveErr := m.platformResolver.ResolveChannelUserWithHint(ctx, msg.ChannelID, msg.SenderID, msg.RoutingHint)
-		if resolveErr != nil {
-			m.logger.Printf("[channels] Platform resolver failed for %s/%s: %v", msg.ChannelID, msg.SenderID, resolveErr)
-			return fmt.Errorf("resolve authenticated channel user: %w", resolveErr)
-		}
-		ctx = enrichedCtx
-		userID = platformUserID
-
-		// Hydrate the shared Redactor from the resolved credential store
-		// so tool output redaction catches PG-backed credentials.
-		if m.redactor != nil {
-			if cs := store.CredentialStoreFromContext(ctx); cs != nil {
-				m.redactor.HydrateFromStore(cs)
-			}
+	// Hydrate the shared Redactor from the resolved credential store so tool
+	// output redaction catches PG-backed credentials.
+	if m.redactor != nil {
+		if cs := store.CredentialStoreFromContext(ctx); cs != nil {
+			m.redactor.HydrateFromStore(cs)
 		}
 	}
 
@@ -671,8 +699,11 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	// Per-message provider resolution: resolve the effective LLM from the
 	// 3-tier DB cascade (Platform → Org → Team) plus the per-session pin
 	// (DECISION-3: missing-cred → warn + cascade fallback, do NOT drop).
+	// OAuth endpoint requests receive their tenant stores through Services, while
+	// legacy channel dispatches receive ProviderStores directly from the channel
+	// resolver. Normalize both forms before selecting the LLM.
 	if m.llmPool != nil {
-		if ps := store.ProviderStoresFromContext(ctx); ps != nil {
+		if ps := providerStoresFromContext(ctx); ps != nil {
 			appCfg := resolveEffectiveWithSessionPin(ctx, ps, route.SessionKey, msg.ChannelID, msg.SenderID)
 
 			if appCfg.General.DefaultProvider != "" {
@@ -1198,6 +1229,42 @@ func sessionServiceFromContext(ctx context.Context) session.Service {
 	}
 	return ss
 }
+
+// Dispatch executes an endpoint-owned inbound request through the existing chat
+// pipeline and writes complete output turns to sink instead of a persistent channel.
+func (m *ChannelManager) Dispatch(ctx context.Context, msg InboundMessage, sink func(context.Context, OutboundMessage) error) error {
+	if sink == nil {
+		return fmt.Errorf("dispatch reply sink is required")
+	}
+	channelID := "a2a-dispatch-" + msg.ID
+	ch := &dispatchSinkChannel{id: channelID, sink: sink}
+	m.mu.Lock()
+	m.channels[channelID] = ch
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.channels, channelID)
+		m.mu.Unlock()
+	}()
+	msg.ChannelID = channelID
+	return m.handleInbound(ctx, msg)
+}
+
+type dispatchSinkChannel struct {
+	id   string
+	sink func(context.Context, OutboundMessage) error
+}
+
+func (c *dispatchSinkChannel) ID() string                                  { return c.id }
+func (c *dispatchSinkChannel) Name() string                                { return "Endpoint reply sink" }
+func (c *dispatchSinkChannel) Start(context.Context, MessageHandler) error { return nil }
+func (c *dispatchSinkChannel) Stop(context.Context) error                  { return nil }
+func (c *dispatchSinkChannel) Send(ctx context.Context, _ Target, msg OutboundMessage) error {
+	return c.sink(ctx, msg)
+}
+func (c *dispatchSinkChannel) BroadcastTargets() []Target               { return nil }
+func (c *dispatchSinkChannel) SendTyping(context.Context, Target) error { return nil }
+func (c *dispatchSinkChannel) Status() ChannelStatus                    { return ChannelStatus{Connected: true} }
 
 // getChannel returns a registered channel by ID.
 func (m *ChannelManager) getChannel(id string) Channel {

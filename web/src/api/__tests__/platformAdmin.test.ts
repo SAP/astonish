@@ -12,10 +12,11 @@ afterEach(() => { globalThis.fetch = originalFetch })
 
 describe('OAuth platform administration API', () => {
   it('loads discovery and lists secret-free clients through the admin transport', async () => {
-    globalThis.fetch = mockFetch({ Issuer: 'https://issuer.example', Resource: 'https://api.example' })
+    globalThis.fetch = mockFetch({ Issuer: 'https://issuer.example', Resource: 'https://api.example', A2AEndpoint: 'https://issuer.example/api/a2a' })
     await expect(getOAuthDiscovery()).resolves.toEqual(expect.objectContaining({
       issuer: 'https://issuer.example',
       resource: 'https://api.example',
+      a2a_endpoint: 'https://issuer.example/api/a2a',
     }))
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/platform/admin/oauth/discovery', expect.objectContaining({ credentials: 'include' }))
 

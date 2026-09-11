@@ -68,10 +68,6 @@ var channelDefinitions = map[string]channelDefinition{
 			{key: "channels.slack.client_secret", label: "OAuth Client Secret"},
 		},
 	},
-	"a2a": {
-		description: "A2A Protocol (Agent-to-Agent)",
-		secrets:     []channelSecretDef{}, // A2A uses per-agent API keys managed via admin endpoints
-	},
 }
 
 // emailMSGraphSecrets defines the secrets needed for Microsoft Graph provider.
@@ -219,31 +215,9 @@ func PlatformAdminListChannelsHandler(w http.ResponseWriter, r *http.Request) {
 		result = append(result, info)
 	}
 
-	// A2A (Agent-to-Agent protocol)
-	{
-		info := channelFullInfo{
-			Type:        "a2a",
-			Description: "A2A Protocol (Agent-to-Agent)",
-			Config:      map[string]any{},
-			Secrets:     []channelSecretAt{}, // A2A uses per-agent API keys, not global secrets
-			SecretsSet:  true,                // No global secrets needed
-		}
-		if channels.A2A != nil {
-			info.Enabled = channels.A2A.Enabled
-			info.Config["base_url"] = channels.A2A.BaseURL
-			info.Config["description"] = channels.A2A.Description
-			info.Config["rate_limit"] = channels.A2A.RateLimit
-			info.Config["max_concurrent_tasks"] = channels.A2A.MaxConcurrentTasks
-			info.Config["task_ttl"] = channels.A2A.TaskTTL
-			info.Config["default_audience"] = channels.A2A.DefaultAudience
-			info.Config["auto_link_by_email"] = channels.A2A.AutoLinkByEmail
-			info.Config["require_actor_claim"] = channels.A2A.RequireActorClaim
-		}
-		result = append(result, info)
-	}
-
 	respondJSON(w, http.StatusOK, result)
 }
+
 // Saves both config fields and secrets for a channel adapter in one request.
 func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 	if RequirePlatformAdmin(w, r) == nil {
@@ -337,41 +311,6 @@ func PlatformAdminSaveChannelHandler(w http.ResponseWriter, r *http.Request) {
 			cfg.CommandURL = v
 		}
 		settings.Channels.Slack = cfg
-	case "a2a":
-		cfg := &store.PlatformA2AConfig{
-			Enabled: body.Enabled,
-		}
-		if v, ok := body.Config["base_url"].(string); ok {
-			cfg.BaseURL = v
-		}
-		if v, ok := body.Config["description"].(string); ok {
-			cfg.Description = v
-		}
-		if v, ok := body.Config["rate_limit"]; ok {
-			cfg.RateLimit = toInt(v)
-		}
-		if v, ok := body.Config["max_concurrent_tasks"]; ok {
-			cfg.MaxConcurrentTasks = toInt(v)
-		}
-		if v, ok := body.Config["task_ttl"].(string); ok {
-			cfg.TaskTTL = v
-		}
-		if v, ok := body.Config["default_audience"].(string); ok {
-			cfg.DefaultAudience = v
-		}
-		if v, ok := body.Config["auto_link_by_email"].(bool); ok {
-			cfg.AutoLinkByEmail = v
-		}
-		if v, ok := body.Config["require_actor_claim"].(bool); ok {
-			cfg.RequireActorClaim = v
-		}
-		if v, ok := body.Config["trusted_issuers"]; ok {
-			cfg.TrustedIssuers = parseTrustedIssuers(v)
-		}
-		if v, ok := body.Config["allowed_agents"]; ok {
-			cfg.AllowedAgents = parseAllowedAgents(v)
-		}
-		settings.Channels.A2A = cfg
 	}
 
 	if err := settingsStore.Save(r.Context(), settings); err != nil {
@@ -776,74 +715,4 @@ func PlatformAdminTestEmailHandler(w http.ResponseWriter, r *http.Request) {
 		"email":       meResp.Mail,
 		"displayName": meResp.DisplayName,
 	})
-}
-
-// parseTrustedIssuers parses the trusted_issuers field from the API config map.
-func parseTrustedIssuers(v any) []store.PlatformTrustedIssuer {
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	var issuers []store.PlatformTrustedIssuer
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		iss := store.PlatformTrustedIssuer{}
-		if s, ok := m["name"].(string); ok {
-			iss.Name = s
-		}
-		if s, ok := m["issuer"].(string); ok {
-			iss.Issuer = s
-		}
-		if s, ok := m["jwks_url"].(string); ok {
-			iss.JWKSURL = s
-		}
-		if s, ok := m["audience"].(string); ok {
-			iss.Audience = s
-		}
-		if s, ok := m["user_claim"].(string); ok {
-			iss.UserClaim = s
-		}
-		if iss.Issuer != "" {
-			issuers = append(issuers, iss)
-		}
-	}
-	return issuers
-}
-
-// parseAllowedAgents parses the allowed_agents field from the API config map.
-func parseAllowedAgents(v any) []store.PlatformAllowedAgent {
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	var agents []store.PlatformAllowedAgent
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		ag := store.PlatformAllowedAgent{}
-		if s, ok := m["name"].(string); ok {
-			ag.Name = s
-		}
-		if s, ok := m["actor_sub"].(string); ok {
-			ag.ActorSub = s
-		}
-		if s, ok := m["issuer"].(string); ok {
-			ag.Issuer = s
-		}
-		if rl, ok := m["rate_limit"]; ok {
-			ag.RateLimit = toInt(rl)
-		}
-		if mt, ok := m["max_tasks"]; ok {
-			ag.MaxTasks = toInt(mt)
-		}
-		if ag.ActorSub != "" {
-			agents = append(agents, ag)
-		}
-	}
-	return agents
 }

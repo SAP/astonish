@@ -17,19 +17,18 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	a2apkg "github.com/SAP/astonish/pkg/a2a"
+	"github.com/SAP/astonish/pkg/a2a"
+	"github.com/SAP/astonish/pkg/a2aserver"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/browser"
 	"github.com/SAP/astonish/pkg/channels"
-	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
 	emailchan "github.com/SAP/astonish/pkg/channels/email"
 	slackchan "github.com/SAP/astonish/pkg/channels/slack"
 	"github.com/SAP/astonish/pkg/channels/telegram"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	emailpkg "github.com/SAP/astonish/pkg/email"
-	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/fleet"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/mailer"
@@ -605,138 +604,15 @@ func Run(cfg RunConfig) error {
 			}
 		}
 
-		// Register A2A (Agent-to-Agent protocol) channel if enabled
-		var a2aConfigError string
-		if chCfg.A2A.IsA2AEnabled() {
-			taskTTL := 72 * time.Hour
-			if chCfg.A2A.TaskTTL != "" {
-				if parsed, err := time.ParseDuration(chCfg.A2A.TaskTTL); err == nil {
-					taskTTL = parsed
-				}
-			}
-			baseURL := chCfg.A2A.BaseURL
-			if baseURL == "" {
-				baseURL = "http://localhost:9393" // default
-			}
-			taskStore := a2apkg.NewInMemoryTaskStore(taskTTL)
-			a2aCh := a2achan.New(&a2achan.Config{
-				TaskStore: taskStore,
-				BaseURL:   baseURL,
-			}, log.Default())
-			mgr.Register(a2aCh)
-			api.SetA2AChannel(a2aCh)
-			logger.Printf("A2A channel registered (multi-client, HTTP-driven)")
-
-			// Wire A2A token validator from channel config.
-			var issuers []a2apkg.TrustedIssuer
-			for _, ti := range chCfg.A2A.TrustedIssuers {
-				userClaim := ti.UserClaim
-				if userClaim == "" {
-					userClaim = "sub"
-				}
-				audience := ti.Audience
-				if audience == "" {
-					audience = chCfg.A2A.DefaultAudience
-				}
-				issuers = append(issuers, a2apkg.TrustedIssuer{
-					ID:        fmt.Sprintf("issuer-%s", ti.Name),
-					Name:      ti.Name,
-					Issuer:    ti.Issuer,
-					JWKSURL:   ti.JWKSURL,
-					Audience:  audience,
-					UserClaim: userClaim,
-					OrgID:     ti.OrgSlug,
-					TeamID:    ti.TeamSlug,
-				})
-			}
-			var agents []a2apkg.AllowedAgent
-			for _, aa := range chCfg.A2A.AllowedAgents {
-				// Find matching issuer ID by name.
-				var issuerID string
-				for _, iss := range issuers {
-					if iss.Name == aa.Issuer {
-						issuerID = iss.ID
-						break
-					}
-				}
-				agents = append(agents, a2apkg.AllowedAgent{
-					ID:        fmt.Sprintf("agent-%s", aa.Name),
-					Name:      aa.Name,
-					ActorSub:  aa.ActorSub,
-					IssuerID:  issuerID,
-					RateLimit: aa.RateLimit,
-					MaxTasks:  aa.MaxTasks,
-					Enabled:   true,
-				})
-			}
-			validator := a2apkg.NewTokenValidator(a2apkg.TokenValidatorConfig{
-				Issuers:           issuers,
-				Agents:            agents,
-				RequireActorClaim: chCfg.A2A.RequireActorClaim,
-			})
-			api.SetA2ATokenValidator(validator)
-			api.SetA2APrincipalResolver(func(requestCtx context.Context, claims *a2apkg.A2ATokenClaims) (execution.Principal, error) {
-				if backend == nil || claims == nil || claims.OrgID == "" || claims.TeamID == "" {
-					return execution.Principal{}, fmt.Errorf("A2A tenant resolution is unavailable")
-				}
-				user, err := backend.Users().GetByOIDC(requestCtx, claims.Issuer, claims.UserIdentifier)
-				if err != nil || user == nil {
-					user, err = backend.Users().GetByEmail(requestCtx, claims.UserIdentifier)
-				}
-				if err != nil || user == nil || user.Status != "active" {
-					return execution.Principal{}, fmt.Errorf("A2A user is not active")
-				}
-				org, err := backend.Organizations().GetBySlug(requestCtx, claims.OrgID)
-				if err != nil || org == nil || org.Status != "active" {
-					return execution.Principal{}, fmt.Errorf("A2A organization is not active")
-				}
-				role, err := backend.Organizations().GetMemberRole(requestCtx, user.ID, org.ID)
-				if err != nil || role == "" {
-					return execution.Principal{}, fmt.Errorf("A2A user is not an organization member")
-				}
-				orgStore, err := backend.ForOrg(org.ID)
-				if err != nil {
-					return execution.Principal{}, fmt.Errorf("open A2A organization: %w", err)
-				}
-				isMember, err := orgStore.Teams().IsTeamMember(requestCtx, user.ID, claims.TeamID)
-				if err != nil || !isMember {
-					return execution.Principal{}, fmt.Errorf("A2A user is not a team member")
-				}
-				return execution.Principal{
-					Kind:           execution.PrincipalKindUser,
-					Authentication: execution.AuthMethodOAuth,
-					Surface:        execution.SurfaceA2A,
-					Subject:        user.ID,
-					Actor:          claims.ActorIdentifier,
-					Issuer:         claims.Issuer,
-					OrgSlug:        claims.OrgID,
-					TeamSlug:       claims.TeamID,
-					Roles:          []string{role},
-					Scopes:         []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)},
-					Authenticated:  true,
-				}, nil
-			})
-			logger.Printf("A2A authentication: %d trusted issuers, %d allowed agents", len(issuers), len(agents))
-
-			// Wire per-agent rate limiter from allowed agents config.
-			rl := a2apkg.NewAgentRateLimiter()
-			for _, ag := range agents {
-				if ag.RateLimit > 0 || ag.MaxTasks > 0 {
-					rl.SetAgentLimits(ag.ActorSub, ag.RateLimit, ag.MaxTasks)
-				}
-			}
-			api.SetA2ARateLimiter(rl)
-
-			// Wire fail-closed user resolver.
-			// For now, accept all authenticated users (the JWT validation already
-			// ensures the token is from a trusted issuer). A full PlatformResolver
-			// integration that checks UserChannel linkage is a follow-up.
-			// Setting the resolver to nil means fail-open (skip check).
-			// To enable fail-closed, uncomment and wire the actual user lookup:
-			// api.SetA2AUserResolver(func(ctx context.Context, userID, orgID string) bool {
-			//     return backend.UserExists(ctx, userID, orgID)
-			// })
+		baseURL := "http://localhost:9393"
+		taskStore := a2a.NewInMemoryTaskStore(72 * time.Hour)
+		service, err := a2aserver.New(a2aserver.Config{TaskStore: taskStore, BaseURL: baseURL, Dispatcher: mgr.Dispatch, Logger: log.Default()})
+		if err != nil {
+			return mgr, fmt.Errorf("create A2A service: %w", err)
 		}
+		api.SetA2AService(service)
+
+		// Inbound A2A is an OAuth-protected API service, not a ChannelManager adapter.
 
 		if err := mgr.StartAll(ctx); err != nil {
 			return mgr, fmt.Errorf("failed to start channels: %w", err)
@@ -754,9 +630,6 @@ func Run(cfg RunConfig) error {
 		}
 		if chCfg.Slack.IsSlackEnabled() {
 			cfgStatuses["slack"] = api.ChannelConfigStatus{Enabled: true, Error: slackConfigError}
-		}
-		if chCfg.A2A.IsA2AEnabled() {
-			cfgStatuses["a2a"] = api.ChannelConfigStatus{Enabled: true, Error: a2aConfigError}
 		}
 		api.SetChannelConfigStatuses(cfgStatuses)
 

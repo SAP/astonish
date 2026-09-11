@@ -7,6 +7,7 @@ import "fmt"
 type Capability string
 
 const (
+	CapabilityA2A         Capability = "a2a"
 	CapabilityChat        Capability = "chat"
 	CapabilityMemoryRead  Capability = "memory:read"
 	CapabilityMemoryWrite Capability = "memory:write"

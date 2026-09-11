@@ -113,6 +113,8 @@ The server publishes OAuth authorization-server metadata and protected-resource 
 | `/oauth/introspect` | Token state inspection | Authenticated client |
 | `/api/oauth/*` | Personal client management and discovery view | Authenticated owner; server enforces owner and tenant membership |
 | `/api/mcp` | Protected Streamable HTTP MCP server | Valid Astonish bearer token with `tool:execute` |
+| `/api/a2a` | Protected inbound A2A JSON-RPC server | Valid Astonish bearer token with exact `a2a` |
+| `/.well-known/agent-card.json` | Inbound A2A Agent Card discovery | Public |
 
 Protocol routes are mounted outside the SPA fallback and remain subject to global HTTP security and rate-limiting middleware. The authorization endpoint independently validates the existing platform session; public route registration does not make authorization anonymous.
 
@@ -271,7 +273,7 @@ Provider claims such as IAS `xs.groups`, Keycloak roles/groups, or SAML attribut
 - Do not make OAuth client administration depend on which upstream login provider is active.
 - Do not conflate OAuth client secrets with OIDC/SAML application credentials used to connect Astonish to an IdP.
 
-A transport that intentionally accepts external bearer tokens, such as a separately configured A2A trusted issuer, owns its own issuer registry and validator. It must still resolve a canonical principal and pass through `pkg/execution` before agent or tool execution.
+No protected execution transport accepts an external bearer token directly. Inbound A2A is protected by an Astonish-issued OAuth token carrying exact `a2a`; it does not use a trusted-issuer registry, external JWKS configuration, or `UserChannel(a2a, ...)` identity links.
 
 ## Security invariants
 
@@ -328,3 +330,4 @@ Each future IAS, Keycloak, OIDC, or SAML integration must prove:
 - Rejection of the raw upstream token at the built-in OAuth bearer boundary.
 
 These are architectural acceptance criteria, not a record of project completion. Temporary status, gap, or remaining-work documents must not replace this contract.
+t replace this contract.

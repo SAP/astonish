@@ -3,855 +3,101 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/base64"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/a2a"
+	"github.com/SAP/astonish/pkg/a2aserver"
 	"github.com/SAP/astonish/pkg/channels"
-	a2achan "github.com/SAP/astonish/pkg/channels/a2a"
 	"github.com/SAP/astonish/pkg/execution"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 )
 
-// testRSAKey is a shared RSA key for test JWT signing.
-var testRSAKey *rsa.PrivateKey
-
-func init() {
-	var err error
-	testRSAKey, err = rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		panic("failed to generate test RSA key: " + err.Error())
-	}
+type a2aTestValidator struct {
+	principal execution.Principal
+	err       error
+	calls     int
 }
 
-// newTestJWKSServer creates an httptest.Server serving a JWKS with the test RSA public key.
-func newTestJWKSServer(t *testing.T) *httptest.Server {
-	t.Helper()
-
-	nBytes := testRSAKey.PublicKey.N.Bytes()
-	eBytes := big.NewInt(int64(testRSAKey.PublicKey.E)).Bytes()
-
-	jwks := map[string]interface{}{
-		"keys": []map[string]interface{}{
-			{
-				"kty": "RSA",
-				"kid": "test-key-1",
-				"n":   base64.RawURLEncoding.EncodeToString(nBytes),
-				"e":   base64.RawURLEncoding.EncodeToString(eBytes),
-			},
-		},
+func (v *a2aTestValidator) ValidateBearer(_ context.Context, _ string, _ string, scopes []string, surface execution.Surface) (execution.Principal, error) {
+	v.calls++
+	if len(scopes) != 1 || scopes[0] != a2aScope || surface != execution.SurfaceA2A {
+		return execution.Principal{}, context.Canceled
 	}
-
-	data, err := json.Marshal(jwks)
-	if err != nil {
-		t.Fatalf("failed to marshal JWKS: %v", err)
-	}
-
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(data)
-	}))
+	return v.principal, v.err
 }
 
-// signTestJWT creates a signed JWT for testing with the given claims.
-func signTestJWT(t *testing.T, issuer, subject, audience string, expiresAt time.Time, actorSub string) string {
-	t.Helper()
+type a2aTestDispatcher struct{}
 
-	claims := jwt.MapClaims{
-		"iss": issuer,
-		"sub": subject,
-		"aud": audience,
-		"exp": jwt.NewNumericDate(expiresAt),
-		"iat": jwt.NewNumericDate(time.Now()),
-	}
-	if actorSub != "" {
-		claims["act"] = map[string]any{"sub": actorSub}
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	token.Header["kid"] = "test-key-1"
-
-	signed, err := token.SignedString(testRSAKey)
-	if err != nil {
-		t.Fatalf("failed to sign test JWT: %v", err)
-	}
-	return signed
+func (a2aTestDispatcher) dispatch(ctx context.Context, _ channels.InboundMessage, reply func(context.Context, channels.OutboundMessage) error) error {
+	return reply(ctx, channels.OutboundMessage{Text: "done"})
 }
 
-// setupA2ATestWithJWT sets up the A2A channel and token validator for tests.
-func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
+func setupA2ARouter(t *testing.T, principal execution.Principal, err error) *mux.Router {
 	t.Helper()
-	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
+	store := a2a.NewInMemoryTaskStore(time.Hour)
 	t.Cleanup(store.Close)
-
-	ch := a2achan.New(&a2achan.Config{
-		TaskStore: store,
-		BaseURL:   "http://localhost:9393",
-	}, nil)
-
-	// Set the global channel
-	SetA2AChannel(ch)
-	t.Cleanup(func() { SetA2AChannel(nil) })
-
-	// Set up a token validator with a test JWKS server
-	jwksServer := newTestJWKSServer(t)
-	t.Cleanup(jwksServer.Close)
-
-	validator := a2a.NewTokenValidator(a2a.TokenValidatorConfig{
-		Issuers: []a2a.TrustedIssuer{
-			{
-				ID:        "test-issuer-id",
-				Name:      "Test Issuer",
-				Issuer:    "https://idp.example.com",
-				JWKSURL:   jwksServer.URL,
-				Audience:  "astonish-a2a",
-				UserClaim: "sub",
-				OrgID:     "org-1",
-				TeamID:    "team-1",
-			},
-		},
-		Agents: []a2a.AllowedAgent{
-			{
-				ID:       "agent-1",
-				Name:     "Test Service Agent",
-				ActorSub: "service-account-1",
-				IssuerID: "test-issuer-id",
-				OrgID:    "org-1",
-				Enabled:  true,
-			},
-		},
-		RequireActorClaim: false,
-	})
-
-	SetA2ATokenValidator(validator)
-	SetA2APrincipalResolver(func(_ context.Context, claims *a2a.A2ATokenClaims) (execution.Principal, error) {
-		return execution.Principal{
-			Kind:           execution.PrincipalKindUser,
-			Authentication: execution.AuthMethodOAuth,
-			Surface:        execution.SurfaceA2A,
-			Subject:        claims.UserIdentifier,
-			Actor:          claims.ActorIdentifier,
-			Issuer:         claims.Issuer,
-			OrgSlug:        claims.OrgID,
-			TeamSlug:       claims.TeamID,
-			Scopes:         []string{string(execution.CapabilityChat)},
-			Authenticated:  true,
-		}, nil
-	})
-	t.Cleanup(func() { SetA2ATokenValidator(nil) })
-	t.Cleanup(func() { SetA2APrincipalResolver(nil) })
-
-	return ch
-}
-
-func TestA2AAgentCardHandler(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	req := httptest.NewRequest("GET", "/.well-known/agent-card.json", nil)
-	w := httptest.NewRecorder()
-
-	AgentCardHandler(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	service, newErr := a2aserver.New(a2aserver.Config{TaskStore: store, BaseURL: "http://example.test", Dispatcher: a2aTestDispatcher{}.dispatch})
+	if newErr != nil {
+		t.Fatal(newErr)
 	}
-
-	var card a2a.AgentCard
-	if err := json.Unmarshal(w.Body.Bytes(), &card); err != nil {
-		t.Fatalf("failed to parse agent card: %v", err)
-	}
-
-	if card.Name != "Astonish" {
-		t.Fatalf("expected name 'Astonish', got %q", card.Name)
-	}
-	if card.URL != "http://localhost:9393/api/a2a" {
-		t.Fatalf("expected URL with /api/a2a, got %q", card.URL)
-	}
-}
-
-func TestA2AAgentCardHandler_NotConfigured(t *testing.T) {
-	SetA2AChannel(nil)
-
-	req := httptest.NewRequest("GET", "/.well-known/agent-card.json", nil)
-	w := httptest.NewRecorder()
-
-	AgentCardHandler(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
-	}
-}
-
-func TestA2AHandler_MessageSend_ValidJWT(t *testing.T) {
-	ch := setupA2ATestWithJWT(t)
-
-	// Start the channel with a handler that responds
-	_ = ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
-		return nil
-	})
-
-	// Build JSON-RPC request
-	params := a2a.SendMessageParams{
-		Message: a2a.Message{
-			Role:  "user",
-			Parts: []a2a.Part{a2a.TextPart{Text: "Hello"}},
-		},
-		Configuration: &a2a.TaskConfig{
-			ReturnImmediately: true,
-		},
-	}
-	paramsJSON, _ := json.Marshal(params)
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-		Params:  paramsJSON,
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	// Create router with auth middleware
+	SetA2AService(service)
+	t.Cleanup(func() { SetA2AService(nil) })
 	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign a valid JWT
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(time.Hour), "")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %+v", resp.Error)
-	}
+	RegisterA2ARoutes(router, &a2aTestValidator{principal: principal, err: err}, nil, nil)
+	return router
 }
-
-func TestA2AHandler_MessageSend_WithActorClaim(t *testing.T) {
-	ch := setupA2ATestWithJWT(t)
-
-	_ = ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
-		return nil
-	})
-
-	params := a2a.SendMessageParams{
-		Message: a2a.Message{
-			Role:  "user",
-			Parts: []a2a.Part{a2a.TextPart{Text: "Hello from service"}},
-		},
-		Configuration: &a2a.TaskConfig{
-			ReturnImmediately: true,
-		},
-	}
-	paramsJSON, _ := json.Marshal(params)
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-		Params:  paramsJSON,
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign a JWT with actor claim (delegation)
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %+v", resp.Error)
-	}
+func oauthA2APrincipal(scopes ...string) execution.Principal {
+	return execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceA2A, Subject: "user", OrgSlug: "org", TeamSlug: "team", Scopes: scopes, Authenticated: true}
 }
-
-func TestA2AHandler_ExpiredToken(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign an expired JWT
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(-time.Hour), "")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for expired token")
-	}
-	if resp.Error.Code != a2a.ErrCodeAuthRequired {
-		t.Fatalf("expected error code %d (auth required), got %d", a2a.ErrCodeAuthRequired, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_WrongAudience(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign a JWT with wrong audience
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "wrong-audience", time.Now().Add(time.Hour), "")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for wrong audience")
-	}
-	if resp.Error.Code != a2a.ErrCodeForbidden {
-		t.Fatalf("expected error code %d (forbidden), got %d", a2a.ErrCodeForbidden, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_UnknownIssuer(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign a JWT with unknown issuer
-	token := signTestJWT(t, "https://unknown-idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(time.Hour), "")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for unknown issuer")
-	}
-	if resp.Error.Code != a2a.ErrCodeForbidden {
-		t.Fatalf("expected error code %d (forbidden), got %d", a2a.ErrCodeForbidden, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_UnauthorizedActor(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Sign a JWT with an actor that's not in the allowed agents list
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(time.Hour), "unauthorized-service")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for unauthorized actor")
-	}
-	if resp.Error.Code != a2a.ErrCodeForbidden {
-		t.Fatalf("expected error code %d (forbidden), got %d", a2a.ErrCodeForbidden, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_NoAuth(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	// No auth header
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for missing auth")
-	}
-	if resp.Error.Code != a2a.ErrCodeAuthRequired {
-		t.Fatalf("expected error code %d, got %d", a2a.ErrCodeAuthRequired, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_UnknownMethod(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "unknown/method",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Valid JWT
-	token := signTestJWT(t, "https://idp.example.com", "user@example.com", "astonish-a2a", time.Now().Add(time.Hour), "")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error for unknown method")
-	}
-	if resp.Error.Code != a2a.ErrCodeMethodNotFound {
-		t.Fatalf("expected error code %d, got %d", a2a.ErrCodeMethodNotFound, resp.Error.Code)
-	}
-}
-
-func TestA2AHandler_ValidatorNotConfigured(t *testing.T) {
-	// Set up channel but no validator
-	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
-	t.Cleanup(store.Close)
-
-	ch := a2achan.New(&a2achan.Config{
-		TaskStore: store,
-		BaseURL:   "http://localhost:9393",
-	}, nil)
-
-	SetA2AChannel(ch)
-	t.Cleanup(func() { SetA2AChannel(nil) })
-	SetA2ATokenValidator(nil)
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-	}
-	body, _ := json.Marshal(rpcReq)
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer some-token")
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	var resp a2a.JSONRPCResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error when validator not configured")
-	}
-	if resp.Error.Code != a2a.ErrCodeInternal {
-		t.Fatalf("expected error code %d (internal), got %d", a2a.ErrCodeInternal, resp.Error.Code)
-	}
-}
-
-func TestA2AAuthExemptPaths(t *testing.T) {
-	tests := []struct {
-		path   string
-		exempt bool
-	}{
-		{"/.well-known/agent-card.json", true},
-		{"/api/a2a", true},
-		{"/api/a2a/stream", true},
-		{"/api/admin/a2a/agents", false},
-	}
-	for _, tt := range tests {
-		got := isAuthExemptPath(tt.path)
-		if got != tt.exempt {
-			t.Errorf("isAuthExemptPath(%q) = %v, want %v", tt.path, got, tt.exempt)
-		}
-	}
-}
-
-func TestA2AHandler_TaskOwnershipIsolation(t *testing.T) {
-	// This test proves that a delegated service (actor) acting for multiple users
-	// cannot see other users' tasks — the exact attack vector identified in the
-	// design assessment.
-	ch := setupA2ATestWithJWT(t)
-
-	_ = ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
-		return nil
-	})
-
-	router := mux.NewRouter()
-	sub := router.PathPrefix("/api/a2a").Subrouter()
-	sub.Use(A2AAuthMiddleware)
-	sub.HandleFunc("", A2AHandler).Methods("POST")
-
-	// Helper to send a message and extract the task ID from the response.
-	sendMessage := func(t *testing.T, userSub string) string {
-		t.Helper()
-		params := a2a.SendMessageParams{
-			Message: a2a.Message{
-				Role:  "user",
-				Parts: []a2a.Part{a2a.TextPart{Text: "Hello from " + userSub}},
-			},
-			Configuration: &a2a.TaskConfig{
-				ReturnImmediately: true,
-			},
-		}
-		paramsJSON, _ := json.Marshal(params)
-		rpcReq := a2a.JSONRPCRequest{
-			JSONRPC: "2.0",
-			ID:      1,
-			Method:  "message/send",
-			Params:  paramsJSON,
-		}
-		body, _ := json.Marshal(rpcReq)
-
-		// Same actor (service-account-1) but different user
-		token := signTestJWT(t, "https://idp.example.com", userSub, "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-
-		req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		router.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-
-		var resp a2a.JSONRPCResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to parse response: %v", err)
-		}
-		if resp.Error != nil {
-			t.Fatalf("unexpected error: %+v", resp.Error)
-		}
-
-		// Extract task ID from result
-		resultBytes, _ := json.Marshal(resp.Result)
-		var task a2a.Task
-		if err := json.Unmarshal(resultBytes, &task); err != nil {
-			t.Fatalf("failed to parse task from result: %v", err)
-		}
-		if task.ID == "" {
-			t.Fatal("expected non-empty task ID")
-		}
-		return task.ID
-	}
-
-	// Helper to call tasks/get and return whether it succeeded.
-	getTask := func(t *testing.T, userSub, taskID string) (bool, *a2a.JSONRPCResponse) {
-		t.Helper()
-		params := a2a.GetTaskParams{TaskID: taskID}
-		paramsJSON, _ := json.Marshal(params)
-		rpcReq := a2a.JSONRPCRequest{
-			JSONRPC: "2.0",
-			ID:      2,
-			Method:  "tasks/get",
-			Params:  paramsJSON,
-		}
-		body, _ := json.Marshal(rpcReq)
-
-		token := signTestJWT(t, "https://idp.example.com", userSub, "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-
-		req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		router.ServeHTTP(w, req)
-
-		var resp a2a.JSONRPCResponse
-		json.Unmarshal(w.Body.Bytes(), &resp)
-		return resp.Error == nil, &resp
-	}
-
-	// Step 1: user-A creates a task via the shared service
-	taskA := sendMessage(t, "user-a@example.com")
-
-	// Step 2: user-B creates a task via the same service
-	taskB := sendMessage(t, "user-b@example.com")
-
-	// Step 3: user-B tries to access user-A's task — must fail
-	ok, resp := getTask(t, "user-b@example.com", taskA)
-	if ok {
-		t.Fatal("SECURITY: user-B was able to access user-A's task — cross-user visibility breach")
-	}
-	if resp.Error.Code != a2a.ErrCodeTaskNotFound {
-		t.Fatalf("expected task not found error, got code %d: %s", resp.Error.Code, resp.Error.Message)
-	}
-
-	// Step 4: user-A can still access their own task — must succeed
-	ok, _ = getTask(t, "user-a@example.com", taskA)
-	if !ok {
-		t.Fatal("user-A should be able to access their own task")
-	}
-
-	// Step 5: user-B can access their own task — must succeed
-	ok, _ = getTask(t, "user-b@example.com", taskB)
-	if !ok {
-		t.Fatal("user-B should be able to access their own task")
-	}
-}
-
-func TestA2AHandler_RateLimitExceeded(t *testing.T) {
-	ch := setupA2ATestWithJWT(t)
-
-	// Start channel with a handler
-	ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
-		target := channels.Target{ThreadID: msg.ID}
-		return ch.Send(ctx, target, channels.OutboundMessage{Text: "ok"})
-	})
-	defer ch.Stop(context.Background())
-
-	// Set up a rate limiter with very low limit (2 req/min)
-	rl := a2a.NewAgentRateLimiter()
-	rl.SetAgentLimits("service-account-1:user-123", 2, 0)
-	SetA2ARateLimiter(rl)
-	t.Cleanup(func() {
-		SetA2ARateLimiter(nil)
-		rl.Close()
-	})
-
-	sendMessage := func() int {
-		rpcReq := a2a.JSONRPCRequest{
-			JSONRPC: "2.0",
-			ID:      1,
-			Method:  "message/send",
-			Params:  json.RawMessage(`{"message":{"role":"user","parts":[{"text":"hi"}]}}`),
-		}
-		body, _ := json.Marshal(rpcReq)
-		token := signTestJWT(t, "https://idp.example.com", "user-123", "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-		req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		w := httptest.NewRecorder()
-		A2AHandler(w, req.WithContext(injectA2AClaims(req.Context(), token)))
-		return w.Code
-	}
-
-	// First two requests should succeed
-	if code := sendMessage(); code != 200 {
-		t.Fatalf("request 1 should succeed, got %d", code)
-	}
-	if code := sendMessage(); code != 200 {
-		t.Fatalf("request 2 should succeed, got %d", code)
-	}
-
-	// Third request should be rate-limited
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      3,
-		Method:  "message/send",
-		Params:  json.RawMessage(`{"message":{"role":"user","parts":[{"text":"hi"}]}}`),
-	}
-	body, _ := json.Marshal(rpcReq)
-	token := signTestJWT(t, "https://idp.example.com", "user-123", "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	A2AHandler(w, req.WithContext(injectA2AClaims(req.Context(), token)))
-
-	var resp a2a.JSONRPCResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Error == nil || resp.Error.Code != a2a.ErrCodeRateLimited {
-		t.Fatalf("expected rate limit error, got: %+v", resp)
-	}
-}
-
-// injectA2AClaims validates the token and injects claims into context (simulating middleware).
-func injectA2AClaims(ctx context.Context, token string) context.Context {
-	validator := getA2ATokenValidator()
-	if validator == nil {
-		return ctx
-	}
-	claims, err := validator.Validate(token)
+func a2aRequest(t *testing.T) []byte {
+	t.Helper()
+	params, _ := json.Marshal(a2a.SendMessageParams{Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}}})
+	body, err := json.Marshal(a2a.JSONRPCRequest{JSONRPC: "2.0", ID: 1, Method: "message/send", Params: params})
 	if err != nil {
-		return ctx
+		t.Fatal(err)
 	}
-	resolver := getA2APrincipalResolver()
-	if resolver == nil {
-		return ctx
-	}
-	principal, err := resolver(ctx, claims)
-	if err != nil {
-		return context.WithValue(ctx, a2aClaimsContextKey{}, claims)
-	}
-	ctx, err = execution.WithPrincipal(ctx, principal)
-	if err != nil {
-		return ctx
-	}
-	return context.WithValue(ctx, a2aClaimsContextKey{}, claims)
+	return body
 }
 
-func TestA2AHandler_UserNotProvisioned(t *testing.T) {
-	_ = setupA2ATestWithJWT(t)
-
-	// Set a user resolver that rejects all users
-	SetA2AUserResolver(func(ctx context.Context, userID string, orgID string) bool {
-		return false // no users are provisioned
-	})
-	t.Cleanup(func() { SetA2AUserResolver(nil) })
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-		Params:  json.RawMessage(`{"message":{"role":"user","parts":[{"text":"hello"}]}}`),
-	}
-	body, _ := json.Marshal(rpcReq)
-	token := signTestJWT(t, "https://idp.example.com", "unknown-user", "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
+func TestA2AAgentCardHandlerIsPublic(t *testing.T) {
+	router := setupA2ARouter(t, oauthA2APrincipal(a2aScope), nil)
 	w := httptest.NewRecorder()
-	A2AHandler(w, req.WithContext(injectA2AClaims(req.Context(), token)))
-
-	var resp a2a.JSONRPCResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Error == nil || resp.Error.Code != a2a.ErrCodeForbidden {
-		t.Fatalf("expected forbidden error for unprovisioned user, got: %+v", resp)
-	}
-	if resp.Error.Message != "A2A identity is not authorized" {
-		t.Fatalf("expected authorization denial message, got: %q", resp.Error.Message)
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/.well-known/agent-card.json", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
 	}
 }
-
-func TestA2AHandler_UserProvisioned(t *testing.T) {
-	ch := setupA2ATestWithJWT(t)
-
-	// Start channel with a handler
-	ch.Start(context.Background(), func(ctx context.Context, msg channels.InboundMessage) error {
-		target := channels.Target{ThreadID: msg.ID}
-		return ch.Send(ctx, target, channels.OutboundMessage{Text: "ok"})
-	})
-	defer ch.Stop(context.Background())
-
-	// Set a user resolver that accepts all users
-	SetA2AUserResolver(func(ctx context.Context, userID string, orgID string) bool {
-		return true
-	})
-	t.Cleanup(func() { SetA2AUserResolver(nil) })
-
-	rpcReq := a2a.JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "message/send",
-		Params:  json.RawMessage(`{"message":{"role":"user","parts":[{"text":"hello"}]}}`),
-	}
-	body, _ := json.Marshal(rpcReq)
-	token := signTestJWT(t, "https://idp.example.com", "valid-user", "astonish-a2a", time.Now().Add(time.Hour), "service-account-1")
-	req := httptest.NewRequest("POST", "/api/a2a", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
+func TestA2AHandlerRequiresA2AScope(t *testing.T) {
+	router := setupA2ARouter(t, oauthA2APrincipal(string(execution.CapabilityChat)), nil)
 	w := httptest.NewRecorder()
-	A2AHandler(w, req.WithContext(injectA2AClaims(req.Context(), token)))
-
-	var resp a2a.JSONRPCResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Error != nil {
-		t.Fatalf("expected success for provisioned user, got error: %+v", resp.Error)
+	req := httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(a2aRequest(t)))
+	req.Header.Set("Authorization", "Bearer token")
+	router.ServeHTTP(w, req)
+	var response a2a.JSONRPCResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error == nil || response.Error.Code != a2a.ErrCodeForbidden {
+		t.Fatalf("expected insufficient-scope JSON-RPC error, got status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+func TestA2AHandlerAllowsExactA2AScope(t *testing.T) {
+	router := setupA2ARouter(t, oauthA2APrincipal(a2aScope), nil)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(a2aRequest(t)))
+	req.Header.Set("Authorization", "Bearer token")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
+	}
+}
+func TestA2AHandlerRejectsInvalidBearerBeforeDispatch(t *testing.T) {
+	router := setupA2ARouter(t, oauthA2APrincipal(a2aScope), context.Canceled)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(a2aRequest(t)))
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d", w.Code)
 	}
 }

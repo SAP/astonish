@@ -5,6 +5,8 @@ import "fmt"
 const (
 	// ScopeToolExecute grants access to the protected MCP endpoint.
 	ScopeToolExecute = "tool:execute"
+	// ScopeA2A grants access to the inbound A2A protocol endpoint.
+	ScopeA2A = "a2a"
 	// ScopeChat grants access to the conversational chat capability.
 	ScopeChat = "chat"
 )
@@ -18,6 +20,7 @@ type ScopeDefinition struct {
 
 var capabilityScopes = []ScopeDefinition{
 	{Value: ScopeToolExecute, Label: "MCP access", Description: "Allows access to the protected MCP tool endpoint."},
+	{Value: ScopeA2A, Label: "A2A access", Description: "Allows access to the inbound A2A protocol endpoint."},
 	{Value: ScopeChat, Label: "Chat access", Description: "Allows conversational access to Astonish chat."},
 }
 

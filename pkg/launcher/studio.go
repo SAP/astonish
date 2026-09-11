@@ -215,6 +215,21 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		api.RegisterSSORoutes(router, ssoHandler)
 		api.RegisterOAuthServerRoutes(router, s.oauthServer)
 		api.RegisterOAuthAdminRoutes(router, s.oauthServer, s.backend)
+		api.RegisterA2ARoutes(router, s.oauthServer, api.A2ATenantResolver(func(ctx context.Context, orgID, teamID string) (string, string, error) {
+			org, err := s.backend.Organizations().GetByID(ctx, orgID)
+			if err != nil || org == nil {
+				return "", "", fmt.Errorf("resolve A2A organization: %w", err)
+			}
+			orgStore, err := s.backend.ForOrg(org.Slug)
+			if err != nil {
+				return "", "", fmt.Errorf("resolve A2A organization store: %w", err)
+			}
+			team, err := orgStore.Teams().GetTeam(ctx, teamID)
+			if err != nil || team == nil {
+				return "", "", fmt.Errorf("resolve A2A team: %w", err)
+			}
+			return org.Slug, team.Slug, nil
+		}), s.tenantMW)
 		api.RegisterMCPRoutes(router, s.oauthServer, func(ctx context.Context, orgID, teamID string) (string, string, error) {
 			org, err := s.backend.Organizations().GetByID(ctx, orgID)
 			if err != nil || org == nil {

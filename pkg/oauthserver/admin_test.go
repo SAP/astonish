@@ -36,8 +36,10 @@ func TestDiscovery_UsesOAuthJSONFieldNames(t *testing.T) {
 		"jwks_uri":               "https://issuer.example/oauth/jwks",
 		"revocation_endpoint":    "https://issuer.example/oauth/revoke",
 		"introspection_endpoint": "https://issuer.example/oauth/introspect",
+		"a2a_endpoint":           "https://issuer.example/api/a2a",
 		"scopes": []any{
 			map[string]any{"value": ScopeToolExecute, "label": "MCP access", "description": "Allows access to the protected MCP tool endpoint."},
+			map[string]any{"value": ScopeA2A, "label": "A2A access", "description": "Allows access to the inbound A2A protocol endpoint."},
 			map[string]any{"value": ScopeChat, "label": "Chat access", "description": "Allows conversational access to Astonish chat."},
 		},
 	}

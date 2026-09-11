@@ -520,6 +520,7 @@ export interface OAuthDiscovery {
   jwks_uri: string
   revocation_endpoint: string
   introspection_endpoint: string
+  a2a_endpoint: string
   scopes: OAuthScopeOption[]
 }
 
@@ -570,6 +571,7 @@ interface OAuthDiscoveryWire {
   jwks_uri?: string
   revocation_endpoint?: string
   introspection_endpoint?: string
+  a2a_endpoint?: string
   scopes?: OAuthScopeOption[]
   Issuer?: string
   Resource?: string
@@ -578,6 +580,7 @@ interface OAuthDiscoveryWire {
   JWKSURI?: string
   RevocationEndpoint?: string
   IntrospectionEndpoint?: string
+  A2AEndpoint?: string
 }
 
 export async function getOAuthDiscovery(): Promise<OAuthDiscovery> {
@@ -592,6 +595,7 @@ export async function getOAuthDiscovery(): Promise<OAuthDiscovery> {
     jwks_uri: data.jwks_uri ?? data.JWKSURI ?? '',
     revocation_endpoint: data.revocation_endpoint ?? data.RevocationEndpoint ?? '',
     introspection_endpoint: data.introspection_endpoint ?? data.IntrospectionEndpoint ?? '',
+    a2a_endpoint: data.a2a_endpoint ?? data.A2AEndpoint ?? '',
     scopes: data.scopes ?? [],
   }
 }

@@ -1301,7 +1301,6 @@ type ChannelsConfig struct {
 	Telegram TelegramConfig `yaml:"telegram,omitempty" json:"telegram,omitempty"`
 	Email    EmailConfig    `yaml:"email,omitempty" json:"email,omitempty"`
 	Slack    SlackConfig    `yaml:"slack,omitempty" json:"slack,omitempty"`
-	A2A      A2AConfig      `yaml:"a2a,omitempty" json:"a2a,omitempty"`
 }
 
 // IsChannelsEnabled returns true if channels are explicitly enabled.
@@ -1635,54 +1634,6 @@ func (c *SlackConfig) GetMode() string {
 		return "socket"
 	}
 	return c.Mode
-}
-
-// A2AConfig holds configuration for the A2A (Agent-to-Agent) protocol channel.
-type A2AConfig struct {
-	// Enabled controls whether the A2A channel is active. Default: false (nil means false).
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// BaseURL is the external base URL where the A2A endpoint is reachable.
-	// Used in the Agent Card's URL field. Defaults to the daemon's listen address.
-	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
-	// TaskTTL is how long completed tasks are retained. Default: "72h".
-	TaskTTL string `yaml:"task_ttl,omitempty" json:"task_ttl,omitempty"`
-	// DefaultAudience is the expected "aud" claim in incoming A2A JWTs when not overridden per-issuer.
-	DefaultAudience string `yaml:"default_audience,omitempty" json:"default_audience,omitempty"`
-	// AutoLinkByEmail enables automatic user linking by matching the token's email claim.
-	AutoLinkByEmail bool `yaml:"auto_link_by_email,omitempty" json:"auto_link_by_email,omitempty"`
-	// RequireActorClaim requires the "act" claim in incoming JWTs for delegation flows.
-	RequireActorClaim bool `yaml:"require_actor_claim,omitempty" json:"require_actor_claim,omitempty"`
-	// TrustedIssuers lists the trusted token issuers for A2A authentication.
-	TrustedIssuers []TrustedIssuerConfig `yaml:"trusted_issuers,omitempty" json:"trusted_issuers,omitempty"`
-	// AllowedAgents lists the allowed A2A agents.
-	AllowedAgents []AllowedAgentConfig `yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
-}
-
-// TrustedIssuerConfig holds YAML configuration for a trusted A2A token issuer.
-type TrustedIssuerConfig struct {
-	Name     string `yaml:"name" json:"name"`
-	Issuer   string `yaml:"issuer" json:"issuer"`
-	JWKSURL  string `yaml:"jwks_url" json:"jwks_url"`
-	Audience string `yaml:"audience" json:"audience"`
-	// OrgSlug identifies the Astonish organization that accepts this issuer.
-	OrgSlug string `yaml:"org_slug" json:"org_slug"`
-	// TeamSlug identifies the Astonish team that receives this issuer's A2A requests.
-	TeamSlug  string `yaml:"team_slug" json:"team_slug"`
-	UserClaim string `yaml:"user_claim,omitempty" json:"user_claim,omitempty"` // default: "sub"
-}
-
-// AllowedAgentConfig holds YAML configuration for an allowed A2A agent.
-type AllowedAgentConfig struct {
-	Name      string `yaml:"name" json:"name"`
-	ActorSub  string `yaml:"actor_sub" json:"actor_sub"`
-	Issuer    string `yaml:"issuer" json:"issuer"` // references TrustedIssuerConfig.Name
-	RateLimit int    `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
-	MaxTasks  int    `yaml:"max_tasks,omitempty" json:"max_tasks,omitempty"`
-}
-
-// IsA2AEnabled returns true if the A2A channel is explicitly enabled.
-func (c *A2AConfig) IsA2AEnabled() bool {
-	return c.Enabled != nil && *c.Enabled
 }
 
 type ProviderConfig map[string]string

@@ -73,7 +73,7 @@ func (s *Server) discovery(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{GrantAuthorizationCode, GrantRefreshToken, GrantClientCredentials},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
-		"scopes_supported":                      []string{"openid", "offline_access", ScopeToolExecute, ScopeChat},
+		"scopes_supported":                      []string{"openid", "offline_access", ScopeToolExecute, ScopeA2A, ScopeChat},
 	})
 }
 

@@ -109,10 +109,10 @@ func isAuthExemptPath(path string) bool {
 	if path == "/api/slack/events" || path == "/api/slack/commands" {
 		return true
 	}
-	// A2A Agent Card discovery is public. A2A and MCP protocol requests use
-	// their own bearer-token middleware rather than the Studio session JWT.
+	// A2A Agent Card discovery — public endpoint for protocol compliance.
+	// A2A JSON-RPC endpoints use their own auth middleware (API key / Bearer).
 	if path == "/.well-known/agent-card.json" ||
-		path == "/api/a2a" || path == "/api/a2a/stream" || path == MCPPath {
+		path == "/api/a2a" || path == "/api/a2a/stream" {
 		return true
 	}
 	// Platform setup endpoints — needed before any user has registered.

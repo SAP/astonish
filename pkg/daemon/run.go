@@ -1713,20 +1713,17 @@ func Run(cfg RunConfig) error {
 		studioOpts = append(studioOpts, launcher.WithTenantMiddleware(entstore.TenantMiddleware(entStore)))
 		api.SetPlatformBackend(entStore)
 		api.SetPlatformSecrets(entStore.Secrets())
-		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.IsEnabled() {
-			issuer := oauthCfg.EffectiveIssuer(port)
-			resource := oauthCfg.EffectiveResource(issuer)
+		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.Enabled {
 			server, serverErr := oauthserver.New(oauthserver.Config{
-				Issuer: issuer, Resource: resource,
+				Issuer: oauthCfg.Issuer, Resource: oauthCfg.Resource,
 				AccessTokenTTL:  time.Duration(oauthCfg.AccessTokenTTLMinutes) * time.Minute,
 				RefreshTokenTTL: time.Duration(oauthCfg.RefreshTokenTTLDays) * 24 * time.Hour,
-				Development:     appCfg.Storage.Auth.IsBuiltinAuth() && strings.HasPrefix(issuer, "http://"),
+				Development:     appCfg.Storage.Auth.IsBuiltinAuth() && strings.HasPrefix(oauthCfg.Issuer, "http://"),
 			}, entStore.OAuthServer(), api.NewOAuthSessionValidator(platformAuth, entStore))
 			if serverErr != nil {
 				return fmt.Errorf("initialize OAuth server: %w", serverErr)
 			}
 			studioOpts = append(studioOpts, launcher.WithOAuthServer(server))
-			api.SetA2AOAuthServer(server)
 		}
 	}
 	studio, err := launcher.NewStudioServer(port, studioOpts...)
@@ -1736,19 +1733,6 @@ func Run(cfg RunConfig) error {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
 	logStartupPhase("studio-server", "complete", studioServerStarted)
-
-	// Start serving before optional chat initialization. Platform administration,
-	// authentication, and OAuth endpoints must remain available while the chat
-	// factory performs potentially expensive embedding/model initialization.
-	logger.Printf("%s backend=%s mode=%s", startupPhaseRecord("serve-handoff", "complete", time.Since(startupStarted)), appCfg.Storage.Backend, daemonMode)
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Printf("HTTP server listening on http://localhost:%d", port)
-		if err := studio.Serve(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
 
 	// Pre-warm the Studio chat agent in the background so the first web request is fast.
 	// Also register the context builder so that Reset() can auto-PreWarm after settings changes.
@@ -1805,6 +1789,17 @@ func Run(cfg RunConfig) error {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// Start serving in a goroutine
+	logger.Printf("%s backend=%s mode=%s", startupPhaseRecord("serve-handoff", "complete", time.Since(startupStarted)), appCfg.Storage.Backend, daemonMode)
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Printf("HTTP server listening on http://localhost:%d", port)
+		if err := studio.Serve(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+		close(errCh)
+	}()
 
 	// Optional inbound channels must not delay HTTP readiness. Build their
 	// shared ChatAgent and register adapters only after the listener is live.

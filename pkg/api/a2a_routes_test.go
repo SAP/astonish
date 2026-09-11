@@ -142,7 +142,7 @@ func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
 			Issuer:         claims.Issuer,
 			OrgSlug:        claims.OrgID,
 			TeamSlug:       claims.TeamID,
-			Scopes:         []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)},
+			Scopes:         []string{string(execution.CapabilityChat)},
 			Authenticated:  true,
 		}, nil
 	})
@@ -150,21 +150,6 @@ func setupA2ATestWithJWT(t *testing.T) *a2achan.A2AChannel {
 	t.Cleanup(func() { SetA2APrincipalResolver(nil) })
 
 	return ch
-}
-
-func TestA2AClaimsFromPrincipal(t *testing.T) {
-	claims := a2aClaimsFromPrincipal(execution.Principal{
-		Subject: "user-1", Actor: "worker-1", Issuer: "https://issuer.example",
-		OrgSlug: "org-1", TeamSlug: "team-1",
-	})
-	if claims.UserIdentifier != "user-1" || claims.ActorIdentifier != "worker-1" || claims.OrgID != "org-1" || claims.TeamID != "team-1" {
-		t.Fatalf("unexpected user claims: %#v", claims)
-	}
-
-	claims = a2aClaimsFromPrincipal(execution.Principal{ClientID: "client-1"})
-	if claims.UserIdentifier != "client-1" {
-		t.Fatalf("service client must own its A2A tasks, got %#v", claims)
-	}
 }
 
 func TestA2AAgentCardHandler(t *testing.T) {

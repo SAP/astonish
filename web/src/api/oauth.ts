@@ -89,11 +89,6 @@ export async function createOAuthClient(input: OAuthClientInput): Promise<OAuthC
   return res.json()
 }
 
-export async function deleteOAuthClient(clientID: string): Promise<void> {
-  const res = await oauthFetch(`/api/oauth/clients/${encodeURIComponent(clientID)}`, { method: 'DELETE' })
-  await throwIfNotOk(res, 'Failed to delete OAuth client')
-}
-
 export async function updateOAuthClient(clientID: string, input: OAuthClientInput): Promise<OAuthClientWriteResponse> {
   const res = await oauthFetch(`/api/oauth/clients/${encodeURIComponent(clientID)}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),

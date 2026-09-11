@@ -73,7 +73,7 @@ func (s *Server) discovery(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{GrantAuthorizationCode, GrantRefreshToken, GrantClientCredentials},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
-		"scopes_supported":                      []string{"openid", "offline_access", "tool:execute"},
+		"scopes_supported":                      []string{"openid", "offline_access", ScopeToolExecute, ScopeChat},
 	})
 }
 
@@ -122,7 +122,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	// session proves the subject belongs to the assigned organization; it must not
 	// be allowed to select or omit the team embedded in the resulting token.
 	orgID, teamID := client.OrgID, client.TeamID
-	scopes := allowed(strings.Fields(q.Get("scope")), client.Scopes)
+	scopes, ok := permittedSubset(strings.Fields(q.Get("scope")), client.Scopes)
+	if !ok {
+		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
+		return
+	}
 	resources := allowed(q["resource"], client.Resources)
 	code, err := randomHandle()
 	if err != nil {
@@ -200,8 +204,9 @@ func (s *Server) refreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 	requestedScopes := strings.Fields(r.Form.Get("scope"))
 	if len(requestedScopes) > 0 {
-		requestedScopes = allowed(requestedScopes, token.Scopes)
-		if len(requestedScopes) == 0 {
+		var ok bool
+		requestedScopes, ok = permittedSubset(requestedScopes, token.Scopes)
+		if !ok {
 			oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
 			return
 		}
@@ -216,7 +221,11 @@ func (s *Server) clientCredentials(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	scopes := allowed(strings.Fields(r.Form.Get("scope")), client.Scopes)
+	scopes, ok := permittedSubset(strings.Fields(r.Form.Get("scope")), client.Scopes)
+	if !ok {
+		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
+		return
+	}
 	resources := allowed(r.Form["resource"], client.Resources)
 	if client.OwnerUserID == "" || client.OrgID == "" || client.TeamID == "" {
 		oauthError(w, http.StatusUnauthorized, "invalid_client", "client is missing required tenant context")
@@ -385,6 +394,25 @@ func allowed(requested, permitted []string) []string {
 		}
 	}
 	return out
+}
+func permittedSubset(requested, permitted []string) ([]string, bool) {
+	if len(requested) == 0 {
+		return nil, true
+	}
+	selected := make(map[string]bool, len(requested))
+	for _, value := range requested {
+		if !contains(permitted, value) {
+			return nil, false
+		}
+		selected[value] = true
+	}
+	out := make([]string, 0, len(selected))
+	for _, value := range permitted {
+		if selected[value] {
+			out = append(out, value)
+		}
+	}
+	return out, true
 }
 func audience(resources []string, fallback string) []string {
 	if len(resources) > 0 {

@@ -94,7 +94,7 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
 		return
 	}
-	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityToolExecute); err != nil {
+	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityChat); err != nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
 		return
 	}
@@ -283,7 +283,7 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
 		return
 	}
-	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityToolExecute); err != nil {
+	if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityChat); err != nil {
 		writeJSONRPCError(w, nil, a2a.ErrCodeForbidden, "A2A identity is not authorized")
 		return
 	}

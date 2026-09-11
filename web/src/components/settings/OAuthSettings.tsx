@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { Copy, KeyRound, Loader2, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Copy, KeyRound, Loader2, Plus, RefreshCw, ShieldCheck } from 'lucide-react'
 
 import * as oauthApi from '../../api/oauth'
 import type { OAuthClient, OAuthClientInput, OAuthContext, OAuthDiscovery } from '../../api/oauth'
@@ -59,18 +59,6 @@ export default function OAuthSettings() {
     void load()
   }
 
-  const remove = async (client: OAuthClient) => {
-    if (!window.confirm(`Delete OAuth client "${client.name}"? Existing refresh tokens will be revoked and this cannot be undone.`)) return
-    try {
-      await oauthApi.deleteOAuthClient(client.client_id)
-      setClients(current => current.filter(item => item.client_id !== client.client_id))
-      setEditing(current => current?.client_id === client.client_id ? null : current)
-      setSuccess(`OAuth client ${client.name} deleted`)
-    } catch (cause) {
-      setError((cause as Error).message)
-    }
-  }
-
   return <div className="flex-1 overflow-y-auto p-6 space-y-6">
     {(error || success) && <div className="space-y-2">{error && <Notice tone="error">{error}</Notice>}{success && <Notice tone="success">{success}</Notice>}</div>}
     <section className="rounded-xl p-4" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
@@ -79,7 +67,7 @@ export default function OAuthSettings() {
     </section>
     {revealedSecret && <section className="rounded-xl p-4" style={{ background: 'var(--warning-soft)', border: '1px solid var(--warning)' }}><h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Copy the new client secret now</h2><p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>It is shown once and is never stored in Studio.</p><div className="mt-3 flex gap-2"><code className="min-w-0 flex-1 break-all rounded p-2 text-xs" style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>{revealedSecret}</code><button onClick={() => void copy(revealedSecret, 'Client secret')} className="p-2 rounded" style={{ color: 'var(--brand)' }} title="Copy client secret"><Copy size={16} /></button></div><button onClick={() => setRevealedSecret('')} className="mt-3 text-xs font-medium" style={{ color: 'var(--brand)' }}>I copied it; hide secret</button></section>}
     <section><div className="flex items-center justify-between mb-3"><div><h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>Your OAuth clients</h2><p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Clients are private to your account. Each client is bound to one organization and team.</p></div><button onClick={() => setShowCreate(true)} className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-white" style={{ background: 'var(--brand)' }}><Plus size={15} /> Add client</button></div>
-      {loading ? <Loading /> : clients.length === 0 ? <div className="rounded-xl py-10 text-center" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>No OAuth clients configured.</div> : <div className="space-y-3">{clients.map(client => <article key={client.client_id} className="rounded-xl p-4" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}><div className="flex justify-between gap-4"><div className="min-w-0"><div className="flex items-center gap-2"><h3 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{client.name}</h3><span className="text-[10px] rounded-full px-2 py-0.5" style={{ background: client.active ? 'var(--success-soft)' : 'var(--bg-tertiary)', color: client.active ? 'var(--success)' : 'var(--text-muted)' }}>{client.active ? 'Active' : 'Disabled'}</span></div><code className="text-xs" style={{ color: 'var(--text-muted)' }}>{client.client_id}</code><p className="mt-2 text-xs" style={{ color: 'var(--text-secondary)' }}>{client.client_type} · {client.grant_types.join(', ')} · scopes: {client.scopes.join(', ') || 'none'}</p></div><div className="flex items-center gap-3"><button onClick={() => setEditing(client)} className="text-xs font-medium" style={{ color: 'var(--brand)' }}>Manage</button><button onClick={() => void remove(client)} className="flex items-center gap-1 text-xs font-medium" style={{ color: 'var(--danger)' }}><Trash2 size={14} /> Delete</button></div></div></article>)}</div>}
+      {loading ? <Loading /> : clients.length === 0 ? <div className="rounded-xl py-10 text-center" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>No OAuth clients configured.</div> : <div className="space-y-3">{clients.map(client => <article key={client.client_id} className="rounded-xl p-4" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}><div className="flex justify-between gap-4"><div className="min-w-0"><div className="flex items-center gap-2"><h3 className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{client.name}</h3><span className="text-[10px] rounded-full px-2 py-0.5" style={{ background: client.active ? 'var(--success-soft)' : 'var(--bg-tertiary)', color: client.active ? 'var(--success)' : 'var(--text-muted)' }}>{client.active ? 'Active' : 'Disabled'}</span></div><code className="text-xs" style={{ color: 'var(--text-muted)' }}>{client.client_id}</code><p className="mt-2 text-xs" style={{ color: 'var(--text-secondary)' }}>{client.client_type} · {client.grant_types.join(', ')} · scopes: {client.scopes.join(', ') || 'none'}</p></div><button onClick={() => setEditing(client)} className="text-xs font-medium" style={{ color: 'var(--brand)' }}>Manage</button></div></article>)}</div>}
     </section>
     {(showCreate || editing) && <ClientModal client={editing} contexts={contexts} onCancel={() => { setShowCreate(false); setEditing(null) }} onError={setError} onSaved={saved} />}
   </div>

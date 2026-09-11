@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createOAuthClient, deleteOAuthClient, getOAuthDiscovery, listOAuthClients, listOAuthContexts, updateOAuthClient } from '../oauth'
+import { createOAuthClient, getOAuthDiscovery, listOAuthClients, listOAuthContexts, updateOAuthClient } from '../oauth'
 
 const originalFetch = globalThis.fetch
 
@@ -35,10 +35,5 @@ describe('personal OAuth API', () => {
     globalThis.fetch = mockFetch({ client: { client_id: 'ast_client' }, client_secret: 'rotated-once' })
     await expect(updateOAuthClient('ast_client', rotate)).resolves.toMatchObject({ client_secret: 'rotated-once' })
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients/ast_client', expect.objectContaining({ method: 'PATCH', body: JSON.stringify(rotate) }))
-  })
-  it('deletes an OAuth client through its owner-scoped route', async () => {
-    globalThis.fetch = mockFetch({})
-    await expect(deleteOAuthClient('ast/client')).resolves.toBeUndefined()
-    expect(globalThis.fetch).toHaveBeenCalledWith('/api/oauth/clients/ast%2Fclient', expect.objectContaining({ method: 'DELETE', credentials: 'include' }))
   })
 })

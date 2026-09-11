@@ -73,7 +73,7 @@ func TestValidateBearer_RequiredScopes(t *testing.T) {
 	}
 }
 
-func TestValidateBearer_Rejects(t *testing.T) {
+func TestValidateBearer_RejectsInvalidTokens(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	server := newValidatorServer(t)
 	now := time.Now()

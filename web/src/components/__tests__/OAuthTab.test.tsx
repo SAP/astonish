@@ -11,7 +11,6 @@ vi.mock('../../api/oauth', () => ({
   listOAuthContexts: vi.fn(),
   createOAuthClient: vi.fn(),
   updateOAuthClient: vi.fn(),
-  deleteOAuthClient: vi.fn(),
 }))
 
 describe('OAuthSettings', () => {
@@ -44,20 +43,5 @@ describe('OAuthSettings', () => {
 
     await user.click(screen.getByTitle('Copy MCP resource'))
     expect(await screen.findByText('MCP resource copied')).toBeInTheDocument()
-  })
-
-  it('confirms deletion and removes the client card after the owner-scoped request succeeds', async () => {
-    const user = userEvent.setup()
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-    vi.mocked(oauthApi.listOAuthClients).mockResolvedValue([{ id: '1', client_id: 'ast_client', name: 'Joule', active: true, client_type: 'public', org_id: 'org', team_id: 'team', redirect_uris: [], grant_types: ['authorization_code'], resources: [], scopes: [], created_at: '', updated_at: '' }])
-    vi.mocked(oauthApi.deleteOAuthClient).mockResolvedValue()
-    render(<OAuthSettings />)
-
-    expect(await screen.findByText('Joule')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /delete/i }))
-
-    expect(oauthApi.deleteOAuthClient).toHaveBeenCalledWith('ast_client')
-    expect(screen.queryByText('Joule')).not.toBeInTheDocument()
-    expect(await screen.findByText('OAuth client Joule deleted')).toBeInTheDocument()
   })
 })

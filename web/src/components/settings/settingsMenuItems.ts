@@ -18,7 +18,6 @@ export const PERSONAL_ITEMS: SettingsMenuItem[] = [
   { id: 'channels', label: 'Channels', icon: Radio },
   { id: 'knowledge', label: 'Knowledge', icon: BookOpen },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
-  { id: 'oauth', label: 'OAuth', icon: KeyRound },
   { id: 'scheduler', label: 'Scheduler', icon: Clock },
 ]
 

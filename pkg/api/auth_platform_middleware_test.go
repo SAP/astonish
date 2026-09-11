@@ -132,6 +132,27 @@ func TestPlatformAuthMiddleware_AllowsAuthEndpoints(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthMiddleware_AllowsMCPProtocolEndpointToUseOAuthBearer(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.authCfg = config.PlatformAuthConfig{LoopbackBypass: "with_token"}
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, MCPPath, nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer oauth-access-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called || rec.Code != http.StatusNoContent {
+		t.Fatalf("MCP OAuth bearer request status = %d, called = %t; want protocol handler to receive it", rec.Code, called)
+	}
+}
+
 func TestPlatformAuthMiddleware_AllowsSlackWebhookEndpoints(t *testing.T) {
 	pa := testPlatformAuth(t)
 

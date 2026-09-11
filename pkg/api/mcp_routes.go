@@ -24,10 +24,14 @@ type BearerPrincipalValidator interface {
 	ValidateBearer(context.Context, string, string, []string, execution.Surface) (execution.Principal, error)
 }
 
+// MCPTenantResolver translates OAuth's immutable organization and team IDs into
+// the canonical slugs required by tenant-scoped stores.
+type MCPTenantResolver func(context.Context, string, string) (orgSlug, teamSlug string, err error)
+
 // RegisterMCPRoutes mounts the protected, stateless Streamable HTTP MCP server.
 // tenantMW is applied after bearer validation, because only a validated canonical
 // principal may choose the organization and team used for scoped stores.
-func RegisterMCPRoutes(router *mux.Router, validator BearerPrincipalValidator, tenantMW func(http.Handler) http.Handler) {
+func RegisterMCPRoutes(router *mux.Router, validator BearerPrincipalValidator, resolveTenant MCPTenantResolver, tenantMW func(http.Handler) http.Handler) {
 	if router == nil || validator == nil {
 		return
 	}
@@ -49,10 +53,10 @@ func RegisterMCPRoutes(router *mux.Router, validator BearerPrincipalValidator, t
 	if tenantMW != nil {
 		handler = tenantMW(handler)
 	}
-	router.Handle(MCPPath, mcpBearerMiddleware(validator, handler)).Methods(http.MethodPost, http.MethodGet, http.MethodDelete)
+	router.Handle(MCPPath, mcpBearerMiddleware(validator, resolveTenant, handler)).Methods(http.MethodPost, http.MethodGet, http.MethodDelete)
 }
 
-func mcpBearerMiddleware(validator BearerPrincipalValidator, next http.Handler) http.Handler {
+func mcpBearerMiddleware(validator BearerPrincipalValidator, resolveTenant MCPTenantResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, err := validator.ValidateBearer(r.Context(), r.Header.Get("Authorization"), "", []string{mcpToolExecuteScope}, execution.SurfaceMCP)
 		if err != nil {
@@ -70,15 +74,25 @@ func mcpBearerMiddleware(validator BearerPrincipalValidator, next http.Handler) 
 			return
 		}
 
-		// RegisterRoutes applies tenant middleware to this endpoint as well. Give
-		// it the tenant selected by the validated token, never request input.
+		orgSlug, teamSlug := principal.OrgSlug, principal.TeamSlug
+		if resolveTenant != nil {
+			orgSlug, teamSlug, err = resolveTenant(r.Context(), principal.OrgSlug, principal.TeamSlug)
+			if err != nil {
+				http.Error(w, "MCP tenant is unavailable", http.StatusForbidden)
+				return
+			}
+		}
+
+		// OAuth clients are bound to opaque platform IDs. Resolve those IDs before
+		// handing the request to the slug-based tenant router. Service clients do
+		// not own a personal schema, so use the client ID as their stable owner.
 		userID := principal.Subject
 		if userID == "" {
 			userID = principal.ClientID
 		}
 		ctx = store.WithTenantContext(ctx, &store.TenantContext{
-			OrgSlug:  principal.OrgSlug,
-			TeamSlug: principal.TeamSlug,
+			OrgSlug:  orgSlug,
+			TeamSlug: teamSlug,
 			UserID:   userID,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))

@@ -109,9 +109,11 @@ func isAuthExemptPath(path string) bool {
 	if path == "/api/slack/events" || path == "/api/slack/commands" {
 		return true
 	}
-	// A2A Agent Card discovery — public endpoint for protocol compliance.
-	// A2A JSON-RPC endpoints use their own auth middleware (API key / Bearer).
-	if path == "/.well-known/agent-card.json" ||
+	// Protocol endpoints authenticate with their own bearer middleware. They must
+	// bypass platform-session and loopback checks so OAuth access tokens reach
+	// their respective protocol validators.
+	if path == "/api/mcp" ||
+		path == "/.well-known/agent-card.json" ||
 		path == "/api/a2a" || path == "/api/a2a/stream" {
 		return true
 	}

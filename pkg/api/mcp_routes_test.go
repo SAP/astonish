@@ -29,7 +29,7 @@ func (s *mcpValidatorStub) ValidateBearer(_ context.Context, _ string, resource 
 
 func TestMCPRoutesRejectsUnauthenticatedRequest(t *testing.T) {
 	router := mux.NewRouter()
-	RegisterMCPRoutes(router, &mcpValidatorStub{err: context.Canceled}, nil)
+	RegisterMCPRoutes(router, &mcpValidatorStub{err: context.Canceled}, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`))
 	rec := httptest.NewRecorder()
@@ -56,7 +56,7 @@ func TestMCPRoutesRejectsPrincipalWithoutExecutionScope(t *testing.T) {
 		Authenticated:  true,
 	}}
 	router := mux.NewRouter()
-	RegisterMCPRoutes(router, validator, nil)
+	RegisterMCPRoutes(router, validator, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`))
 	rec := httptest.NewRecorder()
@@ -90,7 +90,7 @@ func TestMCPRoutesPassesValidatedTenantToTenantMiddleware(t *testing.T) {
 		})
 	}
 	router := mux.NewRouter()
-	RegisterMCPRoutes(router, validator, tenantMW)
+	RegisterMCPRoutes(router, validator, nil, tenantMW)
 
 	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
 	req.Header.Set("Authorization", "Bearer valid")
@@ -100,6 +100,39 @@ func TestMCPRoutesPassesValidatedTenantToTenantMiddleware(t *testing.T) {
 
 	if gotOrg != "org-a" || gotTeam != "team-a" || gotUser != "user-1" {
 		t.Fatalf("tenant middleware got org=%q team=%q user=%q", gotOrg, gotTeam, gotUser)
+	}
+}
+
+func TestMCPRoutesResolvesOAuthTenantIDsBeforeTenantMiddleware(t *testing.T) {
+	validator := &mcpValidatorStub{principal: execution.Principal{
+		Kind: execution.PrincipalKindService, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceMCP,
+		ClientID: "client-1", Issuer: "https://issuer.example", OrgSlug: "org-id", TeamSlug: "team-id",
+		Scopes: []string{string(execution.CapabilityToolExecute)}, Authenticated: true,
+	}}
+	var gotOrg, gotTeam string
+	tenantMW := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tenant := store.TenantContextFrom(r.Context())
+			gotOrg, gotTeam = tenant.OrgSlug, tenant.TeamSlug
+			next.ServeHTTP(w, r)
+		})
+	}
+	router := mux.NewRouter()
+	RegisterMCPRoutes(router, validator, func(_ context.Context, orgID, teamID string) (string, string, error) {
+		if orgID != "org-id" || teamID != "team-id" {
+			t.Fatalf("resolver input = %q/%q", orgID, teamID)
+		}
+		return "org-slug", "team-slug", nil
+	}, tenantMW)
+
+	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
+	req.Header.Set("Authorization", "Bearer valid")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gotOrg != "org-slug" || gotTeam != "team-slug" {
+		t.Fatalf("tenant middleware got org=%q team=%q", gotOrg, gotTeam)
 	}
 }
 
@@ -117,7 +150,7 @@ func TestMCPRoutesInitializesForAuthorizedPrincipal(t *testing.T) {
 		Authenticated:  true,
 	}}
 	router := mux.NewRouter()
-	RegisterMCPRoutes(router, validator, nil)
+	RegisterMCPRoutes(router, validator, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
 	req.Header.Set("Authorization", "Bearer valid")

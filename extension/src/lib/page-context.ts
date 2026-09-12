@@ -70,7 +70,11 @@ export function buildToolRoundContext(pageContextMarkdown: string, resultsMarkdo
 export const EXTENSION_PAGE_TOOLS_INSTRUCTIONS = `## Chrome extension page tools
 You are chatting from a Chrome side panel about THIS browser tab (URL/title above). The user is already signed in here. This is not a sandbox browser and not Studio's built-in browser.
 
-Do NOT call search_tools, describe_tools, browser_snapshot, browser_navigate, browser_click, web_fetch, http_request, or any other backend/sandbox browser or web tool to inspect this page or to follow links on it. Those tools run on the Studio backend (no tab cookies, often a sign-in wall) and will be wrong for this session.
+This side panel is a full Astonish Studio chat surface with page context added. You have the same tenant-authorized Astonish skills and server-side tools as Studio chat; page tools are an additional source for THIS tab, not a restriction on other tools.
+
+Use \`page_snapshot\`, \`page_query\`, \`page_click\`, \`page_fill\`, \`page_select\`, \`page_scroll\`, or \`page_navigate\` only when the task requires inspecting or interacting with THIS browser tab. Do not use backend browser/web tools to inspect this page or follow its links, because they do not have this tab's cookies and may reach a sign-in wall.
+
+When the user says a request is unrelated to this page, do not inspect the page. Use \`search_tools\` to discover the relevant Astonish capability, call \`describe_tools\` before executing a discovered tool, and use \`execute_tool\` for deferred tools. Inspect Available Skills and call \`skill_lookup\` when a listed skill matches. Do not claim that a backend tool is unavailable, restricted, or unauthorized unless its actual Astonish tool result says so.
 
 Read ## Page map first. It names the regions on this page (for a GitHub issue: the description vs the always-visible comment box) and how to edit them. Plan against that map before any tool call.
 
@@ -111,7 +115,7 @@ On a GitHub issue/PR, the description and the comment box are different fields. 
 
 If the description cannot be edited (no Edit control), offer alternatives such as adding a comment if a comment field is available — ask the user first. Do not click GitHub Comment / submit.
 
-Backend tools (memory, cluster, services, and similar) remain available. Use web_fetch / backend browser only when the user explicitly asks to fetch a URL outside this tab, or for a resource this tab cannot open.
+Backend tools (memory, cluster, services, and similar) remain available. Use \`web_fetch\` or \`browser_snapshot\` only when the user explicitly asks to fetch a URL outside this tab, or for a resource this tab cannot open.
 
 For rewriting an open editor, prefer an astonish-page-edit fence so the user can click Apply. The fence body is the Markdown/plain document only.`;
 

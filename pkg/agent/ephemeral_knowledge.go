@@ -15,6 +15,17 @@ const (
 	systemPromptStateKey = "_astonish_system_prompt"
 )
 
+// RenderExternalTurnContext renders the model-facing dynamic context without
+// creating an ADK event. Public MCP returns this exact text to its external
+// client, while native chat persists it through buildTurnContextContent.
+func RenderExternalTurnContext(overrides *PromptOverrides, relevantTools, relevantKnowledge string) string {
+	content := buildTurnContextContent(overrides, relevantTools, relevantKnowledge)
+	if content == nil || len(content.Parts) == 0 || content.Parts[0] == nil {
+		return ""
+	}
+	return content.Parts[0].Text
+}
+
 // buildTurnContextContent constructs the exact per-turn context persisted beside
 // the clean user message. ADK replays this user-role event on every later call.
 func buildTurnContextContent(overrides *PromptOverrides, relevantTools, relevantKnowledge string) *genai.Content {

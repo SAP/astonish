@@ -101,6 +101,149 @@ var (
 			},
 		},
 	}
+	// OauthAuthorizationsColumns holds the columns for the "oauth_authorizations" table.
+	OauthAuthorizationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "client_id", Type: field.TypeString},
+		{Name: "redirect_uri", Type: field.TypeString},
+		{Name: "code_challenge", Type: field.TypeString},
+		{Name: "code_challenge_method", Type: field.TypeString, Default: "S256"},
+		{Name: "nonce", Type: field.TypeString, Nullable: true},
+		{Name: "subject", Type: field.TypeString},
+		{Name: "actor", Type: field.TypeString, Nullable: true},
+		{Name: "org_id", Type: field.TypeString},
+		{Name: "team_id", Type: field.TypeString, Nullable: true},
+		{Name: "scopes", Type: field.TypeJSON},
+		{Name: "resources", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "consumed_at", Type: field.TypeTime, Nullable: true},
+	}
+	// OauthAuthorizationsTable holds the schema information for the "oauth_authorizations" table.
+	OauthAuthorizationsTable = &schema.Table{
+		Name:       "oauth_authorizations",
+		Columns:    OauthAuthorizationsColumns,
+		PrimaryKey: []*schema.Column{OauthAuthorizationsColumns[0]},
+	}
+	// OauthClientsColumns holds the columns for the "oauth_clients" table.
+	OauthClientsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "owner_user_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "org_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "team_id", Type: field.TypeString, Nullable: true},
+		{Name: "client_id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "client_type", Type: field.TypeEnum, Enums: []string{"public", "confidential"}, Default: "public"},
+		{Name: "secret_hash", Type: field.TypeString, Nullable: true},
+		{Name: "redirect_uris", Type: field.TypeJSON},
+		{Name: "grant_types", Type: field.TypeJSON},
+		{Name: "resources", Type: field.TypeJSON},
+		{Name: "scopes", Type: field.TypeJSON},
+		{Name: "active", Type: field.TypeBool, Default: true},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// OauthClientsTable holds the schema information for the "oauth_clients" table.
+	OauthClientsTable = &schema.Table{
+		Name:       "oauth_clients",
+		Columns:    OauthClientsColumns,
+		PrimaryKey: []*schema.Column{OauthClientsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "oauthclient_client_id",
+				Unique:  true,
+				Columns: []*schema.Column{OauthClientsColumns[4]},
+			},
+			{
+				Name:    "oauthclient_owner_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{OauthClientsColumns[1]},
+			},
+			{
+				Name:    "oauthclient_org_id",
+				Unique:  false,
+				Columns: []*schema.Column{OauthClientsColumns[2]},
+			},
+		},
+	}
+	// OauthConsentsColumns holds the columns for the "oauth_consents" table.
+	OauthConsentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "user_id", Type: field.TypeUUID},
+		{Name: "org_id", Type: field.TypeUUID},
+		{Name: "client_id", Type: field.TypeString},
+		{Name: "scopes", Type: field.TypeJSON},
+		{Name: "resources", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+	}
+	// OauthConsentsTable holds the schema information for the "oauth_consents" table.
+	OauthConsentsTable = &schema.Table{
+		Name:       "oauth_consents",
+		Columns:    OauthConsentsColumns,
+		PrimaryKey: []*schema.Column{OauthConsentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "oauthconsent_user_id_org_id_client_id",
+				Unique:  true,
+				Columns: []*schema.Column{OauthConsentsColumns[1], OauthConsentsColumns[2], OauthConsentsColumns[3]},
+			},
+		},
+	}
+	// OauthSigningKeysColumns holds the columns for the "oauth_signing_keys" table.
+	OauthSigningKeysColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "key_id", Type: field.TypeString},
+		{Name: "algorithm", Type: field.TypeString},
+		{Name: "public_jwk", Type: field.TypeJSON},
+		{Name: "encrypted_private_key", Type: field.TypeBytes},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "retired", "revoked"}, Default: "active"},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "not_after", Type: field.TypeTime, Nullable: true},
+	}
+	// OauthSigningKeysTable holds the schema information for the "oauth_signing_keys" table.
+	OauthSigningKeysTable = &schema.Table{
+		Name:       "oauth_signing_keys",
+		Columns:    OauthSigningKeysColumns,
+		PrimaryKey: []*schema.Column{OauthSigningKeysColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "oauthsigningkey_key_id",
+				Unique:  true,
+				Columns: []*schema.Column{OauthSigningKeysColumns[1]},
+			},
+			{
+				Name:    "oauthsigningkey_status",
+				Unique:  false,
+				Columns: []*schema.Column{OauthSigningKeysColumns[5]},
+			},
+		},
+	}
+	// OauthTokensColumns holds the columns for the "oauth_tokens" table.
+	OauthTokensColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "family_id", Type: field.TypeString},
+		{Name: "token_type", Type: field.TypeEnum, Enums: []string{"access", "refresh"}},
+		{Name: "client_id", Type: field.TypeString},
+		{Name: "subject", Type: field.TypeString, Nullable: true},
+		{Name: "actor", Type: field.TypeString, Nullable: true},
+		{Name: "org_id", Type: field.TypeString},
+		{Name: "team_id", Type: field.TypeString, Nullable: true},
+		{Name: "scopes", Type: field.TypeJSON},
+		{Name: "resources", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "replaced_by", Type: field.TypeString, Nullable: true},
+		{Name: "replay_detected", Type: field.TypeBool, Default: false},
+	}
+	// OauthTokensTable holds the schema information for the "oauth_tokens" table.
+	OauthTokensTable = &schema.Table{
+		Name:       "oauth_tokens",
+		Columns:    OauthTokensColumns,
+		PrimaryKey: []*schema.Column{OauthTokensColumns[0]},
+	}
 	// OidcProvidersColumns holds the columns for the "oidc_providers" table.
 	OidcProvidersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -569,6 +712,11 @@ var (
 		DeviceSessionsTable,
 		EmailThreadIndexTable,
 		LoginSessionsTable,
+		OauthAuthorizationsTable,
+		OauthClientsTable,
+		OauthConsentsTable,
+		OauthSigningKeysTable,
+		OauthTokensTable,
 		OidcProvidersTable,
 		OrgMembershipsTable,
 		OrganizationsTable,
@@ -599,6 +747,21 @@ func init() {
 	LoginSessionsTable.ForeignKeys[1].RefTable = UsersTable
 	LoginSessionsTable.Annotation = &entsql.Annotation{
 		Table: "login_sessions",
+	}
+	OauthAuthorizationsTable.Annotation = &entsql.Annotation{
+		Table: "oauth_authorizations",
+	}
+	OauthClientsTable.Annotation = &entsql.Annotation{
+		Table: "oauth_clients",
+	}
+	OauthConsentsTable.Annotation = &entsql.Annotation{
+		Table: "oauth_consents",
+	}
+	OauthSigningKeysTable.Annotation = &entsql.Annotation{
+		Table: "oauth_signing_keys",
+	}
+	OauthTokensTable.Annotation = &entsql.Annotation{
+		Table: "oauth_tokens",
 	}
 	OidcProvidersTable.ForeignKeys[0].RefTable = OrganizationsTable
 	OidcProvidersTable.Annotation = &entsql.Annotation{

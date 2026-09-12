@@ -15,6 +15,11 @@ import (
 	"github.com/SAP/astonish/ent/platform/devicesession"
 	"github.com/SAP/astonish/ent/platform/emailthreadindex"
 	"github.com/SAP/astonish/ent/platform/loginsession"
+	"github.com/SAP/astonish/ent/platform/oauthauthorization"
+	"github.com/SAP/astonish/ent/platform/oauthclient"
+	"github.com/SAP/astonish/ent/platform/oauthconsent"
+	"github.com/SAP/astonish/ent/platform/oauthsigningkey"
+	"github.com/SAP/astonish/ent/platform/oauthtoken"
 	"github.com/SAP/astonish/ent/platform/oidcprovider"
 	"github.com/SAP/astonish/ent/platform/organization"
 	"github.com/SAP/astonish/ent/platform/orgmembership"
@@ -94,6 +99,11 @@ func checkColumn(t, c string) error {
 			devicesession.Table:         devicesession.ValidColumn,
 			emailthreadindex.Table:      emailthreadindex.ValidColumn,
 			loginsession.Table:          loginsession.ValidColumn,
+			oauthauthorization.Table:    oauthauthorization.ValidColumn,
+			oauthclient.Table:           oauthclient.ValidColumn,
+			oauthconsent.Table:          oauthconsent.ValidColumn,
+			oauthsigningkey.Table:       oauthsigningkey.ValidColumn,
+			oauthtoken.Table:            oauthtoken.ValidColumn,
 			oidcprovider.Table:          oidcprovider.ValidColumn,
 			orgmembership.Table:         orgmembership.ValidColumn,
 			organization.Table:          organization.ValidColumn,

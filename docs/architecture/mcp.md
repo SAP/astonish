@@ -1,5 +1,7 @@
 # MCP Integration
 
+> The public inbound MCP contract is documented in [MCP Public Tool Loop](mcp-public-loop.md). It intentionally exposes only `get_agent_context`, `search_tools`, `describe_tools`, and `execute_tool`; `astonish_chat` is removed with no compatibility alias. External clients must treat skills and tool names returned by this endpoint as Astonish capabilities: they load matching skills and invoke the tools those skills recommend through Astonish's discovery and execution operations rather than probing or substituting tools in the client environment.
+
 ## Overview
 
 Astonish integrates with the Model Context Protocol (MCP) to extend the agent's capabilities with external tool servers. MCP servers are standalone processes that expose tools via a JSON-RPC protocol over stdio. Astonish manages the lifecycle of these servers, caches their tool definitions, and optionally runs them inside sandbox containers for security.

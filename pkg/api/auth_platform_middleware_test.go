@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/execution"
 )
 
 // testPlatformAuth creates a minimal PlatformAuth for middleware testing.
@@ -17,7 +19,21 @@ func testPlatformAuth(t *testing.T) *PlatformAuth {
 	}
 }
 
-// TestPlatformAuthMiddleware_AllowsSPAAssets verifies that non-API paths
+func TestBuildAuthenticatedContextRejectsIncompletePrincipal(t *testing.T) {
+	t.Parallel()
+
+	ctx, err := buildAuthenticatedContext(context.Background(), &PlatformClaims{
+		UserID:  "user-123",
+		OrgSlug: "my-org",
+	}, "")
+	if err == nil {
+		t.Fatal("expected incomplete platform principal to be rejected")
+	}
+	if ctx != nil {
+		t.Fatal("expected no context after principal validation failure")
+	}
+}
+
 // (HTML, JS, CSS, images) pass through without authentication.
 func TestPlatformAuthMiddleware_AllowsSPAAssets(t *testing.T) {
 	pa := testPlatformAuth(t)
@@ -113,6 +129,27 @@ func TestPlatformAuthMiddleware_AllowsAuthEndpoints(t *testing.T) {
 				t.Errorf("auth path %q should be accessible, got status %d", path, w.Code)
 			}
 		})
+	}
+}
+
+func TestPlatformAuthMiddleware_AllowsMCPProtocolEndpointToUseOAuthBearer(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.authCfg = config.PlatformAuthConfig{LoopbackBypass: "with_token"}
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, MCPPath, nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer oauth-access-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called || rec.Code != http.StatusNoContent {
+		t.Fatalf("MCP OAuth bearer request status = %d, called = %t; want protocol handler to receive it", rec.Code, called)
 	}
 }
 
@@ -245,8 +282,11 @@ func TestPlatformAuthMiddleware_ValidJWT(t *testing.T) {
 	}
 
 	var gotUser *PlatformUser
+	var gotPrincipal execution.Principal
+	var principalPresent bool
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUser = GetPlatformUser(r)
+		gotPrincipal, principalPresent = execution.PrincipalFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 	handler := PlatformAuthMiddleware(pa, inner)
@@ -271,6 +311,12 @@ func TestPlatformAuthMiddleware_ValidJWT(t *testing.T) {
 	}
 	if gotUser.TeamSlug != "ops" {
 		t.Errorf("team slug = %q, want %q", gotUser.TeamSlug, "ops")
+	}
+	if !principalPresent {
+		t.Fatal("expected canonical principal to be set in context")
+	}
+	if gotPrincipal.Subject != "user-123" || gotPrincipal.OrgSlug != "my-org" || gotPrincipal.TeamSlug != "ops" {
+		t.Errorf("principal = %#v, want user-123 in my-org/ops", gotPrincipal)
 	}
 }
 

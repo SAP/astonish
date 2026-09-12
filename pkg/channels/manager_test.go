@@ -14,6 +14,83 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+type dispatchPlatformResolver struct {
+	called bool
+}
+
+func (r *dispatchPlatformResolver) ResolveChannelUser(context.Context, string, string) (context.Context, string, string, error) {
+	r.called = true
+	return nil, "", "", errors.New("should not resolve a dispatch user")
+}
+
+func (r *dispatchPlatformResolver) ResolveChannelUserWithHint(context.Context, string, string, *RoutingHint) (context.Context, string, string, error) {
+	r.called = true
+	return nil, "", "", errors.New("should not resolve a dispatch user")
+}
+
+func (r *dispatchPlatformResolver) SetRoutingPref(string, string, string, string) {}
+func (r *dispatchPlatformResolver) GetRoutingPref(string, string) *RoutingPref    { return nil }
+func (r *dispatchPlatformResolver) ListUserRoutes(context.Context, string, string) ([]RouteOption, error) {
+	return nil, nil
+}
+
+type testPlatformSettingsStore struct{}
+
+func (testPlatformSettingsStore) Get(context.Context) (*store.PlatformSettings, error) {
+	return nil, nil
+}
+func (testPlatformSettingsStore) Save(context.Context, *store.PlatformSettings) error { return nil }
+
+type testOrgSettingsStore struct{}
+
+func (testOrgSettingsStore) Get(context.Context) (*store.OrgSettings, error) { return nil, nil }
+func (testOrgSettingsStore) Save(context.Context, *store.OrgSettings) error  { return nil }
+
+type testTeamSettingsStore struct{}
+
+func (testTeamSettingsStore) Get(context.Context) (*store.TeamSettings, error) { return nil, nil }
+func (testTeamSettingsStore) Save(context.Context, *store.TeamSettings) error  { return nil }
+
+func TestProviderStoresFromContextUsesTenantServices(t *testing.T) {
+	platform := testPlatformSettingsStore{}
+	org := testOrgSettingsStore{}
+	team := testTeamSettingsStore{}
+	ctx := store.WithServices(context.Background(), &store.Services{
+		PlatformSettings: platform,
+		OrgSettings:      org,
+		Settings:         team,
+	})
+
+	providers := providerStoresFromContext(ctx)
+	if providers == nil {
+		t.Fatal("provider stores = nil")
+	}
+	if providers.Platform != platform || providers.Org != org || providers.Team != team {
+		t.Fatal("provider stores did not preserve tenant services")
+	}
+}
+
+func TestResolveInboundUserUsesAuthenticatedTenant(t *testing.T) {
+	resolver := &dispatchPlatformResolver{}
+	manager := &ChannelManager{platformResolver: resolver, logger: log.Default()}
+	ctx := store.WithTenantContext(context.Background(), &store.TenantContext{
+		OrgSlug:  "acme",
+		TeamSlug: "engineering",
+		UserID:   "oauth-client",
+	})
+
+	_, userID, err := manager.resolveInboundUser(ctx, InboundMessage{ChannelID: "a2a-dispatch-task"})
+	if err != nil {
+		t.Fatalf("resolve inbound A2A user: %v", err)
+	}
+	if userID != "oauth-client" {
+		t.Fatalf("user ID = %q, want OAuth tenant user", userID)
+	}
+	if resolver.called {
+		t.Fatal("endpoint dispatch resolved a legacy channel user")
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -83,7 +83,7 @@ export function formatPageToolResults(
   });
   return [
     '## Chrome extension page-tool results',
-    'These results are from THIS browser tab. The original page document remains in ### Main content above — do not treat a snapshot as a replacement for it. Read ## Page map before the next action. Do not page_navigate to the current URL. Do not call web_fetch, http_request, browser_snapshot, browser_navigate, or other sandbox/backend browser tools to follow links or read this page. Continue with page_snapshot / page_query / page_click / page_fill only if you still need the DOM.',
+    'These results are from THIS browser tab. The original page document remains in ### Main content above — do not treat a snapshot as a replacement for it. Read ## Page map before the next page action. Do not page_navigate to the current URL. Use page_snapshot / page_query / page_click / page_fill only when you still need this tab\'s DOM. For work unrelated to this tab, keep using the normal Astonish skill and tool-discovery loop rather than page tools.',
     ...blocks,
   ].join('\n\n');
 }

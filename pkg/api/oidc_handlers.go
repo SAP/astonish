@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -269,6 +271,22 @@ func (h *SSOHandler) handleInit(w http.ResponseWriter, r *http.Request) {
 	nonce := generateSecureToken(24)
 
 	// Create device session
+	continueURI, err := oauthContinueURI(r.URL.Query().Get("oauth_continue"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if continueURI != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     oauthContinueCookieName(deviceCode),
+			Value:    base64.RawURLEncoding.EncodeToString([]byte(continueURI)),
+			Path:     "/api/auth/sso/callback",
+			MaxAge:   int(deviceSessionTTL.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   isSecureRequest(r),
+		})
+	}
 	sess := &deviceSession{
 		DeviceCode: deviceCode,
 		State:      state,
@@ -637,10 +655,25 @@ func (h *SSOHandler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	sess.AvailableTeams = availableTeams
 	_ = h.deviceSessions.Complete(ctx, sess.DeviceCode, sess)
 
-	// Web UI flow: set session cookies and redirect to the app
+	// Web UI flow: set session cookies and resume the OAuth authorization request
+	// when this browser login originated from an extension authorization flow.
 	if sess.ClientType == "web" {
 		setAccessTokenCookie(w, r, accessToken, h.pa.jwt.AccessTokenTTL())
 		setRefreshTokenCookie(w, r, refreshToken, h.pa.jwt.RefreshTokenTTL())
+		if continueURI, err := oauthContinueCookie(r, sess.DeviceCode); err != nil {
+			h.renderCallbackError(w, "Invalid OAuth login continuation")
+			return
+		} else if continueURI != "" {
+			continueURL, err := url.Parse(continueURI)
+			if err != nil {
+				h.renderCallbackError(w, "Invalid OAuth login continuation")
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: oauthContinueCookieName(sess.DeviceCode), Value: "", Path: "/api/auth/sso/callback", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: isSecureRequest(r)})
+			// #nosec G710 -- oauthContinueURI already requires a same-origin /oauth/authorize request URI.
+			http.Redirect(w, r, continueURL.String(), http.StatusFound)
+			return
+		}
 		h.renderSSOBounce(w)
 		return
 	}
@@ -798,6 +831,38 @@ func (h *SSOHandler) discoverOIDCProvider(provider *store.OIDCProvider) (*oidc.P
 	}
 
 	return oidc.NewProvider(ctx, provider.IssuerURL)
+}
+
+const oauthContinueCookiePrefix = "astonish_oauth_continue_"
+
+func oauthContinueCookieName(deviceCode string) string {
+	return oauthContinueCookiePrefix + deviceCode
+}
+
+func oauthContinueCookie(r *http.Request, deviceCode string) (string, error) {
+	cookie, err := r.Cookie(oauthContinueCookieName(deviceCode))
+	if err == http.ErrNoCookie {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		return "", err
+	}
+	return oauthContinueURI(string(decoded))
+}
+
+func oauthContinueURI(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	continueURL, err := url.Parse(raw)
+	if err != nil || continueURL.IsAbs() || continueURL.Host != "" || !strings.HasPrefix(continueURL.Path, "/oauth/authorize") {
+		return "", fmt.Errorf("invalid OAuth login continuation")
+	}
+	return continueURL.RequestURI(), nil
 }
 
 // failDeviceSession marks a device session as failed.

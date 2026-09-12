@@ -63,6 +63,7 @@ export default defineConfig({
   base: './',
   plugins: [chromeExtensionAssets()],
   build: {
+    modulePreload: false,
     outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {

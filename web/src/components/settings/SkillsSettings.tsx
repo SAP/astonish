@@ -549,13 +549,12 @@ export default function SkillsSettings({ config, onSaved, theme = 'dark', scope,
         { method: 'POST', headers: { 'Content-Type': 'application/json' } },
         teamSlug
       )
+      const data = await res.json().catch(() => null)
       if (!res.ok) {
-        throw new Error('Validation request failed')
+        throw new Error(data?.error || 'Validation request failed')
       }
-      const data = await res.json()
-      if (data.status === 'skipped') {
-        setEditorError('Validation unavailable — no AI provider configured. Skills cannot be used without validation.')
-        return
+      if (data.status !== 'ok') {
+        throw new Error('Validation did not complete')
       }
       // Update local validation status from persisted result
       if (data.validation_status && activeSkill) {

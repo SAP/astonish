@@ -25,6 +25,15 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
   const [ssoProviders, setSsoProviders] = useState<Array<{id: string, name: string}>>([])
   const [resendCooldown, setResendCooldown] = useState(0)
 
+  const oauthContinue = (() => {
+    const value = new URLSearchParams(window.location.search).get('oauth_continue')
+    return value?.startsWith('/oauth/authorize') ? value : ''
+  })()
+
+  const resumeOAuthAuthorization = () => {
+    if (oauthContinue) window.location.assign(oauthContinue)
+  }
+
   // Respond to external state changes
   useEffect(() => {
     if (pendingVerificationEmail) {
@@ -90,6 +99,7 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
         await onRegister(email, password, displayName)
       } else {
         await onLogin(email, password)
+        resumeOAuthAuthorization()
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'An error occurred'
@@ -553,7 +563,10 @@ export default function LoginPage({ onLogin, onRegister, pendingVerificationEmai
                   setLoading(true)
                   setError('')
                   try {
-                    const resp = await fetch('/api/auth/sso/init', {
+                    const ssoInitURL = oauthContinue
+                      ? `/api/auth/sso/init?${new URLSearchParams({ oauth_continue: oauthContinue })}`
+                      : '/api/auth/sso/init'
+                    const resp = await fetch(ssoInitURL, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ provider_id: provider.id, client_type: 'web' }),

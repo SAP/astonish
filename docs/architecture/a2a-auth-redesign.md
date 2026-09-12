@@ -1,4 +1,6 @@
-# A2A Authentication Redesign — Identity Propagation via OAuth 2.0 Token Exchange
+# A2A Authentication Redesign — Historical External-IdP Proposal
+
+> **Historical record.** This proposal is superseded. Inbound A2A accepts only Astonish-issued OAuth bearer tokens for the shared protected-resource audience with exact `a2a` scope. It no longer accepts direct external IdP/JWKS tokens, maintains trusted-issuer or allowed-agent settings, maps `UserChannel(a2a, ...)`, or uses `channels.a2a`. OAuth-issued grants resolve the canonical tenant principal before A2A execution. See [A2A Server](./a2a-server.md) and [OAuth Authorization](./oauth-authorization.md).
 
 ## Problem Statement
 

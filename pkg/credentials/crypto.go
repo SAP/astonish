@@ -167,6 +167,13 @@ func loadOrCreateKey(configDir string) ([]byte, error) {
 	return key, nil
 }
 
+// LoadOrCreateMasterKey returns the configured AES-256 master key. It is shared
+// by platform-owned encrypted records such as OAuth signing keys; callers must
+// never log or return it to an API client.
+func LoadOrCreateMasterKey(configDir string) ([]byte, error) {
+	return loadOrCreateKey(configDir)
+}
+
 // parseKeyFile interprets key file data in either hex-text or raw-binary format.
 // Returns the decoded key, whether a migration from binary occurred, and any error.
 func parseKeyFile(data []byte) (key []byte, migrated bool, err error) {

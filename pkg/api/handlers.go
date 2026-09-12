@@ -1263,8 +1263,7 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/session/{id}/stop", HandleStopSession).Methods("POST")
 	router.HandleFunc("/api/session/{id}/keepalive", HandleSessionKeepalive).Methods("POST")
 
-	// A2A Protocol endpoints (Agent Card, JSON-RPC, admin)
-	RegisterA2ARoutes(router)
+	// A2A protocol routes are registered at the OAuth-aware launcher boundary.
 
 	// Channels endpoints
 	router.HandleFunc("/api/channels/status", ChannelsStatusHandler).Methods("GET")

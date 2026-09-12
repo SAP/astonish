@@ -54,6 +54,9 @@ node_modules/
 # Extension build output (generated, never commit)
 extension/dist/
 
+# Local agent reports (not product documentation)
+docs/reports/
+
 # MCP server directories (runtime)
 mcp_servers/
 

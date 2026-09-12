@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+func TestRenderExternalTurnContext(t *testing.T) {
+	got := RenderExternalTurnContext(nil, "- read_file", "remember this")
+	for _, want := range []string{"[Astonish Per-Turn Context — not user-authored]", "## Relevant Tools For This Request", "- read_file", "## Knowledge For This Task", "remember this"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("external turn context missing %q", want)
+		}
+	}
+	if got := RenderExternalTurnContext(nil, "", ""); got != "" {
+		t.Fatalf("expected empty rendered context, got %q", got)
+	}
+}
+
 func TestBuildTurnContextContent(t *testing.T) {
 	content := buildTurnContextContent(&PromptOverrides{
 		ChannelHints:   "Use plain text.",

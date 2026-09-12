@@ -19,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
@@ -612,7 +613,6 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := effectiveUserID(r)
 	// Resolve the effective app name: use the caller-provided app name if present,
 	// otherwise default to the Studio chat app name. This allows the Chrome extension
 	// to categorize its sessions separately from Studio sessions.
@@ -629,6 +629,27 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "platform superadmin access required for debug mode")
 		return
 	}
+
+	principal, ok := execution.PrincipalFromContext(r.Context())
+	if !ok {
+		respondError(w, http.StatusUnauthorized, "authenticated execution principal is required")
+		return
+	}
+	executionCtx, err := execution.NewService(nil).Authorize(r.Context(), principal, execution.CapabilityChat)
+	if err != nil {
+		respondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	r = r.WithContext(executionCtx)
+	requestedMemoryScope := req.MemoryScope
+	if requestedMemoryScope == "" {
+		requestedMemoryScope = r.Header.Get("X-Astonish-Memory-Mode")
+	}
+	if requestedMemoryScope == "personal" && principal.Kind == execution.PrincipalKindService {
+		respondError(w, http.StatusForbidden, "service principals cannot access personal memory")
+		return
+	}
+	userID := principal.Subject
 
 	cm := GetChatManager()
 	if err := cm.ensureReady(r.Context()); err != nil {
@@ -1084,6 +1105,12 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Launch background runner — the agent runs independently of this HTTP request.
 	runner := newChatRunner(sessionID, userID, effectiveApp, isNew)
+	principalCtx, principalErr := execution.WithPrincipal(runner.ctx, principal)
+	if principalErr != nil {
+		SendErrorSSE(w, flusher, "Failed to establish execution identity")
+		return
+	}
+	runner.ctx = principalCtx
 	runner.ctx = store.WithDebugEnabled(runner.ctx, req.Debug)
 	if req.Debug {
 		if diagnosticsStore, ok := sessionService.(store.SessionStore); ok {
@@ -1137,42 +1164,36 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		memoryScope := store.MemoryScopeTeam
 		// Determine memory scope: body field takes precedence, then header (deprecated fallback).
 		// Default is "team" — personal mode must be explicitly requested per-session.
-		requestedScope := req.MemoryScope
-		if requestedScope == "" {
-			requestedScope = r.Header.Get("X-Astonish-Memory-Mode") // deprecated: prefer body field
-		}
+		requestedScope := requestedMemoryScope
 		// If personal memory mode is active, the memory_save tool should
 		// write to the user's personal store instead of team.
 		// The ThreeTierSearcher remains unchanged (always searches all tiers).
 		if requestedScope == "personal" && svc.TenantRouter != nil {
-			if pu := GetPlatformUser(r); pu != nil {
-				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
-					memStore = orgStore.ForUser(pu.ID).Memories()
-					memoryScope = store.MemoryScopePersonal
-				}
+			if orgStore, err := svc.TenantRouter.ForOrg(principal.OrgSlug); err == nil {
+				memStore = orgStore.ForUser(principal.Subject).Memories()
+				memoryScope = store.MemoryScopePersonal
 			}
 		}
 		runner.InjectMemoryStoresWithScope(memStore, memoryScope, svc.MemorySearcher)
-		if svc.TenantRouter != nil {
-			if pu := GetPlatformUser(r); pu != nil {
-				if orgStore, err := svc.TenantRouter.ForOrg(pu.OrgSlug); err == nil {
-					runner.InjectMemoryStoresByScope(store.MemoryStoresByScope{
-						Personal: orgStore.ForUser(pu.ID).Memories(),
-						Team:     svc.Memory,
-						Org:      orgStore.OrgMemories(),
-					})
-				}
-				canDeleteTeamMemory := CanManageTeam(r, pu)
-				canDeleteOrgMemory := CanManageOrg(pu)
+		if svc.TenantRouter != nil && principal.Kind != execution.PrincipalKindService && principal.Subject != "" {
+			if orgStore, err := svc.TenantRouter.ForOrg(principal.OrgSlug); err == nil {
+				runner.InjectMemoryStoresByScope(store.MemoryStoresByScope{
+					Personal: orgStore.ForUser(principal.Subject).Memories(),
+					Team:     svc.Memory,
+					Org:      orgStore.OrgMemories(),
+				})
+				pu := GetPlatformUser(r)
+				canDeleteTeamMemory := pu != nil && CanManageTeam(r, pu)
+				canDeleteOrgMemory := pu != nil && CanManageOrg(pu)
 				runner.InjectMemoryDeleteAuthorizer(func(_ context.Context, entry *store.MemorySearchResult, scope string) error {
 					canDelete := false
 					switch scope {
 					case string(store.MemoryScopePersonal):
 						canDelete = true
 					case string(store.MemoryScopeTeam):
-						canDelete = entry.CreatedBy == pu.ID || canDeleteTeamMemory
+						canDelete = entry.CreatedBy == principal.Subject || canDeleteTeamMemory
 					case string(store.MemoryScopeOrg):
-						canDelete = entry.CreatedBy == pu.ID || canDeleteOrgMemory
+						canDelete = entry.CreatedBy == principal.Subject || canDeleteOrgMemory
 					}
 					if canDelete {
 						return nil

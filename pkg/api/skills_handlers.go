@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // validationRateLimit tracks the last validation time per skill to prevent
@@ -57,13 +57,27 @@ func canValidateSkill(teamSlug, scope, name string) bool {
 	}
 
 	if last, ok := validationRateMap[key]; ok {
-		if time.Since(last) < validationRateLimit {
-			return false
-		}
+		return time.Since(last) >= validationRateLimit
 	}
-	validationRateMap[key] = time.Now()
 	return true
 }
+
+// recordSkillValidation starts the cooldown after a validation result has been
+// successfully persisted. Failed or unavailable validations must be retryable.
+func recordSkillValidation(teamSlug, scope, name string) {
+	if scope == "" {
+		scope = "team"
+	}
+	if teamSlug == "" {
+		teamSlug = "_"
+	}
+	key := teamSlug + ":" + scope + ":" + name
+	validationRateMu.Lock()
+	defer validationRateMu.Unlock()
+	validationRateMap[key] = time.Now()
+}
+
+var skillValidationLLMProvider = getValidationLLMProvider
 
 // SkillListItem represents a skill in the listing response.
 type SkillListItem struct {
@@ -84,17 +98,17 @@ type SkillListItem struct {
 
 // SkillContentResponse is the response for GET /api/skills/{name}/content.
 type SkillContentResponse struct {
-	Name              string                   `json:"name"`
-	Description       string                   `json:"description"`
-	Source            string                   `json:"source"`
-	Scope             string                   `json:"scope,omitempty"`
-	Content           string                   `json:"content"`
-	RawFile           string                   `json:"raw_file"`
-	FilePath          string                   `json:"file_path,omitempty"`
-	Editable          bool                     `json:"editable"`
-	Files             []SkillFileInfo          `json:"files,omitempty"` // Multi-file support (new)
-	ValidationStatus  string                   `json:"validation_status,omitempty"`
-	Validation        *skills.ValidationResult `json:"validation,omitempty"`          // Persisted issues from last validation
+	Name              string                    `json:"name"`
+	Description       string                    `json:"description"`
+	Source            string                    `json:"source"`
+	Scope             string                    `json:"scope,omitempty"`
+	Content           string                    `json:"content"`
+	RawFile           string                    `json:"raw_file"`
+	FilePath          string                    `json:"file_path,omitempty"`
+	Editable          bool                      `json:"editable"`
+	Files             []SkillFileInfo           `json:"files,omitempty"` // Multi-file support (new)
+	ValidationStatus  string                    `json:"validation_status,omitempty"`
+	Validation        *skills.ValidationResult  `json:"validation,omitempty"`         // Persisted issues from last validation
 	AcknowledgedRisks []skills.AcknowledgedRisk `json:"acknowledged_risks,omitempty"` // Persisted acknowledgments
 }
 
@@ -119,8 +133,8 @@ type SkillFilesResponse struct {
 
 // SaveSkillFileRequest is the request body for saving an auxiliary skill file.
 type SaveSkillFileRequest struct {
-	Content       string `json:"content"`
-	IsExecutable  bool   `json:"is_executable"`
+	Content      string `json:"content"`
+	IsExecutable bool   `json:"is_executable"`
 }
 
 // SkillsListResponse is the response for GET /api/skills.
@@ -793,12 +807,12 @@ func getSkillContentPlatform(w http.ResponseWriter, r *http.Request, svc *store.
 			return
 		}
 		respondJSON(w, http.StatusOK, SkillContentResponse{
-			Name:             skill.Name,
-			Description:      skill.Description,
-			Source:           "custom",
-			Scope:            "team",
-			Content:          extractBody(skill.Content),
-			RawFile:          skill.Content,
+			Name:              skill.Name,
+			Description:       skill.Description,
+			Source:            "custom",
+			Scope:             "team",
+			Content:           extractBody(skill.Content),
+			RawFile:           skill.Content,
 			Editable:          true,
 			ValidationStatus:  skill.ValidationStatus,
 			Validation:        persistedValidation(skill),
@@ -816,9 +830,9 @@ func getSkillContentPlatform(w http.ResponseWriter, r *http.Request, svc *store.
 			return
 		}
 		respondJSON(w, http.StatusOK, SkillContentResponse{
-			Name:             skill.Name,
-			Description:      skill.Description,
-			Source:           "custom",
+			Name:              skill.Name,
+			Description:       skill.Description,
+			Source:            "custom",
 			Scope:             "org",
 			Content:           extractBody(skill.Content),
 			RawFile:           skill.Content,
@@ -839,15 +853,15 @@ func getSkillContentPlatform(w http.ResponseWriter, r *http.Request, svc *store.
 			return
 		}
 		respondJSON(w, http.StatusOK, SkillContentResponse{
-			Name:             skill.Name,
-			Description:      skill.Description,
-			Source:           "custom",
-			Scope:            "platform",
-			Content:          extractBody(skill.Content),
-			RawFile:          skill.Content,
-			Editable:         IsPlatformAdmin(GetPlatformUser(r)),
-			ValidationStatus: skill.ValidationStatus,
-			Validation:       persistedValidation(skill),
+			Name:              skill.Name,
+			Description:       skill.Description,
+			Source:            "custom",
+			Scope:             "platform",
+			Content:           extractBody(skill.Content),
+			RawFile:           skill.Content,
+			Editable:          IsPlatformAdmin(GetPlatformUser(r)),
+			ValidationStatus:  skill.ValidationStatus,
+			Validation:        persistedValidation(skill),
 			AcknowledgedRisks: persistedAcks(skill),
 		})
 
@@ -856,8 +870,8 @@ func getSkillContentPlatform(w http.ResponseWriter, r *http.Request, svc *store.
 		if svc.TeamSkills != nil {
 			if skill, err := svc.TeamSkills.Get(r.Context(), name); err == nil && skill != nil {
 				respondJSON(w, http.StatusOK, SkillContentResponse{
-					Name:             skill.Name,
-					Description:      skill.Description,
+					Name:              skill.Name,
+					Description:       skill.Description,
 					Source:            "custom",
 					Scope:             "team",
 					Content:           extractBody(skill.Content),
@@ -893,15 +907,15 @@ func getSkillContentPlatform(w http.ResponseWriter, r *http.Request, svc *store.
 		if svc.PlatformSkills != nil {
 			if skill, err := svc.PlatformSkills.Get(r.Context(), name); err == nil && skill != nil {
 				respondJSON(w, http.StatusOK, SkillContentResponse{
-					Name:             skill.Name,
-					Description:      skill.Description,
-					Source:           "custom",
-					Scope:            "platform",
-					Content:          extractBody(skill.Content),
-					RawFile:          skill.Content,
-					Editable:         false,
-					ValidationStatus: skill.ValidationStatus,
-					Validation:       persistedValidation(skill),
+					Name:              skill.Name,
+					Description:       skill.Description,
+					Source:            "custom",
+					Scope:             "platform",
+					Content:           extractBody(skill.Content),
+					RawFile:           skill.Content,
+					Editable:          false,
+					ValidationStatus:  skill.ValidationStatus,
+					Validation:        persistedValidation(skill),
 					AcknowledgedRisks: persistedAcks(skill),
 				})
 				return
@@ -989,8 +1003,8 @@ func updateSkillContentPlatform(w http.ResponseWriter, r *http.Request, targetSt
 
 	// Persist validation state (issues + status + carried acks)
 	valMeta := skills.ValidationMeta{
-		LastValidatedAt:  time.Now().UTC().Format(time.RFC3339),
-		ContentHash:      contentHash,
+		LastValidatedAt:   time.Now().UTC().Format(time.RFC3339),
+		ContentHash:       contentHash,
 		AcknowledgedRisks: carryForwardAcks,
 	}
 	if validation != nil {
@@ -1389,41 +1403,26 @@ type ValidateSkillResponse struct {
 // Persists the resulting validation_status to the database, which controls
 // whether the skill can be used at runtime.
 func ValidateSkillHandler(w http.ResponseWriter, r *http.Request) {
-	// Authorization: only team/org admins can trigger validation (costs LLM tokens)
-	if !IsTeamAdmin(r) {
-		respondError(w, http.StatusForbidden, "only team or org admins can trigger skill validation")
-		return
-	}
-
 	name := mux.Vars(r)["name"]
 	scope := r.URL.Query().Get("scope")
 
-	// Rate limiting: prevent abuse (one validation per skill per 60 seconds)
-	if !canValidateSkill(effectiveTeamSlug(r), scope, name) {
-		respondError(w, http.StatusTooManyRequests, "skill was validated recently — please wait before retrying")
-		return
-	}
-
 	svc := store.FromRequest(r)
-	if svc == nil || (svc.Skills == nil && svc.TeamSkills == nil) {
+	if svc == nil || (svc.PlatformSkills == nil && svc.Skills == nil && svc.TeamSkills == nil) {
 		respondError(w, http.StatusNotFound, "no skill store available")
 		return
 	}
 
-	// Resolve store for read
-	var skillStore store.SkillStore
-	if scope == "team" && svc.TeamSkills != nil {
-		skillStore = svc.TeamSkills
-	} else if scope == "org" && svc.Skills != nil {
-		skillStore = svc.Skills
-	} else if svc.TeamSkills != nil {
-		skillStore = svc.TeamSkills
-	} else {
-		skillStore = svc.Skills
+	// Validation updates persisted status and consumes LLM tokens, so it follows
+	// the same scope-aware authorization as other skill mutations.
+	skillStore := resolveSkillStoreForWrite(w, r, svc, scope)
+	if skillStore == nil {
+		return
 	}
 
-	if skillStore == nil {
-		respondError(w, http.StatusNotFound, "No skill store available for scope")
+	// Rate limiting runs only after authorization so callers cannot learn whether
+	// a skill in another scope was recently validated.
+	if !canValidateSkill(effectiveTeamSlug(r), scope, name) {
+		respondError(w, http.StatusTooManyRequests, "skill was validated recently — please wait before retrying")
 		return
 	}
 
@@ -1446,14 +1445,9 @@ func ValidateSkillHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get LLM provider for validation
-	llmProvider := getValidationLLMProvider(r)
+	llmProvider := skillValidationLLMProvider(r)
 	if llmProvider == nil {
-		// No LLM available — cannot validate, status stays unchanged
-		respondJSON(w, http.StatusOK, ValidateSkillResponse{
-			Status:           "skipped",
-			ValidationStatus: skill.ValidationStatus,
-			Validation:       &skills.ValidationResult{Issues: []skills.ValidationIssue{}},
-		})
+		respondError(w, http.StatusServiceUnavailable, "skill validation unavailable: no AI provider configured")
 		return
 	}
 
@@ -1469,11 +1463,7 @@ func ValidateSkillHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		slog.Warn("skill validation failed", "skill", name, "error", err)
-		respondJSON(w, http.StatusOK, ValidateSkillResponse{
-			Status:           "error",
-			ValidationStatus: skill.ValidationStatus,
-			Validation:       &skills.ValidationResult{Issues: []skills.ValidationIssue{}},
-		})
+		respondError(w, http.StatusBadGateway, "skill validation failed")
 		return
 	}
 
@@ -1503,9 +1493,12 @@ func ValidateSkillHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	valMetaJSON, _ := json.Marshal(valMeta)
 	if err := skillStore.UpdateValidationStatus(r.Context(), name, newStatus, string(valMetaJSON)); err != nil {
-		slog.Warn("failed to persist validation status", "skill", name, "error", err)
+		slog.Error("failed to persist validation status", "skill", name, "error", err)
+		respondError(w, http.StatusInternalServerError, "failed to persist skill validation")
+		return
 	}
 
+	recordSkillValidation(effectiveTeamSlug(r), scope, name)
 	respondJSON(w, http.StatusOK, ValidateSkillResponse{
 		Status:           "ok",
 		ValidationStatus: newStatus,
@@ -1521,9 +1514,9 @@ type AcknowledgeSkillRequest struct {
 
 // AcknowledgeSkillResponse is the response for POST /api/skills/{name}/acknowledge.
 type AcknowledgeSkillResponse struct {
-	Status            string               `json:"status"`
-	ValidationStatus  string               `json:"validation_status"`
-	RemainingCritical int                  `json:"remaining_critical"`
+	Status            string                   `json:"status"`
+	ValidationStatus  string                   `json:"validation_status"`
+	RemainingCritical int                      `json:"remaining_critical"`
 	Acknowledgment    *skills.AcknowledgedRisk `json:"acknowledgment,omitempty"` // The ack that was just created
 }
 
@@ -1697,8 +1690,8 @@ func getValidationLLMProvider(r *http.Request) skills.LLMProvider {
 	comp := cm.components
 	cm.mu.Unlock()
 
-	if comp != nil && comp.LLM != nil {
-		return &validationLLMAdapter{llmFunc: makeLLMFuncFromModel(comp.LLM)}
+	if llm := validationLLMFromComponents(comp); llm != nil {
+		return llm
 	}
 
 	// Slow path: create LLM from effective config
@@ -1720,6 +1713,16 @@ func getValidationLLMProvider(r *http.Request) skills.LLMProvider {
 	}
 
 	return &validationLLMAdapter{llmFunc: makeLLMFuncFromModel(llm)}
+}
+
+// validationLLMFromComponents returns the chat LLM only when it is bound to a
+// real provider. A pre-warmed Studio chat may hold the unconfigured placeholder;
+// validation must fall back to the effective request provider in that case.
+func validationLLMFromComponents(comp *StudioChatComponents) skills.LLMProvider {
+	if comp == nil || comp.LLM == nil || comp.ProviderName == "" || comp.ModelName == "" {
+		return nil
+	}
+	return &validationLLMAdapter{llmFunc: makeLLMFuncFromModel(comp.LLM)}
 }
 
 // validationLLMAdapter wraps a simple prompt→response function into skills.LLMProvider.

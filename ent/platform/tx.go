@@ -18,6 +18,16 @@ type Tx struct {
 	EmailThreadIndex *EmailThreadIndexClient
 	// LoginSession is the client for interacting with the LoginSession builders.
 	LoginSession *LoginSessionClient
+	// OAuthAuthorization is the client for interacting with the OAuthAuthorization builders.
+	OAuthAuthorization *OAuthAuthorizationClient
+	// OAuthClient is the client for interacting with the OAuthClient builders.
+	OAuthClient *OAuthClientClient
+	// OAuthConsent is the client for interacting with the OAuthConsent builders.
+	OAuthConsent *OAuthConsentClient
+	// OAuthSigningKey is the client for interacting with the OAuthSigningKey builders.
+	OAuthSigningKey *OAuthSigningKeyClient
+	// OAuthToken is the client for interacting with the OAuthToken builders.
+	OAuthToken *OAuthTokenClient
 	// OIDCProvider is the client for interacting with the OIDCProvider builders.
 	OIDCProvider *OIDCProviderClient
 	// OrgMembership is the client for interacting with the OrgMembership builders.
@@ -184,6 +194,11 @@ func (tx *Tx) init() {
 	tx.DeviceSession = NewDeviceSessionClient(tx.config)
 	tx.EmailThreadIndex = NewEmailThreadIndexClient(tx.config)
 	tx.LoginSession = NewLoginSessionClient(tx.config)
+	tx.OAuthAuthorization = NewOAuthAuthorizationClient(tx.config)
+	tx.OAuthClient = NewOAuthClientClient(tx.config)
+	tx.OAuthConsent = NewOAuthConsentClient(tx.config)
+	tx.OAuthSigningKey = NewOAuthSigningKeyClient(tx.config)
+	tx.OAuthToken = NewOAuthTokenClient(tx.config)
 	tx.OIDCProvider = NewOIDCProviderClient(tx.config)
 	tx.OrgMembership = NewOrgMembershipClient(tx.config)
 	tx.Organization = NewOrganizationClient(tx.config)

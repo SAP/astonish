@@ -11,6 +11,10 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/SAP/astonish/ent/platform/loginsession"
+	"github.com/SAP/astonish/ent/platform/oauthauthorization"
+	"github.com/SAP/astonish/ent/platform/oauthconsent"
+	"github.com/SAP/astonish/ent/platform/oauthsigningkey"
+	"github.com/SAP/astonish/ent/platform/oauthtoken"
 	"github.com/SAP/astonish/ent/platform/pendinglinkcode"
 	teament "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/pkg/store"
@@ -65,6 +69,28 @@ func (s *Store) CleanupExpired(ctx context.Context) error {
 		Where(pendinglinkcode.ExpiresAtLT(now)).
 		Exec(ctx); err != nil {
 		return fmt.Errorf("cleanup link codes: %w", err)
+	}
+
+	// Delete OAuth records that can no longer participate in an active flow.
+	if _, err := s.platformClient.OAuthAuthorization.Delete().
+		Where(oauthauthorization.Or(oauthauthorization.ExpiresAtLT(now), oauthauthorization.ConsumedAtNotNil())).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("cleanup OAuth authorizations: %w", err)
+	}
+	if _, err := s.platformClient.OAuthToken.Delete().
+		Where(oauthtoken.Or(oauthtoken.ExpiresAtLT(now), oauthtoken.RevokedAtNotNil())).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("cleanup OAuth tokens: %w", err)
+	}
+	if _, err := s.platformClient.OAuthConsent.Delete().
+		Where(oauthconsent.Or(oauthconsent.RevokedAtNotNil(), oauthconsent.ExpiresAtLT(now))).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("cleanup OAuth consents: %w", err)
+	}
+	if _, err := s.platformClient.OAuthSigningKey.Delete().
+		Where(oauthsigningkey.Or(oauthsigningkey.StatusEQ(oauthsigningkey.StatusRevoked), oauthsigningkey.NotAfterLT(now))).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("cleanup OAuth signing keys: %w", err)
 	}
 
 	return nil

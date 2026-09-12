@@ -28,6 +28,7 @@ type TrustedIssuer struct {
 	Audience  string // must match JWT `aud` claim
 	UserClaim string // which claim identifies the user: "sub", "email", "preferred_username"
 	OrgID     string // owning organization
+	TeamID    string // target team within the owning organization
 }
 
 // AllowedAgent represents an external service authorized to make A2A calls.
@@ -44,14 +45,15 @@ type AllowedAgent struct {
 
 // A2ATokenClaims holds the validated identity from an A2A JWT.
 type A2ATokenClaims struct {
-	UserIdentifier  string    // extracted from configured user_claim
-	ActorIdentifier string    // from act.sub (empty if direct user token)
+	UserIdentifier  string // extracted from configured user_claim
+	ActorIdentifier string // from act.sub (empty if direct user token)
 	Issuer          string
-	IssuerID        string    // matched TrustedIssuer.ID
+	IssuerID        string // matched TrustedIssuer.ID
 	OrgID           string
+	TeamID          string
 	ExpiresAt       time.Time
-	RateLimit       int       // from matched AllowedAgent (0 = unlimited)
-	MaxTasks        int       // from matched AllowedAgent (0 = unlimited)
+	RateLimit       int // from matched AllowedAgent (0 = unlimited)
+	MaxTasks        int // from matched AllowedAgent (0 = unlimited)
 }
 
 // TokenValidatorConfig configures the token validator.
@@ -180,6 +182,7 @@ func (v *TokenValidator) Validate(tokenStr string) (*A2ATokenClaims, error) {
 		Issuer:         issuer,
 		IssuerID:       matchedIssuer.ID,
 		OrgID:          matchedIssuer.OrgID,
+		TeamID:         matchedIssuer.TeamID,
 		ExpiresAt:      exp.Time,
 	}
 
@@ -249,4 +252,3 @@ func containsString(slice []string, target string) bool {
 	}
 	return false
 }
-

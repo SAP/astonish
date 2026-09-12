@@ -1,4 +1,6 @@
-# A2A Protocol Integration — Research & Architecture Decision
+# A2A Protocol Integration — Historical Research and Superseded Decision
+
+> **Historical record.** The channel-adapter decision below is superseded. Inbound A2A is now the endpoint-owned `pkg/a2aserver` service at `/api/a2a`, protected exclusively by Astonish OAuth with exact `a2a` scope. It is not a `channels.Channel`, does not use `channels.a2a`, trusted external issuers, allowed agents, or `UserChannel(a2a, ...)`. Outbound A2A remains separate. See [A2A Server](./a2a-server.md) and [OAuth Authorization](./oauth-authorization.md).
 
 ## Executive Summary
 

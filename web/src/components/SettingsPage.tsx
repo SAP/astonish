@@ -27,6 +27,7 @@ const ProvidersSettings = lazy(() => import('./settings/ProvidersSettings'))
 const TapsSettings = lazy(() => import('./settings/TapsSettings'))
 const FlowStorePanel = lazy(() => import('./FlowStorePanel'))
 const TeamContainerTab = lazy(() => import('./TeamContainerTab'))
+const OAuthSettings = lazy(() => import('./settings/OAuthSettings'))
 const PlatformAdminPanel = lazy(() => import('./PlatformAdminPanel'))
 const KnowledgeBrowser = lazy(() => import('./KnowledgeBrowser'))
 const NetworkPolicySettings = lazy(() => import('./settings/NetworkPolicySettings'))
@@ -2075,6 +2076,13 @@ export default function SettingsPage({
 
         {/* Content */}
         <div className={activeSection === 'mcp' || activeSection === 'team-mcp' || activeSection === 'knowledge' || activeSection.endsWith('-skills') || activeSection === 'skills' ? 'flex-1 overflow-hidden flex flex-col' : 'flex-1 overflow-y-auto flex flex-col'}>
+          {/* Personal OAuth clients */}
+          {activeSection === 'oauth' && (
+            <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin" style={{ color: 'var(--brand)' }} /></div>}>
+              <OAuthSettings />
+            </Suspense>
+          )}
+
           {/* Team sections */}
           {activeSection.startsWith('team-') && resolvedTeamSlug && selectedTeam && user && (
             <TeamContent

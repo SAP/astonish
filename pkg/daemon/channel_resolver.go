@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
@@ -114,9 +115,23 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 		personalCredentials = personalStore.Credentials()
 	}
 
-	// Inject channel-scoped stores into the context. Credentials are personal-first
-	// with team fallback, matching Studio chat for linked channel users.
-	enrichedCtx := ctx
+	principalCtx, principalErr := execution.NewService(nil).Authorize(ctx, execution.Principal{
+		Kind:           execution.PrincipalKindUser,
+		Authentication: execution.AuthMethodChannel,
+		Surface:        execution.SurfaceChannel,
+		Subject:        link.UserID,
+		Issuer:         "astonish",
+		OrgSlug:        orgSlug,
+		TeamSlug:       teamSlug,
+		Authenticated:  true,
+	}, execution.CapabilityChat)
+	if principalErr != nil {
+		return ctx, "", "", fmt.Errorf("authorize channel principal: %w", principalErr)
+	}
+
+	// Inject channel-scoped stores only after the identity has been authorized.
+	// Credentials are personal-first with team fallback, matching Studio chat for linked users.
+	enrichedCtx := principalCtx
 	enrichedCtx = store.WithCredentialStore(enrichedCtx, store.NewMergedCredentialStore(personalCredentials, teamStore.Credentials()))
 	enrichedCtx = store.WithFlowStore(enrichedCtx, teamStore.Flows())
 	enrichedCtx = store.WithSkillStores(enrichedCtx, &store.SkillStores{
@@ -152,7 +167,6 @@ func (r *channelPlatformResolver) ResolveChannelUserWithHint(
 		Org:      r.backend.OrgSettings(orgSlug),
 		Team:     teamStore.Settings(),
 	})
-
 	return enrichedCtx, link.UserID, user.DisplayName, nil
 }
 

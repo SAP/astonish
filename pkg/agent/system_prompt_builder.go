@@ -162,6 +162,28 @@ func PromptOverridesFromContext(ctx context.Context) *PromptOverrides {
 	return po
 }
 
+// BuildExternal constructs the authenticated user's guidance for an external
+// MCP client that owns the model/tool iteration. It deliberately reuses the
+// native stable prompt, then replaces the native direct-call assumption with
+// the public progressive MCP sequence. Per-turn knowledge belongs in
+// RenderExternalTurnContext, not this cacheable prompt.
+func (b *SystemPromptBuilder) BuildExternal() string {
+	if b == nil {
+		return ""
+	}
+	clone := b.Clone()
+	// Code-mode overrides describe an internal terminal runtime and must not be
+	// exported to a remote MCP host. The base builder contains the tenant/user
+	// guidance shared by all native modes.
+	clone.BuildOverride = nil
+	clone.CodeMode = false
+	clone.RelevantKnowledge = ""
+	clone.RelevantTools = ""
+	prompt := clone.Build()
+	return prompt + "\n\n## External MCP Tool Loop\n\n" +
+		"You are being driven by an external client. At the start of every user turn, call `get_agent_context` with the current user message and a stable session ID. Inspect the returned Available Skills before deciding that a capability is unavailable. When a skill matches the task, discover and execute Astonish's `skill_lookup` through `search_tools`, `describe_tools`, and `execute_tool` before acting; then discover and execute every tool recommended by that skill through the same Astonish MCP operations. Use the context token for every discovery and execution call, execute one tool at a time, and reason over each result. Do not guess tool names or schemas. Names such as `http_request`, `shell_command`, and browser tools always mean tools from Astonish's returned catalog, never similarly named client or host tools. Local PATH, environment-variable, SDK, or package probes outside Astonish do not establish whether an Astonish skill or tool is available. Pass only credential names or placeholders to Astonish tools; never request, resolve, or return credential values. The client must retrieve relevant memory and tool context before producing its final response.\n"
+}
+
 // Build constructs the full system prompt.
 //
 // The output is deliberately compact (~800 tokens static) to maximize

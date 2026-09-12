@@ -259,4 +259,4 @@ All endpoints are under `/api/a2a-agents`. Use `?scope=platform|org|team` to tar
 
 - [MCP Servers](../configuration/mcp-servers.md) — similar pattern for connecting to MCP tool servers
 - [Credential Security](../security/credential-security.md) — how credentials are stored and protected
-- [A2A Server (Channels)](../channels/a2a.md) — exposing Astonish as an A2A agent for others to call
+- [Inbound A2A Server](../channels/a2a.md) — OAuth-protected endpoint for external agents calling Astonish

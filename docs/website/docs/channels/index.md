@@ -2,6 +2,8 @@
 
 Channels are communication adapters that connect external messaging platforms to the Astonish agent engine. They allow users to interact with their AI agents through familiar interfaces — Telegram, Email, or Slack — without changing how agents process requests.
 
+Inbound A2A is not a messaging channel. It is an OAuth-protected HTTP endpoint for external agents; see [Inbound A2A Server](./a2a.md).
+
 ## Supported Platforms
 
 | Platform | Transport | Key Feature |
@@ -9,7 +11,6 @@ Channels are communication adapters that connect external messaging platforms to
 | [Telegram](./telegram.md) | Bot API (polling/webhook) | Real-time chat, inline commands |
 | [Email](./email.md) | IMAP/SMTP | Asynchronous, plus-addressing routing |
 | [Slack](./slack.md) | Events API + OAuth | Workspace integration, threads |
-| [A2A](./a2a.md) | JSON-RPC over HTTP | Agent-to-agent collaboration, multi-client |
 
 ## Architecture
 
@@ -21,12 +22,11 @@ Every channel adapter follows the same pattern:
 4. **Execute** — Pass the message to the agent engine (same engine used by CLI and Studio)
 5. **Respond** — Format the agent's output for the platform and deliver it back
 
-```
+```text
 ┌────────────┐     ┌─────────────┐     ┌──────────────┐
 │  Telegram  │────▶│   Channel   │────▶│    Agent     │
 │  Email     │◀────│   Adapter   │◀────│    Engine    │
 │  Slack     │     └─────────────┘     └──────────────┘
-│  A2A       │
 └────────────┘
 ```
 
@@ -44,7 +44,7 @@ channels:
     enabled: true
     bot_token: "bot-token-here"
     allow_from:
-      - "123456789"  # Telegram user ID
+      - "123456789" # Telegram user ID
 ```
 
 ### Cloud (PostgreSQL)
@@ -65,4 +65,5 @@ See the individual channel pages for detailed setup instructions:
 - [Telegram](./telegram.md)
 - [Email](./email.md)
 - [Slack](./slack.md)
-- [A2A (Agent-to-Agent)](./a2a.md)
+
+For external agents that call Astonish, use [Inbound A2A Server](./a2a.md) and grant the OAuth `a2a` scope. For Astonish calling remote agents, use [A2A Agents](../configuration/a2a-agents.md).

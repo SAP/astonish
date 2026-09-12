@@ -5,6 +5,34 @@ import (
 	"time"
 )
 
+func TestOAuthServerConfigDefaultsAndOverrides(t *testing.T) {
+	var cfg OAuthServerConfig
+	if !cfg.IsEnabled() {
+		t.Fatal("OAuth server should be enabled when enabled is omitted")
+	}
+	issuer := cfg.EffectiveIssuer(9393)
+	if issuer != "http://127.0.0.1:9393" {
+		t.Fatalf("default issuer = %q", issuer)
+	}
+	if resource := cfg.EffectiveResource(issuer); resource != "http://127.0.0.1:9393/api/mcp" {
+		t.Fatalf("default resource = %q", resource)
+	}
+
+	disabled := false
+	cfg.Enabled = &disabled
+	cfg.Issuer = "https://astonish.example/base/"
+	cfg.Resource = "https://resource.example"
+	if cfg.IsEnabled() {
+		t.Fatal("explicit enabled=false was ignored")
+	}
+	if issuer := cfg.EffectiveIssuer(1234); issuer != cfg.Issuer {
+		t.Fatalf("configured issuer = %q", issuer)
+	}
+	if resource := cfg.EffectiveResource(cfg.Issuer); resource != cfg.Resource {
+		t.Fatalf("configured resource = %q", resource)
+	}
+}
+
 func TestRetrievalTimeoutDefaultsAndOverrides(t *testing.T) {
 	var embedding EmbeddingConfig
 	if got := embedding.Timeout(); got != 30*time.Second {

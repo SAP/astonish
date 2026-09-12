@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -27,6 +28,14 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An OAuth protocol adapter may already have validated a scoped Astonish
+		// bearer and attached its canonical principal. Do not reinterpret that
+		// token as a legacy platform JWT.
+		if _, ok := execution.PrincipalFromContext(r.Context()); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Allow unauthenticated access to exempt paths (SPA assets, auth endpoints, etc.)
 		if isAuthExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -69,7 +78,11 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 		}
 
 		// Populate authenticated context and serve.
-		ctx := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+		ctx, err := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+		if err != nil {
+			respondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -97,13 +110,18 @@ func isAuthExemptPath(path string) bool {
 	if strings.HasPrefix(path, "/api/auth/") {
 		return true
 	}
+	if strings.HasPrefix(path, "/.well-known/") || strings.HasPrefix(path, "/oauth/") {
+		return true
+	}
 	// Slack webhooks are authenticated by Slack request signatures in the channel handler.
 	if path == "/api/slack/events" || path == "/api/slack/commands" {
 		return true
 	}
-	// A2A Agent Card discovery — public endpoint for protocol compliance.
-	// A2A JSON-RPC endpoints use their own auth middleware (API key / Bearer).
-	if path == "/.well-known/agent-card.json" ||
+	// Protocol endpoints authenticate with their own bearer middleware. They must
+	// bypass platform-session and loopback checks so OAuth access tokens reach
+	// their respective protocol validators.
+	if path == "/api/mcp" ||
+		path == "/.well-known/agent-card.json" ||
 		path == "/api/a2a" || path == "/api/a2a/stream" {
 		return true
 	}
@@ -190,8 +208,12 @@ func (pa *PlatformAuth) checkTeamAccess(ctx context.Context, claims *PlatformCla
 	return nil
 }
 
-// buildAuthenticatedContext constructs a request context with TenantContext and PlatformUser.
-func buildAuthenticatedContext(ctx context.Context, claims *PlatformClaims, teamSlug string) context.Context {
+// buildAuthenticatedContext constructs a request context with TenantContext,
+// PlatformUser, and the canonical execution principal.
+func buildAuthenticatedContext(ctx context.Context, claims *PlatformClaims, teamSlug string) (context.Context, error) {
+	if claims == nil {
+		return nil, fmt.Errorf("platform claims are required")
+	}
 	tc := &store.TenantContext{
 		OrgSlug:  claims.OrgSlug,
 		TeamSlug: teamSlug,
@@ -207,7 +229,22 @@ func buildAuthenticatedContext(ctx context.Context, claims *PlatformClaims, team
 		Role:         claims.Role,
 		PlatformRole: claims.PlatformRole,
 	})
-	return ctx
+	principal := execution.Principal{
+		Kind:           execution.PrincipalKindUser,
+		Authentication: execution.AuthMethodPlatformJWT,
+		Surface:        execution.SurfaceStudio,
+		Subject:        claims.UserID,
+		Issuer:         "astonish",
+		OrgSlug:        claims.OrgSlug,
+		TeamSlug:       teamSlug,
+		Roles:          []string{claims.Role, claims.PlatformRole},
+		Authenticated:  true,
+	}
+	principalCtx, err := execution.WithPrincipal(ctx, principal)
+	if err != nil {
+		return nil, fmt.Errorf("build execution principal: %w", err)
+	}
+	return principalCtx, nil
 }
 
 // handleLoopbackAuth handles authentication for loopback (localhost) requests.
@@ -235,7 +272,15 @@ func (pa *PlatformAuth) handleLoopbackAuth(w http.ResponseWriter, r *http.Reques
 	if token != "" {
 		if claims, err := pa.jwt.ValidateAccessToken(token); err == nil {
 			teamSlug := resolveTeamSlug(r, claims)
-			ctx := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+			if err := pa.checkTeamAccess(r.Context(), claims, teamSlug); err != nil {
+				respondError(w, http.StatusForbidden, err.Error())
+				return true
+			}
+			ctx, err := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+			if err != nil {
+				respondError(w, http.StatusForbidden, err.Error())
+				return true
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return true
 		}

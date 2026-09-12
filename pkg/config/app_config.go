@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"os"
 	"os/user"
@@ -828,6 +829,11 @@ type PlatformAuthConfig struct {
 	// OIDC holds OpenID Connect provider settings. Only used when mode is "oidc".
 	OIDC OIDCConfig `yaml:"oidc,omitempty" json:"oidc,omitempty"`
 
+	// OAuthServer configures Astonish as an OAuth/OIDC authorization server for
+	// MCP hosts and other relying parties. It authenticates users through the
+	// configured built-in or external identity flow; it never forwards IdP tokens.
+	OAuthServer OAuthServerConfig `yaml:"oauth_server,omitempty" json:"oauth_server,omitempty"`
+
 	// LoopbackBypass controls how requests from 127.0.0.1/::1 are authenticated.
 	// Values:
 	//   "always"     — loopback requests pass without any token (personal mode default)
@@ -835,6 +841,44 @@ type PlatformAuthConfig struct {
 	//   "never"      — loopback requests go through full auth like remote requests
 	// Default: "with_token" in platform mode, "always" in personal mode.
 	LoopbackBypass string `yaml:"loopback_bypass,omitempty" json:"loopback_bypass,omitempty"`
+}
+
+// OAuthServerConfig configures Astonish-issued OAuth/OIDC tokens. The issuer
+// must be the stable public URL of this Astonish instance; upstream OIDC/SAML
+// systems remain authentication providers and are not token issuers here.
+type OAuthServerConfig struct {
+	// Enabled defaults to true. Set explicitly to false to remove the built-in
+	// Astonish authorization server and its administration/protocol routes.
+	Enabled               *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Issuer                string `yaml:"issuer,omitempty" json:"issuer,omitempty"`
+	Resource              string `yaml:"resource,omitempty" json:"resource,omitempty"`
+	AccessTokenTTLMinutes int    `yaml:"access_token_ttl_minutes,omitempty" json:"access_token_ttl_minutes,omitempty"`
+	RefreshTokenTTLDays   int    `yaml:"refresh_token_ttl_days,omitempty" json:"refresh_token_ttl_days,omitempty"`
+}
+
+// IsEnabled reports whether Astonish's built-in OAuth authorization server is
+// enabled. It is available by default so its superadmin Settings destination
+// always has a matching backend; deployments can explicitly opt out.
+func (c OAuthServerConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveIssuer returns the configured public issuer or a loopback default
+// suitable for a local Studio daemon.
+func (c OAuthServerConfig) EffectiveIssuer(port int) string {
+	if c.Issuer != "" {
+		return c.Issuer
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// EffectiveResource returns the configured protected resource identifier or
+// the local Studio MCP endpoint beneath issuer.
+func (c OAuthServerConfig) EffectiveResource(issuer string) string {
+	if c.Resource != "" {
+		return c.Resource
+	}
+	return strings.TrimRight(issuer, "/") + "/api/mcp"
 }
 
 // OIDCConfig holds settings for an external OpenID Connect identity provider.
@@ -1257,7 +1301,6 @@ type ChannelsConfig struct {
 	Telegram TelegramConfig `yaml:"telegram,omitempty" json:"telegram,omitempty"`
 	Email    EmailConfig    `yaml:"email,omitempty" json:"email,omitempty"`
 	Slack    SlackConfig    `yaml:"slack,omitempty" json:"slack,omitempty"`
-	A2A      A2AConfig      `yaml:"a2a,omitempty" json:"a2a,omitempty"`
 }
 
 // IsChannelsEnabled returns true if channels are explicitly enabled.
@@ -1591,50 +1634,6 @@ func (c *SlackConfig) GetMode() string {
 		return "socket"
 	}
 	return c.Mode
-}
-
-// A2AConfig holds configuration for the A2A (Agent-to-Agent) protocol channel.
-type A2AConfig struct {
-	// Enabled controls whether the A2A channel is active. Default: false (nil means false).
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// BaseURL is the external base URL where the A2A endpoint is reachable.
-	// Used in the Agent Card's URL field. Defaults to the daemon's listen address.
-	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
-	// TaskTTL is how long completed tasks are retained. Default: "72h".
-	TaskTTL string `yaml:"task_ttl,omitempty" json:"task_ttl,omitempty"`
-	// DefaultAudience is the expected "aud" claim in incoming A2A JWTs when not overridden per-issuer.
-	DefaultAudience string `yaml:"default_audience,omitempty" json:"default_audience,omitempty"`
-	// AutoLinkByEmail enables automatic user linking by matching the token's email claim.
-	AutoLinkByEmail bool `yaml:"auto_link_by_email,omitempty" json:"auto_link_by_email,omitempty"`
-	// RequireActorClaim requires the "act" claim in incoming JWTs for delegation flows.
-	RequireActorClaim bool `yaml:"require_actor_claim,omitempty" json:"require_actor_claim,omitempty"`
-	// TrustedIssuers lists the trusted token issuers for A2A authentication.
-	TrustedIssuers []TrustedIssuerConfig `yaml:"trusted_issuers,omitempty" json:"trusted_issuers,omitempty"`
-	// AllowedAgents lists the allowed A2A agents.
-	AllowedAgents []AllowedAgentConfig `yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
-}
-
-// TrustedIssuerConfig holds YAML configuration for a trusted A2A token issuer.
-type TrustedIssuerConfig struct {
-	Name      string `yaml:"name" json:"name"`
-	Issuer    string `yaml:"issuer" json:"issuer"`
-	JWKSURL   string `yaml:"jwks_url" json:"jwks_url"`
-	Audience  string `yaml:"audience" json:"audience"`
-	UserClaim string `yaml:"user_claim,omitempty" json:"user_claim,omitempty"` // default: "sub"
-}
-
-// AllowedAgentConfig holds YAML configuration for an allowed A2A agent.
-type AllowedAgentConfig struct {
-	Name      string `yaml:"name" json:"name"`
-	ActorSub  string `yaml:"actor_sub" json:"actor_sub"`
-	Issuer    string `yaml:"issuer" json:"issuer"` // references TrustedIssuerConfig.Name
-	RateLimit int    `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
-	MaxTasks  int    `yaml:"max_tasks,omitempty" json:"max_tasks,omitempty"`
-}
-
-// IsA2AEnabled returns true if the A2A channel is explicitly enabled.
-func (c *A2AConfig) IsA2AEnabled() bool {
-	return c.Enabled != nil && *c.Enabled
 }
 
 type ProviderConfig map[string]string

@@ -8,6 +8,11 @@ import (
 	"github.com/SAP/astonish/ent/platform/devicesession"
 	"github.com/SAP/astonish/ent/platform/emailthreadindex"
 	"github.com/SAP/astonish/ent/platform/loginsession"
+	"github.com/SAP/astonish/ent/platform/oauthauthorization"
+	"github.com/SAP/astonish/ent/platform/oauthclient"
+	"github.com/SAP/astonish/ent/platform/oauthconsent"
+	"github.com/SAP/astonish/ent/platform/oauthsigningkey"
+	"github.com/SAP/astonish/ent/platform/oauthtoken"
 	"github.com/SAP/astonish/ent/platform/oidcprovider"
 	"github.com/SAP/astonish/ent/platform/organization"
 	"github.com/SAP/astonish/ent/platform/orgmembership"
@@ -82,6 +87,130 @@ func init() {
 	loginsessionDescID := loginsessionFields[0].Descriptor()
 	// loginsession.IDValidator is a validator for the "id" field. It is called by the builders before save.
 	loginsession.IDValidator = loginsessionDescID.Validators[0].(func(string) error)
+	oauthauthorizationFields := schema.OAuthAuthorization{}.Fields()
+	_ = oauthauthorizationFields
+	// oauthauthorizationDescClientID is the schema descriptor for client_id field.
+	oauthauthorizationDescClientID := oauthauthorizationFields[1].Descriptor()
+	// oauthauthorization.ClientIDValidator is a validator for the "client_id" field. It is called by the builders before save.
+	oauthauthorization.ClientIDValidator = oauthauthorizationDescClientID.Validators[0].(func(string) error)
+	// oauthauthorizationDescRedirectURI is the schema descriptor for redirect_uri field.
+	oauthauthorizationDescRedirectURI := oauthauthorizationFields[2].Descriptor()
+	// oauthauthorization.RedirectURIValidator is a validator for the "redirect_uri" field. It is called by the builders before save.
+	oauthauthorization.RedirectURIValidator = oauthauthorizationDescRedirectURI.Validators[0].(func(string) error)
+	// oauthauthorizationDescCodeChallenge is the schema descriptor for code_challenge field.
+	oauthauthorizationDescCodeChallenge := oauthauthorizationFields[3].Descriptor()
+	// oauthauthorization.CodeChallengeValidator is a validator for the "code_challenge" field. It is called by the builders before save.
+	oauthauthorization.CodeChallengeValidator = oauthauthorizationDescCodeChallenge.Validators[0].(func(string) error)
+	// oauthauthorizationDescCodeChallengeMethod is the schema descriptor for code_challenge_method field.
+	oauthauthorizationDescCodeChallengeMethod := oauthauthorizationFields[4].Descriptor()
+	// oauthauthorization.DefaultCodeChallengeMethod holds the default value on creation for the code_challenge_method field.
+	oauthauthorization.DefaultCodeChallengeMethod = oauthauthorizationDescCodeChallengeMethod.Default.(string)
+	// oauthauthorizationDescSubject is the schema descriptor for subject field.
+	oauthauthorizationDescSubject := oauthauthorizationFields[6].Descriptor()
+	// oauthauthorization.SubjectValidator is a validator for the "subject" field. It is called by the builders before save.
+	oauthauthorization.SubjectValidator = oauthauthorizationDescSubject.Validators[0].(func(string) error)
+	// oauthauthorizationDescOrgID is the schema descriptor for org_id field.
+	oauthauthorizationDescOrgID := oauthauthorizationFields[8].Descriptor()
+	// oauthauthorization.OrgIDValidator is a validator for the "org_id" field. It is called by the builders before save.
+	oauthauthorization.OrgIDValidator = oauthauthorizationDescOrgID.Validators[0].(func(string) error)
+	// oauthauthorizationDescCreatedAt is the schema descriptor for created_at field.
+	oauthauthorizationDescCreatedAt := oauthauthorizationFields[12].Descriptor()
+	// oauthauthorization.DefaultCreatedAt holds the default value on creation for the created_at field.
+	oauthauthorization.DefaultCreatedAt = oauthauthorizationDescCreatedAt.Default.(func() time.Time)
+	// oauthauthorizationDescID is the schema descriptor for id field.
+	oauthauthorizationDescID := oauthauthorizationFields[0].Descriptor()
+	// oauthauthorization.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	oauthauthorization.IDValidator = oauthauthorizationDescID.Validators[0].(func(string) error)
+	oauthclientFields := schema.OAuthClient{}.Fields()
+	_ = oauthclientFields
+	// oauthclientDescClientID is the schema descriptor for client_id field.
+	oauthclientDescClientID := oauthclientFields[4].Descriptor()
+	// oauthclient.ClientIDValidator is a validator for the "client_id" field. It is called by the builders before save.
+	oauthclient.ClientIDValidator = oauthclientDescClientID.Validators[0].(func(string) error)
+	// oauthclientDescName is the schema descriptor for name field.
+	oauthclientDescName := oauthclientFields[5].Descriptor()
+	// oauthclient.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	oauthclient.NameValidator = oauthclientDescName.Validators[0].(func(string) error)
+	// oauthclientDescActive is the schema descriptor for active field.
+	oauthclientDescActive := oauthclientFields[12].Descriptor()
+	// oauthclient.DefaultActive holds the default value on creation for the active field.
+	oauthclient.DefaultActive = oauthclientDescActive.Default.(bool)
+	// oauthclientDescCreatedAt is the schema descriptor for created_at field.
+	oauthclientDescCreatedAt := oauthclientFields[13].Descriptor()
+	// oauthclient.DefaultCreatedAt holds the default value on creation for the created_at field.
+	oauthclient.DefaultCreatedAt = oauthclientDescCreatedAt.Default.(func() time.Time)
+	// oauthclientDescUpdatedAt is the schema descriptor for updated_at field.
+	oauthclientDescUpdatedAt := oauthclientFields[14].Descriptor()
+	// oauthclient.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	oauthclient.DefaultUpdatedAt = oauthclientDescUpdatedAt.Default.(func() time.Time)
+	// oauthclient.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	oauthclient.UpdateDefaultUpdatedAt = oauthclientDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// oauthclientDescID is the schema descriptor for id field.
+	oauthclientDescID := oauthclientFields[0].Descriptor()
+	// oauthclient.DefaultID holds the default value on creation for the id field.
+	oauthclient.DefaultID = oauthclientDescID.Default.(func() uuid.UUID)
+	oauthconsentFields := schema.OAuthConsent{}.Fields()
+	_ = oauthconsentFields
+	// oauthconsentDescClientID is the schema descriptor for client_id field.
+	oauthconsentDescClientID := oauthconsentFields[3].Descriptor()
+	// oauthconsent.ClientIDValidator is a validator for the "client_id" field. It is called by the builders before save.
+	oauthconsent.ClientIDValidator = oauthconsentDescClientID.Validators[0].(func(string) error)
+	// oauthconsentDescCreatedAt is the schema descriptor for created_at field.
+	oauthconsentDescCreatedAt := oauthconsentFields[6].Descriptor()
+	// oauthconsent.DefaultCreatedAt holds the default value on creation for the created_at field.
+	oauthconsent.DefaultCreatedAt = oauthconsentDescCreatedAt.Default.(func() time.Time)
+	// oauthconsentDescID is the schema descriptor for id field.
+	oauthconsentDescID := oauthconsentFields[0].Descriptor()
+	// oauthconsent.DefaultID holds the default value on creation for the id field.
+	oauthconsent.DefaultID = oauthconsentDescID.Default.(func() uuid.UUID)
+	oauthsigningkeyFields := schema.OAuthSigningKey{}.Fields()
+	_ = oauthsigningkeyFields
+	// oauthsigningkeyDescKeyID is the schema descriptor for key_id field.
+	oauthsigningkeyDescKeyID := oauthsigningkeyFields[1].Descriptor()
+	// oauthsigningkey.KeyIDValidator is a validator for the "key_id" field. It is called by the builders before save.
+	oauthsigningkey.KeyIDValidator = oauthsigningkeyDescKeyID.Validators[0].(func(string) error)
+	// oauthsigningkeyDescAlgorithm is the schema descriptor for algorithm field.
+	oauthsigningkeyDescAlgorithm := oauthsigningkeyFields[2].Descriptor()
+	// oauthsigningkey.AlgorithmValidator is a validator for the "algorithm" field. It is called by the builders before save.
+	oauthsigningkey.AlgorithmValidator = oauthsigningkeyDescAlgorithm.Validators[0].(func(string) error)
+	// oauthsigningkeyDescEncryptedPrivateKey is the schema descriptor for encrypted_private_key field.
+	oauthsigningkeyDescEncryptedPrivateKey := oauthsigningkeyFields[4].Descriptor()
+	// oauthsigningkey.EncryptedPrivateKeyValidator is a validator for the "encrypted_private_key" field. It is called by the builders before save.
+	oauthsigningkey.EncryptedPrivateKeyValidator = oauthsigningkeyDescEncryptedPrivateKey.Validators[0].(func([]byte) error)
+	// oauthsigningkeyDescCreatedAt is the schema descriptor for created_at field.
+	oauthsigningkeyDescCreatedAt := oauthsigningkeyFields[6].Descriptor()
+	// oauthsigningkey.DefaultCreatedAt holds the default value on creation for the created_at field.
+	oauthsigningkey.DefaultCreatedAt = oauthsigningkeyDescCreatedAt.Default.(func() time.Time)
+	// oauthsigningkeyDescID is the schema descriptor for id field.
+	oauthsigningkeyDescID := oauthsigningkeyFields[0].Descriptor()
+	// oauthsigningkey.DefaultID holds the default value on creation for the id field.
+	oauthsigningkey.DefaultID = oauthsigningkeyDescID.Default.(func() uuid.UUID)
+	oauthtokenFields := schema.OAuthToken{}.Fields()
+	_ = oauthtokenFields
+	// oauthtokenDescFamilyID is the schema descriptor for family_id field.
+	oauthtokenDescFamilyID := oauthtokenFields[1].Descriptor()
+	// oauthtoken.FamilyIDValidator is a validator for the "family_id" field. It is called by the builders before save.
+	oauthtoken.FamilyIDValidator = oauthtokenDescFamilyID.Validators[0].(func(string) error)
+	// oauthtokenDescClientID is the schema descriptor for client_id field.
+	oauthtokenDescClientID := oauthtokenFields[3].Descriptor()
+	// oauthtoken.ClientIDValidator is a validator for the "client_id" field. It is called by the builders before save.
+	oauthtoken.ClientIDValidator = oauthtokenDescClientID.Validators[0].(func(string) error)
+	// oauthtokenDescOrgID is the schema descriptor for org_id field.
+	oauthtokenDescOrgID := oauthtokenFields[6].Descriptor()
+	// oauthtoken.OrgIDValidator is a validator for the "org_id" field. It is called by the builders before save.
+	oauthtoken.OrgIDValidator = oauthtokenDescOrgID.Validators[0].(func(string) error)
+	// oauthtokenDescCreatedAt is the schema descriptor for created_at field.
+	oauthtokenDescCreatedAt := oauthtokenFields[10].Descriptor()
+	// oauthtoken.DefaultCreatedAt holds the default value on creation for the created_at field.
+	oauthtoken.DefaultCreatedAt = oauthtokenDescCreatedAt.Default.(func() time.Time)
+	// oauthtokenDescReplayDetected is the schema descriptor for replay_detected field.
+	oauthtokenDescReplayDetected := oauthtokenFields[14].Descriptor()
+	// oauthtoken.DefaultReplayDetected holds the default value on creation for the replay_detected field.
+	oauthtoken.DefaultReplayDetected = oauthtokenDescReplayDetected.Default.(bool)
+	// oauthtokenDescID is the schema descriptor for id field.
+	oauthtokenDescID := oauthtokenFields[0].Descriptor()
+	// oauthtoken.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	oauthtoken.IDValidator = oauthtokenDescID.Validators[0].(func(string) error)
 	oidcproviderFields := schema.OIDCProvider{}.Fields()
 	_ = oidcproviderFields
 	// oidcproviderDescName is the schema descriptor for name field.

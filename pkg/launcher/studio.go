@@ -13,6 +13,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
+	"github.com/SAP/astonish/pkg/oauthserver"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
@@ -63,6 +64,7 @@ type StudioServer struct {
 	backend      studioBackend                   // non-nil in platform mode
 	tenantMW     func(http.Handler) http.Handler // tenant resolution middleware
 	services     *store.Services
+	oauthServer  *oauthserver.Server
 }
 
 // StudioOption configures optional StudioServer behavior.
@@ -103,6 +105,10 @@ func WithTenantMiddleware(mw func(http.Handler) http.Handler) StudioOption {
 	return func(s *StudioServer) {
 		s.tenantMW = mw
 	}
+}
+
+func WithOAuthServer(server *oauthserver.Server) StudioOption {
+	return func(s *StudioServer) { s.oauthServer = server }
 }
 
 // NewStudioServer creates a configured Studio server without starting it.
@@ -186,6 +192,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	}
 
 	router := mux.NewRouter()
+	var oauthStudioTenantResolver api.MCPTenantResolver
 
 	// Register auth endpoints first (they are always accessible)
 	if s.platformAuth != nil {
@@ -207,6 +214,26 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		}
 		api.SetPlatformSSOHandler(ssoHandler)
 		api.RegisterSSORoutes(router, ssoHandler)
+		api.RegisterOAuthServerRoutes(router, s.oauthServer)
+		api.RegisterOAuthAdminRoutes(router, s.oauthServer, s.backend)
+		resolveOAuthTenant := func(ctx context.Context, orgID, teamID string) (string, string, error) {
+			org, err := s.backend.Organizations().GetByID(ctx, orgID)
+			if err != nil || org == nil {
+				return "", "", fmt.Errorf("resolve OAuth organization: %w", err)
+			}
+			orgStore, err := s.backend.ForOrg(org.Slug)
+			if err != nil {
+				return "", "", fmt.Errorf("resolve OAuth organization store: %w", err)
+			}
+			team, err := orgStore.Teams().GetTeam(ctx, teamID)
+			if err != nil || team == nil {
+				return "", "", fmt.Errorf("resolve OAuth team: %w", err)
+			}
+			return org.Slug, team.Slug, nil
+		}
+		api.RegisterA2ARoutes(router, s.oauthServer, api.A2ATenantResolver(resolveOAuthTenant), s.tenantMW)
+		api.RegisterMCPRoutes(router, s.oauthServer, api.MCPTenantResolver(resolveOAuthTenant), s.tenantMW)
+		oauthStudioTenantResolver = api.MCPTenantResolver(resolveOAuthTenant)
 	}
 
 	// Register API routes (passes tenantMW for platform-mode TenantMiddleware)
@@ -221,9 +248,12 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		// Wrap router + SPA into a single handler
 		spaHandler := spaFileServer(http.FS(webFS))
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Let mux handle /api/* and /.well-known/* routes
+			// OAuth protocol paths are intentionally outside /api. They must reach
+			// the mux rather than being treated as SPA routes, or /oauth/token
+			// returns Studio's index.html instead of an OAuth JSON response.
 			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
-				strings.HasPrefix(r.URL.Path, "/.well-known/") {
+				strings.HasPrefix(r.URL.Path, "/.well-known/") ||
+				strings.HasPrefix(r.URL.Path, "/oauth/") {
 				router.ServeHTTP(w, r)
 				return
 			}
@@ -235,7 +265,8 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		fallback := noAssetsHandler()
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if (len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api") ||
-				strings.HasPrefix(r.URL.Path, "/.well-known/") {
+				strings.HasPrefix(r.URL.Path, "/.well-known/") ||
+				strings.HasPrefix(r.URL.Path, "/oauth/") {
 				router.ServeHTTP(w, r)
 				return
 			}
@@ -247,6 +278,9 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	if s.platformAuth != nil {
 		// Platform mode: JWT auth (TenantMiddleware is inside the router via RegisterRoutes)
 		handler = api.PlatformAuthMiddleware(s.platformAuth, handler)
+		// The OAuth adapter is outermost so scoped OAuth requests receive their
+		// canonical principal before PlatformAuthMiddleware sees the bearer token.
+		handler = api.OAuthStudioBearerMiddleware(s.oauthServer, oauthStudioTenantResolver, handler)
 	}
 
 	// Apply rate limiting for remote (non-loopback) requests.

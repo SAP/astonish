@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/agent"
@@ -776,6 +777,23 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return nil, nil
 			})
 		}
+
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			principal, ok := execution.PrincipalFromContext(ctx)
+			if !ok {
+				// Direct agent callers (including standalone tests and embedded
+				// personal-mode agents) may not have a transport principal. Their
+				// existing tool policy remains authoritative in that case.
+				return nil, nil
+			}
+			if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityToolExecute); err != nil {
+				return map[string]any{
+					"status": "authorization_denied",
+					"error":  err.Error(),
+				}, nil
+			}
+			return nil, nil
+		})
 
 		// ── Code-mode authorization gates ──
 		// Active in code mode (EnforceAuthorization) for both Normal and Ask mode

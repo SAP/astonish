@@ -10,11 +10,9 @@ import {
 } from '../lib/astonish-client';
 import {
   clearSession,
-  listSSOProviders,
   loadSession,
-  loginWithSSO,
-  type SSOProvider,
-  type SSOStatus,
+  loginWithOAuth,
+  type OAuthStatus,
 } from '../lib/auth';
 import {
   deleteExtensionSession,
@@ -704,60 +702,20 @@ function hideProviderPicker(): void {
   }
 }
 
-function ssoStatusMessage(status: SSOStatus, verifyUrl?: string): string {
-  switch (status) {
-    case 'opening_browser':
-      return 'Opening browser for authentication…';
-    case 'browser_failed':
-      return verifyUrl
-        ? `Could not open the browser. Open ${verifyUrl}`
-        : 'Could not open the browser. Use the verify URL from Studio.';
-    case 'polling':
-      return 'Waiting for authentication to complete in the browser…';
-    default:
-      return 'Signing in…';
-  }
+function oauthStatusMessage(status: OAuthStatus): string {
+  return status === 'opening_browser'
+    ? 'Opening Studio sign-in in your browser…'
+    : 'Exchanging authorization code…';
 }
 
-async function completeSSO(serverUrl: string, providerID = ''): Promise<void> {
-  if (connectButton) {
-    connectButton.disabled = true;
-  }
-  const session = await loginWithSSO(serverUrl, providerID, (status, verifyUrl) => {
-    setLoginStatus(ssoStatusMessage(status, verifyUrl));
-  });
+async function completeOAuth(serverUrl: string): Promise<void> {
+  if (connectButton) connectButton.disabled = true;
+  const session = await loginWithOAuth(serverUrl, (status) => setLoginStatus(oauthStatusMessage(status)));
   studioUrl = session.serverUrl;
   setLoggedIn(true);
   setLoginStatus(null);
-  hideProviderPicker();
-  if (connectButton) {
-    connectButton.disabled = false;
-  }
+  if (connectButton) connectButton.disabled = false;
   await restoreExtensionChat();
-}
-
-function showProviderPicker(serverUrl: string, providers: SSOProvider[]): void {
-  if (!providerPicker || !providerList) {
-    return;
-  }
-  providerList.replaceChildren();
-  for (const provider of providers) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'secondary';
-    button.textContent = provider.name || provider.id;
-    button.addEventListener('click', () => {
-      clearError();
-      void completeSSO(serverUrl, provider.id).catch((err) => {
-        showError(err instanceof Error ? err.message : String(err));
-        if (connectButton) {
-          connectButton.disabled = false;
-        }
-      });
-    });
-    providerList.appendChild(button);
-  }
-  providerPicker.hidden = false;
 }
 
 function resizeComposer(): void {
@@ -897,24 +855,8 @@ loginForm?.addEventListener('submit', async (event) => {
     return;
   }
   try {
-    setLoginStatus('Looking up SSO providers…');
-    if (connectButton) {
-      connectButton.disabled = true;
-    }
-    const providers = await listSSOProviders(serverUrl);
-    if (providers.length === 0) {
-      throw new Error('no SSO providers configured on this server');
-    }
-    if (providers.length === 1) {
-      setLoginStatus(`Using SSO provider: ${providers[0].name}`);
-      await completeSSO(serverUrl, providers[0].id);
-      return;
-    }
-    setLoginStatus('Select an SSO provider.');
-    showProviderPicker(serverUrl, providers);
-    if (connectButton) {
-      connectButton.disabled = false;
-    }
+    setLoginStatus('Starting Studio sign-in…');
+    await completeOAuth(serverUrl);
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
     setLoginStatus(null);

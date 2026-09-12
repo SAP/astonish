@@ -11,7 +11,19 @@ async function adminFetch(input: string, init?: Parameters<typeof fetch>[1]): Pr
   if (!headers.has('X-Requested-With')) {
     headers.set('X-Requested-With', 'XMLHttpRequest')
   }
-  return fetch(input, { credentials: 'include', ...init, headers })
+  const request = { credentials: 'include' as const, ...init, headers }
+  let response = await fetch(input, request)
+  if (response.status !== 401) return response
+
+  const refresh = await fetch('/api/auth/refresh', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+  })
+  if (!refresh.ok) return response
+
+  response = await fetch(input, request)
+  return response
 }
 
 // Throw a descriptive error if the response is not ok.
@@ -19,6 +31,9 @@ async function adminFetch(input: string, init?: Parameters<typeof fetch>[1]): Pr
 async function throwIfNotOk(res: Response, fallbackMsg: string): Promise<void> {
   if (res.ok) return
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
+  if (res.status === 401) {
+    throw new Error('Your session expired. Sign in again, then reopen OAuth settings.')
+  }
   throw new Error((body.error as string) || fallbackMsg)
 }
 
@@ -495,7 +510,119 @@ export async function savePlatformAuthSettings(
   return res.json()
 }
 
-// --- Brand theme (platform default for login + user inherit) ---
+// --- Astonish OAuth Server Administration API ---
+
+export interface OAuthDiscovery {
+  issuer: string
+  resource: string
+  authorization_endpoint: string
+  token_endpoint: string
+  jwks_uri: string
+  revocation_endpoint: string
+  introspection_endpoint: string
+  a2a_endpoint: string
+  scopes: OAuthScopeOption[]
+}
+
+export interface OAuthScopeOption {
+  value: string
+  label: string
+  description: string
+}
+
+export interface OAuthClient {
+  id: string
+  org_id: string
+  client_id: string
+  name: string
+  client_type: 'public' | 'confidential'
+  redirect_uris: string[]
+  grant_types: string[]
+  resources: string[]
+  scopes: string[]
+  active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface OAuthClientInput {
+  name: string
+  client_type: 'public' | 'confidential'
+  org_id?: string
+  redirect_uris: string[]
+  grant_types: string[]
+  resources: string[]
+  scopes: string[]
+  active: boolean
+  rotate_secret?: boolean
+}
+
+export interface OAuthClientWriteResponse {
+  client: OAuthClient
+  // Present only after confidential-client creation or an explicit rotation.
+  client_secret: string
+}
+
+interface OAuthDiscoveryWire {
+  issuer?: string
+  resource?: string
+  authorization_endpoint?: string
+  token_endpoint?: string
+  jwks_uri?: string
+  revocation_endpoint?: string
+  introspection_endpoint?: string
+  a2a_endpoint?: string
+  scopes?: OAuthScopeOption[]
+  Issuer?: string
+  Resource?: string
+  AuthorizationEndpoint?: string
+  TokenEndpoint?: string
+  JWKSURI?: string
+  RevocationEndpoint?: string
+  IntrospectionEndpoint?: string
+  A2AEndpoint?: string
+}
+
+export async function getOAuthDiscovery(): Promise<OAuthDiscovery> {
+  const res = await adminFetch(`${ADMIN_BASE}/oauth/discovery`, { credentials: 'include' })
+  await throwIfNotOk(res, 'Failed to load OAuth discovery')
+  const data = await res.json() as OAuthDiscoveryWire
+  return {
+    issuer: data.issuer ?? data.Issuer ?? '',
+    resource: data.resource ?? data.Resource ?? '',
+    authorization_endpoint: data.authorization_endpoint ?? data.AuthorizationEndpoint ?? '',
+    token_endpoint: data.token_endpoint ?? data.TokenEndpoint ?? '',
+    jwks_uri: data.jwks_uri ?? data.JWKSURI ?? '',
+    revocation_endpoint: data.revocation_endpoint ?? data.RevocationEndpoint ?? '',
+    introspection_endpoint: data.introspection_endpoint ?? data.IntrospectionEndpoint ?? '',
+    a2a_endpoint: data.a2a_endpoint ?? data.A2AEndpoint ?? '',
+    scopes: data.scopes ?? [],
+  }
+}
+
+export async function listOAuthClients(): Promise<OAuthClient[]> {
+  const res = await adminFetch(`${ADMIN_BASE}/oauth/clients`, { credentials: 'include' })
+  await throwIfNotOk(res, 'Failed to list OAuth clients')
+  const data = await res.json()
+  return data.clients || []
+}
+
+export async function createOAuthClient(input: OAuthClientInput): Promise<OAuthClientWriteResponse> {
+  const res = await adminFetch(`${ADMIN_BASE}/oauth/clients`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  await throwIfNotOk(res, 'Failed to create OAuth client')
+  return res.json()
+}
+
+export async function updateOAuthClient(clientID: string, input: OAuthClientInput): Promise<OAuthClientWriteResponse> {
+  const res = await adminFetch(`${ADMIN_BASE}/oauth/clients/${encodeURIComponent(clientID)}`, {
+    method: 'PATCH', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+  await throwIfNotOk(res, 'Failed to update OAuth client')
+  return res.json()
+}
+
 
 export interface PlatformBrandTheme {
   default_brand_theme: string

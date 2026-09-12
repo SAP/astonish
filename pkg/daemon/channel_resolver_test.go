@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox/netpolicy"
 	"github.com/SAP/astonish/pkg/sandbox/openshell"
 	"github.com/SAP/astonish/pkg/store"
@@ -33,6 +34,13 @@ func TestResolveChannelUser_InjectsAllSkillStores(t *testing.T) {
 	}
 	if displayName != "Test User" {
 		t.Errorf("displayName = %q, want %q", displayName, "Test User")
+	}
+	principal, ok := execution.PrincipalFromContext(enrichedCtx)
+	if !ok {
+		t.Fatal("canonical principal not found in channel context")
+	}
+	if principal.Subject != userID || principal.OrgSlug != "testorg" || principal.TeamSlug != "testteam" {
+		t.Errorf("principal = %#v, want linked user in testorg/testteam", principal)
 	}
 
 	// Step 6: Verify that SkillStores in context has all three tiers

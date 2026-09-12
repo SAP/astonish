@@ -6,14 +6,11 @@ export type AuthSession = {
   expiresAt: number;
 };
 
-export type SSOProvider = {
-  id: string;
-  name: string;
-};
-
-export type SSOStatus = 'opening_browser' | 'browser_failed' | 'polling';
+export type OAuthStatus = 'opening_browser' | 'exchanging_code';
 
 const LOCAL_KEY = 'astonishAuth';
+const EXTENSION_CLIENT_ID = 'astonish-chrome-extension';
+const EXTENSION_SCOPE = 'chat tool:execute offline_access';
 
 export function normalizeServerUrl(serverUrl: string): string {
   return serverUrl.trim().replace(/\/+$/, '');
@@ -24,20 +21,14 @@ function originPattern(serverUrl: string): string {
 }
 
 async function ensureHostPermission(serverUrl: string): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.permissions?.request) {
-    return;
-  }
+  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return;
   const origin = originPattern(serverUrl);
-  const granted = await chrome.permissions.request({ origins: [origin] });
-  if (!granted) {
+  if (!await chrome.permissions.request({ origins: [origin] })) {
     throw new Error(`Host permission was not granted for ${origin}`);
   }
 }
 
-async function storageSet(
-  area: 'local' | 'session',
-  value: Record<string, unknown>,
-): Promise<void> {
+async function storageSet(area: 'local' | 'session', value: Record<string, unknown>): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.[area]) {
     throw new Error('chrome.storage is not available');
   }
@@ -45,233 +36,164 @@ async function storageSet(
 }
 
 async function storageGet<T>(area: 'local' | 'session', key: string): Promise<T | undefined> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.[area]) {
-    return undefined;
-  }
+  if (typeof chrome === 'undefined' || !chrome.storage?.[area]) return undefined;
   const result = await chrome.storage[area].get(key);
   return result[key] as T | undefined;
 }
 
 export async function persistSession(session: AuthSession): Promise<void> {
   await storageSet('local', { [LOCAL_KEY]: session });
-  await storageSet('session', {
-    accessToken: session.accessToken,
-    serverUrl: session.serverUrl,
-    teamSlug: session.teamSlug,
-  });
+  await storageSet('session', { accessToken: session.accessToken, serverUrl: session.serverUrl, teamSlug: session.teamSlug });
 }
 
 export async function loadSession(): Promise<AuthSession | null> {
   const session = await storageGet<AuthSession>('local', LOCAL_KEY);
-  if (!session?.serverUrl || !session.accessToken) {
-    return null;
-  }
-  return session;
+  return session?.serverUrl && session.accessToken ? session : null;
 }
 
 export async function clearSession(): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage) {
-    return;
-  }
+  if (typeof chrome === 'undefined' || !chrome.storage) return;
   await chrome.storage.local.remove(LOCAL_KEY);
   await chrome.storage.session.remove(['accessToken', 'serverUrl', 'teamSlug']);
 }
 
-type LoginResponse = {
+type TokenResponse = {
   access_token?: string;
   refresh_token?: string;
   expires_in?: number;
   team?: string;
   error?: string;
+  error_description?: string;
   message?: string;
 };
 
-function apiError(data: LoginResponse, fallback: string): Error {
-  return new Error(data.message || data.error || fallback);
+function apiError(data: TokenResponse, fallback: string): Error {
+  return new Error(data.message || data.error_description || data.error || fallback);
 }
 
-function sessionFromLogin(
-  serverUrl: string,
-  data: LoginResponse,
-  fallbackTeam = '',
-): AuthSession {
-  if (!data.access_token) {
-    throw new Error('server did not return tokens (ensure server version supports CLI login)');
-  }
-  const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
+function sessionFromTokens(serverUrl: string, data: TokenResponse): AuthSession {
+  if (!data.access_token) throw new Error('OAuth server did not return an access token');
   return {
     serverUrl: normalizeServerUrl(serverUrl),
     accessToken: data.access_token,
     refreshToken: data.refresh_token ?? '',
-    teamSlug: data.team || fallbackTeam,
-    expiresAt: Date.now() + expiresIn * 1000,
+    teamSlug: data.team ?? '',
+    expiresAt: Date.now() + (typeof data.expires_in === 'number' ? data.expires_in : 3600) * 1000,
   };
 }
 
-export async function listSSOProviders(serverUrl: string): Promise<SSOProvider[]> {
-  const normalized = normalizeServerUrl(serverUrl);
-  await ensureHostPermission(normalized);
-  const response = await fetch(`${normalized}/api/auth/sso/providers`);
-  if (!response.ok) {
-    const data = (await response.json().catch(() => ({}))) as LoginResponse;
-    throw apiError(data, `could not list SSO providers (${response.status})`);
-  }
-  const data = (await response.json().catch(() => ({}))) as { providers?: SSOProvider[] };
-  return Array.isArray(data.providers) ? data.providers : [];
+function base64URL(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-type SSOInitResponse = {
-  device_code?: string;
-  verify_url?: string;
-  expires_in?: number;
-  interval?: number;
-  error?: string;
-  message?: string;
-};
-
-type SSOPollResponse = LoginResponse & {
-  status?: string;
-};
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+function randomValue(bytes = 32): string {
+  const value = new Uint8Array(bytes);
+  crypto.getRandomValues(value);
+  return base64URL(value);
 }
 
-async function openVerifyUrl(url: string): Promise<boolean> {
-  if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
-    try {
-      await chrome.tabs.create({ url });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (typeof window !== 'undefined') {
-    return window.open(url, '_blank') !== null;
-  }
-  return false;
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return base64URL(new Uint8Array(digest));
 }
 
-export async function loginWithSSO(
+function extensionRedirectURI(): string {
+  if (typeof chrome === 'undefined' || !chrome.identity?.getRedirectURL) {
+    throw new Error('chrome.identity is not available');
+  }
+  return chrome.identity.getRedirectURL('oauth2');
+}
+
+function callbackCode(callbackURL: string, expectedState: string): string {
+  const callback = new URL(callbackURL);
+  const error = callback.searchParams.get('error');
+  if (error) throw new Error(callback.searchParams.get('error_description') || error);
+  if (callback.searchParams.get('state') !== expectedState) {
+    throw new Error('OAuth callback state did not match the authorization request');
+  }
+  const code = callback.searchParams.get('code');
+  if (!code) throw new Error('OAuth callback did not contain an authorization code');
+  return code;
+}
+
+export async function loginWithOAuth(
   serverUrl: string,
-  providerID = '',
-  onStatus?: (status: SSOStatus, verifyUrl?: string) => void,
+  onStatus?: (status: OAuthStatus) => void,
 ): Promise<AuthSession> {
   const normalized = normalizeServerUrl(serverUrl);
   await ensureHostPermission(normalized);
-
-  const initBody: Record<string, string> = {};
-  if (providerID) {
-    initBody.provider_id = providerID;
+  if (typeof chrome === 'undefined' || !chrome.identity?.launchWebAuthFlow) {
+    throw new Error('chrome.identity.launchWebAuthFlow is not available');
   }
 
-  const initResponse = await fetch(`${normalized}/api/auth/sso/init`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(initBody),
+  const verifier = randomValue(64);
+  const state = randomValue();
+  const redirectURI = extensionRedirectURI();
+  const authorize = new URL(`${normalized}/oauth/authorize`);
+  authorize.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: EXTENSION_CLIENT_ID,
+    redirect_uri: redirectURI,
+    scope: EXTENSION_SCOPE,
+    state,
+    code_challenge_method: 'S256',
+    code_challenge: await pkceChallenge(verifier),
+  }).toString();
+
+  onStatus?.('opening_browser');
+  const callbackURL = await chrome.identity.launchWebAuthFlow({ url: authorize.toString(), interactive: true });
+  if (!callbackURL) throw new Error('OAuth authorization was cancelled');
+
+  onStatus?.('exchanging_code');
+  const form = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: EXTENSION_CLIENT_ID,
+    code: callbackCode(callbackURL, state),
+    redirect_uri: redirectURI,
+    code_verifier: verifier,
   });
-  const initData = (await initResponse.json().catch(() => ({}))) as SSOInitResponse;
-  if (!initResponse.ok || !initData.device_code || !initData.verify_url) {
-    throw apiError(initData, `SSO init failed (${initResponse.status})`);
+  const response = await fetch(`${normalized}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString(),
+  });
+  const data = (await response.json().catch(() => ({}))) as TokenResponse;
+  if (!response.ok || !data.access_token) {
+    throw apiError(data, `OAuth token exchange failed (${response.status})`);
   }
-
-  onStatus?.('opening_browser', initData.verify_url);
-  const opened = await openVerifyUrl(initData.verify_url);
-  if (!opened) {
-    onStatus?.('browser_failed', initData.verify_url);
-  }
-
-  const intervalMs = (typeof initData.interval === 'number' ? initData.interval : 2) * 1000;
-  const timeoutMs = (initData.expires_in && initData.expires_in > 0 ? initData.expires_in : 600) * 1000;
-  const deadline = Date.now() + timeoutMs;
-
-  onStatus?.('polling', initData.verify_url);
-
-  while (Date.now() < deadline) {
-    if (intervalMs > 0) {
-      await sleep(intervalMs);
-    }
-    let pollResponse: Response;
-    try {
-      pollResponse = await fetch(`${normalized}/api/auth/sso/poll`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_code: initData.device_code }),
-      });
-    } catch {
-      continue;
-    }
-    const pollData = (await pollResponse.json().catch(() => ({}))) as SSOPollResponse;
-    if (pollData.status === 'pending') {
-      continue;
-    }
-    if (pollData.status === 'failed') {
-      throw apiError(pollData, 'SSO login failed');
-    }
-    if (pollData.status === 'complete') {
-      const session = sessionFromLogin(normalized, pollData);
-      await persistSession(session);
-      return session;
-    }
-  }
-
-  throw new Error('SSO login timed out. Please try again');
+  const session = sessionFromTokens(normalized, data);
+  await persistSession(session);
+  return session;
 }
 
 async function refreshTokens(session: AuthSession): Promise<AuthSession> {
-  if (!session.refreshToken) {
-    throw new Error('no refresh token available');
-  }
-  const response = await fetch(`${session.serverUrl}/api/auth/refresh`, {
+  if (!session.refreshToken) throw new Error('no OAuth refresh token available');
+  const form = new URLSearchParams({ grant_type: 'refresh_token', client_id: EXTENSION_CLIENT_ID, refresh_token: session.refreshToken });
+  const response = await fetch(`${session.serverUrl}/oauth/token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refresh_token: session.refreshToken }),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString(),
   });
-  const data = (await response.json().catch(() => ({}))) as LoginResponse;
-  if (!response.ok || !data.access_token) {
-    throw apiError(data, `refresh failed (${response.status})`);
-  }
-  const next: AuthSession = {
-    ...session,
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || session.refreshToken,
-    expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
-  };
+  const data = (await response.json().catch(() => ({}))) as TokenResponse;
+  if (!response.ok || !data.access_token) throw apiError(data, `OAuth refresh failed (${response.status})`);
+  const next = { ...session, ...sessionFromTokens(session.serverUrl, data), teamSlug: data.team || session.teamSlug };
   await persistSession(next);
   return next;
 }
 
 export async function studioFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const session = await loadSession();
-  if (!session) {
-    throw new Error('not signed in');
-  }
+  if (!session) throw new Error('not signed in');
 
-  const headers = new Headers(init.headers);
-  if (!headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-  headers.set('Authorization', `Bearer ${session.accessToken}`);
-  if (session.teamSlug) {
-    headers.set('X-Astonish-Team', session.teamSlug);
-  }
-
-  const url = `${session.serverUrl}${path.startsWith('/') ? path : `/${path}`}`;
-  const response = await fetch(url, { ...init, headers });
-  if (response.status !== 401 || !session.refreshToken) {
-    return response;
-  }
-
-  const refreshed = await refreshTokens(session);
-  const retryHeaders = new Headers(init.headers);
-  if (!retryHeaders.has('Content-Type')) {
-    retryHeaders.set('Content-Type', 'application/json');
-  }
-  retryHeaders.set('Authorization', `Bearer ${refreshed.accessToken}`);
-  if (refreshed.teamSlug) {
-    retryHeaders.set('X-Astonish-Team', refreshed.teamSlug);
-  }
-  return fetch(url, { ...init, headers: retryHeaders });
+  const request = (token: string) => {
+    const headers = new Headers(init.headers);
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(`${session.serverUrl}${path.startsWith('/') ? path : `/${path}`}`, { ...init, headers });
+  };
+  const response = await request(session.accessToken);
+  if (response.status !== 401 || !session.refreshToken) return response;
+  return request((await refreshTokens(session)).accessToken);
 }

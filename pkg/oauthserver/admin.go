@@ -130,8 +130,8 @@ func validateClientInput(input ClientInput) error {
 	if strings.TrimSpace(input.OwnerUserID) == "" || strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(input.TeamID) == "" {
 		return fmt.Errorf("OAuth client owner, organization, and team are required")
 	}
-	if len(input.GrantTypes) == 0 || len(input.Resources) == 0 {
-		return fmt.Errorf("at least one grant type and resource are required")
+	if len(input.GrantTypes) == 0 {
+		return fmt.Errorf("at least one grant type is required")
 	}
 	if _, err := normalizeClientScopes(input.Scopes); err != nil {
 		return err

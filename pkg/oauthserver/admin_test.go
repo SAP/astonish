@@ -93,11 +93,11 @@ func TestClientCredentials_RetainsClientTenantContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, secret, err := server.CreateClient(context.Background(), ClientInput{Name: "service", ClientType: "confidential", OwnerUserID: "owner-123", OrgID: "org-123", TeamID: "team-123", GrantTypes: []string{GrantClientCredentials}, Resources: []string{"https://api.example"}, Scopes: []string{"tool:execute"}, Active: true})
+	client, secret, err := server.CreateClient(context.Background(), ClientInput{Name: "default resources", ClientType: "confidential", OwnerUserID: "owner-123", OrgID: "org-123", TeamID: "team-123", GrantTypes: []string{GrantClientCredentials}, Scopes: []string{"tool:execute", "a2a"}, Active: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader("grant_type=client_credentials&scope=tool%3Aexecute"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader("grant_type=client_credentials&scope=tool%3Aexecute%20a2a"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(client.ClientID, secret)
 	res := httptest.NewRecorder()
@@ -115,7 +115,24 @@ func TestClientCredentials_RetainsClientTenantContext(t *testing.T) {
 	if _, _, err := new(jwt.Parser).ParseUnverified(response.AccessToken, claims); err != nil {
 		t.Fatal(err)
 	}
+	if !containsAudience(claims["aud"], "https://api.example") || !containsAudience(claims["aud"], "https://issuer.example/api/a2a") {
+		t.Fatalf("default client audience = %#v, want MCP and A2A", claims["aud"])
+	}
 	if claims["org_id"] != "org-123" || claims["team_id"] != "team-123" {
 		t.Fatalf("tenant claims = %#v", claims)
 	}
+}
+
+func containsAudience(value any, wanted string) bool {
+	switch values := value.(type) {
+	case string:
+		return values == wanted
+	case []any:
+		for _, candidate := range values {
+			if candidate == wanted {
+				return true
+			}
+		}
+	}
+	return false
 }

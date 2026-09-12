@@ -144,7 +144,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
 		return
 	}
-	resources := allowed(q["resource"], client.Resources)
+	// An empty registration permits tokens for Astonish's two built-in protected
+	// resources. An explicit registration remains an audience restriction.
+	resources := allowed(q["resource"], client.Resources, s.defaultResources())
+	if len(q["resource"]) > 0 && len(resources) != len(q["resource"]) {
+		oauthError(w, http.StatusBadRequest, "invalid_target", "requested resource is not allowed")
+		return
+	}
 	code, err := randomHandle()
 	if err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "could not issue code")
@@ -243,7 +249,11 @@ func (s *Server) clientCredentials(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
 		return
 	}
-	resources := allowed(r.Form["resource"], client.Resources)
+	resources := allowed(r.Form["resource"], client.Resources, s.defaultResources())
+	if len(r.Form["resource"]) > 0 && len(resources) != len(r.Form["resource"]) {
+		oauthError(w, http.StatusBadRequest, "invalid_target", "requested resource is not allowed")
+		return
+	}
 	if client.OwnerUserID == "" || client.OrgID == "" || client.TeamID == "" {
 		oauthError(w, http.StatusUnauthorized, "invalid_client", "client is missing required tenant context")
 		return
@@ -275,10 +285,10 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request, requ
 func (s *Server) writeTokens(w http.ResponseWriter, ctx context.Context, client *store.OAuthClient, subject, actor, orgID, teamID string, scopes, resources []string, refresh bool, familyID string) {
 	now := time.Now().UTC()
 	exp := now.Add(s.config.AccessTokenTTL)
-	// MCP clients are permitted to omit the optional RFC 8707 resource parameter.
-	// In that case, issue for this server's advertised protected resource rather
-	// than the client ID so the bearer is accepted at the MCP endpoint.
-	claims := jwt.MapClaims{"iss": s.config.Issuer, "aud": audience(resources, s.config.Resource), "exp": exp.Unix(), "iat": now.Unix(), "client_id": client.ClientID, "scope": strings.Join(scopes, " "), "org_id": orgID}
+	// A client with no explicit resource registration receives a token valid for
+	// both built-in protected resources. Explicitly registered resources continue
+	// to narrow that audience. RFC 8707 resource indicators remain optional.
+	claims := jwt.MapClaims{"iss": s.config.Issuer, "aud": audience(resources, s.defaultResources()), "exp": exp.Unix(), "iat": now.Unix(), "client_id": client.ClientID, "scope": strings.Join(scopes, " "), "org_id": orgID}
 	if subject != "" {
 		claims["sub"] = subject
 	}
@@ -403,9 +413,16 @@ func contains(values []string, value string) bool {
 	}
 	return false
 }
-func allowed(requested, permitted []string) []string {
+func (s *Server) defaultResources() []string {
+	return []string{s.config.Resource, s.config.Issuer + "/api/a2a"}
+}
+
+func allowed(requested, permitted, defaults []string) []string {
+	if len(permitted) == 0 {
+		permitted = defaults
+	}
 	if len(requested) == 0 {
-		return nil
+		return append([]string(nil), permitted...)
 	}
 	out := make([]string, 0, len(requested))
 	for _, value := range requested {
@@ -444,9 +461,9 @@ func permittedSubset(requested, permitted []string) ([]string, bool) {
 	}
 	return out, true
 }
-func audience(resources []string, fallback string) []string {
+func audience(resources, fallback []string) []string {
 	if len(resources) > 0 {
 		return resources
 	}
-	return []string{fallback}
+	return append([]string(nil), fallback...)
 }

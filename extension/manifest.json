@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "Chat with Astonish from the current page.",
   "minimum_chrome_version": "114",
-  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "webNavigation", "debugger"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA/PmX+XfuqbJO3qySAUZD89coXD9SI1b9Y6HZFii69SgjS6nqlGRNtpV5OiEtphDOfDpFrgT/DXLkvE2z00A86/SSqL3fO0f4T3fiWJYy1JMiPi7ONmnw6gfqP93PaGMx5+OfuvJ+wapk8mbRThtevhwotIoBxM56HR0Z0kHTbwrctOSxRMNTgTzZiRiiKsHaaovWtauiKpyfrQESO9Kg+G65R5pLsYQJCM+XwXzTUGrroNKzjFwBgu6DX6Pcu2cjW4JAMIAXjzBiGmA+9I+S3DWgqsuqXkttC0NJ89zDiu2hOQ44P51aFaTk2Fq6Gx1Q4OtUrdzPYLnmLHWPpEFRgwIDAQAB",
+  "permissions": ["sidePanel", "storage", "identity", "activeTab", "scripting", "webNavigation", "debugger"],
   "optional_host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",

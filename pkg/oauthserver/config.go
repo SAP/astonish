@@ -22,6 +22,9 @@ type Config struct {
 	RefreshTokenTTL time.Duration
 	CodeTTL         time.Duration
 	Development     bool
+	// LoginPath is the same-origin Studio route used when an authorization
+	// request needs interactive platform authentication.
+	LoginPath       string
 }
 
 func (c Config) normalized() (Config, error) {
@@ -48,5 +51,13 @@ func (c Config) normalized() (Config, error) {
 	if c.CodeTTL <= 0 {
 		c.CodeTTL = 5 * time.Minute
 	}
+	if c.LoginPath == "" {
+		c.LoginPath = "/"
+	}
+	loginURL, err := url.Parse(c.LoginPath)
+	if err != nil || loginURL.IsAbs() || !strings.HasPrefix(loginURL.Path, "/") {
+		return c, errors.New("oauth login path must be a same-origin absolute path")
+	}
+	c.LoginPath = loginURL.String()
 	return c, nil
 }

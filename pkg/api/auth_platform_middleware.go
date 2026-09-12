@@ -28,6 +28,14 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An OAuth protocol adapter may already have validated a scoped Astonish
+		// bearer and attached its canonical principal. Do not reinterpret that
+		// token as a legacy platform JWT.
+		if _, ok := execution.PrincipalFromContext(r.Context()); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Allow unauthenticated access to exempt paths (SPA assets, auth endpoints, etc.)
 		if isAuthExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)

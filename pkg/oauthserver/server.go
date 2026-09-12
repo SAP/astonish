@@ -91,7 +91,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "authorization code parameters are required")
 		return
 	}
-	client, err := s.store.GetOAuthClient(r.Context(), q.Get("client_id"))
+	client, err := s.client(r.Context(), q.Get("client_id"))
 	redirectURI := ""
 	if client != nil {
 		for _, registeredURI := range client.RedirectURIs {
@@ -111,10 +111,21 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	subject, err := s.validate(r.Context(), r)
 	if err != nil {
-		oauthError(w, http.StatusUnauthorized, "login_required", "an active Astonish login is required")
+		// Validation above has bound this request to an active client, exact redirect
+		// URI, and S256 challenge. Studio authenticates the human (including optional
+		// upstream SSO) and then resumes this same-origin authorization request.
+		login, loginErr := url.Parse(s.config.LoginPath)
+		if loginErr != nil {
+			oauthError(w, http.StatusInternalServerError, "server_error", "oauth login continuation is unavailable")
+			return
+		}
+		loginQuery := login.Query()
+		loginQuery.Set("oauth_continue", r.URL.RequestURI())
+		login.RawQuery = loginQuery.Encode()
+		http.Redirect(w, r, login.String(), http.StatusFound)
 		return
 	}
-	if subject.ID == "" || subject.OrgID == "" || (client.OrgID != "" && subject.OrgID != client.OrgID) {
+	if subject.ID == "" || subject.OrgID == "" || (!isChromeExtensionClient(client) && client.OrgID != "" && subject.OrgID != client.OrgID) {
 		oauthError(w, http.StatusForbidden, "access_denied", "subject is not authorized for this client")
 		return
 	}
@@ -122,6 +133,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	// session proves the subject belongs to the assigned organization; it must not
 	// be allowed to select or omit the team embedded in the resulting token.
 	orgID, teamID := client.OrgID, client.TeamID
+	if isChromeExtensionClient(client) {
+		orgID, teamID = subject.OrgID, subject.TeamID
+	}
 	scopes, ok := permittedSubset(strings.Fields(q.Get("scope")), authorizationScopes(client.Scopes))
 	if !ok {
 		oauthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not granted")
@@ -239,7 +253,7 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request, requ
 	if !basic {
 		id, secret = r.Form.Get("client_id"), r.Form.Get("client_secret")
 	}
-	client, err := s.store.GetOAuthClient(r.Context(), id)
+	client, err := s.client(r.Context(), id)
 	if err != nil || client == nil || !client.Active {
 		oauthError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
 		return nil, false

@@ -35,7 +35,19 @@ func NewOAuthSessionValidator(pa *PlatformAuth, backend store.PlatformBackend) o
 		if err != nil || org == nil || org.Status != "active" {
 			return oauthserver.Subject{}, fmt.Errorf("organization is inactive")
 		}
-		return oauthserver.Subject{ID: user.ID, OrgID: org.ID}, nil
+		teamID := ""
+		if claims.DefaultTeamSlug != "" {
+			orgStore, err := backend.ForOrg(claims.OrgSlug)
+			if err != nil {
+				return oauthserver.Subject{}, fmt.Errorf("resolve platform team store: %w", err)
+			}
+			team, err := orgStore.Teams().GetTeamBySlug(ctx, claims.DefaultTeamSlug)
+			if err != nil || team == nil {
+				return oauthserver.Subject{}, fmt.Errorf("platform team is unavailable")
+			}
+			teamID = team.ID
+		}
+		return oauthserver.Subject{ID: user.ID, OrgID: org.ID, TeamID: teamID}, nil
 	}
 }
 

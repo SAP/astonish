@@ -192,6 +192,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	}
 
 	router := mux.NewRouter()
+	var oauthStudioTenantResolver api.MCPTenantResolver
 
 	// Register auth endpoints first (they are always accessible)
 	if s.platformAuth != nil {
@@ -215,36 +216,24 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		api.RegisterSSORoutes(router, ssoHandler)
 		api.RegisterOAuthServerRoutes(router, s.oauthServer)
 		api.RegisterOAuthAdminRoutes(router, s.oauthServer, s.backend)
-		api.RegisterA2ARoutes(router, s.oauthServer, api.A2ATenantResolver(func(ctx context.Context, orgID, teamID string) (string, string, error) {
+		resolveOAuthTenant := func(ctx context.Context, orgID, teamID string) (string, string, error) {
 			org, err := s.backend.Organizations().GetByID(ctx, orgID)
 			if err != nil || org == nil {
-				return "", "", fmt.Errorf("resolve A2A organization: %w", err)
+				return "", "", fmt.Errorf("resolve OAuth organization: %w", err)
 			}
 			orgStore, err := s.backend.ForOrg(org.Slug)
 			if err != nil {
-				return "", "", fmt.Errorf("resolve A2A organization store: %w", err)
+				return "", "", fmt.Errorf("resolve OAuth organization store: %w", err)
 			}
 			team, err := orgStore.Teams().GetTeam(ctx, teamID)
 			if err != nil || team == nil {
-				return "", "", fmt.Errorf("resolve A2A team: %w", err)
+				return "", "", fmt.Errorf("resolve OAuth team: %w", err)
 			}
 			return org.Slug, team.Slug, nil
-		}), s.tenantMW)
-		api.RegisterMCPRoutes(router, s.oauthServer, func(ctx context.Context, orgID, teamID string) (string, string, error) {
-			org, err := s.backend.Organizations().GetByID(ctx, orgID)
-			if err != nil || org == nil {
-				return "", "", fmt.Errorf("resolve MCP organization: %w", err)
-			}
-			orgStore, err := s.backend.ForOrg(org.Slug)
-			if err != nil {
-				return "", "", fmt.Errorf("resolve MCP organization store: %w", err)
-			}
-			team, err := orgStore.Teams().GetTeam(ctx, teamID)
-			if err != nil || team == nil {
-				return "", "", fmt.Errorf("resolve MCP team: %w", err)
-			}
-			return org.Slug, team.Slug, nil
-		}, s.tenantMW)
+		}
+		api.RegisterA2ARoutes(router, s.oauthServer, api.A2ATenantResolver(resolveOAuthTenant), s.tenantMW)
+		api.RegisterMCPRoutes(router, s.oauthServer, api.MCPTenantResolver(resolveOAuthTenant), s.tenantMW)
+		oauthStudioTenantResolver = api.MCPTenantResolver(resolveOAuthTenant)
 	}
 
 	// Register API routes (passes tenantMW for platform-mode TenantMiddleware)
@@ -289,6 +278,9 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	if s.platformAuth != nil {
 		// Platform mode: JWT auth (TenantMiddleware is inside the router via RegisterRoutes)
 		handler = api.PlatformAuthMiddleware(s.platformAuth, handler)
+		// The OAuth adapter is outermost so scoped OAuth requests receive their
+		// canonical principal before PlatformAuthMiddleware sees the bearer token.
+		handler = api.OAuthStudioBearerMiddleware(s.oauthServer, oauthStudioTenantResolver, handler)
 	}
 
 	// Apply rate limiting for remote (non-loopback) requests.

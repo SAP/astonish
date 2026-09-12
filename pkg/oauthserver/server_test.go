@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -136,6 +137,32 @@ func (m *memoryStore) ListOAuthSigningKeys(_ context.Context) ([]store.OAuthSign
 	return append([]store.OAuthSigningKey(nil), m.keys...), nil
 }
 
+func TestOAuthAuthorizeRedirectsUnauthenticatedBrowserToStudioLogin(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{"extension": {
+		ClientID: "extension", ClientType: "public", Active: true, OrgID: "org", TeamID: "team",
+		RedirectURIs: []string{"https://extension-id.chromiumapp.org/oauth2"}, GrantTypes: []string{GrantAuthorizationCode}, Scopes: []string{ScopeChat},
+	}}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example", LoginPath: "/?existing=1"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{}, errors.New("no session")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestURI := "/oauth/authorize?response_type=code&client_id=extension&redirect_uri=https%3A%2F%2Fextension-id.chromiumapp.org%2Foauth2&scope=chat&state=state&code_challenge_method=S256&code_challenge=challenge"
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, httptest.NewRequest(http.MethodGet, requestURI, nil))
+	if result.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+	location, err := url.Parse(result.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Path != "/" || location.Query().Get("existing") != "1" || location.Query().Get("oauth_continue") != requestURI {
+		t.Fatalf("login continuation = %q", location.String())
+	}
+}
+
 func TestOAuthAuthorizationCodePKCEAndAudience(t *testing.T) {
 	secret, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
 	if err != nil {
@@ -265,6 +292,51 @@ func TestOAuthRejectsMissingPKCEAndWrongRedirect(t *testing.T) {
 		if result.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d", path, result.Code)
 		}
+	}
+}
+
+func TestChromeExtensionAuthorizationUsesAuthenticatedTenant(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{ID: "user", OrgID: "org", TeamID: "team"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+ChromeExtensionClientID+"&redirect_uri="+url.QueryEscape(ChromeExtensionRedirectURI)+"&code_challenge_method=S256&code_challenge=test&scope=chat+tool%3Aexecute+offline_access", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, request)
+	if result.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+	if result.Header().Get("Location") == "" || !strings.HasPrefix(result.Header().Get("Location"), ChromeExtensionRedirectURI) {
+		t.Fatalf("callback location = %q", result.Header().Get("Location"))
+	}
+	for _, authorization := range backend.codes {
+		if authorization.ClientID != ChromeExtensionClientID || authorization.OrgID != "org" || authorization.TeamID != "team" {
+			t.Fatalf("authorization tenant binding = %#v", authorization)
+		}
+		if !contains(authorization.Scopes, ScopeChat) || !contains(authorization.Scopes, ScopeToolExecute) || !contains(authorization.Scopes, "offline_access") || len(authorization.Scopes) != 3 {
+			t.Fatalf("authorization scopes = %q", strings.Join(authorization.Scopes, " "))
+		}
+	}
+}
+
+func TestChromeExtensionRejectsUnpinnedRedirectURI(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{ID: "user", OrgID: "org", TeamID: "team"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+ChromeExtensionClientID+"&redirect_uri=https%3A%2F%2Fevil-extension.chromiumapp.org%2Foauth2&code_challenge_method=S256&code_challenge=test&scope=chat", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, request)
+	if result.Code != http.StatusBadRequest {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
 	}
 }
 

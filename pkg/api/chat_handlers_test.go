@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
@@ -22,7 +24,9 @@ import (
 )
 
 type apiSkillStore struct {
-	skills []store.Skill
+	skills               []store.Skill
+	updateValidationErr  error
+	validationUpdateCall int
 }
 
 func (s *apiSkillStore) LoadAll(context.Context) ([]store.Skill, error) { return s.skills, nil }
@@ -37,7 +41,17 @@ func (s *apiSkillStore) Get(_ context.Context, name string) (*store.Skill, error
 func (s *apiSkillStore) Save(context.Context, *store.Skill) error    { return nil }
 func (s *apiSkillStore) Delete(context.Context, string) error        { return nil }
 func (s *apiSkillStore) List(context.Context) ([]store.Skill, error) { return s.skills, nil }
-func (s *apiSkillStore) UpdateValidationStatus(context.Context, string, string, string) error {
+func (s *apiSkillStore) UpdateValidationStatus(_ context.Context, name, status, meta string) error {
+	s.validationUpdateCall++
+	if s.updateValidationErr != nil {
+		return s.updateValidationErr
+	}
+	for i := range s.skills {
+		if strings.EqualFold(s.skills[i].Name, name) {
+			s.skills[i].ValidationStatus = status
+			s.skills[i].ValidationMeta = meta
+		}
+	}
 	return nil
 }
 func (s *apiSkillStore) ListFiles(context.Context, string) ([]store.SkillFile, error) {
@@ -48,6 +62,135 @@ func (s *apiSkillStore) GetFile(context.Context, string, string, string) (*store
 }
 func (s *apiSkillStore) SaveFile(context.Context, string, *store.SkillFile) error { return nil }
 func (s *apiSkillStore) DeleteFile(context.Context, string, string, string) error { return nil }
+
+type staticValidationLLM struct {
+	response string
+	err      error
+}
+
+func (l staticValidationLLM) EvaluateText(context.Context, string) (string, error) {
+	return l.response, l.err
+}
+
+func withSkillValidationLLM(t *testing.T, provider skills.LLMProvider) {
+	t.Helper()
+	previous := skillValidationLLMProvider
+	skillValidationLLMProvider = func(*http.Request) skills.LLMProvider { return provider }
+	t.Cleanup(func() { skillValidationLLMProvider = previous })
+}
+
+func resetSkillValidationRateLimit(t *testing.T) {
+	t.Helper()
+	validationRateMu.Lock()
+	previous := validationRateMap
+	validationRateMap = make(map[string]time.Time)
+	validationRateMu.Unlock()
+	t.Cleanup(func() {
+		validationRateMu.Lock()
+		validationRateMap = previous
+		validationRateMu.Unlock()
+	})
+}
+
+func TestValidationLLMFromComponentsRejectsUnconfiguredChatPlaceholder(t *testing.T) {
+	components := &StudioChatComponents{LLM: provider.NewPlaceholderLLM()}
+	if got := validationLLMFromComponents(components); got != nil {
+		t.Fatal("unconfigured chat placeholder must not be used for skill validation")
+	}
+}
+
+func TestValidateSkillHandlerPlatformScope(t *testing.T) {
+	platformSkills := &apiSkillStore{skills: []store.Skill{{
+		Name:             "openstack",
+		Content:          "---\nname: openstack\ndescription: OpenStack API access\n---\nUse the API.",
+		ValidationStatus: skills.ValidationStatusUnknown,
+	}}}
+	svc := &store.Services{
+		Mode:           store.ModePlatform,
+		PlatformSkills: platformSkills,
+		TeamSkills:     &apiSkillStore{},
+	}
+
+	t.Run("platform admin validates platform skill", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/api/skills/openstack/validate?scope=platform", nil)
+		r = mux.SetURLVars(r, map[string]string{"name": "openstack"})
+		ctx := store.WithServices(r.Context(), svc)
+		ctx = WithPlatformUser(ctx, &PlatformUser{ID: "admin", PlatformRole: "superadmin"})
+		r = r.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		ValidateSkillHandler(w, r)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+		}
+	})
+
+	t.Run("team admin cannot validate inherited platform skill", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/api/skills/openstack/validate?scope=platform", nil)
+		r = mux.SetURLVars(r, map[string]string{"name": "openstack"})
+		ctx := store.WithServices(r.Context(), svc)
+		ctx = WithPlatformUser(ctx, &PlatformUser{ID: "team-admin", Role: "admin"})
+		r = r.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		ValidateSkillHandler(w, r)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusForbidden, w.Body.String())
+		}
+	})
+}
+
+func TestValidateSkillHandlerPersistsBeforeReportingSuccess(t *testing.T) {
+	resetSkillValidationRateLimit(t)
+	withSkillValidationLLM(t, staticValidationLLM{response: "[]"})
+
+	teamSkills := &apiSkillStore{skills: []store.Skill{{
+		Name: "pr-review", Content: "---\nname: pr-review\ndescription: Review pull requests\n---\nReview the changes.",
+	}}}
+	svc := &store.Services{Mode: store.ModePlatform, TeamSkills: teamSkills}
+	request := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/skills/pr-review/validate?scope=team", nil)
+		r = mux.SetURLVars(r, map[string]string{"name": "pr-review"})
+		ctx := store.WithServices(r.Context(), svc)
+		ctx = WithPlatformUser(ctx, &PlatformUser{ID: "team-admin", Role: "admin"})
+		return r.WithContext(ctx)
+	}
+
+	t.Run("persistence failure is an error and does not consume the cooldown", func(t *testing.T) {
+		teamSkills.updateValidationErr = errors.New("database unavailable")
+		w := httptest.NewRecorder()
+		ValidateSkillHandler(w, request())
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("first status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+		}
+
+		teamSkills.updateValidationErr = nil
+		w = httptest.NewRecorder()
+		ValidateSkillHandler(w, request())
+		if w.Code != http.StatusOK {
+			t.Fatalf("retry status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		if got := teamSkills.skills[0].ValidationStatus; got != skills.ValidationStatusClean {
+			t.Fatalf("persisted status = %q, want %q", got, skills.ValidationStatusClean)
+		}
+	})
+
+	t.Run("successful persistence starts the cooldown", func(t *testing.T) {
+		resetSkillValidationRateLimit(t)
+		w := httptest.NewRecorder()
+		ValidateSkillHandler(w, request())
+		if w.Code != http.StatusOK {
+			t.Fatalf("first status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		w = httptest.NewRecorder()
+		ValidateSkillHandler(w, request())
+		if w.Code != http.StatusTooManyRequests {
+			t.Fatalf("second status = %d, want %d: %s", w.Code, http.StatusTooManyRequests, w.Body.String())
+		}
+	})
+}
 
 func TestStudioUserContentImageOnlyIsUserTurn(t *testing.T) {
 	png := "iVBORw0KGgo=" // tiny base64 payload; decode need not be a valid PNG

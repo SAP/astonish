@@ -56,6 +56,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/.well-known/openid-configuration", s.discovery)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", s.discovery)
 	mux.HandleFunc("/.well-known/oauth-protected-resource", s.protectedResource)
+	// RFC 9728 resource metadata is discovered at a path derived from the
+	// protected resource, e.g. /.well-known/oauth-protected-resource/api/mcp.
+	mux.HandleFunc("/.well-known/oauth-protected-resource/", s.protectedResource)
 	mux.HandleFunc("/oauth/jwks", s.jwks)
 	mux.HandleFunc("/oauth/authorize", s.authorize)
 	mux.HandleFunc("/oauth/token", s.token)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -135,6 +136,39 @@ func (m *memoryStore) ListOAuthSigningKeys(_ context.Context) ([]store.OAuthSign
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]store.OAuthSigningKey(nil), m.keys...), nil
+}
+
+func TestOAuthProtectedResourceMetadataSupportsMCPResourcePath(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://issuer.example/api/mcp"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := mux.NewRouter()
+	RegisterRoutes(router, server)
+	for _, path := range []string{
+		"/.well-known/oauth-protected-resource",
+		"/.well-known/oauth-protected-resource/api/mcp",
+	} {
+		result := httptest.NewRecorder()
+		router.ServeHTTP(result, httptest.NewRequest(http.MethodGet, path, nil))
+		if result.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body=%s", path, result.Code, result.Body.String())
+		}
+		var metadata struct {
+			Resource             string   `json:"resource"`
+			AuthorizationServers []string `json:"authorization_servers"`
+		}
+		if err := json.NewDecoder(result.Body).Decode(&metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata.Resource != "https://issuer.example/api/mcp" || len(metadata.AuthorizationServers) != 1 || metadata.AuthorizationServers[0] != "https://issuer.example" {
+			t.Fatalf("%s metadata = %#v", path, metadata)
+		}
+	}
 }
 
 func TestOAuthAuthorizeRedirectsUnauthenticatedBrowserToStudioLogin(t *testing.T) {

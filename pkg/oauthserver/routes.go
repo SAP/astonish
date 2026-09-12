@@ -17,7 +17,8 @@ func RegisterRoutes(router *mux.Router, server *Server) {
 	h := server.Handler()
 	for _, path := range []string{
 		"/.well-known/openid-configuration", "/.well-known/oauth-authorization-server",
-		"/.well-known/oauth-protected-resource", "/oauth/jwks", "/oauth/authorize",
+		"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/{resource:.*}",
+		"/oauth/jwks", "/oauth/authorize",
 		"/oauth/token", "/oauth/revoke", "/oauth/introspect",
 	} {
 		router.Handle(path, h)

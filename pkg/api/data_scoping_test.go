@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
 
 // --- effectiveUserID tests ---
@@ -122,6 +122,16 @@ func (m *mapCredentialStore) Get(_ context.Context, name string) *store.Credenti
 		return nil
 	}
 	return m.creds[name]
+}
+
+func (m *mapCredentialStore) List(_ context.Context) map[string]store.CredentialType {
+	result := make(map[string]store.CredentialType, len(m.creds))
+	for name, credential := range m.creds {
+		if credential != nil {
+			result[name] = credential.Type
+		}
+	}
+	return result
 }
 
 func TestCredentialResolverForRequest_IgnoresMCPScopeUsesPersonalFirst(t *testing.T) {
@@ -350,20 +360,22 @@ func TestAuditMiddleware_XForwardedFor(t *testing.T) {
 
 type mockCredentialStore struct{}
 
-func (m *mockCredentialStore) Get(_ context.Context, _ string) *store.Credential         { return nil }
+func (m *mockCredentialStore) Get(_ context.Context, _ string) *store.Credential          { return nil }
 func (m *mockCredentialStore) Set(_ context.Context, _ string, _ *store.Credential) error { return nil }
 func (m *mockCredentialStore) Remove(_ context.Context, _ string) error                   { return nil }
-func (m *mockCredentialStore) List(_ context.Context) map[string]store.CredentialType   { return nil }
-func (m *mockCredentialStore) Count(_ context.Context) int                              { return 0 }
+func (m *mockCredentialStore) List(_ context.Context) map[string]store.CredentialType     { return nil }
+func (m *mockCredentialStore) Count(_ context.Context) int                                { return 0 }
 func (m *mockCredentialStore) Resolve(_ context.Context, _ string) (string, string, error) {
 	return "", "", nil
 }
-func (m *mockCredentialStore) InvalidateToken(_ context.Context, _ string) {}
-func (m *mockCredentialStore) SetSecret(_ context.Context, _, _ string) error          { return nil }
-func (m *mockCredentialStore) SetSecretBatch(_ context.Context, _ map[string]string) error { return nil }
-func (m *mockCredentialStore) GetSecret(_ context.Context, _ string) string            { return "" }
-func (m *mockCredentialStore) RemoveSecret(_ context.Context, _ string) error          { return nil }
-func (m *mockCredentialStore) HasSecrets(_ context.Context) bool                     { return false }
-func (m *mockCredentialStore) SecretCount(_ context.Context) int                     { return 0 }
-func (m *mockCredentialStore) ListSecrets(_ context.Context) []string                { return nil }
-func (m *mockCredentialStore) Reload(_ context.Context) error                        { return nil }
+func (m *mockCredentialStore) InvalidateToken(_ context.Context, _ string)    {}
+func (m *mockCredentialStore) SetSecret(_ context.Context, _, _ string) error { return nil }
+func (m *mockCredentialStore) SetSecretBatch(_ context.Context, _ map[string]string) error {
+	return nil
+}
+func (m *mockCredentialStore) GetSecret(_ context.Context, _ string) string   { return "" }
+func (m *mockCredentialStore) RemoveSecret(_ context.Context, _ string) error { return nil }
+func (m *mockCredentialStore) HasSecrets(_ context.Context) bool              { return false }
+func (m *mockCredentialStore) SecretCount(_ context.Context) int              { return 0 }
+func (m *mockCredentialStore) ListSecrets(_ context.Context) []string         { return nil }
+func (m *mockCredentialStore) Reload(_ context.Context) error                 { return nil }

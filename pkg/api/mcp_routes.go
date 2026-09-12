@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
@@ -14,43 +14,30 @@ import (
 )
 
 const (
-	// MCPPath is Astonish's protected Streamable HTTP MCP endpoint.
 	MCPPath             = "/api/mcp"
 	mcpToolExecuteScope = string(execution.CapabilityToolExecute)
 )
 
-// BearerPrincipalValidator is implemented by the Astonish OAuth server. Keeping
-// this narrow boundary means foreign IdP tokens must first pass through an
-// explicit federation adapter rather than being accepted at the MCP endpoint.
 type BearerPrincipalValidator interface {
 	ValidateBearer(context.Context, string, string, []string, execution.Surface) (execution.Principal, error)
 }
 
-// MCPTenantResolver translates OAuth's immutable organization and team IDs into
-// the canonical slugs required by tenant-scoped stores.
 type MCPTenantResolver func(context.Context, string, string) (orgSlug, teamSlug string, err error)
 
-// RegisterMCPRoutes mounts the protected, stateless Streamable HTTP MCP server.
-// tenantMW is applied after bearer validation, because only a validated canonical
-// principal may choose the organization and team used for scoped stores.
+// RegisterMCPRoutes mounts the protected Streamable HTTP MCP server. The public
+// contract deliberately contains only the four client-driven orchestration tools.
 func RegisterMCPRoutes(router *mux.Router, validator BearerPrincipalValidator, resolveTenant MCPTenantResolver, tenantMW func(http.Handler) http.Handler) {
 	if router == nil || validator == nil {
 		return
 	}
-
+	tokens := newMCPContextTokens()
 	streamable := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		principal, ok := execution.PrincipalFromContext(r.Context())
 		if !ok {
 			return nil
 		}
-		return newMCPServer(principal)
-	}, &mcp.StreamableHTTPOptions{
-		Stateless:                    true,
-		JSONResponse:                 true,
-		MaxRequestBodyBytes:          1 << 20,
-		PropagateRequestCancellation: true,
-	})
-
+		return newMCPServer(r, principal, tokens)
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 1 << 20, PropagateRequestCancellation: true})
 	handler := http.Handler(streamable)
 	if tenantMW != nil {
 		handler = tenantMW(handler)
@@ -70,12 +57,6 @@ func mcpBearerMiddleware(validator BearerPrincipalValidator, resolveTenant MCPTe
 			http.Error(w, "MCP principal is not authorized", http.StatusForbidden)
 			return
 		}
-		ctx, err := execution.WithPrincipal(r.Context(), principal)
-		if err != nil {
-			http.Error(w, "MCP principal is not authorized", http.StatusForbidden)
-			return
-		}
-
 		orgSlug, teamSlug := principal.OrgSlug, principal.TeamSlug
 		if resolveTenant != nil {
 			orgSlug, teamSlug, err = resolveTenant(r.Context(), principal.OrgSlug, principal.TeamSlug)
@@ -84,75 +65,122 @@ func mcpBearerMiddleware(validator BearerPrincipalValidator, resolveTenant MCPTe
 				return
 			}
 		}
-
-		// OAuth clients are bound to opaque platform IDs. Resolve those IDs before
-		// handing the request to the slug-based tenant router. Service clients do
-		// not own a personal schema, so use the client ID as their stable owner.
+		principal.OrgSlug, principal.TeamSlug = orgSlug, teamSlug
+		ctx, err := execution.WithPrincipal(r.Context(), principal)
+		if err != nil {
+			http.Error(w, "MCP principal is not authorized", http.StatusForbidden)
+			return
+		}
 		userID := principal.Subject
 		if userID == "" {
 			userID = principal.ClientID
 		}
-		ctx = store.WithTenantContext(ctx, &store.TenantContext{
-			OrgSlug:  orgSlug,
-			TeamSlug: teamSlug,
-			UserID:   userID,
-		})
+		ctx = store.WithTenantContext(ctx, &store.TenantContext{OrgSlug: orgSlug, TeamSlug: teamSlug, UserID: userID})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-func newMCPServer(principal execution.Principal) *mcp.Server {
+func newMCPServer(request *http.Request, principal execution.Principal, tokens *mcpContextTokens) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "astonish", Version: "1.0"}, nil)
-	server.AddTool(&mcp.Tool{
-		Name:        "astonish_chat",
-		Title:       "Astonish chat",
-		Description: "Runs a conversational request through Astonish using the authenticated principal.",
-		InputSchema: map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"message": map[string]any{"type": "string", "description": "The request to send to Astonish."},
-			},
-			"required": []string{"message"},
-		},
-	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	add := func(name, description string, schema map[string]any, handler func(context.Context, json.RawMessage) (*mcp.CallToolResult, error)) {
+		server.AddTool(&mcp.Tool{Name: name, Title: name, Description: description, InputSchema: schema}, func(ctx context.Context, call *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return handler(ctx, call.Params.Arguments)
+		})
+	}
+	add("get_agent_context", "MANDATORY at the start of every user turn. Returns the authenticated Astonish instructions, relevant memory, tenant-scoped tool catalog, and a token required for discovery and execution.", mcpObjectSchema(map[string]any{"session_id": map[string]any{"type": "string"}, "user_message": map[string]any{"type": "string"}}, "session_id", "user_message"), func(_ context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
 		var args struct {
-			Message string `json:"message"`
+			SessionID   string `json:"session_id"`
+			UserMessage string `json:"user_message"`
 		}
-		if err := json.Unmarshal(request.Params.Arguments, &args); err != nil {
-			return mcpToolError("invalid astonish_chat arguments"), nil
+		if err := json.Unmarshal(raw, &args); err != nil || strings.TrimSpace(args.SessionID) == "" || strings.TrimSpace(args.UserMessage) == "" {
+			return mcpToolJSON(map[string]any{"state": "invalid_arguments", "error": "session_id and user_message are required"}), nil
 		}
-		args.Message = strings.TrimSpace(args.Message)
-		if args.Message == "" {
-			return mcpToolError("message is required"), nil
+		runtime, err := prepareMCPProgressiveRuntime(request, principal, args.SessionID)
+		if err != nil {
+			return mcpToolJSON(map[string]any{"state": agent.ProgressiveStateExecutionError, "error": err.Error()}), nil
 		}
-		if err := (execution.CapabilityAuthorizer{}).Authorize(principal, execution.CapabilityChat); err != nil {
-			return mcpToolError(err.Error()), nil
+		turnContext, memories, memoryState := runtime.contextForTurn(args.UserMessage)
+		token, err := tokens.issue(principal, runtime)
+		if err != nil {
+			return nil, err
 		}
-		return runMCPChat(ctx, args.Message)
+		return mcpToolJSON(map[string]any{
+			"state": agent.ProgressiveStateReady, "instructions": runtime.prompt.BuildExternal(), "turn_context": turnContext,
+			"relevant_memory": memories, "memory_state": memoryState, "tools": runtime.catalogList,
+			"context_version": "v1", "context_token": token,
+		}), nil
+	})
+	validate := func(raw json.RawMessage) (mcpContextToken, *mcp.CallToolResult) {
+		var args struct {
+			Token string `json:"context_token"`
+		}
+		if json.Unmarshal(raw, &args) != nil || strings.TrimSpace(args.Token) == "" {
+			return mcpContextToken{}, mcpToolJSON(map[string]any{"state": agent.ProgressiveStateContextRequired, "error": "call get_agent_context first"})
+		}
+		entry, ok := tokens.validate(args.Token, principal)
+		if !ok {
+			return mcpContextToken{}, mcpToolJSON(map[string]any{"state": agent.ProgressiveStateContextStale, "error": "context token is invalid, expired, or belongs to another principal"})
+		}
+		return entry, nil
+	}
+	add("search_tools", "Search the authenticated context catalog. Call get_agent_context first, then use its context token.", mcpObjectSchema(map[string]any{"context_token": map[string]any{"type": "string"}, "query": map[string]any{"type": "string"}, "max_results": map[string]any{"type": "integer"}}, "context_token", "query"), func(_ context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
+		entry, failure := validate(raw)
+		if failure != nil {
+			return failure, nil
+		}
+		var args struct {
+			Query      string `json:"query"`
+			MaxResults int    `json:"max_results"`
+		}
+		if err := json.Unmarshal(raw, &args); err != nil || strings.TrimSpace(args.Query) == "" {
+			return mcpToolJSON(map[string]any{"state": "invalid_arguments", "error": "query is required"}), nil
+		}
+		return mcpToolJSON(map[string]any{"state": agent.ProgressiveStateReady, "tools": entry.runtime.search(args.Query, args.MaxResults)}), nil
+	})
+	add("describe_tools", "Describe exact schemas from the authenticated context catalog. Call get_agent_context first, then describe a searched tool before execution.", mcpObjectSchema(map[string]any{"context_token": map[string]any{"type": "string"}, "names": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "context_token", "names"), func(_ context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
+		entry, failure := validate(raw)
+		if failure != nil {
+			return failure, nil
+		}
+		var args struct {
+			Names []string `json:"names"`
+		}
+		if err := json.Unmarshal(raw, &args); err != nil || len(args.Names) == 0 {
+			return mcpToolJSON(map[string]any{"state": "invalid_arguments", "error": "names is required"}), nil
+		}
+		described, unavailable := entry.runtime.describe(args.Names)
+		return mcpToolJSON(map[string]any{"state": agent.ProgressiveStateReady, "tools": described, "unavailable": unavailable}), nil
+	})
+	add("execute_tool", "Execute exactly one catalog tool using the protected Astonish runtime. Call get_agent_context and describe_tools first.", mcpObjectSchema(map[string]any{"context_token": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "arguments": map[string]any{"type": "object"}}, "context_token", "name", "arguments"), func(_ context.Context, raw json.RawMessage) (*mcp.CallToolResult, error) {
+		entry, failure := validate(raw)
+		if failure != nil {
+			return failure, nil
+		}
+		var args struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if err := json.Unmarshal(raw, &args); err != nil || strings.TrimSpace(args.Name) == "" {
+			return mcpToolJSON(map[string]any{"state": "invalid_arguments", "error": "name is required"}), nil
+		}
+		if entry.runtime.catalog.GetToolEntry(args.Name) == nil {
+			return mcpToolJSON(map[string]any{"state": "tool_unavailable", "tool": args.Name}), nil
+		}
+		return mcpToolJSON(entry.runtime.execute(args.Name, args.Arguments)), nil
 	})
 	return server
 }
 
-func runMCPChat(ctx context.Context, message string) (*mcp.CallToolResult, error) {
-	request := httptest.NewRequest(http.MethodPost, "/api/studio/chat", strings.NewReader(mustJSON(StudioChatRequest{Message: message}))).WithContext(ctx)
-	request.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-	StudioChatHandler(recorder, request)
-	if recorder.Code >= http.StatusBadRequest {
-		return mcpToolError(strings.TrimSpace(recorder.Body.String())), nil
-	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: recorder.Body.String()}}}, nil
+func mcpObjectSchema(properties map[string]any, required ...string) map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
 }
-
-func mcpToolError(message string) *mcp.CallToolResult {
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}, IsError: true}
-}
-
-func mustJSON(value any) string {
+func mcpToolJSON(value any) *mcp.CallToolResult {
 	body, err := json.Marshal(value)
 	if err != nil {
-		panic(err)
+		return mcpToolError(err.Error())
 	}
-	return string(body)
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}
+}
+func mcpToolError(message string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}, IsError: true}
 }

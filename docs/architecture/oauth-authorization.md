@@ -116,7 +116,7 @@ The server publishes OAuth authorization-server metadata and protected-resource 
 | `/oauth/revoke` | Refresh-token-family revocation | Authenticated client |
 | `/oauth/introspect` | Token state inspection | Authenticated client |
 | `/api/oauth/*` | Personal client management and discovery view | Authenticated owner; server enforces owner and tenant membership |
-| `/api/mcp` | Protected Streamable HTTP MCP server | Valid Astonish bearer token with `tool:execute` |
+| `/api/mcp` | Protected Streamable HTTP MCP server; four-tool client-owned loop (`get_agent_context`, `search_tools`, `describe_tools`, `execute_tool`) | Valid Astonish bearer token with exact `tool:execute`; this does not grant `chat` |
 | `/api/a2a` | Protected inbound A2A JSON-RPC server | Valid Astonish bearer token with exact `a2a` |
 | `/.well-known/agent-card.json` | Inbound A2A Agent Card discovery | Public |
 

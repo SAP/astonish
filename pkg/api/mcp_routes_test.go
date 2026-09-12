@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
 )
@@ -170,7 +172,62 @@ func TestMCPRoutesInitializesForAuthorizedPrincipal(t *testing.T) {
 	}
 }
 
-func TestMCPRoutesListsAstonishChatTool(t *testing.T) {
+func TestMCPProgressiveRuntimeHydratesSkillsAndCredentials(t *testing.T) {
+	const secret = "openstack-secret-value-123456"
+	personal := &mapCredentialStore{creds: map[string]*store.Credential{
+		"openstack": {Type: store.CredBearer, Token: secret},
+	}}
+	team := &mapCredentialStore{creds: map[string]*store.Credential{
+		"openstack": {Type: store.CredBearer, Token: "team-fallback-secret-654321"},
+	}}
+	teamSkills := &apiSkillStore{skills: []store.Skill{{
+		Name:        "opencode",
+		Description: "List OpenStack VMs through Astonish http_request",
+	}}}
+	services := &store.Services{
+		Mode:                store.ModePlatform,
+		PersonalCredentials: personal,
+		Credentials:         team,
+		TeamSkills:          teamSkills,
+	}
+	req := httptest.NewRequest(http.MethodPost, MCPPath, nil)
+	req = req.WithContext(store.WithServices(req.Context(), services))
+	chatCopy := &agent.ChatAgent{}
+	prompt := &agent.SystemPromptBuilder{}
+	components := &StudioChatComponents{FilesystemSkills: []skills.Skill{{
+		Name:        "filesystem-skill",
+		Description: "Filesystem skill remains available",
+	}}}
+
+	ctx := hydrateMCPProgressiveContext(req, req.Context(), components, chatCopy, prompt)
+	credentialStore := store.CredentialStoreFromContext(ctx)
+	if credentialStore == nil {
+		t.Fatal("MCP runtime did not receive a credential store")
+	}
+	credential := credentialStore.Get(ctx, "openstack")
+	if credential == nil || credential.Token != secret {
+		t.Fatalf("MCP credential precedence = %#v, want personal credential", credential)
+	}
+	if stores := store.SkillStoresFromContext(ctx); stores == nil || stores.Team != teamSkills {
+		t.Fatalf("MCP runtime skill stores = %#v, want team skill store", stores)
+	}
+	for _, want := range []string{"filesystem-skill", "opencode", "OpenStack"} {
+		if !strings.Contains(prompt.SkillIndex, want) {
+			t.Errorf("merged MCP skill index missing %q: %s", want, prompt.SkillIndex)
+		}
+	}
+	if chatCopy.Redactor == nil {
+		t.Fatal("MCP runtime did not receive a request-owned redactor")
+	}
+	if got := chatCopy.Redactor.Redact("token=" + secret); strings.Contains(got, secret) {
+		t.Fatalf("MCP redactor leaked credential: %q", got)
+	}
+	if strings.Contains(prompt.BuildExternal(), secret) {
+		t.Fatal("external instructions leaked credential value")
+	}
+}
+
+func TestMCPRoutesListsProgressiveTools(t *testing.T) {
 	validator := &mcpValidatorStub{principal: execution.Principal{
 		Kind: execution.PrincipalKindService, Authentication: execution.AuthMethodOAuth, Surface: execution.SurfaceMCP,
 		ClientID: "client-1", Issuer: "https://issuer.example", OrgSlug: "org", TeamSlug: "team",
@@ -189,10 +246,18 @@ func TestMCPRoutesListsAstonishChatTool(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"name":"astonish_chat"`) {
-		t.Fatalf("tools/list does not expose astonish_chat: %s", rec.Body.String())
+	for _, name := range []string{"get_agent_context", "search_tools", "describe_tools", "execute_tool"} {
+		needle := `"name":"` + name + `"`
+		if strings.Count(rec.Body.String(), needle) != 1 {
+			t.Fatalf("tools/list should expose %s exactly once: %s", name, rec.Body.String())
+		}
 	}
-	if strings.Contains(rec.Body.String(), `"name":"astonish_identity"`) {
-		t.Fatalf("tools/list exposes internal identity tool: %s", rec.Body.String())
+	if got := strings.Count(rec.Body.String(), `"name":"`); got != 4 {
+		t.Fatalf("tools/list exposes %d tools, want exactly 4: %s", got, rec.Body.String())
+	}
+	for _, forbidden := range []string{"astonish_chat", "delegate_to_astonish"} {
+		if strings.Contains(rec.Body.String(), `"name":"`+forbidden+`"`) {
+			t.Fatalf("tools/list exposes forbidden %s: %s", forbidden, rec.Body.String())
+		}
 	}
 }

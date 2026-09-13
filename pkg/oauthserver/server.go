@@ -95,15 +95,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client, err := s.client(r.Context(), q.Get("client_id"))
-	redirectURI := ""
-	if client != nil {
-		for _, registeredURI := range client.RedirectURIs {
-			if registeredURI == q.Get("redirect_uri") {
-				redirectURI = registeredURI
-				break
-			}
-		}
-	}
+	redirectURI := matchRedirectURI(client, q.Get("redirect_uri"))
 	if err != nil || client == nil || !client.Active || !contains(client.GrantTypes, GrantAuthorizationCode) || redirectURI == "" {
 		oauthError(w, http.StatusBadRequest, "invalid_request", "unknown client or redirect URI")
 		return
@@ -128,7 +120,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, login.String(), http.StatusFound)
 		return
 	}
-	if subject.ID == "" || subject.OrgID == "" || (!isChromeExtensionClient(client) && client.OrgID != "" && subject.OrgID != client.OrgID) {
+	if subject.ID == "" || subject.OrgID == "" || (!isFirstPartyPublicClient(client) && client.OrgID != "" && subject.OrgID != client.OrgID) {
 		oauthError(w, http.StatusForbidden, "access_denied", "subject is not authorized for this client")
 		return
 	}
@@ -136,7 +128,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	// session proves the subject belongs to the assigned organization; it must not
 	// be allowed to select or omit the team embedded in the resulting token.
 	orgID, teamID := client.OrgID, client.TeamID
-	if isChromeExtensionClient(client) {
+	if isFirstPartyPublicClient(client) {
 		orgID, teamID = subject.OrgID, subject.TeamID
 	}
 	scopes, ok := permittedSubset(strings.Fields(q.Get("scope")), authorizationScopes(client.Scopes))
@@ -165,9 +157,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	values.Set("code", code)
 	values.Set("state", q.Get("state"))
 	redirect.RawQuery = values.Encode()
-	// redirectURI is selected from the client's registered redirect URI list by
-	// exact match above; it is not an arbitrary request destination.
-	// #nosec G710 -- exact registered redirect URI allowlist enforced above.
+	// redirectURI is selected by matchRedirectURI: exact registered URI, or for
+	// the first-party CLI client an RFC 8252 loopback URI. It is not arbitrary.
+	// #nosec G710 -- registered redirect URI allowlist / CLI loopback check above.
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
 }
 

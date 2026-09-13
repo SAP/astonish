@@ -41,6 +41,13 @@ func OAuthStudioBearerMiddleware(validator BearerPrincipalValidator, resolveTena
 			return
 		}
 		ctx = store.WithTenantContext(ctx, &store.TenantContext{OrgSlug: principal.OrgSlug, TeamSlug: principal.TeamSlug, UserID: principal.Subject})
+		if principal.Kind == execution.PrincipalKindUser && principal.Subject != "" {
+			ctx = WithPlatformUser(ctx, &PlatformUser{
+				ID:       principal.Subject,
+				OrgSlug:  principal.OrgSlug,
+				TeamSlug: principal.TeamSlug,
+			})
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

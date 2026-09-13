@@ -220,6 +220,27 @@ func (c *Client) refresh() error {
 		return fmt.Errorf("refresh token expired")
 	}
 
+	if c.cached.isOAuth() {
+		refreshed, err := refreshOAuthToken(c.baseURL, c.cached.RefreshToken)
+		if err != nil {
+			return err
+		}
+		c.cached.AccessToken = refreshed.AccessToken
+		c.cached.AccessExpiresAt = refreshed.AccessExpiresAt
+		if refreshed.RefreshToken != "" {
+			c.cached.RefreshToken = refreshed.RefreshToken
+			c.cached.RefreshExpiresAt = refreshed.RefreshExpiresAt
+		}
+		c.cached.Kind = TokenKindOAuth
+		c.cached.ClientID = refreshed.ClientID
+		if c.tokens != nil {
+			if err := c.tokens.Save(c.cached); err != nil {
+				fmt.Fprintf(io.Discard, "warning: failed to save refreshed tokens: %v\n", err)
+			}
+		}
+		return nil
+	}
+
 	reqBody := map[string]string{
 		"refresh_token": c.cached.RefreshToken,
 	}

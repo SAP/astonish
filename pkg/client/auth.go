@@ -111,6 +111,7 @@ func LoginWithPassword(serverURL, email, password, org, team string) (*LoginResu
 		RefreshToken:     authResp.RefreshToken,
 		AccessExpiresAt:  time.Now().Add(time.Duration(authResp.ExpiresIn) * time.Second),
 		RefreshExpiresAt: time.Now().Add(90 * 24 * time.Hour), // 90 days default
+		Kind:             TokenKindPlatform,
 	}
 	if err := ts.Save(tokens); err != nil {
 		return nil, fmt.Errorf("save tokens: %w", err)
@@ -264,6 +265,7 @@ func LoginWithSSO(serverURL string, providerID string, onStatus func(status stri
 				RefreshToken:     pollResult.RefreshToken,
 				AccessExpiresAt:  time.Now().Add(time.Duration(pollResult.ExpiresIn) * time.Second),
 				RefreshExpiresAt: time.Now().Add(90 * 24 * time.Hour),
+				Kind:             TokenKindPlatform,
 			}
 			if saveErr := ts.Save(tokens); saveErr != nil {
 				return nil, fmt.Errorf("save tokens: %w", saveErr)

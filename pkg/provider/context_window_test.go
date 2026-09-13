@@ -24,18 +24,23 @@ func TestResolveContextWindow_StaticMap(t *testing.T) {
 		model string
 		want  int
 	}{
-		{"claude-3-opus-20240229", 200_000},
-		{"claude-3-5-sonnet-20241022", 200_000},
+		{"claude-3-opus", 200_000},
+		{"claude-3.5-sonnet", 200_000},
 		{"gpt-4o", 128_000},
 		{"gpt-4-turbo", 128_000},
 		{"gpt-4", 8_192},
 		{"gpt-3.5-turbo", 16_385},
-		{"gemini-2.0-flash", 2_000_000},
-		{"gemini-1.5-flash", 1_000_000},
-		{"llama-3.3-70b-versatile", 131_072},
-		{"grok-beta", 131_072},
+		{"gemini-2.0-flash", 1_048_576},
+		{"gemini-1.5-flash", 1_048_576},
+		{"llama-3.3-70b", 131_072},
+		{"grok-4.6", 500_000},
+		{"grok-4.3", 1_000_000},
+		{"grok-3", 131_072},
 		{"deepseek-chat", 128_000},
 		{"mistral-large-latest", 128_000},
+		{"gpt-5", 272_000},
+		{"gpt-4.1", 1_047_576},
+		{"gemini-2.5-pro", 1_048_576},
 	}
 
 	for _, tt := range tests {

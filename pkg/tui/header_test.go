@@ -63,7 +63,7 @@ func TestRenderHeaderShowsContextPercentWhenModelKnown(t *testing.T) {
 	m := model{
 		theme: DefaultTheme(),
 		width: 120,
-		info:  backend.Info{Mode: "code", Model: "anthropic--claude-3.7-sonnet"},
+		info:  backend.Info{Mode: "code", Model: "anthropic--claude-3.7-sonnet", ContextWindow: 200_000},
 		tr:    &events.Transcript{ContextTokens: 20000},
 	}
 	out := stripANSI(m.renderHeader())

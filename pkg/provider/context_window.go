@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/SAP/astonish/pkg/config"
@@ -132,99 +131,100 @@ func getProviderKey(cfg *config.AppConfig, providerName, keyField, envVar string
 // envLookup reads an environment variable. Replaceable for testing.
 var envLookup = os.Getenv
 
-// ResolveFromStaticMap uses model name patterns to estimate context window.
-// This covers providers that don't expose metadata APIs (Anthropic, OpenAI, xAI, etc.)
-// and acts as a fast fallback for providers whose APIs might be temporarily unreachable.
-// Exported for use in TUI display hints; prefer ResolveContextWindow for authoritative values.
-func ResolveFromStaticMap(modelName string) int {
-	m := strings.ToLower(modelName)
+// curatedContextWindows is a manually maintained map of exact model names to
+// verified context-window sizes (in tokens). This is the authoritative fallback
+// when a provider API doesn't expose context-window metadata. Values come from
+// official model documentation and are periodically updated.
+//
+// Entries use the exact model ID as returned by the provider's list-models API.
+// SAP-prefixed models (e.g. "anthropic--claude-4.6-opus") are covered by the
+// SAP catalog in sap.GetModelConfig, not this map.
+var curatedContextWindows = map[string]int{
+	// Anthropic Claude — direct API names
+	"claude-4.8-opus":     200_000,
+	"claude-4.6-opus":     200_000,
+	"claude-4.5-sonnet":   200_000,
+	"claude-4-sonnet":     200_000,
+	"claude-4-opus":       200_000,
+	"claude-3.7-sonnet":   200_000,
+	"claude-3.5-sonnet":   200_000,
+	"claude-3-sonnet":     200_000,
+	"claude-3-haiku":      200_000,
+	"claude-3-opus":       200_000,
 
-	// Claude family
-	if strings.Contains(m, "claude") {
-		if strings.Contains(m, "haiku") {
-			return 200_000
-		}
-		if strings.Contains(m, "sonnet") || strings.Contains(m, "opus") {
-			return 200_000
-		}
-		if strings.Contains(m, "claude-3") || strings.Contains(m, "claude-4") {
-			return 200_000
-		}
-		if strings.Contains(m, "claude-2") {
-			return 100_000
-		}
-		return 200_000
-	}
+	// OpenAI
+	"gpt-5":        272_000,
+	"gpt-5-nano":   272_000,
+	"gpt-5-mini":   272_000,
+	"gpt-5.6-sol":  272_000,
+	"gpt-4.1":      1_047_576,
+	"gpt-4.1-nano": 1_047_576,
+	"gpt-4.1-mini": 1_047_576,
+	"gpt-4o":       128_000,
+	"gpt-4o-mini":  128_000,
+	"gpt-4-turbo":  128_000,
+	"gpt-4":        8_192,
+	"gpt-3.5-turbo": 16_385,
+	"o1":           200_000,
+	"o1-mini":      128_000,
+	"o3":           200_000,
+	"o3-mini":      200_000,
+	"o4-mini":      200_000,
 
-	// GPT family
-	if strings.Contains(m, "gpt-5") {
-		return 272_000
-	}
-	if strings.Contains(m, "gpt-4.1") {
-		return 1_047_576
-	}
-	if strings.Contains(m, "gpt-4o") {
-		return 128_000
-	}
-	if strings.Contains(m, "gpt-4-turbo") || strings.Contains(m, "gpt-4-1106") || strings.Contains(m, "gpt-4-0125") {
-		return 128_000
-	}
-	if strings.Contains(m, "gpt-4") {
-		return 8_192
-	}
-	if strings.Contains(m, "gpt-3.5-turbo") {
-		return 16_385
-	}
-	if strings.Contains(m, "o1") || strings.Contains(m, "o3") || strings.Contains(m, "o4") {
-		return 200_000
-	}
+	// Google Gemini — inputTokenLimit from Google API
+	"gemini-2.5-pro":       1_048_576,
+	"gemini-2.5-flash":     1_048_576,
+	"gemini-2.0-flash":     1_048_576,
+	"gemini-1.5-pro":       1_048_576,
+	"gemini-1.5-flash":     1_048_576,
+	"gemini-1.0-pro":       32_000,
 
-	// Gemini family
-	if strings.Contains(m, "gemini-2") || strings.Contains(m, "gemini-1.5-pro") {
-		return 2_000_000
-	}
-	if strings.Contains(m, "gemini-1.5-flash") {
-		return 1_000_000
-	}
-	if strings.Contains(m, "gemini-1.0") || strings.Contains(m, "gemini-pro") {
-		return 32_000
-	}
+	// xAI Grok — from xAI documentation
+	"grok-4.6":                       500_000,
+	"grok-4.5":                       500_000,
+	"grok-4.3":                       1_000_000,
+	"grok-4.20-0309-non-reasoning":   2_000_000,
+	"grok-4.20-0309-reasoning":       2_000_000,
+	"grok-4.20-multi-agent-0309":     2_000_000,
+	"grok-3":                         131_072,
+	"grok-3-mini":                    131_072,
+	"grok-build-0.1":                 131_072,
 
-	// Llama family
-	if strings.Contains(m, "llama-3.3") || strings.Contains(m, "llama-3.1") {
-		return 131_072
-	}
-	if strings.Contains(m, "llama-3") || strings.Contains(m, "llama3") {
-		return 8_192
-	}
+	// Meta Llama
+	"llama-3.3-70b":          131_072,
+	"llama-3.1-8b":           131_072,
+	"llama-3.1-70b":          131_072,
+	"llama-3.1-405b":         131_072,
 
-	// Mistral family
-	if strings.Contains(m, "mistral-large") || strings.Contains(m, "mistral-medium") {
-		return 128_000
-	}
-	if strings.Contains(m, "mixtral") {
-		return 32_768
-	}
-	if strings.Contains(m, "mistral") {
-		return 32_000
-	}
-
-	// Grok
-	if strings.Contains(m, "grok") {
-		return 131_072
-	}
+	// Mistral
+	"mistral-large-latest":  128_000,
+	"mistral-medium-latest": 128_000,
+	"mixtral-8x7b":          32_768,
+	"mistral-7b":            32_000,
 
 	// DeepSeek
-	if strings.Contains(m, "deepseek") {
-		return 128_000
-	}
+	"deepseek-chat":     128_000,
+	"deepseek-reasoner": 128_000,
+	"deepseek-coder":    128_000,
 
 	// Qwen
-	if strings.Contains(m, "qwen") {
-		return 128_000
-	}
+	"qwen-2.5-72b":   128_000,
+	"qwen-2.5-coder": 128_000,
 
-	return 0 // unknown — fall through to default
+	// Perplexity
+	"sonar":     128_000,
+	"sonar-pro": 200_000,
+}
+
+// ResolveFromStaticMap looks up the context window for a model by exact name
+// match against the curated map. Returns 0 when the model is not found.
+// Exported for use in TUI display hints; prefer ResolveContextWindow for
+// authoritative values that also query provider APIs and config overrides.
+func ResolveFromStaticMap(modelName string) int {
+	if v, ok := curatedContextWindows[modelName]; ok {
+		return v
+	}
+	return 0
 }
 
 // contextWindowCache caches resolved values per provider+model to avoid repeated API calls.

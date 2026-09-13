@@ -21,30 +21,49 @@ func SetSAPModelLimitsStore(s store.ModelLimitsStore) {
 
 const DefaultContextWindow = 200_000
 
+// ContextWindowResult holds a resolved context window value and whether it was
+// the tier-4 fallback default (model genuinely unknown) vs a real value that
+// happens to equal 200k (e.g. Claude models).
+type ContextWindowResult struct {
+	Size       int
+	IsFallback bool
+}
+
 // ResolveContextWindow determines the context window size for a given provider+model.
 // It uses a 4-tier fallback:
 //  1. Explicit config.yaml override (general.context_length)
 //  2. Provider API metadata (cached, 1hr TTL)
-//  3. Static model family map (instant, no API call)
-//  4. Default: 200,000 tokens
+//  3. Curated model map (instant, no API call)
+//  4. Default: 200,000 tokens (IsFallback=true)
 func ResolveContextWindow(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) int {
+	return resolveContextWindowFull(ctx, providerName, modelName, cfg).Size
+}
+
+// ResolveContextWindowFull is like ResolveContextWindow but also reports whether
+// the value is the tier-4 fallback default. Use this when the UI needs to
+// distinguish "Claude 200k (real)" from "unknown-model 200k (fallback)".
+func ResolveContextWindowFull(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) ContextWindowResult {
+	return resolveContextWindowFull(ctx, providerName, modelName, cfg)
+}
+
+func resolveContextWindowFull(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) ContextWindowResult {
 	// Tier 1: Explicit config override
 	if cfg != nil && cfg.General.ContextLength > 0 {
-		return cfg.General.ContextLength
+		return ContextWindowResult{Size: cfg.General.ContextLength}
 	}
 
 	// Tier 2: Provider API metadata
 	if apiVal := resolveFromProviderAPI(ctx, providerName, modelName, cfg); apiVal > 0 {
-		return apiVal
+		return ContextWindowResult{Size: apiVal}
 	}
 
-	// Tier 3: Static model family map
+	// Tier 3: Curated model map
 	if staticVal := ResolveFromStaticMap(modelName); staticVal > 0 {
-		return staticVal
+		return ContextWindowResult{Size: staticVal}
 	}
 
 	// Tier 4: Default
-	return DefaultContextWindow
+	return ContextWindowResult{Size: DefaultContextWindow, IsFallback: true}
 }
 
 // resolveFromProviderAPI queries the provider's metadata API for context window info.
@@ -255,12 +274,18 @@ func ResolveFromStaticMap(modelName string) int {
 // contextWindowCache caches resolved values per provider+model to avoid repeated API calls.
 var (
 	cwCacheMu sync.RWMutex
-	cwCache   = make(map[string]int)
+	cwCache   = make(map[string]ContextWindowResult)
 )
 
 // ResolveContextWindowCached is like ResolveContextWindow but caches the result.
 // Use this for repeated lookups (e.g., per-turn compaction checks).
 func ResolveContextWindowCached(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) int {
+	return ResolveContextWindowCachedFull(ctx, providerName, modelName, cfg).Size
+}
+
+// ResolveContextWindowCachedFull is like ResolveContextWindowFull but caches the result.
+// Use this in the TUI to get both the size and fallback status.
+func ResolveContextWindowCachedFull(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) ContextWindowResult {
 	key := providerName + ":" + modelName
 
 	cwCacheMu.RLock()
@@ -270,7 +295,7 @@ func ResolveContextWindowCached(ctx context.Context, providerName, modelName str
 	}
 	cwCacheMu.RUnlock()
 
-	val := ResolveContextWindow(ctx, providerName, modelName, cfg)
+	val := resolveContextWindowFull(ctx, providerName, modelName, cfg)
 
 	cwCacheMu.Lock()
 	cwCache[key] = val
@@ -282,6 +307,6 @@ func ResolveContextWindowCached(ctx context.Context, providerName, modelName str
 // InvalidateContextWindowCache clears the cache. Call on model hot-swap.
 func InvalidateContextWindowCache() {
 	cwCacheMu.Lock()
-	cwCache = make(map[string]int)
+	cwCache = make(map[string]ContextWindowResult)
 	cwCacheMu.Unlock()
 }

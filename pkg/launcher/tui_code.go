@@ -678,8 +678,7 @@ func (b *localAgentBackend) Info() backend.Info {
 	}
 
 	// Resolve context window for the current model.
-	cw := provider.ResolveContextWindowCached(context.Background(), b.provider, b.model, b.appConfig)
-	cwFallback := cw == provider.DefaultContextWindow
+	cwResult := provider.ResolveContextWindowCachedFull(context.Background(), b.provider, b.model, b.appConfig)
 
 	info := backend.Info{
 		SessionID:             b.sessionID,
@@ -694,8 +693,8 @@ func (b *localAgentBackend) Info() backend.Info {
 		AutoApprove:           b.autoApprove,
 		Notices:               notices,
 		Title:                 b.title,
-		ContextWindow:         cw,
-		ContextWindowFallback: cwFallback,
+		ContextWindow:         cwResult.Size,
+		ContextWindowFallback: cwResult.IsFallback,
 	}
 	if b.provider == "auto" && b.autoRoutingCfg != nil {
 		info.Provider = "Auto"

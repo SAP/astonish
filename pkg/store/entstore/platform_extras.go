@@ -86,13 +86,7 @@ func NewPlatformServices(ctx context.Context, cfg Config) (*store.Services, *Sto
 			return nil, nil, fmt.Errorf("auto-migrate sqlite platform: %w", err)
 		}
 	} else {
-		migrateTables := []*schema.Table{
-			platformmigrate.PlatformSkillsTable,
-			platformmigrate.PlatformSkillFilesTable,
-			platformmigrate.PlatformSlideTemplatesTable,
-			platformmigrate.SandboxLayersTable, // required by SandboxTemplatesTable FK
-			platformmigrate.SandboxTemplatesTable,
-		}
+		migrateTables := postgresPlatformAutoMigrateTables()
 		if err := platformmigrate.Create(ctx, s.platformClient.Schema, migrateTables); err != nil {
 			s.Close()
 			return nil, nil, fmt.Errorf("auto-migrate platform tables: %w", err)
@@ -115,6 +109,25 @@ func NewPlatformServices(ctx context.Context, cfg Config) (*store.Services, *Sto
 	}
 
 	return svc, s, nil
+}
+
+// postgresPlatformAutoMigrateTables is the PostgreSQL subset of platform
+// Schema.Create. Existing deployments cannot run a full schema migrate: Ent
+// tries to reconcile pre-existing column types (for example platform_mcp_servers
+// id → uuid). New tables must be listed here or they never appear on Postgres.
+func postgresPlatformAutoMigrateTables() []*schema.Table {
+	return []*schema.Table{
+		platformmigrate.PlatformSkillsTable,
+		platformmigrate.PlatformSkillFilesTable,
+		platformmigrate.PlatformSlideTemplatesTable,
+		platformmigrate.SandboxLayersTable, // required by SandboxTemplatesTable FK
+		platformmigrate.SandboxTemplatesTable,
+		platformmigrate.OauthAuthorizationsTable,
+		platformmigrate.OauthClientsTable,
+		platformmigrate.OauthConsentsTable,
+		platformmigrate.OauthSigningKeysTable,
+		platformmigrate.OauthTokensTable,
+	}
 }
 
 // TenantMiddleware is an HTTP middleware that resolves the per-tenant stores

@@ -30,6 +30,29 @@ data:
         {{- if .Values.config.auth.defaultOrgSlug }}
         default_org_slug: {{ .Values.config.auth.defaultOrgSlug | quote }}
         {{- end }}
+        {{- $oauth := .Values.config.auth.oauthServer | default dict }}
+        {{- $oauthIssuer := $oauth.issuer | default "" }}
+        {{- if and (eq $oauthIssuer "") .Values.ingress.enabled .Values.ingress.hosts (gt (len .Values.ingress.hosts) 0) }}
+        {{- $scheme := "http" }}
+        {{- if .Values.ingress.tls }}
+        {{- $scheme = "https" }}
+        {{- end }}
+        {{- $oauthIssuer = printf "%s://%s" $scheme (index .Values.ingress.hosts 0).host }}
+        {{- end }}
+        {{- $oauthEnabled := true }}
+        {{- if hasKey $oauth "enabled" }}
+        {{- $oauthEnabled = $oauth.enabled }}
+        {{- end }}
+        oauth_server:
+          enabled: {{ $oauthEnabled }}
+          {{- if $oauthIssuer }}
+          issuer: {{ $oauthIssuer | quote }}
+          {{- if $oauth.resource }}
+          resource: {{ $oauth.resource | quote }}
+          {{- else }}
+          resource: {{ printf "%s/api/mcp" (trimSuffix "/" $oauthIssuer) | quote }}
+          {{- end }}
+          {{- end }}
     {{- if .Values.sandbox.enabled }}
     sandbox:
       backend: {{ .Values.sandbox.backend | quote }}

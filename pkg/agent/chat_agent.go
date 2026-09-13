@@ -499,8 +499,8 @@ func (c *ChatAgent) AllowActivePlanReplacement() {
 	c.activePlanMu.Unlock()
 }
 
-// MarkActivePlanApproved seals the current plan against replacement while
-// allowing update_plan to continue mutating its step statuses.
+// MarkActivePlanApproved seals the current plan against replacement.
+// Step status updates via update_plan do not require this seal.
 func (c *ChatAgent) MarkActivePlanApproved() {
 	c.activePlanMu.Lock()
 	if c.activePlan != nil {

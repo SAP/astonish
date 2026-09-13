@@ -111,13 +111,6 @@ func (c *ChatAgent) ApplyPlanStepUpdate(step, status string) PlanStepApplyResult
 		return PlanStepApplyResult{Name: name, Applied: applied, Code: PlanStepOK}
 
 	case "complete":
-		if !c.IsActivePlanApproved() {
-			return PlanStepApplyResult{
-				Name:    info.Name,
-				Code:    PlanStepBlockedPlan,
-				Message: "cannot mark a phase complete until the user has approved the plan for execution",
-			}
-		}
 		cmd := strings.TrimSpace(info.Verify)
 		if cmd == "" {
 			return PlanStepApplyResult{

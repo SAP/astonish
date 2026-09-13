@@ -84,9 +84,13 @@ func TestApplyPlanStepUpdate_NoVerify(t *testing.T) {
 	}
 }
 
-func TestApplyPlanStepUpdate_BlockedUntilApproved(t *testing.T) {
+func TestApplyPlanStepUpdate_CompleteWithoutApprovalRunsVerify(t *testing.T) {
+	var ran bool
 	c := &ChatAgent{
-		PlanVerify: func(string) (int, string, error) { return 0, "", nil },
+		PlanVerify: func(string) (int, string, error) {
+			ran = true
+			return 0, "PASS", nil
+		},
 	}
 	plan := NewPlanState("goal", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "types", Verify: "true", VerifyKind: VerifyKindUnit, Files: []PlanFileChange{{Path: "pkg/agent/x.go"}}},
@@ -94,8 +98,15 @@ func TestApplyPlanStepUpdate_BlockedUntilApproved(t *testing.T) {
 	c.SetActivePlan(plan)
 
 	res := c.ApplyPlanStepUpdate("types", "complete")
-	if res.Code != PlanStepBlockedPlan {
-		t.Fatalf("code = %q, want blocked_plan_mode", res.Code)
+	if res.Code != PlanStepOK || res.Applied != "complete" {
+		t.Fatalf("result = %+v, want ok/complete without prior plan approval", res)
+	}
+	if !ran {
+		t.Fatal("verify command should still run")
+	}
+	info, _ := plan.StepLookup("types")
+	if info.Status != "complete" {
+		t.Fatalf("status = %q, want complete", info.Status)
 	}
 }
 

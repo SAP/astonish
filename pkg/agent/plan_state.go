@@ -440,7 +440,6 @@ const (
 	PlanStepNotFound      = "step_not_found"
 	PlanStepVerifyFailed  = "verify_failed"
 	PlanStepNoVerify      = "no_verify"
-	PlanStepBlockedPlan   = "blocked_plan_mode"
 	PlanStepSerialBlocked = "serial_blocked"
 	PlanStepDeleteBlocked = "delete_blocked"
 )

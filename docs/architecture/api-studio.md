@@ -156,5 +156,5 @@ This avoids installing Node under QEMU on GitHub Actions multi-arch `linux/arm64
 
 The unpacked Chrome extension (`extension/`) is another client of existing Studio APIs. It does not add routes.
 
-- `GET /api/auth/sso/providers`, `POST /api/auth/sso/init`, and `POST /api/auth/sso/poll` — the same CLI device-code SSO flow as `astonish login --sso`. Cookies (`astonish_access`) cannot be sent from `chrome-extension://`.
+- OAuth Authorization Code + PKCE flow via `/oauth/authorize` and `/oauth/token` — the extension uses the built-in `astonish-chrome-extension` public client with a `chrome-extension://` redirect URI. Cookies (`astonish_access`) cannot be sent from `chrome-extension://`.
 - `POST /api/studio/chat` SSE with `Authorization: Bearer` and optional `systemContext` (current page URL/title/body). See `docs/architecture/chrome-extension.md`.

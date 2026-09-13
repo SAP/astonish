@@ -6,7 +6,7 @@ Manifest V3 side panel that chats with Studio about the current browser tab. v1 
 
 Clicking the Astonish toolbar icon opens Chrome's native right-hand `chrome.sidePanel` (minimum Chrome 114). The panel is a small local chat client:
 
-- Logged out: Studio URL and Sign in. SSO opens the same device-code browser flow as `astonish login --sso`.
+- Logged out: Studio URL and Sign in. Sign-in opens an OAuth Authorization Code + PKCE flow in the browser.
 - Logged in: session picker (extension-created chats only), tab title/URL line, transcript, optional Apply-to-page bar, composer.
 
 It does **not** iframe Studio Chat and does **not** import `web/src/components/StudioChat.tsx`. Approvals render as a notice plus a "Finish this in Studio" link to the configured Studio URL.
@@ -23,16 +23,19 @@ Follow-up messages reuse the `sessionId` from the SSE `session` event (`data.ses
 
 There is no install-time `content_scripts.matches` for `<all_urls>`. Injection happens after the user opens the panel / clicks Send (`activeTab` plus optional host permission).
 
-## Auth: Bearer `client_type=cli`
+## Auth: OAuth Authorization Code + PKCE
 
 Studio Chat in the SPA uses an HttpOnly `SameSite=Strict` cookie (`astonish_access`). A `chrome-extension://` origin cannot send that cookie.
 
-The extension authenticates the same way the CLI does:
+The extension authenticates via OAuth using the built-in `astonish-chrome-extension` first-party public client:
 
-- `POST /api/auth/login` with `{email, password, client_type: "cli", org?, team?}`
+- User clicks Sign in → extension opens a tab to `/oauth/authorize` with S256 PKCE challenge, `client_id=astonish-chrome-extension`, and `redirect_uri=https://<extension-id>.chromiumapp.org/oauth2`
+- User authenticates (built-in or OIDC) and the authorization server redirects back to the `chrome-extension://` redirect URI with an authorization code
+- Extension exchanges code + verifier at `/oauth/token` for RS256 access + refresh tokens
 - Persist tokens in `chrome.storage.local` (refresh) and `chrome.storage.session` (live access token)
 - `Authorization: Bearer <access>` plus `X-Astonish-Team` when a team slug is set
-- On 401, `POST /api/auth/refresh` with `{refresh_token}` and retry once
+- On 401, refresh via `/oauth/token` with `grant_type=refresh_token` and retry once
+- The extension's allowed scopes are `chat` and `tool:execute` (page tools need tool execution)
 
 It never reads `astonish_access` / `astonish_refresh` cookies.
 

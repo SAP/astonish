@@ -26,8 +26,10 @@ To update the extension, download the new zip, overwrite the folder contents, an
 Click the Astonish toolbar icon to open the side panel. The first time you open it you will see the sign-in screen.
 
 1. Enter your **Studio URL** (e.g. `http://localhost:9393` for a local instance, or your team's cloud URL).
-2. Enter your **email** and **password**.
-3. Click **Sign in**. The extension authenticates using the same bearer-token flow as the CLI (`astonish login`) — it does not use browser cookies.
+2. Click **Sign in with OAuth**. The extension opens a browser tab to the Astonish authorization endpoint where you authenticate (using your email/password or your organization's SSO provider).
+3. After you sign in, the authorization flow redirects back to the extension automatically. The extension receives an **OAuth access token** — it does not use browser cookies or store your password.
+
+The extension uses **OAuth Authorization Code + PKCE** with the built-in `astonish-chrome-extension` public client. Tokens are stored securely in Chrome extension storage and refreshed automatically when they expire.
 
 After sign-in, Chrome will ask you to grant the extension permission to reach your Studio URL. Click **Allow** to continue.
 

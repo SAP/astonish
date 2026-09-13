@@ -66,7 +66,7 @@ This document tracks CLI commands that are planned for future implementation. Cu
 | Planned Command | Purpose | Current Alternative |
 |----------------|---------|--------------------|
 | `astonish login --token <token>` | Login with API token (CI/CD) | `astonish platform issue-token` + manual config |
-| `astonish login --device-code` | Explicit device-code flow | `astonish login --sso` (uses device-code internally) |
+| `astonish login --device-code` | Explicit device-code flow | `astonish login --sso` (uses OAuth Authorization Code + PKCE with browser loopback) |
 
 ## Data Management
 

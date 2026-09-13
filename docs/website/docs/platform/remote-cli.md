@@ -9,12 +9,16 @@ The same `astonish` binary works both locally and against a remote platform serv
 astonish login https://astonish.acme.corp
 ```
 
-This prompts for your email and password interactively. For SSO-enabled environments:
+This prompts for your email and password interactively. For SSO-enabled or OAuth-based environments:
 
 ```bash
-# SSO/OIDC login (uses device-code flow internally)
+# OAuth login (opens browser for sign-in)
 astonish login https://astonish.acme.corp --sso
 ```
+
+The `--sso` flag initiates an **OAuth Authorization Code + PKCE** flow: the CLI starts a temporary loopback HTTP server on `127.0.0.1`, opens your browser to the Astonish authorization endpoint, and receives the authorization code on callback. No device code or manual code entry is required — sign-in completes automatically when the browser redirects back.
+
+The CLI requests only the scopes it needs: `openid`, `offline_access`, and `chat`. It does not request `tool:execute` or other privileged scopes.
 
 You can also pre-select your org and team to skip interactive prompts:
 
@@ -22,7 +26,7 @@ You can also pre-select your org and team to skip interactive prompts:
 astonish login https://astonish.acme.corp --org acme --team backend
 ```
 
-Credentials are stored locally in `~/.config/astonish/remote.yaml`.
+Credentials are stored locally in `~/.config/astonish/remote.yaml`. If a stale login is detected, `astonish login` automatically replaces the old credentials without requiring a manual `astonish logout` first.
 
 ## Checking Status
 
@@ -93,3 +97,4 @@ This removes the `remote.yaml` file and revokes the stored session.
 
 - [Platform Overview](./index) — understanding the platform architecture
 - [Organizations & Teams](./organizations-and-teams) — the org/team context model
+- [Authentication](../security/authentication) — full details on OAuth, OIDC, and token lifecycle

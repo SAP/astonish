@@ -247,14 +247,18 @@ storage:
       refresh_token_ttl_days: 30
 ```
 
-The server is enabled when `enabled` is omitted. `enabled: false` is an explicit opt-out and removes protocol and administration route registration. Local Studio may derive loopback defaults from the daemon port:
+The server is enabled when `enabled` is omitted. `enabled: false` is an explicit opt-out and removes protocol and administration route registration. When `issuer` or `resource` are omitted, the daemon applies the same loopback defaults used by local Studio (`EffectiveIssuer` / `EffectiveResource`) so startup does not fail closed on an empty Kubernetes ConfigMap:
 
 - Issuer: `http://127.0.0.1:<port>`
 - Resource: `<issuer>/api/mcp`
 
+The Helm chart writes `storage.auth.oauth_server` into the ConfigMap. If `config.auth.oauthServer.issuer` is empty and ingress is enabled, it derives `http(s)://<first ingress host>` (HTTPS when `ingress.tls` is set) and sets resource to `<issuer>/api/mcp`.
+
 Loopback HTTP is a development convenience only. Production deployments require a stable public HTTPS issuer. Issuer identity must not change across routine restarts or replicas. Reverse proxies must preserve the externally registered scheme and host semantics.
 
-The daemon creates the OAuth server only after platform storage and authentication are available. It passes the server into `launcher.NewStudioServer`, which registers discovery, protocol, administration, and MCP routes together. HTTP serving begins before optional chat/model pre-warming so control-plane and authorization endpoints are not blocked by embedding or LLM initialization.
+The daemon creates the OAuth server only after platform storage and authentication are available. On PostgreSQL, `NewPlatformServices` auto-migrates only a scoped table list (full `Schema.Create` would try to recast existing columns). That list must include the OAuth tables (`oauth_signing_keys`, `oauth_clients`, `oauth_authorizations`, `oauth_tokens`, `oauth_consents`); omitting them makes daemon startup fail with `relation "oauth_signing_keys" does not exist` on existing platform databases. SQLite still runs full `Schema.Create`.
+
+It passes the server into `launcher.NewStudioServer`, which registers discovery, protocol, administration, and MCP routes together. HTTP serving begins before optional chat/model pre-warming so control-plane and authorization endpoints are not blocked by embedding or LLM initialization.
 
 ## External identity providers
 

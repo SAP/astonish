@@ -71,6 +71,14 @@ config:
     defaultOrgSlug: ""
     accessTokenTTLMinutes: 15
     refreshTokenTTLDays: 90
+    # Built-in OAuth/OIDC authorization server (enabled by default).
+    # issuer/resource must be the stable public URL of this instance.
+    # When issuer is empty and ingress is enabled, the chart derives
+    # http(s)://<first ingress host> from ingress.hosts / ingress.tls.
+    oauthServer:
+      enabled: true
+      issuer: ""
+      resource: ""
 
 # -- Secrets (set in values-*.yaml; NEVER commit real values here)
 secrets:

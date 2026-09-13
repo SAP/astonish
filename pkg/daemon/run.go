@@ -1587,12 +1587,11 @@ func Run(cfg RunConfig) error {
 		api.SetPlatformBackend(entStore)
 		api.SetPlatformSecrets(entStore.Secrets())
 		if oauthCfg := appCfg.Storage.Auth.OAuthServer; oauthCfg.IsEnabled() {
-			server, serverErr := oauthserver.New(oauthserver.Config{
-				Issuer: oauthCfg.Issuer, Resource: oauthCfg.Resource,
-				AccessTokenTTL:  time.Duration(oauthCfg.AccessTokenTTLMinutes) * time.Minute,
-				RefreshTokenTTL: time.Duration(oauthCfg.RefreshTokenTTLDays) * 24 * time.Hour,
-				Development:     appCfg.Storage.Auth.IsBuiltinAuth() && strings.HasPrefix(oauthCfg.Issuer, "http://"),
-			}, entStore.OAuthServer(), api.NewOAuthSessionValidator(platformAuth, entStore))
+			server, serverErr := oauthserver.New(
+				newOAuthServerRuntimeConfig(oauthCfg, port, appCfg.Storage.Auth.IsBuiltinAuth()),
+				entStore.OAuthServer(),
+				api.NewOAuthSessionValidator(platformAuth, entStore),
+			)
 			if serverErr != nil {
 				return fmt.Errorf("initialize OAuth server: %w", serverErr)
 			}

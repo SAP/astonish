@@ -48,6 +48,12 @@ func TestOAuthStudioBearerMiddlewareInstallsScopedStudioPrincipal(t *testing.T) 
 		if !ok || got.OrgSlug != "acme" || got.TeamSlug != "platform" {
 			t.Fatalf("principal = %#v, present=%v", got, ok)
 		}
+		if user := GetPlatformUser(r); user == nil || user.ID != "user-1" || user.OrgSlug != "acme" || user.TeamSlug != "platform" {
+			t.Fatalf("platform user = %#v", user)
+		}
+		if gotID := effectiveUserID(r); gotID != "user-1" {
+			t.Fatalf("effectiveUserID = %q", gotID)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 

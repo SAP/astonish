@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -43,6 +46,21 @@ func TestCtrlTabSwitchesBackend(t *testing.T) {
 	}
 	if nm.activeBackendIdx != 1 {
 		t.Fatalf("expected activeBackendIdx=1, got %d", nm.activeBackendIdx)
+	}
+}
+
+func TestCtrlTabSwitchClearsPreviousBackendFrame(t *testing.T) {
+	m := newDualModeModel(t)
+	m.tr.Apply(events.NewSystem("platform content that must not remain behind the next welcome screen"))
+
+	_, cmd := m.switchBackend()
+	if cmd == nil {
+		t.Fatal("switchBackend() must request a full-screen clear")
+	}
+	got := cmd()
+	want := tea.ClearScreen()
+	if reflect.TypeOf(got) != reflect.TypeOf(want) {
+		t.Fatalf("switchBackend() command = %T, want %T", got, want)
 	}
 }
 

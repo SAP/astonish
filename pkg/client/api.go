@@ -604,8 +604,12 @@ func (c *Client) CreateSkill(name string, scope string) error {
 // --- Utility ---
 
 // Ping checks if the remote server is reachable and authenticated.
+//
+// Studio endpoints accept both legacy platform sessions and OAuth access tokens.
+// Using the session list keeps the check aligned with the authenticated surface
+// used by remote chat, unlike /api/auth/me which only accepts platform sessions.
 func (c *Client) Ping() error {
-	resp, err := c.Do("GET", "/api/auth/me", nil)
+	resp, err := c.Do("GET", "/api/studio/sessions", nil)
 	if err != nil {
 		return err
 	}

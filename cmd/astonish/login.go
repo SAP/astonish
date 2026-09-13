@@ -7,8 +7,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/charmbracelet/huh"
 	"github.com/SAP/astonish/pkg/client"
+	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
 )
 
@@ -17,7 +17,7 @@ func handleLoginCommand(args []string) error {
 		fmt.Println("Usage: astonish login <server-url> [flags]")
 		fmt.Println("")
 		fmt.Println("Flags:")
-		fmt.Println("  --sso           Use SSO/OIDC login (opens browser)")
+		fmt.Println("  --sso           Open a browser for OAuth login (SSO or Studio password)")
 		fmt.Println("  --org <slug>    Select organization (skip prompt)")
 		fmt.Println("  --team <slug>   Select team (skip prompt)")
 		fmt.Println("")
@@ -55,18 +55,15 @@ func handleLoginCommand(args []string) error {
 		serverURL = "https://" + serverURL
 	}
 
-	// Check if already logged in
-	if client.IsRemoteMode() {
-		cfg, _ := client.LoadRemoteConfig()
-		if cfg != nil {
-			fmt.Printf("Already connected to %s as %s\n", cfg.URL, cfg.UserEmail)
-			fmt.Printf("Run 'astonish logout' first to disconnect.\n")
-			return fmt.Errorf("already connected")
-		}
+	// Login is also the recovery path for expired, invalid, or server-incompatible
+	// credentials. Do not treat remote.yaml alone as proof that authentication is
+	// still valid; a successful login replaces both the token and remote config.
+	if cfg, err := client.LoadRemoteConfig(); err == nil && cfg != nil && cfg.URL != "" && cfg.URL != serverURL {
+		fmt.Printf("Switching remote connection from %s to %s\n", cfg.URL, serverURL)
 	}
 
 	if useSSO {
-		return handleSSOLogin(serverURL, flagOrg, flagTeam)
+		return handleOAuthLogin(serverURL)
 	}
 
 	// Interactive email/password prompt
@@ -107,6 +104,9 @@ func handleLoginCommand(args []string) error {
 			if err != nil {
 				return fmt.Errorf("login failed (org switch): %w", err)
 			}
+			if err := exchangePasswordLoginForOAuth(serverURL, result); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -124,6 +124,10 @@ func handleLoginCommand(args []string) error {
 				return fmt.Errorf("login failed (team switch): %w", err)
 			}
 		}
+	}
+
+	if err := exchangePasswordLoginForOAuth(serverURL, result); err != nil {
+		return err
 	}
 
 	printLoginSuccess(result)
@@ -183,9 +187,13 @@ func promptTeamSelection(teams []client.LoginTeamOption, currentSlug string) (st
 
 // printLoginSuccess displays the login success message.
 func printLoginSuccess(result *client.LoginResult) {
-	fmt.Printf("\nLogged in as %s", result.UserEmail)
-	if result.DisplayName != "" {
-		fmt.Printf(" (%s)", result.DisplayName)
+	if result.UserEmail != "" {
+		fmt.Printf("\nLogged in as %s", result.UserEmail)
+		if result.DisplayName != "" {
+			fmt.Printf(" (%s)", result.DisplayName)
+		}
+	} else {
+		fmt.Print("\nLogged in successfully")
 	}
 	fmt.Println()
 
@@ -199,45 +207,13 @@ func printLoginSuccess(result *client.LoginResult) {
 	}
 }
 
-// handleSSOLogin performs the SSO login flow with device-code polling.
-func handleSSOLogin(serverURL, flagOrg, flagTeam string) error {
-	// Check for available SSO providers
-	providers, err := client.ListSSOProviders(serverURL)
-	if err != nil || len(providers) == 0 {
-		return fmt.Errorf("no SSO providers configured on this server")
-	}
-
-	// If multiple providers, let the user choose
-	providerID := ""
-	if len(providers) == 1 {
-		providerID = providers[0].ID
-		fmt.Printf("Using SSO provider: %s\n", providers[0].Name)
-	} else {
-		options := make([]huh.Option[string], 0, len(providers))
-		for _, p := range providers {
-			options = append(options, huh.NewOption(p.Name, p.ID))
-		}
-
-		form := huh.NewForm(
-			huh.NewGroup(
-				huh.NewSelect[string]().
-					Title("Select SSO provider").
-					Options(options...).
-					Value(&providerID),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return fmt.Errorf("provider selection: %w", err)
-		}
-	}
-
-	// Perform the SSO login with status feedback
-	fmt.Println("Initiating SSO login...")
-	result, err := client.LoginWithSSO(serverURL, providerID, func(status string) {
+func handleOAuthLogin(serverURL string) error {
+	fmt.Println("Initiating OAuth login...")
+	result, err := client.LoginWithOAuth(serverURL, func(status string) {
 		switch status {
 		case "opening_browser":
 			fmt.Println("Opening browser for authentication...")
-			fmt.Println("If the browser doesn't open, check the URL above.")
+			fmt.Println("If the browser doesn't open, use the URL printed above.")
 		case "browser_failed":
 			fmt.Println("Could not open browser automatically.")
 			fmt.Println("Please open the URL printed above in your browser.")
@@ -247,56 +223,37 @@ func handleSSOLogin(serverURL, flagOrg, flagTeam string) error {
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("SSO login failed: %w", err)
+		return fmt.Errorf("OAuth login failed: %w", err)
 	}
-
-	// Phase 2: Interactive org selection (if multiple orgs and no flag provided)
-	if flagOrg == "" && len(result.AvailableOrgs) > 1 {
-		selectedOrg, err := promptOrgSelection(result.AvailableOrgs, result.OrgSlug)
-		if err != nil {
-			return fmt.Errorf("org selection: %w", err)
-		}
-
-		if selectedOrg != result.OrgSlug {
-			// For SSO, we can't re-login with the IdP again easily.
-			// Instead, update the remote config to the selected org.
-			// The next refresh will pick up the correct org.
-			result.OrgSlug = selectedOrg
-			for _, o := range result.AvailableOrgs {
-				if o.Slug == selectedOrg {
-					result.OrgName = o.Name
-					break
-				}
-			}
-			cfg := &client.RemoteConfig{
-				URL:       serverURL,
-				Org:       selectedOrg,
-				Team:      result.TeamSlug,
-				UserEmail: result.UserEmail,
-			}
-			_ = client.SaveRemoteConfig(cfg)
-		}
-	}
-
-	// Phase 3: Interactive team selection (if multiple teams and no flag provided)
-	if flagTeam == "" && len(result.AvailableTeams) > 1 {
-		selectedTeam, err := promptTeamSelection(result.AvailableTeams, result.TeamSlug)
-		if err != nil {
-			return fmt.Errorf("team selection: %w", err)
-		}
-
-		if selectedTeam != result.TeamSlug {
-			result.TeamSlug = selectedTeam
-			cfg := &client.RemoteConfig{
-				URL:       serverURL,
-				Org:       result.OrgSlug,
-				Team:      selectedTeam,
-				UserEmail: result.UserEmail,
-			}
-			_ = client.SaveRemoteConfig(cfg)
-		}
-	}
-
 	printLoginSuccess(result)
+	return nil
+}
+
+func exchangePasswordLoginForOAuth(serverURL string, result *client.LoginResult) error {
+	ts, err := client.NewTokenStore()
+	if err != nil {
+		return fmt.Errorf("init token store: %w", err)
+	}
+	tokens, err := ts.Load()
+	if err != nil || tokens == nil || tokens.AccessToken == "" {
+		return fmt.Errorf("password login did not store a session token")
+	}
+	exchanged, err := client.ExchangePlatformSessionForOAuth(serverURL, tokens.AccessToken)
+	if err != nil {
+		return fmt.Errorf("exchange session for OAuth token: %w", err)
+	}
+	converted, err := client.PersistOAuthLogin(serverURL, exchanged)
+	if err != nil {
+		return err
+	}
+	if converted.UserEmail != "" {
+		result.UserEmail = converted.UserEmail
+	}
+	if converted.OrgSlug != "" {
+		result.OrgSlug = converted.OrgSlug
+	}
+	if converted.TeamSlug != "" {
+		result.TeamSlug = converted.TeamSlug
+	}
 	return nil
 }

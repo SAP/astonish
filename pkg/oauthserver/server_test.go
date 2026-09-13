@@ -357,6 +357,52 @@ func TestChromeExtensionAuthorizationUsesAuthenticatedTenant(t *testing.T) {
 	}
 }
 
+func TestCLIAuthorizationAcceptsLoopbackRedirectAndAuthenticatedTenant(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{ID: "user", OrgID: "org", TeamID: "team"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	redirect := "http://127.0.0.1:54321" + CLIRedirectPath
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+CLIClientID+"&redirect_uri="+url.QueryEscape(redirect)+"&code_challenge_method=S256&code_challenge=test&scope=chat+offline_access", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, request)
+	if result.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+	if !strings.HasPrefix(result.Header().Get("Location"), redirect) {
+		t.Fatalf("callback location = %q", result.Header().Get("Location"))
+	}
+	for _, authorization := range backend.codes {
+		if authorization.ClientID != CLIClientID || authorization.OrgID != "org" || authorization.TeamID != "team" {
+			t.Fatalf("CLI authorization tenant binding = %#v", authorization)
+		}
+		if authorization.RedirectURI != redirect {
+			t.Fatalf("CLI authorization redirect = %q", authorization.RedirectURI)
+		}
+	}
+}
+
+func TestCLIAuthorizationRejectsNonLoopbackRedirect(t *testing.T) {
+	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
+	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {
+		return Subject{ID: "user", OrgID: "org", TeamID: "team"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+CLIClientID+"&redirect_uri=http%3A%2F%2Fexample.com%2Foauth%2Fcallback&code_challenge_method=S256&code_challenge=test&scope=chat", nil)
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, request)
+	if result.Code != http.StatusBadRequest {
+		t.Fatalf("authorize status = %d, body=%s", result.Code, result.Body.String())
+	}
+}
+
 func TestChromeExtensionRejectsUnpinnedRedirectURI(t *testing.T) {
 	backend := &memoryStore{clients: map[string]*store.OAuthClient{}, codes: map[string]store.OAuthAuthorization{}}
 	server, err := New(Config{Issuer: "https://issuer.example", Resource: "https://api.example"}, backend, func(context.Context, *http.Request) (Subject, error) {

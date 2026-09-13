@@ -8,6 +8,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 )
@@ -22,6 +23,9 @@ import (
 func effectiveUserID(r *http.Request) string {
 	if pu := GetPlatformUser(r); pu != nil {
 		return pu.ID
+	}
+	if principal, ok := execution.PrincipalFromContext(r.Context()); ok && principal.Subject != "" {
+		return principal.Subject
 	}
 	return studioChatUserID
 }

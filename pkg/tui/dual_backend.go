@@ -117,5 +117,8 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	}
 
 	m.refreshViewport()
-	return m, nil
+	// Switching modes can replace a dense transcript with a mostly blank welcome
+	// screen. Force Bubble Tea to erase the previous frame so stale cells cannot
+	// remain visible behind the new backend.
+	return m, tea.ClearScreen
 }

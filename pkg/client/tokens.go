@@ -13,12 +13,23 @@ import (
 
 const tokenFileName = "remote_tokens.enc"
 
+const (
+	TokenKindPlatform = "platform"
+	TokenKindOAuth    = "oauth"
+)
+
 // Tokens holds the JWT access and refresh tokens for the remote connection.
 type Tokens struct {
 	AccessToken      string    `json:"access_token"`
 	RefreshToken     string    `json:"refresh_token"`
 	AccessExpiresAt  time.Time `json:"access_expires_at"`
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
+	Kind             string    `json:"kind,omitempty"`
+	ClientID         string    `json:"client_id,omitempty"`
+}
+
+func (t *Tokens) isOAuth() bool {
+	return t != nil && t.Kind == TokenKindOAuth
 }
 
 // IsAccessExpired returns true if the access token has expired or will expire

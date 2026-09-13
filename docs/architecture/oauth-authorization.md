@@ -116,6 +116,7 @@ The server publishes OAuth authorization-server metadata and protected-resource 
 | `/oauth/revoke` | Refresh-token-family revocation | Authenticated client |
 | `/oauth/introspect` | Token state inspection | Authenticated client |
 | `/api/oauth/*` | Personal client management and discovery view | Authenticated owner; server enforces owner and tenant membership |
+| `/api/studio/*` | Studio chat, sessions, and extension-facing APIs | Cookie/platform JWT, or a valid Astonish OAuth bearer with exact `chat`. The first-party CLI (`astonish login`) and Chrome extension obtain this bearer through Authorization Code + PKCE. |
 | `/api/mcp` | Protected Streamable HTTP MCP server; four-tool client-owned loop (`get_agent_context`, `search_tools`, `describe_tools`, `execute_tool`) | Valid Astonish bearer token with exact `tool:execute`; this does not grant `chat` |
 | `/api/a2a` | Protected inbound A2A JSON-RPC server | Valid Astonish bearer token with exact `a2a` |
 | `/.well-known/agent-card.json` | Inbound A2A Agent Card discovery | Public |
@@ -129,7 +130,7 @@ OAuth clients are user-owned platform records bound to an organization and optio
 - Stable `client_id` and display name.
 - Public or confidential client type.
 - Secret hash for confidential clients; plaintext secrets are never persisted.
-- Exact redirect URI allowlist.
+- Exact redirect URI allowlist. The first-party CLI client (`astonish-cli`) is an exception: it is a public native client and may use an RFC 8252 loopback redirect of the form `http://127.0.0.1|localhost|::1:<ephemeral-port>/oauth/callback`. The first-party Chrome extension remains pinned to its packaged extension redirect URI.
 - Allowed grant types.
 - Allowed protected resources.
 - Allowed scopes.

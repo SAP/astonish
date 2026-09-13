@@ -40,9 +40,9 @@ func TestResolveContextWindow_StaticMap(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
-			got := resolveFromStaticMap(tt.model)
+			got := ResolveFromStaticMap(tt.model)
 			if got != tt.want {
-				t.Errorf("resolveFromStaticMap(%q) = %d, want %d", tt.model, got, tt.want)
+				t.Errorf("ResolveFromStaticMap(%q) = %d, want %d", tt.model, got, tt.want)
 			}
 		})
 	}
@@ -103,8 +103,8 @@ func TestResolveContextWindowCached(t *testing.T) {
 }
 
 func TestResolveFromStaticMap_UnknownModel(t *testing.T) {
-	got := resolveFromStaticMap("totally-custom-model-v1")
+	got := ResolveFromStaticMap("totally-custom-model-v1")
 	if got != 0 {
-		t.Errorf("resolveFromStaticMap(unknown) = %d, want 0", got)
+		t.Errorf("ResolveFromStaticMap(unknown) = %d, want 0", got)
 	}
 }

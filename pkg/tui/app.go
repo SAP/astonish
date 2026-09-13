@@ -4503,13 +4503,26 @@ func (m model) headerUsageText() string {
 	}
 
 	ctxPart := "Context " + formatTokenCount(contextTokens)
-	if window := contextWindowFor(m.info.Model); window > 0 && contextTokens > 0 {
+
+	// Use the authoritative context window from the backend (provider resolver)
+	// when available, falling back to the local model-name heuristic.
+	var window int64
+	if m.info.ContextWindow > 0 {
+		window = int64(m.info.ContextWindow)
+	} else {
+		window = contextWindowFor(m.info.Model)
+	}
+	if window > 0 && contextTokens > 0 {
 		pct := int(float64(contextTokens) / float64(window) * 100)
 		if pct > 100 {
 			pct = 100
 		}
+		windowLabel := formatTokenCount(window)
+		if m.info.ContextWindow > 0 && m.info.ContextWindowFallback {
+			windowLabel += " (fallback)"
+		}
 		ctxPart = fmt.Sprintf("Context %s/%s (%d%%)",
-			formatTokenCount(contextTokens), formatTokenCount(window), pct)
+			formatTokenCount(contextTokens), windowLabel, pct)
 	}
 
 	if usage.Total <= 0 {

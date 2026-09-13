@@ -763,3 +763,30 @@ func executeBatch(cmd tea.Cmd) []tea.Msg {
 	}
 	return []tea.Msg{msg}
 }
+
+func TestModelPickerShowsContextWindowLabels(t *testing.T) {
+	m := newModelPickerTestModel(t, &modelCatalogBackend{})
+	m.modelPicker = modelPickerState{
+		open:             true,
+		step:             "model",
+		selectedProvider: "openai",
+		providers:        []string{"openai"},
+		models:           []string{"gpt-4o", "gpt-5", "totally-unknown-model-v1"},
+		currentProvider:  "openai",
+		currentModel:     "gpt-4o",
+	}
+	m.modelPicker.rebuildItems()
+	out := stripANSI(m.renderModelPickerOverlay())
+
+	// Known models should show their context window.
+	if !strings.Contains(out, "128.0k") {
+		t.Fatalf("model picker should show 128k for gpt-4o:\n%s", out)
+	}
+	if !strings.Contains(out, "272.0k") {
+		t.Fatalf("model picker should show 272k for gpt-5:\n%s", out)
+	}
+	// Unknown models should show 200k (fallback).
+	if !strings.Contains(out, "200.0k (fallback)") {
+		t.Fatalf("model picker should show 200k (fallback) for unknown model:\n%s", out)
+	}
+}

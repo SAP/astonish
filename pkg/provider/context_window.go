@@ -40,7 +40,7 @@ func ResolveContextWindow(ctx context.Context, providerName, modelName string, c
 	}
 
 	// Tier 3: Static model family map
-	if staticVal := resolveFromStaticMap(modelName); staticVal > 0 {
+	if staticVal := ResolveFromStaticMap(modelName); staticVal > 0 {
 		return staticVal
 	}
 
@@ -132,10 +132,11 @@ func getProviderKey(cfg *config.AppConfig, providerName, keyField, envVar string
 // envLookup reads an environment variable. Replaceable for testing.
 var envLookup = os.Getenv
 
-// resolveFromStaticMap uses model name patterns to estimate context window.
+// ResolveFromStaticMap uses model name patterns to estimate context window.
 // This covers providers that don't expose metadata APIs (Anthropic, OpenAI, xAI, etc.)
 // and acts as a fast fallback for providers whose APIs might be temporarily unreachable.
-func resolveFromStaticMap(modelName string) int {
+// Exported for use in TUI display hints; prefer ResolveContextWindow for authoritative values.
+func ResolveFromStaticMap(modelName string) int {
 	m := strings.ToLower(modelName)
 
 	// Claude family
@@ -156,6 +157,12 @@ func resolveFromStaticMap(modelName string) int {
 	}
 
 	// GPT family
+	if strings.Contains(m, "gpt-5") {
+		return 272_000
+	}
+	if strings.Contains(m, "gpt-4.1") {
+		return 1_047_576
+	}
 	if strings.Contains(m, "gpt-4o") {
 		return 128_000
 	}

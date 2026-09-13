@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -1054,7 +1055,14 @@ func (m model) renderModelStep(body *strings.Builder, th Theme, h int) {
 				m.modelPicker.selectedProvider == m.modelPicker.currentProvider {
 				suffix = th.Muted.Render("  (current)")
 			}
-			body.WriteString(style.Render(mark+item) + suffix + "\n")
+			// Context window label: show resolved size next to each model.
+			cwLabel := ""
+			if cw := provider.ResolveFromStaticMap(item); cw > 0 {
+				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(cw)))
+			} else {
+				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(provider.DefaultContextWindow)) + " (fallback)")
+			}
+			body.WriteString(style.Render(mark+item) + cwLabel + suffix + "\n")
 		}
 		if end < len(m.modelPicker.items) {
 			body.WriteString(th.Muted.Render(fmt.Sprintf("  … %d more", len(m.modelPicker.items)-end)))

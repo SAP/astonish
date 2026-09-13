@@ -807,6 +807,66 @@ func TestCompactor_OnCompactionHookFires(t *testing.T) {
 	}
 }
 
+func TestCompactor_CloneOmitsOnCompactionHook(t *testing.T) {
+	parent := NewCompactor(200_000)
+	parent.Threshold = 0.5
+	parent.PreserveRecent = 6
+	parent.DebugMode = true
+	parent.SetStrategy(&CodeStrategy{})
+	var parentCalls int
+	parent.SetOnCompaction(func(before, after int) { parentCalls++ })
+
+	child := parent.Clone()
+	if child == nil {
+		t.Fatal("Clone returned nil")
+	}
+	if child.ContextWindow != 200_000 {
+		t.Fatalf("cloned ContextWindow = %d", child.ContextWindow)
+	}
+	if child.Threshold != 0.5 {
+		t.Fatalf("cloned Threshold = %v", child.Threshold)
+	}
+	if child.PreserveRecent != 6 {
+		t.Fatalf("cloned PreserveRecent = %d", child.PreserveRecent)
+	}
+	if child.StrategyName() != "code" {
+		t.Fatalf("cloned strategy = %q", child.StrategyName())
+	}
+
+	contents := makeManyContents(20)
+	if _, err := child.CompactContents(context.Background(), contents); err != nil {
+		t.Fatalf("child CompactContents: %v", err)
+	}
+	if parentCalls != 0 {
+		t.Fatalf("parent OnCompaction fired %d times from cloned compact; want 0", parentCalls)
+	}
+
+	if _, err := parent.CompactContents(context.Background(), contents); err != nil {
+		t.Fatalf("parent CompactContents: %v", err)
+	}
+	if parentCalls != 1 {
+		t.Fatalf("parent OnCompaction calls = %d, want 1", parentCalls)
+	}
+}
+
+func TestContentsToSessionEvents(t *testing.T) {
+	contents := []*genai.Content{
+		makeContent("user", "hello"),
+		makeContent("model", "world"),
+		nil,
+	}
+	evs := ContentsToSessionEvents(contents)
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Author != "user" || evs[1].Author != "model" {
+		t.Fatalf("authors = %q, %q", evs[0].Author, evs[1].Author)
+	}
+	if evs[0].LLMResponse.Content == nil || evs[0].LLMResponse.Content.Parts[0].Text != "hello" {
+		t.Fatalf("first event content = %#v", evs[0].LLMResponse.Content)
+	}
+}
+
 // TestCompactor_SummaryMemoized verifies that summarizing the same "old portion"
 // twice calls the summarizer LLM only once — the fix for repeated, expensive
 // re-summarization on every model call within a tool loop.

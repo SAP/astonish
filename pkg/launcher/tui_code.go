@@ -3082,9 +3082,12 @@ func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, model
 	// the API path). InvalidateContextWindowCache forces a fresh resolve so
 	// the next Info() call picks up the new model's metadata.
 	provider.InvalidateContextWindowCache()
+	cw := provider.ResolveContextWindowCached(ctx, providerName, modelName, b.appConfig)
 	if b.result.Compactor != nil {
-		cw := provider.ResolveContextWindowCached(ctx, providerName, modelName, b.appConfig)
 		b.result.Compactor.SetContextWindow(cw)
+	}
+	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil && b.result.ChatAgent.SubAgentManager.Compactor != nil {
+		b.result.ChatAgent.SubAgentManager.Compactor.SetContextWindow(cw)
 	}
 
 	// Persist the choice as the Astonish default so it survives across runs

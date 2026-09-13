@@ -27,3 +27,9 @@ func (s *AutoInitSessionService) Create(ctx context.Context, req *session.Create
 	// Pass to the actual implementation
 	return s.Service.Create(ctx, req)
 }
+
+// Unwrap returns the wrapped session service (e.g. FileStore) so callers can
+// type-assert persistence-only methods like ArchiveAndReplaceEvents.
+func (s *AutoInitSessionService) Unwrap() session.Service {
+	return s.Service
+}

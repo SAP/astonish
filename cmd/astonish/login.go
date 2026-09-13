@@ -55,14 +55,11 @@ func handleLoginCommand(args []string) error {
 		serverURL = "https://" + serverURL
 	}
 
-	// Check if already logged in
-	if client.IsRemoteMode() {
-		cfg, _ := client.LoadRemoteConfig()
-		if cfg != nil {
-			fmt.Printf("Already connected to %s as %s\n", cfg.URL, cfg.UserEmail)
-			fmt.Printf("Run 'astonish logout' first to disconnect.\n")
-			return fmt.Errorf("already connected")
-		}
+	// Login is also the recovery path for expired, invalid, or server-incompatible
+	// credentials. Do not treat remote.yaml alone as proof that authentication is
+	// still valid; a successful login replaces both the token and remote config.
+	if cfg, err := client.LoadRemoteConfig(); err == nil && cfg != nil && cfg.URL != "" && cfg.URL != serverURL {
+		fmt.Printf("Switching remote connection from %s to %s\n", cfg.URL, serverURL)
 	}
 
 	if useSSO {

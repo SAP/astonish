@@ -7,10 +7,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
+	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -96,6 +98,26 @@ func NewCompactor(contextWindow int) *Compactor {
 		ContextWindow:  contextWindow,
 		Threshold:      0.7,
 		PreserveRecent: 4,
+	}
+}
+
+// Clone returns a copy of the compaction settings without UI or persistence
+// hooks, caches, or counters. Sub-agents use this so their compactons do not
+// fire the parent session's transcript notice or share summary-cache state.
+func (c *Compactor) Clone() *Compactor {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &Compactor{
+		ContextWindow:  c.ContextWindow,
+		Threshold:      c.Threshold,
+		PreserveRecent: c.PreserveRecent,
+		LLM:            c.LLM,
+		DebugMode:      c.DebugMode,
+		PlanFilePath:   c.PlanFilePath,
+		Strategy:       c.Strategy,
 	}
 }
 
@@ -723,4 +745,28 @@ func (c *Compactor) BeforeModelCallback() llmagent.BeforeModelCallback {
 		req.Contents = compacted
 		return nil, nil // proceed with compacted contents
 	}
+}
+
+// ContentsToSessionEvents converts compacted genai contents into ADK session
+// events so a FileStore can archive-and-replace the active session history.
+// Non-user roles (including tool/function) collapse to author "model" because
+// compacted history is a summary-plus-recent transcript, not a live tool loop.
+func ContentsToSessionEvents(contents []*genai.Content) []*adksession.Event {
+	out := make([]*adksession.Event, 0, len(contents))
+	for i, c := range contents {
+		if c == nil {
+			continue
+		}
+		author := "model"
+		if c.Role == "user" {
+			author = "user"
+		}
+		out = append(out, &adksession.Event{
+			ID:          fmt.Sprintf("compact-%d", i),
+			Author:      author,
+			Timestamp:   time.Now(),
+			LLMResponse: model.LLMResponse{Content: c},
+		})
+	}
+	return out
 }

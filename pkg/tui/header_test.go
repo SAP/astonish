@@ -63,13 +63,53 @@ func TestRenderHeaderShowsContextPercentWhenModelKnown(t *testing.T) {
 	m := model{
 		theme: DefaultTheme(),
 		width: 120,
-		info:  backend.Info{Mode: "code", Model: "anthropic--claude-3.7-sonnet"},
+		info:  backend.Info{Mode: "code", Model: "anthropic--claude-3.7-sonnet", ContextWindow: 200_000},
 		tr:    &events.Transcript{ContextTokens: 20000},
 	}
 	out := stripANSI(m.renderHeader())
 	// 20k / 200k = 10%
 	if !strings.Contains(out, "Context 20.0k/200.0k (10%)") {
 		t.Fatalf("header missing context percent: %q", out)
+	}
+}
+
+func TestRenderHeaderUsesProviderResolvedContextWindow(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		width: 120,
+		info: backend.Info{
+			Mode:          "code",
+			Model:         "gemini-2.5-pro",
+			ContextWindow: 1_048_576,
+		},
+		tr: &events.Transcript{ContextTokens: 100000},
+	}
+	out := stripANSI(m.renderHeader())
+	// 100k / 1.0M ≈ 10%
+	if !strings.Contains(out, "Context 100.0k/1.0M (9%)") {
+		t.Fatalf("header should use provider-resolved context window: %q", out)
+	}
+}
+
+func TestRenderHeaderShowsFallbackLabel(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		width: 120,
+		info: backend.Info{
+			Mode:                  "code",
+			Model:                 "some-unknown-model-v1",
+			ContextWindow:         200_000,
+			ContextWindowFallback: true,
+		},
+		tr: &events.Transcript{ContextTokens: 40000},
+	}
+	out := stripANSI(m.renderHeader())
+	// Should show (fallback) label when the context window is the universal default.
+	if !strings.Contains(out, "(fallback)") {
+		t.Fatalf("header should show fallback label for unknown model: %q", out)
+	}
+	if !strings.Contains(out, "200.0k (fallback)") {
+		t.Fatalf("header should show 200k fallback: %q", out)
 	}
 }
 

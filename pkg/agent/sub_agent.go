@@ -25,6 +25,32 @@ import (
 	"github.com/google/uuid"
 )
 
+type eventArchiver interface {
+	ArchiveAndReplaceEvents(appName, userID, sessionID string, compactedEvents []*adksession.Event) (string, error)
+}
+
+// eventArchiverUnwrapDepth bounds asEventArchiver so a cyclic Unwrap() chain
+// cannot loop. Code-mode FileStore is typically 0–1 wrap (AutoInitSessionService).
+const eventArchiverUnwrapDepth = 4
+
+func asEventArchiver(svc adksession.Service) eventArchiver {
+	cur := svc
+	for range eventArchiverUnwrapDepth {
+		if cur == nil {
+			return nil
+		}
+		if a, ok := cur.(eventArchiver); ok {
+			return a
+		}
+		u, ok := cur.(interface{ Unwrap() adksession.Service })
+		if !ok {
+			return nil
+		}
+		cur = u.Unwrap()
+	}
+	return nil
+}
+
 // SubAgentConfig holds configuration for the sub-agent system.
 type SubAgentConfig struct {
 	MaxDepth          int           `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`                   // Max delegation nesting (default: 2)
@@ -1084,7 +1110,22 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 
 	if m.Compactor != nil {
-		beforeModelCallbacks = append(beforeModelCallbacks, m.Compactor.BeforeModelCallback())
+		// Per-task clone: isolate summary cache / counters from other sub-agents
+		// and from the parent (whose OnCompaction hook must not fire here).
+		taskCompactor := m.Compactor.Clone()
+		if archiver := asEventArchiver(sessionSvc); archiver != nil {
+			appName := m.AppName
+			uid := userID
+			taskCompactor.SetPersistCompacted(func(_ context.Context, sid string, compacted []*genai.Content) error {
+				evs := persistentsession.ContentsToSessionEvents(compacted)
+				if len(evs) == 0 {
+					return nil
+				}
+				_, err := archiver.ArchiveAndReplaceEvents(appName, uid, sid, evs)
+				return err
+			})
+		}
+		beforeModelCallbacks = append(beforeModelCallbacks, taskCompactor.BeforeModelCallback())
 	}
 
 	// Per-call restore functions keyed by FunctionCallID so parallel

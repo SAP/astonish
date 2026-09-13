@@ -20,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -4503,13 +4504,26 @@ func (m model) headerUsageText() string {
 	}
 
 	ctxPart := "Context " + formatTokenCount(contextTokens)
-	if window := contextWindowFor(m.info.Model); window > 0 && contextTokens > 0 {
+
+	// Use the authoritative context window from the backend (provider resolver)
+	// when available, falling back to the local model-name heuristic.
+	var window int64
+	if m.info.ContextWindow > 0 {
+		window = int64(m.info.ContextWindow)
+	} else {
+		window = contextWindowFor(m.info.Model)
+	}
+	if window > 0 && contextTokens > 0 {
 		pct := int(float64(contextTokens) / float64(window) * 100)
 		if pct > 100 {
 			pct = 100
 		}
+		windowLabel := formatTokenCount(window)
+		if m.info.ContextWindow > 0 && m.info.ContextWindowFallback {
+			windowLabel += " (fallback)"
+		}
 		ctxPart = fmt.Sprintf("Context %s/%s (%d%%)",
-			formatTokenCount(contextTokens), formatTokenCount(window), pct)
+			formatTokenCount(contextTokens), windowLabel, pct)
 	}
 
 	if usage.Total <= 0 {
@@ -4521,44 +4535,13 @@ func (m model) headerUsageText() string {
 	return fmt.Sprintf("%s · Usage %s", ctxPart, formatTokenCount(usage.Total))
 }
 
-// contextWindowFor returns the approximate context-window size (in tokens) for a
-// model name, or 0 when unknown. Matching is domain-agnostic: it keys off common
-// family substrings in the model identifier rather than any single provider's
-// catalog, so it works for local code mode across providers.
+// contextWindowFor returns the context-window size (in tokens) for a model
+// name, or 0 when unknown. Delegates to the provider package's curated map
+// of verified context windows. Used as a fallback when backend.Info does not
+// carry a resolved context window (e.g., platform TUI).
 func contextWindowFor(model string) int64 {
-	name := strings.ToLower(strings.TrimSpace(model))
-	if name == "" {
-		return 0
-	}
-	// Ordered longest/most-specific first so e.g. "gpt-4o-mini" matches gpt-4o.
-	families := []struct {
-		match  string
-		window int64
-	}{
-		{"claude", 200_000},
-		{"gpt-5", 272_000},
-		{"gpt-4.1", 1_047_576},
-		{"gpt-4o", 128_000},
-		{"gpt-4-turbo", 128_000},
-		{"gpt-4", 128_000},
-		{"o4", 200_000},
-		{"o3", 200_000},
-		{"o1", 200_000},
-		{"gpt-3.5", 16_385},
-		{"gemini-2.5", 1_048_576},
-		{"gemini-1.5", 1_048_576},
-		{"gemini", 1_048_576},
-		{"llama-3", 128_000},
-		{"llama", 128_000},
-		{"mistral", 128_000},
-		{"mixtral", 32_768},
-		{"deepseek", 128_000},
-		{"qwen", 128_000},
-	}
-	for _, f := range families {
-		if strings.Contains(name, f.match) {
-			return f.window
-		}
+	if cw := provider.ResolveFromStaticMap(model); cw > 0 {
+		return int64(cw)
 	}
 	return 0
 }

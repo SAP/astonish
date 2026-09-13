@@ -676,19 +676,25 @@ func (b *localAgentBackend) Info() backend.Info {
 	if !b.configured {
 		notices = append(notices, "No AI model configured yet. Type /model to choose a provider and model.")
 	}
+
+	// Resolve context window for the current model.
+	cwResult := provider.ResolveContextWindowCachedFull(context.Background(), b.provider, b.model, b.appConfig)
+
 	info := backend.Info{
-		SessionID:     b.sessionID,
-		Provider:      b.provider,
-		Model:         b.model,
-		Mode:          "code",
-		WorkingDir:    b.workingDir,
-		GitBranch:     b.gitBranch,
-		Usage:         cloneUsage(b.usage),
-		ContextTokens: b.contextTokens,
-		IsResumed:     b.resumed,
-		AutoApprove:   b.autoApprove,
-		Notices:       notices,
-		Title:         b.title,
+		SessionID:             b.sessionID,
+		Provider:              b.provider,
+		Model:                 b.model,
+		Mode:                  "code",
+		WorkingDir:            b.workingDir,
+		GitBranch:             b.gitBranch,
+		Usage:                 cloneUsage(b.usage),
+		ContextTokens:         b.contextTokens,
+		IsResumed:             b.resumed,
+		AutoApprove:           b.autoApprove,
+		Notices:               notices,
+		Title:                 b.title,
+		ContextWindow:         cwResult.Size,
+		ContextWindowFallback: cwResult.IsFallback,
 	}
 	if b.provider == "auto" && b.autoRoutingCfg != nil {
 		info.Provider = "Auto"
@@ -3071,6 +3077,18 @@ func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, model
 	b.routingLLM = nil
 	b.autoRoutingCfg = nil
 	b.mu.Unlock()
+
+	// Update compactor with new context window size (mirrors HotSwapLLM in
+	// the API path). InvalidateContextWindowCache forces a fresh resolve so
+	// the next Info() call picks up the new model's metadata.
+	provider.InvalidateContextWindowCache()
+	cw := provider.ResolveContextWindowCached(ctx, providerName, modelName, b.appConfig)
+	if b.result.Compactor != nil {
+		b.result.Compactor.SetContextWindow(cw)
+	}
+	if b.result.ChatAgent != nil && b.result.ChatAgent.SubAgentManager != nil && b.result.ChatAgent.SubAgentManager.Compactor != nil {
+		b.result.ChatAgent.SubAgentManager.Compactor.SetContextWindow(cw)
+	}
 
 	// Persist the choice as the Astonish default so it survives across runs
 	// (general.default_provider / default_model in ~/.config/astonish/config.yaml).

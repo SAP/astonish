@@ -2089,7 +2089,12 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		}
 		chatAgent.Compactor = compactor
 		if subAgentMgr != nil {
-			subAgentMgr.Compactor = compactor
+			// Clone so sub-agent compactons do not fire the parent UI hook
+			// or share summary-cache / persist state with the main thread.
+			subAgentMgr.Compactor = compactor.Clone()
+			if cfg.CodeMode {
+				subAgentMgr.Compactor.SetStrategy(&persistentsession.CodeStrategy{})
+			}
 		}
 		if cfg.DebugMode {
 			slog.Debug("context compaction enabled", "window_tokens", contextWindow, "threshold_pct", compactor.Threshold*100)

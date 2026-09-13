@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -325,6 +326,17 @@ func (m model) applyModelPinApplied(msg modelPinAppliedMsg) (tea.Model, tea.Cmd)
 	}
 	if msg.effM != "" {
 		m.info.Model = msg.effM
+	}
+	// Re-read backend.Info so the header context window matches the newly
+	// pinned model without requiring a session switch.
+	fresh := m.backend.Info()
+	m.info.ContextWindow = fresh.ContextWindow
+	m.info.ContextWindowFallback = fresh.ContextWindowFallback
+	if fresh.Provider != "" && msg.effP == "" {
+		m.info.Provider = fresh.Provider
+	}
+	if fresh.Model != "" && msg.effM == "" {
+		m.info.Model = fresh.Model
 	}
 	m.modelPicker = modelPickerState{}
 	label := modelFooterText(m.info.Provider, m.info.Model)
@@ -1054,7 +1066,14 @@ func (m model) renderModelStep(body *strings.Builder, th Theme, h int) {
 				m.modelPicker.selectedProvider == m.modelPicker.currentProvider {
 				suffix = th.Muted.Render("  (current)")
 			}
-			body.WriteString(style.Render(mark+item) + suffix + "\n")
+			// Context window label: show resolved size next to each model.
+			cwLabel := ""
+			if cw := provider.ResolveFromStaticMap(item); cw > 0 {
+				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(cw)))
+			} else {
+				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(provider.DefaultContextWindow)) + " (fallback)")
+			}
+			body.WriteString(style.Render(mark+item) + cwLabel + suffix + "\n")
 		}
 		if end < len(m.modelPicker.items) {
 			body.WriteString(th.Muted.Render(fmt.Sprintf("  … %d more", len(m.modelPicker.items)-end)))

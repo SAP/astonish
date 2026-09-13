@@ -1288,3 +1288,52 @@ func TestSubAgentManager_EffectiveTaskLLMNilFallback(t *testing.T) {
 		t.Errorf("effectiveTaskLLM() = %v, want parentLLM (fallback)", got)
 	}
 }
+
+type stubArchiver struct {
+	adksession.Service
+	calls int
+}
+
+func (s *stubArchiver) ArchiveAndReplaceEvents(appName, userID, sessionID string, compactedEvents []*adksession.Event) (string, error) {
+	s.calls++
+	return "archive", nil
+}
+
+type wrappingService struct {
+	inner adksession.Service
+}
+
+func (w wrappingService) Create(ctx context.Context, req *adksession.CreateRequest) (*adksession.CreateResponse, error) {
+	return w.inner.Create(ctx, req)
+}
+func (w wrappingService) Get(ctx context.Context, req *adksession.GetRequest) (*adksession.GetResponse, error) {
+	return w.inner.Get(ctx, req)
+}
+func (w wrappingService) List(ctx context.Context, req *adksession.ListRequest) (*adksession.ListResponse, error) {
+	return w.inner.List(ctx, req)
+}
+func (w wrappingService) Delete(ctx context.Context, req *adksession.DeleteRequest) error {
+	return w.inner.Delete(ctx, req)
+}
+func (w wrappingService) AppendEvent(ctx context.Context, sess adksession.Session, event *adksession.Event) error {
+	return w.inner.AppendEvent(ctx, sess, event)
+}
+func (w wrappingService) Unwrap() adksession.Service { return w.inner }
+
+func TestAsEventArchiverUnwrapsSessionService(t *testing.T) {
+	arch := &stubArchiver{Service: adksession.InMemoryService()}
+	wrapped := wrappingService{inner: arch}
+	got := asEventArchiver(wrapped)
+	if got == nil {
+		t.Fatal("asEventArchiver returned nil for wrapped FileStore-like service")
+	}
+	if _, err := got.ArchiveAndReplaceEvents("app", "u", "s", []*adksession.Event{{ID: "e"}}); err != nil {
+		t.Fatal(err)
+	}
+	if arch.calls != 1 {
+		t.Fatalf("archiver calls = %d, want 1", arch.calls)
+	}
+	if asEventArchiver(adksession.InMemoryService()) != nil {
+		t.Fatal("in-memory service should not look like an event archiver")
+	}
+}

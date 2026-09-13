@@ -40,6 +40,13 @@ type Info struct {
 	Notices []string
 	// Title is the human session title when known.
 	Title string
+	// ContextWindow is the resolved context-window size in tokens for the
+	// current model. Populated by the backend via the provider resolver. When
+	// zero the TUI falls back to model-name heuristics.
+	ContextWindow int
+	// ContextWindowFallback is true when ContextWindow is the universal
+	// default (200k) because no provider API or static map matched the model.
+	ContextWindowFallback bool
 }
 
 // SessionSummary is one row in the sessions picker.

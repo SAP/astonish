@@ -526,6 +526,9 @@ func (cm *ChatManager) HotSwapLLM(ctx context.Context, providerName, modelName s
 	if cm.components.Compactor != nil {
 		contextWindow := provider.ResolveContextWindowCached(ctx, providerName, modelName, appCfg)
 		cm.components.Compactor.SetContextWindow(contextWindow)
+		if cm.components.ChatAgent != nil && cm.components.ChatAgent.SubAgentManager != nil && cm.components.ChatAgent.SubAgentManager.Compactor != nil {
+			cm.components.ChatAgent.SubAgentManager.Compactor.SetContextWindow(contextWindow)
+		}
 	}
 
 	slog.Info("[hot-swap] SUCCESS — LLM swapped without Reset()",

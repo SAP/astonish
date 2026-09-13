@@ -37,7 +37,17 @@ func (b *modelCatalogBackend) SetModelPin(_ context.Context, provider, model str
 	if provider == "" && model == "" {
 		return "cascade-provider", "cascade-model", nil
 	}
+	b.info.Provider = provider
+	b.info.Model = model
+	if model == "gemini-2.5-pro" {
+		b.info.ContextWindow = 1_048_576
+		b.info.ContextWindowFallback = false
+	}
 	return provider, model, nil
+}
+
+func (b *modelCatalogBackend) Info() backend.Info {
+	return b.info
 }
 
 // providerAdminStub is a fake ProviderAdminBackend for overlay tests.
@@ -788,5 +798,50 @@ func TestModelPickerShowsContextWindowLabels(t *testing.T) {
 	// Unknown models should show 200k (fallback).
 	if !strings.Contains(out, "200.0k (fallback)") {
 		t.Fatalf("model picker should show 200k (fallback) for unknown model:\n%s", out)
+	}
+}
+
+func TestApplyModelPinRefreshesHeaderContextWindow(t *testing.T) {
+	b := &modelCatalogBackend{
+		staticBackend: staticBackend{info: backend.Info{
+			Provider:              "sap_ai_core",
+			Model:                 "anthropic--claude-4.6-opus",
+			ContextWindow:         200_000,
+			ContextWindowFallback: false,
+		}},
+	}
+	m := newModelPickerTestModel(t, b)
+	m.info = b.info
+	m.tr.ContextTokens = 31800
+
+	// Simulate SetModelPin having already updated backend.Info for the new model.
+	_, _, err := b.SetModelPin(context.Background(), "google", "gemini-2.5-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next, _ := m.applyModelPinApplied(modelPinAppliedMsg{
+		provider: "google",
+		model:    "gemini-2.5-pro",
+		effP:     "google",
+		effM:     "gemini-2.5-pro",
+	})
+	m = next.(model)
+
+	if m.info.Model != "gemini-2.5-pro" {
+		t.Fatalf("model = %q, want gemini-2.5-pro", m.info.Model)
+	}
+	if m.info.ContextWindow != 1_048_576 {
+		t.Fatalf("ContextWindow = %d, want 1048576 after pin without session switch", m.info.ContextWindow)
+	}
+	if m.info.ContextWindowFallback {
+		t.Fatal("ContextWindowFallback should be false for a known model")
+	}
+	out := stripANSI(m.renderHeader())
+	if !strings.Contains(out, "1.0M") {
+		t.Fatalf("header should show the newly pinned model's context window: %q", out)
+	}
+	if strings.Contains(out, "(fallback)") {
+		t.Fatalf("header should not show fallback after pinning a known model: %q", out)
 	}
 }

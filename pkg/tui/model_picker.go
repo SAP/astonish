@@ -327,6 +327,17 @@ func (m model) applyModelPinApplied(msg modelPinAppliedMsg) (tea.Model, tea.Cmd)
 	if msg.effM != "" {
 		m.info.Model = msg.effM
 	}
+	// Re-read backend.Info so the header context window matches the newly
+	// pinned model without requiring a session switch.
+	fresh := m.backend.Info()
+	m.info.ContextWindow = fresh.ContextWindow
+	m.info.ContextWindowFallback = fresh.ContextWindowFallback
+	if fresh.Provider != "" && msg.effP == "" {
+		m.info.Provider = fresh.Provider
+	}
+	if fresh.Model != "" && msg.effM == "" {
+		m.info.Model = fresh.Model
+	}
 	m.modelPicker = modelPickerState{}
 	label := modelFooterText(m.info.Provider, m.info.Model)
 	if msg.provider == "" && msg.model == "" {

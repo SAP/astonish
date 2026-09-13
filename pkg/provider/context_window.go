@@ -137,13 +137,18 @@ var envLookup = os.Getenv
 // official model documentation and are periodically updated.
 //
 // Entries use the exact model ID as returned by the provider's list-models API.
-// SAP-prefixed models (e.g. "anthropic--claude-4.6-opus") are covered by the
-// SAP catalog in sap.GetModelConfig, not this map.
+// SAP-prefixed models (e.g. "anthropic--claude-4.6-opus") are also included
+// so they resolve via this map when not going through the SAP provider path
+// (e.g., the model picker display or platform TUI fallback).
 var curatedContextWindows = map[string]int{
 	// Anthropic Claude — direct API names
 	"claude-4.8-opus":     200_000,
+	"claude-4.7-opus":     200_000,
 	"claude-4.6-opus":     200_000,
+	"claude-4.6-sonnet":   200_000,
 	"claude-4.5-sonnet":   200_000,
+	"claude-4.5-opus":     200_000,
+	"claude-4.5-haiku":    200_000,
 	"claude-4-sonnet":     200_000,
 	"claude-4-opus":       200_000,
 	"claude-3.7-sonnet":   200_000,
@@ -152,14 +157,34 @@ var curatedContextWindows = map[string]int{
 	"claude-3-haiku":      200_000,
 	"claude-3-opus":       200_000,
 
+	// Anthropic Claude — SAP AI Core prefixed names
+	"anthropic--claude-4.8-opus":   200_000,
+	"anthropic--claude-4.7-opus":   200_000,
+	"anthropic--claude-4.6-opus":   200_000,
+	"anthropic--claude-4.6-sonnet": 200_000,
+	"anthropic--claude-4.5-sonnet": 200_000,
+	"anthropic--claude-4.5-opus":   200_000,
+	"anthropic--claude-4.5-haiku":  200_000,
+	"anthropic--claude-4-sonnet":   200_000,
+	"anthropic--claude-4-opus":     200_000,
+	"anthropic--claude-3.7-sonnet": 200_000,
+	"anthropic--claude-3.5-sonnet": 200_000,
+	"anthropic--claude-3-sonnet":   200_000,
+	"anthropic--claude-3-haiku":    200_000,
+	"anthropic--claude-3-opus":     200_000,
+
 	// OpenAI
-	"gpt-5":        272_000,
-	"gpt-5-nano":   272_000,
-	"gpt-5-mini":   272_000,
-	"gpt-5.6-sol":  272_000,
-	"gpt-4.1":      1_047_576,
-	"gpt-4.1-nano": 1_047_576,
-	"gpt-4.1-mini": 1_047_576,
+	"gpt-5":         272_000,
+	"gpt-5-nano":    272_000,
+	"gpt-5-mini":    272_000,
+	"gpt-5.4":       272_000,
+	"gpt-5.5":       272_000,
+	"gpt-5.6-luna":  272_000,
+	"gpt-5.6-sol":   272_000,
+	"gpt-5.6-terra": 272_000,
+	"gpt-4.1":       1_047_576,
+	"gpt-4.1-nano":  1_047_576,
+	"gpt-4.1-mini":  1_047_576,
 	"gpt-4o":       128_000,
 	"gpt-4o-mini":  128_000,
 	"gpt-4-turbo":  128_000,

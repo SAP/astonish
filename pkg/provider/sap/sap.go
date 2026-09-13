@@ -366,8 +366,12 @@ var ModelConfigs = map[string]ModelConfig{
 	// Anthropic models via Bedrock.
 	// Claude 4.x and later: temperature is deprecated — must be omitted entirely.
 	"anthropic--claude-4.8-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.7-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
 	"anthropic--claude-4.6-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.6-sonnet": {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
 	"anthropic--claude-4.5-sonnet": {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.5-opus":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
+	"anthropic--claude-4.5-haiku":  {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
 	"anthropic--claude-4-sonnet":   {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
 	"anthropic--claude-4-opus":     {MaxTokens: 64000, ContextWindow: 200000, NoTemperature: true},
 	// Claude 3.x: temperature is still supported.
@@ -382,14 +386,20 @@ var ModelConfigs = map[string]ModelConfig{
 	"gemini-2.5-flash": {MaxTokens: 65536, ContextWindow: 1048576},
 
 	// OpenAI models
-	"gpt-4":        {MaxTokens: 4096, ContextWindow: 200000},
-	"gpt-4o":       {MaxTokens: 4096, ContextWindow: 200000},
-	"gpt-4o-mini":  {MaxTokens: 4096, ContextWindow: 200000},
-	"gpt-4.1":      {MaxTokens: 32768, ContextWindow: 1047576},
-	"gpt-4.1-nano": {MaxTokens: 32768, ContextWindow: 1047576},
-	"gpt-5":        {MaxTokens: 128000, ContextWindow: 272000},
-	"gpt-5-nano":   {MaxTokens: 128000, ContextWindow: 272000},
-	"gpt-5-mini":   {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-4":         {MaxTokens: 4096, ContextWindow: 200000},
+	"gpt-4o":        {MaxTokens: 4096, ContextWindow: 200000},
+	"gpt-4o-mini":   {MaxTokens: 4096, ContextWindow: 200000},
+	"gpt-4.1":       {MaxTokens: 32768, ContextWindow: 1047576},
+	"gpt-4.1-mini":  {MaxTokens: 32768, ContextWindow: 1047576},
+	"gpt-4.1-nano":  {MaxTokens: 32768, ContextWindow: 1047576},
+	"gpt-5":         {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5-nano":    {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5-mini":    {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5.4":       {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5.5":       {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5.6-luna":  {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5.6-sol":   {MaxTokens: 128000, ContextWindow: 272000},
+	"gpt-5.6-terra": {MaxTokens: 128000, ContextWindow: 272000},
 
 	// Reasoning models
 	"o1":      {MaxTokens: 4096, ContextWindow: 200000},

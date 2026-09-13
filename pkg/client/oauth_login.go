@@ -20,7 +20,7 @@ import (
 
 const (
 	oauthLoginTimeout = 10 * time.Minute
-	cliOAuthScopes    = "openid offline_access chat tool:execute"
+	cliOAuthScopes    = "openid offline_access chat"
 )
 
 type oauthTokenResponse struct {
@@ -246,14 +246,18 @@ type tokenIdentity struct {
 
 func identityFromAccessToken(accessToken string) tokenIdentity {
 	claims := jwt.MapClaims{}
+	// This is a presentation-only decode used to populate optional CLI labels.
+	// It is never used for authorization; every protected request is validated
+	// server-side against the signed OAuth bearer.
 	_, _, err := jwt.NewParser().ParseUnverified(accessToken, claims)
 	if err != nil {
 		return tokenIdentity{}
 	}
-	org, _ := claims["org_id"].(string)
-	team, _ := claims["team_id"].(string)
-	sub, _ := claims["sub"].(string)
-	return tokenIdentity{UserEmail: sub, OrgSlug: org, TeamSlug: team}
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+	org, _ := claims["org"].(string)
+	team, _ := claims["team"].(string)
+	return tokenIdentity{UserEmail: email, DisplayName: name, OrgSlug: org, TeamSlug: team}
 }
 
 func ExchangePlatformSessionForOAuth(serverURL, platformAccessToken string) (*Tokens, error) {

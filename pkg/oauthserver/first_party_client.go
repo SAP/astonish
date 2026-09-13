@@ -46,7 +46,7 @@ func cliClient() *store.OAuthClient {
 		Active:       true,
 		RedirectURIs: []string{},
 		GrantTypes:   []string{GrantAuthorizationCode, GrantRefreshToken},
-		Scopes:       []string{ScopeChat, ScopeToolExecute},
+		Scopes:       []string{ScopeChat},
 	}
 }
 

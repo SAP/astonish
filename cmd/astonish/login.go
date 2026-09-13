@@ -187,9 +187,13 @@ func promptTeamSelection(teams []client.LoginTeamOption, currentSlug string) (st
 
 // printLoginSuccess displays the login success message.
 func printLoginSuccess(result *client.LoginResult) {
-	fmt.Printf("\nLogged in as %s", result.UserEmail)
-	if result.DisplayName != "" {
-		fmt.Printf(" (%s)", result.DisplayName)
+	if result.UserEmail != "" {
+		fmt.Printf("\nLogged in as %s", result.UserEmail)
+		if result.DisplayName != "" {
+			fmt.Printf(" (%s)", result.DisplayName)
+		}
+	} else {
+		fmt.Print("\nLogged in successfully")
 	}
 	fmt.Println()
 

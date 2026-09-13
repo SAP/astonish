@@ -367,7 +367,7 @@ func TestCLIAuthorizationAcceptsLoopbackRedirectAndAuthenticatedTenant(t *testin
 	}
 
 	redirect := "http://127.0.0.1:54321" + CLIRedirectPath
-	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+CLIClientID+"&redirect_uri="+url.QueryEscape(redirect)+"&code_challenge_method=S256&code_challenge=test&scope=chat+tool%3Aexecute+offline_access", nil)
+	request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?response_type=code&client_id="+CLIClientID+"&redirect_uri="+url.QueryEscape(redirect)+"&code_challenge_method=S256&code_challenge=test&scope=chat+offline_access", nil)
 	result := httptest.NewRecorder()
 	server.Handler().ServeHTTP(result, request)
 	if result.Code != http.StatusFound {

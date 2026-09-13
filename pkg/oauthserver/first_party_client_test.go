@@ -47,6 +47,9 @@ func TestFirstPartyPublicClients(t *testing.T) {
 	if !isFirstPartyPublicClient(cliClient()) || !isFirstPartyPublicClient(chromeExtensionClient()) {
 		t.Fatal("expected CLI and Chrome extension to be first-party public clients")
 	}
+	if got := cliClient().Scopes; len(got) != 1 || got[0] != ScopeChat {
+		t.Fatalf("CLI granted scopes = %#v, want [%q]", got, ScopeChat)
+	}
 	if isFirstPartyPublicClient(&store.OAuthClient{ClientID: "ast_other"}) {
 		t.Fatal("registered clients must not inherit first-party tenant binding")
 	}

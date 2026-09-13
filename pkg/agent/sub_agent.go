@@ -29,9 +29,13 @@ type eventArchiver interface {
 	ArchiveAndReplaceEvents(appName, userID, sessionID string, compactedEvents []*adksession.Event) (string, error)
 }
 
+// eventArchiverUnwrapDepth bounds asEventArchiver so a cyclic Unwrap() chain
+// cannot loop. Code-mode FileStore is typically 0–1 wrap (AutoInitSessionService).
+const eventArchiverUnwrapDepth = 4
+
 func asEventArchiver(svc adksession.Service) eventArchiver {
 	cur := svc
-	for range 4 {
+	for range eventArchiverUnwrapDepth {
 		if cur == nil {
 			return nil
 		}

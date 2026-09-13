@@ -223,7 +223,8 @@ var curatedContextWindows = map[string]int{
 	"gemini-1.5-flash":     1_048_576,
 	"gemini-1.0-pro":       32_000,
 
-	// xAI Grok — from xAI documentation
+	// xAI Grok — from official xAI model cards (not version-monotonic:
+	// grok-4.6 is 500k, grok-4.3 is 1M, grok-4.20 is 2M).
 	"grok-4.6":                       500_000,
 	"grok-4.5":                       500_000,
 	"grok-4.3":                       1_000_000,

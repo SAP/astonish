@@ -749,6 +749,8 @@ func (c *Compactor) BeforeModelCallback() llmagent.BeforeModelCallback {
 
 // ContentsToSessionEvents converts compacted genai contents into ADK session
 // events so a FileStore can archive-and-replace the active session history.
+// Non-user roles (including tool/function) collapse to author "model" because
+// compacted history is a summary-plus-recent transcript, not a live tool loop.
 func ContentsToSessionEvents(contents []*genai.Content) []*adksession.Event {
 	out := make([]*adksession.Event, 0, len(contents))
 	for i, c := range contents {

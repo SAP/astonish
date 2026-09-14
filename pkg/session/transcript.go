@@ -3,13 +3,24 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	adkmodel "google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
+
+// MaxTranscriptLineBytes bounds a single JSONL record when reading a transcript.
+// A line larger than this is skipped rather than aborting the whole file, so one
+// pathological tool response cannot make an entire session unreadable.
+const MaxTranscriptLineBytes = 10 * 1024 * 1024
 
 // Transcript handles reading and writing JSONL session transcript files.
 // Each line in the file is a JSON-serialized TranscriptEntry.
@@ -114,32 +125,151 @@ func (t *Transcript) ReadEvents() ([]*adksession.Event, error) {
 	defer f.Close()
 
 	var events []*adksession.Event
-	scanner := bufio.NewScanner(f)
-	// Increase buffer size for large tool responses
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // up to 10MB per line
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	skipped, skippedBytes, err := scanTranscriptLines(f, func(line []byte) {
 		if len(line) == 0 {
-			continue
+			return
 		}
-
 		var entry TranscriptEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			// Skip malformed lines
-			continue
+			return
 		}
-
 		if entry.Type == "event" && entry.Event != nil {
 			events = append(events, entry.Event)
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	}, nil)
+	if err != nil {
 		return nil, fmt.Errorf("error reading transcript: %w", err)
 	}
 
+	if skipped > 0 {
+		slog.Warn("transcript: skipped oversized lines",
+			"component", "session", "path", t.path,
+			"skipped", skipped, "bytes", skippedBytes)
+		events = append(events, oversizedWarningEvent(skipped, skippedBytes))
+	}
+
 	return events, nil
+}
+
+// ScanOversized counts oversized lines in the transcript without decoding events.
+func (t *Transcript) ScanOversized() (int, int64, error) {
+	f, err := os.Open(t.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to open transcript: %w", err)
+	}
+	defer f.Close()
+
+	return scanTranscriptLines(f, func([]byte) {}, nil)
+}
+
+// oversizedWarningEvent builds the synthetic system event appended when lines
+// had to be skipped, so the gap is visible in the restored transcript.
+func oversizedWarningEvent(skipped int, skippedBytes int64) *adksession.Event {
+	msg := fmt.Sprintf("⚠ %d transcript line(s) totaling %s exceeded the %s read limit and were skipped. Run 'astonish sessions repair <id>' to rewrite this transcript.",
+		skipped, humanBytes(skippedBytes), humanBytes(int64(MaxTranscriptLineBytes)))
+	return &adksession.Event{
+		ID:        "transcript-skipped-lines",
+		Author:    "system",
+		Timestamp: time.Now(),
+		Actions:   adksession.EventActions{},
+		LLMResponse: adkmodel.LLMResponse{
+			Content: genai.NewContentFromText(msg, genai.RoleModel),
+		},
+	}
+}
+
+func humanBytes(n int64) string {
+	const mb = 1024 * 1024
+	switch {
+	case n >= 1024*mb:
+		return fmt.Sprintf("%.1f GB", float64(n)/float64(1024*mb))
+	case n >= mb:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(mb))
+	case n >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// scanTranscriptLines reads newline-delimited records with bounded memory.
+// Lines up to MaxTranscriptLineBytes are passed whole to onLine. Larger lines
+// are never retained: they are counted and streamed to onOversizedChunk (which
+// may be nil to drop them), so a single huge record cannot abort the read or
+// exhaust memory. A trailing record without a final newline is handled normally.
+func scanTranscriptLines(rd io.Reader, onLine func(line []byte), onOversizedChunk func(chunk []byte, final bool)) (int, int64, error) {
+	r := bufio.NewReaderSize(rd, 64*1024)
+
+	var (
+		skipped      int
+		skippedBytes int64
+		acc          []byte
+		accLen       int64
+		over         bool
+	)
+
+	flushLine := func() {
+		if over {
+			skipped++
+			skippedBytes += accLen
+			if onOversizedChunk != nil {
+				onOversizedChunk(nil, true)
+			}
+		} else if onLine != nil {
+			onLine(acc)
+		}
+		acc = acc[:0]
+		accLen = 0
+		over = false
+	}
+
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
+			return skipped, skippedBytes, err
+		}
+
+		hasNewline := err == nil
+		data := chunk
+		if hasNewline {
+			data = chunk[:len(chunk)-1]
+		}
+
+		accLen += int64(len(data))
+		if !over && accLen > MaxTranscriptLineBytes {
+			over = true
+			// Hand off whatever prefix we already buffered, then stop retaining.
+			if onOversizedChunk != nil && len(acc) > 0 {
+				onOversizedChunk(acc, false)
+			}
+			acc = nil
+		}
+		if over {
+			if onOversizedChunk != nil {
+				onOversizedChunk(data, false)
+			}
+		} else {
+			acc = append(acc, data...)
+		}
+
+		if hasNewline {
+			flushLine()
+			continue
+		}
+
+		if errors.Is(err, io.EOF) {
+			if accLen > 0 || over {
+				flushLine()
+			}
+			return skipped, skippedBytes, nil
+		}
+		// ErrBufferFull: keep accumulating this line.
+	}
 }
 
 // EventCount returns the number of events in the transcript (excluding header).
@@ -219,20 +349,25 @@ func (t *Transcript) RedactTranscript(redactFunc func(string) string) error {
 
 	var content []byte
 	changed := false
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // up to 10MB per line
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		redacted := redactFunc(line)
-		if redacted != line {
+	_, _, err = scanTranscriptLines(f, func(line []byte) {
+		s := string(line)
+		redacted := redactFunc(s)
+		if redacted != s {
 			changed = true
 		}
 		content = append(content, []byte(redacted)...)
 		content = append(content, '\n')
-	}
-
-	if err := scanner.Err(); err != nil {
+	}, func(chunk []byte, final bool) {
+		// Oversized lines are passed through unmodified — redaction must never
+		// silently delete content; only `sessions repair` removes lines.
+		if final {
+			content = append(content, '\n')
+			return
+		}
+		content = append(content, chunk...)
+	})
+	if err != nil {
 		return fmt.Errorf("error reading transcript for redaction: %w", err)
 	}
 
@@ -243,3 +378,47 @@ func (t *Transcript) RedactTranscript(redactFunc func(string) string) error {
 
 	return atomicWrite(t.path, content, 0644)
 }
+
+// RepairOversized rewrites the transcript without its oversized lines. Every
+// retained line is copied verbatim (including the header), so the JSONL format
+// and header contract are preserved byte-for-byte. The current file is copied
+// to backupPath before the rewrite. When no line is oversized it makes no
+// backup and performs no write.
+func (t *Transcript) RepairOversized(backupPath string) (int, int64, error) {
+	f, err := os.Open(t.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to open transcript: %w", err)
+	}
+
+	var kept []byte
+	skipped, skippedBytes, err := scanTranscriptLines(f, func(line []byte) {
+		kept = append(kept, line...)
+		kept = append(kept, '\n')
+	}, nil)
+	f.Close()
+	if err != nil {
+		return 0, 0, fmt.Errorf("error reading transcript: %w", err)
+	}
+	if skipped == 0 {
+		return 0, 0, nil
+	}
+
+	orig, err := os.ReadFile(t.path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read transcript for backup: %w", err)
+	}
+	if err := os.WriteFile(backupPath, orig, 0644); err != nil {
+		return 0, 0, fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	if err := atomicWrite(t.path, kept, 0644); err != nil {
+		return 0, 0, fmt.Errorf("failed to rewrite transcript: %w", err)
+	}
+	return skipped, skippedBytes, nil
+}
+
+// HumanBytes formats a byte count for CLI output.
+func HumanBytes(n int64) string { return humanBytes(n) }

@@ -569,18 +569,27 @@ func (s *FileStore) ArchiveAndReplaceEvents(appName, userID, sessionID string, c
 		return "", fmt.Errorf("failed to write archive transcript: %w", err)
 	}
 
+	// Events whose entire payload is a StateDelta (nil Content) carry
+	// side-channel state such as the plan lifecycle and routing decisions.
+	// The compactor's content model cannot represent them, so they would be
+	// dropped by the rewrite below. Carry them forward in their original
+	// relative order so state replayed by loadFromDisk stays complete.
+	// They are prepended because they predate the compacted summary and
+	// loadFromDisk replays StateDelta in order (last writer wins).
+	preserved := stateOnlyEvents(full)
+	newEvents := make([]*adksession.Event, 0, len(preserved)+len(compactedEvents))
+	newEvents = append(newEvents, preserved...)
+	newEvents = append(newEvents, compactedEvents...)
+
 	// Active session becomes a child of the archive and holds only compacted events.
 	if err := s.index.Update(sessionID, func(meta *SessionMeta) {
 		meta.ParentID = archiveID
-		meta.MessageCount = len(compactedEvents)
+		meta.MessageCount = len(newEvents)
 		meta.UpdatedAt = now
 	}); err != nil {
 		return "", fmt.Errorf("failed to update session parent: %w", err)
 	}
 
-	// Clone compacted events so callers cannot mutate our store later.
-	newEvents := make([]*adksession.Event, len(compactedEvents))
-	copy(newEvents, compactedEvents)
 	s.setEventsAll(sessionID, newEvents)
 
 	activePath := filepath.Join(s.baseDir, appName, userID, sessionID+".jsonl")
@@ -593,6 +602,23 @@ func (s *FileStore) ArchiveAndReplaceEvents(appName, userID, sessionID string, c
 	}
 
 	return archiveID, nil
+}
+
+// stateOnlyEvents returns the events whose entire payload is a StateDelta
+// (no Content). These cannot round-trip through the compactor's content model,
+// so ArchiveAndReplaceEvents carries them forward explicitly.
+func stateOnlyEvents(events []*adksession.Event) []*adksession.Event {
+	var out []*adksession.Event
+	for _, ev := range events {
+		if ev == nil || ev.LLMResponse.Content != nil {
+			continue
+		}
+		if len(ev.Actions.StateDelta) == 0 {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // ResolveSessionID resolves a partial session ID (prefix match) to a full ID.
@@ -720,8 +746,8 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 		return cur
 	}
 
-	// If the tip has a valid transcript, return it (the normal/fast path).
-	if s.transcriptExists(cur) {
+	// If the tip has a readable transcript, return it (the normal/fast path).
+	if s.transcriptReadable(cur) {
 		return cur
 	}
 
@@ -732,7 +758,7 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 	walk := sessionID
 	for !seen2[walk] {
 		seen2[walk] = true
-		if s.transcriptExists(walk) {
+		if s.transcriptReadable(walk) {
 			lastValid = walk
 		}
 		if walk == cur {
@@ -760,7 +786,7 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 		walk = next.ID
 	}
 
-	slog.Warn("compaction chain tip has missing transcript, falling back to last valid ancestor",
+	slog.Warn("compaction chain tip has missing or unreadable transcript, falling back to last valid ancestor",
 		"component", "session",
 		"requested", sessionID,
 		"broken_tip", cur,
@@ -769,17 +795,23 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 	return lastValid
 }
 
-// transcriptExists checks whether the transcript file for the given session ID
-// exists on disk. It looks up the session metadata from the index to determine
-// the correct appName/userID path components.
-func (s *FileStore) transcriptExists(sessionID string) bool {
+// transcriptReadable reports whether the session's transcript file exists AND
+// can actually be scanned. A file that is present but unreadable (permissions,
+// I/O failure) is treated like a missing one so the chain walk falls back to
+// the last good ancestor instead of resolving to a tip that loads as empty.
+func (s *FileStore) transcriptReadable(sessionID string) bool {
 	meta, err := s.index.Get(sessionID)
 	if err != nil || meta == nil {
 		return false
 	}
 	path := filepath.Join(s.baseDir, meta.AppName, meta.UserID, sessionID+".jsonl")
-	_, err = os.Stat(path)
-	return err == nil
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	if _, _, err := NewTranscript(path).ScanOversized(); err != nil {
+		return false
+	}
+	return true
 }
 
 // AncestorChain returns the compaction chain from the root ancestor down to and
@@ -808,7 +840,6 @@ func (s *FileStore) AncestorChain(sessionID string) []string {
 	}
 	return chain
 }
-
 
 // AddSessionMeta adds a metadata entry to the session index directly.
 // This is used by fleet sessions that need to appear in the session list

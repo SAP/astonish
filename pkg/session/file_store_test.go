@@ -1106,3 +1106,175 @@ func TestRepairOrphanedToolCalls_TrueOrphan(t *testing.T) {
 		t.Error("synthetic FunctionResponse should have an error message")
 	}
 }
+
+// TestFileStore_LatestDescendantSkipsUnreadableTip verifies the chain walk
+// treats a present-but-unreadable transcript like a missing one, so resume
+// falls back to the last good ancestor instead of an empty tip.
+func TestFileStore_LatestDescendantSkipsUnreadableTip(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0000 is not enforced")
+	}
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: "root"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.LatestDescendant("root"); got != "child" {
+		t.Fatalf("LatestDescendant(root)=%q want child", got)
+	}
+
+	childPath := filepath.Join(store.BaseDir(), "app", "u", "child.jsonl")
+	if err := os.Chmod(childPath, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(childPath, 0644) })
+
+	if got := store.LatestDescendant("root"); got != "root" {
+		t.Fatalf("LatestDescendant(root)=%q want root (child unreadable)", got)
+	}
+}
+
+// TestFileStore_LatestDescendantStillFollowsReadableChain guards the normal
+// chain walk against regression from the readability check.
+func TestFileStore_LatestDescendantStillFollowsReadableChain(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct{ id, parent string }{
+		{"root", ""}, {"child", "root"}, {"tip", "child"},
+	} {
+		req := &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: tc.id}
+		if tc.parent != "" {
+			req.State = map[string]any{StateKeyParentID: tc.parent}
+		}
+		if _, err := store.Create(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip", got)
+	}
+}
+
+// stateEvent builds an event whose entire payload is a StateDelta (nil Content).
+func stateEvent(id string, delta map[string]any) *adksession.Event {
+	ev := &adksession.Event{ID: id, Author: "system"}
+	ev.Actions.StateDelta = delta
+	return ev
+}
+
+func contentEventFS(id, text string) *adksession.Event {
+	return &adksession.Event{
+		ID:          id,
+		Author:      "user",
+		LLMResponse: adkmodel.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleUser)},
+	}
+}
+
+func TestStateOnlyEvents_IgnoresContentEvents(t *testing.T) {
+	withBoth := contentEventFS("both", "hi")
+	withBoth.Actions.StateDelta = map[string]any{"k": "v"}
+	neither := &adksession.Event{ID: "neither", Author: "system"}
+	onlyState := stateEvent("s1", map[string]any{"k": "v"})
+
+	got := stateOnlyEvents([]*adksession.Event{withBoth, neither, onlyState, nil})
+	if len(got) != 1 || got[0].ID != "s1" {
+		t.Fatalf("stateOnlyEvents = %+v, want only s1", got)
+	}
+}
+
+func seedStateOnlySession(t *testing.T, store *FileStore) {
+	t.Helper()
+	ctx := context.Background()
+	resp, err := store.Create(ctx, &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := []*adksession.Event{
+		contentEventFS("a", "message A"),
+		stateEvent("s1", map[string]any{"astonish_plan_lifecycle": "approved"}),
+		contentEventFS("b", "message B"),
+		stateEvent("s2", map[string]any{"routing_info": map[string]any{"tier": "strong", "model": "m1"}}),
+	}
+	for _, ev := range seed {
+		if err := store.AppendEvent(ctx, resp.Session, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestArchiveAndReplaceEvents_PreservesStateOnlyEvents(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedStateOnlySession(t, store)
+
+	compacted := []*adksession.Event{contentEventFS("c0", "[summary]")}
+	archiveID, err := store.ArchiveAndReplaceEvents("app", "u", "active", compacted)
+	if err != nil {
+		t.Fatalf("ArchiveAndReplaceEvents: %v", err)
+	}
+
+	got, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for ev := range got.Session.Events().All() {
+		ids = append(ids, ev.ID)
+	}
+	want := []string{"s1", "s2", "c0"}
+	if len(ids) != len(want) {
+		t.Fatalf("active events = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("active events = %v, want %v", ids, want)
+		}
+	}
+
+	arch, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: archiveID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arch.Session.Events().Len() != 4 {
+		t.Fatalf("archive events = %d, want 4", arch.Session.Events().Len())
+	}
+}
+
+func TestArchiveAndReplaceEvents_StateSurvivesReload(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedStateOnlySession(t, store)
+
+	compacted := []*adksession.Event{contentEventFS("c0", "[summary]")}
+	if _, err := store.ArchiveAndReplaceEvents("app", "u", "active", compacted); err != nil {
+		t.Fatalf("ArchiveAndReplaceEvents: %v", err)
+	}
+
+	// Simulate a process restart: drop the in-memory session and reload from disk.
+	store.mu.Lock()
+	delete(store.sessions, "active")
+	store.mu.Unlock()
+
+	got, err := store.Get(ctx, &adksession.GetRequest{AppName: "app", UserID: "u", SessionID: "active"})
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	v, gerr := got.Session.State().Get("astonish_plan_lifecycle")
+	if gerr != nil {
+		t.Fatalf("plan lifecycle state missing after compaction+reload: %v", gerr)
+	}
+	if fmt.Sprintf("%v", v) != "approved" {
+		t.Fatalf("plan lifecycle = %v, want approved", v)
+	}
+}

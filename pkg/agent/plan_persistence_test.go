@@ -251,3 +251,90 @@ func TestChatAgent_GraphPlanMode_ClearsStaleApprovedPlan(t *testing.T) {
 		t.Fatal("new plan should be accepted after AllowActivePlanReplacement clears approval")
 	}
 }
+
+func TestChatAgent_MarkApprovedWritesLifecycleToPlanFile(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	plan := NewPlanState("Build", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "one", Description: "first"},
+	})
+	if !c.TrySetActivePlan(plan) {
+		t.Fatal("announce should be accepted")
+	}
+	c.MarkActivePlanApproved()
+
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan file: %v", err)
+	}
+	if !strings.Contains(string(data), "## Status") || !strings.Contains(string(data), PlanLifecycleApproved) {
+		t.Fatalf("approval not persisted to PLAN.md:\n%s", data)
+	}
+}
+
+func TestChatAgent_RestoreApprovedPlanSealsFromDocument(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	plan := NewPlanState("Build", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "explore", Description: "investigate"},
+		{Name: "implement", Description: "write code"},
+	})
+	if !c.TrySetActivePlan(plan) {
+		t.Fatal("announce should be accepted")
+	}
+	c.MarkActivePlanApproved()
+	plan.SetStepStatus("explore", "complete")
+
+	// Fresh agent = simulated restart with no in-memory state.
+	c2 := &ChatAgent{}
+	c2.SetPlanFilePath(planPath)
+	if err := c2.RestoreApprovedPlan(); err != nil {
+		t.Fatalf("RestoreApprovedPlan: %v", err)
+	}
+	if !c2.IsActivePlanApproved() {
+		t.Fatal("restored plan must be sealed from the document lifecycle")
+	}
+	restored := c2.GetActivePlan()
+	if restored == nil {
+		t.Fatal("restored plan is nil")
+	}
+	if got := restored.SnapshotDoc().Lifecycle; got != PlanLifecycleApproved {
+		t.Fatalf("restored Lifecycle = %q, want %q", got, PlanLifecycleApproved)
+	}
+	_, steps := restored.SnapshotInfo()
+	if len(steps) != 2 || steps[0].Status != "complete" || steps[1].Status != "pending" {
+		t.Fatalf("phase statuses not preserved: %+v", steps)
+	}
+}
+
+func TestChatAgent_RestoreApprovedPlanWithoutLifecycleStillSeals(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "sess.PLAN.md")
+
+	// PLAN.md written by an older binary: phases but no ## Status section.
+	md := RenderPlanMarkdown("Build", []planStep{
+		{name: "explore", description: "investigate", status: "complete"},
+		{name: "implement", description: "write code", status: "pending"},
+	})
+	if strings.Contains(md, "## Status") {
+		t.Fatalf("fixture unexpectedly contains ## Status:\n%s", md)
+	}
+	if err := os.WriteFile(planPath, []byte(md), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &ChatAgent{}
+	c.SetPlanFilePath(planPath)
+	if err := c.RestoreApprovedPlan(); err != nil {
+		t.Fatalf("RestoreApprovedPlan: %v", err)
+	}
+	if !c.IsActivePlanApproved() {
+		t.Fatal("legacy plan document must still seal (backward compat)")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -470,5 +471,190 @@ func TestListModels_EmptyToken(t *testing.T) {
 	_, err := listModelsFromURL(context.Background(), "", "http://unused")
 	if err == nil {
 		t.Fatal("expected error for empty token, got nil")
+	}
+}
+
+func TestOAuthTransport_ReactiveRetryOn401(t *testing.T) {
+	// Token server returns a fresh access token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "fresh-token", RefreshToken: "new-rt", ExpiresIn: 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	// API server rejects the first call with 401, then accepts the retry.
+	var calls atomic.Int32
+	var lastAuth string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastAuth = r.Header.Get("Authorization")
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	var refreshCalled bool
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "stale-token",
+		refreshToken: "rt",
+		expiresAt:    time.Now().Add(10 * time.Hour), // not expired by clock
+		tokenURL:     tokenServer.URL,
+		onTokenRefresh: func(at, rt string, _ time.Time) {
+			refreshCalled = true
+		},
+	}
+
+	resp, err := (&http.Client{Transport: transport}).Get(apiServer.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (retry should succeed)", resp.StatusCode)
+	}
+	if !refreshCalled {
+		t.Error("onTokenRefresh not called on reactive retry")
+	}
+	if lastAuth != "Bearer fresh-token" {
+		t.Errorf("retry Authorization = %q, want Bearer fresh-token", lastAuth)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("API calls = %d, want 2 (original + retry)", got)
+	}
+}
+
+func TestOAuthTransport_ReactiveRetryOn403(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "fresh-token-403", ExpiresIn: 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	var calls atomic.Int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"unauthenticated:bad-credentials","error":"The OAuth2 access token could not be validated."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "stale-token",
+		refreshToken: "rt",
+		expiresAt:    time.Now().Add(10 * time.Hour),
+		tokenURL:     tokenServer.URL,
+	}
+
+	resp, err := (&http.Client{Transport: transport}).Get(apiServer.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("API calls = %d, want 2", got)
+	}
+}
+
+func TestOAuthTransport_ZeroExpiresAtTriggersRefresh(t *testing.T) {
+	// When expiresAt is zero (legacy config / missing), the transport should
+	// proactively refresh rather than sending a potentially stale token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "refreshed-zero-exp", ExpiresIn: 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	var receivedAuth string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "maybe-stale-token",
+		refreshToken: "valid-rt",
+		expiresAt:    time.Time{}, // zero — should trigger refresh
+		tokenURL:     tokenServer.URL,
+	}
+
+	resp, err := (&http.Client{Transport: transport}).Get(apiServer.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if receivedAuth != "Bearer refreshed-zero-exp" {
+		t.Errorf("Authorization = %q, want Bearer refreshed-zero-exp", receivedAuth)
+	}
+}
+
+// TestOAuthTransport_ReactiveRetryResendsBody guards the POST path: the first
+// RoundTrip consumes req.Body, so the retry must rewind it via GetBody or the
+// server would receive an empty body on the retried request.
+func TestOAuthTransport_ReactiveRetryResendsBody(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "fresh-token", RefreshToken: "new-rt", ExpiresIn: 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	var calls atomic.Int32
+	var bodies []string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "stale-token",
+		refreshToken: "rt",
+		expiresAt:    time.Now().Add(10 * time.Hour),
+		tokenURL:     tokenServer.URL,
+	}
+
+	const payload = `{"model":"grok","messages":[]}`
+	resp, err := (&http.Client{Transport: transport}).Post(apiServer.URL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(bodies))
+	}
+	if bodies[1] != payload {
+		t.Errorf("retried body = %q, want %q (body not rewound)", bodies[1], payload)
 	}
 }

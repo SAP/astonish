@@ -292,3 +292,150 @@ func TestTranscript_Rewrite(t *testing.T) {
 		t.Errorf("event[1].ID = %q, want %q", got[1].ID, "recent")
 	}
 }
+
+// --- oversized line handling ---
+
+func writeOversizedLine(t *testing.T, path string, withNewline bool) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	chunk := strings.Repeat("A", 1024*1024)
+	for i := 0; i < 12; i++ {
+		if _, err := f.WriteString(chunk); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if withNewline {
+		if _, err := f.WriteString("\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+}
+
+func eventText(e *adksession.Event) string {
+	if e == nil || e.LLMResponse.Content == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range e.LLMResponse.Content.Parts {
+		sb.WriteString(p.Text)
+	}
+	return sb.String()
+}
+
+func TestTranscript_OversizedLineSkippedNotFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	tr := NewTranscript(path)
+	if err := tr.WriteHeader("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.AppendEvent(makeEvent("e1", "user", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	writeOversizedLine(t, path, true)
+	if err := tr.AppendEvent(makeEvent("e2", "user", "world")); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := tr.ReadEvents()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (2 real + warning), got %d", len(events))
+	}
+	if !strings.Contains(eventText(events[2]), "skipped") {
+		t.Fatalf("expected skip warning, got %q", eventText(events[2]))
+	}
+}
+
+func TestTranscript_OversizedLineAtEOFWithoutNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	tr := NewTranscript(path)
+	if err := tr.WriteHeader("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.AppendEvent(makeEvent("e1", "user", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	writeOversizedLine(t, path, false)
+
+	events, err := tr.ReadEvents()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (1 real + warning), got %d", len(events))
+	}
+}
+
+func TestTranscript_NoWarningEventWhenAllLinesFit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	tr := NewTranscript(path)
+	if err := tr.WriteHeader("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.AppendEvent(makeEvent("e1", "user", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	events, err := tr.ReadEvents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+}
+
+func TestTranscript_ScanOversizedCounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	tr := NewTranscript(path)
+	if err := tr.WriteHeader("s"); err != nil {
+		t.Fatal(err)
+	}
+	writeOversizedLine(t, path, true)
+
+	skipped, nbytes, err := tr.ScanOversized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected 1 skipped, got %d", skipped)
+	}
+	if nbytes < 12*1024*1024 {
+		t.Fatalf("expected >=12MB, got %d", nbytes)
+	}
+}
+
+func TestTranscript_RedactPreservesOversizedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	tr := NewTranscript(path)
+	if err := tr.WriteHeader("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.AppendEvent(makeEvent("e1", "user", "SECRET")); err != nil {
+		t.Fatal(err)
+	}
+	writeOversizedLine(t, path, true)
+
+	if err := tr.RedactTranscript(func(s string) string {
+		return strings.ReplaceAll(s, "SECRET", "[redacted]")
+	}); err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() < 12*1024*1024 {
+		t.Fatalf("oversized line was dropped; size=%d", info.Size())
+	}
+	skipped, _, err := tr.ScanOversized()
+	if err != nil || skipped != 1 {
+		t.Fatalf("expected oversized line preserved, skipped=%d err=%v", skipped, err)
+	}
+}

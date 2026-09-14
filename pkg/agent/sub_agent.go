@@ -127,6 +127,11 @@ type PlanDocumentInfo struct {
 	// Results is written by announce_completion after e2e verification.
 	// Empty means the plan is not fully accepted.
 	Results string `json:"results,omitempty"`
+	// Lifecycle records the approval state of this plan so a restarted or
+	// compacted session can resume execution from the document alone.
+	// One of PlanLifecycleApproved / PlanLifecycleExecuting / PlanLifecycleCompleted.
+	// Empty means unknown (documents written before this field existed).
+	Lifecycle string `json:"lifecycle,omitempty"`
 }
 
 // PlanStepInfo describes a step in the high-level execution plan.

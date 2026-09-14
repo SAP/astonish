@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
+	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
@@ -53,6 +54,7 @@ var ProviderDisplayNames = map[string]string{
 	"sap_ai_core":   "SAP AI Core",
 	"xai":           "xAI",
 	"xai_oauth":     "xAI (OAuth)",
+	"copilot_oauth": "GitHub Copilot (OAuth)",
 }
 
 // GetProviderDisplayName returns the proper display name for a provider ID.
@@ -343,6 +345,19 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		}
 		return xai_oauth.NewProvider(clientID, accessToken, refreshToken, expiresAt, modelName, xaiOAuthRefreshCallback(cfg, instanceName)), nil
 
+	case "copilot_oauth":
+		githubToken := instance["github_token"]
+		if githubToken == "" {
+			githubToken = os.Getenv("GITHUB_COPILOT_TOKEN")
+		}
+		if githubToken == "" {
+			return nil, fmt.Errorf("Copilot OAuth requires github_token (run setup to authenticate)")
+		}
+		if modelName == "" {
+			modelName = "gpt-4o"
+		}
+		return copilot_oauth.NewProvider(githubToken, modelName), nil
+
 	case "openai_compat":
 		apiKey := instance["api_key"]
 		if apiKey == "" {
@@ -371,6 +386,57 @@ func xaiOAuthRefreshCallback(cfg *config.AppConfig, instanceName string) func(st
 			slog.Error("failed to persist refreshed OAuth tokens", "provider", instanceName, "error", err)
 		}
 	}
+}
+
+// maybeRefreshXAIOAuthToken checks the stored expires_at and, if the token is
+// expired or about to expire, uses the refresh token to obtain a new access
+// token. On success it persists the new tokens via cfg.ProviderTokenRefresh and
+// returns the fresh access token. On failure it returns the original token so
+// the caller can still attempt the request (the server may accept it).
+func maybeRefreshXAIOAuthToken(ctx context.Context, instance config.ProviderConfig, cfg *config.AppConfig, instanceName, accessToken string) (string, error) {
+	refreshToken := instance["refresh_token"]
+	if refreshToken == "" {
+		return accessToken, nil // no refresh token — nothing we can do
+	}
+
+	// Parse expiration; if missing or unparseable, treat as expired to be safe.
+	var expiresAt time.Time
+	if exp := instance["expires_at"]; exp != "" {
+		expiresAt, _ = time.Parse(time.RFC3339, exp)
+	}
+	if !expiresAt.IsZero() && time.Until(expiresAt) > 60*time.Second {
+		return accessToken, nil // still valid
+	}
+
+	clientID := instance["client_id"]
+	if clientID == "" {
+		clientID = os.Getenv("XAI_OAUTH_CLIENT_ID")
+	}
+	if clientID == "" {
+		clientID = xai_oauth.DefaultClientID
+	}
+
+	tokenResp, err := xai_oauth.RefreshAccessToken(ctx, clientID, refreshToken)
+	if err != nil {
+		slog.Warn("xAI OAuth token refresh failed during model listing", "provider", instanceName, "error", err)
+		return accessToken, err
+	}
+
+	newExpiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+	// Persist the refreshed tokens so the provider instance and future calls
+	// use the new token.
+	if cfg != nil && cfg.ProviderTokenRefresh != nil {
+		newRefresh := refreshToken
+		if tokenResp.RefreshToken != "" {
+			newRefresh = tokenResp.RefreshToken
+		}
+		if err := cfg.ProviderTokenRefresh(instanceName, tokenResp.AccessToken, newRefresh, newExpiry); err != nil {
+			slog.Error("failed to persist refreshed OAuth tokens from model list", "provider", instanceName, "error", err)
+		}
+	}
+
+	return tokenResp.AccessToken, nil
 }
 
 // ListModelsForProvider fetches available models for a given provider instance.
@@ -448,7 +514,19 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 		if accessToken == "" {
 			return nil, fmt.Errorf("xAI OAuth access_token not configured (run setup to authenticate)")
 		}
+		// Refresh the token if it's expired before listing models.
+		accessToken, _ = maybeRefreshXAIOAuthToken(ctx, instanceConfig, cfg, providerID, accessToken)
 		return xai_oauth.ListModels(ctx, accessToken)
+
+	case "copilot_oauth":
+		githubToken := instanceConfig["github_token"]
+		if githubToken == "" {
+			githubToken = os.Getenv("GITHUB_COPILOT_TOKEN")
+		}
+		if githubToken == "" {
+			return nil, fmt.Errorf("Copilot OAuth github_token not configured (run setup to authenticate)")
+		}
+		return copilot_oauth.ListModels(ctx, githubToken)
 
 	case "ollama":
 		baseURL := "http://localhost:11434"
@@ -589,6 +667,13 @@ func TestProviderConnection(ctx context.Context, providerType string, params map
 			return nil, fmt.Errorf("access_token is required")
 		}
 		return xai_oauth.ListModels(ctx, accessToken)
+
+	case "copilot_oauth":
+		githubToken := params["github_token"]
+		if githubToken == "" {
+			return nil, fmt.Errorf("github_token is required")
+		}
+		return copilot_oauth.ListModels(ctx, githubToken)
 
 	case "ollama":
 		baseURL := params["base_url"]

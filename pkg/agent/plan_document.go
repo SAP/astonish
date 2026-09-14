@@ -16,6 +16,29 @@ import (
 // The document is intentionally human-readable Markdown with GitHub-style
 // checkboxes so it renders cleanly and can be re-parsed back into plan state.
 
+// Plan lifecycle values persisted in the PLAN.md `## Status` section.
+const (
+	PlanLifecycleApproved  = "approved"
+	PlanLifecycleExecuting = "executing"
+	PlanLifecycleCompleted = "completed"
+)
+
+// NormalizePlanLifecycle canonicalizes a lifecycle token read from a document
+// or passed by a caller. Unrecognized values normalize to "" so a corrupted
+// document cannot seal a plan.
+func NormalizePlanLifecycle(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case PlanLifecycleApproved:
+		return PlanLifecycleApproved
+	case PlanLifecycleExecuting:
+		return PlanLifecycleExecuting
+	case PlanLifecycleCompleted:
+		return PlanLifecycleCompleted
+	default:
+		return ""
+	}
+}
+
 // renderPlanProgress builds a generated Progress section from phase statuses so
 // the model can see "where I am" after compaction without reconstructing it.
 func renderPlanProgress(steps []planStep) string {
@@ -190,6 +213,12 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 		sb.WriteString("\n")
 	}
 
+	// Emit optional Status section (plan lifecycle) before Context.
+	if lc := NormalizePlanLifecycle(doc.Lifecycle); lc != "" {
+		sb.WriteString("## Status\n\n")
+		sb.WriteString(lc + "\n\n")
+	}
+
 	// Emit optional Context section before the phases list.
 	if strings.TrimSpace(doc.Context) != "" {
 		sb.WriteString("## Context\n\n")
@@ -346,6 +375,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		secWhatNotToDo  = "whatnottodo"
 		secVerification = "verification"
 		secResults      = "results"
+		secStatus       = "status"
 	)
 	currentSection := secNone
 	currentGroup := ""
@@ -362,6 +392,8 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 			doc.Verification = content
 		case secResults:
 			doc.Results = content
+		case secStatus:
+			doc.Lifecycle = NormalizePlanLifecycle(content)
 		}
 		sectionLines = nil
 	}
@@ -391,6 +423,8 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 				knownSection = secVerification
 			case headerLower == "results":
 				knownSection = secResults
+			case headerLower == "status":
+				knownSection = secStatus
 			case headerLower == "progress":
 				knownSection = secNone // recognized but not a content section
 			}
@@ -444,7 +478,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		}
 
 		// Inside narrative sections: accumulate content lines.
-		if currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification || currentSection == secResults {
+		if currentSection == secContext || currentSection == secWhatNotToDo || currentSection == secVerification || currentSection == secResults || currentSection == secStatus {
 			sectionLines = append(sectionLines, raw)
 			continue
 		}

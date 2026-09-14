@@ -1,9 +1,12 @@
 package session
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -61,6 +64,25 @@ type turnCheckpoint struct {
 	SessionID string         `json:"session_id"`
 	TurnIndex int            `json:"turn_index"`
 	Snapshots []FileSnapshot `json:"snapshots"`
+	// GitHEAD is the git HEAD commit hash at the time this turn was captured.
+	// Empty when git is unavailable. Used by RestoreTo to skip snapshots that
+	// belong to a different branch/commit.
+	GitHEAD string `json:"git_head,omitempty"`
+}
+
+// resolveGitHEAD returns the current git HEAD commit hash.
+// Returns "" on any failure (no git, not a repo, etc.) — callers treat empty
+// as "unknown" and never block on it. Resolved fresh each call so branch
+// switches within a session are reflected.
+func resolveGitHEAD() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(bytes.TrimSpace(out))
 }
 
 // NewCheckpointStore creates a checkpoint store rooted under baseDir. The
@@ -158,7 +180,7 @@ func (c *CheckpointStore) appendSnapshot(sessionID string, turnIndex int, snap F
 	}
 	path := c.turnPath(sessionID, turnIndex)
 
-	tc := turnCheckpoint{SessionID: sessionID, TurnIndex: turnIndex}
+	tc := turnCheckpoint{SessionID: sessionID, TurnIndex: turnIndex, GitHEAD: resolveGitHEAD()}
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &tc)
 	}
@@ -247,11 +269,17 @@ type RollbackResult struct {
 // newest-first so that when a file was modified across several turns, the
 // oldest (earliest) pre-image at or after the target turn wins — leaving the
 // file exactly as it was just before targetTurn began.
+//
+// Snapshots whose recorded git HEAD differs from the current HEAD are skipped
+// (their checkpoint files are still cleaned up). This prevents cross-branch
+// pollution when rollback fires after a branch switch.
 func (c *CheckpointStore) RestoreTo(sessionID string, targetTurn int) (RollbackResult, error) {
 	var res RollbackResult
 	if c == nil || sessionID == "" {
 		return res, nil
 	}
+
+	currentHEAD := resolveGitHEAD()
 
 	turns := c.TurnsWithChanges(sessionID)
 	// Newest-first so earlier snapshots overwrite later ones for the same path.
@@ -266,6 +294,12 @@ func (c *CheckpointStore) RestoreTo(sessionID string, targetTurn int) (RollbackR
 		affectedTurns = append(affectedTurns, turn)
 		tc, err := c.readTurn(sessionID, turn)
 		if err != nil {
+			continue
+		}
+		// Skip snapshots from a different git HEAD to avoid cross-branch
+		// pollution. Both sides must be non-empty for a mismatch to count;
+		// empty HEAD (no git / legacy checkpoint) is treated as compatible.
+		if tc.GitHEAD != "" && currentHEAD != "" && tc.GitHEAD != currentHEAD {
 			continue
 		}
 		for _, s := range tc.Snapshots {
@@ -311,6 +345,31 @@ func (c *CheckpointStore) RestoreTo(sessionID string, targetTurn int) (RollbackR
 	res.Restored = sortedKeys(restoredSet)
 	res.Deleted = sortedKeys(deletedSet)
 	return res, nil
+}
+
+// ResetSession clears all checkpoint turn files for a session without removing
+// the session directory itself. Use this after compaction resets a session's
+// event indices: the old turn files belong to the now-archived events and must
+// not survive to collide with new captures at the same turn indices.
+func (c *CheckpointStore) ResetSession(sessionID string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.captured, sessionID)
+	c.mu.Unlock()
+
+	dir := c.checkpointDir(sessionID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
 }
 
 // DeleteSession removes all checkpoints for a session (used when a session is

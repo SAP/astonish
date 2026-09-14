@@ -52,7 +52,7 @@ For the plan as a whole:
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
   For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
-- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
+- 'verification': REQUIRED. The end-to-end acceptance story that proves the user-visible outcome — written for a human reviewing the plan. It is NOT executed: completion aggregates each phase's recorded verify evidence. If this plan touches a running surface, the acceptance sequence must also exist as a real phase with verify_kind=behavior that exercises the end-to-end outcome. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 For each phase:
 - 'summary': REQUIRED. A 1-2 sentence plain-English explanation of what this phase accomplishes from the USER'S perspective (e.g. "Users can now add providers directly from the /models overlay without needing a separate command" — NOT "modifies model_picker.go to add provider management").
@@ -83,6 +83,7 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
 - [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
 - [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
+- [ ] Does this plan touch a running surface? If so, is there a final phase with verify_kind=behavior that exercises the end-to-end outcome? Completion does not run plan-level commands — the integration check must be a phase.
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
@@ -145,7 +146,7 @@ For the plan as a whole:
   Do not write terse one-liners. Write 6-12 clear sentences that a colleague could read and understand the full design.
   For GREENFIELD projects, the 'context' section should describe the ARCHITECTURE: technology choices and rationale, directory layout and module boundaries, key abstractions and data flow, what the user will be able to do when the scaffold is complete.
 - 'what_not_to_do': REQUIRED. Explicitly list what is OUT OF SCOPE — interfaces that must not change, files that must not be touched, behaviors that must be preserved. Be specific (name the actual interfaces/files/behaviors).
-- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
+- 'verification': REQUIRED. The end-to-end acceptance story that proves the user-visible outcome — written for a human reviewing the plan. It is NOT executed: completion aggregates each phase's recorded verify evidence. If this plan touches a running surface, the acceptance sequence must also exist as a real phase with verify_kind=behavior that exercises the end-to-end outcome. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 For each phase:
 - 'summary': REQUIRED. A 1-2 sentence plain-English explanation of what this phase accomplishes from the USER'S perspective (e.g. "Users can now add providers directly from the /models overlay without needing a separate command" — NOT "modifies model_picker.go to add provider management").
@@ -179,6 +180,7 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
 - [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
 - [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
+- [ ] Does this plan touch a running surface? If so, is there a final phase with verify_kind=behavior that exercises the end-to-end outcome? Completion does not run plan-level commands — the integration check must be a phase.
 
 If any check reveals a gap, add the missing phase BEFORE calling announce_plan. Do NOT announce an incomplete plan.
 
@@ -230,8 +232,10 @@ EXECUTION RULES:
 7. Start implementing. When you finish a phase, call update_plan(complete) so the runtime can run
    that phase's verify — do not declare success in prose first. Delegated work finishing is not
    completion.
-8. After every phase is complete, call announce_completion with the proven user-visible outcome.
-   Execution mode ends only when that tool writes ## Results. Checkboxes are not proof.
+8. After every phase is complete, call announce_completion with the proven user-visible outcome and
+   anything you did NOT verify. It records the plan as done and writes ## Results from the verify
+   evidence each phase already produced — it does not run new commands. Execution mode ends only
+   when that tool writes ## Results.
 9. If verify fails, investigate the failure. Do not mark the phase complete.`
 
 // BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
@@ -260,7 +264,7 @@ func BuildPlanExecutionSystemContext(planPath string) string {
 // directives so the model returns to normal conversational behavior.
 //
 // Same placeholders as PlanExecutionSystemContext.
-const PlanCompletedSystemContext = `An execution plan was accepted earlier in this session. Every phase verified and PLAN.md has a Results section.
+const PlanCompletedSystemContext = `An execution plan was accepted earlier in this session. Every phase completed with its verify evidence recorded, and PLAN.md has a Results section.
 
 The plan is retained below as historical context. You are NO LONGER in execution mode.
 Respond to the user's messages normally — answer questions, discuss approaches, and only

@@ -716,6 +716,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case xaiOAuthStartedMsg:
 		return m.applyXAIOAuthStarted(msg)
 
+	case copilotOAuthStartedMsg:
+		return m.applyCopilotOAuthStarted(msg)
+
 	case webSearchProvidersLoadedMsg:
 		return m.applyWebSearchProvidersLoaded(msg)
 

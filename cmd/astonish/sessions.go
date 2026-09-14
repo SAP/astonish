@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,18 @@ func handleSessionsCommand(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printSessionsUsage()
 		return nil
+	}
+
+	// `repair` always operates on local JSONL transcripts, so it is handled
+	// before the remote delegation: a configured remote must not hide the
+	// local code-mode sessions this command exists to fix.
+	if args[0] == "repair" {
+		if len(args) < 2 {
+			fmt.Println("Error: session ID required")
+			fmt.Println("Usage: astonish sessions repair <session-id> [--dry-run]")
+			return fmt.Errorf("session ID required")
+		}
+		return handleSessionsRepair(args[1], args[2:])
 	}
 
 	// Remote mode: delegate to API
@@ -352,6 +365,134 @@ func handleSessionsDelete(sessionID string) error {
 	return nil
 }
 
+// handleSessionsRepair walks a session's whole compaction chain and rewrites
+// any transcript containing lines larger than session.MaxTranscriptLineBytes.
+// The poisoned file is usually the chain tip, not the ID the user typed.
+func handleSessionsRepair(sessionID string, flags []string) error {
+	dryRun := false
+	for _, f := range flags {
+		if f == "--dry-run" {
+			dryRun = true
+		}
+	}
+
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if appCfg.Sessions.Storage == "memory" {
+		fmt.Println("Session persistence is disabled (storage: memory).")
+		return nil
+	}
+	baseDir, err := config.GetSessionsDir(&appCfg.Sessions)
+	if err != nil {
+		return fmt.Errorf("failed to resolve sessions dir: %w", err)
+	}
+
+	// Code-mode sessions live in a "code" subdirectory; chat sessions in the
+	// parent. Try both so the command works for either.
+	var (
+		sessDir string
+		index   *persistentsession.SessionIndex
+		fullID  string
+	)
+	for _, dir := range []string{filepath.Join(baseDir, "code"), baseDir} {
+		idx := persistentsession.NewSessionIndex(filepath.Join(dir, "index.json"))
+		if id, rErr := resolveSessionID(idx, sessionID); rErr == nil {
+			sessDir, index, fullID = dir, idx, id
+			break
+		}
+	}
+	if index == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Walk the whole chain: ancestors of the given id, then descendants.
+	store, err := persistentsession.NewFileStore(sessDir)
+	if err != nil {
+		return fmt.Errorf("failed to open session store: %w", err)
+	}
+	chain := store.AncestorChain(fullID)
+	seen := map[string]bool{}
+	for _, id := range chain {
+		seen[id] = true
+	}
+	queue := append([]string{}, chain...)
+	for i := 0; i < len(queue); i++ {
+		children, cErr := index.ListChildren(queue[i])
+		if cErr != nil {
+			continue
+		}
+		for _, c := range children {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				queue = append(queue, c.ID)
+			}
+		}
+	}
+
+	type report struct {
+		id           string
+		path         string
+		skipped      int
+		skippedBytes int64
+	}
+	var reports []report
+	for _, id := range queue {
+		meta, mErr := index.Get(id)
+		if mErr != nil || meta == nil {
+			continue
+		}
+		path := filepath.Join(sessDir, meta.AppName, meta.UserID, id+".jsonl")
+		skipped, nbytes, sErr := persistentsession.NewTranscript(path).ScanOversized()
+		if sErr != nil {
+			fmt.Printf("  %s  error: %v\n", id[:8], sErr)
+			continue
+		}
+		reports = append(reports, report{id: id, path: path, skipped: skipped, skippedBytes: nbytes})
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "SESSION\tOVERSIZED\tBYTES")
+	anyOversized := false
+	for _, r := range reports {
+		if r.skipped > 0 {
+			anyOversized = true
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\n", r.id[:8], r.skipped, persistentsession.HumanBytes(r.skippedBytes))
+	}
+	w.Flush()
+
+	if !anyOversized {
+		fmt.Println("No oversized lines found; nothing to repair.")
+		return nil
+	}
+	if dryRun {
+		fmt.Println("\nDry run: no files were modified.")
+		return nil
+	}
+
+	for _, r := range reports {
+		if r.skipped == 0 {
+			continue
+		}
+		backup := r.path + ".bak"
+		for i := 1; ; i++ {
+			if _, sErr := os.Stat(backup); sErr != nil {
+				break
+			}
+			backup = fmt.Sprintf("%s.bak.%d", r.path, i)
+		}
+		skipped, nbytes, rErr := persistentsession.NewTranscript(r.path).RepairOversized(backup)
+		if rErr != nil {
+			return fmt.Errorf("repair %s: %w", r.id, rErr)
+		}
+		fmt.Printf("Repaired %s: removed %d line(s), reclaimed %s (backup: %s)\n",
+			r.id[:8], skipped, persistentsession.HumanBytes(nbytes), backup)
+	}
+	return nil
+}
+
 func handleSessionsClear() error {
 	appCfg, err := config.LoadAppConfig()
 	if err != nil {
@@ -464,6 +605,7 @@ func printSessionsUsage() {
 	fmt.Println("  show <id> [flags]     Show session trace (tool calls, LLM responses, errors)")
 	fmt.Println("  delete, rm <id>       Delete a session")
 	fmt.Println("  clear                 Delete all sessions")
+	fmt.Println("  repair <id>           Rewrite a session transcript, removing oversized lines (--dry-run to inspect)")
 	fmt.Println("")
 	fmt.Println("show flags:")
 	fmt.Println("  --json                Output as JSON")
@@ -510,6 +652,8 @@ func handleSessionsRemote(args []string) error {
 		return handleSessionsDeleteRemote(c, args[1])
 	case "clear":
 		return fmt.Errorf("'sessions clear' is not supported in remote mode (use Studio UI)")
+	case "repair":
+		return fmt.Errorf("'sessions repair' is not supported in remote mode (local JSONL transcripts only)")
 	default:
 		return fmt.Errorf("unknown subcommand: %s", subcommand)
 	}

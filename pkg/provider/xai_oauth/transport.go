@@ -1,6 +1,7 @@
 package xai_oauth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -48,27 +49,21 @@ func NewOAuthTransport(clientID, accessToken, refreshToken string, expiresAt tim
 
 // RoundTrip implements http.RoundTripper. It checks whether the current access
 // token is expired (with a 60-second buffer) and refreshes it if needed before
-// attaching the Authorization header.
+// attaching the Authorization header. If the upstream server returns 401 or 403
+// despite a seemingly valid token, the transport refreshes and retries once.
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 
 	var refreshed bool
-	// Refresh if token is expired or will expire within 60 seconds
-	if t.refreshToken != "" && !t.expiresAt.IsZero() && time.Until(t.expiresAt) < 60*time.Second {
-		endpoint := tokenURL
-		if t.tokenURL != "" {
-			endpoint = t.tokenURL
-		}
-		tokenResp, err := refreshAccessTokenFromURL(req.Context(), t.clientID, t.refreshToken, endpoint)
-		if err != nil {
+	// Refresh if token is expired or will expire within 60 seconds.
+	// Also refresh when expiresAt is zero — that means the expiration time
+	// was never stored (legacy config), so the token may well be stale.
+	needsRefresh := t.refreshToken != "" && (t.expiresAt.IsZero() || time.Until(t.expiresAt) < 60*time.Second)
+	if needsRefresh {
+		if err := t.doRefreshLocked(req.Context()); err != nil {
 			t.mu.Unlock()
 			return nil, fmt.Errorf("%w: refresh xAI OAuth token: %v", ErrReauthRequired, err)
 		}
-		t.accessToken = tokenResp.AccessToken
-		if tokenResp.RefreshToken != "" {
-			t.refreshToken = tokenResp.RefreshToken
-		}
-		t.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 		refreshed = true
 	}
 
@@ -93,5 +88,63 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	reqClone := req.Clone(req.Context())
 	reqClone.Header.Set("Authorization", "Bearer "+token)
 
-	return t.base.RoundTrip(reqClone)
+	resp, err := t.base.RoundTrip(reqClone)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reactive retry: if the server rejected the token (401/403), refresh once
+	// and retry. This covers clock skew, early server-side revocation, or a
+	// token that was valid by our clock but invalid server-side.
+	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !refreshed && t.refreshToken != "" {
+		resp.Body.Close()
+
+		t.mu.Lock()
+		if err := t.doRefreshLocked(req.Context()); err != nil {
+			t.mu.Unlock()
+			return nil, fmt.Errorf("%w: refresh xAI OAuth token after %d: %v", ErrReauthRequired, resp.StatusCode, err)
+		}
+		token = t.accessToken
+		refreshToken = t.refreshToken
+		expiresAt = t.expiresAt
+		onTokenRefresh = t.onTokenRefresh
+		t.mu.Unlock()
+
+		if onTokenRefresh != nil {
+			onTokenRefresh(token, refreshToken, expiresAt)
+		}
+
+		retryClone := req.Clone(req.Context())
+		// The first RoundTrip consumed req.Body; rewind it so a POST body is
+		// actually resent. Without this the retry would deliver an empty body.
+		if req.GetBody != nil {
+			body, berr := req.GetBody()
+			if berr != nil {
+				return nil, fmt.Errorf("%w: rewind request body for retry after %d: %v", ErrReauthRequired, resp.StatusCode, berr)
+			}
+			retryClone.Body = body
+		}
+		retryClone.Header.Set("Authorization", "Bearer "+token)
+		return t.base.RoundTrip(retryClone)
+	}
+
+	return resp, nil
+}
+
+// doRefreshLocked performs the token refresh while the caller holds t.mu.
+func (t *oauthTransport) doRefreshLocked(ctx context.Context) error {
+	endpoint := tokenURL
+	if t.tokenURL != "" {
+		endpoint = t.tokenURL
+	}
+	tokenResp, err := refreshAccessTokenFromURL(ctx, t.clientID, t.refreshToken, endpoint)
+	if err != nil {
+		return err
+	}
+	t.accessToken = tokenResp.AccessToken
+	if tokenResp.RefreshToken != "" {
+		t.refreshToken = tokenResp.RefreshToken
+	}
+	t.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	return nil
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
+	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	"github.com/SAP/astonish/pkg/store"
@@ -317,6 +318,32 @@ func handleSetupCommand() error {
 			} else {
 				goto SaveConfig
 			}
+		case "copilot_oauth":
+			clientID := copilot_oauth.DefaultClientID
+			pCfg["client_id"] = clientID
+			fmt.Println("\nInitiating GitHub Copilot OAuth device authorization...")
+			dcResp, err := copilot_oauth.RequestDeviceCode(context.Background(), clientID)
+			if err != nil {
+				return fmt.Errorf("failed to request device code: %w", err)
+			}
+			fmt.Printf("\n\U0001f510 Please visit: %s\n", dcResp.VerificationURI)
+			fmt.Printf("   and enter code: %s\n\n", dcResp.UserCode)
+			fmt.Println("Waiting for authorization...")
+			tokenResp, err := copilot_oauth.PollForToken(context.Background(), clientID, dcResp.DeviceCode, dcResp.Interval)
+			if err != nil {
+				return fmt.Errorf("OAuth authorization failed: %w", err)
+			}
+			pCfg["github_token"] = tokenResp.AccessToken
+			fmt.Println("\u2713 Successfully authenticated with GitHub Copilot!")
+			if err := fetchAndSelectCopilotOAuthModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select Copilot models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
 		case "openai_compat":
 			runAPIKeyForm("API Key", "api_key", pCfg)
 			runBaseURLForm("Base URL", "https://api.openai.com/v1", pCfg)
@@ -498,6 +525,7 @@ func selectProviderType() string {
 		huh.NewOption(provider.GetProviderDisplayName("sap_ai_core"), "sap_ai_core"),
 		huh.NewOption(provider.GetProviderDisplayName("xai"), "xai"),
 		huh.NewOption(provider.GetProviderDisplayName("xai_oauth"), "xai_oauth"),
+		huh.NewOption(provider.GetProviderDisplayName("copilot_oauth"), "copilot_oauth"),
 	}
 
 	err := huh.NewForm(
@@ -764,6 +792,8 @@ func saveProviderSecretsToStore(instanceName, providerType string, pCfg config.P
 		secretKeys = nil // no secrets for local providers
 	case "xai_oauth":
 		secretKeys = []string{"access_token", "refresh_token", "expires_at"}
+	case "copilot_oauth":
+		secretKeys = []string{"github_token"}
 	}
 
 	secrets := make(map[string]string)
@@ -1252,6 +1282,40 @@ func fetchAndSelectXAIOAuthModel(pCfg config.ProviderConfig, appCfg *config.AppC
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Select an xAI Model").
+				Options(options...).
+				Value(&selectedModel),
+		),
+	).Run()
+	if err != nil {
+		return err
+	}
+	appCfg.General.DefaultModel = selectedModel
+	return nil
+}
+
+func fetchAndSelectCopilotOAuthModel(pCfg config.ProviderConfig, appCfg *config.AppConfig) error {
+	githubToken := pCfg["github_token"]
+	if githubToken == "" {
+		return fmt.Errorf("github token required")
+	}
+	runSpinner("Fetching models from GitHub Copilot...")
+	models, err := copilot_oauth.ListModels(context.Background(), githubToken)
+	if err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("no models found")
+	}
+	var options []huh.Option[string]
+	for _, m := range models {
+		options = append(options, huh.NewOption(m, m))
+	}
+	var selectedModel string
+	clearScreen()
+	err = huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select a GitHub Copilot Model").
 				Options(options...).
 				Value(&selectedModel),
 		),

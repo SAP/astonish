@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SAP/astonish/pkg/codeintel"
 	"github.com/SAP/astonish/pkg/config"
@@ -160,11 +161,18 @@ type ReadFileArgs struct {
 // always page with offset/limit or pass an explicit large Limit.
 const readFileSoftCapLines = 400
 
+// readFileSoftCapBytes bounds the total bytes read_file returns. The line cap
+// cannot catch a SINGLE pathological line (generated indexes, minified bundles,
+// one-line JSON), which is exactly what blew up a session transcript. This is
+// the last guard before tool output is persisted to the session JSONL.
+const readFileSoftCapBytes = 256 * 1024
+
 type ReadFileResult struct {
 	Content    string `json:"content"`
 	TotalLines int    `json:"total_lines"`
 	Range      string `json:"range,omitempty"`
 	Unchanged  bool   `json:"unchanged,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
 }
 
 func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
@@ -314,10 +322,26 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 		}
 	}
 
+	// Byte cap: the line cap above cannot bound a file whose content is one
+	// enormous line. Truncate on a UTF-8 rune boundary so the JSON response
+	// stays valid.
+	outContent := sb.String()
+	truncated := false
+	if len(outContent) > readFileSoftCapBytes {
+		total := len(outContent)
+		cut := readFileSoftCapBytes
+		for cut > 0 && !utf8.ValidString(outContent[:cut]) {
+			cut--
+		}
+		outContent = outContent[:cut] + fmt.Sprintf("\n\n[truncated: %d of %d bytes shown. This file has very long lines; use grep_search or offset/limit to target a region.]", cut, total)
+		truncated = true
+	}
+
 	return ReadFileResult{
-		Content:    sb.String(),
+		Content:    outContent,
 		TotalLines: totalLines,
 		Range:      rangeStr,
+		Truncated:  truncated,
 	}, nil
 }
 

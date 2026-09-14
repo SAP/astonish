@@ -3257,3 +3257,151 @@ func TestLoadHistory_RestoresRoutingTier(t *testing.T) {
 		t.Error("agents[1].RoutingIsStrong = false, want true")
 	}
 }
+
+// TestResumeSession_OversizedTranscriptStillLoadsHistory drives the exact
+// function the /sessions picker invokes (localAgentBackend.ResumeSession) over a
+// compaction chain whose tip transcript contains a single >12MB line. Before the
+// skip-and-warn reader, ReadEvents aborted the whole file and resume returned
+// zero entries — the blank-session symptom.
+func TestResumeSession_OversizedTranscriptStillLoadsHistory(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/oversized-test")
+	b := newFileStoreBackend(t, dir, userID)
+
+	rootResp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+	})
+	if err != nil {
+		t.Fatalf("Create root session: %v", err)
+	}
+	rootID := rootResp.Session.ID()
+
+	childResp, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+		AppName: codeAppName,
+		UserID:  b.effectiveUserID(),
+		State:   map[string]any{persistentsession.StateKeyParentID: rootID},
+	})
+	if err != nil {
+		t.Fatalf("Create child session: %v", err)
+	}
+	child := childResp.Session
+
+	appendEv := func(id, text string) {
+		t.Helper()
+		if err := b.sessionSvc.AppendEvent(ctx, child, &adksession.Event{
+			ID:     id,
+			Author: "user",
+			LLMResponse: adkmodel.LLMResponse{
+				Content: genai.NewContentFromText(text, genai.RoleUser),
+			},
+			Timestamp: time.Now(),
+		}); err != nil {
+			t.Fatalf("AppendEvent %s: %v", id, err)
+		}
+	}
+	appendEv("u1", "first message")
+	appendEv("u2", "second message")
+
+	// Append a raw >12MB single line straight to the child's JSONL on disk,
+	// mimicking a huge read_file tool response.
+	path := filepath.Join(dir, codeAppName, b.effectiveUserID(), child.ID()+".jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	chunk := strings.Repeat("A", 1024*1024)
+	for i := 0; i < 12; i++ {
+		if _, err := f.WriteString(chunk); err != nil {
+			t.Fatalf("write oversized: %v", err)
+		}
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	f.Close()
+
+	appendEv("u3", "third message")
+
+	// Resume through a fresh backend so the transcript is re-read from disk,
+	// exactly as /sessions does in a new process.
+	b2 := newFileStoreBackend(t, dir, userID)
+	entries, err := b2.ResumeSession(ctx, rootID)
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("ResumeSession returned zero entries for a transcript with one oversized line")
+	}
+	found := false
+	for _, e := range entries {
+		if strings.Contains(e.Text, "skipped") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a skipped-lines warning entry, got %d entries", len(entries))
+	}
+}
+
+// TestResumeSession_UnreadableTranscriptReturnsError verifies that a session
+// whose transcript genuinely cannot be read surfaces an error naming the
+// session, which the /sessions overlay renders as "Failed to load session: …"
+// instead of showing a title with an empty body.
+func TestResumeSession_UnreadableTranscriptReturnsError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0000 is not enforced")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	userID := codeUserIDForDir("/work/unreadable-test")
+	b := newFileStoreBackend(t, dir, userID)
+
+	id := seedSession(t, b, "a session that will become unreadable")
+
+	path := filepath.Join(dir, codeAppName, b.effectiveUserID(), id+".jsonl")
+	if err := os.Chmod(path, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0644) })
+
+	b2 := newFileStoreBackend(t, dir, userID)
+	entries, err := b2.ResumeSession(ctx, id)
+	if err == nil {
+		t.Fatalf("expected an error for an unreadable transcript, got nil with %d entries", len(entries))
+	}
+	if !strings.Contains(err.Error(), id) {
+		t.Fatalf("error %q does not name the session id %s", err, id)
+	}
+}
+
+// TestResumeSession_RealPoisonedSession is an environment-dependent regression
+// guard for the reported symptom: the real on-disk code-mode session whose
+// compaction tip held a ~69MB single line loaded as a title with an empty body.
+// It drives the exact function /sessions invokes and is strictly read-only.
+// Skipped when the local sessions directory or that session is absent.
+func TestResumeSession_RealPoisonedSession(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	dir := filepath.Join(home, "Library", "Application Support", "astonish", "sessions", "code")
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("code sessions dir not present: %v", err)
+	}
+	const sessionID = "86509dd0-1571-407c-8031-aea4e1b90f67"
+	if _, err := os.Stat(filepath.Join(dir, "astonish_code", "local_user_f32806e58f42b514", sessionID+".jsonl")); err != nil {
+		t.Skipf("target session not present: %v", err)
+	}
+
+	b := newFileStoreBackend(t, dir, "local_user_f32806e58f42b514")
+	entries, err := b.ResumeSession(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("ResumeSession returned zero entries for the real session")
+	}
+	t.Logf("resumed %d history entries", len(entries))
+}

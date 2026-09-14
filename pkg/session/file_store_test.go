@@ -1106,3 +1106,62 @@ func TestRepairOrphanedToolCalls_TrueOrphan(t *testing.T) {
 		t.Error("synthetic FunctionResponse should have an error message")
 	}
 }
+
+// TestFileStore_LatestDescendantSkipsUnreadableTip verifies the chain walk
+// treats a present-but-unreadable transcript like a missing one, so resume
+// falls back to the last good ancestor instead of an empty tip.
+func TestFileStore_LatestDescendantSkipsUnreadableTip(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0000 is not enforced")
+	}
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "root",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, &adksession.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "child",
+		State: map[string]any{StateKeyParentID: "root"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.LatestDescendant("root"); got != "child" {
+		t.Fatalf("LatestDescendant(root)=%q want child", got)
+	}
+
+	childPath := filepath.Join(store.BaseDir(), "app", "u", "child.jsonl")
+	if err := os.Chmod(childPath, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(childPath, 0644) })
+
+	if got := store.LatestDescendant("root"); got != "root" {
+		t.Fatalf("LatestDescendant(root)=%q want root (child unreadable)", got)
+	}
+}
+
+// TestFileStore_LatestDescendantStillFollowsReadableChain guards the normal
+// chain walk against regression from the readability check.
+func TestFileStore_LatestDescendantStillFollowsReadableChain(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct{ id, parent string }{
+		{"root", ""}, {"child", "root"}, {"tip", "child"},
+	} {
+		req := &adksession.CreateRequest{AppName: "app", UserID: "u", SessionID: tc.id}
+		if tc.parent != "" {
+			req.State = map[string]any{StateKeyParentID: tc.parent}
+		}
+		if _, err := store.Create(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := store.LatestDescendant("root"); got != "tip" {
+		t.Fatalf("LatestDescendant(root)=%q want tip", got)
+	}
+}

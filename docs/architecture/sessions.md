@@ -143,12 +143,42 @@ Ensure role alternation (no consecutive same-role messages)
 Return compacted contents to LLM
 ```
 
+## Oversized transcript lines
+
+A single transcript record can become enormous when a tool response captures a
+file that is one huge line (e.g. a generated `.codeintel/index.json`). Without a
+guard this makes an entire session unreadable.
+
+- **Reader limit.** `session.MaxTranscriptLineBytes` (10 MB) bounds a single
+  JSONL record. `Transcript.ReadEvents` uses a `bufio.Reader` loop, not
+  `bufio.Scanner` (which cannot recover after `ErrTooLong`).
+- **Skip-and-warn.** An oversized line is skipped, not fatal: every other event
+  is still returned, and a synthetic trailing `system` event
+  (`transcript-skipped-lines`) reports how many lines and bytes were dropped, so
+  the gap is visible rather than silent. `ReadEvents` returns a nil error in
+  this case; it errors only on genuine I/O failure.
+- **Redaction never drops content.** `RedactTranscript` passes oversized lines
+  through unmodified. Only explicit repair removes lines.
+- **Chain safety.** `FileStore.LatestDescendant` treats a present-but-unreadable
+  transcript like a missing one and falls back to the last good ancestor.
+- **Error surfacing.** `localAgentBackend.loadHistory` propagates load failures
+  so the `/sessions` overlay renders "Failed to load session: …" instead of an
+  empty body.
+- **Prevention.** `read_file` caps output by bytes (`readFileSoftCapBytes`) in
+  addition to lines, so no new transcript line can approach the reader limit.
+- **Recovery.** `astonish sessions repair <id> [--dry-run]` walks the whole
+  compaction chain (the poisoned file is usually the tip, not the ID typed),
+  reports oversized lines per session, writes a `.bak`, and atomically rewrites
+  the transcript with the oversized lines removed. Retained lines are copied
+  byte-for-byte, preserving the header and JSONL format.
+
 ## Key Files
 
 | File | Purpose |
 |---|---|
 | `pkg/session/file_store.go` | FileStore: JSONL persistence, CRUD, redaction, orphan repair, cascade delete |
 | `pkg/session/compaction.go` | Compactor: token estimation, LLM summarization, truncation fallback |
+| `pkg/session/transcript.go` | JSONL transcript reader/writer, oversized-line skip-and-warn, `ScanOversized`, `RepairOversized` |
 | `pkg/session/trace.go` | Execution trace persistence (separate from session events) |
 
 ## Interactions

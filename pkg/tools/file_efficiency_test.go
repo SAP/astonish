@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- Layer 2: read_file line-range + line numbers ---
@@ -950,5 +951,69 @@ func TestFileReadCache_EmptyCallerFallback(t *testing.T) {
 	}
 	if !result.Unchanged {
 		t.Error("second read with same (empty) caller should be unchanged")
+	}
+}
+
+// --- byte cap (single pathological line) ---
+
+func TestReadFile_ByteCapTruncatesSingleHugeLine(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("A", 1024*1024)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ReadFile(nil, ReadFileArgs{Path: path})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !res.Truncated {
+		t.Error("expected Truncated = true")
+	}
+	if len(res.Content) >= 300*1024 {
+		t.Errorf("content not capped: %d bytes", len(res.Content))
+	}
+	if !strings.Contains(res.Content, "truncated") {
+		t.Error("expected a truncation notice in content")
+	}
+}
+
+func TestReadFile_ByteCapNotAppliedToSmallFile(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "small.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ReadFile(nil, ReadFileArgs{Path: path})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if res.Truncated {
+		t.Error("small file should not be truncated")
+	}
+	if res.Content != "1: alpha\n2: beta" {
+		t.Errorf("content = %q", res.Content)
+	}
+}
+
+func TestReadFile_ByteCapRuneBoundary(t *testing.T) {
+	resetTestCache(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "utf8.txt")
+	// 3-byte runes so the cap almost certainly lands mid-rune.
+	if err := os.WriteFile(path, []byte(strings.Repeat("世", 200*1024)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ReadFile(nil, ReadFileArgs{Path: path})
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatal("expected truncation")
+	}
+	if !utf8.ValidString(res.Content) {
+		t.Error("truncated content is not valid UTF-8")
 	}
 }

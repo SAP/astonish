@@ -2569,7 +2569,10 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 		UserID:    b.effectiveUserID(),
 		SessionID: id,
 	})
-	if err != nil || resp == nil || resp.Session == nil {
+	if err != nil {
+		return nil, fmt.Errorf("load session %s: %w", id, err)
+	}
+	if resp == nil || resp.Session == nil {
 		return nil, nil
 	}
 

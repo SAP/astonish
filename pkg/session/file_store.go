@@ -720,8 +720,8 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 		return cur
 	}
 
-	// If the tip has a valid transcript, return it (the normal/fast path).
-	if s.transcriptExists(cur) {
+	// If the tip has a readable transcript, return it (the normal/fast path).
+	if s.transcriptReadable(cur) {
 		return cur
 	}
 
@@ -732,7 +732,7 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 	walk := sessionID
 	for !seen2[walk] {
 		seen2[walk] = true
-		if s.transcriptExists(walk) {
+		if s.transcriptReadable(walk) {
 			lastValid = walk
 		}
 		if walk == cur {
@@ -760,7 +760,7 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 		walk = next.ID
 	}
 
-	slog.Warn("compaction chain tip has missing transcript, falling back to last valid ancestor",
+	slog.Warn("compaction chain tip has missing or unreadable transcript, falling back to last valid ancestor",
 		"component", "session",
 		"requested", sessionID,
 		"broken_tip", cur,
@@ -769,17 +769,23 @@ func (s *FileStore) LatestDescendant(sessionID string) string {
 	return lastValid
 }
 
-// transcriptExists checks whether the transcript file for the given session ID
-// exists on disk. It looks up the session metadata from the index to determine
-// the correct appName/userID path components.
-func (s *FileStore) transcriptExists(sessionID string) bool {
+// transcriptReadable reports whether the session's transcript file exists AND
+// can actually be scanned. A file that is present but unreadable (permissions,
+// I/O failure) is treated like a missing one so the chain walk falls back to
+// the last good ancestor instead of resolving to a tip that loads as empty.
+func (s *FileStore) transcriptReadable(sessionID string) bool {
 	meta, err := s.index.Get(sessionID)
 	if err != nil || meta == nil {
 		return false
 	}
 	path := filepath.Join(s.baseDir, meta.AppName, meta.UserID, sessionID+".jsonl")
-	_, err = os.Stat(path)
-	return err == nil
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	if _, _, err := NewTranscript(path).ScanOversized(); err != nil {
+		return false
+	}
+	return true
 }
 
 // AncestorChain returns the compaction chain from the root ancestor down to and
@@ -808,7 +814,6 @@ func (s *FileStore) AncestorChain(sessionID string) []string {
 	}
 	return chain
 }
-
 
 // AddSessionMeta adds a metadata entry to the session index directly.
 // This is used by fleet sessions that need to appear in the session list

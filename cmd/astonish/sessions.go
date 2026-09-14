@@ -73,13 +73,6 @@ func handleSessionsCommand(args []string) error {
 			return fmt.Errorf("session ID required")
 		}
 		return handleSessionsDelete(args[1])
-	case "repair":
-		if len(args) < 2 {
-			fmt.Println("Error: session ID required")
-			fmt.Println("Usage: astonish sessions repair <session-id> [--dry-run]")
-			return fmt.Errorf("session ID required")
-		}
-		return handleSessionsRepair(args[1], args[2:])
 	case "clear":
 		return handleSessionsClear()
 	default:

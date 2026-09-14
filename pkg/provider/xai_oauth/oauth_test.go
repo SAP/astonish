@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -604,5 +605,56 @@ func TestOAuthTransport_ZeroExpiresAtTriggersRefresh(t *testing.T) {
 
 	if receivedAuth != "Bearer refreshed-zero-exp" {
 		t.Errorf("Authorization = %q, want Bearer refreshed-zero-exp", receivedAuth)
+	}
+}
+
+// TestOAuthTransport_ReactiveRetryResendsBody guards the POST path: the first
+// RoundTrip consumes req.Body, so the retry must rewind it via GetBody or the
+// server would receive an empty body on the retried request.
+func TestOAuthTransport_ReactiveRetryResendsBody(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "fresh-token", RefreshToken: "new-rt", ExpiresIn: 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	var calls atomic.Int32
+	var bodies []string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &oauthTransport{
+		base:         http.DefaultTransport,
+		clientID:     "test-client",
+		accessToken:  "stale-token",
+		refreshToken: "rt",
+		expiresAt:    time.Now().Add(10 * time.Hour),
+		tokenURL:     tokenServer.URL,
+	}
+
+	const payload = `{"model":"grok","messages":[]}`
+	resp, err := (&http.Client{Transport: transport}).Post(apiServer.URL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(bodies))
+	}
+	if bodies[1] != payload {
+		t.Errorf("retried body = %q, want %q (body not rewound)", bodies[1], payload)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -547,5 +548,55 @@ func TestNextPollingIntervalAccumulatesSlowDown(t *testing.T) {
 	interval = nextPollingInterval(interval)
 	if interval != 15 {
 		t.Fatalf("interval = %d, want 15", interval)
+	}
+}
+
+// TestCopilotTransport_ReactiveRetryResendsBody guards the POST path: the first
+// RoundTrip consumes req.Body, so the retry must rewind it via GetBody or the
+// server would receive an empty body on the retried request.
+func TestCopilotTransport_ReactiveRetryResendsBody(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token": "fresh-session-token", "expires_at": time.Now().Add(time.Hour).Unix(),
+		})
+	}))
+	defer tokenServer.Close()
+
+	var calls atomic.Int32
+	var bodies []string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	transport := &copilotTransport{
+		base:             http.DefaultTransport,
+		githubToken:      "gh-token",
+		sessionToken:     "stale-session-token",
+		sessionExpiresAt: time.Now().Add(time.Hour),
+		copilotTokenURL:  tokenServer.URL,
+	}
+
+	const payload = `{"model":"gpt-4","messages":[]}`
+	resp, err := (&http.Client{Transport: transport}).Post(apiServer.URL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(bodies))
+	}
+	if bodies[1] != payload {
+		t.Errorf("retried body = %q, want %q (body not rewound)", bodies[1], payload)
 	}
 }

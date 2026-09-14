@@ -115,6 +115,15 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		retryClone := req.Clone(req.Context())
+		// The first RoundTrip consumed req.Body; rewind it so a POST body is
+		// actually resent. Without this the retry would deliver an empty body.
+		if req.GetBody != nil {
+			body, berr := req.GetBody()
+			if berr != nil {
+				return nil, fmt.Errorf("%w: rewind request body for retry after %d: %v", ErrReauthRequired, resp.StatusCode, berr)
+			}
+			retryClone.Body = body
+		}
 		retryClone.Header.Set("Authorization", "Bearer "+token)
 		return t.base.RoundTrip(retryClone)
 	}

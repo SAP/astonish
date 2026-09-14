@@ -1266,6 +1266,11 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 					return nil
 				}
 				_, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, userID, sid, evs)
+				if err == nil && b.checkpoints != nil {
+					// Clear checkpoint turn files from the pre-compaction epoch
+					// so they don't collide with new captures after event-index reset.
+					b.checkpoints.ResetSession(sid)
+				}
 				return err
 			})
 		}
@@ -1776,6 +1781,11 @@ func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string
 		if _, aErr := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), sessionID, newEvents); aErr != nil {
 			slog.Warn("persistent compaction archive failed", "session_id", sessionID, "error", aErr)
 			return out
+		}
+		// Clear checkpoint turn files from the pre-compaction epoch so they
+		// don't collide with new captures after event-index reset.
+		if b.checkpoints != nil {
+			b.checkpoints.ResetSession(sessionID)
 		}
 		b.mu.Lock()
 		b.sessionID = sessionID // unchanged — ADK Run keeps this id

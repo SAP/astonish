@@ -216,6 +216,31 @@ type XAIOAuthBackend interface {
 	WaitXAIOAuth(ctx context.Context, pending XAIOAuthPending) (map[string]string, error)
 }
 
+// CopilotOAuthPending is the in-flight device-code authorization state for
+// GitHub Copilot. The TUI displays UserCode and VerificationURL, then calls
+// WaitCopilotOAuth to block until the user approves in the browser.
+type CopilotOAuthPending struct {
+	ClientID        string
+	DeviceCode      string
+	UserCode        string
+	VerificationURL string
+	Interval        int
+}
+
+// CopilotOAuthBackend is an optional capability for backends that can run the
+// GitHub Copilot device-code OAuth flow in two phases so the TUI can show the
+// user code before polling. localAgentBackend implements it; platform backends
+// do not.
+type CopilotOAuthBackend interface {
+	// StartCopilotOAuth requests a device code, opens the verification URL in
+	// the user's browser, and returns the pending authorization details.
+	StartCopilotOAuth(ctx context.Context, clientID string) (*CopilotOAuthPending, error)
+	// WaitCopilotOAuth polls until the user approves (or the code expires)
+	// and returns token fields (github_token, client_id) suitable for passing
+	// to AddProvider.
+	WaitCopilotOAuth(ctx context.Context, pending CopilotOAuthPending) (map[string]string, error)
+}
+
 // WebSearchProvider describes one available web search provider in the /websearch picker.
 type WebSearchProvider struct {
 	ID          string // standard server ID (e.g. "tavily", "brave-search", "perplexity")

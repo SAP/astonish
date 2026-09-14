@@ -6,6 +6,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider"
+	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
 
@@ -260,6 +261,33 @@ func TestAddProvider_CopiesExtraOAuthTokenFields(t *testing.T) {
 		if inst[k] != want {
 			t.Errorf("field %q = %q, want %q", k, inst[k], want)
 		}
+	}
+}
+
+func TestAddProvider_CopilotOAuth(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	b := &localAgentBackend{appConfig: &config.AppConfig{}}
+	fields := map[string]string{
+		"client_id":    copilot_oauth.DefaultClientID,
+		"github_token": "ghu_test_token_abc",
+	}
+	if err := b.AddProvider(context.Background(), "copilot_oauth", "copilot_oauth", fields); err != nil {
+		t.Fatalf("AddProvider(copilot_oauth) failed: %v", err)
+	}
+	inst := b.appConfig.Providers["copilot_oauth"]
+	if inst == nil {
+		t.Fatal("copilot_oauth instance not stored in config")
+	}
+	if inst["type"] != "copilot_oauth" {
+		t.Errorf("type = %q, want copilot_oauth", inst["type"])
+	}
+	// github_token should be persisted (or in credential store if available)
+	if inst["github_token"] != "ghu_test_token_abc" {
+		t.Errorf("github_token = %q, want ghu_test_token_abc", inst["github_token"])
+	}
+	if inst["client_id"] != copilot_oauth.DefaultClientID {
+		t.Errorf("client_id = %q, want %s", inst["client_id"], copilot_oauth.DefaultClientID)
 	}
 }
 

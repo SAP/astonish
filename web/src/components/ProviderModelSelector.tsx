@@ -39,6 +39,7 @@ const providerTitles: Record<string, string> = {
   poe: 'Select Poe Model',
   sap_ai_core: 'Select SAP AI Core Model',
   xai: 'Select xAI Grok Model',
+  copilot_oauth: 'Select GitHub Copilot Model',
   lm_studio: 'Select LM Studio Model',
   ollama: 'Select Ollama (Local) Model',
 }

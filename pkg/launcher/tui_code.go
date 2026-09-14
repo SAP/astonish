@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/routing"
+	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -3428,6 +3429,9 @@ func codeProviderTypes() []backend.ProviderTypeInfo {
 		{ID: "xai_oauth", DisplayName: provider.GetProviderDisplayName("xai_oauth"), Fields: []backend.ProviderField{
 			{Key: "client_id", Label: "OAuth Client ID (auto-filled)", Default: "b1a00492-073a-47ea-816f-4c329264a828", Optional: true},
 		}},
+		{ID: "copilot_oauth", DisplayName: provider.GetProviderDisplayName("copilot_oauth"), Fields: []backend.ProviderField{
+			{Key: "client_id", Label: "OAuth Client ID (auto-filled)", Default: copilot_oauth.DefaultClientID, Optional: true},
+		}},
 		{ID: "openrouter", DisplayName: provider.GetProviderDisplayName("openrouter"), Fields: []backend.ProviderField{apiKey}},
 		{ID: "poe", DisplayName: provider.GetProviderDisplayName("poe"), Fields: []backend.ProviderField{apiKey}},
 		{
@@ -3559,6 +3563,14 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 		}
 	}
 
+	// For copilot_oauth, run the GitHub device-code flow unless the caller
+	// already obtained a github_token (the TUI two-phase path passes it in fields).
+	if typeID == "copilot_oauth" && inst["github_token"] == "" {
+		if err := b.runCopilotOAuthFlow(inst); err != nil {
+			return fmt.Errorf("Copilot OAuth authentication failed: %w", err)
+		}
+	}
+
 	b.mu.Lock()
 	if b.appConfig.Providers == nil {
 		b.appConfig.Providers = make(map[string]config.ProviderConfig)
@@ -3584,6 +3596,20 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 		delete(inst, "expires_at")
 	}
 
+	var githubToken string
+	if typeID == "copilot_oauth" && b.result != nil && b.result.CredentialStore != nil {
+		githubToken = inst["github_token"]
+		if err := b.result.CredentialStore.SetSecretBatch(map[string]string{
+			"provider." + name + ".github_token": githubToken,
+		}); err != nil {
+			b.mu.Lock()
+			delete(b.appConfig.Providers, name)
+			b.mu.Unlock()
+			return fmt.Errorf("failed to save Copilot OAuth credentials: %w", err)
+		}
+		delete(inst, "github_token")
+	}
+
 	if err := b.saveAppConfig(); err != nil {
 		// Roll back the in-memory change so state matches disk.
 		b.mu.Lock()
@@ -3599,6 +3625,9 @@ func (b *localAgentBackend) AddProvider(ctx context.Context, name, typeID string
 	}
 	if expiresAt != "" {
 		inst["expires_at"] = expiresAt
+	}
+	if githubToken != "" {
+		inst["github_token"] = githubToken
 	}
 	return nil
 }
@@ -3662,6 +3691,59 @@ func (b *localAgentBackend) WaitXAIOAuth(ctx context.Context, pending backend.XA
 		"access_token":  tokenResp.AccessToken,
 		"refresh_token": tokenResp.RefreshToken,
 		"expires_at":    expiresAt.Format(time.RFC3339),
+	}, nil
+}
+
+// runCopilotOAuthFlow performs the GitHub device-code OAuth flow for Copilot,
+// obtaining a GitHub token and storing it in the provider config.
+func (b *localAgentBackend) runCopilotOAuthFlow(inst config.ProviderConfig) error {
+	pending, err := b.StartCopilotOAuth(context.Background(), inst["client_id"])
+	if err != nil {
+		return err
+	}
+	if inst["client_id"] == "" {
+		inst["client_id"] = pending.ClientID
+	}
+	fmt.Fprintf(os.Stderr, "\n🔐 GitHub Copilot OAuth: authorize in your browser\n   Code: %s\n   URL:  %s\n\n", pending.UserCode, pending.VerificationURL)
+	tokens, err := b.WaitCopilotOAuth(context.Background(), *pending)
+	if err != nil {
+		return err
+	}
+	for k, v := range tokens {
+		inst[k] = v
+	}
+	return nil
+}
+
+// StartCopilotOAuth requests a device code and opens the verification URL.
+func (b *localAgentBackend) StartCopilotOAuth(ctx context.Context, clientID string) (*backend.CopilotOAuthPending, error) {
+	if clientID == "" {
+		clientID = copilot_oauth.DefaultClientID
+	}
+	dcResp, err := copilot_oauth.RequestDeviceCode(ctx, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request device code: %w", err)
+	}
+	verifyURL := dcResp.VerificationURI
+	_ = openBrowser(verifyURL)
+	return &backend.CopilotOAuthPending{
+		ClientID:        clientID,
+		DeviceCode:      dcResp.DeviceCode,
+		UserCode:        dcResp.UserCode,
+		VerificationURL: verifyURL,
+		Interval:        dcResp.Interval,
+	}, nil
+}
+
+// WaitCopilotOAuth polls until the user approves the device authorization.
+func (b *localAgentBackend) WaitCopilotOAuth(ctx context.Context, pending backend.CopilotOAuthPending) (map[string]string, error) {
+	tokenResp, err := copilot_oauth.PollForToken(ctx, pending.ClientID, pending.DeviceCode, pending.Interval)
+	if err != nil {
+		return nil, fmt.Errorf("visit %s and enter code %s — %w", pending.VerificationURL, pending.UserCode, err)
+	}
+	return map[string]string{
+		"client_id":    pending.ClientID,
+		"github_token": tokenResp.AccessToken,
 	}, nil
 }
 

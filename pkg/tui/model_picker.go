@@ -106,6 +106,13 @@ type xaiOAuthStartedMsg struct {
 	err     error
 }
 
+type copilotOAuthStartedMsg struct {
+	name    string
+	fields  map[string]string
+	pending backend.CopilotOAuthPending
+	err     error
+}
+
 // --- Backend capability checks (moved from provider_picker.go) ---
 
 // providerAdmin returns the ProviderAdminBackend capability of the active
@@ -121,6 +128,13 @@ func (m model) providerAdmin() backend.ProviderAdminBackend {
 func (m model) xaiOAuth() backend.XAIOAuthBackend {
 	if xo, ok := m.backend.(backend.XAIOAuthBackend); ok {
 		return xo
+	}
+	return nil
+}
+
+func (m model) copilotOAuth() backend.CopilotOAuthBackend {
+	if co, ok := m.backend.(backend.CopilotOAuthBackend); ok {
+		return co
 	}
 	return nil
 }
@@ -246,6 +260,44 @@ func (m model) waitXAIOAuthCmd(msg xaiOAuthStartedMsg) tea.Cmd {
 			fields[k] = v
 		}
 		err = pa.AddProvider(m.ctx, msg.name, "xai_oauth", fields)
+		return providerMutatedMsg{action: "add", name: msg.name, err: err}
+	}
+}
+
+func (m model) startCopilotOAuthCmd(name string, fields map[string]string) tea.Cmd {
+	co := m.copilotOAuth()
+	return func() tea.Msg {
+		if co == nil {
+			return copilotOAuthStartedMsg{name: name, fields: fields, err: fmt.Errorf("Copilot OAuth unavailable")}
+		}
+		pending, err := co.StartCopilotOAuth(m.ctx, fields["client_id"])
+		msg := copilotOAuthStartedMsg{name: name, fields: fields, err: err}
+		if pending != nil {
+			msg.pending = *pending
+		}
+		return msg
+	}
+}
+
+func (m model) waitCopilotOAuthCmd(msg copilotOAuthStartedMsg) tea.Cmd {
+	co := m.copilotOAuth()
+	pa := m.providerAdmin()
+	return func() tea.Msg {
+		if co == nil || pa == nil {
+			return providerMutatedMsg{action: "add", name: msg.name, err: fmt.Errorf("Copilot OAuth unavailable")}
+		}
+		tokens, err := co.WaitCopilotOAuth(m.ctx, msg.pending)
+		if err != nil {
+			return providerMutatedMsg{action: "add", name: msg.name, err: err}
+		}
+		fields := make(map[string]string, len(msg.fields)+len(tokens))
+		for k, v := range msg.fields {
+			fields[k] = v
+		}
+		for k, v := range tokens {
+			fields[k] = v
+		}
+		err = pa.AddProvider(m.ctx, msg.name, "copilot_oauth", fields)
 		return providerMutatedMsg{action: "add", name: msg.name, err: err}
 	}
 }
@@ -400,6 +452,27 @@ func (m model) applyXAIOAuthStarted(msg xaiOAuthStartedMsg) (tea.Model, tea.Cmd)
 	return m, m.waitXAIOAuthCmd(msg)
 }
 
+func (m model) applyCopilotOAuthStarted(msg copilotOAuthStartedMsg) (tea.Model, tea.Cmd) {
+	if !m.modelPicker.open {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.modelPicker.loading = false
+		m.modelPicker.err = "Failed: " + msg.err.Error()
+		m.modelPicker.notice = ""
+		m.modelPicker.step = "add-form"
+		return m, nil
+	}
+	m.modelPicker.loading = true
+	m.modelPicker.err = ""
+	m.modelPicker.step = "oauth"
+	m.modelPicker.notice = fmt.Sprintf(
+		"Authorize GitHub Copilot in your browser\nCode: %s\nURL:  %s\nWaiting for approval…",
+		msg.pending.UserCode, msg.pending.VerificationURL,
+	)
+	return m, m.waitCopilotOAuthCmd(msg)
+}
+
 func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		if m.modelPicker.open {
@@ -517,6 +590,10 @@ func (m model) submitProviderForm() (tea.Model, tea.Cmd) {
 	if m.modelPicker.selectedType.ID == "xai_oauth" && m.xaiOAuth() != nil {
 		m.modelPicker.notice = "Requesting xAI authorization…"
 		return m, m.startXAIOAuthCmd(name, fields)
+	}
+	if m.modelPicker.selectedType.ID == "copilot_oauth" && m.copilotOAuth() != nil {
+		m.modelPicker.notice = "Requesting GitHub Copilot authorization…"
+		return m, m.startCopilotOAuthCmd(name, fields)
 	}
 	m.modelPicker.notice = "Saving " + name + "…"
 	return m, m.addProviderCmd(name, m.modelPicker.selectedType.ID, fields)

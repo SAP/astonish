@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/provider/xai"
+	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
@@ -53,6 +54,7 @@ var ProviderDisplayNames = map[string]string{
 	"sap_ai_core":   "SAP AI Core",
 	"xai":           "xAI",
 	"xai_oauth":     "xAI (OAuth)",
+	"copilot_oauth": "GitHub Copilot (OAuth)",
 }
 
 // GetProviderDisplayName returns the proper display name for a provider ID.
@@ -343,6 +345,19 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		}
 		return xai_oauth.NewProvider(clientID, accessToken, refreshToken, expiresAt, modelName, xaiOAuthRefreshCallback(cfg, instanceName)), nil
 
+	case "copilot_oauth":
+		githubToken := instance["github_token"]
+		if githubToken == "" {
+			githubToken = os.Getenv("GITHUB_COPILOT_TOKEN")
+		}
+		if githubToken == "" {
+			return nil, fmt.Errorf("Copilot OAuth requires github_token (run setup to authenticate)")
+		}
+		if modelName == "" {
+			modelName = "gpt-4o"
+		}
+		return copilot_oauth.NewProvider(githubToken, modelName), nil
+
 	case "openai_compat":
 		apiKey := instance["api_key"]
 		if apiKey == "" {
@@ -503,6 +518,16 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 		accessToken, _ = maybeRefreshXAIOAuthToken(ctx, instanceConfig, cfg, providerID, accessToken)
 		return xai_oauth.ListModels(ctx, accessToken)
 
+	case "copilot_oauth":
+		githubToken := instanceConfig["github_token"]
+		if githubToken == "" {
+			githubToken = os.Getenv("GITHUB_COPILOT_TOKEN")
+		}
+		if githubToken == "" {
+			return nil, fmt.Errorf("Copilot OAuth github_token not configured (run setup to authenticate)")
+		}
+		return copilot_oauth.ListModels(ctx, githubToken)
+
 	case "ollama":
 		baseURL := "http://localhost:11434"
 		if instanceConfig["base_url"] != "" {
@@ -642,6 +667,13 @@ func TestProviderConnection(ctx context.Context, providerType string, params map
 			return nil, fmt.Errorf("access_token is required")
 		}
 		return xai_oauth.ListModels(ctx, accessToken)
+
+	case "copilot_oauth":
+		githubToken := params["github_token"]
+		if githubToken == "" {
+			return nil, fmt.Errorf("github_token is required")
+		}
+		return copilot_oauth.ListModels(ctx, githubToken)
 
 	case "ollama":
 		baseURL := params["base_url"]

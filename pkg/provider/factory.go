@@ -373,6 +373,57 @@ func xaiOAuthRefreshCallback(cfg *config.AppConfig, instanceName string) func(st
 	}
 }
 
+// maybeRefreshXAIOAuthToken checks the stored expires_at and, if the token is
+// expired or about to expire, uses the refresh token to obtain a new access
+// token. On success it persists the new tokens via cfg.ProviderTokenRefresh and
+// returns the fresh access token. On failure it returns the original token so
+// the caller can still attempt the request (the server may accept it).
+func maybeRefreshXAIOAuthToken(ctx context.Context, instance config.ProviderConfig, cfg *config.AppConfig, instanceName, accessToken string) (string, error) {
+	refreshToken := instance["refresh_token"]
+	if refreshToken == "" {
+		return accessToken, nil // no refresh token — nothing we can do
+	}
+
+	// Parse expiration; if missing or unparseable, treat as expired to be safe.
+	var expiresAt time.Time
+	if exp := instance["expires_at"]; exp != "" {
+		expiresAt, _ = time.Parse(time.RFC3339, exp)
+	}
+	if !expiresAt.IsZero() && time.Until(expiresAt) > 60*time.Second {
+		return accessToken, nil // still valid
+	}
+
+	clientID := instance["client_id"]
+	if clientID == "" {
+		clientID = os.Getenv("XAI_OAUTH_CLIENT_ID")
+	}
+	if clientID == "" {
+		clientID = xai_oauth.DefaultClientID
+	}
+
+	tokenResp, err := xai_oauth.RefreshAccessToken(ctx, clientID, refreshToken)
+	if err != nil {
+		slog.Warn("xAI OAuth token refresh failed during model listing", "provider", instanceName, "error", err)
+		return accessToken, err
+	}
+
+	newExpiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+	// Persist the refreshed tokens so the provider instance and future calls
+	// use the new token.
+	if cfg != nil && cfg.ProviderTokenRefresh != nil {
+		newRefresh := refreshToken
+		if tokenResp.RefreshToken != "" {
+			newRefresh = tokenResp.RefreshToken
+		}
+		if err := cfg.ProviderTokenRefresh(instanceName, tokenResp.AccessToken, newRefresh, newExpiry); err != nil {
+			slog.Error("failed to persist refreshed OAuth tokens from model list", "provider", instanceName, "error", err)
+		}
+	}
+
+	return tokenResp.AccessToken, nil
+}
+
 // ListModelsForProvider fetches available models for a given provider instance.
 // This is used by the API to provide model lists to the UI.
 func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.AppConfig) ([]string, error) {
@@ -448,6 +499,8 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 		if accessToken == "" {
 			return nil, fmt.Errorf("xAI OAuth access_token not configured (run setup to authenticate)")
 		}
+		// Refresh the token if it's expired before listing models.
+		accessToken, _ = maybeRefreshXAIOAuthToken(ctx, instanceConfig, cfg, providerID, accessToken)
 		return xai_oauth.ListModels(ctx, accessToken)
 
 	case "ollama":

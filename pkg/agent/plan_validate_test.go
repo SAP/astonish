@@ -175,3 +175,43 @@ func TestGraphPlanAnnounceMessage(t *testing.T) {
 		t.Fatalf("covered verification rejected: %q", msg)
 	}
 }
+
+func TestValidateAnnouncedPlan_RequiresBehaviorPhaseForRunningSurface(t *testing.T) {
+	doc := validDoc(t)
+
+	// A running-surface phase proven by a behavior verify is acceptable.
+	ok := []PlanStepInfo{
+		validLibStep("lib"),
+		validBehaviorStep("wire-tui", "pkg/launcher/tui_code.go", "./astonish --version"),
+	}
+	if msg := ValidateAnnouncedPlan(doc, ok); msg != "" {
+		t.Fatalf("behavior-verified running-surface plan rejected: %s", msg)
+	}
+
+	// The same plan with no behavior phase must be rejected for missing the
+	// integration phase.
+	bad := []PlanStepInfo{
+		validLibStep("lib"),
+		func() PlanStepInfo {
+			s := validBehaviorStep("wire-tui", "pkg/launcher/tui_code.go", "./astonish --version")
+			s.VerifyKind = VerifyKindUnit
+			return s
+		}(),
+	}
+	msg := ValidateAnnouncedPlan(doc, bad)
+	if !strings.Contains(msg, "integration phase") {
+		t.Fatalf("expected integration-phase rejection, got %q", msg)
+	}
+}
+
+func TestValidateAnnouncedPlan_LibraryOnlyPlanNeedsNoBehaviorPhase(t *testing.T) {
+	doc := validDoc(t)
+	one := validLibStep("one")
+	two := validLibStep("two")
+	two.Files = []PlanFileChange{{Path: "pkg/agent/plan_state.go", Kind: "modify"}}
+	two.Verify = "go test ./pkg/agent/ -run TestPlanState"
+
+	if msg := ValidateAnnouncedPlan(doc, []PlanStepInfo{one, two}); msg != "" {
+		t.Fatalf("library-only all-unit plan must be accepted, got %q", msg)
+	}
+}

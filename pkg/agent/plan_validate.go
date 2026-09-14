@@ -103,6 +103,8 @@ func ValidateAnnouncedPlan(doc PlanDocumentInfo, steps []PlanStepInfo) string {
 	}
 	groupFiles := map[string][]fileRef{}
 	serialVerify := map[string]string{} // verify command → first serial step name
+	planTouchesRunningSurface := false
+	hasBehaviorPhase := false
 
 	for i, s := range steps {
 		label := stepLabel(s, i)
@@ -141,6 +143,13 @@ func ValidateAnnouncedPlan(doc PlanDocumentInfo, steps []PlanStepInfo) string {
 					deletesRunning = true
 				}
 			}
+		}
+
+		if touchesRunning {
+			planTouchesRunningSurface = true
+		}
+		if kind == VerifyKindBehavior {
+			hasBehaviorPhase = true
 		}
 
 		if kind == VerifyKindUnit && touchesRunning {
@@ -193,6 +202,13 @@ func ValidateAnnouncedPlan(doc PlanDocumentInfo, steps []PlanStepInfo) string {
 				seen[r.path] = r.step
 			}
 		}
+	}
+
+	// Completion no longer executes plan-level verification commands, so the
+	// end-to-end check has to live in a phase. A plan that touches a running
+	// surface must prove it with at least one behavior phase.
+	if planTouchesRunningSurface && !hasBehaviorPhase {
+		missing = append(missing, "integration phase: this plan touches a running surface (cmd/api/launcher/daemon/sandbox/tui/browser/web) but no phase has verify_kind=behavior. Add a final phase whose verify exercises the end-to-end outcome — completion no longer runs plan-level commands, so the integration check must be a phase")
 	}
 
 	if len(missing) == 0 {

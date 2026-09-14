@@ -273,3 +273,19 @@ func TestGraphPlanModeSystemContext_UnderstandFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanExecutionSystemContext_CompletionDoesNotRunCommands(t *testing.T) {
+	ctx := BuildPlanExecutionSystemContext("")
+	if !strings.Contains(ctx, "does not run new commands") {
+		t.Fatal("execution context must say announce_completion does not run new commands")
+	}
+}
+
+func TestGraphPlanModeSystemContext_RequiresIntegrationPhase(t *testing.T) {
+	if !strings.Contains(GraphPlanModeSystemContext, "verify_kind=behavior that exercises the end-to-end outcome") {
+		t.Fatal("graph plan mode must require a behavior phase for running surfaces")
+	}
+	if !strings.Contains(GraphPlanModeSystemContext, "is NOT executed") {
+		t.Fatal("graph plan mode must say verification is not executed")
+	}
+}

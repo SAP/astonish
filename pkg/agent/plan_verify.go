@@ -209,14 +209,17 @@ type PlanCompletionResult struct {
 }
 
 const (
-	PlanCompletionOK           = "ok"
-	PlanCompletionIncomplete   = "incomplete"
-	PlanCompletionVerifyFailed = "verify_failed"
-	PlanCompletionNoPlan       = "no_active_plan"
+	PlanCompletionOK         = "ok"
+	PlanCompletionIncomplete = "incomplete"
+	PlanCompletionNoPlan     = "no_active_plan"
 )
 
-// AnnounceCompletion runs plan-level verification and writes the Results
-// section. The plan does not leave execution mode without this.
+// AnnounceCompletion records that an approved plan is done and writes the
+// Results section. Completion is structural: every phase must already be
+// complete, and each phase's verify command ran (and was recorded) when it was
+// marked complete. This does NOT execute any command — Results aggregates the
+// evidence already stored on each phase. The plan does not leave execution mode
+// without this.
 func (c *ChatAgent) AnnounceCompletion(outcomeObserved, unverified string) PlanCompletionResult {
 	plan := c.GetActivePlan()
 	if plan == nil {
@@ -228,51 +231,31 @@ func (c *ChatAgent) AnnounceCompletion(outcomeObserved, unverified string) PlanC
 	if !plan.AllStepsComplete() {
 		return PlanCompletionResult{Code: PlanCompletionIncomplete, Message: "not every phase is complete with a passing verify — cannot celebrate yet"}
 	}
-	doc := plan.SnapshotDoc()
-	cmds := verificationCommands(doc.Verification)
-	if len(cmds) == 0 {
-		return PlanCompletionResult{Code: PlanCompletionIncomplete, Message: "plan-level verification is empty; request changes and re-announce"}
-	}
+	// Aggregate the verify evidence each phase already recorded. No command
+	// is executed here: re-running them would duplicate work the phases
+	// already proved, and a failure would strand a sealed plan.
+	_, steps := plan.SnapshotInfo()
 	var logLines []string
-	for _, cmd := range cmds {
-		exit, output, err := c.runPlanVerify(cmd)
-		line := formatPlanEvidence(exit, output)
-		if err != nil {
-			line += "; " + err.Error()
+	for _, step := range steps {
+		cmd := strings.TrimSpace(step.Verify)
+		if cmd == "" {
+			continue
 		}
-		logLines = append(logLines, "$ "+cmd+"\n"+line)
-		if err != nil || exit != 0 {
-			c.markPlanVerifyFailed()
-			return PlanCompletionResult{
-				Code:    PlanCompletionVerifyFailed,
-				Message: "end-to-end verification failed; stay in execution mode",
-				Log:     strings.Join(logLines, "\n"),
-			}
+		evidence := strings.TrimSpace(step.Evidence)
+		if evidence == "" {
+			evidence = "(no evidence recorded)"
 		}
+		logLines = append(logLines, fmt.Sprintf("%s\n$ %s\n%s", step.Name, cmd, evidence))
 	}
 	unverified = strings.TrimSpace(unverified)
 	if unverified == "" {
 		unverified = "(none stated)"
 	}
-	results := fmt.Sprintf("Outcome observed: %s\n\nVerification:\n%s\n\nUnverified: %s",
+	results := fmt.Sprintf("Outcome observed: %s\n\nPhase evidence:\n%s\n\nUnverified: %s",
 		strings.TrimSpace(outcomeObserved),
 		strings.Join(logLines, "\n"),
 		unverified)
 	plan.SetResults(results)
 	c.clearPlanVerifyFailed()
 	return PlanCompletionResult{Code: PlanCompletionOK, Log: strings.Join(logLines, "\n")}
-}
-
-func verificationCommands(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		line = strings.TrimPrefix(line, "- ")
-		line = strings.TrimPrefix(line, "* ")
-		out = append(out, line)
-	}
-	return out
 }

@@ -81,7 +81,7 @@ type AnnouncePlanArgs struct {
 	Steps        []PlanStepInput `json:"steps" jsonschema:"Ordered list of steps to complete the goal. Each step represents a distinct phase of work. Keep it to 3-7 phases; put concrete per-phase detail in the 'details' field."`
 	Context      string          `json:"context,omitempty" jsonschema:"REQUIRED design-document preamble. Structure it with these markdown sub-sections (use '## ' — they are preserved as content, not parsed as plan sections): '## Problem' (what's wrong in the user's terms), '## Root causes' (bulleted, cite files as path:line), '## Approach' (architectural decisions, not file lists), an optional fenced flow diagram (triple-backtick block) showing the end-to-end path, an optional markdown | Component | Change | table distributing the work across files, and '## Boundaries' (what stays unchanged). Aim for the richness of a short design doc. Plans without context are rejected."`
 	WhatNotToDo  string          `json:"what_not_to_do,omitempty" jsonschema:"REQUIRED scope guard listing what must NOT change during this plan. Name the specific interfaces, files, and behaviors that must remain untouched. Persisted to PLAN.md."`
-	Verification string          `json:"verification,omitempty" jsonschema:"REQUIRED end-to-end command sequence that proves the user-visible outcome after all phases complete. Must include the acceptance sequence recorded at gplan_finalize when Graph-Optimized Plan was used. Persisted to PLAN.md."`
+	Verification string          `json:"verification,omitempty" jsonschema:"REQUIRED end-to-end acceptance story that proves the user-visible outcome after all phases complete. This is narrative for the human reviewing the plan — it is NOT executed. When the plan touches a running surface, the same sequence must also exist as a phase with verify_kind=behavior. Must include the acceptance sequence recorded at gplan_finalize when Graph-Optimized Plan was used. Persisted to PLAN.md."`
 }
 
 // AnnouncePlanResult is the output of the announce_plan tool.
@@ -181,7 +181,7 @@ func NewAnnouncePlanTool() (tool.Tool, error) {
 Document-level sections (set once for the whole plan):
 - 'context': REQUIRED — plans without context are rejected. Write it as a short design doc using markdown sub-sections: '## Problem', '## Root causes' (cite files as path:line), '## Approach', an optional fenced flow diagram, an optional markdown | Component | Change | table, and '## Boundaries'. These '## ' sub-headings are preserved as content, not parsed as plan sections.
 - 'what_not_to_do': REQUIRED scope guard — name the specific interfaces, files, and behaviors that must NOT change.
-- 'verification': REQUIRED. The end-to-end command sequence that proves the user-visible outcome after all phases. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
+- 'verification': REQUIRED end-to-end acceptance story that proves the user-visible outcome after all phases complete. This is narrative for the human reviewing the plan — it is NOT executed. When the plan touches a running surface, the same sequence must also exist as a phase with verify_kind=behavior. In Graph-Optimized Plan mode this must include the 'acceptance' sequence from gplan_finalize.
 
 Make each phase complete, not a sketch. 'details' and 'files' are required:
 - 'files': list every file the phase touches, each marked 'new'/'modify'/'delete'. Include the symbol AND its callers, tests, generated code, migrations, and docs so nothing is left orphaned or unwired.
@@ -199,7 +199,7 @@ For UI changes, specify behavior per mode and per state (empty, error, populated
 Tracking progress:
 - For work you do yourself on the main thread (edit_file, shell_command, etc.), call update_plan to mark each phase 'running' when you start it and 'complete' when you are ready for the runtime to run that phase's verify. complete is rejected unless verify exits 0.
 - For delegated work, set the plan_step field on each delegate_tasks task; those phases stay running until verify passes. Sub-agent finish is not completion.
-- After every phase is complete, call announce_completion. Execution mode ends only when PLAN.md has a Results section.
+- After every phase is complete, call announce_completion. It writes ## Results from the verify evidence each phase already recorded; it does not run plan-level commands. Execution mode ends only when PLAN.md has a Results section.
 
 After a context summary, re-read PLAN.md to recover the plan and mark the next phase running.`,
 	}, announcePlan)
@@ -291,7 +291,7 @@ func announceCompletion(_ tool.Context, args AnnounceCompletionArgs) (AnnounceCo
 func NewAnnounceCompletionTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "announce_completion",
-		Description: `Record that an approved execution plan is actually done. The runtime runs the plan-level 'verification' commands; only if they all exit 0 does PLAN.md gain a Results section and execution mode end. Call this after every phase is complete with passing per-phase verify. Do not claim the plan is done in prose instead of this tool.`,
+		Description: `Record that an approved execution plan is actually done. Requires every phase to be complete — each phase's verify already ran when you marked it complete. This writes ## Results from that recorded evidence and ends execution mode; it does not run new commands. State anything you did not verify in 'unverified'. Do not claim the plan is done in prose instead of this tool.`,
 	}, announceCompletion)
 }
 

@@ -22,7 +22,7 @@ Studio chat emits the same Live Evidence block from `SystemPromptBuilder` (no co
 
 ## Plan completion (evidence)
 
-Checkboxes are not proof. `update_plan(complete)` runs the phase `verify` command; a non-zero exit marks the phase failed. Sub-agent finish is not completion. `announce_completion` runs plan-level `verification` and writes `## Results`. Execution mode ends only when `IsFullyAccepted()` (all phases complete AND Results). The Incus→Docker session (2026-09-06) is the regression story: six mega-phases marked complete while the container did not exist. GRAPH-phase allow-list is unchanged.
+Checkboxes are not proof. `update_plan(complete)` runs the phase `verify` command; a non-zero exit marks the phase failed. Sub-agent finish is not completion. `announce_completion` requires every phase complete and writes `## Results` by aggregating the verify evidence each phase already recorded — it does not run plan-level commands. When a plan touches a running surface, `ValidateAnnouncedPlan` requires a phase with `verify_kind=behavior`, so the end-to-end check is a phase rather than a separate completion exam. Execution mode ends only when `IsFullyAccepted()` (all phases complete AND Results). The Incus→Docker session (2026-09-06) is the regression story: six mega-phases marked complete while the container did not exist. GRAPH-phase allow-list is unchanged.
 
 Execution mode may inspect a **running surface** (shell, docker, `browser_navigate`, `run_drill`) even when PLAN.md already named the files. That is verification, not rediscovery. GRAPH phase stays codegraph/`find_files` only.
 

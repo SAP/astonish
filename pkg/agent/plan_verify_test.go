@@ -170,7 +170,10 @@ func TestDefaultPlanVerify_True(t *testing.T) {
 
 func TestAnnounceCompletion_RequiresAllComplete(t *testing.T) {
 	c := &ChatAgent{
-		PlanVerify: func(string) (int, string, error) { return 0, "ok", nil },
+		PlanVerify: func(cmd string) (int, string, error) {
+			t.Errorf("plan-level verification must not execute commands, got %q", cmd)
+			return 0, "", nil
+		},
 	}
 	plan := NewPlanState("goal", PlanDocumentInfo{Verification: "true"}, []PlanStepInfo{
 		{Name: "one", Verify: "true", Status: "running"},
@@ -187,10 +190,8 @@ func TestAnnounceCompletion_RequiresAllComplete(t *testing.T) {
 func TestAnnounceCompletion_WritesResults(t *testing.T) {
 	c := &ChatAgent{
 		PlanVerify: func(command string) (int, string, error) {
-			if command != "true" {
-				t.Errorf("e2e command = %q", command)
-			}
-			return 0, "ok", nil
+			t.Errorf("plan-level verification must not execute commands, got %q", command)
+			return 0, "", nil
 		},
 	}
 	plan := NewPlanState("goal", PlanDocumentInfo{Verification: "true"}, []PlanStepInfo{
@@ -212,24 +213,58 @@ func TestAnnounceCompletion_WritesResults(t *testing.T) {
 	if !strings.Contains(plan.SnapshotDoc().Results, "the helper no longer panics") {
 		t.Fatalf("results = %q", plan.SnapshotDoc().Results)
 	}
+	if !strings.Contains(plan.SnapshotDoc().Results, "Phase evidence:") {
+		t.Fatalf("results must report phase evidence, got %q", plan.SnapshotDoc().Results)
+	}
 }
 
-func TestAnnounceCompletion_E2EFailed(t *testing.T) {
+func TestAnnounceCompletion_ResultsCarryPhaseEvidence(t *testing.T) {
 	c := &ChatAgent{
-		PlanVerify: func(string) (int, string, error) { return 2, "nope", nil },
+		PlanVerify: func(cmd string) (int, string, error) {
+			t.Errorf("plan-level verification must not execute commands, got %q", cmd)
+			return 0, "", nil
+		},
 	}
-	plan := NewPlanState("goal", PlanDocumentInfo{Verification: "false"}, []PlanStepInfo{
-		{Name: "one", Verify: "true", Status: "complete"},
+	plan := NewPlanState("goal", PlanDocumentInfo{Verification: "narrative only"}, []PlanStepInfo{
+		{Name: "one", Verify: "go test ./a", Status: "complete"},
+		{Name: "two", Verify: "go test ./b", Status: "complete"},
+	})
+	plan.RecordEvidence("one", "exit 0; ok-one")
+	plan.RecordEvidence("two", "exit 0; ok-two")
+	c.SetActivePlan(plan)
+	c.MarkActivePlanApproved()
+
+	got := c.AnnounceCompletion("it works", "")
+	if got.Code != PlanCompletionOK {
+		t.Fatalf("code = %q message=%q", got.Code, got.Message)
+	}
+	results := plan.SnapshotDoc().Results
+	for _, want := range []string{"one", "two", "go test ./a", "go test ./b", "exit 0; ok-one", "exit 0; ok-two"} {
+		if !strings.Contains(results, want) {
+			t.Errorf("results missing %q; got %q", want, results)
+		}
+	}
+}
+
+func TestAnnounceCompletion_NoEvidencePlaceholder(t *testing.T) {
+	c := &ChatAgent{
+		PlanVerify: func(cmd string) (int, string, error) {
+			t.Errorf("plan-level verification must not execute commands, got %q", cmd)
+			return 0, "", nil
+		},
+	}
+	plan := NewPlanState("goal", PlanDocumentInfo{Verification: "narrative only"}, []PlanStepInfo{
+		{Name: "one", Verify: "go test ./a", Status: "complete"},
 	})
 	c.SetActivePlan(plan)
 	c.MarkActivePlanApproved()
 
-	res := c.AnnounceCompletion("claimed done", "")
-	if res.Code != PlanCompletionVerifyFailed {
-		t.Fatalf("code = %q, want verify_failed", res.Code)
+	got := c.AnnounceCompletion("it works", "")
+	if got.Code != PlanCompletionOK {
+		t.Fatalf("code = %q message=%q", got.Code, got.Message)
 	}
-	if plan.IsFullyAccepted() {
-		t.Fatal("failed e2e must not accept the plan")
+	if !strings.Contains(plan.SnapshotDoc().Results, "(no evidence recorded)") {
+		t.Fatalf("results = %q", plan.SnapshotDoc().Results)
 	}
 }
 

@@ -157,12 +157,15 @@ plan to a **per-session `PLAN.md`**.
   complete. A phase becomes `complete` only when `update_plan` runs its `verify` command and that
   command exits 0. Sub-agent `task_complete` leaves the phase `running`. Execution mode ends only
   when `IsFullyAccepted()` — every phase complete **and** `announce_completion` has written
-  `## Results`. Defended by `TestPlanState_CompleteAll`, `TestPlanState_AnnounceOnlyTurnDoesNotComplete`,
+  `## Results` from the recorded per-phase evidence. `announce_completion` executes no plan-level
+  commands. Defended by `TestPlanState_CompleteAll`, `TestPlanState_AnnounceOnlyTurnDoesNotComplete`,
   and `pkg/agent/plan_verify_test.go`.
 - **Detail preserved:** each phase requires a `details` implementation spec plus a `files` list
   (each affected file marked new/modify/delete), a testable `outcome`, a `verify` command, and
-  `verify_kind` (`unit` or `behavior`). Running surfaces require `behavior`. Plan-level
-  `verification` and `what_not_to_do` are required. Incomplete announcements are rejected with
+  `verify_kind` (`unit` or `behavior`). Running surfaces require `behavior`, and a plan that touches
+  a running surface must include at least one `verify_kind=behavior` phase — the end-to-end check is
+  a phase, not a completion exam. Plan-level `verification` is required as the narrative acceptance
+  story and is **not** executed; `what_not_to_do` is required. Incomplete announcements are rejected with
   guidance to slice by user-visible capability, not by layer. This makes the *detailed*,
   capability-shaped plan survive compaction.
 - **Format:** human-readable Markdown with GitHub-style checkboxes per phase

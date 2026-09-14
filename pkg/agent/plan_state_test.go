@@ -471,3 +471,25 @@ func TestNewPlanState_CarriesFilesAndVerify(t *testing.T) {
 		t.Errorf("outcome = %q", steps[0].outcome)
 	}
 }
+
+func TestPlanState_SetLifecyclePersists(t *testing.T) {
+	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
+		{Name: "one", Description: "first"},
+	})
+	calls := 0
+	ps.SetOnChange(func() { calls++ })
+
+	ps.SetLifecycle(PlanLifecycleApproved)
+	if calls != 1 {
+		t.Fatalf("onChange invocations = %d, want 1", calls)
+	}
+	if got := ps.SnapshotDoc().Lifecycle; got != PlanLifecycleApproved {
+		t.Fatalf("Lifecycle = %q, want %q", got, PlanLifecycleApproved)
+	}
+
+	// Unknown values normalize to empty rather than sealing the plan.
+	ps.SetLifecycle("bogus")
+	if got := ps.SnapshotDoc().Lifecycle; got != "" {
+		t.Fatalf("Lifecycle after bogus = %q, want empty", got)
+	}
+}

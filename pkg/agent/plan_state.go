@@ -157,6 +157,14 @@ func (ps *PlanState) SetResults(results string) {
 	ps.notifyChangeLocked()
 }
 
+// SetLifecycle records the plan's approval state and persists PLAN.md.
+func (ps *PlanState) SetLifecycle(lifecycle string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.doc.Lifecycle = NormalizePlanLifecycle(lifecycle)
+	ps.notifyChangeLocked()
+}
+
 // AllStepsComplete reports whether every phase is complete (not failed/pending).
 func (ps *PlanState) AllStepsComplete() bool {
 	ps.mu.Lock()

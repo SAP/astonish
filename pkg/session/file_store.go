@@ -569,18 +569,27 @@ func (s *FileStore) ArchiveAndReplaceEvents(appName, userID, sessionID string, c
 		return "", fmt.Errorf("failed to write archive transcript: %w", err)
 	}
 
+	// Events whose entire payload is a StateDelta (nil Content) carry
+	// side-channel state such as the plan lifecycle and routing decisions.
+	// The compactor's content model cannot represent them, so they would be
+	// dropped by the rewrite below. Carry them forward in their original
+	// relative order so state replayed by loadFromDisk stays complete.
+	// They are prepended because they predate the compacted summary and
+	// loadFromDisk replays StateDelta in order (last writer wins).
+	preserved := stateOnlyEvents(full)
+	newEvents := make([]*adksession.Event, 0, len(preserved)+len(compactedEvents))
+	newEvents = append(newEvents, preserved...)
+	newEvents = append(newEvents, compactedEvents...)
+
 	// Active session becomes a child of the archive and holds only compacted events.
 	if err := s.index.Update(sessionID, func(meta *SessionMeta) {
 		meta.ParentID = archiveID
-		meta.MessageCount = len(compactedEvents)
+		meta.MessageCount = len(newEvents)
 		meta.UpdatedAt = now
 	}); err != nil {
 		return "", fmt.Errorf("failed to update session parent: %w", err)
 	}
 
-	// Clone compacted events so callers cannot mutate our store later.
-	newEvents := make([]*adksession.Event, len(compactedEvents))
-	copy(newEvents, compactedEvents)
 	s.setEventsAll(sessionID, newEvents)
 
 	activePath := filepath.Join(s.baseDir, appName, userID, sessionID+".jsonl")
@@ -593,6 +602,23 @@ func (s *FileStore) ArchiveAndReplaceEvents(appName, userID, sessionID string, c
 	}
 
 	return archiveID, nil
+}
+
+// stateOnlyEvents returns the events whose entire payload is a StateDelta
+// (no Content). These cannot round-trip through the compactor's content model,
+// so ArchiveAndReplaceEvents carries them forward explicitly.
+func stateOnlyEvents(events []*adksession.Event) []*adksession.Event {
+	var out []*adksession.Event
+	for _, ev := range events {
+		if ev == nil || ev.LLMResponse.Content != nil {
+			continue
+		}
+		if len(ev.Actions.StateDelta) == 0 {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // ResolveSessionID resolves a partial session ID (prefix match) to a full ID.

@@ -3405,3 +3405,28 @@ func TestResumeSession_RealPoisonedSession(t *testing.T) {
 	}
 	t.Logf("resumed %d history entries", len(entries))
 }
+
+func TestShouldContinueApprovedPlan_FromPlanDocument(t *testing.T) {
+	dir := t.TempDir()
+	b := newFileStoreBackend(t, dir, codeUserID)
+	ctx := context.Background()
+	id := seedSession(t, b, "implement the plan")
+	path := b.planFilePath(id)
+
+	// No session-state lifecycle key and no in-memory ChatAgent approval.
+	legacy := "# Execution Plan\n\n**Goal:** Keep going\n\n## Phases\n\n- [ ] **one** — first\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must not continue when PLAN.md has no Status and session state is empty")
+	}
+
+	approved := "# Execution Plan\n\n**Goal:** Keep going\n\n## Status\n\napproved\n\n## Phases\n\n- [ ] **one** — first\n"
+	if err := os.WriteFile(path, []byte(approved), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !b.shouldContinueApprovedPlan(ctx, id, path, nil) {
+		t.Fatal("must continue when PLAN.md records an approved lifecycle")
+	}
+}

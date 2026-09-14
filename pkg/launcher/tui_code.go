@@ -1086,6 +1086,15 @@ func (b *localAgentBackend) shouldContinueApprovedPlan(ctx context.Context, sess
 	if chatAgent != nil && chatAgent.IsActivePlanApproved() {
 		return true
 	}
+	// A restarted process has no in-memory seal. PLAN.md carries the lifecycle,
+	// so prefer the document before falling back to the session-state key.
+	if data, err := os.ReadFile(planPath); err == nil {
+		if doc, _, _, perr := agent.ParsePlanDocument(string(data)); perr == nil {
+			if agent.NormalizePlanLifecycle(doc.Lifecycle) != "" {
+				return true
+			}
+		}
+	}
 	return b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved
 }
 

@@ -503,10 +503,18 @@ func (c *ChatAgent) AllowActivePlanReplacement() {
 // Step status updates via update_plan do not require this seal.
 func (c *ChatAgent) MarkActivePlanApproved() {
 	c.activePlanMu.Lock()
-	if c.activePlan != nil {
+	plan := c.activePlan
+	if plan != nil {
 		c.activePlanApproved = true
 	}
 	c.activePlanMu.Unlock()
+	// Persist the seal to PLAN.md so a restarted or compacted session can
+	// recognize this plan as approved from the document alone. Done outside
+	// activePlanMu because SetLifecycle takes the PlanState lock and invokes
+	// the persist callback.
+	if plan != nil {
+		plan.SetLifecycle(PlanLifecycleApproved)
+	}
 }
 
 // IsActivePlanApproved reports whether the in-memory plan has been sealed for
@@ -538,6 +546,18 @@ func (c *ChatAgent) RestoreApprovedPlan() error {
 	}
 	plan := NewPlanState(goal, doc, steps)
 	c.SetActivePlan(plan)
+	if NormalizePlanLifecycle(doc.Lifecycle) != "" {
+		// Document says this plan was approved — re-seal in memory without
+		// rewriting the file (the value is already on disk).
+		c.activePlanMu.Lock()
+		if c.activePlan == plan {
+			c.activePlanApproved = true
+		}
+		c.activePlanMu.Unlock()
+		return nil
+	}
+	// No lifecycle recorded (document written by an older binary): preserve
+	// the previous behavior so existing sessions keep resuming.
 	c.MarkActivePlanApproved()
 	return nil
 }

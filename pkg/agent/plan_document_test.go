@@ -868,3 +868,97 @@ func TestPlanDocument_RoundTrip_StructuredContext(t *testing.T) {
 		t.Errorf("round-trip not stable:\nfirst:\n%s\nsecond:\n%s", parsedDoc.Context, parsedDoc2.Context)
 	}
 }
+
+func TestNormalizePlanLifecycle(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"approved", PlanLifecycleApproved},
+		{" Approved ", PlanLifecycleApproved},
+		{"EXECUTING", PlanLifecycleExecuting},
+		{"completed", PlanLifecycleCompleted},
+		{"", ""},
+		{"bogus", ""},
+		{"approved-ish", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizePlanLifecycle(c.in); got != c.want {
+			t.Errorf("NormalizePlanLifecycle(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPlanDocument_LifecycleRoundTrip(t *testing.T) {
+	doc := PlanDocumentInfo{
+		Context:      "why we are doing this",
+		WhatNotToDo:  "do not touch web/",
+		Verification: "run the tests",
+		Results:      "it worked",
+		Lifecycle:    PlanLifecycleApproved,
+	}
+	steps := []planStep{{name: "one", description: "first phase", status: "running"}}
+	md := renderPlanMarkdownWithDoc("My Goal", doc, steps)
+	if !strings.Contains(md, "## Status") {
+		t.Fatalf("expected ## Status section, got:\n%s", md)
+	}
+
+	got, goal, parsed, err := ParsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("ParsePlanMarkdownFull error: %v", err)
+	}
+	if goal != "My Goal" {
+		t.Errorf("goal = %q", goal)
+	}
+	if len(parsed) != 1 || parsed[0].name != "one" {
+		t.Fatalf("phases did not round-trip: %+v", parsed)
+	}
+	if got.Lifecycle != PlanLifecycleApproved {
+		t.Errorf("Lifecycle = %q, want %q", got.Lifecycle, PlanLifecycleApproved)
+	}
+	if got.Context != doc.Context || got.WhatNotToDo != doc.WhatNotToDo ||
+		got.Verification != doc.Verification || got.Results != doc.Results {
+		t.Errorf("narrative sections altered: %+v", got)
+	}
+}
+
+func TestPlanDocument_LifecycleAbsentIsEmpty(t *testing.T) {
+	steps := []planStep{
+		{name: "explore", description: "look around", status: "complete"},
+		{name: "build", description: "make changes", status: "pending"},
+	}
+	md := RenderPlanMarkdown("My Goal", steps)
+	if strings.Contains(md, "## Status") {
+		t.Fatalf("did not expect ## Status, got:\n%s", md)
+	}
+	doc, _, parsed, err := ParsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("ParsePlanMarkdownFull error: %v", err)
+	}
+	if doc.Lifecycle != "" {
+		t.Errorf("Lifecycle = %q, want empty", doc.Lifecycle)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("parsed %d phases, want 2", len(parsed))
+	}
+}
+
+func TestPlanDocument_LifecycleDoesNotBreakNarrativeSections(t *testing.T) {
+	doc := PlanDocumentInfo{
+		Context:   "intro line\n\n## The Problem\n\ndetails here",
+		Lifecycle: PlanLifecycleApproved,
+	}
+	steps := []planStep{{name: "one", description: "first", status: "pending"}}
+	md := renderPlanMarkdownWithDoc("Goal", doc, steps)
+
+	got, _, parsed, err := ParsePlanMarkdownFull(md)
+	if err != nil {
+		t.Fatalf("ParsePlanMarkdownFull error: %v", err)
+	}
+	if got.Lifecycle != PlanLifecycleApproved {
+		t.Errorf("Lifecycle = %q", got.Lifecycle)
+	}
+	if !strings.Contains(got.Context, "The Problem") {
+		t.Errorf("sub-heading lost from Context: %q", got.Context)
+	}
+	if len(parsed) != 1 {
+		t.Fatalf("parsed %d phases, want 1", len(parsed))
+	}
+}

@@ -248,7 +248,6 @@ func scenarioCardIdentityText(card ScenarioCard) string {
 	parts = append(parts, card.Facts...)
 	parts = append(parts, card.RecommendedRecipe...)
 	parts = append(parts, card.Conditions...)
-	parts = append(parts, card.CautionsOrConditionalFailures...)
 	parts = append(parts, card.Verification...)
 	return strings.Join(parts, "\n")
 }

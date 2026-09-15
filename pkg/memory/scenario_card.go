@@ -21,25 +21,24 @@ const (
 )
 
 type ScenarioCard struct {
-	CanonicalKey                  string                   `json:"canonical_key"`
-	ScenarioID                    string                   `json:"scenario_id,omitempty"`
-	Scope                         string                   `json:"scope,omitempty"`
-	Title                         string                   `json:"title"`
-	Aliases                       []string                 `json:"aliases,omitempty"`
-	Category                      string                   `json:"category,omitempty"`
-	Facts                         []string                 `json:"facts,omitempty"`
-	RecommendedRecipe             []string                 `json:"recommended_recipe"`
-	Conditions                    []string                 `json:"conditions,omitempty"`
-	CautionsOrConditionalFailures []string                 `json:"cautions_or_conditional_failures,omitempty"`
-	Verification                  []string                 `json:"verification,omitempty"`
-	SourceMemoryIDs               []string                 `json:"source_memory_ids,omitempty"`
-	SourceSessionIDs              []string                 `json:"source_session_ids,omitempty"`
-	RelatedScenarioIDs            []string                 `json:"related_scenario_ids,omitempty"`
-	Superseded                    []ScenarioSupersededItem `json:"superseded,omitempty"`
-	Identity                      ScenarioIdentity         `json:"identity,omitempty"`
-	Status                        string                   `json:"status"`
-	Confidence                    float64                  `json:"confidence,omitempty"`
-	LastVerifiedAt                string                   `json:"last_verified_at,omitempty"`
+	CanonicalKey       string                   `json:"canonical_key"`
+	ScenarioID         string                   `json:"scenario_id,omitempty"`
+	Scope              string                   `json:"scope,omitempty"`
+	Title              string                   `json:"title"`
+	Aliases            []string                 `json:"aliases,omitempty"`
+	Category           string                   `json:"category,omitempty"`
+	Facts              []string                 `json:"facts,omitempty"`
+	RecommendedRecipe  []string                 `json:"recommended_recipe"`
+	Conditions         []string                 `json:"conditions,omitempty"`
+	Verification       []string                 `json:"verification,omitempty"`
+	SourceMemoryIDs    []string                 `json:"source_memory_ids,omitempty"`
+	SourceSessionIDs   []string                 `json:"source_session_ids,omitempty"`
+	RelatedScenarioIDs []string                 `json:"related_scenario_ids,omitempty"`
+	Superseded         []ScenarioSupersededItem `json:"superseded,omitempty"`
+	Identity           ScenarioIdentity         `json:"identity,omitempty"`
+	Status             string                   `json:"status"`
+	Confidence         float64                  `json:"confidence,omitempty"`
+	LastVerifiedAt     string                   `json:"last_verified_at,omitempty"`
 }
 
 func IsScenarioCard(result store.MemorySearchResult) bool {
@@ -102,7 +101,6 @@ func DraftScenarioCardFromMemories(key, targetScope string, memories []store.Mem
 		}
 		for _, bullet := range extractReusableBullets(m.Snippet) {
 			if cautionLine(bullet) {
-				card.CautionsOrConditionalFailures = appendUnique(card.CautionsOrConditionalFailures, softenCaution(bullet))
 				continue
 			}
 			card.RecommendedRecipe = appendUnique(card.RecommendedRecipe, bullet)
@@ -163,7 +161,6 @@ func RenderScenarioCard(card ScenarioCard) string {
 	writeSection(&b, "Recommended path", card.RecommendedRecipe)
 	writeSection(&b, "Conditions", card.Conditions)
 	writeSection(&b, "Verification", card.Verification)
-	writeSection(&b, "Cautions or conditional failures", card.CautionsOrConditionalFailures)
 	writeSection(&b, "Facts", card.Facts)
 	return strings.TrimSpace(b.String()) + "\n"
 }
@@ -226,7 +223,6 @@ func ParseScenarioCard(content string) (ScenarioCard, bool) {
 	card.RecommendedRecipe = extractMarkdownSection(body, "Recommended path")
 	card.Conditions = extractMarkdownSection(body, "Conditions")
 	card.Verification = extractMarkdownSection(body, "Verification")
-	card.CautionsOrConditionalFailures = extractMarkdownSection(body, "Cautions or conditional failures")
 	card.Facts = extractMarkdownSection(body, "Facts")
 	if card.CanonicalKey == "" {
 		card.CanonicalKey = NormalizeScenarioKey(card.Title)
@@ -259,7 +255,6 @@ func MergeScenarioCards(existing, incoming ScenarioCard) ScenarioCard {
 	merged.Facts = appendUniqueMany(merged.Facts, incoming.Facts)
 	merged.RecommendedRecipe = appendUniqueMany(merged.RecommendedRecipe, incoming.RecommendedRecipe)
 	merged.Conditions = appendUniqueMany(merged.Conditions, incoming.Conditions)
-	merged.CautionsOrConditionalFailures = appendUniqueMany(merged.CautionsOrConditionalFailures, incoming.CautionsOrConditionalFailures)
 	merged.Verification = appendUniqueMany(merged.Verification, incoming.Verification)
 	merged.SourceMemoryIDs = appendUniqueMany(merged.SourceMemoryIDs, incoming.SourceMemoryIDs)
 	merged.SourceSessionIDs = appendUniqueMany(merged.SourceSessionIDs, incoming.SourceSessionIDs)
@@ -556,7 +551,7 @@ func cautionLine(line string) bool {
 	// NOT also contain a positive resolution indicator. Lines like "do not use
 	// X, use Y instead" are operational knowledge (recipe steps), not cautions.
 	conditionalCaution := []string{
-		"did not work", "doesn't work", "does not work",
+		"did not work", "doesn't work", "does not work", "does not match",
 		"do not use", "don't use", "avoid", "not found", "does not exist",
 		"is not substituted", "are not substituted", "not substituted",
 		"wrong", "incorrect", "manual authenticate", "manually authenticate",
@@ -572,6 +567,9 @@ func cautionLine(line string) bool {
 			// If it does, this is operational knowledge, not a caution.
 			hasResolution := false
 			for _, res := range resolutionIndicators {
+				if res == "correct " && strings.Contains(lower, "incorrect ") {
+					continue
+				}
 				if strings.Contains(lower, res) {
 					hasResolution = true
 					break
@@ -582,32 +580,6 @@ func cautionLine(line string) bool {
 			}
 			// Has a resolution indicator — not a caution, it's a recipe step.
 			return false
-		}
-	}
-	return false
-}
-
-func softenCaution(line string) string {
-	line = strings.TrimSpace(line)
-	lower := strings.ToLower(line)
-	if strings.Contains(lower, "temporary") || strings.Contains(lower, "outage") || strings.Contains(lower, "timeout") || strings.Contains(lower, "503") || strings.Contains(lower, "502") {
-		return "Treat as conditional only; verify current service status before changing the path: " + line
-	}
-	return line
-}
-
-// IsEphemeralCaution returns true if a caution line is genuinely ephemeral
-// (contains always-caution markers like "timeout", "outage", "503", "502",
-// "temporary", "failed attempt"). These should never be promoted to recipe steps.
-func IsEphemeralCaution(line string) bool {
-	lower := strings.ToLower(line)
-	ephemeralMarkers := []string{
-		"caution:", "temporary", "temporarily", "outage", "timeout", "timed out",
-		"503", "502", "failed attempt", "trial and error",
-	}
-	for _, marker := range ephemeralMarkers {
-		if strings.Contains(lower, marker) {
-			return true
 		}
 	}
 	return false

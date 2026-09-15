@@ -180,13 +180,12 @@ func TestBuildMemoryHealthRecommendsExistingCardUpdate(t *testing.T) {
 
 func TestBuildMemoryHealthRecommendsCleanupForIncorporatedRawScenarioCardSources(t *testing.T) {
 	card := memory.ScenarioCard{
-		CanonicalKey:                  "proxmox-console-access",
-		Scope:                         "team",
-		Title:                         "Proxmox Console Access",
-		RecommendedRecipe:             []string{"Use the noVNC ticket endpoint."},
-		CautionsOrConditionalFailures: []string{"Temporary 503 outages should be rechecked before changing the path."},
-		Status:                        memory.ScenarioCardStatusDraft,
-		SourceMemoryIDs:               []string{"raw-1", "raw-2"},
+		CanonicalKey:      "proxmox-console-access",
+		Scope:             "team",
+		Title:             "Proxmox Console Access",
+		RecommendedRecipe: []string{"Use the noVNC ticket endpoint."},
+		Status:            memory.ScenarioCardStatusDraft,
+		SourceMemoryIDs:   []string{"raw-1", "raw-2"},
 	}
 	report := BuildMemoryMap([]store.MemorySearchResult{
 		{ID: "card-1", Snippet: memory.RenderScenarioCard(card), Category: memory.ScenarioCardCategory, Scope: "team"},

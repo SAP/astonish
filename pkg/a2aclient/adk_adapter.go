@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -89,6 +90,7 @@ func GetA2ATools(ctx context.Context, platformMode bool) []tool.Tool {
 	}
 
 	mgr := NewManager(cfg)
+	mgr.SetCredentialResolver(credentials.ResolverFromContext(ctx))
 	if err := mgr.Initialize(ctx); err != nil {
 		slog.Warn("failed to initialize A2A client manager", "error", err)
 		return nil
@@ -176,6 +178,7 @@ func GetA2AToolsFromStores(ctx context.Context, stores *store.A2AAgentStores) []
 
 	cfg := &A2AClientConfig{Agents: merged}
 	mgr := NewManager(cfg)
+	mgr.SetCredentialResolver(credentials.ResolverFromContext(ctx))
 	if err := mgr.Initialize(ctx); err != nil {
 		slog.Warn("failed to initialize A2A client manager from stores", "error", err)
 		return nil

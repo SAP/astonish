@@ -88,6 +88,42 @@ func TestHandleChatRuntimeNetworkPolicyContext_AttachesStoresAndGateway(t *testi
 	}
 }
 
+func TestWithRuntimeSandboxContextAttachesTeamTemplateLayerAndImage(t *testing.T) {
+	prevTemplateLayer := resolveRuntimeTemplateLayerChain
+	prevTemplateImage := resolveRuntimeTemplateImage
+	prevBaseLayer := resolveRuntimeBaseLayerChain
+	prevBaseImage := resolveRuntimeBaseImage
+	t.Cleanup(func() {
+		resolveRuntimeTemplateLayerChain = prevTemplateLayer
+		resolveRuntimeTemplateImage = prevTemplateImage
+		resolveRuntimeBaseLayerChain = prevBaseLayer
+		resolveRuntimeBaseImage = prevBaseImage
+	})
+	resolveRuntimeTemplateLayerChain = func(context.Context, string) []string {
+		return []string{"@base", "cloakbrowser"}
+	}
+	resolveRuntimeTemplateImage = func(context.Context, string) string {
+		return "ghcr.io/sap/browser-sandbox:test"
+	}
+	resolveRuntimeBaseLayerChain = func(context.Context) []string { return []string{"@base"} }
+	resolveRuntimeBaseImage = func(context.Context) string { return "ghcr.io/sap/base-sandbox:test" }
+
+	ctx := store.WithServices(context.Background(), &store.Services{
+		Settings: &mockTeamSettingsStore{settings: &store.TeamSettings{TemplateName: "browser-enabled"}},
+	})
+	ctx = WithRuntimeSandboxContext(ctx)
+
+	if got := store.SandboxTemplateFromContext(ctx); got != "browser-enabled" {
+		t.Fatalf("expected team template, got %q", got)
+	}
+	if got := store.SandboxLayerChainFromContext(ctx); len(got) != 2 || got[1] != "cloakbrowser" {
+		t.Fatalf("expected browser-enabled layer chain, got %v", got)
+	}
+	if got := store.SandboxImageFromContext(ctx); got != "ghcr.io/sap/browser-sandbox:test" {
+		t.Fatalf("expected browser-enabled image, got %q", got)
+	}
+}
+
 func TestFlowRuntimeSandboxContext_AttachesTeamTemplateLayerAndImage(t *testing.T) {
 	prevTemplateLayer := resolveRuntimeTemplateLayerChain
 	prevTemplateImage := resolveRuntimeTemplateImage

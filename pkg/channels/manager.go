@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -100,6 +102,11 @@ type ChannelManager struct {
 	// the execution context for inbound channel messages. When nil, the channel
 	// operates in personal mode (no team context injection).
 	platformResolver PlatformResolver
+
+	// runtimeContextEnricher applies platform-specific request context that the
+	// channel package cannot resolve itself (for example sandbox template layer
+	// chains). Endpoint-owned dispatch uses the same enrichment as Studio chat.
+	runtimeContextEnricher func(context.Context) context.Context
 }
 
 // PlatformResolver resolves an external channel identity (e.g., Telegram user ID)
@@ -245,6 +252,12 @@ func NewChannelManager(chatAgent *agent.ChatAgent, sessSvc session.Service, logg
 		m.filesystemSkills = append([]skills.Skill(nil), cfg.FilesystemSkills...)
 	}
 	return m
+}
+
+// SetRuntimeContextEnricher installs platform-specific per-request context
+// enrichment. It is called after tenant resolution and before the agent run.
+func (m *ChannelManager) SetRuntimeContextEnricher(fn func(context.Context) context.Context) {
+	m.runtimeContextEnricher = fn
 }
 
 // SetRedactor sets the credential redactor for outbound message sanitization.
@@ -632,6 +645,89 @@ func providerStoresFromContext(ctx context.Context) *store.ProviderStores {
 	}
 }
 
+func enrichA2ADispatchContext(ctx context.Context) context.Context {
+	services := store.FromContext(ctx)
+	if services == nil {
+		return ctx
+	}
+
+	if services.PersonalCredentials != nil || services.Credentials != nil {
+		ctx = store.WithCredentialStore(ctx, store.NewMergedCredentialStore(services.PersonalCredentials, services.Credentials))
+	}
+
+	stores := &store.A2AAgentStores{
+		Platform: services.PlatformA2AAgents,
+		Org:      services.A2AAgents,
+		Team:     services.TeamA2AAgents,
+	}
+	tools := a2aclient.GetA2AToolsFromStores(ctx, stores)
+	if len(tools) == 0 {
+		return ctx
+	}
+
+	ctx = store.WithA2AAgentStores(ctx, stores)
+	ctx = agent.WithRequestMCPGroups(ctx, map[string]*agent.ToolGroup{
+		"a2a": {
+			Name:        "a2a",
+			Description: "Remote A2A agent skills (invoke external agents via the A2A protocol)",
+			Tools:       tools,
+		},
+	})
+
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name())
+	}
+	sort.Strings(toolNames)
+	hint := "\n\n## A2A Agents (deferred tools)\n\nThe following remote A2A agent tools are configured. Inspect them with `describe_tools`, then invoke them with `execute_tool` using the returned reference:\n"
+	for _, name := range toolNames {
+		hint += "- `" + name + "`\n"
+	}
+	hint += "\nCall them with a `message` argument describing what you need. They connect to external AI agents via the A2A protocol.\n"
+
+	overrides := agent.PromptOverridesFromContext(ctx)
+	if overrides == nil {
+		overrides = &agent.PromptOverrides{}
+	} else {
+		copyOverrides := *overrides
+		overrides = &copyOverrides
+	}
+	overrides.SessionContext += hint
+	overrides.PinnedToolGroups = appendUniqueString(overrides.PinnedToolGroups, "a2a")
+	return agent.WithPromptOverrides(ctx, overrides)
+}
+
+func withChannelPromptOverrides(ctx context.Context, channelID, sessionContext string, pinnedGroups []string, skillIndex string) context.Context {
+	overrides := agent.PromptOverridesFromContext(ctx)
+	if overrides == nil {
+		overrides = &agent.PromptOverrides{}
+	} else {
+		clone := *overrides
+		clone.PinnedToolGroups = append([]string(nil), overrides.PinnedToolGroups...)
+		overrides = &clone
+	}
+	overrides.ChannelHints = channelHints(channelID)
+	if sessionContext != "" {
+		overrides.SessionContext += sessionContext
+	}
+	for _, group := range pinnedGroups {
+		overrides.PinnedToolGroups = appendUniqueString(overrides.PinnedToolGroups, group)
+	}
+	if skillIndex != "" {
+		overrides.SkillIndex = skillIndex
+	}
+	return agent.WithPromptOverrides(ctx, overrides)
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 func (m *ChannelManager) resolveInboundUser(ctx context.Context, msg InboundMessage) (context.Context, string, error) {
 	userID := fmt.Sprintf("channel_%s_%s", msg.ChannelID, msg.SenderID)
 	if !strings.HasPrefix(msg.ChannelID, "a2a-dispatch-") {
@@ -680,6 +776,12 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	ctx, userID, err := m.resolveInboundUser(ctx, msg)
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(msg.ChannelID, "a2a-dispatch-") {
+		ctx = enrichA2ADispatchContext(ctx)
+	}
+	if m.runtimeContextEnricher != nil {
+		ctx = m.runtimeContextEnricher(ctx)
 	}
 	appName := "astonish"
 
@@ -738,21 +840,18 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 
 	// Set channel-specific output hints and session context via context overrides
 	// (thread-safe). Run() clones the SystemPromptBuilder and applies these.
-	overrides := &agent.PromptOverrides{
-		ChannelHints: channelHints(msg.ChannelID),
-	}
+	var sessionContext string
 	if sessionCtx := m.consumeSessionContext(route.SessionKey); sessionCtx != "" {
-		overrides.SessionContext = agent.EscapeCurlyPlaceholders(sessionCtx)
+		sessionContext = agent.EscapeCurlyPlaceholders(sessionCtx)
 	}
-	if pinnedGroups := m.consumePinnedToolGroups(route.SessionKey); len(pinnedGroups) > 0 {
-		overrides.PinnedToolGroups = pinnedGroups
-	}
+	pinnedGroups := m.consumePinnedToolGroups(route.SessionKey)
+	var skillIndex string
 	// Build the full runtime cascade from the filesystem base and platform-only
 	// request stores. Personal/code mode has no SkillStores in its context.
 	if ss := store.SkillStoresFromContext(ctx); ss != nil {
-		overrides.SkillIndex = buildChannelSkillIndex(ctx, m.filesystemSkills, ss)
+		skillIndex = buildChannelSkillIndex(ctx, m.filesystemSkills, ss)
 	}
-	ctx = agent.WithPromptOverrides(ctx, overrides)
+	ctx = withChannelPromptOverrides(ctx, msg.ChannelID, sessionContext, pinnedGroups, skillIndex)
 
 	// Create ADK agent wrapper for this turn
 	adkAgent, err := adkagent.New(adkagent.Config{
@@ -806,9 +905,9 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	// Process events as they arrive. For real-time channels (Telegram, etc.),
 	// each complete LLM text turn is sent as a separate message immediately,
 	// giving the user real-time updates during multi-tool operations.
-	// For batch channels (email), only the final text turn is sent — earlier
-	// turns (like "Let me look into that...") are dropped because email
-	// recipients should get one concise reply, not a stream of intermediate steps.
+	// For batch channels (email and A2A), only the final text turn is sent — earlier
+	// turns (like "Let me look into that...") are dropped because recipients
+	// should get one concise reply, not a stream of intermediate steps.
 	// Images from tool results (e.g., browser_take_screenshot) are collected
 	// and attached to the next outbound text message.
 	var messagesSent int
@@ -819,8 +918,9 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	var pendingDocuments []DocumentAttachment
 	const maxDocumentSize = 10 * 1024 * 1024 // 10 MB limit for document attachments
 
-	// Email is a batch channel: keep only the last text turn, send once at the end.
-	isBatchChannel := msg.ChannelID == "email"
+	// Batch channels keep only the last text turn and send once at the end.
+	isBatchChannel := isBatchChannelID(msg.ChannelID)
+	progressSink := ProgressSinkFromContext(ctx)
 	var batchText string
 
 	sessionID := sess.ID() // captured for sandbox-aware file reads
@@ -898,8 +998,10 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 			continue
 		}
 
+		emitProgress(progressSink, displayText)
+
 		if isBatchChannel {
-			// Last-wins: only the final text turn matters for email.
+			// Last-wins: only the final text turn matters for batch channels.
 			// Intermediate narration ("Let me look into that...") is dropped.
 			batchText = displayText
 			continue
@@ -1265,6 +1367,16 @@ func (c *dispatchSinkChannel) Send(ctx context.Context, _ Target, msg OutboundMe
 func (c *dispatchSinkChannel) BroadcastTargets() []Target               { return nil }
 func (c *dispatchSinkChannel) SendTyping(context.Context, Target) error { return nil }
 func (c *dispatchSinkChannel) Status() ChannelStatus                    { return ChannelStatus{Connected: true} }
+
+func emitProgress(sink ProgressSink, text string) {
+	if sink != nil {
+		sink.Progress(text)
+	}
+}
+
+func isBatchChannelID(channelID string) bool {
+	return channelID == "email" || channelID == "a2a" || strings.HasPrefix(channelID, "a2a-dispatch-")
+}
 
 // getChannel returns a registered channel by ID.
 func (m *ChannelManager) getChannel(id string) Channel {

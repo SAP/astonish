@@ -98,6 +98,8 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSONRPCResult(w, req.ID, task)
+	case "message/stream":
+		streamA2AMessage(w, r, service, identity, req)
 	case "tasks/get":
 		var params a2a.GetTaskParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -141,6 +143,10 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, "Stream endpoint only supports message/stream")
 		return
 	}
+	streamA2AMessage(w, r, service, a2aIdentity(principal), req)
+}
+
+func streamA2AMessage(w http.ResponseWriter, r *http.Request, service *a2aserver.Service, identity a2aserver.Identity, req a2a.JSONRPCRequest) {
 	var params a2a.SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
@@ -153,19 +159,33 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	task, err := service.SendMessage(r.Context(), a2aIdentity(principal), params)
+
+	var writeMu sync.Mutex
+	writeResponse := func(resp a2a.JSONRPCResponse) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		data, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("[a2a] marshal stream response: %v", err)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+	emit := func(event a2a.TaskStatusUpdateEvent) {
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: event})
+	}
+
+	task, err := service.SendMessageStream(r.Context(), identity, params, emit)
 	if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
-		writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &a2a.JSONRPCError{Code: a2a.ErrCodeRateLimited, Message: "A2A active task limit reached"}})
 		return
 	}
-	resp := a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: task}
 	if err != nil {
-		resp.Result = nil
-		resp.Error = &a2a.JSONRPCError{Code: a2a.ErrCodeInternal, Message: err.Error()}
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &a2a.JSONRPCError{Code: a2a.ErrCodeInternal, Message: err.Error()}})
+		return
 	}
-	data, _ := json.Marshal(resp)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
+	writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: task})
 }
 
 func authorizedA2AService(w http.ResponseWriter, r *http.Request) (*a2aserver.Service, execution.Principal, bool) {

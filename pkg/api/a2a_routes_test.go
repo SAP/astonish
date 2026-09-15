@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,15 @@ func (a2aTestDispatcher) dispatch(ctx context.Context, _ channels.InboundMessage
 	return reply(ctx, channels.OutboundMessage{Text: "done"})
 }
 
+type a2aStreamDispatcher struct{}
+
+func (a2aStreamDispatcher) dispatch(ctx context.Context, _ channels.InboundMessage, reply func(context.Context, channels.OutboundMessage) error) error {
+	if sink := channels.ProgressSinkFromContext(ctx); sink != nil {
+		sink.Progress("activity")
+	}
+	return reply(ctx, channels.OutboundMessage{Text: "final"})
+}
+
 func setupA2ARouter(t *testing.T, principal execution.Principal, err error) *mux.Router {
 	t.Helper()
 	store := a2a.NewInMemoryTaskStore(time.Hour)
@@ -61,6 +71,53 @@ func a2aRequest(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func TestA2AHandlerStreamsMessageStream(t *testing.T) {
+	store := a2a.NewInMemoryTaskStore(time.Hour)
+	t.Cleanup(store.Close)
+	service, err := a2aserver.New(a2aserver.Config{TaskStore: store, BaseURL: "http://example.test", Dispatcher: a2aStreamDispatcher{}.dispatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetA2AService(service)
+	t.Cleanup(func() { SetA2AService(nil) })
+	router := mux.NewRouter()
+	RegisterA2ARoutes(router, &a2aTestValidator{principal: oauthA2APrincipal(a2aScope)}, nil, nil)
+
+	params, err := json.Marshal(a2a.SendMessageParams{Message: a2a.Message{Role: "user", Parts: []a2a.Part{a2a.TextPart{Text: "hello"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(a2a.JSONRPCRequest{JSONRPC: "2.0", ID: "stream", Method: "message/stream", Params: params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/a2a", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Accept", "text/event-stream")
+	router.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	frames := strings.Split(strings.TrimSpace(w.Body.String()), "\n\n")
+	if len(frames) != 4 {
+		t.Fatalf("got %d SSE frames, want 4: %s", len(frames), w.Body.String())
+	}
+	if !strings.Contains(frames[0], `"state":"working"`) {
+		t.Fatalf("first frame is not working: %s", frames[0])
+	}
+	if !strings.Contains(frames[1], `"activity"`) || !strings.Contains(frames[1], `"state":"working"`) {
+		t.Fatalf("second frame is not working activity: %s", frames[1])
+	}
+	if !strings.Contains(frames[2], `"state":"completed"`) {
+		t.Fatalf("third frame is not completed status: %s", frames[2])
+	}
+	if !strings.Contains(frames[3], `"state":"completed"`) || !strings.Contains(frames[3], `"name":"response"`) || !strings.Contains(frames[3], `"text":"final"`) {
+		t.Fatalf("final frame is not completed task with response artifact: %s", frames[3])
+	}
 }
 
 func TestA2AAgentCardHandlerIsPublic(t *testing.T) {

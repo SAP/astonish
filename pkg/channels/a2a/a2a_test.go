@@ -2,6 +2,7 @@ package a2achan
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -106,6 +107,22 @@ func TestNormalizePartsToText(t *testing.T) {
 	}
 }
 
+func TestNormalizePartsToText_KindPart(t *testing.T) {
+	var params a2a.SendMessageParams
+	if err := json.Unmarshal([]byte(`{
+		"message": {
+			"role": "user",
+			"parts": [{"kind": "text", "text": "List the devices per site."}]
+		}
+	}`), &params); err != nil {
+		t.Fatalf("unmarshal params: %v", err)
+	}
+
+	if got := NormalizePartsToText(params.Message.Parts); got != "List the devices per site." {
+		t.Fatalf("normalized text = %q, want %q", got, "List the devices per site.")
+	}
+}
+
 func TestA2AChannel_HandleGetTask_Scoping(t *testing.T) {
 	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
 	defer store.Close()
@@ -187,6 +204,54 @@ func TestA2AChannel_HandleSendMessage_Claims(t *testing.T) {
 	}
 	if task.Status.State != a2a.TaskStateCompleted {
 		t.Errorf("expected state completed, got %q", task.Status.State)
+	}
+}
+
+func TestA2AChannel_HandleSendMessage_ReturnsFinalTurn(t *testing.T) {
+	store := a2a.NewInMemoryTaskStore(1 * time.Hour)
+	defer store.Close()
+
+	ch := New(&Config{
+		TaskStore: store,
+		BaseURL:   "http://localhost:9393",
+	}, nil)
+
+	// ChannelManager.isBatchChannelID collapses A2A turns before delivery, so
+	// the synchronous handler receives one Send containing the final answer.
+	handler := func(ctx context.Context, msg channels.InboundMessage) error {
+		return ch.Send(ctx, channels.Target{ThreadID: msg.ID}, channels.OutboundMessage{Text: "final answer"})
+	}
+	if err := ch.Start(context.Background(), handler); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer ch.Stop(context.Background())
+
+	task, err := ch.HandleSendMessage(context.Background(), &a2a.A2ATokenClaims{
+		Issuer:         "https://auth.example.com",
+		UserIdentifier: "user-direct",
+	}, a2a.SendMessageParams{Message: a2a.Message{
+		Role:  "user",
+		Parts: []a2a.Part{a2a.TextPart{Text: "List the devices per site."}},
+	}})
+	if err != nil {
+		t.Fatalf("HandleSendMessage failed: %v", err)
+	}
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("state = %q, want %q", task.Status.State, a2a.TaskStateCompleted)
+	}
+	if task.Status.Message == nil || len(task.Status.Message.Parts) != 1 {
+		t.Fatalf("status message = %#v, want one text part", task.Status.Message)
+	}
+	statusText, ok := task.Status.Message.Parts[0].(a2a.TextPart)
+	if !ok || statusText.Text != "final answer" {
+		t.Fatalf("status message part = %#v, want TextPart{Text: %q}", task.Status.Message.Parts[0], "final answer")
+	}
+	if len(task.Artifacts) != 1 || len(task.Artifacts[0].Parts) != 1 {
+		t.Fatalf("artifacts = %#v, want one response artifact with one part", task.Artifacts)
+	}
+	artifactText, ok := task.Artifacts[0].Parts[0].(a2a.TextPart)
+	if !ok || artifactText.Text != "final answer" {
+		t.Fatalf("artifact part = %#v, want TextPart{Text: %q}", task.Artifacts[0].Parts[0], "final answer")
 	}
 }
 

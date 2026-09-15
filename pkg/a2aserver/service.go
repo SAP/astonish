@@ -89,14 +89,80 @@ func New(cfg Config) (*Service, error) {
 	}, nil
 }
 
+// StreamEmit receives ordered A2A task status updates during a streaming run.
+// Implementations must be safe for calls from the dispatch goroutine.
+type StreamEmit func(a2a.TaskStatusUpdateEvent)
+
+type streamProgressSink struct {
+	taskID string
+	emit   StreamEmit
+}
+
+func (s streamProgressSink) Progress(text string) {
+	if s.emit == nil {
+		return
+	}
+	s.emit(a2a.TaskStatusUpdateEvent{
+		TaskID: s.taskID,
+		Status: a2a.TaskStatus{
+			State:     a2a.TaskStateWorking,
+			Timestamp: time.Now(),
+			Message: &a2a.Message{
+				Role:  "agent",
+				Parts: []a2a.Part{a2a.TextPart{Text: text}},
+			},
+		},
+	})
+}
+
 // SendMessage creates, dispatches, and optionally waits for an A2A task.
 func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a.SendMessageParams) (*a2a.Task, error) {
 	if identity.AgentID == "" {
 		return nil, fmt.Errorf("a2a agent identity is required")
 	}
+	task, inbound, err := s.prepareTask(identity, params)
+	if err != nil {
+		return nil, err
+	}
+	if params.Configuration != nil && params.Configuration.ReturnImmediately {
+		go s.dispatchAsync(ctx, task.ID, inbound)
+		return s.store.Get(task.ID)
+	}
+	return s.dispatchAndWait(ctx, task.ID, inbound)
+}
+
+// SendMessageStream creates and dispatches an A2A task while emitting ordered
+// working, progress, and terminal status events.
+func (s *Service) SendMessageStream(ctx context.Context, identity Identity, params a2a.SendMessageParams, emit StreamEmit) (*a2a.Task, error) {
+	if identity.AgentID == "" {
+		return nil, fmt.Errorf("a2a agent identity is required")
+	}
+	task, inbound, err := s.prepareTask(identity, params)
+	if err != nil {
+		return nil, err
+	}
+	if emit != nil {
+		emit(a2a.TaskStatusUpdateEvent{
+			TaskID: task.ID,
+			Status: a2a.TaskStatus{
+				State:     a2a.TaskStateWorking,
+				Timestamp: time.Now(),
+				Message:   &params.Message,
+			},
+		})
+	}
+	ctx = channels.WithProgressSink(ctx, streamProgressSink{taskID: task.ID, emit: emit})
+	finalTask, err := s.dispatchAndWait(ctx, task.ID, inbound)
+	if finalTask != nil && emit != nil {
+		emit(a2a.TaskStatusUpdateEvent{TaskID: task.ID, Status: finalTask.Status})
+	}
+	return finalTask, err
+}
+
+func (s *Service) prepareTask(identity Identity, params a2a.SendMessageParams) (*a2a.Task, channels.InboundMessage, error) {
 	ownerKey := identity.ownerKey()
 	if !s.acquire(ownerKey) {
-		return nil, ErrActiveTaskLimit
+		return nil, channels.InboundMessage{}, ErrActiveTaskLimit
 	}
 	contextID := ""
 	if params.Configuration != nil {
@@ -119,28 +185,28 @@ func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a
 	if identity.OrgID != "" {
 		inbound.RoutingHint = &channels.RoutingHint{OrgSlug: identity.OrgID}
 	}
-	if params.Configuration != nil && params.Configuration.ReturnImmediately {
-		go s.dispatchAsync(ctx, task.ID, inbound)
-		return s.store.Get(task.ID)
-	}
-	waiter := s.register(task.ID)
-	defer s.unregister(task.ID)
+	return task, inbound, nil
+}
+
+func (s *Service) dispatchAndWait(ctx context.Context, taskID string, inbound channels.InboundMessage) (*a2a.Task, error) {
+	waiter := s.register(taskID)
+	defer s.unregister(taskID)
 	if err := s.dispatch(ctx, inbound, func(replyCtx context.Context, msg channels.OutboundMessage) error {
-		return s.reply(replyCtx, task.ID, msg)
+		return s.reply(replyCtx, taskID, msg)
 	}); err != nil {
-		s.fail(task.ID, err)
-		return s.store.Get(task.ID)
+		s.fail(taskID, err)
+		return s.store.Get(taskID)
 	}
 	select {
 	case reply := <-waiter:
-		s.complete(task.ID, reply)
+		s.complete(taskID, reply)
 	case <-ctx.Done():
-		_ = s.store.UpdateState(task.ID, a2a.TaskStateCanceled, nil)
-		s.release(task.ID)
+		_ = s.store.UpdateState(taskID, a2a.TaskStateCanceled, nil)
+		s.release(taskID)
 	case <-time.After(s.synchronousWait):
-		s.fail(task.ID, fmt.Errorf("request timed out"))
+		s.fail(taskID, fmt.Errorf("request timed out"))
 	}
-	return s.store.Get(task.ID)
+	return s.store.Get(taskID)
 }
 
 func (s *Service) acquire(agentID string) bool {

@@ -31,9 +31,6 @@ func TestScenarioCardDraftSeparatesRecommendedPathFromTransientFailures(t *testi
 	if len(card.RecommendedRecipe) != 1 {
 		t.Fatalf("RecommendedRecipe = %#v, want one efficient path", card.RecommendedRecipe)
 	}
-	if len(card.CautionsOrConditionalFailures) != 1 {
-		t.Fatalf("CautionsOrConditionalFailures = %#v, want one conditional caution", card.CautionsOrConditionalFailures)
-	}
 	if card.SourceMemoryIDs[0] != "m1" || card.SourceMemoryIDs[1] != "m2" {
 		t.Fatalf("SourceMemoryIDs = %#v", card.SourceMemoryIDs)
 	}
@@ -88,17 +85,11 @@ func TestDraftScenarioCardSeparatesCredentialFailuresFromRecommendedPath(t *test
 		Category: "infrastructure/openstack credential access",
 		Scope:    "team",
 	}})
-	// Lines with a conditional-caution marker BUT a resolution indicator should
-	// be treated as recipe steps (operational knowledge), not cautions.
-	// Only pure failure notes (no resolution) should be cautions.
+	// Pure failure notes are dropped rather than persisted.
 	for _, step := range card.RecommendedRecipe {
-		// "does NOT work ... not substituted" with no resolution indicator → should be a caution, not recipe
 		if strings.Contains(strings.ToLower(step), "does not work") && strings.Contains(strings.ToLower(step), "not substituted") {
 			t.Fatalf("pure failure note leaked into recommended path: %#v", card.RecommendedRecipe)
 		}
-	}
-	if len(card.CautionsOrConditionalFailures) < 1 {
-		t.Fatalf("CautionsOrConditionalFailures = %#v, want at least one pure failure note", card.CautionsOrConditionalFailures)
 	}
 	// The "not found — must use" line should be in recipe (has resolution indicator "use ")
 	foundNotFoundInRecipe := false
@@ -109,6 +100,50 @@ func TestDraftScenarioCardSeparatesCredentialFailuresFromRecommendedPath(t *test
 	}
 	if !foundNotFoundInRecipe {
 		t.Fatalf("operational knowledge with resolution ('not found — must use') should be in recipe, got recipe=%#v", card.RecommendedRecipe)
+	}
+}
+
+func TestDraftScenarioCardDropsBadPathCaution(t *testing.T) {
+	entry := store.MemoryEntry{
+		Category: "infrastructure/github enterprise issues",
+		Content: strings.Join([]string{
+			"- Use GET https://github.wdf.sap.corp/api/v3/issues with sap-github-bearer",
+			"- Caution: the sap-github credential does NOT work",
+		}, "\n"),
+	}
+
+	card := DraftScenarioCardFromMemoryEntry("team", entry)
+	rendered := RenderScenarioCard(card)
+	if strings.Contains(rendered, "Cautions or conditional failures") {
+		t.Fatalf("rendered card contains removed caution section: %q", rendered)
+	}
+	if strings.Contains(rendered, "does NOT work") {
+		t.Fatalf("rendered card contains bad-path knowledge: %q", rendered)
+	}
+	if !strings.Contains(rendered, "github.wdf.sap.corp") {
+		t.Fatalf("rendered card lost the working path: %q", rendered)
+	}
+}
+
+func TestRenderScenarioCardHasNoCautionSection(t *testing.T) {
+	rendered := RenderScenarioCard(ScenarioCard{
+		CanonicalKey:      "github-enterprise-issues",
+		Title:             "GitHub Enterprise issues",
+		RecommendedRecipe: []string{"Use the GitHub Enterprise issues endpoint."},
+	})
+	if strings.Contains(rendered, "Cautions or conditional failures") {
+		t.Fatalf("rendered card contains removed caution section: %q", rendered)
+	}
+}
+
+func TestScenarioCardKeepsOperationalUseInstead(t *testing.T) {
+	card := DraftScenarioCardFromMemoryEntry("team", store.MemoryEntry{
+		Category: "infrastructure/github credential",
+		Content:  "- Do not use sap-github; use sap-github-bearer instead",
+	})
+	rendered := RenderScenarioCard(card)
+	if !strings.Contains(rendered, "sap-github-bearer") {
+		t.Fatalf("rendered card lost working alternative: %q", rendered)
 	}
 }
 
@@ -472,14 +507,10 @@ func TestCautionLine_PureNegative(t *testing.T) {
 	}
 }
 
-func TestHasUsableScenarioRecipe_WithCautionOnlyContent(t *testing.T) {
-	// A card where all bullets were classified as cautions should have an
-	// empty RecommendedRecipe (only placeholder), making HasUsableScenarioRecipe false.
-	// The fix in memory_merge.go handles the promotion; this tests the gate itself.
+func TestHasUsableScenarioRecipe_WithPlaceholderOnlyContent(t *testing.T) {
 	card := ScenarioCard{
-		CanonicalKey:                 "test-card",
-		RecommendedRecipe:            []string{ScenarioCardPlaceholderRecipe},
-		CautionsOrConditionalFailures: []string{"This does not work at all"},
+		CanonicalKey:      "test-card",
+		RecommendedRecipe: []string{ScenarioCardPlaceholderRecipe},
 	}
 	if HasUsableScenarioRecipe(card) {
 		t.Fatal("card with only placeholder recipe should not be usable")
@@ -489,30 +520,5 @@ func TestHasUsableScenarioRecipe_WithCautionOnlyContent(t *testing.T) {
 	card.RecommendedRecipe = []string{"Use the /v2/api endpoint with credential X"}
 	if !HasUsableScenarioRecipe(card) {
 		t.Fatal("card with real recipe step should be usable")
-	}
-}
-
-func TestIsEphemeralCaution(t *testing.T) {
-	ephemeral := []string{
-		"Service returned 503 temporarily",
-		"Connection timed out after 30s",
-		"A temporary network outage occurred",
-		"This was a failed attempt",
-	}
-	for _, line := range ephemeral {
-		if !IsEphemeralCaution(line) {
-			t.Errorf("expected ephemeral caution: %q", line)
-		}
-	}
-
-	nonEphemeral := []string{
-		"The credential was not found in the store",
-		"This approach does not work",
-		"The configuration is incorrect",
-	}
-	for _, line := range nonEphemeral {
-		if IsEphemeralCaution(line) {
-			t.Errorf("expected non-ephemeral caution: %q", line)
-		}
 	}
 }

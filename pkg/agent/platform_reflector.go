@@ -66,7 +66,7 @@ CRITICAL: If the "ALREADY SAVED IN TEAM MEMORY" section below contains informati
 Durable knowledge includes:
 - Connection details, configuration parameters, or environment-specific information (hostnames, API base URLs, auth methods, credential names, ports)
 - Discovered access recipes: the credential name/type that worked, the service catalog type, base URL, HTTP method/path, and required safe headers/placeholders
-- Workarounds discovered after initial failures, but phrase them as conditional cautions separate from the shortest successful path
+- Workarounds that ended up WORKING — record only the final working approach, not the failed attempts before it
 - Non-obvious file paths, API endpoints, configuration patterns
 - Shell command quirks, syntax gotchas, tool-specific behaviors
 - Integration details (auth flows, required headers, API schemas, credential names)
@@ -86,7 +86,7 @@ Example: if a task discovers that Kubernetes clusters in SAP Converged Cloud QA-
 
 If you find durable knowledge worth saving, call memory_save with:
 - category: a descriptive scenario heading using "kind/topic" format (e.g., "infrastructure/Proxmox API", "tools/SSH Patterns", "workarounds/Docker DNS")
-- content: concise bullet points. Put the positive successful path first. If you include failed assumptions, prefix them as "Caution:" so the scenario-card generator keeps them out of the recommended path.
+- content: concise bullet points. Record ONLY the shortest verified successful path. If an approach failed, was temporary, or "does not work", OMIT it entirely — do NOT save cautions, warnings, or negative-path instructions. Bad paths are temporary and recoverable; saving them wrongly blocks future attempts.
 
 If there is nothing worth saving, respond with exactly: "No durable knowledge to save."
 
@@ -561,11 +561,11 @@ Rules:
 1. Group memories by operational scenario, not by every shared word. A prerequisite credential/tooling lesson may be its own card; a concrete workflow such as listing OpenStack Octavia load balancers should be its own focused card.
 2. Deduplicate: if the same fact appears in multiple entries, keep it only once.
 3. Keep each entry focused. Do not mix unrelated service endpoints into a narrow workflow card unless the scenario is explicitly service discovery.
-4. Preserve factual content, but separate positive steps from failed assumptions. Prefix failures, wrong credentials, placeholder issues, and "do not use" notes as "Caution:" so they do not become the recommended path.
+4. Keep ONLY the successful path. Drop failed assumptions, wrong-credential notes, placeholder-failure notes, and "do not use"/"does not work" lines entirely — do not carry them forward in any form.
 5. Each output entry must have a clear, descriptive category name.
 6. Content should be concise bullet points with the shortest successful path first.
 7. If memories are already well-organized (single topic, no duplicates), return them as-is.
 8. NEVER add information that wasn't in the original memories.
 9. NEVER save secret values (passwords, tokens, API keys).
 
-Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short scenario heading) and "content" (bullet-point successful path plus any Caution bullets).`
+Output format: Call consolidate_memories with an array of consolidated entries. Each entry has a "category" (short scenario heading) and "content" (bullet-point successful path only).`

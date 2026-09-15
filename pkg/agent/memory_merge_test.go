@@ -214,9 +214,7 @@ func TestSaveOrMergeWithStatus_DiscardsEmptyContent(t *testing.T) {
 	}
 }
 
-func TestSaveOrMergeWithStatus_PromotesNonEphemeralCautions(t *testing.T) {
-	// Content where ALL lines are conditional cautions (no resolution indicator)
-	// but are NOT ephemeral should be promoted to recipe and saved.
+func TestSaveOrMergeWithStatus_DiscardsNonEphemeralCautionsWithNoResolution(t *testing.T) {
 	memStore := &failingScenarioUpsertStore{}
 	merger := &MemoryMerger{}
 
@@ -230,9 +228,64 @@ func TestSaveOrMergeWithStatus_PromotesNonEphemeralCautions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveOrMerge returned error: %v", err)
 	}
-	// These are non-ephemeral cautions — they should be promoted and saved.
-	if result.Action == "discarded" {
-		t.Fatal("non-ephemeral cautions should be promoted to recipe, not discarded")
+	if result.Action != "discarded" {
+		t.Fatalf("Action = %q, want discarded", result.Action)
+	}
+	if memStore.addCalled {
+		t.Fatal("bad-path-only memory should not be stored")
+	}
+}
+
+func TestMemoryIngestionEndToEndDropsBadPaths(t *testing.T) {
+	merger := &MemoryMerger{}
+
+	mixedStore := &failingScenarioUpsertStore{}
+	result, err := merger.SaveOrMergeWithStatus(context.Background(), mixedStore, store.MemoryEntry{
+		Content: strings.Join([]string{
+			"- Use GET https://github.wdf.sap.corp/api/v3/issues with X-Auth-Token: {{CREDENTIAL:sap-github-bearer:token}}",
+			"- Caution: the sap-github credential does NOT work on api.github.com",
+		}, "\n"),
+		Category: "infrastructure/github-enterprise-issues",
+	}, mem.ScenarioCardStatusVerified)
+	if err != nil {
+		t.Fatalf("mixed SaveOrMergeWithStatus returned error: %v", err)
+	}
+	if result.Action != "created" {
+		t.Fatalf("mixed Action = %q, want created", result.Action)
+	}
+	card, ok := mem.ParseScenarioCard(mixedStore.added.Content)
+	if !ok {
+		t.Fatalf("stored content is not a scenario card: %s", mixedStore.added.Content)
+	}
+	if strings.Contains(mixedStore.added.Content, "Cautions or conditional failures") || strings.Contains(mixedStore.added.Content, "does NOT work") {
+		t.Fatalf("stored card contains bad-path content: %s", mixedStore.added.Content)
+	}
+	if !strings.Contains(strings.Join(card.RecommendedRecipe, "\n"), "github.wdf.sap.corp") {
+		t.Fatalf("stored card lost working endpoint: %#v", card.RecommendedRecipe)
+	}
+
+	badOnlyStore := &failingScenarioUpsertStore{}
+	result, err = merger.SaveOrMerge(context.Background(), badOnlyStore, store.MemoryEntry{
+		Content:  "- The default configuration is incorrect for production\n- The schema does not match the documentation",
+		Category: "configuration-failures",
+	})
+	if err != nil {
+		t.Fatalf("bad-only SaveOrMerge returned error: %v", err)
+	}
+	if result.Action != "discarded" || badOnlyStore.addCalled {
+		t.Fatalf("bad-only result = %#v addCalled=%v, want discarded without storage", result, badOnlyStore.addCalled)
+	}
+
+	alternativeStore := &failingScenarioUpsertStore{}
+	result, err = merger.SaveOrMerge(context.Background(), alternativeStore, store.MemoryEntry{
+		Content:  "- Do not use sap-github, use sap-github-bearer instead",
+		Category: "infrastructure/github-credential",
+	})
+	if err != nil {
+		t.Fatalf("working-alternative SaveOrMerge returned error: %v", err)
+	}
+	if result.Action == "discarded" || !strings.Contains(alternativeStore.added.Content, "sap-github-bearer") {
+		t.Fatalf("working alternative was not stored: result=%#v content=%q", result, alternativeStore.added.Content)
 	}
 }
 

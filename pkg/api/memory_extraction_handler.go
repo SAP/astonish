@@ -25,7 +25,7 @@ const extractionSystemPrompt = `You are a memory consolidation assistant. You re
 Rules:
 1. Group related memories by repeatable task or scenario.
 2. Keep the shortest successful path and durable conditions.
-3. Treat temporary failures, outages, and trial/error as conditional cautions only.
+3. Keep ONLY the successful path. Drop failed assumptions, wrong-credential notes, placeholder-failure notes, temporary failures, outages, trial/error, and "do not use"/"does not work" lines entirely — do not carry them forward in any form.
 4. Do not preserve raw scattered notes just because they exist.
 5. If a memory cannot be turned into a useful repeatable scenario card, omit it; the system can learn it again later.
 6. NEVER add information that wasn't in the original memories.

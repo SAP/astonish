@@ -64,32 +64,11 @@ func (mm *MemoryMerger) SaveOrMergeWithStatus(ctx context.Context, memStore stor
 		}
 	}
 	if !mem.HasUsableScenarioRecipe(card) {
-		// Fallback: if content was extracted but all classified as cautions,
-		// promote non-ephemeral cautions to recipe so the card isn't silently
-		// dropped. Operational knowledge like "do not use X, use Y" may end up
-		// here. Genuinely ephemeral cautions (timeout, outage, 503) stay out.
-		if len(card.CautionsOrConditionalFailures) > 0 {
-			var promoted []string
-			var kept []string
-			for _, c := range card.CautionsOrConditionalFailures {
-				if mem.IsEphemeralCaution(c) {
-					kept = append(kept, c)
-				} else {
-					promoted = append(promoted, c)
-				}
-			}
-			if len(promoted) > 0 {
-				card.RecommendedRecipe = append(card.RecommendedRecipe, promoted...)
-				card.CautionsOrConditionalFailures = kept
-			}
-		}
-		if !mem.HasUsableScenarioRecipe(card) {
-			slog.Info("platform reflector: discarded card with no usable recipe",
-				"component", "platform-reflector",
-				"category", entry.Category,
-				"contentSnippet", truncateForMergeLog(entry.Content, 120))
-			return MergeResult{Action: "discarded"}, nil
-		}
+		slog.Info("platform reflector: discarded card with no usable recipe",
+			"component", "platform-reflector",
+			"category", entry.Category,
+			"contentSnippet", truncateForMergeLog(entry.Content, 120))
+		return MergeResult{Action: "discarded"}, nil
 	}
 	result, err := mem.UpsertScenarioCard(ctx, memStore, card)
 	if err != nil {

@@ -86,6 +86,10 @@ func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchT
 			mcpHits = agent.FilterAccessibleToolMatches(searchCtx, mcpHits)
 			matches = agent.MergeToolMatches(matches, mcpHits)
 		}
+		// Per-request tools such as the tenant-selected Perplexity search tool are
+		// deferred through execute_tool but do not belong to an MCP group or the
+		// pre-warmed index. They must participate in discovery as well as execution.
+		matches = agent.MergeToolMatches(matches, matchingAdditionalTools(searchCtx, args.Query))
 		// Also keyword-match individual request MCP tools by name/description.
 		for _, m := range agent.ToolMatchesFromRequestMCP(searchCtx) {
 			ql := strings.ToLower(args.Query)
@@ -126,6 +130,56 @@ func SearchTools(toolIndex *agent.ToolIndex) func(ctx tool.Context, args SearchT
 	}
 }
 
+func additionalToolMatches(ctx context.Context) []agent.ToolMatch {
+	overrides := agent.PromptOverridesFromContext(ctx)
+	if overrides == nil || len(overrides.AdditionalTools) == 0 {
+		return nil
+	}
+	matches := make([]agent.ToolMatch, 0, len(overrides.AdditionalTools))
+	seen := make(map[string]bool, len(overrides.AdditionalTools))
+	for _, requestTool := range overrides.AdditionalTools {
+		if requestTool == nil || requestTool.Name() == "" || seen[requestTool.Name()] {
+			continue
+		}
+		seen[requestTool.Name()] = true
+		matches = append(matches, agent.ToolMatch{
+			ToolName:    requestTool.Name(),
+			GroupName:   "request",
+			Description: requestTool.Description(),
+			Score:       1.0,
+		})
+	}
+	return matches
+}
+
+func matchingAdditionalTools(ctx context.Context, query string) []agent.ToolMatch {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return nil
+	}
+	var matches []agent.ToolMatch
+	for _, match := range additionalToolMatches(ctx) {
+		name := strings.ToLower(match.ToolName)
+		description := strings.ToLower(match.Description)
+		if strings.Contains(name, query) || strings.Contains(description, query) ||
+			strings.Contains(query, name) || sharesSearchTerm(query, name+" "+description) {
+			matches = append(matches, match)
+		}
+	}
+	return matches
+}
+
+func sharesSearchTerm(query, candidate string) bool {
+	for _, term := range strings.FieldsFunc(query, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' '
+	}) {
+		if len(term) >= 3 && strings.Contains(candidate, term) {
+			return true
+		}
+	}
+	return false
+}
+
 // listAllTools returns every tool in the index, grouped by group name.
 // MCP tools from servers the user doesn't have access to are excluded.
 // Also merges per-request MCP groups (team servers not present in the
@@ -144,6 +198,11 @@ func listAllTools(ctx context.Context, toolIndex *agent.ToolIndex) SearchToolsRe
 	}
 	// Merge request-scoped MCP tools (team catalog) into inventory.
 	for _, m := range agent.ToolMatchesFromRequestMCP(searchCtx) {
+		groups[m.GroupName] = append(groups[m.GroupName], m)
+	}
+	// Request-scoped non-MCP tools use the same deferred bridge and belong in
+	// the complete inventory under a neutral request group.
+	for _, m := range additionalToolMatches(searchCtx) {
 		groups[m.GroupName] = append(groups[m.GroupName], m)
 	}
 

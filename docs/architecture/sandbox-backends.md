@@ -264,7 +264,7 @@ This lazy-refresh model is a deliberate safety property: a single `@base` edit c
 
 ## 4. Docker OverlayFS Backend (Local Default)
 
-Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. See `docs/architecture/sandbox.md`.
+Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. See `docs/architecture/sandbox.md`.
 
 Personal mode (`astonish studio`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 

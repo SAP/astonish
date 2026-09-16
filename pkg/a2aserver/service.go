@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/channels"
@@ -115,6 +116,35 @@ func (s streamProgressSink) Progress(text string) {
 	})
 }
 
+func (s streamProgressSink) ProgressEvent(event channels.ProgressEvent) {
+	name := humanizeToolName(event.ToolName)
+	if name == "" {
+		return
+	}
+	var text string
+	switch event.Kind {
+	case channels.ProgressToolStarted:
+		text = "Using " + name + "…"
+	case channels.ProgressToolCompleted:
+		text = name + " completed."
+	default:
+		return
+	}
+	s.Progress(text)
+}
+
+func humanizeToolName(name string) string {
+	words := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(name))
+	for i, word := range words {
+		runes := []rune(word)
+		if len(runes) > 0 {
+			runes[0] = unicode.ToUpper(runes[0])
+			words[i] = string(runes)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 // SendMessage creates, dispatches, and optionally waits for an A2A task.
 func (s *Service) SendMessage(ctx context.Context, identity Identity, params a2a.SendMessageParams) (*a2a.Task, error) {
 	if identity.AgentID == "" {
@@ -147,14 +177,15 @@ func (s *Service) SendMessageStream(ctx context.Context, identity Identity, para
 			Status: a2a.TaskStatus{
 				State:     a2a.TaskStateWorking,
 				Timestamp: time.Now(),
-				Message:   &params.Message,
 			},
 		})
 	}
 	ctx = channels.WithProgressSink(ctx, streamProgressSink{taskID: task.ID, emit: emit})
 	finalTask, err := s.dispatchAndWait(ctx, task.ID, inbound)
 	if finalTask != nil && emit != nil {
-		emit(a2a.TaskStatusUpdateEvent{TaskID: task.ID, Status: finalTask.Status})
+		status := finalTask.Status
+		status.Message = nil
+		emit(a2a.TaskStatusUpdateEvent{TaskID: task.ID, Status: status})
 	}
 	return finalTask, err
 }

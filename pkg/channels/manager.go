@@ -905,9 +905,9 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	// Process events as they arrive. For real-time channels (Telegram, etc.),
 	// each complete LLM text turn is sent as a separate message immediately,
 	// giving the user real-time updates during multi-tool operations.
-	// For batch channels (email and A2A), only the final text turn is sent — earlier
-	// turns (like "Let me look into that...") are dropped because recipients
-	// should get one concise reply, not a stream of intermediate steps.
+	// For batch channels (email and A2A), the final text turn is sent once at the
+	// end. A request-scoped progress sink can receive earlier complete turns while
+	// channels without one still produce only the final reply.
 	// Images from tool results (e.g., browser_take_screenshot) are collected
 	// and attached to the next outbound text message.
 	var messagesSent int
@@ -918,9 +918,14 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 	var pendingDocuments []DocumentAttachment
 	const maxDocumentSize = 10 * 1024 * 1024 // 10 MB limit for document attachments
 
-	// Batch channels keep only the last text turn and send once at the end.
+	// Batch channels retain the latest text turn as the final reply. When another
+	// complete turn arrives, the previous one is known to be intermediate and can
+	// be forwarded through a request-scoped progress sink (such as A2A streaming).
+	// Text attached to a tool call is structurally intermediate and is forwarded
+	// immediately. Email has no progress sink and remains a single-reply channel.
 	isBatchChannel := isBatchChannelID(msg.ChannelID)
 	progressSink := ProgressSinkFromContext(ctx)
+	progressTools := newProgressToolTracker()
 	var batchText string
 
 	sessionID := sess.ID() // captured for sandbox-aware file reads
@@ -979,9 +984,18 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 		}
 
 		// Extract user-facing text only. Skip internal parts: function
-		// calls, function responses, and chain-of-thought (Thought).
+		// responses and chain-of-thought (Thought). Track function calls so text
+		// in the same model turn can be classified as progress structurally.
 		var eventText strings.Builder
+		hasFunctionCall := false
 		for _, part := range event.LLMResponse.Content.Parts {
+			if part.FunctionCall != nil {
+				hasFunctionCall = true
+				emitToolProgress(progressSink, ProgressEvent{Kind: ProgressToolStarted, ToolName: progressTools.call(part.FunctionCall)})
+			}
+			if part.FunctionResponse != nil {
+				emitToolProgress(progressSink, ProgressEvent{Kind: ProgressToolCompleted, ToolName: progressTools.response(part.FunctionResponse)})
+			}
 			if part.Text != "" && !part.Thought && part.FunctionCall == nil && part.FunctionResponse == nil {
 				eventText.WriteString(part.Text)
 			}
@@ -989,6 +1003,9 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 
 		text := eventText.String()
 		if strings.TrimSpace(text) == "" {
+			if isBatchChannel && hasFunctionCall {
+				batchText = advanceBatchText(progressSink, batchText, "", true)
+			}
 			continue
 		}
 
@@ -998,14 +1015,12 @@ func (m *ChannelManager) handleInbound(ctx context.Context, msg InboundMessage) 
 			continue
 		}
 
-		emitProgress(progressSink, displayText)
-
 		if isBatchChannel {
-			// Last-wins: only the final text turn matters for batch channels.
-			// Intermediate narration ("Let me look into that...") is dropped.
-			batchText = displayText
+			batchText = advanceBatchText(progressSink, batchText, displayText, hasFunctionCall)
 			continue
 		}
+
+		emitProgress(progressSink, displayText)
 
 		// Streaming mode: send this turn's text as a message immediately.
 		// Attach any pending images and documents from preceding tool calls.
@@ -1367,6 +1382,25 @@ func (c *dispatchSinkChannel) Send(ctx context.Context, _ Target, msg OutboundMe
 func (c *dispatchSinkChannel) BroadcastTargets() []Target               { return nil }
 func (c *dispatchSinkChannel) SendTyping(context.Context, Target) error { return nil }
 func (c *dispatchSinkChannel) Status() ChannelStatus                    { return ChannelStatus{Connected: true} }
+
+func advanceBatchText(sink ProgressSink, pending, current string, continues bool) string {
+	if pending != "" {
+		emitProgress(sink, pending)
+	}
+	if continues {
+		if current != "" {
+			emitProgress(sink, current)
+		}
+		return ""
+	}
+	return current
+}
+
+func emitToolProgress(sink ProgressSink, event ProgressEvent) {
+	if structured, ok := sink.(StructuredProgressSink); ok && event.ToolName != "" {
+		structured.ProgressEvent(event)
+	}
+}
 
 func emitProgress(sink ProgressSink, text string) {
 	if sink != nil {

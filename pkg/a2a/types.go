@@ -361,9 +361,10 @@ type AgentProvider struct {
 
 // AgentCapabilities declares what the agent supports.
 type AgentCapabilities struct {
-	Streaming              bool `json:"streaming"`
-	PushNotifications      bool `json:"pushNotifications"`
-	StateTransitionHistory bool `json:"stateTransitionHistory"`
+	Streaming                         bool `json:"streaming"`
+	PushNotifications                 bool `json:"pushNotifications"`
+	StateTransitionHistory            bool `json:"stateTransitionHistory"`
+	SupportsAuthenticatedExtendedCard bool `json:"supportsAuthenticatedExtendedCard,omitempty"`
 }
 
 // SecurityScheme describes an authentication method (OpenAPI-style).

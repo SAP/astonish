@@ -2,9 +2,29 @@ package channels
 
 import "context"
 
+// ProgressKind identifies a safe, user-visible progress event.
+type ProgressKind string
+
+const (
+	ProgressToolStarted   ProgressKind = "tool_started"
+	ProgressToolCompleted ProgressKind = "tool_completed"
+)
+
+// ProgressEvent carries lifecycle metadata without tool arguments or results.
+type ProgressEvent struct {
+	Kind     ProgressKind
+	ToolName string
+}
+
 // ProgressSink receives redacted, user-facing progress text from an agent run.
 type ProgressSink interface {
 	Progress(text string)
+}
+
+// StructuredProgressSink additionally receives safe tool lifecycle events.
+type StructuredProgressSink interface {
+	ProgressSink
+	ProgressEvent(event ProgressEvent)
 }
 
 type progressSinkKey struct{}

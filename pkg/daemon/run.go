@@ -373,7 +373,9 @@ func Run(cfg RunConfig) error {
 		}
 
 		mgr := channels.NewChannelManager(factoryResult.ChatAgent, factoryResult.SessionService, log.Default(), channelManagerConfigFromFactoryResult(factoryResult))
-		mgr.SetRuntimeContextEnricher(api.WithRuntimeSandboxContext)
+		mgr.SetRuntimeContextEnricher(func(ctx context.Context) context.Context {
+			return api.WithChannelRuntimeContext(ctx, factoryResult.SandboxPool)
+		})
 
 		if factoryResult.CredentialStore != nil {
 			mgr.SetRedactor(factoryResult.CredentialStore.Redactor())

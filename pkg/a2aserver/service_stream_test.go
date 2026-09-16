@@ -2,12 +2,41 @@ package a2aserver
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/channels"
 )
+
+func TestSendMessageStream_EmitsToolLifecycleWithoutArgumentsOrResults(t *testing.T) {
+	var events []a2a.TaskStatusUpdateEvent
+	sink := streamProgressSink{taskID: "task-1", emit: func(event a2a.TaskStatusUpdateEvent) {
+		events = append(events, event)
+	}}
+
+	sink.ProgressEvent(channels.ProgressEvent{Kind: channels.ProgressToolStarted, ToolName: "perplexity_web_search"})
+	sink.ProgressEvent(channels.ProgressEvent{Kind: channels.ProgressToolCompleted, ToolName: "perplexity_web_search"})
+
+	if len(events) != 2 {
+		t.Fatalf("got %d lifecycle events, want 2", len(events))
+	}
+	got := []string{
+		events[0].Status.Message.Parts[0].(a2a.TextPart).Text,
+		events[1].Status.Message.Parts[0].(a2a.TextPart).Text,
+	}
+	want := []string{"Using Perplexity Web Search…", "Perplexity Web Search completed."}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("lifecycle text = %q, want %q", got, want)
+	}
+	for _, text := range got {
+		if strings.Contains(text, "query") || strings.Contains(text, "result") {
+			t.Fatalf("lifecycle text leaked tool payload: %q", text)
+		}
+	}
+}
 
 func TestSendMessageStream_EmitsWorkingProgressThenCompleted(t *testing.T) {
 	store := a2a.NewInMemoryTaskStore(time.Hour)
@@ -43,12 +72,18 @@ func TestSendMessageStream_EmitsWorkingProgressThenCompleted(t *testing.T) {
 	if events[0].Status.State != a2a.TaskStateWorking {
 		t.Fatalf("first state = %q, want working", events[0].Status.State)
 	}
+	if events[0].Status.Message != nil {
+		t.Fatalf("initial working event contains message: %+v", events[0].Status.Message)
+	}
 	progress := events[1].Status.Message.Parts[0].(a2a.TextPart).Text
 	if events[1].Status.State != a2a.TaskStateWorking || progress != "activity 1" {
 		t.Fatalf("progress event = %+v, want working/activity 1", events[1])
 	}
 	if events[2].Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("terminal state = %q, want completed", events[2].Status.State)
+	}
+	if events[2].Status.Message != nil {
+		t.Fatalf("terminal event contains duplicated response: %+v", events[2].Status.Message)
 	}
 	if task.Status.State != a2a.TaskStateCompleted || len(task.Artifacts) != 1 {
 		t.Fatalf("final task = %+v, want completed task with artifact", task)

@@ -413,7 +413,7 @@ func (db *DockerBackend) dockerRunArgs(spec sandbox.SessionSpec, cname, layerCha
 		"--privileged",
 		eqFlag("--device", "/dev/fuse"),
 		eqFlag("--volume", db.cfg.LayersDir+":"+mountLayers+layersMountOpt(spec)),
-		eqFlag("--volume", upperDir+":"+mountUppers),
+		eqFlag("--mount", "type=bind,source="+upperDir+",target="+mountUppers),
 		eqFlag("--volume", overlayVolumeName(spec.SessionID)+":"+mountOverlay),
 		eqFlag("--env", envSessionID+"="+spec.SessionID),
 		eqFlag("--env", envLayerChain+"="+layerChain),

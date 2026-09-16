@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/a2aserver"
@@ -82,9 +84,15 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	identity := a2aIdentity(principal)
 	switch req.Method {
-	case "message/send":
+	case "message/send", "SendMessage":
 		var params a2a.SendMessageParams
-		if err := json.Unmarshal(req.Params, &params); err != nil {
+		var err error
+		if req.Method == "SendMessage" {
+			params, err = decodeA2AV1SendMessageParams(req.Params)
+		} else {
+			err = json.Unmarshal(req.Params, &params)
+		}
+		if err != nil {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 			return
 		}
@@ -97,7 +105,13 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONRPCError(w, req.ID, a2a.ErrCodeInternal, err.Error())
 			return
 		}
-		writeJSONRPCResult(w, req.ID, task)
+		if req.Method == "SendMessage" {
+			writeJSONRPCResult(w, req.ID, map[string]any{"task": encodeA2AV1Task(task)})
+		} else {
+			writeJSONRPCResult(w, req.ID, task)
+		}
+	case "message/stream", "SendStreamingMessage":
+		streamA2AMessage(w, r, service, identity, req)
 	case "tasks/get":
 		var params a2a.GetTaskParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -123,6 +137,16 @@ func A2AHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCResult(w, req.ID, map[string]string{"status": "canceled"})
 	case "pushNotification/set", "pushNotification/get", "pushNotification/delete":
 		handlePushNotification(w, r, service, identity, req)
+	case "agent/getAuthenticatedExtendedCard":
+		skills, description := tenantCardSkills(r)
+		card := a2a.BuildAuthenticatedAgentCard(a2a.AgentCardConfig{
+			Name:        "Astonish",
+			Description: "AI agent platform with multi-tool capabilities",
+			BaseURL:     service.BaseURL(),
+			Version:     "1.0.0",
+			AuthMethods: []string{"bearer"},
+		}, skills, description)
+		writeJSONRPCResult(w, req.ID, card)
 	default:
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, fmt.Sprintf("Unknown method: %s", req.Method))
 	}
@@ -141,8 +165,18 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeMethodNotFound, "Stream endpoint only supports message/stream")
 		return
 	}
+	streamA2AMessage(w, r, service, a2aIdentity(principal), req)
+}
+
+func streamA2AMessage(w http.ResponseWriter, r *http.Request, service *a2aserver.Service, identity a2aserver.Identity, req a2a.JSONRPCRequest) {
 	var params a2a.SendMessageParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
+	var err error
+	if req.Method == "SendStreamingMessage" {
+		params, err = decodeA2AV1SendMessageParams(req.Params)
+	} else {
+		err = json.Unmarshal(req.Params, &params)
+	}
+	if err != nil {
 		writeJSONRPCError(w, req.ID, a2a.ErrCodeInvalidParams, "Invalid params: "+err.Error())
 		return
 	}
@@ -153,19 +187,76 @@ func A2AStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	task, err := service.SendMessage(r.Context(), a2aIdentity(principal), params)
+
+	var writeMu sync.Mutex
+	writeFrame := func(frame string) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, _ = fmt.Fprint(w, frame)
+		flusher.Flush()
+	}
+	writeResponse := func(resp a2a.JSONRPCResponse) {
+		data, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("[a2a] marshal stream response: %v", err)
+			return
+		}
+		writeFrame(fmt.Sprintf("data: %s\n\n", data))
+	}
+	stopHeartbeat := startSSEHeartbeat(r.Context(), 15*time.Second, writeFrame)
+	defer stopHeartbeat()
+	var terminal *a2a.TaskStatusUpdateEvent
+	writeStatus := func(event a2a.TaskStatusUpdateEvent, final bool) {
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: encodeA2AV1StatusUpdate(event.TaskID, "", event.Status, final)})
+	}
+	emit := func(event a2a.TaskStatusUpdateEvent) {
+		if event.Status.State.IsTerminal() {
+			terminal = &event
+			return
+		}
+		writeStatus(event, false)
+	}
+
+	task, err := service.SendMessageStream(r.Context(), identity, params, emit)
 	if errors.Is(err, a2aserver.ErrActiveTaskLimit) {
-		writeJSONRPCError(w, req.ID, a2a.ErrCodeRateLimited, "A2A active task limit reached")
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &a2a.JSONRPCError{Code: a2a.ErrCodeRateLimited, Message: "A2A active task limit reached"}})
 		return
 	}
-	resp := a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: task}
 	if err != nil {
-		resp.Result = nil
-		resp.Error = &a2a.JSONRPCError{Code: a2a.ErrCodeInternal, Message: err.Error()}
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &a2a.JSONRPCError{Code: a2a.ErrCodeInternal, Message: err.Error()}})
+		return
 	}
-	data, _ := json.Marshal(resp)
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-	flusher.Flush()
+	for i, artifact := range task.Artifacts {
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: encodeA2AV1ArtifactUpdate(task.ID, task.ContextID, artifact, i)})
+	}
+	if terminal != nil {
+		writeResponse(a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: encodeA2AV1StatusUpdate(terminal.TaskID, task.ContextID, terminal.Status, true)})
+	}
+}
+
+func startSSEHeartbeat(ctx context.Context, interval time.Duration, write func(string)) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				write(": keepalive\n\n")
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
 }
 
 func authorizedA2AService(w http.ResponseWriter, r *http.Request) (*a2aserver.Service, execution.Principal, bool) {

@@ -39,7 +39,36 @@ A2A does not implement `channels.Channel` and is not registered as a channel. Th
 | `GET /.well-known/agent-card.json` | Public | A2A discovery |
 | `POST /api/a2a` | Astonish OAuth bearer with `a2a` | JSON-RPC operations, including streaming responses |
 
-The service retains the supported A2A operations for synchronous and return-immediately message handling, task retrieval, cancellation, push-notification configuration, and streaming. Requests retain the 1 MiB body limit. SSE events are flushed as complete protocol events.
+The service retains the supported A2A operations for synchronous and return-immediately message handling, task retrieval, cancellation, push-notification configuration, and streaming. Requests retain the 1 MiB body limit.
+
+### Request-scoped capabilities
+
+Before each channel-backed A2A execution, the daemon applies the same request-scoped runtime preparation as Studio chat:
+
+- tenant MCP groups are resolved from the attached scoped stores;
+- the cascade-selected web-search tool and prompt metadata are injected into the runner;
+- request-scoped non-MCP tools, including Perplexity, participate in semantic `search_tools` results and the complete tool inventory; and
+- deferred tools remain resolved through `describe_tools` and `execute_tool`, rather than being available only at execution time.
+
+The public Agent Card remains generic. It advertises authenticated extended-card support, and `agent/getAuthenticatedExtendedCard` returns skills synthesized from the authenticated tenant's effective built-in tools, MCP integrations, and connected A2A agents.
+
+### Streaming projection
+
+Official v1 `SendMessage` responses project completed output exactly once as a response artifact. The status remains lifecycle-only, and history retains the user input without a duplicate agent-output entry.
+
+A successful SSE stream emits, in order:
+
+1. an initial content-free `working` status;
+2. intermediate user-facing model turns as ordered `working` progress statuses;
+3. safe tool lifecycle statuses containing only the tool display name and started/completed state;
+4. each result as an `artifactUpdate`; and
+5. one content-free `completed` status with `final: true`.
+
+Discovery operations retain their own identities (`search_tools` and `describe_tools`). Lifecycle events for the generic `execute_tool` wrapper use the nested tool name requested by that call and correlate completion by call ID, with ordered fallback when a provider omits IDs. Tool arguments, credentials, and tool responses are never projected into lifecycle statuses.
+
+Finality is determined at the channel event boundary: text associated with continuing tool execution is progress, while the last completed text turn is the response artifact. Model narration remains an atomic A2A message rather than token-level protocol events. The projection does not compare, buffer, or deduplicate message content, so separately emitted events remain distinct even when their text is equal. The stream does not append a redundant full-task snapshot; internal task persistence remains unchanged for legacy operations and ownership enforcement.
+
+Each real SSE event is flushed immediately. Comment-only `: keepalive` frames are emitted every 15 seconds while execution is idle so intermediaries do not treat a long tool call as a dead stream.
 
 ## Authentication and authorization
 

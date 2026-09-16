@@ -3,13 +3,18 @@ package channels
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/a2a"
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/store"
 )
@@ -51,6 +56,108 @@ type testTeamSettingsStore struct{}
 func (testTeamSettingsStore) Get(context.Context) (*store.TeamSettings, error) { return nil, nil }
 func (testTeamSettingsStore) Save(context.Context, *store.TeamSettings) error  { return nil }
 
+func TestA2ADispatchContextInjectsTenantToolsAndCredentials(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(a2a.AgentCard{
+			Name: "devices",
+			Skills: []a2a.Skill{{
+				ID:          "devices-per-site",
+				Name:        "Devices per site",
+				Description: "Lists devices grouped by site",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	teamAgents := &dispatchA2AAgentStore{agents: []store.A2AAgent{{
+		Name:           "devices",
+		URL:            server.URL,
+		CredentialName: "device-agent",
+	}}}
+	teamCreds := &dispatchCredentialStore{credentials: map[string]*store.Credential{
+		"device-agent": {Type: store.CredBearer, Token: "tenant-token"},
+	}}
+	ctx := store.WithServices(context.Background(), &store.Services{
+		TeamA2AAgents: teamAgents,
+		Credentials:   teamCreds,
+	})
+
+	ctx = enrichA2ADispatchContext(ctx)
+	if receivedAuth != "Bearer tenant-token" {
+		t.Fatalf("agent card Authorization = %q, want tenant credential", receivedAuth)
+	}
+	if got := store.CredentialStoreFromContext(ctx); got == nil {
+		t.Fatal("A2A dispatch context is missing tenant credentials")
+	}
+	stores := store.A2AAgentStoresFromContext(ctx)
+	if stores == nil || stores.Team != teamAgents {
+		t.Fatalf("A2A stores = %+v, want tenant team store", stores)
+	}
+	groups := agent.RequestMCPGroupsFromContext(ctx)
+	if groups["a2a"] == nil || len(groups["a2a"].Tools) != 1 {
+		t.Fatalf("A2A request tool group = %+v, want one device tool", groups["a2a"])
+	}
+	overrides := agent.PromptOverridesFromContext(ctx)
+	if overrides == nil || !strings.Contains(overrides.SessionContext, groups["a2a"].Tools[0].Name()) {
+		t.Fatalf("prompt overrides = %+v, want injected A2A tool name", overrides)
+	}
+	if len(overrides.PinnedToolGroups) != 1 || overrides.PinnedToolGroups[0] != "a2a" {
+		t.Fatalf("pinned groups = %v, want [a2a]", overrides.PinnedToolGroups)
+	}
+}
+
+type dispatchA2AAgentStore struct {
+	agents []store.A2AAgent
+}
+
+func (s *dispatchA2AAgentStore) List(context.Context) ([]store.A2AAgent, error) {
+	return s.agents, nil
+}
+func (s *dispatchA2AAgentStore) Get(context.Context, string) (*store.A2AAgent, error) {
+	return nil, nil
+}
+func (s *dispatchA2AAgentStore) Save(context.Context, *store.A2AAgent) error { return nil }
+func (s *dispatchA2AAgentStore) Delete(context.Context, string) error        { return nil }
+func (s *dispatchA2AAgentStore) UpdateCachedCard(context.Context, string, json.RawMessage, json.RawMessage) error {
+	return nil
+}
+
+type dispatchCredentialStore struct {
+	credentials map[string]*store.Credential
+}
+
+func (s *dispatchCredentialStore) Get(_ context.Context, name string) *store.Credential {
+	return s.credentials[name]
+}
+func (s *dispatchCredentialStore) Set(context.Context, string, *store.Credential) error {
+	return nil
+}
+func (s *dispatchCredentialStore) Remove(context.Context, string) error { return nil }
+func (s *dispatchCredentialStore) List(context.Context) map[string]store.CredentialType {
+	return nil
+}
+func (s *dispatchCredentialStore) Count(context.Context) int { return len(s.credentials) }
+func (s *dispatchCredentialStore) Resolve(_ context.Context, name string) (string, string, error) {
+	return store.ResolveCredentialHeader(name, s.credentials[name], nil)
+}
+func (s *dispatchCredentialStore) InvalidateToken(context.Context, string) {}
+func (s *dispatchCredentialStore) SetSecret(context.Context, string, string) error {
+	return nil
+}
+func (s *dispatchCredentialStore) SetSecretBatch(context.Context, map[string]string) error {
+	return nil
+}
+func (s *dispatchCredentialStore) GetSecret(context.Context, string) string { return "" }
+func (s *dispatchCredentialStore) RemoveSecret(context.Context, string) error {
+	return nil
+}
+func (s *dispatchCredentialStore) HasSecrets(context.Context) bool      { return false }
+func (s *dispatchCredentialStore) SecretCount(context.Context) int      { return 0 }
+func (s *dispatchCredentialStore) ListSecrets(context.Context) []string { return nil }
+func (s *dispatchCredentialStore) Reload(context.Context) error         { return nil }
+
 func TestProviderStoresFromContextUsesTenantServices(t *testing.T) {
 	platform := testPlatformSettingsStore{}
 	org := testOrgSettingsStore{}
@@ -88,6 +195,46 @@ func TestResolveInboundUserUsesAuthenticatedTenant(t *testing.T) {
 	}
 	if resolver.called {
 		t.Fatal("endpoint dispatch resolved a legacy channel user")
+	}
+}
+
+func TestA2ADispatchPromptOverridesSurviveChannelSetup(t *testing.T) {
+	ctx := agent.WithPromptOverrides(context.Background(), &agent.PromptOverrides{
+		SessionContext:   "device tool hint",
+		PinnedToolGroups: []string{"a2a"},
+	})
+
+	ctx = withChannelPromptOverrides(ctx, "a2a-dispatch-task", "", nil, "")
+	overrides := agent.PromptOverridesFromContext(ctx)
+	if overrides == nil {
+		t.Fatal("channel setup removed A2A prompt overrides")
+	}
+	if !strings.Contains(overrides.SessionContext, "device tool hint") {
+		t.Fatalf("session context = %q, want existing A2A tool hint", overrides.SessionContext)
+	}
+	if len(overrides.PinnedToolGroups) != 1 || overrides.PinnedToolGroups[0] != "a2a" {
+		t.Fatalf("pinned groups = %v, want [a2a]", overrides.PinnedToolGroups)
+	}
+}
+
+func TestIsBatchChannelID(t *testing.T) {
+	tests := []struct {
+		channelID string
+		want      bool
+	}{
+		{channelID: "email", want: true},
+		{channelID: "a2a", want: true},
+		{channelID: "a2a-dispatch-task-123", want: true},
+		{channelID: "telegram", want: false},
+		{channelID: "slack", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.channelID, func(t *testing.T) {
+			if got := isBatchChannelID(tt.channelID); got != tt.want {
+				t.Fatalf("isBatchChannelID(%q) = %v, want %v", tt.channelID, got, tt.want)
+			}
+		})
 	}
 }
 

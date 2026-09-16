@@ -94,22 +94,22 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		switch v := p.(type) {
 		case TextPart:
 			raw, err = json.Marshal(struct {
-				Type string `json:"type"`
+				Kind string `json:"kind"`
 				Text string `json:"text"`
-			}{Type: "text", Text: v.Text})
+			}{Kind: "text", Text: v.Text})
 		case FilePart:
 			raw, err = json.Marshal(struct {
-				Type     string `json:"type"`
+				Kind     string `json:"kind"`
 				Name     string `json:"name,omitempty"`
 				MimeType string `json:"mimeType,omitempty"`
 				URI      string `json:"uri,omitempty"`
-			}{Type: "file", Name: v.Name, MimeType: v.MimeType, URI: v.URI})
+			}{Kind: "file", Name: v.Name, MimeType: v.MimeType, URI: v.URI})
 		case DataPart:
 			raw, err = json.Marshal(struct {
-				Type     string         `json:"type"`
+				Kind     string         `json:"kind"`
 				MimeType string         `json:"mimeType,omitempty"`
 				Data     map[string]any `json:"data"`
-			}{Type: "data", MimeType: v.MimeType, Data: v.Data})
+			}{Kind: "data", MimeType: v.MimeType, Data: v.Data})
 		}
 		if err != nil {
 			return nil, err
@@ -138,12 +138,19 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.Parts = make([]Part, 0, len(raw.Parts))
 	for _, rawPart := range raw.Parts {
 		var typeHolder struct {
+			Kind string `json:"kind"`
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(rawPart, &typeHolder); err != nil {
 			return err
 		}
-		switch typeHolder.Type {
+		// A2A v1.0 uses the "kind" discriminator. Fall back to the legacy
+		// "type" field for backward compatibility with older payloads.
+		partKind := typeHolder.Kind
+		if partKind == "" {
+			partKind = typeHolder.Type
+		}
+		switch partKind {
 		case "text":
 			var p TextPart
 			if err := json.Unmarshal(rawPart, &p); err != nil {
@@ -354,9 +361,10 @@ type AgentProvider struct {
 
 // AgentCapabilities declares what the agent supports.
 type AgentCapabilities struct {
-	Streaming              bool `json:"streaming"`
-	PushNotifications      bool `json:"pushNotifications"`
-	StateTransitionHistory bool `json:"stateTransitionHistory"`
+	Streaming                         bool `json:"streaming"`
+	PushNotifications                 bool `json:"pushNotifications"`
+	StateTransitionHistory            bool `json:"stateTransitionHistory"`
+	SupportsAuthenticatedExtendedCard bool `json:"supportsAuthenticatedExtendedCard,omitempty"`
 }
 
 // SecurityScheme describes an authentication method (OpenAPI-style).

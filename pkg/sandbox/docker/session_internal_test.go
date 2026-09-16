@@ -60,6 +60,32 @@ func TestDockerRunArgs_OverlayContract(t *testing.T) {
 	assertWrapperSafeCLI(t, args, db.cfg.SandboxImage)
 }
 
+func TestDockerRunArgs_A2ASessionIDUsesStructuredUpperMount(t *testing.T) {
+	db := &DockerBackend{cfg: Config{
+		LayersDir:    "/tmp/layers",
+		UppersDir:    "/tmp/uppers",
+		SandboxImage: "ghcr.io/sap/astonish-sandbox-base:latest",
+	}}
+	spec := sandbox.SessionSpec{
+		SessionID: "a2a:direct:ast_client:context-id",
+		Type:      sandbox.SessionTypeChat,
+	}
+	upperDir := db.upperPath(spec.SessionID)
+	args := db.dockerRunArgs(spec, containerName(spec.SessionID), "seed", upperDir)
+
+	shortMount := "--volume=" + upperDir + ":" + mountUppers
+	structuredMount := "--mount=type=bind,source=" + upperDir + ",target=" + mountUppers
+	for _, arg := range args {
+		if arg == shortMount {
+			t.Fatalf("A2A session ID must not use ambiguous short volume syntax: %q", arg)
+		}
+		if arg == structuredMount {
+			return
+		}
+	}
+	t.Fatalf("docker run args missing structured upper bind mount %q\n%s", structuredMount, strings.Join(args, "\n"))
+}
+
 func TestSeedCreateArgs_WrapperSafe(t *testing.T) {
 	image := "ghcr.io/sap/astonish-sandbox-base:latest"
 	args := seedCreateArgs("astonish-seed-base", image)

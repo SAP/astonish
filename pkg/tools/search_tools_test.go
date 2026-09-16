@@ -1310,6 +1310,59 @@ func testToolIndex(t *testing.T) *agent.ToolIndex {
 	return idx
 }
 
+func TestSearchTools_RequestScopedAdditionalTool(t *testing.T) {
+	requestTool := searchToolsMockTool{
+		name: "perplexity_web_search",
+		desc: "Search the live web using Perplexity",
+	}
+	ctx := agent.WithPromptOverrides(context.Background(), &agent.PromptOverrides{
+		AdditionalTools: []tool.Tool{requestTool},
+	})
+	fn := SearchTools(testToolIndex(t))
+
+	result, err := fn(&mockToolCtx{Context: ctx}, SearchToolsArgs{
+		Query:      "latest web news search",
+		MaxResults: 10,
+	})
+	if err != nil {
+		t.Fatalf("SearchTools: %v", err)
+	}
+	for _, match := range result.Matches {
+		if match.ToolName == requestTool.Name() {
+			if match.GroupName != "request" {
+				t.Fatalf("request tool group = %q, want request", match.GroupName)
+			}
+			if !strings.Contains(match.Access, "describe_tools") || !strings.Contains(match.Access, "execute_tool") {
+				t.Fatalf("request tool access = %q, want progressive bridge guidance", match.Access)
+			}
+			return
+		}
+	}
+	t.Fatalf("request tool %q missing from matches: %#v", requestTool.Name(), result.Matches)
+}
+
+func TestSearchTools_RequestScopedAdditionalToolListedInInventory(t *testing.T) {
+	requestTool := searchToolsMockTool{
+		name: "perplexity_web_search",
+		desc: "Search the live web using Perplexity",
+	}
+	ctx := agent.WithPromptOverrides(context.Background(), &agent.PromptOverrides{
+		AdditionalTools: []tool.Tool{requestTool},
+	})
+	fn := SearchTools(testToolIndex(t))
+
+	result, err := fn(&mockToolCtx{Context: ctx}, SearchToolsArgs{Query: "*"})
+	if err != nil {
+		t.Fatalf("SearchTools: %v", err)
+	}
+	for _, match := range result.Matches {
+		if match.ToolName == requestTool.Name() {
+			return
+		}
+	}
+	t.Fatalf("request tool %q missing from inventory: %#v", requestTool.Name(), result.Matches)
+}
+
 func TestSearchTools_EmptyQuery(t *testing.T) {
 	idx := testToolIndex(t)
 	fn := SearchTools(idx)
@@ -1473,4 +1526,3 @@ func TestSearchTools_ListAllVariants(t *testing.T) {
 		}
 	}
 }
-

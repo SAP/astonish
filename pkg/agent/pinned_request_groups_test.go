@@ -77,6 +77,29 @@ func TestProgressiveToolBridge_RequestScopedExecutionAndDisabledCheck(t *testing
 	}
 }
 
+func TestProgressiveToolBridge_RequestScopedAdditionalTool(t *testing.T) {
+	requestTool, err := functiontool.New(functiontool.Config{Name: "perplexity_web_search", Description: "Search live news"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+		return map[string]any{"query": args["query"]}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithPromptOverrides(context.Background(), &PromptOverrides{
+		AdditionalTools: []tool.Tool{requestTool},
+	})
+	bridge, err := NewProgressiveToolBridge(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := bridge[1].(runnableDeferredTool)
+	result, err := runner.Run(&contextToolContext{minimalReadonlyContext{Context: ctx}}, map[string]any{
+		"name": "perplexity_web_search", "arguments": map[string]any{"query": "Apple news"},
+	})
+	if err != nil || result["query"] != "Apple news" {
+		t.Fatalf("execute request additional tool = %#v, %v", result, err)
+	}
+}
+
 func TestRequestGroupsMergeAndRejectAmbiguousBareNames(t *testing.T) {
 	mcpTool, err := functiontool.New(functiontool.Config{Name: "shared", Description: "mcp"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
 		return map[string]any{"source": "mcp"}, nil

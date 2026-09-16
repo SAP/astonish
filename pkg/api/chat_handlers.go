@@ -2046,45 +2046,7 @@ func applyPerRequestWebSearch(runner *ChatRunner, _ *agent.ChatAgent, appCfg *co
 	if runner == nil || appCfg == nil {
 		return
 	}
-
-	searchOK, searchServer, searchTool := IsWebSearchConfiguredWith(appCfg)
-	extractOK, extractServer, extractTool := IsWebExtractConfiguredWith(appCfg)
-
-	searchName := ""
-	searchAvailable := false
-	if searchOK && searchTool != "" {
-		searchTool = strings.ReplaceAll(searchTool, "-", "_")
-		if searchServer == "perplexity" {
-			if appCfg.PerplexityWebSearch.Provider != "" && appCfg.PerplexityWebSearch.Model != "" {
-				searchAvailable = true
-				searchName = searchTool
-			}
-		} else if searchServer != "" {
-			// MCP standard web search (Tavily/Brave/Firecrawl): advertise when
-			// selected. Tool presence is handled by MCP merge/filter + ToolIndex.
-			searchAvailable = true
-			searchName = searchTool
-		}
-	}
-
-	extractName := ""
-	extractAvailable := false
-	if extractOK && extractTool != "" {
-		extractAvailable = true
-		extractName = strings.ReplaceAll(extractTool, "-", "_")
-		_ = extractServer
-	}
-
-	runner.InjectWebSearchPrompt(searchAvailable, searchName, extractAvailable, extractName)
-
-	// Perplexity is request-scoped because the singleton serves multiple tenants.
-	if searchAvailable && searchServer == "perplexity" {
-		if t, err := tools.NewPerplexityWebSearchTool(appCfg, provider.GetProvider); err != nil {
-			slog.Warn("failed to create request-scoped perplexity_web_search tool", "error", err)
-		} else {
-			runner.InjectRequestTools(t)
-		}
-	}
+	runner.ctx = withPerRequestWebSearchContext(runner.ctx, appCfg)
 }
 
 // resolveSessionEffectiveModel returns the effective provider/model for a

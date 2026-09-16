@@ -1,12 +1,27 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/oauthserver"
 )
+
+func servesA2A(mode string) bool {
+	return mode != config.DaemonModeWorker
+}
+
+func a2aServiceBaseURL(appCfg *config.AppConfig, port int) string {
+	if appCfg != nil {
+		issuer := appCfg.Storage.Auth.OAuthServer.EffectiveIssuer(port)
+		if issuer != "" {
+			return strings.TrimRight(issuer, "/")
+		}
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
 
 // newOAuthServerRuntimeConfig applies documented issuer/resource defaults so
 // the built-in authorization server can start when oauth_server.issuer is

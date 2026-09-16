@@ -64,6 +64,9 @@ func effectiveMCPSourceNames(r *http.Request, services *store.Services) map[stri
 	if services == nil {
 		return names
 	}
+	// Stores are ordered from broadest to narrowest scope. Later scopes override
+	// earlier ones, so a disabled team entry suppresses an enabled org/platform
+	// entry with the same name. MCP server names are unique within each store.
 	for _, serverStore := range []store.MCPServerStore{
 		services.PlatformMCPServers,
 		services.MCPServers,

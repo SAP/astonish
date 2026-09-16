@@ -91,7 +91,8 @@ func New(cfg Config) (*Service, error) {
 }
 
 // StreamEmit receives ordered A2A task status updates during a streaming run.
-// Implementations must be safe for calls from the dispatch goroutine.
+// Implementations must serialize concurrent calls from dispatch and progress
+// goroutines before writing to the transport.
 type StreamEmit func(a2a.TaskStatusUpdateEvent)
 
 type streamProgressSink struct {

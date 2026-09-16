@@ -24,25 +24,80 @@ func decodeA2AV1SendMessageParams(data json.RawMessage) (a2a.SendMessageParams, 
 	}
 	message := a2a.Message{Role: normalizeA2AV1Role(wire.Message.Role), Metadata: wire.Message.Metadata}
 	for _, rawPart := range wire.Message.Parts {
-		var part struct {
-			Kind      string         `json:"kind"`
-			Text      string         `json:"text"`
-			Data      map[string]any `json:"data"`
-			MediaType string         `json:"mediaType"`
+		part, err := decodeA2AV1Part(rawPart)
+		if err != nil {
+			return a2a.SendMessageParams{}, err
 		}
-		if err := json.Unmarshal(rawPart, &part); err != nil {
-			return a2a.SendMessageParams{}, fmt.Errorf("invalid message part: %w", err)
-		}
-		switch {
-		case part.Kind == "text" || part.Text != "":
-			message.Parts = append(message.Parts, a2a.TextPart{Text: part.Text})
-		case part.Kind == "data" || part.Data != nil:
-			message.Parts = append(message.Parts, a2a.DataPart{MimeType: part.MediaType, Data: part.Data})
-		default:
-			return a2a.SendMessageParams{}, fmt.Errorf("unsupported message part")
-		}
+		message.Parts = append(message.Parts, part)
 	}
 	return a2a.SendMessageParams{Message: message, Configuration: wire.Configuration}, nil
+}
+
+func decodeA2AV1Part(rawPart json.RawMessage) (a2a.Part, error) {
+	var part struct {
+		Kind      string          `json:"kind"`
+		Text      *string         `json:"text"`
+		Data      json.RawMessage `json:"data"`
+		MediaType string          `json:"mediaType"`
+		File      *struct {
+			Name     string `json:"name"`
+			MimeType string `json:"mimeType"`
+			URI      string `json:"uri"`
+			Bytes    []byte `json:"bytes"`
+		} `json:"file"`
+	}
+	if err := json.Unmarshal(rawPart, &part); err != nil {
+		return nil, fmt.Errorf("invalid message part: %w", err)
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(part.Kind))
+	if kind == "" {
+		present := 0
+		if part.Text != nil {
+			kind = "text"
+			present++
+		}
+		if part.Data != nil {
+			kind = "data"
+			present++
+		}
+		if part.File != nil {
+			kind = "file"
+			present++
+		}
+		if present != 1 {
+			return nil, fmt.Errorf("message part without kind must contain exactly one of text, data, or file")
+		}
+	}
+
+	switch kind {
+	case "text":
+		if part.Text == nil {
+			return nil, fmt.Errorf("text message part is missing text")
+		}
+		return a2a.TextPart{Text: *part.Text}, nil
+	case "data":
+		if part.Data == nil {
+			return nil, fmt.Errorf("data message part is missing data")
+		}
+		var value map[string]any
+		if err := json.Unmarshal(part.Data, &value); err != nil {
+			return nil, fmt.Errorf("invalid data message part: %w", err)
+		}
+		return a2a.DataPart{MimeType: part.MediaType, Data: value}, nil
+	case "file":
+		if part.File == nil {
+			return nil, fmt.Errorf("file message part is missing file")
+		}
+		return a2a.FilePart{
+			Name:     part.File.Name,
+			MimeType: part.File.MimeType,
+			URI:      part.File.URI,
+			Bytes:    part.File.Bytes,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported message part kind %q", part.Kind)
+	}
 }
 
 func normalizeA2AV1Role(role string) string {
@@ -155,13 +210,16 @@ func encodeA2AV1ArtifactUpdate(taskID, contextID string, artifact a2a.Artifact, 
 }
 
 func encodeA2AV1Message(message a2a.Message, messageID string) map[string]any {
-	return map[string]any{
+	result := map[string]any{
 		"kind":      "message",
 		"messageId": messageID,
 		"role":      encodeA2AV1Role(message.Role),
 		"parts":     encodeA2AV1Parts(message.Parts),
-		"metadata":  message.Metadata,
 	}
+	if message.Metadata != nil {
+		result["metadata"] = message.Metadata
+	}
+	return result
 }
 
 func encodeA2AV1Parts(parts []a2a.Part) []map[string]any {

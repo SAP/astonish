@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -406,6 +407,28 @@ func TestSubstituteShellCommand_DollarSign(t *testing.T) {
 	exportPart := parts[0]
 	if !strings.Contains(exportPart, "'46898dfe-secret$4xghIXJReKKDiYvjki0bqtacT0SzRatkuCcyns-qvkA='") {
 		t.Errorf("expected single-quoted secret value in export, got:\n%s", exportPart)
+	}
+}
+
+func TestSubstituteShellCommand_PreservesFullBearerTokenAtExecution(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzABCD"
+	if err := store.Set("sap-github", &Credential{Type: CredBearer, Token: token}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	command := `test 'Authorization: Bearer {{CREDENTIAL:sap-github:token}}' = "Authorization: Bearer ` + token + `"`
+	resolved := SubstituteShellCommand(command, store)
+	if strings.Contains(resolved, "{{CREDENTIAL:") {
+		t.Fatalf("placeholder was not resolved: %s", resolved)
+	}
+	if err := exec.Command("sh", "-c", resolved).Run(); err != nil {
+		t.Fatalf("shell did not receive the complete bearer token: %v", err)
 	}
 }
 

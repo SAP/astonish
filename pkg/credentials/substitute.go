@@ -114,6 +114,11 @@ func SubstitutePlaceholders(text string, resolver CredentialResolver) string {
 	})
 }
 
+type shellResolvedCredential struct {
+	envVar string
+	value  string
+}
+
 // SubstituteShellCommand replaces credential placeholders in a shell command
 // string using environment variable injection. Instead of inlining secret values
 // directly (which is unsafe because characters like $, `, !, etc. are interpreted
@@ -134,12 +139,8 @@ func SubstituteShellCommand(command string, resolver CredentialResolver) string 
 	command = normalizeCredentialPlaceholderText(command)
 
 	// Find all unique placeholders and resolve them.
-	type resolvedCred struct {
-		envVar string
-		value  string
-	}
-	seen := make(map[string]*resolvedCred) // placeholder → resolved info
-	var envVars []resolvedCred
+	seen := make(map[string]*shellResolvedCredential) // placeholder → resolved info
+	var envVars []shellResolvedCredential
 	counter := 0
 
 	for _, match := range credentialPlaceholderRe.FindAllString(command, -1) {
@@ -158,7 +159,7 @@ func SubstituteShellCommand(command string, resolver CredentialResolver) string 
 		}
 		envName := fmt.Sprintf("__ASTONISH_CRED_%d", counter)
 		counter++
-		rc := resolvedCred{envVar: envName, value: value}
+		rc := shellResolvedCredential{envVar: envName, value: value}
 		seen[match] = &rc
 		envVars = append(envVars, rc)
 	}
@@ -167,11 +168,10 @@ func SubstituteShellCommand(command string, resolver CredentialResolver) string 
 		return command
 	}
 
-	// Replace placeholders in the command with env var references.
-	result := command
-	for placeholder, rc := range seen {
-		result = strings.ReplaceAll(result, placeholder, "${"+rc.envVar+"}")
-	}
+	// Replace placeholders with env var references. A placeholder inside a
+	// single-quoted shell string must temporarily leave that quote context;
+	// otherwise the shell treats ${VAR} literally instead of expanding it.
+	result := replaceShellCredentialPlaceholders(command, seen)
 
 	// Prepend export statements with single-quoted values (safe from expansion).
 	var prefix strings.Builder
@@ -184,6 +184,60 @@ func SubstituteShellCommand(command string, resolver CredentialResolver) string 
 	}
 
 	return prefix.String() + result
+}
+
+func replaceShellCredentialPlaceholders(command string, seen map[string]*shellResolvedCredential) string {
+	matches := credentialPlaceholderRe.FindAllStringIndex(command, -1)
+	if len(matches) == 0 {
+		return command
+	}
+
+	var result strings.Builder
+	result.Grow(len(command))
+	last := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+	for _, loc := range matches {
+		for _, ch := range command[last:loc[0]] {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' && !inSingleQuote {
+				escaped = true
+				continue
+			}
+			switch ch {
+			case '\'':
+				if !inDoubleQuote {
+					inSingleQuote = !inSingleQuote
+				}
+			case '"':
+				if !inSingleQuote {
+					inDoubleQuote = !inDoubleQuote
+				}
+			}
+		}
+		result.WriteString(command[last:loc[0]])
+
+		placeholder := command[loc[0]:loc[1]]
+		rc := seen[placeholder]
+		if rc == nil {
+			result.WriteString(placeholder)
+		} else if inSingleQuote {
+			result.WriteString("'\"${")
+			result.WriteString(rc.envVar)
+			result.WriteString("}\"'")
+		} else {
+			result.WriteString("${")
+			result.WriteString(rc.envVar)
+			result.WriteString("}")
+		}
+		last = loc[1]
+	}
+	result.WriteString(command[last:])
+	return result.String()
 }
 
 // shellQuoteSingle wraps a value in single quotes, escaping any embedded single

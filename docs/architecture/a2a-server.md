@@ -30,7 +30,7 @@ flowchart LR
 | OAuth bearer and tenant boundary | `pkg/api/a2a_auth.go`, `pkg/oauthserver`, `pkg/execution` |
 | Reused inbound agent execution | `pkg/channels.ChannelManager.Dispatch` |
 
-A2A does not implement `channels.Channel` and is not registered as a channel. The dispatcher reuses the channel execution machinery without giving A2A channel lifecycle or reply-routing ownership. The A2A task ID remains explicit, while `contextId` provides the conversation thread/session identity.
+A2A does not implement `channels.Channel` and is not registered as a channel. The dispatcher reuses the channel execution machinery without giving A2A channel lifecycle or reply-routing ownership. In split Kubernetes deployments, API pods construct this dispatcher from the pre-warmed Studio runtime even though external channel adapters run only on worker pods; worker pods do not own the A2A HTTP service. The A2A task ID remains explicit, while `contextId` provides the conversation thread/session identity.
 
 ## Protocol surface
 

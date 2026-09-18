@@ -7,6 +7,33 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 )
 
+func TestServesA2AOnlyOnHTTPModes(t *testing.T) {
+	if !servesA2A(config.DaemonModeAPI) {
+		t.Fatal("API mode must serve A2A")
+	}
+	if !servesA2A(config.DaemonModeDefault) {
+		t.Fatal("default mode must serve A2A")
+	}
+	if servesA2A(config.DaemonModeWorker) {
+		t.Fatal("worker mode must not own the A2A HTTP service")
+	}
+}
+
+func TestA2AServiceBaseURLUsesConfiguredIssuer(t *testing.T) {
+	cfg := &config.AppConfig{}
+	cfg.Storage.Auth.OAuthServer.Issuer = "https://astonish.example/"
+	if got := a2aServiceBaseURL(cfg, 9393); got != "https://astonish.example" {
+		t.Fatalf("base URL = %q", got)
+	}
+}
+
+func TestA2AServiceBaseURLUsesLoopbackDefault(t *testing.T) {
+	cfg := &config.AppConfig{}
+	if got := a2aServiceBaseURL(cfg, 1234); got != "http://127.0.0.1:1234" {
+		t.Fatalf("base URL = %q", got)
+	}
+}
+
 func TestNewOAuthServerRuntimeConfigAppliesLoopbackDefaults(t *testing.T) {
 	got := newOAuthServerRuntimeConfig(config.OAuthServerConfig{}, 9393, true)
 	if got.Issuer != "http://127.0.0.1:9393" {

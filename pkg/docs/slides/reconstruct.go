@@ -465,13 +465,35 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 
 	// Build open slots list: unfilled numbered slots that are NOT at canvas edges.
 	// Parse each slot's position from the markup so we can do positional matching.
+	//
+	// Supplemental scan: the archetype markup may contain ph-N ast-text elements
+	// that are not in the declared FillSlots list (e.g. when the import_worker
+	// generated more text regions than it declared as fill slots). These are still
+	// valid fill targets — scan the markup for all id="ph-N" patterns and add any
+	// undeclared ones to the candidate pool so overflow text is not silently dropped.
 	type slotBox struct {
 		id   string
 		x, y int
 		w, h int
 	}
-	var openSlots []slotBox
+	// Collect all slot IDs: declared FillSlots first, then undeclared ph-N from markup.
+	slotIDSet := make(map[string]bool, len(fillSlots))
+	allSlotIDs := make([]string, 0, len(fillSlots)+4)
 	for _, id := range fillSlots {
+		slotIDSet[id] = true
+		allSlotIDs = append(allSlotIDs, id)
+	}
+	// Scan markup for undeclared ph-N elements (e.g. ph-10, ph-11 beyond FillSlots).
+	for i := 1; i <= 50; i++ {
+		id := fmt.Sprintf("ph-%d", i)
+		if !slotIDSet[id] && strings.Contains(markup, `id="`+id+`"`) {
+			allSlotIDs = append(allSlotIDs, id)
+			slotIDSet[id] = true
+		}
+	}
+
+	var openSlots []slotBox
+	for _, id := range allSlotIDs {
 		if filled[id] || !isNumberedSlot(id) {
 			continue
 		}
@@ -494,6 +516,10 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 	// We use a greedy nearest-neighbour assignment: sort source texts by Y then X
 	// (reading order), then for each assign to the nearest available slot.
 	//
+	// Y-band preference: a slot within the same horizontal band (|srcY - slotY| < 200)
+	// is preferred over any cross-band match. This prevents a text at y=657 from
+	// stealing a slot at y=847 when a better in-band slot exists.
+	//
 	// Sort texts by Y then X for reading order.
 	for i := 1; i < len(texts); i++ {
 		for j := i; j > 0; j-- {
@@ -507,14 +533,24 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 	// Build a usage map to prevent a slot from being used twice.
 	usedSlots := map[string]bool{}
 
+	// yBandThreshold is the maximum vertical distance (in pixels) between a
+	// source text and a slot centroid for the match to be considered "in-band".
+	// In-band matches are always preferred over cross-band matches, regardless
+	// of Euclidean distance.
+	const yBandThreshold = 200.0
+
 	for _, txt := range texts {
 		// Source text centroid.
 		srcCX := float64(txt.x) + float64(txt.w)/2.0
 		srcCY := float64(txt.y) + float64(txt.h)/2.0
 
-		// Find nearest unused slot.
+		// Two-phase nearest-neighbour:
+		// Phase A: find nearest in-band slot (|srcCY - slotCY| < yBandThreshold).
+		// Phase B: if no in-band slot, find nearest cross-band slot.
 		bestDist := -1.0
 		bestIdx := -1
+		hasInBand := false
+
 		for i, s := range openSlots {
 			if usedSlots[s.id] {
 				continue
@@ -522,9 +558,26 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 			// Slot centroid.
 			sCX := float64(s.x) + float64(s.w)/2.0
 			sCY := float64(s.y) + float64(s.h)/2.0
-			dx := srcCX - sCX
 			dy := srcCY - sCY
-			dist := dx*dx + dy*dy // squared distance, no need for sqrt
+			if dy < 0 {
+				dy = -dy
+			}
+			inBand := dy < yBandThreshold
+			dx := srcCX - sCX
+			dist := dx*dx + (srcCY-sCY)*(srcCY-sCY) // squared distance
+
+			// Prefer in-band over cross-band: if we already have an in-band
+			// candidate, skip cross-band slots entirely.
+			if hasInBand && !inBand {
+				continue
+			}
+			if inBand && !hasInBand {
+				// First in-band candidate — clear any previous cross-band best.
+				bestDist = dist
+				bestIdx = i
+				hasInBand = true
+				continue
+			}
 			if bestDist < 0 || dist < bestDist {
 				bestDist = dist
 				bestIdx = i

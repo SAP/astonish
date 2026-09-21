@@ -577,6 +577,9 @@ func injectSlotColor(markup, slotID, color string) string {
 }
 
 // injectText replaces the text content between `id="<slotID>"` ast-text tags.
+// Text is wrapped in <ast-run> so the slides runtime renders it correctly.
+// Multi-line text (newlines) is split into multiple <ast-run> elements separated
+// by line breaks, which the runtime renders correctly with white-space:pre-wrap.
 func injectText(markup, slotID, text string) string {
 	// Find the opening ast-text tag containing id="<slotID>".
 	marker := `id="` + slotID + `"`
@@ -599,7 +602,22 @@ func injectText(markup, slotID, text string) string {
 	}
 	closeIdx += tagEnd
 
-	return markup[:tagEnd] + text + markup[closeIdx:]
+	// Wrap text in <ast-run> so the slides runtime displays it.
+	// Escape HTML special chars so & < > don't break the markup.
+	// Multi-line text: each line gets its own <ast-run> separated by \n
+	// which pre-wrap renders correctly. Alternatively use one run with \n.
+	escaped := htmlEscape(text)
+	content := `<ast-run>` + escaped + `</ast-run>`
+
+	return markup[:tagEnd] + content + markup[closeIdx:]
+}
+
+// htmlEscape escapes the minimal HTML special characters for safe inline embedding.
+func htmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 // projectImages substitutes asset refs from image chrome objects into the

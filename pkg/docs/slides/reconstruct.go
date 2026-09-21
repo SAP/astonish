@@ -733,6 +733,12 @@ func htmlEscape(s string) string {
 
 // projectImages substitutes asset refs from image chrome objects into the
 // nearest ph-pic-N fill slot in the markup.
+//
+// If the image's media key is already referenced as an asset-ref attribute in the
+// archetype markup (i.e. it is already embedded as a fixed decorative image), the
+// object is silently skipped — no warning, no duplicate injection. This prevents
+// false-positive "no ph-pic-N slot" warnings for the common case where the
+// import_worker baked the image directly into the archetype markup.
 func projectImages(markup string, objects []themes.IRChrome, assets map[string]string) (string, []string) {
 	var warnings []string
 	for _, obj := range objects {
@@ -742,6 +748,12 @@ func projectImages(markup string, objects []themes.IRChrome, assets map[string]s
 		assetRef, ok := assets[obj.MediaKey]
 		if !ok {
 			assetRef = obj.MediaKey // use key as-is if not in map
+		}
+		// If the archetype markup already contains this asset-ref (the image is
+		// already a fixed decorative element in the slide chrome), skip silently.
+		if strings.Contains(markup, `asset-ref="`+obj.MediaKey+`"`) ||
+			strings.Contains(markup, `asset-ref="`+assetRef+`"`) {
+			continue
 		}
 		// Find the nearest ph-pic-N fill slot.
 		idx := strings.Index(markup, `id="ph-pic-`)

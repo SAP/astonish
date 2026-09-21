@@ -383,9 +383,14 @@ func scoreArchetypeByFingerprint(srcFP SlideFingerprint, srcPHCount, srcTextChro
 //
 // Strategy:
 //  1. From placeholders: map title-type → ph-title-like slot, body-type → ph-2.
-//  2. From text chrome objects (IRChrome.Kind == "text"): collect non-empty
-//     texts sorted by Y then X (reading order) and fill remaining numbered slots
-//     sequentially starting from the first unfilled ph-N slot.
+//  2. From text chrome objects (IRChrome.Kind == "text"): parse the archetype
+//     markup to find each slot's (x, y, w, h) position, then match each source
+//     text object to the nearest slot by centroid distance. This positional
+//     matching ensures "One Alerting Platform" at source (104,447) goes to the
+//     archetype slot whose box is centred near (104,447), not to a header strip
+//     at y=40 that happens to be first in the slot list.
+//     Slots at canvas edges (x > canvasW-60 or y > canvasH-60) are never filled
+//     — they are footer/date/slide-number chrome, not content regions.
 func projectText(markup string, fillSlots []string, placeholders []themes.IRPlaceholder, objects []themes.IRChrome) (string, []string) {
 	var warnings []string
 
@@ -434,11 +439,12 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 		}
 	}
 
-	// --- Step 2: text chrome objects → numbered card slots ---
-	// Collect non-empty text strings from chrome in reading order.
+	// --- Step 2: text chrome objects → numbered card slots (positional matching) ---
+	// Collect non-empty text objects from chrome.
 	type textObj struct {
 		text string
 		x, y int
+		w, h int
 	}
 	var texts []textObj
 	for _, obj := range objects {
@@ -449,9 +455,46 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 		if t == "" {
 			continue
 		}
-		texts = append(texts, textObj{text: t, x: obj.X, y: obj.Y})
+		// Skip footer/edge text objects — these are chrome (date, copyright, slide
+		// number) that should not be mapped to content slots.
+		if obj.Y > 960 || obj.X > 1800 {
+			continue
+		}
+		texts = append(texts, textObj{text: t, x: obj.X, y: obj.Y, w: obj.W, h: obj.H})
 	}
-	// Sort by Y then X for reading order.
+
+	// Build open slots list: unfilled numbered slots that are NOT at canvas edges.
+	// Parse each slot's position from the markup so we can do positional matching.
+	type slotBox struct {
+		id   string
+		x, y int
+		w, h int
+	}
+	var openSlots []slotBox
+	for _, id := range fillSlots {
+		if filled[id] || !isNumberedSlot(id) {
+			continue
+		}
+		x, y, w, h := parseSlotGeometry(markup, id)
+		// Skip footer/edge slots — slide-number, date, copyright chrome at canvas edges.
+		// Canvas is 1920×1080; slots with x > 1860 or y > 1020 are edge chrome.
+		if x > 1860 || y > 1020 {
+			continue
+		}
+		openSlots = append(openSlots, slotBox{id: id, x: x, y: y, w: w, h: h})
+	}
+
+	if len(openSlots) == 0 || len(texts) == 0 {
+		return markup, warnings
+	}
+
+	// Positional matching: for each source text object, find the nearest
+	// archetype slot by centroid distance. Each slot can only receive one text.
+	// Distance is the Euclidean distance between source text centroid and slot centroid.
+	// We use a greedy nearest-neighbour assignment: sort source texts by Y then X
+	// (reading order), then for each assign to the nearest available slot.
+	//
+	// Sort texts by Y then X for reading order.
 	for i := 1; i < len(texts); i++ {
 		for j := i; j > 0; j-- {
 			a, b := texts[j-1], texts[j]
@@ -461,28 +504,96 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 		}
 	}
 
-	// Build a list of unfilled numbered slots (ph-N where N is a digit).
-	var openSlots []string
-	for _, id := range fillSlots {
-		if filled[id] {
-			continue
-		}
-		// Only target numbered content slots: ph-1..ph-N, ph-card-N, etc.
-		if isNumberedSlot(id) {
-			openSlots = append(openSlots, id)
-		}
-	}
+	// Build a usage map to prevent a slot from being used twice.
+	usedSlots := map[string]bool{}
 
-	// Inject texts into open slots sequentially.
-	for i, txt := range texts {
-		if i >= len(openSlots) {
-			break
+	for _, txt := range texts {
+		// Source text centroid.
+		srcCX := float64(txt.x) + float64(txt.w)/2.0
+		srcCY := float64(txt.y) + float64(txt.h)/2.0
+
+		// Find nearest unused slot.
+		bestDist := -1.0
+		bestIdx := -1
+		for i, s := range openSlots {
+			if usedSlots[s.id] {
+				continue
+			}
+			// Slot centroid.
+			sCX := float64(s.x) + float64(s.w)/2.0
+			sCY := float64(s.y) + float64(s.h)/2.0
+			dx := srcCX - sCX
+			dy := srcCY - sCY
+			dist := dx*dx + dy*dy // squared distance, no need for sqrt
+			if bestDist < 0 || dist < bestDist {
+				bestDist = dist
+				bestIdx = i
+			}
 		}
-		markup = injectText(markup, openSlots[i], txt.text)
-		filled[openSlots[i]] = true
+
+		if bestIdx < 0 {
+			break // no more slots
+		}
+		slot := openSlots[bestIdx]
+		// Only fill if the source text is reasonably close to the slot
+		// (within ~2× the slot diagonal). This prevents wildly off-canvas
+		// texts from filling slots they have no relationship to.
+		slotDiag := float64(slot.w)*float64(slot.w) + float64(slot.h)*float64(slot.h)
+		maxDistSq := 4.0 * slotDiag
+		if slotDiag > 0 && bestDist > maxDistSq {
+			continue // too far — skip this text object
+		}
+		markup = injectText(markup, slot.id, txt.text)
+		filled[slot.id] = true
+		usedSlots[slot.id] = true
 	}
 
 	return markup, warnings
+}
+
+// parseSlotGeometry extracts the x, y, w, h attributes of the ast-text element
+// with the given slot id from the markup string. Returns zeros if not found.
+func parseSlotGeometry(markup, slotID string) (x, y, w, h int) {
+	marker := `id="` + slotID + `"`
+	idx := strings.Index(markup, marker)
+	if idx < 0 {
+		return
+	}
+	// Find the start of this tag.
+	start := strings.LastIndex(markup[:idx], "<")
+	if start < 0 {
+		return
+	}
+	end := strings.Index(markup[start:], ">")
+	if end < 0 {
+		return
+	}
+	tag := markup[start : start+end+1]
+	x = attrInt(tag, "x")
+	y = attrInt(tag, "y")
+	w = attrInt(tag, "w")
+	h = attrInt(tag, "h")
+	return
+}
+
+// attrInt extracts an integer attribute value from a tag string.
+// Returns 0 if the attribute is not found or not parseable.
+func attrInt(tag, attr string) int {
+	key := attr + `="`
+	idx := strings.Index(tag, key)
+	if idx < 0 {
+		return 0
+	}
+	valStart := idx + len(key)
+	valEnd := strings.Index(tag[valStart:], `"`)
+	if valEnd < 0 {
+		return 0
+	}
+	v, err := strconv.Atoi(tag[valStart : valStart+valEnd])
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // isNumberedSlot returns true when the slot id looks like a numbered content

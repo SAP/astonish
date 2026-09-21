@@ -18,6 +18,17 @@ package themes
 // the parent slides package into themes, which would create an import cycle).
 const SchemaModelV3 = 3
 
+// IterationResult records the outcome of one import-loop iteration.
+// Iteration is 1-based. Archetypes holds the archetype set that was used
+// during this iteration; FidelityScore and GapSummary capture the comparison
+// result. Append to ImportHistory — do not replace previous entries.
+type IterationResult struct {
+	Iteration     int         `json:"iteration"`
+	Archetypes    []Archetype `json:"archetypes,omitempty"`
+	FidelityScore float64     `json:"fidelityScore"`
+	GapSummary    []string    `json:"gapSummary,omitempty"` // top gap descriptions
+}
+
 // TemplateModel is the top-level lossless IR for one imported template.
 type TemplateModel struct {
 	Schema     int               `json:"schema"`
@@ -27,6 +38,17 @@ type TemplateModel struct {
 	Slides     []IRLayout        `json:"slides,omitempty"`
 	Warnings   []IRWarning       `json:"warnings,omitempty"`
 	StyleGuide *StyleGuide       `json:"styleGuide,omitempty"`
+
+	// Source provenance fields. SourceHash is the SHA-256 hex of the original
+	// .pptx bytes; SourceSlideCount is the slide count in the source file.
+	// Both are populated at import time and used by the repair loop to detect
+	// whether the source has changed since the last import pass.
+	SourceHash       string `json:"sourceHash,omitempty"`
+	SourceSlideCount int    `json:"sourceSlideCount,omitempty"`
+
+	// ImportHistory records each iteration of the repair loop. Entries are
+	// appended in order; the last entry reflects the final state.
+	ImportHistory []IterationResult `json:"importHistory,omitempty"`
 }
 
 // IRSize is the canvas size in logical pixels (normally 1920x1080).

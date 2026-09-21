@@ -536,7 +536,14 @@ func createDeck(ctx context.Context, args CreateDeckArgs) (DeckResult, error) {
 		if len(result.Catalog) > 0 {
 			result.Instructions = createDeckCatalogInstructions(tmpl, merged)
 		}
-		result.StyleGuide = RecipeGuideMarkdown()
+		// For imported templates, surface the brand layout catalog as the primary
+		// guide so the LLM uses the real PPTX layouts instead of generic recipes.
+		// For built-in/plain templates, keep the recipe guide.
+		if tmpl.Model != nil {
+			result.StyleGuide = ImportedTemplateGuideMarkdown(tmpl)
+		} else {
+			result.StyleGuide = RecipeGuideMarkdown()
+		}
 		if tmpl.StyleGuide != nil && tmpl.StyleGuide.Markdown != "" {
 			result.StyleGuide += tmpl.StyleGuide.Markdown
 		}
@@ -736,7 +743,7 @@ func applyFills(ctx context.Context, deckSlug, templateName string, specs []Fill
 		}
 		fills := aliasOfficialBookendFills(arch, spec.Fills)
 		fills = applyCoverPhotoFill(arch, fills, titleImage)
-		if miss := missingTextSlotFills(arch, fills); len(miss) > 0 {
+		if miss := missingTextSlotFills(arch, fills, tmpl.Model != nil); len(miss) > 0 {
 			return empty, "", nil, fmt.Errorf("slides[%d]: missing fills for text slots %s — fill every required slot (or pick a recipe with fewer items)", i, strings.Join(miss, ", "))
 		}
 		markup, err := fillArchetypeMarkup(arch.Markup, fills)
@@ -1341,9 +1348,29 @@ func createDeckCatalogInstructions(tmpl themes.Template, theme map[string]string
 		"After the deck is created, use add_slide_image whenever the user asks to add a picture to an existing slide. " +
 		"Every slide accepts images; image slots are optional conveniences, never restrictions. Preserve the current layout and never switch variants merely to add a picture. " +
 		"Use write_slide for other customizations that fill_slides cannot express (adding/removing or repositioning non-image elements). " +
-		"For write_slide, read_slide first and edit the returned markup. Template asset-refs are auto-resolved. " +
-		"Body slides: recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
-		"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
+		"For write_slide, read_slide first and edit the returned markup. Template asset-refs are auto-resolved. "
+
+	// Imported templates: the catalog leads with real PPTX archetypes.
+	// Built-in / plain templates: the catalog leads with recipe-* layouts.
+	if tmpl.Model != nil {
+		imported := importedBodyArchetypes(tmpl)
+		if len(imported) > 0 {
+			kinds := make([]string, 0, len(imported))
+			for _, a := range imported {
+				kinds = append(kinds, a.Kind)
+			}
+			s += "Body slides: this template's IMPORTED layouts (" + strings.Join(kinds, ", ") + "). " +
+				"Match the imported layout whose slot hints best fit the content (card grids, timeline, split narrative, etc.). " +
+				"Use recipe-* layouts ONLY when no imported layout fits the content shape. " +
+				"A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
+		} else {
+			s += "Body slides: recipe-* catalog entries. " +
+				"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
+		}
+	} else {
+		s += "Body slides: recipe-* catalog entries (named slots: eyebrow, headline, body_1, item_1_title, …). " +
+			"Pick the recipe whose slot count matches the content. A chapter is an eyebrow on a full content slide — do not insert empty section dividers. "
+	}
 	titles := officialBookendKinds(tmpl, "title")
 	closings := officialBookendKinds(tmpl, "closing")
 	if len(titles) > 0 {

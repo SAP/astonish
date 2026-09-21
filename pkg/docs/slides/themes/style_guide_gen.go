@@ -284,6 +284,12 @@ func deriveLayoutPatterns(model *TemplateModel) []LayoutPattern {
 	return patterns
 }
 
+// InferLayoutKind infers the layout kind from its name and placeholder structure.
+// Kind values: "title", "section", "agenda", "closing", "content".
+func InferLayoutKind(layout IRLayout) string {
+	return inferLayoutKind(layout)
+}
+
 func inferLayoutKind(layout IRLayout) string {
 	nameLower := strings.ToLower(layout.Name)
 	hasBody := false
@@ -293,8 +299,53 @@ func inferLayoutKind(layout IRLayout) string {
 			break
 		}
 	}
+
+	// Detect full-width background image in chrome objects.
+	// Some PPTX slides (closing/title) embed the background as a chrome
+	// image object (x≈0, y≈0, w>1800, h>900) instead of using the slide
+	// background property. We use this signal to identify branded slides.
+	hasBgImageObject := layout.Background.Kind == "image"
+	if !hasBgImageObject {
+		for _, o := range layout.Objects {
+			if o.Kind == "image" && o.X <= 10 && o.Y <= 10 && o.W >= 1800 && o.H >= 900 {
+				hasBgImageObject = true
+				break
+			}
+		}
+	}
+
+	// Scan text objects for closing-slide keywords (name-based detection fails
+	// when all slides are named "Slide N").
+	hasClosingKeyword := strings.Contains(nameLower, "thank") ||
+		strings.Contains(nameLower, "copyright") ||
+		strings.Contains(nameLower, "contact")
+	if !hasClosingKeyword {
+		for _, o := range layout.Objects {
+			txt := strings.ToLower(o.Text)
+			if strings.Contains(txt, "thank you") || strings.Contains(txt, "copyright") {
+				hasClosingKeyword = true
+				break
+			}
+		}
+	}
+
+	// Count total text content length across chrome text objects.
+	// Closing/title branded slides have very little text (contact names,
+	// a tagline); content slides have substantial text (paragraphs, bullet
+	// lists). Threshold: > 300 chars of text chrome → it's a content slide
+	// even if it has a full-width background image.
+	chromTextLen := 0
+	for _, o := range layout.Objects {
+		chromTextLen += len(o.Text)
+	}
+
 	switch {
-	case !hasBody && (strings.Contains(nameLower, "thank") || strings.Contains(nameLower, "copyright") || strings.Contains(nameLower, "contact")):
+	case !hasBody && hasClosingKeyword:
+		return "closing"
+	// Branded closing/title slide: full-width bg image + no body placeholder +
+	// very little text content (< 300 chars total). Covers the typical
+	// "thank you" / contact / cover brand slides that don't have named layouts.
+	case !hasBody && hasBgImageObject && len(layout.Placeholders) <= 1 && chromTextLen < 300:
 		return "closing"
 	case strings.Contains(nameLower, "agenda") || strings.Contains(nameLower, "toc") || strings.Contains(nameLower, "contents"):
 		return "agenda"
@@ -905,4 +956,445 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// GenerateStyleGuideFromEvidence is like GenerateStyleGuide but enriches the
+// Markdown field with concrete evidence from the iterative import-fidelity
+// loop: validated archetype catalog with per-layout examples, full multi-color
+// accent set, chrome element table, LLM-repair DO-NOT rules, and unsupported
+// constructs. Returns nil only when model is nil.
+//
+// evidence carries the ImportEvidence built by the caller from the final
+// CompareReport; this avoids an import cycle back to the parent slides package.
+func GenerateStyleGuideFromEvidence(model *TemplateModel, tokens map[string]string, archetypes []Archetype, evidence ImportEvidence) *StyleGuide {
+	if model == nil {
+		return nil
+	}
+	if tokens == nil {
+		tokens = map[string]string{}
+	}
+
+	sg := &StyleGuide{}
+	sg.TypographyScale = deriveTypographyScale(model, tokens)
+	sg.ColorRoles = deriveColorRoles(tokens)
+	sg.SpacingSystem = deriveSpacingSystem(model)
+	sg.LayoutPatterns = deriveLayoutPatterns(model)
+	sg.FontPairing = deriveFontPairing(model, tokens)
+	sg.AvoidList = generateAvoidList(model, tokens)
+	sg.ComponentPatterns = GenerateComponentPatterns(archetypes)
+
+	// Detect accent colors and recurring chrome from the IR.
+	accentColors := detectAccentColors(model, tokens)
+	chromeElems := detectRecurringChrome(model)
+
+	// Build the validation evidence summary.
+	sg.ValidationEvidence = buildValidationSummary(model, evidence, archetypes, accentColors)
+
+	sg.Markdown = generateMarkdownFromEvidence(sg, tokens, accentColors, chromeElems, archetypes, evidence)
+	return sg
+}
+
+// detectAccentColors scans all IRChrome.Fill hex colors across layouts (both
+// layouts and slides) and returns unique colors that are neither near-white nor
+// near-black nor matching the surface/ink tokens within ±15 per channel.
+func detectAccentColors(model *TemplateModel, tokens map[string]string) []string {
+	surface := tokens["surface"]
+	ink := tokens["ink"]
+
+	seen := map[string]bool{}
+	var out []string
+
+	scanLayouts := func(layouts []IRLayout) {
+		for _, layout := range layouts {
+			for _, obj := range layout.Objects {
+				if obj.Fill == nil || obj.Fill.Color == "" {
+					continue
+				}
+				c := obj.Fill.Color
+				if !isHexColor(c) {
+					continue
+				}
+				norm := normalizeHex(c)
+				if seen[norm] {
+					continue
+				}
+				if isNearWhite(norm) || isNearBlack(norm) {
+					continue
+				}
+				if surface != "" && colorDeltaRGB(norm, surface) <= 15 {
+					continue
+				}
+				if ink != "" && colorDeltaRGB(norm, ink) <= 15 {
+					continue
+				}
+				seen[norm] = true
+				out = append(out, norm)
+			}
+		}
+	}
+
+	scanLayouts(model.Layouts)
+	scanLayouts(model.Slides)
+
+	sort.Strings(out)
+	return out
+}
+
+// chromeEntry is a recurring chrome object identified across layouts.
+type chromeEntry struct {
+	Kind       string
+	X, Y, W, H int
+	Text       string
+	AppearsOn  string // human-readable scope description
+}
+
+// detectRecurringChrome finds IRChrome elements that appear in more than half
+// of the layouts with near-identical geometry (±10px tolerance).
+func detectRecurringChrome(model *TemplateModel) []chromeEntry {
+	layouts := model.Layouts
+	if len(layouts) == 0 {
+		return nil
+	}
+	total := len(layouts)
+	threshold := total / 2 // strictly more than half
+
+	// For each (kind, approxX, approxY) bucket, count appearances and
+	// collect one representative.
+	type bucketKey struct {
+		kind string
+		ax   int // rounded to nearest 10px
+		ay   int
+	}
+	type bucketVal struct {
+		count int
+		rep   IRChrome
+	}
+	buckets := map[bucketKey]*bucketVal{}
+
+	for _, layout := range layouts {
+		// Track which buckets we already counted for this layout (avoid
+		// double-counting multiple appearances in the same layout).
+		counted := map[bucketKey]bool{}
+		for _, obj := range layout.Objects {
+			k := bucketKey{
+				kind: obj.Kind,
+				ax:   (obj.X + 5) / 10 * 10,
+				ay:   (obj.Y + 5) / 10 * 10,
+			}
+			if counted[k] {
+				continue
+			}
+			counted[k] = true
+			if bv, ok := buckets[k]; ok {
+				bv.count++
+			} else {
+				buckets[k] = &bucketVal{count: 1, rep: obj}
+			}
+		}
+	}
+
+	var entries []chromeEntry
+	for _, bv := range buckets {
+		if bv.count <= threshold {
+			continue
+		}
+		obj := bv.rep
+		appearsOn := "All slides"
+		if bv.count < total {
+			appearsOn = fmt.Sprintf("%d/%d slides", bv.count, total)
+		}
+		ce := chromeEntry{
+			Kind:      obj.Kind,
+			X:         obj.X,
+			Y:         obj.Y,
+			W:         obj.W,
+			H:         obj.H,
+			AppearsOn: appearsOn,
+		}
+		if obj.Kind == "text" {
+			ce.Text = obj.Text
+		}
+		entries = append(entries, ce)
+	}
+
+	// Sort for deterministic output: by Y then X.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Y != entries[j].Y {
+			return entries[i].Y < entries[j].Y
+		}
+		return entries[i].X < entries[j].X
+	})
+	return entries
+}
+
+// buildValidationSummary assembles a ValidationSummary from the model warnings,
+// evidence, and detected accent colors.
+func buildValidationSummary(model *TemplateModel, evidence ImportEvidence, archetypes []Archetype, accentColors []string) *ValidationSummary {
+	vs := &ValidationSummary{
+		DetectedAccentColors:  accentColors,
+		RepairsApplied:        evidence.RepairsApplied,
+		UnsupportedConstructs: evidence.UnsupportedConstructs,
+	}
+	// Collect unique archetype kinds for validation.
+	kindSeen := map[string]bool{}
+	for _, a := range archetypes {
+		if !kindSeen[a.Kind] {
+			kindSeen[a.Kind] = true
+			vs.ValidatedArchetypes = append(vs.ValidatedArchetypes, a.Kind)
+		}
+	}
+	// Supplement unsupported constructs from model Warnings if not already set.
+	if len(vs.UnsupportedConstructs) == 0 && len(model.Warnings) > 0 {
+		for _, w := range model.Warnings {
+			vs.UnsupportedConstructs = append(vs.UnsupportedConstructs, w.Message)
+		}
+	}
+	return vs
+}
+
+// generateMarkdownFromEvidence extends generateMarkdown with evidence-grounded
+// sections: Detected Accent Colors, Identity Chrome, Validated Layout Catalog,
+// What Was Repaired, and Unsupported Constructs.
+func generateMarkdownFromEvidence(sg *StyleGuide, tokens map[string]string, accentColors []string, chrome []chromeEntry, archetypes []Archetype, evidence ImportEvidence) string {
+	var b strings.Builder
+
+	// Optional validation notice at the very top.
+	if evidence.FidelityScore > 0 && evidence.Passed {
+		iters := evidence.Iterations
+		if iters <= 0 {
+			iters = 1
+		}
+		b.WriteString(fmt.Sprintf("> Validated: fidelity score %.0f%% (%d iteration(s))\n\n",
+			evidence.FidelityScore*100, iters))
+	}
+
+	b.WriteString("# Style Guide\n\n")
+
+	// Typography Scale
+	if len(sg.TypographyScale) > 0 {
+		b.WriteString("## Typography Scale\n")
+		b.WriteString("| Role | Size | Weight | Font | Usage |\n")
+		b.WriteString("|------|------|--------|------|-------|\n")
+		for _, t := range sg.TypographyScale {
+			font := t.Font
+			if font == "" {
+				font = "-"
+			}
+			b.WriteString(fmt.Sprintf("| %s | %dpx | %s | %s | %s |\n",
+				t.Role, t.FontSize, t.Weight, font, t.Usage))
+		}
+		b.WriteString("\n")
+	}
+
+	// Color Palette
+	if len(sg.ColorRoles) > 0 {
+		b.WriteString("## Color Palette & Usage\n")
+		b.WriteString("| Role | Color | Usage | Limit |\n")
+		b.WriteString("|------|-------|-------|-------|\n")
+		for _, c := range sg.ColorRoles {
+			limit := c.Limit
+			if limit == "" {
+				limit = "-"
+			}
+			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				c.Name, c.Color, c.Usage, limit))
+		}
+		b.WriteString("\n")
+	}
+
+	// Spacing System
+	if sg.SpacingSystem != nil {
+		sp := sg.SpacingSystem
+		b.WriteString("## Spacing System\n")
+		b.WriteString(fmt.Sprintf("- Page margins: %dpx horizontal, %dpx vertical\n", sp.PageMarginX, sp.PageMarginY))
+		b.WriteString(fmt.Sprintf("- Title → body gap: %dpx\n", sp.TitleBodyGap))
+		b.WriteString(fmt.Sprintf("- Between elements: %dpx\n", sp.ElementGap))
+		b.WriteString(fmt.Sprintf("- Between sections: %dpx\n", sp.SectionGap))
+		b.WriteString(fmt.Sprintf("- Content starts at Y=%dpx (after title area)\n", sp.ContentStartY))
+		b.WriteString("\n")
+	}
+
+	// Font Pairing
+	if sg.FontPairing != nil {
+		fp := sg.FontPairing
+		b.WriteString("## Font Pairing\n")
+		b.WriteString(fmt.Sprintf("- **Headlines**: %s\n", fp.DisplayUsage))
+		b.WriteString(fmt.Sprintf("- **Body text**: %s\n", fp.BodyUsage))
+		if fp.MonoFont != "" {
+			b.WriteString(fmt.Sprintf("- **Labels/metadata**: %s (monospace — uppercase, letter-spacing for visual distinction)\n", fp.MonoFont))
+		}
+		b.WriteString("\n")
+	}
+
+	// Layout Patterns
+	if len(sg.LayoutPatterns) > 0 {
+		b.WriteString("## Layout Patterns\n")
+		for _, lp := range sg.LayoutPatterns {
+			b.WriteString(fmt.Sprintf("- **%s** (%s): %s\n", lp.Name, lp.Kind, lp.Description))
+		}
+		b.WriteString("\n")
+	}
+
+	// Content Layout Guide (Component Patterns)
+	if len(sg.ComponentPatterns) > 0 {
+		b.WriteString("## Content Layout Guide (FLEXIBLE Archetypes)\n\n")
+		b.WriteString("Each entry is a fillable layout or sample-derived pattern. Author it with fill_slides\n")
+		b.WriteString("(kind or label + fills map). Prefer recipe-* layout types for cover and body slides.\n")
+		b.WriteString("Use pattern-* only when the imported sample matches the same job. Do not rebuild chrome by hand.\n\n")
+		for _, cp := range sg.ComponentPatterns {
+			b.WriteString(fmt.Sprintf("### %s (kind: %s)\n", cp.ArchetypeLabel, cp.Kind))
+			b.WriteString(fmt.Sprintf("**Looks like:** %s\n", cp.VisualSummary))
+			if len(cp.FillSlots) > 0 {
+				b.WriteString(fmt.Sprintf("**Fill slots:** %s\n", strings.Join(cp.FillSlots, ", ")))
+			}
+			b.WriteString(fmt.Sprintf("**Use when:** %s\n", cp.UsageRule))
+			if cp.ChromeNote != "" {
+				b.WriteString(fmt.Sprintf("**Chrome:** %s\n", cp.ChromeNote))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// ---- Evidence-grounded sections (inserted before DO NOT) ----
+
+	// Detected Accent Colors
+	if len(accentColors) > 0 {
+		b.WriteString("## Detected Accent Colors\n")
+		b.WriteString("| Hex | Notes |\n")
+		b.WriteString("|-----|-------|\n")
+		for _, c := range accentColors {
+			b.WriteString(fmt.Sprintf("| %s | accent color detected in template chrome |\n", c))
+		}
+		b.WriteString("\n")
+	}
+
+	// Identity Chrome
+	if len(chrome) > 0 {
+		b.WriteString("## Identity Chrome\n")
+		b.WriteString("These fixed objects recur across slides and MUST be preserved in every archetype.\n\n")
+		b.WriteString("| Element | Position | Appears on | Text (if fixed) |\n")
+		b.WriteString("|---------|----------|------------|------------------|\n")
+		for _, ce := range chrome {
+			text := ce.Text
+			if text == "" {
+				text = "-"
+			}
+			label := ce.Kind + " element"
+			b.WriteString(fmt.Sprintf("| %s | x=%d, y=%d, w=%d, h=%d | %s | %q |\n",
+				label, ce.X, ce.Y, ce.W, ce.H, ce.AppearsOn, text))
+		}
+		b.WriteString("\n")
+	}
+
+	// Validated Layout Catalog
+	if len(archetypes) > 0 {
+		b.WriteString("## Validated Layout Catalog\n\n")
+		for _, a := range archetypes {
+			b.WriteString(fmt.Sprintf("### %s (kind: %s)\n", a.Title, a.Kind))
+			if a.Tier != "" {
+				b.WriteString(fmt.Sprintf("- **Tier**: %s\n", a.Tier))
+			}
+			if len(a.FillSlots) > 0 {
+				b.WriteString(fmt.Sprintf("- **Fill slots**: %s\n", strings.Join(a.FillSlots, ", ")))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// What Was Repaired
+	if len(evidence.RepairsApplied) > 0 {
+		b.WriteString("## What Was Repaired (DO NOT repeat these mistakes)\n\n")
+		for _, r := range evidence.RepairsApplied {
+			b.WriteString(fmt.Sprintf("- %s\n", r))
+		}
+		b.WriteString("\n")
+	}
+
+	// Unsupported Constructs
+	b.WriteString("## Unsupported Constructs\n\n")
+	unsupported := evidence.UnsupportedConstructs
+	if len(unsupported) == 0 {
+		b.WriteString("None detected.\n\n")
+	} else {
+		for _, u := range unsupported {
+			b.WriteString(fmt.Sprintf("- %s\n", u))
+		}
+		b.WriteString("\n")
+	}
+
+	// Avoid List (standard DO NOT section)
+	if len(sg.AvoidList) > 0 {
+		b.WriteString("## DO NOT (Avoid List)\n")
+		for _, item := range sg.AvoidList {
+			b.WriteString(fmt.Sprintf("- %s\n", item))
+		}
+		b.WriteString("\n")
+	}
+
+	// Append universal rules
+	b.WriteString(DefaultStyleRules())
+
+	return b.String()
+}
+
+// -------------------------------------------------------------------------
+// Accent color detection helpers
+// -------------------------------------------------------------------------
+
+// isHexColor reports whether s is a valid #RRGGBB hex color string.
+func isHexColor(s string) bool {
+	if len(s) != 7 || s[0] != '#' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeHex returns the hex color in uppercase #RRGGBB form.
+func normalizeHex(s string) string {
+	return strings.ToUpper(s)
+}
+
+// isNearWhite returns true when all channels are >= 240.
+func isNearWhite(hex string) bool {
+	r := hexVal(hex[1:3])
+	g := hexVal(hex[3:5])
+	b := hexVal(hex[5:7])
+	return r >= 240 && g >= 240 && b >= 240
+}
+
+// isNearBlack returns true when all channels are <= 30.
+func isNearBlack(hex string) bool {
+	r := hexVal(hex[1:3])
+	g := hexVal(hex[3:5])
+	b := hexVal(hex[5:7])
+	return r <= 30 && g <= 30 && b <= 30
+}
+
+// colorDeltaRGB computes the per-channel average delta between two #RRGGBB
+// hex color strings. Returns 255 on parse error.
+func colorDeltaRGB(a, b string) float64 {
+	aR := hexVal(a[1:3])
+	aG := hexVal(a[3:5])
+	aB := hexVal(a[5:7])
+	bR := hexVal(b[1:3])
+	bG := hexVal(b[3:5])
+	bB := hexVal(b[5:7])
+	dR := aR - bR
+	if dR < 0 {
+		dR = -dR
+	}
+	dG := aG - bG
+	if dG < 0 {
+		dG = -dG
+	}
+	dB := aB - bB
+	if dB < 0 {
+		dB = -dB
+	}
+	return float64(dR+dG+dB) / 3.0
 }

@@ -615,16 +615,33 @@ func isImageFillSlot(arch themes.Archetype, id string) bool {
 
 // missingTextSlotFills lists text fillSlots that have no non-empty fill.
 // Image slots are optional. Built-in archetypes with no FillSlots skip the check.
-func missingTextSlotFills(arch themes.Archetype, fills map[string]string) []string {
+//
+// When importedTemplate is true (the archetype comes from a real .pptx import,
+// i.e. tmpl.Model != nil) and the archetype kind is a pattern-*, only the first
+// fill slot (conventionally the slide title) is required. All remaining body
+// slots are treated as optional: the archetype markup keeps its {{BODY}}
+// placeholder text when unfilled, which is correct — the LLM does not have to
+// fill every one of the 14 card slots in a 6-card grid if only 3 cards' worth
+// of content exist. Recipe-* layouts and non-imported templates are not affected.
+func missingTextSlotFills(arch themes.Archetype, fills map[string]string, importedTemplate ...bool) []string {
 	if len(arch.FillSlots) == 0 {
 		return nil
 	}
+	// For imported pattern-* archetypes, only the title slot (FillSlots[0]) is
+	// required; all other body slots are optional so partial fills are valid.
+	isImported := len(importedTemplate) > 0 && importedTemplate[0]
+	relaxBodySlots := isImported && !isRecipeKind(arch.Kind) &&
+		strings.HasPrefix(stripVariantSuffix(arch.Kind), "pattern")
 	var missing []string
-	for _, id := range arch.FillSlots {
+	for i, id := range arch.FillSlots {
 		if isImageFillSlot(arch, id) {
 			continue
 		}
 		if slotHintRole(arch, id) == "optional" {
+			continue
+		}
+		// For imported patterns: only enforce the first (title) slot.
+		if relaxBodySlots && i > 0 {
 			continue
 		}
 		if strings.TrimSpace(fills[id]) == "" {

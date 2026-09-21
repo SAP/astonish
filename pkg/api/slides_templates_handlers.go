@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -16,8 +15,8 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/docs/slides"
-	"github.com/SAP/astonish/pkg/docs/slides/pptxworker"
 	"github.com/SAP/astonish/pkg/docs/slides/themes"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	webassets "github.com/SAP/astonish/web"
 	"github.com/gorilla/mux"
@@ -49,6 +48,9 @@ type slidesTemplateListItem struct {
 	ArchetypeKinds []string                 `json:"archetypeKinds,omitempty"`
 	Archetypes     []slidesArchetypeVariant `json:"archetypes,omitempty"`
 	Cover          *slidesTemplateCover     `json:"cover,omitempty"`
+	ImportState    string                   `json:"importState,omitempty"`
+	ImportWarnings []string                 `json:"importWarnings,omitempty"`
+	FidelityScore  float64                  `json:"fidelityScore,omitempty"`
 }
 
 // slidesTemplateCover is the representative slide shown on a Templates library
@@ -102,6 +104,11 @@ func archetypeVariants(t themes.Template) []slidesArchetypeVariant {
 }
 
 func slidesTemplateListDTO(t themes.Template, scope string) slidesTemplateListItem {
+	t = t.WithoutSource()
+	var fidelityScore float64
+	if t.Model != nil && len(t.Model.ImportHistory) > 0 {
+		fidelityScore = t.Model.ImportHistory[len(t.Model.ImportHistory)-1].FidelityScore
+	}
 	return slidesTemplateListItem{
 		Name:           t.Name,
 		Label:          t.Label,
@@ -111,6 +118,9 @@ func slidesTemplateListDTO(t themes.Template, scope string) slidesTemplateListIt
 		ArchetypeKinds: archetypeKinds(t),
 		Archetypes:     archetypeVariants(t),
 		Cover:          templateCoverDTO(t),
+		ImportState:    t.ImportState,
+		ImportWarnings: t.ImportWarnings,
+		FidelityScore:  fidelityScore,
 	}
 }
 
@@ -550,6 +560,65 @@ func decodeTemplateMediaURI(s string) (contentType string, body []byte, ok bool)
 	return mime, raw, true
 }
 
+// GetSlidesTemplateImportProofHandler returns the import proof SceneGraph for
+// a template — a deck with one slide per imported archetype rendered verbatim,
+// so a reviewer can confirm every visual pattern was faithfully captured before
+// authoring with the template. Returns 404 when the template has no proof deck
+// (built-ins, imports made before this feature existed).
+func GetSlidesTemplateImportProofHandler(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(mux.Vars(r)["name"])
+	if name == "" {
+		http.Error(w, "template name required", http.StatusBadRequest)
+		return
+	}
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	proof, err := slides.RetrieveImportProofDeck(tmpl)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if proof == nil {
+		http.Error(w, "no import proof available", http.StatusNotFound)
+		return
+	}
+	writeSlidesJSON(w, http.StatusOK, proof)
+}
+
+// GetSlidesTemplateImportReportHandler returns the most recent import-loop
+// CompareReport for a template as JSON. Returns 404 when no import history
+// exists (built-ins, templates imported before the loop was added, or
+// templates with no model).
+func GetSlidesTemplateImportReportHandler(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(mux.Vars(r)["name"])
+	if name == "" {
+		http.Error(w, "template name required", http.StatusBadRequest)
+		return
+	}
+	tmpl, found, err := resolveSlidesTemplateFromRequest(r, name)
+	if err != nil {
+		writeSlidesError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "template not found", http.StatusNotFound)
+		return
+	}
+	if tmpl.Model == nil || len(tmpl.Model.ImportHistory) == 0 {
+		http.Error(w, "no import report available", http.StatusNotFound)
+		return
+	}
+	last := tmpl.Model.ImportHistory[len(tmpl.Model.ImportHistory)-1]
+	writeSlidesJSON(w, http.StatusOK, last)
+}
+
 // findArchetypeForThumbnail returns the archetype matching kind exactly.
 // Variant suffixes are significant: title-2 is a different cover from title.
 func findArchetypeForThumbnail(tmpl themes.Template, kind string) (themes.Archetype, bool) {
@@ -657,23 +726,29 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "import pptx template: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	runner := pptxworker.ImportRunner{
+
+	// Acquire an LLM handle for the repair loop (best-effort; nil is fine).
+	appCfg := effectiveAppConfig(r)
+	injectProviderSecrets(appCfg)
+	providerName := appCfg.General.DefaultProvider
+	modelName := appCfg.General.DefaultModel
+	if providerName == "" {
+		providerName = "gemini"
+	}
+	if modelName == "" {
+		modelName = "gemini-2.0-flash"
+	}
+	llm, _ := provider.GetProvider(r.Context(), providerName, modelName, appCfg)
+	// llm may be nil if GetProvider fails — RunImportLoop handles nil gracefully.
+
+	opts := slides.ImportLoopOptions{
 		WorkingDir: workingDir,
 		ScriptPath: scriptPath,
 	}
-
-	resp, err := runner.Run(r.Context(), pptxworker.ImportRequest{PPTXBase64: b64, Mode: "template"})
-	if err != nil {
-		slog.Error("import pptx template", "error", err)
-		http.Error(w, "import pptx template", importErrorStatus(err))
-		return
-	}
-
-	var tmpl themes.Template
-	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
-		slog.Error("import slides template: worker response did not decode into Template",
-			"error", err, "body_prefix", truncateForLog(resp.SceneOrTemplate, 2000))
-		http.Error(w, fmt.Sprintf("import worker returned invalid template: %v", err), http.StatusInternalServerError)
+	tmpl, _, importErr := slides.RunImportLoop(r.Context(), b64, opts, llm)
+	if importErr != nil {
+		slog.Error("import pptx template", "error", importErr)
+		http.Error(w, "import pptx template", importErrorStatus(importErr))
 		return
 	}
 
@@ -699,13 +774,9 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Label = label
 	tmpl.Scope = writeScopeOrPersonal(slidesTemplateScope(r))
 
-	// Generate rich style guidance for LLM content authoring. Best-effort:
-	// a nil or incomplete guide never fails the import.
-	if tmpl.Model != nil {
-		tmpl.StyleGuide = themes.GenerateStyleGuide(tmpl.Model, tmpl.Tokens, tmpl.Archetypes)
-		// Also store on the model so it persists through TemplateModel JSON serialization.
-		tmpl.Model.StyleGuide = tmpl.StyleGuide
-	}
+	// Store the source bytes on the template so future repair passes can
+	// re-invoke the worker without the client re-uploading.
+	tmpl.SourcePPTXBase64 = b64
 
 	// Pre-bake static PNG thumbnails for each archetype using the shared headless
 	// Chrome browser. This is BEST-EFFORT: any browser-launch or per-archetype
@@ -730,11 +801,11 @@ func ImportSlidesTemplateHandler(w http.ResponseWriter, r *http.Request) {
 
 	writeSlidesJSON(w, http.StatusOK, map[string]any{
 		"template": map[string]any{
-			"name":  tmpl.Name,
-			"label": tmpl.Label,
-			"scope": scope,
+			"name":        tmpl.Name,
+			"label":       tmpl.Label,
+			"scope":       scope,
+			"importState": tmpl.ImportState,
 		},
-		"warnings": resp.Warnings,
 	})
 }
 
@@ -818,12 +889,3 @@ func importErrorStatus(err error) int {
 	}
 }
 
-// truncateForLog returns a bounded string view of raw JSON for diagnostic logs,
-// so a large worker payload does not flood the log while still surfacing the
-// shape that failed to decode.
-func truncateForLog(b []byte, max int) string {
-	if len(b) <= max {
-		return string(b)
-	}
-	return string(b[:max]) + "…(truncated)"
-}

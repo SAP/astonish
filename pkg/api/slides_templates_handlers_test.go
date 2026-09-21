@@ -904,3 +904,84 @@ func TestGetSlidesTemplateMediaServesHeroThumb(t *testing.T) {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 }
+
+// importReportReq drives GetSlidesTemplateImportReportHandler via mux.SetURLVars.
+func importReportReq(t *testing.T, personal store.DocsStore, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates/"+name+"/import-report", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	req = mux.SetURLVars(req, map[string]string{"name": name})
+	rec := httptest.NewRecorder()
+	GetSlidesTemplateImportReportHandler(rec, req)
+	return rec
+}
+
+// TestGetSlidesTemplateImportReportNotFound verifies that a template whose Model
+// is nil (e.g. built-in or pre-loop import) returns 404.
+func TestGetSlidesTemplateImportReportNotFound(t *testing.T) {
+	personal := newMemDocsStore()
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   "no-history",
+		Label:  "No history",
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+		// Model is intentionally nil — no import loop has run.
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	rec := importReportReq(t, personal, "no-history")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for template with no Model, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSlidesTemplateListDTOFidelityScore verifies that the list DTO surfaces the
+// FidelityScore from the last ImportHistory entry.
+func TestSlidesTemplateListDTOFidelityScore(t *testing.T) {
+	personal := newMemDocsStore()
+	tmpl := themes.Template{
+		Schema: 2,
+		Name:   "with-score",
+		Label:  "With score",
+		Archetypes: []themes.Archetype{
+			{Kind: "title", Markup: `<ast-slide id="t"></ast-slide>`},
+		},
+		Model: &themes.TemplateModel{
+			ImportHistory: []themes.IterationResult{
+				{Iteration: 1, FidelityScore: 0.65},
+				{Iteration: 2, FidelityScore: 0.82},
+			},
+		},
+	}
+	if err := (slides.Service{Store: personal}).SaveTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/docs/slides/templates?scope=personal", nil)
+	req = withDocsServices(req, personal, newMemDocsStore())
+	rec := httptest.NewRecorder()
+	ListSlidesTemplatesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Templates []struct {
+			Name          string  `json:"name"`
+			FidelityScore float64 `json:"fidelityScore"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range resp.Templates {
+		if item.Name == "with-score" {
+			if item.FidelityScore != 0.82 {
+				t.Fatalf("fidelityScore = %f, want 0.82", item.FidelityScore)
+			}
+			return
+		}
+	}
+	t.Fatalf("template with-score not found in list response; got %+v", resp.Templates)
+}

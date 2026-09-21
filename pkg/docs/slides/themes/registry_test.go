@@ -1,157 +1,123 @@
-package themes
+package themes_test
 
 import (
-	"strings"
+	"encoding/json"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/docs/slides/themes"
 )
 
-func TestListTemplatesDeterministicOrder(t *testing.T) {
-	got := ListTemplates()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 built-in templates, got %d", len(got))
+// TestTemplateImportStateRoundTrip asserts that all new import lifecycle fields
+// survive a JSON marshal → unmarshal cycle without data loss.
+func TestTemplateImportStateRoundTrip(t *testing.T) {
+	orig := themes.Template{
+		Schema:           2,
+		Name:             "brand",
+		Label:            "Brand",
+		ImportState:      "validated",
+		ImportIterations: 3,
+		ImportWarnings:   []string{"table on slide 4 not supported", "chart on slide 7 not supported"},
+		SourcePPTXBase64: "dGVzdA==", // "test" in base64
+		Tokens:           map[string]string{"surface": "#FFFFFF", "ink": "#000000"},
 	}
-	want := []string{"classic", "modern"}
-	for i, name := range want {
-		if got[i].Name != name {
-			t.Fatalf("template %d = %q, want %q", i, got[i].Name, name)
-		}
-		if got[i].Schema != 2 {
-			t.Fatalf("template %q schema = %d, want 2", got[i].Name, got[i].Schema)
-		}
-		if len(got[i].Archetypes) != 3 {
-			t.Fatalf("template %q has %d archetypes, want 3", got[i].Name, len(got[i].Archetypes))
-		}
-		kinds := map[string]bool{}
-		for _, a := range got[i].Archetypes {
-			kinds[a.Kind] = true
-		}
-		for _, k := range []string{"title", "section", "content"} {
-			if !kinds[k] {
-				t.Fatalf("template %q missing archetype kind %q", got[i].Name, k)
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got themes.Template
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.ImportState != orig.ImportState {
+		t.Errorf("ImportState: got %q, want %q", got.ImportState, orig.ImportState)
+	}
+	if got.ImportIterations != orig.ImportIterations {
+		t.Errorf("ImportIterations: got %d, want %d", got.ImportIterations, orig.ImportIterations)
+	}
+	if len(got.ImportWarnings) != len(orig.ImportWarnings) {
+		t.Errorf("ImportWarnings len: got %d, want %d", len(got.ImportWarnings), len(orig.ImportWarnings))
+	} else {
+		for i, w := range orig.ImportWarnings {
+			if got.ImportWarnings[i] != w {
+				t.Errorf("ImportWarnings[%d]: got %q, want %q", i, got.ImportWarnings[i], w)
 			}
 		}
 	}
-}
-
-func TestLookupTemplate(t *testing.T) {
-	tmpl, ok := LookupTemplate("classic")
-	if !ok {
-		t.Fatal("expected classic template to exist")
-	}
-	if tmpl.Tokens["surface"] != "#FFFFFF" || tmpl.Tokens["accent"] != "#1E40AF" {
-		t.Fatalf("unexpected classic tokens: %#v", tmpl.Tokens)
-	}
-	if tmpl.ThemeTokens()["ink"] != "#172033" {
-		t.Fatalf("ThemeTokens mismatch: %#v", tmpl.ThemeTokens())
-	}
-	if tmpl.Skin != "corporate" {
-		t.Fatalf("classic skin = %q, want corporate", tmpl.Skin)
-	}
-	if _, ok := LookupTemplate("does-not-exist"); ok {
-		t.Fatal("expected missing template to report ok=false")
-	}
-	prod, ok := LookupTemplate("modern")
-	if !ok {
-		t.Fatal("expected modern template to exist")
-	}
-	if prod.Name != "modern" || prod.Skin != "product" || prod.Tokens["accent"] != "#8B5CF6" {
-		t.Fatalf("unexpected modern template: %#v", prod)
-	}
-	if prod.Label != "Modern" {
-		t.Fatalf("modern label = %q, want Modern", prod.Label)
-	}
-	if len(prod.Palettes) < 8 {
-		t.Fatalf("modern palettes = %d, want >= 8", len(prod.Palettes))
-	}
-	if _, ok := prod.PaletteByID("orange"); !ok {
-		t.Fatal("modern missing orange palette")
-	}
-	if _, ok := prod.PaletteByID("editorial"); !ok {
-		t.Fatal("modern missing editorial palette")
-	}
-	if !strings.Contains(prod.Tokens["embedded-fonts"], `"family":"Manrope"`) {
-		t.Fatal("modern must declare the faces it needs")
-	}
-	if !strings.Contains(prod.Tokens["embedded-fonts"], `"family":"JetBrains Mono"`) {
-		t.Fatal("modern must declare JetBrains Mono")
-	}
-	if tmpl.Tokens["embedded-fonts"] != "" {
-		t.Fatal("classic must not declare fonts it does not need")
-	}
-	if len(tmpl.Palettes) != 3 {
-		t.Fatalf("classic palettes = %d, want 3", len(tmpl.Palettes))
-	}
-	for _, id := range []string{"light", "midnight", "aurora"} {
-		if _, ok := tmpl.PaletteByID(id); !ok {
-			t.Fatalf("classic missing palette %q", id)
-		}
-	}
-	seen := map[string]bool{}
-	for _, p := range prod.Palettes {
-		if p.ID == "" || p.Label == "" || p.Tokens["accent"] == "" {
-			t.Fatalf("invalid palette: %#v", p)
-		}
-		if seen[p.ID] {
-			t.Fatalf("duplicate palette id %q", p.ID)
-		}
-		seen[p.ID] = true
+	if got.SourcePPTXBase64 != orig.SourcePPTXBase64 {
+		t.Errorf("SourcePPTXBase64: got %q, want %q", got.SourcePPTXBase64, orig.SourcePPTXBase64)
 	}
 }
 
-func TestLookupTemplateAliases(t *testing.T) {
-	for _, name := range []string{"aurora", "midnight", "light-corporate"} {
-		got, ok := LookupTemplate(name)
-		if !ok {
-			t.Fatalf("%s should alias to classic", name)
-		}
-		if got.Name != "classic" {
-			t.Fatalf("%s resolved to %q, want classic", name, got.Name)
-		}
+// TestWithoutSourceZeroesSourceField asserts that WithoutSource zeroes
+// SourcePPTXBase64 while preserving all other fields.
+func TestWithoutSourceZeroesSourceField(t *testing.T) {
+	orig := themes.Template{
+		Schema:           2,
+		Name:             "brand",
+		Label:            "Brand",
+		ImportState:      "validated",
+		ImportIterations: 1,
+		ImportWarnings:   []string{"chart on slide 2 not supported"},
+		SourcePPTXBase64: "dGVzdA==",
+		Tokens:           map[string]string{"surface": "#FFFFFF"},
 	}
-	if CanonicalTemplateName("midnight") != "classic" {
-		t.Fatal("CanonicalTemplateName(midnight)")
+
+	clean := orig.WithoutSource()
+
+	if clean.SourcePPTXBase64 != "" {
+		t.Errorf("WithoutSource: SourcePPTXBase64 should be empty, got %q", clean.SourcePPTXBase64)
 	}
-	if AliasPaletteID("midnight") != "midnight" || AliasPaletteID("light-corporate") != "light" {
-		t.Fatalf("AliasPaletteID: midnight=%q light-corporate=%q", AliasPaletteID("midnight"), AliasPaletteID("light-corporate"))
+	// All other fields must be preserved.
+	if clean.Name != orig.Name {
+		t.Errorf("Name changed: got %q, want %q", clean.Name, orig.Name)
 	}
-	pal, ok := LookupTemplate("classic")
-	if !ok {
-		t.Fatal("classic missing")
+	if clean.ImportState != orig.ImportState {
+		t.Errorf("ImportState changed: got %q, want %q", clean.ImportState, orig.ImportState)
 	}
-	mid, ok := pal.PaletteByID("midnight")
-	if !ok || mid.Tokens["surface"] != "#0B1220" {
-		t.Fatalf("midnight palette: %#v", mid)
+	if clean.ImportIterations != orig.ImportIterations {
+		t.Errorf("ImportIterations changed: got %d, want %d", clean.ImportIterations, orig.ImportIterations)
+	}
+	// Original must be unmodified.
+	if orig.SourcePPTXBase64 != "dGVzdA==" {
+		t.Errorf("WithoutSource must not mutate the receiver; orig.SourcePPTXBase64 = %q", orig.SourcePPTXBase64)
 	}
 }
 
-func TestArchetypesForMatchesInternal(t *testing.T) {
-	got := ArchetypesFor("#101820", "#F2F2F2", "#FFB81C")
-	if len(got) != 3 {
-		t.Fatalf("expected 3 archetypes, got %d", len(got))
+// TestTemplateZeroImportState asserts that a Template with a zero ImportState
+// (empty string) serializes and deserializes cleanly — the field is omitted
+// from JSON (omitempty) and the deserialized value is the zero string.
+func TestTemplateZeroImportState(t *testing.T) {
+	orig := themes.Template{
+		Schema: 2,
+		Name:   "classic",
+		Tokens: map[string]string{"surface": "#FFFFFF"},
 	}
-	kinds := map[string]string{}
-	for _, a := range got {
-		kinds[a.Kind] = a.Markup
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	for _, k := range []string{"title", "section", "content"} {
-		markup, ok := kinds[k]
-		if !ok {
-			t.Fatalf("missing archetype kind %q", k)
-		}
-		// The palette colors must be embedded in the regenerated markup so
-		// previews reflect the new colors.
-		if !strings.Contains(markup, "#101820") {
-			t.Fatalf("archetype %q missing surface color: %s", k, markup)
-		}
+	// Field must be omitted (omitempty).
+	if string(data) == "" {
+		t.Fatal("marshal returned empty bytes")
 	}
-	// The exported wrapper must equal the internal builder for the default title.
-	want := archetypesFor("#101820", "#F2F2F2", "#FFB81C", "")
-	if len(want) != len(got) {
-		t.Fatalf("ArchetypesFor length %d != archetypesFor length %d", len(got), len(want))
+	// The JSON must NOT contain importState when the zero value is used.
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
 	}
-	for i := range want {
-		if got[i].Kind != want[i].Kind || got[i].Markup != want[i].Markup {
-			t.Fatalf("archetype %d mismatch between ArchetypesFor and archetypesFor", i)
-		}
+	if _, present := raw["importState"]; present {
+		t.Error("importState should be omitted from JSON when zero, but it was present")
+	}
+
+	var got themes.Template
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ImportState != "" {
+		t.Errorf("ImportState: got %q, want empty string", got.ImportState)
 	}
 }

@@ -1658,7 +1658,15 @@ try {
       if (o.fill && o.fill.kind === 'gradient') return false
       // Empty / noFill / white tiles from the slide master (SAP templates ship
       // ~100 of these). They paint as opaque white squares in PPTX.
-      if (isWhiteOrEmptyFill(o)) return true
+      // EXCEPTION: large structural shapes (cards, panels) are kept even with
+      // white fill — they define the layout geometry and are not master clutter.
+      // A structural shape is: roundRect (any size) OR a rect/shape > 200×80px.
+      if (isWhiteOrEmptyFill(o)) {
+        const isStructural = (o.geom === 'roundRect' || o.rectRadius > 0) ||
+          ((o.w || 0) >= 200 && (o.h || 0) >= 80)
+        if (!isStructural) return true
+        // Structural white shapes are kept — they're card containers, not tiles.
+      }
       // Authoring palettes (Harvey balls, stacked icon sheets) are small
       // squares. Real accent bars are long and thin; icon-row markers are
       // ellipses/images — keep those.
@@ -1884,10 +1892,17 @@ try {
         return (ix > 0 && iy > 0) ? ix * iy : 0
       }
       // Photos (not 40–90px icons) that cover a card must not get a text fill —
-      // long copy on a picture is unreadable.
+      // long copy on a picture is unreadable. Full-canvas background images
+      // (x≈0, y≈0, w≈1920, h≈1080) are design backgrounds, not foreground photos —
+      // exclude them so text slots on top of background images are not suppressed.
       const isLargePhoto = (o) => {
         if (!o || o.kind !== 'image') return false
-        return (o.w || 0) >= 360 && (o.h || 0) >= 280
+        const w = o.w || 0
+        const h = o.h || 0
+        if (!w || !h) return false
+        // Full-canvas image: covers ≥85% of canvas on both axes → background, not photo
+        if (w >= CANVAS_W * 0.85 && h >= CANVAS_H * 0.85) return false
+        return w >= 360 && h >= 280
       }
       const overlapsLargePhoto = (box) => {
         const area = Math.max(1, (box.w || 0) * (box.h || 0))
@@ -1945,8 +1960,14 @@ try {
           // Split a card (shape + text) so the colored box stays chrome and the
           // copy becomes a fill slot inset inside the box. Slot ids are assigned
           // later in reading order, not PowerPoint document order.
+          //
+          // Extend "cardLike" to include numbered ellipses (step-indicator circles)
+          // and any shape with a fill — these MUST emit their chrome geometry even
+          // when the text label becomes a fill slot, otherwise the visual circles
+          // are dropped from the archetype entirely.
           const cardLike = objectHasShape(o) && (
             o.geom === 'roundRect' || o.rectRadius ||
+            o.kind === 'ellipse' || o.geom === 'ellipse' ||
             ((o.w || 0) >= 200 && (o.h || 0) >= 80 && o.fill && o.fill.color)
           )
           if (objectHasShape(o) && cardLike) {
@@ -2347,8 +2368,10 @@ try {
       const spTree = cSld ? findChild(cSld, 'p:spTree') : null
       phCounter = 0
       const ir = await buildIRLayout(spTree, cSld, rels, dir, uniqueLayoutId(`slide-${irSlides.length + 1}`), `Slide ${irSlides.length + 1}`)
-      irSlides.push(ir)
       const lp = layoutPathOfSlide(rels, dir)
+      // Store layout path on the IR so the new per-slide pattern loop can look it up.
+      ir._layoutPath = lp || null
+      irSlides.push(ir)
       if (lp) (samplesByLayoutPath[lp] = samplesByLayoutPath[lp] || []).push(ir)
     }
 
@@ -2673,13 +2696,22 @@ try {
       archetypes.push({ kind: uniqueKind(want), title: synth.name, markup, tier, fillSlots, slotHints, _layout: synth })
     }
 
-    // ---- Content patterns from sample slides --------------------------------
-    // Layouts for body roles are empty placeholder holes. The designed cards,
-    // colored boxes, icon rows, etc. live as free shapes on the SAMPLE slides
-    // (typically authored on Title Only). Promote those samples to fillable
-    // pattern archetypes so the model can fill them instead of copying a
-    // title+body hole. Covers/dividers/agenda/closing samples are skipped —
-    // those roles already have branded layout archetypes.
+    // ---- Content patterns from source slides --------------------------------
+    // Key insight from spec §4.3: the reconstruction must look like the source.
+    // This means EACH source slide needs its own archetype that captures that
+    // slide's actual visual chrome (card positions, colors, layout geometry).
+    //
+    // Previous approach: group slides by layout, take 1 representative per group,
+    // filter out slides with >16 slots. Problem: slides 7/8/9/... all use the
+    // same generic "content" layout → only 1 pattern, which looks like none of them.
+    //
+    // New approach: one archetype per source slide. Structural deduplication
+    // removes only TRULY identical layouts (same roundRect count + shape count +
+    // slot count). Every visually distinct slide gets its own pattern archetype.
+    //
+    // CHROME_KINDS slides (title/closing/section/agenda) already have branded
+    // layout archetypes above — skip them here.
+
     const isDesignedExtra = (o) => {
       if (!o) return false
       if (o.kind === 'image' || o.kind === 'ellipse' || o.kind === 'path' || o.kind === 'line') return true
@@ -2689,6 +2721,38 @@ try {
       if (o.fill && o.fill.color) return true
       return false
     }
+
+    // Build a structural fingerprint for deduplication.
+    // Two slides are "same" only when roundRect count, total shape count,
+    // slot count, AND dominant fill color set all match — avoids false dedup
+    // of visually distinct slides that happen to share the same layout geometry
+    // (e.g. a 3-column status table where one slide uses red/green/blue and
+    // another uses purple/teal/orange — same structure, different brand colors).
+    const slideFingerprint = (extras, fillSlots) => {
+      const rr = extras.filter((o) => o.geom === 'roundRect' || o.rectRadius).length
+      const shapes = extras.filter((o) => o.kind !== 'text' && o.kind !== 'image').length
+      const slots = (fillSlots || []).length
+      // Collect up to 4 distinct accent fill colors from structural shapes.
+      // Sort and join to make the signature order-independent.
+      const colorSet = new Set()
+      for (const o of extras) {
+        if (o.kind === 'line' || o.kind === 'text' || o.kind === 'image') continue
+        const col = (o.fill && o.fill.color) ? String(o.fill.color).toLowerCase() : ''
+        if (!col) continue
+        // Rough isAccentColor: not white/near-white and not near-black
+        const r = parseInt(col.replace('#','').slice(0,2),16) || 0
+        const g = parseInt(col.replace('#','').slice(2,4),16) || 0
+        const b = parseInt(col.replace('#','').slice(4,6),16) || 0
+        const lum = 0.299*r + 0.587*g + 0.114*b
+        const mx = Math.max(r,g,b); const mn = Math.min(r,g,b)
+        const sat = mx > 0 ? (mx - mn) / mx : 0
+        if (sat > 0.15 && lum > 20 && lum < 230) colorSet.add(col)
+        if (colorSet.size >= 4) break
+      }
+      const colorSig = [...colorSet].sort().join(',')
+      return `rr${rr}|sh${shapes}|sl${slots}|c${colorSig}`
+    }
+
     const patternLabel = (extras, slotCount, hints) => {
       const cardHints = (hints || []).filter((h) => /card \d+ of \d+/i.test(h.hint || ''))
       if (cardHints.length >= 2) {
@@ -2703,6 +2767,7 @@ try {
       const ell = extras.filter((o) => o.kind === 'ellipse').length
       const img = extras.filter((o) => o.kind === 'image').length
       const cards = extras.filter((o) => objectHasShape(o) && (o.fill || o.geom === 'roundRect' || o.rectRadius)).length
+      if (rr >= 5) return `${rr}-row scenario table`
       if (rr >= 2) return `${rr} rounded cards`
       if (ell >= 2 && img) return 'Icon row with images'
       if (ell >= 2) return `${ell} icon markers`
@@ -2711,62 +2776,106 @@ try {
       if (slotCount > 0) return `Designed content (${slotCount} slots)`
       return 'Designed content'
     }
-    const scorePattern = (p) => {
-      const slots = (p.fillSlots || []).length
-      let s = 0
-      if (slots >= 3 && slots <= 8) s += 10
-      else if (slots > 20) s -= 15
-      if (/roundRect/.test(p.markup)) s += 8
-      const shapes = (p.markup.match(/<ast-shape /g) || []).length
-      if (shapes > 40) s -= 20
-      else if (shapes >= 4 && shapes <= 25) s += 5
-      return s
-    }
 
     const layoutByPath = {}
     for (const ir of irLayouts) {
       if (ir._layoutPath) layoutByPath[ir._layoutPath] = ir
     }
+
+    // Process EVERY source slide individually (not grouped by layout).
+    // This guarantees slide 7 (scenario table) and slide 8 (3-col cards) each
+    // get their own archetype, even though they share the same "content" layout.
     const patternCandidates = []
-    for (const [lp, samples] of Object.entries(samplesByLayoutPath)) {
-      const layoutIR = layoutByPath[lp]
-      if (!layoutIR) continue
-      const baseKind = kindOf(layoutIR, layoutIR._layoutType || '')
-      if (CHROME_KINDS.includes(baseKind)) continue
-      // layoutIR.objects already includes master chrome when showMasterSp is on.
-      const inherited = layoutIR.objects || []
-      for (const sample of samples) {
-        const extras = (sample.objects || []).filter((o) => !isSampleJunk(o) && !isMasterClutter(o))
-        if (!extras.some(isDesignedExtra)) continue
-        const bg = (sample.background && sample.background.kind === 'image' && sample.background.mediaKey)
-          ? sample.background
-          : (layoutIR.background || sample.background)
-        const merged = {
-          id: sample.id,
-          name: sample.name,
-          background: bg,
-          objects: inherited.concat(extras),
-          placeholders: mergePatternPlaceholders(layoutIR.placeholders, sample.placeholders),
-        }
-        const { markup, fillSlots, slotHints } = layoutToAsd(merged, {
-          extraTextAsSlots: true,
-          inheritedCount: inherited.length,
-        })
-        if (!fillSlots.length) continue
-        // Widget sheets (every Harvey ball as a "card") are not body layouts.
-        if (fillSlots.length > 16) continue
-        if ((markup.match(/<ast-shape /g) || []).length > 30) continue
-        patternCandidates.push({
-          title: patternLabel(extras, fillSlots.length, slotHints),
-          markup,
-          fillSlots,
-          slotHints,
-          _layout: merged,
-        })
+    const seenFingerprints = new Set()
+
+    // Per-slide archetype generation: EVERY source slide gets its own archetype
+    // (including cover/bookend slides). This is the key to Phase-0 matching in
+    // reconstruct.go — slide N can only be correctly reconstructed if an archetype
+    // with sourceSlideIndex==N exists and captures that slide's actual chrome.
+    //
+    // Chrome-kind archetypes (title/section/closing/agenda) from the layout pass
+    // above still exist for the general fill_slide('title') authoring use case.
+    // The per-slide archetypes coexist with them: the reconstruct loop picks the
+    // per-slide one via Phase 0, ignoring the generic chrome archetypes.
+    for (let slideIdx = 0; slideIdx < irSlides.length; slideIdx++) {
+      const sample = irSlides[slideIdx]
+      // Find this slide's layout.
+      const lp = sample._layoutPath || null
+      const layoutIR = lp ? layoutByPath[lp] : null
+
+      const inherited = layoutIR ? (layoutIR.objects || []) : []
+      // For bookend slides (bg image + no body PH) we include the layout objects
+      // as inherited chrome so the cover's right-panel, title, decorative shapes
+      // all appear in the archetype markup. For content slides we filter junk.
+      const isCoverSlide = (() => {
+        const chromTextLen = (sample.objects || []).reduce((acc, o) => acc + (o.text ? o.text.length : 0), 0)
+        const hasBgImageObj = (sample.objects || []).some(
+          (o) => o.kind === 'image' && (o.x || 0) <= 10 && (o.y || 0) <= 10 && (o.w || 0) >= 1800 && (o.h || 0) >= 900
+        )
+        const hasBodyPH = (sample.placeholders || []).some((p) => p.type === 'body')
+        // Also consider the layout background image as a cover indicator
+        const layoutHasBgImg = layoutIR && layoutIR.background && layoutIR.background.kind === 'image'
+        return (hasBgImageObj || layoutHasBgImg) && !hasBodyPH && chromTextLen < 300
+      })()
+
+      const extras = (sample.objects || []).filter((o) => !isSampleJunk(o) && !isMasterClutter(o))
+
+      // For non-cover content slides: require at least one designed-extra shape.
+      // Cover slides are always included (their chrome IS the design).
+      if (!isCoverSlide && !extras.some(isDesignedExtra)) continue
+
+      const bg = (sample.background && sample.background.kind === 'image' && sample.background.mediaKey)
+        ? sample.background
+        : (layoutIR ? layoutIR.background : sample.background) || sample.background
+
+      const merged = {
+        id: sample.id,
+        name: sample.name,
+        background: bg,
+        objects: inherited.concat(extras),
+        placeholders: mergePatternPlaceholders(layoutIR ? layoutIR.placeholders : [], sample.placeholders),
       }
+
+      phCounter = 0
+      // Cover slides: use extraTextAsSlots so their title/date text become fill
+      // slots; content slides also use extraTextAsSlots for card text regions.
+      const { markup, fillSlots, slotHints } = layoutToAsd(merged, {
+        extraTextAsSlots: true,
+        inheritedCount: inherited.length,
+        // Cover slides: never omit the full-bleed background image — it IS the slide design.
+        omitEmptyFullBleedPic: !isCoverSlide,
+      })
+
+      // Cover slides always get an archetype even with 0 fill slots (they have fixed chrome).
+      // Content slides need at least 1 slot to be useful.
+      if (!isCoverSlide && !fillSlots.length) continue
+
+      // Dedup: skip if we already have an archetype with the exact same structural
+      // fingerprint for a DIFFERENT slide (same visual appears twice in the deck).
+      // NEVER dedup two slides that have different slideIdx — each slide must get
+      // its own archetype so Phase-0 matching works correctly.
+      const fp = `idx${slideIdx}|` + slideFingerprint(extras, fillSlots)
+      if (seenFingerprints.has(fp)) continue
+      seenFingerprints.add(fp)
+
+      patternCandidates.push({
+        title: isCoverSlide
+          ? (slideIdx === 0 ? 'Cover slide' : 'Closing slide')
+          : patternLabel(extras, fillSlots.length, slotHints),
+        markup,
+        fillSlots,
+        slotHints,
+        _layout: merged,
+        _sourceSlideId: sample.id,
+        _sourceSlideIndex: slideIdx,
+      })
     }
-    patternCandidates.sort((a, b) => scorePattern(b) - scorePattern(a))
-    // Dedup labels so several "3 rounded cards" variants stay distinguishable.
+
+    // Sort by slot count descending so richer archetypes get lower-numbered kinds
+    // (pattern-2 = most slots = best for complex slides).
+    patternCandidates.sort((a, b) => (b.fillSlots || []).length - (a.fillSlots || []).length)
+
+    // Dedup labels so several variants stay distinguishable.
     const patternLabelCounts = {}
     for (const p of patternCandidates) {
       const base = p.title
@@ -2781,6 +2890,7 @@ try {
         fillSlots: p.fillSlots,
         slotHints: p.slotHints,
         _layout: p._layout,
+        sourceSlideIndex: p._sourceSlideIndex,
       })
     }
 
@@ -2805,14 +2915,22 @@ try {
       label: 'Imported Template',
       tokens: themeTokens,
       assets,
-      archetypes: archetypes.map((a) => ({
-        kind: a.kind,
-        title: a.title,
-        markup: a.markup,
-        tier: a.tier,
-        fillSlots: a.fillSlots,
-        slotHints: a.slotHints,
-      })),
+      archetypes: archetypes.map((a) => {
+        const entry = {
+          kind: a.kind,
+          title: a.title,
+          markup: a.markup,
+          tier: a.tier,
+          fillSlots: a.fillSlots,
+          slotHints: a.slotHints,
+        }
+        // Preserve sourceSlideIndex (1-based sentinel) so reconstruct.go Phase-0
+        // can match slide N directly to the archetype built from slide N.
+        if (typeof a.sourceSlideIndex === 'number' && a.sourceSlideIndex >= 0) {
+          entry.sourceSlideIndex = a.sourceSlideIndex + 1 // 1-based; 0 = unset in Go JSON
+        }
+        return entry
+      }),
       templateModel,
     }
     ok(template)

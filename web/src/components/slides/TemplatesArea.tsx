@@ -25,6 +25,40 @@ function templateScope(tpl: SlidesTemplate): DocsScope {
   return tpl.scope === 'team' ? 'team' : 'personal'
 }
 
+/** Badge showing the import lifecycle state for imported (non-built-in) templates. */
+function ImportStateBadge({ importState }: { importState?: string }) {
+  if (!importState) return null
+  let label: string
+  let bg: string
+  let fg: string
+  if (importState === 'validated') {
+    label = 'Validated'
+    bg = 'rgba(16, 185, 129, 0.15)'
+    fg = '#34d399'
+  } else if (importState === 'validation_incomplete') {
+    label = 'Incomplete'
+    bg = 'rgba(245, 158, 11, 0.15)'
+    fg = '#f59e0b'
+  } else if (importState === 'failed') {
+    label = 'Failed'
+    bg = 'rgba(239, 68, 68, 0.15)'
+    fg = '#f87171'
+  } else {
+    label = 'Processing…'
+    bg = 'var(--bg-tertiary)'
+    fg = 'var(--text-muted)'
+  }
+  return (
+    <span
+      className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+      style={{ background: bg, color: fg }}
+      data-testid="template-import-state-badge"
+    >
+      {label}
+    </span>
+  )
+}
+
 function ScopeBadge({ scope }: { scope?: string }) {
   const label =
     scope === 'builtin' ? 'Built-in'
@@ -149,7 +183,10 @@ function TemplateCard({
         <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
           {title}
         </span>
-        <ScopeBadge scope={tpl.scope} />
+        <div className="flex shrink-0 items-center gap-1">
+          <ImportStateBadge importState={tpl.importState} />
+          <ScopeBadge scope={tpl.scope} />
+        </div>
       </div>
 
       <div className="mt-auto flex items-center gap-2 pt-2" style={{ borderTop: '1px solid var(--border-color)' }}>
@@ -298,6 +335,13 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
     }
   }, [load, notifyUpdated, showToast])
 
+  // Filter out in-progress import states so only usable templates are shown in
+  // the picker grid. Built-ins (no importState) and terminal states (validated,
+  // validation_incomplete, failed) are always shown; only active workflow states
+  // are hidden from authoring.
+  const inProgressStates = new Set(['importing', 'candidate', 'reconstructing', 'repairing'])
+  const usableTemplates = templates.filter(t => !t.importState || !inProgressStates.has(t.importState))
+
   return (
     <div className="flex-1 overflow-auto p-6" style={{ background: 'var(--bg-primary)' }} data-testid="templates-area">
       <div className="mx-auto max-w-5xl">
@@ -340,7 +384,7 @@ export default function TemplatesArea({ onNavigate, showToast }: TemplatesAreaPr
           <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No templates available.</p>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {templates.map(tpl => (
+            {usableTemplates.map(tpl => (
               <TemplateCard
                 key={`${tpl.scope || 'builtin'}-${tpl.name}`}
                 tpl={tpl}

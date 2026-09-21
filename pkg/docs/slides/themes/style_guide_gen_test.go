@@ -291,3 +291,118 @@ func TestGenerateStyleGuide_NilArchetypes(t *testing.T) {
 		t.Error("markdown should not contain Content Layout Guide without archetypes")
 	}
 }
+
+// -------------------------------------------------------------------------
+// Tests for GenerateStyleGuideFromEvidence
+// -------------------------------------------------------------------------
+
+func TestGenerateStyleGuideFromEvidenceMarkdownContainsAccents(t *testing.T) {
+	// Two layouts each with one chrome object filled with a distinct accent color.
+	model := &TemplateModel{
+		Schema: 3,
+		Size:   IRSize{W: 1920, H: 1080},
+		Layouts: []IRLayout{
+			{
+				ID: "layout-a",
+				Objects: []IRChrome{
+					{Kind: "rect", X: 0, Y: 0, W: 100, H: 20, Fill: &IRFill{Kind: "solid", Color: "#E9730C"}},
+				},
+			},
+			{
+				ID: "layout-b",
+				Objects: []IRChrome{
+					{Kind: "rect", X: 0, Y: 0, W: 100, H: 20, Fill: &IRFill{Kind: "solid", Color: "#7357D9"}},
+				},
+			},
+		},
+	}
+	tokens := map[string]string{
+		"surface": "#FFFFFF",
+		"ink":     "#000000",
+	}
+
+	sg := GenerateStyleGuideFromEvidence(model, tokens, nil, ImportEvidence{})
+	if sg == nil {
+		t.Fatal("expected non-nil style guide")
+	}
+	for _, hex := range []string{"#E9730C", "#7357D9"} {
+		if !strings.Contains(strings.ToUpper(sg.Markdown), strings.ToUpper(hex)) {
+			t.Errorf("markdown missing accent color %s", hex)
+		}
+	}
+	// ValidationEvidence should capture both colors.
+	if sg.ValidationEvidence == nil {
+		t.Fatal("expected non-nil ValidationEvidence")
+	}
+	if len(sg.ValidationEvidence.DetectedAccentColors) < 2 {
+		t.Errorf("expected at least 2 detected accent colors, got %d", len(sg.ValidationEvidence.DetectedAccentColors))
+	}
+}
+
+func TestGenerateStyleGuideFromEvidenceRepairsInMarkdown(t *testing.T) {
+	model := &TemplateModel{Schema: 3, Size: IRSize{W: 1920, H: 1080}}
+	evidence := ImportEvidence{
+		RepairsApplied: []string{"Do not use generic blue slab"},
+	}
+
+	sg := GenerateStyleGuideFromEvidence(model, nil, nil, evidence)
+	if sg == nil {
+		t.Fatal("expected non-nil style guide")
+	}
+	if !strings.Contains(sg.Markdown, "generic blue slab") {
+		t.Error("markdown should contain 'generic blue slab' from RepairsApplied")
+	}
+	if !strings.Contains(sg.Markdown, "What Was Repaired") {
+		t.Error("markdown should contain 'What Was Repaired' section")
+	}
+}
+
+func TestGenerateStyleGuideFromEvidenceValidationNotice(t *testing.T) {
+	model := &TemplateModel{Schema: 3, Size: IRSize{W: 1920, H: 1080}}
+	evidence := ImportEvidence{
+		FidelityScore: 0.82,
+		Passed:        true,
+		Iterations:    2,
+	}
+
+	sg := GenerateStyleGuideFromEvidence(model, nil, nil, evidence)
+	if sg == nil {
+		t.Fatal("expected non-nil style guide")
+	}
+	if !strings.HasPrefix(sg.Markdown, "> Validated") {
+		t.Errorf("markdown should start with '> Validated', got prefix: %q",
+			sg.Markdown[:min(40, len(sg.Markdown))])
+	}
+}
+
+func TestGenerateStyleGuideFromEvidenceChromeTable(t *testing.T) {
+	// Three layouts all containing a text chrome element at x=35, y=9 with text "Eyebrow".
+	makeLayout := func(id string) IRLayout {
+		return IRLayout{
+			ID: id,
+			Objects: []IRChrome{
+				{Kind: "text", X: 35, Y: 9, W: 370, H: 29, Text: "Eyebrow"},
+			},
+		}
+	}
+	model := &TemplateModel{
+		Schema: 3,
+		Size:   IRSize{W: 1920, H: 1080},
+		Layouts: []IRLayout{
+			makeLayout("layout-1"),
+			makeLayout("layout-2"),
+			makeLayout("layout-3"),
+		},
+	}
+
+	sg := GenerateStyleGuideFromEvidence(model, nil, nil, ImportEvidence{})
+	if sg == nil {
+		t.Fatal("expected non-nil style guide")
+	}
+	if !strings.Contains(sg.Markdown, "Identity Chrome") {
+		t.Error("markdown should contain 'Identity Chrome' section")
+	}
+	if !strings.Contains(sg.Markdown, "Eyebrow") {
+		t.Error("markdown should contain 'Eyebrow' text from recurring chrome")
+	}
+}

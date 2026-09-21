@@ -49,6 +49,16 @@ type Archetype struct {
 	// zero for built-ins and for imports made before the static-thumbnail pipeline
 	// existed; those fall back to a live ast-deck render.
 	ThumbnailRef string `json:"thumbnailRef,omitempty"`
+	// SourceSlideIndex is the 1-based index of the source slide (within the
+	// imported PPTX irSlides array) that this archetype was built from.
+	// 0 (the zero value, omitted from JSON) means "not set" — chrome-kind
+	// archetypes built from layout definitions have SourceSlideIndex == 0.
+	// import_worker.mjs stores slideIdx+1 so that the first slide (idx 0) maps
+	// to SourceSlideIndex == 1, safely distinct from the "unset" zero value.
+	// Phase 0 of selectArchetype uses this field to guarantee that source slide
+	// N always gets the archetype built FROM slide N, giving true per-slide
+	// visual fidelity without any structural scoring heuristics.
+	SourceSlideIndex int `json:"sourceSlideIndex,omitempty"`
 }
 
 // SlotHint is a compact description of one fill slot on an archetype.
@@ -87,6 +97,28 @@ type Template struct {
 	// ship colorways; imported brand templates typically have none — their
 	// color is the brand.
 	Palettes []Palette `json:"palettes,omitempty"`
+
+	// Import lifecycle fields. ImportState is "" (not imported / treat as
+	// validated), "importing", "candidate", "validated", "validation_incomplete",
+	// or "failed". The zero value is backward-compatible: built-ins and plain
+	// scoped templates without this field behave as validated.
+	ImportState      string   `json:"importState,omitempty"`
+	ImportIterations int      `json:"importIterations,omitempty"`
+	ImportWarnings   []string `json:"importWarnings,omitempty"`
+
+	// SourcePPTXBase64 holds the base64-encoded original .pptx bytes so
+	// subsequent repair passes can re-invoke the worker without the client
+	// re-uploading. This field is NEVER sent to the UI or LLM context — use
+	// WithoutSource() before any DTO projection.
+	SourcePPTXBase64 string `json:"sourcePPTXBase64,omitempty"`
+}
+
+// WithoutSource returns a shallow copy of the template with SourcePPTXBase64
+// zeroed. Call this on every DTO projection path so the heavy source bytes
+// never reach the UI or LLM context.
+func (t Template) WithoutSource() Template {
+	t.SourcePPTXBase64 = ""
+	return t
 }
 
 // Palette is a named colorway on a Template. Skin, furniture, and fonts stay

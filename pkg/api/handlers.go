@@ -1081,6 +1081,8 @@ func RegisterRoutes(router *mux.Router, svc *store.Services, backend store.Platf
 	router.HandleFunc("/api/docs/slides/templates/{name}/recolor", RecolorSlidesTemplateHandler).Methods("PATCH")
 	router.HandleFunc("/api/docs/slides/templates/{name}/thumbnails/{kind}", GetSlidesTemplateThumbnailHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/templates/{name}/media/{ref}", GetSlidesTemplateMediaHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/templates/{name}/import-report", GetSlidesTemplateImportReportHandler).Methods("GET")
+	router.HandleFunc("/api/docs/slides/templates/{name}/import-proof", GetSlidesTemplateImportProofHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", GetSlidesDeckHandler).Methods("GET")
 	router.HandleFunc("/api/docs/slides/{deckSlug}", DeleteSlidesDeckHandler).Methods("DELETE")
 	router.HandleFunc("/api/docs/slides/{deckSlug}/slides/{idx:[0-9]+}", GetSlideHandler).Methods("GET")

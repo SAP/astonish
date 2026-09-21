@@ -106,6 +106,12 @@ export interface SlidesTemplate {
   /** Whether this template has a rich style guide for LLM content generation. */
   hasStyleGuide?: boolean
   cover?: SlidesTemplateCover
+  /** Import lifecycle state. Empty/absent for built-in templates. */
+  importState?: string
+  /** Warnings from the most recent import pass. */
+  importWarnings?: string[]
+  /** Fidelity score [0–1] from the last import-loop iteration. 0 when absent. */
+  fidelityScore?: number
 }
 
 function withScope(path: string, scope: DocsScope): string {
@@ -441,4 +447,25 @@ export async function restoreDeckVersion(
   )
   if (!response.ok) throw await responseError(response, 'Failed to restore deck version')
   return response.json() as Promise<SlidesDeckResponse>
+}
+
+/**
+ * Fetch the most recent import-loop CompareReport for a template.
+ * Throws when the template has no import history (404) or on network error.
+ */
+export async function getSlidesTemplateImportReport(name: string): Promise<unknown> {
+  const res = await fetch(`/api/docs/slides/templates/${encodeURIComponent(name)}/import-report`)
+  if (!res.ok) throw new Error(`import report: ${res.status}`)
+  return res.json()
+}
+
+/**
+ * Fetch the import proof SceneGraph for a template — one slide per imported
+ * archetype, rendered verbatim so a reviewer can confirm visual fidelity.
+ * Throws when the template has no proof deck (404) or on network error.
+ */
+export async function getSlidesTemplateImportProof(name: string): Promise<unknown> {
+  const res = await fetch(`/api/docs/slides/templates/${encodeURIComponent(name)}/import-proof`)
+  if (!res.ok) throw new Error(`import proof: ${res.status}`)
+  return res.json()
 }

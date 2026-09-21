@@ -364,6 +364,25 @@ func RecipeArchetypes(tmpl themes.Template) []themes.Archetype {
 }
 
 func catalogFromTemplate(tmpl themes.Template) []ArchetypeCatalogEntry {
+	// For imported templates (Model != nil) the extracted pattern-* archetypes
+	// ARE the body layout catalog — they represent the actual visual designs from
+	// the PPTX. Put them first so the LLM picks the real template layouts, not
+	// generic recipe boxes. Recipe-* entries follow as a structural fallback when
+	// the imported layouts do not cover a required content shape.
+	if tmpl.Model != nil {
+		cat := catalogFrom(agentCatalogBookends(tmpl))
+		cat = append(cat, catalogFrom(importedBodyArchetypes(tmpl))...)
+		recipes := RecipeArchetypes(tmpl)
+		recipeCat := catalogFrom(recipes)
+		for i := range recipeCat {
+			if m, ok := recipeByKind(recipeCat[i].Kind); ok {
+				recipeCat[i].Summary = m.Summary
+			}
+		}
+		return append(cat, recipeCat...)
+	}
+
+	// Built-in / plain scoped templates: recipes first, official bookends appended.
 	recipes := RecipeArchetypes(tmpl)
 	cat := catalogFrom(recipes)
 	for i := range cat {
@@ -372,6 +391,34 @@ func catalogFromTemplate(tmpl themes.Template) []ArchetypeCatalogEntry {
 		}
 	}
 	return append(cat, catalogFrom(agentCatalogBookends(tmpl))...)
+}
+
+// importedBodyArchetypes returns the non-bookend archetypes from an imported
+// template that should be promoted into the authoring catalog. These are the
+// pattern-*, content-*, and other flexible layouts extracted from the PPTX
+// — the real visual designs the LLM must use to stay on-brand.
+//
+// Only archetypes with ≥2 fill slots are returned. Archetypes with 0 or 1 fill
+// slot are not useful body layouts: they are either empty background-only slides
+// (content, blank) or single-slot photo/title-only layouts. The ≥2 filter
+// keeps card grids, column rows, and other multi-slot content archetypes while
+// discarding empty chrome placeholders and page-number-only layouts.
+func importedBodyArchetypes(tmpl themes.Template) []themes.Archetype {
+	var out []themes.Archetype
+	for _, a := range tmpl.Archetypes {
+		base := stripVariantSuffix(a.Kind)
+		// Skip bookends — they are already in agentCatalogBookends.
+		if base == "title" || base == "closing" {
+			continue
+		}
+		// Skip archetypes with fewer than 2 fill slots: empty backgrounds,
+		// single-slot photo layouts, and page-number-only chrome slides.
+		if len(a.FillSlots) < 2 {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // RenderRecipe builds ASD markup for one layout type. fills are applied later
@@ -1131,8 +1178,10 @@ func stripTags(s string) string {
 	return b.String()
 }
 
-// RecipeGuideMarkdown is prepended to the template style guide so the model
-// sees layout types before imported pattern-* holes.
+// RecipeGuideMarkdown returns the recipe layout guide prepended to the
+// template style guide. For imported templates (model != nil), call
+// ImportedTemplateGuideMarkdown instead, which surfaces the actual PPTX
+// layouts as the primary catalog.
 func RecipeGuideMarkdown() string {
 	var b strings.Builder
 	b.WriteString("## Layout types (recipe-*) — default body slides\n\n")
@@ -1142,10 +1191,100 @@ func RecipeGuideMarkdown() string {
 	b.WriteString("Optional `headline_accent` colors one phrase; `emphasis` (1/2/3) highlights one card. ")
 	b.WriteString("The catalog's fillSlots for this template is authoritative (product cover has two meta cells, optional third — not meta_4; product closer is cover-like: headline + thesis, optional CTA, optional numbered takeaways — not three gray chips). ")
 	b.WriteString("If the catalog lists title / title-N, slide 0 is that official cover (fill those slot ids, not recipe names). If it lists closing / closing-N, the last slide is that official end page. ")
-	b.WriteString("pattern-*, section, and agenda are not in the default catalog; fetch them with get_archetype only if the user asked. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.\n\n")
+	b.WriteString("section and agenda are available via get_archetype. A chapter is an eyebrow on a full content slide — do not insert empty section dividers.\n\n")
 	for _, m := range allRecipeMeta() {
 		b.WriteString(fmt.Sprintf("- **%s** (`%s`): %s\n", m.Title, m.Kind, m.Summary))
 	}
 	b.WriteString("\nTitle and Text is last resort. Do not pour a story into an imported sample.\n\n")
+	return b.String()
+}
+
+// ImportedTemplateGuideMarkdown returns the layout guide for an imported
+// template. Unlike RecipeGuideMarkdown, it promotes the imported pattern-*
+// archetypes as the PRIMARY body layouts — the real visual designs from the
+// original PPTX — and demotes recipe-* to a structural fallback.
+func ImportedTemplateGuideMarkdown(tmpl themes.Template) string {
+	var b strings.Builder
+	b.WriteString("## This template's layout catalog — USE THESE for body slides\n\n")
+	b.WriteString("This is an **imported brand template**. The layouts below were extracted directly from ")
+	b.WriteString("the original PowerPoint file. ")
+	b.WriteString("**You MUST use these imported layouts for body slides** — they carry the exact visual ")
+	b.WriteString("language of the brand (card shapes, accent colors, chrome geometry). ")
+	b.WriteString("Do NOT substitute generic recipe-* layouts when an imported layout fits the content.\n\n")
+
+	// List imported body archetypes with their key slot hints.
+	// Cap the fill-slot listing to the first 4 slots (title + up to 3 body)
+	// so the guide is readable even for archetypes with 14+ slots.
+	const maxDisplaySlots = 4
+	body := importedBodyArchetypes(tmpl)
+	if len(body) > 0 {
+		b.WriteString("### Imported body layouts (primary — prefer these)\n\n")
+		for _, a := range body {
+			label := a.Title
+			if label == "" {
+				label = a.Kind
+			}
+			b.WriteString(fmt.Sprintf("- **%s** (`%s`)", label, a.Kind))
+			if len(a.FillSlots) > 0 {
+				display := a.FillSlots
+				suffix := ""
+				if len(display) > maxDisplaySlots {
+					display = display[:maxDisplaySlots]
+					suffix = fmt.Sprintf(" … (%d total slots)", len(a.FillSlots))
+				}
+				b.WriteString(fmt.Sprintf(" — fill slots: %s%s", strings.Join(display, ", "), suffix))
+			}
+			// Show slot hints only for the capped set, to keep the guide brief.
+			if len(a.SlotHints) > 0 {
+				shown := a.SlotHints
+				if len(shown) > maxDisplaySlots {
+					shown = shown[:maxDisplaySlots]
+				}
+				hints := make([]string, 0, len(shown))
+				for _, h := range shown {
+					if h.Hint != "" {
+						hints = append(hints, h.ID+": "+h.Hint)
+					}
+				}
+				if len(hints) > 0 {
+					b.WriteString("\n  - " + strings.Join(hints, "\n  - "))
+				}
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Bookend summary.
+	titles := make([]string, 0)
+	closings := make([]string, 0)
+	for _, a := range tmpl.Archetypes {
+		base := stripVariantSuffix(a.Kind)
+		if base == "title" {
+			titles = append(titles, a.Kind)
+		} else if base == "closing" {
+			closings = append(closings, a.Kind)
+		}
+	}
+	if len(titles) > 0 {
+		b.WriteString("### Cover slide (first slide, position 0)\n\n")
+		b.WriteString("Use kind: `" + strings.Join(titles, "` or `") + "`. ")
+		b.WriteString("Fill only the slots listed in the catalog's fillSlots.\n\n")
+	}
+	if len(closings) > 0 {
+		b.WriteString("### Closing slide (last slide)\n\n")
+		b.WriteString("Use kind: `" + strings.Join(closings, "` or `") + "`.\n\n")
+	}
+
+	// Recipe-* as fallback.
+	b.WriteString("### Recipe layouts (fallback — only when no imported layout fits)\n\n")
+	b.WriteString("Use recipe-* layouts **only** when the content shape has no matching imported layout ")
+	b.WriteString("(e.g. a data table, a single large quote, a process terminal). ")
+	b.WriteString("Never use recipe-* as a substitute for an available imported layout.\n\n")
+	for _, m := range allRecipeMeta() {
+		b.WriteString(fmt.Sprintf("- `%s`: %s\n", m.Kind, m.Summary))
+	}
+	b.WriteString("\n")
+
 	return b.String()
 }

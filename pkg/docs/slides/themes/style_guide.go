@@ -25,6 +25,30 @@ type StyleGuide struct {
 	// Markdown is the full human/LLM-readable style guide as a markdown document
 	// (the primary artifact the LLM sees in context).
 	Markdown string `json:"markdown,omitempty"`
+	// ValidationEvidence is populated only when the style guide was generated
+	// via GenerateStyleGuideFromEvidence (i.e., after the iterative import loop).
+	ValidationEvidence *ValidationSummary `json:"validationEvidence,omitempty"`
+}
+
+// ValidationSummary captures evidence from the iterative import-fidelity loop.
+type ValidationSummary struct {
+	ValidatedArchetypes   []string `json:"validatedArchetypes,omitempty"`  // archetype kinds that passed comparison
+	RepairsApplied        []string `json:"repairsApplied,omitempty"`        // gap descriptions that required LLM repair
+	UnsupportedConstructs []string `json:"unsupportedConstructs,omitempty"` // from model.Warnings
+	DetectedAccentColors  []string `json:"detectedAccentColors,omitempty"`  // all accent hex colors found across layouts
+}
+
+// ImportEvidence is the evidence snapshot passed to GenerateStyleGuideFromEvidence.
+// It mirrors the fields of slides.CompareReport and slides.IterationResult that
+// the style guide generator needs, without creating an import cycle back to the
+// parent slides package.
+type ImportEvidence struct {
+	FidelityScore         float64  `json:"fidelityScore"`
+	Passed                bool     `json:"passed"`
+	GapDescriptions       []string `json:"gapDescriptions,omitempty"`       // top gap descriptions from all SlideFindings
+	RepairsApplied        []string `json:"repairsApplied,omitempty"`        // from IterationResult.GapSummary (fixed gaps)
+	UnsupportedConstructs []string `json:"unsupportedConstructs,omitempty"` // from model.Warnings
+	Iterations            int      `json:"iterations,omitempty"`            // number of loop iterations completed
 }
 
 // TypeLevel represents one level in the typography hierarchy.

@@ -99,3 +99,12 @@ webhook
 
 .opencode/
 graphify-out/
+
+# Slides diagnostics binary
+/slides-diag
+
+# Slides improvement working directory (specs, fixtures, reference material)
+slides_improve/
+
+# Local planning docs
+slides-import-fidelity-plan.md

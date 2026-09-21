@@ -20,8 +20,25 @@ import (
 // Unsupported constructs (tables, charts, SmartArt) are recorded as warning
 // strings on the returned slice; they are never silently dropped.
 func ReconstructScene(model *themes.TemplateModel, archetypes []themes.Archetype, assets map[string]string) (*SceneGraph, []string, error) {
+	scene, markups, warnings, err := reconstructCore(model, archetypes, assets)
+	_ = markups
+	return scene, warnings, err
+}
+
+// ReconstructMarkups is like ReconstructScene but also returns the per-slide
+// ASD markup strings (after text/image projection, before node parsing).
+// The i-th string corresponds to scene.Slides[i]. Used by the diagnostics tool
+// to render the filled slide in the live-preview panel without re-running
+// projection.
+func ReconstructMarkups(model *themes.TemplateModel, archetypes []themes.Archetype, assets map[string]string) (*SceneGraph, []string, []string, error) {
+	return reconstructCore(model, archetypes, assets)
+}
+
+// reconstructCore is the shared implementation of ReconstructScene and
+// ReconstructMarkups.
+func reconstructCore(model *themes.TemplateModel, archetypes []themes.Archetype, assets map[string]string) (*SceneGraph, []string, []string, error) {
 	if model == nil {
-		return nil, nil, fmt.Errorf("reconstruct: model must not be nil")
+		return nil, nil, nil, fmt.Errorf("reconstruct: model must not be nil")
 	}
 
 	var warnings []string
@@ -52,6 +69,8 @@ func ReconstructScene(model *themes.TemplateModel, archetypes []themes.Archetype
 	// Pre-compute archetype fingerprints once (parsing markup is not free).
 	archFPs := buildArchetypeFingerprints(archetypes)
 
+	markups := make([]string, 0, len(model.Slides))
+
 	for i, srcSlide := range model.Slides {
 		arch := selectArchetype(archetypes, archFPs, srcSlide, i)
 		markup := arch.Markup
@@ -79,10 +98,11 @@ func ReconstructScene(model *themes.TemplateModel, archetypes []themes.Archetype
 			slide.Title = firstTitleText(srcSlide)
 		}
 
+		markups = append(markups, markup)
 		scene.Slides = append(scene.Slides, slide)
 	}
 
-	return scene, warnings, nil
+	return scene, markups, warnings, nil
 }
 
 // archetypeFingerprint holds pre-parsed structural data for one archetype so

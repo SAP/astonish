@@ -79,7 +79,7 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "▶  Reconstructing …")
-	scene, warnings, err := slides.ReconstructScene(tmpl.Model, tmpl.Archetypes, tmpl.Assets)
+	scene, recoMarkups, warnings, err := slides.ReconstructMarkups(tmpl.Model, tmpl.Archetypes, tmpl.Assets)
 	if err != nil {
 		fatalf("reconstruct: %v", err)
 	}
@@ -154,7 +154,7 @@ doneGaps:
 		out = filepath.Join(filepath.Dir(*pptxPath), base+"-diag.html")
 	}
 
-	page := buildReport(tmpl, scene, report, warnings, runtimeJS, pngComparisons)
+	page := buildReport(tmpl, scene, recoMarkups, report, warnings, runtimeJS, pngComparisons)
 	if err := os.WriteFile(out, []byte(page), 0o644); err != nil {
 		fatalf("write: %v", err)
 	}
@@ -203,11 +203,21 @@ func renderSlideComparisons(tmpl themes.Template, scene *slides.SceneGraph, runt
 	// Pre-select the best archetype per source slide (same logic as ReconstructScene).
 	archFPs := buildArchetypeFPs(tmpl.Archetypes)
 
+	// Find shared master chrome objects (prepended to source slides so the
+	// PNG source render includes eyebrow/logo inherited from the slide master).
+	var masterObjs []themes.IRChrome
+	for _, l := range tmpl.Model.Layouts {
+		if strings.Contains(strings.ToUpper(l.Name), "MASTER") && len(l.Objects) > 0 {
+			masterObjs = l.Objects
+			break
+		}
+	}
+
 	var results []slideComparison
 
 	for i, srcSlide := range tmpl.Model.Slides {
 		// ── 1. Render SOURCE slide (IR → ASD → HTML → PNG) ─────────────────
-		srcMarkup := irLayoutToASD(srcSlide, tmpl.Assets)
+		srcMarkup := irLayoutToASD(srcSlide, tmpl.Assets, masterObjs...)
 		srcSlideObj, _, parseErr := slides.ParseSlide(srcMarkup)
 		if parseErr != nil {
 			fmt.Fprintf(os.Stderr, "  slide %d: source parse error: %v\n", i+1, parseErr)
@@ -652,7 +662,7 @@ func generateDiffPNG(a, b []byte, threshold float64) []byte {
 
 // ─── HTML report ──────────────────────────────────────────────────────────────
 
-func buildReport(tmpl themes.Template, scene *slides.SceneGraph,
+func buildReport(tmpl themes.Template, scene *slides.SceneGraph, recoMarkups []string,
 	report slides.CompareReport, warnings []string, runtimeJS string,
 	pngComparisons []slideComparison) string {
 
@@ -778,9 +788,9 @@ code{font-family:monospace;font-size:11px;background:#252540;padding:1px 4px;bor
 	}
 	b.WriteString(`<header>
 <h1>Slides Import Diagnostics — ` + gohtml.EscapeString(tmpl.Label) + `</h1>
-<p>` + fmt.Sprintf("%d archetypes · %d source slides · fidelity ", len(tmpl.Archetypes), len(tmpl.Model.Slides)) +
+<p>` + fmt.Sprintf("%d archetypes · %d source slides · structural fidelity ", len(tmpl.Archetypes), len(tmpl.Model.Slides)) +
 		`<strong class="` + passClass + `">` + fmt.Sprintf("%.1f%%", report.FidelityScore*100) + `</strong>
- · verdict <strong class="` + passClass + `">` + passText + `</strong>`)
+	· verdict <strong class="` + passClass + `">` + passText + `</strong>`)
 	if hasPNGs {
 		avgSim := 0.0
 		for _, c := range pngComparisons {
@@ -789,21 +799,23 @@ code{font-family:monospace;font-size:11px;background:#252540;padding:1px 4px;bor
 		avgSim /= float64(len(pngComparisons))
 		b.WriteString(fmt.Sprintf(` · pixel-similarity <strong>%.1f%%</strong>`, avgSim*100))
 	}
-	b.WriteString(`</p></header>`)
+	b.WriteString(`</p>
+<p style="font-size:12px;opacity:0.75;margin-top:4px">⚠ Structural fidelity measures chrome shape identity (roundRects, ellipses, slot counts), not pixel-level visual similarity. Use <code>-browser</code> for pixel comparison.</p>
+</header>`)
 
 	// ── score bar ─────────────────────────────────────────────────────────────
 	b.WriteString(`<div class="scores">`)
-	scoreCard(&b, "Overall", report.FidelityScore, report.Passed)
-	scoreCard(&b, "Structure (50%)", report.StructureScore, report.StructureScore >= 0.75)
-	scoreCard(&b, "Style (30%)", report.StyleScore, report.StyleScore >= 0.75)
-	scoreCard(&b, "Content (20%)", report.ContentScore, report.ContentScore >= 0.75)
+	scoreCard(&b, "Structural (overall)", report.FidelityScore, report.Passed)
+	scoreCard(&b, "Chrome shapes (50%)", report.StructureScore, report.StructureScore >= 0.75)
+	scoreCard(&b, "Style tokens (30%)", report.StyleScore, report.StyleScore >= 0.75)
+	scoreCard(&b, "Content slots (20%)", report.ContentScore, report.ContentScore >= 0.75)
 	if hasPNGs {
 		avgSim := 0.0
 		for _, c := range pngComparisons {
 			avgSim += c.Similarity
 		}
 		avgSim /= float64(len(pngComparisons))
-		scoreCard(&b, "Pixel Similarity", avgSim, avgSim >= 0.75)
+		scoreCard(&b, "Pixel similarity", avgSim, avgSim >= 0.75)
 	}
 	b.WriteString(`</div>`)
 
@@ -973,79 +985,87 @@ No LibreOffice needed — everything rendered via Astonish's own HTML+Chrome pip
 		b.WriteString(`<div class="no-rt">slides-runtime.js not found — rebuild web/ to enable live renders</div>`)
 	} else {
 		b.WriteString(`<div class="notice">
-<strong>SOURCE</strong> = every shape from the raw PPTX rendered from the IR (ground truth via Astonish renderer).
-<strong>GENERATED</strong> = ReconstructScene output — what Astonish produces.
-These should look identical. Use <code>-browser</code> flag for PNG pixel comparison.
-</div><div class="slides-wrap">`)
-
-		gapsBySlide := map[int][]slides.GapItem{}
-		for _, sf := range report.SlideFindings {
-			gapsBySlide[sf.SlideIndex] = sf.Gaps
-		}
-
-		for i, srcSlide := range tmpl.Model.Slides {
-			gaps := gapsBySlide[i]
-
-			archFrameClass := "frame arch-frame ok"
-			if len(gaps) > 0 {
-				worst := "minor"
-				for _, g := range gaps {
-					if g.Severity == slides.SeverityCritical {
-						worst = "critical"
+	<strong>SOURCE</strong> = slide IR rendered directly (slide's own objects only — may be missing inherited master/layout chrome such as eyebrow text or logo).
+	<strong>GENERATED</strong> = archetype filled with original source content via ReconstructScene — this is what Astonish actually produces and is the primary comparison target.
+	Both columns use the same source text. Differences in chrome placement indicate archetype gaps. Use <code>-browser</code> for pixel-accurate comparison.
+	</div><div class="slides-wrap">`)
+	
+			gapsBySlide := map[int][]slides.GapItem{}
+			for _, sf := range report.SlideFindings {
+				gapsBySlide[sf.SlideIndex] = sf.Gaps
+			}
+	
+			for i, srcSlide := range tmpl.Model.Slides {
+				gaps := gapsBySlide[i]
+	
+				genFrameClass := "frame arch-frame ok"
+				if len(gaps) > 0 {
+					worst := "minor"
+					for _, g := range gaps {
+						if g.Severity == slides.SeverityCritical {
+							worst = "critical"
+							break
+						}
+						if g.Severity == slides.SeverityMajor {
+							worst = "major"
+						}
+					}
+					switch worst {
+					case "critical":
+						genFrameClass = "frame arch-frame has-crit"
+					case "major":
+						genFrameClass = "frame arch-frame has-major"
+					}
+				}
+	
+				// Source slide → ASD markup from IR.
+				// Try to prepend the shared master chrome (MASTER layout objects) so
+				// the source column shows the eyebrow, logo etc. that are on every slide.
+				var masterObjs []themes.IRChrome
+				for _, l := range tmpl.Model.Layouts {
+					if strings.Contains(strings.ToUpper(l.Name), "MASTER") && len(l.Objects) > 0 {
+						masterObjs = l.Objects
 						break
 					}
-					if g.Severity == slides.SeverityMajor {
-						worst = "major"
-					}
 				}
-				switch worst {
-				case "critical":
-					archFrameClass = "frame arch-frame has-crit"
-				case "major":
-					archFrameClass = "frame arch-frame has-major"
+				srcMarkup := irLayoutToASD(srcSlide, tmpl.Assets, masterObjs...)
+	
+				// Generated slide markup: archetype filled with source content.
+				// recoMarkups[i] is the projected markup from ReconstructMarkups —
+				// it has the full chrome (layout + slide objects from the archetype)
+				// with original text substituted into fill slots.
+				genMarkup := ""
+				if i < len(recoMarkups) {
+					genMarkup = recoMarkups[i]
 				}
-			}
-
-			// Source slide → ASD markup from IR
-			srcMarkup := irLayoutToASD(srcSlide, tmpl.Assets)
-
-			// Reconstruction slide markup: use the ReconstructScene output directly.
-			// This shows exactly what the user would see in a real export.
-			genMarkup := ""
-			if i < len(scene.Slides) {
-				// Marshal and re-parse to get the markup string from the scene slide.
-				recoSlide := scene.Slides[i]
-				_ = recoSlide
-				genMarkup = bestMatchingArchetypeMarkupByIndex(tmpl.Archetypes, i)
-			}
-
-			b.WriteString(fmt.Sprintf(`<div class="slide-row">
-<div class="slide-header">
-  <span class="num">%d</span>
-  <span>%s</span>
-  <span class="layout-name">%d source shapes · %d gaps</span>
-</div>
-<div class="slide-cols-3">`,
-				i+1,
-				gohtml.EscapeString(srcSlide.Name),
-				len(srcSlide.Objects)+len(srcSlide.Placeholders),
-				len(gaps)))
-
-			// Column 1: SOURCE (from IR)
-			b.WriteString(`<div class="slide-col"><label>Source (from PPTX IR)</label>`)
-			b.WriteString(`<div class="frame src-frame">`)
-			b.WriteString(renderCanvas(srcMarkup, tmpl.Assets, tokenCSS, fmt.Sprintf("src-%d", i)))
-			b.WriteString(`</div></div>`)
-
-			// Column 2: GENERATED
-			b.WriteString(`<div class="slide-col"><label>Generated (Reconstruct)</label>`)
-			b.WriteString(`<div class="` + archFrameClass + `">`)
-			if genMarkup != "" {
-				b.WriteString(renderCanvas(genMarkup, tmpl.Assets, tokenCSS, fmt.Sprintf("gen-%d", i)))
-			} else {
-				b.WriteString(`<div class="frame-inner" style="display:flex;align-items:center;justify-content:center;color:#555">no reconstruction</div>`)
-			}
-			b.WriteString(`</div></div>`)
+	
+				b.WriteString(fmt.Sprintf(`<div class="slide-row">
+	<div class="slide-header">
+		 <span class="num">%d</span>
+		 <span>%s</span>
+		 <span class="layout-name">%d source shapes · %d gaps</span>
+	</div>
+	<div class="slide-cols-3">`,
+					i+1,
+					gohtml.EscapeString(srcSlide.Name),
+					len(srcSlide.Objects)+len(srcSlide.Placeholders),
+					len(gaps)))
+	
+				// Column 1: SOURCE (slide IR only — missing layout/master chrome)
+				b.WriteString(`<div class="slide-col"><label>Source (slide IR — no master chrome)</label>`)
+				b.WriteString(`<div class="frame src-frame">`)
+				b.WriteString(renderCanvas(srcMarkup, tmpl.Assets, tokenCSS, fmt.Sprintf("src-%d", i)))
+				b.WriteString(`</div></div>`)
+	
+				// Column 2: GENERATED (archetype + original source content)
+				b.WriteString(`<div class="slide-col"><label>Generated — archetype filled with source content</label>`)
+				b.WriteString(`<div class="` + genFrameClass + `">`)
+				if genMarkup != "" {
+					b.WriteString(renderCanvas(genMarkup, tmpl.Assets, tokenCSS, fmt.Sprintf("gen-%d", i)))
+				} else {
+					b.WriteString(`<div class="frame-inner" style="display:flex;align-items:center;justify-content:center;color:#555">no reconstruction</div>`)
+				}
+				b.WriteString(`</div></div>`)
 
 			// Column 3: GAPS
 			b.WriteString(`<div class="slide-col"><label>Gaps</label>`)
@@ -1252,8 +1272,11 @@ window.addEventListener('resize',scaleDecks);
 
 // irLayoutToASD converts a source IRLayout (the raw PPTX data) to a complete
 // ast-slide markup that renders every shape exactly as it appeared in the slide.
-// This is the "ground truth" render for the diagnostic.
-func irLayoutToASD(layout themes.IRLayout, assets map[string]string) string {
+// irLayoutToASD converts an IR slide layout to ASD markup for rendering.
+// If inheritedObjs is non-nil, those objects are rendered first (behind the
+// slide's own objects) — use this to inject layout/master chrome objects that
+// are stored separately in model.Layouts and not merged into the slide IR.
+func irLayoutToASD(layout themes.IRLayout, assets map[string]string, inheritedObjs ...themes.IRChrome) string {
 	var b strings.Builder
 	id := layout.ID
 	if id == "" {
@@ -1261,18 +1284,19 @@ func irLayoutToASD(layout themes.IRLayout, assets map[string]string) string {
 	}
 	b.WriteString(`<ast-slide id="` + gohtml.EscapeString(id) + `">`)
 
-	// 1. Background
-	switch layout.Background.Kind {
+	// 1. Background (prefer slide's own background over inherited)
+	bg := layout.Background
+	switch bg.Kind {
 	case "image":
-		if layout.Background.MediaKey != "" {
+		if bg.MediaKey != "" {
 			b.WriteString(fmt.Sprintf(
 				`<ast-image id="bg" x="0" y="0" w="1920" h="1080" asset-ref="%s" fit="cover" alt="" decorative="true"></ast-image>`,
-				gohtml.EscapeString(layout.Background.MediaKey)))
+				gohtml.EscapeString(bg.MediaKey)))
 		} else {
 			b.WriteString(`<ast-shape id="bg" kind="rect" x="0" y="0" w="1920" h="1080" fill="#FFFFFF" alt="" decorative="true"></ast-shape>`)
 		}
 	default:
-		color := layout.Background.Color
+		color := bg.Color
 		if color == "" {
 			color = "#FFFFFF"
 		}
@@ -1281,40 +1305,23 @@ func irLayoutToASD(layout themes.IRLayout, assets map[string]string) string {
 			gohtml.EscapeString(color)))
 	}
 
-	// 2. Chrome objects (shapes, lines, images, text)
+	// 2. Inherited layout/master chrome objects (prepended, behind slide objects)
+	for oi, obj := range inheritedObjs {
+		emitIRChrome(&b, obj, fmt.Sprintf("inh-%d", oi))
+	}
+
+	// 3. Slide's own chrome objects
 	for oi, obj := range layout.Objects {
 		emitIRChrome(&b, obj, fmt.Sprintf("obj-%d", oi))
 	}
 
-	// 3. Placeholders (text/image slots)
+	// 4. Placeholders (text/image slots with their actual content)
 	for pi, ph := range layout.Placeholders {
 		emitIRPlaceholder(&b, ph, fmt.Sprintf("ph-%d", pi))
 	}
 
 	b.WriteString(`</ast-slide>`)
 	return b.String()
-}
-
-// bestMatchingArchetypeMarkupByIndex returns the markup of the archetype for
-// source slide at the given 0-based index, using Phase-0 direct index match.
-// Falls back to bestMatchingArchetypeMarkup if no Phase-0 archetype is found.
-func bestMatchingArchetypeMarkupByIndex(archetypes []themes.Archetype, srcSlideIdx int) string {
-	if len(archetypes) == 0 {
-		return ""
-	}
-	want1Based := srcSlideIdx + 1
-	for _, a := range archetypes {
-		if a.SourceSlideIndex == want1Based {
-			return a.Markup
-		}
-	}
-	// No Phase-0 match: fall back to first archetype with enough slots.
-	for _, a := range archetypes {
-		if len(a.FillSlots) >= 2 {
-			return a.Markup
-		}
-	}
-	return archetypes[0].Markup
 }
 
 func emitIRChrome(b *strings.Builder, obj themes.IRChrome, id string) {

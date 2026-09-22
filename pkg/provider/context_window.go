@@ -225,6 +225,7 @@ var curatedContextWindows = map[string]int{
 
 	// xAI Grok — from official xAI model cards (not version-monotonic:
 	// grok-4.6 is 500k, grok-4.3 is 1M, grok-4.20 is 2M).
+        "grok-4.7":                       500_000,
 	"grok-4.6":                       500_000,
 	"grok-4.5":                       500_000,
 	"grok-4.3":                       1_000_000,

@@ -27,6 +27,9 @@ func (db *DockerBackend) Exec(ctx context.Context, sessionID string, opts sandbo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	args := buildDockerExecArgs(cname, opts.WorkDir, opts.Env, false, wrapShell(opts.Command))
@@ -62,6 +65,9 @@ func (db *DockerBackend) ExecInteractive(ctx context.Context, sessionID string, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	// -i -t allocates a PTY and attaches stdin.
@@ -83,6 +89,9 @@ func (db *DockerBackend) ExecInteractive(ctx context.Context, sessionID string, 
 // Used for machine-to-machine protocols (MCP JSON-RPC, node stdio).
 func (db *DockerBackend) ExecStreaming(ctx context.Context, sessionID string, opts sandbox.ExecStreamSpec) (sandbox.ExecStream, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
 	cname := containerName(sessionID)
@@ -107,6 +116,9 @@ func (db *DockerBackend) ExecStreaming(ctx context.Context, sessionID string, op
 // avoid the tar-file limitation of `docker cp` for non-root callers.
 func (db *DockerBackend) PushFile(ctx context.Context, sessionID, path string, content io.Reader, mode os.FileMode) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return err
 	}
 	cname := containerName(sessionID)
@@ -143,6 +155,9 @@ func (db *DockerBackend) PullFile(ctx context.Context, sessionID, path string) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	// Stream via docker exec + cat.
@@ -157,6 +172,26 @@ func (db *DockerBackend) PullFile(ctx context.Context, sessionID, path string) (
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// requireRegisteredSession fails closed when a registry is injected and the
+// session is not in it. Kubernetes and OpenShell already refuse exec and file
+// pull for an unknown session ID. Docker used to derive the container name
+// from the ID and run docker exec anyway, so a caller-supplied foreign ID
+// reached another team's container. A nil registry keeps the old behavior so
+// unit tests that construct a backend without a store still compile.
+func (db *DockerBackend) requireRegisteredSession(sessionID string) error {
+	if db == nil || db.cfg.Sessions == nil {
+		return nil
+	}
+	rec, err := db.cfg.Sessions.GetSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("sandbox/docker: session %s: %w", sessionID, err)
+	}
+	if rec == nil {
+		return fmt.Errorf("sandbox/docker: session %q is not registered", sessionID)
+	}
+	return nil
+}
 
 func wrapShell(command []string) []string {
 	if len(command) == 0 {

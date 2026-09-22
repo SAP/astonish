@@ -114,6 +114,9 @@ func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return err
+	}
 	cname := containerName(sessionID)
 	state, err := db.containerState(ctx, cname)
 	if err != nil {
@@ -157,9 +160,12 @@ func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) erro
 }
 
 // DestroySession permanently removes the container and its upper layer.
-// Idempotent: no error if the session never existed.
+// A registry, when injected, must contain the session before docker rm runs.
 func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return err
 	}
 	cname := containerName(sessionID)
@@ -189,6 +195,9 @@ func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) e
 // SessionState returns the current observed state of the session.
 func (db *DockerBackend) SessionState(ctx context.Context, sessionID string) (sandbox.SessionState, error) {
 	if err := ctx.Err(); err != nil {
+		return sandbox.SessionStateGone, err
+	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return sandbox.SessionStateGone, err
 	}
 	cname := containerName(sessionID)
@@ -310,7 +319,24 @@ func (e *dockerPSEntry) toSession() *sandbox.Session {
 		State:      st,
 		BackendRef: e.Names,
 		Labels:     labels,
+		CreatedAt:  parseDockerCreated(e.Created),
 	}
+}
+
+// parseDockerCreated parses docker ps Created. A missing or unparseable value
+// is treated as now so the orphan reaper's one-hour guard does not delete a
+// container whose age is unknown.
+func parseDockerCreated(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Now().UTC()
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05 -0700 MST", "2006-01-02 15:04:05 +0000 UTC"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t
+		}
+	}
+	return time.Now().UTC()
 }
 
 // containerState inspects a container by name and returns its SessionState.
@@ -543,6 +569,7 @@ func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, template
 		PodName:      cname,
 		TemplateID:   templateID,
 		State:        store.SandboxSessionStateRunning,
+		CreatedBy:    spec.UserID,
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 		LastActiveAt: time.Now().UTC(),

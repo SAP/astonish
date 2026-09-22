@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	sboxdocker "github.com/SAP/astonish/pkg/sandbox/docker"
 	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
 )
 
@@ -200,6 +201,9 @@ func SandboxOptionalToolsHandler(w http.ResponseWriter, r *http.Request) {
 
 // SandboxInitHandler handles POST /api/sandbox/init.
 func SandboxInitHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	var req SandboxInitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -291,6 +295,7 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 
 	default: // docker OverlayFS
 		fillDockerDetails(&resp)
+		resp.ContainerCount = visibleDockerContainerCount(r)
 	}
 
 	// Backward compat: mirror runtimeAvailable into deprecated field.
@@ -302,8 +307,7 @@ func SandboxDetailsHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxContainerListHandler handles GET /api/sandbox/containers.
 // Lists all session containers and identifies orphans.
 func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
-	appCfg, _ := config.LoadAppConfig()
-	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
+	b, cleanup, err := sandboxBackendForAuthorizedRequest(r)
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -318,7 +322,7 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessions, listErr := b.ListSessions(r.Context(), sandbox.SessionFilter{})
+	sessions, listErr := b.ListSessions(r.Context(), sandboxSessionFilterForRequest(r))
 	if listErr != nil {
 		respondError(w, http.StatusInternalServerError, "failed to list sessions: "+listErr.Error())
 		return
@@ -332,6 +336,9 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 	containers := make([]ContainerInfo, 0, len(entries))
 	registeredIDs := map[string]bool{}
 	for _, e := range entries {
+		if !sandboxSessionVisible(r, sessRegistry, e.SessionID) {
+			continue
+		}
 		registeredIDs[e.SessionID] = true
 		status := "missing"
 		if sess := byID[e.SessionID]; sess != nil {
@@ -369,11 +376,11 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 					hostPorts[portStr] = hp
 				}
 
-				// Auto-recover subdomain routes from persisted base domain
+				// Auto-recover subdomain routes only for a container this caller owns.
 				if e.BaseDomain != "" {
 					hostname := SubdomainHostname(e.ContainerName, port, e.BaseDomain)
-					if _, _, ok := sr.Lookup(hostname); !ok && status == "running" {
-						sr.RegisterHost(hostname, e.ContainerName, port)
+					if _, _, _, ok := sr.Lookup(hostname); !ok && status == "running" {
+						sr.RegisterHost(hostname, e.ContainerName, e.SessionID, port)
 					}
 					proxyHosts[portStr] = hostname
 				}
@@ -390,9 +397,14 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 
 	var orphans []string
 	for _, s := range sessions {
-		if !registeredIDs[s.SessionID] {
-			orphans = append(orphans, s.BackendRef)
+		if registeredIDs[s.SessionID] {
+			continue
 		}
+		// Never surface another user's backend container as an orphan.
+		if !sandboxSessionVisible(r, sessRegistry, s.SessionID) {
+			continue
+		}
+		orphans = append(orphans, s.BackendRef)
 	}
 
 	respondJSON(w, http.StatusOK, ContainerListResponse{
@@ -410,27 +422,30 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appCfg, _ := config.LoadAppConfig()
-	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
-	if err != nil {
-		respondError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
 	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
 	}
 
-	// Resolve to session ID (accepts session ID, container name, or prefix)
+	// Resolve to session ID (accepts session ID, container name, or prefix).
+	// Ownership is checked before any backend call so a teammate cannot delete
+	// another user's chat sandbox by knowing the ID.
 	sessionID, found := sessRegistry.ResolveSessionID(id)
-	if !found {
-		respondError(w, http.StatusNotFound, "container not found: "+id)
+	if !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if !found {
+			respondError(w, http.StatusNotFound, "container not found: "+id)
+		}
 		return
+	}
+
+	b, cleanup, err := sandboxBackendForAuthorizedRequest(r)
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	if err := b.DestroySession(r.Context(), sessionID); err != nil {
@@ -444,6 +459,9 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxPruneHandler handles POST /api/sandbox/prune.
 // Prunes orphaned containers whose sessions no longer exist.
 func SandboxPruneHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	appCfg, cfgErr := config.LoadAppConfig()
 	if cfgErr != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load config: "+cfgErr.Error())
@@ -476,7 +494,7 @@ func SandboxPruneHandler(w http.ResponseWriter, r *http.Request) {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	pruned, pErr := sandbox.PruneOrphansForBackend(r.Context(), b, sessRegistry, existingSessionIDs)
+	pruned, pErr := sandbox.PruneOrphansForBackendFiltered(r.Context(), b, sessRegistry, existingSessionIDs, sandboxPruneFilter(r))
 	if pErr != nil {
 		respondError(w, http.StatusInternalServerError, "prune failed: "+pErr.Error())
 		return
@@ -566,6 +584,9 @@ func SandboxTemplateInfoHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxTemplateCreateHandler handles POST /api/sandbox/templates.
 // Creates a new template from @base.
 func SandboxTemplateCreateHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	var req CreateTemplateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request: "+err.Error())
@@ -671,6 +692,9 @@ func SandboxTemplateDeleteHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxTemplateSnapshotHandler handles POST /api/sandbox/templates/{name}/snapshot.
 // Snapshots a template, freezing its state for cloning into session containers.
 func SandboxTemplateSnapshotHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	name := mux.Vars(r)["name"]
 	if name == "" {
 		respondError(w, http.StatusBadRequest, "missing template name")
@@ -715,6 +739,9 @@ func SandboxTemplateSnapshotHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxTemplatePromoteHandler handles POST /api/sandbox/templates/{name}/promote.
 // Promotes a template to replace @base.
 func SandboxTemplatePromoteHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	name := mux.Vars(r)["name"]
 	if name == "" {
 		respondError(w, http.StatusBadRequest, "missing template name")
@@ -762,6 +789,9 @@ func SandboxTemplatePromoteHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxRefreshHandler handles POST /api/sandbox/refresh.
 // Refreshes all templates with the current astonish binary.
 func SandboxRefreshHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	b, err := openStudioDocker()
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
@@ -809,10 +839,15 @@ func SandboxExposePortHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve container name — accept session ID, container name, or prefix
+	// Resolve container name — accept session ID, container name, or prefix.
+	// Authorize the resolved session ID, not the raw URL segment, so a prefix
+	// cannot skip the owner check.
 	containerName := resolveContainerName(sessRegistry, id)
-	if containerName == "" {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+	sessionID, found := sessRegistry.ResolveSessionID(id)
+	if containerName == "" || !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if containerName == "" || !found {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+		}
 		return
 	}
 
@@ -841,7 +876,7 @@ func SandboxExposePortHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		proxyHost = SubdomainHostname(containerName, req.Port, req.BaseDomain)
-		GetSubdomainRouter().RegisterHost(proxyHost, containerName, req.Port)
+		GetSubdomainRouter().RegisterHost(proxyHost, containerName, sessionID, req.Port)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
@@ -965,8 +1000,11 @@ func SandboxListExposedPortsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	containerName := resolveContainerName(sessRegistry, id)
-	if containerName == "" {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+	sessionID, found := sessRegistry.ResolveSessionID(id)
+	if containerName == "" || !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if containerName == "" || !found {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+		}
 		return
 	}
 
@@ -1118,9 +1156,50 @@ func fillDockerDetails(resp *SandboxDetailResponse) {
 	if tplRegistry, err := sandbox.NewTemplateRegistry(); err == nil {
 		resp.TemplateCount = len(tplRegistry.List())
 	}
-	if sessions, err := b.ListSessions(context.Background(), sandbox.SessionFilter{}); err == nil {
-		resp.ContainerCount = len(sessions)
+	// Do not count every container on the daemon. Details is filled without a
+	// request here; SandboxDetailsHandler overwrites ContainerCount with the
+	// caller-visible set when a request is available.
+}
+
+// sandboxSessionFilterForRequest narrows a backend list to the caller's org
+// and team. An empty filter lists every container on the host.
+func allowHostSandboxMutation(w http.ResponseWriter, r *http.Request) bool {
+	if !isPlatformMode(r) {
+		return true
 	}
+	return RequirePlatformAdmin(w, r) != nil
+}
+
+func sandboxPruneFilter(r *http.Request) *sandbox.SessionFilter {
+	if !isPlatformMode(r) {
+		return nil
+	}
+	f := sandboxSessionFilterForRequest(r)
+	return &f
+}
+
+func sandboxSessionFilterForRequest(r *http.Request) sandbox.SessionFilter {
+	tc := store.TenantContextFrom(r.Context())
+	if tc == nil {
+		return sandbox.SessionFilter{}
+	}
+	return sandbox.SessionFilter{OrgSlug: tc.OrgSlug, TeamSlug: tc.TeamSlug}
+}
+
+// visibleDockerContainerCount counts only sessions the caller may see.
+// An empty ListSessions filter returns every container on the daemon.
+func visibleDockerContainerCount(r *http.Request) int {
+	reg, err := sandboxSessionRegistryForRequest(r)
+	if err != nil || reg == nil {
+		return 0
+	}
+	n := 0
+	for _, e := range reg.List() {
+		if sandboxSessionVisible(r, reg, e.SessionID) {
+			n++
+		}
+	}
+	return n
 }
 
 // sandboxK8sHealth returns a BackendHealth for the K8s sandbox backend.

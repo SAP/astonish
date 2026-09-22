@@ -1,8 +1,10 @@
 package docker
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
@@ -242,5 +244,78 @@ func TestRecordSession_SetsContainerNameAndPodName(t *testing.T) {
 	}
 	if rec.State != store.SandboxSessionStateRunning {
 		t.Errorf("State = %q, want running", rec.State)
+	}
+}
+
+func TestDockerPSEntry_MissingCreatedIsNotAncient(t *testing.T) {
+	sess := (&dockerPSEntry{
+		Names:  "astonish-session-x",
+		State:  "running",
+		Labels: "astonish.session_id=abc",
+	}).toSession()
+	if sess == nil {
+		t.Fatal("toSession returned nil")
+	}
+	if sess.CreatedAt.IsZero() {
+		t.Fatal("missing Created must not be the zero time")
+	}
+	if time.Since(sess.CreatedAt) > time.Minute {
+		t.Fatalf("missing Created parsed as %s, want approximately now", sess.CreatedAt)
+	}
+}
+
+func TestRecordSession_SetsCreatedBy(t *testing.T) {
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalSessionStore: %v", err)
+	}
+	reg := sandbox.NewSessionRegistryFromStore(st)
+	db := &DockerBackend{cfg: Config{Sessions: reg}}
+	spec := sandbox.SessionSpec{SessionID: "owner-session", UserID: "user-owner"}
+	db.recordSession(spec, containerName(spec.SessionID), sandbox.BaseTemplateID)
+
+	rec, err := reg.GetSession(spec.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("GetSession returned nil")
+	}
+	if rec.CreatedBy != "user-owner" {
+		t.Errorf("CreatedBy = %q, want user-owner", rec.CreatedBy)
+	}
+}
+
+func TestDockerRequireRegistered_RejectsUnknownSession(t *testing.T) {
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalSessionStore: %v", err)
+	}
+	reg := sandbox.NewSessionRegistryFromStore(st)
+	if err := reg.Put("known", "astonish-session-known", sandbox.BaseTemplateID); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	db := &DockerBackend{cfg: Config{
+		Sessions:             reg,
+		ContainerRuntimePath: "/nonexistent/docker-must-not-run",
+	}}
+
+	if _, err := db.PullFile(context.Background(), "foreign-session", "/tmp/secret"); err == nil {
+		t.Fatal("PullFile of an unregistered session must fail before docker exec")
+	}
+	if _, err := db.Exec(context.Background(), "foreign-session", sandbox.ExecSpec{Command: []string{"id"}}); err == nil || !strings.Contains(err.Error(), "is not registered") {
+		t.Fatalf("Exec of an unregistered session must fail at the registry gate, got %v", err)
+	}
+	if err := db.DestroySession(context.Background(), "foreign-session"); err == nil || !strings.Contains(err.Error(), "is not registered") {
+		t.Fatalf("DestroySession of an unregistered session must fail at the registry gate, got %v", err)
+	}
+	if _, err := db.SessionState(context.Background(), "foreign-session"); err == nil {
+		t.Fatal("SessionState of an unregistered session must fail before docker inspect")
+	}
+	// A registered ID passes the gate. The docker binary is fake, so the call
+	// fails at exec, not at the registry check.
+	_, pullErr := db.PullFile(context.Background(), "known", "/tmp/x")
+	if pullErr == nil || strings.Contains(pullErr.Error(), "is not registered") {
+		t.Fatalf("registered session must pass the registry gate, got %v", pullErr)
 	}
 }

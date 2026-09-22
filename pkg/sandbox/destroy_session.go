@@ -90,6 +90,14 @@ func TryDestroySession(appCfg *config.AppConfig, sessionID string, sessRegistry 
 // Returns the number of sessions pruned and the first error encountered (if
 // any; non-fatal errors are logged and skipped).
 func PruneOrphansForBackend(ctx context.Context, b Backend, registry *SessionRegistry, existingSessionIDs map[string]bool) (int, error) {
+	return PruneOrphansForBackendFiltered(ctx, b, registry, existingSessionIDs, nil)
+}
+
+// PruneOrphansForBackendFiltered is PruneOrphansForBackend with an optional
+// team filter on the unregistered pass. A nil filter keeps the daemon reaper's
+// current behavior. HTTP prune must pass the caller's org and team so a
+// platform admin cannot delete another tenant's containers by accident.
+func PruneOrphansForBackendFiltered(ctx context.Context, b Backend, registry *SessionRegistry, existingSessionIDs map[string]bool, filter *SessionFilter) (int, error) {
 	entries := registry.List()
 	pruned := 0
 
@@ -123,7 +131,11 @@ func PruneOrphansForBackend(ctx context.Context, b Backend, registry *SessionReg
 	// These can occur if a crash happened between pod creation and registry
 	// write. For K8s this queries pods by label; for Incus it's handled by
 	// the legacy PruneOrphans function (ListSessionContainers).
-	allSessions, err := b.ListSessions(ctx, SessionFilter{})
+	listFilter := SessionFilter{}
+	if filter != nil {
+		listFilter = *filter
+	}
+	allSessions, err := b.ListSessions(ctx, listFilter)
 	if err != nil {
 		// Non-fatal: we already pruned registered orphans above.
 		slog.Warn("PruneOrphansForBackend: ListSessions failed",

@@ -122,11 +122,195 @@ func buildPGSessionRegistry(ctx context.Context) *sandbox.SessionRegistry {
 // on a platform deployment exposes every team's sandbox sessions and allows
 // cross-tenant list/delete/expose/proxy by container id.
 func sandboxSessionRegistryForRequest(r *http.Request) (*sandbox.SessionRegistry, error) {
+	if reg := sandboxRegistryFromRequest(r); reg != nil {
+		return reg, nil
+	}
 	if reg := buildPGSessionRegistry(r.Context()); reg != nil {
 		return reg, nil
 	}
 	// Personal / single-tenant deployments: no team schema to scope to.
 	return sandbox.NewSessionRegistry()
+}
+
+// sandboxBackendForAuthorizedRequest is the backend handlers must use when a
+// caller-supplied session or container ID will be passed to Exec, PullFile, or
+// DestroySession. It injects the request's team-scoped registry so Kubernetes
+// and OpenShell fail closed for an ID that is not in that team's store. Docker
+// additionally refuses an unregistered ID inside the backend itself.
+//
+// Do not call sandbox.BackendFromAppConfig for a user-supplied ID: that injects
+// the unscoped local JSON registry and, on Docker, derives the container name
+// from the ID with no ownership check.
+func sandboxBackendForAuthorizedRequest(r *http.Request) (sandbox.Backend, func(), error) {
+	return sandboxBackendForRequest(r)
+}
+
+// authorizeSandboxSession decides whether the caller may act on sessionID.
+// It returns the resolved sandbox row, or writes 404 and returns nil.
+//
+// A missing or foreign ID is always 404, never 403: a forbidden status would
+// confirm that the container exists. Admin-only routes (prune, base-image
+// mutation) are a separate check and may return 403 before any ID lookup.
+//
+// Ownership is not team membership. A Studio chat sandbox is allowed only for
+// the user who owns the linked chat session. A fleet sandbox is allowed for a
+// member of that fleet's team. Personal mode has one user and is always allowed
+// once the row exists.
+func authorizeSandboxSession(w http.ResponseWriter, r *http.Request, registry *sandbox.SessionRegistry, sessionID string) *store.SandboxSession {
+	sess, ok := lookupSandboxSession(registry, sessionID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "container not found")
+		return nil
+	}
+	if !sandboxSessionVisible(r, registry, sess.SessionID) {
+		respondError(w, http.StatusNotFound, "container not found")
+		return nil
+	}
+	return sess
+}
+
+// sandboxSessionVisible reports whether the caller may see sessionID.
+// It does not write an HTTP response, so list handlers can filter a row
+// without turning the whole response into a 404.
+func sandboxSessionVisible(r *http.Request, registry *sandbox.SessionRegistry, sessionID string) bool {
+	sess, ok := lookupSandboxSession(registry, sessionID)
+	if !ok || sess == nil {
+		return false
+	}
+	if !isPlatformMode(r) {
+		return true
+	}
+	if allowed, synthetic := syntheticSandboxVisible(r, sess.SessionID); synthetic {
+		return allowed
+	}
+	if sandboxSessionIsFleet(r, sess) {
+		return fleetSandboxVisible(r, sess)
+	}
+	return chatSandboxVisible(r, sess)
+}
+
+func lookupSandboxSession(registry *sandbox.SessionRegistry, sessionID string) (*store.SandboxSession, bool) {
+	if registry == nil || sessionID == "" {
+		return nil, false
+	}
+	resolved, found := registry.ResolveSessionID(sessionID)
+	if !found || resolved == "" {
+		resolved = sessionID
+	}
+	sess, err := registry.GetSession(resolved)
+	if err != nil || sess == nil {
+		return nil, false
+	}
+	return sess, true
+}
+
+// syntheticSandboxVisible handles server-derived sandbox IDs that are not chat
+// sessions. The second return is false when the ID is not synthetic, so the
+// caller falls through to chat or fleet ownership.
+func syntheticSandboxVisible(r *http.Request, sessionID string) (allowed bool, synthetic bool) {
+	switch {
+	case strings.HasPrefix(sessionID, "team-template-"):
+		return strings.TrimPrefix(sessionID, "team-template-") == effectiveTeamSlug(r), true
+	case strings.HasPrefix(sessionID, "app-mcp-"):
+		return strings.TrimPrefix(sessionID, "app-mcp-") == effectiveUserID(r), true
+	case strings.HasPrefix(sessionID, "slides-pdf-"):
+		rest := strings.TrimPrefix(sessionID, "slides-pdf-")
+		uid := effectiveUserID(r)
+		return rest == uid || strings.HasPrefix(rest, uid+"-"), true
+	default:
+		return false, false
+	}
+}
+
+func sandboxSessionIsFleet(r *http.Request, sess *store.SandboxSession) bool {
+	if sess == nil {
+		return false
+	}
+	if reg := getFleetSessionRegistry(); reg != nil && reg.IsFleetSession(sess.SessionID) {
+		return true
+	}
+	chatID := sess.ChatSessionID
+	if chatID == "" {
+		chatID = sess.SessionID
+	}
+	meta := chatSessionMeta(r, chatID)
+	return meta != nil && meta.FleetKey != ""
+}
+
+func chatSandboxVisible(r *http.Request, sess *store.SandboxSession) bool {
+	chatID := sess.ChatSessionID
+	if chatID == "" {
+		chatID = sess.SessionID
+	}
+	meta := chatSessionMeta(r, chatID)
+	caller := effectiveUserID(r)
+	if meta != nil {
+		// Empty user_id on a platform row is not a pass.
+		return meta.UserID != "" && meta.UserID == caller
+	}
+	// Chat row is gone. The owner may still delete a dead container when
+	// CreatedBy was recorded. A teammate with a different ID is not the owner.
+	return sess.CreatedBy != "" && sess.CreatedBy == caller
+}
+
+func fleetSandboxVisible(r *http.Request, sess *store.SandboxSession) bool {
+	if CanManageOrg(GetPlatformUser(r)) {
+		return true
+	}
+	team := effectiveTeamSlug(r)
+	if team == "" {
+		return false
+	}
+	if reg := getFleetSessionRegistry(); reg != nil {
+		if fs := reg.Get(sess.SessionID); fs != nil && fs.TeamSlug != "" && fs.TeamSlug != team {
+			return false
+		}
+	}
+	// PlatformAuthMiddleware already rejected a caller who is not a member of
+	// the request team. Matching that team is the fleet ownership check.
+	return true
+}
+
+type sandboxAccessMetaKey struct{}
+
+type sandboxRegistryKey struct{}
+
+func withSandboxRegistry(r *http.Request, reg *sandbox.SessionRegistry) *http.Request {
+	if r == nil || reg == nil {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), sandboxRegistryKey{}, reg))
+}
+
+func sandboxRegistryFromRequest(r *http.Request) *sandbox.SessionRegistry {
+	if r == nil {
+		return nil
+	}
+	reg, _ := r.Context().Value(sandboxRegistryKey{}).(*sandbox.SessionRegistry)
+	return reg
+}
+
+func chatSessionMeta(r *http.Request, sessionID string) *store.SessionMeta {
+	if r == nil || sessionID == "" {
+		return nil
+	}
+	if fn, ok := r.Context().Value(sandboxAccessMetaKey{}).(func(context.Context, string) (*store.SessionMeta, error)); ok && fn != nil {
+		meta, _ := fn(r.Context(), sessionID)
+		return meta
+	}
+	svc := store.FromRequest(r)
+	if svc == nil {
+		return nil
+	}
+	ss := resolveSessionStore(svc, sessionID)
+	if ss == nil {
+		return nil
+	}
+	meta, err := ss.GetSessionMeta(r.Context(), sessionID)
+	if err != nil || meta == nil {
+		return nil
+	}
+	return meta
 }
 
 // teamTemplateSessionID returns the canonical session ID used by the

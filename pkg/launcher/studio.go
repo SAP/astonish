@@ -299,8 +299,9 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	// domain and won't be sent on subdomain requests anyway.
 	studioHandler := handler
 	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if containerName, port, ok := api.GetSubdomainRouter().Lookup(r.Host); ok {
-			api.ServeSubdomainProxy(w, r, containerName, port)
+		if containerName, sessionID, port, ok := api.GetSubdomainRouter().Lookup(r.Host); ok {
+			api.ServeSubdomainProxy(w, r, sessionID, port)
+			_ = containerName
 			return
 		}
 		studioHandler.ServeHTTP(w, r)

@@ -19,6 +19,18 @@
 > §10 captures the matrix explicitly. For step-by-step deployment,
 > see `docs/deployment/kubernetes.md`.
 >
+> **Sandbox access control.** A chat sandbox is authorized by the owning
+> chat session's user_id, not by team membership. Two users on the same
+> team cannot list, read, proxy, VNC, or delete each other's chat
+> sandboxes; a foreign ID is 404, not 403. Fleet sandboxes (a chat
+> session with a fleet key, or a live fleet session) are authorized by
+> team membership. Team-template editor sessions stay team-admin and use
+> a server-derived ID. Prune, init, refresh, and template
+> create/snapshot/promote/delete require a platform admin in platform
+> mode. Docker Exec, PullFile, and DestroySession fail closed unless the
+> session is in the injected registry. List and details must not return
+> another user's containers as orphans.
+>
 > **Reading guide.** Where this document still says "Sysbox pod",
 > read it as "selected privilege path"; the contract holds across
 > all four. Sections that have shipped on top of the original Round 2

@@ -52,6 +52,7 @@
     "lit": "^3.3.3",
     "lucide-react": "^1.44.0",
     "mtx-decompressor": "^1.6.0",
+    "pptx-glimpse": "^5.3.1",
     "pptxgenjs": "^4.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.3.0",

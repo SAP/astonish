@@ -27,43 +27,46 @@ type ipCacheEntry struct {
 
 var ipCache sync.Map
 
-func sessionIDForProxyContainer(containerName string) string {
-	reg, err := sandbox.NewSessionRegistry()
-	if err != nil {
-		return containerName
+func sessionIDForProxyContainer(r *http.Request, containerName string) string {
+	reg, err := sandboxSessionRegistryForRequest(r)
+	if err != nil || reg == nil || containerName == "" {
+		return ""
+	}
+	if resolved, ok := reg.ResolveSessionID(containerName); ok && resolved != "" {
+		return resolved
 	}
 	for _, e := range reg.List() {
 		if e.ContainerName == containerName || e.SessionID == containerName {
 			return e.SessionID
 		}
 	}
-	return containerName
+	return ""
 }
 
-func studioBackendDial(containerName string, port int) (net.Conn, error) {
-	appCfg, err := config.LoadAppConfig()
+func studioBackendDial(r *http.Request, sessionID string, port int) (net.Conn, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("container not found")
+	}
+	b, cleanup, err := sandboxBackendForAuthorizedRequest(r)
 	if err != nil {
 		return nil, err
 	}
-	b, _, err := sandbox.BackendFromAppConfig(appCfg)
-	if err != nil {
-		return nil, err
+	if cleanup != nil {
+		defer cleanup()
 	}
-	sessionID := sessionIDForProxyContainer(containerName)
-	return sandbox.DialSessionPort(context.Background(), b, sessionID, port)
+	return sandbox.DialSessionPort(r.Context(), b, sessionID, port)
 }
 
-func studioProxyTransport(containerName string, port int) *http.Transport {
+func studioProxyTransport(r *http.Request, sessionID string, port int) *http.Transport {
 	return &http.Transport{
-		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return studioBackendDial(containerName, port)
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return studioBackendDial(r.WithContext(ctx), sessionID, port)
 		},
 		MaxIdleConnsPerHost: 2,
 	}
 }
 
-// ensureProxySessionRunning reports whether the sandbox for containerName is running.
-func ensureProxySessionRunning(containerName string) error {
+func ensureNamedSessionRunning(containerName string) error {
 	appCfg, err := config.LoadAppConfig()
 	if err != nil {
 		return err
@@ -75,8 +78,28 @@ func ensureProxySessionRunning(containerName string) error {
 	if cleanup != nil {
 		defer cleanup()
 	}
-	sessionID := sessionIDForProxyContainer(containerName)
-	state, err := b.SessionState(context.Background(), sessionID)
+	state, err := b.SessionState(context.Background(), containerName)
+	if err != nil {
+		return err
+	}
+	if state != sandbox.SessionStateRunning && state != sandbox.SessionStateCreating {
+		return fmt.Errorf("session %s is not running", containerName)
+	}
+	return nil
+}
+
+func ensureProxySessionRunning(r *http.Request, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("container not found")
+	}
+	b, cleanup, err := sandboxBackendForAuthorizedRequest(r)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	state, err := b.SessionState(r.Context(), sessionID)
 	if err != nil {
 		return err
 	}
@@ -126,8 +149,15 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, `{"error":"failed to load session registry"}`)
 		return
 	}
+	sessionID := sessionIDForProxyContainer(r, containerName)
+	if sessionID == "" || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if sessionID == "" {
+			respondError(w, http.StatusNotFound, "container not found")
+		}
+		return
+	}
 
-	if !sessRegistry.IsPortExposed(containerName, port) {
+	if !sessRegistry.IsPortExposed(containerName, port) && !sessRegistry.IsPortExposed(sessionID, port) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprintf(w, `{"error":"port %d is not exposed on container %q. Use 'astonish sandbox expose %s %d' first."}`,
@@ -135,7 +165,7 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := ensureProxySessionRunning(containerName); err != nil {
+	if err := ensureProxySessionRunning(r, sessionID); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		fmt.Fprintf(w, `{"error":"container %q is not running"}`, containerName)
@@ -152,7 +182,7 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// WebSocket upgrade
 	if isWebSocketUpgrade(r) {
 		proxyWebSocket(w, r, func() (net.Conn, error) {
-			return studioBackendDial(containerName, port)
+			return studioBackendDial(r, sessionID, port)
 		}, downstreamPath)
 		return
 	}
@@ -182,7 +212,7 @@ func SandboxProxyHandler(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("X-Forwarded-Host", r.Host)
 			req.Header.Set("X-Forwarded-Proto", "http")
 		},
-		Transport: studioProxyTransport(containerName, port),
+		Transport: studioProxyTransport(r, sessionID, port),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
@@ -283,7 +313,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 		return 0, err
 	}
 
-	if err := ensureProxySessionRunning(containerName); err != nil {
+	if err := ensureNamedSessionRunning(containerName); err != nil {
 		return 0, fmt.Errorf("sandbox unavailable: %w", err)
 	}
 
@@ -293,7 +323,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
 			proxyWebSocket(w, r, func() (net.Conn, error) {
-				return studioBackendDial(containerName, containerPort)
+				return studioBackendDial(r, containerName, containerPort)
 			}, r.URL.Path)
 			return
 		}
@@ -322,7 +352,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 				req.Header.Set("X-Forwarded-Host", r.Host)
 				req.Header.Set("X-Forwarded-Proto", "http")
 			},
-			Transport: studioProxyTransport(containerName, containerPort),
+			Transport: studioProxyTransport(r, containerName, containerPort),
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 			},
@@ -551,14 +581,14 @@ func (sr *SubdomainRouter) ListForContainer(containerName string) map[int]string
 // ServeSubdomainProxy handles an HTTP request by proxying it to the matched
 // container. Called from the Studio main handler when a subdomain match is found.
 func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName string, containerPort int) {
-	if err := ensureProxySessionRunning(containerName); err != nil {
+	if err := ensureProxySessionRunning(r, containerName); err != nil {
 		respondError(w, http.StatusBadGateway, fmt.Sprintf("cannot reach sandbox: %s", err))
 		return
 	}
 
 	if isWebSocketUpgrade(r) {
 		proxyWebSocket(w, r, func() (net.Conn, error) {
-			return studioBackendDial(containerName, containerPort)
+			return studioBackendDial(r, containerName, containerPort)
 		}, r.URL.Path)
 		return
 	}
@@ -586,7 +616,7 @@ func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName s
 			req.Header.Set("X-Forwarded-Host", r.Host)
 			req.Header.Set("X-Forwarded-Proto", "http")
 		},
-		Transport: studioProxyTransport(containerName, containerPort),
+		Transport: studioProxyTransport(r, containerName, containerPort),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 		},

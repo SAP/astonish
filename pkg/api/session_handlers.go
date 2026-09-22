@@ -889,6 +889,9 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid path")
 		return
 	}
+	if sessionID != "" && !artifactSessionVisible(w, r, sessionID) {
+		return
+	}
 	fileName := filepath.Base(cleanPath)
 
 	// Tier 1: Try serving directly from host filesystem
@@ -970,6 +973,9 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid path")
 		return
 	}
+	if sessionID != "" && !artifactSessionVisible(w, r, sessionID) {
+		return
+	}
 
 	// Tier 1: Try reading from host filesystem
 	if content, err := os.ReadFile(cleanPath); err == nil { // #nosec G304 -- path validated by validateArtifactPath
@@ -1012,6 +1018,23 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondError(w, http.StatusNotFound, "file not found")
+}
+
+func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID string) bool {
+	reg := sandboxRegistryFromRequest(r)
+	var err error
+	if reg == nil {
+		reg, err = sandboxSessionRegistryForRequest(r)
+		if err != nil {
+			respondError(w, http.StatusNotFound, "container not found")
+			return false
+		}
+	}
+	if _, ok := lookupSandboxSession(reg, sessionID); !ok {
+		// No sandbox row. Transcript reconstruction is already filtered by user ID.
+		return true
+	}
+	return authorizeSandboxSession(w, r, reg, sessionID) != nil
 }
 
 // readFromSandboxContainer attempts to read a file from the configured
@@ -1090,6 +1113,9 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 	cleanPath, err := validateArtifactPath(filePath)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	if sessionID != "" && !artifactSessionVisible(w, r, sessionID) {
 		return
 	}
 

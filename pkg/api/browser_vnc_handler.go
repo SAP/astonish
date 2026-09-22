@@ -48,50 +48,66 @@ func SetVNCContainerDialFunc(fn func(containerName string, port int) (net.Conn, 
 //  1. Registered VNC dial func (set by chat_factory for OpenShell/exec-tunnel)
 //  2. Global browser Manager's ContainerDialFunc (legacy/Incus with tunnel)
 //  3. Incus sandbox direct connection (fallback)
-func getVNCDialFunc(containerName string) (dialFn func() (net.Conn, error), httpTransport *http.Transport, err error) {
-	// Priority 1: Registered dial func from chat_factory (OpenShell path).
+func getVNCDialFunc(r *http.Request, sessionID string) (dialFn func() (net.Conn, error), httpTransport *http.Transport, err error) {
+	if sessionID == "" {
+		return nil, nil, fmt.Errorf("container not found")
+	}
 	registeredVNCDialMu.RLock()
 	dialFunc := registeredVNCDialFunc
 	registeredVNCDialMu.RUnlock()
 
 	if dialFunc != nil {
 		dialFn = func() (net.Conn, error) {
-			return dialFunc(containerName, vncDialerPort)
+			return dialFunc(sessionID, vncDialerPort)
 		}
 		httpTransport = &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return dialFunc(containerName, vncDialerPort)
+				return dialFunc(sessionID, vncDialerPort)
 			},
 			MaxIdleConnsPerHost: 2,
 		}
 		return dialFn, httpTransport, nil
 	}
 
-	// Priority 2: Global browser Manager's ContainerDialFunc.
 	mgr := GetBrowserManager()
 	if mgr != nil && mgr.ContainerDialFunc != nil {
 		dialFn = func() (net.Conn, error) {
-			return mgr.ContainerDialFunc(containerName, vncDialerPort)
+			return mgr.ContainerDialFunc(sessionID, vncDialerPort)
 		}
 		httpTransport = &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return mgr.ContainerDialFunc(containerName, vncDialerPort)
+				return mgr.ContainerDialFunc(sessionID, vncDialerPort)
 			},
 			MaxIdleConnsPerHost: 2,
 		}
 		return dialFn, httpTransport, nil
 	}
 
-	// Priority 3: Backend exec tunnel (Docker/K8s OverlayFS).
 	port := 6901
-	if err := ensureProxySessionRunning(containerName); err != nil {
+	if err := ensureProxySessionRunning(r, sessionID); err != nil {
 		return nil, nil, fmt.Errorf("failed to reach sandbox: %w", err)
 	}
 	dialFn = func() (net.Conn, error) {
-		return studioBackendDial(containerName, port)
+		return studioBackendDial(r, sessionID, port)
 	}
-	httpTransport = studioProxyTransport(containerName, port)
+	httpTransport = studioProxyTransport(r, sessionID, port)
 	return dialFn, httpTransport, nil
+}
+
+func authorizeVNCContainer(w http.ResponseWriter, r *http.Request, containerName string) (string, bool) {
+	reg, err := sandboxSessionRegistryForRequest(r)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "container not found")
+		return "", false
+	}
+	sessionID := sessionIDForProxyContainer(r, containerName)
+	if sessionID == "" || authorizeSandboxSession(w, r, reg, sessionID) == nil {
+		if sessionID == "" {
+			respondError(w, http.StatusNotFound, "container not found")
+		}
+		return "", false
+	}
+	return sessionID, true
 }
 
 // BrowserVNCProxyHandler proxies HTTP and WebSocket requests to the KasmVNC
@@ -119,9 +135,12 @@ func BrowserVNCProxyHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "container name is required")
 		return
 	}
+	sessionID, ok := authorizeVNCContainer(w, r, containerName)
+	if !ok {
+		return
+	}
 
-	// Resolve the dialer for this container (OpenShell exec tunnel or Incus).
-	dialFn, httpTransport, err := getVNCDialFunc(containerName)
+	dialFn, httpTransport, err := getVNCDialFunc(r, sessionID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -222,21 +241,23 @@ func BrowserVNCInfoHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "container name is required")
 		return
 	}
+	sessionID, ok := authorizeVNCContainer(w, r, containerName)
+	if !ok {
+		return
+	}
 
-	// Check if the Manager knows about this container (backend-agnostic).
 	mgr := GetBrowserManager()
-	if mgr != nil && mgr.ContainerDialFunc != nil && mgr.ContainerName() == containerName {
-		// OpenShell path: container exists and is managed by the Manager.
+	if mgr != nil && mgr.ContainerDialFunc != nil && (mgr.ContainerName() == containerName || mgr.ContainerName() == sessionID) {
 		respondJSON(w, http.StatusOK, map[string]any{
 			"container": containerName,
-			"ip":        "tunnel", // Not a real IP — connections are tunneled.
+			"ip":        "tunnel",
 			"vnc_port":  vncDialerPort,
 			"proxy_url": fmt.Sprintf("/api/browser/vnc/%s/", containerName),
 		})
 		return
 	}
 
-	if err := ensureProxySessionRunning(containerName); err != nil {
+	if err := ensureProxySessionRunning(r, sessionID); err != nil {
 		respondError(w, http.StatusBadGateway, "sandbox is not running: "+err.Error())
 		return
 	}

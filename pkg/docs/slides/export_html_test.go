@@ -161,8 +161,11 @@ func TestExportHTML_TextWhitespacePreWrap(t *testing.T) {
 	if !strings.Contains(doc, "ast-text{white-space:pre-wrap") {
 		t.Fatal("ast-text CSS rule not applied to the ast-text element")
 	}
-	if !strings.Contains(doc, "overflow-x:clip") || !strings.Contains(doc, "overflow-y:visible") {
-		t.Fatal("ast-text must not clip glyph descenders with overflow:hidden")
+	if !strings.Contains(doc, "overflow:clip") || !strings.Contains(doc, "overflow-clip-margin:0.32em 0 0.32em 0") {
+		t.Fatal("ast-text must clip text to the box width while keeping descender room")
+	}
+	if strings.Contains(doc, "overflow-x:clip") {
+		t.Fatal("overflow-x:clip does not clip text; row labels paint past the card")
 	}
 	// The separator run's newline must be present in the emitted markup.
 	if !strings.Contains(doc, "\n\n") {

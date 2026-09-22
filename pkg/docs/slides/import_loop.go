@@ -109,6 +109,7 @@ func RunImportLoop(ctx context.Context, pptxBase64 string, opts ImportLoopOption
 
 		if report.Passed {
 			tmpl.ImportState = "validated"
+			recordComponentGaps(&tmpl)
 			// Build the evidence-grounded style guide before returning.
 			if tmpl.Model != nil {
 				evidence := buildImportEvidence(finalReport, repairsApplied, warnings, iter)
@@ -141,6 +142,7 @@ func RunImportLoop(ctx context.Context, pptxBase64 string, opts ImportLoopOption
 
 	// All iterations exhausted without passing.
 	tmpl.ImportState = "validation_incomplete"
+	recordComponentGaps(&tmpl)
 	// Build the evidence-grounded style guide with the best evidence we have.
 	if tmpl.Model != nil {
 		evidence := buildImportEvidence(finalReport, repairsApplied, nil, tmpl.ImportIterations)

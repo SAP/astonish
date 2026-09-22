@@ -8,10 +8,12 @@ export const runtimeStyles = `
      pass over its whole subtree. See DeckController.applyState. */
   ast-slide { display:none; position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; content-visibility:auto; contain-intrinsic-size:1080px 1920px; }
   ast-slide[active] { display:block; content-visibility:visible; }
-  /* overflow-x:clip (not hidden) keeps overflow-y visible so descenders
-     ("g","y","world") are not shaved by a flush line box. overflow-clip-margin
-     gives a little extra paint room for anti-aliased glyph edges. */
-  ast-text { white-space:pre-wrap; overflow-wrap:break-word; overflow-x:clip; overflow-y:visible; overflow-clip-margin:0.32em; font-variant-ligatures:none; }
+  /* Clip on BOTH axes so text wider than the box (a row label on a card) is
+     cut at the box edge instead of painting across the next column. The clip
+     margin is top/right/bottom/left: 0.32em top and bottom keeps paint room so
+     descenders ("g","y") are not shaved, while 0 left/right clips text tight to
+     the card. */
+  ast-text { white-space:pre-wrap; overflow-wrap:break-word; overflow:clip; overflow-clip-margin:0.32em 0 0.32em 0; font-variant-ligatures:none; }
   ast-run { display:inline; }
   ast-shape svg { width:100%; height:100%; display:block; overflow:visible; }
   ast-image img { width:100%; height:100%; object-fit:var(--ast-image-fit,contain); }

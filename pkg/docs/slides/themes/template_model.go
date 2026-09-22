@@ -101,6 +101,29 @@ type IRChrome struct {
 	Style      *IRTextStyle `json:"style,omitempty"`
 	MediaKey   string       `json:"mediaKey,omitempty"`
 	Name       string       `json:"name,omitempty"`
+	// Opacity is the picture or shape alpha, 0..1. Zero means fully opaque
+	// (the JSON omitempty default). Values below 1 must survive into markup.
+	Opacity float64 `json:"opacity,omitempty"`
+	// Align is the first paragraph's horizontal alignment (ctr|r|justify).
+	// Anchor is a:bodyPr vertical alignment (t|ctr|b).
+	Align  string  `json:"align,omitempty"`
+	Anchor string  `json:"anchor,omitempty"`
+	Runs   []IRRun `json:"runs,omitempty"`
+	// Geom is the OOXML preset (ellipse, roundRect, line, …). Kind is often
+	// forced to "text" when the shape also carries a run, so Geom is what
+	// tells the ASD projection to also emit the circle or card behind the label.
+	Geom string `json:"geom,omitempty"`
+}
+
+// IRRun is one OOXML text run after theme inheritance. Size is raw points;
+// the ASD projection scales it onto the canvas.
+type IRRun struct {
+	Text   string `json:"text"`
+	Bold   bool   `json:"bold,omitempty"`
+	Italic bool   `json:"italic,omitempty"`
+	Color  string `json:"color,omitempty"`
+	Font   string `json:"font,omitempty"`
+	Size   int    `json:"size,omitempty"`
 }
 
 // IRPathSeg is one SVG-path subpath in the object's own W x H unit box. FillNone
@@ -177,6 +200,8 @@ type IRPlaceholder struct {
 	Fill      string      `json:"fill,omitempty"`
 	FlipH     bool        `json:"flipH,omitempty"`
 	FlipV     bool        `json:"flipV,omitempty"`
+	Align     string      `json:"align,omitempty"`
+	Anchor    string      `json:"anchor,omitempty"`
 }
 
 // IRSlideNumber is the slide-number placeholder position/style, kept separate

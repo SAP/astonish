@@ -31,4 +31,14 @@ describe('slides runtime styles', () => {
   it('does not carry the stale 12in x 6.75in page size', () => {
     expect(runtimeStyles).not.toContain('12in 6.75in')
   })
+
+  it('clips text that is wider than its box without shaving descenders', () => {
+    // overflow-x:clip alone does not clip text, so a row label paints past
+    // the card edge. Clip both axes; the clip margin (top right bottom left)
+    // keeps vertical paint room for descenders while clipping tight on the
+    // left/right so text stays inside its card.
+    expect(runtimeStyles).toContain('overflow:clip')
+    expect(runtimeStyles).toContain('overflow-clip-margin:0.32em 0 0.32em 0')
+    expect(runtimeStyles).not.toContain('overflow-x:clip; overflow-y:visible')
+  })
 })

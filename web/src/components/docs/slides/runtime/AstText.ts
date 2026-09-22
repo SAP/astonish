@@ -155,9 +155,12 @@ export class AstText extends PositionedElement {
     this.style.whiteSpace = 'pre-wrap'
     this.style.overflowWrap = 'break-word'
     this.style.fontVariantLigatures = 'none'
-    // Clip horizontally (long tokens) but never shave glyph descenders.
-    this.style.overflowX = 'clip'
-    this.style.overflowY = 'visible'
+    // Clip on both axes so text wider than the box is cut at the box edge
+    // instead of painting across neighboring cards. overflow-clip-margin keeps
+    // vertical paint room for descenders (top/bottom) while clipping tight on
+    // the left/right. Mirrors the ast-text CSS rule in the HTML export.
+    this.style.overflow = 'clip'
+    this.style.overflowClipMargin = '0.32em 0 0.32em 0'
     if (this.anchor === 'ctr') {
       this.style.display = 'flex'
       this.style.flexDirection = 'column'

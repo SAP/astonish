@@ -154,3 +154,18 @@ func TestReconstructSceneUnsupportedWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestInjectTextSkipsGradientScriptThatContainsSlotID(t *testing.T) {
+	markup := `<ast-slide id="s"><ast-shape id="hdr" kind="rect" x="0" y="0" w="100" h="40" fill="#fff"><script type="application/json" id="hdr-g">{"kind":"linear","angle":0,"stops":[{"pos":0,"color":"#fff"},{"pos":100,"color":"#000"}]}</script></ast-shape><ast-text id="ph-1" x="10" y="10" w="80" h="20">old</ast-text></ast-slide>`
+	got := injectText(markup, "ph-1", "Kick-off")
+	want := `<ast-text id="ph-1" x="10" y="10" w="80" h="20"><ast-run>Kick-off</ast-run></ast-text>`
+	if !strings.Contains(got, want) {
+		t.Fatalf("text did not land in the ast-text slot:\n%s", got)
+	}
+	if strings.Index(got, "Kick-off") < strings.Index(got, `<ast-text id="ph-1"`) {
+		t.Fatalf("text was injected into the gradient script:\n%s", got)
+	}
+	if _, _, err := ParseSlide(got); err != nil {
+		t.Fatalf("projected markup no longer parses: %v\n%s", err, got)
+	}
+}

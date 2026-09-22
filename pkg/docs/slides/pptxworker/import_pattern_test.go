@@ -929,3 +929,302 @@ func TestImportDropsHiddenMasterWidgets(t *testing.T) {
 		t.Fatal("visible accent bar was dropped along with hidden widgets")
 	}
 }
+
+func TestImportKeepsAuthoredTextAlignAndAnchor(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title")+
+			`<p:sp>
+<p:nvSpPr><p:cNvPr id="10" name="Label"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="800000" y="2000000"/><a:ext cx="5000000" cy="700000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+<p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/>
+<a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="en-US" sz="1800"/><a:t>Centered label</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>`)
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	pattern := findArchByKindPrefix(tmpl, "content")
+	if pattern == nil {
+		pattern = findArchByKindPrefix(tmpl, "title")
+	}
+	if pattern == nil {
+		t.Fatal("expected a layout archetype")
+	}
+	if !strings.Contains(pattern.Markup, `align="ctr"`) || !strings.Contains(pattern.Markup, `anchor="ctr"`) {
+		t.Fatalf("authored center align/anchor was dropped:\n%s", pattern.Markup)
+	}
+}
+
+func TestImportKeepsDistinctRunsInChromeText(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	row := `<p:sp>
+<p:nvSpPr><p:cNvPr id="11" name="Row"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="800000" y="2500000"/><a:ext cx="5000000" cy="700000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/>
+<a:p><a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="002A86"/></a:solidFill><a:latin typeface="72 Brand Medium"/></a:rPr><a:t>Title line</a:t></a:r>
+<a:r><a:rPr lang="en-US" sz="1200"><a:solidFill><a:srgbClr val="5B738B"/></a:solidFill><a:latin typeface="72 Brand Light"/></a:rPr><a:t>Body line</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>`
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + row + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "deck"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var scene struct {
+		Slides []struct {
+			Nodes []struct {
+				Text string `json:"text"`
+				Runs []struct {
+					Text  string `json:"text"`
+					Color string `json:"color"`
+					Size  int    `json:"size"`
+				} `json:"runs"`
+			} `json:"nodes"`
+		} `json:"slides"`
+	}
+	if err := json.Unmarshal(resp.SceneOrTemplate, &scene); err != nil {
+		t.Fatalf("bad scene: %v", err)
+	}
+	var found bool
+	for _, sl := range scene.Slides {
+		for _, n := range sl.Nodes {
+			if !strings.Contains(n.Text, "Title line") {
+				continue
+			}
+			found = true
+			if len(n.Runs) < 2 || n.Runs[1].Color != "#5B738B" || n.Runs[1].Text != "Body line" {
+				t.Fatalf("second run was flattened: %+v", n.Runs)
+			}
+			if n.Runs[1].Size != 12 {
+				t.Fatalf("second run size = %d, want raw 12pt", n.Runs[1].Size)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("row text was dropped from deck import")
+	}
+}
+
+func TestImportKeepsNumberInsideStepCircle(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	badge := `<p:sp>
+<p:nvSpPr><p:cNvPr id="11" name="Step 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="900000" y="1800000"/><a:ext cx="550000" cy="550000"/></a:xfrm>
+<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></p:spPr>
+<p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/>
+<a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="en-US" sz="1800" b="1"><a:solidFill><a:srgbClr val="0C6ED1"/></a:solidFill></a:rPr><a:t>1</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>`
+	body := `<p:sp>
+<p:nvSpPr><p:cNvPr id="12" name="Step body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="1600000" y="1800000"/><a:ext cx="7000000" cy="550000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/>
+<a:p><a:r><a:rPr lang="en-US" sz="1800"/><a:t>Start development</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>`
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + badge + body + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	var markup string
+	for _, a := range tmpl.Archetypes {
+		if strings.Contains(a.Markup, "Start development") || strings.Contains(a.Markup, `geom="ellipse"`) {
+			markup = a.Markup
+			break
+		}
+	}
+	if markup == "" {
+		var kinds []string
+		for _, a := range tmpl.Archetypes {
+			kinds = append(kinds, a.Kind)
+		}
+		t.Fatalf("step body was dropped; archetypes=%v warnings=%v", kinds, resp.Warnings)
+	}
+	if !strings.Contains(markup, `geom="ellipse"`) {
+		t.Fatalf("step number was split off its circle:\n%s", markup)
+	}
+	if !strings.Contains(markup, ">1</ast-run>") {
+		t.Fatalf("step digit was dropped:\n%s", markup)
+	}
+}
+
+func TestImportKeepsSourceTextBoxHeight(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	// EMUs: 1920px canvas / 12192000 EMU. A ~63px title is the workshop case
+	// that was stretched to 120 and painted over the subtitle.
+	title := textBox(21, 400000, 400000, 8000000, 400000, "Target Architecture")
+	subtitle := textBox(22, 400000, 900000, 9000000, 300000, "The agreed MVP keeps current onboarding")
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + title + subtitle + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	var markup string
+	for _, a := range tmpl.Archetypes {
+		if strings.HasPrefix(a.Kind, "pattern") {
+			markup = a.Markup
+			break
+		}
+	}
+	if !strings.Contains(markup, `id="ph-2"`) || !strings.Contains(markup, `id="ph-3"`) {
+		t.Fatalf("title/subtitle slots missing from pattern markup:\n%s", markup)
+	}
+	h := attrNear(t, markup, `id="ph-2"`, "h")
+	if h > 80 {
+		t.Fatalf("title box grew from ~63px to h=%d and covers the line below:\n%s", h, markup)
+	}
+	sub := attrNear(t, markup, `id="ph-3"`, "h")
+	if sub > 70 {
+		t.Fatalf("subtitle box grew from ~47px to h=%d:\n%s", sub, markup)
+	}
+}
+
+func TestImportSplitsStackedColumnIntoLineSlots(t *testing.T) {
+	workingDir, importScript, _ := requireNodeEnv(t)
+	titleOnly := layoutXML("Title Only", "",
+		phSp(2, "Title 1", "title", "", 288000, 400000, 11000000, 900000, "", "Click to add title"))
+	// One OOXML shape whose paragraphs are separate visual rows. The workshop
+	// column is 695px tall with eight title/body pairs; flattening it into one
+	// text box loses the row rhythm the source picture shows.
+	var paras strings.Builder
+	for i := 1; i <= 4; i++ {
+		paras.WriteString(`<a:p><a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="002A86"/></a:solidFill></a:rPr><a:t>Row ` + itoa(i) + ` title</a:t></a:r></a:p>`)
+		paras.WriteString(`<a:p><a:r><a:rPr lang="en-US" sz="1200"/><a:t>Row ` + itoa(i) + ` body</a:t></a:r></a:p>`)
+	}
+	column := `<p:sp>
+<p:nvSpPr><p:cNvPr id="30" name="Column"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="800000" y="1600000"/><a:ext cx="4500000" cy="4400000"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/>
+` + paras.String() + `
+</p:txBody>
+</p:sp>`
+	sample := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+` + column + `
+</p:spTree></p:cSld>
+</p:sld>`
+	resp, err := (ImportRunner{WorkingDir: workingDir, ScriptPath: importScript, Timeout: 30 * time.Second}).
+		Run(context.Background(), ImportRequest{PPTXBase64: zipPPTX(t, minimalTemplateFiles(sample, titleOnly, classificationMaster)), Mode: "template"})
+	if err != nil {
+		t.Fatalf("import worker failed: %v", err)
+	}
+	var tmpl themes.Template
+	if err := json.Unmarshal(resp.SceneOrTemplate, &tmpl); err != nil {
+		t.Fatalf("bad template: %v", err)
+	}
+	var markup string
+	for _, a := range tmpl.Archetypes {
+		if strings.HasPrefix(a.Kind, "pattern") {
+			markup = a.Markup
+			break
+		}
+	}
+	slots := strings.Count(markup, "<ast-text")
+	if slots < 8 {
+		t.Fatalf("stacked column stayed one box (%d text slots, want at least 8 rows):\n%s", slots, markup)
+	}
+	for i := 1; i <= 4; i++ {
+		if !strings.Contains(markup, "Row "+itoa(i)+" title") && !strings.Contains(markup, "{{BODY}}") {
+			t.Fatalf("row %d title missing:\n%s", i, markup)
+		}
+	}
+}
+
+func textBox(id, x, y, cx, cy int, text string) string {
+	return `<p:sp>
+<p:nvSpPr><p:cNvPr id="` + itoa(id) + `" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="` + itoa(x) + `" y="` + itoa(y) + `"/><a:ext cx="` + itoa(cx) + `" cy="` + itoa(cy) + `"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/>
+<a:p><a:r><a:rPr lang="en-US" sz="2000"/><a:t>` + text + `</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>`
+}
+
+func attrNear(t *testing.T, markup, needle, attr string) int {
+	t.Helper()
+	idx := strings.Index(markup, needle)
+	if idx < 0 {
+		t.Fatalf("%s not in markup", needle)
+	}
+	start := strings.LastIndex(markup[:idx], "<ast-text")
+	if start < 0 {
+		start = strings.LastIndex(markup[:idx], "<")
+	}
+	tagEnd := strings.Index(markup[idx:], ">")
+	if tagEnd < 0 {
+		t.Fatalf("unclosed tag near %s", needle)
+	}
+	tag := markup[start : idx+tagEnd]
+	re := regexp.MustCompile(attr + `="(\d+)"`)
+	m := re.FindStringSubmatch(tag)
+	if m == nil {
+		t.Fatalf("no %s on text box for %s:\n%s", attr, needle, tag)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}

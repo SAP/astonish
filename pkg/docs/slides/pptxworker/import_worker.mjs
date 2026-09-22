@@ -96,6 +96,18 @@ const hexToRgb = (hex) => {
 }
 const rgbToHex = ({ r, g, b }) => [r, g, b].map((v) => clamp255(v).toString(16).padStart(2, '0')).join('').toUpperCase()
 
+// Composite #RRGGBB at alpha 0..1 over white. ASD gradient stops are opaque;
+// PowerPoint paints these stops over the slide surface.
+const compositeOverWhite = (hex, alpha) => {
+  const a = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1
+  if (a >= 0.999) {
+    const raw = String(hex || '').replace(/^#/, '').toUpperCase()
+    return raw ? `#${raw}` : '#FFFFFF'
+  }
+  const { r, g, b } = hexToRgb(hex)
+  return `#${rgbToHex({ r: r * a + 255 * (1 - a), g: g * a + 255 * (1 - a), b: b * a + 255 * (1 - a) })}`
+}
+
 // Apply an OOXML color transform in document order. mods is an array of
 // { op, val } where val is 0..1 (parsed from the @_val "per-mille"/percent thousandths).
 const applyMods = (hex, mods) => {
@@ -351,6 +363,22 @@ const extractRuns = (txBody, themeColors, styleDefaults = null) => {
     if (styleDefaults && styleDefaults[key] != null) return styleDefaults[key]
     return null
   }
+  // a:bodyPr/@anchor is vertical alignment (t/ctr/b). a:pPr/@algn is horizontal
+  // (l/ctr/r). ASD only styles the first paragraph's align, matching how
+  // styleOf already takes the first run's size and color.
+  const bodyPr = findChild(txBody, 'a:bodyPr')
+  const anchorRaw = bodyPr ? String(attrsOf(bodyPr)['@_anchor'] || '') : ''
+  const anchor = anchorRaw === 'ctr' || anchorRaw === 'b' || anchorRaw === 't' ? anchorRaw : ''
+  let align = ''
+  for (const p of findAll(txBody, 'a:p')) {
+    const pPr = findChild(p, 'a:pPr')
+    const algn = pPr ? String(attrsOf(pPr)['@_algn'] || '') : ''
+    if (algn === 'ctr' || algn === 'r' || algn === 'just') { align = algn === 'just' ? 'justify' : algn; break }
+    if (findAll(p, 'a:r').some((r) => textOf(findChild(r, 'a:t')))) break
+  }
+  const layout = {}
+  if (anchor) layout.anchor = anchor
+  if (align) layout.align = align
   for (const p of findAll(txBody, 'a:p')) {
     for (const r of findAll(p, 'a:r')) {
       const rPr = findChild(r, 'a:rPr')
@@ -374,11 +402,12 @@ const extractRuns = (txBody, themeColors, styleDefaults = null) => {
       if (col) run.color = col.hex
       else { const c = inherit('color'); if (c != null) run.color = c }
       runs.push(run)
+      if (text && !text.endsWith('\n') && !str.startsWith(' ')) text += ' '
       text += str
     }
     text += '\n'
   }
-  return { runs, text: text.trim(), defaults: localDefaults }
+  return { runs, text: text.trim(), defaults: localDefaults, layout }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +457,7 @@ const extractFill = (spPr, themeColors, out) => {
       for (const gs of findAll(gsLst, 'a:gs')) {
         const pos = int(pct(attrsOf(gs)['@_pos']) * 100)
         const c = colorFromFill(gs, themeColors)
-        stops.push({ pos, color: c ? c.hex : '#FFFFFF' })
+        stops.push({ pos, color: c ? c.hex : '#FFFFFF', alpha: c && Number.isFinite(c.alpha) ? c.alpha : 1 })
       }
     }
     let angle = 0
@@ -976,11 +1005,12 @@ try {
       }
     }
     const txBody = findChild(sp, 'p:txBody')
-    const { runs, text, defaults } = extractRuns(txBody, themeColors, txStyleDefaultFor(node.ph && node.ph.type))
+    const { runs, text, defaults, layout } = extractRuns(txBody, themeColors, txStyleDefaultFor(node.ph && node.ph.type))
     if (runs.length) {
       node.runs = runs
       node.text = text
     }
+    if (layout && (layout.align || layout.anchor)) node.textLayout = layout
     // Empty placeholders (no runs) still carry an authored color via the shape's
     // own <a:lstStyle> defRPr solidFill (a layout-level override). Preserve it so
     // classify() can backfill the placeholder color when styleOf finds no run.
@@ -1018,6 +1048,13 @@ try {
         }
       }
       if (!embed) embed = attrsOf(blip)['@_r:embed'] || null
+      // a:alphaModFix @amt is the picture's opacity (82000 = 82%). Dropping it
+      // paints a full-bleed photo as opaque and hides the slide underneath.
+      const alphaMod = findChild(blip, 'a:alphaModFix')
+      if (alphaMod) {
+        const amt = pct(attrsOf(alphaMod)['@_amt'])
+        if (amt < 0.999) node.opacity = Number(Math.max(0, Math.min(1, amt)).toFixed(3))
+      }
     }
     if (embed && slideRels[embed]) {
       const target = resolveTarget(slideDir, slideRels[embed].target)
@@ -1323,6 +1360,8 @@ try {
           prompt: type === 'title' ? '{{TITLE}}' : '{{BODY}}',
           ooxmlType: node.ph.type,
           idx: node.ph.idx ? Number(node.ph.idx) : 0,
+          align: node.textLayout && node.textLayout.align ? node.textLayout.align : '',
+          anchor: node.textLayout && node.textLayout.anchor ? node.textLayout.anchor : '',
         }
         // A layout title/body placeholder is usually EMPTY (no a:r runs), so
         // styleOf yields no color/size/font. The real text color for that role
@@ -1362,6 +1401,7 @@ try {
                 : node.geom === 'ellipse' ? 'ellipse'
                   : node.text ? 'text' : 'rect',
         x: g.x, y: g.y, w: g.w, h: g.h,
+        geom: node.geom || '',
       }
       if (node.rot) chrome.rot = node.rot
       if (node.flipH) chrome.flipH = true
@@ -1371,9 +1411,26 @@ try {
       if (node.line) chrome.line = { color: node.line, width: (node.props && node.props.lineWidth) || 1, dash: node.dash || 'solid' }
       if (node.rectRadius) chrome.rectRadius = node.rectRadius
       if (node.paths) chrome.paths = node.paths
-      if (node.text) { chrome.text = node.text; chrome.style = styleOf(node) }
+      if (node.text) {
+        chrome.text = node.text
+        chrome.style = styleOf(node)
+        if (node.textLayout) {
+          if (node.textLayout.align) {
+            chrome.align = node.textLayout.align
+            chrome.style.align = node.textLayout.align === 'ctr' ? 'center' : node.textLayout.align === 'r' ? 'right' : node.textLayout.align
+          }
+          if (node.textLayout.anchor) {
+            chrome.anchor = node.textLayout.anchor
+            chrome.style.valign = node.textLayout.anchor === 'ctr' ? 'middle' : node.textLayout.anchor === 'b' ? 'bottom' : 'top'
+          }
+        }
+        if (node.runs && node.runs.length) chrome.runs = node.runs.map((r) => ({
+          text: r.text, bold: !!r.bold, italic: !!r.italic, color: r.color || '', font: r.font || '', size: r.size || 0,
+        }))
+      }
       if (node.type === 'image' && node.props && node.props.assetRef) chrome.mediaKey = node.props.assetRef
-      chrome.geom = node.geom
+      if (node.opacity != null && node.opacity < 1) chrome.opacity = node.opacity
+      chrome.geom = node.geom || ''
       layout.objects.push(chrome)
     }
 
@@ -1521,7 +1578,8 @@ try {
       const geo = clampGeo(o)
       const rot = o.rot ? ` rot="${Math.max(-360, Math.min(360, o.rot))}"` : ''
       if (o.kind === 'image' && o.mediaKey) {
-        return `<ast-image id="${id}" ${geo}${rot} asset-ref="${esc(o.mediaKey)}" fit="cover" decorative="true"></ast-image>`
+        const op = (o.opacity != null && o.opacity < 1) ? ` opacity="${Number(o.opacity).toFixed(3)}"` : ''
+        return `<ast-image id="${id}" ${geo}${rot} asset-ref="${esc(o.mediaKey)}" fit="cover"${op} decorative="true"></ast-image>`
       }
       if (o.kind === 'text' || o.text) {
         const st = o.style || {}
@@ -1530,37 +1588,87 @@ try {
         attrs.push(`color="${col}"`)
         if (st.bold) attrs.push('weight="bold"')
         if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
-        // italic is a run-level attribute (i) — ast-text has no italic attr.
-        const runAttr = st.italic ? ' i="true"' : ''
-        const runs = String(o.text).split('\n').filter((l) => l !== '')
-          .map((l) => `<ast-run${runAttr}>${escText(l)}</ast-run>`).join('')
-        return `<ast-text id="${id}" ${geo}${rot} ${attrs.join(' ')}>${runs || '<ast-run></ast-run>'}</ast-text>`
+        if (o.align === 'ctr' || o.align === 'r' || o.align === 'justify') attrs.push(`align="${o.align}"`)
+        if (o.anchor === 'ctr' || o.anchor === 'b' || o.anchor === 't') attrs.push(`anchor="${o.anchor}"`)
+        // Keep each OOXML run. Flattening to the first run paints a light body
+        // in the bold title color (slide 18's row labels).
+        const srcRuns = Array.isArray(o.runs) && o.runs.length ? o.runs : String(o.text || '').split('\n').filter((l) => l !== '').map((l) => ({ text: l }))
+        const runs = srcRuns.map((r) => {
+          const ra = []
+          if (r.bold || st.bold) ra.push('b="true"')
+          if (r.italic || st.italic) ra.push('i="true"')
+          if (r.underline) ra.push('u="true"')
+          const rc = safeCol(r.color)
+          if (rc && rc !== col) ra.push(`color="${rc}"`)
+          if (r.font && r.font !== st.fontFace && !/[;<>]/.test(r.font) && !/^\+/.test(r.font)) ra.push(`font="${esc(withFontFallback(r.font))}"`)
+          if (r.size) {
+            const scaled = int(r.size * scale)
+            if (!st.fontSize || scaled !== st.fontSize) ra.push(`size="${scaled}"`)
+          }
+          return `<ast-run${ra.length ? ' ' + ra.join(' ') : ''}>${escText(r.text)}</ast-run>`
+        }).join('')
+        const textEl = `<ast-text id="${id}" ${geo}${rot} ${attrs.join(' ')}>${runs || '<ast-run></ast-run>'}</ast-text>`
+        // classify() tags any shape that also carries a run as kind:'text'.
+        // A numbered circle then loses its fill unless the shape is emitted too.
+        // Built inline — calling chromeToAsd again would recurse on the text.
+        if (objectHasShape(o) && o.kind === 'text') {
+          const geom = o.geom === 'ellipse' ? 'ellipse' : o.kind === 'line' ? 'line' : (o.rectRadius || o.geom === 'roundRect' ? 'roundRect' : 'rect')
+          const kind = geom === 'line' ? 'line' : geom === 'ellipse' ? 'ellipse' : 'rect'
+          let fillAttr = ''
+          if (o.fill && o.fill.kind === 'solid' && safeCol(o.fill.color)) fillAttr = ` fill="${o.fill.color}"`
+          const lineAttr = o.line && safeCol(o.line.color) ? ` line="${o.line.color}"` : ''
+          return `<ast-shape id="${id}-s" kind="${kind}" ${geo}${rot} geom="${geom}"${fillAttr}${lineAttr}></ast-shape>${textEl}`
+        }
+        return textEl
       }
       // Shape family (rect/ellipse/line/path). ast-shape requires kind.
       let fillAttr = ''
+      let gradientChild = ''
       if (o.fill && o.fill.kind === 'solid' && safeCol(o.fill.color)) fillAttr = ` fill="${o.fill.color}"`
-      else if (o.fill && o.fill.kind === 'gradient' && o.fill.gradient && o.fill.gradient.stops && o.fill.gradient.stops[0] && safeCol(o.fill.gradient.stops[0].color)) {
-        // ASD gradients need a JSON <script> child; for the archetype we
-        // approximate with the first stop color and keep the true gradient in IR.
-        fillAttr = ` fill="${o.fill.gradient.stops[0].color}"`
-        warn(`Gradient approximated as solid in archetype (${id})`)
+      else if (o.fill && o.fill.kind === 'gradient' && o.fill.gradient) {
+        const payload = gradientScriptJSON(o.fill.gradient)
+        if (payload) {
+          const stops = o.fill.gradient.stops || []
+          const last = stops[stops.length - 1]
+          const first = stops[0]
+          const fallback = safeCol(last && last.color) || safeCol(first && first.color) || '#FFFFFF'
+          fillAttr = ` fill="${fallback}"`
+          gradientChild = `<script type="application/json" id="${id}-g">${payload}</script>`
+        }
       }
       const lineAttr = o.line && safeCol(o.line.color) ? ` line="${o.line.color}"` : ''
       if (o.kind === 'path' && o.paths && o.paths.length) {
         const p = o.paths[0]
         const d = scalePath(p.d, p.w, p.h, o.w, o.h)
         if (d && /^[MmLlCcQqZzHhVvAa0-9\s,.+-]*$/.test(d)) {
-          return `<ast-shape id="${id}" kind="rect" ${geo}${rot} path="${esc(d)}"${fillAttr}${lineAttr}></ast-shape>`
+          return `<ast-shape id="${id}" kind="rect" ${geo}${rot} path="${esc(d)}"${fillAttr}${lineAttr}>${gradientChild}</ast-shape>`
         }
-        // Unsafe/empty path -> approximate as rect.
-        return `<ast-shape id="${id}" kind="rect" ${geo}${rot} geom="rect"${fillAttr}${lineAttr}></ast-shape>`
+        return `<ast-shape id="${id}" kind="rect" ${geo}${rot} geom="rect"${fillAttr}${lineAttr}>${gradientChild}</ast-shape>`
       }
       const geom = o.kind === 'line' ? 'line'
         : o.kind === 'ellipse' ? 'ellipse'
           : (o.geom === 'roundRect' || o.rectRadius) ? 'roundRect'
             : (o.geom && o.geom !== 'path' && ALLOWED_GEOM.has(o.geom)) ? o.geom : 'rect'
       const kind = geom === 'line' ? 'line' : geom === 'ellipse' ? 'ellipse' : 'rect'
-      return `<ast-shape id="${id}" kind="${kind}" ${geo}${rot} geom="${geom}"${fillAttr}${lineAttr}></ast-shape>`
+      return `<ast-shape id="${id}" kind="${kind}" ${geo}${rot} geom="${geom}"${fillAttr}${lineAttr}>${gradientChild}</ast-shape>`
+    }
+
+    // Stops must be non-decreasing. PowerPoint sometimes stores them reversed;
+    // sort so the wash still renders instead of failing validation.
+    const gradientScriptJSON = (g) => {
+      if (!g || !Array.isArray(g.stops)) return ''
+      const stops = g.stops
+        .map((s) => ({ pos: Math.max(0, Math.min(100, int(s.pos))), color: safeCol(s.color), alpha: Number.isFinite(s.alpha) ? s.alpha : 1 }))
+        .filter((s) => s.color)
+      if (stops.length < 2) return ''
+      stops.sort((a, b) => a.pos - b.pos)
+      // ASD fills are opaque. PowerPoint paints these stops over the slide
+      // surface (white when there is no photo). A full-bleed picture's own
+      // opacity is emitted on the image so the photo shows through instead of
+      // covering the page. Leaving the raw sRGB makes a 7% #0070F2 stop render
+      // as solid SAP blue.
+      const opaque = stops.map((s) => ({ pos: s.pos, color: compositeOverWhite(s.color, s.alpha) }))
+      return JSON.stringify({ kind: g.kind === 'radial' ? 'radial' : 'linear', angle: int(g.angle || 0), stops: opaque })
     }
 
     // Geometry presets ASD's validator allows (mirror of allowedGeomPresets).
@@ -1573,6 +1681,8 @@ try {
       const attrs = [`size="${st.fontSize || (p.type === 'title' ? 54 : 28)}"`, `color="${col}"`]
       if (st.bold || p.type === 'title') attrs.push('weight="bold"')
       if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
+      if (p.align === 'ctr' || p.align === 'r' || p.align === 'justify') attrs.push(`align="${p.align}"`)
+      if (p.anchor === 'ctr' || p.anchor === 'b' || p.anchor === 't') attrs.push(`anchor="${p.anchor}"`)
       const runAttr = st.italic ? ' i="true"' : ''
       const geo = clampGeo(p)
       return `<ast-text id="ph-${idc}" ${geo} ${attrs.join(' ')}><ast-run${runAttr}>${escText(p.prompt || '{{BODY}}')}</ast-run></ast-text>`
@@ -1675,7 +1785,12 @@ try {
       const maxSide = Math.max(w, h)
       const minSide = Math.min(w, h)
       if (o.kind === 'ellipse' || o.geom === 'ellipse' || o.kind === 'image') return false
-      if (maxSide > 0 && maxSide <= 220 && minSide >= maxSide * 0.55) return true
+      if (maxSide > 0 && maxSide <= 220 && minSide >= maxSide * 0.55) {
+        // Nearly-square tiles from the master palette are junk only when they
+        // have no paint. Colored squares (card headers, icon chips) are the
+        // slide; dropping them leaves white holes in the reconstruction.
+        if (isWhiteOrEmptyFill(o) && !(o.fill && o.fill.kind === 'gradient')) return true
+      }
       return false
     }
     const isSampleJunkShape = (o) => {
@@ -1703,6 +1818,28 @@ try {
         h: Math.max(1, (o.h || 0) - 2 * pad),
         style: o.style,
       }
+    }
+    // A tall text box with several paragraphs is a column of rows, not one
+    // wrapped paragraph. Give each paragraph its own slot at the source line
+    // height so the reconstruction keeps the row rhythm.
+    const paragraphBoxes = (o) => {
+      const runs = Array.isArray(o.runs) ? o.runs.filter((r) => String(r.text || '').trim()) : []
+      if (runs.length < 3 || (o.h || 0) < 180) return []
+      const h = o.h || 0
+      const rowH = Math.max(28, Math.round(h / runs.length))
+      return runs.map((r, i) => ({
+        x: o.x || 0,
+        y: (o.y || 0) + i * rowH,
+        w: o.w || 0,
+        h: i === runs.length - 1 ? Math.max(28, (o.y || 0) + h - ((o.y || 0) + i * rowH)) : rowH,
+        style: {
+          ...(o.style || {}),
+          fontSize: r.size || (o.style && o.style.fontSize) || 18,
+          bold: !!r.bold,
+          color: r.color || (o.style && o.style.color),
+        },
+        text: r.text,
+      }))
     }
     const regionHint = (o) => {
       const x = o.x || 0
@@ -1812,8 +1949,29 @@ try {
       const attrs = [`size="${st.fontSize || 28}"`, `color="${col}"`]
       if (st.bold) attrs.push('weight="bold"')
       if (st.fontFace && !/[;<>]/.test(st.fontFace) && !/^\+/.test(st.fontFace)) attrs.push(`font="${esc(withFontFallback(st.fontFace))}"`)
-      const runAttr = st.italic ? ' i="true"' : ''
+      if (box.align === 'ctr' || box.align === 'r' || box.align === 'justify') attrs.push(`align="${box.align}"`)
+      if (box.anchor === 'ctr' || box.anchor === 'b' || box.anchor === 't') attrs.push(`anchor="${box.anchor}"`)
       const geo = clampGeo(box)
+      // A multi-run label keeps its source runs in the slot. A single-run slot
+      // stays a {{BODY}}/{{TITLE}} prompt so fill_slide can replace the copy.
+      const runs = Array.isArray(box.runs) ? box.runs : []
+      if (runs.length >= 2) {
+        const inner = runs.map((r) => {
+          const ra = []
+          if (r.bold) ra.push('b="true"')
+          if (r.italic) ra.push('i="true"')
+          const rc = safeCol(r.color)
+          if (rc && rc !== col) ra.push(`color="${rc}"`)
+          if (r.font && r.font !== st.fontFace && !/[;<>]/.test(r.font) && !/^\+/.test(r.font)) ra.push(`font="${esc(withFontFallback(r.font))}"`)
+          if (r.size) {
+            const scaled = int(r.size * scale)
+            if (!st.fontSize || scaled !== st.fontSize) ra.push(`size="${scaled}"`)
+          }
+          return `<ast-run${ra.length ? ' ' + ra.join(' ') : ''}>${escText(r.text)}</ast-run>`
+        }).join('')
+        return `<ast-text id="${id}" ${geo} ${attrs.join(' ')}>${inner}</ast-text>`
+      }
+      const runAttr = st.italic ? ' i="true"' : ''
       return `<ast-text id="${id}" ${geo} ${attrs.join(' ')}${extraAttrs}><ast-run${runAttr}>${escText(prompt)}</ast-run></ast-text>`
     }
     const CENTER_ATTRS = ' align="ctr" anchor="ctr"'
@@ -1879,6 +2037,9 @@ try {
           fromCard: !!fromCard,
           placeholder: placeholder || null,
           extraAttrs: extraAttrs || '',
+          align: (placeholder && placeholder.align) || box.align || '',
+          anchor: (placeholder && placeholder.anchor) || box.anchor || '',
+          runs: box.runs || (placeholder && placeholder.runs) || null,
         })
       }
       const boxesOverlap = (a, b) => {
@@ -1956,7 +2117,30 @@ try {
         }
         const fillablePrompt = !inherited && objectHasText(o) && isFillablePromptText(o.text)
         const extraSlot = extraTextAsSlots && !inherited && objectHasText(o) && !isWatermarkText(o) && !isPlaceholderTokenText(o.text)
-        if (fillablePrompt || extraSlot) {
+        // A step badge is a small shape whose only copy is the number (or a
+        // one-word label) painted inside it. Splitting that into an empty shape
+        // plus a fill slot drops the digit: the slot is then filled by nearby
+        // body copy, and the circle renders blank. Keep the label as chrome.
+        const badgeText = String(o.text || '').replace(/\s+/g, ' ').trim()
+        const isStepBadge = objectHasShape(o) && badgeText.length > 0 && badgeText.length <= 3 &&
+          Math.max(o.w || 0, o.h || 0) <= 160 && Math.min(o.w || 0, o.h || 0) >= 24
+        if ((fillablePrompt || extraSlot) && isStepBadge) {
+          const shape = `<ast-shape id="c-${idc}-s" kind="ellipse" ${clampGeo(o)} geom="ellipse" fill="${safeCol(o.fill && o.fill.color) || '#FFFFFF'}"></ast-shape>`
+          const label = chromeToAsd({ ...o, kind: 'text', fill: null, geom: 'rect' }, idc)
+          parts.push(shape)
+          if (label) parts.push(label)
+          continue
+        }
+        if ((fillablePrompt || extraSlot) && !isStepBadge) {
+          const paras = paragraphBoxes(o)
+          if (paras.length >= 3) {
+            for (const box of paras) {
+              if (overlapsLargePhoto(box)) continue
+              idc += 1
+              queueTextSlot(box, box.style || o.style, false, null)
+            }
+            continue
+          }
           // Split a card (shape + text) so the colored box stays chrome and the
           // copy becomes a fill slot inset inside the box. Slot ids are assigned
           // later in reading order, not PowerPoint document order.
@@ -1968,6 +2152,7 @@ try {
           const cardLike = objectHasShape(o) && (
             o.geom === 'roundRect' || o.rectRadius ||
             o.kind === 'ellipse' || o.geom === 'ellipse' ||
+            (o.fill && (o.fill.color || o.fill.kind === 'gradient')) ||
             ((o.w || 0) >= 200 && (o.h || 0) >= 80 && o.fill && o.fill.color)
           )
           if (objectHasShape(o) && cardLike) {
@@ -2117,15 +2302,8 @@ try {
           if (t.placeholder || t.forceTitle) continue
           if (overlapsLargePhoto(t)) pendingText.splice(i, 1)
         }
-        // Tiny leftover caption boxes (h < 70) cannot hold a complete thought.
-        // Grow them downward when the canvas has room so copy is not clipped.
-        for (const t of pendingText) {
-          if (t.forceTitle || (t.placeholder && t.placeholder.type === 'title')) continue
-          if ((t.h || 0) >= 70 || (t.w || 0) < 200) continue
-          const room = CANVAS_H - 48 - (t.y || 0)
-          if (room < 72) continue
-          t.h = Math.min(120, room)
-        }
+        // Do not grow a short source box. A 63px title stretched to 120 paints
+        // over the subtitle on the next line. The source height is the box.
       }
       // Text slots in reading order (top-to-bottom, left-to-right) so ph-1 is
       // the first thing a reader sees — not PowerPoint's document order.

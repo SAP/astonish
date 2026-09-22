@@ -607,26 +607,40 @@ func projectText(markup string, fillSlots []string, placeholders []themes.IRPlac
 // parseSlotGeometry extracts the x, y, w, h attributes of the ast-text element
 // with the given slot id from the markup string. Returns zeros if not found.
 func parseSlotGeometry(markup, slotID string) (x, y, w, h int) {
-	marker := `id="` + slotID + `"`
-	idx := strings.Index(markup, marker)
-	if idx < 0 {
+	tag := astTextOpenTag(markup, slotID)
+	if tag == "" {
 		return
 	}
-	// Find the start of this tag.
-	start := strings.LastIndex(markup[:idx], "<")
-	if start < 0 {
-		return
-	}
-	end := strings.Index(markup[start:], ">")
-	if end < 0 {
-		return
-	}
-	tag := markup[start : start+end+1]
 	x = attrInt(tag, "x")
 	y = attrInt(tag, "y")
 	w = attrInt(tag, "w")
 	h = attrInt(tag, "h")
 	return
+}
+
+// astTextOpenTag returns the opening <ast-text ...> tag whose id attribute is
+// slotID. A bare id="ph-N" search is not enough: gradient JSON can contain the
+// same character sequence, and injecting into that script blanks the slide.
+func astTextOpenTag(markup, slotID string) string {
+	marker := `id="` + slotID + `"`
+	searchFrom := 0
+	for {
+		rel := strings.Index(markup[searchFrom:], marker)
+		if rel < 0 {
+			return ""
+		}
+		idx := searchFrom + rel
+		start := strings.LastIndex(markup[:idx], "<")
+		if start < 0 || !strings.HasPrefix(markup[start:], "<ast-text") {
+			searchFrom = idx + len(marker)
+			continue
+		}
+		endRel := strings.Index(markup[start:], ">")
+		if endRel < 0 {
+			return ""
+		}
+		return markup[start : start+endRel+1]
+	}
 }
 
 // attrInt extracts an integer attribute value from a tag string.
@@ -745,34 +759,22 @@ func injectSlotColor(markup, slotID, color string) string {
 // Multi-line text (newlines) is split into multiple <ast-run> elements separated
 // by line breaks, which the runtime renders correctly with white-space:pre-wrap.
 func injectText(markup, slotID, text string) string {
-	// Find the opening ast-text tag containing id="<slotID>".
-	marker := `id="` + slotID + `"`
-	idx := strings.Index(markup, marker)
+	open := astTextOpenTag(markup, slotID)
+	if open == "" {
+		return markup
+	}
+	idx := strings.Index(markup, open)
 	if idx < 0 {
 		return markup
 	}
-	// Find the closing ">" of the opening tag.
-	tagEnd := strings.Index(markup[idx:], ">")
-	if tagEnd < 0 {
-		return markup
-	}
-	tagEnd += idx + 1 // absolute position just after ">"
-
-	// Find the closing </ast-text>.
+	tagEnd := idx + len(open)
 	closeTag := "</ast-text>"
 	closeIdx := strings.Index(markup[tagEnd:], closeTag)
 	if closeIdx < 0 {
 		return markup
 	}
 	closeIdx += tagEnd
-
-	// Wrap text in <ast-run> so the slides runtime displays it.
-	// Escape HTML special chars so & < > don't break the markup.
-	// Multi-line text: each line gets its own <ast-run> separated by \n
-	// which pre-wrap renders correctly. Alternatively use one run with \n.
-	escaped := htmlEscape(text)
-	content := `<ast-run>` + escaped + `</ast-run>`
-
+	content := `<ast-run>` + htmlEscape(text) + `</ast-run>`
 	return markup[:tagEnd] + content + markup[closeIdx:]
 }
 

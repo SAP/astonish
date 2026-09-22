@@ -83,11 +83,15 @@ export interface IRTextChrome extends IRChromeBase {
   kind: 'text'
   text: string
   style?: IRTextStyle
+  align?: string
+  anchor?: string
+  runs?: { text: string, bold?: boolean, italic?: boolean, color?: string, font?: string, size?: number }[]
 }
 
 export interface IRImageChrome extends IRChromeBase {
   kind: 'image'
   mediaKey: string
+  opacity?: number
 }
 
 export interface IRPathChrome extends IRChromeBase {

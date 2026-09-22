@@ -27,6 +27,9 @@ func (db *DockerBackend) Exec(ctx context.Context, sessionID string, opts sandbo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	args := buildDockerExecArgs(cname, opts.WorkDir, opts.Env, false, wrapShell(opts.Command))
@@ -86,6 +89,9 @@ func (db *DockerBackend) ExecInteractive(ctx context.Context, sessionID string, 
 // Used for machine-to-machine protocols (MCP JSON-RPC, node stdio).
 func (db *DockerBackend) ExecStreaming(ctx context.Context, sessionID string, opts sandbox.ExecStreamSpec) (sandbox.ExecStream, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
 	cname := containerName(sessionID)

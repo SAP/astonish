@@ -203,34 +203,29 @@ func TestSubdomainRouterRegisterAndLookup(t *testing.T) {
 	sr := GetSubdomainRouter()
 	hostname := "test-container-9999.example.com"
 
-	// Register
-	sr.RegisterHost(hostname, "test-container", 9999)
+	sr.RegisterHost(hostname, "test-container", "test-session", 9999)
 
-	// Lookup without port
-	cn, port, ok := sr.Lookup(hostname)
+	cn, sid, port, ok := sr.Lookup(hostname)
 	if !ok {
 		t.Fatal("expected Lookup to find registered host")
 	}
-	if cn != "test-container" || port != 9999 {
-		t.Errorf("Lookup = (%q, %d), want (%q, %d)", cn, port, "test-container", 9999)
+	if cn != "test-container" || sid != "test-session" || port != 9999 {
+		t.Errorf("Lookup = (%q, %q, %d), want (%q, %q, %d)", cn, sid, port, "test-container", "test-session", 9999)
 	}
 
-	// Lookup with port suffix (as it appears in r.Host)
-	cn, port, ok = sr.Lookup(hostname + ":9393")
+	cn, sid, port, ok = sr.Lookup(hostname + ":9393")
 	if !ok {
 		t.Fatal("expected Lookup to find host with port suffix")
 	}
-	if cn != "test-container" || port != 9999 {
-		t.Errorf("Lookup with port = (%q, %d), want (%q, %d)", cn, port, "test-container", 9999)
+	if cn != "test-container" || sid != "test-session" || port != 9999 {
+		t.Errorf("Lookup with port = (%q, %q, %d), want (%q, %q, %d)", cn, sid, port, "test-container", "test-session", 9999)
 	}
 
-	// Lookup for unknown host
-	_, _, ok = sr.Lookup("unknown.example.com")
+	_, _, _, ok = sr.Lookup("unknown.example.com")
 	if ok {
 		t.Error("expected Lookup to return false for unknown host")
 	}
 
-	// Clean up
 	sr.UnregisterHost(hostname)
 }
 
@@ -238,10 +233,10 @@ func TestSubdomainRouterUnregister(t *testing.T) {
 	sr := GetSubdomainRouter()
 	hostname := "unreg-test-3000.example.com"
 
-	sr.RegisterHost(hostname, "unreg-test", 3000)
+	sr.RegisterHost(hostname, "unreg-test", "unreg-session", 3000)
 	sr.UnregisterHost(hostname)
 
-	_, _, ok := sr.Lookup(hostname)
+	_, _, _, ok := sr.Lookup(hostname)
 	if ok {
 		t.Error("expected Lookup to return false after UnregisterHost")
 	}
@@ -250,22 +245,22 @@ func TestSubdomainRouterUnregister(t *testing.T) {
 func TestSubdomainRouterUnregisterAllForContainer(t *testing.T) {
 	sr := GetSubdomainRouter()
 
-	sr.RegisterHost("multi-test-3000.example.com", "multi-test", 3000)
-	sr.RegisterHost("multi-test-8080.example.com", "multi-test", 8080)
-	sr.RegisterHost("other-container-3000.example.com", "other-container", 3000)
+	sr.RegisterHost("multi-test-3000.example.com", "multi-test", "multi-session", 3000)
+	sr.RegisterHost("multi-test-8080.example.com", "multi-test", "multi-session", 8080)
+	sr.RegisterHost("other-container-3000.example.com", "other-container", "other-session", 3000)
 
 	count := sr.UnregisterAllForContainer("multi-test")
 	if count != 2 {
 		t.Errorf("UnregisterAllForContainer returned %d, want 2", count)
 	}
 
-	_, _, ok := sr.Lookup("multi-test-3000.example.com")
+	_, _, _, ok := sr.Lookup("multi-test-3000.example.com")
 	if ok {
 		t.Error("expected multi-test-3000 to be unregistered")
 	}
 
 	// Other container should still be registered
-	_, _, ok = sr.Lookup("other-container-3000.example.com")
+	_, _, _, ok = sr.Lookup("other-container-3000.example.com")
 	if !ok {
 		t.Error("expected other-container-3000 to still be registered")
 	}
@@ -277,8 +272,8 @@ func TestSubdomainRouterUnregisterAllForContainer(t *testing.T) {
 func TestSubdomainRouterListForContainer(t *testing.T) {
 	sr := GetSubdomainRouter()
 
-	sr.RegisterHost("list-test-3000.example.com", "list-test", 3000)
-	sr.RegisterHost("list-test-8080.example.com", "list-test", 8080)
+	sr.RegisterHost("list-test-3000.example.com", "list-test", "list-session", 3000)
+	sr.RegisterHost("list-test-8080.example.com", "list-test", "list-session", 8080)
 
 	result := sr.ListForContainer("list-test")
 	if len(result) != 2 {

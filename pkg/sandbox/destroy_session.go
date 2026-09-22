@@ -131,7 +131,11 @@ func PruneOrphansForBackendFiltered(ctx context.Context, b Backend, registry *Se
 	// These can occur if a crash happened between pod creation and registry
 	// write. For K8s this queries pods by label; for Incus it's handled by
 	// the legacy PruneOrphans function (ListSessionContainers).
-	allSessions, err := b.ListSessions(ctx, SessionFilter{})
+	listFilter := SessionFilter{}
+	if filter != nil {
+		listFilter = *filter
+	}
+	allSessions, err := b.ListSessions(ctx, listFilter)
 	if err != nil {
 		// Non-fatal: we already pruned registered orphans above.
 		slog.Warn("PruneOrphansForBackend: ListSessions failed",

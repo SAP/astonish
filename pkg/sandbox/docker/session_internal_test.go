@@ -303,11 +303,11 @@ func TestDockerRequireRegistered_RejectsUnknownSession(t *testing.T) {
 	if _, err := db.PullFile(context.Background(), "foreign-session", "/tmp/secret"); err == nil {
 		t.Fatal("PullFile of an unregistered session must fail before docker exec")
 	}
-	if _, err := db.Exec(context.Background(), "foreign-session", sandbox.ExecSpec{Command: []string{"id"}}); err == nil {
-		t.Fatal("Exec of an unregistered session must fail before docker exec")
+	if _, err := db.Exec(context.Background(), "foreign-session", sandbox.ExecSpec{Command: []string{"id"}}); err == nil || !strings.Contains(err.Error(), "is not registered") {
+		t.Fatalf("Exec of an unregistered session must fail at the registry gate, got %v", err)
 	}
-	if err := db.DestroySession(context.Background(), "foreign-session"); err == nil {
-		t.Fatal("DestroySession of an unregistered session must fail before docker rm")
+	if err := db.DestroySession(context.Background(), "foreign-session"); err == nil || !strings.Contains(err.Error(), "is not registered") {
+		t.Fatalf("DestroySession of an unregistered session must fail at the registry gate, got %v", err)
 	}
 	if _, err := db.SessionState(context.Background(), "foreign-session"); err == nil {
 		t.Fatal("SessionState of an unregistered session must fail before docker inspect")

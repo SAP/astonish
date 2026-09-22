@@ -43,6 +43,33 @@ func sessionIDForProxyContainer(r *http.Request, containerName string) string {
 	return ""
 }
 
+func studioNamedBackendDial(sessionID string, port int) (net.Conn, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("container not found")
+	}
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		return nil, err
+	}
+	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
+	if err != nil {
+		return nil, err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	return sandbox.DialSessionPort(context.Background(), b, sessionID, port)
+}
+
+func studioNamedProxyTransport(sessionID string, port int) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return studioNamedBackendDial(sessionID, port)
+		},
+		MaxIdleConnsPerHost: 2,
+	}
+}
+
 func studioBackendDial(r *http.Request, sessionID string, port int) (net.Conn, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("container not found")
@@ -316,6 +343,15 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 	if err := ensureNamedSessionRunning(containerName); err != nil {
 		return 0, fmt.Errorf("sandbox unavailable: %w", err)
 	}
+	// The listener has no user request. Dial the session ID when the name is
+	// already a registered session; otherwise keep the name for backends that
+	// were started without a registry (personal mode and unit tests).
+	dialID := containerName
+	if reg, regErr := sandbox.NewSessionRegistry(); regErr == nil && reg != nil {
+		if resolved, ok := reg.ResolveSessionID(containerName); ok && resolved != "" {
+			dialID = resolved
+		}
+	}
 
 	tunnelTarget := fmt.Sprintf("http://127.0.0.1:%d", containerPort)
 
@@ -323,7 +359,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
 			proxyWebSocket(w, r, func() (net.Conn, error) {
-				return studioBackendDial(r, containerName, containerPort)
+				return studioNamedBackendDial(dialID, containerPort)
 			}, r.URL.Path)
 			return
 		}
@@ -352,7 +388,7 @@ func (m *PortProxyManager) StartProxy(containerName string, containerPort int) (
 				req.Header.Set("X-Forwarded-Host", r.Host)
 				req.Header.Set("X-Forwarded-Proto", "http")
 			},
-			Transport: studioProxyTransport(r, containerName, containerPort),
+			Transport: studioNamedProxyTransport(dialID, containerPort),
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 			},
@@ -478,6 +514,7 @@ func (m *PortProxyManager) ListForContainer(containerName string) map[int]int {
 // subdomainTarget describes where to proxy a matched subdomain request.
 type subdomainTarget struct {
 	containerName string
+	sessionID     string
 	containerPort int
 }
 
@@ -509,14 +546,18 @@ func SubdomainHostname(containerName string, port int, baseDomain string) string
 }
 
 // RegisterHost adds a hostname → container mapping.
-func (sr *SubdomainRouter) RegisterHost(hostname, containerName string, port int) {
+func (sr *SubdomainRouter) RegisterHost(hostname, containerName, sessionID string, port int) {
+	if sessionID == "" {
+		sessionID = containerName
+	}
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	sr.hostMap[hostname] = &subdomainTarget{
 		containerName: containerName,
+		sessionID:     sessionID,
 		containerPort: port,
 	}
-	slog.Info("registered subdomain route", "component", "sandbox-proxy", "hostname", hostname, "container", containerName, "port", port)
+	slog.Info("registered subdomain route", "component", "sandbox-proxy", "hostname", hostname, "container", containerName, "session", sessionID, "port", port)
 }
 
 // UnregisterHost removes a hostname mapping.
@@ -548,7 +589,7 @@ func (sr *SubdomainRouter) UnregisterAllForContainer(containerName string) int {
 
 // Lookup checks if a host matches a registered subdomain proxy.
 // The host may include a port (e.g., "foo.example.com:9393"), which is stripped.
-func (sr *SubdomainRouter) Lookup(host string) (containerName string, port int, ok bool) {
+func (sr *SubdomainRouter) Lookup(host string) (containerName, sessionID string, port int, ok bool) {
 	// Strip port from host if present
 	hostname := host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -559,9 +600,13 @@ func (sr *SubdomainRouter) Lookup(host string) (containerName string, port int, 
 	defer sr.mu.RUnlock()
 	target, found := sr.hostMap[hostname]
 	if !found {
-		return "", 0, false
+		return "", "", 0, false
 	}
-	return target.containerName, target.containerPort, true
+	sessionID = target.sessionID
+	if sessionID == "" {
+		sessionID = target.containerName
+	}
+	return target.containerName, sessionID, target.containerPort, true
 }
 
 // ListForContainer returns a map of containerPort → hostname for all active
@@ -578,17 +623,18 @@ func (sr *SubdomainRouter) ListForContainer(containerName string) map[int]string
 	return result
 }
 
-// ServeSubdomainProxy handles an HTTP request by proxying it to the matched
-// container. Called from the Studio main handler when a subdomain match is found.
-func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName string, containerPort int) {
-	if err := ensureProxySessionRunning(r, containerName); err != nil {
+// ServeSubdomainProxy handles an HTTP request by proxying it to a hostname
+// that was registered only after an ownership check. sessionID is the
+// registry session, not the container name, so Docker's registry gate matches.
+func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, sessionID string, containerPort int) {
+	if err := ensureNamedSessionRunning(sessionID); err != nil {
 		respondError(w, http.StatusBadGateway, fmt.Sprintf("cannot reach sandbox: %s", err))
 		return
 	}
 
 	if isWebSocketUpgrade(r) {
 		proxyWebSocket(w, r, func() (net.Conn, error) {
-			return studioBackendDial(r, containerName, containerPort)
+			return studioNamedBackendDial(sessionID, containerPort)
 		}, r.URL.Path)
 		return
 	}
@@ -616,7 +662,7 @@ func ServeSubdomainProxy(w http.ResponseWriter, r *http.Request, containerName s
 			req.Header.Set("X-Forwarded-Host", r.Host)
 			req.Header.Set("X-Forwarded-Proto", "http")
 		},
-		Transport: studioProxyTransport(r, containerName, containerPort),
+		Transport: studioNamedProxyTransport(sessionID, containerPort),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			respondError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %s", err))
 		},

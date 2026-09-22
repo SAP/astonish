@@ -379,8 +379,8 @@ func SandboxContainerListHandler(w http.ResponseWriter, r *http.Request) {
 				// Auto-recover subdomain routes only for a container this caller owns.
 				if e.BaseDomain != "" {
 					hostname := SubdomainHostname(e.ContainerName, port, e.BaseDomain)
-					if _, _, ok := sr.Lookup(hostname); !ok && status == "running" {
-						sr.RegisterHost(hostname, e.ContainerName, port)
+					if _, _, _, ok := sr.Lookup(hostname); !ok && status == "running" {
+						sr.RegisterHost(hostname, e.ContainerName, e.SessionID, port)
 					}
 					proxyHosts[portStr] = hostname
 				}
@@ -422,27 +422,30 @@ func SandboxContainerDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appCfg, _ := config.LoadAppConfig()
-	b, cleanup, err := sandbox.BackendFromAppConfig(appCfg)
-	if err != nil {
-		respondError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
 	sessRegistry, err := sandboxSessionRegistryForRequest(r)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load session registry: "+err.Error())
 		return
 	}
 
-	// Resolve to session ID (accepts session ID, container name, or prefix)
+	// Resolve to session ID (accepts session ID, container name, or prefix).
+	// Ownership is checked before any backend call so a teammate cannot delete
+	// another user's chat sandbox by knowing the ID.
 	sessionID, found := sessRegistry.ResolveSessionID(id)
-	if !found {
-		respondError(w, http.StatusNotFound, "container not found: "+id)
+	if !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if !found {
+			respondError(w, http.StatusNotFound, "container not found: "+id)
+		}
 		return
+	}
+
+	b, cleanup, err := sandboxBackendForAuthorizedRequest(r)
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	if err := b.DestroySession(r.Context(), sessionID); err != nil {
@@ -581,6 +584,9 @@ func SandboxTemplateInfoHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxTemplateCreateHandler handles POST /api/sandbox/templates.
 // Creates a new template from @base.
 func SandboxTemplateCreateHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	var req CreateTemplateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request: "+err.Error())
@@ -686,6 +692,9 @@ func SandboxTemplateDeleteHandler(w http.ResponseWriter, r *http.Request) {
 // SandboxTemplateSnapshotHandler handles POST /api/sandbox/templates/{name}/snapshot.
 // Snapshots a template, freezing its state for cloning into session containers.
 func SandboxTemplateSnapshotHandler(w http.ResponseWriter, r *http.Request) {
+	if !allowHostSandboxMutation(w, r) {
+		return
+	}
 	name := mux.Vars(r)["name"]
 	if name == "" {
 		respondError(w, http.StatusBadRequest, "missing template name")
@@ -830,10 +839,13 @@ func SandboxExposePortHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve container name — accept session ID, container name, or prefix
+	// Resolve container name — accept session ID, container name, or prefix.
+	// Authorize the resolved session ID, not the raw URL segment, so a prefix
+	// cannot skip the owner check.
 	containerName := resolveContainerName(sessRegistry, id)
-	if containerName == "" || authorizeSandboxSession(w, r, sessRegistry, id) == nil {
-		if containerName == "" {
+	sessionID, found := sessRegistry.ResolveSessionID(id)
+	if containerName == "" || !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if containerName == "" || !found {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
 		}
 		return
@@ -864,7 +876,7 @@ func SandboxExposePortHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		proxyHost = SubdomainHostname(containerName, req.Port, req.BaseDomain)
-		GetSubdomainRouter().RegisterHost(proxyHost, containerName, req.Port)
+		GetSubdomainRouter().RegisterHost(proxyHost, containerName, sessionID, req.Port)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
@@ -988,8 +1000,11 @@ func SandboxListExposedPortsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	containerName := resolveContainerName(sessRegistry, id)
-	if containerName == "" {
-		respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+	sessionID, found := sessRegistry.ResolveSessionID(id)
+	if containerName == "" || !found || authorizeSandboxSession(w, r, sessRegistry, sessionID) == nil {
+		if containerName == "" || !found {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("container %q not found", id))
+		}
 		return
 	}
 

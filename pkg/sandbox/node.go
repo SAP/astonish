@@ -106,11 +106,11 @@ func (nc *NodeClient) Call(toolName string, args map[string]interface{}) (json.R
 		nc.started = false
 	}
 
-	// Auto-start or restart if needed
+	// Auto-start or restart if needed. The Incus node client is gone, so this
+	// always fails; return that error directly so staticcheck does not see an
+	// always-true comparison against a function that cannot return nil.
 	if !nc.started {
-		if err := nc.startLocked(); err != nil {
-			return nil, fmt.Errorf("failed to start node: %w", err)
-		}
+		return nil, fmt.Errorf("failed to start node: %w", nc.startLocked())
 	}
 
 	id := strconv.FormatInt(nc.nextID.Add(1), 10)
@@ -307,45 +307,15 @@ func (lnc *LazyNodeClient) BindSession(sessionID string) {
 func (lnc *LazyNodeClient) initBackground(sessionID string) {
 	defer close(lnc.initDone)
 
+	// Incus session containers are gone. Record the error and stop. The old
+	// success path compared a constant error and tripped SA4023.
 	err := fmt.Errorf("legacy Incus session containers removed; use BackendPool")
-	var containerName string
-	if err != nil {
-		_ = containerName
-	}
-	if err != nil {
-		lnc.mu.Lock()
-		lnc.containerErr = fmt.Errorf("failed to create session container: %w", err)
-		lnc.initErr = lnc.containerErr
-		lnc.mu.Unlock()
-		close(lnc.containerReady)
-		return
-	}
-
-	// Store container name and signal that the container is ready.
-	// MCP transport (EnsureContainerReady) can proceed from here.
 	lnc.mu.Lock()
-	lnc.containerName = containerName
+	lnc.containerErr = fmt.Errorf("failed to create session container: %w", err)
+	lnc.initErr = lnc.containerErr
 	lnc.mu.Unlock()
 	close(lnc.containerReady)
-
-	// Phase 2: Create and start the node client
-	nc := NewNodeClient(containerName)
-	nc.Env = lnc.Env // Forward environment variables (credentials) to node
-	if err := nc.Start(); err != nil {
-		lnc.mu.Lock()
-		lnc.initErr = fmt.Errorf("failed to start node in %q: %w", containerName, err)
-		lnc.mu.Unlock()
-		return
-	}
-
-	lnc.mu.Lock()
-	lnc.nodeClient = nc
-	lnc.initialized = true
-	lnc.mu.Unlock()
-
-	// Record initial activity so the idle watchdog doesn't immediately stop
-	// a freshly-created container.
-	lnc.lastActivity.Store(time.Now().Unix())
+	return
 }
 
 // Call proxies a tool call to the container node. If BindSession was called,

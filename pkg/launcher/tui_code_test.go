@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
@@ -3428,5 +3429,77 @@ func TestShouldContinueApprovedPlan_FromPlanDocument(t *testing.T) {
 	}
 	if !b.shouldContinueApprovedPlan(ctx, id, path, nil) {
 		t.Fatal("must continue when PLAN.md records an approved lifecycle")
+	}
+}
+
+// TestAddProvider_XAIReauthUpdatesInMemoryToken encodes the user-visible
+// contract behind the re-auth loop bug: after re-authentication (which calls
+// AddProvider with fresh tokens), the in-memory appConfig the /model picker
+// reads via ListModelsForProvider must hold the NEW access token, not the old
+// expired one. If it still holds the old token, the picker sends a dead token,
+// gets 403, and re-prompts forever.
+func TestAddProvider_XAIReauthUpdatesInMemoryToken(t *testing.T) {
+	dir := t.TempDir()
+	// Isolate config persistence (SaveAppConfig writes under $HOME) so the test
+	// never touches the developer's real config.
+	t.Setenv("HOME", dir)
+	cs, err := credentials.Open(dir)
+	if err != nil {
+		t.Fatalf("credentials.Open: %v", err)
+	}
+
+	// Seed the in-memory config + store with an OLD (expired) xai_oauth token,
+	// mimicking a session whose refresh token has died.
+	const oldExpiry = "2020-01-01T00:00:00Z"
+	b := &localAgentBackend{
+		userID: "u1",
+		appConfig: &config.AppConfig{
+			Providers: map[string]config.ProviderConfig{
+				"xai_oauth": {
+					"type":          "xai_oauth",
+					"client_id":     "cid",
+					"access_token":  "OLD_TOKEN",
+					"refresh_token": "OLD_REFRESH",
+					"expires_at":    oldExpiry,
+				},
+			},
+		},
+		result: &ChatFactoryResult{CredentialStore: cs},
+	}
+	if err := cs.SetSecretBatch(map[string]string{
+		"provider.xai_oauth.access_token":  "OLD_TOKEN",
+		"provider.xai_oauth.refresh_token": "OLD_REFRESH",
+		"provider.xai_oauth.expires_at":    oldExpiry,
+	}); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	// Simulate the re-auth device-code result: AddProvider is called with fresh
+	// tokens, exactly as waitXAIOAuthCmd does after the browser approval.
+	newExpiry := time.Now().Add(time.Hour).Format(time.RFC3339)
+	err = b.AddProvider(context.Background(), "xai_oauth", "xai_oauth", map[string]string{
+		"client_id":     "cid",
+		"access_token":  "NEW_TOKEN",
+		"refresh_token": "NEW_REFRESH",
+		"expires_at":    newExpiry,
+	})
+	if err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+
+	// The in-memory config the picker reads must now carry the fresh token.
+	inst := b.appConfig.Providers["xai_oauth"]
+	if got := inst["access_token"]; got != "NEW_TOKEN" {
+		t.Fatalf("in-memory access_token = %q, want NEW_TOKEN (stale token causes the 403 re-auth loop)", got)
+	}
+	if got := inst["expires_at"]; got != newExpiry {
+		t.Fatalf("in-memory expires_at = %q, want %q", got, newExpiry)
+	}
+
+	// The credential store must also hold the fresh token so a rebuild that
+	// re-hydrates from the store (rebuildAgent → InjectProviderSecretsToConfig)
+	// picks up the new value.
+	if got := cs.GetSecret("provider.xai_oauth.access_token"); got != "NEW_TOKEN" {
+		t.Fatalf("stored access_token = %q, want NEW_TOKEN", got)
 	}
 }

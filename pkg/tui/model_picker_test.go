@@ -109,12 +109,15 @@ func newProviderStub() *providerAdminStub {
 	}
 }
 
-// xaiOAuthStub implements ProviderAdminBackend and XAIOAuthBackend so the
-// overlay can exercise the two-phase device-code flow without a network.
+// xaiOAuthStub implements ProviderAdminBackend, XAIOAuthBackend, and
+// ProviderReloader so the overlay can exercise the two-phase device-code flow
+// and the post-re-auth provider reload without a network.
 type xaiOAuthStub struct {
 	providerAdminStub
-	started []string
-	waited  int
+	started   []string
+	waited    int
+	reloaded  int
+	reloadErr error
 }
 
 func (b *xaiOAuthStub) StartXAIOAuth(_ context.Context, clientID string) (*backend.XAIOAuthPending, error) {
@@ -136,6 +139,11 @@ func (b *xaiOAuthStub) WaitXAIOAuth(_ context.Context, pending backend.XAIOAuthP
 		"refresh_token": "rt",
 		"expires_at":    "2026-01-01T00:00:00Z",
 	}, nil
+}
+
+func (b *xaiOAuthStub) ReloadActiveProvider(_ context.Context) error {
+	b.reloaded++
+	return b.reloadErr
 }
 
 // ---------------------------------------------------------------------------

@@ -514,9 +514,15 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 		if accessToken == "" {
 			return nil, fmt.Errorf("xAI OAuth access_token not configured (run setup to authenticate)")
 		}
-		// Refresh the token if it's expired before listing models.
-		accessToken, _ = maybeRefreshXAIOAuthToken(ctx, instanceConfig, cfg, providerID, accessToken)
-		return xai_oauth.ListModels(ctx, accessToken)
+		// Refresh the token if it's expired before listing models. If the
+		// refresh itself fails (refresh token expired/revoked), surface a
+		// re-auth-required error so the UI can offer to re-authenticate rather
+		// than issuing a doomed request with a stale token.
+		refreshedToken, refreshErr := maybeRefreshXAIOAuthToken(ctx, instanceConfig, cfg, providerID, accessToken)
+		if refreshErr != nil {
+			return nil, fmt.Errorf("%w: %v", xai_oauth.ErrReauthRequired, refreshErr)
+		}
+		return xai_oauth.ListModels(ctx, refreshedToken)
 
 	case "copilot_oauth":
 		githubToken := instanceConfig["github_token"]

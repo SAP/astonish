@@ -216,6 +216,20 @@ type XAIOAuthBackend interface {
 	WaitXAIOAuth(ctx context.Context, pending XAIOAuthPending) (map[string]string, error)
 }
 
+// ProviderReloader is an optional capability for backends that can rebuild the
+// live provider client from the persisted config after credentials change out
+// from under a running session (e.g. after xAI OAuth re-authentication). Without
+// it, AddProvider only writes new tokens to disk while the running agent keeps
+// its old in-memory transport — which, for a re-auth, means the next turn uses
+// the dead token and fails again. localAgentBackend implements it; platform
+// backends do not.
+type ProviderReloader interface {
+	// ReloadActiveProvider rebuilds the active provider client from the current
+	// persisted config/credential store so freshly written tokens take effect
+	// immediately in the running session. Returns an error if the rebuild fails.
+	ReloadActiveProvider(ctx context.Context) error
+}
+
 // CopilotOAuthPending is the in-flight device-code authorization state for
 // GitHub Copilot. The TUI displays UserCode and VerificationURL, then calls
 // WaitCopilotOAuth to block until the user approves in the browser.

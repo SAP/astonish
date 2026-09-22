@@ -31,7 +31,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/knights-analytics/hugot v0.7.5
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sashabaranov/go-openai v1.42.1
 	github.com/slack-go/slack v0.29.0

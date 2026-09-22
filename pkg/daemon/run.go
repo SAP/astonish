@@ -607,15 +607,7 @@ func Run(cfg RunConfig) error {
 			}
 		}
 
-		baseURL := "http://localhost:9393"
-		taskStore := a2a.NewInMemoryTaskStore(72 * time.Hour)
-		service, err := a2aserver.New(a2aserver.Config{TaskStore: taskStore, BaseURL: baseURL, Dispatcher: mgr.Dispatch, Logger: log.Default()})
-		if err != nil {
-			return mgr, fmt.Errorf("create A2A service: %w", err)
-		}
-		api.SetA2AService(service)
-
-		// Inbound A2A is an OAuth-protected API service, not a ChannelManager adapter.
+		// Inbound A2A is initialized independently after the Studio runtime is ready.
 
 		if err := mgr.StartAll(ctx); err != nil {
 			return mgr, fmt.Errorf("failed to start channels: %w", err)
@@ -1652,6 +1644,29 @@ func Run(cfg RunConfig) error {
 	}
 	logger.Printf("Studio chat agent pre-warmed successfully")
 	close(studioPreWarmDone)
+
+	// API pods do not initialize external channel adapters, but inbound A2A is an
+	// endpoint-owned service and must remain available there. Reuse the pre-warmed
+	// Studio runtime without starting Slack, Telegram, or email consumers.
+	if servesA2A(daemonMode) {
+		dispatcher, dispatchErr := api.GetChatManager().NewEndpointDispatcher(warmCtx)
+		if dispatchErr != nil {
+			return fmt.Errorf("initialize A2A dispatcher: %w", dispatchErr)
+		}
+		taskStore := a2a.NewInMemoryTaskStore(72 * time.Hour)
+		defer taskStore.Close()
+		service, serviceErr := a2aserver.New(a2aserver.Config{
+			TaskStore:  taskStore,
+			BaseURL:    a2aServiceBaseURL(appCfg, port),
+			Dispatcher: dispatcher,
+			Logger:     log.Default(),
+		})
+		if serviceErr != nil {
+			return fmt.Errorf("initialize A2A service: %w", serviceErr)
+		}
+		api.SetA2AService(service)
+		logger.Printf("A2A service initialized for API mode")
+	}
 
 	// Discover tools for config-file (mcp_config.json) MCP servers that are not
 	// yet cached, so they "just work" in a local platform install without a

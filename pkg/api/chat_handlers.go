@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
+	"github.com/SAP/astonish/pkg/channels"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
@@ -541,6 +542,32 @@ func (cm *ChatManager) HotSwapLLM(ctx context.Context, providerName, modelName s
 // Safe to call concurrently with incoming requests — ensureReady is mutex-protected.
 func (cm *ChatManager) PreWarm(ctx context.Context) error {
 	return cm.ensureReady(ctx)
+}
+
+// NewEndpointDispatcher returns a dispatcher backed by the initialized Studio
+// runtime. It does not register or start external channel adapters.
+func (cm *ChatManager) NewEndpointDispatcher(ctx context.Context) (func(context.Context, channels.InboundMessage, func(context.Context, channels.OutboundMessage) error) error, error) {
+	if err := cm.ensureReady(ctx); err != nil {
+		return nil, err
+	}
+
+	cm.mu.Lock()
+	components := cm.components
+	cm.mu.Unlock()
+	if components == nil || components.ChatAgent == nil || components.SessionService == nil {
+		return nil, fmt.Errorf("studio chat components unavailable")
+	}
+
+	manager := channels.NewChannelManager(components.ChatAgent, components.SessionService, nil, &channels.ChannelManagerConfig{
+		ProviderName:     components.ProviderName,
+		ModelName:        components.ModelName,
+		ToolCount:        components.InternalToolCount,
+		FilesystemSkills: components.FilesystemSkills,
+	})
+	manager.SetRuntimeContextEnricher(func(dispatchCtx context.Context) context.Context {
+		return WithChannelRuntimeContext(dispatchCtx, components.SandboxPool)
+	})
+	return manager.Dispatch, nil
 }
 
 // ensureReady lazily initializes the ChatAgent on first use.

@@ -66,11 +66,11 @@ type artifactHit struct {
 // level avoids re-running padBlock/paintTranscriptBlock/appendPlainSpanned for
 // every historical item on every refreshViewport call.
 type renderedBlock struct {
-	raw        string     // padded block before painting (needed to re-apply selection)
-	painted    string     // padded + painted block ready for viewport
-	plainLines []string   // ANSI-stripped lines for selection/copy
-	spans      [][2]int   // content spans per line
-	lineCount  int        // rendered block lines + 1 gap separator
+	raw        string   // padded block before painting (needed to re-apply selection)
+	painted    string   // padded + painted block ready for viewport
+	plainLines []string // ANSI-stripped lines for selection/copy
+	spans      [][2]int // content spans per line
+	lineCount  int      // rendered block lines + 1 gap separator
 }
 
 type fileViewerState struct {
@@ -712,6 +712,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case providerMutatedMsg:
 		return m.applyProviderMutated(msg)
+
+	case providerReloadedMsg:
+		return m.applyProviderReloaded(msg)
 
 	case xaiOAuthStartedMsg:
 		return m.applyXAIOAuthStarted(msg)
@@ -2801,7 +2804,7 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	// If the click is in the sticky header zone (rows 2..2+stickyHeaderLines-1),
 	// handle double-click to expand/collapse right on press.
 	if m.stickyHeaderLines > 0 {
-		stickyTop := 2    // after header(1) + sep(1)
+		stickyTop := 2 // after header(1) + sep(1)
 		stickyBot := stickyTop + m.stickyHeaderLines
 		if msg.Y >= stickyTop && msg.Y < stickyBot {
 			if isDouble {
@@ -5147,7 +5150,6 @@ func summarizeToolArgs(args map[string]any, maxWidth int) string {
 	}
 	return result
 }
-
 
 // formatDuration renders a duration as a compact human-readable string:
 // "3s", "1m 23s", "1h 5m 12s".

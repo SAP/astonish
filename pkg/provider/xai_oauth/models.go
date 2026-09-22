@@ -57,6 +57,12 @@ func listModelsFromURL(ctx context.Context, accessToken, endpoint string) ([]str
 		if readErr != nil {
 			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
 		}
+		// 401/403 mean the access token is missing/expired/invalid. Signal that
+		// the user must re-authenticate so callers can offer the re-auth flow
+		// instead of surfacing a raw "bad-credentials" error.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("%w: models request returned %s: %s", ErrReauthRequired, resp.Status, string(body))
+		}
 		return nil, fmt.Errorf("models request returned %s: %s", resp.Status, string(body))
 	}
 

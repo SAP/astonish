@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/gorilla/mux"
 )
 
@@ -48,10 +49,48 @@ func SetVNCContainerDialFunc(fn func(containerName string, port int) (net.Conn, 
 //  1. Registered VNC dial func (set by chat_factory for OpenShell/exec-tunnel)
 //  2. Global browser Manager's ContainerDialFunc (legacy/Incus with tunnel)
 //  3. Incus sandbox direct connection (fallback)
+var (
+	ensureVNCSessionRunning = ensureProxySessionRunning
+	dialVNCBackend          = studioBackendDial
+	transportVNCBackend     = studioProxyTransport
+)
+
 func getVNCDialFunc(r *http.Request, sessionID string) (dialFn func() (net.Conn, error), httpTransport *http.Transport, err error) {
 	if sessionID == "" {
 		return nil, nil, fmt.Errorf("container not found")
 	}
+
+	return getVNCDialFuncForBackend(r, sessionID, effectiveVNCBackendKind(r))
+}
+
+func effectiveVNCBackendKind(r *http.Request) sandbox.BackendKind {
+	if cfg := effectiveAppConfig(r); cfg != nil {
+		return sandbox.BackendKind(cfg.Sandbox.BackendKind())
+	}
+	return ""
+}
+
+func getVNCDialFuncForBackend(r *http.Request, sessionID string, kind sandbox.BackendKind) (dialFn func() (net.Conn, error), httpTransport *http.Transport, err error) {
+	// Docker and Kubernetes backends must use the request-scoped backend here.
+	// The process-global dial function captures the backend and registry created
+	// by the chat factory. That registry can be an older in-memory view after a
+	// session is lazily created or the daemon is restarted, even though the
+	// request-scoped registry already authorizes the session. Using it produces
+	// "session ... is not registered" after authorization has succeeded and can
+	// also bypass tenant backend selection. The request-scoped path preserves
+	// both the current registry and the caller's tenant scope.
+	if kind == sandbox.BackendKindDocker || kind == sandbox.BackendKindK8s {
+		if err := ensureVNCSessionRunning(r, sessionID); err != nil {
+			return nil, nil, fmt.Errorf("failed to reach sandbox: %w", err)
+		}
+		port := vncDialerPort
+		dialFn = func() (net.Conn, error) {
+			return dialVNCBackend(r, sessionID, port)
+		}
+		httpTransport = transportVNCBackend(r, sessionID, port)
+		return dialFn, httpTransport, nil
+	}
+
 	registeredVNCDialMu.RLock()
 	dialFunc := registeredVNCDialFunc
 	registeredVNCDialMu.RUnlock()

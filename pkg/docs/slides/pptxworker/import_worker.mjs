@@ -1560,7 +1560,8 @@ try {
           : (o.geom === 'roundRect' || o.rectRadius) ? 'roundRect'
             : (o.geom && o.geom !== 'path' && ALLOWED_GEOM.has(o.geom)) ? o.geom : 'rect'
       const kind = geom === 'line' ? 'line' : geom === 'ellipse' ? 'ellipse' : 'rect'
-      return `<ast-shape id="${id}" kind="${kind}" ${geo}${rot} geom="${geom}"${fillAttr}${lineAttr}></ast-shape>`
+      const radiusAttr = geom === 'roundRect' && o.rectRadius ? ` rect-radius="${int(o.rectRadius)}"` : ''
+      return `<ast-shape id="${id}" kind="${kind}" ${geo}${rot} geom="${geom}"${radiusAttr}${fillAttr}${lineAttr}></ast-shape>`
     }
 
     // Geometry presets ASD's validator allows (mirror of allowedGeomPresets).

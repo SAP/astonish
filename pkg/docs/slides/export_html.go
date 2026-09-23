@@ -305,10 +305,117 @@ func nodeInlineStyle(node Node) string {
 	if node.Opacity > 0 && node.Opacity < 1 {
 		parts = append(parts, "opacity:"+strconv.FormatFloat(node.Opacity, 'g', -1, 64))
 	}
+	if node.Type == "shape" && node.Geom == "roundRect" && node.Path == "" {
+		parts = append(parts, roundRectCSS(node)...)
+	}
 	return strings.Join(parts, ";")
 }
 
+// roundRectCSS paints a rounded rectangle as a CSS box. SVG under
+// preserveAspectRatio="none" stretches a circular corner into a pill on wide
+// cards; border-radius does not. Radius is the authored rectRadius, or the
+// OOXML default of one sixth of the shorter side.
+func roundRectCSS(node Node) []string {
+	w, h := node.Geometry.W, node.Geometry.H
+	shorter := w
+	if h < shorter {
+		shorter = h
+	}
+	if shorter < 0 {
+		shorter = 0
+	}
+	r := node.RectRadius
+	if r <= 0 {
+		r = shorter / 6
+	}
+	if r > shorter/2 {
+		r = shorter / 2
+	}
+	parts := []string{"border-radius:" + strconv.Itoa(r) + "px", "box-sizing:border-box"}
+	if node.Gradient != nil {
+		if bg := cssGradient(node.Gradient); bg != "" {
+			parts = append(parts, "background:"+bg)
+		}
+	} else if fill := shapeFillCSS(node); fill != "" {
+		parts = append(parts, "background:"+fill)
+	}
+	if stroke := shapeLineCSS(node); stroke != "" {
+		width := "1"
+		if node.Props != nil {
+			if lw, ok := scalarString(node.Props["line-width"]); ok && safeCSSValue(lw) {
+				width = lw
+			}
+		}
+		style := "solid"
+		switch node.Dash {
+		case "dash":
+			style = "dashed"
+		case "dot":
+			style = "dotted"
+		}
+		parts = append(parts, "border:"+width+"px "+style+" "+stroke)
+	}
+	return parts
+}
+
+// shapeFillCSS is the CSS background for a shape that is not drawn as SVG.
+// Imported cards often put the color in fill-token rather than fill; ignoring
+// that left the present iframe transparent while thumbnails (baked before this
+// path) still showed the card.
+func shapeFillCSS(node Node) string {
+	if fill := resolveColor(node.Fill); fill != "" {
+		return fill
+	}
+	return propColorCSS(node, "fill-token")
+}
+
+func shapeLineCSS(node Node) string {
+	if stroke := resolveColor(node.Line); stroke != "" {
+		return stroke
+	}
+	return propColorCSS(node, "line-token")
+}
+
+func propColorCSS(node Node, key string) string {
+	if node.Props == nil {
+		return ""
+	}
+	raw, ok := scalarString(node.Props[key])
+	if !ok || raw == "" || raw == "transparent" {
+		return ""
+	}
+	return resolveColor(raw)
+}
+
+func cssGradient(g *Gradient) string {
+	if g == nil || len(g.Stops) == 0 {
+		return ""
+	}
+	var stops []string
+	for _, s := range g.Stops {
+		c := resolveColor(s.Color)
+		if c == "" {
+			continue
+		}
+		stops = append(stops, c+" "+strconv.Itoa(s.Pos)+"%")
+	}
+	if len(stops) == 0 {
+		return ""
+	}
+	joined := strings.Join(stops, ", ")
+	if g.Kind == "radial" {
+		cx, cy := radialOrigin(g)
+		return fmt.Sprintf("radial-gradient(circle at %d%% %d%%, %s)", cx, cy, joined)
+	}
+	return fmt.Sprintf("linear-gradient(%ddeg, %s)", g.Angle, joined)
+}
+
 func shapeNeedsSVG(node Node) bool {
+	// roundRect is a CSS border-radius. An SVG path under
+	// preserveAspectRatio="none" stretches a circular corner into a pill.
+	if node.Geom == "roundRect" && node.Path == "" {
+		return false
+	}
 	if node.Geom != "" || node.Path != "" || node.Gradient != nil {
 		return true
 	}
@@ -390,6 +497,9 @@ func writeShapeSVG(out *bytes.Buffer, node Node, slideID string) {
 	}
 
 	stroke := resolveColor(node.Line)
+	if stroke == "" {
+		stroke = propColorCSS(node, "line-token")
+	}
 	strokeWidth := ""
 	if node.Props != nil {
 		if lw, ok := scalarString(node.Props["line-width"]); ok && safeCSSValue(lw) {

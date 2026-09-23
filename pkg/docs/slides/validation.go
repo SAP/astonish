@@ -162,6 +162,9 @@ func validateFidelity(out *[]Diagnostic, slideID string, n Node) {
 	if n.Path != "" && !safePath(n.Path) {
 		*out = append(*out, Diagnostic{Severity: "error", Code: "invalid_path", Message: fmt.Sprintf("custom path contains unsafe characters: %q", n.Path), SlideID: slideID, ElementID: n.ID})
 	}
+	if n.RectRadius < 0 {
+		*out = append(*out, Diagnostic{Severity: "error", Code: "invalid_rect_radius", Message: fmt.Sprintf("rect radius %d must be non-negative", n.RectRadius), SlideID: slideID, ElementID: n.ID})
+	}
 	for _, run := range n.Runs {
 		if run.Color != "" && !safeColor(run.Color) {
 			*out = append(*out, Diagnostic{Severity: "error", Code: "invalid_color", Message: fmt.Sprintf("run color %q is not a safe #RRGGBB(AA) or rgb()/rgba() value", run.Color), SlideID: slideID, ElementID: n.ID})

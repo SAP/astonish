@@ -80,8 +80,39 @@ describe('slides runtime', () => {
     expect(shape.style.transformOrigin).toBe('center')
   })
 
+  it('keeps a present-page roundRect fill after Lit clears the exported style', async () => {
+    // Present HTML paints the card as an inline style, then the runtime element
+    // upgrades and overwrites style. The fill attribute is not re-emitted, so
+    // the box must still read the exported background.
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="card-2" kind="rect" x="680" y="400" w="560" h="440" line-width="1" style="border-radius:73px;box-sizing:border-box;background:#0C3230;border:1px solid #12998A"></ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    expect(shape.style.backgroundColor || shape.style.background).toMatch(/0C3230|rgb\(12,\s*50,\s*48\)/i)
+    expect(shape.style.borderRadius).not.toBe('')
+  })
+
+  it('paints a wide roundRect with a circular CSS radius, not a stretched SVG pill', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="800" h="200" geom="roundRect" fill="#3a2418" line="#c46a1a" rect-radius="16"></ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    expect(shape.querySelector('svg')).toBeNull()
+    expect(shape.style.borderRadius).toBe('16px')
+    expect(shape.style.background).toBe('rgb(58, 36, 24)')
+    expect(shape.style.border).toContain('1px')
+  })
+
+  it('uses the OOXML default radius when a roundRect has no rect-radius', async () => {
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="600" h="180" geom="roundRect" fill-token="accent"></ast-shape></ast-slide></ast-deck>')
+    const shape = document.querySelector<HTMLElement>('ast-shape')!
+    await (shape as unknown as { updateComplete: Promise<unknown> }).updateComplete
+    expect(shape.querySelector('svg')).toBeNull()
+    // one sixth of the shorter side (180), not the old 12% / 24px pill
+    expect(shape.style.borderRadius).toBe('30px')
+    expect(shape.style.background).toContain('var(--ast-accent')
+  })
+
   it('renders a gradient shape as an inline svg with a gradient definition', async () => {
-    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="200" h="120" geom="roundRect">' +
+    await mount('<ast-deck><ast-slide id="one"><ast-shape id="s" kind="rect" x="0" y="0" w="200" h="120" geom="rect">' +
       '<script type="application/json">{"kind":"linear","angle":90,"stops":[{"pos":0,"color":"#000000"},{"pos":100,"color":"#ffffff"}]}</script>' +
       '</ast-shape></ast-slide></ast-deck>')
     const shape = document.querySelector<HTMLElement>('ast-shape')!

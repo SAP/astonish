@@ -21,7 +21,7 @@ var schemasV1 = map[string]AttributeSchema{
 	"ast-shape": {Required: []string{"id", "kind", "x", "y", "w", "h"}, Optional: []string{
 		"fill-token", "line-token", "line-width", "alt", "decorative",
 		// v2 fidelity attributes:
-		"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity", "flip-h", "flip-v",
+		"rot", "fill", "line", "line-dash", "head-end", "tail-end", "geom", "path", "opacity", "flip-h", "flip-v", "rect-radius",
 	}},
 	"ast-image": {Required: []string{"id", "asset-ref", "x", "y", "w", "h"}, Optional: []string{
 		"fit", "alt", "decorative",

@@ -7,11 +7,35 @@ type Gradient = { kind: 'linear' | 'radial', angle: number, cx?: number, cy?: nu
 
 let gradientSeq = 0
 
-/** Geometry presets mapped to an SVG path `d` in a 0..100 unit box. */
-const GEOM_PATHS: Record<string, (w: number, h: number) => string> = {
+/**
+ * OOXML roundRect default adj is 16667 — one sixth of the shorter side.
+ * Imported shapes override this via rect-radius (canvas px).
+ */
+export function roundRectRadius(w: number, h: number, authored?: number): number {
+  const shorter = Math.min(w, h)
+  if (shorter <= 0) return 0
+  const raw = authored != null && Number.isFinite(authored) && authored > 0
+    ? authored
+    : shorter / 6
+  return Math.min(raw, shorter / 2)
+}
+
+/** CSS equivalent of the SVG gradient, so roundRect can stay a CSS box. */
+function cssGradient(g: Gradient): string {
+  const stops = g.stops.map(s => `${s.color} ${s.pos}%`).join(', ')
+  if (g.kind === 'radial') {
+    const cx = g.cx && g.cx > 0 ? g.cx : 80
+    const cy = g.cy && g.cy > 0 ? g.cy : 8
+    return `radial-gradient(circle at ${cx}% ${cy}%, ${stops})`
+  }
+  return `linear-gradient(${g.angle}deg, ${stops})`
+}
+
+/** Geometry presets mapped to an SVG path `d` in the shape's own box. */
+const GEOM_PATHS: Record<string, (w: number, h: number, radius?: number) => string> = {
   rect: (w, h) => `M0 0 H${w} V${h} H0 Z`,
-  roundRect: (w, h) => {
-    const r = Math.min(w, h) * 0.12
+  roundRect: (w, h, radius) => {
+    const r = roundRectRadius(w, h, radius)
     return `M${r} 0 H${w - r} Q${w} 0 ${w} ${r} V${h - r} Q${w} ${h} ${w - r} ${h} H${r} Q0 ${h} 0 ${h - r} V${r} Q0 0 ${r} 0 Z`
   },
   ellipse: (w, h) => {
@@ -33,6 +57,7 @@ export class AstShape extends PositionedElement {
     headEnd: { attribute: 'head-end', reflect: true }, tailEnd: { attribute: 'tail-end', reflect: true },
     geom: { reflect: true }, path: { reflect: true }, opacity: { type: Number, reflect: true },
     gradient: { reflect: true },
+    rectRadius: { type: Number, attribute: 'rect-radius', reflect: true },
   }
   kind = 'rect'
   fillToken = 'transparent'
@@ -47,6 +72,7 @@ export class AstShape extends PositionedElement {
   path = ''
   opacity = NaN
   gradient = ''
+  rectRadius = 0
 
   private readonly gradId = `ast-grad-${gradientSeq++}`
 
@@ -60,6 +86,11 @@ export class AstShape extends PositionedElement {
 
   /** Whether the shape needs an inline SVG rather than the CSS box fallback. */
   private usesVector(): boolean {
+    const geom = this.geom || this.kind
+    // roundRect is painted as a CSS border-radius so the corner stays circular.
+    // An SVG path (or <rect rx>) under preserveAspectRatio="none" is stretched
+    // to the element box and turns wide cards into pills.
+    if (geom === 'roundRect' && !this.path) return false
     return Boolean(this.geom || this.path || this.parseGradient() ||
       this.isRawColor(this.fill) || this.isRawColor(this.line) ||
       this.headEnd === 'arrow' || this.headEnd === 'triangle' ||
@@ -147,7 +178,8 @@ export class AstShape extends PositionedElement {
     const stroke = this.paint(this.line, this.lineToken, false)
     const strokeWidth = this.lineWidth || (this.isRawColor(this.line) ? 1 : 0)
     const dash = this.dashArray()
-    const d = this.path || (GEOM_PATHS[this.geom || this.kind] ?? GEOM_PATHS.rect)(w, h)
+    const preset = GEOM_PATHS[this.geom || this.kind] ?? GEOM_PATHS.rect
+    const d = this.path || preset(w, h, this.rectRadius)
     const isOpenPath = (this.geom || this.kind) === 'line'
     const useHead = this.headEnd === 'arrow' || this.headEnd === 'triangle'
     const useTail = this.tailEnd === 'arrow' || this.tailEnd === 'triangle'
@@ -188,8 +220,53 @@ export class AstShape extends PositionedElement {
       this.style.borderRadius = ''
       return
     }
-    this.style.background = `var(--ast-${this.fillToken}, transparent)`
-    this.style.border = `${this.lineWidth}px solid var(--ast-${this.lineToken}, transparent)`
-    this.style.borderRadius = this.kind === 'roundRect' ? '24px' : ''
+    const exportedBorderColor = this.exportedBorder.replace(/^\d+(?:\.\d+)?px\s+\w+\s+/, '')
+    const exportedBorderWidth = Number.parseFloat(this.exportedBorder) || 0
+    const gradient = this.parseGradient()
+    if (gradient) {
+      this.style.background = cssGradient(gradient)
+    } else if (this.isRawColor(this.fill)) {
+      this.style.background = this.fill
+    } else if (this.fillToken && this.fillToken !== 'transparent') {
+      this.style.background = `var(--ast-${this.fillToken}, transparent)`
+    } else if (this.exportedBackground) {
+      this.style.background = this.exportedBackground
+    } else {
+      this.style.background = `var(--ast-${this.fillToken}, transparent)`
+    }
+    const stroke = this.isRawColor(this.line)
+      ? this.line
+      : (this.lineToken && this.lineToken !== 'transparent'
+        ? `var(--ast-${this.lineToken}, transparent)`
+        : (exportedBorderColor !== this.exportedBorder ? exportedBorderColor : ''))
+    const width = this.lineWidth || (this.isRawColor(this.line) ? 1 : exportedBorderWidth)
+    this.style.border = width && stroke ? `${width}px solid ${stroke}` : ''
+    if (this.lineDash === 'dash') this.style.borderStyle = 'dashed'
+    else if (this.lineDash === 'dot') this.style.borderStyle = 'dotted'
+    else if (width && stroke) this.style.borderStyle = 'solid'
+    const rounded = (this.geom || this.kind) === 'roundRect' || this.exportedRadius > 0
+    const radius = rounded ? roundRectRadius(this.w, this.h, this.rectRadius || this.exportedRadius) : 0
+    this.style.borderRadius = radius ? `${radius}px` : ''
+  }
+
+  private exportedBackground = ''
+  private exportedBorder = ''
+  private exportedRadius = 0
+
+  override connectedCallback(): void {
+    this.captureExportedPaint()
+    super.connectedCallback()
+  }
+
+  /** Present HTML paints the card on style= and omits fill=. Capture it before Lit clears style. */
+  private captureExportedPaint(): void {
+    const raw = this.getAttribute('style') || ''
+    const pick = (name: string) => {
+      const m = raw.match(new RegExp(`(?:^|;)\\s*${name}\\s*:\\s*([^;]+)`, 'i'))
+      return m ? m[1].trim() : ''
+    }
+    this.exportedBackground = pick('background') || pick('background-color')
+    this.exportedBorder = pick('border')
+    this.exportedRadius = Number.parseFloat(pick('border-radius')) || 0
   }
 }

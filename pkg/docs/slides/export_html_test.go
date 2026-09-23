@@ -99,6 +99,67 @@ func TestHTMLExporterRendersV2FidelityAttributes(t *testing.T) {
 	}
 }
 
+func TestHTMLExporterPaintsRoundRectAsCSSNotStretchedSVG(t *testing.T) {
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Cards", Slides: []Slide{{
+		ID: "roadmap",
+		Nodes: []Node{{
+			ID: "card", Type: "shape",
+			Geometry: Geometry{X: 1200, Y: 280, W: 560, H: 220},
+			Geom:     "roundRect", RectRadius: 16,
+			Fill: "#3a2418", Line: "#c46a1a",
+			Props: map[string]any{"line-width": "2"},
+		}},
+	}}}
+	result, err := (HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}).Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(result.Bytes)
+	for _, want := range []string{
+		"border-radius:16px",
+		"background:#3a2418",
+		"border:2px solid #c46a1a",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("roundRect document missing %q", want)
+		}
+	}
+	if strings.Contains(doc, "<svg") {
+		t.Fatal("roundRect must not be an SVG; preserveAspectRatio=none stretches the corner into a pill")
+	}
+}
+
+func TestHTMLExporterPaintsTokenFillOnRoundRect(t *testing.T) {
+	// Imported and recipe cards often store the color as fill-token, not fill.
+	// Skipping SVG must not leave the card transparent in the present iframe.
+	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Cards", Slides: []Slide{{
+		ID: "roadmap",
+		Nodes: []Node{{
+			ID: "card", Type: "shape",
+			Geometry: Geometry{X: 80, Y: 200, W: 560, H: 220},
+			Geom:     "roundRect",
+			Props:    map[string]any{"fill-token": "accent", "line-token": "ink"},
+		}},
+	}}}
+	result, err := (HTMLExporter{RuntimeJS: []byte(`window.runtimeReady=true`)}).Export(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(result.Bytes)
+	for _, want := range []string{
+		"background:var(--ast-accent)",
+		"border:1px solid var(--ast-ink)",
+		`fill-token="accent"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("token roundRect missing %q\n%s", want, doc)
+		}
+	}
+	if strings.Contains(doc, "<svg") {
+		t.Fatal("token roundRect must stay a CSS box")
+	}
+}
+
 func TestHTMLExporterRendersImageFlipTransform(t *testing.T) {
 	scene := SceneGraph{SchemaVersion: SchemaV2, Title: "Flip Deck", Slides: []Slide{{
 		ID: "cover",

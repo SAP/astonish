@@ -200,6 +200,12 @@ func nodeFromHTML(n *html.Node) (Node, error) {
 			out.Dash = a.Val
 		case "geom":
 			out.Geom = a.Val
+		case "rect-radius":
+			v, err := strconv.Atoi(strings.TrimSpace(a.Val))
+			if err != nil {
+				return Node{}, fmt.Errorf("%s attribute %q must be an integer", n.Data, a.Key)
+			}
+			out.RectRadius = v
 		case "path":
 			out.Path = a.Val
 		case "flip-h":

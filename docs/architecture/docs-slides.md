@@ -926,9 +926,13 @@ Each `IRLayout` is serialized to a valid `<ast-slide>` archetype (fill-ready wit
   smuggling).
 - Custom paths → `<ast-shape kind="rect" path="M … A … Z">`; the SVG viewBox is
   `0 0 W H` in canvas px, path coords scaled into the shape box.
-- Rounded rects → `geom="roundRect"` (the runtime's fixed ~0.12 radius). The IR
-  keeps the true `rectRadius` for the future editor / high-fidelity export; this
-  is a **known v1 approximation**.
+- Rounded rects → `geom="roundRect"` plus `rect-radius` (canvas px) when the
+  source adj is known. The web runtime paints that as CSS `border-radius` so a
+  wide card keeps a circular corner. Without `rect-radius`, both web and HTML
+  export fall back to the OOXML default: one sixth of the shorter side. SVG
+  under `preserveAspectRatio="none"` must not be used for this preset — it
+  stretches the corner into a pill. The IR still keeps `rectRadius` for the
+  lossless template model.
 - **Font sizes are scaled to the ASD canvas.** OOXML run sizes are in points; the
   runtime applies `ast-text size` as **px** on the fixed 1920×1080 canvas. Because
   all geometry (x/y/w/h) is already scaled by `scale = min(1920/pxW, 1080/pxH)`

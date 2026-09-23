@@ -70,6 +70,8 @@ func TestValidateSlideFidelityAttributes(t *testing.T) {
 		{name: "gradient bad stop color", node: Node{ID: "n", Type: "shape", Geometry: geom, Gradient: &Gradient{Kind: "linear", Stops: []GradientStop{{Pos: 0, Color: "blue"}, {Pos: 100, Color: "#FFFFFF"}}}}, wantCode: "invalid_gradient"},
 
 		{name: "valid geom preset", node: Node{ID: "n", Type: "shape", Geometry: geom, Geom: "roundRect"}},
+		{name: "valid rect radius", node: Node{ID: "n", Type: "shape", Geometry: geom, Geom: "roundRect", RectRadius: 16}},
+		{name: "negative rect radius", node: Node{ID: "n", Type: "shape", Geometry: geom, RectRadius: -1}, wantCode: "invalid_rect_radius"},
 		{name: "invalid geom preset", node: Node{ID: "n", Type: "shape", Geometry: geom, Geom: "pentagon"}, wantCode: "invalid_geometry_preset"},
 
 		{name: "valid path", node: Node{ID: "n", Type: "shape", Geometry: geom, Path: "M0 0 L10 10 C 20,20 30,30 40,40 Z"}},

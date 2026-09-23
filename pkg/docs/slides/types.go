@@ -71,16 +71,17 @@ type Node struct {
 	Children []Node         `json:"children,omitempty"`
 
 	// v2 fidelity fields.
-	Rot      int       `json:"rot,omitempty"`
-	Fill     string    `json:"fill,omitempty"`
-	Line     string    `json:"line,omitempty"`
-	Dash     string    `json:"dash,omitempty"`
-	Opacity  float64   `json:"opacity,omitempty"`
-	Geom     string    `json:"geom,omitempty"`
-	Path     string    `json:"path,omitempty"`
-	Gradient *Gradient `json:"gradient,omitempty"`
-	FlipH    bool      `json:"flipH,omitempty"`
-	FlipV    bool      `json:"flipV,omitempty"`
+	Rot        int       `json:"rot,omitempty"`
+	Fill       string    `json:"fill,omitempty"`
+	Line       string    `json:"line,omitempty"`
+	Dash       string    `json:"dash,omitempty"`
+	Opacity    float64   `json:"opacity,omitempty"`
+	Geom       string    `json:"geom,omitempty"`
+	RectRadius int       `json:"rectRadius,omitempty"`
+	Path       string    `json:"path,omitempty"`
+	Gradient   *Gradient `json:"gradient,omitempty"`
+	FlipH      bool      `json:"flipH,omitempty"`
+	FlipV      bool      `json:"flipV,omitempty"`
 }
 
 type Slide struct {

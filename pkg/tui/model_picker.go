@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -99,6 +101,13 @@ type providerMutatedMsg struct {
 	err    error
 }
 
+// providerReloadedMsg reports the result of rebuilding the active provider
+// client after re-authentication so freshly written tokens take effect.
+type providerReloadedMsg struct {
+	name string
+	err  error
+}
+
 type xaiOAuthStartedMsg struct {
 	name    string
 	fields  map[string]string
@@ -128,6 +137,13 @@ func (m model) providerAdmin() backend.ProviderAdminBackend {
 func (m model) xaiOAuth() backend.XAIOAuthBackend {
 	if xo, ok := m.backend.(backend.XAIOAuthBackend); ok {
 		return xo
+	}
+	return nil
+}
+
+func (m model) providerReloader() backend.ProviderReloader {
+	if pr, ok := m.backend.(backend.ProviderReloader); ok {
+		return pr
 	}
 	return nil
 }
@@ -315,12 +331,41 @@ func (m model) removeProviderCmd(name string) tea.Cmd {
 
 // --- Apply messages ---
 
+// offerReauthFromPicker handles an xAI OAuth "re-authentication required" error
+// surfaced while loading providers/models in the /model overlay. When the error
+// is ErrReauthRequired and the backend supports the device-code flow, it closes
+// the picker and arms the persistent re-auth prompt (identical to the turn-error
+// path) so the user can press Enter to re-authenticate. Returns handled=false
+// for any other error so the caller renders it normally.
+func (m model) offerReauthFromPicker(err error, providerName string) (tea.Model, tea.Cmd, bool) {
+	if !errors.Is(err, xai_oauth.ErrReauthRequired) {
+		return m, nil, false
+	}
+	if m.xaiOAuth() == nil {
+		// Platform mode: no local device-code flow. Leave the picker to render
+		// a static hint via the caller's normal error path.
+		return m, nil, false
+	}
+	if providerName == "" {
+		providerName = m.info.Provider
+	}
+	// Close the overlay and arm the persistent prompt on the main transcript.
+	m.modelPicker = modelPickerState{}
+	m.reauthProvider = providerName
+	m.tr.Apply(events.NewSystem("xAI OAuth session expired. Press Enter to re-authenticate, Esc to dismiss."))
+	m.refreshViewport()
+	return m, nil, true
+}
+
 func (m model) applyModelProvidersLoaded(msg modelProvidersLoadedMsg) (tea.Model, tea.Cmd) {
 	if !m.modelPicker.open {
 		return m, nil
 	}
 	m.modelPicker.loading = false
 	if msg.err != nil {
+		if next, cmd, handled := m.offerReauthFromPicker(msg.err, m.modelPicker.currentProvider); handled {
+			return next, cmd
+		}
 		m.modelPicker.err = "Failed to load providers: " + msg.err.Error()
 		return m, nil
 	}
@@ -343,6 +388,11 @@ func (m model) applyModelModelsLoaded(msg modelModelsLoadedMsg) (tea.Model, tea.
 	}
 	m.modelPicker.loading = false
 	if msg.err != nil {
+		// Expired/invalid xAI OAuth token: close the picker and offer to
+		// re-authenticate instead of showing a raw 403/bad-credentials error.
+		if next, cmd, handled := m.offerReauthFromPicker(msg.err, msg.provider); handled {
+			return next, cmd
+		}
 		m.modelPicker.err = "Failed to load models: " + msg.err.Error()
 		m.modelPicker.step = "provider"
 		m.modelPicker.rebuildItems()
@@ -492,8 +542,16 @@ func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd)
 	}
 	// Success: system notice and refresh.
 	if m.reauthLaunched && !m.modelPicker.open {
-		// Re-authentication completed outside the picker.
+		// Re-authentication completed outside the picker. New tokens are now
+		// persisted, but the running agent still holds the old in-memory
+		// transport with the dead refresh token — rebuild the active provider
+		// so the next turn uses the fresh tokens instead of re-prompting.
 		m.reauthLaunched = false
+		if pr := m.providerReloader(); pr != nil {
+			m.tr.Apply(events.NewSystem("Applying re-authenticated xAI OAuth session…"))
+			m.refreshViewport()
+			return m, m.reloadProviderCmd(msg.name)
+		}
 		m.tr.Apply(events.NewSystem("xAI OAuth re-authenticated."))
 		m.refreshViewport()
 		return m, nil
@@ -517,6 +575,36 @@ func (m model) applyProviderMutated(msg providerMutatedMsg) (tea.Model, tea.Cmd)
 		m.modelPicker.instanceName = ""
 		return m, tea.Batch(m.loadManageInstancesCmd(), m.loadModelProvidersCmd())
 	}
+	return m, nil
+}
+
+// reloadProviderCmd rebuilds the active provider client from the freshly
+// persisted config so re-authenticated xAI OAuth tokens take effect in the
+// running session. It runs off the Update loop and reports via
+// providerReloadedMsg.
+func (m model) reloadProviderCmd(name string) tea.Cmd {
+	pr := m.providerReloader()
+	ctx := m.ctx
+	return func() tea.Msg {
+		if pr == nil {
+			return providerReloadedMsg{name: name, err: fmt.Errorf("provider reload unavailable")}
+		}
+		err := pr.ReloadActiveProvider(ctx)
+		return providerReloadedMsg{name: name, err: err}
+	}
+}
+
+// applyProviderReloaded reports the outcome of rebuilding the active provider
+// after re-authentication. On success the session is ready to use the new
+// tokens; on failure the user is told the provider could not be reloaded.
+func (m model) applyProviderReloaded(msg providerReloadedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.tr.Apply(events.NewError("xAI OAuth re-authenticated, but reloading the provider failed: " + msg.err.Error()))
+		m.refreshViewport()
+		return m, nil
+	}
+	m.tr.Apply(events.NewSystem("xAI OAuth re-authenticated."))
+	m.refreshViewport()
 	return m, nil
 }
 

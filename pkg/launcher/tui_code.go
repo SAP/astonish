@@ -28,8 +28,8 @@ import (
 	"github.com/SAP/astonish/pkg/gitutil"
 	"github.com/SAP/astonish/pkg/memory"
 	"github.com/SAP/astonish/pkg/provider"
-	"github.com/SAP/astonish/pkg/provider/routing"
 	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
+	"github.com/SAP/astonish/pkg/provider/routing"
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
@@ -3046,6 +3046,24 @@ func (b *localAgentBackend) rebuildAgent() {
 	b.model = result.ModelName
 	b.configured = result.ProviderConfigured
 	b.mu.Unlock()
+}
+
+// ReloadActiveProvider rebuilds the active provider client from the current
+// persisted config so freshly written credentials (e.g. after xAI OAuth
+// re-authentication) take effect immediately in the running session. Without
+// this, AddProvider writes new tokens to disk but the running agent keeps its
+// old in-memory transport holding the dead refresh token, causing the next turn
+// to fail and re-prompt in a loop. It implements backend.ProviderReloader.
+func (b *localAgentBackend) ReloadActiveProvider(ctx context.Context) error {
+	_ = ctx
+	b.rebuildAgent()
+	b.mu.Lock()
+	configured := b.configured
+	b.mu.Unlock()
+	if !configured {
+		return fmt.Errorf("provider not configured after reload")
+	}
+	return nil
 }
 
 func (b *localAgentBackend) ListProviders(ctx context.Context) ([]string, error) {

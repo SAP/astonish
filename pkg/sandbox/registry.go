@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -45,6 +46,10 @@ type SessionEntry struct {
 // control (filestore: a per-file mutex; pgstore: PostgreSQL transactions).
 type SessionRegistry struct {
 	store store.SandboxSessionStore
+
+	mu            sync.RWMutex
+	sessionScopes map[string]store.SandboxSessionStore
+	storeResolver func(orgSlug, teamSlug string) store.SandboxSessionStore
 }
 
 // NewSessionRegistry creates the personal-mode registry. It wires a
@@ -81,7 +86,49 @@ func NewSessionRegistry() (*SessionRegistry, error) {
 // NewSessionRegistryFromStore wraps an arbitrary SandboxSessionStore. Used
 // by platform-mode wiring (pgstore) and tests.
 func NewSessionRegistryFromStore(st store.SandboxSessionStore) *SessionRegistry {
-	return &SessionRegistry{store: st}
+	return &SessionRegistry{store: st, sessionScopes: make(map[string]store.SandboxSessionStore)}
+}
+
+// SetStoreResolver installs a resolver for per-session tenant stores. A session
+// is pinned to the first resolved store before it is created, so later reads,
+// rebinds, and lifecycle updates use the same tenant registry.
+func (r *SessionRegistry) SetStoreResolver(fn func(orgSlug, teamSlug string) store.SandboxSessionStore) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.storeResolver = fn
+	if r.sessionScopes == nil {
+		r.sessionScopes = make(map[string]store.SandboxSessionStore)
+	}
+}
+
+// SetSessionScope selects the tenant store for a session before provisioning.
+// Existing sessions keep their original store for lifecycle consistency.
+func (r *SessionRegistry) SetSessionScope(sessionID, orgSlug, teamSlug string) {
+	if r == nil || sessionID == "" || (orgSlug == "" && teamSlug == "") {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessionScopes == nil {
+		r.sessionScopes = make(map[string]store.SandboxSessionStore)
+	}
+	if _, ok := r.sessionScopes[sessionID]; ok {
+		return
+	}
+	if r.storeResolver != nil {
+		if st := r.storeResolver(orgSlug, teamSlug); st != nil {
+			r.sessionScopes[sessionID] = st
+		}
+	}
+}
+
+func (r *SessionRegistry) storeForSession(sessionID string) store.SandboxSessionStore {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if st := r.sessionScopes[sessionID]; st != nil {
+		return st
+	}
+	return r.store
 }
 
 // newDefaultSessionStore is the shim populated by registry_personal.go.
@@ -168,7 +215,7 @@ func (r *SessionRegistry) Put(sessionID, containerName, templateName string) err
 		TemplateID:    templateName,
 		State:         store.SandboxSessionStateRunning,
 	}
-	return r.store.Put(ctx, sess)
+	return r.storeForSession(sessionID).Put(ctx, sess)
 }
 
 // PutSession inserts or replaces a full session record. Unlike Put, which
@@ -196,7 +243,7 @@ func (r *SessionRegistry) PutSession(sess *store.SandboxSession) error {
 	if sess.State == "" {
 		sess.State = store.SandboxSessionStateRunning
 	}
-	return r.store.Put(context.Background(), sess)
+	return r.storeForSession(sess.SessionID).Put(context.Background(), sess)
 }
 
 // GetSession returns the full store.SandboxSession by ID, or nil if absent.
@@ -204,7 +251,7 @@ func (r *SessionRegistry) PutSession(sess *store.SandboxSession) error {
 // view). Backends that need backend-specific fields (PodName, Backend,
 // UpperLayerID) should use GetSession.
 func (r *SessionRegistry) GetSession(sessionID string) (*store.SandboxSession, error) {
-	return r.store.Get(context.Background(), sessionID)
+	return r.storeForSession(sessionID).Get(context.Background(), sessionID)
 }
 
 // Get returns the session entry, or nil if not found.
@@ -227,7 +274,7 @@ func (r *SessionRegistry) GetContainerName(sessionID string) string {
 
 // Remove deletes a session-to-container mapping.
 func (r *SessionRegistry) Remove(sessionID string) error {
-	return r.store.Delete(context.Background(), sessionID)
+	return r.storeForSession(sessionID).Delete(context.Background(), sessionID)
 }
 
 // List returns all session entries.
@@ -265,7 +312,7 @@ func (r *SessionRegistry) ResolveSessionID(input string) (string, bool) {
 	ctx := context.Background()
 
 	// Exact session ID
-	if sess, _ := r.store.Get(ctx, input); sess != nil {
+	if sess, _ := r.storeForSession(input).Get(ctx, input); sess != nil {
 		return sess.SessionID, true
 	}
 	// Exact container name (indexed in the store)

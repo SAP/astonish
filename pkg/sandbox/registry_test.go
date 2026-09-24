@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // newTestRegistry creates a SessionRegistry backed by a temp-file local
@@ -31,6 +33,42 @@ func newTestRegistryAt(t *testing.T, dir string) *SessionRegistry {
 		t.Fatalf("newLocalSessionStore: %v", err)
 	}
 	return NewSessionRegistryFromStore(st)
+}
+
+func TestSessionRegistryScopesSessionToResolvedStore(t *testing.T) {
+	defaultReg := newTestRegistry(t)
+	teamDir := t.TempDir()
+	teamReg := newTestRegistryAt(t, teamDir)
+
+	defaultReg.SetStoreResolver(func(orgSlug, teamSlug string) store.SandboxSessionStore {
+		if orgSlug == "org" && teamSlug == "team" {
+			return teamReg.store
+		}
+		return nil
+	})
+	defaultReg.SetSessionScope("session-personal", "org", "team")
+
+	if err := defaultReg.PutSession(&store.SandboxSession{
+		SessionID: "session-personal",
+		Backend:   "k8s",
+		PodName:   "astn-session-personal",
+	}); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	if got := teamReg.Get("session-personal"); got == nil {
+		t.Fatal("session was not persisted to the resolved team store")
+	}
+	if got, err := defaultReg.GetSession("session-personal"); err != nil || got == nil {
+		t.Fatal("session was not readable through the resolved store")
+	}
+
+	// A later rebind/lifecycle write must stay on the original team store even
+	// if a different scope is supplied after the session already exists.
+	defaultReg.SetSessionScope("session-personal", "org", "other-team")
+	defaultReg.TouchActivity("session-personal")
+	if got := teamReg.Get("session-personal"); got == nil {
+		t.Fatal("session moved away from its original team store")
+	}
 }
 
 func TestSessionRegistryPutGet(t *testing.T) {

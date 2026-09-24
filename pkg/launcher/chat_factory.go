@@ -918,7 +918,23 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 
 			limits := sandbox.EffectiveLimits(&cfg.AppConfig.Sandbox)
-			pool := sandbox.NewBackendPool(b, sandbox.ToResourceLimits(limits))
+			pool := sandbox.NewBackendPool(b, sandbox.ToResourceLimits(limits), sessRegistry)
+
+			// Browser-first provisioning may happen after this shared chat factory
+			// was created. Resolve the persistent sandbox store from the live
+			// request's org/team before the backend creates the session.
+			if cfg.PlatformMode {
+				if svc := store.FromContext(ctx); svc != nil && svc.Platform != nil {
+					if provider, ok := svc.Platform.(store.SandboxSessionProvider); ok {
+						sessRegistry.SetStoreResolver(func(orgSlug, teamSlug string) store.SandboxSessionStore {
+							if orgSlug == "" || teamSlug == "" {
+								return nil
+							}
+							return provider.SandboxSessionsForTeam(ctx, orgSlug, teamSlug)
+						})
+					}
+				}
+			}
 
 			// Wrap all tool category slices with pool-backed proxies.
 			// Browser tools are NOT wrapped as Node tools; they call the

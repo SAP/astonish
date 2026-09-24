@@ -492,8 +492,9 @@ func truncate(s string, n int) string {
 // (e.g. one pool per concurrent flow), and the Backend outlives any pool.
 // Cleanup only tears down sessions created by this pool's clients.
 type backendPool struct {
-	backend Backend
-	limits  ResourceLimits
+	backend  Backend
+	limits   ResourceLimits
+	registry *SessionRegistry
 
 	mu      sync.Mutex
 	clients map[string]*backendNodeClient // keyed by sessionID
@@ -506,14 +507,19 @@ type backendPool struct {
 //
 // limits is the per-session resource cap applied on CreateSession. Pass
 // EffectiveLimits(&cfg.Sandbox) for parity with the Incus path.
-func NewBackendPool(b Backend, limits ResourceLimits) ToolNodePool {
+func NewBackendPool(b Backend, limits ResourceLimits, registries ...*SessionRegistry) ToolNodePool {
 	if b == nil {
 		return nil
 	}
+	var registry *SessionRegistry
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
 	return &backendPool{
-		backend: b,
-		limits:  limits,
-		clients: make(map[string]*backendNodeClient),
+		backend:  b,
+		limits:   limits,
+		registry: registry,
+		clients:  make(map[string]*backendNodeClient),
 	}
 }
 
@@ -540,13 +546,11 @@ func (p *backendPool) GetBackend() Backend {
 	return p.backend
 }
 
-// SetSessionScope is a no-op for backend pools. The backend-agnostic pools
-// (K8s/OpenShell/mock) resolve their team-scoped session store inside the
-// Backend at construction time via BackendFromAppConfigWithSessions; the
-// registry is not swappable per session here. Per-session tenant routing for
-// those backends is a separate concern and not part of the Incus cross-tenant
-// container-isolation fix this method supports. Present to satisfy ToolNodePool.
-func (p *backendPool) SetSessionScope(_, _, _ string) {}
+func (p *backendPool) SetSessionScope(sessionID, orgSlug, teamSlug string) {
+	if p.registry != nil {
+		p.registry.SetSessionScope(sessionID, orgSlug, teamSlug)
+	}
+}
 
 func (p *backendPool) getOrCreate(sessionID, template string, chain []string, image string) ToolNodeClient {
 	if sessionID == "" {

@@ -49,6 +49,8 @@ func SetVNCContainerDialFunc(fn func(containerName string, port int) (net.Conn, 
 //  1. Registered VNC dial func (set by chat_factory for OpenShell/exec-tunnel)
 //  2. Global browser Manager's ContainerDialFunc (legacy/Incus with tunnel)
 //  3. Incus sandbox direct connection (fallback)
+//
+// Test seams for backend-selection coverage. Do not swap these concurrently.
 var (
 	ensureVNCSessionRunning = ensureProxySessionRunning
 	dialVNCBackend          = studioBackendDial
@@ -64,10 +66,10 @@ func getVNCDialFunc(r *http.Request, sessionID string) (dialFn func() (net.Conn,
 }
 
 func effectiveVNCBackendKind(r *http.Request) sandbox.BackendKind {
-	if cfg := effectiveAppConfig(r); cfg != nil {
-		return sandbox.BackendKind(cfg.Sandbox.BackendKind())
-	}
-	return ""
+	// BackendKind intentionally defaults an empty sandbox backend to Docker.
+	// Docker must use the request-scoped backend even when config is implicit.
+	cfg := effectiveAppConfig(r)
+	return sandbox.BackendKind(cfg.Sandbox.BackendKind())
 }
 
 func getVNCDialFuncForBackend(r *http.Request, sessionID string, kind sandbox.BackendKind) (dialFn func() (net.Conn, error), httpTransport *http.Transport, err error) {

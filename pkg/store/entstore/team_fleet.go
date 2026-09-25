@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 
 	teament "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/ent/team/fleetplan"
@@ -329,22 +330,70 @@ func (s *teamFleetPlanStore) GetPlanYAML(ctx context.Context, key string) (strin
 		}
 		return "", fmt.Errorf("entstore: FleetPlanStore.GetPlanYAML: %w", err)
 	}
+
+	// definition is the source of truth (kept in sync by every editor tab), so
+	// serialize it to YAML. This keeps the YAML tab consistent with the others and
+	// covers plans created in the UI that never wrote yaml_content.
+	if yamlStr, ok := planYAMLFromDefinition(ent.Definition, key, ent.Name); ok {
+		return yamlStr, nil
+	}
 	if ent.YamlContent != nil {
 		return *ent.YamlContent, nil
 	}
 	return "", nil
 }
 
+// planYAMLFromDefinition deserializes a stored definition map into a FleetPlan,
+// heals its identity from the column values, and marshals it back to YAML.
+func planYAMLFromDefinition(definition map[string]any, key, name string) (string, bool) {
+	data, err := json.Marshal(definition)
+	if err != nil {
+		return "", false
+	}
+	var plan fleet.FleetPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return "", false
+	}
+	if plan.Key == "" {
+		plan.Key = key
+	}
+	if plan.Name == "" {
+		if name != "" {
+			plan.Name = name
+		} else {
+			plan.Name = key
+		}
+	}
+	out, err := yaml.Marshal(&plan)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
 func (s *teamFleetPlanStore) SavePlanYAML(ctx context.Context, key string, yamlContent string) error {
-	n, err := s.client.FleetPlan.Update().
+	// Parse the YAML into a plan and reconcile it into the definition (source of
+	// truth) so edits reach every other tab and execution, not just yaml_content.
+	var plan fleet.FleetPlan
+	if err := yaml.Unmarshal([]byte(yamlContent), &plan); err != nil {
+		return fmt.Errorf("invalid YAML: %w", err)
+	}
+	plan.Key = key
+	if err := plan.Validate(); err != nil {
+		return err
+	}
+
+	if err := s.Save(ctx, &plan); err != nil {
+		return err
+	}
+
+	// Store the raw text too; GET regenerates from definition, so this is never
+	// served stale after edits from other tabs.
+	if _, err := s.client.FleetPlan.Update().
 		Where(fleetplan.KeyEQ(key)).
 		SetYamlContent(yamlContent).
-		Save(ctx)
-	if err != nil {
+		Save(ctx); err != nil {
 		return fmt.Errorf("entstore: FleetPlanStore.SavePlanYAML: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("fleet plan %q not found", key)
 	}
 	return nil
 }

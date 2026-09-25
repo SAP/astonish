@@ -43,8 +43,8 @@ make build           # Go binary only: ./astonish
 make build-ui        # npm install and production UI/sandbox bundles in web/dist
 make run             # go run .
 go run .              # run CLI directly
-make studio           # build UI, then start Studio backend
-make studio-dev       # backend on :9393; run `cd web && npm run dev` separately for :5173
+make daemon           # build UI, then start Astonish (serves Studio UI)
+make daemon-dev       # backend on :9393; run `cd web && npm run dev` separately for :5173
 ```
 
 `Makefile` auto-loads gitignored `.env` and `.env.local`; existing shell variables win. Start from `.env.example` or `.env.integration.example` and never commit credentials.

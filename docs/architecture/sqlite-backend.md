@@ -1076,7 +1076,7 @@ $ astonish setup
   ✓ Generated JWT signing key
 
   Setup complete! Start Astonish with:
-    astonish studio
+    astonish daemon run
 
   Or connect the CLI:
     astonish chat

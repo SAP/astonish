@@ -21,8 +21,8 @@ The SSE stream delivers multiple event types: text chunks (partial and complete)
 The API server is embedded in the Astonish binary and served by the daemon. The React UI is built and embedded via Go's `embed` package. This means:
 
 - **Single deployment**: No separate frontend server, no CORS issues, no reverse proxy needed.
-- **Dev mode**: `make studio-dev` runs the Vite dev server on port 5173 with hot reload, proxied to the Go API.
-- **Production mode**: `make studio` serves the pre-built UI from embedded assets.
+- **Dev mode**: `make daemon-dev` runs the Vite dev server on port 5173 with hot reload, proxied to the Go API.
+- **Production mode**: `make daemon` serves the pre-built UI from embedded assets.
 
 ### Why Device Authorization
 

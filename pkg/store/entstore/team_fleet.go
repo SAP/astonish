@@ -38,6 +38,11 @@ func (s *teamFleetTemplateStore) GetFleet(ctx context.Context, key string) (any,
 	if err != nil {
 		return nil, false
 	}
+	// Legacy rows kept the name only in the column; backfill the body so callers
+	// that validate the config see a non-empty name.
+	if n, _ := ent.Definition["name"].(string); n == "" {
+		ent.Definition["name"] = ent.Name
+	}
 	return ent.Definition, true
 }
 
@@ -133,6 +138,8 @@ func (s *teamFleetTemplateStore) Save(ctx context.Context, key string, fleetCfg 
 	if n, ok := definition["name"].(string); ok && n != "" {
 		name = n
 	}
+	// Mirror the name into the body so reads and validation stay consistent.
+	definition["name"] = name
 
 	// Try update first.
 	n, err := s.client.FleetTemplate.Update().
@@ -210,6 +217,19 @@ func (s *teamFleetPlanStore) GetPlan(ctx context.Context, key string) (any, bool
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return ent.Definition, true
 	}
+	// FleetPlan embeds FleetConfig and both tag `name`, so encoding/json fills
+	// only the outer FleetPlan.Name and leaves the embedded FleetConfig.Name (the
+	// field Validate checks) empty. Reconcile both, falling back to the `name`
+	// column for legacy rows.
+	name := plan.Name
+	if name == "" {
+		name = ent.Name
+	}
+	plan.Name = name
+	plan.FleetConfig.Name = name
+	if plan.FleetConfig.Description == "" {
+		plan.FleetConfig.Description = plan.Description
+	}
 	return &plan, true
 }
 
@@ -266,6 +286,8 @@ func (s *teamFleetPlanStore) Save(ctx context.Context, plan any) error {
 	if n, ok := definition["name"].(string); ok && n != "" {
 		name = n
 	}
+	// Mirror the name into the body so reads and validation stay consistent.
+	definition["name"] = name
 
 	// Try update first.
 	n, updateErr := s.client.FleetPlan.Update().

@@ -29,8 +29,8 @@ help:
 	@echo "  make build-extension - Build the Chrome MV3 extension (extension/dist)"
 	@echo "  make build-all       - Build UI first, then Go binary"
 	@echo "  make run             - Run the Go application"
-	@echo "  make studio          - Run Astonish Studio (dev mode)"
-	@echo "  make studio-dev      - Run Studio with live UI reload"
+	@echo "  make daemon          - Run Astonish (serves Studio UI)"
+	@echo "  make daemon-dev      - Run with live UI reload"
 	@echo "  make test            - Run all unit tests (Go + frontend)"
 	@echo "  make test-unit       - Same as 'make test'"
 	@echo "  make test-integration - Run integration tests (needs ASTONISH_TEST_DSN)"
@@ -142,19 +142,19 @@ run:
 	@echo "Running Go application..."
 	go run .
 
-# Run Astonish Studio (production mode - serves built UI)
-studio: build-ui
-	@echo "Starting Astonish Studio..."
-	go run . studio
+# Run Astonish (production mode - serves built Studio UI)
+daemon: build-ui
+	@echo "Starting Astonish..."
+	go run . daemon run
 
-# Run Studio in dev mode (Go backend + Vite dev server)
-studio-dev:
-	@echo "Starting Astonish Studio (dev mode)..."
+# Run in dev mode (Go backend + Vite dev server)
+daemon-dev:
+	@echo "Starting Astonish (dev mode)..."
 	@echo "  Backend: http://localhost:9393"
 	@echo "  Frontend: http://localhost:5173"
 	@echo ""
 	@echo "Run 'cd web && npm run dev' in another terminal for live UI reload"
-	go run . studio
+	go run . daemon run
 
 # Run tests — unit tests (Go + frontend, no external deps)
 test: test-unit
@@ -556,7 +556,7 @@ update-mcp-stars:
 	GITHUB_TOKEN=$$(gh auth token) python3 scripts/update-mcp-stars.py
 	@echo "Star counts updated!"
 
-.PHONY: all help build build-ui build-extension build-all run studio studio-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
+.PHONY: all help build build-ui build-extension build-all run daemon daemon-dev test test-unit test-integration test-e2e test-e2e-sqlite test-e2e-inspect test-e2e-inspect-stop e2e-k8s-up e2e-k8s-down install clean update-mcp-stars setup-hooks platform-init create-secrets e2e-env-up e2e-env-down e2e-env-rebuild docker-up docker-down docker-rebuild build-linux build-linux-arm64 sandbox-entrypoint docker-sandbox-base docker-sandbox-openshell ensure-builder push-dev push-sandbox-base-dev push-sandbox-openshell-dev push-all-dev push-dev-fast push-sandbox-base-dev-fast push-sandbox-openshell-dev-fast push-all-dev-fast ent-generate proto-gen
 
 # Docker Test Environment - isolated environment for running integration/E2E tests
 e2e-env-up:

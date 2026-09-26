@@ -41,11 +41,11 @@ make lint                    # config verify + full lint (same as CI)
 # Run the CLI
 go run .
 
-# Run Studio (production mode — serves built UI)
-make studio
+# Run Astonish (production mode — serves built Studio UI)
+make daemon
 
-# Run Studio (dev mode — live UI reload on http://localhost:5173)
-make studio-dev
+# Run in dev mode (live UI reload on http://localhost:5173)
+make daemon-dev
 ```
 
 ## Project Structure

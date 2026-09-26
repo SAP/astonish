@@ -114,7 +114,7 @@ graph TB
 
 | Mode | Backend |
 |------|---------|
-| Personal (`astonish studio`) | `DockerBackend` (empty / `docker` / legacy `incus`) |
+| Personal (`astonish daemon run`) | `DockerBackend` (empty / `docker` / legacy `incus`) |
 | Platform (`astonish daemon run`), `sandbox.backend: docker` | `DockerBackend` |
 | Platform (`astonish daemon run`), `sandbox.backend: k8s` | `K8sBackend` |
 | Platform (`astonish daemon run`), `sandbox.backend: openshell` | `OpenShellBackend` |
@@ -278,7 +278,7 @@ This lazy-refresh model is a deliberate safety property: a single `@base` edit c
 
 Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. See `docs/architecture/sandbox.md`.
 
-Personal mode (`astonish studio`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
+Personal mode (`astonish daemon run`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 
 Platform mode local/self-hosted deployments set `sandbox.backend: docker` (or leave it empty).
 
@@ -1056,18 +1056,18 @@ When bumping a mutable tag like `:dev` in production, evict the node-level image
 
 ### 6.5 Personal mode invariants
 
-`astonish studio` **never** uses the K8s backend and **never** touches the layer store, event journal, or template DAG. These invariants are type-system-enforced via `ErrUnsupported` returns from `filestore`:
+In personal mode (`astonish daemon run` with the default Docker backend and no PostgreSQL), the sandbox tier does not touch the content-addressed layer store, the cross-pod event journal, or a template DAG. Since `pkg/store/filestore/` was removed these hold by *absence*: the local JSON stores (`pkg/sandbox/tmplmeta`, `pkg/sandbox/session_store_local.go`) simply do not implement those interfaces, and the default-template resolver treats any `store.ErrUnsupported` as "skip". (Backend choice is config-driven and orthogonal to storage mode; K8s is used only when `sandbox.backend` is set to `k8s`.)
 
 1. **Runtime backend is Docker OverlayFS.** `BackendFromAppConfig` selects Docker for empty / `docker` / legacy `incus`. Assumptions: local Docker engine (native on Linux; Colima/Desktop on macOS); local filesystem for registries; no Kubernetes dependency.
-2. **Storage backend is always filestore.** Personal mode retains the JSON registries at `~/.local/share/astonish/sandbox/templates.json` and `sessions.json` via the existing `TemplateRegistry` and `SessionRegistry`. No PostgreSQL is required.
-3. **Templates remain flat.** The filestore template store ignores `ParentTemplateID` and `TopLayerID`; when the on-disk `TemplateMeta` grows these fields they are present but always `nil`/empty. Personal mode has no notion of a template DAG.
-4. **Scope degenerates to personal.** The `scope` enum value is `personal` for every template; there are no `org`/`team`/`global` templates. The default-template resolution cascade collapses to "personal default".
-5. **`@base` is a platform-only concept.** Personal mode has no `@base` template and no `SaveAsBase` admin operation; the built-in bundled template fulfills the same role. The `superadmin` role and associated admin API surface (§5.15) do not exist in personal mode.
-6. **Layer store returns `ErrUnsupported`.** `filestore.LayerStore` returns `store.ErrUnsupported` for every method.
-7. **Event journal returns `ErrUnsupported`.** `filestore.ChatEventJournal` returns `store.ErrUnsupported` for every method.
+2. **Sandbox state persists as local JSON.** Templates live in `~/.local/share/astonish/sandbox/templates.json` (`tmplmeta.TemplateRegistry`); sessions live in `sandbox_sessions.json` (`sandbox.localSessionStore`, which migrates any legacy `sessions.json` on first run). The entstore sandbox stores are Postgres-only, so even a SQLite deployment falls back to these local registries. No PostgreSQL is required.
+3. **Templates remain flat.** The local template type `tmplmeta.TemplateMeta` has no `ParentTemplateID`, `TopLayerID`, or `scope` fields at all — there is no template DAG. Those DAG fields exist only on the platform `store.SandboxTemplate`.
+4. **Scope degenerates to personal.** The local JSON registry has no scope field; the default-template resolver synthesizes a single `personal`-scoped default, so there are no `org`/`team`/`global` templates.
+5. **`@base` exists, but its admin surface is platform-only.** The Docker backend seeds an `@base` rootfs locally, so the base template is a runtime concept in personal mode. What is platform-only is `@base` *configuration* (`SetBaseConfig`) and the `superadmin` role / admin API surface (§5.15); personal mode relies on the bundled default template and exposes no such admin operations.
+6. **Content-addressed layer store: not used.** `LayerStore` is implemented only by `entstore` (platform) and is never constructed in personal mode; layer bytes are managed on disk by the Docker overlay backend.
+7. **Cross-pod event journal: not used.** `ChatEventJournal` is a defined-but-unimplemented interface — no backend implements it in any mode today — so personal mode does not touch it.
 8. **No migration path personal → platform.** Decision Q8. Personal mode is a terminal deployment shape; there is no export of templates, sessions, or layers into a PostgreSQL-backed deployment.
 
-These invariants MUST hold for every Phase A change: any code added to `pkg/store/filestore/` under the Round 2 interfaces MUST either (a) preserve existing personal-mode behavior verbatim (for template reads via `TemplateRegistry`), or (b) return `store.ErrUnsupported` verbatim. Callers that need to differentiate between "feature disabled in personal mode" and other errors use `errors.Is(err, store.ErrUnsupported)`.
+These invariants are maintained by keeping the local stores (`pkg/sandbox/tmplmeta`, `pkg/sandbox/session_store_local.go`) free of DAG, layer-store, and journal behavior. Where a platform-only operation is reached through a shared cascade, callers distinguish it from real failures via `errors.Is(err, store.ErrUnsupported)`.
 
 ## 7. Database Schema (Phase A Prerequisite)
 

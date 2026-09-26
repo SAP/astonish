@@ -89,7 +89,14 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
     const taskMap: Record<string, TaskState> = {}
     const taskOrder: string[] = []
 
-    for (const t of data.tasks) {
+    // Restored history messages may omit `tasks`/`events` (e.g. a delegate_tasks
+    // call whose buffered plan could not be matched serializes with the array
+    // absent). Guard against non-arrays so a missing field never throws
+    // "tasks is not iterable" and blanks the whole chat.
+    const tasks = Array.isArray(data.tasks) ? data.tasks : []
+    const events = Array.isArray(data.events) ? data.events : []
+
+    for (const t of tasks) {
       if (!taskMap[t.name]) {
         taskMap[t.name] = {
           name: t.name,
@@ -101,7 +108,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
       }
     }
 
-    for (const evt of data.events) {
+    for (const evt of events) {
       if (evt.type === 'delegation_start' || evt.type === 'delegation_complete') continue
 
       const taskName = evt.task_name || '_unknown'

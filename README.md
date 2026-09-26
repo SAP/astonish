@@ -272,7 +272,7 @@ astonish flows list                                # Browse team flows
 **Astonish Studio.** Visual flow designer with AI assistant, drag-and-drop editing, real-time execution, and the Apps tab for managing generative UI creations. Plan auto-progression shows agent execution in real-time. Token usage tracking with per-call visibility.
 
 ```bash
-astonish studio    # Opens at http://localhost:9393
+astonish daemon run    # Opens at http://localhost:9393
 ```
 
 ---

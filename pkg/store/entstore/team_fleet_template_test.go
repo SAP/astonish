@@ -85,3 +85,33 @@ func TestFleetTemplateStore_BundledImmutableAndWins(t *testing.T) {
 		t.Fatalf("custom name = %v", def["name"])
 	}
 }
+
+// TestFleetTemplateStore_GetFleetHealsLegacyRow verifies a legacy custom template
+// row (display name only in the `name` column, definition body has no name) is
+// healed on read so callers that validate the config see a non-empty name.
+func TestFleetTemplateStore_GetFleetHealsLegacyRow(t *testing.T) {
+	ctx := context.Background()
+	_, client := setupTeamStore(t)
+	s := &teamFleetTemplateStore{client: client}
+
+	_, err := client.FleetTemplate.Create().
+		SetKey("legacy-tmpl").
+		SetName("Legacy Template").
+		SetDefinition(map[string]any{"agents": map[string]any{}}). // no "name" in body
+		Save(ctx)
+	if err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+
+	got, ok := s.GetFleet(ctx, "legacy-tmpl")
+	if !ok {
+		t.Fatal("GetFleet: not found")
+	}
+	def, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("GetFleet type = %T, want map[string]any", got)
+	}
+	if def["name"] != "Legacy Template" {
+		t.Fatalf("healed name = %v, want %q", def["name"], "Legacy Template")
+	}
+}

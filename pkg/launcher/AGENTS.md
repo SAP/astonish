@@ -30,4 +30,4 @@ platform-backed terminal chat app and the Studio HTTP server.
 
 ## When editing
 - Changing the terminal UI chrome/render? Prefer `pkg/tui`.
-- Changing SPA-serving behavior? Update both dev (`web/dist`) and embedded paths, and re-test `make studio-dev` and `make studio`.
+- Changing SPA-serving behavior? Update both dev (`web/dist`) and embedded paths, and re-test `make daemon-dev` and `make daemon`.

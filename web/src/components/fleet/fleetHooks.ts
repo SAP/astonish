@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 
-export type FleetDetailTab = 'overview' | 'settings' | 'agents'
+export type FleetDetailTab = 'overview' | 'settings' | 'agents' | 'yaml'
 
-const TABS: FleetDetailTab[] = ['overview', 'settings', 'agents']
+const TABS: FleetDetailTab[] = ['overview', 'settings', 'agents', 'yaml']
 
 export function useFleetDetailTab(kind: 'template' | 'plan', key: string): [FleetDetailTab, (tab: FleetDetailTab) => void] {
   const readTab = useCallback(() => {

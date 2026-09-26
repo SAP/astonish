@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, ArrowRight, Code, Copy, GitBranch, Loader, Play, Radio, Rocket, RotateCcw, Trash2 } from 'lucide-react'
+import { AlertCircle, ArrowRight, Copy, GitBranch, Loader, Play, Radio, Rocket, RotateCcw, Trash2 } from 'lucide-react'
 
 import YamlDrawer from '../YamlDrawer'
 import {
@@ -24,7 +24,6 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
   const [plan, setPlan] = useState<FleetPlanData | null>(null)
   const [planStatus, setPlanStatus] = useState<FleetPlanStatusExt | null>(null)
   const [yamlContent, setYamlContent] = useState('')
-  const [showYaml, setShowYaml] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isActivating, setIsActivating] = useState(false)
@@ -75,7 +74,6 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
 
   useEffect(() => {
     setEditingAgentKey(null)
-    setShowYaml(false)
   }, [planKey])
 
   const handleTabChange = (next: typeof tab) => {
@@ -248,7 +246,7 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
   const artifacts: [string, FleetArtifactDef][] = plan.artifacts ? Object.entries(plan.artifacts) : []
   const editingAgent = editingAgentKey ? agents.find(([key]) => key === editingAgentKey) || null : null
   const canDeleteAgent = agents.length > 1
-  const bottomDock = Boolean(showYaml || editingAgent)
+  const bottomDock = Boolean(editingAgent)
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -265,20 +263,15 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
               </div>
             </div>
             <PlanActions
-              showYaml={showYaml}
               isDuplicating={isDuplicating}
               isDeleting={isDeleting}
-              onToggleYaml={() => {
-                setEditingAgentKey(null)
-                setShowYaml(v => !v)
-              }}
               onLaunch={() => setShowLaunchDialog(true)}
               onDuplicate={handleDuplicate}
               onDelete={handleDelete}
             />
           </div>
 
-          <FleetDetailTabs activeTab={tab} onChange={handleTabChange} />
+          <FleetDetailTabs activeTab={tab} onChange={handleTabChange} tabs={['overview', 'settings', 'agents', 'yaml']} />
 
           {tab === 'overview' && (
             <>
@@ -308,7 +301,6 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
               fleetSettings={plan.settings}
               selectedKey={editingAgentKey}
               onSelectedKeyChange={(key) => {
-                setShowYaml(false)
                 setEditingAgentKey(key)
               }}
               onSaveAgent={handleSaveAgent}
@@ -318,6 +310,21 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
                 if (editingAgentKey === agentKey) setEditingAgentKey(null)
               }}
             />
+          )}
+
+          {tab === 'yaml' && (
+            <div className="h-[calc(100vh-16rem)] min-h-[400px] rounded-lg overflow-hidden" style={{ border: '1px solid var(--border-color)' }}>
+              <YamlDrawer
+                content={yamlContent}
+                onChange={setYamlContent}
+                onClose={() => handleTabChange('overview')}
+                theme={theme as 'dark' | 'light'}
+                subtitle="Fleet plan configuration"
+                onSave={handleSaveYaml}
+                isSaving={isSaving}
+                saveStatus={saveStatus}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -339,21 +346,6 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
         </div>
       )}
 
-      {showYaml && !editingAgent && (
-        <div className="h-1/2" style={{ borderTop: '1px solid var(--border-color)' }}>
-          <YamlDrawer
-            content={yamlContent}
-            onChange={setYamlContent}
-            onClose={() => setShowYaml(false)}
-            theme={theme as 'dark' | 'light'}
-            subtitle="Fleet plan configuration"
-            onSave={handleSaveYaml}
-            isSaving={isSaving}
-            saveStatus={saveStatus}
-          />
-        </div>
-      )}
-
       {showLaunchDialog && (
         <LaunchDialog
           planName={plan.name || planKey}
@@ -368,12 +360,9 @@ export default function PlanDetail({ planKey, onNavigate, onRefresh, theme }: Pl
   )
 }
 
-function PlanActions({ showYaml, isDuplicating, isDeleting, onToggleYaml, onLaunch, onDuplicate, onDelete }: { showYaml: boolean; isDuplicating: boolean; isDeleting: boolean; onToggleYaml: () => void; onLaunch: () => void; onDuplicate: () => void; onDelete: () => void }) {
+function PlanActions({ isDuplicating, isDeleting, onLaunch, onDuplicate, onDelete }: { isDuplicating: boolean; isDeleting: boolean; onLaunch: () => void; onDuplicate: () => void; onDelete: () => void }) {
   return (
     <div className="flex items-center gap-2 flex-wrap justify-end">
-      <button onClick={onToggleYaml} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors" style={{ background: showYaml ? 'var(--brand-muted)' : 'var(--bg-tertiary)', color: showYaml ? 'var(--brand)' : 'var(--text-secondary)' }}>
-        <Code size={12} /> {showYaml ? 'Hide Source' : 'Import/Export YAML'}
-      </button>
       <button onClick={onLaunch} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary hover:bg-primary/90 text-white transition-colors">
         <Play size={12} /> Launch
       </button>

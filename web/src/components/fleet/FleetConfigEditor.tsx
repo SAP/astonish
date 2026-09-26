@@ -19,10 +19,10 @@ import {
 
 const TABS: FleetDetailTab[] = ['overview', 'settings', 'agents']
 
-export function FleetDetailTabs({ activeTab, onChange }: { activeTab: FleetDetailTab; onChange: (tab: FleetDetailTab) => void }) {
+export function FleetDetailTabs({ activeTab, onChange, tabs = TABS }: { activeTab: FleetDetailTab; onChange: (tab: FleetDetailTab) => void; tabs?: FleetDetailTab[] }) {
   return (
     <div className="flex items-center gap-1 rounded-lg p-1" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }}>
-      {TABS.map(tab => (
+      {tabs.map(tab => (
         <button
           key={tab}
           onClick={() => onChange(tab)}

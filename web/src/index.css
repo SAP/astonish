@@ -1060,6 +1060,12 @@ button, input, select, textarea {
   font-family: inherit;
 }
 
+/* Tailwind v4's Preflight no longer sets cursor:pointer on buttons (v3 did). */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
 .react-flow__node {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-soft);

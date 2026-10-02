@@ -3,6 +3,7 @@ package a2aclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -308,5 +309,216 @@ func TestGenerateToolsSpecialCharacters(t *testing.T) {
 	expected := "a2a_special_agent_my_skill_v2"
 	if tools[0].Name() != expected {
 		t.Errorf("expected tool name %q, got %q", expected, tools[0].Name())
+	}
+}
+
+func TestToolRunStreamingEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify it's a streaming request
+		var rpcReq a2a.JSONRPCRequest
+		json.NewDecoder(r.Body).Decode(&rpcReq)
+		if rpcReq.Method != "message/stream" {
+			t.Errorf("expected method 'message/stream', got %q", rpcReq.Method)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Errorf("expected Accept 'text/event-stream', got %q", r.Header.Get("Accept"))
+		}
+
+		// Send SSE events
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+
+		// Working status
+		workingData, _ := json.Marshal(map[string]any{
+			"result": a2a.TaskStatusUpdateEvent{
+				TaskID: "stream-task-1",
+				Status: a2a.TaskStatus{
+					State:     a2a.TaskStateWorking,
+					Timestamp: time.Now(),
+				},
+			},
+		})
+		fmt.Fprintf(w, "event: status_update\ndata: %s\n\n", workingData)
+		flusher.Flush()
+
+		// Completed status with message
+		completedData, _ := json.Marshal(map[string]any{
+			"result": a2a.TaskStatusUpdateEvent{
+				TaskID: "stream-task-1",
+				Status: a2a.TaskStatus{
+					State: a2a.TaskStateCompleted,
+					Message: &a2a.Message{
+						Role:  "agent",
+						Parts: []a2a.Part{a2a.TextPart{Text: "streamed response"}},
+					},
+					Timestamp: time.Now(),
+				},
+			},
+		})
+		fmt.Fprintf(w, "event: status_update\ndata: %s\n\n", completedData)
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := NewClient(A2AAgentConfig{
+		Name: "stream-test",
+		URL:  server.URL,
+	}, nil)
+
+	tool := &A2ATool{
+		name:      "a2a_stream_test",
+		agentName: "stream-test",
+		skillID:   "skill1",
+		client:    client,
+		streaming: true,
+	}
+
+	result, err := tool.Run(context.Background(), map[string]any{"message": "hello"})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if result["status"] != "completed" {
+		t.Errorf("expected status 'completed', got %v", result["status"])
+	}
+	if result["response"] != "streamed response" {
+		t.Errorf("expected response 'streamed response', got %v", result["response"])
+	}
+	if result["task_id"] != "stream-task-1" {
+		t.Errorf("expected task_id 'stream-task-1', got %v", result["task_id"])
+	}
+}
+
+func TestToolRunStreamingDisabled(t *testing.T) {
+	var receivedMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rpcReq a2a.JSONRPCRequest
+		json.NewDecoder(r.Body).Decode(&rpcReq)
+		receivedMethod = rpcReq.Method
+
+		resp := a2a.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      rpcReq.ID,
+			Result: a2a.Task{
+				ID:     "nonstream-task",
+				Status: a2a.TaskStatus{State: a2a.TaskStateCompleted, Timestamp: time.Now()},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(A2AAgentConfig{
+		Name: "nonstream-test",
+		URL:  server.URL,
+	}, nil)
+
+	tool := &A2ATool{
+		name:      "a2a_nonstream_test",
+		agentName: "nonstream-test",
+		skillID:   "skill1",
+		client:    client,
+		streaming: false,
+	}
+
+	_, err := tool.Run(context.Background(), map[string]any{"message": "hello"})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if receivedMethod != "message/send" {
+		t.Errorf("expected method 'message/send', got %q", receivedMethod)
+	}
+}
+
+func TestGenerateToolsStreamingFromCard(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities *a2a.AgentCapabilities
+		wantStream   bool
+	}{
+		{"streaming true", &a2a.AgentCapabilities{Streaming: true}, true},
+		{"streaming false", &a2a.AgentCapabilities{Streaming: false}, false},
+		{"nil capabilities", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			card := &a2a.AgentCard{
+				Name:         "test-agent",
+				Capabilities: tt.capabilities,
+				Skills: []a2a.Skill{
+					{ID: "s1", Name: "Skill", Description: "A skill"},
+				},
+			}
+			tools := GenerateTools("test", card, nil)
+			if len(tools) != 1 {
+				t.Fatalf("expected 1 tool, got %d", len(tools))
+			}
+			if tools[0].streaming != tt.wantStream {
+				t.Errorf("streaming = %v, want %v", tools[0].streaming, tt.wantStream)
+			}
+		})
+	}
+}
+
+func TestCollectStreamResultWithArtifacts(t *testing.T) {
+	ch := make(chan StreamEvent, 3)
+	ch <- StreamEvent{
+		Type: "status_update",
+		StatusUpdate: &a2a.TaskStatusUpdateEvent{
+			TaskID: "art-task",
+			Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+		},
+	}
+	ch <- StreamEvent{
+		Type: "artifact_update",
+		ArtifactUpdate: &a2a.TaskArtifactUpdateEvent{
+			TaskID:   "art-task",
+			Artifact: a2a.Artifact{Name: "result", Description: "The result", Index: 0},
+		},
+	}
+	ch <- StreamEvent{
+		Type: "status_update",
+		StatusUpdate: &a2a.TaskStatusUpdateEvent{
+			TaskID: "art-task",
+			Status: a2a.TaskStatus{
+				State:   a2a.TaskStateCompleted,
+				Message: &a2a.Message{Role: "agent", Parts: []a2a.Part{a2a.TextPart{Text: "done"}}},
+			},
+		},
+	}
+	close(ch)
+
+	result, err := collectStreamResult(ch)
+	if err != nil {
+		t.Fatalf("collectStreamResult failed: %v", err)
+	}
+	if result["status"] != "completed" {
+		t.Errorf("status = %v, want completed", result["status"])
+	}
+	if result["response"] != "done" {
+		t.Errorf("response = %v, want done", result["response"])
+	}
+	if result["task_id"] != "art-task" {
+		t.Errorf("task_id = %v, want art-task", result["task_id"])
+	}
+	artifacts, ok := result["artifacts"].([]any)
+	if !ok || len(artifacts) != 1 {
+		t.Fatalf("expected 1 artifact, got %v", result["artifacts"])
+	}
+}
+
+func TestCollectStreamResultWithError(t *testing.T) {
+	ch := make(chan StreamEvent, 1)
+	ch <- StreamEvent{Error: fmt.Errorf("stream failed")}
+	close(ch)
+
+	result, err := collectStreamResult(ch)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if result["status"] != "error" {
+		t.Errorf("status = %v, want error", result["status"])
 	}
 }

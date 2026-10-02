@@ -19,6 +19,7 @@ type A2ATool struct {
 	agentName   string
 	skillID     string
 	client      *Client
+	streaming   bool
 }
 
 // Name returns the sanitized tool name.
@@ -54,6 +55,17 @@ func (t *A2ATool) Run(ctx context.Context, args map[string]any) (map[string]any,
 		params.Configuration = &a2a.TaskConfig{
 			ContextID: contextID,
 		}
+	}
+
+	if t.streaming {
+		ch, err := t.client.SendMessageStream(ctx, params)
+		if err != nil {
+			return map[string]any{
+				"status":   "error",
+				"response": err.Error(),
+			}, err
+		}
+		return collectStreamResult(ch)
 	}
 
 	task, err := t.client.SendMessage(ctx, params)
@@ -136,12 +148,69 @@ func ExtractResponse(task *a2a.Task) string {
 	return ""
 }
 
+// collectStreamResult drains an SSE stream channel and reconstructs the final
+// task state, response text, task ID, and artifacts from the streamed events.
+func collectStreamResult(ch <-chan StreamEvent) (map[string]any, error) {
+	var (
+		lastStatus  a2a.TaskState
+		lastMessage *a2a.Message
+		taskID      string
+		artifacts   []any
+	)
+	for event := range ch {
+		if event.Error != nil {
+			return map[string]any{
+				"status":   "error",
+				"response": event.Error.Error(),
+			}, event.Error
+		}
+		if event.StatusUpdate != nil {
+			taskID = event.StatusUpdate.TaskID
+			lastStatus = event.StatusUpdate.Status.State
+			if event.StatusUpdate.Status.Message != nil {
+				lastMessage = event.StatusUpdate.Status.Message
+			}
+		}
+		if event.ArtifactUpdate != nil {
+			if taskID == "" {
+				taskID = event.ArtifactUpdate.TaskID
+			}
+			art := event.ArtifactUpdate.Artifact
+			artifacts = append(artifacts, map[string]any{
+				"name":        art.Name,
+				"description": art.Description,
+				"index":       art.Index,
+			})
+		}
+	}
+	response := ""
+	if lastMessage != nil {
+		for _, part := range lastMessage.Parts {
+			if tp, ok := part.(a2a.TextPart); ok {
+				response = tp.Text
+				break
+			}
+		}
+	}
+	if artifacts == nil {
+		artifacts = []any{}
+	}
+	return map[string]any{
+		"status":    string(lastStatus),
+		"response":  response,
+		"task_id":   taskID,
+		"artifacts": artifacts,
+	}, nil
+}
+
 // GenerateTools creates A2ATool instances from an agent card's skills.
 // If the card has no skills, a single generic tool is generated.
 func GenerateTools(agentName string, card *a2a.AgentCard, client *Client) []*A2ATool {
 	if card == nil {
 		return nil
 	}
+
+	streaming := card.Capabilities != nil && card.Capabilities.Streaming
 
 	if len(card.Skills) == 0 {
 		// Generate a single generic tool for the agent
@@ -158,6 +227,7 @@ func GenerateTools(agentName string, card *a2a.AgentCard, client *Client) []*A2A
 				agentName:   agentName,
 				skillID:     "",
 				client:      client,
+				streaming:   streaming,
 			},
 		}
 	}
@@ -179,6 +249,7 @@ func GenerateTools(agentName string, card *a2a.AgentCard, client *Client) []*A2A
 			agentName:   agentName,
 			skillID:     skill.ID,
 			client:      client,
+			streaming:   streaming,
 		})
 	}
 

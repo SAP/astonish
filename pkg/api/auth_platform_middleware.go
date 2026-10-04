@@ -28,6 +28,21 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if pa.IsNoAuth() {
+			claims, err := pa.singleUserClaims(r.Context())
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to resolve local user")
+				return
+			}
+			ctx, err := buildAuthenticatedContext(r.Context(), claims, claims.DefaultTeamSlug)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to build local user context")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		// An OAuth protocol adapter may already have validated a scoped Astonish
 		// bearer and attached its canonical principal. Do not reinterpret that
 		// token as a legacy platform JWT.

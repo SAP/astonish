@@ -214,11 +214,12 @@ func cleanPGError(msg string) string {
 
 // SQLitePlatformInitRequest is the request body for POST /api/platform/init/sqlite.
 type SQLitePlatformInitRequest struct {
-	DataDir      string `json:"data_dir"`
-	OrgName      string `json:"org_name"`
-	OrgSlug      string `json:"org_slug"`
-	AdminEmail   string `json:"admin_email"`
-	AdminName    string `json:"admin_name"`
+	DataDir       string `json:"data_dir"`
+	OrgName       string `json:"org_name"`
+	OrgSlug       string `json:"org_slug"`
+	AuthMode      string `json:"auth_mode,omitempty"`
+	AdminEmail    string `json:"admin_email"`
+	AdminName     string `json:"admin_name"`
 	AdminPassword string `json:"admin_password"`
 }
 
@@ -251,14 +252,20 @@ func SQLitePlatformInitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields.
-	if req.AdminEmail == "" {
+	if req.AuthMode == "" {
+		req.AuthMode = config.AuthModeNone
+	}
+	if err := config.ValidateAuthMode("sqlite", req.AuthMode); err != nil {
+		respondJSON(w, http.StatusBadRequest, PlatformInitResponse{Error: err.Error()})
+		return
+	}
+	if req.AuthMode == config.AuthModeBuiltin && req.AdminEmail == "" {
 		respondJSON(w, http.StatusBadRequest, PlatformInitResponse{
 			Error: "Admin email is required",
 		})
 		return
 	}
-	if req.AdminPassword == "" || len(req.AdminPassword) < 8 {
+	if req.AuthMode == config.AuthModeBuiltin && (req.AdminPassword == "" || len(req.AdminPassword) < 8) {
 		respondJSON(w, http.StatusBadRequest, PlatformInitResponse{
 			Error: "Admin password must be at least 8 characters",
 		})
@@ -311,6 +318,28 @@ func SQLitePlatformInitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer entStore.Close()
+
+	if req.AuthMode == config.AuthModeNone {
+		if err := store.ProvisionSingleUser(ctx, entStore, req.OrgName, req.OrgSlug); err != nil {
+			respondJSON(w, http.StatusInternalServerError, PlatformInitResponse{Error: "Failed to create local workspace: " + err.Error()})
+			return
+		}
+		cfg.Storage.Backend = "sqlite"
+		cfg.Storage.SQLite.DataDir = dataDir
+		cfg.Storage.Auth.Mode = config.AuthModeNone
+		cfg.Storage.Auth.DefaultOrgName = req.OrgName
+		cfg.Storage.Auth.DefaultOrgSlug = req.OrgSlug
+		if err := config.SaveAppConfig(cfg); err != nil {
+			respondJSON(w, http.StatusInternalServerError, PlatformInitResponse{Error: "Platform initialized but failed to save config: " + err.Error()})
+			return
+		}
+		respondJSON(w, http.StatusOK, PlatformInitResponse{
+			Success:         true,
+			Message:         "SQLite single-user workspace initialized successfully. Please restart Astonish to activate it.",
+			RestartRequired: true,
+		})
+		return
+	}
 
 	// Seed admin user.
 	now := time.Now()

@@ -777,22 +777,33 @@ func sanitizeDBSlug(s string) string {
 	return b.String()
 }
 
+const (
+	// AuthModeNone uses the automatically provisioned local user without login.
+	// It is supported only by the SQLite backend.
+	AuthModeNone = "none"
+	// AuthModeBuiltin uses email/password registration and JWT sessions.
+	AuthModeBuiltin = "builtin"
+	// AuthModeOIDC delegates authentication to an OpenID Connect provider.
+	AuthModeOIDC = "oidc"
+
+	// SingleUserID and SingleUserEmail identify the local user provisioned when
+	// SQLite runs in single-user mode.
+	SingleUserID    = "00000000-0000-4000-8000-000000000001"
+	SingleUserEmail = "local@astonish.local"
+)
+
 // PlatformAuthConfig controls authentication in platform (multi-tenant) mode.
 //
-// Two modes are supported:
-//   - "builtin" (default): Email/password registration with bcrypt hashing.
-//     JWT tokens are issued as httpOnly cookies. This mode requires no external
-//     identity provider and works out of the box.
-//   - "oidc": Delegates authentication to an external OpenID Connect provider
-//     (SAP IAS, Azure AD, Okta, etc.). Users are auto-created on first login.
-//     Team memberships can be auto-mapped from OIDC group claims.
-//
-// Both modes use JWT for session management. The JWT contains user ID, org slug,
-// and default team slug as claims. A separate X-Astonish-Team header allows
-// switching team context within the same org.
+// Modes are "none" (SQLite single-user only), "builtin" (email/password), and
+// "oidc" (external OpenID Connect). Builtin and OIDC use JWT session management.
 type PlatformAuthConfig struct {
-	// Mode selects the authentication strategy: "builtin" (default) or "oidc".
+	// Mode selects the authentication strategy. SQLite defaults to "none" when omitted;
+	// other backends default to "builtin".
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// SingleUserEmail selects the existing user used by SQLite no-auth mode.
+	// Empty uses SingleUserEmail (local@astonish.local) for fresh installations.
+	SingleUserEmail string `yaml:"single_user_email,omitempty" json:"single_user_email,omitempty"`
 
 	// JWTSecret is the HMAC-SHA256 signing key for access and refresh tokens.
 	// Required in platform mode. If empty, a random 32-byte key is generated
@@ -841,6 +852,36 @@ type PlatformAuthConfig struct {
 	//   "never"      — loopback requests go through full auth like remote requests
 	// Default: "with_token" in platform mode, "always" in personal mode.
 	LoopbackBypass string `yaml:"loopback_bypass,omitempty" json:"loopback_bypass,omitempty"`
+}
+
+// EffectiveAuthMode returns the configured mode, or the backend-specific default.
+// SQLite defaults to single-user mode; other backends default to builtin auth.
+func (c PlatformAuthConfig) EffectiveAuthMode(backend string) string {
+	if c.Mode != "" {
+		return c.Mode
+	}
+	if backend == "sqlite" {
+		return AuthModeNone
+	}
+	return AuthModeBuiltin
+}
+
+// IsNoAuth reports whether this config enables SQLite single-user mode.
+func (c PlatformAuthConfig) IsNoAuth(backend string) bool {
+	return c.EffectiveAuthMode(backend) == AuthModeNone
+}
+
+// ValidateAuthMode ensures the configured auth mode is valid for the storage backend.
+func ValidateAuthMode(backend, mode string) error {
+	switch mode {
+	case "", AuthModeNone, AuthModeBuiltin, AuthModeOIDC:
+	default:
+		return fmt.Errorf("unsupported auth mode %q", mode)
+	}
+	if backend == "postgres" && mode == AuthModeNone {
+		return fmt.Errorf("auth mode %q is only supported with the sqlite backend", AuthModeNone)
+	}
+	return nil
 }
 
 // OAuthServerConfig configures Astonish-issued OAuth/OIDC tokens. The issuer

@@ -35,12 +35,13 @@ type orgResolver interface {
 // It handles user registration, login, JWT token lifecycle, and automated
 // org/team provisioning for the first user.
 type PlatformAuth struct {
-	jwt          *JWTIssuer
-	authCfg      config.PlatformAuthConfig
-	pgStore      store.PlatformBackend
-	storeCfg     config.StorageConfig
-	orgResolver  orgResolver // defaults to pgStore; override in tests
-	linkCodes    store.LinkCodeStore
+	jwt         *JWTIssuer
+	authCfg     config.PlatformAuthConfig
+	pgStore     store.PlatformBackend
+	storeCfg    config.StorageConfig
+	noAuthMode  bool
+	orgResolver orgResolver // defaults to pgStore; override in tests
+	linkCodes   store.LinkCodeStore
 }
 
 // NewPlatformAuth creates a new platform auth manager.
@@ -51,8 +52,14 @@ func NewPlatformAuth(authCfg config.PlatformAuthConfig, backend store.PlatformBa
 		authCfg:     authCfg,
 		pgStore:     backend,
 		storeCfg:    storeCfg,
+		noAuthMode:  authCfg.IsNoAuth(storeCfg.Backend),
 		orgResolver: backend,
 	}
+}
+
+// IsNoAuth reports whether this platform uses the automatically authenticated local user.
+func (pa *PlatformAuth) IsNoAuth() bool {
+	return pa.noAuthMode
 }
 
 // SetLinkCodeStoreForAuth sets the link code store for registration email verification.
@@ -87,14 +94,14 @@ type registerRequest struct {
 }
 
 type authResponse struct {
-	User           authUserResponse  `json:"user"`
-	Org            authOrgResponse   `json:"org"`
-	AccessToken    string            `json:"access_token,omitempty"`
-	RefreshToken   string            `json:"refresh_token,omitempty"`
-	ExpiresIn      int               `json:"expires_in"`
-	TeamSlug       string            `json:"team,omitempty"`
-	AvailableOrgs  []authOrgOption   `json:"available_orgs,omitempty"`
-	AvailableTeams []authTeamOption  `json:"available_teams,omitempty"`
+	User           authUserResponse `json:"user"`
+	Org            authOrgResponse  `json:"org"`
+	AccessToken    string           `json:"access_token,omitempty"`
+	RefreshToken   string           `json:"refresh_token,omitempty"`
+	ExpiresIn      int              `json:"expires_in"`
+	TeamSlug       string           `json:"team,omitempty"`
+	AvailableOrgs  []authOrgOption  `json:"available_orgs,omitempty"`
+	AvailableTeams []authTeamOption `json:"available_teams,omitempty"`
 }
 
 type authOrgOption struct {
@@ -277,9 +284,9 @@ func (pa *PlatformAuth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if user.Status == "pending_verification" {
 		respondJSON(w, http.StatusForbidden, map[string]any{
 			"error":                 "email_not_verified",
-			"message":              "Please verify your email address before logging in.",
+			"message":               "Please verify your email address before logging in.",
 			"requires_verification": true,
-			"email":                user.Email,
+			"email":                 user.Email,
 		})
 		return
 	}
@@ -597,6 +604,10 @@ func (pa *PlatformAuth) handleLogout(w http.ResponseWriter, r *http.Request) {
 // --- Handler: GET /api/auth/me ---
 
 func (pa *PlatformAuth) handleMe(w http.ResponseWriter, r *http.Request) {
+	if pa.IsNoAuth() {
+		pa.respondSingleUser(w, r)
+		return
+	}
 	// Read access token from Authorization header (CLI) or cookie (browser)
 	var tokenStr string
 	if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
@@ -641,6 +652,14 @@ func (pa *PlatformAuth) handleMe(w http.ResponseWriter, r *http.Request) {
 // Used by the frontend to decide whether to show register or login.
 
 func (pa *PlatformAuth) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	if pa.IsNoAuth() {
+		respondJSON(w, http.StatusOK, map[string]any{
+			"initialized":        true,
+			"allow_registration": false,
+			"auth_mode":          config.AuthModeNone,
+		})
+		return
+	}
 	ctx := r.Context()
 	count, err := pa.pgStore.Organizations().Count(ctx)
 	if err != nil {
@@ -651,10 +670,73 @@ func (pa *PlatformAuth) handleSetupStatus(w http.ResponseWriter, r *http.Request
 	resp := map[string]any{
 		"initialized":        count > 0,
 		"allow_registration": pa.isRegistrationEffectivelyAllowed(ctx),
-		"auth_mode":          pa.authCfg.Mode,
+		"auth_mode":          pa.authCfg.EffectiveAuthMode(pa.storeCfg.Backend),
 	}
 
 	respondJSON(w, http.StatusOK, resp)
+}
+
+func (pa *PlatformAuth) respondSingleUser(w http.ResponseWriter, r *http.Request) {
+	claims, err := pa.singleUserClaims(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to resolve local user")
+		return
+	}
+	org, err := pa.pgStore.Organizations().GetBySlug(r.Context(), claims.OrgSlug)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to resolve local organization")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"user": authUserResponse{
+			ID:           claims.UserID,
+			Email:        claims.Email,
+			DisplayName:  claims.DisplayName,
+			Role:         claims.Role,
+			PlatformRole: claims.PlatformRole,
+		},
+		"org":  authOrgResponse{ID: org.ID, Name: org.Name, Slug: org.Slug},
+		"team": claims.DefaultTeamSlug,
+	})
+}
+
+func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, error) {
+	identity := pa.authCfg.SingleUserEmail
+	if identity == "" {
+		identity = config.SingleUserEmail
+	}
+	user, err := pa.pgStore.Users().GetByEmail(ctx, identity)
+	if err != nil {
+		return nil, fmt.Errorf("get single user %q: %w", identity, err)
+	}
+	if user == nil {
+		return nil, fmt.Errorf("get single user %q: user not found", identity)
+	}
+	if user.Status != "active" {
+		return nil, fmt.Errorf("get single user %q: user is not active", identity)
+	}
+	memberships, err := pa.pgStore.Organizations().GetUserOrgs(ctx, user.ID)
+	if err != nil || len(memberships) == 0 {
+		return nil, fmt.Errorf("get single user organization: %w", err)
+	}
+	membership := memberships[0]
+	orgStore, err := pa.orgResolver.ForOrg(membership.OrgSlug)
+	if err != nil {
+		return nil, fmt.Errorf("get local organization store: %w", err)
+	}
+	teams, err := orgStore.Teams().ListTeamsForUser(ctx, user.ID)
+	if err != nil || len(teams) == 0 {
+		return nil, fmt.Errorf("get local user team: %w", err)
+	}
+	return &PlatformClaims{
+		UserID:          user.ID,
+		Email:           user.Email,
+		DisplayName:     user.DisplayName,
+		OrgSlug:         membership.OrgSlug,
+		Role:            membership.Role,
+		PlatformRole:    user.PlatformRole,
+		DefaultTeamSlug: teams[0].Slug,
+	}, nil
 }
 
 // --- Effective auth policy (DB override > YAML config) ---

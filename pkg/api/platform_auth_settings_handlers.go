@@ -5,22 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/store"
 )
 
 // platformAuthSettingsResponse is returned by GET /api/platform/admin/auth-settings.
 // It represents the effective auth policy (DB override merged with config defaults).
 type platformAuthSettingsResponse struct {
-	AllowRegistration        bool `json:"allow_registration"`
-	RequireEmailVerification bool `json:"require_email_verification"`
-	DevEnvironment           bool `json:"dev_environment"`
+	AllowRegistration        bool   `json:"allow_registration"`
+	RequireEmailVerification bool   `json:"require_email_verification"`
+	DevEnvironment           bool   `json:"dev_environment"`
+	AuthMode                 string `json:"auth_mode"`
+	SingleUserEmail          string `json:"single_user_email,omitempty"`
 }
 
 // platformAuthSettingsRequest is accepted by PUT /api/platform/admin/auth-settings.
 type platformAuthSettingsRequest struct {
-	AllowRegistration        *bool `json:"allow_registration"`
-	RequireEmailVerification *bool `json:"require_email_verification"`
-	DevEnvironment           *bool `json:"dev_environment"`
+	AllowRegistration        *bool  `json:"allow_registration"`
+	RequireEmailVerification *bool  `json:"require_email_verification"`
+	DevEnvironment           *bool  `json:"dev_environment"`
+	AuthMode                 string `json:"auth_mode,omitempty"`
+	SingleUserEmail          string `json:"single_user_email,omitempty"`
 }
 
 // PlatformAdminGetAuthSettingsHandler handles GET /api/platform/admin/auth-settings.
@@ -44,6 +49,13 @@ func PlatformAdminGetAuthSettingsHandler(w http.ResponseWriter, r *http.Request)
 		AllowRegistration:        effectiveAllowRegistration(settings, pa),
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),
 		DevEnvironment:           effectiveDevEnvironment(settings),
+	}
+	if pa != nil {
+		resp.AuthMode = pa.authCfg.EffectiveAuthMode(pa.storeCfg.Backend)
+		resp.SingleUserEmail = pa.authCfg.SingleUserEmail
+		if resp.SingleUserEmail == "" {
+			resp.SingleUserEmail = config.SingleUserEmail
+		}
 	}
 
 	respondJSON(w, http.StatusOK, resp)
@@ -89,7 +101,48 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		settings.Auth.DevEnvironment = req.DevEnvironment
 	}
 
-	// Persist.
+	if req.AuthMode != "" || req.SingleUserEmail != "" {
+		if req.AuthMode == "" {
+			req.AuthMode = config.AuthModeNone
+		}
+		backendName := "sqlite"
+		if pa := getPlatformAuth(); pa != nil {
+			backendName = pa.storeCfg.Backend
+		}
+		if err := config.ValidateAuthMode(backendName, req.AuthMode); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.AuthMode == config.AuthModeNone && req.SingleUserEmail == "" {
+			respondError(w, http.StatusBadRequest, "single_user_email is required when enabling no-login mode")
+			return
+		}
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to load app config")
+			return
+		}
+		cfg.Storage.Auth.Mode = req.AuthMode
+		if req.AuthMode == config.AuthModeNone {
+			user, err := backend.Users().GetByEmail(ctx, req.SingleUserEmail)
+			if err != nil || user == nil {
+				respondError(w, http.StatusBadRequest, "selected single user was not found")
+				return
+			}
+			if user.Status != "active" {
+				respondError(w, http.StatusBadRequest, "selected single user is not active")
+				return
+			}
+			cfg.Storage.Auth.SingleUserEmail = user.Email
+		} else {
+			cfg.Storage.Auth.SingleUserEmail = ""
+		}
+		if err := config.SaveAppConfig(cfg); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
+			return
+		}
+	}
+
 	if err := backend.PlatformSettings().Save(ctx, settings); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save auth settings")
 		return
@@ -101,6 +154,13 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		AllowRegistration:        effectiveAllowRegistration(settings, pa),
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),
 		DevEnvironment:           effectiveDevEnvironment(settings),
+	}
+	if pa != nil {
+		resp.AuthMode = pa.authCfg.EffectiveAuthMode(pa.storeCfg.Backend)
+		resp.SingleUserEmail = pa.authCfg.SingleUserEmail
+		if resp.SingleUserEmail == "" {
+			resp.SingleUserEmail = config.SingleUserEmail
+		}
 	}
 	respondJSON(w, http.StatusOK, resp)
 }

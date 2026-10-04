@@ -243,6 +243,33 @@ func Run(cfg RunConfig) error {
 	}
 	logStartupPhase("migrations", "complete", migrationStarted)
 
+	// Preserve authentication for SQLite installations created before no-auth mode.
+	// An omitted mode means no-auth only for a genuinely new workspace; an existing
+	// organization proves this database was already initialized under the legacy
+	// authenticated setup.
+	if appCfg.Storage.Backend == "sqlite" && appCfg.Storage.Auth.Mode == "" {
+		orgCount, err := entStore.Organizations().Count(context.Background())
+		if err != nil {
+			return fmt.Errorf("detect existing SQLite workspace: %w", err)
+		}
+		if orgCount > 0 {
+			appCfg.Storage.Auth.Mode = config.AuthModeBuiltin
+			logger.Printf("Existing SQLite workspace detected; preserving builtin authentication")
+		} else {
+			appCfg.Storage.Auth.Mode = config.AuthModeNone
+		}
+	}
+	if err := config.ValidateAuthMode(appCfg.Storage.Backend, appCfg.Storage.Auth.Mode); err != nil {
+		return fmt.Errorf("invalid authentication configuration: %w", err)
+	}
+	if appCfg.Storage.Auth.IsNoAuth(appCfg.Storage.Backend) {
+		if err := store.ProvisionSingleUser(context.Background(), entStore,
+			appCfg.Storage.Auth.GetDefaultOrgName(), appCfg.Storage.Auth.GetDefaultOrgSlug()); err != nil {
+			return fmt.Errorf("auto-provision single user: %w", err)
+		}
+		logger.Printf("Single-user mode: default user and workspace ready")
+	}
+
 	// Initialize embedding
 	embeddingStarted := time.Now()
 	{

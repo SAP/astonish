@@ -33,6 +33,9 @@ func newOAuthServerRuntimeConfig(oauthCfg config.OAuthServerConfig, port int, bu
 		Resource:        oauthCfg.EffectiveResource(issuer),
 		AccessTokenTTL:  time.Duration(oauthCfg.AccessTokenTTLMinutes) * time.Minute,
 		RefreshTokenTTL: time.Duration(oauthCfg.RefreshTokenTTLDays) * 24 * time.Hour,
-		Development:     builtinAuth && strings.HasPrefix(issuer, "http://"),
+		// Loopback HTTP is safe for local SQLite deployments, including no-login
+		// mode. Non-loopback issuers still require HTTPS unless builtin auth is
+		// explicitly running in development mode.
+		Development: strings.HasPrefix(issuer, "http://127.0.0.1:") || strings.HasPrefix(issuer, "http://[::1]:") || (builtinAuth && strings.HasPrefix(issuer, "http://")),
 	}
 }

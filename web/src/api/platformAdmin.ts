@@ -490,6 +490,8 @@ export interface PlatformAuthSettings {
   allow_registration: boolean
   require_email_verification: boolean
   dev_environment: boolean
+  auth_mode: 'none' | 'builtin' | 'oidc'
+  single_user_email?: string
 }
 
 export async function getPlatformAuthSettings(): Promise<PlatformAuthSettings> {

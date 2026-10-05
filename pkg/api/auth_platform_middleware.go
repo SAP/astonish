@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -37,9 +38,13 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 		}
 
 		// Single-user mode is intentionally limited to requests originating on
-		// the local machine. The Studio listener binds all interfaces, so a
-		// no-auth identity must never be granted to a remote client.
+		// the local machine. The Studio listener binds no-auth mode to loopback,
+		// and this check keeps the local identity out of remote request contexts.
 		if pa.IsNoAuth() && isLoopbackRequest(r) {
+			if err := validateNoAuthOrigin(r); err != nil {
+				respondError(w, http.StatusForbidden, err.Error())
+				return
+			}
 			claims, err := pa.singleUserClaims(r.Context())
 			if err != nil {
 				respondError(w, http.StatusInternalServerError, "failed to resolve local user")
@@ -337,7 +342,27 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// --- PlatformUser context ---
+// validateNoAuthOrigin rejects unsafe browser requests whose Origin is not local.
+// Requests without an Origin header are non-browser clients and remain supported.
+func validateNoAuthOrigin(r *http.Request) error {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return nil
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return nil
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid request origin %q", origin)
+	}
+	switch parsed.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("request origin %q is not a trusted local address", origin)
+	}
+}
 
 // PlatformUser represents the authenticated user for the current request.
 type PlatformUser struct {

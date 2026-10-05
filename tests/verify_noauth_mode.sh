@@ -7,6 +7,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gomodcache="$(go env GOMODCACHE)"
 tmp="$(mktemp -d)"
 port="${ASTONISH_VERIFY_PORT:-19393}"
+ready_timeout="${ASTONISH_VERIFY_READY_TIMEOUT:-180}"
 pid=""
 
 cleanup() {
@@ -41,7 +42,7 @@ go build -o "$tmp/astonish" .
 pid=$!
 
 ready=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 "$ready_timeout"); do
   if curl --fail --silent "http://127.0.0.1:$port/api/healthz" >/dev/null; then
     ready=1
     break
@@ -63,3 +64,9 @@ printf '%s' "$me" | grep -q '"email":"local@astonish.local"'
 
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/api/studio/sessions")"
 [[ "$status" == "200" ]]
+
+foreign_origin_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST -H 'Origin: http://evil.example.com' -H 'Content-Type: application/json' "http://127.0.0.1:$port/api/studio/sessions")"
+[[ "$foreign_origin_status" == "403" ]]
+
+local_origin_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST -H "Origin: http://localhost:$port" -H 'Content-Type: application/json' "http://127.0.0.1:$port/api/studio/sessions")"
+[[ "$local_origin_status" != "403" ]]

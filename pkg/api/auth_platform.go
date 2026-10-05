@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -718,17 +719,43 @@ func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, 
 		return nil, fmt.Errorf("get single user %q: user is not active", identity)
 	}
 	memberships, err := pa.pgStore.Organizations().GetUserOrgs(ctx, user.ID)
-	if err != nil || len(memberships) == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("get single user organization: %w", err)
 	}
+	if len(memberships) == 0 {
+		return nil, fmt.Errorf("get single user organization: no memberships")
+	}
+	defaultOrgSlug := pa.authCfg.GetDefaultOrgSlug()
+	sort.Slice(memberships, func(i, j int) bool {
+		return memberships[i].OrgSlug < memberships[j].OrgSlug
+	})
 	membership := memberships[0]
+	for _, candidate := range memberships {
+		if candidate.OrgSlug == defaultOrgSlug {
+			membership = candidate
+			break
+		}
+	}
 	orgStore, err := pa.orgResolver.ForOrg(membership.OrgSlug)
 	if err != nil {
 		return nil, fmt.Errorf("get local organization store: %w", err)
 	}
 	teams, err := orgStore.Teams().ListTeamsForUser(ctx, user.ID)
-	if err != nil || len(teams) == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("get local user team: %w", err)
+	}
+	if len(teams) == 0 {
+		return nil, fmt.Errorf("get local user team: no memberships")
+	}
+	sort.Slice(teams, func(i, j int) bool {
+		return teams[i].Slug < teams[j].Slug
+	})
+	selectedTeam := teams[0]
+	for _, candidate := range teams {
+		if candidate.Slug == "general" {
+			selectedTeam = candidate
+			break
+		}
 	}
 	return &PlatformClaims{
 		UserID:          user.ID,
@@ -737,7 +764,7 @@ func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, 
 		OrgSlug:         membership.OrgSlug,
 		Role:            membership.Role,
 		PlatformRole:    user.PlatformRole,
-		DefaultTeamSlug: teams[0].Slug,
+		DefaultTeamSlug: selectedTeam.Slug,
 	}, nil
 }
 

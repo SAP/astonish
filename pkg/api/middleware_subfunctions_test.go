@@ -57,6 +57,41 @@ func TestIsAuthExemptPath(t *testing.T) {
 	}
 }
 
+func TestValidateNoAuthOrigin(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		origin    string
+		expectErr bool
+	}{
+		{name: "GET with foreign origin", method: http.MethodGet, origin: "http://evil.example.com"},
+		{name: "POST without origin", method: http.MethodPost},
+		{name: "POST from localhost", method: http.MethodPost, origin: "http://localhost:9393"},
+		{name: "POST from IPv4 loopback", method: http.MethodPost, origin: "http://127.0.0.1:9393"},
+		{name: "POST from IPv6 loopback", method: http.MethodPost, origin: "http://[::1]:9393"},
+		{name: "POST from HTTPS localhost", method: http.MethodPost, origin: "https://localhost:9393"},
+		{name: "POST from foreign origin", method: http.MethodPost, origin: "http://evil.example.com", expectErr: true},
+		{name: "POST from deceptive localhost hostname", method: http.MethodPost, origin: "http://localhost.evil.com", expectErr: true},
+		{name: "DELETE from foreign origin", method: http.MethodDelete, origin: "http://attacker.local", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/test", nil)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			err := validateNoAuthOrigin(req)
+			if tt.expectErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.expectErr && err != nil {
+				t.Fatalf("validateNoAuthOrigin() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateCSRF(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -192,9 +227,9 @@ func TestResolveCredentialHeader(t *testing.T) {
 		expectErr   bool
 	}{
 		{
-			name:        "nil credential returns error",
-			cred:        nil,
-			expectErr:   true,
+			name:      "nil credential returns error",
+			cred:      nil,
+			expectErr: true,
 		},
 		{
 			name:        "API key with custom header",

@@ -120,6 +120,30 @@ func TestPlatformAuthMiddleware_NoAuthPreservesScopedPrincipal(t *testing.T) {
 		t.Fatalf("principal = %#v, want %#v", got, scoped)
 	}
 }
+func TestPlatformAuthMiddleware_NoAuthRejectsForeignOriginPOST(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://evil.example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("foreign-origin no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-origin no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestPlatformAuthMiddleware_NoAuthRejectsRemote(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true

@@ -133,6 +133,10 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 				respondError(w, http.StatusBadRequest, "selected single user is not active")
 				return
 			}
+			if user.PlatformRole != "superadmin" {
+				respondError(w, http.StatusBadRequest, "no-login mode requires a superadmin user")
+				return
+			}
 			cfg.Storage.Auth.SingleUserEmail = user.Email
 		} else {
 			cfg.Storage.Auth.SingleUserEmail = ""

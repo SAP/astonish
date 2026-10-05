@@ -226,7 +226,7 @@ export default function AuthTab() {
             >
               <option value="">Require login (builtin authentication)</option>
               {users.filter(user => user.status === 'active').map(user => (
-                <option key={user.id} value={user.email}>{user.display_name} — {user.email}</option>
+                <option key={user.id} value={user.email}>{user.display_name} — {user.email} ({user.platform_role || 'member'})</option>
               ))}
             </select>
             <button
@@ -239,7 +239,7 @@ export default function AuthTab() {
             </button>
           </div>
           <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
-            Current mode: {authSettings?.auth_mode || 'unknown'}{authSettings?.single_user_email ? ` (${authSettings.single_user_email})` : ''}. Restart Astonish after changing this setting.
+                         Current mode: {authSettings?.auth_mode || 'unknown'}{authSettings?.single_user_email ? ` (${authSettings.single_user_email})` : ''}. The selected user must have the superadmin role. Restart Astonish after changing this setting.
           </p>
         </div>
 

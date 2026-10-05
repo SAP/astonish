@@ -82,6 +82,21 @@ func TestPlatformAuthHandleMe_NoAuthRejectsRemote(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthHandleMe_NoAuthRejectsForeignHost(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example.com/api/auth/me", nil)
+	req.Host = "evil.example.com"
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	pa.handleMe(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-host no-auth /api/auth/me status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestPlatformAuthMiddleware_NoAuthPreservesScopedPrincipal(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true

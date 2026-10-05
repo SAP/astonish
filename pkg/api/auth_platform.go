@@ -612,6 +612,10 @@ func (pa *PlatformAuth) handleMe(w http.ResponseWriter, r *http.Request) {
 	// The auth middleware intentionally bypasses /api/auth/* routes, so apply
 	// the same loopback restriction here before exposing the local identity.
 	if pa.IsNoAuth() && isLoopbackRequest(r) {
+		if err := validateNoAuthRequest(r); err != nil {
+			respondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		pa.respondSingleUser(w, r)
 		return
 	}
@@ -723,9 +727,9 @@ func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, 
 
 	pa.claimsMu.Lock()
 	if pa.claims != nil && pa.claimsEmail == identity {
-		claims := pa.claims
+		claims := *pa.claims
 		pa.claimsMu.Unlock()
-		return claims, nil
+		return &claims, nil
 	}
 	pa.claimsMu.Unlock()
 
@@ -736,8 +740,9 @@ func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, 
 	pa.claimsMu.Lock()
 	pa.claimsEmail = identity
 	pa.claims = claims
+	cachedClaims := *claims
 	pa.claimsMu.Unlock()
-	return claims, nil
+	return &cachedClaims, nil
 }
 
 func (pa *PlatformAuth) resolveSingleUserClaims(ctx context.Context, identity string) (*PlatformClaims, error) {

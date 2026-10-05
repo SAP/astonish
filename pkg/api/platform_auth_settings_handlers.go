@@ -70,6 +70,13 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	pa := getPlatformAuth()
+	if pa == nil {
+		respondError(w, http.StatusInternalServerError, "platform auth is unavailable")
+		return
+	}
+	backendName := pa.storeCfg.Backend
+
 	var req platformAuthSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -105,10 +112,6 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 	if req.AuthMode != "" || req.SingleUserEmail != "" {
 		if req.AuthMode == "" {
 			req.AuthMode = config.AuthModeNone
-		}
-		backendName := "sqlite"
-		if pa := getPlatformAuth(); pa != nil {
-			backendName = pa.storeCfg.Backend
 		}
 		if err := config.ValidateAuthMode(backendName, req.AuthMode); err != nil {
 			respondError(w, http.StatusBadRequest, err.Error())
@@ -154,15 +157,12 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
 			return
 		}
-		if pa := getPlatformAuth(); pa != nil {
-			pa.authCfg = pendingConfig.Storage.Auth
-			pa.noAuthMode = pa.authCfg.IsNoAuth(pa.storeCfg.Backend)
-			pa.InvalidateSingleUserClaims()
-		}
+		pa.authCfg = pendingConfig.Storage.Auth
+		pa.noAuthMode = pa.authCfg.IsNoAuth(pa.storeCfg.Backend)
+		pa.InvalidateSingleUserClaims()
 	}
 
 	// Return the effective settings after save.
-	pa := getPlatformAuth()
 	resp := platformAuthSettingsResponse{
 		AllowRegistration:        effectiveAllowRegistration(settings, pa),
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),

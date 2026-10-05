@@ -4,7 +4,7 @@ Astonish uses a layered authentication architecture. **Upstream authentication**
 
 ## SQLite Single-User Authentication
 
-SQLite installations may use `storage.auth.mode: none` to skip login and automatically authenticate loopback requests as a configured superadmin. This mode is intended only for a trusted single-user machine: anyone who can connect to the Astonish loopback port on that host, including another local process or host user, receives the selected identity's full platform access. Do not enable it on shared machines or expose the listener through a proxy.
+SQLite installations may use `storage.auth.mode: none` to skip login and automatically authenticate loopback requests as a configured superadmin. This mode is intended only for a trusted single-user machine: anyone who can connect to the Astonish loopback port on that host, including another local process or host user, receives the selected identity's full platform access. Do not enable this mode on shared machines, and never place a reverse proxy, port-forward, SSH tunnel, or other proxy accepting remote traffic in front of the no-login listener. No-auth mode rejects common forwarding headers, but the security boundary still depends on the loopback connection being the original local client.
 
 The Studio listener binds to loopback in this mode and validates the request peer, Host, and Origin. Changing the mode in Platform Administration persists the setting but requires a restart; the running process keeps its startup policy until then.
 

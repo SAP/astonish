@@ -89,6 +89,7 @@ func TestValidateNoAuthOrigin(t *testing.T) {
 		name      string
 		method    string
 		origin    string
+		header    string
 		expectErr bool
 	}{
 		{name: "GET with foreign origin", method: http.MethodGet, origin: "http://evil.example.com"},
@@ -104,11 +105,14 @@ func TestValidateNoAuthOrigin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "/api/test", nil)
+			req := httptest.NewRequest(tt.method, "http://localhost/api/test", nil)
 			if tt.origin != "" {
 				req.Header.Set("Origin", tt.origin)
 			}
-			err := validateNoAuthOrigin(req)
+			if tt.header != "" {
+				req.Header.Set(tt.header, "127.0.0.1")
+			}
+			err := validateNoAuthRequest(req)
 			if tt.expectErr && err == nil {
 				t.Fatal("expected error, got nil")
 			}

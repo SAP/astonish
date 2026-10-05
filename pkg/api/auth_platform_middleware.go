@@ -343,10 +343,25 @@ func isLoopbackRequest(r *http.Request) bool {
 }
 
 func validateNoAuthRequest(r *http.Request) error {
+	if err := validateNoAuthProxyHeaders(r); err != nil {
+		return err
+	}
 	if err := validateNoAuthHost(r); err != nil {
 		return err
 	}
 	return validateNoAuthOrigin(r)
+}
+
+// validateNoAuthProxyHeaders rejects forwarding metadata in single-user mode.
+// A loopback peer is trusted only when it is the original local client; these
+// headers indicate that a proxy or tunnel may be forwarding a remote request.
+func validateNoAuthProxyHeaders(r *http.Request) error {
+	for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host"} {
+		if r.Header.Get(header) != "" {
+			return fmt.Errorf("no-auth mode does not accept proxied requests (%s header present)", header)
+		}
+	}
+	return nil
 }
 
 func validateNoAuthHost(r *http.Request) error {

@@ -664,6 +664,14 @@ func (pa *PlatformAuth) handleMe(w http.ResponseWriter, r *http.Request) {
 
 func (pa *PlatformAuth) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	if pa.IsNoAuth() {
+		if !isLoopbackRequest(r) {
+			respondError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		if err := validateNoAuthRequest(r); err != nil {
+			respondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		respondJSON(w, http.StatusOK, map[string]any{
 			"initialized":        true,
 			"allow_registration": false,

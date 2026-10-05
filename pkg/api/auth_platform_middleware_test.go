@@ -82,6 +82,36 @@ func TestPlatformAuthHandleMe_NoAuthRejectsRemote(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthHandleSetupStatus_NoAuthRejectsRemote(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/auth/setup-status", nil)
+	req.Host = "localhost"
+	req.RemoteAddr = "192.168.1.100:54321"
+	rec := httptest.NewRecorder()
+	pa.handleSetupStatus(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("remote no-auth setup-status status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPlatformAuthHandleSetupStatus_NoAuthRejectsProxy(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/auth/setup-status", nil)
+	req.Host = "localhost"
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Forwarded", "for=192.168.1.100")
+	rec := httptest.NewRecorder()
+	pa.handleSetupStatus(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("proxied no-auth setup-status status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
 func TestPlatformAuthHandleMe_NoAuthRejectsForeignHost(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true
@@ -159,6 +189,29 @@ func TestPlatformAuthMiddleware_NoAuthRejectsForeignOriginPOST(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthMiddleware_NoAuthRejectsProxyForwardingHeader(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/agents", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "192.168.1.10")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("proxied no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("proxied no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
 func TestPlatformAuthMiddleware_NoAuthRejectsForeignHostGET(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true

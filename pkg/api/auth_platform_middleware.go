@@ -28,7 +28,10 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if pa.IsNoAuth() {
+		// Single-user mode is intentionally limited to requests originating on
+		// the local machine. The Studio listener binds all interfaces, so a
+		// no-auth identity must never be granted to a remote client.
+		if pa.IsNoAuth() && isLoopbackRequest(r) {
 			claims, err := pa.singleUserClaims(r.Context())
 			if err != nil {
 				respondError(w, http.StatusInternalServerError, "failed to resolve local user")

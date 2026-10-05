@@ -67,8 +67,29 @@ func TestPlatformAuthMiddleware_AllowsSPAAssets(t *testing.T) {
 	}
 }
 
-// TestPlatformAuthMiddleware_BlocksAPIWithoutAuth verifies that /api/*
-// endpoints (except bypassed ones) require authentication.
+func TestPlatformAuthMiddleware_NoAuthRejectsRemote(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req.RemoteAddr = "192.168.1.100:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("remote no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("remote no-auth request status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestPlatformAuthMiddleware_BlocksAPIWithoutAuth(t *testing.T) {
 	pa := testPlatformAuth(t)
 

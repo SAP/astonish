@@ -28,6 +28,14 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An OAuth protocol adapter may already have validated a scoped Astonish
+		// bearer and attached its canonical principal. Do not reinterpret that
+		// token as a legacy platform JWT or replace it with the local identity.
+		if _, ok := execution.PrincipalFromContext(r.Context()); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Single-user mode is intentionally limited to requests originating on
 		// the local machine. The Studio listener binds all interfaces, so a
 		// no-auth identity must never be granted to a remote client.

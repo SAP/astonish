@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -81,6 +82,44 @@ func TestPlatformAuthHandleMe_NoAuthRejectsRemote(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthMiddleware_NoAuthPreservesScopedPrincipal(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	scoped := execution.Principal{
+		Kind:           execution.PrincipalKindUser,
+		Authentication: execution.AuthMethodOAuth,
+		Surface:        execution.SurfaceMCP,
+		Subject:        "oauth-user",
+		OrgSlug:        "scoped-org",
+		TeamSlug:       "scoped-team",
+		Scopes:         []string{"mcp:read"},
+		Authenticated:  true,
+	}
+	ctx, err := execution.WithPrincipal(context.Background(), scoped)
+	if err != nil {
+		t.Fatalf("WithPrincipal() error: %v", err)
+	}
+
+	var got execution.Principal
+	var present bool
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, present = execution.PrincipalFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent || !present {
+		t.Fatalf("scoped principal request status = %d, present = %t; want 204 and principal", rec.Code, present)
+	}
+	if !reflect.DeepEqual(got, scoped) {
+		t.Fatalf("principal = %#v, want %#v", got, scoped)
+	}
+}
 func TestPlatformAuthMiddleware_NoAuthRejectsRemote(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true

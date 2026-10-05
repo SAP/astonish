@@ -77,6 +77,7 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
+	var pendingConfig *config.AppConfig
 
 	// Load existing platform settings (preserves providers, channels, etc.).
 	settings, err := backend.PlatformSettings().Get(ctx)
@@ -141,15 +142,23 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		} else {
 			cfg.Storage.Auth.SingleUserEmail = ""
 		}
-		if err := config.SaveAppConfig(cfg); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
-			return
-		}
+		pendingConfig = cfg
 	}
 
 	if err := backend.PlatformSettings().Save(ctx, settings); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save auth settings")
 		return
+	}
+	if pendingConfig != nil {
+		if err := config.SaveAppConfig(pendingConfig); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
+			return
+		}
+		if pa := getPlatformAuth(); pa != nil {
+			pa.authCfg = pendingConfig.Storage.Auth
+			pa.noAuthMode = pa.authCfg.IsNoAuth(pa.storeCfg.Backend)
+			pa.InvalidateSingleUserClaims()
+		}
 	}
 
 	// Return the effective settings after save.

@@ -144,6 +144,30 @@ func TestPlatformAuthMiddleware_NoAuthRejectsForeignOriginPOST(t *testing.T) {
 	}
 }
 
+func TestPlatformAuthMiddleware_NoAuthRejectsForeignHostGET(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example.com/api/agents", nil)
+	req.Host = "evil.example.com"
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("foreign-host no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-host no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestPlatformAuthMiddleware_NoAuthRejectsRemote(t *testing.T) {
 	pa := testPlatformAuth(t)
 	pa.noAuthMode = true

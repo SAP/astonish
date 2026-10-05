@@ -57,6 +57,33 @@ func TestIsAuthExemptPath(t *testing.T) {
 	}
 }
 
+func TestValidateNoAuthHost(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		expectErr bool
+	}{
+		{name: "localhost", host: "localhost:9393"},
+		{name: "IPv4 loopback", host: "127.0.0.1:9393"},
+		{name: "IPv6 loopback", host: "[::1]:9393"},
+		{name: "foreign host", host: "evil.example.com:9393", expectErr: true},
+		{name: "deceptive localhost", host: "localhost.evil.com:9393", expectErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://"+tt.host+"/api/test", nil)
+			req.Host = tt.host
+			err := validateNoAuthHost(req)
+			if tt.expectErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.expectErr && err != nil {
+				t.Fatalf("validateNoAuthHost() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateNoAuthOrigin(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -41,6 +41,10 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 		// the local machine. The Studio listener binds no-auth mode to loopback,
 		// and this check keeps the local identity out of remote request contexts.
 		if pa.IsNoAuth() && isLoopbackRequest(r) {
+			if err := validateNoAuthHost(r); err != nil {
+				respondError(w, http.StatusForbidden, err.Error())
+				return
+			}
 			if err := validateNoAuthOrigin(r); err != nil {
 				respondError(w, http.StatusForbidden, err.Error())
 				return
@@ -340,6 +344,27 @@ func isLoopbackRequest(r *http.Request) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func validateNoAuthHost(r *http.Request) error {
+	host := r.Host
+	if host == "" && r.URL != nil {
+		host = r.URL.Host
+	}
+	if host == "" {
+		return nil
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("request host %q is not a trusted local address", r.Host)
+	}
 }
 
 // validateNoAuthOrigin rejects unsafe browser requests whose Origin is not local.

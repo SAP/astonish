@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,9 @@ type PlatformAuth struct {
 	noAuthMode  bool
 	orgResolver orgResolver // defaults to pgStore; override in tests
 	linkCodes   store.LinkCodeStore
+	claimsMu    sync.Mutex
+	claimsEmail string
+	claims      *PlatformClaims
 }
 
 // NewPlatformAuth creates a new platform auth manager.
@@ -703,11 +707,40 @@ func (pa *PlatformAuth) respondSingleUser(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// InvalidateSingleUserClaims forces the next no-auth request to resolve the identity again.
+func (pa *PlatformAuth) InvalidateSingleUserClaims() {
+	pa.claimsMu.Lock()
+	pa.claimsEmail = ""
+	pa.claims = nil
+	pa.claimsMu.Unlock()
+}
+
 func (pa *PlatformAuth) singleUserClaims(ctx context.Context) (*PlatformClaims, error) {
 	identity := pa.authCfg.SingleUserEmail
 	if identity == "" {
 		identity = config.SingleUserEmail
 	}
+
+	pa.claimsMu.Lock()
+	if pa.claims != nil && pa.claimsEmail == identity {
+		claims := pa.claims
+		pa.claimsMu.Unlock()
+		return claims, nil
+	}
+	pa.claimsMu.Unlock()
+
+	claims, err := pa.resolveSingleUserClaims(ctx, identity)
+	if err != nil {
+		return nil, err
+	}
+	pa.claimsMu.Lock()
+	pa.claimsEmail = identity
+	pa.claims = claims
+	pa.claimsMu.Unlock()
+	return claims, nil
+}
+
+func (pa *PlatformAuth) resolveSingleUserClaims(ctx context.Context, identity string) (*PlatformClaims, error) {
 	user, err := pa.pgStore.Users().GetByEmail(ctx, identity)
 	if err != nil {
 		return nil, fmt.Errorf("get single user %q: %w", identity, err)

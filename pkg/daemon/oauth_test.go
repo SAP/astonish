@@ -7,6 +7,24 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 )
 
+func TestResolveSQLiteAuthModePreservesExistingWorkspace(t *testing.T) {
+	if got := resolveSQLiteAuthMode("", 1); got != config.AuthModeBuiltin {
+		t.Fatalf("existing workspace mode = %q, want %q", got, config.AuthModeBuiltin)
+	}
+}
+
+func TestResolveSQLiteAuthModeDefaultsFreshWorkspaceToNone(t *testing.T) {
+	if got := resolveSQLiteAuthMode("", 0); got != config.AuthModeNone {
+		t.Fatalf("fresh workspace mode = %q, want %q", got, config.AuthModeNone)
+	}
+}
+
+func TestResolveSQLiteAuthModePreservesExplicitMode(t *testing.T) {
+	if got := resolveSQLiteAuthMode(config.AuthModeBuiltin, 0); got != config.AuthModeBuiltin {
+		t.Fatalf("explicit mode = %q, want %q", got, config.AuthModeBuiltin)
+	}
+}
+
 func TestServesA2AOnlyOnHTTPModes(t *testing.T) {
 	if !servesA2A(config.DaemonModeAPI) {
 		t.Fatal("API mode must serve A2A")
@@ -47,6 +65,13 @@ func TestNewOAuthServerRuntimeConfigAppliesLoopbackDefaults(t *testing.T) {
 	}
 	if got.AccessTokenTTL != 0 {
 		t.Fatalf("unset access TTL should stay 0 for oauthserver defaults, got %s", got.AccessTokenTTL)
+	}
+}
+
+func TestNewOAuthServerRuntimeConfigAllowsLocalhostNoAuth(t *testing.T) {
+	got := newOAuthServerRuntimeConfig(config.OAuthServerConfig{Issuer: "http://localhost:9393"}, 9393, false)
+	if !got.Development {
+		t.Fatal("localhost issuer should allow HTTP development mode")
 	}
 }
 

@@ -68,6 +68,16 @@ func startupPhaseRecord(phase, outcome string, elapsed time.Duration) string {
 	return fmt.Sprintf("startup phase=%s outcome=%s elapsed=%s", phase, outcome, elapsed.Round(time.Millisecond))
 }
 
+func resolveSQLiteAuthMode(mode string, orgCount int) string {
+	if mode != "" {
+		return mode
+	}
+	if orgCount > 0 {
+		return config.AuthModeBuiltin
+	}
+	return config.AuthModeNone
+}
+
 // Run starts the daemon in the foreground. It starts the Studio HTTP server,
 // writes a PID file, handles signals for graceful shutdown, and cleans up on exit.
 // This function blocks until a shutdown signal is received.
@@ -252,11 +262,9 @@ func Run(cfg RunConfig) error {
 		if err != nil {
 			return fmt.Errorf("detect existing SQLite workspace: %w", err)
 		}
-		if orgCount > 0 {
-			appCfg.Storage.Auth.Mode = config.AuthModeBuiltin
+		appCfg.Storage.Auth.Mode = resolveSQLiteAuthMode(appCfg.Storage.Auth.Mode, orgCount)
+		if appCfg.Storage.Auth.Mode == config.AuthModeBuiltin && orgCount > 0 {
 			logger.Printf("Existing SQLite workspace detected; preserving builtin authentication")
-		} else {
-			appCfg.Storage.Auth.Mode = config.AuthModeNone
 		}
 	}
 	if err := config.ValidateAuthMode(appCfg.Storage.Backend, appCfg.Storage.Auth.Mode); err != nil {

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,6 +25,15 @@ func a2aServiceBaseURL(appCfg *config.AppConfig, port int) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
+func isLoopbackHTTPIssuer(issuer string) bool {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	return strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
+}
+
 // newOAuthServerRuntimeConfig applies documented issuer/resource defaults so
 // the built-in authorization server can start when oauth_server.issuer is
 // omitted (local Studio loopback, Kubernetes until Helm sets a public URL).
@@ -36,6 +47,6 @@ func newOAuthServerRuntimeConfig(oauthCfg config.OAuthServerConfig, port int, bu
 		// Loopback HTTP is safe for local SQLite deployments, including no-login
 		// mode. Non-loopback issuers still require HTTPS unless builtin auth is
 		// explicitly running in development mode.
-		Development: strings.HasPrefix(issuer, "http://127.0.0.1:") || strings.HasPrefix(issuer, "http://[::1]:") || (builtinAuth && strings.HasPrefix(issuer, "http://")),
+		Development: isLoopbackHTTPIssuer(issuer) || (builtinAuth && strings.HasPrefix(issuer, "http://")),
 	}
 }

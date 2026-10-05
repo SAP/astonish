@@ -604,7 +604,9 @@ func (pa *PlatformAuth) handleLogout(w http.ResponseWriter, r *http.Request) {
 // --- Handler: GET /api/auth/me ---
 
 func (pa *PlatformAuth) handleMe(w http.ResponseWriter, r *http.Request) {
-	if pa.IsNoAuth() {
+	// The auth middleware intentionally bypasses /api/auth/* routes, so apply
+	// the same loopback restriction here before exposing the local identity.
+	if pa.IsNoAuth() && isLoopbackRequest(r) {
 		pa.respondSingleUser(w, r)
 		return
 	}

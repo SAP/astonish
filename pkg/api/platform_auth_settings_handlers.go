@@ -157,23 +157,27 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
 			return
 		}
-		pa.authCfg = pendingConfig.Storage.Auth
-		pa.noAuthMode = pa.authCfg.IsNoAuth(pa.storeCfg.Backend)
-		pa.InvalidateSingleUserClaims()
+		// The running server intentionally keeps its current auth policy. The
+		// listener binding is fixed at startup, so applying only part of a mode
+		// change here would create a misleading half-applied state. Restarting
+		// Astonish loads the persisted policy and applies it atomically.
 	}
 
-	// Return the effective settings after save.
+	// Return the persisted mode when it was changed. The running process keeps
+	// serving with its current policy until restart.
 	resp := platformAuthSettingsResponse{
 		AllowRegistration:        effectiveAllowRegistration(settings, pa),
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),
 		DevEnvironment:           effectiveDevEnvironment(settings),
 	}
-	if pa != nil {
-		resp.AuthMode = pa.authCfg.EffectiveAuthMode(pa.storeCfg.Backend)
-		resp.SingleUserEmail = pa.authCfg.SingleUserEmail
-		if resp.SingleUserEmail == "" {
-			resp.SingleUserEmail = config.SingleUserEmail
-		}
+	responseAuth := pa.authCfg
+	if pendingConfig != nil {
+		responseAuth = pendingConfig.Storage.Auth
+	}
+	resp.AuthMode = responseAuth.EffectiveAuthMode(pa.storeCfg.Backend)
+	resp.SingleUserEmail = responseAuth.SingleUserEmail
+	if resp.SingleUserEmail == "" {
+		resp.SingleUserEmail = config.SingleUserEmail
 	}
 	respondJSON(w, http.StatusOK, resp)
 }

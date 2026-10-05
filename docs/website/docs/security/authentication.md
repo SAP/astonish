@@ -2,6 +2,12 @@
 
 Astonish uses a layered authentication architecture. **Upstream authentication** proves who a human is (built-in email/password, OIDC federation). **Downstream authorization** grants applications and workloads constrained access to Astonish through a built-in OAuth 2.0 authorization server that issues Astonish-signed tokens.
 
+## SQLite Single-User Authentication
+
+SQLite installations may use `storage.auth.mode: none` to skip login and automatically authenticate loopback requests as a configured superadmin. This mode is intended only for a trusted single-user machine: anyone who can connect to the Astonish loopback port on that host, including another local process or host user, receives the selected identity's full platform access. Do not enable it on shared machines or expose the listener through a proxy.
+
+The Studio listener binds to loopback in this mode and validates the request peer, Host, and Origin. Changing the mode in Platform Administration persists the setting but requires a restart; the running process keeps its startup policy until then.
+
 ## Built-in Authentication
 
 Built-in auth uses bcrypt-hashed passwords with JWT bearer tokens for the Studio web UI:

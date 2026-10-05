@@ -225,7 +225,7 @@ export default function AuthTab() {
               style={inputStyle}
             >
               <option value="">Require login (builtin authentication)</option>
-              {users.filter(user => user.status === 'active').map(user => (
+              {users.filter(user => user.status === 'active' && user.platform_role === 'superadmin').map(user => (
                 <option key={user.id} value={user.email}>{user.display_name} — {user.email} ({user.platform_role || 'member'})</option>
               ))}
             </select>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, type FormEvent, type ChangeEvent } from 'react'
 import { Plus, Trash2, Loader2, Edit2, Shield, ToggleLeft, ToggleRight, Globe, Eye, EyeOff, UserPlus, Mail } from 'lucide-react'
 import * as adminApi from '../../api/platformAdmin'
-import type { OIDCProvider, PlatformAuthSettings } from '../../api/platformAdmin'
+import type { OIDCProvider, PlatformAuthSettings, AdminUser } from '../../api/platformAdmin'
 import { InlineError, InlineSuccess } from './shared'
 import { gradientAmber, inputStyle } from './sharedStyles'
 
@@ -22,6 +22,9 @@ export default function AuthTab() {
   const [authSettings, setAuthSettings] = useState<PlatformAuthSettings | null>(null)
   const [authSettingsLoading, setAuthSettingsLoading] = useState<boolean>(true)
   const [authSettingsSaving, setAuthSettingsSaving] = useState<string | null>(null) // tracks which field is saving
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [selectedSingleUser, setSelectedSingleUser] = useState('')
+  const [singleUserSaving, setSingleUserSaving] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
@@ -40,6 +43,7 @@ export default function AuthTab() {
     try {
       const data = await adminApi.getPlatformAuthSettings()
       setAuthSettings(data)
+      setSelectedSingleUser(data.single_user_email || '')
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -47,7 +51,7 @@ export default function AuthTab() {
     }
   }, [])
 
-  useEffect(() => { void load(); void loadAuthSettings() }, [load, loadAuthSettings])
+  useEffect(() => { void load(); void loadAuthSettings(); void adminApi.listUsers().then(setUsers).catch(() => undefined) }, [load, loadAuthSettings])
 
   // Auto-dismiss
   useEffect(() => {
@@ -73,6 +77,21 @@ export default function AuthTab() {
     }
   }
 
+  const handleSaveSingleUser = async () => {
+    setSingleUserSaving(true)
+    try {
+      const updated = await adminApi.savePlatformAuthSettings({
+        auth_mode: selectedSingleUser ? 'none' : 'builtin',
+        ...(selectedSingleUser ? { single_user_email: selectedSingleUser } : {}),
+      })
+      setAuthSettings(updated)
+      setSuccess(selectedSingleUser ? `No-login mode enabled for ${selectedSingleUser}. Restart Astonish to apply it.` : 'No-login mode disabled. Restart Astonish to restore login.')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setSingleUserSaving(false)
+    }
+  }
   const handleToggleEnabled = async (provider: OIDCProvider) => {
     setTogglingId(provider.id)
     try {
@@ -190,6 +209,38 @@ export default function AuthTab() {
               </div>
             </div>
           )}
+        </div>
+
+        {/* --- Single-user mode Section --- */}
+        <div className="mb-6">
+          <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Local single-user mode</h3>
+          <p className="text-xs mb-3" style={{ color: 'var(--text-muted)' }}>
+            Skip login on this trusted local installation by selecting the existing user Astonish should use. Users and their data are preserved.
+          </p>
+          <div className="flex items-center gap-3">
+            <select
+              value={selectedSingleUser}
+              onChange={e => setSelectedSingleUser(e.target.value)}
+              className="flex-1 rounded-lg px-3 py-2 text-sm"
+              style={inputStyle}
+            >
+              <option value="">Require login (builtin authentication)</option>
+              {users.filter(user => user.status === 'active' && user.platform_role === 'superadmin').map(user => (
+                <option key={user.id} value={user.email}>{user.display_name} — {user.email} ({user.platform_role || 'member'})</option>
+              ))}
+            </select>
+            <button
+              onClick={handleSaveSingleUser}
+              disabled={singleUserSaving || (Boolean(selectedSingleUser) && users.length === 0)}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+              style={gradientAmber}
+            >
+              {singleUserSaving ? <Loader2 size={16} className="animate-spin" /> : 'Save'}
+            </button>
+          </div>
+          <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+                         Current mode: {authSettings?.auth_mode || 'unknown'}{authSettings?.single_user_email ? ` (${authSettings.single_user_email})` : ''}. The selected user must have the superadmin role. Restart Astonish after changing this setting.
+          </p>
         </div>
 
         {/* Divider */}

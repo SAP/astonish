@@ -5,22 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/store"
 )
 
 // platformAuthSettingsResponse is returned by GET /api/platform/admin/auth-settings.
 // It represents the effective auth policy (DB override merged with config defaults).
 type platformAuthSettingsResponse struct {
-	AllowRegistration        bool `json:"allow_registration"`
-	RequireEmailVerification bool `json:"require_email_verification"`
-	DevEnvironment           bool `json:"dev_environment"`
+	AllowRegistration        bool   `json:"allow_registration"`
+	RequireEmailVerification bool   `json:"require_email_verification"`
+	DevEnvironment           bool   `json:"dev_environment"`
+	AuthMode                 string `json:"auth_mode"`
+	SingleUserEmail          string `json:"single_user_email,omitempty"`
 }
 
 // platformAuthSettingsRequest is accepted by PUT /api/platform/admin/auth-settings.
 type platformAuthSettingsRequest struct {
-	AllowRegistration        *bool `json:"allow_registration"`
-	RequireEmailVerification *bool `json:"require_email_verification"`
-	DevEnvironment           *bool `json:"dev_environment"`
+	AllowRegistration        *bool  `json:"allow_registration"`
+	RequireEmailVerification *bool  `json:"require_email_verification"`
+	DevEnvironment           *bool  `json:"dev_environment"`
+	AuthMode                 string `json:"auth_mode,omitempty"`
+	SingleUserEmail          string `json:"single_user_email,omitempty"`
 }
 
 // PlatformAdminGetAuthSettingsHandler handles GET /api/platform/admin/auth-settings.
@@ -45,6 +50,13 @@ func PlatformAdminGetAuthSettingsHandler(w http.ResponseWriter, r *http.Request)
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),
 		DevEnvironment:           effectiveDevEnvironment(settings),
 	}
+	if pa != nil {
+		resp.AuthMode = pa.authCfg.EffectiveAuthMode(pa.storeCfg.Backend)
+		resp.SingleUserEmail = pa.authCfg.SingleUserEmail
+		if resp.SingleUserEmail == "" {
+			resp.SingleUserEmail = config.SingleUserEmail
+		}
+	}
 
 	respondJSON(w, http.StatusOK, resp)
 }
@@ -58,6 +70,13 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	pa := getPlatformAuth()
+	if pa == nil {
+		respondError(w, http.StatusInternalServerError, "platform auth is unavailable")
+		return
+	}
+	backendName := pa.storeCfg.Backend
+
 	var req platformAuthSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
@@ -65,6 +84,7 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
+	var pendingConfig *config.AppConfig
 
 	// Load existing platform settings (preserves providers, channels, etc.).
 	settings, err := backend.PlatformSettings().Get(ctx)
@@ -89,18 +109,75 @@ func PlatformAdminSaveAuthSettingsHandler(w http.ResponseWriter, r *http.Request
 		settings.Auth.DevEnvironment = req.DevEnvironment
 	}
 
-	// Persist.
+	if req.AuthMode != "" || req.SingleUserEmail != "" {
+		if req.AuthMode == "" {
+			req.AuthMode = config.AuthModeNone
+		}
+		if err := config.ValidateAuthMode(backendName, req.AuthMode); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.AuthMode == config.AuthModeNone && req.SingleUserEmail == "" {
+			respondError(w, http.StatusBadRequest, "single_user_email is required when enabling no-login mode")
+			return
+		}
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to load app config")
+			return
+		}
+		cfg.Storage.Auth.Mode = req.AuthMode
+		if req.AuthMode == config.AuthModeNone {
+			user, err := backend.Users().GetByEmail(ctx, req.SingleUserEmail)
+			if err != nil || user == nil {
+				respondError(w, http.StatusBadRequest, "selected single user was not found")
+				return
+			}
+			if user.Status != "active" {
+				respondError(w, http.StatusBadRequest, "selected single user is not active")
+				return
+			}
+			if user.PlatformRole != "superadmin" {
+				respondError(w, http.StatusBadRequest, "no-login mode requires a superadmin user")
+				return
+			}
+			cfg.Storage.Auth.SingleUserEmail = user.Email
+		} else {
+			cfg.Storage.Auth.SingleUserEmail = ""
+		}
+		pendingConfig = cfg
+	}
+
 	if err := backend.PlatformSettings().Save(ctx, settings); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to save auth settings")
 		return
 	}
+	if pendingConfig != nil {
+		if err := config.SaveAppConfig(pendingConfig); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to save auth mode")
+			return
+		}
+		// The running server intentionally keeps its current auth policy. The
+		// listener binding is fixed at startup, so applying only part of a mode
+		// change here would create a misleading half-applied state. Restarting
+		// Astonish loads the persisted policy and applies it atomically.
+	}
 
-	// Return the effective settings after save.
-	pa := getPlatformAuth()
+	// Return the persisted mode when it was changed. The running process keeps
+	// serving with its current policy until restart.
 	resp := platformAuthSettingsResponse{
 		AllowRegistration:        effectiveAllowRegistration(settings, pa),
 		RequireEmailVerification: effectiveRequireEmailVerification(settings, pa),
 		DevEnvironment:           effectiveDevEnvironment(settings),
+	}
+	responseAuth := pa.authCfg
+	if pendingConfig != nil {
+		responseAuth = pendingConfig.Storage.Auth
+	}
+	resp.AuthMode = responseAuth.EffectiveAuthMode(pa.storeCfg.Backend)
+	resp.SingleUserEmail = responseAuth.SingleUserEmail
+	if resp.SingleUserEmail == "" {
+		resp.SingleUserEmail = config.SingleUserEmail
 	}
 	respondJSON(w, http.StatusOK, resp)
 }

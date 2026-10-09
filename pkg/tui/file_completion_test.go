@@ -76,6 +76,36 @@ func TestExpandFileMentions(t *testing.T) {
 	}
 }
 
+func TestExpandFileMentionsPreservesUnresolvedTokens(t *testing.T) {
+	dir := t.TempDir()
+	message := "read @astonishmacdev_bot: stat astonishmacdev_bot: no such file or directory"
+
+	got, err := expandFileMentions(message, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != message {
+		t.Fatalf("expandFileMentions = %q, want unchanged %q", got, message)
+	}
+}
+
+func TestExpandFileMentionsExpandsFilesAndPreservesUnresolvedTokens(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes\nhello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := expandFileMentions("summarize @notes.md and tell @astonishmacdev_bot", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"summarize @notes.md and tell @astonishmacdev_bot", "File: notes.md", "# Notes"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expanded message missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestListFileCandidatesSkipsHiddenEntries(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite := func(path, content string) {

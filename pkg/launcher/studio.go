@@ -307,7 +307,7 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 		studioHandler.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := studioListenAddress(port, s.platformAuth)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -322,6 +322,13 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 	s.listener = listener
 
 	return s, nil
+}
+
+func studioListenAddress(port int, platformAuth *api.PlatformAuth) string {
+	if platformAuth != nil && platformAuth.IsNoAuth() {
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	return fmt.Sprintf(":%d", port)
 }
 
 // Port returns the port the server is listening on.

@@ -168,6 +168,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
   const [platformError, setPlatformError] = useState<string | null>(null)
   const [restartRequired, setRestartRequired] = useState(false)
   // SQLite-specific state
+  const [sqliteAuthMode, setSqliteAuthMode] = useState<'none' | 'builtin'>('none')
   const [sqliteAdminEmail, setSqliteAdminEmail] = useState('')
   const [sqliteAdminName, setSqliteAdminName] = useState('')
   const [sqliteAdminPassword, setSqliteAdminPassword] = useState('')
@@ -529,9 +530,19 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
               <div className="max-w-xl mx-auto mt-4 p-6 rounded-xl" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)' }}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
                   <Shield size={18} className="text-emerald-400" />
-                  Create Admin Account
+                  SQLite Workspace Setup
                 </h3>
-                <div className="space-y-4 mb-4">
+                <div className="grid grid-cols-2 gap-3 mb-5">
+                  <button type="button" onClick={() => setSqliteAuthMode('none')} className={`p-3 rounded-lg border text-left ${sqliteAuthMode === 'none' ? 'border-primary bg-primary/10' : ''}`} style={{ borderColor: sqliteAuthMode === 'none' ? undefined : 'var(--border-color)' }}>
+                    <div className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>Single user</div>
+                    <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Recommended for this computer. No sign-in required.</div>
+                  </button>
+                  <button type="button" onClick={() => setSqliteAuthMode('builtin')} className={`p-3 rounded-lg border text-left ${sqliteAuthMode === 'builtin' ? 'border-primary bg-primary/10' : ''}`} style={{ borderColor: sqliteAuthMode === 'builtin' ? undefined : 'var(--border-color)' }}>
+                    <div className="font-medium text-sm" style={{ color: 'var(--text-primary)' }}>Multi-user</div>
+                    <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Create an admin account and require sign-in.</div>
+                  </button>
+                </div>
+                {sqliteAuthMode === 'builtin' && <div className="space-y-4 mb-4">
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Admin Email</label>
                     <input type="email" value={sqliteAdminEmail} onChange={e => setSqliteAdminEmail(e.target.value)} placeholder="admin@example.com" className="w-full px-3 py-2 rounded-lg border text-sm" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} />
@@ -544,7 +555,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Password</label>
                     <input type="password" value={sqliteAdminPassword} onChange={e => setSqliteAdminPassword(e.target.value)} placeholder="Minimum 8 characters" className="w-full px-3 py-2 rounded-lg border text-sm" style={{ background: 'var(--bg-primary)', borderColor: 'var(--border-color)', color: 'var(--text-primary)' }} />
                   </div>
-                </div>
+                </div>}
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Organization Name</label>
@@ -571,6 +582,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                       const result = await initializeSQLitePlatform({
                         org_name: orgName,
                         org_slug: orgSlug,
+                        auth_mode: sqliteAuthMode,
                         admin_email: sqliteAdminEmail,
                         admin_name: sqliteAdminName,
                         admin_password: sqliteAdminPassword,
@@ -587,7 +599,7 @@ export default function SetupWizard({ onComplete }: { onComplete: () => void }) 
                       setPlatformInitializing(false)
                     }
                   }}
-                  disabled={platformInitializing || !sqliteAdminEmail || sqliteAdminPassword.length < 8}
+                  disabled={platformInitializing || (sqliteAuthMode === 'builtin' && (!sqliteAdminEmail || sqliteAdminPassword.length < 8))}
                   className="w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-50"
                   style={{ background: 'linear-gradient(to right, #059669, #3b82f6)', color: 'white' }}
                 >

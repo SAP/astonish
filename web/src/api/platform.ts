@@ -734,9 +734,10 @@ export interface SQLitePlatformInitParams {
   data_dir?: string
   org_name: string
   org_slug: string
-  admin_email: string
+  auth_mode?: 'none' | 'builtin'
+  admin_email?: string
   admin_name?: string
-  admin_password: string
+  admin_password?: string
 }
 
 export interface PlatformInitResult {

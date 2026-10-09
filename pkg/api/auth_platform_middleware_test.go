@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -67,8 +68,197 @@ func TestPlatformAuthMiddleware_AllowsSPAAssets(t *testing.T) {
 	}
 }
 
-// TestPlatformAuthMiddleware_BlocksAPIWithoutAuth verifies that /api/*
-// endpoints (except bypassed ones) require authentication.
+func TestPlatformAuthHandleMe_NoAuthRejectsRemote(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	req.RemoteAddr = "192.168.1.100:54321"
+	rec := httptest.NewRecorder()
+	pa.handleMe(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("remote no-auth /api/auth/me status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPlatformAuthHandleSetupStatus_NoAuthRejectsRemote(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/auth/setup-status", nil)
+	req.Host = "localhost"
+	req.RemoteAddr = "192.168.1.100:54321"
+	rec := httptest.NewRecorder()
+	pa.handleSetupStatus(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("remote no-auth setup-status status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPlatformAuthHandleSetupStatus_NoAuthRejectsProxy(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/auth/setup-status", nil)
+	req.Host = "localhost"
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Forwarded", "for=192.168.1.100")
+	rec := httptest.NewRecorder()
+	pa.handleSetupStatus(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("proxied no-auth setup-status status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+func TestPlatformAuthHandleMe_NoAuthRejectsForeignHost(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example.com/api/auth/me", nil)
+	req.Host = "evil.example.com"
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	pa.handleMe(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-host no-auth /api/auth/me status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestPlatformAuthMiddleware_NoAuthPreservesScopedPrincipal(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	scoped := execution.Principal{
+		Kind:           execution.PrincipalKindUser,
+		Authentication: execution.AuthMethodOAuth,
+		Surface:        execution.SurfaceMCP,
+		Subject:        "oauth-user",
+		OrgSlug:        "scoped-org",
+		TeamSlug:       "scoped-team",
+		Scopes:         []string{"mcp:read"},
+		Authenticated:  true,
+	}
+	ctx, err := execution.WithPrincipal(context.Background(), scoped)
+	if err != nil {
+		t.Fatalf("WithPrincipal() error: %v", err)
+	}
+
+	var got execution.Principal
+	var present bool
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, present = execution.PrincipalFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent || !present {
+		t.Fatalf("scoped principal request status = %d, present = %t; want 204 and principal", rec.Code, present)
+	}
+	if !reflect.DeepEqual(got, scoped) {
+		t.Fatalf("principal = %#v, want %#v", got, scoped)
+	}
+}
+func TestPlatformAuthMiddleware_NoAuthRejectsForeignOriginPOST(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Origin", "http://evil.example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("foreign-origin no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-origin no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestPlatformAuthMiddleware_NoAuthRejectsProxyForwardingHeader(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/agents", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "192.168.1.10")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("proxied no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("proxied no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+func TestPlatformAuthMiddleware_NoAuthRejectsForeignHostGET(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example.com/api/agents", nil)
+	req.Host = "evil.example.com"
+	req.RemoteAddr = "127.0.0.1:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("foreign-host no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign-host no-auth request status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestPlatformAuthMiddleware_NoAuthRejectsRemote(t *testing.T) {
+	pa := testPlatformAuth(t)
+	pa.noAuthMode = true
+
+	called := false
+	handler := PlatformAuthMiddleware(pa, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req.RemoteAddr = "192.168.1.100:54321"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if called {
+		t.Fatal("remote no-auth request reached the downstream handler")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("remote no-auth request status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestPlatformAuthMiddleware_BlocksAPIWithoutAuth(t *testing.T) {
 	pa := testPlatformAuth(t)
 

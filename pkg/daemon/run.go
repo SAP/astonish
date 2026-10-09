@@ -68,6 +68,16 @@ func startupPhaseRecord(phase, outcome string, elapsed time.Duration) string {
 	return fmt.Sprintf("startup phase=%s outcome=%s elapsed=%s", phase, outcome, elapsed.Round(time.Millisecond))
 }
 
+func resolveSQLiteAuthMode(mode string, orgCount int) string {
+	if mode != "" {
+		return mode
+	}
+	if orgCount > 0 {
+		return config.AuthModeBuiltin
+	}
+	return config.AuthModeNone
+}
+
 // Run starts the daemon in the foreground. It starts the Studio HTTP server,
 // writes a PID file, handles signals for graceful shutdown, and cleans up on exit.
 // This function blocks until a shutdown signal is received.
@@ -242,6 +252,31 @@ func Run(cfg RunConfig) error {
 		return fmt.Errorf("failed to migrate storage schemas: %w", err)
 	}
 	logStartupPhase("migrations", "complete", migrationStarted)
+
+	// Preserve authentication for SQLite installations created before no-auth mode.
+	// An omitted mode means no-auth only for a genuinely new workspace; an existing
+	// organization proves this database was already initialized under the legacy
+	// authenticated setup.
+	if appCfg.Storage.Backend == "sqlite" && appCfg.Storage.Auth.Mode == "" {
+		orgCount, err := entStore.Organizations().Count(context.Background())
+		if err != nil {
+			return fmt.Errorf("detect existing SQLite workspace: %w", err)
+		}
+		appCfg.Storage.Auth.Mode = resolveSQLiteAuthMode(appCfg.Storage.Auth.Mode, orgCount)
+		if appCfg.Storage.Auth.Mode == config.AuthModeBuiltin && orgCount > 0 {
+			logger.Printf("Existing SQLite workspace detected; preserving builtin authentication")
+		}
+	}
+	if err := config.ValidateAuthMode(appCfg.Storage.Backend, appCfg.Storage.Auth.Mode); err != nil {
+		return fmt.Errorf("invalid authentication configuration: %w", err)
+	}
+	if appCfg.Storage.Auth.IsNoAuth(appCfg.Storage.Backend) {
+		if err := store.ProvisionSingleUser(context.Background(), entStore,
+			appCfg.Storage.Auth.GetDefaultOrgName(), appCfg.Storage.Auth.GetDefaultOrgSlug()); err != nil {
+			return fmt.Errorf("auto-provision single user: %w", err)
+		}
+		logger.Printf("Single-user mode: default user and workspace ready")
+	}
 
 	// Initialize embedding
 	embeddingStarted := time.Now()

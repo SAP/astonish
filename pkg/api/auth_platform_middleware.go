@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -30,9 +31,31 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// An OAuth protocol adapter may already have validated a scoped Astonish
 		// bearer and attached its canonical principal. Do not reinterpret that
-		// token as a legacy platform JWT.
+		// token as a legacy platform JWT or replace it with the local identity.
 		if _, ok := execution.PrincipalFromContext(r.Context()); ok {
 			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Single-user mode is intentionally limited to requests originating on
+		// the local machine. The Studio listener binds no-auth mode to loopback,
+		// and this check keeps the local identity out of remote request contexts.
+		if pa.IsNoAuth() && isLoopbackRequest(r) {
+			if err := validateNoAuthRequest(r); err != nil {
+				respondError(w, http.StatusForbidden, err.Error())
+				return
+			}
+			claims, err := pa.singleUserClaims(r.Context())
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to resolve local user")
+				return
+			}
+			ctx, err := buildAuthenticatedContext(r.Context(), claims, claims.DefaultTeamSlug)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to build local user context")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -319,7 +342,70 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// --- PlatformUser context ---
+func validateNoAuthRequest(r *http.Request) error {
+	if err := validateNoAuthProxyHeaders(r); err != nil {
+		return err
+	}
+	if err := validateNoAuthHost(r); err != nil {
+		return err
+	}
+	return validateNoAuthOrigin(r)
+}
+
+// validateNoAuthProxyHeaders rejects forwarding metadata in single-user mode.
+// A loopback peer is trusted only when it is the original local client; these
+// headers indicate that a proxy or tunnel may be forwarding a remote request.
+func validateNoAuthProxyHeaders(r *http.Request) error {
+	for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host"} {
+		if r.Header.Get(header) != "" {
+			return fmt.Errorf("no-auth mode does not accept proxied requests (%s header present)", header)
+		}
+	}
+	return nil
+}
+
+func validateNoAuthHost(r *http.Request) error {
+	host := r.Host
+	if host == "" && r.URL != nil {
+		host = r.URL.Host
+	}
+	if host == "" {
+		return nil
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	} else {
+		host = strings.Trim(host, "[]")
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("request host %q is not a trusted local address", r.Host)
+	}
+}
+
+// validateNoAuthOrigin rejects unsafe browser requests whose Origin is not local.
+// Requests without an Origin header are non-browser clients and remain supported.
+func validateNoAuthOrigin(r *http.Request) error {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return nil
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return nil
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid request origin %q", origin)
+	}
+	switch parsed.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	default:
+		return fmt.Errorf("request origin %q is not a trusted local address", origin)
+	}
+}
 
 // PlatformUser represents the authenticated user for the current request.
 type PlatformUser struct {

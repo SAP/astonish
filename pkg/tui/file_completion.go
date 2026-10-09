@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -192,6 +193,12 @@ func expandFileMentions(message, root string) (string, error) {
 		seen[mention] = true
 		content, err := readMentionFile(root, mention)
 		if err != nil {
+			// An @token is only a file mention when it resolves inside the
+			// workspace. Preserve ordinary prose such as email addresses, handles,
+			// and pasted command output whose token does not name a local file.
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return "", err
 		}
 		if total+len(content) > maxMentionContextBytes {
@@ -199,6 +206,9 @@ func expandFileMentions(message, root string) (string, error) {
 		}
 		total += len(content)
 		blocks = append(blocks, fmt.Sprintf("File: %s\n```\n%s\n```", mention, strings.TrimRight(content, "\n")))
+	}
+	if len(blocks) == 0 {
+		return message, nil
 	}
 	return strings.TrimSpace(message) + "\n\n<context from @file mentions>\n" + strings.Join(blocks, "\n\n") + "\n</context>", nil
 }

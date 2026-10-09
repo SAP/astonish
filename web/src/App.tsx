@@ -90,12 +90,15 @@ function App() {
   // In personal mode (file backend), this endpoint doesn't exist (404).
   // In platform mode (postgres backend), it returns setup status.
   const [isPlatformMode, setIsPlatformMode] = useState(false)
+  const [authMode, setAuthMode] = useState<string | null>(null)
   const [isPlatformChecked, setIsPlatformChecked] = useState(false)
   useEffect(() => {
     fetch('/api/auth/setup-status')
       .then(async res => {
         if (res.ok) {
+          const status = await res.json()
           setIsPlatformMode(true)
+          setAuthMode(status.auth_mode || 'builtin')
         }
       })
       .catch(() => {})
@@ -1553,7 +1556,7 @@ layout:
   return (
     <>
       {/* Platform Auth Gate — only in platform mode */}
-      {isPlatformMode && (!auth.isAuthenticated || auth.pendingVerificationEmail || auth.noTeamMembership) && !auth.isLoading && isPlatformChecked && (
+      {isPlatformMode && authMode !== 'none' && (!auth.isAuthenticated || auth.pendingVerificationEmail || auth.noTeamMembership) && !auth.isLoading && isPlatformChecked && (
         <LoginPage
           onLogin={async (email, password) => { await auth.login(email, password) }}
           onRegister={async (email, password, displayName) => { await auth.register(email, password, displayName) }}

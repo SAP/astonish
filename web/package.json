@@ -51,7 +51,7 @@
     "jszip": "^3.10.2",
     "lit": "^3.3.3",
     "lucide-react": "^1.48.0",
-    "mtx-decompressor": "^1.6.0",
+    "mtx-decompressor": "^1.8.0",
     "pptxgenjs": "^4.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.3.0",

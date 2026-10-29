@@ -280,3 +280,33 @@ func NewSearchToolsTool(toolIndex *agent.ToolIndex) (tool.Tool, error) {
 		Description: description,
 	}, SearchTools(toolIndex))
 }
+
+// NewScopedSearchToolsTool searches only the child's immutable executable catalog.
+// It never merges ambient request catalogs or the global semantic index.
+func NewScopedSearchToolsTool(scope *agent.ChildToolScope) (tool.Tool, error) {
+	if scope == nil {
+		return nil, fmt.Errorf("child scope is required")
+	}
+	return functiontool.New(functiontool.Config{Name: "search_tools", Description: "Search tools allowed for this child. Inspect with describe_tools and call execute_tool. Use '*' to list all allowed tools."}, func(ctx tool.Context, args SearchToolsArgs) (SearchToolsResult, error) {
+		query := strings.ToLower(strings.TrimSpace(args.Query))
+		if query == "" {
+			return SearchToolsResult{}, fmt.Errorf("query is required")
+		}
+		result := SearchToolsResult{Matches: []SearchToolsMatchResult{}}
+		limit := args.MaxResults
+		if limit <= 0 {
+			limit = 10
+		}
+		for _, m := range scope.Matches(ctx) {
+			if !isListAllQuery(query) && !sharesSearchTerm(query, strings.ToLower(m.ToolName+" "+m.Description)) && !strings.Contains(strings.ToLower(m.ToolName), query) {
+				continue
+			}
+			result.Matches = append(result.Matches, SearchToolsMatchResult{ToolName: m.ToolName, GroupName: m.GroupName, Description: m.Description, Score: m.Score, Access: "allowed for this child — inspect with describe_tools, then invoke with execute_tool using exact name `" + m.ToolName + "`"})
+			if !isListAllQuery(query) && len(result.Matches) >= limit {
+				break
+			}
+		}
+		result.Count = len(result.Matches)
+		return result, nil
+	})
+}

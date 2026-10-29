@@ -200,6 +200,12 @@ export interface KnowledgeDebugResponse {
 }
 
 export interface SubtaskEventItem {
+  batch_id?: string
+  task_id?: string
+  child_session_id?: string
+  attempt?: number
+  call_id?: string
+  sequence?: number
   type: string
   tool_name?: string
   tool_args?: unknown
@@ -227,14 +233,27 @@ export async function fetchKnowledgeDebug(sessionId: string, invocationId: strin
   return response.json()
 }
 
-export async function fetchSubtaskEvents(sessionId: string, taskName: string): Promise<SubtaskEventItem[]> {
-  const params = new URLSearchParams({ task_name: taskName })
-  const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/subtask-events?${params}`)
-  if (!response.ok) {
-    return []
-  }
+export interface SubtaskSelector {
+  child_session_id?: string
+  batch_id?: string
+  task_id?: string
+  attempt?: number
+  task_name?: string
+}
+
+export class SubtaskDetailError extends Error {
+  constructor(message: string, public status: number) { super(message) }
+}
+
+export async function fetchSubtaskEvents(sessionId: string, selector: SubtaskSelector | string, signal?: AbortSignal): Promise<SubtaskEventItem[]> {
+  const fields = typeof selector === 'string' ? { task_name: selector } : selector
+  const params = new URLSearchParams()
+  Object.entries(fields).forEach(([key, value]) => { if (value != null) params.set(key, String(value)) })
+  const response = await teamFetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/subtask-events?${params}`, { signal })
+  if (!response.ok) throw new SubtaskDetailError(response.status === 409 ? 'Ambiguous task identity. Choose a specific attempt.' : `Unable to load execution detail (${response.status})`, response.status)
   const data = await response.json()
-  return data.events || []
+  if (!Array.isArray(data.events)) throw new SubtaskDetailError('Invalid execution detail response', 502)
+  return data.events
 }
 
 export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {

@@ -139,6 +139,28 @@ func TestCodeSystemPromptContracts_ProjectGuidance(t *testing.T) {
 	assertNotContains(t, base.Build(), "## Project Guidance", "Project Guidance must NOT appear in chat-mode (base) prompt")
 }
 
+func TestCodeSystemPromptContracts_ContinuationMarkerReports(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	for _, want := range []string{
+		"small, clearly bounded files may use `write_file` normally",
+		"ASTONISH_CONTINUE:<random-id>",
+		"Each `edit_file` must replace exactly that marker",
+		"one bounded semantic section",
+		"exact same marker",
+		"After interruption or compaction, inspect/read the file",
+		"Never claim completion or emit a report fence while the marker remains",
+		"final edit removes it",
+		"astonish-report",
+		"exact path",
+		"concise response",
+	} {
+		assertContains(t, prompt, want, "code-mode report contract supports growing-file recovery")
+	}
+	for _, unwanted := range []string{"begin_artifact_job", "append_artifact_chunk", "artifact_job_status", "finalize_artifact_job"} {
+		assertNotContains(t, prompt, unwanted, "code-mode report contract must not mention artifact jobs")
+	}
+}
+
 func TestCodeSystemPromptContracts_CodeNavigationRule(t *testing.T) {
 	cb := maximalCodeBuilder()
 	prompt := cb.Build()

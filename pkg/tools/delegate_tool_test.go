@@ -1,7 +1,12 @@
 package tools
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/agent"
+	"google.golang.org/genai"
 )
 
 func TestDelegateTasks_NilManager(t *testing.T) {
@@ -64,15 +69,73 @@ func TestDelegateTasks_TooManyTasks(t *testing.T) {
 	}
 }
 
+func TestDelegateTasksBoundManagerSurvivesGlobalReplacement(t *testing.T) {
+	first := agent.NewSubAgentManager(agent.SubAgentConfig{})
+	second := agent.NewSubAgentManager(agent.SubAgentConfig{})
+
+	firstEvents := 0
+	secondEvents := 0
+	first.SubTaskProgress = func(agent.SubTaskProgressEvent) { firstEvents++ }
+	second.SubTaskProgress = func(agent.SubTaskProgressEvent) { secondEvents++ }
+
+	bound, err := NewDelegateTasksToolForManager(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetSubAgentManager(second)
+	t.Cleanup(func() { SetSubAgentManager(nil) })
+
+	declared, ok := bound.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok || declared.Declaration() == nil {
+		t.Fatalf("bound delegate tool type %T is missing its declaration", bound)
+	}
+	runFirst := newDelegateTasksRunner(first)
+	_, _ = runFirst(nil, DelegateTasksArgs{})
+
+	if firstEvents == 0 {
+		t.Fatal("manager-bound delegate tool did not emit through its own manager")
+	}
+	if secondEvents != 0 {
+		t.Fatalf("manager-bound delegate tool leaked to replacement global manager: %d events", secondEvents)
+	}
+}
+
 func TestNewDelegateTasksTool(t *testing.T) {
-	tool, err := NewDelegateTasksTool()
+	got, err := NewDelegateTasksTool()
 	if err != nil {
 		t.Fatalf("NewDelegateTasksTool() error = %v", err)
 	}
-	if tool.Name() != "delegate_tasks" {
-		t.Errorf("Name() = %q, want 'delegate_tasks'", tool.Name())
+	if got.Name() != "delegate_tasks" {
+		t.Errorf("Name() = %q, want 'delegate_tasks'", got.Name())
 	}
-	if tool.Description() == "" {
+	if got.Description() == "" {
 		t.Error("Description() is empty")
+	}
+
+	declared, ok := got.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		t.Fatal("delegate_tasks does not expose its provider declaration")
+	}
+	declaration := declared.Declaration()
+	if declaration == nil || declaration.ParametersJsonSchema == nil {
+		t.Fatal("delegate_tasks declaration is missing its input schema")
+	}
+	schema, err := json.Marshal(declaration.ParametersJsonSchema)
+	if err != nil {
+		t.Fatalf("marshal delegate_tasks schema: %v", err)
+	}
+	for _, required := range []string{`"tasks"`, `"name"`, `"task"`} {
+		if !strings.Contains(string(schema), required) {
+			t.Errorf("delegate_tasks schema %s does not contain %s", schema, required)
+		}
+	}
+	for _, unsupported := range []string{`"expected_output"`, `"output_format"`} {
+		if strings.Contains(string(schema), unsupported) {
+			t.Errorf("delegate_tasks schema unexpectedly contains unsupported field %s: %s", unsupported, schema)
+		}
 	}
 }

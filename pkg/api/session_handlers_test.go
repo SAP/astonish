@@ -1,13 +1,124 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	persistentsession "github.com/SAP/astonish/pkg/session"
+	adksession "google.golang.org/adk/session"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/gorilla/mux"
 )
+
+func TestSubtaskSelectorForeignTenantHTTP(t *testing.T) {
+	env := setupMemoryHTTPAcceptance(t, NewMockLLM(TextTurn("Parent ready.")), nil)
+	events := env.Turn(t, "", "Create parent", false)
+	parent := toString(assertHasEvent(t, events, "session").Data["sessionId"])
+	for _, selector := range []string{"child_session_id=foreign-child", "batch_id=foreign-batch&task_id=foreign-task&attempt=1"} {
+		resp := env.Request(t, http.MethodGet, "/api/studio/sessions/"+parent+"/subtask-events?"+selector, nil, memoryIdentityForeign)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("foreign tenant exact selector status=%d", resp.StatusCode)
+		}
+	}
+}
+
+type selectorSessionStore struct {
+	store.SessionStore
+	service  adksession.Service
+	metas    map[string]*store.SessionMeta
+	children []store.SessionMeta
+	reads    int
+}
+
+func (s *selectorSessionStore) GetSessionMeta(_ context.Context, id string) (*store.SessionMeta, error) {
+	return s.metas[id], nil
+}
+func (s *selectorSessionStore) ListChildren(_ context.Context, id string) ([]store.SessionMeta, error) {
+	children := make([]store.SessionMeta, 0, len(s.children))
+	for _, child := range s.children {
+		if child.ParentID == id {
+			children = append(children, child)
+		}
+	}
+	return children, nil
+}
+func (s *selectorSessionStore) Get(ctx context.Context, r *adksession.GetRequest) (*adksession.GetResponse, error) {
+	return s.service.Get(ctx, r)
+}
+func (s *selectorSessionStore) ReadTranscriptEvents(context.Context, string, string, string) ([]*adksession.Event, error) {
+	s.reads++
+	return nil, nil
+}
+
+func TestSubtaskSelectorsEnforceParentTenantAndAmbiguity(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, parent, user string
+		count, status             int
+		omitParentState           bool
+	}{
+		{name: "exact child", query: "child_session_id=child1", parent: "parent", user: "caller", count: 1, status: 200},
+		{name: "platform child parent metadata only", query: "child_session_id=child1", parent: "parent", user: "caller", count: 1, status: 200, omitParentState: true},
+		{name: "exact child ignores stale tuple", query: "child_session_id=child1&batch_id=stale&task_id=stale&attempt=9", parent: "parent", user: "caller", count: 1, status: 200},
+		{name: "exact tuple", query: "batch_id=batch&task_id=task&attempt=1", parent: "parent", user: "caller", count: 1, status: 200},
+		{name: "wrong parent child", query: "child_session_id=child1", parent: "other-parent", user: "caller", count: 1, status: 404},
+		{name: "wrong parent tuple", query: "batch_id=batch&task_id=task&attempt=1", parent: "other-parent", user: "caller", count: 1, status: 404},
+		{name: "foreign tenant child", query: "child_session_id=child1", parent: "parent", user: "foreign", count: 1, status: 404},
+		{name: "foreign tenant tuple", query: "batch_id=batch&task_id=task&attempt=1", parent: "parent", user: "foreign", count: 1, status: 404},
+		{name: "legacy ambiguous", query: "task_name=same", parent: "parent", user: "caller", count: 2, status: 409},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &selectorSessionStore{service: adksession.InMemoryService(), metas: map[string]*store.SessionMeta{"parent": {ID: "parent", UserID: "caller", AppName: studioChatAppName}}}
+			for _, id := range []string{"child1", "child2"}[:tc.count] {
+				state := map[string]any{"batch_id": "batch", "task_id": "task", "attempt": 1}
+				if !tc.omitParentState {
+					state[persistentsession.StateKeyParentID] = tc.parent
+				}
+				_, err := s.service.Create(context.Background(), &adksession.CreateRequest{AppName: studioChatAppName, UserID: tc.user, SessionID: id, State: state})
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.children = append(s.children, store.SessionMeta{ID: id, Title: "same", UserID: "caller", ParentID: tc.parent})
+			}
+			req := mux.SetURLVars(httptest.NewRequest("GET", "/?"+tc.query, nil), map[string]string{"id": "parent"})
+			ctx := WithPlatformUser(req.Context(), &PlatformUser{ID: "caller", OrgSlug: "tenant-a", TeamSlug: "team"})
+			ctx = store.WithTenantContext(ctx, &store.TenantContext{OrgSlug: "tenant-a", TeamSlug: "team", UserID: "caller"})
+			req = req.WithContext(store.WithServices(ctx, &store.Services{Mode: store.ModePlatform, PersonalSessions: s}))
+			w := httptest.NewRecorder()
+			StudioSubtaskEventsHandler(w, req)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", w.Code, tc.status, w.Body.String())
+			}
+			if tc.status != 200 && s.reads != 0 {
+				t.Fatal("unauthorized/ambiguous selector read transcript")
+			}
+			if tc.status == 409 && !strings.Contains(w.Body.String(), "ambiguous") {
+				t.Fatal(w.Body.String())
+			}
+		})
+	}
+}
+
+func TestSubtaskSelectorValidation(t *testing.T) {
+	for _, q := range []string{"attempt=-1", "attempt=wat", "batch_id=b", "batch_id=b&task_id=t", "child_session_id=../bad"} {
+		t.Run(q, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/?"+q, nil)
+			req = mux.SetURLVars(req, map[string]string{"id": "parent"})
+			svc := &store.Services{Mode: store.ModePlatform, PersonalSessions: &memSessionStore{metas: map[string]*store.SessionMeta{"parent": {ID: "parent", UserID: "caller", AppName: studioChatAppName}}}}
+			ctx := WithPlatformUser(req.Context(), &PlatformUser{ID: "caller"})
+			req = req.WithContext(store.WithServices(ctx, svc))
+			w := httptest.NewRecorder()
+			StudioSubtaskEventsHandler(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
 
 func TestSessionOwnerAllowed(t *testing.T) {
 	t.Parallel()

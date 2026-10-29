@@ -163,7 +163,7 @@ User Message
 5. LLM Agent Creation: llmagent.New() with callbacks
    - BeforeToolCallbacks: credential substitution, secret token resolution
    - AfterToolCallbacks: credential restoration, redaction, trace recording, image stripping
-   - BeforeModelCallbacks: tool response truncation and context compaction
+   - BeforeModelCallbacks: non-progressing discovery circuit breaker, tool response truncation, and context compaction
     |
     v
 6. Execution Loop (with retry):
@@ -172,7 +172,7 @@ User Message
    - Tool follow-ups and retries reuse that suffix; a new invocation never replays it automatically
    - Retryable errors (429, 502, 503) -> exponential backoff, retry up to 3x
    - Deferred tools are called through `execute_tool`; unknown direct names keep ADK's default error
-   - Tool call count cap (default 25) -> pause and ask user to continue
+   - Discovery circuit breaker: before another provider dispatch, stop after 2 identical `search_tools` / `describe_tools` / `skill_lookup` calls or 12 total discovery calls in the current invocation; direct and `execute_tool`-wrapped calls share the budget, while prior turns form the baseline and are not charged again
    - Approval pause -> yield event and return, resume on next user message
     |
     v
@@ -256,13 +256,15 @@ The semantic catalog is a required startup dependency when embeddings are config
 The `SubAgentManager` enables the ChatAgent to delegate work to specialized child agents via the `delegate_tasks` tool:
 
 - **Concurrent execution**: Multiple sub-agents run in parallel, each with its own session, tool set, and optional model override.
-- **Tool groups**: Tools are organized into named groups (core, browser, mcp:*). The LLM specifies which groups each sub-agent needs.
+- **Tool groups**: Tools are organized into named groups (core, browser, mcp:*). Explicit tool/group filters and override instances are hard boundaries: each child freezes an immutable executable catalog, and its search/describe/execute helpers share that catalog. A qualified single MCP tool never grants its whole server. The web group adds only the configured request-local search tool. Wrapped sandbox instances are preserved; helper and requested declarations are deduplicated.
 - **Depth limiting**: Default max depth of 2 prevents infinite delegation chains.
 - **Container sharing**: Sub-agent sessions are aliased to the parent's sandbox container via `NodeClientPool.Alias()`.
 - **Event forwarding**: When `UIEventCallback` is set, sub-agent events (tool calls, text) are streamed to the UI in real-time.
-- **Bounded liveness**: Every child has the existing absolute task timeout plus a shorter inactivity watchdog (two minutes by default). Meaningful activity is a tool call/result or non-thought text; hidden thought tokens never reset the watchdog. The watchdog cancels the child runner context, so a provider wait cannot hold a semaphore slot indefinitely.
+- **Bounded liveness**: Every child has the existing absolute task timeout plus a shorter inactivity watchdog (two minutes by default). Meaningful activity is a new successful non-discovery tool result or non-thought text; tool errors, repeated identical results, discovery helpers, and hidden thought tokens never reset the watchdog. The watchdog cancels the child runner context, so a provider wait cannot hold a semaphore slot indefinitely.
 - **Observable state**: Structured progress events distinguish `queued`, `running`, `waiting_on_model`, `retrying`, `complete`, and `failed`, with attempt, elapsed duration, last-activity age, and an explicit inactivity reason. Heartbeats report state but do not themselves count as progress.
-- **Progress-gated retry**: The outer one-time retry is permitted only after meaningful partial progress (`ToolCalls > 0` or visible result text). Inert children fail promptly without retry; all cancellation paths release the concurrency semaphore.
+- **Progress-gated retry**: The outer one-time retry (at most two attempts) requires successful non-discovery tool evidence and is suppressed after parent cancellation. Both continuation and restart carry a redacted checkpoint: last eight useful tool results, at most 1 KiB per excerpt and 12 KiB total, UTF-8-safe, with partial answer, blocker and next action. Arguments are omitted. Tool counts, durations and traces accumulate across attempts; inert/error/discovery-only children do not earn a retry. All cancellation paths release the concurrency semaphore.
+
+Local scripted acceptance: `go test ./pkg/agent ./pkg/tools ./pkg/launcher -count=1` and `go test ./pkg/api -run '^TestChildDiscoveryHTTPAcceptance$' -count=1 -timeout=3m -v`. The latter sends a real loopback HTTP chat request through delegate_tasks and an isolated scripted child, observes scoped search/describe/execute and fixed declarations, and counts the allowed tool execution without paid model credentials. This scripted acceptance does not exercise paid provider inference, real remote MCP servers, or a live sandbox/container; wrapper identity and override boundaries are covered by local tests instead.
 
 Each sub-agent gets its own system prompt built by `buildChildPrompt()` which includes the task instructions, available tool names, and a reminder that it's a focused worker with a specific mission.
 

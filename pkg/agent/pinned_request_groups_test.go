@@ -206,3 +206,40 @@ func TestProgressiveToolBridge_FixedDeclarations(t *testing.T) {
 }
 
 type contextToolContext struct{ minimalReadonlyContext }
+
+func TestChildScopedDiscoveryExecution(t *testing.T) {
+	var executions int
+	local, err := functiontool.New(functiontool.Config{Name: "allowed", Description: "wrapped"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		executions++
+		return map[string]any{"source": "wrapped"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"mcp:test": {Name: "mcp:test", Toolsets: []tool.Toolset{&staticToolset{name: "test", tools: []tool.Tool{local, mockTool{name: "forbidden"}}}}}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"mcp:test/allowed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge, err := NewScopedProgressiveToolBridge(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &contextToolContext{minimalReadonlyContext{Context: context.Background()}}
+	described, err := bridge[0].(runnableDeferredTool).Run(ctx, map[string]any{"names": []any{"mcp:test/allowed", "forbidden"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(described)
+	if !strings.Contains(string(data), "wrapped") || !strings.Contains(string(data), "outside the child scope") {
+		t.Fatalf("describe=%s", data)
+	}
+	output, err := bridge[1].(runnableDeferredTool).Run(ctx, map[string]any{"name": "mcp:test/allowed", "arguments": map[string]any{}})
+	if err != nil || output["source"] != "wrapped" || executions != 1 {
+		t.Fatalf("execute=%v %v count=%d", output, err, executions)
+	}
+	if _, err := bridge[1].(runnableDeferredTool).Run(ctx, map[string]any{"name": "forbidden"}); err == nil {
+		t.Fatal("single tool widened server")
+	}
+}

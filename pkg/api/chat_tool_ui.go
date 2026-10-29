@@ -3,6 +3,7 @@ package api
 import (
 	"sync"
 
+	"github.com/SAP/astonish/pkg/common"
 	"google.golang.org/genai"
 )
 
@@ -53,6 +54,19 @@ func (t *uiToolTracker) response(response *genai.FunctionResponse) string {
 			t.removePending(identity.id)
 			return identity.name
 		}
+		// Some providers remap the function-call ID between call and response.
+		// A sole pending dispatcher call is still unambiguous; preserve the
+		// user-facing underlying tool name. With multiple pending calls, keep the
+		// wrapper rather than pairing the response to the wrong operation.
+		if len(t.pending) == 1 {
+			identity := t.pending[0]
+			t.pending = nil
+			if identity.id != "" {
+				delete(t.byID, identity.id)
+			}
+			return identity.name
+		}
+		return response.Name
 	}
 	if len(t.pending) > 0 {
 		identity := t.pending[0]
@@ -82,13 +96,10 @@ func unwrapUIToolCall(name string, args map[string]any) uiToolIdentity {
 	if name != deferredExecuteToolName || args == nil {
 		return identity
 	}
-	underlyingName, ok := args["name"].(string)
-	if !ok || underlyingName == "" {
+	underlyingName, underlyingArgs, err := common.NormalizeExecuteToolArgs(args)
+	if err != nil {
+		// Preserve invalid envelopes rather than guessing a tool mutation.
 		return identity
-	}
-	underlyingArgs, _ := args["arguments"].(map[string]any)
-	if underlyingArgs == nil {
-		underlyingArgs = map[string]any{}
 	}
 	return uiToolIdentity{name: underlyingName, args: underlyingArgs}
 }

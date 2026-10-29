@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
+  fetchSubtaskEvents,
   fetchArtifactContent,
   fetchArtifactBlob,
   fetchArtifactPDFBlob,
@@ -28,6 +29,18 @@ describe('studioChat API', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch
+  })
+
+  describe('subtask details', () => {
+    it('sends precise identity and preserves a successful empty response', async () => {
+      globalThis.fetch = mockFetch({ events: [] })
+      expect(await fetchSubtaskEvents('s/1', { batch_id: 'b', task_id: 't', child_session_id: 'c', attempt: 2 })).toEqual([])
+      expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining('batch_id=b&task_id=t&child_session_id=c&attempt=2'), expect.anything())
+    })
+    it.each([403, 404, 409, 500])('does not hide HTTP %s as empty detail', async status => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status })
+      await expect(fetchSubtaskEvents('s', 'same')).rejects.toMatchObject({ status })
+    })
   })
 
   describe('artifact session compatibility', () => {

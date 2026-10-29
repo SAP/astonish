@@ -139,11 +139,15 @@ type artifactTranscriptStore struct {
 	artifactOwnerStore
 	path    string
 	content string
+	events  []*adksession.Event
 }
 
 func (s artifactTranscriptStore) ReadTranscriptEvents(_ context.Context, _, userID, sessionID string) ([]*adksession.Event, error) {
 	if userID != "owner" || sessionID != "owned" {
 		return nil, fmt.Errorf("unauthorized transcript")
+	}
+	if s.events != nil {
+		return s.events, nil
 	}
 	path, content := s.path, s.content
 	if path == "" {
@@ -154,6 +158,42 @@ func (s artifactTranscriptStore) ReadTranscriptEvents(_ context.Context, _, user
 			"file_path": path, "content": content,
 		}},
 	}}}}}}, nil
+}
+
+func TestArtifactWriteEditContentSurvivesPlatformRestore(t *testing.T) {
+	const path = "/tmp/final-report.md"
+	const initial = "# Durable report\n\n<!-- next -->\n"
+	const finalContent = "# Durable report\n\nFirst section.\n\nSecond section.\n\n<!-- next -->\n"
+	parts := []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "write", Name: "write_file", Args: map[string]any{"file_path": path, "content": initial}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: "write", Name: "write_file", Response: map[string]any{"path": path}}},
+		{FunctionCall: &genai.FunctionCall{ID: "edit-1", Name: "edit_file", Args: map[string]any{"path": path, "old_string": "<!-- next -->", "new_string": "First section.\n\n<!-- next -->"}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: "edit-1", Name: "edit_file", Response: map[string]any{"path": path}}},
+		{FunctionCall: &genai.FunctionCall{ID: "edit-2", Name: "edit_file", Args: map[string]any{"path": path, "old_string": "<!-- next -->", "new_string": "Second section.\n\n<!-- next -->"}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: "edit-2", Name: "edit_file", Response: map[string]any{"path": path}}},
+	}
+	events := []*adksession.Event{{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: parts}}}}
+	if got, ok := readArtifactContentFromEventSlice(events, path); !ok || got != finalContent {
+		t.Fatalf("write/edit reconstruction = %q, %v; want=%q", got, ok, finalContent)
+	}
+
+	registryStore, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := sandbox.NewSessionRegistryFromStore(registryStore)
+	for _, handler := range []http.HandlerFunc{StudioArtifactContentHandler, StudioArtifactDownloadHandler} {
+		r := httptest.NewRequest(http.MethodGet, "/?path="+url.QueryEscape(path)+"&session=owned", nil)
+		r = r.WithContext(WithPlatformUser(store.WithServices(r.Context(), &store.Services{
+			PersonalSessions: artifactTranscriptStore{events: events},
+		}), &PlatformUser{ID: "owner"}))
+		r = withSandboxRegistry(r, registry)
+		w := httptest.NewRecorder()
+		handler(w, r)
+		if w.Code != http.StatusOK || w.Body.String() != finalContent {
+			t.Fatalf("write/edit artifact unavailable after restore: status=%d body=%q", w.Code, w.Body.String())
+		}
+	}
 }
 
 func TestArtifactPlatformTranscriptAvailableDuringContainment(t *testing.T) {
@@ -224,6 +264,45 @@ func TestArtifactPlatformActiveTranscriptDelivery(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+type artifactConfinedBackend struct {
+	*mock.MockBackend
+	directArtifact string
+}
+
+func (b *artifactConfinedBackend) ArtifactReadsConfined() bool { return true }
+func (b *artifactConfinedBackend) PullArtifact(ctx context.Context, sessionID, path string) (io.ReadCloser, error) {
+	if b.directArtifact != "" {
+		return io.NopCloser(strings.NewReader(b.directArtifact)), nil
+	}
+	return b.MockBackend.PullFile(ctx, sessionID, path)
+}
+
+func TestPullArtifactPlatformAllowsConfinedBackend(t *testing.T) {
+	ctx := WithPlatformUser(context.Background(), &PlatformUser{ID: "owner"})
+	backend := &artifactConfinedBackend{MockBackend: mock.New()}
+	if _, err := backend.CreateSession(ctx, sandbox.SessionSpec{SessionID: "owned", TemplateID: sandbox.BaseTemplateID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.PushFile(ctx, "owned", "/root/shell-created.md", strings.NewReader("visible live artifact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, ok := pullArtifactFromSandboxBackend(ctx, backend, "owned", "/root/shell-created.md")
+	if !ok || string(content) != "visible live artifact" {
+		t.Fatalf("confined platform artifact unavailable: ok=%v content=%q", ok, content)
+	}
+}
+
+func TestPullArtifactPlatformFallsBackFromMissingScopedRegistry(t *testing.T) {
+	ctx := WithPlatformUser(context.Background(), &PlatformUser{ID: "owner"})
+	missingScoped := &artifactConfinedBackend{MockBackend: mock.New(), directArtifact: "visible live artifact"}
+
+	content, ok := pullAuthorizedArtifactFromSandboxBackend(ctx, missingScoped, "owned", "/root/shell-created.md")
+	if !ok || string(content) != "visible live artifact" {
+		t.Fatalf("authorized read without sandbox registry row unavailable: ok=%v content=%q", ok, content)
 	}
 }
 

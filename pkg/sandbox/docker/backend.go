@@ -199,6 +199,8 @@ func (db *DockerBackend) Kind() sandbox.BackendKind {
 	return sandbox.BackendKindDocker
 }
 
+func (db *DockerBackend) ArtifactReadsConfined() bool { return db != nil && db.cfg.Sessions != nil }
+
 // Capabilities reports Docker backend feature flags.
 func (db *DockerBackend) Capabilities() sandbox.BackendCapabilities {
 	return sandbox.BackendCapabilities{

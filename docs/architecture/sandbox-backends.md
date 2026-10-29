@@ -122,6 +122,24 @@ graph TB
 
 The abstraction lives in `pkg/sandbox/backend.go`. Local sessions are `pkg/sandbox/docker/`. K8s code is under `pkg/sandbox/k8s/`. The OpenShell backend (`pkg/sandbox/openshell/`) delegates sandbox lifecycle to an NVIDIA OpenShell gateway deployed as a Helm subchart, gaining per-process Landlock/seccomp isolation and L7 egress policy enforcement on top of standard Kubernetes pod boundaries. See [`openshell-sandbox-backend.md`](openshell-sandbox-backend.md) for full details. Callers see only the interface. `sandbox.backend: incus` aliases to Docker.
 
+### Tool argument validation and file routing
+
+For session-bound calls, `NodeTool.Run` normalizes arguments and invokes
+`common.ValidateToolArguments` against the original tool declaration before
+client acquisition, `EnsureReady`, or `_caller` injection. Missing required
+arguments and non-nullable required arguments supplied as null fail without
+sandbox dispatch. Optional fields and deeper validation remain the tool's
+responsibility. The dispatch map is copied before caller metadata is added;
+the caller's argument map is not mutated. Calls without a session ID retain
+the original tool's local fallback unchanged. Request-time sandbox warming
+in `ProcessRequest` remains independent of this per-call validation.
+
+`load_file`, like `read_file`, is a container tool: pool-backed chat/flow and
+fleet wrappers route it to the session filesystem. The `run_drill` composite
+executor uses the same routing rule when a sandbox is active, rather than
+inspecting the host filesystem. No-sandbox drill execution remains local.
+These dispatch rules do not change backend interfaces or lifecycle behavior.
+
 ## 3. `SandboxBackend` Interface Specification
 
 The interface encapsulates every operation Astonish performs against the sandbox tier. Concrete Go signatures will follow existing style in `pkg/sandbox/`; this is the conceptual contract.
@@ -276,7 +294,7 @@ This lazy-refresh model is a deliberate safety property: a single `@base` edit c
 
 ## 4. Docker OverlayFS Backend (Local Default)
 
-Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. See `docs/architecture/sandbox.md`.
+Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. `StopSession` archives the live upper layer before removing the container and overlay volume; if archival fails it returns the error and leaves both intact so the session remains recoverable. `DestroySession` is intentionally different: it permanently removes the container, volume, registry row, and persisted upper after orphanhood or explicit deletion has been established. See `docs/architecture/sandbox.md`.
 
 Personal mode (`astonish daemon run`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 
@@ -747,6 +765,8 @@ Some reclamation patterns benefit from background batching: orphan detection (§
 - Cleans crashed template-builder staging directories, orphan session/fleet pods whose registry row disappeared, and old completed GC helper pods.
 
 **Retention semantics.** Stale evicted upper cleanup removes sandbox resumability, not chat history. The chat transcript, artifact metadata, and transcript fallback content remain in the session store. If the user later interacts with an old chat after its upper was reclaimed, Astonish creates a fresh sandbox from the template rather than restoring the old writable filesystem.
+
+**Live artifact reads.** Studio may preview or download a file that exists only in an active sandbox (including files created by `shell_command` and later observed by `read_file`). In platform mode this path is allowed only after chat ownership and tenant-scoped sandbox-row authorization succeed, and only through a backend implementing `ConfinedArtifactReader`. Docker, Kubernetes, and OpenShell advertise that contract only when constructed with an injected session registry, so a caller-supplied session ID cannot fall through to host-file access or an unscoped backend. Persisted `write_file`/`edit_file` event reconstruction remains the fallback after the live sandbox is stopped or reclaimed.
 
 **Grace period rationale.** Short-lived zero-ref or untracked-upper windows happen legitimately during template refreshes, manual rollbacks, and eviction/create races. The layer and orphan-upper grace periods are safety margins around those windows. The evicted-upper retention period is a production storage bound for the `astonish-uppers` RWX PVC.
 
@@ -1320,15 +1340,18 @@ These guarantees are identical across both backends.
 
 ### On idle timeout
 
-- **Docker OverlayFS:** existing prune logic (stop + reap).
+- **Docker OverlayFS:** `StopSession` first archives the writable upper. Only a successful archive permits container and overlay-volume removal; an archive error leaves the running sandbox intact for retry.
 - **K8s:** evict (tar-stream upper to the uppers PVC + delete pod); session row status -> `evicted`. See §10 for eviction concurrency controls.
 
 ### On orphan prune
 
-- **Docker OverlayFS:** compare registry vs `docker ps` by `astonish-session-*` prefix; destroy orphans.
-- **K8s:** compare registry (pgstore) vs `ListPods` by labels; destroy orphans (pod delete, uppers PVC cleanup).
+Destructive orphan pruning requires a complete, authoritative snapshot of chat-session IDs. In platform mode the daemon enumerates every active organization and every team in SQLite or PostgreSQL, unions the IDs, and treats any organization open, team listing/open, or session-query failure as failure of the whole snapshot. Request-scoped tenant stores are not global deletion authority. A successful empty snapshot is authoritative and may prune all eligible resources; a nil, partial, or failed snapshot skips the destructive cycle, logs the reason, and retries at the normal interval.
 
-**Invariant:** no code path deletes an Astonish entity without also deleting its backing sandbox resource. No backend implements any "soft delete." Every `DestroySession` / `DeleteTemplate` returns only after cleanup is complete and verified.
+- **Docker OverlayFS:** compare the authoritative chat-session snapshot with registry rows and `docker ps`; destroy unpinned registered orphans, and destroy backend-only sessions only after the one-hour creation grace period.
+- **K8s:** compare the same authority with the team registry and labeled pods; destroy proven orphans (pod delete and upper cleanup), while preserving pinned rows and the backend-only age guard.
+- The K8s deferred reconciler remains responsible for retention-based reclamation of evicted uppers and its independent PVC/layer consistency checks; chat-session orphan pruning does not replace that policy.
+
+**Invariant:** no code path deletes an Astonish entity without also deleting its backing sandbox resource. No backend implements any "soft delete." Every `DestroySession` / `DeleteTemplate` returns only after cleanup is complete and verified. Conversely, periodic cleanup must not call `DestroySession` until a complete chat-session snapshot proves the resource is orphaned.
 
 ### Preservation requirements (tar pipelines)
 
@@ -1490,6 +1513,21 @@ artefacts:
   build the backend through `BackendFromAppConfig` and wrap the
   tool set with `WrapToolsWithPool`. Chat and fleet keep the
   concrete Incus pool verbatim (out of scope for this pass).
+  The per-call response parser (`parseNodeResponse`) accepts NDJSON lines up
+  to **10 MiB (10,485,760 bytes)**, excluding LF/CRLF delimiters, including a
+  final line without a newline. Its scanner reserves delimiter space and
+  checks both token length and scan errors; an oversized line before the first
+  response returns an explicit size-limit error with the process exit code,
+  not a misleading “no node response.” Ready messages, banners, and malformed
+  lines within the budget remain skippable; the first valid non-empty-ID
+  response wins. Missing-response errors retain the exit code, stdout byte
+  count, and a sample limited to 256 source bytes. This is a parser line limit,
+  not an aggregate `Backend.Exec` output-memory cap or a change to tool-level
+  output limits. `TestBackendNodeLargeResultProcess` builds the root CLI in
+  `t.TempDir`, runs `astonish node` through a process-backed test `Backend`,
+  and checks a >64 KiB UTF-8 `read_file` result byte-for-byte through
+  `backendNodeClient.Call`, including clean process exit. It requires no
+  Docker/Kubernetes/OpenShell service and does not prove those transports.
 - `docker/sandbox-base/Dockerfile` installs the host-built binary at
   `/usr/local/bin/astonish-host` and a chroot wrapper at
   `/usr/local/bin/astonish`; the entrypoint bind-mounts the host-layer

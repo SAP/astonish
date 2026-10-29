@@ -169,6 +169,38 @@ func (db *DockerBackend) PullFile(ctx context.Context, sessionID, path string) (
 	return io.NopCloser(bytes.NewReader(out)), nil
 }
 
+// PullArtifact reads an owner-authorized artifact from the exact Docker
+// container identified by the session label. It intentionally does not trust a
+// derived container name when the registry row is missing.
+func (db *DockerBackend) PullArtifact(ctx context.Context, sessionID, path string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath,
+		"ps", "--all", "--filter", "label=astonish.session_id="+sessionID,
+		"--format", "{{.Names}}",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/docker: locate artifact session %s: %w", sessionID, err)
+	}
+	names := strings.Fields(string(out))
+	if len(names) == 0 {
+		if err := db.recreateFromPersist(ctx, sessionID); err != nil {
+			return nil, fmt.Errorf("sandbox/docker: restore artifact session %s: %w", sessionID, err)
+		}
+		names = []string{containerName(sessionID)}
+	}
+	if len(names) != 1 || names[0] != containerName(sessionID) {
+		return nil, fmt.Errorf("sandbox/docker: artifact session %q is not uniquely registered by label", sessionID)
+	}
+	args := []string{"exec", names[0], astonishShell, "cat", path}
+	content, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/docker: PullArtifact %q from %s: %w", path, sessionID, err)
+	}
+	return io.NopCloser(bytes.NewReader(content)), nil
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

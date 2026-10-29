@@ -27,8 +27,8 @@ type SessionNotes struct {
 
 // FileNote describes a single file's involvement in the session.
 type FileNote struct {
-	Action      string    // "created", "modified", "deleted", "read"
-	Description string    // One-line description
+	Action      string // "created", "modified", "deleted", "read"
+	Description string // One-line description
 	LastTouched time.Time
 }
 

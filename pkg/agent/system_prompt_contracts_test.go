@@ -196,19 +196,27 @@ func TestSystemPromptContracts_GenerativeUI(t *testing.T) {
 	// Contract 3: Mermaid diagrams for reports
 	assertContains(t, prompt, "mermaid", "mermaid blocks — MermaidBlock.tsx renders ```mermaid fences inside report markdown")
 
-	// Contract 20: Reports use a TWO-STEP contract — write_file PLUS astonish-report fence.
-	// Both signals are required for an artifact to be promoted to inline report
-	// rendering on the frontend (EmbeddedFileViewer). The prompt MUST teach the
-	// LLM both halves of the contract:
-	//   1. write_file creates the markdown file on disk;
-	//   2. an ```astonish-report fence with `path:` flips the IsReport gate so
-	//      the chat UI embeds the artifact inline instead of as a download card.
-	// These three assertions prevent silent regression where the prompt teaches
-	// only one side of the contract and the gate effectively goes back to "any
-	// last-turn markdown file is a report" (the b5310ae regression).
-	assertContains(t, prompt, "write_file", "write_file tool — Step 1 of the report contract: persist the markdown file on disk")
-	assertContains(t, prompt, "astonish-report", "astonish-report fence — Step 2 of the report contract: signal the file as a report so the frontend embeds it inline")
-	assertContains(t, prompt, "path:", "astonish-report fence requires `path:` — the path MUST match the absolute path passed to write_file or the marker is silently dropped")
+	// Contract 20: reports grow in the destination file behind a continuation
+	// marker, and are not announced as complete until the final edit removes it.
+	for _, want := range []string{
+		"small files may use `write_file` normally",
+		"ASTONISH_CONTINUE:<random-id>",
+		"Each `edit_file` call must replace exactly that marker",
+		"one bounded semantic section",
+		"exact same marker",
+		"After interruption/compaction, inspect/read the file",
+		"Marker present means incomplete",
+		"do not claim completion or emit a report fence",
+		"Final edit removes the marker",
+		"astonish-report",
+		"exact path/title",
+		"concise response",
+	} {
+		assertContains(t, prompt, want, "report contract supports growing-file continuation and recovery")
+	}
+	for _, unwanted := range []string{"begin_artifact_job", "append_artifact_chunk", "artifact_job_status", "finalize_artifact_job"} {
+		assertNotContains(t, prompt, unwanted, "report contract must not mention artifact jobs")
+	}
 }
 
 func TestSystemPromptContracts_Delegation(t *testing.T) {
@@ -558,7 +566,7 @@ func TestSystemPromptContracts_PlatformAuthority(t *testing.T) {
 
 func TestSystemPromptContracts_ReportSelection(t *testing.T) {
 	p := minimalBuilder().Build()
-	for _, want := range []string{"requested reports, reviews or documents", "substantial reusable/shareable deliverables", "not casual summaries", "read-only modes", "not saved", "never fabricate a fence", "write_file", "astonish-report", "file_path"} {
+	for _, want := range []string{"Reports/reviews/docs", "reusable", "deliverables", "not casual summaries", "Read-only", "not saved", "never fabricate a fence", "write_file", "astonish-report", "exact path"} {
 		assertContains(t, p, want, "report selection versus artifact protocol")
 	}
 }

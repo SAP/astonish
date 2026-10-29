@@ -1,7 +1,20 @@
 // Package streaming provides payload-free provider progress notifications.
 package streaming
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// Kind distinguishes model phases from transport liveness and recovery.
+// The zero value is a legacy phase notification, equivalent to KindPhase.
+type Kind string
+
+const (
+	KindPhase     Kind = "phase"
+	KindHeartbeat Kind = "heartbeat"
+	KindRecovery  Kind = "recovery"
+)
 
 // Phase describes work that may not yet produce visible model output.
 type Phase string
@@ -9,10 +22,21 @@ type Phase string
 const (
 	PhaseThinking      Phase = "thinking"
 	PhaseToolArguments Phase = "tool_arguments"
+	PhaseWaiting       Phase = "waiting"
+	PhaseRecovering    Phase = "recovering"
 )
 
 // Progress deliberately carries no reasoning, tool names, or arguments.
-type Progress struct{ Phase Phase }
+// Attempt is one-based; Elapsed is generation age and LastActivity is time since
+// the most recent upstream bytes (or attempt start before any bytes arrive).
+type Progress struct {
+	Kind         Kind
+	Phase        Phase
+	Attempt      int
+	MaxAttempts  int
+	Elapsed      time.Duration
+	LastActivity time.Duration
+}
 
 type progressKey struct{}
 

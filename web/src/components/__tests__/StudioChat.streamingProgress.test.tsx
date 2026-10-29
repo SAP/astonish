@@ -25,6 +25,12 @@ function controlledStream() {
         controller.close()
       }
     },
+    fail(error = new Error('network disconnected')) {
+      if (!closed) {
+        closed = true
+        controller.error(error)
+      }
+    },
   }
 }
 
@@ -37,6 +43,37 @@ describe('StudioChat streaming generation progress', () => {
     result?.cleanup()
     result = undefined
     stream = undefined
+  })
+
+  it('keeps an active delegation recoverable after a send-stream network failure', async () => {
+    const sessionId = 'delegation-network-session'
+    const pendingStream = controlledStream()
+    stream = pendingStream
+    result = renderChat({
+      mockConfig: { customHandlers: {
+        '/api/settings/providers/effective': () => mockJsonResponse([]),
+        '/model-status': () => mockJsonResponse(null),
+        '/api/studio/chat': () => pendingStream.response,
+      } },
+    })
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'Research in parallel' } })
+    fireEvent.keyDown(screen.getByTestId('chat-input'), { key: 'Enter', code: 'Enter' })
+    await waitFor(() => expect(screen.getByTitle('Stop')).toBeVisible())
+    await act(async () => {
+      pendingStream.emit('session', { sessionId, isNew: true })
+      pendingStream.emit('subtask_progress', {
+        event_type: 'delegation_start', batch_id: 'batch', sequence: 1,
+        tasks: [{ task_id: 'one', name: 'worker-one', description: '' }, { task_id: 'two', name: 'worker-two', description: '' }],
+      })
+      pendingStream.emit('subtask_progress', { event_type: 'task_complete', batch_id: 'batch', task_id: 'one', attempt: 1, sequence: 2, duration: '2s' })
+    })
+    expect(await screen.findByText('1/2 tasks')).toBeVisible()
+
+    await act(async () => { pendingStream.fail() })
+    await waitFor(() => expect(screen.queryByTitle('Stop')).not.toBeInTheDocument())
+    expect(screen.getByText('1/2 tasks')).toBeVisible()
+    expect(screen.queryByText('Delegation interrupted')).not.toBeInTheDocument()
+    expect(await screen.findByText(/task is no longer running.*refresh this conversation to continue/i)).toBeVisible()
   })
 
   for (const theme of ['light', 'dark']) {
@@ -77,6 +114,11 @@ describe('StudioChat streaming generation progress', () => {
         expect(screen.getByTitle('Stop')).toBeVisible()
         expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', 'Agent is responding...')
       }
+      expectStillStreaming()
+
+      // Transport liveness is visible while the model has not produced output.
+      await act(async () => { pendingStream.emit('thinking', { text: 'Waiting for model response (45s)…' }) })
+      expect(await screen.findByText('Waiting for model response (45s)…')).toBeVisible()
       expectStillStreaming()
 
       // ChatRunner.processStateDelta maps _spinner_text to thinking.data.text.

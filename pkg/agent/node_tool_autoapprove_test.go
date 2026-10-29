@@ -24,11 +24,11 @@ func TestHandleToolNode_GlobalAutoApproveBypassesApproval(t *testing.T) {
 		Tools:       []tool.Tool{mockTool},
 	}
 	node := &config.Node{
-		Name:            "run_curl",
-		Type:            "tool",
-		ToolsSelection:  []string{"shell_command"},
+		Name:              "run_curl",
+		Type:              "tool",
+		ToolsSelection:    []string{"shell_command"},
 		ToolsAutoApproval: false,
-		Args:            map[string]interface{}{"command": "echo hi"},
+		Args:              map[string]interface{}{"command": "echo hi"},
 	}
 
 	paused := false

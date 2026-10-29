@@ -408,6 +408,11 @@ func (b *K8sBackend) Kind() sandbox.BackendKind {
 	return sandbox.BackendKindK8s
 }
 
+func (b *K8sBackend) ArtifactReadsConfined() bool { return b != nil && b.sessions != nil }
+func (b *K8sBackend) PullArtifact(ctx context.Context, sessionID, path string) (io.ReadCloser, error) {
+	return b.PullFile(ctx, sessionID, path)
+}
+
 // ServerArchitecture returns the architecture of the Kubernetes cluster
 // nodes (normalized). In homogeneous clusters this matches the pods that
 // will be scheduled. We conservatively return "amd64" here; real deployments

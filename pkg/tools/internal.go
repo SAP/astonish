@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/SAP/astonish/pkg/codeintel"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/pathscope"
 	"google.golang.org/adk/tool"
@@ -151,7 +154,7 @@ type ReadFileArgs struct {
 	Path   string `json:"path" jsonschema:"Absolute path to the file to read"`
 	Offset *int   `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-indexed). Omit to start from line 1."`
 	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file (large files are auto-capped; page with offset/limit)."`
-	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since last read. Use when you no longer have the file content in your conversation history."`
+	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since the last read."`
 }
 
 // readFileSoftCapLines bounds how many lines an unbounded read_file returns for
@@ -168,7 +171,9 @@ const readFileSoftCapLines = 400
 const readFileSoftCapBytes = 256 * 1024
 
 type ReadFileResult struct {
-	Content    string `json:"content"`
+	Content    string `json:"content,omitempty"`
+	Path       string `json:"path,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
 	TotalLines int    `json:"total_lines"`
 	Range      string `json:"range,omitempty"`
 	Unchanged  bool   `json:"unchanged,omitempty"`
@@ -176,6 +181,9 @@ type ReadFileResult struct {
 }
 
 func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
+	if strings.TrimSpace(args.Path) == "" {
+		return ReadFileResult{}, fmt.Errorf("path is required (use the read_file 'path' argument, not 'file_path')")
+	}
 	args.Path = expandPath(args.Path)
 	if isProtectedPath(args.Path) {
 		return ReadFileResult{}, fmt.Errorf("access denied: this file is part of the credential store and cannot be read")
@@ -345,10 +353,78 @@ func ReadFile(ctx tool.Context, args ReadFileArgs) (ReadFileResult, error) {
 	}, nil
 }
 
+// --- Load File Tool ---
+
+type LoadFileArgs struct {
+	Path  string `json:"path" jsonschema:"Absolute path to the file to publish to the user's Files section"`
+	Title string `json:"title,omitempty" jsonschema:"Optional display title for the file in the Files section"`
+}
+
+type LoadFileResult struct {
+	Path       string `json:"path,omitempty"`
+	Title      string `json:"title,omitempty"`
+	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	TotalLines int    `json:"total_lines"`
+}
+
+// LoadFile publishes a file to the user-facing Files section WITHOUT returning
+// its content to the model. It returns metadata only; the Studio browser fetches
+// the complete file directly. The artifact itself is captured by the agent's
+// after-tool callback keyed on the tool name "load_file". This is the counterpart
+// to read_file: read_file loads content into the model's context, load_file loads
+// the file for the user.
+func LoadFile(ctx tool.Context, args LoadFileArgs) (LoadFileResult, error) {
+	if strings.TrimSpace(args.Path) == "" {
+		return LoadFileResult{}, fmt.Errorf("path is required (use the load_file 'path' argument)")
+	}
+	args.Path = expandPath(args.Path)
+	if isProtectedPath(args.Path) {
+		return LoadFileResult{}, fmt.Errorf("access denied: this file is part of the credential store and cannot be published")
+	}
+	info, err := os.Stat(args.Path)
+	if err != nil {
+		return LoadFileResult{}, fmt.Errorf("failed to inspect file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return LoadFileResult{}, fmt.Errorf("failed to publish file: path is not a regular file")
+	}
+	file, err := os.Open(args.Path)
+	if err != nil {
+		return LoadFileResult{}, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	buffer := make([]byte, 32*1024)
+	totalLines := 0
+	endsWithNewline := false
+	for {
+		n, readErr := file.Read(buffer)
+		if n > 0 {
+			chunk := buffer[:n]
+			totalLines += bytes.Count(chunk, []byte{'\n'})
+			endsWithNewline = bytes.HasSuffix(chunk, []byte{'\n'})
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return LoadFileResult{}, fmt.Errorf("failed to inspect file: %w", readErr)
+			}
+			break
+		}
+	}
+	if info.Size() > 0 && !endsWithNewline {
+		totalLines++
+	}
+	return LoadFileResult{
+		Path:       args.Path,
+		Title:      strings.TrimSpace(args.Title),
+		SizeBytes:  info.Size(),
+		TotalLines: totalLines,
+	}, nil
+}
+
 // --- Write File Tool ---
 
 type WriteFileArgs struct {
-	FilePath string `json:"file_path" jsonschema:"The path to the file where content will be written."`
+	FilePath string `json:"path" jsonschema:"The path to the file where content will be written."`
 	Content  string `json:"content" jsonschema:"The content to write to the file."`
 }
 
@@ -388,6 +464,9 @@ func tryExtractStdout(input string) (string, bool) {
 }
 
 func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
+	if strings.TrimSpace(args.FilePath) == "" {
+		return WriteFileResult{}, fmt.Errorf("path is required (use the write_file 'path' argument)")
+	}
 	args.FilePath = expandPath(args.FilePath)
 	if isProtectedPath(args.FilePath) {
 		return WriteFileResult{}, fmt.Errorf("access denied: this file is part of the credential store and cannot be modified")
@@ -790,15 +869,23 @@ func FilterJson(ctx tool.Context, args FilterJsonArgs) (FilterJsonResult, error)
 func GetInternalTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Read file contents with line numbers. Large files are auto-capped to a bounded window when no limit is given — page with offset/limit, or (preferred) use grep_search/code_definition to jump straight to the relevant lines instead of reading whole files.",
+		Description: "Read a file's contents with line numbers into the model's context for inspection. Large files are auto-capped to a bounded window when no limit is given — page with offset/limit, or (preferred) use grep_search/code_definition to jump straight to the relevant lines. To publish a file to the user's Files section WITHOUT reading it into context, use load_file instead.",
 	}, ReadFile)
+	if err != nil {
+		return nil, err
+	}
+
+	loadFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "load_file",
+		Description: "Publish a file to the user's Files section so they can view or download it, WITHOUT transporting its content through the model. Returns metadata only (path, size, line count); the browser fetches the complete file directly. Use this to surface a report, log, or generated file to the user. To read a file's content into your own context instead, use read_file.",
+	}, LoadFile)
 	if err != nil {
 		return nil, err
 	}
 
 	writeFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "write_file",
-		Description: "Write content to a file with intelligent 'stdout' extraction. If the content is the output from shell_command (containing 'stdout' key), it will extract and write only the stdout value.",
+		Description: "Write content to a file with intelligent 'stdout' extraction. If the content is the output from shell_command (containing 'stdout' key), it will extract and write only the stdout value. For oversized content, create a bounded initial file ending in a unique continuation marker. Then repeatedly use edit_file to replace exactly that marker with the next bounded semantic section plus the same marker; the final edit removes the marker.",
 	}, WriteFile)
 	if err != nil {
 		return nil, err
@@ -929,8 +1016,14 @@ func GetInternalTools() ([]tool.Tool, error) {
 	}
 
 	out := []tool.Tool{
-		readFileTool, writeFileTool, shellCommandTool, filterJsonTool, gitDiffAddLineNumbersTool,
+		readFileTool, loadFileTool, writeFileTool, shellCommandTool, filterJsonTool, gitDiffAddLineNumbersTool,
 		fileTreeTool, grepSearchTool, findFilesTool, editFileTool,
+	}
+	for i, candidate := range out {
+		switch candidate.Name() {
+		case "read_file", "write_file", "edit_file", "load_file":
+			out[i] = &fileArgumentTool{Tool: candidate}
+		}
 	}
 	out = append(out, codeIntelTools...)
 	out = append(out, webFetchTool, readPDFTool, httpRequestTool)
@@ -938,6 +1031,11 @@ func GetInternalTools() ([]tool.Tool, error) {
 }
 
 func ExecuteTool(ctx context.Context, name string, args map[string]interface{}, caller string) (any, error) {
+	var err error
+	args, err = common.NormalizeFileToolArguments(name, args)
+	if err != nil {
+		return nil, err
+	}
 	// Set the current caller for cache scoping. Safe because astonish node
 	// dispatches sequentially (one tool call at a time).
 	currentCaller = caller
@@ -966,6 +1064,13 @@ func ExecuteTool(ctx context.Context, name string, args map[string]interface{}, 
 		// ReadFile doesn't use ctx.
 		// ShellCommand doesn't use ctx.
 		return ReadFile(nil, toolArgs)
+
+	case "load_file":
+		var toolArgs LoadFileArgs
+		if err := toStruct(args, &toolArgs); err != nil {
+			return nil, fmt.Errorf("invalid args for load_file: %w", err)
+		}
+		return LoadFile(nil, toolArgs)
 
 	case "write_file":
 		var toolArgs WriteFileArgs

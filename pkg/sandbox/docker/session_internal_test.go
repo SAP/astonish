@@ -2,6 +2,8 @@ package docker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,90 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
+
+func TestStopSessionPersistFailureLeavesContainerAndVolumeIntact(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	binary := writeDockerTestScript(t, logPath, `
+case "$1" in
+inspect) printf 'running\n' ;;
+exec) exit 42 ;;
+*) printf '%s\n' "$*" >> "$DOCKER_TEST_LOG" ;;
+esac
+`)
+	t.Setenv("DOCKER_TEST_LOG", logPath)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+
+	err := db.StopSession(context.Background(), "persist-fails")
+	if err == nil || !strings.Contains(err.Error(), "persist upper") {
+		t.Fatalf("StopSession() error = %v, want persist error", err)
+	}
+	assertDockerTestLogExcludes(t, logPath, "rm -f -v")
+	assertDockerTestLogExcludes(t, logPath, "volume rm -f")
+}
+
+func TestStopSessionPersistSuccessRemovesContainerAndVolume(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	binary := writeDockerTestScript(t, logPath, `
+printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then printf 'running\n'; fi
+`)
+	t.Setenv("DOCKER_TEST_LOG", logPath)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+
+	if err := db.StopSession(context.Background(), "persist-succeeds"); err != nil {
+		t.Fatalf("StopSession() error = %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read docker log: %v", err)
+	}
+	logText := string(data)
+	cname := containerName("persist-succeeds")
+	for _, want := range []string{"exec " + cname, "rm -f -v " + cname, "volume rm -f " + overlayVolumeName("persist-succeeds")} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("docker log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func TestStopSessionAlreadyGoneIsIdempotent(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	binary := writeDockerTestScript(t, logPath, `
+if [ "$1" = inspect ]; then echo 'No such container' >&2; exit 1; fi
+printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+`)
+	t.Setenv("DOCKER_TEST_LOG", logPath)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+
+	if err := db.StopSession(context.Background(), "already-gone"); err != nil {
+		t.Fatalf("StopSession() error = %v", err)
+	}
+	assertDockerTestLogExcludes(t, logPath, "rm")
+}
+
+func writeDockerTestScript(t *testing.T, logPath, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "docker-test")
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write docker test script: %v", err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("initialize docker test log: %v", err)
+	}
+	return path
+}
+
+func assertDockerTestLogExcludes(t *testing.T, path, unwanted string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read docker test log: %v", err)
+	}
+	if strings.Contains(string(data), unwanted) {
+		t.Fatalf("docker log contains %q:\n%s", unwanted, data)
+	}
+}
 
 func TestDockerRunArgs_OverlayContract(t *testing.T) {
 	db := &DockerBackend{cfg: Config{

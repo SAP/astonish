@@ -1,16 +1,14 @@
 {
-  "name": "task-failure",
-  "description": "A delegated task fails with an error",
-  "category": "delegation",
+  "name": "task-failure", "description": "A delegated task fails", "category": "delegation",
   "events": [
     { "type": "session", "data": { "sessionId": "sess-delegate-fail", "isNew": true } },
     { "type": "text", "data": { "text": "I'll deploy the changes now." } },
-    { "type": "subtask_progress", "data": { "event_type": "delegation_start", "tasks": [{ "name": "Deploy to staging", "description": "Deploy the latest changes to staging environment" }] } },
-    { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "Deploy to staging" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_tool_call", "task_name": "Deploy to staging", "tool_name": "shell_command", "tool_args": { "command": "kubectl apply -f deploy.yaml" } } },
-    { "type": "subtask_progress", "data": { "event_type": "task_tool_result", "task_name": "Deploy to staging", "tool_name": "shell_command", "tool_result": "error: connection refused to staging cluster" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_failed", "task_name": "Deploy to staging", "status": "error", "error": "Connection refused to staging cluster", "duration": "1.5s" } },
-    { "type": "subtask_progress", "data": { "event_type": "delegation_complete", "status": "error" } },
+    { "type": "subtask_progress", "data": { "event_type": "delegation_start", "batch_id": "failure", "sequence": 1, "tasks": [{ "task_id": "deploy", "name": "Deploy to staging", "description": "Deploy the latest changes to staging environment" }] } },
+    { "type": "subtask_progress", "data": { "event_type": "task_start", "batch_id": "failure", "task_id": "deploy", "child_session_id": "deploy-child", "attempt": 1, "sequence": 2, "task_name": "Deploy to staging" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_tool_call", "batch_id": "failure", "task_id": "deploy", "child_session_id": "deploy-child", "attempt": 1, "sequence": 3, "call_id": "deploy-call", "task_name": "Deploy to staging", "tool_name": "shell_command", "tool_args": { "command": "kubectl apply -f deploy.yaml" } } },
+    { "type": "subtask_progress", "data": { "event_type": "task_tool_result", "batch_id": "failure", "task_id": "deploy", "child_session_id": "deploy-child", "attempt": 1, "sequence": 4, "call_id": "deploy-call", "task_name": "Deploy to staging", "tool_name": "shell_command", "tool_result": "error: connection refused to staging cluster" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_failed", "batch_id": "failure", "task_id": "deploy", "child_session_id": "deploy-child", "attempt": 1, "sequence": 5, "task_name": "Deploy to staging", "status": "error", "error": "Connection refused to staging cluster", "duration": "1.5s" } },
+    { "type": "subtask_progress", "data": { "event_type": "delegation_complete", "batch_id": "failure", "sequence": 6, "status": "error" } },
     { "type": "text", "data": { "text": "The deployment failed because the staging cluster is unreachable." } },
     { "type": "usage", "data": { "input_tokens": 300, "output_tokens": 150, "total_tokens": 450 } },
     { "type": "done", "data": { "done": true } }

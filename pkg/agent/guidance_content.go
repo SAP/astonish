@@ -216,42 +216,19 @@ After all sub-tasks complete, you are the synthesizer. **Do not just concatenate
 
 ## Structured Output & Reports
 
-When the user's request involves research, analysis, or comparison work — or when they explicitly ask for a report — your final deliverable should be a **well-structured document saved as a file** using ` + "`write_file`" + `. This applies to:
-- Deep comparisons or competitive analyses
-- Architecture or code reviews
-- Research summaries with multiple sections
-- Any output the user is likely to share, reference later, or export
-
-**Reports are produced via a TWO-STEP contract. Both steps are required.**
-
-**Step 1 — Write the file with ` + "`write_file`" + `:**
-- Use ` + "`write_file`" + ` directly — do NOT delegate file writing to sub-agents.
-- Use a descriptive filename in the working directory (e.g., ` + "`comparison-report.md`" + `, ` + "`pricing-analysis.md`" + `, ` + "`architecture-review.md`" + `).
-- The file extension must be ` + "`.md`" + ` — only markdown reports are eligible for inline rendering.
-
-**Step 2 — Signal that the file is a report with an ` + "`astonish-report`" + ` fence:**
-
-After the ` + "`write_file`" + ` call completes, include a fenced block in your reply text:
+When research, analysis, comparison, or an explicitly requested report produces a reusable deliverable, create a Markdown artifact.
+- Small, clearly bounded files may use ` + "`write_file`" + ` normally.
+- For large, multi-section, or uncertain-size output, use ` + "`write_file`" + ` to create a bounded initial Markdown file whose final line is a unique sentinel such as ` + "`<!-- ASTONISH_CONTINUE:<random-id> -->`" + `.
+- Grow that same file with ` + "`edit_file`" + `. Every edit must replace exactly the sentinel with one bounded semantic section followed by the exact same sentinel. Do not batch multiple sections into one edit and do not change the marker between edits.
+- After interruption or compaction, inspect or read the file, find the sentinel, and continue there. The file is incomplete while the sentinel remains: do not claim completion and do not emit an ` + "`astonish-report`" + ` fence.
+- After all intended content is present, make one final ` + "`edit_file`" + ` call that removes the sentinel. Only after marker removal emit the report fence below, using the exact file path and title, and keep the surrounding response concise.
 
 ` + "```" + `astonish-report
-path: <absolute path you passed to write_file>
-title: <human-readable title — optional but strongly preferred>
+path: <exact path passed to write_file/edit_file>
+title: <human-readable title>
 ` + "```" + `
 
-The ` + "`path`" + ` field MUST match exactly the absolute path you used in ` + "`write_file`" + `. The fence is a *signal*, not content — it tells the chat UI to embed the file inline as a full-width report viewer instead of as a small download card. Without the fence, your file will still be saved and downloadable, but it will appear as a compact artifact card, not a report. Without ` + "`write_file`" + `, the fence is ignored — there is no file to embed.
-
-**Both steps are mandatory. The fence alone does not create a file. The file alone does not promote to a report viewer.**
-
-**When to use this two-step contract:**
-- Any time the user asks for a report, analysis, review, comparison, or research summary.
-- Any time you produce a long-form markdown document the user is likely to read end-to-end, share, or export to PDF/DOCX.
-
-**When NOT to use the fence:**
-- Quick answers, status updates, conversational replies — respond directly in the chat, no file needed.
-- Code files, configs, scripts, data files — these are working artifacts, not reports. Use ` + "`write_file`" + ` without the fence; they appear as a download card, which is the correct affordance.
-- Incidental edits during a larger task (e.g., fixing a typo in an existing file). Use ` + "`edit_file`" + ` without the fence unless the edit *is itself* the report being delivered.
-
-After Step 2, present a concise summary inline in the chat with key findings. The user gets all three: an inline-rendered report, a downloadable document, and an at-a-glance overview.
+The fence path must exactly match the artifact path. A Markdown file without the fence remains a download card; a fence without a file is ignored. Code, config, scripts, data, and incidental edits are artifacts rather than reports and do not need a fence.
 
 ### Diagrams in Reports (Mermaid)
 

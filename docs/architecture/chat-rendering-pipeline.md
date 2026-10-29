@@ -55,6 +55,28 @@ sequenceDiagram
     StudioChat->>User: Rendered: Agent bubble + placeholder; report in side panel
 ```
 
+## Durable growing-file publication
+
+Large or uncertain-size Markdown documents grow at their destination instead of streaming partial Markdown into chat or creating a separate progress protocol. A bounded initial `write_file` writes the opening content and a unique HTML continuation marker. Each bounded `edit_file` replaces exactly that marker with one semantic section followed by the unchanged marker. The destination file is the durable checkpoint and remains visible and usable while incomplete.
+
+Resume reads or inspects the destination, locates the marker, and checks the tail to determine the next section. There is no expected count, chunk ledger, generation ID, hash, manifest, or assembly event. Retries are not automatically idempotent: after an uncertain tool result, inspect the marker and tail before retrying so an already-written section is not duplicated.
+
+The final edit removes the marker. After that edit succeeds, the model emits the existing `astonish-report` fence for the completed Markdown path. Report publication then follows the unchanged artifact and `report_marker` pipeline and the unchanged frontend three-signal gate: the artifact must be from the last turn, have `fileType === "Markdown"`, and carry backend `isReport === true`. No report is published merely because a partial growing file exists.
+
+Platform preview, download, PDF conversion, reconnect, and refresh continue to use the authorized session's normal artifact access path. They do not reconstruct content from tool-call chunks or a second store: the destination file is the content source. If that file no longer exists, there is no separate assembly record from which to recover it. Existing sessions and model-authored report fences remain readable and supported.
+
+## Delegation identity and restoration
+
+Live send and reconnect both feed `reduceDelegationProgress` in `toolActivity.ts`; history passes through `normalizeDelegationHistory`. `TaskPlanPanel` reads `deriveDelegationTasks` rather than interpreting a second lifecycle. A `subtask_execution` is a hard rendering boundary outside generic activity folds.
+
+Optional snake-case `batch_id`, `task_id`, `child_session_id`, `attempt`, `call_id`, and `sequence` retain backend identity. Sequence replay is idempotent; equal payload text with different sequence numbers remains distinct. Tasks with duplicate display names must not merge. Legacy detail requests retain name lookup and expose ambiguity rather than selecting an arbitrary child.
+
+Detail requests carry full identity, are cached under parent/batch/task/attempt/child, and abort on session, batch, or selected-attempt changes. Request finalizers check controller identity so a stale response cannot clear a newer load. Empty detail, loading, unavailable/error, and retry are explicit UI states. Attempt selectors request the corresponding child rather than the latest same-name execution. Missing task/event data remains a visible error, not a successful empty delegation.
+
+`DelegationAttempt` owns its status, error, duration, and progress flags. Selecting an older failed attempt shows that failure while the batch completed-count continues to reflect each task's latest attempt. Earlier unfinished attempts and active tasks left over at a terminal batch become interrupted. Stream `done` and `error` call `interruptActiveDelegations`, affecting only still-running batches; neither implies successful delegation. Duplicate history panels with the same batch ID merge at their first transcript position, preserving other tools and sequence order.
+
+Focused coverage is in `TaskPlanPanel.test.tsx`, `toolActivity.test.ts`, and `test/scenarios/task-delegation.test.tsx`: attempt cancellation, exact retry-child selection, reused names across batches, replay/history equality, and terminal interruption. All delegation scenario fixtures carry stable identities; backend generic `delegate_tasks` suppression is upstream of the frontend activity grouping.
+
 ## SSE Transport Layer
 
 SSE parsing is implemented **manually** using the `ReadableStream` API in `web/src/api/studioChat.ts` -- not the browser's native `EventSource`. This is because the initial request is a `POST` (EventSource only supports GET).
@@ -79,7 +101,7 @@ Two functions share identical parsing logic:
 
 ### Generation progress is not model content
 
-`ChatRunner.Run` (`pkg/api/chat_runner.go`) binds the context-scoped provider progress callback from `pkg/provider/streaming`. It translates `PhaseThinking` into `thinking: {text: "Model is thinking…"}` and `PhaseToolArguments` into `thinking: {text: "Preparing tool arguments…"}`. Structured `Thought` responses have a bounded status fallback. These are static process notes, never raw reasoning, tool names or unfinished argument JSON. Notifications are bounded by phase transitions/once-per-phase guards, not emitted for every token; lack of a notification is not evidence of a stalled provider.
+`ChatRunner.Run` (`pkg/api/chat_runner.go`) binds the context-scoped provider progress callback from `pkg/provider/streaming`. It translates `PhaseThinking` into `thinking: {text: "Model is thinking…"}`, `PhaseToolArguments` into `thinking: {text: "Preparing tool arguments…"}`, `PhaseWaiting` into an elapsed `Waiting for model response (Ns)…` status, and `PhaseRecovering` into a recovery-attempt status. Structured `Thought` responses have a bounded status fallback. These are process notes, never raw reasoning, tool names or unfinished argument JSON. Notifications are bounded by phase transitions/once-per-phase guards or heartbeat intervals, not emitted for every token; lack of a notification is not evidence of a stalled provider.
 
 Both Studio send and reconnect handlers update one ephemeral `generationProgress` status; they do not append `thinking` to the transcript or split assistant text. Legacy `thinking` records are omitted by the display projection, without English-text matching or rewriting saved history. Visible text, validated tool activity, actionable boundaries, completion, error, EOF, stop and session/turn changes clear the temporary status. The bottom indicator prioritizes an active tool, then generation progress, then the existing Thinking… fallback. Thus “Preparing tool arguments…” may appear temporarily while waiting, but never accumulates as Notes or assistant bubbles.
 

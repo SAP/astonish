@@ -26,11 +26,11 @@ const (
 	KindSubagent      Kind = "subagent"
 	KindSessionTitle  Kind = "session_title"
 	KindModelChanged  Kind = "model_changed"
-	KindStatus        Kind = "status"     // spinner / live status text
-	KindUser          Kind = "user"       // local echo of user message
-	KindDelegation    Kind = "delegation"  // sub-agent delegation lifecycle
-	KindPlan          Kind = "plan"        // plan document plus its approval lifecycle
-	KindCompaction    Kind = "compaction"  // context compaction result
+	KindStatus        Kind = "status"       // spinner / live status text
+	KindUser          Kind = "user"         // local echo of user message
+	KindDelegation    Kind = "delegation"   // sub-agent delegation lifecycle
+	KindPlan          Kind = "plan"         // plan document plus its approval lifecycle
+	KindCompaction    Kind = "compaction"   // context compaction result
 	KindRoutingInfo   Kind = "routing_info" // per-turn model routing decision
 )
 
@@ -88,14 +88,23 @@ type CompactionInfo struct {
 
 // DelegationTask describes one sub-task in a delegation event.
 type DelegationTask struct {
-	Name        string
-	Description string
-	PlanStep    string
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	Name           string
+	Description    string
+	PlanStep       string
 }
 
 // Event is one unit of chat progress. Fields are optional by Kind.
 type Event struct {
-	Kind Kind
+	DelegationBatchID        string
+	DelegationTaskID         string
+	DelegationChildSessionID string
+	DelegationCallID         string
+	DelegationSequence       int64
+	Kind                     Kind
 
 	// Text is used by KindText, KindThinking, KindSystem, KindError, KindStatus.
 	Text string
@@ -148,16 +157,16 @@ type Event struct {
 	Compaction *CompactionInfo
 
 	// Routing fields for KindRoutingInfo.
-	RoutingModel      string  `json:"routing_model,omitempty"`
-	RoutingIsStrong   bool    `json:"routing_is_strong,omitempty"`
-	RoutingStrongPct  float64 `json:"routing_strong_pct,omitempty"`
-	RoutingWeakPct    float64 `json:"routing_weak_pct,omitempty"`
-	RoutingTotal      int64   `json:"routing_total,omitempty"`
-	RoutingStrongName string  `json:"routing_strong_name,omitempty"`
-	RoutingWeakName   string  `json:"routing_weak_name,omitempty"`
-	RoutingMediumName string  `json:"routing_medium_name,omitempty"`
-	RoutingMediumPct  float64 `json:"routing_medium_pct,omitempty"`
-	RoutingTier           string  `json:"routing_tier,omitempty"`            // "strong", "medium", or "weak"
+	RoutingModel          string  `json:"routing_model,omitempty"`
+	RoutingIsStrong       bool    `json:"routing_is_strong,omitempty"`
+	RoutingStrongPct      float64 `json:"routing_strong_pct,omitempty"`
+	RoutingWeakPct        float64 `json:"routing_weak_pct,omitempty"`
+	RoutingTotal          int64   `json:"routing_total,omitempty"`
+	RoutingStrongName     string  `json:"routing_strong_name,omitempty"`
+	RoutingWeakName       string  `json:"routing_weak_name,omitempty"`
+	RoutingMediumName     string  `json:"routing_medium_name,omitempty"`
+	RoutingMediumPct      float64 `json:"routing_medium_pct,omitempty"`
+	RoutingTier           string  `json:"routing_tier,omitempty"`             // "strong", "medium", or "weak"
 	RoutingCostSavingsPct float64 `json:"routing_cost_savings_pct,omitempty"` // 0-100, % saved vs all-strong
 
 	// RoutingSummary is the end-of-turn Auto routing summary line carried on

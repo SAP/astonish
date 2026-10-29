@@ -9,6 +9,21 @@ Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, Cod
 
 **Entry:** `astonish chat` (requires login) or `astonish code` (no login). On an interactive TTY with an existing login, bare `astonish` opens the platform chat app.
 
+## Delegation detail adapters
+
+Both backends implement `backend.DelegationDetailBackend`. Platform detail requests use
+`GET /api/studio/sessions/{parent}/subtask-events` with `child_session_id`, `batch_id`,
+`task_id`, `attempt`, and `task_name`, preserving authentication and tenant headers.
+Local detail reads verify parent ownership, app namespace, and child membership before
+reading through the session service. Ambiguous legacy name-only selection fails closed.
+Studio `subtask_execution` tasks/events and local persisted `attempt_history` are
+normalized into the same terminal delegation events; individual attempts remain selectable.
+Interleaved child tool results pair by call ID, not tool name. Completed restored summaries
+fetch child detail even when a summary text activity is already present.
+
+Adapter regression coverage uses HTTP test servers and a real local FileStore. These tests
+are not proof of a deployed server or interactive PTY acceptance.
+
 ## Architecture
 
 ```mermaid
@@ -430,3 +445,19 @@ If the Studio SSE connection returns a read error after a session id is known, t
 - `docs/architecture/chat-rendering-pipeline.md` — Studio SPA pipeline (UX reference)
 - `docs/website/docs/cli/code.md` — user-facing Astonish Code documentation (VitePress)
 - `pkg/tui/AGENTS.md`
+
+### Delegation identity and detail
+
+Local progress and remote `subtask_progress` frames pass through the same launcher
+mapper. Transcript rows retain batch/task/child-session IDs, attempt and activity
+call IDs/sequences. Identified retries create separate attempt rows; name-only
+legacy events are accepted only when unambiguous. History entries carry the same
+event envelope, including through resume and rollback, without importing the agent
+runtime into `pkg/tui`.
+
+The existing clickable activity overlay supports the optional
+`backend.DelegationDetailBackend` capability: missing activity can be loaded with a
+loading state, error plus `r` Retry, and request-identity stale-response protection.
+Escape returns to chat without quitting. Backends without the capability retain the
+live activity/empty view; detail transport implementations must authorize child
+membership under the current parent session.

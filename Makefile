@@ -708,8 +708,9 @@ docker-sandbox-base: sandbox-entrypoint
 		--platform linux/$(DEV_ARCH) \
 		-f docker/sandbox-base/Dockerfile \
 		-t $(DOCKER_REGISTRY)/astonish-sandbox-base:$(VERSION) \
+		-t $(DOCKER_REGISTRY)/astonish-sandbox-base:latest \
 		--load .
-	@echo "Image built: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(VERSION)"
+	@echo "Image built: $(DOCKER_REGISTRY)/astonish-sandbox-base:$(VERSION) and :latest"
 
 # Build the OpenShell sandbox image (NVIDIA sandbox base + Astonish agent tools)
 docker-sandbox-openshell: build-linux

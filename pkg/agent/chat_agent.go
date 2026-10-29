@@ -261,11 +261,11 @@ type ImageFromTool struct {
 	Format string // "png" or "jpeg"
 }
 
-// FileArtifact holds metadata about a file created/modified by a tool call.
-// Captured from write_file and edit_file tool args for UI display.
+// FileArtifact holds metadata about a file created, modified, or explicitly
+// published to a user-facing file surface by a tool call.
 type FileArtifact struct {
 	Path     string // Absolute file path
-	ToolName string // "write_file" or "edit_file"
+	ToolName string // e.g. "read_file", "write_file", or "edit_file"
 }
 
 // DryRunExecResult holds the output from executing a distilled flow as a test run.

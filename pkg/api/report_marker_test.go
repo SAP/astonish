@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -157,6 +158,33 @@ func TestDetectAndEmitReportMarkers_HappyPath(t *testing.T) {
 	}
 }
 
+func TestDetectAndEmitReportMarkers_RequiresModelFence(t *testing.T) {
+	runner := newChatRunner("test-rm-fence", studioChatUserID, studioChatAppName, true)
+	ch := runner.Subscribe("test")
+	defer runner.Unsubscribe("test")
+
+	runner.emitEvent("artifact", map[string]any{"path": "/tmp/report.md", "toolName": "write_file"})
+	<-ch
+	runner.detectAndEmitReportMarkers(nil)
+	select {
+	case ev := <-ch:
+		t.Fatalf("published report before model fence: %q (%v)", ev.Type, ev.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	runner.emitEvent("text", map[string]any{"text": "```astonish-report\npath: /tmp/report.md\ntitle: Model Report\n```"})
+	<-ch
+	runner.detectAndEmitReportMarkers(nil)
+	select {
+	case ev := <-ch:
+		if ev.Type != "report_marker" || ev.Data["path"] != "/tmp/report.md" {
+			t.Fatalf("publication after model fence = %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("report was not published after model fence")
+	}
+}
+
 // TestDetectAndEmitReportMarkers_PathMismatch: a fence whose path does
 // NOT correspond to any same-turn artifact must be silently dropped.
 // This is the safety property that prevents an LLM hallucinating a path
@@ -226,6 +254,135 @@ func TestDetectAndEmitReportMarkers_Dedup(t *testing.T) {
 // load time. Given a slice of reconstructed artifacts and a markers map,
 // only artifacts whose path is keyed in the map must be flagged
 // IsReport=true with the matching title. All others must be untouched.
+func TestArtifactRestoreRequiresSuccessfulFilePublication(t *testing.T) {
+	const path = "/tmp/report.md"
+	for _, toolName := range []string{"load_file", "write_file", "edit_file", "read_file"} {
+		for _, envelope := range []string{"native", "object", "string_arguments", "outer_arguments", "self_wrapper", "self_wrapper_string"} {
+			for _, result := range []struct {
+				name     string
+				response map[string]any
+				success  bool
+			}{
+				{"metadata", map[string]any{"path": path, "size_bytes": 42}, true},
+				{"error", map[string]any{"error": "denied"}, false},
+				{"failure", map[string]any{"success": false}, false},
+				{"failed_status", map[string]any{"status": "failed"}, false},
+				{"pending_approval", map[string]any{"status": "pending_approval"}, false},
+				{"approval_required", map[string]any{"status": "approval_required"}, false},
+				{"pending_authorization", map[string]any{"status": "pending_authorization"}, false},
+				{"nil_result", nil, false},
+				{"missing_result", nil, false},
+			} {
+				t.Run(toolName+"/"+envelope+"/"+result.name, func(t *testing.T) {
+					args := map[string]any{"path": path}
+					if toolName == "write_file" {
+						args = map[string]any{"file_path": path, "content": "report"}
+					}
+					callName := toolName
+					if envelope != "native" {
+						callName = "execute_tool"
+						if envelope == "string_arguments" || envelope == "self_wrapper_string" {
+							encoded, _ := json.Marshal(args)
+							args = map[string]any{"name": toolName, "arguments": string(encoded)}
+						} else {
+							args = map[string]any{"name": toolName, "arguments": args}
+						}
+						switch envelope {
+						case "outer_arguments":
+							args = map[string]any{"arguments": args}
+						case "self_wrapper":
+							args = map[string]any{"name": "execute_tool", "arguments": args}
+						case "self_wrapper_string":
+							encoded, _ := json.Marshal(args)
+							args = map[string]any{"name": "execute_tool", "arguments": string(encoded)}
+						}
+					}
+					events := testEvents{artifactToolCallEvent("inv", "call", callName, args)}
+					if result.name != "missing_result" {
+						events = append(events, toolResponseEvent("inv", "call", callName, result.response))
+					}
+					want := 0
+					if toolName != "read_file" && result.success {
+						want = 1
+					}
+					artifacts := collectArtifacts(events)
+					if len(artifacts) != want {
+						t.Errorf("Files artifacts = %#v, want %d", artifacts, want)
+					} else if want == 1 && (artifacts[0].Path != path || artifacts[0].ToolName != toolName) {
+						t.Errorf("Files artifact lost identity: %#v", artifacts[0])
+					}
+					count := 0
+					for _, msg := range eventsToMessages(events, nil) {
+						if msg.Type == "artifact" {
+							count++
+							if msg.Content != path || msg.ToolName != toolName {
+								t.Errorf("restored artifact lost identity: %#v", msg)
+							}
+						}
+					}
+					if count != want {
+						t.Errorf("restored artifact count = %d, want %d", count, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestInvalidExecuteToolEnvelopeDoesNotPublishArtifact(t *testing.T) {
+	valid := map[string]any{"name": "load_file", "arguments": map[string]any{"path": "/tmp/report.md"}}
+	for _, args := range []map[string]any{
+		{"name": "write_file", "arguments": "not JSON"},
+		{"name": "load_file"},
+		{"name": "search_tools", "arguments": map[string]any{"path": "/tmp/report.md"}},
+		{"name": "execute_tool", "arguments": map[string]any{"name": "execute_tool", "arguments": valid}},
+	} {
+		events := testEvents{
+			artifactToolCallEvent("inv", "call", "execute_tool", args),
+			toolResponseEvent("inv", "call", "execute_tool", map[string]any{"path": "/tmp/report.md"}),
+		}
+		if artifacts := collectArtifacts(events); len(artifacts) != 0 {
+			t.Errorf("invalid envelope published artifacts: %#v", artifacts)
+		}
+		for _, msg := range eventsToMessages(events, nil) {
+			if msg.Type == "artifact" {
+				t.Errorf("invalid envelope restored artifact: %#v", msg)
+			}
+			if msg.Type == "tool_call" && msg.ToolName != "execute_tool" {
+				t.Errorf("invalid envelope guessed underlying tool: %#v", msg)
+			}
+		}
+	}
+}
+
+func TestLoadFileAppearsAsArtifactWithoutContent(t *testing.T) {
+	const path = "/tmp/large-documentary.md"
+	events := testEvents{
+		artifactToolCallEvent("inv-1", "call-1", "load_file", map[string]any{"path": path, "title": "Doc"}),
+		toolResponseEvent("inv-1", "call-1", "load_file", map[string]any{
+			"path": path, "size_bytes": float64(180802), "total_lines": float64(2061),
+		}),
+	}
+
+	artifacts := collectArtifacts(events)
+	if len(artifacts) != 1 || artifacts[0].Path != path || artifacts[0].ToolName != "load_file" {
+		t.Fatalf("artifacts = %#v", artifacts)
+	}
+	messages := eventsToMessages(events, nil)
+	artifactCount := 0
+	for _, message := range messages {
+		if message.Type == "artifact" {
+			artifactCount++
+			if message.Content != path || message.ToolName != "load_file" {
+				t.Fatalf("artifact message = %#v", message)
+			}
+		}
+	}
+	if artifactCount != 1 {
+		t.Fatalf("artifact message count = %d", artifactCount)
+	}
+}
+
 func TestCollectArtifactsKeepsLatestMutationForPath(t *testing.T) {
 	events := testEvents{
 		artifactToolCallEvent("inv-1", "call-1", "write_file", map[string]any{"file_path": "/tmp/report.md", "content": "2025"}),
@@ -255,6 +412,36 @@ func TestReadArtifactContentFromEventsAppliesEditFileMutations(t *testing.T) {
 		t.Fatal("expected fallback content")
 	}
 	want := "# Report\n\nYear: 2026\nStatus: final\n"
+	if content != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+}
+
+func TestReadArtifactContentFromEventsAppliesWrappedEditsWithRemappedResponseIDs(t *testing.T) {
+	const path = "/tmp/report.md"
+	wrappedCall := func(invocationID, callID, name string, args map[string]any) *session.Event {
+		return artifactToolCallEvent(invocationID, callID, "execute_tool", map[string]any{
+			"name":      name,
+			"arguments": args,
+		})
+	}
+	wrappedResponse := func(invocationID, responseID string, response map[string]any) *session.Event {
+		return toolResponseEvent(invocationID, responseID, "execute_tool", response)
+	}
+	events := testEvents{
+		wrappedCall("inv-1", "write-call", "write_file", map[string]any{"file_path": path, "content": "# Report\n\n<!-- next -->\n"}),
+		wrappedResponse("inv-1", "write-response", map[string]any{"path": path}),
+		wrappedCall("inv-2", "edit-call-1", "edit_file", map[string]any{"path": path, "old_string": "<!-- next -->", "new_string": "First.\n\n<!-- next -->"}),
+		wrappedResponse("inv-2", "edit-response-1", map[string]any{"path": path}),
+		wrappedCall("inv-3", "edit-call-2", "edit_file", map[string]any{"path": path, "old_string": "<!-- next -->", "new_string": "Second.\n"}),
+		wrappedResponse("inv-3", "edit-response-2", map[string]any{"path": path}),
+	}
+
+	content, ok := readArtifactContentFromEvents(events, path)
+	if !ok {
+		t.Fatal("expected fallback content")
+	}
+	const want = "# Report\n\nFirst.\n\nSecond.\n\n"
 	if content != want {
 		t.Fatalf("content = %q, want %q", content, want)
 	}

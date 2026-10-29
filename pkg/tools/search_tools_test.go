@@ -1511,6 +1511,31 @@ func TestSearchTools_ListAll(t *testing.T) {
 	}
 }
 
+func TestScopedSearchToolsEmptyScope(t *testing.T) {
+	if _, err := NewScopedSearchToolsTool(nil); err == nil {
+		t.Fatal("nil scope must fail closed")
+	}
+	search, err := NewScopedSearchToolsTool(&agent.ChildToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := search.(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	})
+	for _, query := range []string{"*", "shell", "list all"} {
+		got, err := runner.Run(&toolContextStub{Context: context.Background()}, map[string]any{"query": query})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(got["count"]) != "0" {
+			t.Fatalf("empty scope leaked global tools: %v", got)
+		}
+	}
+	if _, err := runner.Run(&toolContextStub{Context: context.Background()}, map[string]any{"query": ""}); err == nil {
+		t.Fatal("empty query accepted")
+	}
+}
+
 func TestSearchTools_ListAllVariants(t *testing.T) {
 	idx := testToolIndex(t)
 	fn := SearchTools(idx)

@@ -1,10 +1,43 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestSubtaskEventsExactQueryAndErrors(t *testing.T) {
+	for _, status := range []int{200, 403, 500} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for key, want := range map[string]string{"child_session_id": "child", "batch_id": "batch", "task_id": "task", "attempt": "2", "task_name": "name & value"} {
+					if r.URL.Query().Get(key) != want {
+						t.Errorf("%s=%q", key, r.URL.Query().Get(key))
+					}
+				}
+				if r.Header.Get("Authorization") != "Bearer token" {
+					t.Error("missing auth")
+				}
+				w.WriteHeader(status)
+				w.Write([]byte(`{"events":[{"type":"tool_call","call_id":"call","child_session_id":"child","sequence":3}]}`))
+			}))
+			defer s.Close()
+			c := NewWithConfig(s.URL)
+			c.cached = &Tokens{AccessToken: "token", Kind: TokenKindOAuth}
+			rows, err := c.GetSubtaskEvents(context.Background(), "parent", SubtaskInfo{Name: "name & value", ChildSessionID: "child", BatchID: "batch", TaskID: "task", Attempt: 2})
+			if status != 200 {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil || len(rows) != 1 || rows[0].CallID != "call" || rows[0].Sequence != 3 {
+				t.Fatalf("%+v %v", rows, err)
+			}
+		})
+	}
+}
 
 func TestPingUsesStudioSessionsEndpoint(t *testing.T) {
 	var gotPath, gotAuthorization string

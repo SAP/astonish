@@ -3,17 +3,16 @@ import type { PlanMessage, PlanStepInfo, ChatMsg } from './chatTypes'
 
 interface TodoPanelProps {
   messages: ChatMsg[]
+  planOverride?: PlanMessage | null
   onClose: () => void
 }
 
 // Right-side panel showing plan steps from announce_plan/update_plan.
 // Follows the FilePanel pattern: 320px wide, border-left, same theme vars.
-export default function TodoPanel({ messages, onClose }: TodoPanelProps) {
-  // Extract all plan messages from the chat
+export default function TodoPanel({ messages, planOverride, onClose }: TodoPanelProps) {
+  // Explicit plans and delegation tasks share this rendering surface.
   const plans = messages.filter((m): m is PlanMessage => m.type === 'plan')
-
-  // Use the most recent plan (last one)
-  const plan = plans.length > 0 ? plans[plans.length - 1] : null
+  const plan = planOverride ?? (plans.length > 0 ? plans[plans.length - 1] : null)
 
   const completedCount = plan ? plan.steps.filter(s => s.status === 'complete').length : 0
   const failedCount = plan ? plan.steps.filter(s => s.status === 'failed').length : 0

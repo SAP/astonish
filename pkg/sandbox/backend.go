@@ -427,6 +427,15 @@ type FleetSpec struct {
 	Limits ResourceLimits    `json:"limits"`
 }
 
+// ConfinedArtifactReader exposes an owner-authorized artifact read that remains
+// confined to the addressed sandbox. Unlike PullFile, implementations may
+// recover a live resource whose registry row is missing, but must independently
+// prove that the resource belongs to the exact session ID.
+type ConfinedArtifactReader interface {
+	ArtifactReadsConfined() bool
+	PullArtifact(ctx context.Context, sessionID, path string) (io.ReadCloser, error)
+}
+
 // BackendCapabilities are feature flags the UI may query to gate controls.
 type BackendCapabilities struct {
 	Kind                  BackendKind `json:"kind"`

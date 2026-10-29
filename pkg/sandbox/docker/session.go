@@ -150,7 +150,9 @@ func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) erro
 		return nil
 	}
 	if state == sandbox.SessionStateRunning || state == sandbox.SessionStateCreating {
-		_ = db.persistUpper(ctx, sessionID)
+		if err := db.persistUpper(ctx, sessionID); err != nil {
+			return fmt.Errorf("sandbox/docker: persist upper for session %s: %w", sessionID, err)
+		}
 	}
 	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", cname); err != nil && !isDockerNotFoundError(err) {
 		return fmt.Errorf("sandbox/docker: docker rm %s: %w", cname, err)

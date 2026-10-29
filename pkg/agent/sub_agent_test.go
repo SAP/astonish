@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"strings"
@@ -9,14 +10,63 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/SAP/astonish/pkg/credentials"
 
 	"github.com/SAP/astonish/pkg/common"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
+
+func TestQueuedDelegationCancellationAndDeadline(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			mgr := newLivenessTestManager(SubAgentConfig{MaxConcurrent: 1})
+			mgr.sem <- struct{}{}
+			defer func() { <-mgr.sem }()
+			ctx, cancel := context.WithCancel(context.Background())
+			if deadline {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			}
+			defer cancel()
+			cancel()
+			var progress []SubTaskProgressEvent
+			mgr.SubTaskProgress = func(e SubTaskProgressEvent) { progress = append(progress, e) }
+			got := mgr.RunTasks(ctx, []SubAgentTask{{Name: "queued", ParentID: "parent"}})[0]
+			want, state := "cancelled", "cancelled"
+			if deadline {
+				want, state = "timeout", "failed"
+			}
+			if got.Status != want {
+				t.Fatalf("status=%s want %s", got.Status, want)
+			}
+			if len(progress) != 2 || progress[0].Status != "queued" || progress[1].Status != state {
+				t.Fatalf("transitions=%+v", progress)
+			}
+		})
+	}
+}
+
+func TestAttemptHistoryHasDuration(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{})
+	got := mgr.RunTask(context.Background(), SubAgentTask{Name: "invalid-depth", ParentDepth: 100})
+	data, err := json.Marshal(got.AttemptHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts []map[string]any
+	if err := json.Unmarshal(data, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0]["duration"] == nil {
+		t.Fatalf("missing per-attempt duration: %s", data)
+	}
+}
 
 func TestNewSubAgentManager_Defaults(t *testing.T) {
 	mgr := NewSubAgentManager(SubAgentConfig{})
@@ -550,11 +600,21 @@ func TestSubAgentManager_RetriesInactivityOnlyAfterProgress(t *testing.T) {
 		InactivityTimeout: 40 * time.Millisecond,
 		HeartbeatInterval: 10 * time.Millisecond,
 	})
+	local, err := functiontool.New(functiontool.Config{Name: "retry_evidence", Description: "useful work"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"evidence": "done"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: []tool.Tool{local}}}
 	var calls atomic.Int32
 	mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 		return func(yield func(*model.LLMResponse, error) bool) {
-			if calls.Add(1) == 1 {
-				yield(&model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "partial"}}}, Partial: true}, nil)
+			switch calls.Add(1) {
+			case 1:
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "work", Name: "retry_evidence", Args: map[string]any{}}}}}}, nil)
+				return
+			case 2:
 				<-ctx.Done()
 				return
 			}
@@ -570,7 +630,7 @@ func TestSubAgentManager_RetriesInactivityOnlyAfterProgress(t *testing.T) {
 		eventsMu.Unlock()
 	}
 
-	results := mgr.RunTasks(context.Background(), []SubAgentTask{{Name: "retry", Description: "work"}})
+	results := mgr.RunTasks(context.Background(), []SubAgentTask{{Name: "retry", Description: "work", ToolFilter: []string{"retry_evidence"}}})
 	if len(results) != 1 || results[0].Status != "success" || results[0].Attempts != 2 {
 		t.Fatalf("retry result = %#v, want success on attempt 2", results)
 	}
@@ -1206,6 +1266,7 @@ func TestSubAgentManager_EmitsEvaluatingEvent(t *testing.T) {
 		Status:           "timeout",
 		Error:            "no meaningful activity for 2m0s",
 		ToolCalls:        5,
+		Trace:            &ExecutionTrace{Steps: []TraceStep{{ToolName: "read_file", Success: true, ToolResult: map[string]any{"content": "evidence"}}}},
 		InactivityReason: "no meaningful activity for 2m0s",
 	}
 
@@ -1267,6 +1328,34 @@ func (s *stubLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 	}
 }
 
+func TestSubAgentManager_TransientRetryKeepsTypedLiveState(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{MaxRetries: 2})
+	var calls atomic.Int32
+	mgr.LLM = livenessTestLLM{generate: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+		attempt := calls.Add(1)
+		return func(yield func(*model.LLMResponse, error) bool) {
+			if attempt == 1 {
+				yield(nil, context.DeadlineExceeded)
+				return
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "recovered"}}}}, nil)
+		}
+	}}
+
+	var progress []SubTaskProgressEvent
+	mgr.SubTaskProgress = func(event SubTaskProgressEvent) { progress = append(progress, event) }
+	result := mgr.RunTask(context.Background(), SubAgentTask{Name: "transient-retry", Description: "recover"})
+	if result.Status != "success" || !strings.Contains(result.Result, "recovered") {
+		t.Fatalf("RunTask result = %#v, want successful retry", result)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("LLM calls = %d, want 2", calls.Load())
+	}
+	if !hasProgressEvent(progress, "task_state", string(TaskRetrying), false) {
+		t.Fatalf("missing typed retrying progress event: %#v", progress)
+	}
+}
+
 func TestSubAgentManager_EffectiveTaskLLM(t *testing.T) {
 	parentLLM := &stubLLM{name: "parent"}
 	taskLLM := &stubLLM{name: "task"}
@@ -1274,8 +1363,51 @@ func TestSubAgentManager_EffectiveTaskLLM(t *testing.T) {
 		LLM: parentLLM,
 	}
 	mgr.SetTaskLLM(taskLLM)
-	if got := mgr.effectiveTaskLLM(); got != taskLLM {
+	if got := mgr.effectiveTaskLLM(context.Background()); got != taskLLM {
 		t.Errorf("effectiveTaskLLM() = %v, want taskLLM", got)
+	}
+}
+
+func TestSubAgentManager_EffectiveTaskLLMRequestOverride(t *testing.T) {
+	startupLLM := &stubLLM{name: "startup-placeholder"}
+	taskLLM := &stubLLM{name: "task"}
+	requestLLM := &stubLLM{name: "request-resolved"}
+	mgr := &SubAgentManager{LLM: startupLLM}
+	mgr.SetTaskLLM(taskLLM)
+
+	ctx := WithLLM(context.Background(), requestLLM)
+	if got := mgr.effectiveTaskLLM(ctx); got != requestLLM {
+		t.Errorf("effectiveTaskLLM(request context) = %v, want request-resolved LLM", got)
+	}
+}
+
+func TestSubAgentManager_RunTaskUsesRequestResolvedLLM(t *testing.T) {
+	mgr := newLivenessTestManager(SubAgentConfig{})
+	var startupCalls atomic.Int32
+	mgr.LLM = livenessTestLLM{generate: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+		startupCalls.Add(1)
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(nil, fmt.Errorf("no AI model configured"))
+		}
+	}}
+
+	var requestCalls atomic.Int32
+	requestLLM := livenessTestLLM{generate: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+		requestCalls.Add(1)
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "delegated result"}}}}, nil)
+		}
+	}}
+
+	result := mgr.RunTask(WithLLM(context.Background(), requestLLM), SubAgentTask{Name: "request-model-child", Description: "respond"})
+	if result.Status != "success" || !strings.Contains(result.Result, "delegated result") {
+		t.Fatalf("RunTask result = %#v, want success from request-resolved LLM", result)
+	}
+	if startupCalls.Load() != 0 {
+		t.Fatalf("startup placeholder called %d times, want 0", startupCalls.Load())
+	}
+	if requestCalls.Load() != 1 {
+		t.Fatalf("request-resolved LLM called %d times, want 1", requestCalls.Load())
 	}
 }
 
@@ -1284,7 +1416,7 @@ func TestSubAgentManager_EffectiveTaskLLMNilFallback(t *testing.T) {
 	mgr := &SubAgentManager{
 		LLM: parentLLM,
 	}
-	if got := mgr.effectiveTaskLLM(); got != parentLLM {
+	if got := mgr.effectiveTaskLLM(context.Background()); got != parentLLM {
 		t.Errorf("effectiveTaskLLM() = %v, want parentLLM (fallback)", got)
 	}
 }
@@ -1335,5 +1467,201 @@ func TestAsEventArchiverUnwrapsSessionService(t *testing.T) {
 	}
 	if asEventArchiver(adksession.InMemoryService()) != nil {
 		t.Fatal("in-memory service should not look like an event archiver")
+	}
+}
+
+type childForbiddenAmbientToolset struct{ name string }
+
+func (s childForbiddenAmbientToolset) Name() string { return s.name }
+func (s childForbiddenAmbientToolset) Tools(adkagent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, fmt.Errorf("ambient toolset must not initialize for overrides")
+}
+
+func TestChildScopeDoesNotInitializeUnselectedToolsets(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{
+		"core":          {Name: "core", Tools: mockTools("read_file")},
+		"mcp:unrelated": {Name: "mcp:unrelated", Toolsets: []tool.Toolset{childForbiddenAmbientToolset{name: "unrelated"}}},
+	}
+	for _, token := range []string{"core", "read_file"} {
+		scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{token}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(scope.entries) != 1 {
+			t.Fatalf("scope=%+v", scope.entries)
+		}
+	}
+}
+
+func TestChildOverrideToolsetsPreserveWrappedScope(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"mcp:test": {Name: "mcp:test", Toolsets: []tool.Toolset{childForbiddenAmbientToolset{name: "test"}}}}
+	wrapped := &mockTool{name: "allowed"}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{
+		ToolFilter:       []string{"mcp:test/allowed"},
+		OverrideToolsets: []tool.Toolset{&staticToolset{name: "test", tools: []tool.Tool{wrapped, mockTool{name: "forbidden"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &minimalReadonlyContext{Context: context.Background()}
+	got, _, err := scope.resolve(ctx, "mcp:test/allowed")
+	if err != nil || got != wrapped {
+		t.Fatalf("wrapped instance lost: %v %v", got, err)
+	}
+	if _, _, err := scope.resolve(ctx, "mcp:test/forbidden"); err == nil {
+		t.Fatal("override toolset widened explicit filter")
+	}
+}
+
+func TestChildRequestWebDisabledCannotBeRequestedByName(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	available := false
+	ctx := WithPromptOverrides(context.Background(), &PromptOverrides{WebSearchAvailable: &available, WebSearchToolName: "selected_search", AdditionalTools: mockTools("selected_search")})
+	for _, token := range []string{"web", "request", "selected_search"} {
+		scope, _, err := mgr.childToolScope(ctx, SubAgentTask{ToolFilter: []string{token}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(scope.Matches(ctx)) != 0 {
+			t.Fatalf("disabled search exposed by %s", token)
+		}
+	}
+}
+
+func TestChildOverridesDoNotWiden(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file", "write_file")}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"read_file"}, OverrideTools: mockTools("read_file", "write_file")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &minimalReadonlyContext{Context: context.Background()}
+	if _, _, err := scope.resolve(ctx, "write_file"); err == nil {
+		t.Fatal("override widened explicit filter")
+	}
+	if _, _, err := scope.resolve(ctx, "read_file"); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestChildDeclarationsUnique(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file", "read_file", "search_tools", "describe_tools", "execute_tool")}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core", "read_file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope.entries) != 1 {
+		t.Fatalf("scope includes duplicates/helpers: %#v", scope.entries)
+	}
+}
+
+func TestChildRequestWebScope(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"web": {Name: "web", Tools: mockTools("web_fetch")}}
+	ctx := WithPromptOverrides(context.Background(), &PromptOverrides{WebSearchToolName: "selected_search", AdditionalTools: mockTools("selected_search", "unrelated_search")})
+	scope, _, err := mgr.childToolScope(ctx, SubAgentTask{ToolFilter: []string{"web"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := scope.Matches(ctx)
+	if len(matches) != 2 {
+		t.Fatalf("web matches=%+v", matches)
+	}
+	readCtx := &minimalReadonlyContext{Context: ctx}
+	if _, _, err := scope.resolve(readCtx, "selected_search"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := scope.resolve(readCtx, "unrelated_search"); err == nil {
+		t.Fatal("web group widened")
+	}
+	mgr.ToolGroups["web"].Tools = mockTools("later_tool")
+	if _, _, err := scope.resolve(readCtx, "web_fetch"); err != nil {
+		t.Fatal("scope changed after construction")
+	}
+	if _, _, err := scope.resolve(readCtx, "later_tool"); err == nil {
+		t.Fatal("mutable catalog leaked into scope")
+	}
+}
+
+func TestChildRetryCheckpointBoundsAndRedaction(t *testing.T) {
+	r := credentials.NewRedactor()
+	r.AddTransientSecret("checkpoint-secret")
+	trace := NewExecutionTrace("task")
+	for i := 0; i < 12; i++ {
+		trace.RecordStep(fmt.Sprintf("work_%02d", i), map[string]any{"password": "never-copy-arguments"}, map[string]any{"evidence": "checkpoint-secret " + strings.Repeat("界", 700)}, nil)
+	}
+	trace.RecordStep("search_tools", nil, map[string]any{"tools": "discovery-only"}, nil)
+	checkpoint := childRetryCheckpoint(TaskResult{Trace: trace, Result: "checkpoint-secret " + strings.Repeat("界", 1000), Error: "checkpoint-secret blocked"}, r)
+	if len(checkpoint) > childCheckpointBytes || !utf8.ValidString(checkpoint) {
+		t.Fatalf("invalid checkpoint: bytes=%d UTF8=%v", len(checkpoint), utf8.ValidString(checkpoint))
+	}
+	for _, forbidden := range []string{"checkpoint-secret", "never-copy-arguments", "work_03", "discovery-only"} {
+		if strings.Contains(checkpoint, forbidden) {
+			t.Fatalf("checkpoint leaked %q", forbidden)
+		}
+	}
+	for i := 4; i < 12; i++ {
+		if !strings.Contains(checkpoint, fmt.Sprintf("work_%02d", i)) {
+			t.Fatalf("missing last-eight result %d", i)
+		}
+	}
+	for _, line := range strings.Split(checkpoint, "\n") {
+		if strings.HasPrefix(line, "work_") && len(strings.SplitN(line, ": ", 2)[1]) > childCheckpointExcerptBytes {
+			t.Fatal("oversize excerpt")
+		}
+	}
+	if !strings.Contains(checkpoint, "Unresolved blocker:") || !strings.Contains(checkpoint, "Next action:") {
+		t.Fatal("missing continuation instructions")
+	}
+}
+
+func TestChildRetryCumulativeAccounting(t *testing.T) {
+	firstTrace, lastTrace := NewExecutionTrace("original"), NewExecutionTrace("retry")
+	firstTrace.RecordStep("first", nil, map[string]any{"ok": true}, nil)
+	lastTrace.RecordStep("last", nil, map[string]any{"ok": true}, nil)
+	got := mergeChildAttempts(TaskResult{ToolCalls: 3, Duration: time.Second, Trace: firstTrace}, TaskResult{Status: "success", Result: "finished", ToolCalls: 2, Duration: 2 * time.Second, Trace: lastTrace})
+	if got.ToolCalls != 5 || got.Duration != 3*time.Second || got.Attempts != 2 || got.Result != "finished" || len(got.Trace.Steps) != 2 {
+		t.Fatalf("accounting=%+v", got)
+	}
+	if got.Trace.Steps[0].ToolName != "first" || got.Trace.Steps[1].ToolName != "last" || len(firstTrace.Steps) != 1 {
+		t.Fatal("trace lost ordering or mutated earlier attempt")
+	}
+}
+
+func TestChildRetryDoesNotRewardDiscoveryLoop(t *testing.T) {
+	t.Run("running child discovery loop", func(t *testing.T) {
+		mgr := NewSubAgentManager(SubAgentConfig{TaskTimeout: time.Second, InactivityTimeout: 40 * time.Millisecond, HeartbeatInterval: 5 * time.Millisecond, MaxRetries: 1})
+		mgr.AppName, mgr.UserID = "test", "user"
+		mgr.SessionService = adksession.InMemoryService()
+		var calls atomic.Int32
+		mgr.LLM = livenessTestLLM{generate: func(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Millisecond):
+				}
+				id := calls.Add(1)
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprint(id), Name: "describe_tools", Args: map[string]any{"names": []any{"unavailable"}}}}}}}, nil)
+			}
+		}}
+		results := mgr.RunTasks(context.Background(), []SubAgentTask{{Name: "loop", Description: "discover forever"}})
+		if len(results) != 1 || results[0].Status != "timeout" || results[0].Attempts != 1 || results[0].InactivityReason == "" || calls.Load() < 2 {
+			t.Fatalf("discovery loop rewarded: %+v calls=%d", results, calls.Load())
+		}
+	})
+	for _, name := range []string{"search_tools", "describe_tools", "skill_lookup", "read_file"} {
+		trace := NewExecutionTrace("task")
+		trace.RecordStep(name, nil, map[string]any{"error": "failed"}, nil)
+		if hasProgress(TaskResult{ToolCalls: 10, Trace: trace}) {
+			t.Fatalf("rewarded %s failure/discovery", name)
+		}
+	}
+	trace := NewExecutionTrace("task")
+	trace.RecordStep("read_file", nil, map[string]any{"content": "useful"}, nil)
+	if !hasProgress(TaskResult{Trace: trace}) {
+		t.Fatal("successful work lost")
 	}
 }

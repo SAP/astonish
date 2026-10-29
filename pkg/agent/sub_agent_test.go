@@ -1059,51 +1059,6 @@ func TestEvaluateTimeoutResult_NilLLM(t *testing.T) {
 	}
 }
 
-func TestBuildRestartPrompt(t *testing.T) {
-	originalDesc := "find all bugs in the codebase"
-	failedResult := TaskResult{
-		Name:      "bugfinder",
-		Status:    "timeout",
-		Error:     "timed out",
-		ToolCalls: 15,
-		Result:    "some partial output that should NOT appear in restart prompt",
-	}
-	guidance := "try a different search strategy"
-
-	prompt := buildRestartPrompt(originalDesc, failedResult, guidance)
-
-	if !strings.Contains(prompt, "RESTART") {
-		t.Error("restart prompt missing 'RESTART' keyword")
-	}
-	if !strings.Contains(prompt, "DIFFERENT approach") {
-		t.Error("restart prompt missing 'DIFFERENT approach' instruction")
-	}
-	if !strings.Contains(prompt, originalDesc) {
-		t.Error("restart prompt missing original task description")
-	}
-	if !strings.Contains(prompt, guidance) {
-		t.Error("restart prompt missing guidance text")
-	}
-	if strings.Contains(prompt, "some partial output") {
-		t.Error("restart prompt should NOT contain partial output from failed attempt")
-	}
-}
-
-func TestBuildRestartPrompt_NoGuidance(t *testing.T) {
-	prompt := buildRestartPrompt("do something", TaskResult{}, "")
-
-	if !strings.Contains(prompt, "RESTART") {
-		t.Error("restart prompt missing 'RESTART' keyword")
-	}
-	if !strings.Contains(prompt, "do something") {
-		t.Error("restart prompt missing original description")
-	}
-	// Without guidance, should not have the "DIFFERENT approach" line
-	if strings.Contains(prompt, "DIFFERENT approach") {
-		t.Error("restart prompt should NOT include 'DIFFERENT approach' when guidance is empty")
-	}
-}
-
 func TestBuildEvaluationSummary(t *testing.T) {
 	task := SubAgentTask{
 		Name:        "test-task",

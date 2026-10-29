@@ -11,7 +11,7 @@
     "lint": "npm run lint:deps && node lint-tool/node_modules/eslint/bin/eslint.js --config lint-tool/eslint.config.js .",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "node scripts/vitest-run.mjs",
+    "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },

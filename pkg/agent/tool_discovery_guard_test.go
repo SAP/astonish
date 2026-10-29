@@ -18,48 +18,44 @@ import (
 
 func TestToolDiscoveryGuardStopsRepeatedIdenticalCalls(t *testing.T) {
 	guard := newToolDiscoveryGuard()
-	args := map[string]any{"query": "cinematic documentary"}
-
-	for i := 0; i < maxIdenticalDiscoveryCalls; i++ {
-		if err := guard.record("search_tools", args); err != nil {
-			t.Fatalf("call %d unexpectedly blocked: %v", i+1, err)
-		}
+	if err := guard.validateHistory(nil); err != nil {
+		t.Fatal(err)
 	}
-
-	err := guard.record("search_tools", args)
-	if !errors.Is(err, errToolDiscoveryLoop) {
-		t.Fatalf("record error = %v, want errToolDiscoveryLoop", err)
+	var contents []*genai.Content
+	// Production checks history before the next model dispatch: two completed
+	// identical calls stop dispatch, while the first call still allows recovery.
+	for i := 1; i <= 2; i++ {
+		contents = append(contents, &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%d", i), Name: "search_tools", Args: map[string]any{"query": "cinematic documentary"}},
+		}}})
+		err := guard.validateHistory(contents)
+		if i < 2 && err != nil {
+			t.Fatalf("first discovery unexpectedly blocked: %v", err)
+		}
+		if i == 2 && !errors.Is(err, errToolDiscoveryLoop) {
+			t.Fatalf("second discovery error = %v, want errToolDiscoveryLoop", err)
+		}
 	}
 }
 
 func TestToolDiscoveryGuardStopsNonProgressingDiscoveryCycle(t *testing.T) {
 	guard := newToolDiscoveryGuard()
-	cycle := []struct {
-		name string
-		args map[string]any
-	}{
-		{name: "search_tools", args: map[string]any{"query": "cinematic documentary"}},
-		{name: "describe_tools", args: map[string]any{"names": []any{"skill_lookup"}}},
-		{name: "skill_lookup", args: map[string]any{"name": "cinematic-documentary"}},
+	if err := guard.validateHistory(nil); err != nil {
+		t.Fatal(err)
 	}
-
-	for i := 0; i < maxDiscoveryCallsPerTurn; i++ {
-		call := cycle[i%len(cycle)]
-		// Vary an irrelevant argument so this exercises the total non-progress
-		// budget rather than the identical-call limit.
-		args := make(map[string]any, len(call.args)+1)
-		for key, value := range call.args {
-			args[key] = value
+	var contents []*genai.Content
+	for i := 1; i <= 12; i++ {
+		name := []string{"search_tools", "describe_tools", "skill_lookup"}[(i-1)%3]
+		contents = append(contents, &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%d", i), Name: name, Args: map[string]any{"attempt": i}},
+		}}})
+		err := guard.validateHistory(contents)
+		if i < 12 && err != nil {
+			t.Fatalf("call %d unexpectedly blocked: %v", i, err)
 		}
-		args["attempt"] = i
-		if err := guard.record(call.name, args); err != nil {
-			t.Fatalf("call %d unexpectedly blocked: %v", i+1, err)
+		if i == 12 && !errors.Is(err, errToolDiscoveryLoop) {
+			t.Fatalf("discovery budget error = %v, want errToolDiscoveryLoop", err)
 		}
-	}
-
-	err := guard.record("search_tools", map[string]any{"query": "one more", "attempt": maxDiscoveryCallsPerTurn})
-	if !errors.Is(err, errToolDiscoveryLoop) {
-		t.Fatalf("record error = %v, want errToolDiscoveryLoop", err)
 	}
 }
 
@@ -127,8 +123,15 @@ func TestToolDiscoveryGuardDoesNotRecountFailedPriorTurn(t *testing.T) {
 
 func TestToolDiscoveryGuardIgnoresProductiveTools(t *testing.T) {
 	guard := newToolDiscoveryGuard()
+	if err := guard.validateHistory(nil); err != nil {
+		t.Fatal(err)
+	}
+	var contents []*genai.Content
 	for i := 0; i < maxDiscoveryCallsPerTurn*2; i++ {
-		if err := guard.record("read_file", map[string]any{"path": "file.go"}); err != nil {
+		contents = append(contents, &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "read_file", Args: map[string]any{"path": "file.go"}},
+		}}})
+		if err := guard.validateHistory(contents); err != nil {
 			t.Fatalf("productive tool call %d blocked: %v", i+1, err)
 		}
 	}

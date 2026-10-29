@@ -1,5 +1,7 @@
 {
-  "name": "task-failure", "description": "A delegated task fails", "category": "delegation",
+  "name": "task-failure",
+  "description": "A delegated task fails with an error",
+  "category": "delegation",
   "events": [
     { "type": "session", "data": { "sessionId": "sess-delegate-fail", "isNew": true } },
     { "type": "text", "data": { "text": "I'll deploy the changes now." } },

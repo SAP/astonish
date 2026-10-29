@@ -1,5 +1,7 @@
 {
-  "name": "simple-delegation", "description": "Agent delegates a single task", "category": "delegation",
+  "name": "simple-delegation",
+  "description": "Agent delegates a single task to a sub-agent",
+  "category": "delegation",
   "events": [
     { "type": "session", "data": { "sessionId": "sess-delegate-1", "isNew": true } },
     { "type": "text", "data": { "text": "I'll research this for you." } },
@@ -11,6 +13,7 @@
     { "type": "subtask_progress", "data": { "event_type": "task_complete", "batch_id": "simple-batch", "task_id": "research", "child_session_id": "research-child", "attempt": 1, "sequence": 6, "task_name": "Research competitors", "status": "success", "duration": "3.2s" } },
     { "type": "subtask_progress", "data": { "event_type": "delegation_complete", "batch_id": "simple-batch", "sequence": 7, "status": "success" } },
     { "type": "text", "data": { "text": "Based on my research, here are the top competitors in the market." } },
+    { "type": "usage", "data": { "input_tokens": 500, "output_tokens": 250, "total_tokens": 750 } },
     { "type": "done", "data": { "done": true } }
   ]
 }

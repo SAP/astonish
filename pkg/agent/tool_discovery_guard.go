@@ -29,38 +29,14 @@ var discoveryToolNames = map[string]struct{}{
 
 type toolDiscoveryGuard struct {
 	mu                 sync.Mutex
-	total              int
-	identical          map[string]int
 	historyInitialized bool
 	historyBaseline    map[string]int
 }
 
 func newToolDiscoveryGuard() *toolDiscoveryGuard {
 	return &toolDiscoveryGuard{
-		identical:       make(map[string]int),
 		historyBaseline: make(map[string]int),
 	}
-}
-
-func (g *toolDiscoveryGuard) record(name string, args map[string]any) error {
-	if _, discovery := discoveryToolNames[name]; !discovery {
-		return nil
-	}
-
-	fingerprint := discoveryCallFingerprint(name, args)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if g.total >= maxDiscoveryCallsPerTurn {
-		return fmt.Errorf("%w: exceeded %d discovery calls in one turn; stop discovering tools and answer with the capabilities already found", errToolDiscoveryLoop, maxDiscoveryCallsPerTurn)
-	}
-	if g.identical[fingerprint] >= maxIdenticalDiscoveryCalls {
-		return fmt.Errorf("%w: repeated identical %s call more than %d times; stop retrying this discovery call", errToolDiscoveryLoop, name, maxIdenticalDiscoveryCalls)
-	}
-
-	g.total++
-	g.identical[fingerprint]++
-	return nil
 }
 
 func (g *toolDiscoveryGuard) validateHistory(contents []*genai.Content) error {

@@ -154,7 +154,7 @@ type ReadFileArgs struct {
 	Path   string `json:"path" jsonschema:"Absolute path to the file to read"`
 	Offset *int   `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-indexed). Omit to start from line 1."`
 	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Omit to read to end of file (large files are auto-capped; page with offset/limit)."`
-	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since the last read."`
+	Force  bool   `json:"force,omitempty" jsonschema:"Bypass the read cache and always return file content even if unchanged since last read. Use when you no longer have the file content in your conversation history."`
 }
 
 // readFileSoftCapLines bounds how many lines an unbounded read_file returns for
@@ -171,9 +171,7 @@ const readFileSoftCapLines = 400
 const readFileSoftCapBytes = 256 * 1024
 
 type ReadFileResult struct {
-	Content    string `json:"content,omitempty"`
-	Path       string `json:"path,omitempty"`
-	SizeBytes  int64  `json:"size_bytes,omitempty"`
+	Content    string `json:"content"`
 	TotalLines int    `json:"total_lines"`
 	Range      string `json:"range,omitempty"`
 	Unchanged  bool   `json:"unchanged,omitempty"`

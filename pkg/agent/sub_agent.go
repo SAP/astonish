@@ -914,22 +914,6 @@ func parseEvaluationResponse(response string) (action string, reason string, gui
 	return action, reason, guidance
 }
 
-// buildRestartPrompt creates a fresh-start prompt for a task that was stuck.
-// Unlike buildRetryPrompt, it does NOT carry forward partial output — the task
-// starts completely fresh with corrective guidance.
-func buildRestartPrompt(originalDescription string, failedAttempt TaskResult, guidance string) string {
-	var sb strings.Builder
-	sb.WriteString("RESTART: Your previous attempt at this task was stopped because it was not converging.\n\n")
-	if guidance != "" {
-		sb.WriteString("The previous approach failed. Try a DIFFERENT approach: ")
-		sb.WriteString(guidance)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString("Do NOT repeat the approach that failed. Original task:\n")
-	sb.WriteString(originalDescription)
-	return sb.String()
-}
-
 // RunTask executes a single sub-agent task synchronously.
 // It creates a child session, builds a filtered ChatAgent, runs the full
 // agent loop, collects the output and trace, then returns the result.

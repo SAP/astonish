@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 )
 
-// AtomicWrite writes a small data file atomically using the temp-file + rename
-// pattern. It is exported for durable sidecar manifests; callers assembling large
-// artifacts must stream to a temporary file instead of materializing []byte.
-func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+// atomicWrite writes data to a file atomically using the temp-file + rename pattern.
+// This prevents partial writes from corrupting data on crash.
+func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -49,9 +48,4 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 
 	success = true
 	return nil
-}
-
-// atomicWrite preserves the package-local API used by existing session stores.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	return AtomicWrite(path, data, perm)
 }

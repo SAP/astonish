@@ -1,5 +1,7 @@
 {
-  "name": "multi-task-parallel", "description": "Parallel delegation", "category": "delegation",
+  "name": "multi-task-parallel",
+  "description": "Agent delegates multiple tasks that run in parallel",
+  "category": "delegation",
   "events": [
     { "type": "session", "data": { "sessionId": "sess-delegate-multi", "isNew": true } },
     { "type": "text", "data": { "text": "I'll research this from multiple angles." } },

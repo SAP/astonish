@@ -1288,49 +1288,16 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// Wire structured sub-task progress so delegation events flow to the TUI.
 	// This enables the delegation panel that shows task timers and completion status.
 	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
-		switch evt.Type {
-		case "plan_announced":
-			// Plan content is rendered by the FunctionResponse handler for
-			// announce_plan; no text emission needed here to avoid duplication.
-		case "delegation_start":
-			tasks := make([]any, len(evt.Tasks))
-			for i, t := range evt.Tasks {
-				tasks[i] = map[string]any{"name": t.Name, "description": t.Description, "plan_step": t.PlanStep}
-			}
-			emit("delegation", map[string]any{"type": "start", "tasks": tasks})
-		case "task_start":
-			emit("delegation", map[string]any{"type": "task_start", "task_name": evt.TaskName, "status": evt.Status, "attempt": evt.Attempt})
-		case "task_state", "task_retry", "evaluating":
-			emit("delegation", map[string]any{
-				"type": evt.Type, "task_name": evt.TaskName, "status": evt.Status,
-				"duration": evt.Duration, "last_activity": evt.LastActivity,
-				"attempt": evt.Attempt, "reason": evt.Reason, "no_activity": evt.NoActivity,
-			})
-		case "task_complete":
-			emit("delegation", map[string]any{"type": "task_complete", "task_name": evt.TaskName, "duration": evt.Duration, "status": evt.Status, "attempt": evt.Attempt})
-		case "task_failed":
-			emit("delegation", map[string]any{
-				"type": "task_failed", "task_name": evt.TaskName, "duration": evt.Duration,
-				"error": evt.Error, "status": evt.Status, "attempt": evt.Attempt,
-				"reason": evt.Reason, "no_activity": evt.NoActivity,
-			})
-		case "task_tool_call":
-			emit("delegation", map[string]any{
-				"type": "task_tool_call", "task_name": evt.TaskName,
-				"tool_name": evt.ToolName, "tool_args": evt.ToolArgs,
-			})
-		case "task_tool_result":
-			emit("delegation", map[string]any{
-				"type": "task_tool_result", "task_name": evt.TaskName,
-				"tool_name": evt.ToolName, "tool_result": evt.ToolResult,
-			})
-		case "task_text":
-			emit("delegation", map[string]any{
-				"type": "task_text", "task_name": evt.TaskName,
-				"text": evt.Text,
-			})
-		case "delegation_complete":
-			emit("delegation", map[string]any{"type": "done", "status": evt.Status})
+		if evt.Type == "plan_announced" {
+			return
+		}
+		raw, err := json.Marshal(evt)
+		if err != nil {
+			return
+		}
+		var payload map[string]any
+		if json.Unmarshal(raw, &payload) == nil {
+			emit("subtask_progress", payload)
 		}
 	}
 	// Wire sub-agent authorization gate for code-mode HITL. When a sub-agent
@@ -2522,6 +2489,182 @@ func (b *localAgentBackend) recordRoutingDecision(ctx context.Context, sessionID
 	}
 }
 
+func localDelegationHistory(callID string, response map[string]any, callArgs ...map[string]any) []backend.HistoryEntry {
+	var original struct {
+		Tasks []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"tasks"`
+	}
+	if len(callArgs) > 0 {
+		raw, _ := json.Marshal(callArgs[0])
+		_ = json.Unmarshal(raw, &original)
+	}
+	if response == nil {
+		var results []map[string]any
+		for _, task := range original.Tasks {
+			results = append(results, map[string]any{"name": task.Name, "status": "interrupted"})
+		}
+		response = map[string]any{"batch_id": callID, "status": "interrupted", "results": results}
+	}
+	raw, _ := json.Marshal(response)
+	var data struct {
+		BatchID string `json:"batch_id"`
+		Status  string `json:"status"`
+		Results []struct {
+			Name           string                `json:"name"`
+			TaskID         string                `json:"task_id"`
+			ChildSessionID string                `json:"child_session_id"`
+			Attempts       int                   `json:"attempts"`
+			Status         string                `json:"status"`
+			Result         string                `json:"result"`
+			Duration       string                `json:"duration"`
+			Error          string                `json:"error"`
+			History        []client.SubtaskEvent `json:"attempt_history"`
+		} `json:"results"`
+	}
+	if json.Unmarshal(raw, &data) != nil {
+		return nil
+	}
+	if data.BatchID == "" {
+		data.BatchID = callID
+	}
+	msg := client.StudioMessage{Type: "subtask_execution", BatchID: data.BatchID, Status: data.Status}
+	for i, result := range data.Results {
+		if result.TaskID == "" {
+			result.TaskID = fmt.Sprintf("%s/task-%d", data.BatchID, i+1)
+		}
+		description := ""
+		if i < len(original.Tasks) {
+			description = original.Tasks[i].Description
+		}
+		msg.Tasks = append(msg.Tasks, client.SubtaskInfo{Name: result.Name, Description: description, TaskID: result.TaskID, BatchID: data.BatchID, Attempt: 1})
+		if len(result.History) == 0 {
+			result.History = []client.SubtaskEvent{{Attempt: max(1, result.Attempts), ChildSessionID: result.ChildSessionID, Status: result.Status, Duration: result.Duration, Error: result.Error}}
+		}
+		for j, a := range result.History {
+			a.BatchID = data.BatchID
+			a.TaskID = result.TaskID
+			a.TaskName = result.Name
+			if a.Attempt == 0 {
+				a.Attempt = j + 1
+			}
+			a.Type = "task_state"
+			if a.Status == "failed" {
+				a.Type = "task_failed"
+			}
+			if a.Status == "success" || a.Status == "complete" {
+				a.Type = "task_complete"
+			}
+			msg.Events = append(msg.Events, a)
+			if j == len(result.History)-1 && result.Result != "" {
+				a.Type = "task_text"
+				a.Text = result.Result
+				msg.Events = append(msg.Events, a)
+			}
+		}
+	}
+	return studioMessagesToHistory([]client.StudioMessage{msg})
+}
+
+func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task events.DelegationTaskState) ([]events.DelegationActivity, error) {
+	b.mu.Lock()
+	parent := b.sessionID
+	b.mu.Unlock()
+	if b.fileStore == nil || b.sessionSvc == nil || parent == "" {
+		return nil, fmt.Errorf("delegation store unavailable")
+	}
+	owner := b.effectiveUserID()
+	meta, err := b.fileStore.GetSessionMeta(parent)
+	if err != nil || meta == nil || meta.UserID != owner || meta.AppName != codeAppName {
+		return nil, fmt.Errorf("parent session not owned")
+	}
+	children, err := b.fileStore.ListChildren(parent)
+	if err != nil {
+		return nil, err
+	}
+	childID := ""
+	for _, child := range children {
+		if task.ChildSessionID != "" && child.ID != task.ChildSessionID {
+			continue
+		}
+		if task.Name != "" && child.Title != task.Name {
+			continue
+		}
+		if child.UserID != owner || child.AppName != codeAppName {
+			return nil, fmt.Errorf("child session not owned")
+		}
+		// Validate every supplied selector against persisted immutable attempt metadata.
+		candidate, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: owner, SessionID: child.ID})
+		if getErr != nil || candidate == nil || candidate.Session == nil {
+			continue
+		}
+		matches := true
+		for key, want := range map[string]string{"batch_id": task.BatchID, "task_id": task.TaskID} {
+			if want != "" {
+				got, stateErr := candidate.Session.State().Get(key)
+				if stateErr != nil || got != want {
+					matches = false
+				}
+			}
+		}
+		if task.Attempt > 0 {
+			got, stateErr := candidate.Session.State().Get("attempt")
+			if stateErr != nil || fmt.Sprint(got) != fmt.Sprint(task.Attempt) {
+				matches = false
+			}
+		}
+		if !matches {
+			continue
+		}
+		if childID != "" {
+			return nil, fmt.Errorf("ambiguous task; select an exact attempt")
+		}
+		childID = child.ID
+	}
+	if childID == "" {
+		return nil, fmt.Errorf("child is not a member of this session")
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: owner, SessionID: childID})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Session == nil {
+		return nil, nil
+	}
+	var out []events.DelegationActivity
+	for ev := range resp.Session.Events().All() {
+		if ev == nil {
+			continue
+		}
+		for _, part := range eventAllParts(ev) {
+			if part == nil {
+				continue
+			}
+			a := events.DelegationActivity{Sequence: int64(len(out) + 1)}
+			switch {
+			case part.FunctionCall != nil:
+				a.Type = "tool_call"
+				a.CallID = part.FunctionCall.ID
+				a.ToolName = part.FunctionCall.Name
+				a.Args = part.FunctionCall.Args
+			case part.FunctionResponse != nil:
+				a.Type = "tool_result"
+				a.CallID = part.FunctionResponse.ID
+				a.ToolName = part.FunctionResponse.Name
+				a.Result = part.FunctionResponse.Response
+			case part.Text != "" && !part.Thought:
+				a.Type = "text"
+				a.Text = part.Text
+			default:
+				continue
+			}
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
 func (b *localAgentBackend) LoadHistory(ctx context.Context) ([]backend.HistoryEntry, error) {
 	b.mu.Lock()
 	id := b.sessionID
@@ -2697,6 +2840,17 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 	// both the message and its tool fold.
 	routingIdx := 0
 
+	delegationResponses := make(map[string]map[string]any)
+	for _, ev := range allEvents {
+		if ev == nil {
+			continue
+		}
+		for _, part := range eventAllParts(ev) {
+			if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "delegate_tasks" {
+				delegationResponses[part.FunctionResponse.ID] = part.FunctionResponse.Response
+			}
+		}
+	}
 	var out []backend.HistoryEntry
 	for i, ev := range allEvents {
 		if ev == nil {
@@ -2784,6 +2938,10 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 					announcePlanArgs[part.FunctionCall.ID] = part.FunctionCall.Args
 					continue
 				}
+				if part.FunctionCall.Name == "delegate_tasks" {
+					out = append(out, localDelegationHistory(part.FunctionCall.ID, delegationResponses[part.FunctionCall.ID], part.FunctionCall.Args)...)
+					continue
+				}
 				toolEntry := backend.HistoryEntry{
 					Kind:     "tool_call",
 					ToolName: part.FunctionCall.Name,
@@ -2793,6 +2951,9 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				stampEntryRouting(&toolEntry)
 				out = append(out, toolEntry)
 			case part.FunctionResponse != nil:
+				if part.FunctionResponse.Name == "delegate_tasks" {
+					continue
+				}
 				// Reconstruct the plan document text from the stored call args,
 				// mirroring the synthetic text event emitted during live execution.
 				if part.FunctionResponse.Name == "announce_plan" {

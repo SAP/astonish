@@ -142,7 +142,22 @@ func sandboxSessionRegistryForRequest(r *http.Request) (*sandbox.SessionRegistry
 // the unscoped local JSON registry and, on Docker, derives the container name
 // from the ID with no ownership check.
 func sandboxBackendForAuthorizedRequest(r *http.Request) (sandbox.Backend, func(), error) {
-	return sandboxBackendForRequest(r)
+	appCfg := effectiveAppConfig(r)
+	if appCfg == nil {
+		return nil, nil, fmt.Errorf("sandbox unavailable: unable to load application config")
+	}
+	if !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
+		return nil, nil, fmt.Errorf("sandbox is not enabled in configuration")
+	}
+	registry, err := sandboxSessionRegistryForRequest(r)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox unavailable: load authorized session registry: %w", err)
+	}
+	backend, cleanup, err := sandbox.BackendFromAppConfigWithSessions(appCfg, registry)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox unavailable: %w", err)
+	}
+	return backend, cleanup, nil
 }
 
 // authorizeSandboxSession decides whether the caller may act on sessionID.

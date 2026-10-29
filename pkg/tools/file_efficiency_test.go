@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,9 +10,252 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/SAP/astonish/pkg/common"
 )
 
+func TestWriteFile_RejectsBlankPath(t *testing.T) {
+	for _, path := range []string{"", " ", "\t\n", "\u2003"} {
+		t.Run(fmt.Sprintf("path=%q", path), func(t *testing.T) {
+			resetTestCache(t)
+			dir := t.TempDir()
+			t.Chdir(dir)
+			result, err := WriteFile(nil, WriteFileArgs{FilePath: path, Content: "private-content"})
+			if err == nil || !strings.Contains(err.Error(), "path") {
+				t.Errorf("expected actionable path error, got %v", err)
+			}
+			if result.Path != "" || result.Created {
+				t.Errorf("invalid write returned success metadata: %+v", result)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("invalid write changed directory: %v, %v", entries, err)
+			}
+			if _, err := os.Stat(cacheFilePath); !os.IsNotExist(err) {
+				t.Errorf("invalid write touched cache: %v", err)
+			}
+		})
+	}
+}
+
+func TestExecuteTool_WriteFileRejectsWrongKey(t *testing.T) {
+	resetTestCache(t)
+	oldCaller := currentCaller
+	t.Cleanup(func() { currentCaller = oldCaller })
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// Unknown path spellings must still fail before filesystem side effects.
+	for i, caller := range []string{"", "chat", ""} {
+		args := map[string]any{"unknown_path": filepath.Join(dir, "nested", "hello.txt"), "content": "hello\n"}
+		if caller != "" {
+			args["_caller"] = caller
+		}
+		_, err := ExecuteTool(context.Background(), "write_file", args, "chat")
+		if err == nil || !strings.Contains(err.Error(), "path") {
+			t.Errorf("attempt %d: expected file_path error, got %v", i+1, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("wrong-key writes changed directory: %v, %v", entries, err)
+	}
+	if _, err := os.Stat(cacheFilePath); !os.IsNotExist(err) {
+		t.Errorf("wrong-key writes touched cache: %v", err)
+	}
+}
+
+func TestWriteFile_ValidPathsAndEmptyContent(t *testing.T) {
+	for _, dispatch := range []bool{false, true} {
+		for _, content := range []string{"hello\n", ""} {
+			t.Run(fmt.Sprintf("dispatch=%t/empty=%t", dispatch, content == ""), func(t *testing.T) {
+				resetTestCache(t)
+				oldCaller := currentCaller
+				t.Cleanup(func() { currentCaller = oldCaller })
+				t.Chdir(t.TempDir())
+				// Significant leading/trailing spaces are not trimmed.
+				path := " hello.txt "
+				var result WriteFileResult
+				var err error
+				if dispatch {
+					var raw any
+					raw, err = ExecuteTool(context.Background(), "write_file", map[string]any{"path": path, "content": content}, "chat")
+					if err == nil {
+						result = raw.(WriteFileResult)
+					}
+				} else {
+					result, err = WriteFile(nil, WriteFileArgs{FilePath: path, Content: content})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Path != path || !result.Created {
+					t.Fatalf("result = %+v", result)
+				}
+				if got := readTestFile(t, path); got != content {
+					t.Fatalf("bytes = %q, want %q", got, content)
+				}
+			})
+		}
+	}
+}
+
+func TestLoadFile_MetadataStates(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		lines         int
+	}{
+		{"empty", "", 0},
+		{"large", strings.Repeat("private-file-content\n", 100000), 100000},
+		{"unterminated", "private-file-content\nlast", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTestFile(t, t.TempDir(), "published.txt", tc.content)
+			oldCaller := currentCaller
+			t.Cleanup(func() { currentCaller = oldCaller })
+			raw, err := ExecuteTool(context.Background(), "load_file", map[string]any{"path": path, "title": " Report "}, "chat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, ok := raw.(LoadFileResult)
+			if !ok || result.Path != path || result.Title != "Report" || result.SizeBytes != int64(len(tc.content)) || result.TotalLines != tc.lines {
+				t.Fatalf("metadata = %+v", raw)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for key := range fields {
+				switch key {
+				case "path", "title", "size_bytes", "total_lines":
+				default:
+					t.Errorf("non-metadata field %q", key)
+				}
+			}
+			if strings.Contains(string(data), "private-file-content") {
+				t.Fatal("file bytes leaked into result")
+			}
+		})
+	}
+}
+
+func TestLoadFile_RejectsInvalidTargets(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SUDO_USER", "")
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	protectedDir := filepath.Join(dir, "astonish")
+	if err := os.MkdirAll(protectedDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := writeTestFile(t, protectedDir, ".store_key", "secret-key")
+	creds := writeTestFile(t, protectedDir, "credentials.enc", "encrypted-secrets")
+	for _, tc := range []struct{ name, path, want string }{
+		{"missing_path", "", "path is required"},
+		{"blank_path", " \t\n", "path is required"},
+		{"missing_file", filepath.Join(dir, "missing"), "failed to inspect file"},
+		{"directory", dir, "not a regular file"},
+		{"store_key", key, "access denied"},
+		{"credentials", creds, "access denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := LoadFile(nil, LoadFileArgs{Path: tc.path})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %s", err, tc.want)
+			}
+			if result != (LoadFileResult{}) {
+				t.Fatalf("failed load returned metadata: %+v", result)
+			}
+		})
+	}
+}
+
+func TestFileToolSchemas_ReadAndPublish(t *testing.T) {
+	t.Setenv("SUDO_USER", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	registered, err := GetInternalTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range registered {
+		switch candidate.Name() {
+		case "read_file", "load_file", "write_file":
+		default:
+			continue
+		}
+		seen[candidate.Name()] = true
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(common.ExtractToolInputSchema(candidate), &schema); err != nil {
+			t.Fatal(err)
+		}
+		if candidate.Name() == "read_file" {
+			if _, exists := schema.Properties["delivery"]; exists {
+				t.Fatal("read_file advertises removed delivery mode")
+			}
+		}
+		if candidate.Name() == "write_file" {
+			if _, exists := schema.Properties["file_path"]; exists {
+				t.Fatal("write_file advertises legacy file_path alias")
+			}
+			if err := common.ValidateToolArguments(candidate, map[string]any{"path": "ok"}); err == nil || !strings.Contains(err.Error(), "content") {
+				t.Fatalf("missing content error = %v", err)
+			}
+			if err := common.ValidateToolArguments(candidate, map[string]any{"path": "ok", "content": ""}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, name := range []string{"read_file", "load_file", "write_file"} {
+		if !seen[name] {
+			t.Errorf("%s not registered", name)
+		}
+	}
+}
+
 // --- Layer 2: read_file line-range + line numbers ---
+
+func TestLoadFile_PublishesMetadataWithoutContent(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("large private line\n", 2061)
+	path := filepath.Join(dir, "documentary.md")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadFile(nil, LoadFileArgs{Path: path, Title: "Doc"})
+	if err != nil {
+		t.Fatalf("LoadFile() error = %v", err)
+	}
+	if result.Path != path || result.Title != "Doc" {
+		t.Fatalf("unexpected load result: %#v", result)
+	}
+	if result.TotalLines != 2061 || result.SizeBytes != int64(len(content)) {
+		t.Fatalf("metadata = lines %d, bytes %d", result.TotalLines, result.SizeBytes)
+	}
+	encoded := fmt.Sprintf("%+v", result)
+	if strings.Contains(encoded, "large private line") {
+		t.Fatal("load_file transported file content")
+	}
+}
+
+func TestLoadFile_RejectsMissingPath(t *testing.T) {
+	_, err := LoadFile(nil, LoadFileArgs{})
+	if err == nil || !strings.Contains(err.Error(), "path is required") {
+		t.Fatalf("missing-path error = %v", err)
+	}
+}
+
+func TestReadFile_RejectsMissingPathWithArgumentGuidance(t *testing.T) {
+	_, err := ReadFile(nil, ReadFileArgs{})
+	if err == nil || !strings.Contains(err.Error(), "not 'file_path'") {
+		t.Fatalf("missing-path error = %v", err)
+	}
+}
 
 func TestReadFile_LineNumbers(t *testing.T) {
 	resetTestCache(t)

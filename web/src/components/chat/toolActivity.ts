@@ -1,4 +1,127 @@
-import type { AgentMessage, ChatMsg, ToolCallMessage, ToolResultMessage } from './chatTypes'
+import type { AgentMessage, ChatMsg, ToolCallMessage, ToolResultMessage, SubTaskEvent, SubTaskExecutionMessage, SubTaskInfo, DelegationIdentity } from './chatTypes'
+
+export interface DelegationAttempt extends DelegationIdentity {
+  events: SubTaskEvent[]
+  status: 'pending' | 'running' | 'complete' | 'failed' | 'interrupted'
+  retrying?: boolean
+  evaluating?: boolean
+  duration?: string
+  error?: string
+  startTimestamp?: number
+}
+
+export interface DelegationTask extends SubTaskInfo, DelegationAttempt {
+  id: string
+  attempts: DelegationAttempt[]
+}
+
+/** Identity, not payload equality, decides replay. Equal text can be emitted twice. */
+function orderedDelegationEvents(events: SubTaskEvent[]): SubTaskEvent[] {
+  const seen = new Set<string>()
+  return events.filter(e => {
+    if (e.sequence == null) return true
+    const key = JSON.stringify([e.batch_id, e.task_id, e.attempt, e.sequence])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).sort((a, b) => a.sequence != null && b.sequence != null ? a.sequence - b.sequence : 0)
+}
+
+export function deriveDelegationTasks(data: SubTaskExecutionMessage): DelegationTask[] {
+  const tasks: DelegationTask[] = []
+  const add = (info: SubTaskInfo, id: string) => {
+    const task: DelegationTask = { ...info, id, events: [], attempts: [], status: 'pending' }
+    tasks.push(task)
+    return task
+  }
+  for (const [index, info] of (Array.isArray(data.tasks) ? data.tasks : []).entries()) {
+    if (!info || typeof info.name !== 'string') continue
+    add(info, info.task_id || `legacy:${index}:${info.name}`)
+  }
+  for (const event of orderedDelegationEvents(Array.isArray(data.events) ? data.events : [])) {
+    if (event.type.startsWith('delegation_')) continue
+    let task = event.task_id ? tasks.find(t => t.task_id === event.task_id) : undefined
+    if (!event.task_id) {
+      const matches = tasks.filter(t => t.name === event.task_name)
+      if (matches.length === 1) task = matches[0]
+      if (matches.length > 1) continue // Unidentified legacy events cannot pick a same-name task.
+    }
+    if (!task) task = add({ name: event.task_name || event.task_id || 'Unknown task', description: '', task_id: event.task_id }, event.task_id || `legacy:${tasks.length}:${event.task_name}`)
+    task.events.push(event)
+    const attemptNumber = event.attempt ?? task.attempt ?? 1
+    let attempt = task.attempts.find(a => a.attempt === attemptNumber)
+    if (!attempt) { attempt = { batch_id: data.batch_id, task_id: task.task_id, attempt: attemptNumber, events: [], status: 'pending', error: undefined, duration: undefined, retrying: false, evaluating: false, startTimestamp: undefined, child_session_id: undefined }; task.attempts.push(attempt) }
+    attempt.events.push(event)
+    if (event.child_session_id) attempt.child_session_id = event.child_session_id
+    switch (event.type) {
+      case 'task_start': attempt.status = 'running'; attempt.retrying = false; attempt.evaluating = false; attempt.startTimestamp = event.timestamp; break
+      case 'task_retry': attempt.status = 'running'; attempt.retrying = true; attempt.evaluating = false; attempt.error = undefined; attempt.duration = undefined; break
+      case 'evaluating': attempt.status = 'running'; attempt.evaluating = true; attempt.retrying = false; break
+      case 'task_complete': attempt.status = 'complete'; attempt.retrying = false; attempt.evaluating = false; attempt.duration = event.duration; attempt.error = undefined; break
+      case 'task_failed': attempt.status = 'failed'; attempt.retrying = false; attempt.evaluating = false; attempt.duration = event.duration; attempt.error = event.error; break
+    }
+  }
+  tasks.forEach(task => {
+    task.attempts.sort((a, b) => (a.attempt ?? 1) - (b.attempt ?? 1))
+    task.attempts.forEach((attempt, index) => {
+      if ((data.status !== 'running' || index < task.attempts.length - 1) && (attempt.status === 'pending' || attempt.status === 'running')) {
+        attempt.status = 'interrupted'; attempt.retrying = false; attempt.evaluating = false
+      }
+    })
+    const latest = task.attempts.at(-1)
+    if (latest) Object.assign(task, { ...latest, events: task.events })
+    else if (data.status !== 'running') task.status = 'interrupted'
+  })
+  return tasks
+}
+
+export function reduceDelegationProgress(messages: ChatMsg[], input: SubTaskEvent | Record<string, unknown>): ChatMsg[] {
+  const event = { ...input, type: ('event_type' in input ? input.event_type : input.type) } as SubTaskEvent
+  if (typeof event.type !== 'string') return messages
+  const candidates = messages.flatMap((m, i) => m.type === 'subtask_execution' ? [{ message: m, index: i }] : [])
+  const exactBatch = event.batch_id ? candidates.find(c => c.message.batch_id === event.batch_id) : undefined
+  const identityMatches = candidates.filter(c => {
+    const tasks = Array.isArray(c.message.tasks) ? c.message.tasks : []
+    return tasks.some(task =>
+      (event.child_session_id && task.child_session_id === event.child_session_id) ||
+      (event.task_id && task.task_id === event.task_id),
+    )
+  })
+  const identityMatch = identityMatches.length === 1 ? identityMatches[0] : undefined
+  const match = exactBatch || identityMatch || (!event.batch_id && event.type !== 'delegation_start'
+    ? candidates.filter(c => !c.message.batch_id && c.message.status === 'running').at(-1)
+    : undefined)
+  const previous = match?.message
+  const events = orderedDelegationEvents([...(previous?.events || []), event])
+  const tasks = events.find(e => e.type === 'delegation_start' && Array.isArray(e.tasks))?.tasks || previous?.tasks || []
+  const terminal = [...events].reverse().find(e => e.type === 'delegation_complete')
+  const panel: SubTaskExecutionMessage = { type: 'subtask_execution', batch_id: event.batch_id, tasks, events, status: terminal?.status || (terminal ? 'interrupted' : 'running') }
+  if (match) return messages.map((m, i) => i === match.index ? panel : m)
+  return [...messages, panel]
+}
+
+export function interruptActiveDelegations(messages: ChatMsg[]): ChatMsg[] {
+  return messages.map(message => message.type === 'subtask_execution' && message.status === 'running' ? { ...message, status: 'interrupted' } : message)
+}
+
+export function normalizeDelegationHistory(messages: ChatMsg[]): ChatMsg[] {
+  return messages.reduce<ChatMsg[]>((output, message) => {
+    if (message.type !== 'subtask_execution') return [...output, message]
+    const events = orderedDelegationEvents(Array.isArray(message.events) ? message.events : [])
+    const tasks = Array.isArray(message.tasks) ? message.tasks : []
+    let normalized = events.length ? events.reduce((state, event) => reduceDelegationProgress(state, { ...event, batch_id: event.batch_id || message.batch_id }), [] as ChatMsg[]) : [{ ...message, events, tasks, status: tasks.length ? message.status : 'error' } as ChatMsg]
+    normalized = normalized.map(panel => panel.type === 'subtask_execution' ? { ...message, ...panel, tasks: panel.tasks.length ? panel.tasks : tasks, status: message.status || panel.status } : panel)
+    for (const panel of normalized) {
+      if (panel.type !== 'subtask_execution' || !panel.batch_id) { output.push(panel); continue }
+      const index = output.findIndex(m => m.type === 'subtask_execution' && m.batch_id === panel.batch_id)
+      const previous = output[index]
+      if (previous?.type !== 'subtask_execution') output.push(panel)
+      else output[index] = { ...previous, ...panel, tasks: panel.tasks.length ? panel.tasks : previous.tasks, events: orderedDelegationEvents([...previous.events, ...panel.events]) }
+    }
+    return output
+  }, [])
+}
+
 
 export type ToolStepStatus = 'running' | 'complete' | 'error'
 
@@ -61,6 +184,17 @@ export function groupChronologicalActivity(messages: ChatMsg[]): ChronologicalAc
     let finalAgent = -1
     for (let j = lastTool + 1; j <= end; j++) {
       if (messages[j].type === 'agent') finalAgent = j
+    }
+    // A visible component/dialog is a continuation of the explanation that
+    // immediately precedes its launching tool. Keep that context in the main
+    // transcript even though the tool call itself remains in the activity fold.
+    if (finalAgent < 0 && i < messages.length && isVisibleBoundaryType(messages[i].type)) {
+      for (let j = end; j >= start; j--) {
+        if (messages[j].type === 'agent') {
+          finalAgent = j
+          break
+        }
+      }
     }
     const entries: ActivityEntry[] = steps.map(step => ({ kind: 'tool', index: step.callIndex, step }))
     const coveredIndices: number[] = []
@@ -243,6 +377,21 @@ export function isHardBreakType(type: string): boolean {
   if (type === 'tool_call' || type === 'tool_result') return false
   if (isSoftNoteType(type)) return false
   return true
+}
+
+/**
+ * Boundaries that render user-facing interactive or rich UI and therefore need
+ * the immediately preceding assistant explanation visible beside them.
+ */
+function isVisibleBoundaryType(type: string): boolean {
+  return type === 'chat_question' ||
+    type === 'approval' ||
+    type === 'browser_handoff' ||
+    type === 'plan' ||
+    type === 'tutorial_blueprint_preview' ||
+    type === 'tutorial_scene_slideshow' ||
+    type === 'app_preview' ||
+    type === 'distill_preview'
 }
 
 export function isHardBreak(msg: ChatMsg): boolean {

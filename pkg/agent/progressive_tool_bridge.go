@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
@@ -12,7 +13,19 @@ import (
 	"google.golang.org/genai"
 )
 
-const executeToolName = "execute_tool"
+const executeToolName = common.ExecuteToolName
+
+// isBridgeOwnToolName reports whether name is one of the progressive bridge's
+// own fixed dispatcher/discovery tools. These are model-visible by declaration
+// and must never be looked up as deferred catalog entries.
+func isBridgeOwnToolName(name string) bool {
+	switch name {
+	case executeToolName, "describe_tools", "search_tools":
+		return true
+	default:
+		return false
+	}
+}
 
 type DescribeToolsArgs struct {
 	Names []string `json:"names" jsonschema:"Tool names returned by search_tools"`
@@ -37,12 +50,26 @@ type ExecuteToolArgs struct {
 
 type deferredToolResolver struct {
 	index *ToolIndex
+	scope *ChildToolScope
 }
 
 func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (tool.Tool, string, error) {
 	name = strings.TrimSpace(name)
+	if r.scope != nil {
+		return r.scope.resolve(ctx, name)
+	}
 	if name == "" {
 		return nil, "", fmt.Errorf("tool name is required")
+	}
+	// The progressive bridge's own fixed names must never be resolved as deferred
+	// catalog tools. If one reaches here it means an execute_tool envelope was not
+	// unwrapped to its inner tool (the model nested execute_tool inside itself, or
+	// a provider echoed the dispatcher name as the inner name). Returning the
+	// generic "not found in the available catalog" here is actively misleading —
+	// it implies the dispatcher is missing. Instead, guide the model to supply the
+	// real inner tool name and arguments.
+	if isBridgeOwnToolName(name) {
+		return nil, "", fmt.Errorf("%q is the tool dispatcher, not a target tool; call it with a %q field naming the deferred tool to run (from describe_tools) and its parameters under %q", name, "name", "arguments")
 	}
 	resolved := resolveIndexedToolName(r.index, name)
 	qualified := strings.Contains(name, "/")
@@ -150,6 +177,14 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(args.Name) == "" {
+		// The provider delivered an execute_tool envelope without a
+		// resolvable inner tool name (e.g. the arguments object was
+		// fragmented or streamed truncated). Returning a precise,
+		// actionable message lets the model re-issue the call correctly
+		// instead of seeing the misleading generic "tool name is required".
+		return nil, fmt.Errorf("execute_tool requires a %q field naming the tool to run (from describe_tools), with its parameters under %q", "name", "arguments")
+	}
 	resolved, _, err := b.resolver.resolve(ctx, args.Name)
 	if err != nil {
 		return nil, err
@@ -158,32 +193,49 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 	if !ok {
 		return nil, fmt.Errorf("tool %q is not executable", resolved.Name())
 	}
+	if err := common.ValidateToolArguments(resolved, args.Arguments); err != nil {
+		return nil, err
+	}
 	return runner.Run(ctx, args.Arguments)
 }
 
 func decodeExecuteToolArgs(raw any) (ExecuteToolArgs, error) {
 	switch args := raw.(type) {
 	case ExecuteToolArgs:
-		return args, nil
+		raw = map[string]any{"name": args.Name, "arguments": args.Arguments}
 	case *ExecuteToolArgs:
 		if args != nil {
-			return *args, nil
+			raw = map[string]any{"name": args.Name, "arguments": args.Arguments}
 		}
-	case map[string]any:
-		name, _ := args["name"].(string)
-		arguments, _ := args["arguments"].(map[string]any)
-		if arguments == nil {
-			arguments = map[string]any{}
-		}
-		return ExecuteToolArgs{Name: name, Arguments: arguments}, nil
 	}
-	return ExecuteToolArgs{}, fmt.Errorf("invalid execute_tool arguments")
+	name, arguments, err := common.NormalizeExecuteToolArgs(raw)
+	if err == nil {
+		// Canonicalize the invocation once so callback substitutions and the
+		// runner share an argument object, including provider JSON strings.
+		// The common decoder stays pure for persisted-event projection.
+		if envelope, ok := raw.(map[string]any); ok {
+			envelope["name"] = name
+			envelope["arguments"] = arguments
+		}
+	}
+	return ExecuteToolArgs{Name: name, Arguments: arguments}, err
 }
 
 // NewProgressiveToolBridge creates the fixed declarations used to inspect and
 // execute deferred tools without changing the model-visible tool set.
 func NewProgressiveToolBridge(index *ToolIndex) ([]tool.Tool, error) {
-	resolver := deferredToolResolver{index: index}
+	return newProgressiveToolBridge(deferredToolResolver{index: index})
+}
+
+// NewScopedProgressiveToolBridge never resolves outside the immutable child scope.
+func NewScopedProgressiveToolBridge(scope *ChildToolScope) ([]tool.Tool, error) {
+	if scope == nil {
+		return nil, fmt.Errorf("child tool scope is required")
+	}
+	return newProgressiveToolBridge(deferredToolResolver{scope: scope})
+}
+
+func newProgressiveToolBridge(resolver deferredToolResolver) ([]tool.Tool, error) {
 	describe, err := functiontool.New(functiontool.Config{
 		Name:        "describe_tools",
 		Description: "Return descriptions and input schemas for deferred tools from search_tools. This does not add tool declarations.",

@@ -753,16 +753,27 @@ func (cr *ChatRunner) Run(
 	//
 	// Register per-session so concurrent sessions on the same singleton
 	// ChatAgent don't leak events across sessions.
-	subTaskUITools := newUIToolTracker()
+	var subTaskTrackers sync.Map
+	var representedDelegations sync.Map
+	pendingLiveDelegations := make(map[string]*pendingDelegation)
 	chatAgent.RegisterSubTaskProgress(cr.SessionID, func(evt agent.SubTaskProgressEvent) {
+		if evt.BatchID != "" {
+			representedDelegations.Store(evt.BatchID, true)
+		}
+		key := fmt.Sprintf("%s/%s/%s/%d", evt.BatchID, evt.TaskID, evt.ChildSessionID, evt.Attempt)
+		if evt.TaskID == "" && evt.ChildSessionID == "" {
+			key += "/" + evt.TaskName
+		}
+		tracker, _ := subTaskTrackers.LoadOrStore(key, newUIToolTracker())
+		subTaskUITools := tracker.(*uiToolTracker)
 		if evt.Type == "task_tool_call" {
 			if args, ok := evt.ToolArgs.(map[string]any); ok {
-				uiTool := subTaskUITools.call(&genai.FunctionCall{Name: evt.ToolName, Args: args})
+				uiTool := subTaskUITools.call(&genai.FunctionCall{ID: evt.CallID, Name: evt.ToolName, Args: args})
 				evt.ToolName = uiTool.name
 				evt.ToolArgs = uiTool.args
 			}
 		} else if evt.Type == "task_tool_result" {
-			evt.ToolName = subTaskUITools.response(&genai.FunctionResponse{Name: evt.ToolName})
+			evt.ToolName = subTaskUITools.response(&genai.FunctionResponse{ID: evt.CallID, Name: evt.ToolName})
 		}
 
 		data := map[string]any{
@@ -770,6 +781,21 @@ func (cr *ChatRunner) Run(
 			"task_name":  evt.TaskName,
 		}
 		// Include fields conditionally to keep payloads lean
+		if evt.BatchID != "" {
+			data["batch_id"] = evt.BatchID
+		}
+		if evt.TaskID != "" {
+			data["task_id"] = evt.TaskID
+		}
+		if evt.ChildSessionID != "" {
+			data["child_session_id"] = evt.ChildSessionID
+		}
+		if evt.CallID != "" {
+			data["call_id"] = evt.CallID
+		}
+		if evt.Sequence != 0 {
+			data["sequence"] = evt.Sequence
+		}
 		if len(evt.Tasks) > 0 {
 			data["tasks"] = evt.Tasks
 		}
@@ -891,6 +917,11 @@ func (cr *ChatRunner) Run(
 			}
 		case streaming.PhaseToolArguments:
 			cr.emitEvent("thinking", map[string]any{"text": "Preparing tool arguments…"})
+		case streaming.PhaseWaiting:
+			seconds := int(progress.Elapsed.Round(time.Second) / time.Second)
+			cr.emitEvent("thinking", map[string]any{"text": fmt.Sprintf("Waiting for model response (%ds)…", seconds)})
+		case streaming.PhaseRecovering:
+			cr.emitEvent("thinking", map[string]any{"text": fmt.Sprintf("Restoring model stream (attempt %d)…", progress.Attempt)})
 		}
 	})
 
@@ -963,6 +994,12 @@ runLoop:
 				if part.FunctionCall != nil {
 					hasContent = true
 					uiTool := cr.uiTools.call(part.FunctionCall)
+					if uiTool.name == "delegate_tasks" {
+						pd := extractDelegationPlan(uiTool.args)
+						pd.batchID = part.FunctionCall.ID
+						pendingLiveDelegations[part.FunctionCall.ID] = pd
+						continue
+					}
 					// Suppress plan tool calls — their effect is visible via the PlanPanel,
 					// showing them as raw tool_call messages adds noise.
 					if uiTool.name == "announce_plan" {
@@ -1001,6 +1038,36 @@ runLoop:
 				if part.FunctionResponse != nil {
 					hasContent = true
 					toolName := cr.uiTools.response(part.FunctionResponse)
+					if toolName == "delegate_tasks" {
+						resp := part.FunctionResponse.Response
+						if chatAgent.Redactor != nil {
+							resp = chatAgent.Redactor.RedactMap(resp)
+						}
+						batchID := strVal(resp["batch_id"])
+						if batchID == "" {
+							batchID = part.FunctionResponse.ID
+						}
+						if _, seen := representedDelegations.Load(batchID); !seen {
+							msg := buildSubTaskExecutionMessage(pendingLiveDelegations[part.FunctionResponse.ID], resp)
+							for _, evt := range msg.Events {
+								payload, _ := json.Marshal(evt)
+								data := map[string]any{}
+								_ = json.Unmarshal(payload, &data)
+								data["event_type"] = evt.Type
+								delete(data, "type")
+								if evt.Type == "delegation_start" {
+									data["tasks"] = msg.Tasks
+								}
+								if evt.Type == string(agent.DelegationComplete) && strVal(resp["status"]) == "error" {
+									data["error"] = strVal(resp["summary"])
+								}
+								cr.emitEvent("subtask_progress", data)
+							}
+						}
+						delete(pendingLiveDelegations, part.FunctionResponse.ID)
+						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
+						continue
+					}
 					// Suppress plan tool results — no useful info for the user.
 					if toolName == "announce_plan" {
 						continue
@@ -1190,6 +1257,12 @@ runLoop:
 					}
 					if part.FunctionCall != nil {
 						uiTool := cr.uiTools.call(part.FunctionCall)
+						if uiTool.name == "delegate_tasks" {
+							pd := extractDelegationPlan(uiTool.args)
+							pd.batchID = part.FunctionCall.ID
+							pendingLiveDelegations[part.FunctionCall.ID] = pd
+							continue
+						}
 						if uiTool.name == "announce_plan" {
 							continue
 						}
@@ -1204,6 +1277,33 @@ runLoop:
 					}
 					if part.FunctionResponse != nil {
 						toolName := cr.uiTools.response(part.FunctionResponse)
+						if toolName == "delegate_tasks" {
+							resp := part.FunctionResponse.Response
+							if chatAgent.Redactor != nil {
+								resp = chatAgent.Redactor.RedactMap(resp)
+							}
+							batchID := strVal(resp["batch_id"])
+							if batchID == "" {
+								batchID = part.FunctionResponse.ID
+							}
+							if _, seen := representedDelegations.Load(batchID); !seen {
+								msg := buildSubTaskExecutionMessage(pendingLiveDelegations[part.FunctionResponse.ID], resp)
+								for _, evt := range msg.Events {
+									payload, _ := json.Marshal(evt)
+									data := map[string]any{}
+									_ = json.Unmarshal(payload, &data)
+									data["event_type"] = evt.Type
+									delete(data, "type")
+									if evt.Type == "delegation_start" {
+										data["tasks"] = msg.Tasks
+									}
+									cr.emitEvent("subtask_progress", data)
+								}
+							}
+							delete(pendingLiveDelegations, part.FunctionResponse.ID)
+							cr.drainImagesAndFlowOutput(chatAgent, sessionService)
+							continue
+						}
 						if toolName == "announce_plan" {
 							continue
 						}

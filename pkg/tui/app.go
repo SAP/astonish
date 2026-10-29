@@ -84,6 +84,10 @@ type fileViewerState struct {
 
 // delegationDetailState holds the overlay state for viewing a sub-task's activity.
 type delegationDetailState struct {
+	loading bool
+	err     string
+	request *int
+
 	open     bool
 	taskName string
 	taskIdx  int // index into the DelegationTasks slice
@@ -433,6 +437,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case delegationDetailLoadedMsg:
+		if !m.delegationDetail.open || m.delegationDetail.request != msg.request {
+			return m, nil
+		}
+		i, j := m.delegationDetail.itemIdx, m.delegationDetail.taskIdx
+		if i < 0 || i >= len(m.tr.Items) || j < 0 || j >= len(m.tr.Items[i].DelegationTasks) {
+			m.delegationDetail = delegationDetailState{}
+			return m, nil
+		}
+		m.delegationDetail.loading = false
+		if msg.err != nil {
+			m.delegationDetail.err = msg.err.Error()
+		} else {
+			task := &m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks[m.delegationDetail.taskIdx]
+			if len(task.Activity) == 0 || (task.Status == "complete" || task.Status == "failed") && len(msg.activity) > 0 {
+				task.Activity = msg.activity
+			}
+		}
+		m.layoutDelegationDetail()
+		return m, nil
+
 	case tea.PasteMsg:
 		// In v2, bracketed paste arrives as tea.PasteMsg.
 		if next, cmd, handled := m.handleOverlayPaste(msg.Content); handled {
@@ -4604,8 +4629,16 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		w = 30
 	}
 
-	// Header line.
-	header := fmt.Sprintf(" Delegating %d tasks ", len(tasks))
+	// Attempts remain individually selectable; the task count is logical tasks.
+	logicalTasks := make(map[string]struct{})
+	for _, task := range tasks {
+		key := task.TaskID
+		if key == "" {
+			key = task.Name
+		}
+		logicalTasks[key] = struct{}{}
+	}
+	header := fmt.Sprintf(" Delegating %d tasks ", len(logicalTasks))
 
 	var lines []string
 	for _, task := range tasks {
@@ -4621,6 +4654,10 @@ func (m model) renderDelegationItem(it events.Item, width int) string {
 		case "failed":
 			icon = th.Error.Render("✗")
 			nameStyle = th.Error
+			timeStr = task.Duration
+		case "interrupted", "cancelled":
+			icon = th.Muted.Render("○")
+			nameStyle = th.Muted
 			timeStr = task.Duration
 		case "queued":
 			icon = th.Muted.Render("○")
@@ -4887,6 +4924,28 @@ func (m model) delegationTaskAtLine(line int, itemIdx int) int {
 	return -1
 }
 
+type delegationDetailLoadedMsg struct {
+	request  *int
+	activity []events.DelegationActivity
+	err      error
+}
+
+func (m model) fetchDelegationDetail() (tea.Model, tea.Cmd) {
+	cap, ok := m.backend.(backend.DelegationDetailBackend)
+	if !ok {
+		return m, nil
+	}
+	task := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks[m.delegationDetail.taskIdx]
+	request := new(int)
+	m.delegationDetail.request = request
+	m.delegationDetail.loading = true
+	m.delegationDetail.err = ""
+	return m, func() tea.Msg {
+		a, err := cap.LoadDelegationDetail(m.ctx, task)
+		return delegationDetailLoadedMsg{request: request, activity: a, err: err}
+	}
+}
+
 func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 	tasks := m.tr.Items[itemIdx].DelegationTasks
 	if taskIdx < 0 || taskIdx >= len(tasks) {
@@ -4904,6 +4963,9 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 		itemIdx:  itemIdx,
 		vp:       vp,
 	}
+	if len(tasks[taskIdx].Activity) == 0 || tasks[taskIdx].ChildSessionID != "" {
+		return m.fetchDelegationDetail()
+	}
 	return m, nil
 }
 
@@ -4915,6 +4977,14 @@ func (m *model) layoutDelegationDetail() {
 	h := max(5, m.screenHeight()-4)
 	m.delegationDetail.vp.SetWidth(w)
 	m.delegationDetail.vp.SetHeight(h)
+	if m.delegationDetail.loading {
+		m.delegationDetail.vp.SetContent("Loading attempt activity…")
+		return
+	}
+	if m.delegationDetail.err != "" {
+		m.delegationDetail.vp.SetContent("Could not load activity: " + m.delegationDetail.err + "\nPress r to Retry.")
+		return
+	}
 	// Refresh content from current task state.
 	if m.delegationDetail.itemIdx >= 0 && m.delegationDetail.itemIdx < len(m.tr.Items) {
 		tasks := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks
@@ -4930,6 +5000,11 @@ func (m *model) layoutDelegationDetail() {
 
 func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "r":
+		if !m.delegationDetail.loading {
+			return m.fetchDelegationDetail()
+		}
+		return m, nil
 	case "esc", "q":
 		m.delegationDetail = delegationDetailState{}
 		return m, nil
@@ -5076,8 +5151,13 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 
 	// Build ToolStep groups: pair each tool_call with its following tool_result
 	// (same tool name). Standalone text entries are rendered as markdown blocks.
+	consumed := make(map[int]bool)
 	i := 0
 	for i < len(task.Activity) {
+		if consumed[i] {
+			i++
+			continue
+		}
 		act := task.Activity[i]
 		switch act.Type {
 		case "tool_call":
@@ -5087,10 +5167,21 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 				Args:   act.Args,
 				Status: "running",
 			}
-			if i+1 < len(task.Activity) && task.Activity[i+1].Type == "tool_result" && task.Activity[i+1].ToolName == act.ToolName {
-				step.Result = task.Activity[i+1].Result
-				step.Status = "complete"
-				i++ // consume the result entry
+			for j := i + 1; j < len(task.Activity); j++ {
+				result := task.Activity[j]
+				if consumed[j] || result.Type != "tool_result" {
+					continue
+				}
+				match := act.CallID != "" && result.CallID == act.CallID
+				if act.CallID == "" && result.CallID == "" {
+					match = j == i+1 && result.ToolName == act.ToolName
+				}
+				if match {
+					step.Result = result.Result
+					step.Status = "complete"
+					consumed[j] = true
+					break
+				}
 			}
 			// Render using the same format as renderActivity expanded view.
 			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)

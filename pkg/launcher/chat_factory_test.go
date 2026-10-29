@@ -11,8 +11,10 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	astonishtools "github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
 )
 
 func TestLogChatFactoryInitialization(t *testing.T) {
@@ -109,12 +111,13 @@ func TestSubAgentCredentialStoreWiring(t *testing.T) {
 }
 
 func TestMainThreadToolAllowlistByMode(t *testing.T) {
-	if allow := mainThreadToolAllowlist(false); len(allow) != 0 {
-		t.Fatalf("platform/chat main-thread allowlist = %#v, want all domain tools deferred", allow)
+	platformAllow := mainThreadToolAllowlist(false)
+	if len(platformAllow) != 5 || !platformAllow["delegate_tasks"] {
+		t.Fatalf("platform/chat main-thread allowlist = %#v, want delegate_tasks and four basic file tools", platformAllow)
 	}
 
 	allow := mainThreadToolAllowlist(true)
-	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "announce_completion", "codegraph_explore"} {
+	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "announce_completion", "codegraph_explore", "delegate_tasks"} {
 		if !allow[name] {
 			t.Errorf("code-mode main-thread allowlist is missing %q", name)
 		}
@@ -123,6 +126,66 @@ func TestMainThreadToolAllowlistByMode(t *testing.T) {
 		if allow[name] {
 			t.Errorf("code-mode main-thread allowlist unexpectedly exposes bridge tool %q", name)
 		}
+	}
+}
+
+func TestBasicFileToolSchemasDirectByMode(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	coreTools, err := astonishtools.GetInternalTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileNames := []string{"read_file", "write_file", "edit_file", "load_file"}
+	for _, tc := range []struct {
+		name     string
+		codeMode bool
+	}{
+		{name: "Studio"},
+		{name: "Code", codeMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allow := mainThreadToolAllowlist(tc.codeMode)
+			var preferred []tool.Tool
+			for _, candidate := range coreTools {
+				if allow[candidate.Name()] {
+					preferred = append(preferred, candidate)
+				}
+			}
+			providerTools, err := providerToolsForMode(tc.codeMode, agent.NewLexicalToolIndex(), preferred, []*agent.ToolGroup{{Name: "core", Tools: coreTools}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			visible := make(map[string]tool.Tool)
+			for _, candidate := range providerTools {
+				if visible[candidate.Name()] != nil {
+					t.Errorf("duplicate provider declaration for %q", candidate.Name())
+				}
+				visible[candidate.Name()] = candidate
+			}
+			for _, name := range fileNames {
+				if !allow[name] {
+					t.Errorf("main-thread allowlist is missing %q", name)
+				}
+				declared, ok := visible[name].(interface {
+					Declaration() *genai.FunctionDeclaration
+				})
+				if !ok || declared.Declaration() == nil || declared.Declaration().ParametersJsonSchema == nil {
+					t.Errorf("%q is missing its direct provider-visible schema", name)
+				}
+			}
+			if !tc.codeMode {
+				for _, name := range []string{"shell_command", "grep_search", "find_files", "web_fetch", "http_request"} {
+					if allow[name] || visible[name] != nil {
+						t.Errorf("Studio must keep unrelated tool %q deferred", name)
+					}
+				}
+				for _, name := range []string{"search_tools", "describe_tools", "execute_tool"} {
+					if visible[name] == nil {
+						t.Errorf("Studio is missing deferred-tool bridge %q", name)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -169,6 +232,27 @@ func TestProviderToolsForCodeModeOmitsBridge(t *testing.T) {
 	}
 	if len(providerTools) != 1 || providerTools[0].Name() != "read_file" {
 		t.Fatalf("code provider tools = %#v, want only read_file", providerTools)
+	}
+}
+
+func TestProviderToolsForChatModeIncludesDirectDelegateSchema(t *testing.T) {
+	delegate, err := astonishtools.GetDelegateTasksTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerTools, err := providerToolsForMode(false, agent.NewLexicalToolIndex(), []tool.Tool{delegate}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerTools[0].Name() != "delegate_tasks" {
+		t.Fatalf("first direct chat tool = %q, want delegate_tasks", providerTools[0].Name())
+	}
+	type declaredTool interface {
+		Declaration() *genai.FunctionDeclaration
+	}
+	declared, ok := providerTools[0].(declaredTool)
+	if !ok || declared.Declaration() == nil || declared.Declaration().ParametersJsonSchema == nil {
+		t.Fatal("direct delegate_tasks tool is missing its provider-visible schema")
 	}
 }
 

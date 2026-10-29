@@ -1417,7 +1417,7 @@ func Run(cfg RunConfig) error {
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
-		runPeriodicCleanup(ctx, appCfg, nil, logger)
+		runPeriodicCleanup(ctx, appCfg, backend.AllChatSessionIDs, nil, logger)
 	}()
 
 	// Start transient table cleanup in platform mode (device_sessions, pending_link_codes).
@@ -2190,9 +2190,25 @@ func (a *dbFleetTemplateRegistryAdapter) GetFleet(key string) (channels.FleetTem
 	}, true
 }
 
+type sessionIDProvider func(context.Context) (map[string]bool, error)
+
+type cleanupCycleDeps struct {
+	loadConfig func() (*config.AppConfig, error)
+	backend    func(*config.AppConfig) (sandbox.Backend, func(), error)
+	registry   func() (*sandbox.SessionRegistry, error)
+}
+
+func defaultCleanupCycleDeps() cleanupCycleDeps {
+	return cleanupCycleDeps{
+		loadConfig: config.LoadAppConfig,
+		backend:    sandbox.BackendFromAppConfig,
+		registry:   sandbox.NewSessionRegistry,
+	}
+}
+
 // runPeriodicCleanup runs session expiry and orphan container pruning on a timer.
 // It runs once shortly after startup, then periodically based on config.
-func runPeriodicCleanup(ctx context.Context, appCfg *config.AppConfig, sessionStore *persistentsession.FileStore, logger *Logger) {
+func runPeriodicCleanup(ctx context.Context, appCfg *config.AppConfig, sessionIDs sessionIDProvider, sessionStore *persistentsession.FileStore, logger *Logger) {
 	// Initial delay to avoid slowing down startup
 	select {
 	case <-ctx.Done():
@@ -2200,8 +2216,9 @@ func runPeriodicCleanup(ctx context.Context, appCfg *config.AppConfig, sessionSt
 	case <-time.After(30 * time.Second):
 	}
 
+	deps := defaultCleanupCycleDeps()
 	// Run once immediately after the initial delay
-	runCleanupCycle(appCfg, sessionStore, logger)
+	runCleanupCycle(ctx, appCfg, sessionIDs, sessionStore, logger, deps)
 
 	// Then run periodically
 	interval := time.Duration(appCfg.Sandbox.Prune.OrphanCheckHours) * time.Hour
@@ -2216,54 +2233,75 @@ func runPeriodicCleanup(ctx context.Context, appCfg *config.AppConfig, sessionSt
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runCleanupCycle(appCfg, sessionStore, logger)
+			runCleanupCycle(ctx, appCfg, sessionIDs, sessionStore, logger, deps)
 		}
 	}
 }
 
 // runCleanupCycle performs a single cleanup pass: expired sessions + orphan containers.
-func runCleanupCycle(appCfg *config.AppConfig, sessionStore *persistentsession.FileStore, logger *Logger) {
-	// Reload config to pick up changes without restart
-	freshCfg, err := config.LoadAppConfig()
-	if err == nil {
-		appCfg = freshCfg
+func runCleanupCycle(parent context.Context, appCfg *config.AppConfig, sessionIDs sessionIDProvider, sessionStore *persistentsession.FileStore, logger *Logger, deps cleanupCycleDeps) {
+	// Reload config to pick up changes without restart.
+	if deps.loadConfig != nil {
+		if freshCfg, err := deps.loadConfig(); err == nil {
+			appCfg = freshCfg
+		}
 	}
 
-	// 1. Clean up expired sessions
+	// 1. Clean up expired legacy file sessions.
 	if sessionStore != nil {
 		maxAge := appCfg.Sessions.Cleanup.EffectiveMaxAgeDays()
 		if maxAge > 0 {
 			deletedIDs := sessionStore.CleanupExpiredSessions(maxAge)
-			// Destroy sandbox containers for deleted sessions
 			for _, id := range deletedIDs {
 				sandbox.TryDestroySession(appCfg, id, nil)
 			}
 		}
 	}
 
-	// 2. Prune orphan sandbox containers
-	if sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
-		var liveSessionIDs map[string]bool
-		if sessionStore != nil {
-			liveSessionIDs = sessionStore.AllSessionIDs()
-		}
-
-		b, cleanup, bErr := sandbox.BackendFromAppConfig(appCfg)
-		if bErr == nil {
-			if cleanup != nil {
-				defer cleanup()
-			}
-			registry, regErr := sandbox.NewSessionRegistry()
-			if regErr == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				pruned, _ := sandbox.PruneOrphansForBackend(ctx, b, registry, liveSessionIDs)
-				cancel()
-				if pruned > 0 {
-					logger.Printf("[cleanup] Pruned %d orphaned sandbox session(s)", pruned)
-				}
-			}
-		}
+	if !sandbox.IsSandboxEnabled(&appCfg.Sandbox) {
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
+
+	var liveSessionIDs map[string]bool
+	var err error
+	switch {
+	case sessionIDs != nil:
+		liveSessionIDs, err = sessionIDs(ctx)
+	case sessionStore != nil:
+		liveSessionIDs = sessionStore.AllSessionIDs()
+	default:
+		err = fmt.Errorf("no live-session inventory provider configured")
+	}
+	if err != nil || liveSessionIDs == nil {
+		if err == nil {
+			err = sandbox.ErrOrphanPruneAuthorityUnavailable
+		}
+		logger.Printf("[cleanup] Skipped orphan pruning: authoritative live-session snapshot unavailable: %v", err)
+		return
+	}
+
+	b, cleanup, err := deps.backend(appCfg)
+	if err != nil {
+		logger.Printf("[cleanup] Skipped orphan pruning: backend initialization failed: %v", err)
+		return
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	registry, err := deps.registry()
+	if err != nil {
+		logger.Printf("[cleanup] Skipped orphan pruning: session registry unavailable: %v", err)
+		return
+	}
+	pruned, err := sandbox.PruneOrphansForBackend(ctx, b, registry, liveSessionIDs)
+	if err != nil {
+		logger.Printf("[cleanup] Orphan pruning failed: %v", err)
+		return
+	}
+	logger.Printf("[cleanup] Reconciled authoritative live-session snapshot: live=%d pruned=%d", len(liveSessionIDs), pruned)
 }
 
 // cascadePlatformProviders merges platform-level and default-org provider

@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -99,6 +100,9 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 		restores = append(restores, e.Agent.PendingSecrets.SubstituteAndRestore(args))
 	}
 
+	if err := common.ValidateToolArguments(resolved, args); err != nil {
+		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Tool: resolved.Name(), Error: err.Error()}
+	}
 	output, err := runner.Run(ctx, args)
 	output = e.Agent.finalizeProgressiveToolOutput(resolved, args, output, err)
 	if err != nil {
@@ -121,26 +125,32 @@ func (c *ChatAgent) finalizeProgressiveToolOutput(t tool.Tool, input, output map
 		redacted = c.Redactor.RedactMap(output)
 	}
 	redacted = c.extractAndStripImages(redacted)
-	if err == nil {
-		switch t.Name() {
-		case "write_file":
-			if path, ok := input["file_path"].(string); ok && path != "" {
-				c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-			}
-		case "edit_file":
-			if path, ok := input["path"].(string); ok && path != "" {
-				c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-			}
-		case "browser_stop_recording":
-			if path, ok := redacted["path"].(string); ok && path != "" {
-				c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-			}
-		case "run_drill":
-			captureRunDrillArtifacts(c.CaptureFileArtifact, redacted)
-		}
-	}
+	c.captureToolArtifacts(t, input, redacted, err)
 	if t.Name() == "run_flow" && redacted != nil {
 		redacted = c.extractAndStripFlowOutput(redacted)
 	}
 	return redacted
+}
+
+// captureToolArtifacts publishes only completed successful tool results. Native
+// callbacks and progressive execution share this gate so pending approvals,
+// absent results, and structured failures cannot enqueue file artifacts.
+// Callers supply sanitized output, preserving response-derived artifact paths.
+func (c *ChatAgent) captureToolArtifacts(t tool.Tool, input, output map[string]any, err error) {
+	if c == nil || t == nil || !common.ToolResultSucceeded(output, err) {
+		return
+	}
+	switch t.Name() {
+	case "load_file", "edit_file", "write_file":
+		if path := common.FileToolPath(input); path != "" {
+			c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
+		}
+	case "browser_stop_recording":
+		// The browser manager chooses the path, not the input arguments.
+		if path, ok := output["path"].(string); ok && path != "" {
+			c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
+		}
+	case "run_drill":
+		captureRunDrillArtifacts(c.CaptureFileArtifact, output)
+	}
 }

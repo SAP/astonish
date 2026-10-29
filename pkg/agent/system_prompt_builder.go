@@ -206,8 +206,7 @@ func (b *SystemPromptBuilder) Build() string {
 	// ── Tier 1: Static Core ──────────────────────────────────────
 
 	// 1. Identity
-	sb.WriteString("You are Astonish, an AI assistant with access to tools.\n")
-	sb.WriteString("You help users accomplish tasks by calling tools and reasoning through problems.\n\n")
+	sb.WriteString("You are Astonish, an AI assistant with tools. Help users by calling tools and reasoning.\n\n")
 
 	// 1b. Channel-specific output constraints (set per-turn by channel manager)
 	if b.ChannelHints != "" {
@@ -440,9 +439,8 @@ func (b *SystemPromptBuilder) Build() string {
 	// hidden behind vector retrieval, because the LLM cannot retrieve
 	// guidance it doesn't know exists).
 	sb.WriteString("\n## Reports\n\n")
-	sb.WriteString("For requested reports, reviews or documents, and substantial reusable/shareable deliverables — not casual summaries or conversational explanations — save a `.md` file via `write_file`, then emit an `astonish-report` fence. Both steps are required for a report. Reports may include mermaid diagrams. In read-only modes, give the analysis in chat and state it was not saved; never fabricate a fence.\n\n")
-	sb.WriteString("```astonish-report\npath: <exact path passed to write_file>\ntitle: <human-readable title>\n```\n\n")
-	sb.WriteString("The fence `path` MUST match the `file_path` you used. File without fence: download card, not inline report. Fence without `write_file`: ignored. Do NOT use `astonish-app` for reports.\n")
+	sb.WriteString("Reports/reviews/docs (reusable Markdown/mermaid deliverables; not casual summaries): small files may use `write_file` normally. Large/multi-section/uncertain output: write a bounded initial file ending in unique `<!-- ASTONISH_CONTINUE:<random-id> -->`. Each `edit_file` call must replace exactly that marker with one bounded semantic section plus the exact same marker. After interruption/compaction, inspect/read the file and continue at the marker. Marker present means incomplete: do not claim completion or emit a report fence. Final edit removes the marker; only then emit `astonish-report` with exact path/title and a concise response. Read-only: not saved; never fabricate a fence.\n\n")
+	sb.WriteString("```astonish-report\npath: <exact path>\ntitle: <title>\n```\n")
 
 	// ── Tier 3: Per-Turn Dynamic ─────────────────────────────────
 	// Execution plans and auto-retrieved knowledge are appended here at

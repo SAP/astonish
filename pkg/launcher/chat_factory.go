@@ -219,7 +219,11 @@ func providerToolsForMode(codeMode bool, toolIndex *agent.ToolIndex, preferred [
 	if toolIndex == nil {
 		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
 	}
-	return fixedProviderTools(toolIndex)
+	bridge, err := fixedProviderTools(toolIndex)
+	if err != nil {
+		return nil, err
+	}
+	return append(directCodeTools(preferred, nil), bridge...), nil
 }
 
 func directCodeTools(preferred []tool.Tool, groups []*agent.ToolGroup) []tool.Tool {
@@ -244,13 +248,19 @@ func directCodeTools(preferred []tool.Tool, groups []*agent.ToolGroup) []tool.To
 }
 
 func mainThreadToolAllowlist(codeMode bool) map[string]bool {
-	if !codeMode {
-		return map[string]bool{}
+	// Delegation and basic file operations are main-thread capabilities, not
+	// deferred domain integrations. Keep their full schemas visible in every mode.
+	allow := map[string]bool{
+		"delegate_tasks": true,
+		"read_file":      true,
+		"write_file":     true,
+		"edit_file":      true,
+		"load_file":      true,
 	}
-	return map[string]bool{
-		"read_file":             true,
-		"write_file":            true,
-		"edit_file":             true,
+	if !codeMode {
+		return allow
+	}
+	for name := range map[string]bool{
 		"shell_command":         true,
 		"grep_search":           true,
 		"find_files":            true,
@@ -277,7 +287,10 @@ func mainThreadToolAllowlist(codeMode bool) map[string]bool {
 		"skill_lookup":          true,
 		"create_skill":          true,
 		"perplexity_web_search": true,
+	} {
+		allow[name] = true
 	}
+	return allow
 }
 
 // optionalCredentialResolver preserves a nil interface when the optional
@@ -646,7 +659,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	var subAgentMgr *agent.SubAgentManager
 	var fleetOnlyTools []tool.Tool // fleet-only tools (run_fleet_phase), assigned to SubAgentManager.FleetTools
 	if cfg.AppConfig.SubAgents.IsSubAgentsEnabled() {
-		delegateTool, delegateErr := tools.GetDelegateTasksTool()
+		subAgentCfg := agent.SubAgentConfig{
+			MaxDepth:      cfg.AppConfig.SubAgents.MaxDepth,
+			MaxConcurrent: cfg.AppConfig.SubAgents.MaxConcurrent,
+			TaskTimeout:   cfg.AppConfig.SubAgents.TaskTimeout(),
+		}
+		subAgentMgr = agent.NewSubAgentManager(subAgentCfg)
+		delegateTool, delegateErr := tools.NewDelegateTasksToolForManager(subAgentMgr)
 		if delegateErr != nil {
 			if cfg.DebugMode {
 				slog.Warn("failed to create delegate_tasks tool", "error", delegateErr)
@@ -694,12 +713,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				coreTools = append(coreTools, gpFinalize)
 			}
 
-			subAgentCfg := agent.SubAgentConfig{
-				MaxDepth:      cfg.AppConfig.SubAgents.MaxDepth,
-				MaxConcurrent: cfg.AppConfig.SubAgents.MaxConcurrent,
-				TaskTimeout:   cfg.AppConfig.SubAgents.TaskTimeout(),
-			}
-			subAgentMgr = agent.NewSubAgentManager(subAgentCfg)
 		}
 	}
 
@@ -1618,11 +1631,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if err != nil {
 		return nil, err
 	}
-	if cfg.CodeMode {
-		mainThreadTools = providerTools
-	} else {
-		mainThreadTools = append(mainThreadTools, providerTools...)
-	}
+	mainThreadTools = providerTools
 
 	// --- 6. Create ChatAgent ---
 	chatAgent := agent.NewChatAgent(
@@ -1891,14 +1900,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if toolIndex != nil {
 			subAgentMgr.ToolIndex = toolIndex
 		}
-		// Sub-agents retain their existing discovery behavior; the fixed bridge is
-		// specific to ChatAgent's stable model-visible declarations.
-		if toolIndex != nil {
-			idx := toolIndex
-			subAgentMgr.SearchToolsFactory = func() (tool.Tool, error) {
-				return tools.NewSearchToolsTool(idx)
-			}
-		}
+		// Discovery and execution share the immutable child catalog, even when
+		// no global semantic index is configured.
+		subAgentMgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
 		// Wire skill awareness into sub-agents so they can load skill
 		// content on demand (e.g., git/github skills for repo operations).
 		if skillLookupTool != nil {

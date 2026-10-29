@@ -68,6 +68,27 @@ describe('StudioChat', () => {
     })
   })
 
+  it('uses the same translucent dark background for transcript and activity agent bubbles', async () => {
+    vi.mocked(fetchSessionHistory).mockResolvedValue({
+      id: 'agent-bubbles', title: 'Agent bubbles', messages: [
+        { type: 'agent', content: 'Writing the first section.' },
+        { type: 'tool_call', toolName: 'shell_command', toolArgs: { command: 'printf first' } },
+        { type: 'tool_result', toolName: 'shell_command', toolResult: { exit_code: 0 } },
+        { type: 'agent', content: 'Finished.' },
+      ],
+    } as never)
+
+    render(<StudioChat {...defaultProps} initialSessionId="agent-bubbles" />)
+
+    const activity = await screen.findByTestId('tool-activity-block')
+    fireEvent.click(activity.querySelector('button')!)
+    const bubbles = await screen.findAllByTestId('agent-message-bubble')
+    expect(bubbles).toHaveLength(2)
+    for (const bubble of bubbles) {
+      expect(bubble).toHaveStyle({ backgroundColor: 'rgba(255, 255, 255, 0.08)' })
+    }
+  })
+
   it('renders the sidebar with Conversations title', async () => {
     render(<StudioChat {...defaultProps} />)
     expect(screen.getByText('Conversations')).toBeInTheDocument()
@@ -309,6 +330,36 @@ describe('StudioChat', () => {
   describe('chat_question rendering', () => {
     beforeEach(() => {
       vi.mocked(fetchSessionHistory).mockReset()
+    })
+
+    it('renders the explanatory assistant message outside tools before a question dialog', async () => {
+      vi.mocked(fetchSessionHistory).mockResolvedValue({
+        messages: [
+          { type: 'tool_call', toolName: 'delegate_tasks', toolArgs: {} },
+          { type: 'tool_result', toolName: 'delegate_tasks', toolResult: 'research complete' },
+          { type: 'agent', content: 'The treatment uses four acts and an open-ended conclusion.' },
+          { type: 'tool_call', toolName: 'ask_user', toolArgs: { question: 'How should we proceed?' } },
+          { type: 'tool_result', toolName: 'ask_user', toolResult: { pending: true } },
+          {
+            type: 'chat_question',
+            questionId: 'q-context',
+            kind: 'select',
+            prompt: 'How should we proceed?',
+            options: [{ id: 'build', label: 'Approve and build the script' }],
+          },
+        ],
+      } as never)
+
+      await act(async () => {
+        render(<StudioChat {...defaultProps} initialSessionId="sess-context" />)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      })
+
+      const explanation = screen.getByText('The treatment uses four acts and an open-ended conclusion.')
+      expect(explanation.closest('[data-testid="tool-activity-block"]')).toBeNull()
+      expect(screen.getByText('How should we proceed?')).toBeVisible()
+      expect(screen.getByText('Approve and build the script')).toBeVisible()
+      expect(screen.getByTestId('tool-activity-block')).toBeInTheDocument()
     })
 
     it('renders a yesno chat question with Yes/No controls', async () => {

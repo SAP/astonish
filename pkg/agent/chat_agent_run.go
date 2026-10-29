@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
@@ -444,6 +445,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// other's restore closures.
 		var restoreFuncs sync.Map // map[string]func() — one entry per in-flight call
 
+		// ADK owns the model→tool→model loop. Every next provider request must
+		// pass the BeforeModelCallback below, where the persisted turn history is
+		// checked before more tokens can be spent.
+		discoveryGuard := newToolDiscoveryGuard()
+
 		// Create the AfterToolCallback for trace recording
 		afterToolCallback := func(ctx tool.Context, t tool.Tool, input, output map[string]any, err error) (map[string]any, error) {
 			t, input = c.effectiveToolCall(ctx, t, input)
@@ -469,30 +475,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// stashed in the ChatAgent's image queue for channel delivery.
 			redactedOutput = c.extractAndStripImages(redactedOutput)
 
-			// Capture file artifacts from write_file, edit_file,
-			// browser_stop_recording, and run_drill (tutorial scene clips).
-			// Paths are stashed for UI delivery.
-			// Only capture on success — failed writes must not emit artifact events,
-			// otherwise the live SSE pipeline and session-detail reconstruction diverge.
-			if err == nil {
-				switch t.Name() {
-				case "write_file":
-					if path, ok := input["file_path"].(string); ok && path != "" {
-						c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-					}
-				case "edit_file":
-					if path, ok := input["path"].(string); ok && path != "" {
-						c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-					}
-				case "browser_stop_recording":
-					// Path comes from the tool response (Manager chose the output file).
-					if path, ok := redactedOutput["path"].(string); ok && path != "" {
-						c.CaptureFileArtifact(resolveAbsPath(path), t.Name())
-					}
-				case "run_drill":
-					captureRunDrillArtifacts(c.CaptureFileArtifact, redactedOutput)
-				}
-			}
+			// Share the completed-success gate with progressive execution; pending
+			// approvals and structured failures must never publish file artifacts.
+			c.captureToolArtifacts(t, input, redactedOutput, err)
 
 			// Strip large flow output from run_flow results. The full output
 			// is stashed for direct delivery to the user (via SSE or channel),
@@ -659,6 +644,28 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return nil, nil
 			})
 		}
+
+		// Refuse oversized direct writes before filesystem mutation. The model gets
+		// a structured continuation recipe and can self-correct within the same run.
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
+			if t.Name() != "write_file" {
+				return nil, nil
+			}
+			content, _ := args["content"].(string)
+			if len(content) <= directWriteMaxBytes {
+				return nil, nil
+			}
+			path := common.FileToolPath(args)
+			return map[string]any{
+				"status": "continuation_marker_required",
+				"error": fmt.Sprintf(
+					"write_file content is %d bytes; direct writes are limited to %d bytes; create a bounded initial file ending with a unique <!-- ASTONISH_CONTINUE:<random-id> --> marker, then use edit_file to replace exactly that marker with one bounded semantic section followed by the same marker; inspect/read after interruption and remove the marker only in the final edit",
+					len(content), directWriteMaxBytes,
+				),
+				"path": path,
+			}, nil
+		})
 
 		// Runtime authorization remains authoritative even when cache-stable
 		// sessions retain a declaration that was disabled after session start.
@@ -979,6 +986,19 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			})
 		}
 
+		// Refuse the next provider dispatch once discovery has stopped making
+		// progress. This boundary is provider-independent and catches both direct
+		// discovery calls and discovery invoked through execute_tool.
+		beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+			if req == nil {
+				return nil, nil
+			}
+			if err := discoveryGuard.validateHistory(req.Contents); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		})
+
 		// Truncate oversized tool responses before they reach the model.
 		beforeModelCallbacks = append(beforeModelCallbacks, TruncateToolResponsesCallback())
 
@@ -1292,6 +1312,8 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		c.traceMu.Unlock()
 	}
 }
+
+const directWriteMaxBytes = 48 * 1024
 
 // resolveAbsPath ensures a file path is absolute. If the path is relative,
 // it is resolved against the current working directory. Used when capturing

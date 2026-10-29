@@ -3,6 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+
+	"github.com/SAP/astonish/pkg/client"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +19,20 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestDelegationDetailPairsInterleavedCallIDs(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 100}
+	task := events.DelegationTaskState{Name: "same", Activity: []events.DelegationActivity{
+		{Type: "tool_call", CallID: "one", ToolName: "read_file"},
+		{Type: "tool_call", CallID: "two", ToolName: "read_file"},
+		{Type: "tool_result", CallID: "two", ToolName: "read_file", Result: "second"},
+		{Type: "tool_result", CallID: "one", ToolName: "read_file", Result: "first"},
+	}}
+	out := stripANSI(m.renderDelegationDetailContent(task, 96))
+	if strings.Contains(out, "Running") {
+		t.Fatalf("unpaired calls: %s", out)
+	}
+}
 
 func TestRenderUserBubbleUsesFullWidthRectangleBorder(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 80}
@@ -235,7 +254,7 @@ func TestLiveStatusShowsTimerWhileStreaming(t *testing.T) {
 		t.Fatalf("timer should appear to the right of status text; statusIdx=%d timerIdx=%d in %q", statusIdx, timerIdx, out)
 	}
 	// There should be multiple spaces between status and timer (right-alignment gap).
-	between := out[statusIdx+len("Running shell_command…"):timerIdx]
+	between := out[statusIdx+len("Running shell_command…") : timerIdx]
 	if len(strings.TrimRight(between, " ")) == len(between) {
 		t.Fatalf("expected whitespace gap between status and timer for right-alignment: %q", out)
 	}
@@ -1262,5 +1281,78 @@ func TestFileDiffCollisionPrevention(t *testing.T) {
 	}
 	if !strings.Contains(render2, "goodbye") {
 		t.Errorf("render2 should contain 'goodbye': %s", render2)
+	}
+}
+
+type acceptanceDetailBackend struct {
+	staticBackend
+	client *client.Client
+}
+
+func (b acceptanceDetailBackend) LoadDelegationDetail(ctx context.Context, task events.DelegationTaskState) ([]events.DelegationActivity, error) {
+	rows, err := b.client.GetSubtaskEvents(ctx, "parent", client.SubtaskInfo{BatchID: task.BatchID, TaskID: task.TaskID, ChildSessionID: task.ChildSessionID, Attempt: task.Attempt})
+	var out []events.DelegationActivity
+	for _, row := range rows {
+		out = append(out, events.DelegationActivity{Type: row.Type, Text: row.Text, CallID: row.CallID})
+	}
+	return out, err
+}
+
+// TestDelegationProgramAcceptance runs real mouse/key input and HTTP detail loading.
+func TestDelegationProgramAcceptance(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("task_id") != "task" || r.URL.Query().Get("attempt") != "1" {
+			t.Errorf("selectors: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"events":[{"type":"text","text":"persisted child output"}]}`))
+		requested <- struct{}{}
+	}))
+	defer server.Close()
+	m := newModel(context.Background(), Config{Backend: acceptanceDetailBackend{staticBackend: staticBackend{info: backend.Info{Mode: "code"}}, client: client.NewWithConfig(server.URL)}, Width: 80, Height: 24})
+	ev := events.NewDelegationStart([]events.DelegationTask{{Name: "inspect", TaskID: "task", BatchID: "batch", ChildSessionID: "child"}})
+	m.tr.LoadHistory([]events.HistoryMsg{{Delegation: &ev}})
+	m.ready = true
+	m.layout()
+	m.refreshViewport()
+	line := -1
+	for _, region := range m.hitRegions {
+		if region.kind == events.ItemDelegation {
+			line = region.start + 1
+		}
+	}
+	if line < 0 {
+		t.Fatal("no clickable delegation row")
+	}
+	y := m.viewportTopY() + line - m.vp.YOffset() + 1
+	r, w := io.Pipe()
+	defer r.Close()
+	p := tea.NewProgram(m, tea.WithInput(r), tea.WithOutput(io.Discard))
+	go func() {
+		defer w.Close()
+		time.Sleep(30 * time.Millisecond)
+		_, _ = fmt.Fprintf(w, "\x1b[<0;3;%dM\x1b[<0;3;%dm", y, y)
+		select {
+		case <-requested:
+		case <-time.After(2 * time.Second):
+			p.Quit()
+			return
+		}
+		time.Sleep(60 * time.Millisecond)
+		_, _ = w.Write([]byte("\x1b"))
+		time.Sleep(100 * time.Millisecond)
+		p.Quit()
+	}()
+	final, err := p.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := final.(model)
+	if got.delegationDetail.open || got.quitting {
+		t.Fatal("Escape did not return to idle chat")
+	}
+	task := got.tr.Items[0].DelegationTasks[0]
+	if len(task.Activity) != 1 || task.Activity[0].Text != "persisted child output" {
+		t.Fatalf("real input did not load HTTP detail: %+v", task)
 	}
 }

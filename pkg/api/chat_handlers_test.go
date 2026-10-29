@@ -337,6 +337,77 @@ func textEvent(invocationID, role, text string) *session.Event {
 	}
 }
 
+func TestStudioRequestLLMUsesConfiguredCascadeAndPreservesResolutionError(t *testing.T) {
+	goodServices := &store.Services{
+		PlatformSettings: &mockPlatformSettingsStore{settings: &store.PlatformSettings{
+			DefaultProvider: "configured",
+			DefaultModel:    "configured-model",
+			Providers: map[string]store.ProviderConfig{
+				"configured": {
+					"type":     "openai_compat",
+					"base_url": "https://example.invalid/v1",
+					"api_key":  "test-key",
+				},
+			},
+		}},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/studio/chat", nil)
+	request = request.WithContext(store.WithServices(request.Context(), goodServices))
+
+	llm, err := resolveStudioRequestLLM(request, StudioChatRequest{}, "", true, provider.NewPool())
+	if err != nil {
+		t.Fatalf("configured cascade resolution failed: %v", err)
+	}
+	if llm == nil || llm.Name() == "unconfigured" {
+		t.Fatalf("configured request received placeholder LLM: %#v", llm)
+	}
+
+	badServices := &store.Services{
+		PlatformSettings: &mockPlatformSettingsStore{settings: &store.PlatformSettings{
+			DefaultProvider: "sap",
+			DefaultModel:    "anthropic--claude-4.6-opus",
+			Providers: map[string]store.ProviderConfig{
+				"sap": {"type": "unsupported-test-provider"},
+			},
+		}},
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/studio/chat", nil)
+	request = request.WithContext(store.WithServices(request.Context(), badServices))
+
+	llm, err = resolveStudioRequestLLM(request, StudioChatRequest{}, "", true, provider.NewPool())
+	if err == nil || !strings.Contains(err.Error(), "unsupported provider type") {
+		t.Fatalf("resolution error = %v, want actual provider error", err)
+	}
+	if llm != nil {
+		t.Fatalf("resolution failure returned fallback LLM %q", llm.Name())
+	}
+}
+
+func TestDelegationHistoryAllAttempts(t *testing.T) {
+	msg := buildSubTaskExecutionMessage(&pendingDelegation{batchID: "batch", tasks: []SubTaskInfoMsg{{Name: "work"}}}, map[string]any{"status": "complete", "results": []any{map[string]any{"name": "work", "task_id": "task", "child_session_id": "child2", "attempts": 2, "status": "success", "attempt_history": []any{map[string]any{"attempt": 1, "child_session_id": "child1", "status": "error", "duration": "1s"}, map[string]any{"attempt": 2, "child_session_id": "child2", "status": "success", "duration": "2s"}}}}})
+	starts := 0
+	for _, e := range msg.Events {
+		if e.Type == "task_start" {
+			starts++
+			if e.TaskID != "task" || e.ChildSessionID == "" || e.Attempt == 0 {
+				t.Fatalf("missing identity: %+v", e)
+			}
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("got %d attempts, want 2: %+v", starts, msg)
+	}
+}
+
+func TestDelegationHistoryUnanswered(t *testing.T) {
+	e := textEvent("inv", "model", "")
+	e.Content.Parts = []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "batch", Name: "delegate_tasks", Args: map[string]any{"tasks": []any{map[string]any{"name": "work", "task": "do work"}}}}}}
+	msgs := eventsToMessages(testEvents{e}, nil)
+	if len(msgs) != 1 || msgs[0].Type != "subtask_execution" || msgs[0].Status != "interrupted" {
+		t.Fatalf("unanswered delegation lost: %+v", msgs)
+	}
+}
+
 func TestEventsToMessages_HidesPersistedTurnContext(t *testing.T) {
 	contextEvent := textEvent("inv-1", "user", "[Astonish Per-Turn Context — not user-authored]\n\nsecret context")
 	contextEvent.Actions.StateDelta = map[string]any{"_astonish_turn_context": true}

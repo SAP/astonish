@@ -494,6 +494,100 @@ func TestResolveDeploymentID_Success(t *testing.T) {
 	}
 }
 
+func TestResolveDeploymentID_UsesRunningResourceGroupFilter(t *testing.T) {
+	t.Parallel()
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	deploySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("status") != "RUNNING" || r.URL.Query().Get("resourceGroup") != "configured-rg" {
+			json.NewEncoder(w).Encode(map[string]any{"resources": []any{}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"resources": []map[string]any{{
+				"id":     "dep-opus-46",
+				"status": "RUNNING",
+				"details": map[string]any{
+					"resources": map[string]any{
+						"backendDetails": map[string]any{
+							"model": map[string]any{"name": "anthropic--claude-4.6-opus"},
+						},
+					},
+				},
+			}},
+		})
+	}))
+	defer deploySrv.Close()
+
+	id, err := resolveDeploymentIDWithConfig(
+		context.Background(),
+		"anthropic--claude-4.6-opus",
+		"id", "secret",
+		tokenSrv.URL,
+		deploySrv.URL+"/v2",
+		"configured-rg",
+	)
+	if err != nil {
+		t.Fatalf("resolve model returned by filtered deployment list: %v", err)
+	}
+	if id != "dep-opus-46" {
+		t.Fatalf("expected dep-opus-46, got %q", id)
+	}
+}
+
+func TestResolveDeploymentID_DefaultsEmptyResourceGroup(t *testing.T) {
+	t.Parallel()
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "tok", "expires_in": 3600})
+	}))
+	defer tokenSrv.Close()
+
+	deploySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("AI-Resource-Group") != "default" || r.URL.Query().Get("resourceGroup") != "default" {
+			http.Error(w, `{"error":{"message":"missing default resource group"}}`, http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"resources": []map[string]any{{
+				"id":     "dep-opus-46",
+				"status": "RUNNING",
+				"details": map[string]any{
+					"resources": map[string]any{
+						"backendDetails": map[string]any{
+							"model": map[string]any{"name": "anthropic--claude-4.6-opus"},
+						},
+					},
+				},
+			}},
+		})
+	}))
+	defer deploySrv.Close()
+
+	id, err := resolveDeploymentIDWithConfig(
+		context.Background(),
+		"anthropic--claude-4.6-opus",
+		"id", "secret",
+		tokenSrv.URL,
+		deploySrv.URL+"/v2",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("resolve deployment with omitted resource group: %v", err)
+	}
+	if id != "dep-opus-46" {
+		t.Fatalf("expected dep-opus-46, got %q", id)
+	}
+}
+
 func TestResolveDeploymentID_NotFound(t *testing.T) {
 	t.Parallel()
 

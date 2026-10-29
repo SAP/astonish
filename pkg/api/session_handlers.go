@@ -560,7 +560,62 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskName := r.URL.Query().Get("task_name")
-	if taskName == "" {
+	childID := r.URL.Query().Get("child_session_id")
+	batchID, taskID := r.URL.Query().Get("batch_id"), r.URL.Query().Get("task_id")
+	attempt := 0
+	if raw := r.URL.Query().Get("attempt"); raw != "" {
+		var err error
+		attempt, err = strconv.Atoi(raw)
+		if err != nil || attempt < 1 {
+			respondError(w, http.StatusBadRequest, "invalid attempt")
+			return
+		}
+	}
+	if childID == "" && (batchID != "" || taskID != "" || attempt != 0) && (batchID == "" || taskID == "" || attempt == 0) {
+		respondError(w, http.StatusBadRequest, "provide batch_id, task_id and attempt together")
+		return
+	}
+	selectedIdentities := make(map[string]map[string]any)
+	matchesState := func(svc session.Service, id string) bool {
+		got, err := svc.Get(r.Context(), &session.GetRequest{AppName: studioChatAppName, UserID: effectiveUserID(r), SessionID: id})
+		if err != nil || got == nil || got.Session == nil {
+			return false
+		}
+		state := got.Session.State()
+		// Parent ownership is established by ListChildren(sessionID), whose
+		// implementations query persisted parent_id. Do not require the same link
+		// to be duplicated in ADK state: platform restores can legitimately omit it.
+		// A child ID is already authorized by its parent link and owner. Treat the
+		// child's persisted tuple as authoritative because restored cards may retain
+		// an older provider call ID in their optional identity hints.
+		if childID == "" {
+			for key, want := range map[string]string{"batch_id": batchID, "task_id": taskID} {
+				if want != "" {
+					v, _ := state.Get(key)
+					if v != want {
+						return false
+					}
+				}
+			}
+			if attempt > 0 {
+				v, _ := state.Get("attempt")
+				if toInt(v) != attempt {
+					return false
+				}
+			}
+		}
+		identity := map[string]any{}
+		for _, key := range []string{"batch_id", "task_id", "attempt"} {
+			identity[key], _ = state.Get(key)
+		}
+		selectedIdentities[id] = identity
+		return true
+	}
+	if childID != "" && !validSessionID.MatchString(childID) {
+		respondError(w, http.StatusBadRequest, "invalid child_session_id")
+		return
+	}
+	if taskName == "" && childID == "" && taskID == "" {
 		respondError(w, http.StatusBadRequest, "task_name query parameter is required")
 		return
 	}
@@ -568,11 +623,17 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := effectiveUserID(r)
 
 	type subtaskEventItem struct {
-		Type       string `json:"type"`
-		ToolName   string `json:"tool_name,omitempty"`
-		ToolArgs   any    `json:"tool_args,omitempty"`
-		ToolResult any    `json:"tool_result,omitempty"`
-		Text       string `json:"text,omitempty"`
+		BatchID        string `json:"batch_id,omitempty"`
+		TaskID         string `json:"task_id,omitempty"`
+		Attempt        int    `json:"attempt,omitempty"`
+		CallID         string `json:"call_id,omitempty"`
+		ChildSessionID string `json:"child_session_id,omitempty"`
+		Sequence       int    `json:"sequence,omitempty"`
+		Type           string `json:"type"`
+		ToolName       string `json:"tool_name,omitempty"`
+		ToolArgs       any    `json:"tool_args,omitempty"`
+		ToolResult     any    `json:"tool_result,omitempty"`
+		Text           string `json:"text,omitempty"`
 	}
 
 	type subtaskEventsResponse struct {
@@ -611,7 +672,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 						args = subtaskRedactor.RedactMap(args)
 					}
 					items = append(items, subtaskEventItem{
-						Type:     "task_tool_call",
+						Type: "task_tool_call", CallID: part.FunctionCall.ID,
 						ToolName: name,
 						ToolArgs: args,
 					})
@@ -626,7 +687,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 						resp = subtaskRedactor.RedactMap(resp)
 					}
 					items = append(items, subtaskEventItem{
-						Type:       "task_tool_result",
+						Type: "task_tool_result", CallID: part.FunctionResponse.ID,
 						ToolName:   name,
 						ToolResult: summarizeToolResult(resp),
 					})
@@ -642,6 +703,13 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 					})
 				}
 			}
+		}
+		for i := range items {
+			items[i].ChildSessionID = childID
+			items[i].BatchID = strVal(selectedIdentities[childID]["batch_id"])
+			items[i].TaskID = strVal(selectedIdentities[childID]["task_id"])
+			items[i].Attempt = toInt(selectedIdentities[childID]["attempt"])
+			items[i].Sequence = i + 1
 		}
 		return items
 	}
@@ -664,18 +732,32 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		// Child sessions have title set to the task name.
 		var matchedChild *store.SessionMeta
 		for i := len(children) - 1; i >= 0; i-- {
-			if children[i].Title == taskName {
+			if (childID == "" || children[i].ID == childID) && (taskName == "" || children[i].Title == taskName) {
+				if !requireSessionOwner(w, r, children[i].UserID) {
+					return
+				}
+				if !matchesState(sessionStore, children[i].ID) {
+					continue
+				}
+				if matchedChild != nil {
+					respondError(w, http.StatusConflict, "ambiguous task; provide child_session_id")
+					return
+				}
 				matchedChild = &children[i]
-				break
 			}
 		}
 
 		if matchedChild == nil {
+			if childID != "" || taskID != "" {
+				respondError(w, http.StatusNotFound, "Subtask not found")
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
 			return
 		}
 
+		childID = matchedChild.ID
 		events, err := sessionStore.ReadTranscriptEvents(r.Context(), studioChatAppName, userID, matchedChild.ID)
 		if err != nil {
 			slog.Warn("failed to read child session events", "child_id", matchedChild.ID, "error", err)
@@ -712,18 +794,32 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// Find the last child session matching the task name.
 	var matchedChildID string
 	for i := len(children) - 1; i >= 0; i-- {
-		if children[i].Title == taskName {
+		if (childID == "" || children[i].ID == childID) && (taskName == "" || children[i].Title == taskName) {
+			if !requireSessionOwner(w, r, children[i].UserID) {
+				return
+			}
+			if !matchesState(fs, children[i].ID) {
+				continue
+			}
+			if matchedChildID != "" {
+				respondError(w, http.StatusConflict, "ambiguous task; provide child_session_id")
+				return
+			}
 			matchedChildID = children[i].ID
-			break
 		}
 	}
 
 	if matchedChildID == "" {
+		if childID != "" || taskID != "" {
+			respondError(w, http.StatusNotFound, "Subtask not found")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
 		return
 	}
 
+	childID = matchedChildID
 	transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, matchedChildID+".jsonl")
 	transcript := persistentsession.NewTranscript(transcriptPath)
 	events, err := transcript.ReadEvents()
@@ -1145,25 +1241,19 @@ func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID st
 	return authorizeSandboxSession(w, r, reg, sessionID) != nil
 }
 
-// readFromSandboxContainer reads live files only in trusted local mode. Platform
-// requests use authorized transcript reconstruction until a race-resistant,
-// rooted sandbox artifact reader is implemented; generic PullFile is not one.
+// readFromSandboxContainer reads live files through a backend whose file access
+// is confined to the addressed session's injected registry. The ownership and
+// tenant checks happen before this function is called.
 func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]byte, bool) {
-	if store.FromRequest(r) != nil || GetPlatformUser(r) != nil {
-		// PullFile is an unrestricted transfer API, not a confined artifact
-		// reader. Do not construct or resume a platform backend until a rooted
-		// read contract is implemented. Authorized transcript reads remain usable.
-		return nil, false
-	}
 	if sessionID == "" || filePath == "" {
 		return nil, false
 	}
 
-	if backend, cleanup, err := sandboxBackendForRequest(r); err == nil && backend != nil {
+	if backend, cleanup, err := sandboxBackendForAuthorizedRequest(r); err == nil && backend != nil {
 		if cleanup != nil {
 			defer cleanup()
 		}
-		if content, ok := pullArtifactFromSandboxBackend(r.Context(), backend, sessionID, filePath); ok {
+		if content, ok := pullAuthorizedArtifactFromSandboxBackend(r.Context(), backend, sessionID, filePath); ok {
 			return content, true
 		}
 	} else if err != nil {
@@ -1172,9 +1262,32 @@ func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]by
 	return nil, false
 }
 
+func pullAuthorizedArtifactFromSandboxBackend(ctx context.Context, backend sandbox.Backend, sessionID, filePath string) ([]byte, bool) {
+	confined, ok := backend.(sandbox.ConfinedArtifactReader)
+	if !ok || !confined.ArtifactReadsConfined() {
+		return nil, false
+	}
+	if content, ok := pullArtifactFromSandboxBackend(ctx, backend, sessionID, filePath); ok {
+		return content, true
+	}
+	reader, err := confined.PullArtifact(ctx, sessionID, filePath)
+	if err != nil {
+		return nil, false
+	}
+	content, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, false
+	}
+	return content, true
+}
+
 func pullArtifactFromSandboxBackend(ctx context.Context, backend sandbox.Backend, sessionID, filePath string) ([]byte, bool) {
 	if store.FromContext(ctx) != nil || PlatformUserFromContext(ctx) != nil {
-		return nil, false
+		confined, ok := backend.(sandbox.ConfinedArtifactReader)
+		if !ok || !confined.ArtifactReadsConfined() {
+			return nil, false
+		}
 	}
 	state, stateErr := backend.SessionState(ctx, sessionID)
 	if stateErr != nil {

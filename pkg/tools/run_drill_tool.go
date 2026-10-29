@@ -365,6 +365,7 @@ func CollectRunDrillArtifactPaths(report *adrill.SuiteReport) []string {
 var testContainerTools = map[string]bool{
 	"shell_command":             true,
 	"read_file":                 true,
+	"load_file":                 true,
 	"write_file":                true,
 	"edit_file":                 true,
 	"file_tree":                 true,

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"github.com/google/uuid"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
@@ -43,26 +44,49 @@ type DelegateTasksArgs struct {
 
 // SubTaskResultItem holds the result of a single delegated sub-task.
 type SubTaskResultItem struct {
-	Name             string `json:"name"`
-	Status           string `json:"status"`
-	Result           string `json:"result,omitempty"`
-	FullResultID     string `json:"full_result_id,omitempty"` // ID for read_task_result if result was summarized
-	ToolCalls        int    `json:"tool_calls"`
-	Duration         string `json:"duration"`
-	Error            string `json:"error,omitempty"`
-	Attempts         int    `json:"attempts"`
-	InactivityReason string `json:"inactivity_reason,omitempty"`
+	BatchID          string              `json:"batch_id,omitempty"`
+	TaskID           string              `json:"task_id,omitempty"`
+	ChildSessionID   string              `json:"child_session_id,omitempty"`
+	AttemptHistory   []agent.TaskAttempt `json:"attempt_history,omitempty"`
+	Name             string              `json:"name"`
+	Status           string              `json:"status"`
+	Result           string              `json:"result,omitempty"`
+	FullResultID     string              `json:"full_result_id,omitempty"` // ID for read_task_result if result was summarized
+	ToolCalls        int                 `json:"tool_calls"`
+	Duration         string              `json:"duration"`
+	Error            string              `json:"error,omitempty"`
+	Attempts         int                 `json:"attempts"`
+	InactivityReason string              `json:"inactivity_reason,omitempty"`
 }
 
 // DelegateTasksResult is the output schema for the delegate_tasks tool.
 type DelegateTasksResult struct {
+	BatchID string              `json:"batch_id,omitempty"`
 	Status  string              `json:"status"`
 	Results []SubTaskResultItem `json:"results"`
 	Summary string              `json:"summary"`
 }
 
 func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResult, error) {
-	if subAgentManagerVar == nil {
+	return delegateTasksWithManager(ctx, args, subAgentManagerVar)
+}
+
+func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager *agent.SubAgentManager) (out DelegateTasksResult, err error) {
+	batchID, parentID := "", ""
+	if ctx != nil {
+		batchID, parentID = ctx.FunctionCallID(), ctx.SessionID()
+	}
+	if batchID == "" {
+		batchID = uuid.NewString()
+	}
+	sequence := &agent.DelegationSequence{}
+	defer func() {
+		out.BatchID = batchID
+		if manager != nil && manager.SubTaskProgress != nil {
+			manager.SubTaskProgress(agent.SubTaskProgressEvent{Type: string(agent.DelegationComplete), SessionID: parentID, BatchID: batchID, Sequence: sequence.Next(), Status: out.Status, Error: out.Summary})
+		}
+	}()
+	if manager == nil {
 		return DelegateTasksResult{
 			Status:  "error",
 			Summary: "Sub-agent system is not available",
@@ -95,13 +119,14 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 		// events are forwarded only to the session that initiated the delegation.
 		parentSessionID := ctx.SessionID()
 		var onEvent func(event *adksession.Event)
-		if subAgentManagerVar.EventForwarder != nil {
+		if manager.EventForwarder != nil {
 			onEvent = func(event *adksession.Event) {
-				subAgentManagerVar.EventForwarder(parentSessionID, event)
+				manager.EventForwarder(parentSessionID, event)
 			}
 		}
 
 		tasks[i] = agent.SubAgentTask{
+			BatchID: batchID, TaskID: uuid.NewString(), ChildSessionID: uuid.NewString(), Sequence: sequence,
 			Name:         input.Name,
 			Description:  safeTask,
 			Instructions: safeInstructions,
@@ -114,23 +139,24 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 	}
 
 	// Emit delegation_start progress event with the full task plan
-	if subAgentManagerVar.SubTaskProgress != nil {
+	if manager.SubTaskProgress != nil {
 		taskInfos := make([]agent.SubTaskInfo, len(args.Tasks))
 		for i, t := range args.Tasks {
 			taskInfos[i] = agent.SubTaskInfo{
+				BatchID: batchID, TaskID: tasks[i].TaskID, ChildSessionID: tasks[i].ChildSessionID, Attempt: 1,
 				Name:        t.Name,
 				Description: t.Task,
 				PlanStep:    t.PlanStep,
 			}
 		}
-		subAgentManagerVar.SubTaskProgress(agent.SubTaskProgressEvent{
-			Type:  "delegation_start",
+		manager.SubTaskProgress(agent.SubTaskProgressEvent{
+			Type: string(agent.DelegationStart), SessionID: parentID, BatchID: batchID, Sequence: sequence.Next(),
 			Tasks: taskInfos,
 		})
 	}
 
 	// Execute all tasks via the SubAgentManager
-	results := subAgentManagerVar.RunTasks(ctx, tasks)
+	results := manager.RunTasks(ctx, tasks)
 
 	// Stash sub-agent execution traces for the parent's afterToolCallback.
 	// The callback retrieves these via PopLastTraces() and attaches them to
@@ -143,7 +169,7 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 		}
 	}
 	if len(childTraces) > 0 {
-		subAgentManagerVar.StashLastTraces(childTraces)
+		manager.StashLastTraces(childTraces)
 	}
 
 	// Build response — summarize large results to prevent context explosion.
@@ -159,6 +185,7 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 	successCount := 0
 	for i, r := range results {
 		item := SubTaskResultItem{
+			BatchID: r.BatchID, TaskID: r.TaskID, ChildSessionID: r.ChildSessionID, AttemptHistory: r.AttemptHistory,
 			Name:             r.Name,
 			Status:           r.Status,
 			ToolCalls:        r.ToolCalls,
@@ -201,14 +228,6 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 		overallStatus = "partial"
 	}
 
-	// Emit delegation_complete progress event
-	if subAgentManagerVar.SubTaskProgress != nil {
-		subAgentManagerVar.SubTaskProgress(agent.SubTaskProgressEvent{
-			Type:   "delegation_complete",
-			Status: overallStatus,
-		})
-	}
-
 	return DelegateTasksResult{
 		Status:  overallStatus,
 		Results: resultItems,
@@ -216,13 +235,31 @@ func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResul
 	}, nil
 }
 
-// NewDelegateTasksTool creates the delegate_tasks tool.
+const delegateTasksDescription = `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent gets the tool groups you specify (e.g., ["core"], ["browser"], ["core", "web"]) or auto-discovers tools based on the task description if tools is omitted. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
+
+When a plan is active (you called announce_plan), set the plan_step field on each task to link it to a plan step. Multiple tasks can share the same plan_step — the step is marked complete only when ALL tasks with that plan_step finish. This drives accurate progress tracking in the UI.`
+
+func newDelegateTasksRunner(manager *agent.SubAgentManager) func(tool.Context, DelegateTasksArgs) (DelegateTasksResult, error) {
+	return func(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResult, error) {
+		return delegateTasksWithManager(ctx, args, manager)
+	}
+}
+
+// NewDelegateTasksToolForManager creates a tool permanently bound to manager.
+// Factory-created tools use this form so another agent initialization cannot
+// redirect an older or in-flight session to a different manager.
+func NewDelegateTasksToolForManager(manager *agent.SubAgentManager) (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        "delegate_tasks",
+		Description: delegateTasksDescription,
+	}, newDelegateTasksRunner(manager))
+}
+
+// NewDelegateTasksTool creates a compatibility tool using the legacy global manager.
 func NewDelegateTasksTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
-		Name: "delegate_tasks",
-		Description: `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent gets the tool groups you specify (e.g., ["core"], ["browser"], ["core", "web"]) or auto-discovers tools based on the task description if tools is omitted. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
-
-When a plan is active (you called announce_plan), set the plan_step field on each task to link it to a plan step. Multiple tasks can share the same plan_step — the step is marked complete only when ALL tasks with that plan_step finish. This drives accurate progress tracking in the UI.`,
+		Name:        "delegate_tasks",
+		Description: delegateTasksDescription,
 	}, delegateTasks)
 }
 

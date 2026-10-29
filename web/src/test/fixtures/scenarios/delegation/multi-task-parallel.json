@@ -5,18 +5,18 @@
   "events": [
     { "type": "session", "data": { "sessionId": "sess-delegate-multi", "isNew": true } },
     { "type": "text", "data": { "text": "I'll research this from multiple angles." } },
-    { "type": "subtask_progress", "data": { "event_type": "delegation_start", "tasks": [
-      { "name": "Market research", "description": "Research current market trends" },
-      { "name": "Competitor analysis", "description": "Analyze top 5 competitors" },
-      { "name": "Write summary", "description": "Compile findings into a report" }
+    { "type": "subtask_progress", "data": { "event_type": "delegation_start", "batch_id": "parallel", "sequence": 1, "tasks": [
+      { "task_id": "market", "name": "Market research", "description": "Research current market trends" },
+      { "task_id": "competitors", "name": "Competitor analysis", "description": "Analyze top 5 competitors" },
+      { "task_id": "summary", "name": "Write summary", "description": "Compile findings into a report" }
     ] } },
-    { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "Market research" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "Competitor analysis" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_complete", "task_name": "Market research", "status": "success", "duration": "5.1s" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_start", "task_name": "Write summary" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_complete", "task_name": "Competitor analysis", "status": "success", "duration": "4.3s" } },
-    { "type": "subtask_progress", "data": { "event_type": "task_complete", "task_name": "Write summary", "status": "success", "duration": "2.8s" } },
-    { "type": "subtask_progress", "data": { "event_type": "delegation_complete", "status": "success" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_start", "batch_id": "parallel", "task_id": "market", "child_session_id": "market-child", "attempt": 1, "sequence": 2, "task_name": "Market research" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_start", "batch_id": "parallel", "task_id": "competitors", "child_session_id": "competitors-child", "attempt": 1, "sequence": 3, "task_name": "Competitor analysis" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_complete", "batch_id": "parallel", "task_id": "market", "child_session_id": "market-child", "attempt": 1, "sequence": 4, "task_name": "Market research", "status": "success", "duration": "5.1s" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_start", "batch_id": "parallel", "task_id": "summary", "child_session_id": "summary-child", "attempt": 1, "sequence": 5, "task_name": "Write summary" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_complete", "batch_id": "parallel", "task_id": "competitors", "child_session_id": "competitors-child", "attempt": 1, "sequence": 6, "task_name": "Competitor analysis", "status": "success", "duration": "4.3s" } },
+    { "type": "subtask_progress", "data": { "event_type": "task_complete", "batch_id": "parallel", "task_id": "summary", "child_session_id": "summary-child", "attempt": 1, "sequence": 7, "task_name": "Write summary", "status": "success", "duration": "2.8s" } },
+    { "type": "subtask_progress", "data": { "event_type": "delegation_complete", "batch_id": "parallel", "sequence": 8, "status": "success" } },
     { "type": "text", "data": { "text": "All tasks completed successfully. Here is the full analysis." } },
     { "type": "usage", "data": { "input_tokens": 800, "output_tokens": 400, "total_tokens": 1200 } },
     { "type": "done", "data": { "done": true } }

@@ -416,6 +416,10 @@ func (c *backendNodeClient) discard() {
 	c.closed = true
 }
 
+// maxNodeResponseLineBytes bounds one NDJSON line, excluding its LF/CRLF
+// delimiter. Tool results routinely exceed bufio.Scanner's 64 KiB default.
+const maxNodeResponseLineBytes = 10 * 1024 * 1024
+
 // parseNodeResponse scans NDJSON stdout for the first response line with an
 // "id" field and returns its Result / Error. The ready message is ignored
 // (it has no id). exitCode is included in the error when there is no parsable
@@ -428,8 +432,14 @@ func (c *backendNodeClient) discard() {
 // protocol messages.
 func parseNodeResponse(stdout []byte, exitCode int) (json.RawMessage, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	// Allow the full JSON budget plus CRLF. Check the actual token length
+	// separately so the delimiter allowance cannot admit oversized JSON.
+	scanner.Buffer(make([]byte, 64*1024), maxNodeResponseLineBytes+2)
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if len(line) > maxNodeResponseLineBytes {
+			return nil, fmt.Errorf("backend exec: node response line exceeds %d bytes (exit=%d)", maxNodeResponseLineBytes, exitCode)
+		}
 		if len(line) == 0 {
 			continue
 		}
@@ -455,6 +465,12 @@ func parseNodeResponse(stdout []byte, exitCode int) (json.RawMessage, error) {
 			return nil, fmt.Errorf("node: %s", probe.Error)
 		}
 		return probe.Result, nil
+	}
+	if err := scanner.Err(); err != nil {
+		if err == bufio.ErrTooLong {
+			return nil, fmt.Errorf("backend exec: node response line exceeds %d bytes (exit=%d): %w", maxNodeResponseLineBytes, exitCode, err)
+		}
+		return nil, fmt.Errorf("backend exec: scan node response (exit=%d): %w", exitCode, err)
 	}
 	// If we get here, no valid response line was found.
 	// Include a truncated sample of stdout for diagnostic context.

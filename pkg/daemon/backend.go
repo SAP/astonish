@@ -20,6 +20,10 @@ import (
 type platformDB interface {
 	store.PlatformBackend
 
+	// AllChatSessionIDs returns a complete cross-tenant chat-session snapshot
+	// for platform background cleanup. Partial results must be returned as errors.
+	AllChatSessionIDs(ctx context.Context) (map[string]bool, error)
+
 	// NewToolVectorStore creates a ToolVectorStore for semantic tool discovery.
 	// PG: uses pgvector extension. SQLite: BLOB embeddings + brute-force cosine.
 	// Returns (nil, nil) if the embedding function is not configured.

@@ -31,6 +31,7 @@ type personalSessionStore struct {
 }
 
 var _ store.SessionStore = (*personalSessionStore)(nil)
+var _ store.SessionIDEnumerator = (*personalSessionStore)(nil)
 
 // ---------------------------------------------------------------------------
 // personalSession implements adksession.Session interface
@@ -625,17 +626,28 @@ func (ss *personalSessionStore) ResolveSessionID(ctx context.Context, partial st
 }
 
 func (ss *personalSessionStore) AllSessionIDs(ctx context.Context) map[string]bool {
+	ids, err := ss.AllSessionIDsStrict(ctx)
+	if err != nil {
+		return nil
+	}
+	return ids
+}
+
+// AllSessionIDsStrict implements store.SessionIDEnumerator. Unlike
+// AllSessionIDs it surfaces query errors so platform background cleanup never
+// treats an unreadable personal scope as an authoritative empty set.
+func (ss *personalSessionStore) AllSessionIDsStrict(ctx context.Context) (map[string]bool, error) {
 	ents, err := ss.client.Session.Query().
 		Select(session.FieldID).
 		All(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list all personal session IDs: %w", err)
 	}
 	ids := make(map[string]bool, len(ents))
 	for _, e := range ents {
 		ids[e.ID] = true
 	}
-	return ids
+	return ids, nil
 }
 
 func (ss *personalSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDays int) []string {

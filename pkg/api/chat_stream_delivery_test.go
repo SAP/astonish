@@ -6,6 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/tools"
+	"google.golang.org/adk/model"
+	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +21,77 @@ import (
 	"testing"
 	"time"
 )
+
+func TestChatStreamChildForwarderSuppressesGenericKeepsImage(t *testing.T) {
+	var chatAgent *agent.ChatAgent
+	forward, err := functiontool.New(functiontool.Config{Name: "forward_child", Description: "forward child event"}, func(ctx tool.Context, _ map[string]any) (map[string]any, error) {
+		chatAgent.ForwardSubTaskEvent(ctx.SessionID(), &adksession.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+			{Text: "CHILD_TEXT_MUST_NOT_BE_GENERIC"},
+			{FunctionCall: &genai.FunctionCall{ID: "child-call", Name: "child_only_tool"}},
+			{FunctionResponse: &genai.FunctionResponse{ID: "child-call", Name: "child_only_tool", Response: map[string]any{"ok": true}}},
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("child-image")}},
+		}}}})
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupMemoryHTTPAcceptance(t, NewMockLLM(ToolCallTurn("forward_child", map[string]any{}), TextTurn("Parent finished.")), []tool.Tool{forward})
+	chatAgent = env.ChatAgent
+	events := env.Turn(t, "", "Forward child output", false)
+	images := 0
+	for _, event := range events {
+		if event.Type == "text" && strings.Contains(fmt.Sprint(event.Data["text"]), "CHILD_TEXT_MUST_NOT_BE_GENERIC") {
+			t.Fatal("raw child text duplicated")
+		}
+		if (event.Type == "tool_call" || event.Type == "tool_result") && event.Data["name"] == "child_only_tool" {
+			t.Fatal("raw child tool duplicated")
+		}
+		if event.Type == "image" {
+			images++
+		}
+	}
+	if images != 1 {
+		t.Fatalf("image side channel count=%d events=%+v", images, events)
+	}
+	assertHasEvent(t, events, "done")
+}
+
+func TestChatStreamDelegationValidationErrorSSE(t *testing.T) {
+	for _, structured := range []bool{false, true} {
+		t.Run(fmt.Sprint(structured), func(t *testing.T) {
+			delegate, err := tools.NewDelegateTasksTool()
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := setupMemoryHTTPAcceptance(t, NewMockLLM(ToolCallTurn("delegate_tasks", map[string]any{"tasks": []any{}}), TextTurn("No tasks were supplied.")), []tool.Tool{delegate})
+			mgr := agent.NewSubAgentManager(agent.SubAgentConfig{})
+			if structured {
+				mgr.SubTaskProgress = func(evt agent.SubTaskProgressEvent) { env.ChatAgent.EmitSubTaskProgress(evt.SessionID, evt) }
+			}
+			old := tools.GetSubAgentManager()
+			tools.SetSubAgentManager(mgr)
+			t.Cleanup(func() { tools.SetSubAgentManager(old) })
+			events := env.Turn(t, "", "Delegate an empty batch", false)
+			completed := 0
+			for _, event := range events {
+				if (event.Type == "tool_call" || event.Type == "tool_result") && event.Data["name"] == "delegate_tasks" {
+					t.Fatalf("generic delegation leaked: %+v", event)
+				}
+				if event.Type == "subtask_progress" && event.Data["event_type"] == "delegation_complete" {
+					completed++
+					if event.Data["batch_id"] == "" || event.Data["status"] != "error" || !strings.Contains(fmt.Sprint(event.Data["error"]), "No tasks provided") {
+						t.Fatalf("missing validation details: %+v", event)
+					}
+				}
+			}
+			if completed != 1 {
+				t.Fatalf("completion events=%d events=%+v", completed, events)
+			}
+			assertHasEvent(t, events, "done")
+		})
+	}
+}
 
 // Gate the first flushed chunk, not the socket buffer: this makes backpressure
 // deterministic on every OS while the client still consumes real loopback HTTP.

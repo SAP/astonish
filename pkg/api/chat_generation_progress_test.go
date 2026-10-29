@@ -58,6 +58,7 @@ type generationProgressLLM struct {
 	calls            atomic.Int32
 	retry            bool
 	reportAndThought bool
+	waiting          bool
 }
 
 func (m *generationProgressLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -67,6 +68,9 @@ func (m *generationProgressLLM) GenerateContent(ctx context.Context, _ *model.LL
 			return
 		}
 		call := m.calls.Add(1)
+		if m.waiting && call == 1 {
+			streaming.Report(ctx, streaming.Progress{Kind: streaming.KindHeartbeat, Phase: streaming.PhaseWaiting, Attempt: 1, MaxAttempts: 1, Elapsed: 45 * time.Second, LastActivity: 45 * time.Second})
+		}
 		if m.retry {
 			if call == 1 {
 				streaming.Report(ctx, streaming.Progress{Phase: streaming.PhaseThinking})
@@ -189,7 +193,7 @@ func TestChatGenerationProgressHTTP(t *testing.T) {
 }
 
 func testChatGenerationProgressHTTP(t *testing.T, retry, reportAndThought bool) {
-	provider := &generationProgressLLM{held: make(chan struct{}), release: make(chan struct{}), retry: retry, reportAndThought: reportAndThought}
+	provider := &generationProgressLLM{held: make(chan struct{}), release: make(chan struct{}), retry: retry, reportAndThought: reportAndThought, waiting: true}
 	var executed atomic.Int32
 	probe, err := functiontool.New(functiontool.Config{Name: "progress_probe", Description: "Record a completed tool call"}, func(_ tool.Context, args struct {
 		Input string `json:"input"`
@@ -265,7 +269,7 @@ func testChatGenerationProgressHTTP(t *testing.T, retry, reportAndThought bool) 
 		return e
 	}
 	seen := map[string]bool{}
-	for len(seen) < 4 {
+	for len(seen) < 5 {
 		e := read()
 		if e.Type == "tool_call" || e.Type == "tool_result" || e.Type == "done" {
 			t.Fatalf("premature event: %+v", e)
@@ -274,8 +278,11 @@ func testChatGenerationProgressHTTP(t *testing.T, retry, reportAndThought bool) 
 		if strings.Contains(string(payload), "PRIVATE_ARGUMENT") || strings.Contains(string(payload), "progress_probe") {
 			t.Fatalf("tool payload exposed before stop: %s", payload)
 		}
-		if e.Type == "thinking" && (e.Data["text"] == "Model is thinking…" || e.Data["text"] == "Preparing tool arguments…") {
-			seen[e.Data["text"].(string)] = true
+		if e.Type == "thinking" {
+			text := fmt.Sprint(e.Data["text"])
+			if text == "Model is thinking…" || text == "Preparing tool arguments…" || strings.HasPrefix(text, "Waiting for model response") {
+				seen[text] = true
+			}
 		}
 		if e.Type == "text" && (e.Data["text"] == "Visible partial answer." || e.Data["text"] == " Second visible block.") {
 			seen[e.Data["text"].(string)] = true

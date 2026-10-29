@@ -199,6 +199,7 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	entries := make([]events.HistoryMsg, 0, len(msg.entries))
 	for _, e := range msg.entries {
 		entries = append(entries, events.HistoryMsg{
+			Delegation:       e.Delegation,
 			Kind:             e.Kind,
 			Text:             e.Text,
 			ToolName:         e.ToolName,

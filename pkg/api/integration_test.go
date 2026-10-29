@@ -30,6 +30,7 @@ import (
 	astonishsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
+	"github.com/SAP/astonish/pkg/tools"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
@@ -1672,4 +1673,97 @@ func TestMemoryHTTPAcceptance_Baseline(t *testing.T) {
 		t.Fatalf("executed %d baseline cases, want 7", cases)
 	}
 	t.Logf("executed %d/7 baseline cases: text, tool, persisted history/identities, completed-stream/status, SQLite reopen, frozen requests/retrieval, authorized/denied/scoped HTTP; no skipped prerequisites", cases)
+}
+
+func TestChildDiscoveryHTTPAcceptance(t *testing.T) {
+	var executed atomic.Int32
+	local, err := functiontool.New(functiontool.Config{Name: "child_http_echo", Description: "Allowed local wrapped echo"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+		executed.Add(1)
+		return map[string]any{"evidence": "CHILD_EXECUTED", "value": args["value"]}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegate, err := tools.NewDelegateTasksTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := NewMockLLM(ToolCallTurn("delegate_tasks", map[string]any{"tasks": []any{map[string]any{"name": "child", "task": "Discover and execute local echo", "tools": []any{"child_http_echo"}}}}), TextTurn("Delegated evidence received."))
+	env := setupMemoryHTTPAcceptance(t, parent, []tool.Tool{delegate})
+	child := NewMockLLM(ToolCallTurn("search_tools", map[string]any{"query": "*"}), ToolCallTurn("describe_tools", map[string]any{"names": []any{"child_http_echo"}}), ToolCallTurn("execute_tool", map[string]any{"name": "child_http_echo", "arguments": map[string]any{"value": "ok"}}), TextTurn("CHILD_EXECUTED"))
+	mgr := agent.NewSubAgentManager(agent.SubAgentConfig{MaxRetries: 1})
+	childCapture := &memoryCapturingLLM{Script: child}
+	mgr.LLM = childCapture
+	mgr.AppName = studioChatAppName
+	mgr.UserID = env.UserID
+	mgr.SessionService = env.Services.PersonalSessions
+	mgr.ToolGroups = map[string]*agent.ToolGroup{"core": {Name: "core", Tools: []tool.Tool{local, newMockTool("forbidden_child_tool", "must not leak", nil)}}}
+	mgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
+	previous := tools.GetSubAgentManager()
+	tools.SetSubAgentManager(mgr)
+	t.Cleanup(func() { tools.SetSubAgentManager(previous) })
+	events := env.Turn(t, "", "Delegate the local check", false)
+	assertNoEvent(t, events, "error")
+	assertHasEvent(t, events, "done")
+	if executed.Load() != 1 {
+		t.Fatalf("child executions=%d events=%v", executed.Load(), events)
+	}
+	requests := childCapture.Requests(t)
+	if len(requests) != 4 {
+		t.Fatalf("child requests=%d", len(requests))
+	}
+	for i, req := range requests {
+		declarations, _ := json.Marshal(req.Config.Tools)
+		if strings.Contains(string(declarations), "forbidden_child_tool") {
+			t.Fatal("forbidden declaration exposed")
+		}
+		if !reflect.DeepEqual(req.Config.Tools, requests[0].Config.Tools) {
+			t.Fatal("declarations changed after discovery")
+		}
+		seen := map[string]bool{}
+		for _, declared := range req.Config.Tools {
+			for _, fn := range declared.FunctionDeclarations {
+				if seen[fn.Name] {
+					t.Fatalf("duplicate declaration %s", fn.Name)
+				}
+				seen[fn.Name] = true
+			}
+		}
+		if i > 0 {
+			data, _ := json.Marshal(req.Contents)
+			if !strings.Contains(string(data), "child_http_echo") || strings.Contains(string(data), "forbidden_child_tool") {
+				t.Fatal("discovery missing or outside-scope evidence exposed")
+			}
+		}
+	}
+	for _, expected := range []struct {
+		index          int
+		name, evidence string
+	}{{1, "search_tools", "child_http_echo"}, {2, "describe_tools", "Allowed local wrapped echo"}, {3, "execute_tool", "CHILD_EXECUTED"}} {
+		found := false
+		for _, content := range requests[expected.index].Contents {
+			for _, part := range content.Parts {
+				if part.FunctionResponse != nil && part.FunctionResponse.Name == expected.name {
+					data, _ := json.Marshal(part.FunctionResponse.Response)
+					found = strings.Contains(string(data), expected.evidence)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s result evidence", expected.name)
+		}
+	}
+	parentRequests := env.LLM.Requests(t)
+	if len(parentRequests) != 2 {
+		t.Fatalf("parent calls=%d", len(parentRequests))
+	}
+	parentEvidence, _ := json.Marshal(parentRequests[1].Contents)
+	if !strings.Contains(string(parentEvidence), "CHILD_EXECUTED") {
+		t.Fatal("delegate result missing at parent")
+	}
+	last, _ := json.Marshal(requests[3].Contents)
+	if !strings.Contains(string(last), "CHILD_EXECUTED") {
+		t.Fatalf("execution evidence not returned: %s", last)
+	}
+	t.Log("HTTP POST/SSE -> actual delegate_tasks -> isolated child search/describe/execute -> counted wrapped tool -> parent result; fixed declarations, scoped discovery, no paid model")
 }

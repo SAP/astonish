@@ -96,6 +96,80 @@ func (s *Store) CleanupExpired(ctx context.Context) error {
 	return nil
 }
 
+// AllChatSessionIDs returns an authoritative snapshot of chat-session IDs
+// across every active organization and team. It is intended only for
+// platform-admin background cleanup. Any unreadable scope invalidates the
+// entire snapshot so callers cannot use partial tenant coverage for deletion.
+func (s *Store) AllChatSessionIDs(ctx context.Context) (map[string]bool, error) {
+	orgs, err := s.Organizations().List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list organizations for chat-session snapshot: %w", err)
+	}
+
+	result := make(map[string]bool)
+	for _, org := range orgs {
+		if org.Status != "active" {
+			continue
+		}
+		orgStore, err := s.ForOrg(org.Slug)
+		if err != nil {
+			return nil, fmt.Errorf("open organization %q for chat-session snapshot: %w", org.Slug, err)
+		}
+		teams, err := orgStore.Teams().ListTeams(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list teams in organization %q for chat-session snapshot: %w", org.Slug, err)
+		}
+		for _, team := range teams {
+			teamStore := orgStore.ForTeam(team.Slug)
+			if teamStore == nil {
+				return nil, fmt.Errorf("open team %q in organization %q for chat-session snapshot", team.Slug, org.Slug)
+			}
+			enumerator, ok := teamStore.Sessions().(store.SessionIDEnumerator)
+			if !ok {
+				return nil, fmt.Errorf("team %q in organization %q does not support strict session enumeration", team.Slug, org.Slug)
+			}
+			ids, err := enumerator.AllSessionIDsStrict(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("enumerate sessions in organization %q team %q: %w", org.Slug, team.Slug, err)
+			}
+			for id := range ids {
+				result[id] = true
+			}
+		}
+
+		// Personal (per-user) sessions. Regular Studio chat stores sessions in
+		// the user's personal store (private-first), not a team store, so a
+		// snapshot that only covers teams would classify every live personal
+		// chat session as an orphan and the reaper would destroy its sandbox.
+		// Enumerate every org member's personal sessions with the same
+		// all-or-error discipline: an unopenable personal store or a failed
+		// query invalidates the whole snapshot rather than yielding a partial
+		// set that could authorize destruction.
+		members, err := s.Users().ListByOrg(ctx, org.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list members in organization %q for chat-session snapshot: %w", org.Slug, err)
+		}
+		for _, member := range members {
+			personalStore := orgStore.ForUser(member.ID)
+			if personalStore == nil {
+				return nil, fmt.Errorf("open personal store for user %q in organization %q for chat-session snapshot", member.ID, org.Slug)
+			}
+			personalEnum, ok := personalStore.Sessions().(store.SessionIDEnumerator)
+			if !ok {
+				return nil, fmt.Errorf("personal store for user %q in organization %q does not support strict session enumeration", member.ID, org.Slug)
+			}
+			ids, err := personalEnum.AllSessionIDsStrict(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("enumerate personal sessions for user %q in organization %q: %w", member.ID, org.Slug, err)
+			}
+			for id := range ids {
+				result[id] = true
+			}
+		}
+	}
+	return result, nil
+}
+
 // AllSandboxSessionIDs returns all known sandbox session IDs across all teams.
 // Used by the K8s GC reconciler to detect orphan pods.
 func (s *Store) AllSandboxSessionIDs(ctx context.Context) (map[string]bool, error) {

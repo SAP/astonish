@@ -6,7 +6,15 @@ Astonish provides a comprehensive REST API (51 files in `pkg/api/`) that powers 
 
 ## Artifact access boundary
 
-Platform artifact content, downloads and PDF source reads require an existing authorized session, including for superadmins. They never read daemon-host paths or daemon-local transcripts. Sources are the authorized sandbox backend and scoped persisted events. Trusted local-code mode retains host-file access. Downloads set `nosniff` and a sandboxed `default-src 'none'` CSP; HTML and JavaScript remain attachments. No SSE event shapes change.
+Platform artifact content, downloads and PDF source reads require an existing authorized session, including for superadmins. They never read daemon-host paths or daemon-local transcripts. The source for a growing Markdown document is the authorized destination file in the sandbox backend; there is no secondary job store or reconstruction from persisted chunks. Trusted local-code mode retains host-file access. Downloads set `nosniff` and a sandboxed `default-src 'none'` CSP; HTML and JavaScript remain attachments. Reconnect/restore never grants cross-user lookup, and no existing artifact endpoint or authorization rule is weakened. A partial destination is visible and usable through this same boundary; the existing `astonish-report` fence publishes it as a report only after the continuation marker has been removed.
+
+## Delegation identity
+
+Structured delegation progress adds optional `batch_id`, `task_id`, `child_session_id`, `attempt`, `call_id`, and `sequence`. Batch identity uses the parent tool-call ID when available. Task identity survives retries; each attempt has its own child session, persisted in child state and returned in `attempt_history`. Live tool projection uses a tracker per child/attempt and correlates deferred tools by call ID. History reconstructs identity from persisted delegation results rather than treating task names as globally unique.
+
+`GET /api/studio/sessions/{id}/subtask-events` accepts `child_session_id` or the complete `batch_id`, `task_id`, `attempt` tuple for exact selection. The child must belong to the authorized parent's child list, match its persisted parent state, and pass ownership and request-scoped store checks. Invalid selectors return 400 and inaccessible exact selections return 404 without reading the transcript. Legacy `task_name` selection remains available for unique matches; ambiguity returns 409 instead of selecting the last retry. Detail events include call identity and transcript order.
+
+Each `attempt_history` entry includes its own duration (not the cumulative retry duration). Queued cancellation is `cancelled`; an expired deadline is `timeout` in results and `failed` in progress. Validation failures produce a batch-scoped `delegation_complete` with error details even when no child starts. Structured child activity suppresses duplicate generic text/tools while preserving image delivery.
 
 ## Key Design Decisions
 

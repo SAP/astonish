@@ -77,6 +77,12 @@ type SessionMeta struct {
 	WorkspaceDir string    `json:"workspaceDir,omitempty"`
 }
 
+// SessionIDEnumerator returns an authoritative session-ID snapshot. Implementations
+// must return an error rather than a partial result when enumeration fails.
+type SessionIDEnumerator interface {
+	AllSessionIDsStrict(ctx context.Context) (map[string]bool, error)
+}
+
 // SessionStore manages chat sessions and their events.
 //
 // It embeds the ADK session.Service interface for compatibility with the

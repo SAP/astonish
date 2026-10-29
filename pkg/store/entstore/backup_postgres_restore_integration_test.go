@@ -57,6 +57,55 @@ func TestIntegrationPostgresQuerySurvivesResultTypeChange(t *testing.T) {
 	}
 }
 
+func TestIntegrationAllChatSessionIDsAcrossPostgresTeams(t *testing.T) {
+	ctx := context.Background()
+	s := setupPostgresBackupRestoreStore(t, "all_chat_session_ids")
+	orgID := uuid.NewString()
+	if err := s.Organizations().Create(ctx, &store.Organization{ID: orgID, Name: "Postgres Sessions", Slug: "restorepg", Status: "active"}); err != nil {
+		t.Fatalf("Create org error = %v", err)
+	}
+	if err := s.ProvisionOrg(ctx, orgID, "restorepg"); err != nil {
+		t.Fatalf("ProvisionOrg error = %v", err)
+	}
+	orgStore, err := s.ForOrg("restorepg")
+	if err != nil {
+		t.Fatalf("ForOrg error = %v", err)
+	}
+	for _, slug := range []string{"alpha", "beta"} {
+		if err := orgStore.Teams().CreateTeam(ctx, &store.Team{ID: uuid.NewString(), Name: slug, Slug: slug, SchemaName: teamSchemaName(slug)}); err != nil {
+			t.Fatalf("CreateTeam(%s) error = %v", slug, err)
+		}
+		if err := orgStore.ProvisionTeam(ctx, slug); err != nil {
+			t.Fatalf("ProvisionTeam(%s) error = %v", slug, err)
+		}
+		id := slug + "-session"
+		if err := orgStore.ForTeam(slug).Sessions().AddSessionMeta(ctx, store.SessionMeta{ID: id, AppName: "astonish"}); err != nil {
+			t.Fatalf("AddSessionMeta(%s) error = %v", id, err)
+		}
+	}
+
+	ids, err := s.AllChatSessionIDs(ctx)
+	if err != nil {
+		t.Fatalf("AllChatSessionIDs() error = %v", err)
+	}
+	for _, id := range []string{"alpha-session", "beta-session"} {
+		if !ids[id] {
+			t.Errorf("AllChatSessionIDs() missing %q: %v", id, ids)
+		}
+	}
+
+	if err := orgStore.Teams().CreateTeam(ctx, &store.Team{ID: uuid.NewString(), Name: "Broken", Slug: "broken", SchemaName: teamSchemaName("broken")}); err != nil {
+		t.Fatalf("CreateTeam(broken) error = %v", err)
+	}
+	partial, err := s.AllChatSessionIDs(ctx)
+	if err == nil {
+		t.Fatalf("AllChatSessionIDs() = %v, nil error after unreadable scope", partial)
+	}
+	if partial != nil {
+		t.Fatalf("AllChatSessionIDs() returned partial snapshot %v on error", partial)
+	}
+}
+
 func TestIntegrationPostgresBackupRestoreLogical(t *testing.T) {
 	ctx := context.Background()
 	source := setupPostgresBackupRestoreStore(t, "source")

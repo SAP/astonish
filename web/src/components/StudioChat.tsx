@@ -16,7 +16,7 @@ import type { FleetSession } from '../api/fleetChat'
 import HomePage from './HomePage'
 import type { FleetMessageItem, ChatMsg, FleetInfo, FleetStateInfo, DeferredPrompt, FleetExecutionMessage, FleetEvent, AgentMessage, ToolResultMessage, BrowserHandoffMessage, SubTaskExecutionMessage, SubTaskEvent, SubTaskInfo, PlanMessage, PlanStepInfo, SessionArtifact, ArtifactMessage, AppPreviewMessage, AppSavedMessage, DistillPreviewMessage, DistillSavedMessage, ChatQuestionMessage, TutorialBlueprintPreviewMessage, TutorialBlueprintApprovedMessage, TutorialSceneSlideshowMessage, UserMessage, AttachmentInfo, NetworkDenialMessage, ImageMessage, DocsUpdateMessage } from './chat/chatTypes'
 import { isChatQuestionAnswered } from './chat/chatQuestions'
-import { buildChronologicalActivityRenderIndex, liveActivityHint } from './chat/toolActivity'
+import { deriveDelegationTasks, interruptActiveDelegations, reduceDelegationProgress, normalizeDelegationHistory, buildChronologicalActivityRenderIndex, liveActivityHint } from './chat/toolActivity'
 import ToolActivityBlock from './chat/ToolActivityBlock'
 import { getAgentColor } from './chat/chatTypes'
 import FleetStartDialog from './chat/FleetStartDialog'
@@ -645,16 +645,27 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     return () => window.removeEventListener('resize', update)
   }, [])
 
-  // Latest plan message that actually has steps. The Todo button/panel are
-  // shown only when this is non-null. A plan may be persisted without steps
-  // (e.g. an announce_plan with empty/omitted steps), in which case there is
-  // nothing to show — and `steps` may even be undefined on loaded sessions.
+  // Latest explicit plan or delegation task list. Both surfaces use this same
+  // derived state so the inline tracker and header side panel cannot disagree.
   const latestPlanWithSteps = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.type === 'plan') {
         const plan = m as PlanMessage
         return (plan.steps?.length ?? 0) > 0 ? plan : null
+      }
+      if (m.type === 'subtask_execution') {
+        const tasks = deriveDelegationTasks(m as SubTaskExecutionMessage)
+        if (tasks.length === 0) return null
+        return {
+          type: 'plan' as const,
+          goal: 'Task Delegation',
+          steps: tasks.map(task => ({
+            name: task.name,
+            description: task.description,
+            status: task.status === 'interrupted' ? 'failed' : task.status,
+          })),
+        } satisfies PlanMessage
       }
     }
     return null
@@ -760,6 +771,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'error':
+            setMessages(interruptActiveDelegations)
             setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || 'Unknown error' }])
             break
 
@@ -951,7 +963,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         // The API uses StudioMessage with generic fields (content, toolName);
         // some message types need field remapping for the frontend types.
         const apiMessages = (data.messages || []) as Array<Record<string, any>>
-        const mapped: ChatMsg[] = apiMessages.map(m => {
+        const restored: ChatMsg[] = apiMessages.map(m => {
           const invocation = { invocationId: m.invocationId as string | undefined }
           if (m.type === 'artifact' && m.content) {
             return { ...invocation, type: 'artifact', path: m.content, toolName: m.toolName || 'write_file' } as ArtifactMessage
@@ -1044,7 +1056,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           }
           return m as unknown as ChatMsg
         })
-        setMessages(collapseDocsUpdates(mapped))
+        const mapped = restored
+        setMessages(collapseDocsUpdates(normalizeDelegationHistory(mapped)))
         // Restore active app state from session history
         const appPreviews = mapped.filter((m): m is AppPreviewMessage => m.type === 'app_preview')
         if (appPreviews.length > 0) {
@@ -1075,11 +1088,15 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // Reconnect to an active background chat runner. The runner streams all
   // buffered events (catch-up) followed by live events. This uses the same
   // event handler as sendMessage so all event types are handled identically.
-  const reconnectToChatRunner = useCallback((sessionId: string) => {
-    setMessages([])
-    setSessionArtifacts([])
+  const reconnectToChatRunner = useCallback(function reconnect(sessionId: string, attempt = 0) {
+    // Only clear the transcript for the initial catch-up connection. A transport
+    // retry replays persisted events into the existing reducers.
+    if (attempt === 0) {
+      setMessages([])
+      setSessionArtifacts([])
+      setSessionStartTime(Date.now())
+    }
     setIsStreaming(true)
-    setSessionStartTime(Date.now())
     setGenerationProgress(null)
     const streamGen = ++streamGenRef.current
 
@@ -1253,6 +1270,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'error':
+            setMessages(interruptActiveDelegations)
             setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
             break
 
@@ -1354,6 +1372,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'done':
+            setMessages(interruptActiveDelegations)
             setIsStreaming(false)
             // After done, poll the known stream session for async reflector saves.
             startSessionMemoryPolling(sessionId)
@@ -1402,47 +1421,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               break
             }
 
-            // ── Delegation events ──
-            const stEvent: SubTaskEvent = {
-              type: stEventType,
-              task_name: data.task_name as string | undefined,
-              status: data.status as string | undefined,
-              duration: data.duration as string | undefined,
-              error: data.error as string | undefined,
-              tool_name: data.tool_name as string | undefined,
-              tool_args: data.tool_args,
-              tool_result: data.tool_result,
-              text: data.text as string | undefined,
-              tasks: data.tasks as SubTaskInfo[] | undefined,
-              timestamp: Date.now(),
-            }
-            setMessages((prev: ChatMsg[]) => {
-              let existingIdx = -1
-              for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].type === 'subtask_execution' && (prev[i] as SubTaskExecutionMessage).status === 'running') {
-                  existingIdx = i
-                  break
-                }
-              }
-              const existing = existingIdx >= 0 ? prev[existingIdx] as SubTaskExecutionMessage : undefined
-              if (existing) {
-                const updated: SubTaskExecutionMessage = { ...existing, events: [...existing.events, stEvent] }
-                if (stEventType === 'delegation_complete') {
-                  updated.status = (data.status as string) || 'complete'
-                }
-                if (stEventType === 'delegation_start' && stEvent.tasks) {
-                  updated.tasks = stEvent.tasks
-                }
-                return prev.map((m, i) => i === existingIdx ? updated : m)
-              }
-              const tasks: SubTaskInfo[] = (stEventType === 'delegation_start' && stEvent.tasks) ? stEvent.tasks : []
-              return [...prev, {
-                type: 'subtask_execution',
-                events: [stEvent],
-                tasks,
-                status: 'running',
-              } as SubTaskExecutionMessage]
-            })
+            setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
             break
           }
 
@@ -1467,7 +1446,27 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat reconnect stream error:', err)
-        setIsStreaming(false)
+        void fetchSessionStatus(sessionId).then(status => {
+          if (streamGenRef.current !== streamGen) return
+          if (status.running && attempt < 3) {
+            reconnect(sessionId, attempt + 1)
+            return
+          }
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'error',
+            content: status.running
+              ? 'Connection to the running task was lost after several recovery attempts. Refresh this conversation to try again.'
+              : 'Connection was lost and the task is no longer running. Refresh this conversation to continue.',
+          }])
+          setIsStreaming(false)
+        }).catch(() => {
+          if (streamGenRef.current !== streamGen) return
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'error',
+            content: 'Connection to the task was lost and its current status could not be confirmed. Refresh this conversation to retry.',
+          }])
+          setIsStreaming(false)
+        })
       },
       onDone: () => {
         if (streamGenRef.current !== streamGen) return
@@ -2314,54 +2313,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               break
             }
 
-            // ── Delegation events (existing subtask_execution handling) ──
-            const event: SubTaskEvent = {
-              type: eventType,
-              task_name: data.task_name as string | undefined,
-              status: data.status as string | undefined,
-              duration: data.duration as string | undefined,
-              error: data.error as string | undefined,
-              tool_name: data.tool_name as string | undefined,
-              tool_args: data.tool_args,
-              tool_result: data.tool_result,
-              text: data.text as string | undefined,
-              tasks: data.tasks as SubTaskInfo[] | undefined,
-              timestamp: Date.now(),
-            }
-
-            setMessages((prev: ChatMsg[]) => {
-              // Find the latest subtask_execution message that is still running (search from end)
-              let existingIdx = -1
-              for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].type === 'subtask_execution' && (prev[i] as SubTaskExecutionMessage).status === 'running') {
-                  existingIdx = i
-                  break
-                }
-              }
-              const existing = existingIdx >= 0 ? prev[existingIdx] as SubTaskExecutionMessage : undefined
-
-              if (existing) {
-                const updated: SubTaskExecutionMessage = { ...existing, events: [...existing.events, event] }
-                // Update status on delegation_complete
-                if (eventType === 'delegation_complete') {
-                  updated.status = (data.status as string) || 'complete'
-                }
-                // Update tasks list on delegation_start (if somehow received after creation)
-                if (eventType === 'delegation_start' && event.tasks) {
-                  updated.tasks = event.tasks
-                }
-                return prev.map((m, i) => i === existingIdx ? updated : m)
-              }
-
-              // First event: create the subtask_execution message
-              const tasks: SubTaskInfo[] = (eventType === 'delegation_start' && event.tasks) ? event.tasks : []
-              return [...prev, {
-                type: 'subtask_execution',
-                events: [event],
-                tasks,
-                status: 'running',
-              } as SubTaskExecutionMessage]
-            })
+            setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
             break
           }
 
@@ -2386,6 +2338,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'error':
+            setMessages(interruptActiveDelegations)
             setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
             break
 
@@ -2492,6 +2445,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'done':
+            setMessages(interruptActiveDelegations)
             // Finalize streaming text and stop the processing indicator.
             // The SSE stream may stay open briefly (grace period for async
             // events like session_title), but the user-facing response is
@@ -2523,8 +2477,31 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat stream error:', err)
-        setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: err.message }])
-        setIsStreaming(false)
+        if (!streamSessionId) {
+          setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: err.message }])
+          setIsStreaming(false)
+          return
+        }
+        const interruptedSessionId = streamSessionId
+        void fetchSessionStatus(interruptedSessionId).then(status => {
+          if (streamGenRef.current !== streamGen) return
+          if (status.running) {
+            reconnectToChatRunner(interruptedSessionId, 1)
+            return
+          }
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'error',
+            content: 'Connection was lost and the task is no longer running. Refresh this conversation to continue.',
+          }])
+          setIsStreaming(false)
+        }).catch(() => {
+          if (streamGenRef.current !== streamGen) return
+          setMessages((prev: ChatMsg[]) => [...prev, {
+            type: 'error',
+            content: 'Connection to the task was lost and its current status could not be confirmed. Refresh this conversation to retry.',
+          }])
+          setIsStreaming(false)
+        })
       },
       onDone: () => {
         if (streamGenRef.current !== streamGen) return
@@ -2550,7 +2527,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     })
 
     abortRef.current = controller
-  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, startSessionMemoryPolling, memoryScope, canDebug, debugEnabled])
+  }, [activeSessionId, activeWizardContext, activePinnedToolGroups, attachments, prepareAttachmentPayloads, clearAttachments, preChatProvider, preChatModel, preChatProviders, changeSession, reconnectToChatRunner, startSessionMemoryPolling, memoryScope, canDebug, debugEnabled])
 
   // Process deferred fleet plan prompt (set by fleet_plan_redirect SSE event)
   useEffect(() => {
@@ -2786,8 +2763,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                       </div>
                     </div>
                     <div
-                      className="p-4 rounded-lg max-w-[90%] min-w-0 overflow-x-auto bg-card"
+                      data-testid="agent-message-bubble"
+                      className="p-4 rounded-lg max-w-[90%] min-w-0 overflow-x-auto"
                       style={{
+                        backgroundColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.08)' : 'white',
                         border: '1px solid var(--border-color)',
                       }}
                     >
@@ -3941,6 +3920,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       {todoPanelOpen && (
         <TodoPanel
           messages={messages}
+          planOverride={latestPlanWithSteps}
           onClose={() => setTodoPanelOpen(false)}
         />
       )}

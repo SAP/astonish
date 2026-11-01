@@ -37,8 +37,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -491,6 +494,9 @@ func TestBackendPool_RemoveDropsClientWithoutDestroy(t *testing.T) {
 	if err := a.EnsureReady("sess-rm"); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
+	if err := m.DestroySession(context.Background(), "sess-rm"); err != nil {
+		t.Fatal(err)
+	}
 	destroyBefore := len(m.DestroySessionCalls())
 
 	pool.Remove("sess-rm")
@@ -510,3 +516,334 @@ func TestBackendPool_RemoveDropsClientWithoutDestroy(t *testing.T) {
 	}
 }
 
+// readinessBackend adds controllable lifecycle barriers without registering a
+// mock factory in the production sandbox package's test binary.
+type readinessBackend struct {
+	*mock.MockBackend
+	mu         sync.Mutex
+	state      *sandbox.SessionState
+	inspectErr error
+	gate       <-chan struct{}
+	entered    chan struct{}
+	execs      atomic.Int32
+}
+
+func (b *readinessBackend) SessionState(ctx context.Context, id string) (sandbox.SessionState, error) {
+	b.mu.Lock()
+	state, err := b.state, b.inspectErr
+	if state != nil {
+		copied := *state
+		state = &copied
+	}
+	b.mu.Unlock()
+	if err != nil {
+		return sandbox.SessionStateGone, err
+	}
+	if state != nil {
+		return *state, nil
+	}
+	return b.MockBackend.SessionState(ctx, id)
+}
+
+func (b *readinessBackend) WaitForSessionReady(ctx context.Context, id string) error {
+	b.mu.Lock()
+	gate, entered := b.gate, b.entered
+	b.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return b.MockBackend.WaitForSessionReady(ctx, id)
+}
+
+func (b *readinessBackend) Exec(ctx context.Context, id string, spec sandbox.ExecSpec) (*sandbox.ExecResult, error) {
+	b.execs.Add(1)
+	state, err := b.MockBackend.SessionState(ctx, id)
+	if err != nil || state != sandbox.SessionStateRunning {
+		return nil, fmt.Errorf("exec into unavailable session %s", id)
+	}
+	return &sandbox.ExecResult{Stdout: []byte(fmt.Sprintf("{\"ready\":true}\n{\"id\":\"1\",\"result\":%q}\n", id))}, nil
+}
+
+func newReadinessPool(t *testing.T) (*readinessBackend, sandbox.ToolNodePool, sandbox.ToolNodeClient) {
+	t.Helper()
+	b := &readinessBackend{MockBackend: mock.New()}
+	p := sandbox.NewBackendPool(b, sandbox.ResourceLimits{})
+	t.Cleanup(p.Cleanup)
+	c := p.GetOrCreateWithTemplate("parent", "default")
+	p.Alias("child", "parent")
+	return b, p, c
+}
+
+func requireOwnerCall(t *testing.T, c sandbox.ToolNodeClient, logical string) {
+	t.Helper()
+	result, err := c.Call(logical, "read_file", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result) != `"parent"` {
+		t.Fatalf("execution owner = %s, want parent", result)
+	}
+}
+
+func TestBackendPool_AliasBeforeBindUsesParentOwner(t *testing.T) {
+	b, p, _ := newReadinessPool(t)
+	c := p.GetOrCreate("child")
+	c.BindSession("child")
+	requireOwnerCall(t, c, "child")
+	if calls := b.CreateSessionCalls(); len(calls) != 1 || calls[0].Spec.SessionID != "parent" {
+		t.Fatalf("create calls = %+v", calls)
+	}
+}
+
+func TestBackendPool_AliasEnsureReadyDoesNotRebindChild(t *testing.T) {
+	b, p, c := newReadinessPool(t)
+	if err := c.EnsureReady("parent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GetOrCreate("child").EnsureReady("child"); err != nil {
+		t.Fatal(err)
+	}
+	requireOwnerCall(t, c, "child")
+	if n := len(b.CreateSessionCalls()); n != 1 {
+		t.Fatalf("created %d sessions, want one owner", n)
+	}
+}
+
+func TestBackendPool_CallRebindsCanonicalOwnerAfterDestroy(t *testing.T) {
+	b, p, c := newReadinessPool(t)
+	requireOwnerCall(t, c, "parent")
+	if err := b.DestroySession(context.Background(), "parent"); err != nil {
+		t.Fatal(err)
+	}
+	requireOwnerCall(t, p.GetOrCreate("child"), "child")
+	calls := b.CreateSessionCalls()
+	if len(calls) != 2 || calls[1].Spec.SessionID != "parent" || calls[1].Spec.TemplateID != "default" {
+		t.Fatalf("recovery calls = %+v", calls)
+	}
+}
+
+func TestBackendPool_ConcurrentAliasCallsRebindOnce(t *testing.T) {
+	b, p, c := newReadinessPool(t)
+	requireOwnerCall(t, c, "parent")
+	if err := b.DestroySession(context.Background(), "parent"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); requireOwnerCall(t, p.GetOrCreate("child"), "child") }()
+	}
+	wg.Wait()
+	if n := len(b.CreateSessionCalls()); n != 2 {
+		t.Fatalf("create calls = %d, want 2", n)
+	}
+	if n := b.execs.Load(); n != 25 {
+		t.Fatalf("exec calls = %d, want 25", n)
+	}
+}
+
+func TestBackendPool_AliasCleanupDestroysOwnerOnce(t *testing.T) {
+	b, p, c := newReadinessPool(t)
+	if err := c.EnsureReady("parent"); err != nil {
+		t.Fatal(err)
+	}
+	p.Alias("grandchild", "child")
+	p.Cleanup()
+	p.Cleanup()
+	calls := b.DestroySessionCalls()
+	if len(calls) != 1 || calls[0] != "parent" {
+		t.Fatalf("destroy calls = %v", calls)
+	}
+	if err := c.EnsureReady("child"); err == nil {
+		t.Fatal("closed client became ready")
+	}
+}
+
+func TestBackendPool_InspectionErrorDoesNotCreate(t *testing.T) {
+	b, _, c := newReadinessPool(t)
+	if err := c.EnsureReady("parent"); err != nil {
+		t.Fatal(err)
+	}
+	inspectionErr := errors.New("backend inspection unavailable")
+	b.mu.Lock()
+	b.inspectErr = inspectionErr
+	b.mu.Unlock()
+	if err := c.EnsureReady("child"); !errors.Is(err, inspectionErr) {
+		t.Fatalf("readiness = %v, want inspection error", err)
+	}
+	if n := len(b.CreateSessionCalls()); n != 1 {
+		t.Fatalf("inspection error caused %d creates", n)
+	}
+	b.mu.Lock()
+	b.inspectErr = nil
+	b.mu.Unlock()
+	if err := c.EnsureReady("child"); err != nil {
+		t.Fatalf("subsequent attempt: %v", err)
+	}
+}
+
+func TestBackendPool_WaitsForRestartAndOverlay(t *testing.T) {
+	for _, state := range []sandbox.SessionState{sandbox.SessionStateRunning, sandbox.SessionStateCreating, sandbox.SessionStateResuming, sandbox.SessionStateStopped, sandbox.SessionStateEvicting} {
+		t.Run(string(state), func(t *testing.T) {
+			b, _, c := newReadinessPool(t)
+			if err := c.EnsureReady("parent"); err != nil {
+				t.Fatal(err)
+			}
+			gate, entered := make(chan struct{}), make(chan struct{}, 1)
+			defer close(gate)
+			b.mu.Lock()
+			s := state
+			b.state, b.gate, b.entered = &s, gate, entered
+			b.mu.Unlock()
+			done := make(chan error, 1)
+			go func() { _, err := c.Call("child", "read_file", nil); done <- err }()
+			if state == sandbox.SessionStateEvicting {
+				select {
+				case err := <-done:
+					t.Fatalf("executed during eviction: %v", err)
+				case <-time.After(30 * time.Millisecond):
+				}
+				b.mu.Lock()
+				s = sandbox.SessionStateStopped
+				b.mu.Unlock()
+			}
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("never waited for overlay")
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("executed before overlay readiness: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if n := b.execs.Load(); n != 0 {
+				t.Fatalf("exec ran before readiness: %d", n)
+			}
+			// Release without closing: defer owns the close on failure, too.
+			gate <- struct{}{}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("call did not finish")
+			}
+			wantStarts := 1
+			if state == sandbox.SessionStateStopped || state == sandbox.SessionStateEvicting {
+				wantStarts++
+			}
+			if n := len(b.StartSessionCalls()); n != wantStarts {
+				t.Fatalf("start calls = %d, want %d", n, wantStarts)
+			}
+			if n := len(b.CreateSessionCalls()); n != 1 {
+				t.Fatalf("unexpected recreation: %d", n)
+			}
+		})
+	}
+}
+
+func TestBackendPool_ReadinessCancellation(t *testing.T) {
+	b, _, c := newReadinessPool(t)
+	gate, entered := make(chan struct{}), make(chan struct{}, 2)
+	b.mu.Lock()
+	b.gate, b.entered = gate, entered
+	b.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() { first <- sandbox.EnsureToolClientReady(ctx, c, "child") }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prepare not entered")
+	}
+	go func() { second <- sandbox.EnsureToolClientReady(context.Background(), c, "parent") }()
+	cancel()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation blocked")
+	}
+	select {
+	case err := <-second:
+		t.Fatalf("other waiter released early: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("other waiter blocked")
+	}
+	if n := len(b.CreateSessionCalls()); n != 1 {
+		t.Fatalf("creates = %d, want one shared attempt", n)
+	}
+}
+
+func TestBackendPool_ReadinessCloseDuringPrepare(t *testing.T) {
+	b, p, c := newReadinessPool(t)
+	gate, entered := make(chan struct{}), make(chan struct{}, 1)
+	b.mu.Lock()
+	b.gate, b.entered = gate, entered
+	b.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- c.EnsureReady("child") }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("prepare not entered")
+	}
+	p.Cleanup()
+	close(gate)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("closed preparation published ready")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closed waiter blocked")
+	}
+	if err := c.EnsureReady("parent"); err == nil {
+		t.Fatal("closed client retried")
+	}
+	if n := len(b.CreateSessionCalls()); n != 1 {
+		t.Fatalf("creates = %d", n)
+	}
+	if calls := b.DestroySessionCalls(); len(calls) != 1 || calls[0] != "parent" {
+		t.Fatalf("destroy = %v", calls)
+	}
+}
+
+func TestBackendPool_DoesNotReplayExec(t *testing.T) {
+	m := mock.New()
+	var calls atomic.Int32
+	failure := errors.New("connection lost after side effect")
+	m.ExecResultFn = func(string, sandbox.ExecSpec) (*sandbox.ExecResult, error) { calls.Add(1); return nil, failure }
+	p := sandbox.NewBackendPool(m, sandbox.ResourceLimits{})
+	defer p.Cleanup()
+	c := p.GetOrCreateWithTemplate("parent", "default")
+	if _, err := c.Call("parent", "shell_command", nil); !errors.Is(err, failure) {
+		t.Fatalf("exec error = %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("potential side effect replayed %d times", n)
+	}
+}

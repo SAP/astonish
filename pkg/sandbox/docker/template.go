@@ -154,7 +154,6 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		labels[k] = v
 	}
 	labels["astonish.io/purpose"] = "template-builder"
-	db.pruneDanglingOverlayVolumes(ctx)
 	if err := db.ensureParentLayers(ctx, spec.ParentLayers); err != nil {
 		return nil, err
 	}
@@ -208,7 +207,7 @@ func captureLayerError(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "no space left") {
-		return fmt.Errorf("sandbox/docker: capture layer: no space left on device (need room for the overlay snapshot on the layers volume). Free Docker disk: docker volume prune -f && docker system prune, or increase the Docker Desktop disk image: %w", err)
+		return fmt.Errorf("sandbox/docker: capture layer: no space left on device (need room for the overlay snapshot on the layers volume). Reclaim disk through session-aware explicit cleanup, or increase Docker disk capacity: %w", err)
 	}
 	return fmt.Errorf("sandbox/docker: capture layer: %w", err)
 }
@@ -256,7 +255,7 @@ func overlayAptPrepScript() string {
 		"avail=$(df -Pm / | awk 'NR==2 { print $4 }')",
 		`echo "overlay free space: ${avail}MB"`,
 		`if [ -n "$avail" ] && [ "$avail" -lt 2048 ]; then`,
-		`  echo "E: overlay has ${avail}MB free; the core package install needs about 2GB. Increase Docker Desktop disk or run: docker system prune" >&2`,
+		`  echo "E: overlay has ${avail}MB free; the core package install needs about 2GB. Increase Docker disk capacity or use session-aware explicit cleanup" >&2`,
 		"  exit 100",
 		"fi",
 		"mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d /usr/sbin",

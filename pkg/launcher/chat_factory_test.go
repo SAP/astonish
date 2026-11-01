@@ -2,15 +2,21 @@ package launcher
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/sandbox"
 	astonishtools "github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -270,6 +276,137 @@ func TestFixedProviderToolsContract(t *testing.T) {
 			t.Fatalf("provider-visible tool %d = %q, want %q", i, got, name)
 		}
 	}
+}
+
+func TestDelegateSandboxAlias_BeforeBind(t *testing.T) {
+	pool := sandbox.NewBackendPool(&delegateMCPTestBackend{}, sandbox.ResourceLimits{})
+	mgr := browser.NewManager(browser.DefaultConfig())
+	aliasBackendChildSession(pool, mgr, "parent", "child")
+	parent, child := pool.GetOrCreate("parent"), pool.GetOrCreate("child")
+	if child != parent || sandbox.CanonicalSessionID(child, "child") != "parent" {
+		t.Fatal("unbound child must share the parent-owned client")
+	}
+}
+
+func TestNestedBrowserUsesCanonicalOwner(t *testing.T) {
+	pool := sandbox.NewBackendPool(&delegateMCPTestBackend{}, sandbox.ResourceLimits{})
+	mgr := browser.NewManager(browser.DefaultConfig())
+	aliasBackendChildSession(pool, mgr, "parent", "child")
+	aliasBackendChildSession(pool, mgr, "child", "grandchild")
+	mgr.EnsureSessionID("grandchild")
+	if mgr.SessionID() != "parent" {
+		t.Fatalf("browser owner = %q, want parent", mgr.SessionID())
+	}
+}
+
+type delegateMCPTestContext struct {
+	tool.Context
+	ctx context.Context
+}
+
+func (c delegateMCPTestContext) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c delegateMCPTestContext) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c delegateMCPTestContext) Err() error                  { return c.ctx.Err() }
+func (c delegateMCPTestContext) Value(key any) any           { return c.ctx.Value(key) }
+
+func (delegateMCPTestContext) SessionID() string { return "delegate" }
+
+type delegateMCPReadyClient struct {
+	sandbox.ToolNodeClient
+	calls int
+}
+
+func (c *delegateMCPReadyClient) EnsureReady(id string) error {
+	c.calls++
+	return errors.New("factory sandbox readiness probe")
+}
+
+type delegateMCPTestBackend struct{ sandbox.Backend }
+
+func TestDelegateMCPGroupResolver_WiresSandboxPool(t *testing.T) {
+	client := &delegateMCPReadyClient{}
+	pool := sandbox.NewSingleClientPool(client, &delegateMCPTestBackend{})
+	registry := &mcpCleanupRegistry{}
+	defer registry.Cleanup()
+	group := newDelegateMCPGroup("factory-probe", []cache.ToolEntry{{Name: "probe"}}, config.MCPServerConfig{Command: "must-not-start-on-host"}, false, nil, pool, registry)
+	if group == nil || group.Name != "mcp:factory-probe" {
+		t.Fatal("missing group")
+	}
+	ts, err := group.Toolsets[0].Tools(nil)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("Tools = %v, %v", ts, err)
+	}
+	runner := ts[0].(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	})
+	ctx := delegateMCPTestContext{ctx: context.Background()}
+	result, err := runner.Run(ctx, map[string]any{})
+	if client.calls == 0 {
+		t.Fatalf("dynamic group did not use sandbox pool: result=%v err=%v", result, err)
+	}
+}
+
+func TestDelegateMCPGroupResolver_NoSandboxPreservation(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	defer registry.Cleanup()
+	group := newDelegateMCPGroup("host", []cache.ToolEntry{{Name: "probe"}}, config.MCPServerConfig{}, false, nil, nil, registry)
+	if group == nil || len(group.Toolsets) != 1 {
+		t.Fatal("host group not preserved")
+	}
+	// Listing declarations remains lazy: no backend, process or network required.
+	ts, err := group.Toolsets[0].Tools(nil)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("Tools = %v, %v", ts, err)
+	}
+}
+
+func TestDynamicMCPCleanupClosesAll(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	const count = 100
+	var closed [count]atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range closed {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			registry.add(func() { closed[i].Add(1) })
+		}(i)
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); <-start; registry.Cleanup() }()
+	close(start)
+	wg.Wait()
+	registry.Cleanup()
+	for i := range closed {
+		if got := closed[i].Load(); got != 1 {
+			t.Fatalf("cleanup %d ran %d times", i, got)
+		}
+	}
+	if group := newDelegateMCPGroup("late", nil, config.MCPServerConfig{}, false, nil, nil, registry); group != nil {
+		t.Fatal("resolver published a group after cleanup")
+	}
+}
+
+func TestDynamicMCPCleanupResolverOverlap(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	registry.add(func() { close(entered); <-release })
+	go func() { registry.Cleanup(); close(done) }()
+	<-entered
+	var late atomic.Int32
+	if registry.add(func() { late.Add(1) }) {
+		t.Fatal("late registration accepted")
+	}
+	if late.Load() != 1 {
+		t.Fatal("late cleanup was lost while shutdown was in progress")
+	}
+	if group := newDelegateMCPGroup("overlap", nil, config.MCPServerConfig{}, false, nil, nil, registry); group != nil {
+		t.Fatal("overlapping resolver published group")
+	}
+	close(release)
+	<-done
 }
 
 func TestSkillLookupMode(t *testing.T) {

@@ -5,8 +5,85 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/config"
 )
+
+// terminalMCPStream exercises terminal I/O independently of the SDK reader.
+type terminalMCPStream struct {
+	ExecStream
+	readErr, writeErr error
+	short             bool
+	closes            atomic.Int32
+}
+
+func (s *terminalMCPStream) Read([]byte) (int, error) { return 0, s.readErr }
+func (s *terminalMCPStream) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	if s.short {
+		return len(p) - 1, nil
+	}
+	return len(p), nil
+}
+func (s *terminalMCPStream) Close() error { s.closes.Add(1); return nil }
+func TestBackendMCPTransport_TerminalReadWriteClose(t *testing.T) {
+	for _, mode := range []string{"read", "write", "short", "close"} {
+		t.Run(mode, func(t *testing.T) {
+			transport, _ := NewBackendMCPTransport(nil, "owner", config.MCPServerConfig{})
+			stream := &terminalMCPStream{readErr: io.EOF, writeErr: io.ErrClosedPipe}
+			rwc := &backendStreamRWC{stream: stream, terminal: &transport.closed}
+			transport.stream = rwc
+			if transport.IsClosed() {
+				t.Fatal("fresh transport terminal")
+			}
+			switch mode {
+			case "read":
+				_, _ = rwc.Read(make([]byte, 1))
+			case "write":
+				_, _ = rwc.Write([]byte("x"))
+			case "short":
+				stream.writeErr = nil
+				stream.short = true
+				_, err := rwc.Write([]byte("x"))
+				if err != io.ErrShortWrite {
+					t.Fatal(err)
+				}
+			case "close":
+				_ = rwc.Close()
+			}
+			if !transport.IsClosed() {
+				t.Fatal("terminal stream not detected")
+			}
+			_ = transport.Close()
+			if stream.closes.Load() != 1 {
+				t.Fatal("stream closed multiple times")
+			}
+		})
+	}
+}
+func TestBackendMCPTransport_ConcurrentClose(t *testing.T) {
+	transport, _ := NewBackendMCPTransport(nil, "owner", config.MCPServerConfig{})
+	stream := &terminalMCPStream{}
+	rwc := &backendStreamRWC{stream: stream, terminal: &transport.closed}
+	transport.stream = rwc
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = transport.Close(); _ = rwc.Close(); _ = transport.IsClosed() }()
+	}
+	wg.Wait()
+	if stream.closes.Load() != 1 || !transport.IsClosed() {
+		t.Fatal("concurrent close not idempotent")
+	}
+	if _, err := transport.Connect(context.Background()); err == nil {
+		t.Fatal("closed transport reconnected")
+	}
+}
 
 // nopCloser wraps an io.Reader as an io.ReadCloser with a no-op Close.
 type nopCloser struct {

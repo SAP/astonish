@@ -24,6 +24,20 @@ type processNodeBackend struct {
 	state  *os.ProcessState
 }
 
+func (b *processNodeBackend) CreateSession(ctx context.Context, spec SessionSpec) (*Session, error) {
+	return &Session{SessionID: spec.SessionID}, ctx.Err()
+}
+
+func (b *processNodeBackend) StartSession(ctx context.Context, _ string) error { return ctx.Err() }
+
+func (b *processNodeBackend) SessionState(ctx context.Context, _ string) (SessionState, error) {
+	return SessionStateRunning, ctx.Err()
+}
+
+func (b *processNodeBackend) WaitForSessionReady(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
 func (b *processNodeBackend) Exec(ctx context.Context, _ string, spec ExecSpec) (*ExecResult, error) {
 	if len(spec.Command) != 2 || spec.Command[0] != "astonish" || spec.Command[1] != "node" {
 		return nil, fmt.Errorf("unexpected command: %q", spec.Command)
@@ -65,9 +79,7 @@ func TestBackendNodeLargeResultProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &processNodeBackend{binary: binary, home: dir}
-	done := make(chan struct{})
-	close(done)
-	client := &backendNodeClient{backend: backend, sessionID: "large-result-test", bound: true, bindDone: done}
+	client := &backendNodeClient{backend: backend, sessionID: "large-result-test", state: backendReady}
 	result, err := client.Call("large-result-test", "read_file", map[string]interface{}{"path": path, "force": true})
 	if err != nil {
 		t.Fatalf("read_file via real node process: %v", err)
@@ -172,5 +184,87 @@ func TestBackendPool_Alias_EmptyIDs(t *testing.T) {
 	pool.Alias("child", "")
 	if len(pool.clients) != 1 {
 		t.Fatal("empty parent should not add entry")
+	}
+}
+
+type legacyReadinessClient struct {
+	ToolNodeClient
+	id  string
+	err error
+}
+
+func (c *legacyReadinessClient) EnsureReady(id string) error { c.id = id; return c.err }
+
+type ownedReadinessClient struct {
+	legacyReadinessClient
+	owner string
+	ctx   context.Context
+}
+
+func (c *ownedReadinessClient) SandboxSessionID() string { return c.owner }
+func (c *ownedReadinessClient) EnsureReadyContext(ctx context.Context, id string) error {
+	c.ctx, c.id = ctx, id
+	return c.err
+}
+
+func TestCanonicalSessionID(t *testing.T) {
+	var typedNil *ownedReadinessClient
+	for _, tt := range []struct {
+		name   string
+		client ToolNodeClient
+		want   string
+	}{
+		{"nil", nil, "logical"},
+		{"typed nil", typedNil, "logical"},
+		{"legacy", &legacyReadinessClient{}, "logical"},
+		{"empty owner", &ownedReadinessClient{}, "logical"},
+		{"owned", &ownedReadinessClient{owner: "physical"}, "physical"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanonicalSessionID(tt.client, "logical"); got != tt.want {
+				t.Fatalf("owner = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadinessHelper(t *testing.T) {
+	if err := EnsureToolClientReady(context.Background(), nil, "logical"); err == nil {
+		t.Fatal("nil client accepted")
+	}
+	var typedNil *ownedReadinessClient
+	if err := EnsureToolClientReady(context.Background(), typedNil, "logical"); err == nil {
+		t.Fatal("typed nil accepted")
+	}
+	failure := fmt.Errorf("readiness failure")
+	legacy := &legacyReadinessClient{err: failure}
+	if err := EnsureToolClientReady(context.Background(), legacy, "logical"); err != failure || legacy.id != "logical" {
+		t.Fatalf("legacy fallback: %v, %q", err, legacy.id)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	owned := &ownedReadinessClient{owner: "physical"}
+	if err := EnsureToolClientReady(ctx, owned, "logical"); err != nil || owned.id != "physical" || owned.ctx != ctx {
+		t.Fatalf("context ownership forwarding: %v, %+v", err, owned)
+	}
+	cancel()
+	owned.id = ""
+	if err := EnsureToolClientReady(ctx, owned, "logical"); err != context.Canceled || owned.id != "" {
+		t.Fatalf("cancelled readiness caused side effect: %v", err)
+	}
+}
+
+func TestBackendNodeReadinessDirectFirstBindOwner(t *testing.T) {
+	c := newBackendNodeClient(&processNodeBackend{}, "default", nil, "", ResourceLimits{}, nil)
+	c.BindSession("parent")
+	if err := c.EnsureReady("child"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.SandboxSessionID(); got != "parent" {
+		t.Fatalf("owner = %q", got)
+	}
+	c.discard()
+	if err := c.EnsureReady("child"); err == nil {
+		t.Fatal("discarded client became ready")
 	}
 }

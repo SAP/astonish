@@ -69,232 +69,233 @@ const backendExecTimeout = 5 * time.Minute
 //
 // One instance per sessionID. Construction is cheap (no I/O); BindSession
 // triggers the first network round-trip. Safe for concurrent Call().
+type backendReadinessState uint8
+
+const (
+	backendUnbound backendReadinessState = iota
+	backendPreparing
+	backendReady
+	backendFailed
+	backendClosed
+)
+
+// Each attempt owns its result and signal. Waiters never observe a later
+// generation's result or close a channel that another generation replaced.
+type backendPrepareAttempt struct {
+	initial    bool // first provisioning has not successfully created the owner
+	created    bool // initial CreateSession succeeded; published with done
+	generation uint64
+	done       chan struct{}
+	cancel     context.CancelFunc
+	err        error // published before done closes
+}
+
 type backendNodeClient struct {
 	backend    Backend
-	sessionID  string   // set by BindSession; stable after first call
-	templateID string   // may be empty → backend default
-	layerChain []string // pre-resolved chain (K8s); nil → derive from templateID
-	image      string   // per-template container image (OpenShell); empty → backend default
+	sessionID  string // immutable owner: pool construction or first direct bind
+	templateID string
+	layerChain []string
+	image      string
 	limits     ResourceLimits
 	sessionEnv map[string]string
 
-	mu       sync.Mutex
-	bound    bool          // BindSession has run
-	bindDone chan struct{} // closed once the create/start round-trip finishes
-	bindErr  error         // captured on bindDone close
-	closed   bool          // Cleanup has run
-	// networkAllowEndpoints are baked into OpenShell CreateSession when set
-	// before BindSession completes provisioning (see SetNetworkAllowEndpoints).
+	mu                    sync.Mutex
+	state                 backendReadinessState
+	generation            uint64
+	attempt               *backendPrepareAttempt
+	closedDone            chan struct{}
 	networkAllowEndpoints []NetworkAllowEndpoint
 }
 
-// newBackendNodeClient constructs a client. The session is NOT created until
-// BindSession is called; the client is inert until then so the caller may
-// defer provisioning until it knows the LLM actually needs a tool.
 func newBackendNodeClient(b Backend, templateID string, layerChain []string, image string, limits ResourceLimits, sessionEnv map[string]string) *backendNodeClient {
+	env := make(map[string]string, len(sessionEnv))
+	for k, v := range sessionEnv {
+		env[k] = v
+	}
 	return &backendNodeClient{
-		backend:    b,
-		templateID: templateID,
-		layerChain: layerChain,
-		image:      image,
-		limits:     limits,
-		sessionEnv: sessionEnv,
+		backend: b, templateID: templateID,
+		layerChain: append([]string(nil), layerChain...), image: image,
+		limits: limits, sessionEnv: env,
 	}
 }
 
-// BindSession creates + starts the backend session for sessionID if this is
-// the first call. Subsequent calls (any sessionID) are no-ops — matches
-// LazyNodeClient.BindSession semantics so ToolNodeClient behaves uniformly.
-//
-// The actual Backend.CreateSession / StartSession runs in a background
-// goroutine so the LLM call overlaps with container provisioning, mirroring
-// the Incus path's latency optimisation.
+// SandboxSessionID returns the stable physical owner, never a delegate ID.
+func (c *backendNodeClient) SandboxSessionID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionID
+}
+
+// BindSession only warms the first attempt; readiness calls coordinate retries.
 func (c *backendNodeClient) BindSession(sessionID string) {
 	if sessionID == "" {
 		return
 	}
 	c.mu.Lock()
-	if c.bound || c.closed {
-		c.mu.Unlock()
-		return
-	}
-	c.sessionID = sessionID
-	c.bound = true
-	c.bindDone = make(chan struct{})
-	c.mu.Unlock()
-
-	go c.provision(sessionID)
-}
-
-// resetBind clears a completed bind so BindSession can provision again.
-// Used when the underlying sandbox was destroyed (e.g. ephemeral adaptive
-// scheduler runs) but this client is still cached in the pool.
-func (c *backendNodeClient) resetBind() {
-	c.mu.Lock()
-	done := c.bindDone
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
-		return
-	}
-	if done != nil {
-		<-done // wait for in-flight provision before flipping bound
-	}
-	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.state != backendUnbound {
 		return
 	}
-	c.bound = false
-	c.bindDone = nil
-	c.bindErr = nil
-	c.sessionID = ""
+	if c.sessionID == "" {
+		c.sessionID = sessionID
+	}
+	c.startPrepareLocked()
 }
 
-// sessionStillReady reports whether the backend still has a usable sandbox
-// for sessionID after a prior successful bind.
-func (c *backendNodeClient) sessionStillReady(sessionID string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	state, err := c.backend.SessionState(ctx, sessionID)
-	if err != nil {
-		return false
+// startPrepareLocked snapshots all inputs before starting backend I/O.
+func (c *backendNodeClient) startPrepareLocked() *backendPrepareAttempt {
+	c.generation++
+	ctx, cancel := context.WithTimeout(context.Background(), backendExecTimeout)
+	initial := c.state == backendUnbound || (c.state == backendFailed && c.attempt.initial && !c.attempt.created)
+	a := &backendPrepareAttempt{initial: initial, generation: c.generation, done: make(chan struct{}), cancel: cancel}
+	if c.closedDone == nil {
+		c.closedDone = make(chan struct{})
 	}
-	switch state {
-	case SessionStateRunning, SessionStateCreating, SessionStateResuming:
-		return true
-	default:
-		return false
+	c.attempt, c.state = a, backendPreparing
+	env := make(map[string]string, len(c.sessionEnv))
+	for k, v := range c.sessionEnv {
+		env[k] = v
 	}
+	spec := SessionSpec{
+		SessionID: c.sessionID, Type: SessionTypeChat, TemplateID: c.templateID,
+		LayerChain: append([]string(nil), c.layerChain...), Image: c.image,
+		Limits: c.limits, Env: env,
+		NetworkAllowEndpoints: append([]NetworkAllowEndpoint(nil), c.networkAllowEndpoints...),
+	}
+	go c.provision(ctx, c.backend, spec, a)
+	return a
 }
 
-// EnsureReady satisfies ToolNodeClient. It triggers provisioning (via
-// BindSession) and blocks until the sandbox session is fully running.
-// Returns nil on success or the provisioning error.
-//
-// If a prior bind completed but the sandbox is gone (destroyed externally
-// or by an ephemeral adaptive run), EnsureReady resets the bind and
-// provisions a fresh session. An in-flight first bind is not treated as
-// "gone" — SessionState would still be absent until CreateSession finishes.
 func (c *backendNodeClient) EnsureReady(sessionID string) error {
-	if sessionID == "" {
-		return fmt.Errorf("backend node client: no session bound (empty session ID)")
-	}
+	return c.EnsureReadyContext(context.Background(), sessionID)
+}
 
+// EnsureReadyContext joins a shared bounded preparation. Cancelling one waiter
+// does not cancel preparation needed by another. A completed attempt is checked
+// again on the next call, including backend overlay readiness when running.
+func (c *backendNodeClient) EnsureReadyContext(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
-	alreadyBound := c.bound && !c.closed
-	done := c.bindDone
-	c.mu.Unlock()
-
-	if alreadyBound && done != nil {
-		select {
-		case <-done:
-			// Prior bind finished — re-provision if the sandbox disappeared.
-			c.mu.Lock()
-			priorErr := c.bindErr
-			c.mu.Unlock()
-			if priorErr != nil || !c.sessionStillReady(sessionID) {
-				slog.Info("backend node client: re-binding after sandbox gone",
-					"component", "sandbox", "session", shortSession(sessionID))
-				c.resetBind()
-			}
-		default:
-			// First provision still running — wait below, do not reset.
-		}
-	}
-
-	c.BindSession(sessionID)
-
-	c.mu.Lock()
-	done = c.bindDone
-	closed := c.closed
-	c.mu.Unlock()
-
-	if done == nil {
-		return fmt.Errorf("backend node client: no session bound (empty session ID)")
-	}
-	if closed {
+	if c.state == backendClosed {
+		c.mu.Unlock()
 		return fmt.Errorf("backend node client: closed")
 	}
-	<-done
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.bindErr
+	if c.sessionID == "" {
+		if sessionID == "" {
+			c.mu.Unlock()
+			return fmt.Errorf("backend node client: no session bound (empty session ID)")
+		}
+		c.sessionID = sessionID
+	}
+	a := c.attempt
+	if c.state != backendPreparing {
+		a = c.startPrepareLocked()
+	}
+	closedDone := c.closedDone
+	c.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-closedDone:
+		return fmt.Errorf("backend node client: closed")
+	case <-a.done:
+		c.mu.Lock()
+		closed := c.state == backendClosed
+		c.mu.Unlock()
+		if closed {
+			return fmt.Errorf("backend node client: closed")
+		}
+		return a.err
+	}
 }
 
-// SetNetworkAllowEndpoints stashes DB allow rules for CreateSession. Must be
-// called before BindSession's provision goroutine reads the spec (typically
-// from NodeTool.ProcessRequest before BindSession). Ignored after bind starts
-// if create already used an empty list — PreSeed-before-Call covers that case.
+// SetNetworkAllowEndpoints supplies allow rules for the next create snapshot.
+// Already captured attempts are immutable; later recovery retains these rules.
 func (c *backendNodeClient) SetNetworkAllowEndpoints(endpoints []NetworkAllowEndpoint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.bound {
-		// Provision may already be running; still store for a late CreateSession
-		// that has not yet copied the slice (provision reads under lock below).
-		if len(c.networkAllowEndpoints) > 0 {
-			return
-		}
+	if c.state == backendClosed || (c.state != backendUnbound && len(c.networkAllowEndpoints) > 0) {
+		return
 	}
 	c.networkAllowEndpoints = append([]NetworkAllowEndpoint(nil), endpoints...)
 }
 
-// GetBackend exposes the underlying Backend for credential file PushFile and similar.
-func (c *backendNodeClient) GetBackend() Backend {
-	return c.backend
+func (c *backendNodeClient) GetBackend() Backend { return c.backend }
+
+func (c *backendNodeClient) provision(ctx context.Context, backend Backend, spec SessionSpec, a *backendPrepareAttempt) {
+	defer a.cancel()
+	err := func() error {
+		// A new owner is not registered yet on authorization-enforcing backends.
+		// Initial creation is intentional, not recovery inferred from an error.
+		if a.initial {
+			if _, err := backend.CreateSession(ctx, spec); err != nil {
+				return fmt.Errorf("backend create session: %w", err)
+			}
+			a.created = true
+			if err := backend.StartSession(ctx, spec.SessionID); err != nil {
+				return fmt.Errorf("backend start session: %w", err)
+			}
+			if err := backend.WaitForSessionReady(ctx, spec.SessionID); err != nil {
+				return fmt.Errorf("backend wait for session ready: %w", err)
+			}
+			return nil
+		}
+		return prepareBackendSession(ctx, backend, spec)
+	}()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a.err = err
+	if c.state != backendClosed && c.generation == a.generation {
+		if err != nil {
+			c.state = backendFailed
+		} else {
+			c.state = backendReady
+		}
+	}
+	close(a.done)
 }
 
-// provision does the CreateSession + StartSession round trip. Any error is
-// captured on c.bindErr; bindDone is always closed exactly once.
-func (c *backendNodeClient) provision(sessionID string) {
-	defer close(c.bindDone)
-
-	// Cap provisioning at the backend-exec timeout; CreateSession on a
-	// sick cluster should fail loudly rather than block forever.
-	ctx, cancel := context.WithTimeout(context.Background(), backendExecTimeout)
-	defer cancel()
-
-	spec := SessionSpec{
-		SessionID:  sessionID,
-		Type:       SessionTypeChat,
-		TemplateID: c.templateID,
-		LayerChain: c.layerChain,
-		Image:      c.image,
-		Limits:     c.limits,
-		Env:        c.sessionEnv,
-	}
-	c.mu.Lock()
-	if len(c.networkAllowEndpoints) > 0 {
-		spec.NetworkAllowEndpoints = append([]NetworkAllowEndpoint(nil), c.networkAllowEndpoints...)
-	}
-	c.mu.Unlock()
-	if _, err := c.backend.CreateSession(ctx, spec); err != nil {
-		c.mu.Lock()
-		c.bindErr = fmt.Errorf("backend create session: %w", err)
-		c.mu.Unlock()
-		return
-	}
-	// StartSession is idempotent per the Backend contract; calling it here
-	// is defensive: some backends (mock) consider CreateSession sufficient,
-	// others (k8s pod) need an explicit Start to move from Pending→Running.
-	if err := c.backend.StartSession(ctx, sessionID); err != nil {
-		c.mu.Lock()
-		c.bindErr = fmt.Errorf("backend start session: %w", err)
-		c.mu.Unlock()
-		return
-	}
-	// Wait for the sandbox to reach Running state before allowing Exec.
-	// Required by the Backend contract (see Backend.WaitForSessionReady doc):
-	// "Callers that need to exec into a session immediately after
-	// CreateSession MUST call this first."
-	// On Incus this returns in <1s; on K8s/OpenShell it polls until the
-	// pod reaches Running phase (image pull + scheduling may take seconds).
-	if err := c.backend.WaitForSessionReady(ctx, sessionID); err != nil {
-		c.mu.Lock()
-		c.bindErr = fmt.Errorf("backend wait for session ready: %w", err)
-		c.mu.Unlock()
-		return
+func prepareBackendSession(ctx context.Context, backend Backend, spec SessionSpec) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		state, err := backend.SessionState(ctx, spec.SessionID)
+		if err != nil {
+			return fmt.Errorf("backend inspect session: %w", err)
+		}
+		switch state {
+		case SessionStateGone:
+			if _, err := backend.CreateSession(ctx, spec); err != nil {
+				return fmt.Errorf("backend create session: %w", err)
+			}
+			if err := backend.StartSession(ctx, spec.SessionID); err != nil {
+				return fmt.Errorf("backend start session: %w", err)
+			}
+		case SessionStateStopped: // Includes evicted sessions with preserved data.
+			if err := backend.StartSession(ctx, spec.SessionID); err != nil {
+				return fmt.Errorf("backend start session: %w", err)
+			}
+		case SessionStateRunning, SessionStateCreating, SessionStateResuming:
+			// Running is not sufficient: the overlay/entrypoint must be ready.
+		case SessionStateEvicting:
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				continue
+			}
+		default:
+			return fmt.Errorf("backend session has unsupported state %q", state)
+		}
+		if err := backend.WaitForSessionReady(ctx, spec.SessionID); err != nil {
+			return fmt.Errorf("backend wait for session ready: %w", err)
+		}
+		return nil
 	}
 }
 
@@ -307,29 +308,12 @@ func (c *backendNodeClient) provision(sessionID string) {
 // one NDJSON response. Stderr is logged but not propagated — in-sandbox
 // logs stay in-sandbox unless debug is explicitly wired.
 func (c *backendNodeClient) Call(sessionID, toolName string, args map[string]interface{}) (json.RawMessage, error) {
-	// Safety net: ProcessRequest should have called BindSession already,
-	// but the contract permits skipping it. Bind synchronously here.
-	c.BindSession(sessionID)
-
-	c.mu.Lock()
-	done := c.bindDone
-	closed := c.closed
-	c.mu.Unlock()
-	if done == nil {
-		return nil, fmt.Errorf("backend node client: no session bound (empty session ID)")
-	}
-	if closed {
-		return nil, fmt.Errorf("backend node client: closed")
-	}
-	<-done
-
-	c.mu.Lock()
-	if c.bindErr != nil {
-		err := c.bindErr
-		c.mu.Unlock()
+	// Readiness belongs here as well as in NodeTool: direct callers must
+	// recover before dispatch. Never retry after Exec may have started.
+	if err := c.EnsureReady(sessionID); err != nil {
 		return nil, err
 	}
-	c.mu.Unlock()
+	owner := c.SandboxSessionID()
 
 	// Build NDJSON request. Request ID is synthetic — the one-shot Exec
 	// only ever sees a single request/response pair, but the node server
@@ -352,14 +336,14 @@ func (c *backendNodeClient) Call(sessionID, toolName string, args map[string]int
 		Command: []string{"astonish", "node"},
 		Stdin:   bytes.NewReader(reqBytes),
 	}
-	res, err := c.backend.Exec(ctx, c.sessionID, spec)
+	res, err := c.backend.Exec(ctx, owner, spec)
 	if err != nil {
 		return nil, fmt.Errorf("backend exec: %w", err)
 	}
 
 	if len(res.Stderr) > 0 {
 		slog.Debug("backend node stderr", "component", "sandbox",
-			"session", shortSession(c.sessionID),
+			"session", shortSession(owner),
 			"tool", toolName,
 			"stderr", truncate(string(res.Stderr), 512))
 	}
@@ -376,44 +360,56 @@ func (c *backendNodeClient) Call(sessionID, toolName string, args map[string]int
 // Safe to call multiple times; subsequent calls are no-ops.
 func (c *backendNodeClient) close() {
 	c.mu.Lock()
-	if c.closed {
+	if c.state == backendClosed {
 		c.mu.Unlock()
 		return
 	}
-	c.closed = true
-	sessionID := c.sessionID
-	done := c.bindDone
+	c.markClosedLocked()
+	sessionID, a := c.sessionID, c.attempt
 	c.mu.Unlock()
-
-	// If bind never finished, wait briefly so we don't orphan a
-	// half-created session.
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			slog.Warn("backend node client: bind did not complete before close",
-				"component", "sandbox", "session", shortSession(sessionID))
+	// Cancellation prevents normal backends from creating after teardown. If a
+	// backend ignores cancellation, defer destruction until it actually exits.
+	destroy := func() {
+		if sessionID == "" {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := c.backend.DestroySession(ctx, sessionID); err != nil {
+			slog.Warn("backend destroy session failed", "component", "sandbox", "session", shortSession(sessionID), "error", err)
 		}
 	}
-	if sessionID == "" {
-		return
+	if a != nil {
+		select {
+		case <-a.done:
+		case <-time.After(10 * time.Second):
+			slog.Warn("backend node client: preparation did not complete before close", "component", "sandbox", "session", shortSession(sessionID))
+			go func() { <-a.done; destroy() }()
+			return
+		}
 	}
+	destroy()
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := c.backend.DestroySession(ctx, sessionID); err != nil {
-		slog.Warn("backend destroy session failed", "component", "sandbox",
-			"session", shortSession(sessionID), "error", err)
+// markClosedLocked is terminal: a late preparation cannot publish ready.
+func (c *backendNodeClient) markClosedLocked() {
+	c.state = backendClosed
+	if c.closedDone == nil {
+		c.closedDone = make(chan struct{})
+	}
+	close(c.closedDone)
+	if c.attempt != nil {
+		c.attempt.cancel()
 	}
 }
 
-// discard marks the client unusable without calling Backend.DestroySession.
-// Used by pool.Remove after the caller already destroyed the sandbox
-// (ephemeral adaptive runs) so we do not race a second destroy.
+// discard marks the client unusable without destroying the stable owner.
 func (c *backendNodeClient) discard() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.closed = true
+	if c.state != backendClosed {
+		c.markClosedLocked()
+	}
 }
 
 // maxNodeResponseLineBytes bounds one NDJSON line, excluding its LF/CRLF
@@ -590,6 +586,7 @@ func (p *backendPool) getOrCreate(sessionID, template string, chain []string, im
 		return c
 	}
 	c := newBackendNodeClient(p.backend, template, chain, image, p.limits, nil)
+	c.sessionID = sessionID // pin before any aliased child can bind
 	p.clients[sessionID] = c
 	return c
 }

@@ -88,10 +88,17 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 			if client == nil {
 				return fmt.Errorf("no sandbox client for session %q", sessionID)
 			}
-			return client.EnsureReady(sessionID)
+			return EnsureToolClientReady(ctx, client, sessionID)
 		}
 	}
+	canonicalOwner := func(sessionID string) string {
+		if pool != nil {
+			return CanonicalSessionID(pool.GetOrCreate(sessionID), sessionID)
+		}
+		return sessionID
+	}
 	mgr.ContainerResolveFunc = func(sessionID string) (string, string, error) {
+		sessionID = canonicalOwner(sessionID)
 		if sessReg != nil {
 			rec, err := sessReg.GetSession(sessionID)
 			if err != nil || !sessionRuntimeBound(rec) {
@@ -113,7 +120,9 @@ func WireBackendBrowserManager(mgr *browser.Manager, backend Backend, sessReg *S
 		return startBackendRecording(context.Background(), backend, containerName, display, outPath)
 	}
 	if touchActivity != nil {
-		mgr.ActivityTouchFunc = touchActivity
+		mgr.ActivityTouchFunc = func(sessionID string) {
+			touchActivity(canonicalOwner(sessionID))
+		}
 	}
 	return true
 }

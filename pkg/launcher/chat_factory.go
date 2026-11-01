@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/a2aclient"
@@ -350,14 +351,84 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	return result, err
 }
 
-func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
-	phaseStarted := time.Now()
-	var cleanups []func()
-	cleanup := func() {
-		// Run cleanups in reverse order (LIFO, like defer)
+// mcpCleanupRegistry owns both initial and dynamically discovered toolsets.
+// Registration after shutdown immediately disposes the toolset and refuses to
+// publish it. Cleanup callbacks run outside the lock and at most once.
+type mcpCleanupRegistry struct {
+	mu       sync.Mutex
+	closed   bool
+	cleanups []func()
+	once     sync.Once
+}
+
+func (r *mcpCleanupRegistry) add(cleanup func()) bool {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		cleanup()
+		return false
+	}
+	r.cleanups = append(r.cleanups, cleanup)
+	r.mu.Unlock()
+	return true
+}
+
+func (r *mcpCleanupRegistry) Cleanup() {
+	r.once.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		cleanups := r.cleanups
+		r.cleanups = nil
+		r.mu.Unlock()
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			cleanups[i]()
 		}
+	})
+}
+
+func wireMCPToolset(lt *agent.LazyMCPToolset, pool sandbox.ToolNodePool) {
+	if pool != nil {
+		lt.SetSandboxPool(pool)
+	}
+}
+
+func newDelegateMCPGroup(serverName string, entries []cache.ToolEntry, cfg config.MCPServerConfig, debug bool, resolver credentials.CredentialResolver, pool sandbox.ToolNodePool, cleanups *mcpCleanupRegistry) *agent.ToolGroup {
+	lt := agent.NewLazyMCPToolset(serverName, entries, cfg, debug)
+	lt.SetCredentialResolver(resolver)
+	wireMCPToolset(lt, pool)
+	if !cleanups.add(lt.Cleanup) {
+		return nil
+	}
+	return &agent.ToolGroup{
+		Name:        "mcp:" + serverName,
+		Description: fmt.Sprintf("MCP server: %s (%d tools)", serverName, lt.ToolCount()),
+		Toolsets:    []tool.Toolset{agent.NewSanitizedToolset(lt, debug)},
+	}
+}
+
+func aliasBackendChildSession(pool sandbox.ToolNodePool, mgr *browser.Manager, parentID, childID string) {
+	// The parent's client is already owner-pinned even before provisioning.
+	// Browser aliases are one-hop, so nested children must point to the owner.
+	owner := sandbox.CanonicalSessionID(pool.GetOrCreate(parentID), parentID)
+	pool.Alias(childID, parentID)
+	mgr.AliasSession(childID, owner)
+}
+
+func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
+	phaseStarted := time.Now()
+	var cleanups []func()
+	mcpCleanups := &mcpCleanupRegistry{}
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			// Stop accepting dynamically discovered MCP groups before disposing
+			// their sandbox/backend dependencies.
+			mcpCleanups.Cleanup()
+			// Run remaining cleanups in reverse order (LIFO, like defer).
+			for i := len(cleanups) - 1; i >= 0; i-- {
+				cleanups[i]()
+			}
+		})
 	}
 
 	// --- 0. Initialize credential store (must happen before LLM — secrets are scrubbed from config after migration) ---
@@ -836,11 +907,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// Each server is registered as its own tool group (mcp:<name>)
 		// in section 4b below, wrapped in SanitizedToolset at that point.
 	}
-	cleanups = append(cleanups, func() {
-		for _, lt := range lazyToolsets {
-			lt.Cleanup()
-		}
-	})
+	for _, lt := range lazyToolsets {
+		mcpCleanups.add(lt.Cleanup)
+	}
 
 	// Track startup notices
 	var startupNotices []string
@@ -1064,7 +1133,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// inside the session's sandbox (same as Incus path). SSE
 			// transports are unaffected (isSSETransport check inside).
 			for _, lt := range lazyToolsets {
-				lt.SetSandboxPool(pool)
+				wireMCPToolset(lt, pool)
 			}
 			if len(lazyToolsets) > 0 {
 				slog.Info("sandbox MCP routing enabled for backend",
@@ -1773,7 +1842,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if mcpCfg != nil {
 			capturedMCPCfg := mcpCfg
 			capturedDebugMode := cfg.DebugMode
-			capturedCredStore := credStore
+			capturedPool := backendSandboxPool
+			if sandboxNodePool != nil {
+				capturedPool = sandbox.AsNodePool(sandboxNodePool)
+			}
+			capturedCredStore := optionalCredentialResolver(credStore)
 			subAgentMgr.MCPGroupResolver = func(ctx context.Context, serverName string) *agent.ToolGroup {
 				serverCfg, exists := capturedMCPCfg.MCPServers[serverName]
 				if !exists || !serverCfg.IsEnabled() {
@@ -1825,17 +1898,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					return nil
 				}
 				// Build the ToolGroup on-the-fly
-				lt := agent.NewLazyMCPToolset(serverName, cachedTools, serverCfg, capturedDebugMode)
-				if capturedCredStore != nil {
-					lt.SetCredentialResolver(capturedCredStore)
-				}
-				sanitized := agent.NewSanitizedToolset(lt, capturedDebugMode)
-				groupName := "mcp:" + serverName
-				return &agent.ToolGroup{
-					Name:        groupName,
-					Description: fmt.Sprintf("MCP server: %s (%d tools)", serverName, lt.ToolCount()),
-					Toolsets:    []tool.Toolset{sanitized},
-				}
+				return newDelegateMCPGroup(serverName, cachedTools, serverCfg, capturedDebugMode, capturedCredStore, capturedPool, mcpCleanups)
 			}
 		}
 
@@ -1950,19 +2013,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		} else if backendSandboxPool != nil {
 			pool := backendSandboxPool
-			bmgr := browserMgr // capture for closure
-			sessReg := backendSessRegistry
+			bmgr := browserMgr
 			subAgentMgr.OnChildSession = func(parentSessionID, childSessionID string) {
-				pool.Alias(childSessionID, parentSessionID)
-				bmgr.AliasSession(childSessionID, parentSessionID)
-				// Register the child session in the backend session registry
-				// so Backend.ExecStreaming (MCP servers) and other non-pool
-				// paths can resolve the child to the parent's pod/container.
-				if sessReg != nil {
-					if entry := sessReg.Get(parentSessionID); entry != nil {
-						_ = sessReg.Put(childSessionID, entry.ContainerName, entry.TemplateName)
-					}
-				}
+				aliasBackendChildSession(pool, bmgr, parentSessionID, childSessionID)
 			}
 		}
 		// Wire sub-agent authorization gate for code-mode HITL.

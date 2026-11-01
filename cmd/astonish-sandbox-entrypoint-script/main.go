@@ -1,8 +1,9 @@
 // Command astonish-sandbox-entrypoint-script emits the canonical
 // astonish-sandbox-entrypoint POSIX-shell script to stdout.
 //
-// The script is the PID-1 entrypoint for sandbox pods in the K8s+Sysbox
-// backend. Its source of truth lives in pkg/sandbox/k8s.EntrypointScript;
+// The script is the PID-1 entrypoint for Docker and K8s overlay sandboxes.
+// It owns the exclusive lock and transactional initialization marker contract.
+// Its source of truth lives in pkg/sandbox/k8s.EntrypointScript;
 // this command exists so image builders can generate the script
 // deterministically without invoking the main astonish binary, which
 // would pull in the full server + UI.

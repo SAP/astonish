@@ -219,15 +219,16 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 
 	// Ensure sandbox is up, then PreSeed DB allow rules BEFORE any tool Exec
 	// so the first Keystone/HTTP CONNECT is not CONNECT-403.
-	if err := client.EnsureReady(sessionID); err != nil {
+	if err := EnsureToolClientReady(ctx, client, sessionID); err != nil {
 		return nil, err
 	}
-	ensureNetworkPolicyPreSeed(ctx, sessionID)
+	owner := CanonicalSessionID(client, sessionID)
+	ensureNetworkPolicyPreSeed(ctx, owner)
 
 	// Provision session credential vault only for http_request so a PushFile
 	// failure cannot brick shell/file tools. Keystone/OAuth stay in-sandbox.
 	if nt.Name() == "http_request" {
-		if err := SyncSessionCredentialVault(ctx, nt.backendForPush(client), nil, sessionID); err != nil {
+		if err := SyncSessionCredentialVault(ctx, nt.backendForPush(client), nil, owner); err != nil {
 			return nil, err
 		}
 	}

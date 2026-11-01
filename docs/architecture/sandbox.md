@@ -92,6 +92,60 @@ Idle/cleanup:
   - Session deletion removes the container and overlay volume
 ```
 
+### Transparent recovery and physical ownership
+
+Backend-pool clients pin one physical sandbox owner at construction (or the first
+bind for a directly constructed client). Delegate IDs remain logical identities
+for history, attribution and MCP cleanup; aliasing never changes the physical
+owner. File/shell calls, credential provisioning, MCP startup and browser tunnel
+resolution use that owner. Dynamically discovered MCP groups receive the same
+pool as initially configured groups. Local Code mode remains host-based.
+
+Before execution, callers join a bounded readiness attempt (five minutes maximum).
+An unbound client creates its owner; preparing callers join the same attempt;
+running/creating/resuming sessions still wait for overlay readiness; stopped
+sessions resume; evicting sessions are polled; a missing container is recreated
+with its original configuration. Inspection errors are not absence. Failed
+attempts can be retried by a subsequent call; cancelling a waiter does not cancel
+other waiters, and closing a client is terminal. Shell and MCP methods are never
+replayed after execution may have started. Broken MCP transports reconnect before
+a subsequent invocation; genuine storage/configuration errors remain visible.
+No recovery instructions, new SSE events or agent prompt changes are required.
+
+The named Docker volume is authoritative. Stop archives a ready upper then stops
+the container, retaining both container and volume. Container-only loss reuses the
+volume, including files newer than the archive. Ordinary template builds do not
+prune dangling volumes: an offline session can still own one. Explicit deletion
+and authoritative orphan cleanup remain permanent and retain their existing
+ownership safeguards. Failed volume deletion retains recovery metadata for retry.
+
+The canonical entrypoint holds an exclusive `flock` through workload handoff.
+Version/session/chain markers live outside `upper/`; initialized upper storage,
+including empty storage, wins over archives. Unmarked nonempty legacy uppers are
+adopted before preseed. Missing/uninitialized empty uppers restore into staging,
+then publish only after successful extraction. Interrupted staging is discarded
+on retry; corruption and identity mismatches fail without exposing partial data.
+Fresh K8s `emptyDir` still restores its archive (current and legacy archive paths
+are supported); PVC layout is unchanged. Native OpenShell supervision does not
+consume these overlay markers.
+
+Docker stores a versioned, atomically written `0600` launch sidecar next to the
+archive: original image, resolved chain, template, identity, labels and limits.
+Environment values and resolved credentials are not serialized. Recreation that
+requires unavailable environment values fails until fresh authorized values are
+provided. Legacy containers can supply inspected structural metadata; incomplete
+legacy recovery configuration fails safely rather than inventing another template
+or owner. Sidecars are recovery recipes, not authorization records. Registry owner,
+pinning, ports and creation metadata are preserved. Lifecycle serialization spans
+backend instances in one process; this is single-host/single-controller durability,
+not distributed Docker storage or multi-process writer support.
+
+Deploy both backend changes and the rebuilt canonical entrypoint together:
+`make sandbox-entrypoint` and `make docker-sandbox-base`. Existing containers keep
+their original image; a host binary update alone does not update their entrypoint.
+Do not discard user volumes to apply the change. These guarantees cannot recover
+bytes already lost before deployment.
+
 ### Template system
 
 - **@base**: Root layer. Created during `sandbox init` or Studio Rebuild Base

@@ -305,27 +305,65 @@ fi
 	writeSingleQuoted(&b, string(opts.Mode))
 	b.WriteString("\n\n")
 
-	// Resume path.
-	b.WriteString(`# --- 1. Resume from persisted upper (if present) -----------------------
-# When a previously-evicted session is restarted, Astonish mounts only that
-# session's uppers PVC subdirectory at $UPPERS_DIR. Stream the saved upper back
-# onto the local emptyDir before the overlay mount. Older pods mounted the PVC
-# root and used $UPPERS_DIR/<session>/upper.tar.zst; the fallback keeps those
-# sessions resumable during rolling upgrades without exposing other sessions to
-# the chrooted sandbox.
-RESUME_TAR="$UPPERS_DIR/upper.tar.zst"
-if [ ! -f "$RESUME_TAR" ] && [ -f "$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst" ]; then
-  RESUME_TAR="$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst"
+	// Transactional initialization shared by Docker volumes and K8s emptyDir.
+	b.WriteString(`# --- 1. Initialize durable upper under exclusive ownership -------------
+# FD 9 remains open across workload handoff: another composer cannot mount this
+# upper while the workload still owns it. This is a local-filesystem lock.
+OVERLAY_ROOT="${UPPER_DIR%/*}"
+mkdir -p "$OVERLAY_ROOT"
+exec 9>"$OVERLAY_ROOT/.astonish-overlay.lock"
+flock -n 9 || { echo "astonish-entrypoint: overlay already owned" >&2; exit 1; }
+if mountpoint -q "$MOUNT_POINT"; then
+  echo "astonish-entrypoint: overlay already mounted" >&2
+  exit 1
 fi
-if [ -f "$RESUME_TAR" ]; then
-  echo "astonish-entrypoint: resuming upper from $RESUME_TAR" 1>&2
+INIT_MARKER="$OVERLAY_ROOT/.astonish-overlay-v1"
+RESTORE_MARKER="$OVERLAY_ROOT/.astonish-restore-in-progress"
+STAGING_DIR="$OVERLAY_ROOT/.astonish-restore-staging"
+IDENTITY=$(printf 'version=1\nsession=%s\nchain=%s' "$ASTONISH_SESSION_ID" "$ASTONISH_LAYER_CHAIN")
+if [ -f "$INIT_MARKER" ]; then
+  [ "$(cat "$INIT_MARKER")" = "$IDENTITY" ] || {
+    echo "astonish-entrypoint: overlay identity or chain mismatch" >&2; exit 1;
+  }
+  [ -d "$UPPER_DIR" ] || { echo "astonish-entrypoint: initialized upper missing" >&2; exit 1; }
+else
+  if [ -f "$RESTORE_MARKER" ]; then
+    [ "$(cat "$RESTORE_MARKER")" = "$IDENTITY" ] || {
+      echo "astonish-entrypoint: interrupted restore identity mismatch" >&2; exit 1;
+    }
+    # A published upper is complete even if the final marker was interrupted.
+    rm -rf "$STAGING_DIR"
+  fi
   mkdir -p "$UPPER_DIR"
-  tar --numeric-owner --xattrs --acls -I zstd -xf "$RESUME_TAR" -C "$UPPER_DIR"
+  # Include dotfiles, whiteouts and symlinks; adopt legacy data before preseed.
+  if [ -z "$(find "$UPPER_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    RESUME_TAR="$UPPERS_DIR/upper.tar.zst"
+    if [ ! -f "$RESUME_TAR" ] && [ -f "$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst" ]; then
+      RESUME_TAR="$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst"
+    fi
+    if [ -f "$RESUME_TAR" ]; then
+      printf '%s\n' "$IDENTITY" > "$RESTORE_MARKER.tmp"
+      mv "$RESTORE_MARKER.tmp" "$RESTORE_MARKER"
+      rm -rf "$STAGING_DIR"
+      mkdir "$STAGING_DIR"
+      echo "astonish-entrypoint: restoring upper from $RESUME_TAR" >&2
+      if ! tar --numeric-owner --xattrs --acls -I zstd -xf "$RESUME_TAR" -C "$STAGING_DIR"; then
+        rm -rf "$STAGING_DIR"
+        echo "astonish-entrypoint: restore failed; upper not published" >&2
+        exit 1
+      fi
+      rmdir "$UPPER_DIR"
+      mv "$STAGING_DIR" "$UPPER_DIR"
+    fi
+  fi
+  printf '%s\n' "$IDENTITY" > "$INIT_MARKER.tmp"
+  mv "$INIT_MARKER.tmp" "$INIT_MARKER"
 fi
-
-# Always ensure the overlay dirs exist; on fresh sessions they're
-# already present (emptyDir mounts) but this is cheap and idempotent.
-mkdir -p "$UPPER_DIR" "$WORK_DIR" "$MOUNT_POINT"
+rm -f "$RESTORE_MARKER"
+# Work is scratch; reset only under exclusive ownership before mount.
+[ "${WORK_DIR%/*}" = "$OVERLAY_ROOT" ] && [ "$WORK_DIR" != "$UPPER_DIR" ] || exit 1
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR" "$MOUNT_POINT"
 `)
 
 	// Pre-overlay: ensure /dev, /proc, /sys exist in the upper dir so

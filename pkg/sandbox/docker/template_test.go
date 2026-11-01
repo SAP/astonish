@@ -10,6 +10,41 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox/docker"
 )
 
+func TestBuildTemplateDoesNotPruneRetainedSessionVolumes(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "docker.log")
+	runtime := filepath.Join(t.TempDir(), "docker")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$ASTONISH_TEST_DOCKER_LOG"
+# Fail only creation; the absence of volume enumeration/removal is the contract.
+if [ "$1" = inspect ]; then echo 'No such container' >&2; exit 1; fi
+if [ "$1" = container ]; then exit 42; fi
+`
+	if err := os.WriteFile(runtime, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ASTONISH_TEST_DOCKER_LOG", log)
+	layers := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(layers, "parent", "rootfs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := docker.New(docker.Config{Sessions: newTestRegistry(t), LayersDir: layers, UppersDir: t.TempDir(), ContainerRuntimePath: runtime, SandboxImage: "test-image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BuildTemplate(t.Context(), sandbox.TemplateBuildSpec{TemplateID: "unrelated", ParentLayers: []string{"parent"}}); err == nil {
+		t.Fatal("expected fixture creation failure")
+	}
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"volume ls", "volume rm", "prune"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("build performed global cleanup: %s", raw)
+		}
+	}
+}
+
 func TestAliasLayer_CreatesRelativeSymlink(t *testing.T) {
 	r := newTestRegistry(t)
 	b, err := docker.New(newTestConfig(t, r))

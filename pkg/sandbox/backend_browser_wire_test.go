@@ -13,6 +13,113 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+type browserOwnerReadyClient struct {
+	browserReadySpyClient
+	owner string
+	ctx   context.Context
+}
+
+func (c *browserOwnerReadyClient) SandboxSessionID() string { return c.owner }
+func (c *browserOwnerReadyClient) EnsureReadyContext(ctx context.Context, id string) error {
+	c.ctx = ctx
+	c.sessionID = id
+	return ctx.Err()
+}
+
+type browserOwnerExecBackend struct {
+	interfaceTestStub
+	owners []string
+}
+
+func (*browserOwnerExecBackend) Kind() BackendKind { return BackendKindDocker }
+func (b *browserOwnerExecBackend) ExecStreaming(_ context.Context, id string, _ ExecStreamSpec) (ExecStream, error) {
+	b.owners = append(b.owners, id)
+	return &failedBrowserStream{stdout: strings.NewReader("DONE: browser ready\n")}, nil
+}
+func (b *browserOwnerExecBackend) Exec(_ context.Context, id string, _ ExecSpec) (*ExecResult, error) {
+	b.owners = append(b.owners, id)
+	return &ExecResult{Stdout: []byte("1920x1080"), ExitCode: 0}, nil
+}
+
+func TestWireBackendBrowserManager_AliasedRegistryAndExecHandle(t *testing.T) {
+	reg := newTestRegistry(t)
+	if err := reg.PutSession(&store.SandboxSession{SessionID: "owner", ContainerName: "physical", Backend: string(BackendKindDocker), State: store.SandboxSessionStateRunning}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &browserOwnerExecBackend{}
+	pool := NewBackendPool(backend, ResourceLimits{})
+	pool.GetOrCreate("owner")
+	pool.Alias("child", "owner")
+	pool.Alias("grandchild", "child")
+	mgr := browser.NewManager(browser.DefaultConfig())
+	var touched string
+	WireBackendBrowserManager(mgr, backend, reg, pool, func(id string) { touched = id })
+	handle, _, err := mgr.ContainerResolveFunc("grandchild")
+	if err != nil || handle != "owner" {
+		t.Fatalf("resolve = %q, %v", handle, err)
+	}
+	if rec, _ := reg.GetSession("grandchild"); rec != nil {
+		t.Fatal("child registry record should not be fabricated")
+	}
+	launch, err := mgr.ContainerStartBrowserFunc(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer launch.Close()
+	conn, err := mgr.ContainerDialFunc(handle, 9222)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	stop, _, _, err := mgr.ContainerStartRecordingFunc(handle, ":0", "/tmp/test.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	mgr.ActivityTouchFunc("grandchild")
+	if touched != "owner" {
+		t.Fatalf("activity = %q", touched)
+	}
+	for _, id := range backend.owners {
+		if id != "owner" {
+			t.Fatalf("physical operation used %q", id)
+		}
+	}
+	if len(backend.owners) < 3 {
+		t.Fatal("expected launch, dial and recording operations")
+	}
+}
+
+func TestWireBackendBrowserManager_PinnedSingleClientOwnership(t *testing.T) {
+	reg := newTestRegistry(t)
+	if err := reg.PutSession(&store.SandboxSession{SessionID: "fleet-owner", ContainerName: "fleet-container", Backend: string(BackendKindDocker)}); err != nil {
+		t.Fatal(err)
+	}
+	client := &browserOwnerReadyClient{owner: "fleet-owner"}
+	backend := &browserOwnerExecBackend{}
+	pool := NewSingleClientPool(client, backend)
+	mgr := browser.NewManager(browser.DefaultConfig())
+	WireBackendBrowserManager(mgr, backend, reg, pool, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := mgr.ContainerEnsureReadyFunc(ctx, "logical-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if client.ctx != ctx || client.sessionID != "fleet-owner" {
+		t.Fatalf("readiness lost context or owner: %q", client.sessionID)
+	}
+	handle, _, err := mgr.ContainerResolveFunc("logical-agent")
+	if err != nil || handle != "fleet-owner" {
+		t.Fatalf("resolve = %q, %v", handle, err)
+	}
+	cancel()
+	if err := mgr.ContainerEnsureReadyFunc(ctx, "logical-agent"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("readiness = %v, want cancellation", err)
+	}
+}
+
 func TestBuildBackendBrowserLaunchScript_UsesSandboxBrowser(t *testing.T) {
 	script := buildBackendBrowserLaunchScript(browser.BrowserConfig{
 		ViewportWidth:       1366,
@@ -314,7 +421,7 @@ func TestGetPoolClientFromContext_TemplateOnlyUsesGetOrCreateWithTemplate(t *tes
 // startBackendRecording.
 type recordingExecBackend struct {
 	interfaceTestStub
-	kind        BackendKind
+	kind BackendKind
 	// calls receives each script that was executed via Exec.
 	calls []string
 	// execResults maps call index → ExecResult. If no entry, returns a default

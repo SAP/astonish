@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
@@ -19,7 +20,7 @@ import (
 // This works for both Incus and Kubernetes backends.
 //
 // The MCP SDK expects a Transport that returns a bidirectional JSON-RPC
-// connection. This transport uses Backend.ExecInteractive() to get a stream
+// connection. This transport uses Backend.ExecStreaming() to get a stream
 // attached to the MCP server process's stdin/stdout inside the container.
 type BackendMCPTransport struct {
 	backend   Backend
@@ -35,7 +36,8 @@ type BackendMCPTransport struct {
 	StdoutDiagnostics *bytes.Buffer
 
 	mu     sync.Mutex
-	stream ExecStream
+	stream *backendStreamRWC
+	closed atomic.Bool
 }
 
 // NewBackendMCPTransport creates a transport that will run the given MCP
@@ -65,6 +67,16 @@ func NewBackendMCPTransport(backend Backend, sessionID string, cfg config.MCPSer
 func (t *BackendMCPTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed.Load() {
+		return nil, fmt.Errorf("MCP transport is closed")
+	}
+	if t.stream != nil {
+		return nil, fmt.Errorf("MCP transport is already connected")
+	}
+	if t.backend == nil || t.sessionID == "" || len(t.command) == 0 || strings.TrimSpace(t.command[0]) == "" {
+		t.closed.Store(true)
+		return nil, fmt.Errorf("MCP transport requires backend, sandbox session identity and command")
+	}
 
 	// Ensure PATH includes common tool locations (npx, uv, etc.)
 	env := make(map[string]string, len(t.env)+1)
@@ -98,15 +110,22 @@ func (t *BackendMCPTransport) Connect(ctx context.Context) (mcp.Connection, erro
 		execCmd = append([]string{"/usr/local/bin/astonish-shell"}, resolved...)
 	}
 
-	stream, err := t.backend.ExecStreaming(ctx, t.sessionID, ExecStreamSpec{
+	// The exec stream belongs to the transport, not to the startup request.
+	// Honor cancellation while opening it, but keep successful connections alive
+	// across tool calls; Close releases this lifetime explicitly.
+	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopCancel := context.AfterFunc(ctx, cancel)
+	stream, err := t.backend.ExecStreaming(streamCtx, t.sessionID, ExecStreamSpec{
 		Command:        execCmd,
 		Env:            env,
 		SeparateStderr: t.Stderr, // Keep stderr separate from JSON-RPC stdout
 	})
+	stopCancel()
 	if err != nil {
+		cancel()
+		t.closed.Store(true)
 		return nil, fmt.Errorf("failed to start MCP server in session %q: %w", t.sessionID, err)
 	}
-	t.stream = stream
 
 	// Wrap the stream's Reader/Writer in an IOTransport.
 	// ExecStream implements io.Reader (stdout) and io.Writer (stdin).
@@ -115,18 +134,28 @@ func (t *BackendMCPTransport) Connect(ctx context.Context) (mcp.Connection, erro
 	// Discarded lines are captured separately for diagnostics so startup EOFs
 	// do not hide npm/node/package-manager failures printed on stdout.
 	// Every line is checked — only lines starting with '{"' pass through.
-	rwc := &backendStreamRWC{stream: stream}
+	rwc := &backendStreamRWC{stream: stream, terminal: &t.closed, cancel: cancel}
+	t.stream = rwc
 	filteredReader := newJSONLineFilterReaderWithDiagnostics(rwc, t.StdoutDiagnostics)
 
 	inner := &mcp.IOTransport{
 		Reader: filteredReader,
 		Writer: rwc,
 	}
-	return inner.Connect(ctx)
+	conn, err := inner.Connect(ctx)
+	if err != nil {
+		_ = rwc.Close()
+	}
+	return conn, err
 }
+
+// IsClosed reports terminal I/O or explicit closure, without blocking an I/O
+// goroutine. A fresh, not-yet-connected transport is not closed.
+func (t *BackendMCPTransport) IsClosed() bool { return t.closed.Load() }
 
 // Close terminates the MCP server process.
 func (t *BackendMCPTransport) Close() error {
+	t.closed.Store(true)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -142,24 +171,43 @@ func (t *BackendMCPTransport) Close() error {
 // backendStreamRWC adapts an ExecStream to io.ReadWriteCloser for mcp.IOTransport.
 type backendStreamRWC struct {
 	stream    ExecStream
+	terminal  *atomic.Bool
+	cancel    context.CancelFunc
 	closeOnce sync.Once
 	closeErr  error
 }
 
+func (s *backendStreamRWC) markTerminal() {
+	if s.terminal != nil {
+		s.terminal.Store(true)
+	}
+}
 func (s *backendStreamRWC) Read(p []byte) (int, error) {
-	return s.stream.Read(p)
+	n, err := s.stream.Read(p)
+	if err != nil {
+		s.markTerminal()
+	}
+	return n, err
 }
 
 func (s *backendStreamRWC) Write(p []byte) (int, error) {
-	return s.stream.Write(p)
+	n, err := s.stream.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		s.markTerminal()
+	}
+	return n, err
 }
 
 func (s *backendStreamRWC) Close() error {
+	s.markTerminal()
 	s.closeOnce.Do(func() {
-		// Close stdin by closing the write side — signals MCP server to shut down
-		if closer, ok := s.stream.(io.Closer); ok {
-			s.closeErr = closer.Close()
+		if s.cancel != nil {
+			s.cancel()
 		}
+		s.closeErr = s.stream.Close()
 	})
 	return s.closeErr
 }

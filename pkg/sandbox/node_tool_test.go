@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,6 +19,70 @@ import (
 
 	"github.com/SAP/astonish/pkg/store"
 )
+
+type aliasVaultStore struct{ store.CredentialStore }
+
+func (*aliasVaultStore) List(context.Context) map[string]store.CredentialType { return nil }
+
+type aliasVaultBackend struct {
+	Backend
+	owner string
+}
+
+func (b *aliasVaultBackend) PushFile(_ context.Context, id, _ string, r io.Reader, _ os.FileMode) error {
+	b.owner = id
+	_, err := io.ReadAll(r)
+	return err
+}
+
+type aliasVaultClient struct {
+	argumentSpyClient
+	readyID string
+}
+
+func (*aliasVaultClient) SandboxSessionID() string { return "parent" }
+func (c *aliasVaultClient) EnsureReadyContext(ctx context.Context, id string) error {
+	c.readyID = id
+	return ctx.Err()
+}
+
+type aliasVaultPool struct {
+	spyPool
+	client  *aliasVaultClient
+	backend Backend
+}
+
+func (p *aliasVaultPool) GetOrCreate(string) ToolNodeClient { return p.client }
+func (p *aliasVaultPool) GetBackend() Backend               { return p.backend }
+
+func TestNodeToolRun_AliasedHTTPVaultUsesCanonicalOwner(t *testing.T) {
+	backend := &aliasVaultBackend{}
+	client := &aliasVaultClient{}
+	nt := NewNodeToolWithPool(testTool{name: "http_request"}, &aliasVaultPool{client: client, backend: backend})
+	previous := NetworkPolicyPreSeeder
+	t.Cleanup(func() { NetworkPolicyPreSeeder = previous })
+	var policyOwner string
+	NetworkPolicyPreSeeder = func(_ context.Context, id string) { policyOwner = id }
+	ctx := store.WithCredentialStore(context.Background(), &aliasVaultStore{})
+	_, err := nt.Run(testToolContext{Context: ctx, sessionID: "child"}, map[string]any{"url": "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.owner != "parent" || policyOwner != "parent" || !client.called || client.args["_caller"] != "agent-1" {
+		t.Fatalf("vault=%q policy=%q client=%+v", backend.owner, policyOwner, client)
+	}
+}
+
+func TestNodeToolRun_ReadinessCancellationBeforeDispatch(t *testing.T) {
+	client := &aliasVaultClient{}
+	nt := NewNodeToolWithPool(testTool{name: "read_file"}, &aliasVaultPool{client: client})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := nt.Run(testToolContext{Context: ctx, sessionID: "child"}, map[string]any{"path": "/file"})
+	if err != context.Canceled || client.called {
+		t.Fatalf("err=%v called=%v", err, client.called)
+	}
+}
 
 type argumentTestTool struct {
 	testTool

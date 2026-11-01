@@ -140,6 +140,37 @@ executor uses the same routing rule when a sandbox is active, rather than
 inspecting the host filesystem. No-sandbox drill execution remains local.
 These dispatch rules do not change backend interfaces or lifecycle behavior.
 
+### Stable owner and readiness contract
+
+The backend pool pins an immutable physical owner before delegate aliasing.
+`CanonicalSessionID` and `EnsureToolClientReady` are optional-capability helpers;
+required `Backend`, `ToolNodeClient` and `ToolNodePool` signatures are unchanged.
+Logical delegate IDs still key attribution and MCP state/cleanup. Physical file,
+shell, credential, MCP and browser operations use the same owner. Dynamic delegate
+MCP discovery uses the active sandbox pool and a shutdown-safe cleanup registry.
+
+Readiness is coordinated per attempt, bounded to five minutes, and precedes
+execution. Running containers still wait for overlay readiness; creating/resuming
+sessions wait; stopped sessions start; evicting sessions are polled; missing
+containers recreate from original configuration. Inspection errors never mean
+absence. Cancelled waiters leave shared work intact, failed attempts can retry on
+the next call, and closed clients cannot publish a late ready state. Neither shell
+commands nor MCP methods are replayed after uncertain execution. Closed MCP
+transports reconnect before the next invocation, not by replaying a failed method.
+Host/SSE MCP routing, local Code mode, prompts and frontend/TUI events are unchanged.
+
+Docker lifecycle locking is process-local across backend instances. A private
+atomic `0600` sidecar preserves original structural launch metadata without env
+values; required unavailable env must be supplied afresh through an authorized
+caller. Legacy storage is adopted conservatively; unsafe/incomplete configuration
+returns an error and retains data. A surviving initialized upper wins over an
+archive, even when empty. Global dangling-volume pruning is not part of template
+builds. Explicit/orphan destruction retains authoritative ownership checks and
+keeps recovery metadata when resource deletion fails. This is single-host,
+single-controller recovery, not a multi-host/multi-process storage protocol.
+See [sandbox.md](sandbox.md#transparent-recovery-and-physical-ownership) for
+initialization markers, compatibility and image rebuild requirements.
+
 ## 3. `SandboxBackend` Interface Specification
 
 The interface encapsulates every operation Astonish performs against the sandbox tier. Concrete Go signatures will follow existing style in `pkg/sandbox/`; this is the conceptual contract.
@@ -294,7 +325,7 @@ This lazy-refresh model is a deliberate safety property: a single `@base` edit c
 
 ## 4. Docker OverlayFS Backend (Local Default)
 
-Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. `StopSession` archives the live upper layer before removing the container and overlay volume; if archival fails it returns the error and leaves both intact so the session remains recoverable. `DestroySession` is intentionally different: it permanently removes the container, volume, registry row, and persisted upper after orphanhood or explicit deletion has been established. See `docs/architecture/sandbox.md`.
+Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` starts an `astonish-session-*` container from `ghcr.io/sap/astonish-sandbox-base`, composes overlay layers at `/sandbox/rootfs`, and records the session with `container_name`. Exec, file I/O, browser CDP, and template capture all go through that overlay. Persisted-upper host paths use Docker's structured `--mount` syntax because externally derived session IDs, including A2A IDs such as `a2a:direct:...`, may contain colons that are ambiguous in short `source:target` volume syntax. `StopSession` archives the ready live upper layer, then stops the container while retaining both container and overlay volume; if archival fails it returns the error and leaves both intact. The live volume takes precedence over an older archive on restart or container replacement. `DestroySession` is intentionally different: it permanently removes the container, volume, registry row, and persisted upper after orphanhood or explicit deletion has been established. See `docs/architecture/sandbox.md`.
 
 Personal mode (`astonish daemon run`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 
@@ -396,12 +427,7 @@ This is decision Q2(b): simpler initial implementation; upgrade to namespace-per
 
 The entrypoint runs as PID 1 with the privilege path selected at chart-install time and performs, in order:
 
-1. **Resume path** — if `/mnt/astonish-uppers/<session-id>/upper.tar.zst` exists, stream it back into the local `emptyDir`:
-   ```sh
-   tar --numeric-owner --xattrs --acls -I zstd \
-       -xf /mnt/astonish-uppers/<session-id>/upper.tar.zst \
-       -C /var/astonish/overlay/upper
-   ```
+1. **Initialize under exclusive ownership** — acquire an overlay-root `flock`, validate the version/session/chain marker, and retain initialized or nonempty legacy upper storage. Only an uninitialized empty upper restores `/mnt/astonish-uppers/upper.tar.zst` (or its legacy session-subdirectory path). Extraction targets a sibling staging directory, then publishes atomically after success. Corrupt archives fail readiness; interrupted staging is discarded on retry. A fresh K8s `emptyDir` therefore still restores, without changing PVC layout. The lock is retained through workload handoff.
 2. **Pre-seed first-level directories.** Create the top-level FS layout (`/proc /sys /dev /mnt /sandbox /var/astonish` and friends) inside `/var/astonish/overlay/upper` so subsequent bind mounts have valid mount points after the overlay is composed. This is what makes `chroot /sandbox/rootfs` resolve `/proc`, `/sys`, `/dev`, the layer PVC mounts, and the persisted-uppers mount.
 3. **Compose the overlay.** Build `lowerdir` from the layer chain (top-most layer first, so the leaf wins on conflicts):
    ```sh

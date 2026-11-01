@@ -17,7 +17,7 @@ func TestStopSessionPersistFailureLeavesContainerAndVolumeIntact(t *testing.T) {
 	binary := writeDockerTestScript(t, logPath, `
 case "$1" in
 inspect) printf 'running\n' ;;
-exec) exit 42 ;;
+exec) case "$*" in *'upper.tar.zst'*) exit 42 ;; *) exit 0 ;; esac ;;
 *) printf '%s\n' "$*" >> "$DOCKER_TEST_LOG" ;;
 esac
 `)
@@ -32,7 +32,23 @@ esac
 	assertDockerTestLogExcludes(t, logPath, "volume rm -f")
 }
 
-func TestStopSessionPersistSuccessRemovesContainerAndVolume(t *testing.T) {
+func TestStopSessionWaitsForOverlayBeforeArchive(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "log")
+	binary := writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then echo running; fi
+if [ "$1" = exec ]; then exit 1; fi`)
+	t.Setenv("DOCKER_TEST_LOG", log)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := db.StopSession(ctx, "not-ready"); err == nil {
+		t.Fatal("unready overlay archived")
+	}
+	assertDockerTestLogExcludes(t, log, "upper.tar.zst")
+	assertDockerTestLogExcludes(t, log, "stop ")
+}
+
+func TestStopSessionPersistSuccessRetainsOverlayVolume(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "docker.log")
 	binary := writeDockerTestScript(t, logPath, `
 printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
@@ -50,7 +66,9 @@ if [ "$1" = inspect ]; then printf 'running\n'; fi
 	}
 	logText := string(data)
 	cname := containerName("persist-succeeds")
-	for _, want := range []string{"exec " + cname, "rm -f -v " + cname, "volume rm -f " + overlayVolumeName("persist-succeeds")} {
+	assertDockerTestLogExcludes(t, logPath, "volume rm")
+	assertDockerTestLogExcludes(t, logPath, "rm -f -v")
+	for _, want := range []string{"exec " + cname, "stop " + cname} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("docker log missing %q:\n%s", want, logText)
 		}
@@ -268,21 +286,6 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-func TestIsPrunableOverlayVolume(t *testing.T) {
-	if !isPrunableOverlayVolume("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
-		t.Error("64-hex dangling anonymous volume should be prunable")
-	}
-	if !isPrunableOverlayVolume("astonish-session-build-base-config-abcdef-overlay") {
-		t.Error("named session overlay volume should be prunable")
-	}
-	if isPrunableOverlayVolume("postgres_data") {
-		t.Error("must not prune unrelated named volumes")
-	}
-	if isPrunableOverlayVolume("not-hex") {
-		t.Error("short names must not be treated as anonymous overlay volumes")
-	}
-}
-
 func TestContainerName_DoesNotTruncateTo12(t *testing.T) {
 	a := containerName("aaaaaaaaaaaa-one")
 	b := containerName("aaaaaaaaaaaa-two")
@@ -310,7 +313,9 @@ func TestRecordSession_SetsContainerNameAndPodName(t *testing.T) {
 	db := &DockerBackend{cfg: Config{Sessions: reg}}
 	spec := sandbox.SessionSpec{SessionID: "c1b27dfb-f828-40f2-b510-c8e85df3cda7"}
 	cname := containerName(spec.SessionID)
-	db.recordSession(spec, cname, sandbox.BaseTemplateID)
+	if err := db.recordSession(spec, cname, sandbox.BaseTemplateID); err != nil {
+		t.Fatal(err)
+	}
 
 	rec, err := reg.GetSession(spec.SessionID)
 	if err != nil {
@@ -358,7 +363,9 @@ func TestRecordSession_SetsCreatedBy(t *testing.T) {
 	reg := sandbox.NewSessionRegistryFromStore(st)
 	db := &DockerBackend{cfg: Config{Sessions: reg}}
 	spec := sandbox.SessionSpec{SessionID: "owner-session", UserID: "user-owner"}
-	db.recordSession(spec, containerName(spec.SessionID), sandbox.BaseTemplateID)
+	if err := db.recordSession(spec, containerName(spec.SessionID), sandbox.BaseTemplateID); err != nil {
+		t.Fatal(err)
+	}
 
 	rec, err := reg.GetSession(spec.SessionID)
 	if err != nil {
@@ -369,6 +376,270 @@ func TestRecordSession_SetsCreatedBy(t *testing.T) {
 	}
 	if rec.CreatedBy != "user-owner" {
 		t.Errorf("CreatedBy = %q, want user-owner", rec.CreatedBy)
+	}
+}
+
+func TestAlreadyStoppedRetainsContainerAndVolume(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "log")
+	binary := writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then printf 'exited\n'; fi`)
+	t.Setenv("DOCKER_TEST_LOG", log)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+	if err := db.StopSession(t.Context(), "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	assertDockerTestLogExcludes(t, log, "exec ")
+	assertDockerTestLogExcludes(t, log, "rm ")
+	assertDockerTestLogExcludes(t, log, "stop ")
+}
+
+func TestStartSessionUnpausesContainer(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "log")
+	binary := writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then printf 'paused\n'; fi`)
+	t.Setenv("DOCKER_TEST_LOG", log)
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: binary}}
+	if err := db.StartSession(t.Context(), "paused"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(log)
+	if err != nil || !strings.Contains(string(raw), "unpause astonish-session-") {
+		t.Fatalf("unpause not called: %s %v", raw, err)
+	}
+	assertDockerTestLogExcludes(t, log, "start ")
+}
+
+func TestLegacyRecoveryPreservesRegistryIdentity(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.cfg.Sessions = sandbox.NewSessionRegistryFromStore(st)
+	id := "legacy-chain"
+	if err := db.cfg.Sessions.PutSession(&store.SandboxSession{SessionID: id, Backend: "docker", CreatedBy: "owner", TemplateID: "original-template", Image: "historical-image"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(db.upperPath(id), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(db.upperPath(id), layerChainFile), []byte("old-chain\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.recreateFromPersist(t.Context(), id); err == nil {
+		t.Fatal("legacy recovery without current configuration must fail")
+	}
+	spec := sandbox.SessionSpec{SessionID: id, Type: sandbox.SessionTypeChat, UserID: "different-owner", TemplateID: "new-template", LayerChain: []string{"new-chain"}}
+	if _, err := db.CreateSession(t.Context(), spec); err == nil {
+		t.Fatal("owner mismatch accepted")
+	}
+	spec.UserID = "owner"
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	m, err := db.readSessionMetadata(id)
+	if err != nil || m.TemplateID != "original-template" || m.Image != "historical-image" || m.UserID != "owner" || strings.Join(m.LayerChain, ",") != "old-chain" {
+		t.Fatalf("legacy metadata %+v %v", m, err)
+	}
+	assertDockerTestLogExcludes(t, log, "volume rm")
+}
+
+func TestLegacyContainerAdoptsStructureWithoutSecrets(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `
+if [ "$1" = image ]; then printf '%s\n' '["PATH=/bin"]'; exit; fi
+if [ "$3" = '{{.State.Status}}' ]; then echo running; exit; fi
+printf '%s\n' '{"Config":{"Image":"legacy-image","Labels":{"astonish.session_id":"legacy-container","astonish.type":"chat","astonish.org":"org","astonish.team":"team","custom":"label"},"Env":["PATH=/bin","ASTONISH_LAYER_CHAIN=old-chain","TOKEN=never-serialize-me"]},"HostConfig":{"NanoCpus":2000000000,"Memory":268435456,"PidsLimit":64}}'
+`)
+	spec := sandbox.SessionSpec{SessionID: "legacy-container", UserID: "owner", TemplateID: "original-template"}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	m, err := db.readSessionMetadata(spec.SessionID)
+	if err != nil || m.Image != "legacy-image" || m.OrgSlug != "org" || m.TeamSlug != "team" || m.Limits.CPUs != 2 || m.Limits.MemoryMiB != 256 || m.Limits.PIDs != 64 || len(m.EnvKeys) != 1 || m.EnvKeys[0] != "TOKEN" {
+		t.Fatalf("legacy metadata %+v %v", m, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(db.upperPath(spec.SessionID), dockerSessionMetadataFile))
+	if err != nil || strings.Contains(string(raw), "never-serialize-me") {
+		t.Fatalf("secret in metadata or read error: %v", err)
+	}
+	if _, err := db.recoverySpec(m, spec, true); err == nil {
+		t.Fatal("legacy recreation silently dropped required env")
+	}
+	spec.Env = map[string]string{"TOKEN": "fresh-value"}
+	if _, err := db.recoverySpec(m, spec, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recoveryTestBackend(t *testing.T) (*DockerBackend, string) {
+	t.Helper()
+	log := filepath.Join(t.TempDir(), "log")
+	binary := writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then echo 'No such container' >&2; exit 1; fi`)
+	t.Setenv("DOCKER_TEST_LOG", log)
+	db := &DockerBackend{networkRegistry: make(map[string]bool), cfg: Config{ContainerRuntimePath: binary, LayersDir: t.TempDir(), UppersDir: t.TempDir(), SandboxImage: "original-image"}}
+	for _, layer := range []string{"old-chain", "new-chain"} {
+		if err := os.MkdirAll(db.layerRootfs(layer), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db, log
+}
+func TestCreateSessionRetainedVolumePreservesLayerChain(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	spec := sandbox.SessionSpec{SessionID: "retained", TemplateID: "template", LayerChain: []string{"old-chain"}}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	spec.LayerChain = []string{"new-chain"}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(db.upperPath(spec.SessionID), layerChainFile))
+	if err != nil || string(raw) != "old-chain\n" {
+		t.Fatalf("chain %q, %v", raw, err)
+	}
+	assertDockerTestLogExcludes(t, log, "volume rm")
+	assertDockerTestLogExcludes(t, log, "ASTONISH_LAYER_CHAIN=new-chain")
+}
+func TestRecreateFromPersistPreservesLaunchMetadata(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	spec := sandbox.SessionSpec{SessionID: "metadata", Type: sandbox.SessionTypeChat, TemplateID: "original-template", LayerChain: []string{"old-chain"}, UserID: "owner", OrgSlug: "org", TeamSlug: "team", Labels: map[string]string{"custom": "label"}, Limits: sandbox.ResourceLimits{CPUs: 2, MemoryMiB: 256, PIDs: 64}, Env: map[string]string{"TOKEN": "secret-value"}}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(db.upperPath(spec.SessionID), dockerSessionMetadataFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret-value") {
+		t.Fatal("secret persisted")
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("mode %v %v", info, err)
+	}
+	if err := db.recreateFromPersist(t.Context(), spec.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	reopened := &DockerBackend{cfg: db.cfg, networkRegistry: make(map[string]bool)}
+	reopened.cfg.SandboxImage = "new-image"
+	if err := reopened.recreateFromPersist(t.Context(), spec.SessionID); err == nil || !strings.Contains(err.Error(), "fresh authorized environment") {
+		t.Fatalf("missing env should fail: %v", err)
+	}
+	if _, err := reopened.CreateSession(t.Context(), sandbox.SessionSpec{SessionID: spec.SessionID, Env: map[string]string{"TOKEN": "fresh-secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(log)
+	for _, want := range []string{"original-image", "--cpus=2", "--memory=256m", "--pids-limit=64", "astonish.org=org", "astonish.team=team", "custom=label", "TOKEN=fresh-secret"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	assertDockerTestLogExcludes(t, log, "new-image")
+	m, err := reopened.readSessionMetadata(spec.SessionID)
+	if err != nil || m.UserID != "owner" || m.TemplateID != "original-template" {
+		t.Fatalf("metadata %+v %v", m, err)
+	}
+}
+func TestRecordSessionPreservesOwnerPinnedPortsAndCreatedAt(t *testing.T) {
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := sandbox.NewSessionRegistryFromStore(st)
+	created := time.Now().UTC().Add(-time.Hour)
+	original := &store.SandboxSession{Backend: "docker", SessionID: "merge", ChatSessionID: "chat", TemplateID: "original", CreatedBy: "owner", Pinned: true, ExposedPorts: []int{8080}, CreatedAt: created, BaseDomain: "example.test"}
+	if err := reg.PutSession(original); err != nil {
+		t.Fatal(err)
+	}
+	db := &DockerBackend{cfg: Config{Sessions: reg}}
+	if err := db.recordSession(sandbox.SessionSpec{SessionID: "merge", UserID: "replacement"}, "container", "new-template"); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := reg.GetSession("merge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.CreatedBy != "owner" || !rec.Pinned || len(rec.ExposedPorts) != 1 || rec.ExposedPorts[0] != 8080 || !rec.CreatedAt.Equal(created) || rec.TemplateID != "original" || rec.ChatSessionID != "chat" || rec.BaseDomain != "example.test" {
+		t.Fatalf("lost metadata: %+v", rec)
+	}
+}
+func TestDestroySessionVolumeFailurePreservesRecoveryMetadata(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.cfg.Sessions = sandbox.NewSessionRegistryFromStore(st)
+	spec := sandbox.SessionSpec{SessionID: "destroy-retry", TemplateID: "old-chain", LayerChain: []string{"old-chain"}}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `if [ "$1" = volume ]; then echo 'volume in use' >&2; exit 1; fi`)
+	if err := db.DestroySession(t.Context(), spec.SessionID); err == nil {
+		t.Fatal("expected volume removal error")
+	}
+	if m, err := db.readSessionMetadata(spec.SessionID); err != nil || m == nil {
+		t.Fatalf("metadata removed: %v", err)
+	}
+	if rec, err := db.cfg.Sessions.GetSession(spec.SessionID); err != nil || rec == nil {
+		t.Fatalf("authority removed: %v", err)
+	}
+	db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `exit 0`)
+	if err := db.DestroySession(t.Context(), spec.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(db.upperPath(spec.SessionID)); !os.IsNotExist(err) {
+		t.Fatalf("persist retained after explicit destroy: %v", err)
+	}
+}
+func TestSessionLifecycleSerializesAcrossBackendInstances(t *testing.T) {
+	db, _ := recoveryTestBackend(t)
+	other := &DockerBackend{cfg: db.cfg}
+	unlock, err := db.lockSession(t.Context(), "same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(entered)
+		release, e := other.lockSession(t.Context(), "same")
+		if e == nil {
+			release()
+		}
+		done <- e
+	}()
+	<-entered
+	select {
+	case err := <-done:
+		t.Fatalf("overlapping lifecycle: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lock not released")
+	}
+}
+func TestLockHonorsCancellation(t *testing.T) {
+	db, _ := recoveryTestBackend(t)
+	unlock, err := db.lockSession(t.Context(), "same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := db.lockSession(ctx, "same"); err != context.DeadlineExceeded {
+		t.Fatalf("got %v", err)
 	}
 }
 

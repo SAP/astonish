@@ -12,7 +12,70 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
+
+func TestOpenAICompatibleDetectedResponsesRouting(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/openai/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"gpt-6-astra"}]}`)
+		case "/openai/v1/responses":
+			fmt.Fprint(w, `{"id":"resp","status":"completed","output":[{"type":"function_call","call_id":"call","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	llm := NewProvider(context.Background(), "secret", server.URL+"/litellm/v1", "gpt-6-astra", false)
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("lookup", genai.RoleUser)}, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup", ParametersJsonSchema: map[string]any{"type": "object"}}}}}}}
+	var call *genai.FunctionCall
+	for response, err := range llm.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Content != nil {
+			call = response.Content.Parts[0].FunctionCall
+		}
+	}
+	if call == nil || call.Name != "lookup" {
+		t.Fatalf("call=%+v", call)
+	}
+	if fmt.Sprint(paths) != "[/openai/v1/models /openai/v1/responses]" {
+		t.Fatalf("paths=%v", paths)
+	}
+}
+
+func TestOpenAICompatibleUndetectedStaysChat(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/openai/v1/models":
+			fmt.Fprint(w, `{"data":[]}`)
+		case "/litellm/v1/chat/completions":
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	llm := NewProvider(context.Background(), "secret", server.URL+"/litellm/v1", "gpt-6-astra", false)
+	for _, err := range llm.GenerateContent(context.Background(), &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fmt.Sprint(paths) != "[/openai/v1/models /litellm/v1/chat/completions]" {
+		t.Fatalf("paths=%v", paths)
+	}
+}
 
 func TestFetchModelMetadataFieldSemantics(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

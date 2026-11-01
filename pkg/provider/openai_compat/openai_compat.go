@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sashabaranov/go-openai"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
+	"github.com/sashabaranov/go-openai"
 	"google.golang.org/adk/model"
 )
 
@@ -20,8 +20,10 @@ type Provider struct {
 	*openai_provider.Provider
 }
 
-// NewProvider creates a new OpenAI Compatible provider.
-func NewProvider(apiKey, baseURL, modelName string, debug bool) model.LLM {
+// NewProvider creates a new OpenAI Compatible provider. GPT-6 uses a
+// positively detected same-origin Responses endpoint; all other cases retain
+// Chat Completions on the configured URL.
+func NewProvider(ctx context.Context, apiKey, baseURL, modelName string, debug bool) model.LLM {
 	config := openai.DefaultConfig(apiKey)
 
 	// Ensure baseURL has /v1 suffix
@@ -43,10 +45,16 @@ func NewProvider(apiKey, baseURL, modelName string, debug bool) model.LLM {
 	}
 
 	client := openai.NewClientWithConfig(config)
-
-	return &Provider{
-		Provider: openai_provider.NewProviderWithMaxTokens(client, modelName, true, 64000),
+	wrapped := openai_provider.NewProviderWithMaxTokens(client, modelName, true, 64000)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "gpt-6") {
+		if responsesBase, ok := DetectResponsesBaseURL(ctx, apiKey, baseURL, modelName); ok {
+			responsesConfig := config
+			responsesConfig.BaseURL = responsesBase
+			wrapped = openai_provider.NewProviderWithResponses(openai.NewClientWithConfig(responsesConfig), modelName, true, 64000)
+		}
 	}
+
+	return &Provider{Provider: wrapped}
 }
 
 // Name implements model.LLM.

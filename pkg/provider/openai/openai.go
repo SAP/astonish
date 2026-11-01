@@ -48,6 +48,12 @@ func NewOpenAIProvider(client *openai.Client, modelName string, supportsJSONMode
 	}
 }
 
+// NewProviderWithResponses creates a provider for a positively detected
+// OpenAI-compatible Responses endpoint.
+func NewProviderWithResponses(client *openai.Client, modelName string, supportsJSONMode bool, maxCompletionTokens int) *Provider {
+	return &Provider{client: client, model: modelName, supportsJSONMode: supportsJSONMode, maxCompletionTokens: maxCompletionTokens, useResponsesAPI: true}
+}
+
 // NewProvider creates an OpenAI-compatible provider using Chat Completions.
 func NewProvider(client *openai.Client, modelName string, supportsJSONMode bool) *Provider {
 	return &Provider{

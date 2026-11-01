@@ -396,7 +396,7 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		if modelName == "" {
 			modelName = "gpt-4o"
 		}
-		return openai_compat.NewProvider(apiKey, baseURL, modelName, debugMode), nil
+		return openai_compat.NewProvider(ctx, apiKey, baseURL, modelName, debugMode), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)

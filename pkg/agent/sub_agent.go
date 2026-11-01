@@ -204,17 +204,27 @@ type PlanStepInfo struct {
 	Status string `json:"status,omitempty"`
 }
 
+// ChildToolSelectionMode distinguishes a hard allow-list from initial tool preferences.
+// The zero value preserves the strict behavior of existing callers.
+type ChildToolSelectionMode string
+
+const (
+	ChildToolSelectionStrict    ChildToolSelectionMode = ""
+	ChildToolSelectionPreferred ChildToolSelectionMode = "preferred"
+)
+
 // SubAgentTask describes a single sub-agent task to execute.
 type SubAgentTask struct {
 	BatchID, TaskID, ChildSessionID string
 	Sequence                        *DelegationSequence
-	Name                            string   // Short identifier for the sub-agent (e.g. "researcher", "coder")
-	Instructions                    string   // Task-specific instructions for the sub-agent
-	Description                     string   // Brief description of what to accomplish
-	ToolFilter                      []string // Specific tool names to include (empty = all allowed)
-	Model                           string   // Override model (empty = use parent's model)
-	Provider                        string   // Override provider (empty = use parent's provider)
-	PlanStep                        string   // Plan step this task belongs to (for progress tracking)
+	Name                            string                 // Short identifier for the sub-agent (e.g. "researcher", "coder")
+	Instructions                    string                 // Task-specific instructions for the sub-agent
+	Description                     string                 // Brief description of what to accomplish
+	ToolFilter                      []string               // Strict allow-list or preferred initial tools, according to ToolSelectionMode.
+	ToolSelectionMode               ChildToolSelectionMode // Zero value preserves the legacy hard boundary.
+	Model                           string                 // Override model (empty = use parent's model)
+	Provider                        string                 // Override provider (empty = use parent's provider)
+	PlanStep                        string                 // Plan step this task belongs to (for progress tracking)
 
 	// CustomPrompt, when true, uses Instructions directly as the LLM system prompt
 	// instead of wrapping it with buildChildPrompt(). This is used by fleet agents
@@ -1071,7 +1081,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	var childTools []tool.Tool
 	var childToolsets []tool.Toolset
 	seenDeclarations := map[string]bool{}
-	for _, e := range scope.entries {
+	for _, e := range scope.initial {
 		if !seenDeclarations[e.tool.Name()] {
 			childTools = append(childTools, e.tool)
 			seenDeclarations[e.tool.Name()] = true
@@ -1112,7 +1122,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	if task.CustomPrompt && task.Instructions != "" {
 		childPrompt = task.Instructions
 	} else {
-		childPrompt = m.buildChildPrompt(taskCtx, task)
+		childPrompt = m.buildChildPromptWithScope(taskCtx, task, scope)
 	}
 
 	// Create child session linked to parent.
@@ -1949,6 +1959,11 @@ func (m *SubAgentManager) AvailableGroups() []*ToolGroup {
 
 // buildChildPrompt constructs the system prompt for a sub-agent.
 func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTask) string {
+	scope, _, _ := m.childToolScope(ctx, task)
+	return m.buildChildPromptWithScope(ctx, task, scope)
+}
+
+func (m *SubAgentManager) buildChildPromptWithScope(ctx context.Context, task SubAgentTask, scope *ChildToolScope) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("You are %q, a focused sub-agent working on a specific task.\n\n", task.Name))
@@ -1972,17 +1987,19 @@ func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTas
 	sb.WriteString("- Do NOT write scripts or code unless explicitly asked — use your tools directly.\n")
 	sb.WriteString("- If you encounter an error, report it clearly in your response.\n")
 	if len(task.ToolFilter) > 0 {
-		sb.WriteString(fmt.Sprintf("- Your assigned tools (%s) are your PRIMARY tools — use them first. Additional tools may be available via `search_tools`, but use them only if your primary tools are genuinely insufficient to complete the task (e.g., all primary tools are failing or the task requires a capability they don't have).\n", strings.Join(task.ToolFilter, ", ")))
+		if task.ToolSelectionMode == ChildToolSelectionPreferred && task.OverrideTools == nil && task.OverrideToolsets == nil {
+			sb.WriteString(fmt.Sprintf("- Your preferred tools (%s) are your PRIMARY tools — use them first. If they are insufficient, use `search_tools`, `describe_tools`, and `execute_tool` for additional authorized capabilities. Preferences do not grant access to excluded, disabled, or inaccessible tools.\n", strings.Join(task.ToolFilter, ", ")))
+		} else {
+			sb.WriteString(fmt.Sprintf("- Your assigned PRIMARY tools (%s) are a STRICT allow-list. Discovery, description and execution are limited to this same scope; do not seek tools outside it.\n", strings.Join(task.ToolFilter, ", ")))
+		}
 	}
 
-	// Tool-specific operational guidance based on what tools the child actually has
-	resolvedTools, _, resolveWarnings := m.resolveTools(ctx, task.ToolFilter)
-	if len(resolveWarnings) > 0 {
-		slog.Warn("failed to resolve tools for sub-agent", "tool_filter", task.ToolFilter, "warnings", resolveWarnings)
-	}
-	childToolSet := make(map[string]bool, len(resolvedTools))
-	for _, t := range resolvedTools {
-		childToolSet[t.Name()] = true
+	// Guidance reads the already resolved invocation scope, never ambient tools.
+	childToolSet := make(map[string]bool)
+	if scope != nil {
+		for _, e := range scope.initial {
+			childToolSet[e.tool.Name()] = true
+		}
 	}
 
 	// Inject working directory so sub-agents know the correct project path.
@@ -2049,15 +2066,130 @@ func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTas
 	return sb.String()
 }
 
-// ChildToolScope is an invocation-local catalog of the exact executable instances
-// selected for a child. Entries are private: discovery cannot widen this boundary.
-type ChildToolScope struct{ entries []childToolEntry }
+// ChildToolScope keeps initial declarations separate from permitted executable
+// instances. Deferred groups are invocation-local and never fall back to ambient
+// instances when sandbox overrides are supplied.
+type ChildToolScope struct {
+	entries  []childToolEntry
+	initial  []childToolEntry
+	mu       sync.Mutex
+	metadata []ToolMatch
+	denied   map[string]bool
+	deferred map[string]*ToolGroup
+	resolver func(context.Context, string) *ToolGroup
+}
+
+// loadDeferred is called with mu held. Policy is checked before connecting.
+func (s *ChildToolScope) loadDeferred(ctx adkagent.ReadonlyContext, group string) error {
+	if IsMCPGroupInaccessible(ctx, group) {
+		return fmt.Errorf("group %q is inaccessible", group)
+	}
+	g := s.deferred[group]
+	if (g == nil || (len(g.Tools) == 0 && len(g.Toolsets) == 0)) && s.resolver != nil && strings.HasPrefix(group, "mcp:") {
+		g = s.resolver(ctx, strings.TrimPrefix(group, "mcp:"))
+	}
+	if g == nil || (len(g.Tools) == 0 && len(g.Toolsets) == 0) {
+		return fmt.Errorf("resolve child group %q: no executable tools or toolsets", group)
+	}
+	var added []childToolEntry
+	for _, ts := range g.Toolsets {
+		if ts == nil {
+			continue
+		}
+		tools, err := ts.Tools(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve child toolset %s: %w", ts.Name(), err)
+		}
+		for _, t := range tools {
+			added = append(added, childToolEntry{t, group})
+		}
+	}
+	for _, t := range g.Tools {
+		added = append(added, childToolEntry{t, group})
+	}
+	for _, e := range added {
+		if e.tool == nil || childDiscoveryHelper(e.tool.Name()) || excludedChildTools[e.tool.Name()] {
+			continue
+		}
+		key := group + "/" + e.tool.Name()
+		if isToolDisabled(ctx, e.tool.Name(), key) {
+			continue
+		}
+		seen := false
+		for _, old := range s.entries {
+			if old.group == group && old.tool.Name() == e.tool.Name() {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			s.entries = append(s.entries, e)
+		}
+	}
+	delete(s.deferred, group)
+	return nil
+}
+
 type childToolEntry struct {
 	tool  tool.Tool
 	group string
 }
 
 func (s *ChildToolScope) resolve(ctx adkagent.ReadonlyContext, name string) (tool.Tool, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if childDiscoveryHelper(name) || s.denied[name] {
+		return nil, "", fmt.Errorf("tool %q is outside the child scope", name)
+	}
+	if isToolDisabled(ctx, name) {
+		return nil, "", fmt.Errorf("tool %q is disabled", name)
+	}
+	if slash := strings.LastIndexByte(name, '/'); slash > 0 {
+		group := name[:slash]
+		bare := name[slash+1:]
+		if s.denied[bare] || (excludedChildTools[bare] && group != "fleet") || childDiscoveryHelper(bare) {
+			return nil, "", fmt.Errorf("tool %q is outside the child scope", name)
+		}
+		if isToolDisabled(ctx, bare, name) {
+			return nil, "", fmt.Errorf("tool %q is disabled", name)
+		}
+		present := false
+		for _, entry := range s.entries {
+			if entry.group == group && entry.tool.Name() == bare {
+				present = true
+				break
+			}
+		}
+		if !present && s.deferred[group] != nil {
+			if err := s.loadDeferred(ctx, group); err != nil {
+				return nil, "", err
+			}
+		}
+	} else {
+		candidates := map[string]bool{}
+		for _, e := range s.entries {
+			if e.tool.Name() == name && !IsMCPGroupInaccessible(ctx, e.group) && !isToolDisabled(ctx, name, e.group+"/"+name) {
+				candidates[e.group] = true
+			}
+		}
+		for _, m := range s.metadata {
+			bare, valid := childMetadataBareName(m.ToolName, m.GroupName)
+			if valid && bare == name && !excludedChildTools[name] && s.deferred[m.GroupName] != nil && !IsMCPGroupInaccessible(ctx, m.GroupName) && !isToolDisabled(ctx, name, m.GroupName+"/"+name) {
+				candidates[m.GroupName] = true
+			}
+		}
+		if len(candidates) > 1 {
+			return nil, "", fmt.Errorf("tool %q is ambiguous; use a qualified name", name)
+		}
+		for group := range candidates {
+			if s.deferred[group] != nil {
+				if err := s.loadDeferred(ctx, group); err != nil {
+					return nil, "", err
+				}
+			}
+		}
+	}
 	var match *childToolEntry
 	for i := range s.entries {
 		e := &s.entries[i]
@@ -2081,32 +2213,174 @@ func (s *ChildToolScope) resolve(ctx adkagent.ReadonlyContext, name string) (too
 	return match.tool, match.group, nil
 }
 
-// Matches returns a fresh, access-filtered snapshot. Every result is executable
-// through this scope's bridge, including request-local and sandbox-wrapped tools.
+// Matches returns the searchable inventory without initializing unknown toolsets.
 func (s *ChildToolScope) Matches(ctx context.Context) []ToolMatch {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	readCtx := &minimalReadonlyContext{Context: ctx}
-	var matches []ToolMatch
-	for _, e := range s.entries {
-		name := e.tool.Name()
-		if strings.HasPrefix(e.group, "mcp:") || e.group == "a2a" {
-			name = e.group + "/" + name
-		}
-		if _, _, err := s.resolve(readCtx, name); err != nil {
-			continue
-		}
-		matches = append(matches, ToolMatch{ToolName: name, GroupName: e.group, Description: e.tool.Description(), Score: 1})
-	}
+	s.mu.Lock()
+	count := len(s.entries)
+	s.mu.Unlock()
+	matches, _ := s.Search(ctx, "*", count)
 	return matches
 }
 
+// Search resolves only query-matched metadata. Wildcard inventory includes only
+// executable entries and never enumerates deferred toolsets or calls resolvers.
+func (s *ChildToolScope) Search(ctx context.Context, query string, maxResults int) ([]ToolMatch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("child tool search: %w", err)
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	all := query == "*" || query == "list all" || query == "list all tools" || query == "all" || query == "all tools"
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	if maxResults <= 0 {
+		maxResults = 10
+	}
+	readCtx := &minimalReadonlyContext{Context: ctx}
+	s.mu.Lock()
+	var candidates []ToolMatch
+	if !all {
+		for _, m := range s.metadata {
+			if s.deferred[m.GroupName] != nil {
+				candidates = append(candidates, m)
+			}
+		}
+	}
+	for _, e := range s.entries {
+		candidates = append(candidates, ToolMatch{ToolName: e.tool.Name(), GroupName: e.group, Description: e.tool.Description(), Score: 1})
+	}
+	s.mu.Unlock()
+	for i := range candidates {
+		candidates[i].Score = childToolSearchScore(query, candidates[i], all)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score > candidates[j].Score
+		}
+		return candidates[i].GroupName+"/"+candidates[i].ToolName < candidates[j].GroupName+"/"+candidates[j].ToolName
+	})
+	seen := map[string]bool{}
+	var matches []ToolMatch
+	for _, m := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("child tool search: %w", err)
+		}
+		bare, valid := childMetadataBareName(m.ToolName, m.GroupName)
+		if !valid {
+			continue
+		}
+		key := m.GroupName + "/" + bare
+		if seen[key] || s.denied[bare] || s.denied[key] || childDiscoveryHelper(bare) || (excludedChildTools[bare] && m.GroupName != "fleet") || IsMCPGroupInaccessible(ctx, m.GroupName) || isToolDisabled(readCtx, bare, key) {
+			continue
+		}
+		seen[key] = true
+		if m.Score <= 0 {
+			continue
+		}
+		t, group, err := s.resolve(readCtx, key)
+		if err != nil {
+			return nil, fmt.Errorf("search child tool %q: %w", key, err)
+		}
+		name := t.Name()
+		if strings.HasPrefix(group, "mcp:") || group == "a2a" {
+			name = group + "/" + name
+		} else {
+			// Qualification must not probe unrelated deferred groups.
+			for _, other := range candidates {
+				otherBare, valid := childMetadataBareName(other.ToolName, other.GroupName)
+				if valid && otherBare == name && other.GroupName != group && !IsMCPGroupInaccessible(ctx, other.GroupName) && !isToolDisabled(readCtx, name, other.GroupName+"/"+name) {
+					name = key
+					break
+				}
+			}
+		}
+		matches = append(matches, ToolMatch{ToolName: name, GroupName: group, Description: t.Description(), Score: m.Score})
+		if len(matches) >= maxResults {
+			break
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("child tool search: %w", err)
+	}
+	return matches, nil
+}
+
+// childToolSearchScore ranks exact references before lexical matches. Name-term
+// coverage outweighs incidental description matches, so a generic word such as
+// "search" cannot crowd an exact tool out of a bounded result set.
+func childToolSearchScore(query string, match ToolMatch, all bool) float64 {
+	if all {
+		return 1
+	}
+	bare, valid := childMetadataBareName(match.ToolName, match.GroupName)
+	if !valid {
+		return 0
+	}
+	name := strings.ToLower(bare)
+	key := strings.ToLower(match.GroupName + "/" + bare)
+	if query == name || query == key {
+		return 1
+	}
+	terms := strings.FieldsFunc(query, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' ' || r == '/'
+	})
+	description := strings.ToLower(match.Description)
+	seen := map[string]bool{}
+	var total, nameHits, descriptionHits float64
+	for _, term := range terms {
+		if len(term) < 3 || seen[term] {
+			continue
+		}
+		seen[term] = true
+		total++
+		if strings.Contains(key, term) {
+			nameHits++
+		} else if strings.Contains(description, term) {
+			descriptionHits++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return (0.8*nameHits + 0.1*descriptionHits) / total
+}
+
+// childMetadataBareName accepts bare names or names qualified by their own group.
+// A different qualifier must never be reinterpreted as belonging to this group.
+func childMetadataBareName(name, group string) (string, bool) {
+	if strings.Contains(name, "/") {
+		if group == "" || !strings.HasPrefix(name, group+"/") {
+			return "", false
+		}
+		name = strings.TrimPrefix(name, group+"/")
+	}
+	return name, name != "" && !strings.Contains(name, "/")
+}
 func childDiscoveryHelper(name string) bool {
 	return name == "search_tools" || name == "describe_tools" || name == executeToolName || name == "skill_lookup"
 }
 
 func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask) (*ChildToolScope, []string, error) {
+	if task.ToolSelectionMode != ChildToolSelectionStrict && task.ToolSelectionMode != ChildToolSelectionPreferred {
+		return nil, nil, fmt.Errorf("invalid tool selection %q", task.ToolSelectionMode)
+	}
+	preferred := task.ToolSelectionMode == ChildToolSelectionPreferred && task.OverrideTools == nil && task.OverrideToolsets == nil
+	deferred := make(map[string]*ToolGroup)
+	denied := map[string]bool{}
+	var metadata []ToolMatch
+	if m.ToolIndex != nil && task.OverrideTools == nil && task.OverrideToolsets == nil {
+		m.ToolIndex.mu.RLock()
+		for _, entry := range m.ToolIndex.toolRegistry {
+			bare, valid := childMetadataBareName(entry.Name, entry.GroupName)
+			if valid {
+				metadata = append(metadata, ToolMatch{ToolName: bare, GroupName: entry.GroupName, Description: entry.Description, Score: 1})
+			}
+		}
+		m.ToolIndex.mu.RUnlock()
+	}
 	if len(task.ToolFilter) == 0 && task.OverrideTools == nil && task.OverrideToolsets == nil && m.ToolIndex != nil && task.Description != "" {
 		discovered, err := m.ToolIndex.SearchGroupsHybrid(ctx, task.Description, 12, 0.005)
 		if err != nil {
@@ -2128,6 +2402,9 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 			webName = po.WebSearchToolName
 		}
 		webDisabled := po.WebSearchAvailable != nil && !*po.WebSearchAvailable
+		if webDisabled {
+			denied[webName] = true
+		}
 		for _, t := range po.AdditionalTools {
 			if t == nil || (webDisabled && t.Name() == webName) {
 				continue
@@ -2142,14 +2419,32 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 				*copy = *old
 				copy.Tools = append([]tool.Tool(nil), old.Tools...)
 			}
+			for i := 0; i < len(copy.Tools); i++ {
+				if copy.Tools[i] != nil && copy.Tools[i].Name() == t.Name() {
+					copy.Tools = append(copy.Tools[:i], copy.Tools[i+1:]...)
+					i--
+				}
+			}
 			copy.Tools = append(copy.Tools, t)
 			groups[group] = copy
+		}
+	}
+	// The index is metadata only; executables come from invocation groups or
+	// the permitted MCP resolver, never cached index Tool instances.
+	if preferred && m.MCPGroupResolver != nil {
+		for _, entry := range metadata {
+			if groups[entry.GroupName] == nil && strings.HasPrefix(entry.GroupName, "mcp:") {
+				deferred[entry.GroupName] = &ToolGroup{Name: entry.GroupName}
+			}
 		}
 	}
 	// Resolve lazy explicitly requested groups into this local map only.
 	for _, token := range task.ToolFilter {
 		group := strings.SplitN(token, "/", 2)[0]
-		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil {
+		if parts := strings.SplitN(token, "/", 2); len(parts) == 2 && (denied[parts[1]] || childDiscoveryHelper(parts[1]) || excludedChildTools[parts[1]] || isToolDisabled(&minimalReadonlyContext{Context: ctx}, parts[1], token)) {
+			continue
+		}
+		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil && task.OverrideTools == nil && task.OverrideToolsets == nil && !IsMCPGroupInaccessible(ctx, group) {
 			groups[group] = m.MCPGroupResolver(ctx, strings.TrimPrefix(group, "mcp:"))
 		}
 	}
@@ -2165,6 +2460,9 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		if g == nil {
 			continue
 		}
+		if preferred && strings.HasPrefix(name, "mcp:") && len(g.Tools) == 0 && len(g.Toolsets) == 0 && task.OverrideTools == nil && task.OverrideToolsets == nil {
+			deferred[name] = &ToolGroup{Name: name}
+		}
 		for _, t := range g.Tools {
 			catalog = append(catalog, childToolEntry{t, name})
 		}
@@ -2176,29 +2474,31 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		needsToolsets := false
 		for _, token := range task.ToolFilter {
 			if token == name || strings.HasPrefix(token, name+"/") {
+				bare := strings.TrimPrefix(token, name+"/")
+				if token != name && (childDiscoveryHelper(bare) || excludedChildTools[bare] || isToolDisabled(readCtx, bare, token)) {
+					continue
+				}
 				needsToolsets = true
 				break
 			}
-			// Only an unresolved bare tool name needs catalog-wide lookup.
-			if groups[token] != nil || strings.Contains(token, "/") {
-				continue
-			}
-			known := false
-			for _, candidate := range groups {
-				if candidate == nil {
-					continue
-				}
-				for _, t := range candidate.Tools {
-					if t != nil && t.Name() == token {
-						known = true
+			// Unknown bare names never initialize unrelated toolsets. Index
+			// metadata identifies candidate groups before any lazy connection.
+			if !strings.Contains(token, "/") && groups[token] == nil && !isToolDisabled(readCtx, token) {
+				candidates := map[string]bool{}
+				for _, entry := range metadata {
+					if entry.ToolName == token && !IsMCPGroupInaccessible(ctx, entry.GroupName) && !isToolDisabled(readCtx, token, entry.GroupName+"/"+token) {
+						candidates[entry.GroupName] = true
 					}
 				}
-			}
-			if !known {
-				needsToolsets = true
+				if len(candidates) == 1 && candidates[name] {
+					needsToolsets = true
+				}
 			}
 		}
 		if !needsToolsets {
+			if preferred && len(g.Toolsets) > 0 {
+				deferred[name] = &ToolGroup{Name: name, Toolsets: append([]tool.Toolset(nil), g.Toolsets...)}
+			}
 			continue
 		}
 		for _, ts := range g.Toolsets {
@@ -2258,7 +2558,13 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 			}
 		}
 	}
-	scope := &ChildToolScope{}
+	scope := &ChildToolScope{deferred: deferred, denied: denied}
+	if preferred {
+		scope.metadata = metadata
+	}
+	if preferred && task.OverrideTools == nil && task.OverrideToolsets == nil {
+		scope.resolver = m.MCPGroupResolver
+	}
 	seen := map[string]bool{}
 	matched := map[string]bool{}
 	for _, e := range catalog {
@@ -2266,7 +2572,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 			continue
 		}
 		name := e.tool.Name()
-		if childDiscoveryHelper(name) || (excludedChildTools[name] && e.group != "fleet") {
+		if childDiscoveryHelper(name) || denied[name] || (excludedChildTools[name] && e.group != "fleet") {
 			continue
 		}
 		allowed := len(task.ToolFilter) == 0 && (task.OverrideTools != nil || task.OverrideToolsets != nil)
@@ -2277,11 +2583,14 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 			}
 		}
 		key := e.group + "/" + name
-		if !allowed || seen[key] || isToolDisabled(readCtx, name, key) || IsMCPGroupInaccessible(ctx, e.group) {
+		if (!allowed && !preferred) || seen[key] || isToolDisabled(readCtx, name, key) || IsMCPGroupInaccessible(ctx, e.group) {
 			continue
 		}
 		seen[key] = true
 		scope.entries = append(scope.entries, e)
+		if allowed {
+			scope.initial = append(scope.initial, e)
+		}
 	}
 	var warnings []string
 	for _, token := range task.ToolFilter {

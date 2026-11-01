@@ -248,7 +248,7 @@ func newProgressiveToolBridge(resolver deferredToolResolver) ([]tool.Tool, error
 				continue
 			}
 			resolvedName := t.Name()
-			if RequestMCPGroupsFromContext(ctx)[group] != nil {
+			if RequestMCPGroupsFromContext(ctx)[group] != nil || (resolver.scope != nil && (strings.HasPrefix(group, "mcp:") || group == "a2a")) {
 				resolvedName = group + "/" + t.Name()
 			}
 			described := DescribedTool{Name: resolvedName, Description: t.Description(), GroupName: group}

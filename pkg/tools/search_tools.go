@@ -293,18 +293,12 @@ func NewScopedSearchToolsTool(scope *agent.ChildToolScope) (tool.Tool, error) {
 			return SearchToolsResult{}, fmt.Errorf("query is required")
 		}
 		result := SearchToolsResult{Matches: []SearchToolsMatchResult{}}
-		limit := args.MaxResults
-		if limit <= 0 {
-			limit = 10
+		matches, err := scope.Search(ctx, query, args.MaxResults)
+		if err != nil {
+			return SearchToolsResult{}, fmt.Errorf("child tool search failed: %w", err)
 		}
-		for _, m := range scope.Matches(ctx) {
-			if !isListAllQuery(query) && !sharesSearchTerm(query, strings.ToLower(m.ToolName+" "+m.Description)) && !strings.Contains(strings.ToLower(m.ToolName), query) {
-				continue
-			}
+		for _, m := range matches {
 			result.Matches = append(result.Matches, SearchToolsMatchResult{ToolName: m.ToolName, GroupName: m.GroupName, Description: m.Description, Score: m.Score, Access: "allowed for this child — inspect with describe_tools, then invoke with execute_tool using exact name `" + m.ToolName + "`"})
-			if !isListAllQuery(query) && len(result.Matches) >= limit {
-				break
-			}
 		}
 		result.Count = len(result.Matches)
 		return result, nil

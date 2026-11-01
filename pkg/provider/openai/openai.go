@@ -91,6 +91,9 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			for _, t := range req.Config.Tools {
 				for _, fd := range t.FunctionDeclarations {
 					params := sanitizeToolParams(fd.ParametersJsonSchema)
+					if strings.HasPrefix(strings.ToLower(strings.TrimSpace(p.model)), "gemini-") {
+						normalizeGeminiNullableTypes(params)
+					}
 					tools = append(tools, openai.Tool{
 						Type: openai.ToolTypeFunction,
 						Function: &openai.FunctionDefinition{

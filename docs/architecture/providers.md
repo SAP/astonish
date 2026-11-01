@@ -64,6 +64,8 @@ go test ./pkg/launcher -run TestCodeCompatibleMetadataContext -count=1
 
 Provider adapters canonicalize tool schemas before constructing outbound requests. Function declarations are globally sorted by name independent of their original grouping; JSON object keys and safe set-like arrays (`required`, `enum`, and union `type`) are normalized recursively; empty object schemas use one representation; and allowed function names are sorted. Semantically ordered arrays remain in source order. Canonicalization failures stop request construction rather than silently sending unstable data.
 
+For Gemini model IDs (`gemini-*`) using the shared OpenAI-compatible adapter, nullable JSON Schema type arrays with exactly one distinct non-null type are converted recursively to a scalar `type` plus `nullable: true`. This handles ADK-generated nested slices such as `announce_plan.steps` and `steps.items.files`, which otherwise lose their type through the proxy's Gemini translation. Normalization operates only on the canonical request copy and schema positions; descriptions, required fields, items, defaults, examples and enum payloads remain intact. Multi-type ambiguous unions are not guessed. Non-Gemini requests and native Vertex conversion remain unchanged. `TestGeminiAnnouncePlanNullableSchema` exercises the real tool declaration across the HTTP boundary in streaming and non-streaming modes.
+
 OpenAI-compatible responses map `prompt_tokens_details.cached_tokens` to ADK's cached-content token count when the server reports it. Cache fingerprints log only truncated SHA-256 hashes and counts, never prompt contents or credentials.
 
 ### Why Connection Pooling

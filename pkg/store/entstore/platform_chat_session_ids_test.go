@@ -174,15 +174,79 @@ func TestAllChatSessionIDsIncludesPersonalSessions(t *testing.T) {
 		t.Fatalf("add personal session: %v", err)
 	}
 
-	ids, err := s.AllChatSessionIDs(ctx)
-	if err != nil {
-		t.Fatalf("AllChatSessionIDs() error = %v", err)
+	org, err := s.Organizations().GetByID(ctx, orgID)
+	if err != nil || org == nil {
+		t.Fatalf("read provisioned organization: org=%v, err=%v", org, err)
 	}
-	if !ids["live-studio-session"] {
-		t.Errorf("AllChatSessionIDs() missing personal chat session %q: %v", "live-studio-session", ids)
+	for _, status := range []string{"active", "suspended", "decommissioned", "active"} {
+		t.Run(status, func(t *testing.T) {
+			org.Status = status
+			if err := s.Organizations().Update(ctx, org); err != nil {
+				t.Fatalf("update organization status: %v", err)
+			}
+			ids, err := s.AllChatSessionIDs(ctx)
+			if err != nil {
+				t.Fatalf("AllChatSessionIDs() error = %v", err)
+			}
+			for _, id := range []string{"live-studio-session", "fleet-team-session"} {
+				if !ids[id] {
+					t.Errorf("AllChatSessionIDs() missing retained session %q: %v", id, ids)
+				}
+			}
+			if len(ids) != 2 {
+				t.Errorf("AllChatSessionIDs() returned %d IDs, want 2: %v", len(ids), ids)
+			}
+			// Platform inventory must not broaden either scoped store's view.
+			teamIDs, err := orgStore.ForTeam("shared").Sessions().(store.SessionIDEnumerator).AllSessionIDsStrict(ctx)
+			if err != nil || len(teamIDs) != 1 || !teamIDs["fleet-team-session"] {
+				t.Errorf("team inventory = %v, err=%v; want only team session", teamIDs, err)
+			}
+			personalIDs, err := personal.Sessions().(store.SessionIDEnumerator).AllSessionIDsStrict(ctx)
+			if err != nil || len(personalIDs) != 1 || !personalIDs["live-studio-session"] {
+				t.Errorf("personal inventory = %v, err=%v; want only personal session", personalIDs, err)
+			}
+		})
 	}
-	if !ids["fleet-team-session"] {
-		t.Errorf("AllChatSessionIDs() missing team session %q: %v", "fleet-team-session", ids)
+}
+
+func TestAllChatSessionIDsRejectsUnreadableInactiveOrganization(t *testing.T) {
+	for _, status := range []string{"suspended", "decommissioned"} {
+		t.Run(status, func(t *testing.T) {
+			ctx := context.Background()
+			s := newSQLitePlatformStoreForSessionIDs(t, ctx)
+			// Enumerate healthy retained data before reaching the unreadable org.
+			healthy := &store.Organization{ID: uuid.NewString(), Name: "A Healthy", Slug: "healthy", Status: "active"}
+			if err := s.Organizations().Create(ctx, healthy); err != nil {
+				t.Fatalf("create healthy organization: %v", err)
+			}
+			if err := s.ProvisionOrg(ctx, healthy.ID, healthy.Slug); err != nil {
+				t.Fatalf("provision healthy organization: %v", err)
+			}
+			orgStore, err := s.ForOrg(healthy.Slug)
+			if err != nil {
+				t.Fatalf("open healthy organization: %v", err)
+			}
+			if err := orgStore.Teams().CreateTeam(ctx, &store.Team{ID: uuid.NewString(), Name: "shared", Slug: "shared", SchemaName: teamSchemaName("shared")}); err != nil {
+				t.Fatalf("create healthy team: %v", err)
+			}
+			if err := orgStore.ProvisionTeam(ctx, "shared"); err != nil {
+				t.Fatalf("provision healthy team: %v", err)
+			}
+			if err := orgStore.ForTeam("shared").Sessions().AddSessionMeta(ctx, store.SessionMeta{ID: "must-not-be-partial", AppName: "astonish"}); err != nil {
+				t.Fatalf("add healthy session: %v", err)
+			}
+			// The retained organization record has no readable tenant DB.
+			if err := s.Organizations().Create(ctx, &store.Organization{ID: uuid.NewString(), Name: "Z Unreadable", Slug: "unreadable", DBName: "unreadable", Status: status}); err != nil {
+				t.Fatalf("create unreadable organization: %v", err)
+			}
+			ids, err := s.AllChatSessionIDs(ctx)
+			if err == nil {
+				t.Fatalf("AllChatSessionIDs() = %v, nil error; want unreadable inactive organization error", ids)
+			}
+			if ids != nil {
+				t.Fatalf("AllChatSessionIDs() returned partial snapshot %v on error", ids)
+			}
+		})
 	}
 }
 

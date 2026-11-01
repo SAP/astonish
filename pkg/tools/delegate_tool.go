@@ -82,6 +82,14 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 	sequence := &agent.DelegationSequence{}
 	defer func() {
 		out.BatchID = batchID
+		// An unset result means execution unwound before returning normally.
+		// Give observers a terminal error, but do not recover or mask the panic.
+		if out.Status == "" {
+			out.Status = "error"
+			if out.Summary == "" {
+				out.Summary = "Delegation did not complete normally"
+			}
+		}
 		if manager != nil && manager.SubTaskProgress != nil {
 			manager.SubTaskProgress(agent.SubTaskProgressEvent{Type: string(agent.DelegationComplete), SessionID: parentID, BatchID: batchID, Sequence: sequence.Next(), Status: out.Status, Error: out.Summary})
 		}
@@ -256,6 +264,8 @@ func NewDelegateTasksToolForManager(manager *agent.SubAgentManager) (tool.Tool, 
 }
 
 // NewDelegateTasksTool creates a compatibility tool using the legacy global manager.
+// It resolves the global manager on each invocation, not at construction time.
+// Session factories should use NewDelegateTasksToolForManager instead.
 func NewDelegateTasksTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "delegate_tasks",

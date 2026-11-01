@@ -131,14 +131,31 @@ consume these overlay markers.
 
 Docker stores a versioned, atomically written `0600` launch sidecar next to the
 archive: original image, resolved chain, template, identity, labels and limits.
-Environment values and resolved credentials are not serialized. Recreation that
-requires unavailable environment values fails until fresh authorized values are
-provided. Legacy containers can supply inspected structural metadata; incomplete
+Environment values and resolved credentials are not serialized. Required keys
+come from the launch recipe, not the union of idempotent `CreateSession` requests.
+An existing-container request can refresh authorized values in memory without
+applying its environment to that container or adding durable requirements. A
+container launch recipe records all environment keys passed to Docker before
+launch, so a crash after launch cannot leave an unrecorded credential requirement.
+Ambiguous launch failures retain that recipe conservatively; no-op requests never
+add keys. Previous launch keys remain required.
+Recreation that lacks required keys fails closed, retaining storage, until fresh
+authorized values are provided (including after controller restart). Previously
+accumulated sidecar keys are not automatically removed: without trustworthy launch
+provenance, dropping an old requirement could silently omit a real credential.
+Legacy containers can supply inspected structural metadata; incomplete
 legacy recovery configuration fails safely rather than inventing another template
 or owner. Sidecars are recovery recipes, not authorization records. Registry owner,
 pinning, ports and creation metadata are preserved. Lifecycle serialization spans
-backend instances in one process; this is single-host/single-controller durability,
-not distributed Docker storage or multi-process writer support.
+backend instances in one process for the same resolved CLI, `DOCKER_HOST`,
+`DOCKER_CONTEXT` and container name. Docker subprocesses inherit current process
+environment rather than a construction-time snapshot. Keep the CLI path/PATH,
+Docker selection variables and Docker context configuration stable while a
+controller is active: changing them mid-operation can change the actual daemon
+without moving an already-held lock. Capturing only the lock identity would be
+unsafe unless every CLI invocation (including exec/streaming paths) also pins the
+same runtime. This is single-host/single-controller durability, not distributed
+Docker storage or multi-process writer support.
 
 Deploy both backend changes and the rebuilt canonical entrypoint together:
 `make sandbox-entrypoint` and `make docker-sandbox-base`. Existing containers keep

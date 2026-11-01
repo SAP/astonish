@@ -25,6 +25,9 @@ func (t *fileArgumentTool) NormalizeArguments(args map[string]any) (map[string]a
 }
 
 func (t *fileArgumentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	if req == nil {
+		return fmt.Errorf("file tool: nil LLM request")
+	}
 	if err := t.Tool.(interface {
 		ProcessRequest(tool.Context, *model.LLMRequest) error
 	}).ProcessRequest(ctx, req); err != nil {

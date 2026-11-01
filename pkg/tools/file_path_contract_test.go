@@ -4,12 +4,69 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/common"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
+
+// Embedding tool.Tool lets this spy detect dispatch without needing a valid dependency.
+type fileRequestDispatchSpy struct {
+	tool.Tool
+	called bool
+}
+
+func (s *fileRequestDispatchSpy) ProcessRequest(tool.Context, *model.LLMRequest) error {
+	s.called = true
+	panic("nil request dispatched to dependency")
+}
+
+func TestFileArgumentToolProcessRequestNilRequest(t *testing.T) {
+	dependency := &fileRequestDispatchSpy{}
+	wrapped := &fileArgumentTool{Tool: dependency}
+	err := wrapped.ProcessRequest(nil, nil)
+	if dependency.called {
+		t.Fatal("nil request reached the underlying tool")
+	}
+	if err == nil || !strings.Contains(err.Error(), "nil LLM request") {
+		t.Fatalf("error = %v, want explicit nil LLM request error", err)
+	}
+}
+
+func TestFileArgumentToolProcessRequestEmptyRequest(t *testing.T) {
+	registered, err := GetInternalTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, candidate := range registered {
+		switch candidate.Name() {
+		case "read_file", "write_file", "edit_file", "load_file":
+		default:
+			continue
+		}
+		found++
+		t.Run(candidate.Name(), func(t *testing.T) {
+			req := &model.LLMRequest{}
+			if err := candidate.(interface {
+				ProcessRequest(tool.Context, *model.LLMRequest) error
+			}).ProcessRequest(&toolContextStub{Context: context.Background()}, req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Tools[candidate.Name()] != candidate {
+				t.Fatal("empty request did not retain compatibility wrapper")
+			}
+			if req.Config == nil || len(req.Config.Tools) == 0 {
+				t.Fatal("empty request did not initialize provider tools")
+			}
+		})
+	}
+	if found != 4 {
+		t.Fatalf("found %d file tools, want 4", found)
+	}
+}
 
 func TestFileToolsCanonicalPathSequence(t *testing.T) {
 	for _, native := range []bool{false, true} {

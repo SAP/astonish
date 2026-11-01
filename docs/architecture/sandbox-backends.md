@@ -159,10 +159,20 @@ commands nor MCP methods are replayed after uncertain execution. Closed MCP
 transports reconnect before the next invocation, not by replaying a failed method.
 Host/SSE MCP routing, local Code mode, prompts and frontend/TUI events are unchanged.
 
-Docker lifecycle locking is process-local across backend instances. A private
-atomic `0600` sidecar preserves original structural launch metadata without env
-values; required unavailable env must be supplied afresh through an authorized
-caller. Legacy storage is adopted conservatively; unsafe/incomplete configuration
+Docker lifecycle locking is process-local across backend instances with the same
+resolved CLI path, `DOCKER_HOST`, `DOCKER_CONTEXT` and container name. Commands
+inherit the current process environment: runtime selection is not captured at
+backend construction. Keep CLI resolution and Docker selection/configuration
+stable while controllers are active; changing them during an operation is not
+supported. Pinning only a lock key would not pin the runtime actually executed.
+A private atomic `0600` sidecar preserves original structural launch metadata
+without env values. Required env keys describe launch configuration, not every
+idempotent request: requests against an existing container may refresh authorized
+credentials in memory but never add durable keys. A recreation records its launch
+recipe's keys before running Docker, and future recovery must supply them, including
+on ambiguous launch failure. Unavailable required env must be supplied afresh
+through an authorized caller. Legacy storage is adopted conservatively;
+unsafe/incomplete configuration
 returns an error and retains data. A surviving initialized upper wins over an
 archive, even when empty. Global dangling-volume pruning is not part of template
 builds. Explicit/orphan destruction retains authoritative ownership checks and

@@ -113,19 +113,15 @@ func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.S
 		meta = newDockerSessionMetadata(spec)
 	}
 	if spec.Env != nil {
+		// Refresh authorized credentials in memory, but an idempotent request does
+		// not change the existing container's launch environment or required keys.
 		sessionLaunchEnvs.Store(sessionEnvKey{db, spec.SessionID}, cloneEnv(spec.Env))
-		required := make(map[string]bool)
-		for _, key := range meta.EnvKeys {
-			required[key] = true
-		}
-		for key := range spec.Env {
-			required[key] = true
-		}
-		meta.EnvKeys = nil
-		for key := range required {
-			meta.EnvKeys = append(meta.EnvKeys, key)
-		}
-		sort.Strings(meta.EnvKeys)
+	}
+	if state == sandbox.SessionStateGone {
+		// Only launch configuration changes durable requirements. Write before
+		// Docker runs so a crash after launch cannot omit a required credential.
+		// On an ambiguous launch failure retain this fail-closed recovery recipe.
+		meta.EnvKeys = newDockerSessionMetadata(spec).EnvKeys
 	}
 	if err := db.writeSessionMetadata(meta); err != nil {
 		return nil, err
@@ -631,7 +627,10 @@ func (db *DockerBackend) recreateFromPersistLocked(ctx context.Context, sessionI
 }
 
 // Lifecycle locks span backend instances targeting the same CLI/context/name.
-// They are process-local, not a distributed storage/writer protocol.
+// Docker commands inherit current process env, so a construction-time lock-only
+// snapshot would not identify the runtime they actually execute. Keep runtime
+// selection stable during operations; these locks are process-local, not a
+// distributed storage/writer protocol.
 type sessionLifecycleLock struct {
 	token chan struct{}
 	refs  int
@@ -780,6 +779,8 @@ func (db *DockerBackend) writeSessionMetadata(m *dockerSessionMetadata) error {
 	if err != nil {
 		return err
 	}
+	// Remove the staging file on failure; after a successful rename the old
+	// temporary name no longer exists, so this leaves the durable sidecar intact.
 	defer os.Remove(file.Name())
 	if _, err = file.Write(raw); err == nil {
 		err = file.Sync()

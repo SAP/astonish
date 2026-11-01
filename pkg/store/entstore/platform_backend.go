@@ -97,9 +97,11 @@ func (s *Store) CleanupExpired(ctx context.Context) error {
 }
 
 // AllChatSessionIDs returns an authoritative snapshot of chat-session IDs
-// across every active organization and team. It is intended only for
-// platform-admin background cleanup. Any unreadable scope invalidates the
-// entire snapshot so callers cannot use partial tenant coverage for deletion.
+// across every existing organization's teams and member personal stores,
+// regardless of organization status. Suspension does not delete stored chats.
+// It is intended only for platform-admin background cleanup. Any unreadable
+// scope invalidates the entire snapshot so callers cannot use partial tenant
+// coverage for deletion.
 func (s *Store) AllChatSessionIDs(ctx context.Context) (map[string]bool, error) {
 	orgs, err := s.Organizations().List(ctx)
 	if err != nil {
@@ -108,9 +110,6 @@ func (s *Store) AllChatSessionIDs(ctx context.Context) (map[string]bool, error) 
 
 	result := make(map[string]bool)
 	for _, org := range orgs {
-		if org.Status != "active" {
-			continue
-		}
 		orgStore, err := s.ForOrg(org.Slug)
 		if err != nil {
 			return nil, fmt.Errorf("open organization %q for chat-session snapshot: %w", org.Slug, err)

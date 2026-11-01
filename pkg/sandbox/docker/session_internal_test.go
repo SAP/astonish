@@ -503,6 +503,102 @@ func TestCreateSessionRetainedVolumePreservesLayerChain(t *testing.T) {
 	assertDockerTestLogExcludes(t, log, "volume rm")
 	assertDockerTestLogExcludes(t, log, "ASTONISH_LAYER_CHAIN=new-chain")
 }
+func TestCreateSessionExistingContainerDoesNotAccumulateEnvKeys(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	statePath := filepath.Join(t.TempDir(), "state")
+	t.Setenv("DOCKER_TEST_STATE", statePath)
+	db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
+if [ "$1" = inspect ]; then
+  if [ -f "$DOCKER_TEST_STATE" ]; then echo running; else echo 'No such container' >&2; exit 1; fi
+fi
+if [ "$1" = container ] && [ "$2" = run ]; then touch "$DOCKER_TEST_STATE"; fi`)
+	spec := sandbox.SessionSpec{SessionID: "no-op-env", TemplateID: "template", LayerChain: []string{"old-chain"}, Env: map[string]string{"TOKEN": "original-secret"}}
+	if _, err := db.CreateSession(t.Context(), spec); err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range []map[string]string{
+		{"TOKEN": "refreshed-secret", "TEMPORARY": "never-launched-secret"},
+		{"TOKEN": "original-secret"},
+	} {
+		if _, err := db.CreateSession(t.Context(), sandbox.SessionSpec{SessionID: spec.SessionID, Env: env}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "container run ") != 1 {
+		t.Fatalf("idempotent requests launched a container: %s", data)
+	}
+	assertDockerTestLogExcludes(t, log, "TEMPORARY=")
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.recreateFromPersist(t.Context(), spec.SessionID); err != nil {
+		t.Fatalf("recovery with original launch env failed: %v", err)
+	}
+	m, err := db.readSessionMetadata(spec.SessionID)
+	if err != nil || m == nil {
+		t.Fatalf("metadata: %+v, %v", m, err)
+	}
+	if strings.Join(m.EnvKeys, ",") != "TOKEN" {
+		t.Fatalf("required keys = %v, want only actual launch key TOKEN", m.EnvKeys)
+	}
+}
+
+func TestCreateSessionRecoveryEnvRequirementsFollowLaunchRecipe(t *testing.T) {
+	for _, failLaunch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "successful-launch", true: "failed-launch"}[failLaunch], func(t *testing.T) {
+			db, log := recoveryTestBackend(t)
+			spec := sandbox.SessionSpec{SessionID: "applied-env", TemplateID: "template", LayerChain: []string{"old-chain"}, Env: map[string]string{"TOKEN": "original-secret"}}
+			if _, err := db.CreateSession(t.Context(), spec); err != nil {
+				t.Fatal(err)
+			}
+			if failLaunch {
+				db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `if [ "$1" = inspect ]; then echo 'No such container' >&2; exit 1; fi
+if [ "$1" = container ]; then exit 42; fi`)
+			}
+			_, err := db.CreateSession(t.Context(), sandbox.SessionSpec{SessionID: spec.SessionID, Env: map[string]string{"TOKEN": "fresh-secret", "ADDED": "added-secret"}})
+			if (err != nil) != failLaunch {
+				t.Fatalf("launch error = %v, failLaunch = %v", err, failLaunch)
+			}
+			m, err := db.readSessionMetadata(spec.SessionID)
+			if err != nil || m == nil {
+				t.Fatalf("metadata: %+v, %v", m, err)
+			}
+			want := "ADDED,TOKEN"
+			if strings.Join(m.EnvKeys, ",") != want {
+				t.Fatalf("required keys = %v, want %s", m.EnvKeys, want)
+			}
+			raw, err := os.ReadFile(filepath.Join(db.upperPath(spec.SessionID), dockerSessionMetadataFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "secret") {
+				t.Fatal("secret persisted in recovery metadata")
+			}
+			if !failLaunch {
+				// A newly constructed controller cannot use the old controller's
+				// memory-only credentials or omit a key from the applied launch.
+				reopened := &DockerBackend{cfg: db.cfg}
+				if err := os.WriteFile(log, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				for _, env := range []map[string]string{nil, {"TOKEN": "fresh-secret"}, {"ADDED": "added-secret"}} {
+					if _, err := reopened.CreateSession(t.Context(), sandbox.SessionSpec{SessionID: spec.SessionID, Env: env}); err == nil || !strings.Contains(err.Error(), "fresh authorized environment") {
+						t.Fatalf("missing launch keys must fail closed, env %v: %v", env, err)
+					}
+				}
+				assertDockerTestLogExcludes(t, log, "container run")
+				if retained, err := reopened.readSessionMetadata(spec.SessionID); err != nil || retained == nil || strings.Join(retained.EnvKeys, ",") != want {
+					t.Fatalf("rejected recovery lost requirements: %+v, %v", retained, err)
+				}
+			}
+		})
+	}
+}
+
 func TestRecreateFromPersistPreservesLaunchMetadata(t *testing.T) {
 	db, log := recoveryTestBackend(t)
 	spec := sandbox.SessionSpec{SessionID: "metadata", Type: sandbox.SessionTypeChat, TemplateID: "original-template", LayerChain: []string{"old-chain"}, UserID: "owner", OrgSlug: "org", TeamSlug: "team", Labels: map[string]string{"custom": "label"}, Limits: sandbox.ResourceLimits{CPUs: 2, MemoryMiB: 256, PIDs: 64}, Env: map[string]string{"TOKEN": "secret-value"}}
@@ -629,6 +725,42 @@ func TestSessionLifecycleSerializesAcrossBackendInstances(t *testing.T) {
 		t.Fatal("lock not released")
 	}
 }
+func TestSessionLifecycleIdentityTracksInheritedDockerEnvironment(t *testing.T) {
+	db, log := recoveryTestBackend(t)
+	db.cfg.ContainerRuntimePath = writeDockerTestScript(t, log, `printf '%s|%s\n' "$DOCKER_HOST" "$DOCKER_CONTEXT" >> "$DOCKER_TEST_LOG"`)
+	t.Setenv("DOCKER_HOST", "unix:///original.sock")
+	t.Setenv("DOCKER_CONTEXT", "original-context")
+	unlock, err := db.lockSession(t.Context(), "same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if _, err := runDocker(t.Context(), db.cfg.ContainerRuntimePath, "version"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HOST", "unix:///changed.sock")
+	t.Setenv("DOCKER_CONTEXT", "changed-context")
+	// The CLI now actually selects a different runtime. Capturing only the
+	// lock identity at New would incorrectly retain the original runtime key.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	release, err := db.lockSession(ctx, "same")
+	if err != nil {
+		t.Fatalf("changed CLI context still locked the original runtime: %v", err)
+	}
+	defer release()
+	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "version"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "unix:///original.sock|original-context\nunix:///changed.sock|changed-context\n" {
+		t.Fatalf("CLI did not inherit current Docker selection: %s", data)
+	}
+}
+
 func TestLockHonorsCancellation(t *testing.T) {
 	db, _ := recoveryTestBackend(t)
 	unlock, err := db.lockSession(t.Context(), "same")

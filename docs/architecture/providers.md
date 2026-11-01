@@ -38,7 +38,7 @@ HTTP connection pooling (`httpool`) is used to reuse TCP connections across LLM 
 
 The `pkg/provider/llmerror` package defines structured error types for LLM API failures:
 
-- **Retryable errors**: 429 (rate limit), 502/503 (server overload), timeouts. The agent engine retries these with exponential backoff.
+- **Retryable errors**: 429 (rate limit), transient server failures, timeouts, and 401 responses explicitly reporting JWT/token expiry. The agent engine retries these with exponential backoff within its existing three-attempt budget. Token-expiry detection checks both the message and raw body, including non-JSON gateway responses such as `Jwt is expired`; it does not refresh credentials itself. Ordinary invalid-key 401s and all 403s remain non-retryable, and failures after emitted model output must never replay.
 - **Context length errors**: The request exceeded the model's context window.
 - **Authentication errors**: Invalid API key or expired credentials.
 - **Unknown tool errors**: The model hallucinated a tool name that doesn't exist.
@@ -95,7 +95,8 @@ llmerror.Classify(err):
   - Rate limit (429) -> RetryableError{Wait: Retry-After header}
   - Server error (502, 503) -> RetryableError{Wait: exponential backoff}
   - Context length -> ContextLengthError
-  - Auth error -> AuthError
+  - Explicit JWT/token expiry (401) -> retryable within existing budget
+  - Other auth error -> AuthError
   - Unknown tool -> UnknownToolError
     |
     v

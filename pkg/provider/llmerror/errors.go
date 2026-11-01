@@ -81,7 +81,7 @@ func NewLLMError(provider string, statusCode int, message, body string) *LLMErro
 		Provider:   provider,
 		Message:    message,
 		Body:       body,
-		Retryable:  isRetryableStatus(statusCode),
+		Retryable:  isRetryableStatus(statusCode) || isExpiredTokenResponse(statusCode, message, body),
 	}
 }
 
@@ -96,6 +96,7 @@ func NewFromResponse(provider string, resp *http.Response, body []byte) *LLMErro
 // IsRetryable returns true if the error is an LLMError that should be retried.
 // This includes 429 (rate limit), 500 (server error / proxy failure),
 // 502/503 (server overload), 504 (timeout), and 408 (request timeout).
+// Explicit token-expiry 401s also allow recovery within the caller's retry budget.
 // An interrupted stream is never replayable, regardless of its underlying cause.
 func IsRetryable(err error) bool {
 	var interrupted *InterruptedStreamError
@@ -187,6 +188,27 @@ func StatusCode(err error) int {
 		return llmErr.StatusCode
 	}
 	return 0
+}
+
+// isExpiredTokenResponse permits bounded recovery when a provider or proxy
+// rejects a stale token. It does not refresh credentials itself; permanent
+// expiry will still exhaust the caller's retry budget. Other 401s and all 403s
+// remain non-retryable. Match explicit expiry phrases, not unrelated expiry.
+func isExpiredTokenResponse(code int, message, body string) bool {
+	if code != http.StatusUnauthorized {
+		return false
+	}
+	text := strings.ToLower(strings.Join(strings.Fields(message+" "+body), " "))
+	for _, phrase := range []string{
+		"jwt is expired", "jwt expired", "jwt has expired",
+		"token is expired", "token expired", "token has expired",
+		"expired jwt", "expired token", "token_expired", "expired_token",
+	} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // isRetryableStatus classifies HTTP status codes as retryable or not.

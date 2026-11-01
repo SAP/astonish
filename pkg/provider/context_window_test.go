@@ -11,6 +11,47 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 )
 
+func TestResolveContextWindow_CompatibleMetadata(t *testing.T) {
+	for _, kind := range []string{"openai_compat", "litellm"} {
+		t.Run(kind, func(t *testing.T) {
+			var down atomic.Bool
+			down.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if down.Load() {
+					w.WriteHeader(503)
+					return
+				}
+				input := 872000
+				if r.Header.Get("Authorization") == "Bearer rotated" {
+					input = 700000
+				}
+				fmt.Fprintf(w, `{"data":[{"model_name":"gpt-6-astra","model_info":{"max_tokens":128000,"max_input_tokens":%d,"max_output_tokens":128000}},{"model_name":"explicit","model_info":{"context_window":1000000,"max_input_tokens":600000}}]}`, input)
+			}))
+			defer server.Close()
+			cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"proxy": {"type": kind, "base_url": server.URL + "/litellm/v1", "api_key": "fixture"}}}
+			ctx := WithConfinedProviderSecrets(context.Background())
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); !got.IsFallback {
+				t.Fatalf("outage = %+v", got)
+			}
+			down.Store(false)
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 872000 || got.IsFallback {
+				t.Fatalf("metadata = %+v", got)
+			}
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "explicit", cfg); got.Size != 600000 {
+				t.Fatalf("input cap = %+v", got)
+			}
+			cfg.Providers["proxy"]["api_key"] = "rotated"
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 700000 {
+				t.Fatalf("rotation = %+v", got)
+			}
+			cfg.General.ContextLength = 42000
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 42000 {
+				t.Fatalf("override = %+v", got)
+			}
+		})
+	}
+}
+
 func TestResolveContextWindow_ConfigOverride(t *testing.T) {
 	cfg := &config.AppConfig{
 		General: config.GeneralConfig{

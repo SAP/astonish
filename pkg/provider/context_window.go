@@ -8,6 +8,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider/google"
 	"github.com/SAP/astonish/pkg/provider/groq"
+	"github.com/SAP/astonish/pkg/provider/openai_compat"
 	"github.com/SAP/astonish/pkg/provider/openrouter"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/store"
@@ -107,6 +108,24 @@ func resolveFromProviderAPI(ctx context.Context, providerName, modelName string,
 		if err == nil {
 			return window
 		}
+
+	case "openai_compat", "litellm":
+		key := instance["api_key"]
+		baseURL := instance["base_url"]
+		if providerType == "litellm" {
+			if key == "" {
+				key = envFallback(ctx, "LITELLM_API_KEY")
+			}
+			if baseURL == "" {
+				baseURL = "http://localhost:4000/v1"
+			}
+		}
+		meta := openai_compat.FetchModelMetadata(ctx, key, baseURL)[modelName]
+		window := meta.ContextLength
+		if meta.MaxInputTokens > 0 && (window <= 0 || meta.MaxInputTokens < window) {
+			window = meta.MaxInputTokens
+		}
+		return window
 
 	case "openrouter":
 		apiKey := getProviderKey(cfg, providerName, "api_key", "OPENROUTER_API_KEY")
@@ -312,9 +331,16 @@ func isSAPContextProvider(providerName string, cfg *config.AppConfig) bool {
 // ResolveContextWindowCachedFull is like ResolveContextWindowFull but caches the result.
 // Use this in the TUI to get both the size and fallback status.
 func ResolveContextWindowCachedFull(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) ContextWindowResult {
-	// SAP owns a connection-scoped TTL cache; do not retain results in this
-	// provider-name-only cache, including overrides and transient fallbacks.
-	if isSAPContextProvider(providerName, cfg) {
+	// Connection-scoped metadata providers own expiring caches. Do not strand
+	// their overrides, credentials or fallback results in the outer cache.
+	connectionMetadata := isSAPContextProvider(providerName, cfg)
+	if cfg != nil {
+		if name, instance, ok := resolveProviderInstance(providerName, cfg); ok {
+			kind := config.GetProviderType(name, instance)
+			connectionMetadata = connectionMetadata || kind == "openai_compat" || kind == "litellm"
+		}
+	}
+	if connectionMetadata {
 		return resolveContextWindowFull(ctx, providerName, modelName, cfg)
 	}
 	key := providerName + ":" + modelName

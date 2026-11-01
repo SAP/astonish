@@ -141,6 +141,7 @@ describe('Provider Model Selector Scenarios', () => {
     fetchModels = vi.fn<typeof teamContext.teamFetch>()
     vi.spyOn(teamContext, 'teamFetch').mockImplementation((...args) => {
       if (args[0] === '/api/providers/sap_ai_core/models-metadata') return fetchModels(...args)
+      if (args[0] === '/api/providers/openai_compat/models-metadata') return fetchModels(...args)
       return originalTeamFetch(...args)
     })
   })
@@ -192,6 +193,47 @@ describe('Provider Model Selector Scenarios', () => {
     expect(modelLabels).toHaveLength(2)
     modelLabels.forEach(label => expect(label).toBeVisible())
     expect(within(model).getByText('1.1M ctx')).toBeVisible()
+
+    await user.click(model)
+
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('gpt-6-astra')
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onSelect.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0])
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('shows enriched OpenAI-compatible context and output metadata and selects the unchanged ID before closing', async () => {
+    fetchModels.mockResolvedValue(new Response(JSON.stringify({
+      provider: 'openai_compat',
+      has_metadata: true,
+      models: [{
+        id: 'gpt-6-astra',
+        name: 'gpt-6-astra',
+        context_length: 872000,
+        max_input_tokens: 872000,
+        max_completion_tokens: 128000,
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const onSelect = vi.fn()
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+
+    function SelectorHarness() {
+      const [isOpen, setIsOpen] = useState(true)
+      return <ProviderModelSelector
+        provider="openai_compat"
+        isOpen={isOpen}
+        currentModel="gpt-6-astra"
+        onSelect={onSelect}
+        onClose={() => { onClose(); setIsOpen(false) }}
+      />
+    }
+
+    render(<SelectorHarness />)
+    const model = await screen.findByRole('button', { name: /gpt-6-astra/ })
+    expect(fetchModels).toHaveBeenCalledExactlyOnceWith('/api/providers/openai_compat/models-metadata')
+    expect(within(model).getByText('872K ctx')).toBeVisible()
+    expect(within(model).getByText('128K out')).toBeVisible()
 
     await user.click(model)
 

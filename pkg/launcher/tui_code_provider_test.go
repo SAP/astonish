@@ -14,8 +14,34 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
 
-// TestCodeSAPCatalogContext exercises the actual code-mode Info path, including
-// its cached resolver, against a loopback SAP OAuth and foundation-model catalog.
+func TestCodeCompatibleMetadataContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/litellm/v1/models" {
+			fmt.Fprint(w, `{"data":[{"id":"gpt-6-astra"}]}`)
+			return
+		}
+		if r.URL.Path != "/litellm/v1/model/info" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"model_name":"gpt-6-astra","model_info":{"max_tokens":128000,"max_input_tokens":872000,"max_output_tokens":128000}}]}`)
+	}))
+	defer server.Close()
+	b := &localAgentBackend{configured: true, provider: "hyperspace", model: "gpt-6-astra", appConfig: &config.AppConfig{Providers: map[string]config.ProviderConfig{"hyperspace": {"type": "openai_compat", "base_url": server.URL + "/litellm/v1", "api_key": "fixture"}}}}
+	models, err := b.ListModels(context.Background(), "hyperspace")
+	if err != nil || len(models) != 1 {
+		t.Fatalf("discovery: %v %v", models, err)
+	}
+	for _, metadata := range []backend.ModelContextBackend{b, &lazyCodeBackend{inner: b}} {
+		if got := metadata.ModelContextWindows(context.Background(), "hyperspace", models)["gpt-6-astra"]; got.Size != 872000 || got.IsFallback {
+			t.Fatalf("picker: %+v", got)
+		}
+	}
+	if info := b.Info(); info.ContextWindow != 872000 || info.ContextWindowFallback {
+		t.Fatalf("header: %+v", info)
+	}
+}
+
 func TestCodeSAPCatalogContext(t *testing.T) {
 	fixture := func(t *testing.T, capacity int) (*config.AppConfig, *atomic.Int32) {
 		t.Helper()

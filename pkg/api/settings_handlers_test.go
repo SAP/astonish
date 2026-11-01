@@ -17,9 +17,178 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/provider/openai_compat"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/store"
 )
+
+// TestCompatibleMetadataHTTP exercises the scoped platform route and both real
+// loopback HTTP endpoints, without an external provider or durable secret writes.
+func TestCompatibleMetadataHTTP(t *testing.T) {
+	assertFileUnchanged := isolateIndependentSettingsConfig(t)
+	t.Setenv("LITELLM_API_KEY", "operator-litellm-secret")
+	t.Setenv("OPENAI_API_KEY", "operator-openai-secret")
+
+	var mu sync.Mutex
+	calls := make(map[string]int)
+	outage := true
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if strings.Contains(key, "operator-") {
+			t.Error("platform request inherited an operator environment key")
+			http.Error(w, "operator key rejected", http.StatusUnauthorized)
+			return
+		}
+		calls[key+":"+r.URL.Path]++
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected upstream method: %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/litellm/v1/models":
+			if key == "empty" {
+				fmt.Fprint(w, `{"data":[]}`)
+				return
+			}
+			fmt.Fprint(w, `{"data":[{"id":"gpt-6-astra"},{"id":"total-smaller"},{"id":"no-limits"},{"id":"output-only"}]}`)
+		case "/litellm/v1/model/info", "/litellm/model/info":
+			if key == "unsupported" {
+				http.NotFound(w, r)
+				return
+			}
+			if key == "outage" && outage {
+				http.Error(w, "optional metadata unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if key == "catalog-only" {
+				fmt.Fprint(w, `{"data":[{"model_name":"not-discovered","model_info":{"context_length":9999999}}]}`)
+				return
+			}
+			capacity := 872000
+			if key == "secondary" {
+				capacity = 222222
+			}
+			fmt.Fprintf(w, `{"data":[{"model_name":"gpt-6-astra","model_info":{"context_length":1100000,"max_input_tokens":%d,"max_output_tokens":128000}},{"model_name":"total-smaller","model_info":{"context_window":4096,"max_input_tokens":8192}},{"model_name":"no-limits","model_info":{"context_length":-1,"max_input_tokens":0,"max_output_tokens":-5}},{"model_name":"output-only","model_info":{"max_output_tokens":512}},{"model_name":"not-discovered","model_info":{"context_length":9999999}}]}`, capacity)
+		default:
+			t.Errorf("unexpected compatible upstream path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	providers := make(map[string]map[string]string)
+	for _, typ := range []string{"openai_compat", "litellm"} {
+		for _, key := range []string{"primary", "secondary", "outage", "unsupported", "catalog-only", "empty", ""} {
+			providers[typ+"-"+key] = map[string]string{"type": typ, "api_key": key, "base_url": upstream.URL + "/litellm/v1"}
+		}
+	}
+	svc := &store.Services{
+		Mode:             store.ModePlatform,
+		PlatformSettings: &providerMatrixPlatformStore{value: &store.PlatformSettings{Providers: providers}},
+		OrgSettings:      &providerMatrixOrgStore{value: &store.OrgSettings{}},
+		Settings:         &urgentSettingsStore{value: &store.TeamSettings{}},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/api/providers/{providerId}/models-metadata", func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithPlatformUser(r.Context(), &PlatformUser{ID: "metadata-user"})
+		ctx = store.WithTenantContext(store.WithServices(ctx, svc), &store.TenantContext{OrgSlug: "metadata-org", TeamSlug: "metadata-team"})
+		ListProviderModelsWithMetadataHandler(w, r.WithContext(ctx))
+	}).Methods(http.MethodGet)
+	platform := httptest.NewServer(router)
+	defer platform.Close()
+	client := &http.Client{Timeout: 15 * time.Second}
+	fetch := func(t *testing.T, typ, key string, wantMetadata bool) []openai_compat.ModelMetadata {
+		t.Helper()
+		id := typ + "-" + key
+		resp, err := client.Get(platform.URL + "/api/providers/" + id + "/models-metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Provider    string                        `json:"provider"`
+			HasMetadata bool                          `json:"has_metadata"`
+			Models      []openai_compat.ModelMetadata `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("decode metadata (status=%d): %v", resp.StatusCode, err)
+		}
+		if resp.StatusCode != http.StatusOK || result.Provider != id || result.HasMetadata != wantMetadata {
+			t.Fatalf("invalid metadata envelope: status=%d result=%+v", resp.StatusCode, result)
+		}
+		if key == "empty" {
+			if result.Models == nil || len(result.Models) != 0 {
+				t.Fatalf("empty discovery must remain an empty JSON array: %+v", result)
+			}
+			return result.Models
+		}
+		wantIDs := []string{"gpt-6-astra", "total-smaller", "no-limits", "output-only"}
+		if len(result.Models) != len(wantIDs) {
+			t.Fatalf("metadata changed discovered model count: %+v", result.Models)
+		}
+		for i, model := range result.Models {
+			if model.ID != wantIDs[i] || model.Name != wantIDs[i] {
+				t.Fatalf("metadata changed discovery IDs/order/names: %+v", result.Models)
+			}
+			if !wantMetadata && (model.ContextLength != 0 || model.MaxInputTokens != 0 || model.MaxOutputTokens != 0) {
+				t.Fatalf("basic model contains unexpected limits: %+v", model)
+			}
+		}
+		return result.Models
+	}
+	assertLimits := func(t *testing.T, models []openai_compat.ModelMetadata, capacity int) {
+		t.Helper()
+		if m := models[0]; m.ContextLength != capacity || m.MaxInputTokens != capacity || m.MaxOutputTokens != 128000 {
+			t.Fatalf("Astra must use conservative input and preserve output: %+v", m)
+		}
+		if m := models[1]; m.ContextLength != 4096 || m.MaxInputTokens != 8192 {
+			t.Fatalf("positive total below input must win: %+v", m)
+		}
+		if m := models[2]; m.ContextLength != 0 || m.MaxInputTokens != 0 || m.MaxOutputTokens != 0 {
+			t.Fatalf("non-positive limits must not be exposed: %+v", m)
+		}
+		if m := models[3]; m.ContextLength != 0 || m.MaxInputTokens != 0 || m.MaxOutputTokens != 512 {
+			t.Fatalf("output-only metadata must not manufacture context: %+v", m)
+		}
+	}
+	for _, typ := range []string{"openai_compat", "litellm"} {
+		t.Run(typ, func(t *testing.T) {
+			assertLimits(t, fetch(t, typ, "primary", true), 872000)
+			assertLimits(t, fetch(t, typ, "secondary", true), 222222)
+			assertLimits(t, fetch(t, typ, "primary", true), 872000)
+			fetch(t, typ, "unsupported", false)
+			fetch(t, typ, "catalog-only", false)
+			fetch(t, typ, "empty", false)
+			assertLimits(t, fetch(t, typ, "", true), 872000)
+		})
+	}
+	// Transient failures do not poison discovery or prevent immediate recovery.
+	for _, typ := range []string{"openai_compat", "litellm"} {
+		fetch(t, typ, "outage", false)
+	}
+	mu.Lock()
+	outage = false
+	mu.Unlock()
+	for _, typ := range []string{"openai_compat", "litellm"} {
+		assertLimits(t, fetch(t, typ, "outage", true), 872000)
+	}
+	mu.Lock()
+	for _, key := range []string{"primary", "secondary"} {
+		if n := calls[key+":/litellm/v1/model/info"]; n != 1 {
+			t.Errorf("metadata cache must be independent per key: %s calls=%d, want 1", key, n)
+		}
+		if n := calls[key+":/litellm/v1/models"]; n < 2 {
+			t.Errorf("both provider types must discover models: %s calls=%d", key, n)
+		}
+	}
+	if calls[":/litellm/v1/model/info"] == 0 || calls[":/litellm/v1/models"] == 0 || calls["litellm:/litellm/v1/models"] == 0 {
+		t.Error("keyless requests did not use anonymous metadata/compatible discovery and LiteLLM's placeholder key")
+	}
+	mu.Unlock()
+	assertFileUnchanged()
+}
 
 type sapCatalogHTTPModelLimits struct {
 	store.ModelLimitsStore // Unexpected writes fail rather than touching durable state.

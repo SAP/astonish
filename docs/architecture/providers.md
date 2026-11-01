@@ -44,6 +44,20 @@ go test ./pkg/tui -run 'TestRenderHeader.*(SAP|Fallback)|TestFormatTokenCount' -
 
 The 1,100,000 fixture verifies propagation, not any model's production capacity; a real model's value remains whatever its authenticated SAP catalog reports.
 
+### Optional OpenAI-compatible metadata
+
+OpenAI-compatible and LiteLLM instances probe the nonstandard LiteLLM `/model/info` extension using the configured URL and key. For `http://localhost:6655/litellm/v1`, probes are `/litellm/v1/model/info` then `/litellm/model/info`; only the final `/v1` component is removed, never the proxy prefix. All redirects are rejected, responses are bounded to 8 MiB, and the entire probe sequence has a three-second timeout. Scoped platform requests do not inherit operator environment secrets.
+
+Exact `model_name` entries enrich only IDs discovered by `/models`. Positive `context_length` or `context_window` fields and `max_input_tokens` supply a conservative budget (the smaller positive value when both exist). With only `max_input_tokens`, the context indicator is an input budget, **not a claimed total context capacity**. `max_output_tokens` remains separate and is exposed as `max_completion_tokens` for Studio. `max_tokens` is never interpreted as context capacity, and input/output limits are never summed. Generation output defaults are unchanged.
+
+Successful metadata is cached for one hour by URL/key fingerprint; unsupported schemas/endpoints and denied access are cached for one minute. Transient outages are not cached. The indefinite outer context cache is bypassed for these connections. No model-specific lookup is added; absent usable metadata retains existing static/default resolution and basic model discovery. Code `/model`, its header and runtime budget use the shared resolver; Studio receives the same conservative capacity and output limit from the metadata HTTP handler.
+
+```bash
+go test -race ./pkg/provider/... -count=1
+go test ./pkg/api -run TestCompatibleMetadataHTTP -count=1
+go test ./pkg/launcher -run TestCodeCompatibleMetadataContext -count=1
+```
+
 ### Why Canonical Tool Serialization
 
 Provider adapters canonicalize tool schemas before constructing outbound requests. Function declarations are globally sorted by name independent of their original grouping; JSON object keys and safe set-like arrays (`required`, `enum`, and union `type`) are normalized recursively; empty object schemas use one representation; and allowed function names are sorted. Semantically ordered arrays remain in source order. Canonicalization failures stop request construction rather than silently sending unstable data.

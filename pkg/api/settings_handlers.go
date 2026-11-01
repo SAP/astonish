@@ -15,6 +15,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/anthropic"
 	"github.com/SAP/astonish/pkg/provider/google"
 	"github.com/SAP/astonish/pkg/provider/groq"
+	"github.com/SAP/astonish/pkg/provider/litellm"
 	"github.com/SAP/astonish/pkg/provider/lmstudio"
 	"github.com/SAP/astonish/pkg/provider/ollama"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
@@ -882,22 +883,57 @@ func ListProviderModelsWithMetadataHandler(w http.ResponseWriter, r *http.Reques
 		respondJSON(w, http.StatusOK, map[string]interface{}{"provider": providerID, "has_metadata": true, "models": models})
 		return
 
-	case "openai_compat":
-		apiKey := resolveProviderSecret(r.Context(), providerID, "api_key", "", pCfg)
+	case "openai_compat", "litellm":
+		envVar := ""
 		baseURL := pCfg["base_url"]
-		if baseURL == "" {
+		if providerType == "litellm" {
+			envVar = "LITELLM_API_KEY"
+			if baseURL == "" {
+				baseURL = "http://localhost:4000/v1"
+			}
+		} else if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
-		models, err := openai_compat.ListModels(r.Context(), apiKey, baseURL)
+		apiKey := resolveProviderSecret(r.Context(), providerID, "api_key", envVar, pCfg)
+		var models []string
+		var err error
+		if providerType == "litellm" {
+			models, err = litellm.ListModels(r.Context(), apiKey, baseURL)
+		} else {
+			models, err = openai_compat.ListModels(r.Context(), apiKey, baseURL)
+		}
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to fetch models: "+err.Error())
 			return
 		}
-		var modelInfos []map[string]interface{}
+		// Model info is optional enrichment, never another source of available IDs.
+		metadata := openai_compat.FetchModelMetadata(r.Context(), apiKey, baseURL)
+		modelInfos := make([]map[string]interface{}, 0, len(models))
+		hasMetadata := false
 		for _, m := range models {
-			modelInfos = append(modelInfos, map[string]interface{}{"id": m, "name": m})
+			info := map[string]interface{}{"id": m, "name": m}
+			limits := metadata[m]
+			// Without a guaranteed total window, use the smaller positive input
+			// or context budget rather than overstating usable capacity.
+			contextLength := limits.ContextLength
+			if limits.MaxInputTokens > 0 && (contextLength <= 0 || limits.MaxInputTokens < contextLength) {
+				contextLength = limits.MaxInputTokens
+			}
+			if contextLength > 0 {
+				info["context_length"] = contextLength
+				hasMetadata = true
+			}
+			if limits.MaxInputTokens > 0 {
+				info["max_input_tokens"] = limits.MaxInputTokens
+				hasMetadata = true
+			}
+			if limits.MaxOutputTokens > 0 {
+				info["max_completion_tokens"] = limits.MaxOutputTokens
+				hasMetadata = true
+			}
+			modelInfos = append(modelInfos, info)
 		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{"provider": providerID, "has_metadata": false, "models": modelInfos})
+		respondJSON(w, http.StatusOK, map[string]interface{}{"provider": providerID, "has_metadata": hasMetadata, "models": modelInfos})
 		return
 	}
 

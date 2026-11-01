@@ -44,13 +44,9 @@ func TestRun_GeneratorEqualityAndPackaging(t *testing.T) {
 	if out.String() != canonical {
 		t.Fatal("generator diverges from canonical script")
 	}
-	generated, err := os.ReadFile("../../astonish-sandbox-entrypoint")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(generated) != canonical {
-		t.Fatal("run make sandbox-entrypoint to regenerate")
-	}
+	// The build artifact is gitignored and absent in clean checkouts. Compare
+	// generator output directly with its canonical source above; packaging below
+	// verifies that image builds install the generated script.
 	dockerfile, err := os.ReadFile("../../docker/sandbox-base/Dockerfile")
 	if err != nil {
 		t.Fatal(err)

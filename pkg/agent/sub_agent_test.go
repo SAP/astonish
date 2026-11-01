@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/store"
 
 	"github.com/SAP/astonish/pkg/common"
 	adkagent "google.golang.org/adk/agent"
@@ -1432,6 +1434,319 @@ func (s childForbiddenAmbientToolset) Tools(adkagent.ReadonlyContext) ([]tool.To
 	return nil, fmt.Errorf("ambient toolset must not initialize for overrides")
 }
 
+func TestChildPreferredMetadataLazyDiscovery(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mail := &childCountingToolset{tools: mockTools("send_email", "duplicate")}
+	other := &childCountingToolset{tools: mockTools("duplicate", "calendar_list")}
+	generic := &childCountingToolset{tools: mockTools("unindexed")}
+	mgr.ToolGroups = map[string]*ToolGroup{
+		"core":      {Name: "core", Tools: mockTools("read_file")},
+		"mcp:mail":  {Name: "mcp:mail", Toolsets: []tool.Toolset{mail}},
+		"mcp:other": {Name: "mcp:other", Toolsets: []tool.Toolset{other}},
+		"generic":   {Name: "generic", Toolsets: []tool.Toolset{generic}},
+	}
+	mgr.ToolIndex = &ToolIndex{toolRegistry: map[string]ToolEntry{
+		"mail":     {Name: "send_email", GroupName: "mcp:mail", Description: "send an email", Tool: &mockTool{name: "ambient"}},
+		"dup1":     {Name: "duplicate", GroupName: "mcp:mail"},
+		"dup2":     {Name: "duplicate", GroupName: "mcp:other"},
+		"calendar": {Name: "calendar_list", GroupName: "mcp:other"},
+	}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := &minimalReadonlyContext{Context: context.Background()}
+	for _, name := range []string{"unknown", "duplicate"} {
+		if _, _, err := scope.resolve(rc, name); err == nil {
+			t.Fatalf("resolved %s", name)
+		}
+	}
+	if mail.calls.Load() != 0 || other.calls.Load() != 0 {
+		t.Fatal("unknown/ambiguous bare call initialized groups")
+	}
+	if hits, err := scope.Search(rc, "no_such_capability", 10); err != nil || len(hits) != 0 {
+		t.Fatal(hits)
+	}
+	var searches sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		searches.Add(1)
+		go func() {
+			defer searches.Done()
+			if hits, err := scope.Search(rc, "send email", 1); err != nil || len(hits) != 1 || hits[0].ToolName != "mcp:mail/send_email" {
+				t.Error(hits)
+			}
+		}()
+	}
+	searches.Wait()
+	if hits, err := scope.Search(rc, "send email", 1); err != nil || len(hits) != 1 || hits[0].ToolName != "mcp:mail/send_email" {
+		t.Fatal(hits)
+	}
+	if mail.calls.Load() != 1 || other.calls.Load() != 0 || generic.calls.Load() != 0 {
+		t.Fatal("search loaded unrelated toolsets")
+	}
+	scope.Search(rc, "*", 1)
+	if other.calls.Load() != 0 || generic.calls.Load() != 0 {
+		t.Fatal("wildcard initialized unindexed generic toolset")
+	}
+	if len(scope.initial) != 1 {
+		t.Fatal("search changed initial declarations")
+	}
+}
+
+func TestChildPreferredNoIndexExecutableFallback(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	ambient := &mockTool{name: "ambient_tool"}
+	mgr.ToolIndex = &ToolIndex{toolRegistry: map[string]ToolEntry{
+		"ambient": {Name: "ambient_tool", GroupName: "mcp:late", Tool: ambient},
+		"host":    {Name: "hostexclusive", GroupName: "host", Tool: &mockTool{name: "hostexclusive"}},
+	}}
+	var calls atomic.Int32
+	local := &mockTool{name: "ambient_tool"}
+	mgr.MCPGroupResolver = func(context.Context, string) *ToolGroup {
+		calls.Add(1)
+		return &ToolGroup{Name: "mcp:late", Tools: []tool.Tool{local}}
+	}
+	mgr.MCPGroupResolver = nil
+	unresolved, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"missing"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := unresolved.resolve(&minimalReadonlyContext{Context: context.Background()}, "mcp:late/ambient_tool"); err == nil {
+		t.Fatal("index executable exposed without permitted resolver")
+	}
+	if hits, err := unresolved.Search(context.Background(), "*", 0); err != nil || len(hits) != 0 {
+		t.Fatal("index-only executable searchable")
+	}
+	mgr.MCPGroupResolver = func(context.Context, string) *ToolGroup {
+		calls.Add(1)
+		return &ToolGroup{Name: "mcp:late", Tools: []tool.Tool{local}}
+	}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"missing"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("eager resolver")
+	}
+	if hits, err := scope.Search(context.Background(), "hostexclusive", 10); err != nil || len(hits) != 0 {
+		t.Fatal("ambient host fallback", hits)
+	}
+	got, _, err := scope.resolve(&minimalReadonlyContext{Context: context.Background()}, "ambient_tool")
+	if err != nil || got != local || got == ambient || calls.Load() != 1 {
+		t.Fatalf("instance=%v err=%v calls=%d", got, err, calls.Load())
+	}
+}
+
+func TestChildPreferredAutoRecoveryAndEmptyCatalog(t *testing.T) {
+	for _, withTools := range []bool{false, true} {
+		mgr := NewSubAgentManager(SubAgentConfig{})
+		mgr.ToolIndex = newTestToolIndex(t, testSemanticEmbeddingFunc())
+		if withTools {
+			mgr.ToolGroups = map[string]*ToolGroup{"browser": {Name: "browser", Tools: mockTools("browser_navigate")}}
+		}
+		scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{Description: "unknown capability", ToolSelectionMode: ChildToolSelectionPreferred})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(scope.initial) != 0 {
+			t.Fatal("unexpected auto declarations")
+		}
+		hits, err := scope.Search(context.Background(), "browser", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(hits) == 1) != withTools {
+			t.Fatal(hits)
+		}
+	}
+}
+
+func TestChildPreferredRequestWebDisabledAndAccess(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	ambient := &mockTool{name: "selected_search"}
+	request := &mockTool{name: "selected_search"}
+	lazy := &childCountingToolset{tools: mockTools("private_tool")}
+	mgr.ToolGroups = map[string]*ToolGroup{"web": {Name: "web", Tools: []tool.Tool{ambient}}, "mcp:scope-private": {Name: "mcp:scope-private", Toolsets: []tool.Toolset{lazy}}}
+	available := true
+	ctx := WithPromptOverrides(context.Background(), &PromptOverrides{WebSearchAvailable: &available, WebSearchToolName: "selected_search", AdditionalTools: []tool.Tool{request}})
+	scope, _, err := mgr.childToolScope(ctx, SubAgentTask{ToolFilter: []string{"missing"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := scope.resolve(&minimalReadonlyContext{Context: ctx}, "selected_search"); err != nil || got != request {
+		t.Fatal("request identity", err)
+	}
+	available = false
+	blocked := store.WithMCPServerStores(ctx, &store.MCPServerStores{})
+	scope, _, err = mgr.childToolScope(blocked, SubAgentTask{ToolFilter: []string{"missing"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"selected_search", "mcp:scope-private/private_tool"} {
+		if _, _, err := scope.resolve(&minimalReadonlyContext{Context: blocked}, name); err == nil {
+			t.Fatal("exposed", name)
+		}
+	}
+	if hits, err := scope.Search(blocked, "*", 0); err != nil || len(hits) != 0 || lazy.calls.Load() != 0 {
+		t.Fatal("disabled/inaccessible discovery leaked")
+	}
+}
+
+func TestChildPreferredDiscoveryRegression(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file")}, "browser": {Name: "browser", Tools: mockTools("browser_navigate")}}
+	// Preferred primary tools must not be the authorization boundary.
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope.initial) != 1 || scope.initial[0].tool.Name() != "read_file" {
+		t.Fatalf("initial declarations = %+v", scope.initial)
+	}
+	if _, _, err := scope.resolve(&minimalReadonlyContext{Context: context.Background()}, "browser_navigate"); err != nil {
+		t.Fatalf("authorized additional discovery unavailable: %v", err)
+	}
+}
+
+type childCountingToolset struct {
+	calls atomic.Int32
+	tools []tool.Tool
+}
+
+func (s *childCountingToolset) Name() string { return "lazy" }
+func (s *childCountingToolset) Tools(adkagent.ReadonlyContext) ([]tool.Tool, error) {
+	s.calls.Add(1)
+	return s.tools, nil
+}
+
+func TestChildPreferredLazyCatalog(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	lazy := &childCountingToolset{tools: mockTools("send_email", "memory_save")}
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file")}, "mcp:email": {Name: "mcp:email", Toolsets: []tool.Toolset{lazy}}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &minimalReadonlyContext{Context: context.Background()}
+	if lazy.calls.Load() != 0 {
+		t.Fatal("eager initialization")
+	}
+	if _, _, err := scope.resolve(ctx, "read_file"); err != nil {
+		t.Fatal(err)
+	}
+	if lazy.calls.Load() != 0 {
+		t.Fatal("first-party execution initialized unrelated MCP")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := scope.resolve(ctx, "mcp:email/send_email"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if lazy.calls.Load() != 1 {
+		t.Fatalf("lazy loads=%d", lazy.calls.Load())
+	}
+	if _, _, err := scope.resolve(ctx, "mcp:email/memory_save"); err == nil {
+		t.Fatal("excluded deferred tool exposed")
+	}
+	if len(scope.initial) != 1 {
+		t.Fatal("discovery changed declarations")
+	}
+}
+
+func TestChildPreferredLazyResolver(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file")}, "mcp:late": {Name: "mcp:late"}}
+	calls := 0
+	mgr.MCPGroupResolver = func(context.Context, string) *ToolGroup {
+		calls++
+		return &ToolGroup{Name: "mcp:late", Tools: mockTools("late_tool")}
+	}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("eager resolver")
+	}
+	blocked := &minimalReadonlyContext{Context: store.WithDisabledTools(context.Background(), []string{"late_tool"})}
+	if _, _, err := scope.resolve(blocked, "mcp:late/late_tool"); err == nil || calls != 0 {
+		t.Fatal("disabled tool invoked resolver")
+	}
+	if _, _, err := scope.resolve(&minimalReadonlyContext{Context: context.Background()}, "mcp:late/late_tool"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+	if mgr.ToolGroups["mcp:late"].Tools != nil {
+		t.Fatal("resolver mutated shared manager")
+	}
+}
+
+func TestChildPreferredPolicyAndOverrides(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file", "write_file", "memory_save")}, "browser": {Name: "browser", Tools: mockTools("browser_navigate")}}
+	wrapped := &mockTool{name: "write_file"}
+	ctx := store.WithDisabledTools(context.Background(), []string{"read_file"})
+	scope, _, err := mgr.childToolScope(ctx, SubAgentTask{ToolFilter: []string{"read_file"}, ToolSelectionMode: ChildToolSelectionPreferred, OverrideTools: []tool.Tool{wrapped, mockTool{name: "memory_save"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := &minimalReadonlyContext{Context: ctx}
+	if _, _, err := scope.resolve(rc, "write_file"); err == nil {
+		t.Fatal("override widened strict read_file filter")
+	}
+	identity, _, err := mgr.childToolScope(ctx, SubAgentTask{ToolFilter: []string{"write_file"}, ToolSelectionMode: ChildToolSelectionPreferred, OverrideTools: []tool.Tool{wrapped}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := identity.resolve(rc, "write_file")
+	if err != nil || got != wrapped {
+		t.Fatalf("wrapper=%v err=%v", got, err)
+	}
+	for _, name := range []string{"read_file", "memory_save", "browser_navigate", "search_tools", "execute_tool"} {
+		if _, _, err := scope.resolve(rc, name); err == nil {
+			t.Fatalf("exposed %s", name)
+		}
+	}
+	if len(scope.Matches(ctx)) != 0 {
+		t.Fatalf("matches=%+v", scope.Matches(ctx))
+	}
+}
+
+func TestChildSelectionModesAndPrompt(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file")}, "browser": {Name: "browser", Tools: mockTools("browser_navigate")}}
+	for _, mode := range []ChildToolSelectionMode{"", ChildToolSelectionStrict, ChildToolSelectionPreferred} {
+		task := SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: mode}
+		scope, _, err := mgr.childToolScope(context.Background(), task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = scope.resolve(&minimalReadonlyContext{Context: context.Background()}, "browser_navigate")
+		if (err == nil) != (mode == ChildToolSelectionPreferred) {
+			t.Fatalf("mode %q err=%v", mode, err)
+		}
+		prompt := mgr.buildChildPromptWithScope(context.Background(), task, scope)
+		if mode == ChildToolSelectionPreferred {
+			if !strings.Contains(prompt, "PRIMARY") {
+				t.Fatal(prompt)
+			}
+		} else if !strings.Contains(prompt, "STRICT allow-list") {
+			t.Fatal(prompt)
+		}
+	}
+	if _, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolSelectionMode: "typo"}); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+}
+
 func TestChildScopeDoesNotInitializeUnselectedToolsets(t *testing.T) {
 	mgr := NewSubAgentManager(SubAgentConfig{})
 	mgr.ToolGroups = map[string]*ToolGroup{
@@ -1618,5 +1933,56 @@ func TestChildRetryDoesNotRewardDiscoveryLoop(t *testing.T) {
 	trace.RecordStep("read_file", nil, map[string]any{"content": "useful"}, nil)
 	if !hasProgress(TaskResult{Trace: trace}) {
 		t.Fatal("successful work lost")
+	}
+}
+
+func TestChildSearchErrorsAndWildcardContract(t *testing.T) {
+	for _, resolverOnly := range []bool{false, true} {
+		t.Run(fmt.Sprint(resolverOnly), func(t *testing.T) {
+			var calls atomic.Int32
+			scope := &ChildToolScope{deferred: map[string]*ToolGroup{"mcp:broken": {Name: "mcp:broken"}}, metadata: []ToolMatch{{ToolName: "mcp:broken/action", GroupName: "mcp:broken"}}}
+			if resolverOnly {
+				scope.resolver = func(context.Context, string) *ToolGroup { calls.Add(1); return nil }
+			} else {
+				scope.deferred["mcp:broken"].Toolsets = []tool.Toolset{childForbiddenAmbientToolset{name: "broken"}}
+			}
+			if hits, err := scope.Search(context.Background(), "*", 0); err != nil || len(hits) != 0 || calls.Load() != 0 {
+				t.Fatalf("wildcard advertised or resolved unavailable metadata: hits=%v err=%v calls=%d", hits, err, calls.Load())
+			}
+			if hits, err := scope.Search(context.Background(), "action", 10); err == nil || len(hits) != 0 || !strings.Contains(err.Error(), "mcp:broken/action") {
+				t.Fatalf("search hid resolution error: hits=%v err=%v", hits, err)
+			}
+		})
+	}
+	scope := &ChildToolScope{}
+	if _, err := scope.Search(context.Background(), "  ", 0); err == nil {
+		t.Fatal("empty query accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := scope.Search(ctx, "*", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation lost: %v", err)
+	}
+}
+
+func TestChildQualifiedMetadataSelection(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	lazy := &childCountingToolset{tools: mockTools("send_email")}
+	mgr.ToolGroups = map[string]*ToolGroup{"mcp:mail": {Name: "mcp:mail", Toolsets: []tool.Toolset{lazy}}}
+	mgr.ToolIndex = &ToolIndex{toolRegistry: map[string]ToolEntry{"mail": {Name: "mcp:mail/send_email", GroupName: "mcp:mail"}, "wrong": {Name: "mcp:other/wrong", GroupName: "mcp:mail"}}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"send_email"}, ToolSelectionMode: ChildToolSelectionStrict})
+	if err != nil || len(scope.initial) != 1 || lazy.calls.Load() != 1 {
+		t.Fatalf("qualified metadata selection failed: scope=%v err=%v calls=%d", scope, err, lazy.calls.Load())
+	}
+}
+
+func TestChildPreferredAutoSelectionError(t *testing.T) {
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	failure := context.Canceled
+	mgr.ToolIndex = newTestToolIndex(t, testSemanticEmbeddingFunc())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if scope, _, err := mgr.childToolScope(ctx, SubAgentTask{Description: "discover tools", ToolSelectionMode: ChildToolSelectionPreferred}); !errors.Is(err, failure) || scope != nil || !strings.Contains(err.Error(), "discover tool groups") {
+		t.Fatalf("auto-selection hid error: scope=%v err=%v", scope, err)
 	}
 }

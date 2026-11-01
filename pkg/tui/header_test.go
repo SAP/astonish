@@ -91,6 +91,24 @@ func TestRenderHeaderUsesProviderResolvedContextWindow(t *testing.T) {
 	}
 }
 
+func TestRenderHeaderSAPCatalogContext(t *testing.T) {
+	m := model{
+		theme: DefaultTheme(),
+		width: 120,
+		info:  backend.Info{Mode: "code", Model: "gpt-6-astra", ContextWindow: 1_100_000},
+		tr:    &events.Transcript{ContextTokens: 110_000},
+	}
+	out := stripANSI(m.renderHeader())
+	if !strings.Contains(out, "Context 110.0k/1.1M (10%)") || strings.Contains(out, "(fallback)") {
+		t.Fatalf("header should render SAP catalog capacity and utilization without fallback: %q", out)
+	}
+	m.tr.ContextTokens = 0
+	out = stripANSI(m.renderHeader())
+	if strings.Contains(out, "(fallback)") {
+		t.Fatalf("empty usage must not turn catalog capacity into fallback: %q", out)
+	}
+}
+
 func TestRenderHeaderShowsFallbackLabel(t *testing.T) {
 	m := model{
 		theme: DefaultTheme(),
@@ -141,6 +159,7 @@ func TestFormatTokenCountMatchesStudioStyle(t *testing.T) {
 		42:        "42",
 		1_200:     "1.2k",
 		1_000_000: "1.0M",
+		1_100_000: "1.1M",
 	}
 	for n, want := range cases {
 		if got := formatTokenCount(n); got != want {

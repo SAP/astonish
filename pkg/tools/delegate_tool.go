@@ -33,7 +33,7 @@ type SubTaskInput struct {
 	Name         string   `json:"name" jsonschema:"Short identifier for this sub-agent (e.g., 'researcher', 'code-reviewer', 'api-tester'). Must be unique within the delegation call."`
 	Task         string   `json:"task" jsonschema:"Clear description of what the sub-agent should accomplish. Be specific about the expected output."`
 	Instructions string   `json:"instructions,omitempty" jsonschema:"Additional context or constraints for this sub-agent. Include relevant file paths, API details, or formatting requirements."`
-	Tools        []string `json:"tools,omitempty" jsonschema:"Tool group names or individual tool names for this sub-agent (e.g., ['core'], ['browser'], ['core', 'web'], ['mcp:github']). If omitted, tools are auto-discovered based on the task description. Available groups are listed in the system prompt under Task Delegation."`
+	Tools        []string `json:"tools,omitempty" jsonschema:"Initial preferred tool group names or individual tools. These are not an allow-list; additional authorized tools remain discoverable. Omitted, null or empty lists request auto-selection."`
 	PlanStep     string   `json:"plan_step,omitempty" jsonschema:"The plan step this task belongs to. Set this to the 'name' of the step from announce_plan that this task contributes to. Multiple tasks can share the same plan_step — the step completes only when ALL tasks with that plan_step finish. If omitted, progress tracking falls back to name-based matching."`
 }
 
@@ -135,14 +135,15 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 
 		tasks[i] = agent.SubAgentTask{
 			BatchID: batchID, TaskID: uuid.NewString(), ChildSessionID: uuid.NewString(), Sequence: sequence,
-			Name:         input.Name,
-			Description:  safeTask,
-			Instructions: safeInstructions,
-			ToolFilter:   input.Tools,
-			PlanStep:     input.PlanStep,
-			ParentID:     parentSessionID,
-			ParentDepth:  0,       // delegate_tasks creates top-level sub-agents
-			OnEvent:      onEvent, // transparent streaming to UI (session-scoped)
+			Name:              input.Name,
+			Description:       safeTask,
+			Instructions:      safeInstructions,
+			ToolFilter:        input.Tools,
+			ToolSelectionMode: agent.ChildToolSelectionPreferred,
+			PlanStep:          input.PlanStep,
+			ParentID:          parentSessionID,
+			ParentDepth:       0,       // delegate_tasks creates top-level sub-agents
+			OnEvent:           onEvent, // transparent streaming to UI (session-scoped)
 		}
 	}
 
@@ -243,7 +244,7 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 	}, nil
 }
 
-const delegateTasksDescription = `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent gets the tool groups you specify (e.g., ["core"], ["browser"], ["core", "web"]) or auto-discovers tools based on the task description if tools is omitted. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
+const delegateTasksDescription = `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent starts with the tool groups or individual tools you specify as preferences (e.g., ["core"], ["browser"], ["core", "web"]). Omitted, null, or empty tools request automatic initial selection based on the task description. These preferences are not an allow-list: when needed, the child can discover, describe, and execute additional tools within the parent's permissions and child restrictions. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
 
 When a plan is active (you called announce_plan), set the plan_step field on each task to link it to a plan step. Multiple tasks can share the same plan_step — the step is marked complete only when ALL tasks with that plan_step finish. This drives accurate progress tracking in the UI.`
 

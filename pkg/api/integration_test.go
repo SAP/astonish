@@ -1676,94 +1676,184 @@ func TestMemoryHTTPAcceptance_Baseline(t *testing.T) {
 }
 
 func TestChildDiscoveryHTTPAcceptance(t *testing.T) {
-	var executed atomic.Int32
-	local, err := functiontool.New(functiontool.Config{Name: "child_http_echo", Description: "Allowed local wrapped echo"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
-		executed.Add(1)
-		return map[string]any{"evidence": "CHILD_EXECUTED", "value": args["value"]}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	delegate, err := tools.NewDelegateTasksTool()
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := NewMockLLM(ToolCallTurn("delegate_tasks", map[string]any{"tasks": []any{map[string]any{"name": "child", "task": "Discover and execute local echo", "tools": []any{"child_http_echo"}}}}), TextTurn("Delegated evidence received."))
-	env := setupMemoryHTTPAcceptance(t, parent, []tool.Tool{delegate})
-	child := NewMockLLM(ToolCallTurn("search_tools", map[string]any{"query": "*"}), ToolCallTurn("describe_tools", map[string]any{"names": []any{"child_http_echo"}}), ToolCallTurn("execute_tool", map[string]any{"name": "child_http_echo", "arguments": map[string]any{"value": "ok"}}), TextTurn("CHILD_EXECUTED"))
-	mgr := agent.NewSubAgentManager(agent.SubAgentConfig{MaxRetries: 1})
-	childCapture := &memoryCapturingLLM{Script: child}
-	mgr.LLM = childCapture
-	mgr.AppName = studioChatAppName
-	mgr.UserID = env.UserID
-	mgr.SessionService = env.Services.PersonalSessions
-	mgr.ToolGroups = map[string]*agent.ToolGroup{"core": {Name: "core", Tools: []tool.Tool{local, newMockTool("forbidden_child_tool", "must not leak", nil)}}}
-	mgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
-	previous := tools.GetSubAgentManager()
-	tools.SetSubAgentManager(mgr)
-	t.Cleanup(func() { tools.SetSubAgentManager(previous) })
-	events := env.Turn(t, "", "Delegate the local check", false)
-	assertNoEvent(t, events, "error")
-	assertHasEvent(t, events, "done")
-	if executed.Load() != 1 {
-		t.Fatalf("child executions=%d events=%v", executed.Load(), events)
-	}
-	requests := childCapture.Requests(t)
-	if len(requests) != 4 {
-		t.Fatalf("child requests=%d", len(requests))
-	}
-	for i, req := range requests {
-		declarations, _ := json.Marshal(req.Config.Tools)
-		if strings.Contains(string(declarations), "forbidden_child_tool") {
-			t.Fatal("forbidden declaration exposed")
-		}
-		if !reflect.DeepEqual(req.Config.Tools, requests[0].Config.Tools) {
-			t.Fatal("declarations changed after discovery")
-		}
-		seen := map[string]bool{}
-		for _, declared := range req.Config.Tools {
-			for _, fn := range declared.FunctionDeclarations {
-				if seen[fn.Name] {
-					t.Fatalf("duplicate declaration %s", fn.Name)
+	for _, tc := range []struct {
+		name     string
+		tools    any
+		omit     bool
+		selected bool
+	}{
+		{name: "explicit-group", tools: []any{"seed"}},
+		{name: "explicit-tool", tools: []any{"child_http_seed"}},
+		{name: "null", tools: nil},
+		{name: "omitted", omit: true},
+		{name: "empty", tools: []any{}},
+		{name: "selected-compatibility", tools: []any{"child_http_echo"}, selected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var executed, forbiddenExecuted, middlewareCalls atomic.Int32
+			local, err := functiontool.New(functiontool.Config{Name: "child_http_echo", Description: "Allowed local wrapped echo"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+				executed.Add(1)
+				return map[string]any{"evidence": "CHILD_EXECUTED", "value": args["value"]}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			forbidden, err := functiontool.New(functiontool.Config{Name: "forbidden_child_tool", Description: "Forbidden sentinel capability"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+				forbiddenExecuted.Add(1)
+				return map[string]any{"evidence": "FORBIDDEN_EXECUTED"}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := agent.NewSubAgentManager(agent.SubAgentConfig{MaxRetries: 1})
+			mgr.ToolGroups = map[string]*agent.ToolGroup{
+				"seed": {Name: "seed", Tools: []tool.Tool{newMockTool("child_http_seed", "quasarbootstrap quasarbootstrap", nil)}},
+				"echo": {Name: "echo", Tools: []tool.Tool{local, forbidden}},
+			}
+			mgr.ToolIndex = agent.NewLexicalToolIndex()
+			if err := mgr.ToolIndex.PrimeTools(context.Background(), nil, agent.SortedGroups(mgr.ToolGroups)); err != nil {
+				t.Fatal(err)
+			}
+			// Auto-selection must actually pick seed, not silently start with echo.
+			groups, err := mgr.ToolIndex.SearchGroupsHybrid(context.Background(), "quasarbootstrap", 12, 0.005)
+			if err != nil || !reflect.DeepEqual(groups, []string{"seed"}) {
+				t.Fatalf("automatic groups=%v err=%v", groups, err)
+			}
+			mgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
+			delegate, err := tools.NewDelegateTasksToolForManager(mgr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := map[string]any{"name": "child", "task": "quasarbootstrap"}
+			if !tc.omit {
+				task["tools"] = tc.tools
+			}
+			parent := NewMockLLM(ToolCallTurn("delegate_tasks", map[string]any{"tasks": []any{task}}), TextTurn("Delegated evidence received."))
+			env := setupMemoryHTTPAcceptance(t, parent, []tool.Tool{delegate})
+			// The HTTP handler deliberately creates a detached runner context and
+			// copies team restrictions from Settings, rather than arbitrary request
+			// values. Seed the real scoped settings path as well as the request.
+			orgStore, err := env.Store.ForOrg(env.OrgSlug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env.Services.Settings = orgStore.ForTeam(env.TeamSlug).Settings()
+			settings, err := env.Services.Settings.Get(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings.DisabledTools = []string{"forbidden_child_tool"}
+			if err := env.Services.Settings.Save(context.Background(), settings); err != nil {
+				t.Fatal(err)
+			}
+			env.Router.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					middlewareCalls.Add(1)
+					next.ServeHTTP(w, r.WithContext(store.WithDisabledTools(r.Context(), []string{"forbidden_child_tool"})))
+				})
+			})
+			childCapture := &memoryCapturingLLM{Script: NewMockLLM(
+				ToolCallTurn("search_tools", map[string]any{"query": "*"}),
+				ToolCallTurn("describe_tools", map[string]any{"names": []any{"child_http_echo"}}),
+				ToolCallTurn("execute_tool", map[string]any{"name": "child_http_echo", "arguments": map[string]any{"value": "ok"}}),
+				ToolCallTurn("describe_tools", map[string]any{"names": []any{"forbidden_child_tool"}}),
+				ToolCallTurn("execute_tool", map[string]any{"name": "forbidden_child_tool", "arguments": map[string]any{}}),
+				TextTurn("CHILD_EXECUTED"),
+			)}
+			mgr.LLM = childCapture
+			mgr.AppName = studioChatAppName
+			mgr.UserID = env.UserID
+			mgr.SessionService = env.Services.PersonalSessions
+			events := env.Turn(t, "", "Delegate the local check", false)
+			assertFirstAndLast(t, events)
+			assertNoEvent(t, events, "error")
+			assertEventSequence(t, events, "session", "subtask_progress", "text", "done")
+			if middlewareCalls.Load() != 1 || executed.Load() != 1 || forbiddenExecuted.Load() != 0 {
+				t.Fatalf("HTTP middleware=%d echo=%d forbidden=%d events=%v", middlewareCalls.Load(), executed.Load(), forbiddenExecuted.Load(), events)
+			}
+			requests := childCapture.Requests(t)
+			if len(requests) != 6 {
+				t.Fatalf("child requests=%d want=6", len(requests))
+			}
+			for i, req := range requests {
+				if !reflect.DeepEqual(req.Config.Tools, requests[0].Config.Tools) {
+					t.Fatal("declarations changed after discovery")
 				}
-				seen[fn.Name] = true
-			}
-		}
-		if i > 0 {
-			data, _ := json.Marshal(req.Contents)
-			if !strings.Contains(string(data), "child_http_echo") || strings.Contains(string(data), "forbidden_child_tool") {
-				t.Fatal("discovery missing or outside-scope evidence exposed")
-			}
-		}
-	}
-	for _, expected := range []struct {
-		index          int
-		name, evidence string
-	}{{1, "search_tools", "child_http_echo"}, {2, "describe_tools", "Allowed local wrapped echo"}, {3, "execute_tool", "CHILD_EXECUTED"}} {
-		found := false
-		for _, content := range requests[expected.index].Contents {
-			for _, part := range content.Parts {
-				if part.FunctionResponse != nil && part.FunctionResponse.Name == expected.name {
-					data, _ := json.Marshal(part.FunctionResponse.Response)
-					found = strings.Contains(string(data), expected.evidence)
+				seen := map[string]bool{}
+				for _, declared := range req.Config.Tools {
+					for _, fn := range declared.FunctionDeclarations {
+						if seen[fn.Name] {
+							t.Fatalf("duplicate declaration %s", fn.Name)
+						}
+						seen[fn.Name] = true
+					}
+				}
+				if seen["forbidden_child_tool"] || seen["child_http_echo"] != tc.selected {
+					t.Fatalf("request %d initial declarations=%v selected=%v", i, seen, tc.selected)
+				}
+				if !tc.selected && !seen["child_http_seed"] {
+					t.Fatalf("seed missing from initial declarations: %v", seen)
+				}
+				for _, helper := range []string{"search_tools", "describe_tools", "execute_tool"} {
+					if !seen[helper] {
+						t.Fatalf("missing helper %s", helper)
+					}
 				}
 			}
-		}
-		if !found {
-			t.Fatalf("missing %s result evidence", expected.name)
-		}
+			// Inspect the actual function responses delivered to the child, not the
+			// scripted final text (which alone would not prove any tool execution).
+			response := func(index int, name string) string {
+				t.Helper()
+				for c := len(requests[index].Contents) - 1; c >= 0; c-- {
+					for _, part := range requests[index].Contents[c].Parts {
+						if fr := part.FunctionResponse; fr != nil && fr.Name == name {
+							data, err := json.Marshal(fr.Response)
+							if err != nil {
+								t.Fatal(err)
+							}
+							return string(data)
+						}
+					}
+				}
+				t.Fatalf("missing %s function response at request %d", name, index)
+				return ""
+			}
+			search := response(1, "search_tools")
+			if !strings.Contains(search, "child_http_echo") || strings.Contains(search, "forbidden_child_tool") {
+				t.Fatalf("search scope=%s", search)
+			}
+			description := response(2, "describe_tools")
+			if !strings.Contains(description, "Allowed local wrapped echo") {
+				t.Fatalf("description=%s", description)
+			}
+			execution := response(3, "execute_tool")
+			if !strings.Contains(execution, "CHILD_EXECUTED") || !strings.Contains(execution, "ok") {
+				t.Fatalf("execution=%s", execution)
+			}
+			deniedDescription := response(4, "describe_tools")
+			deniedExecution := response(5, "execute_tool")
+			for name, denied := range map[string]string{"describe": deniedDescription, "execute": deniedExecution} {
+				if !strings.Contains(denied, "error") || !strings.Contains(denied, "is disabled") || strings.Contains(denied, "Forbidden sentinel capability") || strings.Contains(denied, "FORBIDDEN_EXECUTED") {
+					t.Fatalf("%s did not deny disabled tool: %s", name, denied)
+				}
+			}
+			parentRequests := env.LLM.Requests(t)
+			if len(parentRequests) != 2 {
+				t.Fatalf("parent calls=%d", len(parentRequests))
+			}
+			parentResult := ""
+			for _, content := range parentRequests[1].Contents {
+				for _, part := range content.Parts {
+					if fr := part.FunctionResponse; fr != nil && fr.Name == "delegate_tasks" {
+						data, _ := json.Marshal(fr.Response)
+						parentResult = string(data)
+					}
+				}
+			}
+			if !strings.Contains(parentResult, "CHILD_EXECUTED") || !strings.Contains(parentResult, "success") {
+				t.Fatalf("parent delegate result=%s", parentResult)
+			}
+			t.Logf("real loopback POST/SSE -> bound delegate -> child: echo selected=%v, discovered/described/executed once; disabled sentinel absent search, describe=%s execute=%s, forbidden executions=0; stable unique declarations; parent received CHILD_EXECUTED", tc.selected, deniedDescription, deniedExecution)
+		})
 	}
-	parentRequests := env.LLM.Requests(t)
-	if len(parentRequests) != 2 {
-		t.Fatalf("parent calls=%d", len(parentRequests))
-	}
-	parentEvidence, _ := json.Marshal(parentRequests[1].Contents)
-	if !strings.Contains(string(parentEvidence), "CHILD_EXECUTED") {
-		t.Fatal("delegate result missing at parent")
-	}
-	last, _ := json.Marshal(requests[3].Contents)
-	if !strings.Contains(string(last), "CHILD_EXECUTED") {
-		t.Fatalf("execution evidence not returned: %s", last)
-	}
-	t.Log("HTTP POST/SSE -> actual delegate_tasks -> isolated child search/describe/execute -> counted wrapped tool -> parent result; fixed declarations, scoped discovery, no paid model")
 }

@@ -2,10 +2,55 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/config"
 )
+
+func TestResolveContextWindow_CompatibleMetadata(t *testing.T) {
+	for _, kind := range []string{"openai_compat", "litellm"} {
+		t.Run(kind, func(t *testing.T) {
+			var down atomic.Bool
+			down.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if down.Load() {
+					w.WriteHeader(503)
+					return
+				}
+				input := 872000
+				if r.Header.Get("Authorization") == "Bearer rotated" {
+					input = 700000
+				}
+				fmt.Fprintf(w, `{"data":[{"model_name":"gpt-6-astra","model_info":{"max_tokens":128000,"max_input_tokens":%d,"max_output_tokens":128000}},{"model_name":"explicit","model_info":{"context_window":1000000,"max_input_tokens":600000}}]}`, input)
+			}))
+			defer server.Close()
+			cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"proxy": {"type": kind, "base_url": server.URL + "/litellm/v1", "api_key": "fixture"}}}
+			ctx := WithConfinedProviderSecrets(context.Background())
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); !got.IsFallback {
+				t.Fatalf("outage = %+v", got)
+			}
+			down.Store(false)
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 872000 || got.IsFallback {
+				t.Fatalf("metadata = %+v", got)
+			}
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "explicit", cfg); got.Size != 600000 {
+				t.Fatalf("input cap = %+v", got)
+			}
+			cfg.Providers["proxy"]["api_key"] = "rotated"
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 700000 {
+				t.Fatalf("rotation = %+v", got)
+			}
+			cfg.General.ContextLength = 42000
+			if got := ResolveContextWindowCachedFull(ctx, "proxy", "gpt-6-astra", cfg); got.Size != 42000 {
+				t.Fatalf("override = %+v", got)
+			}
+		})
+	}
+}
 
 func TestResolveContextWindow_ConfigOverride(t *testing.T) {
 	cfg := &config.AppConfig{
@@ -69,7 +114,7 @@ func TestResolveContextWindow_SAPProvider(t *testing.T) {
 			"sap_ai_core": {"type": "sap_ai_core"},
 		},
 	}
-	// SAP provider uses hardcoded map, should resolve without API call
+	// Without credentials, SAP known models still resolve from static fallback.
 	got := ResolveContextWindow(context.Background(), "sap_ai_core", "anthropic--claude-3.5-sonnet", cfg)
 	if got <= 0 {
 		t.Errorf("ResolveContextWindow() = %d, want > 0 for SAP known model", got)
@@ -112,4 +157,106 @@ func TestResolveFromStaticMap_UnknownModel(t *testing.T) {
 	if got != 0 {
 		t.Errorf("ResolveFromStaticMap(unknown) = %d, want 0", got)
 	}
+}
+
+func sapContextFixture(t *testing.T, capacity int, unavailable bool) (*config.AppConfig, *atomic.Int32, *atomic.Bool) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	outage := &atomic.Bool{}
+	outage.Store(unavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			fmt.Fprint(w, `{"access_token":"fixture-token","expires_in":3600,"token_type":"Bearer"}`)
+			return
+		}
+		calls.Add(1)
+		if outage.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path != "/v2/lm/scenarios/foundation-models/models" || r.Header.Get("AI-Resource-Group") != "fixture" {
+			t.Errorf("unexpected catalog request: %s headers %v", r.URL.Path, r.Header)
+		}
+		fmt.Fprintf(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"isLatest":true,"contextLength":%d}]},{"model":"anthropic--claude-3.5-sonnet","versions":[{"isLatest":true,"contextLength":%d}]}]}`, capacity, capacity)
+	}))
+	t.Cleanup(server.Close)
+	cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{
+		"corporate-sap": {"type": "sap_ai_core", "client_id": "fixture", "client_secret": "secret", "auth_url": server.URL, "base_url": server.URL, "resource_group": "fixture"},
+	}}
+	return cfg, calls, outage
+}
+
+func TestResolveContextWindow_SAPCatalog(t *testing.T) {
+	ctx := WithConfinedProviderSecrets(context.Background())
+	for _, tc := range []struct {
+		name     string
+		capacity int
+		outage   bool
+		model    string
+		want     ContextWindowResult
+	}{
+		{"catalog", 1_100_000, false, "gpt-6-astra", ContextWindowResult{Size: 1_100_000}},
+		{"catalog overrides known static", 1_100_000, false, "anthropic--claude-3.5-sonnet", ContextWindowResult{Size: 1_100_000}},
+		{"missing", 1_100_000, false, "unknown-sap-model", ContextWindowResult{Size: 200_000, IsFallback: true}},
+		{"invalid", 0, false, "gpt-6-astra", ContextWindowResult{Size: 200_000, IsFallback: true}},
+		{"negative", -1, false, "gpt-6-astra", ContextWindowResult{Size: 200_000, IsFallback: true}},
+		{"outage", 1_100_000, true, "gpt-6-astra", ContextWindowResult{Size: 200_000, IsFallback: true}},
+		{"static 200k is real", 1_100_000, true, "anthropic--claude-3.5-sonnet", ContextWindowResult{Size: 200_000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, _, _ := sapContextFixture(t, tc.capacity, tc.outage)
+			if got := ResolveContextWindowFull(ctx, "corporate-sap", tc.model, cfg); got != tc.want {
+				t.Fatalf("context = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	t.Run("override avoids network", func(t *testing.T) {
+		cfg, calls, _ := sapContextFixture(t, 1_100_000, false)
+		cfg.General.ContextLength = 42_000
+		if got := ResolveContextWindowFull(ctx, "corporate-sap", "gpt-6-astra", cfg); got.Size != 42_000 || got.IsFallback || calls.Load() != 0 {
+			t.Fatalf("override = %+v, requests = %d", got, calls.Load())
+		}
+	})
+	t.Run("confined secrets", func(t *testing.T) {
+		cfg, calls, _ := sapContextFixture(t, 1_100_000, false)
+		t.Setenv("AICORE_CLIENT_SECRET", "operator-secret")
+		delete(cfg.Providers["corporate-sap"], "client_secret")
+		if got := ResolveContextWindowFull(ctx, "corporate-sap", "gpt-6-astra", cfg); !got.IsFallback || calls.Load() != 0 {
+			t.Fatalf("confined = %+v, requests = %d", got, calls.Load())
+		}
+		if got := ResolveContextWindowFull(context.Background(), "corporate-sap", "gpt-6-astra", cfg); got.Size != 1_100_000 {
+			t.Fatalf("trusted local env fallback = %+v", got)
+		}
+	})
+}
+
+func TestResolveContextWindowCached_SAPIsolationRefresh(t *testing.T) {
+	ctx := WithConfinedProviderSecrets(context.Background())
+	cfg, calls, outage := sapContextFixture(t, 1_100_000, true)
+	resolve := func(cfg *config.AppConfig, want ContextWindowResult) {
+		t.Helper()
+		if got := ResolveContextWindowCachedFull(ctx, "corporate-sap", "gpt-6-astra", cfg); got != want {
+			t.Fatalf("cached context = %+v, want %+v", got, want)
+		}
+	}
+	resolve(cfg, ContextWindowResult{Size: 200_000, IsFallback: true})
+	outage.Store(false)
+	resolve(cfg, ContextWindowResult{Size: 1_100_000})
+	resolve(cfg, ContextWindowResult{Size: 1_100_000})
+	if calls.Load() != 2 {
+		t.Fatalf("expected retry then adapter cache, got %d calls", calls.Load())
+	}
+	other, _, _ := sapContextFixture(t, 700_000, false)
+	resolve(other, ContextWindowResult{Size: 700_000})
+	cfg.Providers["corporate-sap"]["client_secret"] = "rotated"
+	resolve(cfg, ContextWindowResult{Size: 1_100_000})
+	if calls.Load() != 3 {
+		t.Fatal("credential rotation did not refresh catalog")
+	}
+	cfg.General.ContextLength = 42_000
+	resolve(cfg, ContextWindowResult{Size: 42_000})
+	cfg.General.ContextLength = 84_000
+	resolve(cfg, ContextWindowResult{Size: 84_000})
+	cfg.General.ContextLength = 0
+	resolve(cfg, ContextWindowResult{Size: 1_100_000})
 }

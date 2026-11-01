@@ -2,12 +2,51 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
+
+func TestScopedBridgePreferredExactReference(t *testing.T) {
+	inner, err := functiontool.New(functiontool.Config{Name: "send_email", Description: "Send mail"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"wrapped": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewSubAgentManager(SubAgentConfig{})
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: mockTools("read_file")}, "mcp:mail": {Name: "mcp:mail", Tools: []tool.Tool{inner}}}
+	scope, _, err := mgr.childToolScope(context.Background(), SubAgentTask{ToolFilter: []string{"core"}, ToolSelectionMode: ChildToolSelectionPreferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge, err := NewScopedProgressiveToolBridge(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &contextToolContext{minimalReadonlyContext{Context: context.Background()}}
+	described, err := bridge[0].(runnableDeferredTool).Run(ctx, map[string]any{"names": []any{"mcp:mail/send_email"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(described)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"name":"mcp:mail/send_email"`) {
+		t.Fatalf("description=%s", data)
+	}
+	out, err := bridge[1].(runnableDeferredTool).Run(ctx, map[string]any{"name": "mcp:mail/send_email", "arguments": map[string]any{}})
+	if err != nil || out["wrapped"] != true {
+		t.Fatalf("out=%v err=%v", out, err)
+	}
+	if len(scope.initial) != 1 {
+		t.Fatal("bridge changed initial declarations")
+	}
+}
 
 func TestDecodeExecuteToolArgsUnwrapsOneAccidentalArgumentsEnvelope(t *testing.T) {
 	raw := map[string]any{

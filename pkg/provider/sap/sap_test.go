@@ -3,6 +3,7 @@ package sap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,46 @@ import (
 )
 
 // ---------- GetModelConfig ----------
+
+func TestReadSAPDeploymentResponseBoundaries(t *testing.T) {
+	for _, size := range []int{maxSAPDeploymentResponseBytes, maxSAPDeploymentResponseBytes + 1} {
+		body, err := readSAPDeploymentResponse(strings.NewReader(strings.Repeat("x", size)))
+		if size == maxSAPDeploymentResponseBytes {
+			if err != nil || len(body) != size {
+				t.Fatal("response at limit should be accepted")
+			}
+		} else if err == nil || body != nil {
+			t.Fatal("response over limit should be rejected")
+		}
+	}
+}
+
+func TestDeploymentResponseSizeLimit(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusBadGateway} {
+		for _, resolve := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status=%d/resolve=%v", status, resolve), func(t *testing.T) {
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/oauth/token" {
+						fmt.Fprint(w, `{"access_token":"fixture","expires_in":3600}`)
+						return
+					}
+					w.WriteHeader(status)
+					fmt.Fprint(w, `{"resources":[],"padding":"`+strings.Repeat("x", 8<<20)+`"}`)
+				}))
+				defer s.Close()
+				var err error
+				if resolve {
+					_, err = resolveDeploymentIDWithConfig(context.Background(), "unknown", "id", "secret", s.URL, s.URL, "default")
+				} else {
+					_, err = ListModels(context.Background(), "id", "secret", s.URL, s.URL, "default")
+				}
+				if err == nil || !strings.Contains(err.Error(), "response too large") {
+					t.Fatalf("oversized response was not rejected with the size-limit error (error present: %v)", err != nil)
+				}
+			})
+		}
+	}
+}
 
 func TestGetModelConfig_KnownModels(t *testing.T) {
 	t.Parallel()
@@ -829,7 +871,451 @@ func TestSAPGPT6FunctionToolsUseResponsesAPI(t *testing.T) {
 	}
 }
 
+// ---------- Auth recovery edge cases ----------
+
+func TestSapTransport_DoesNotRecover403(t *testing.T) {
+	var authCalls atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "forbidden", http.StatusForbidden) }))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 403 || authCalls.Load() != 0 || tr.token != "old" {
+		t.Fatal("403 caused auth renewal")
+	}
+}
+
+func TestSapTransport_TokenExpiryBuffer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{authURL: srv.URL}
+	before := time.Now()
+	if _, err := tr.getToken(); err != nil {
+		t.Fatal(err)
+	}
+	if tr.expiresAt.Before(before.Add(3570*time.Second)) || tr.expiresAt.After(time.Now().Add(3570*time.Second)) {
+		t.Fatal("30-second expiry buffer not applied")
+	}
+}
+
+func TestSapTransport_Concurrent401SingleRenewal(t *testing.T) {
+	const workers = 12
+	var authCalls atomic.Int32
+	var rejected atomic.Int32
+	barrier := make(chan struct{})
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer old" {
+			if rejected.Add(1) == workers {
+				close(barrier)
+			}
+			<-barrier
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status %d", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+	if authCalls.Load() != 1 {
+		t.Fatalf("renewals=%d, want 1", authCalls.Load())
+	}
+	// A delayed rejection must not clear a newer cached token.
+	tr.invalidateToken("old")
+	tok, err := tr.getTokenForRequest(context.Background(), "old")
+	if err != nil || tok != "new" || authCalls.Load() != 1 {
+		t.Fatalf("newer token not reused: %q %v", tok, err)
+	}
+}
+
+func TestSapTransport_RefreshFailureInvalidatesRejectedToken(t *testing.T) {
+	var authCalls atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authCalls.Add(1) == 1 {
+			http.Error(w, "secret token old client-secret", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := tr.RoundTrip(req)
+	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "old") {
+		t.Fatalf("unsanitized/missing auth failure: %v", err)
+	}
+	tr.mu.Lock()
+	cached := tr.token
+	tr.mu.Unlock()
+	if cached != "" {
+		t.Fatal("rejected token remains cached")
+	}
+	tok, err := tr.getToken()
+	if err != nil || tok != "new" || authCalls.Load() != 2 {
+		t.Fatalf("later exchange: %q %v", tok, err)
+	}
+}
+
+func TestSapTransport_Second401IsTerminal(t *testing.T) {
+	var authCalls, requests atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "terminal", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 401 || string(body) != "terminal\n" || authCalls.Load() != 1 || requests.Load() != 2 {
+		t.Fatalf("unbounded/lost terminal response: %d %s", resp.StatusCode, body)
+	}
+	tr.mu.Lock()
+	cached := tr.token
+	tr.mu.Unlock()
+	if cached != "" {
+		t.Fatal("second rejected token cached")
+	}
+}
+
+func TestSapTransport_RefreshCancellation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-release }))
+	defer srv.Close()
+	defer close(release)
+	tr := &sapTransport{base: http.DefaultTransport, authURL: srv.URL}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := tr.getTokenForRequest(ctx, ""); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("exchange ignored request cancellation")
+	}
+}
+
+func TestSapTransport_RejectsInvalidTokenResponse(t *testing.T) {
+	for _, body := range []string{`{"access_token":"","expires_in":3600}`, `{"access_token":"secret","expires_in":0}`, `{"access_token":"secret","expires_in":-1}`, `{"access_token":"secret","expires_in":9223372036854775807}`, `{"access_token":"secret","expires_in":"oops"}`, `not-json secret`, strings.Repeat("x", maxSAPAuthResponseBytes+1)} {
+		t.Run(fmt.Sprintf("case-%d", len(body)), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+			defer srv.Close()
+			tr := &sapTransport{authURL: srv.URL, token: "old", expiresAt: time.Now().Add(-time.Second)}
+			_, err := tr.getToken()
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("invalid/unsanitized response: %v", err)
+			}
+			if tr.token != "" {
+				t.Fatal("invalid token cached")
+			}
+		})
+	}
+}
+
+func TestSAPDiscovery401Recovery(t *testing.T) {
+	for _, mode := range []string{"configured", "environment", "models"} {
+		t.Run(mode, func(t *testing.T) {
+			var authCalls, requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth/token" {
+					fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, authCalls.Add(1))
+					return
+				}
+				if r.URL.Path != "/v2/lm/deployments" || r.Header.Get("AI-Resource-Group") != "a & b" || r.URL.Query().Get("resourceGroup") != "a & b" || r.URL.Query().Get("status") != "RUNNING" {
+					t.Errorf("discovery endpoint/filters changed: %s", r.URL)
+				}
+				if requests.Add(1) == 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer token-2" {
+					t.Error("missing renewed token")
+				}
+				fmt.Fprint(w, `{"resources":[{"id":"deployment","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-4o"}}}}}]}`)
+			}))
+			defer srv.Close()
+			var err error
+			switch mode {
+			case "configured":
+				var id string
+				id, err = resolveDeploymentIDWithConfig(context.Background(), "gpt-4o", "id", "secret", srv.URL, srv.URL, "a & b")
+				if err == nil && id != "deployment" {
+					t.Fatalf("id=%q", id)
+				}
+			case "environment":
+				t.Setenv("AICORE_CLIENT_ID", "id")
+				t.Setenv("AICORE_CLIENT_SECRET", "secret")
+				t.Setenv("AICORE_AUTH_URL", srv.URL)
+				t.Setenv("AICORE_BASE_URL", srv.URL)
+				t.Setenv("AICORE_RESOURCE_GROUP", "a & b")
+				var id string
+				id, err = ResolveDeploymentID(context.Background(), "gpt-4o")
+				if err == nil && id != "deployment" {
+					t.Fatalf("id=%q", id)
+				}
+			case "models":
+				var models []string
+				models, err = ListModels(context.Background(), "id", "secret", srv.URL, srv.URL, "a & b")
+				if err == nil && (len(models) != 1 || models[0] != "gpt-4o") {
+					t.Fatalf("models=%v", models)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authCalls.Load() != 2 || requests.Load() != 2 {
+				t.Fatalf("auth=%d discovery=%d", authCalls.Load(), requests.Load())
+			}
+		})
+	}
+}
+
+func TestSAPGenerationAuthRecovery(t *testing.T) {
+	for _, name := range []string{"gpt-4o", "gemini-2.5-pro", "anthropic--claude-3-sonnet"} {
+		for _, stream := range []bool{false, true} {
+			for _, expired := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t/expired=%t", name, stream, expired), func(t *testing.T) {
+					var authCalls, generationCalls atomic.Int32
+					var rejectNext atomic.Bool
+					var mu sync.Mutex
+					var rejectedBody, replayBody, rejectedPath, replayPath, rejectedQuery, replayQuery string
+					var rejectedHeader, replayHeader http.Header
+					var awaitingReplay bool
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/oauth/token" {
+							fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, authCalls.Add(1))
+							return
+						}
+						if r.URL.Path == "/v2/lm/deployments" {
+							fmt.Fprintf(w, `{"resources":[{"id":"dep","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":%q}}}}}]}`, name)
+							return
+						}
+						generationCalls.Add(1)
+						body, _ := io.ReadAll(r.Body)
+						if r.Header.Get("AI-Resource-Group") != "group" {
+							t.Error("resource group missing")
+						}
+						if rejectNext.Swap(false) {
+							mu.Lock()
+							rejectedBody = string(body)
+							rejectedPath = r.URL.Path
+							rejectedQuery = r.URL.RawQuery
+							rejectedHeader = r.Header.Clone()
+							awaitingReplay = true
+							mu.Unlock()
+							http.Error(w, `{"error":{"message":"server expired token"}}`, http.StatusUnauthorized)
+							return
+						}
+						mu.Lock()
+						if awaitingReplay {
+							replayBody = string(body)
+							replayPath = r.URL.Path
+							replayQuery = r.URL.RawQuery
+							replayHeader = r.Header.Clone()
+							awaitingReplay = false
+						}
+						mu.Unlock()
+						w.Header().Set("Content-Type", "application/json")
+						switch {
+						case strings.HasPrefix(name, "gpt-"):
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprint(w, "data: {\"id\":\"chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+							} else {
+								fmt.Fprint(w, `{"id":"chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+							}
+						case strings.HasPrefix(name, "gemini-"):
+							response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprintf(w, "data: %s\n\n", response)
+							} else {
+								fmt.Fprint(w, response)
+							}
+						default:
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input_tokens\":1}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\ndata: {\"type\":\"message_stop\"}\n\n")
+							} else {
+								fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}],"role":"assistant","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+							}
+						}
+					}))
+					defer srv.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					llm, err := NewProviderWithConfig(ctx, name, "id", "secret", srv.URL, srv.URL, "group")
+					if err != nil {
+						t.Fatal(err)
+					}
+					p := llm.(*Provider)
+					req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("unchanged prompt", genai.RoleUser)}}
+					generate := func() {
+						t.Helper()
+						var text strings.Builder
+						for response, err := range p.GenerateContent(ctx, req, stream) {
+							if err != nil {
+								t.Fatal(err)
+							}
+							if response != nil && response.Content != nil {
+								for _, part := range response.Content.Parts {
+									if part != nil {
+										text.WriteString(part.Text)
+									}
+								}
+							}
+						}
+						if !strings.Contains(text.String(), "ok") {
+							t.Fatalf("no generated content: %q", text.String())
+						}
+					}
+					generate() // Same instance succeeds before rejection.
+					beforeAuth := authCalls.Load()
+					if expired {
+						p.authConfig.mu.Lock()
+						p.authConfig.expiresAt = time.Now().Add(-time.Second)
+						p.authConfig.mu.Unlock()
+					}
+					rejectNext.Store(true)
+					generate() // Server rejection must be transparent even after proactive refresh.
+					generate() // New token is retained for subsequent generation.
+					wantAuth := beforeAuth + 1
+					if expired {
+						wantAuth++
+					}
+					if authCalls.Load() != wantAuth || generationCalls.Load() != 4 {
+						t.Fatalf("auth=%d want=%d generation=%d want=4", authCalls.Load(), wantAuth, generationCalls.Load())
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					if rejectedBody == "" || rejectedBody != replayBody || rejectedPath != replayPath || rejectedQuery != replayQuery {
+						t.Fatal("generation request changed during replay")
+					}
+					if rejectedHeader.Get("Authorization") == replayHeader.Get("Authorization") {
+						t.Fatal("replay used rejected token")
+					}
+					rejectedHeader.Del("Authorization")
+					replayHeader.Del("Authorization")
+					oldHeaders, _ := json.Marshal(rejectedHeader)
+					newHeaders, _ := json.Marshal(replayHeader)
+					if string(oldHeaders) != string(newHeaders) {
+						t.Fatalf("non-auth headers changed: %s vs %s", oldHeaders, newHeaders)
+					}
+				})
+			}
+		}
+	}
+}
+
 // ---------- BaseURL normalization ----------
+
+func TestSapTransport_Reactive401Recovery(t *testing.T) {
+	testSAPTransportRecovery(t, false)
+}
+
+func TestSapTransport_RefreshThen401Recovery(t *testing.T) {
+	testSAPTransportRecovery(t, true)
+}
+
+func testSAPTransportRecovery(t *testing.T, expired bool) {
+	var authCalls atomic.Int32
+	var requests atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := authCalls.Add(1)
+		fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, n)
+	}))
+	defer tokenSrv.Close()
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"prompt":"unchanged"}` {
+			t.Errorf("replay body changed: %s", body)
+		}
+		if r.Header.Get("AI-Resource-Group") != "group" || r.URL.Query().Get("api-version") != "2024-12-01-preview" {
+			t.Error("missing decoration")
+		}
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer token-2" {
+			t.Errorf("retry token = %s", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, resourceGroup: "group", token: "token-1", expiresAt: time.Now().Add(time.Hour)}
+	if expired {
+		tr.expiresAt = time.Now().Add(-time.Second)
+	} else {
+		authCalls.Store(1)
+	}
+	req, _ := http.NewRequest(http.MethodPost, targetSrv.URL+"/chat/completions?custom=preserved", strings.NewReader(`{"prompt":"unchanged"}`))
+	req.Header.Set("Authorization", "original")
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after renewal", resp.StatusCode)
+	}
+	if requests.Load() != 2 || authCalls.Load() != 2 {
+		t.Fatalf("requests=%d auth=%d", requests.Load(), authCalls.Load())
+	}
+	if req.Header.Get("Authorization") != "original" || req.URL.Query().Get("api-version") != "" {
+		t.Error("caller request mutated")
+	}
+}
 
 func TestNewProviderWithConfig_BaseURLNormalization(t *testing.T) {
 	t.Parallel()
@@ -873,12 +1359,243 @@ func TestProvider_Name(t *testing.T) {
 
 // ---------- ListModelsWithMetadata ----------
 
+func TestSAPCatalogContextWindow(t *testing.T) {
+	cases := []struct {
+		name, versions string
+		want           int
+	}{
+		{"latest", `[{"contextLength":9000000},{"name":"latest","isLatest":true,"contextLength":1100000}]`, 1100000},
+		{"sole", `[{"contextLength":123456}]`, 123456},
+		{"same", `[{"contextLength":123456},{"contextLength":123456}]`, 123456},
+		{"missing", `[{}]`, 0},
+		{"zero", `[{"isLatest":true,"contextLength":0}]`, 0},
+		{"negative", `[{"contextLength":-1}]`, 0},
+		{"ambiguous", `[{"contextLength":100},{"contextLength":200}]`, 0},
+		{"two latest", `[{"isLatest":true,"contextLength":100},{"isLatest":true,"contextLength":100}]`, 0},
+		{"invalid latest", `[{"isLatest":true},{"contextLength":100}]`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var authCalls, catalogCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth/token" {
+					if r.Method != http.MethodPost {
+						t.Error("OAuth method")
+					}
+					_ = r.ParseForm()
+					if r.Form.Get("client_id") != "id" || r.Form.Get("client_secret") != "secret" {
+						t.Error("OAuth fields")
+					}
+					fmt.Fprintf(w, `{"access_token":"tok-%d","expires_in":3600}`, authCalls.Add(1))
+					return
+				}
+				if r.URL.Path != "/v2/lm/scenarios/foundation-models/models" || r.Method != http.MethodGet || r.Header.Get("AI-Resource-Group") != "default" {
+					t.Errorf("catalog request %s", r.URL)
+				}
+				if catalogCalls.Add(1) == 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer tok-2" {
+					t.Error("renewed authorization missing")
+				}
+				fmt.Fprintf(w, `{"resources":[{"model":"exact","displayName":"friendly","executableId":"executable","versions":%s}]}`, tc.versions)
+			}))
+			defer srv.Close()
+			for _, suffix := range []string{"", "/", "/v2", "/v2/"} {
+				got, err := GetModelContextWindow(context.Background(), "exact", "id", "secret", srv.URL+"/", srv.URL+suffix, "")
+				if err != nil || got != tc.want {
+					t.Fatalf("got=%d want=%d err=%v", got, tc.want, err)
+				}
+			}
+			for _, name := range []string{"friendly", "executable", "Exact", "absent"} {
+				got, err := GetModelContextWindow(context.Background(), name, "id", "secret", srv.URL, srv.URL, "default")
+				if err != nil || got != 0 {
+					t.Fatalf("non-ID matched: %s %d %v", name, got, err)
+				}
+			}
+			if authCalls.Load() != 2 || catalogCalls.Load() != 2 {
+				t.Fatal("normalized cache or 401 recovery failed")
+			}
+		})
+	}
+	for _, body := range []string{"secret-not-json", strings.Repeat("x", maxSAPCatalogResponseBytes+1)} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/oauth/token" {
+				fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+				return
+			}
+			fmt.Fprint(w, body)
+		}))
+		_, err := GetModelContextWindow(context.Background(), "exact", "id", "secret", srv.URL, srv.URL, "default")
+		srv.Close()
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("unsanitized/absent error: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := GetModelContextWindow(ctx, "exact", "id", "secret", "https://invalid", "https://invalid", ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+	if _, err := GetModelContextWindow(context.Background(), "exact", "", "", "", "", ""); err == nil {
+		t.Fatal("incomplete credentials accepted")
+	}
+}
+
+func TestSAPCatalogCacheIsolation(t *testing.T) {
+	var calls atomic.Int32
+	var unavailable atomic.Bool
+	var empty atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+			return
+		}
+		calls.Add(1)
+		if unavailable.Load() {
+			http.Error(w, "secret", http.StatusServiceUnavailable)
+			return
+		}
+		if empty.Load() {
+			fmt.Fprint(w, `{"resources":[]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"resources":[{"model":"m","versions":[{"contextLength":%d}]}]}`, calls.Load())
+	}))
+	defer srv.Close()
+	lookup := func(id, secret, group string) int {
+		t.Helper()
+		got, err := GetModelContextWindow(context.Background(), "m", id, secret, srv.URL, srv.URL, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		id, secret, group string
+		want              int
+	}{
+		{"a", "secret", "rg", 1},
+		{"a", "secret", "rg", 1}, // Same connection must reuse the catalog.
+		{"b", "secret", "rg", 2},
+		{"a", "rotated", "rg", 3},
+		{"a", "secret", "other", 4},
+	} {
+		if got := lookup(tc.id, tc.secret, tc.group); got != tc.want {
+			t.Fatalf("connection context = %d, want %d", got, tc.want)
+		}
+	}
+	key := sapConnectionKey("a", "secret", srv.URL, srv.URL, "rg")
+	sapModelCacheMu.Lock()
+	e := sapCatalogCache[key]
+	e.FetchedAt = time.Now().Add(-2 * time.Hour)
+	sapCatalogCache[key] = e
+	sapModelCacheMu.Unlock()
+	if lookup("a", "secret", "rg") != 5 {
+		t.Fatal("expired catalog not refreshed")
+	}
+	unavailable.Store(true)
+	if _, err := GetModelContextWindow(context.Background(), "m", "failed", "secret", srv.URL, srv.URL, "rg"); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("outage=%v", err)
+	}
+	unavailable.Store(false)
+	if lookup("failed", "secret", "rg") != 7 {
+		t.Fatal("failure cached")
+	}
+	empty.Store(true)
+	for range 2 {
+		if lookup("empty", "secret", "rg") != 0 {
+			t.Fatal("empty catalog returned context")
+		}
+	}
+	if calls.Load() != 8 {
+		t.Fatal("empty catalog not cached")
+	}
+	// Public metadata returns deep copies, even of optional capability pointers.
+	v := false
+	models := []ModelInfo{{ID: "m", SupportsTools: &v}}
+	copy := copySAPModels(models)
+	*copy[0].SupportsTools = true
+	copy[0].ID = "changed"
+	if *models[0].SupportsTools || models[0].ID != "m" {
+		t.Fatal("metadata copy aliases cached values")
+	}
+	invalidateModelCache()
+	if lookup("a", "secret", "rg") != 5 {
+		t.Fatal("learned-limit invalidation discarded catalog")
+	}
+}
+
+func TestListModelsWithMetadata_CatalogOutage(t *testing.T) {
+	var down atomic.Bool
+	down.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+		case "/v2/lm/deployments":
+			fmt.Fprint(w, `{"resources":[{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-6-astra"}}}}}]}`)
+		default:
+			if down.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprint(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"contextLength":1100000}]}]}`)
+		}
+	}))
+	defer srv.Close()
+	for _, want := range []int{200000, 1100000} {
+		models, err := ListModelsWithMetadata(context.Background(), "id", "secret", srv.URL, srv.URL, "default")
+		if err != nil || len(models) != 1 || models[0].ContextLength != want {
+			t.Fatalf("outage recovery: %+v %v", models, err)
+		}
+		down.Store(false)
+	}
+}
+
+func TestListModelsWithMetadata_CatalogContext(t *testing.T) {
+	invalidateModelCache()
+	t.Cleanup(invalidateModelCache)
+	mem := newMemLimits()
+	SetModelLimitsStore(mem)
+	t.Cleanup(func() { SetModelLimitsStore(nil) })
+	_ = mem.UpsertMaxOutput(context.Background(), sapAICoreProviderType, "gpt-6-astra", 32768, "learned_400")
+	_ = mem.UpsertSupportsTools(context.Background(), sapAICoreProviderType, "gpt-6-astra", false, "learned_400")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+		case "/v2/lm/deployments":
+			fmt.Fprint(w, `{"resources":[{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-6-astra"}}}}},{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-4o"}}}}}]}`)
+		case "/v2/lm/scenarios/foundation-models/models":
+			fmt.Fprint(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"isLatest":true,"contextLength":1100000}]},{"model":"gpt-4o","versions":[{"isLatest":true,"contextLength":128000}]},{"model":"undeployed","versions":[{"contextLength":9000000}]}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	models, err := ListModelsWithMetadata(context.Background(), "id", "secret", srv.URL, srv.URL, "default")
+	if err != nil || len(models) != 2 {
+		t.Fatalf("models=%v error=%v", models, err)
+	}
+	for _, m := range models {
+		want := 128000
+		if m.ID == "gpt-6-astra" {
+			want = 1100000
+			if m.MaxOutputTokens != 32768 || m.SupportsTools == nil || *m.SupportsTools {
+				t.Fatalf("learned limits lost: %+v", m)
+			}
+		}
+		if m.ContextLength != want {
+			t.Errorf("%s context=%d, want catalog %d", m.ID, m.ContextLength, want)
+		}
+	}
+}
+
 func TestListModelsWithMetadata_EnrichesConfig(t *testing.T) {
 	// Reset cache for this test
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -933,13 +1650,14 @@ func TestListModelsWithMetadata_EnrichesConfig(t *testing.T) {
 
 func TestListModelsWithMetadata_UsesCache(t *testing.T) {
 	cached := []ModelInfo{{ID: "cached-model", Name: "cached-model", ContextLength: 100, MaxOutputTokens: 50}}
+	key := sapConnectionKey("id", "secret", "https://auth.invalid", "https://api.invalid", "default")
 	sapModelCacheMu.Lock()
-	sapModelCache = cached
-	sapModelCacheTime = time.Now()
+	sapModelCache[key] = sapMetadataCacheEntry{Models: cached, FetchedAt: time.Now()}
+	sapCatalogCache[key] = sapCatalogCacheEntry{Windows: map[string]int{}, FetchedAt: time.Now()}
 	sapModelCacheMu.Unlock()
 
-	// No servers needed — should return cache
-	models, err := ListModelsWithMetadata(context.Background(), "", "", "", "", "")
+	// No servers needed — should return this connection's cache.
+	models, err := ListModelsWithMetadata(context.Background(), "id", "secret", "https://auth.invalid", "https://api.invalid", "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,8 +1666,5 @@ func TestListModelsWithMetadata_UsesCache(t *testing.T) {
 	}
 
 	// Clean up
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 }

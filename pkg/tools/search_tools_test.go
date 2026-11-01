@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -15,8 +17,57 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
+
+func TestChildPreferredSearchSharesExecutionScope(t *testing.T) {
+	mgr := agent.NewSubAgentManager(agent.SubAgentConfig{})
+	read, err := functiontool.New(functiontool.Config{Name: "read_file"}, func(tool.Context, map[string]any) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := functiontool.New(functiontool.Config{Name: "write_file"}, func(tool.Context, map[string]any) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.ToolGroups = map[string]*agent.ToolGroup{"core": {Name: "core", Tools: []tool.Tool{read}}, "extra": {Name: "extra", Tools: []tool.Tool{write}}}
+	for _, mode := range []agent.ChildToolSelectionMode{agent.ChildToolSelectionStrict, agent.ChildToolSelectionPreferred} {
+		var names []string
+		mgr.SearchToolsFactory = func(scope *agent.ChildToolScope) (tool.Tool, error) {
+			search, err := NewScopedSearchToolsTool(scope)
+			if err != nil {
+				return nil, err
+			}
+			out, err := search.(interface {
+				Run(tool.Context, any) (map[string]any, error)
+			}).Run(&toolContextStub{Context: context.Background()}, map[string]any{"query": "*"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result SearchToolsResult
+			if err := json.Unmarshal(data, &result); err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range result.Matches {
+				names = append(names, m.ToolName)
+			}
+			return nil, fmt.Errorf("stop after scope probe")
+		}
+		mgr.RunTask(context.Background(), agent.SubAgentTask{Name: "probe", ToolFilter: []string{"core"}, ToolSelectionMode: mode})
+		want := 1
+		if mode == agent.ChildToolSelectionPreferred {
+			want = 2
+		}
+		if len(names) != want {
+			t.Fatalf("mode=%s names=%v", mode, names)
+		}
+	}
+}
 
 func TestFileTree(t *testing.T) {
 	// Create a temp directory structure for testing
@@ -1549,5 +1600,20 @@ func TestSearchTools_ListAllVariants(t *testing.T) {
 		if result.Count != 5 {
 			t.Errorf("SearchTools(%q): expected 5 tools, got %d", q, result.Count)
 		}
+	}
+}
+
+func TestScopedSearchToolsPropagatesCancellation(t *testing.T) {
+	search, err := NewScopedSearchToolsTool(&agent.ChildToolScope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = search.(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	}).Run(&toolContextStub{Context: ctx}, map[string]any{"query": "*"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("scoped search hid cancellation: %v", err)
 	}
 }

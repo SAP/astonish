@@ -2,6 +2,10 @@ package launcher
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/config"
@@ -9,6 +13,130 @@ import (
 	copilot_oauth "github.com/SAP/astonish/pkg/provider/copilot_oauth"
 	"github.com/SAP/astonish/pkg/tui/backend"
 )
+
+func TestCodeCompatibleMetadataContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/litellm/v1/models" {
+			fmt.Fprint(w, `{"data":[{"id":"gpt-6-astra"}]}`)
+			return
+		}
+		if r.URL.Path != "/litellm/v1/model/info" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"model_name":"gpt-6-astra","model_info":{"max_tokens":128000,"max_input_tokens":872000,"max_output_tokens":128000}}]}`)
+	}))
+	defer server.Close()
+	b := &localAgentBackend{configured: true, provider: "hyperspace", model: "gpt-6-astra", appConfig: &config.AppConfig{Providers: map[string]config.ProviderConfig{"hyperspace": {"type": "openai_compat", "base_url": server.URL + "/litellm/v1", "api_key": "fixture"}}}}
+	models, err := b.ListModels(context.Background(), "hyperspace")
+	if err != nil || len(models) != 1 {
+		t.Fatalf("discovery: %v %v", models, err)
+	}
+	for _, metadata := range []backend.ModelContextBackend{b, &lazyCodeBackend{inner: b}} {
+		if got := metadata.ModelContextWindows(context.Background(), "hyperspace", models)["gpt-6-astra"]; got.Size != 872000 || got.IsFallback {
+			t.Fatalf("picker: %+v", got)
+		}
+	}
+	if info := b.Info(); info.ContextWindow != 872000 || info.ContextWindowFallback {
+		t.Fatalf("header: %+v", info)
+	}
+}
+
+func TestCodeSAPCatalogContext(t *testing.T) {
+	fixture := func(t *testing.T, capacity int) (*config.AppConfig, *atomic.Int32) {
+		t.Helper()
+		calls := &atomic.Int32{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/oauth/token":
+				fmt.Fprint(w, `{"access_token":"code-fixture-token","expires_in":3600,"token_type":"Bearer"}`)
+			case "/v2/lm/scenarios/foundation-models/models":
+				calls.Add(1)
+				if r.Header.Get("AI-Resource-Group") != "code-fixture" || r.Header.Get("Authorization") != "Bearer code-fixture-token" {
+					t.Errorf("unexpected catalog headers: %v", r.Header)
+				}
+				fmt.Fprintf(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"isLatest":true,"contextLength":%d}]}]}`, capacity)
+			default:
+				t.Errorf("unexpected SAP request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(server.Close)
+		return &config.AppConfig{Providers: map[string]config.ProviderConfig{
+			"code-sap": {
+				"type": "sap_ai_core", "client_id": "code-fixture", "client_secret": "fixture-secret",
+				"auth_url": server.URL, "base_url": server.URL, "resource_group": "code-fixture",
+			},
+		}}, calls
+	}
+	assertInfo := func(t *testing.T, b *localAgentBackend, window int, fallback bool) {
+		t.Helper()
+		// Repeated header refreshes must preserve both capacity and provenance.
+		for i := 0; i < 2; i++ {
+			info := b.Info()
+			for _, metadata := range []backend.ModelContextBackend{b, &lazyCodeBackend{inner: b}} {
+				windows := metadata.ModelContextWindows(context.Background(), b.provider, []string{b.model})
+				if got := windows[b.model]; got.Size != window || got.IsFallback != fallback {
+					t.Fatalf("picker metadata = %+v, want %d fallback=%t", got, window, fallback)
+				}
+			}
+			if info.ContextWindow != window || info.ContextWindowFallback != fallback {
+				t.Fatalf("Info refresh %d: context = %d, fallback = %t; want %d, %t", i, info.ContextWindow, info.ContextWindowFallback, window, fallback)
+			}
+			if info.Mode != "code" || info.Provider != b.provider || info.Model != b.model {
+				t.Fatalf("unexpected code backend identity: %+v", info)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		model    string
+		override int
+		window   int
+		fallback bool
+	}{
+		{name: "catalog", model: "gpt-6-astra", window: 1_100_000},
+		{name: "unknown fallback", model: "unknown-code-sap-model", window: 200_000, fallback: true},
+		{name: "known static fallback", model: "anthropic--claude-3.5-sonnet", window: 200_000},
+		{name: "explicit override", model: "gpt-6-astra", override: 42_000, window: 42_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, calls := fixture(t, 1_100_000)
+			cfg.General.ContextLength = tc.override
+			b := &localAgentBackend{appConfig: cfg, provider: "code-sap", model: tc.model, configured: true}
+			assertInfo(t, b, tc.window, tc.fallback)
+			wantCalls := int32(1)
+			if tc.override > 0 {
+				wantCalls = 0
+			}
+			if got := calls.Load(); got != wantCalls {
+				t.Fatalf("catalog requests = %d, want %d", got, wantCalls)
+			}
+		})
+	}
+
+	t.Run("changed connection", func(t *testing.T) {
+		cfg, firstCalls := fixture(t, 1_100_000)
+		b := &localAgentBackend{appConfig: cfg, provider: "code-sap", model: "gpt-6-astra", configured: true}
+		assertInfo(t, b, 1_100_000, false)
+		other, secondCalls := fixture(t, 700_000)
+		// Keep the provider alias and model unchanged: only the SAP connection
+		// changes, so a provider-name-only cache would return the stale 1.1M.
+		cfg.Providers["code-sap"] = other.Providers["code-sap"]
+		assertInfo(t, b, 700_000, false)
+		cfg.General.ContextLength = 42_000
+		assertInfo(t, b, 42_000, false)
+		cfg.General.ContextLength = 84_000
+		assertInfo(t, b, 84_000, false)
+		cfg.General.ContextLength = 0
+		assertInfo(t, b, 700_000, false)
+		if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+			t.Fatalf("connection catalog requests = %d, %d; want 1, 1", firstCalls.Load(), secondCalls.Load())
+		}
+	})
+}
 
 // codeProviderCatalogSupported is the set of provider types that the /provider
 // overlay in code mode must offer. It mirrors provider.ProviderDisplayNames —

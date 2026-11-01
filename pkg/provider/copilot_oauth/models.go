@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"time"
-
-	"github.com/SAP/astonish/pkg/provider/httpool"
 )
 
 // copilotModelResponse represents a single model from the Copilot API.
@@ -38,31 +36,21 @@ func listModelsFromURL(ctx context.Context, githubToken, modelsEndpoint, tokenEn
 		return nil, fmt.Errorf("github token is required")
 	}
 
-	// Exchange GitHub token for a Copilot session token.
-	var copilotToken *CopilotTokenResponse
-	var err error
-	if tokenEndpoint != "" {
-		copilotToken, err = exchangeForCopilotTokenFromURL(ctx, githubToken, tokenEndpoint)
-	} else {
-		copilotToken, err = ExchangeForCopilotToken(ctx, githubToken)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("exchange copilot token for model listing: %w", err)
-	}
+	transport := NewCopilotTransport(githubToken)
+	transport.copilotTokenURL = tokenEndpoint
 
 	req, err := http.NewRequestWithContext(ctx, "GET", modelsEndpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create models request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+copilotToken.Token)
 	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
 	req.Header.Set("Editor-Version", "vscode/1.107.0")
 	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.35.0")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := httpool.Client(30 * time.Second)
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("models request failed: %w", err)
@@ -73,6 +61,9 @@ func listModelsFromURL(ctx context.Context, githubToken, modelsEndpoint, tokenEn
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("%w: models request returned HTTP %d", ErrReauthRequired, resp.StatusCode)
 		}
 		return nil, fmt.Errorf("models request returned %s: %s", resp.Status, string(body))
 	}

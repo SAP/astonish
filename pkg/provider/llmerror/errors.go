@@ -96,6 +96,7 @@ func NewFromResponse(provider string, resp *http.Response, body []byte) *LLMErro
 // IsRetryable returns true if the error is an LLMError that should be retried.
 // This includes 429 (rate limit), 500 (server error / proxy failure),
 // 502/503 (server overload), 504 (timeout), and 408 (request timeout).
+// Authentication failures require credential recovery, not blind request replay.
 // An interrupted stream is never replayable, regardless of its underlying cause.
 func IsRetryable(err error) bool {
 	var interrupted *InterruptedStreamError

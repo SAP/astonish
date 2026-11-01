@@ -22,11 +22,51 @@ Each provider/model combination has a known context window size. The system trac
 - **Prompt budgeting**: The system prompt builder can estimate remaining capacity.
 - **Error prevention**: Avoid sending requests that exceed the model's limit.
 
-Context window sizes are maintained in a registry within each provider adapter.
+Context budgets and Code mode indicators share `pkg/provider/context_window.go`. Resolution precedence is an explicit `general.context_length` override, provider API metadata, an exact SAP model configuration (for SAP instances) followed by the shared curated model map, then the universal 200,000-token default. Only the universal default is marked `IsFallback`; a known model whose conservative capacity happens to be 200k is not.
+
+For SAP AI Core, authoritative capacity comes from the authenticated `GET /v2/lm/scenarios/foundation-models/models` catalog's `versions[].contextLength`, matching the exact `model` ID. A unique latest version must have a positive capacity. Without a latest designation, the available positive capacities must agree; ambiguous latest entries, invalid latest capacity, or differing positive lengths are not guessed or resolved by taking the largest value. Model-name-only configuration cannot establish pinned deployment-version accuracy.
+
+Successful catalog maps, including empty maps, and deployment metadata lists use one-hour connection-scoped caches. Connection identity includes normalized base/auth URLs, client ID, client secret and effective resource group in a SHA-256 fingerprint; secret inputs are not logged. Failed catalog requests are not cached, and SAP context resolution bypasses the generic indefinite provider-name/model cache, so credential rotation, overrides and outage recovery are not stranded there. Local Code mode retains environment fallback; confined platform contexts refuse operator environment credentials.
+
+SAP deployment listing and deployment-ID resolution bound both success and error response bodies to 8 MiB, rejecting oversized responses before JSON decoding or diagnostic formatting. The limit does not change the running-deployment-only discovery contract.
+
+The platform model metadata response overlays catalog capacity onto **running deployments only**: undeployed catalog models are never added. Catalog failure preserves deployment discovery and static fallback. Independently learned maximum-output and tool-support limits remain intact; capacity enrichment does not alter generation defaults. Existing Studio and terminal formatting display 1,100,000 as `1.1M` without new UI or transport fields.
+
+The Code `/model` picker loads capacities for discovered IDs through the optional `backend.ModelContextBackend` capability, implemented by the local backend and forwarded by the lazy Code wrapper. It uses the same resolver and fallback provenance as the header, stores values with the selected provider's model list, and performs no network requests while rendering or filtering. Backends without that capability retain static display hints.
+
+Deterministic checks use loopback OAuth/catalog/deployment servers, the actual platform HTTP handler and Code backend, and the existing renderers:
+
+```bash
+go test -race ./pkg/provider/... -count=1 -timeout=10m
+go test ./pkg/api -run TestSAPCatalogMetadataHTTP -count=1
+go test ./pkg/launcher -run TestCodeSAPCatalogContext -count=1
+go test ./pkg/tui -run 'TestRenderHeader.*(SAP|Fallback)|TestFormatTokenCount' -count=1
+(cd web && npm test -- src/test/scenarios/panel-interactions.test.tsx && npm run typecheck)
+```
+
+The 1,100,000 fixture verifies propagation, not any model's production capacity; a real model's value remains whatever its authenticated SAP catalog reports.
+
+### Optional OpenAI-compatible metadata
+
+OpenAI-compatible and LiteLLM instances probe the nonstandard LiteLLM `/model/info` extension using the configured URL and key. For `http://localhost:6655/litellm/v1`, probes are `/litellm/v1/model/info` then `/litellm/model/info`; only the final `/v1` component is removed, never the proxy prefix. All redirects are rejected, responses are bounded to 8 MiB, and the entire probe sequence has a three-second timeout. Scoped platform requests do not inherit operator environment secrets.
+
+Exact `model_name` entries enrich only IDs discovered by `/models`. Positive `context_length` or `context_window` fields and `max_input_tokens` supply a conservative budget (the smaller positive value when both exist). With only `max_input_tokens`, the context indicator is an input budget, **not a claimed total context capacity**. `max_output_tokens` remains separate and is exposed as `max_completion_tokens` for Studio. `max_tokens` is never interpreted as context capacity, and input/output limits are never summed. Generation output defaults are unchanged.
+
+For the narrowly defined same-origin layout where a configured URL ends in `/litellm/v1`, GPT-6 generation also probes the sibling `/openai/v1/models` with the same credentials and exact model ID. A positive match routes that model's generation through `/openai/v1/responses`; Chat Completions and ordinary discovery remain on `/litellm/v1`. This capability probe is a bounded, non-billable GET with redirect rejection, and caches positive results for one hour and definitive unsupported results for one minute by URL, credential and model fingerprint. Other paths, missing exact IDs, outages and incompatible servers retain Chat Completions; Astonish never guesses Responses support from a model name alone.
+
+Successful metadata is cached for one hour by URL/key fingerprint; unsupported schemas/endpoints and denied access are cached for one minute. Transient outages are not cached. The indefinite outer context cache is bypassed for these connections. No model-specific lookup is added; absent usable metadata retains existing static/default resolution and basic model discovery. Code `/model`, its header and runtime budget use the shared resolver; Studio receives the same conservative capacity and output limit from the metadata HTTP handler.
+
+```bash
+go test -race ./pkg/provider/... -count=1
+go test ./pkg/api -run TestCompatibleMetadataHTTP -count=1
+go test ./pkg/launcher -run TestCodeCompatibleMetadataContext -count=1
+```
 
 ### Why Canonical Tool Serialization
 
 Provider adapters canonicalize tool schemas before constructing outbound requests. Function declarations are globally sorted by name independent of their original grouping; JSON object keys and safe set-like arrays (`required`, `enum`, and union `type`) are normalized recursively; empty object schemas use one representation; and allowed function names are sorted. Semantically ordered arrays remain in source order. Canonicalization failures stop request construction rather than silently sending unstable data.
+
+For Gemini model IDs (`gemini-*`) using the shared OpenAI-compatible adapter, nullable JSON Schema type arrays with exactly one distinct non-null type are converted recursively to a scalar `type` plus `nullable: true`. This handles ADK-generated nested slices such as `announce_plan.steps` and `steps.items.files`, which otherwise lose their type through the proxy's Gemini translation. Normalization operates only on the canonical request copy and schema positions; descriptions, required fields, items, defaults, examples and enum payloads remain intact. Multi-type ambiguous unions are not guessed. Non-Gemini requests and native Vertex conversion remain unchanged. `TestGeminiAnnouncePlanNullableSchema` exercises the real tool declaration across the HTTP boundary in streaming and non-streaming modes.
 
 OpenAI-compatible responses map `prompt_tokens_details.cached_tokens` to ADK's cached-content token count when the server reports it. Cache fingerprints log only truncated SHA-256 hashes and counts, never prompt contents or credentials.
 
@@ -38,7 +78,7 @@ HTTP connection pooling (`httpool`) is used to reuse TCP connections across LLM 
 
 The `pkg/provider/llmerror` package defines structured error types for LLM API failures:
 
-- **Retryable errors**: 429 (rate limit), 502/503 (server overload), timeouts. The agent engine retries these with exponential backoff.
+- **Retryable errors**: 429 (rate limit), transient server failures, and timeouts. The agent engine retries these with exponential backoff within its existing three-attempt budget. Authentication failures, including plain-text or JSON JWT/token-expiry 401 responses, are not credential-blind retry triggers. Renewable providers recover in their HTTP transport before SDK error classification; exhausted authentication failures remain terminal, and failures after emitted model output must never blindly replay.
 - **Context length errors**: The request exceeded the model's context window.
 - **Authentication errors**: Invalid API key or expired credentials.
 - **Unknown tool errors**: The model hallucinated a tool name that doesn't exist.
@@ -85,25 +125,54 @@ ChatAgent creation:
   NewLLM(providerName, modelName) -> model.LLM interface
 ```
 
+### Authentication Renewal and Recovery
+
+Renewable adapters use `httpool.RoundTripWithToken` below the SDK layer for generation and model discovery. Before each request they check cached expiration and acquire usable credentials when needed. If the first response rejects authentication, they invalidate the exact rejected credential, renew it (or reuse a newer valid credential installed by another request), and replay the identical request **once**. Reactive renewal still runs if proactive renewal happened immediately before that rejected request. A successful replay is returned normally, without exposing the intermediate authentication failure or introducing UI/SSE events.
+
+| Authentication path | Renewal mechanism | Proactive check | Reactive recovery |
+|---|---|---|---|
+| SAP AI Core, including its OpenAI, Vertex and Bedrock model paths | OAuth client-credentials exchange | 30-second expiry buffer | HTTP 401 only; SAP permission-denied 403 is not expiry |
+| xAI OAuth | Refresh-token exchange with rotation and persistence callback | 60-second buffer; legacy missing expiry triggers renewal when a refresh token exists | HTTP 401/403 with a refresh token |
+| GitHub Copilot OAuth | Persistent GitHub token exchanged for a session token | Missing expiry or 60-second buffer | HTTP 401/403 |
+| Static API-key/token adapters, including access-token-only xAI setup | No configured renewal mechanism | No arbitrary token regeneration | Authentication rejection is terminal; no blind same-credential retry |
+| Direct AWS/GCP credential-chain adapters | SDK-owned credential lifecycle | Existing SDK behavior | Not integrated with this shared replay helper |
+
+Token caches and exchanges are mutex-protected. Compare-and-invalidate ensures a late rejection of an older token does not discard a newer credential or unnecessarily rotate it again. Renewal rejects empty tokens and invalid/nonpositive lifetimes; token exchange diagnostics do not expose raw secret-bearing responses. xAI refresh-token rotation updates the cache atomically. Persistence callbacks run outside the token mutex, with serialized notifications and generation checks so delayed older callbacks cannot overwrite newer persisted credentials; callbacks can read/reenter an already-valid transport.
+
+The helper clones request headers and URL before decoration. It closes the first rejected response before renewal, recreates nonempty request bodies only through `GetBody`, and preserves nil/`http.NoBody` requests. A non-replayable body fails with `ErrAuthReplayUnavailable` after invalidating the rejected token: it is never sent empty or buffered without a bound. Cancellation is preserved and unsent bodies are closed. Successful response bodies are neither read nor consumed by authentication recovery, so a successful stream is delivered once; errors inside an already-started stream do not trigger authentication replay.
+
+A second authentication rejection invalidates the renewed cached token and returns the final response without another replay. Renewal failures retain OAuth reauthentication sentinels and context-cancellation identity; OAuth model discovery and generation retain their existing final reauthentication handling. A subsequent request can attempt fresh acquisition, but outer authentication classification cannot restart an identical doomed retry loop. Existing provider constructors, access-token-only `ListModels` signatures, configuration/persistence contracts and tenant-confined environment resolution remain unchanged; renewable xAI listing uses `ListModelsWithOAuth`.
+
+Deterministic tests exercise the actual adapters and transports against loopback token and inference endpoints, using the same provider instance across rejection, renewal, identical replay and later successful calls. They cover streaming/non-streaming generation, model discovery, concurrent rejection, refresh failure, second rejection, cancellation, body ownership and static-key failure. They do not exercise production credentials, prove overnight upstream reliability, or establish why the original upstream token was rejected.
+
+```bash
+go test -race ./pkg/provider/... -count=1 -timeout=10m
+go test ./pkg/tui -run 'Test.*(Reauth|OAuth)' -count=1
+```
+
 ### Error Handling Flow
 
 ```
-LLM API call fails
+Renewable provider HTTP request:
+  Check expiry -> acquire token -> send request
+  First eligible auth rejection -> renew -> replay once
+  Success -> return response/stream normally
+  Renewal failure or second rejection -> final error
     |
     v
-llmerror.Classify(err):
-  - Rate limit (429) -> RetryableError{Wait: Retry-After header}
-  - Server error (502, 503) -> RetryableError{Wait: exponential backoff}
-  - Context length -> ContextLengthError
-  - Auth error -> AuthError
-  - Unknown tool -> UnknownToolError
+SDK / llmerror classification:
+  - Rate limit (429) -> retryable, Retry-After header
+  - Transient server error / timeout -> retryable, exponential backoff
+  - Context length -> context overflow
+  - Authentication failure, including JWT/token expiry -> non-retryable
+  - Unknown tool -> unknown-tool error
     |
     v
 Agent engine:
-  - RetryableError -> wait and retry (up to 3x)
-  - UnknownToolError -> inject synthetic error response, let LLM self-correct
-  - ContextLengthError -> trigger compaction
-  - AuthError -> surface to user
+  - Retryable error -> wait and retry (existing bounded budget)
+  - Unknown tool -> inject synthetic error response, let LLM self-correct
+  - Context overflow -> trigger compaction
+  - Final authentication error -> surface to user / existing OAuth reauth handling
 ```
 
 ## Streaming Safety and Generation Progress

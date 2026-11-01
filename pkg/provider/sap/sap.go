@@ -3,6 +3,7 @@ package sap
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,8 +100,7 @@ func requestWithoutTools(req *model.LLMRequest) *model.LLMRequest {
 // the next UI fetch picks up newly learned limits.
 func invalidateModelCache() {
 	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
+	sapModelCache = make(map[[32]byte]sapMetadataCacheEntry)
 	sapModelCacheMu.Unlock()
 }
 
@@ -233,6 +233,20 @@ func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecre
 	}, nil
 }
 
+const maxSAPDeploymentResponseBytes = 8 << 20
+
+// readSAPDeploymentResponse bounds success and error bodies alike.
+func readSAPDeploymentResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxSAPDeploymentResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read SAP deployment response: %w", err)
+	}
+	if len(data) > maxSAPDeploymentResponseBytes {
+		return nil, errors.New("SAP deployment response too large")
+	}
+	return data, nil
+}
+
 // resolveDeploymentIDWithConfig finds the deployment ID for a given model name using explicit config.
 func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (string, error) {
 	resourceGroup = effectiveResourceGroup(resourceGroup)
@@ -242,20 +256,15 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 	}
 
 	t := &sapTransport{
-		base:          http.DefaultTransport,
+		base:          httpool.Transport(),
 		clientID:      clientID,
 		clientSecret:  clientSecret,
 		authURL:       authURL,
 		resourceGroup: resourceGroup,
 	}
 
-	token, err := t.getToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to get token for deployment lookup: %w", err)
-	}
-
 	if !strings.HasSuffix(baseURL, "/v2") {
-		baseURL += "/v2"
+		baseURL = strings.TrimRight(baseURL, "/") + "/v2"
 	}
 
 	requestURL, err := url.Parse(baseURL + "/lm/deployments")
@@ -271,21 +280,19 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", resourceGroup)
 
-	client := httpool.Client(10 * time.Second)
+	client := &http.Client{Transport: t, Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
+	body, err := readSAPDeploymentResponse(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
 		return "", fmt.Errorf("failed to list deployments: %s, body: %s", resp.Status, string(body))
 	}
 
@@ -305,7 +312,7 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 		} `json:"resources"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 
@@ -345,77 +352,87 @@ type sapTransport struct {
 }
 
 func (t *sapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	token, err := t.getToken()
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", t.resourceGroup)
-
-	// SAP AI Core requires specific path adjustment sometimes, but let's try standard OpenAI path first
-	// Standard: BaseURL + /chat/completions
-	// Constructed: .../inference/deployments/{id}/chat/completions
-	// This should match SAP AI Core API
-
-	// Inject api-version for Azure OpenAI models if missing
-	if strings.Contains(req.URL.Path, "/chat/completions") {
-		q := req.URL.Query()
-		if q.Get("api-version") == "" {
-			q.Set("api-version", "2024-12-01-preview")
-			req.URL.RawQuery = q.Encode()
+	// Recover authentication rejection (401), not resource permission failures
+	// (403). Renewing credentials must not retry a SAP authorization denial.
+	return httpool.RoundTripWithToken(req, t.base, t.getTokenForRequest, t.invalidateToken, func(clone *http.Request, token string) {
+		clone.Header.Set("Authorization", "Bearer "+token)
+		clone.Header.Set("AI-Resource-Group", t.resourceGroup)
+		if strings.Contains(clone.URL.Path, "/chat/completions") {
+			q := clone.URL.Query()
+			if q.Get("api-version") == "" {
+				q.Set("api-version", "2024-12-01-preview")
+				clone.URL.RawQuery = q.Encode()
+			}
 		}
-	}
+	}, func(status int) bool { return status == http.StatusUnauthorized })
+}
 
-	return t.base.RoundTrip(req)
+func (t *sapTransport) invalidateToken(rejected string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.token == rejected {
+		t.token = ""
+		t.expiresAt = time.Time{}
+	}
 }
 
 func (t *sapTransport) getToken() (string, error) {
+	return t.getTokenForRequest(context.Background(), "")
+}
+
+const maxSAPAuthResponseBytes = 1 << 20
+
+func (t *sapTransport) getTokenForRequest(ctx context.Context, rejected string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	if t.token != "" && time.Now().Before(t.expiresAt) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if t.token != "" && t.token != rejected && time.Now().Before(t.expiresAt) {
 		return t.token, nil
 	}
-
-	// Fetch new token
-	data := url.Values{}
-	data.Set("grant_type", "client_credentials")
-	data.Set("client_id", t.clientID)
-	data.Set("client_secret", t.clientSecret)
-
-	authReq, err := http.NewRequest("POST", t.authURL+"/oauth/token", strings.NewReader(data.Encode()))
+	// Clear stale/rejected state before exchange, including every failure path.
+	t.token = ""
+	t.expiresAt = time.Time{}
+	data := url.Values{"grant_type": {"client_credentials"}, "client_id": {t.clientID}, "client_secret": {t.clientSecret}}
+	authReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(t.authURL, "/")+"/oauth/token", strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", err
+		return "", errors.New("SAP token exchange: invalid authentication URL")
 	}
 	authReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	client := httpool.Client(10 * time.Second)
-	resp, err := client.Do(authReq)
+	resp, err := httpool.Client(10 * time.Second).Do(authReq)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("SAP token exchange failed")
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return "", fmt.Errorf("failed to get token: %s, body: %s", resp.Status, string(body))
+		return "", fmt.Errorf("SAP token exchange failed: HTTP %d", resp.StatusCode)
 	}
-
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSAPAuthResponseBytes+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("SAP token exchange: unreadable response")
+	}
+	if len(body) > maxSAPAuthResponseBytes {
+		return "", errors.New("SAP token exchange: response too large")
+	}
 	var result struct {
 		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+	if json.Unmarshal(body, &result) != nil {
+		return "", errors.New("SAP token exchange: invalid response")
 	}
-
+	if strings.TrimSpace(result.AccessToken) == "" || result.ExpiresIn <= 0 || result.ExpiresIn > int64((1<<63-1)/time.Second) || result.AccessToken == rejected {
+		return "", errors.New("SAP token exchange: invalid token or lifetime")
+	}
 	t.token = result.AccessToken
-	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Add(-30 * time.Second) // Buffer
-
+	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn)*time.Second - 30*time.Second)
 	return t.token, nil
 }
 
@@ -518,95 +535,18 @@ var ModelIDMap = map[string]string{
 
 // ResolveDeploymentID finds the deployment ID for a given model name.
 func ResolveDeploymentID(ctx context.Context, modelName string) (string, error) {
-	// Check map first
-	if mapped, ok := ModelIDMap[modelName]; ok {
-		modelName = mapped
-	}
-
-	// We need a temporary transport to get the token
-	t := &sapTransport{
-		base:          http.DefaultTransport,
-		clientID:      os.Getenv("AICORE_CLIENT_ID"),
-		clientSecret:  os.Getenv("AICORE_CLIENT_SECRET"),
-		authURL:       os.Getenv("AICORE_AUTH_URL"),
-		resourceGroup: os.Getenv("AICORE_RESOURCE_GROUP"),
-	}
-
-	token, err := t.getToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to get token for deployment lookup: %w", err)
-	}
-
-	baseURL := os.Getenv("AICORE_BASE_URL")
-	if !strings.HasSuffix(baseURL, "/v2") {
-		baseURL += "/v2"
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/lm/deployments", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", t.resourceGroup)
-
-	client := httpool.Client(10 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return "", fmt.Errorf("failed to list deployments: %s, body: %s", resp.Status, string(body))
-	}
-
-	var result struct {
-		Resources []struct {
-			ID      string `json:"id"`
-			Details struct {
-				Resources struct {
-					BackendDetails struct {
-						Model struct {
-							Name string `json:"name"`
-						} `json:"model"`
-					} `json:"backendDetails"`
-				} `json:"resources"`
-			} `json:"details"`
-			Status string `json:"status"`
-		} `json:"resources"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	for _, res := range result.Resources {
-		if res.Status == "RUNNING" && res.Details.Resources.BackendDetails.Model.Name == modelName {
-			return res.ID, nil
-		}
-	}
-
-	return "", fmt.Errorf("no running deployment found for model: %s", modelName)
+	return resolveDeploymentIDWithConfig(ctx, modelName, os.Getenv("AICORE_CLIENT_ID"), os.Getenv("AICORE_CLIENT_SECRET"), os.Getenv("AICORE_AUTH_URL"), os.Getenv("AICORE_BASE_URL"), os.Getenv("AICORE_RESOURCE_GROUP"))
 }
 
 // ListModels fetches the list of available models from running deployments.
 func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]string, error) {
 	resourceGroup = effectiveResourceGroup(resourceGroup)
 	t := &sapTransport{
-		base:          http.DefaultTransport,
+		base:          httpool.Transport(),
 		clientID:      clientID,
 		clientSecret:  clientSecret,
 		authURL:       authURL,
 		resourceGroup: resourceGroup,
-	}
-
-	token, err := t.getToken()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
 	if !strings.HasSuffix(baseURL, "/v2") {
@@ -617,34 +557,32 @@ func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, r
 		}
 	}
 
-	requestURL := fmt.Sprintf("%s/lm/deployments?status=RUNNING&resourceGroup=%s", baseURL, resourceGroup)
-	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+	requestURL, err := url.Parse(baseURL + "/lm/deployments")
+	if err != nil {
+		return nil, err
+	}
+	query := requestURL.Query()
+	query.Set("status", "RUNNING")
+	query.Set("resourceGroup", resourceGroup)
+	requestURL.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", resourceGroup)
-	// Token will be added by the transport
-
-	client := httpool.Client(10 * time.Second)
+	client := &http.Client{Transport: t, Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch deployments: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return nil, fmt.Errorf("%s, body: %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readSAPDeploymentResponse(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s, body: %s", resp.Status, string(body))
 	}
 
 	var result struct {
@@ -693,31 +631,187 @@ type ModelInfo struct {
 	SupportsTools   *bool  `json:"supports_tools,omitempty"`
 }
 
-// Model cache for SAP AI Core
+const maxSAPCatalogResponseBytes = 8 << 20
+
+// Catalog metadata and deployment metadata have independent lifetimes. Learning
+// an output limit invalidates deployment metadata without discarding the catalog.
+type sapCatalogVersion struct {
+	Name          string `json:"name"`
+	IsLatest      bool   `json:"isLatest"`
+	ContextLength int    `json:"contextLength"`
+}
+
+type sapCatalogResponse struct {
+	Resources []struct {
+		Model    string              `json:"model"`
+		Versions []sapCatalogVersion `json:"versions"`
+	} `json:"resources"`
+}
+
+type sapCatalogCacheEntry struct {
+	Windows   map[string]int
+	FetchedAt time.Time
+}
+
+type sapMetadataCacheEntry struct {
+	Models    []ModelInfo
+	FetchedAt time.Time
+}
+
 var (
-	sapModelCacheMu   sync.RWMutex
-	sapModelCache     []ModelInfo
-	sapModelCacheTime time.Time
-	sapModelCacheTTL  = 1 * time.Hour
+	sapModelCacheMu  sync.RWMutex
+	sapModelCache    = make(map[[32]byte]sapMetadataCacheEntry)
+	sapCatalogCache  = make(map[[32]byte]sapCatalogCacheEntry)
+	sapModelCacheTTL = time.Hour
 )
 
-// ListModelsWithMetadata fetches running deployments and enriches with ModelConfigs metadata
-func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]ModelInfo, error) {
-	// Check cache first
+func normalizedSAPBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(baseURL, "/v2") {
+		baseURL += "/v2"
+	}
+	return baseURL
+}
+
+func sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup string) [32]byte {
+	// JSON framing avoids collisions between values containing separators.
+	identity, _ := json.Marshal([]string{normalizedSAPBaseURL(baseURL), strings.TrimRight(authURL, "/"), clientID, clientSecret, effectiveResourceGroup(resourceGroup)})
+	return sha256.Sum256(identity)
+}
+
+func catalogVersionContext(versions []sapCatalogVersion) int {
+	latestCount, latest, positive := 0, 0, 0
+	ambiguous := false
+	for _, v := range versions {
+		if v.IsLatest {
+			latestCount++
+			latest = v.ContextLength
+		}
+		if v.ContextLength > 0 {
+			if positive != 0 && positive != v.ContextLength {
+				ambiguous = true
+			}
+			positive = v.ContextLength
+		}
+	}
+	if latestCount == 1 {
+		return max(latest, 0)
+	}
+	if latestCount > 1 || ambiguous {
+		return 0
+	}
+	return positive
+}
+
+// GetModelContextWindow returns the catalog capacity for an exact model ID.
+// Zero means no unambiguous positive metadata is available; no static default
+// is returned here, so callers can distinguish metadata from fallback values.
+func GetModelContextWindow(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (int, error) {
+	windows, err := fetchSAPCatalog(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
+	return windows[modelName], err
+}
+
+func fetchSAPCatalog(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) (map[string]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clientID == "" || clientSecret == "" || authURL == "" || baseURL == "" {
+		return nil, errors.New("SAP catalog: configuration incomplete")
+	}
+	key := sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup)
 	sapModelCacheMu.RLock()
-	if len(sapModelCache) > 0 && time.Since(sapModelCacheTime) < sapModelCacheTTL {
-		cached := make([]ModelInfo, len(sapModelCache))
-		copy(cached, sapModelCache)
+	cached, ok := sapCatalogCache[key]
+	sapModelCacheMu.RUnlock()
+	if ok && time.Since(cached.FetchedAt) < sapModelCacheTTL {
+		return cached.Windows, nil // Immutable after insertion; never exposed publicly.
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, normalizedSAPBaseURL(baseURL)+"/lm/scenarios/foundation-models/models", nil)
+	if err != nil {
+		return nil, errors.New("SAP catalog: invalid URL")
+	}
+	client := &http.Client{Transport: &sapTransport{base: httpool.Transport(), clientID: clientID, clientSecret: clientSecret, authURL: authURL, resourceGroup: effectiveResourceGroup(resourceGroup)}}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("SAP catalog: request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SAP catalog: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSAPCatalogResponseBytes+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("SAP catalog: unreadable response")
+	}
+	if len(body) > maxSAPCatalogResponseBytes {
+		return nil, errors.New("SAP catalog: response too large")
+	}
+	var result sapCatalogResponse
+	if json.Unmarshal(body, &result) != nil {
+		return nil, errors.New("SAP catalog: invalid response")
+	}
+	windows := make(map[string]int)
+	seen := make(map[string]bool)
+	for _, resource := range result.Resources {
+		if resource.Model == "" {
+			continue
+		}
+		if seen[resource.Model] {
+			windows[resource.Model] = 0 // Duplicate resources cannot establish an authority.
+			continue
+		}
+		seen[resource.Model] = true
+		windows[resource.Model] = catalogVersionContext(resource.Versions)
+	}
+	sapModelCacheMu.Lock()
+	sapCatalogCache[key] = sapCatalogCacheEntry{Windows: windows, FetchedAt: time.Now()}
+	sapModelCacheMu.Unlock()
+	return windows, nil
+}
+
+func copySAPModels(models []ModelInfo) []ModelInfo {
+	result := append([]ModelInfo(nil), models...)
+	for i := range result {
+		if result[i].SupportsTools != nil {
+			v := *result[i].SupportsTools
+			result[i].SupportsTools = &v
+		}
+	}
+	return result
+}
+
+// ListModelsWithMetadata fetches running deployments and overlays catalog context
+// capacity. Catalog outages preserve discovery and static fallback metadata.
+func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]ModelInfo, error) {
+	if clientID == "" || clientSecret == "" || authURL == "" || baseURL == "" {
+		return nil, errors.New("SAP metadata: configuration incomplete")
+	}
+	key := sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup)
+	// Check cache first; never retain a list beyond its catalog's expiry.
+	sapModelCacheMu.RLock()
+	cached, ok := sapModelCache[key]
+	catalog, catalogOK := sapCatalogCache[key]
+	if ok && catalogOK && time.Since(cached.FetchedAt) < sapModelCacheTTL && time.Since(catalog.FetchedAt) < sapModelCacheTTL {
+		result := copySAPModels(cached.Models)
 		sapModelCacheMu.RUnlock()
-		return cached, nil
+		return result, nil
 	}
 	sapModelCacheMu.RUnlock()
 
 	// Fetch model IDs using existing ListModels
-	modelIDs, err := ListModels(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
+	modelIDs, err := ListModels(ctx, clientID, clientSecret, authURL, normalizedSAPBaseURL(baseURL), resourceGroup)
 	if err != nil {
 		return nil, err
 	}
+
+	windows, catalogErr := fetchSAPCatalog(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
 
 	// Enrich with ModelConfigs metadata; learned limits override MaxOutputTokens
 	// and SupportsTools when known.
@@ -725,6 +819,10 @@ func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL
 	limits := getModelLimitsStore()
 	for _, id := range modelIDs {
 		config := GetModelConfig(id)
+		contextLength := config.ContextWindow
+		if windows[id] > 0 {
+			contextLength = windows[id]
+		}
 		maxOut := config.MaxTokens
 		var supportsTools *bool
 		if limits != nil {
@@ -740,19 +838,21 @@ func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL
 		models = append(models, ModelInfo{
 			ID:              id,
 			Name:            id,
-			ContextLength:   config.ContextWindow,
+			ContextLength:   contextLength,
 			MaxOutputTokens: maxOut,
 			SupportsTools:   supportsTools,
 		})
 	}
 
-	// Update cache
-	sapModelCacheMu.Lock()
-	sapModelCache = models
-	sapModelCacheTime = time.Now()
-	sapModelCacheMu.Unlock()
+	// Do not cache fallback lists caused by a catalog outage: the next fetch
+	// should recover immediately when the catalog becomes available.
+	if catalogErr == nil {
+		sapModelCacheMu.Lock()
+		sapModelCache[key] = sapMetadataCacheEntry{Models: copySAPModels(models), FetchedAt: time.Now()}
+		sapModelCacheMu.Unlock()
+	}
 
-	return models, nil
+	return copySAPModels(models), nil
 }
 
 func (p *Provider) generateBedrockContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {

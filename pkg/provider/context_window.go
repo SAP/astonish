@@ -8,6 +8,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/provider/google"
 	"github.com/SAP/astonish/pkg/provider/groq"
+	"github.com/SAP/astonish/pkg/provider/openai_compat"
 	"github.com/SAP/astonish/pkg/provider/openrouter"
 	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/store"
@@ -57,7 +58,12 @@ func resolveContextWindowFull(ctx context.Context, providerName, modelName strin
 		return ContextWindowResult{Size: apiVal}
 	}
 
-	// Tier 3: Curated model map
+	// Tier 3: Exact SAP configuration, then the shared curated map.
+	if isSAPContextProvider(providerName, cfg) {
+		if mc, ok := sap.ModelConfigs[modelName]; ok && mc.ContextWindow > 0 {
+			return ContextWindowResult{Size: mc.ContextWindow}
+		}
+	}
 	if staticVal := ResolveFromStaticMap(modelName); staticVal > 0 {
 		return ContextWindowResult{Size: staticVal}
 	}
@@ -85,11 +91,41 @@ func resolveFromProviderAPI(ctx context.Context, providerName, modelName string,
 
 	switch providerType {
 	case "sap_ai_core":
-		// SAP uses a hardcoded map — instant, no API call
-		mc := sap.GetModelConfig(modelName)
-		if mc.ContextWindow > 0 {
-			return mc.ContextWindow
+		field := func(key, env string) string {
+			if v := instance[key]; v != "" {
+				return v
+			}
+			return envFallback(ctx, env)
 		}
+		clientID := field("client_id", "AICORE_CLIENT_ID")
+		clientSecret := field("client_secret", "AICORE_CLIENT_SECRET")
+		authURL := field("auth_url", "AICORE_AUTH_URL")
+		baseURL := field("base_url", "AICORE_BASE_URL")
+		if clientID == "" || clientSecret == "" || authURL == "" || baseURL == "" {
+			return 0
+		}
+		window, err := sap.GetModelContextWindow(ctx, modelName, clientID, clientSecret, authURL, baseURL, field("resource_group", "AICORE_RESOURCE_GROUP"))
+		if err == nil {
+			return window
+		}
+
+	case "openai_compat", "litellm":
+		key := instance["api_key"]
+		baseURL := instance["base_url"]
+		if providerType == "litellm" {
+			if key == "" {
+				key = envFallback(ctx, "LITELLM_API_KEY")
+			}
+			if baseURL == "" {
+				baseURL = "http://localhost:4000/v1"
+			}
+		}
+		meta := openai_compat.FetchModelMetadata(ctx, key, baseURL)[modelName]
+		window := meta.ContextLength
+		if meta.MaxInputTokens > 0 && (window <= 0 || meta.MaxInputTokens < window) {
+			window = meta.MaxInputTokens
+		}
+		return window
 
 	case "openrouter":
 		apiKey := getProviderKey(cfg, providerName, "api_key", "OPENROUTER_API_KEY")
@@ -161,20 +197,20 @@ var envLookup = os.Getenv
 // (e.g., the model picker display or platform TUI fallback).
 var curatedContextWindows = map[string]int{
 	// Anthropic Claude — direct API names
-	"claude-4.8-opus":     200_000,
-	"claude-4.7-opus":     200_000,
-	"claude-4.6-opus":     200_000,
-	"claude-4.6-sonnet":   200_000,
-	"claude-4.5-sonnet":   200_000,
-	"claude-4.5-opus":     200_000,
-	"claude-4.5-haiku":    200_000,
-	"claude-4-sonnet":     200_000,
-	"claude-4-opus":       200_000,
-	"claude-3.7-sonnet":   200_000,
-	"claude-3.5-sonnet":   200_000,
-	"claude-3-sonnet":     200_000,
-	"claude-3-haiku":      200_000,
-	"claude-3-opus":       200_000,
+	"claude-4.8-opus":   200_000,
+	"claude-4.7-opus":   200_000,
+	"claude-4.6-opus":   200_000,
+	"claude-4.6-sonnet": 200_000,
+	"claude-4.5-sonnet": 200_000,
+	"claude-4.5-opus":   200_000,
+	"claude-4.5-haiku":  200_000,
+	"claude-4-sonnet":   200_000,
+	"claude-4-opus":     200_000,
+	"claude-3.7-sonnet": 200_000,
+	"claude-3.5-sonnet": 200_000,
+	"claude-3-sonnet":   200_000,
+	"claude-3-haiku":    200_000,
+	"claude-3-opus":     200_000,
 
 	// Anthropic Claude — SAP AI Core prefixed names
 	"anthropic--claude-4.8-opus":   200_000,
@@ -204,42 +240,42 @@ var curatedContextWindows = map[string]int{
 	"gpt-4.1":       1_047_576,
 	"gpt-4.1-nano":  1_047_576,
 	"gpt-4.1-mini":  1_047_576,
-	"gpt-4o":       128_000,
-	"gpt-4o-mini":  128_000,
-	"gpt-4-turbo":  128_000,
-	"gpt-4":        8_192,
+	"gpt-4o":        128_000,
+	"gpt-4o-mini":   128_000,
+	"gpt-4-turbo":   128_000,
+	"gpt-4":         8_192,
 	"gpt-3.5-turbo": 16_385,
-	"o1":           200_000,
-	"o1-mini":      128_000,
-	"o3":           200_000,
-	"o3-mini":      200_000,
-	"o4-mini":      200_000,
+	"o1":            200_000,
+	"o1-mini":       128_000,
+	"o3":            200_000,
+	"o3-mini":       200_000,
+	"o4-mini":       200_000,
 
 	// Google Gemini — inputTokenLimit from Google API
-	"gemini-2.5-pro":       1_048_576,
-	"gemini-2.5-flash":     1_048_576,
-	"gemini-2.0-flash":     1_048_576,
-	"gemini-1.5-pro":       1_048_576,
-	"gemini-1.5-flash":     1_048_576,
-	"gemini-1.0-pro":       32_000,
+	"gemini-2.5-pro":   1_048_576,
+	"gemini-2.5-flash": 1_048_576,
+	"gemini-2.0-flash": 1_048_576,
+	"gemini-1.5-pro":   1_048_576,
+	"gemini-1.5-flash": 1_048_576,
+	"gemini-1.0-pro":   32_000,
 
 	// xAI Grok — from official xAI model cards (not version-monotonic:
 	// grok-4.6 is 500k, grok-4.3 is 1M, grok-4.20 is 2M).
-	"grok-4.6":                       500_000,
-	"grok-4.5":                       500_000,
-	"grok-4.3":                       1_000_000,
-	"grok-4.20-0309-non-reasoning":   2_000_000,
-	"grok-4.20-0309-reasoning":       2_000_000,
-	"grok-4.20-multi-agent-0309":     2_000_000,
-	"grok-3":                         131_072,
-	"grok-3-mini":                    131_072,
-	"grok-build-0.1":                 131_072,
+	"grok-4.6":                     500_000,
+	"grok-4.5":                     500_000,
+	"grok-4.3":                     1_000_000,
+	"grok-4.20-0309-non-reasoning": 2_000_000,
+	"grok-4.20-0309-reasoning":     2_000_000,
+	"grok-4.20-multi-agent-0309":   2_000_000,
+	"grok-3":                       131_072,
+	"grok-3-mini":                  131_072,
+	"grok-build-0.1":               131_072,
 
 	// Meta Llama
-	"llama-3.3-70b":          131_072,
-	"llama-3.1-8b":           131_072,
-	"llama-3.1-70b":          131_072,
-	"llama-3.1-405b":         131_072,
+	"llama-3.3-70b":  131_072,
+	"llama-3.1-8b":   131_072,
+	"llama-3.1-70b":  131_072,
+	"llama-3.1-405b": 131_072,
 
 	// Mistral
 	"mistral-large-latest":  128_000,
@@ -284,9 +320,29 @@ func ResolveContextWindowCached(ctx context.Context, providerName, modelName str
 	return ResolveContextWindowCachedFull(ctx, providerName, modelName, cfg).Size
 }
 
+func isSAPContextProvider(providerName string, cfg *config.AppConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	resolvedName, instance, ok := resolveProviderInstance(providerName, cfg)
+	return ok && config.GetProviderType(resolvedName, instance) == "sap_ai_core"
+}
+
 // ResolveContextWindowCachedFull is like ResolveContextWindowFull but caches the result.
 // Use this in the TUI to get both the size and fallback status.
 func ResolveContextWindowCachedFull(ctx context.Context, providerName, modelName string, cfg *config.AppConfig) ContextWindowResult {
+	// Connection-scoped metadata providers own expiring caches. Do not strand
+	// their overrides, credentials or fallback results in the outer cache.
+	connectionMetadata := isSAPContextProvider(providerName, cfg)
+	if cfg != nil {
+		if name, instance, ok := resolveProviderInstance(providerName, cfg); ok {
+			kind := config.GetProviderType(name, instance)
+			connectionMetadata = connectionMetadata || kind == "openai_compat" || kind == "litellm"
+		}
+	}
+	if connectionMetadata {
+		return resolveContextWindowFull(ctx, providerName, modelName, cfg)
+	}
 	key := providerName + ":" + modelName
 
 	cwCacheMu.RLock()

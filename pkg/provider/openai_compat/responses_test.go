@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+func TestDetectResponsesWithoutKeyOmitsAuthorization(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, exists := r.Header["Authorization"]; exists {
+			t.Error("unauthenticated probe must omit Authorization")
+		}
+		fmt.Fprint(w, `{"data":[{"id":"wanted"}]}`)
+	}))
+	defer s.Close()
+	if _, ok := DetectResponsesBaseURL(context.Background(), "", s.URL+"/litellm/v1", "wanted"); !ok {
+		t.Fatal("unauthenticated model endpoint should be detected")
+	}
+}
+
 func TestDetectResponsesBaseURLExactRouteAuthAndModel(t *testing.T) {
 	var requests atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -90,6 +90,7 @@ func TestFetchModelMetadataFieldSemantics(t *testing.T) {
    {"model_name":"input-only","model_info":{"max_input_tokens":32000}},
    {"model_name":"window","model_info":{"context_length":-1,"context_window":16000}},
    {"model_name":"max-only","model_info":{"max_tokens":999999}},
+   {"model_name":"zero","model_info":{"context_length":0,"context_window":0,"max_input_tokens":0,"max_output_tokens":0}},
    {"model_name":"negative","model_info":{"context_length":-1,"max_input_tokens":-2,"max_output_tokens":-3}},
    {"model_name":"duplicate","model_info":{"context_length":12000}},
    {"model_name":"duplicate","model_info":{"context_length":24000}},
@@ -103,6 +104,7 @@ func TestFetchModelMetadataFieldSemantics(t *testing.T) {
 		"input-only": {ID: "input-only", Name: "input-only", ContextLength: 32000, MaxInputTokens: 32000},
 		"window":     {ID: "window", Name: "window", ContextLength: 16000},
 		"max-only":   {ID: "max-only", Name: "max-only"},
+		"zero":       {ID: "zero", Name: "zero"},
 		"negative":   {ID: "negative", Name: "negative"},
 		" alias ":    {ID: " alias ", Name: " alias ", ContextLength: 1000},
 	}

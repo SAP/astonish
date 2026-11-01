@@ -22,6 +22,46 @@ import (
 
 // ---------- GetModelConfig ----------
 
+func TestReadSAPDeploymentResponseBoundaries(t *testing.T) {
+	for _, size := range []int{maxSAPDeploymentResponseBytes, maxSAPDeploymentResponseBytes + 1} {
+		body, err := readSAPDeploymentResponse(strings.NewReader(strings.Repeat("x", size)))
+		if size == maxSAPDeploymentResponseBytes {
+			if err != nil || len(body) != size {
+				t.Fatal("response at limit should be accepted")
+			}
+		} else if err == nil || body != nil {
+			t.Fatal("response over limit should be rejected")
+		}
+	}
+}
+
+func TestDeploymentResponseSizeLimit(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusBadGateway} {
+		for _, resolve := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status=%d/resolve=%v", status, resolve), func(t *testing.T) {
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/oauth/token" {
+						fmt.Fprint(w, `{"access_token":"fixture","expires_in":3600}`)
+						return
+					}
+					w.WriteHeader(status)
+					fmt.Fprint(w, `{"resources":[],"padding":"`+strings.Repeat("x", 8<<20)+`"}`)
+				}))
+				defer s.Close()
+				var err error
+				if resolve {
+					_, err = resolveDeploymentIDWithConfig(context.Background(), "unknown", "id", "secret", s.URL, s.URL, "default")
+				} else {
+					_, err = ListModels(context.Background(), "id", "secret", s.URL, s.URL, "default")
+				}
+				if err == nil || !strings.Contains(err.Error(), "response too large") {
+					t.Fatalf("oversized response was not rejected with the size-limit error (error present: %v)", err != nil)
+				}
+			})
+		}
+	}
+}
+
 func TestGetModelConfig_KnownModels(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

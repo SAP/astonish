@@ -14,7 +14,8 @@ var ErrAuthReplayUnavailable = errors.New("authentication replay unavailable: re
 // and permits at most one authentication replay. acquire receives an empty
 // rejected token initially and the exact rejected token on recovery; invalidate
 // must likewise invalidate only the supplied token. Callbacks must be safe for
-// concurrent use if the enclosing transport is shared.
+// concurrent use if the enclosing transport is shared. decorate receives a
+// request clone with independent headers and URL, never the caller's request.
 //
 // The base transport owns each body handed to it. Before a body is handed off,
 // this helper closes it on acquisition failure or cancellation. A rejected

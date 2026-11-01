@@ -112,6 +112,8 @@ func FetchModelMetadata(ctx context.Context, apiKey, baseURL string) map[string]
 			return copyMetadata(models)
 		}
 		if status == metadataUnauthorized {
+			// Stop on denied credentials rather than probing another path. Cache
+			// briefly only when no earlier transient failure could mask support.
 			if allUnsupported {
 				storeMetadata(key, nil, metadataUnsupportedTTL)
 			}

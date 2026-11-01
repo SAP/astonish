@@ -233,6 +233,20 @@ func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecre
 	}, nil
 }
 
+const maxSAPDeploymentResponseBytes = 8 << 20
+
+// readSAPDeploymentResponse bounds success and error bodies alike.
+func readSAPDeploymentResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxSAPDeploymentResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read SAP deployment response: %w", err)
+	}
+	if len(data) > maxSAPDeploymentResponseBytes {
+		return nil, errors.New("SAP deployment response too large")
+	}
+	return data, nil
+}
+
 // resolveDeploymentIDWithConfig finds the deployment ID for a given model name using explicit config.
 func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (string, error) {
 	resourceGroup = effectiveResourceGroup(resourceGroup)
@@ -274,11 +288,11 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 	}
 	defer resp.Body.Close()
 
+	body, err := readSAPDeploymentResponse(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
 		return "", fmt.Errorf("failed to list deployments: %s, body: %s", resp.Status, string(body))
 	}
 
@@ -298,7 +312,7 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 		} `json:"resources"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 
@@ -338,6 +352,8 @@ type sapTransport struct {
 }
 
 func (t *sapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Recover authentication rejection (401), not resource permission failures
+	// (403). Renewing credentials must not retry a SAP authorization denial.
 	return httpool.RoundTripWithToken(req, t.base, t.getTokenForRequest, t.invalidateToken, func(clone *http.Request, token string) {
 		clone.Header.Set("Authorization", "Bearer "+token)
 		clone.Header.Set("AI-Resource-Group", t.resourceGroup)
@@ -561,17 +577,12 @@ func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, r
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return nil, fmt.Errorf("%s, body: %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readSAPDeploymentResponse(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s, body: %s", resp.Status, string(body))
 	}
 
 	var result struct {

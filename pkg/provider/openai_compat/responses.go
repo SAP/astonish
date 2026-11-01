@@ -146,7 +146,9 @@ func probeResponsesModels(ctx context.Context, client *http.Client, apiKey, endp
 	if err != nil {
 		return responsesTransient
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

@@ -176,11 +176,6 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("tool %q: no session ID and no local fallback", nt.Name())
 	}
 
-	client := nt.getClientFromContext(ctx, sessionID)
-	if client == nil {
-		return nil, fmt.Errorf("tool %q: no sandbox client available for session %s", nt.Name(), sessionID)
-	}
-
 	// Convert args to map[string]interface{}
 	argsMap, ok := args.(map[string]interface{})
 	if !ok {
@@ -195,6 +190,23 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		}
 	}
 
+	// Reject malformed calls before client acquisition or sandbox side effects.
+	if err := common.ValidateToolArguments(nt.Tool, argsMap); err != nil {
+		return nil, err
+	}
+
+	client := nt.getClientFromContext(ctx, sessionID)
+	if client == nil {
+		return nil, fmt.Errorf("tool %q: no sandbox client available for session %s", nt.Name(), sessionID)
+	}
+
+	// Keep caller-owned arguments unchanged, including when the input is nil.
+	dispatchArgs := make(map[string]any, len(argsMap)+1)
+	for key, value := range argsMap {
+		dispatchArgs[key] = value
+	}
+	argsMap = dispatchArgs
+
 	// Inject caller identity for per-agent cache scoping inside the container.
 	// The container-side node handler extracts and removes this before dispatching.
 	if ctx != nil {
@@ -207,15 +219,16 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 
 	// Ensure sandbox is up, then PreSeed DB allow rules BEFORE any tool Exec
 	// so the first Keystone/HTTP CONNECT is not CONNECT-403.
-	if err := client.EnsureReady(sessionID); err != nil {
+	if err := EnsureToolClientReady(ctx, client, sessionID); err != nil {
 		return nil, err
 	}
-	ensureNetworkPolicyPreSeed(ctx, sessionID)
+	owner := CanonicalSessionID(client, sessionID)
+	ensureNetworkPolicyPreSeed(ctx, owner)
 
 	// Provision session credential vault only for http_request so a PushFile
 	// failure cannot brick shell/file tools. Keystone/OAuth stay in-sandbox.
 	if nt.Name() == "http_request" {
-		if err := SyncSessionCredentialVault(ctx, nt.backendForPush(client), nil, sessionID); err != nil {
+		if err := SyncSessionCredentialVault(ctx, nt.backendForPush(client), nil, owner); err != nil {
 			return nil, err
 		}
 	}
@@ -369,6 +382,7 @@ func (nt *NodeTool) getClientFromContext(ctx context.Context, sessionID string) 
 // Tools NOT in this set run on the host (memory, credentials, scheduler, etc.).
 var containerTools = map[string]bool{
 	"read_file":                 true,
+	"load_file":                 true,
 	"write_file":                true,
 	"edit_file":                 true,
 	"file_tree":                 true,

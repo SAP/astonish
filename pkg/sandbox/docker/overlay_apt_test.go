@@ -47,8 +47,8 @@ func TestBuildCaptureScript_DoesNotStageTmpTar(t *testing.T) {
 
 func TestCaptureLayerError_NoSpace(t *testing.T) {
 	err := captureLayerError(fmt.Errorf("exit status 2\nstderr: tar: /tmp/astn-layer.tar: Cannot write: No space left on device"))
-	if err == nil || !strings.Contains(err.Error(), "docker volume prune") {
-		t.Fatalf("expected prune hint, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "session-aware") {
+		t.Fatalf("expected session-aware cleanup hint, got %v", err)
 	}
 }
 
@@ -68,7 +68,7 @@ func TestOverlayAptPrepScript_ChecksFreeSpace(t *testing.T) {
 	if !strings.Contains(script, "df -Pm") {
 		t.Fatal("expected a df free-space check")
 	}
-	if !strings.Contains(script, "docker system prune") {
+	if !strings.Contains(script, "session-aware") {
 		t.Fatal("expected a prune hint when the overlay is too small")
 	}
 }

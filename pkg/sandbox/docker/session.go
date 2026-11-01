@@ -20,175 +20,222 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
 
-// CreateSession materialises a new sandbox container. Idempotent on SessionID:
-// if the container already exists the call is a no-op and the existing session
-// is returned.
+// CreateSession keeps the named volume authoritative across container loss.
 func (db *DockerBackend) CreateSession(ctx context.Context, spec sandbox.SessionSpec) (*sandbox.Session, error) {
-	if err := ctx.Err(); err != nil {
+	unlock, err := db.lockSession(ctx, spec.SessionID)
+	if err != nil {
 		return nil, err
 	}
+	defer unlock()
+	return db.createSessionLocked(ctx, spec)
+}
 
-	// Normalise template ID.
-	templateID := spec.TemplateID
-	if templateID == "" {
-		templateID = sandbox.BaseTemplateID
-	}
-
+func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.SessionSpec) (*sandbox.Session, error) {
 	cname := containerName(spec.SessionID)
-
-	// Idempotency: if the container already exists, return current state.
-	state, err := db.containerState(ctx, cname)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox/docker: CreateSession inspect: %w", err)
-	}
-	if state != sandbox.SessionStateGone {
-		// Re-record after Studio restart so browser resolve can find the
-		// already-running container (registry is file-backed but older
-		// rows may lack PodName).
-		db.recordSession(spec, cname, templateID)
-		return &sandbox.Session{
-			SessionID:  spec.SessionID,
-			Type:       spec.Type,
-			TemplateID: templateID,
-			OrgSlug:    spec.OrgSlug,
-			TeamSlug:   spec.TeamSlug,
-			State:      state,
-			BackendRef: cname,
-			Labels:     spec.Labels,
-			CreatedAt:  time.Now().UTC(),
-		}, nil
-	}
-
-	layerChain, err := db.resolveLayerChain(spec.LayerChain, templateID)
+	state, err := db.settledContainerState(ctx, cname)
 	if err != nil {
 		return nil, err
 	}
-
-	upperDir := db.upperPath(spec.SessionID)
-	if err := os.MkdirAll(upperDir, 0o755); err != nil {
-		return nil, fmt.Errorf("sandbox/docker: create persist dir %q: %w", upperDir, err)
+	// Read durable configuration before resolving a potentially newer template.
+	meta, err := db.readSessionMetadata(spec.SessionID)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(upperDir, layerChainFile), []byte(layerChain+"\n"), 0o644); err != nil {
-		return nil, fmt.Errorf("sandbox/docker: persist layer chain: %w", err)
-	}
-
-	if spec.OrgSlug != "" {
-		if err := db.EnsureOrgNetwork(ctx, spec.OrgSlug); err != nil {
+	if meta == nil && state != sandbox.SessionStateGone {
+		meta, err = db.adoptContainerMetadata(ctx, spec, cname)
+		if err != nil {
 			return nil, err
 		}
 	}
-
-	db.removeOverlayVolume(ctx, spec.SessionID)
-	args := db.dockerRunArgs(spec, cname, layerChain, upperDir)
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...); err != nil {
-		return nil, fmt.Errorf("sandbox/docker: docker run for session %s: %w", spec.SessionID, err)
+	if meta != nil {
+		spec, err = db.recoverySpec(meta, spec, state == sandbox.SessionStateGone)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if raw, readErr := os.ReadFile(filepath.Join(db.upperPath(spec.SessionID), layerChainFile)); readErr == nil {
+			if spec.Type == "" {
+				return nil, fmt.Errorf("sandbox/docker: legacy recovery requires current authorized launch configuration; storage retained")
+			}
+			chain := strings.TrimSpace(string(raw))
+			if chain == "" {
+				return nil, fmt.Errorf("sandbox/docker: empty persisted layer chain")
+			}
+			spec.LayerChain = strings.Split(chain, ",")
+			if db.cfg.Sessions != nil {
+				rec, e := db.cfg.Sessions.GetSession(spec.SessionID)
+				if e != nil {
+					return nil, e
+				}
+				if rec != nil {
+					if spec.UserID != "" && rec.CreatedBy != "" && spec.UserID != rec.CreatedBy {
+						return nil, fmt.Errorf("sandbox/docker: legacy recovery owner mismatch; storage retained")
+					}
+					if rec.TemplateID != "" {
+						spec.TemplateID = rec.TemplateID
+					}
+					if rec.CreatedBy != "" {
+						spec.UserID = rec.CreatedBy
+					}
+					if rec.Image != "" {
+						spec.Image = rec.Image
+					}
+				}
+			}
+			if spec.TemplateID == "" {
+				return nil, fmt.Errorf("sandbox/docker: legacy recovery requires authorized template configuration; storage retained")
+			}
+		} else if !os.IsNotExist(readErr) {
+			return nil, readErr
+		}
+		if spec.TemplateID == "" {
+			spec.TemplateID = sandbox.BaseTemplateID
+		}
+		chain, e := db.resolveLayerChain(spec.LayerChain, spec.TemplateID)
+		if e != nil {
+			return nil, e
+		}
+		spec.LayerChain = strings.Split(chain, ",")
+		if spec.Image == "" {
+			spec.Image = db.cfg.SandboxImage
+		}
+		meta = newDockerSessionMetadata(spec)
 	}
-
-	sess := &sandbox.Session{
-		SessionID:  spec.SessionID,
-		Type:       spec.Type,
-		TemplateID: templateID,
-		OrgSlug:    spec.OrgSlug,
-		TeamSlug:   spec.TeamSlug,
-		State:      sandbox.SessionStateCreating,
-		BackendRef: cname,
-		Labels:     spec.Labels,
-		CreatedAt:  time.Now().UTC(),
+	if spec.Env != nil {
+		// Refresh authorized credentials in memory, but an idempotent request does
+		// not change the existing container's launch environment or required keys.
+		sessionLaunchEnvs.Store(sessionEnvKey{db, spec.SessionID}, cloneEnv(spec.Env))
 	}
-	db.recordSession(spec, cname, templateID)
-	return sess, nil
+	if state == sandbox.SessionStateGone {
+		// Only launch configuration changes durable requirements. Write before
+		// Docker runs so a crash after launch cannot omit a required credential.
+		// On an ambiguous launch failure retain this fail-closed recovery recipe.
+		meta.EnvKeys = newDockerSessionMetadata(spec).EnvKeys
+	}
+	if err := db.writeSessionMetadata(meta); err != nil {
+		return nil, err
+	}
+	chain := strings.Join(spec.LayerChain, ",")
+	if err := os.WriteFile(filepath.Join(db.upperPath(spec.SessionID), layerChainFile), []byte(chain+"\n"), 0600); err != nil {
+		return nil, err
+	}
+	if state == sandbox.SessionStateGone {
+		if _, err := db.resolveLayerChain(spec.LayerChain, spec.TemplateID); err != nil {
+			return nil, err
+		}
+		if spec.OrgSlug != "" {
+			if err := db.EnsureOrgNetwork(ctx, spec.OrgSlug); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, db.dockerRunArgs(spec, cname, chain, db.upperPath(spec.SessionID))...); err != nil {
+			return nil, fmt.Errorf("sandbox/docker: create session %s: %w", spec.SessionID, err)
+		}
+		state = sandbox.SessionStateCreating
+	}
+	if err := db.recordSession(spec, cname, spec.TemplateID); err != nil {
+		return nil, err
+	}
+	return &sandbox.Session{SessionID: spec.SessionID, Type: spec.Type, TemplateID: spec.TemplateID, OrgSlug: spec.OrgSlug, TeamSlug: spec.TeamSlug, State: state, BackendRef: cname, Labels: spec.Labels, CreatedAt: time.Now().UTC()}, nil
 }
 
-// StartSession resumes a stopped session. If the container was removed on
-// Stop (k8s-style evict), it is recreated from the persisted upper tarball
-// and layer-chain file. Idempotent if already running.
+// StartSession resumes the existing container, including a paused container.
 func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) error {
-	if err := ctx.Err(); err != nil {
+	unlock, err := db.lockSession(ctx, sessionID)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return err
 	}
 	cname := containerName(sessionID)
-	state, err := db.containerState(ctx, cname)
+	state, err := db.settledContainerState(ctx, cname)
 	if err != nil {
-		return fmt.Errorf("sandbox/docker: StartSession inspect %s: %w", sessionID, err)
+		return err
 	}
 	switch state {
 	case sandbox.SessionStateRunning, sandbox.SessionStateCreating:
 		return nil
 	case sandbox.SessionStateGone:
-		return db.recreateFromPersist(ctx, sessionID)
+		return db.recreateFromPersistLocked(ctx, sessionID)
 	}
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "start", cname); err != nil {
-		return fmt.Errorf("sandbox/docker: docker start %s: %w", cname, err)
-	}
-	return nil
-}
-
-// StopSession persists the overlay upper layer, then removes the container
-// and its overlay volume. The persist dir keeps upper.tar.zst for resume.
-// Idempotent if already gone.
-func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) error {
-	if err := ctx.Err(); err != nil {
+	raw, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{.State.Status}}", cname)
+	if err != nil {
 		return err
 	}
-	cname := containerName(sessionID)
-	state, err := db.containerState(ctx, cname)
-	if err != nil {
-		return fmt.Errorf("sandbox/docker: StopSession inspect %s: %w", sessionID, err)
+	verb := "start"
+	if strings.TrimSpace(string(raw)) == "paused" {
+		verb = "unpause"
 	}
-	if state == sandbox.SessionStateGone {
+	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, verb, cname)
+	return err
+}
+
+// StopSession archives ready live state, then stops without removing storage.
+func (db *DockerBackend) StopSession(ctx context.Context, sessionID string) error {
+	unlock, err := db.lockSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	cname := containerName(sessionID)
+	state, err := db.settledContainerState(ctx, cname)
+	if err != nil {
+		return err
+	}
+	if state == sandbox.SessionStateGone || state == sandbox.SessionStateStopped {
 		return nil
 	}
-	if state == sandbox.SessionStateRunning || state == sandbox.SessionStateCreating {
-		_ = db.persistUpper(ctx, sessionID)
-	}
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", cname); err != nil && !isDockerNotFoundError(err) {
-		return fmt.Errorf("sandbox/docker: docker rm %s: %w", cname, err)
-	}
-	db.removeOverlayVolume(ctx, sessionID)
-	return nil
-}
-
-// DestroySession permanently removes the container and its upper layer.
-// A registry, when injected, must contain the session before docker rm runs.
-func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) error {
-	if err := ctx.Err(); err != nil {
+	// Docker reports running before PID 1 has finished composing the overlay.
+	// Readiness is required even in that window, not just while restarting.
+	if err := db.WaitForSessionReady(ctx, sessionID); err != nil {
 		return err
 	}
+	if err := db.persistUpper(ctx, sessionID); err != nil {
+		return fmt.Errorf("sandbox/docker: persist upper for session %s: %w", sessionID, err)
+	}
+	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "stop", cname)
+	return err
+}
+
+// DestroySession is permanent. Keep recovery/registry authority on failure.
+func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) error {
+	unlock, err := db.lockSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return err
 	}
-	cname := containerName(sessionID)
-
-	// Remove container (force-stops first if running) and the overlay volume.
-	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", cname)
-	if err != nil {
-		// "No such container" is not an error for idempotency.
-		if !strings.Contains(err.Error(), "No such container") &&
-			!strings.Contains(err.Error(), "no such container") {
-			return fmt.Errorf("sandbox/docker: docker rm %s: %w", cname, err)
-		}
+	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", containerName(sessionID))
+	if err != nil && !isDockerNotFoundError(err) {
+		return err
 	}
-	db.removeOverlayVolume(ctx, sessionID)
-
-	// Remove upper layer directory.
-	upperDir := db.upperPath(sessionID)
-	if err := os.RemoveAll(upperDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("sandbox/docker: remove upper dir %q: %w", upperDir, err)
+	if err := db.removeOverlayVolume(ctx, sessionID); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(db.upperPath(sessionID)); err != nil {
+		return err
 	}
 	if db.cfg.Sessions != nil {
-		_ = db.cfg.Sessions.Remove(sessionID)
+		if err := db.cfg.Sessions.Remove(sessionID); err != nil {
+			return err
+		}
 	}
+	sessionLaunchEnvs.Delete(sessionEnvKey{db, sessionID})
 	return nil
 }
 
@@ -477,7 +524,11 @@ func (db *DockerBackend) dockerRunArgs(spec sandbox.SessionSpec, cname, layerCha
 	if spec.Limits.PIDs > 0 {
 		args = append(args, eqFlag("--pids-limit", fmt.Sprintf("%d", spec.Limits.PIDs)))
 	}
-	args = append(args, db.cfg.SandboxImage, "sleep", "infinity")
+	image := spec.Image
+	if image == "" {
+		image = db.cfg.SandboxImage
+	}
+	args = append(args, image, "sleep", "infinity")
 	return args
 }
 
@@ -514,89 +565,331 @@ func (db *DockerBackend) persistUpper(ctx context.Context, sessionID string) err
 	return err
 }
 
-func (db *DockerBackend) removeOverlayVolume(ctx context.Context, sessionID string) {
-	vol := overlayVolumeName(sessionID)
-	_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", vol)
+func (db *DockerBackend) removeOverlayVolume(ctx context.Context, sessionID string) error {
+	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", overlayVolumeName(sessionID))
+	if err != nil && !isDockerNotFoundError(err) {
+		return fmt.Errorf("sandbox/docker: remove overlay volume: %w", err)
+	}
+	return nil
 }
 
-// pruneDanglingOverlayVolumes deletes unused overlay volumes left behind by
-// `docker rm -f` without `-v` (anonymous 64-hex names) and our named
-// `*-overlay` volumes whose container is already gone.
-func (db *DockerBackend) pruneDanglingOverlayVolumes(ctx context.Context) {
-	out, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "ls", "-qf", "dangling=true")
-	if err != nil {
-		return
-	}
-	for _, name := range strings.Split(string(out), "\n") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if !isPrunableOverlayVolume(name) {
-			continue
-		}
-		_, _ = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", name)
-	}
-}
-
-func isPrunableOverlayVolume(name string) bool {
-	if strings.HasSuffix(name, "-overlay") && strings.HasPrefix(name, "astonish-session-") {
-		return true
-	}
-	if len(name) != 64 {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, templateID string) {
+func (db *DockerBackend) recordSession(spec sandbox.SessionSpec, cname, templateID string) error {
 	if db.cfg.Sessions == nil {
-		return
+		return nil
 	}
-	_ = db.cfg.Sessions.PutSession(&store.SandboxSession{
-		SessionID:     spec.SessionID,
-		ChatSessionID: spec.SessionID,
-		Backend:       string(sandbox.BackendKindDocker),
-		ContainerName: cname,
-		// Browser/PDF resolvers historically required PodName (K8s field).
-		// Docker has no pod; reuse the container name so those lookups work.
-		PodName:      cname,
-		TemplateID:   templateID,
-		State:        store.SandboxSessionStateRunning,
-		CreatedBy:    spec.UserID,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
-		LastActiveAt: time.Now().UTC(),
-	})
+	rec, err := db.cfg.Sessions.GetSession(spec.SessionID)
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		rec = &store.SandboxSession{SessionID: spec.SessionID, ChatSessionID: spec.SessionID, CreatedAt: time.Now().UTC()}
+	} else {
+		copy := *rec
+		rec = &copy
+	}
+	rec.Backend = string(sandbox.BackendKindDocker)
+	rec.ContainerName = cname
+	rec.PodName = cname
+	if rec.TemplateID == "" {
+		rec.TemplateID = templateID
+	}
+	if rec.CreatedBy == "" {
+		rec.CreatedBy = spec.UserID
+	}
+	if rec.Image == "" {
+		rec.Image = spec.Image
+	}
+	rec.State = store.SandboxSessionStateRunning
+	rec.UpdatedAt = time.Now().UTC()
+	rec.LastActiveAt = rec.UpdatedAt
+	return db.cfg.Sessions.PutSession(rec)
 }
 
 func (db *DockerBackend) recreateFromPersist(ctx context.Context, sessionID string) error {
-	upperDir := db.upperPath(sessionID)
-	raw, err := os.ReadFile(filepath.Join(upperDir, layerChainFile))
+	unlock, err := db.lockSession(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("sandbox/docker: session %s has no persist dir; call CreateSession first", sessionID)
+		return err
 	}
-	chain := strings.TrimSpace(string(raw))
+	defer unlock()
+	return db.recreateFromPersistLocked(ctx, sessionID)
+}
+
+func (db *DockerBackend) recreateFromPersistLocked(ctx context.Context, sessionID string) error {
+	if _, err := os.Stat(filepath.Join(db.upperPath(sessionID), layerChainFile)); err != nil {
+		return fmt.Errorf("sandbox/docker: session %s has no recovery configuration; call CreateSession first: %w", sessionID, err)
+	}
+	spec := sandbox.SessionSpec{SessionID: sessionID}
+	if env, ok := sessionLaunchEnvs.Load(sessionEnvKey{db, sessionID}); ok {
+		spec.Env = cloneEnv(env.(map[string]string))
+	}
+	_, err := db.createSessionLocked(ctx, spec)
+	return err
+}
+
+// Lifecycle locks span backend instances targeting the same CLI/context/name.
+// Docker commands inherit current process env, so a construction-time lock-only
+// snapshot would not identify the runtime they actually execute. Keep runtime
+// selection stable during operations; these locks are process-local, not a
+// distributed storage/writer protocol.
+type sessionLifecycleLock struct {
+	token chan struct{}
+	refs  int
+}
+
+var sessionLifecycleLocks = struct {
+	sync.Mutex
+	entries map[string]*sessionLifecycleLock
+}{entries: make(map[string]*sessionLifecycleLock)}
+
+type sessionEnvKey struct {
+	backend   *DockerBackend
+	sessionID string
+}
+
+var sessionLaunchEnvs sync.Map // secrets are memory-only, never serialized
+
+func (db *DockerBackend) lockSession(ctx context.Context, id string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	runtime := db.cfg.ContainerRuntimePath
+	if resolved, err := exec.LookPath(runtime); err == nil {
+		runtime = resolved
+	}
+	if absolute, err := filepath.Abs(runtime); err == nil {
+		runtime = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(runtime); err == nil {
+		runtime = resolved
+	}
+	key := runtime + "\x00" + os.Getenv("DOCKER_HOST") + "\x00" + os.Getenv("DOCKER_CONTEXT") + "\x00" + containerName(id)
+	sessionLifecycleLocks.Lock()
+	entry := sessionLifecycleLocks.entries[key]
+	if entry == nil {
+		entry = &sessionLifecycleLock{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
+		sessionLifecycleLocks.entries[key] = entry
+	}
+	entry.refs++
+	sessionLifecycleLocks.Unlock()
+	releaseRef := func() {
+		sessionLifecycleLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(sessionLifecycleLocks.entries, key)
+		}
+		sessionLifecycleLocks.Unlock()
+	}
+	select {
+	case <-ctx.Done():
+		releaseRef()
+		return nil, ctx.Err()
+	case <-entry.token:
+		if err := ctx.Err(); err != nil {
+			entry.token <- struct{}{}
+			releaseRef()
+			return nil, err
+		}
+		return func() { entry.token <- struct{}{}; releaseRef() }, nil
+	}
+}
+
+func (db *DockerBackend) settledContainerState(ctx context.Context, cname string) (sandbox.SessionState, error) {
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	for {
+		state, err := db.containerState(ctx, cname)
+		if err != nil || state != sandbox.SessionStateEvicting {
+			return state, err
+		}
+		select {
+		case <-ctx.Done():
+			return state, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+const dockerSessionMetadataFile = "docker-session.json"
+const dockerSessionMetadataVersion = 1
+
+// A private recovery recipe, NOT an authorization record. Env values and
+// credentials are deliberately excluded. EnvKeys requires fresh authorized env
+// after a controller restart instead of silently launching a degraded session.
+type dockerSessionMetadata struct {
+	Version    int                    `json:"version"`
+	SessionID  string                 `json:"session_id"`
+	Type       sandbox.SessionType    `json:"type"`
+	UserID     string                 `json:"user_id,omitempty"`
+	OrgSlug    string                 `json:"org_slug,omitempty"`
+	TeamSlug   string                 `json:"team_slug,omitempty"`
+	TemplateID string                 `json:"template_id"`
+	LayerChain []string               `json:"layer_chain"`
+	Image      string                 `json:"image"`
+	Labels     map[string]string      `json:"labels,omitempty"`
+	Limits     sandbox.ResourceLimits `json:"limits"`
+	EnvKeys    []string               `json:"required_env_keys,omitempty"`
+}
+
+func cloneEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	copy := make(map[string]string, len(env))
+	for k, v := range env {
+		copy[k] = v
+	}
+	return copy
+}
+func newDockerSessionMetadata(spec sandbox.SessionSpec) *dockerSessionMetadata {
+	m := &dockerSessionMetadata{Version: dockerSessionMetadataVersion, SessionID: spec.SessionID, Type: spec.Type, UserID: spec.UserID, OrgSlug: spec.OrgSlug, TeamSlug: spec.TeamSlug, TemplateID: spec.TemplateID, LayerChain: append([]string(nil), spec.LayerChain...), Image: spec.Image, Labels: cloneEnv(spec.Labels), Limits: spec.Limits}
+	for key := range spec.Env {
+		m.EnvKeys = append(m.EnvKeys, key)
+	}
+	sort.Strings(m.EnvKeys)
+	return m
+}
+func (db *DockerBackend) readSessionMetadata(id string) (*dockerSessionMetadata, error) {
+	raw, err := os.ReadFile(filepath.Join(db.upperPath(id), dockerSessionMetadataFile))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var m dockerSessionMetadata
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("sandbox/docker: invalid recovery metadata: %w", err)
+	}
+	if m.Version != dockerSessionMetadataVersion || m.SessionID != id || m.TemplateID == "" || len(m.LayerChain) == 0 || m.Image == "" {
+		return nil, fmt.Errorf("sandbox/docker: incompatible recovery metadata for %s; storage retained", id)
+	}
+	return &m, nil
+}
+func (db *DockerBackend) writeSessionMetadata(m *dockerSessionMetadata) error {
+	dir := db.upperPath(m.SessionID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(dir, ".docker-session-*")
+	if err != nil {
+		return err
+	}
+	// Remove the staging file on failure; after a successful rename the old
+	// temporary name no longer exists, so this leaves the durable sidecar intact.
+	defer os.Remove(file.Name())
+	if _, err = file.Write(raw); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(file.Name(), filepath.Join(dir, dockerSessionMetadataFile))
+}
+func (db *DockerBackend) recoverySpec(m *dockerSessionMetadata, current sandbox.SessionSpec, recreating bool) (sandbox.SessionSpec, error) {
+	if (current.UserID != "" && m.UserID != "" && current.UserID != m.UserID) || (current.OrgSlug != "" && current.OrgSlug != m.OrgSlug) || (current.TeamSlug != "" && current.TeamSlug != m.TeamSlug) {
+		return current, fmt.Errorf("sandbox/docker: recovery identity mismatch; storage retained")
+	}
+	env := current.Env
+	if env == nil {
+		if cached, ok := sessionLaunchEnvs.Load(sessionEnvKey{db, current.SessionID}); ok {
+			env = cloneEnv(cached.(map[string]string))
+		}
+	}
+	if recreating {
+		for _, key := range m.EnvKeys {
+			if _, ok := env[key]; !ok {
+				return current, fmt.Errorf("sandbox/docker: recovery requires fresh authorized environment for session %s; call CreateSession with current credentials", current.SessionID)
+			}
+		}
+	}
+	return sandbox.SessionSpec{SessionID: m.SessionID, Type: m.Type, UserID: m.UserID, OrgSlug: m.OrgSlug, TeamSlug: m.TeamSlug, TemplateID: m.TemplateID, LayerChain: append([]string(nil), m.LayerChain...), Image: m.Image, Labels: cloneEnv(m.Labels), Limits: m.Limits, Env: env}, nil
+}
+
+// Adopt structural legacy launch configuration from Docker without serializing
+// its environment. Image defaults are excluded when finding required env keys.
+func (db *DockerBackend) adoptContainerMetadata(ctx context.Context, current sandbox.SessionSpec, cname string) (*dockerSessionMetadata, error) {
+	var info struct {
+		Config struct {
+			Image  string
+			Env    []string
+			Labels map[string]string
+		}
+		HostConfig struct {
+			NanoCpus  int64
+			Memory    int64
+			PidsLimit *int64
+		}
+	}
+	raw, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{json .}}", cname)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return nil, fmt.Errorf("sandbox/docker: cannot safely adopt legacy container configuration: %w", err)
+	}
+	labels := info.Config.Labels
+	if labels["astonish.session_id"] != current.SessionID {
+		return nil, fmt.Errorf("sandbox/docker: legacy container identity mismatch")
+	}
+	spec := sandbox.SessionSpec{SessionID: current.SessionID, Type: sandbox.SessionType(labels["astonish.type"]), OrgSlug: labels["astonish.org"], TeamSlug: labels["astonish.team"], UserID: current.UserID, TemplateID: current.TemplateID, Image: info.Config.Image, Labels: labels}
+	if db.cfg.Sessions != nil {
+		rec, e := db.cfg.Sessions.GetSession(current.SessionID)
+		if e != nil {
+			return nil, e
+		}
+		if rec != nil {
+			spec.UserID = rec.CreatedBy
+			spec.TemplateID = rec.TemplateID
+		}
+	}
+	vars := map[string]string{}
+	for _, item := range info.Config.Env {
+		if k, v, ok := strings.Cut(item, "="); ok {
+			vars[k] = v
+		}
+	}
+	chain := vars[envLayerChain]
 	if chain == "" {
-		return fmt.Errorf("sandbox/docker: session %s persist is missing layer chain", sessionID)
+		return nil, fmt.Errorf("sandbox/docker: legacy container lacks layer chain; storage retained")
 	}
-	spec := sandbox.SessionSpec{SessionID: sessionID, Type: sandbox.SessionTypeChat, LayerChain: strings.Split(chain, ",")}
-	db.removeOverlayVolume(ctx, sessionID)
-	cname := containerName(sessionID)
-	args := db.dockerRunArgs(spec, cname, chain, upperDir)
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...); err != nil {
-		return fmt.Errorf("sandbox/docker: recreate session %s: %w", sessionID, err)
+	spec.LayerChain = strings.Split(chain, ",")
+	if spec.TemplateID == "" {
+		return nil, fmt.Errorf("sandbox/docker: legacy recovery requires authorized template configuration; storage retained")
 	}
-	templateID := spec.TemplateID
-	if templateID == "" {
-		templateID = sandbox.BaseTemplateID
+	spec.Limits.CPUs = int(info.HostConfig.NanoCpus / 1e9)
+	spec.Limits.MemoryMiB = int(info.HostConfig.Memory / (1024 * 1024))
+	if info.HostConfig.PidsLimit != nil && *info.HostConfig.PidsLimit > 0 {
+		spec.Limits.PIDs = int(*info.HostConfig.PidsLimit)
 	}
-	db.recordSession(spec, cname, templateID)
-	return nil
+	var defaults []string
+	raw, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "image", "inspect", "--format", "{{json .Config.Env}}", info.Config.Image)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/docker: cannot establish legacy environment requirements: %w", err)
+	}
+	if err := json.Unmarshal(raw, &defaults); err != nil {
+		return nil, err
+	}
+	for _, item := range defaults {
+		if k, v, ok := strings.Cut(item, "="); ok && vars[k] == v {
+			delete(vars, k)
+		}
+	}
+	for _, key := range []string{envSessionID, envLayerChain, envUpperDir, envWorkDir, envLayersDir, envUppersDir, envHandoff, envHandoffArg} {
+		delete(vars, key)
+	}
+	spec.Env = vars
+	m := newDockerSessionMetadata(spec)
+	if _, err := db.recoverySpec(m, current, false); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

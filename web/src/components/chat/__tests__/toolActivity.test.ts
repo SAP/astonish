@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatMsg } from '../chatTypes'
 import {
+  reduceDelegationProgress, normalizeDelegationHistory, deriveDelegationTasks,
   activityStats,
   activitySummary,
   buildActivityRenderIndex,
@@ -25,6 +26,57 @@ import {
   stickyAgentBubbleKey,
   supersededAgentIndices,
 } from '../toolActivity'
+
+describe('delegation identity', () => {
+  it('merges duplicate history panels and preserves other tools', () => {
+    const panel = { type: 'subtask_execution' as const, batch_id: 'batch', tasks: [{ task_id: 'task', name: 'same', description: '' }], status: 'complete', events: [{ type: 'task_complete', batch_id: 'batch', task_id: 'task', sequence: 1 }] }
+    const tool: ChatMsg = { type: 'tool_call', toolName: 'read_file', toolArgs: {} }
+    expect(normalizeDelegationHistory([panel, tool, panel])).toEqual([panel, tool])
+  })
+  it('retains failed attempt status independently of successful cumulative state', () => {
+    const [task] = deriveDelegationTasks({ type: 'subtask_execution', batch_id: 'b', status: 'complete', tasks: [{ task_id: 't', name: 'same', description: '' }], events: [
+      { type: 'task_failed', task_id: 't', attempt: 1, error: 'first failed', duration: '1s' },
+      { type: 'task_complete', task_id: 't', attempt: 2, duration: '2s' },
+    ] })
+    expect(task.status).toBe('complete')
+    expect(task.attempts[0]).toMatchObject({ status: 'failed', error: 'first failed', duration: '1s' })
+    expect(task.attempts[1]).toMatchObject({ status: 'complete', duration: '2s' })
+  })
+  it('replays by sequence without merging same names or repeated text', () => {
+    const records = [
+      { type: 'delegation_start', batch_id: 'b', sequence: 1, tasks: [{ name: 'same', description: '', task_id: 'a' }, { name: 'same', description: '', task_id: 'b' }] },
+      { type: 'task_text', batch_id: 'b', task_id: 'a', sequence: 2, text: 'repeat' },
+      { type: 'task_text', batch_id: 'b', task_id: 'a', sequence: 3, text: 'repeat' },
+      { type: 'task_failed', batch_id: 'b', task_id: 'b', sequence: 4 },
+    ]
+    const messages = records.reduce(reduceDelegationProgress, [] as ChatMsg[])
+    expect(records.reduce(reduceDelegationProgress, messages)).toEqual(messages)
+    const panel = normalizeDelegationHistory(messages)[0]
+    expect(panel.type).toBe('subtask_execution')
+    if (panel.type !== 'subtask_execution') throw new Error('missing panel')
+    const tasks = deriveDelegationTasks(panel)
+    expect(tasks).toHaveLength(2)
+    expect(tasks[0].events.filter(e => e.text === 'repeat')).toHaveLength(2)
+    expect(tasks[1].status).toBe('failed')
+  })
+  it('keeps child-linked events in their delegation when persisted batch identity drifts', () => {
+    const messages = [
+      { type: 'delegation_start', batch_id: 'provider-call', tasks: [{ task_id: 'task', child_session_id: 'child', name: 'worker', description: '' }] },
+      { type: 'task_start', batch_id: 'runtime-batch', task_id: 'task', child_session_id: 'child', attempt: 1 },
+      { type: 'task_complete', batch_id: 'runtime-batch', task_id: 'task', child_session_id: 'child', attempt: 1 },
+    ].reduce(reduceDelegationProgress, [] as ChatMsg[])
+    expect(messages).toHaveLength(1)
+    const panel = messages[0]
+    expect(panel.type).toBe('subtask_execution')
+    if (panel.type !== 'subtask_execution') throw new Error('missing panel')
+    expect(deriveDelegationTasks(panel)[0].status).toBe('complete')
+  })
+  it('keeps interleaved batches separate', () => {
+    const messages = [{ type: 'delegation_start', batch_id: 'a' }, { type: 'delegation_start', batch_id: 'b' }, { type: 'task_text', batch_id: 'a', task_id: 't', text: 'first' }].reduce(reduceDelegationProgress, [] as ChatMsg[])
+    expect(messages).toHaveLength(2)
+    expect((messages[0] as any).events).toHaveLength(2)
+  })
+})
 
 describe('chronological activity', () => {
   const messages: ChatMsg[] = [
@@ -60,11 +112,33 @@ describe('chronological activity', () => {
     expect(skipIndices.has(2)).toBe(true)
     expect(groupChronologicalActivity(structuredClone(messages))).toEqual(groupChronologicalActivity(messages))
   })
-  it.each(['approval', 'artifact', 'error', 'chat_question', 'future_card'])('never crosses %s boundaries', type => {
+  it.each([
+    { type: 'approval', keepsContext: true },
+    { type: 'artifact', keepsContext: false },
+    { type: 'error', keepsContext: false },
+    { type: 'chat_question', keepsContext: true },
+    { type: 'future_card', keepsContext: false },
+  ])('never crosses $type boundaries', ({ type, keepsContext }) => {
     const input = [messages[1], messages[3], messages[4], { type }, messages[5], messages[6], messages[7], messages[8]] as ChatMsg[]
     const projection = buildChronologicalActivityRenderIndex(input)
-    expect([...projection.activityByStart.keys()]).toEqual([0, 4])
+    expect([...projection.activityByStart.keys()]).toEqual([keepsContext ? 1 : 0, 4])
     expect(projection.skipIndices.has(3)).toBe(false)
+  })
+
+  it('keeps the explanatory message before an interactive boundary visible', () => {
+    const input: ChatMsg[] = [
+      { type: 'tool_call', toolName: 'delegate_tasks', toolArgs: {} },
+      { type: 'tool_result', toolName: 'delegate_tasks', toolResult: 'research complete' },
+      { type: 'agent', content: 'Here is the treatment and why these options follow.' },
+      { type: 'tool_call', toolName: 'ask_user', toolArgs: { question: 'How should we proceed?' } },
+      { type: 'tool_result', toolName: 'ask_user', toolResult: { pending: true } },
+      { type: 'chat_question', questionId: 'q1', kind: 'select', prompt: 'How should we proceed?', options: [] },
+    ]
+    const projection = buildChronologicalActivityRenderIndex(input)
+    expect(projection.skipIndices.has(2)).toBe(false)
+    expect([...projection.activityByStart.values()][0].entries.map(entry => [entry.kind, entry.index])).toEqual([
+      ['tool', 0], ['tool', 3],
+    ])
   })
 
   it('pairs parallel same-name calls FIFO, retains failures and orphan results', () => {

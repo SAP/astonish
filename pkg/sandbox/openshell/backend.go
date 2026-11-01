@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
@@ -141,6 +142,11 @@ func init() {
 // Kind returns BackendKindOpenShell.
 func (b *OpenShellBackend) Kind() sandbox.BackendKind {
 	return sandbox.BackendKindOpenShell
+}
+
+func (b *OpenShellBackend) ArtifactReadsConfined() bool { return b != nil && b.sessions != nil }
+func (b *OpenShellBackend) PullArtifact(ctx context.Context, sessionID, path string) (io.ReadCloser, error) {
+	return b.PullFile(ctx, sessionID, path)
 }
 
 // ServerArchitecture returns "amd64" (conservative default).

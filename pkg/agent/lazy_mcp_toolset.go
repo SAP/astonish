@@ -34,13 +34,15 @@ const (
 )
 
 // sessionMCPState holds MCP server state for a single session.
-// In sandbox mode, each session gets its own container/pod and thus its own
-// MCP server process. This struct tracks the per-session transport and tools.
+// In sandbox mode, each logical session gets its own MCP process, but delegates
+// can share the parent's physical sandbox. State and cleanup stay logical.
 type sessionMCPState struct {
 	transport *sandbox.BackendMCPTransport
 	liveTools map[string]tool.Tool
 	startErr  error
 	started   bool
+	ownerID   string // physical sandbox; map key remains the logical session
+	permanent bool   // configuration/credential errors must not be retried
 }
 
 // isTransientMCPError returns true if the error is likely transient and worth
@@ -88,7 +90,7 @@ func isTransientMCPError(err error) bool {
 // stay on the host (they connect to remote URLs).
 //
 // Per-session state: in sandbox mode, each session gets its own MCP server
-// process (running in its own container/pod). The per-session state is stored in
+// process (running in its canonical owner's sandbox). The per-session state is stored in
 // the perSession map. In host mode, a single global state is used (the host
 // runs one MCP server process shared across all sessions).
 //
@@ -211,7 +213,7 @@ func (l *LazyMCPToolset) isSandboxMode() bool {
 	if l.isSSETransport() {
 		return false
 	}
-	return l.sandboxBackend != nil
+	return l.sandboxBackend != nil || l.sandboxPool != nil || l.sandboxClient != nil
 }
 
 // isSSETransport returns true if the MCP server uses SSE transport (remote URL).
@@ -240,8 +242,8 @@ func (l *LazyMCPToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) 
 // ensureServerStarted connects to the MCP server if not already connected.
 // Thread-safe: only one goroutine will start the server.
 //
-// In sandbox mode, each session gets its own MCP server process inside its
-// own container. In host mode, a single global process is used.
+// In sandbox mode, each logical session gets its own MCP server process inside
+// its canonical owner's container. In host mode, a single global process is used.
 //
 // Host-mode retry: if the previous startup failed with a transient error
 // (context canceled, timeout, connection refused, etc.), the next call will
@@ -252,7 +254,10 @@ func (l *LazyMCPToolset) ensureServerStarted(ctx context.Context, sessionID stri
 	defer l.mu.Unlock()
 
 	// Sandbox mode: per-session state
-	if l.isSandboxMode() && sessionID != "" {
+	if l.isSandboxMode() {
+		if sessionID == "" {
+			return fmt.Errorf("sandbox MCP requires a session identity")
+		}
 		return l.ensureServerStartedSandbox(ctx, sessionID)
 	}
 
@@ -298,22 +303,50 @@ func (l *LazyMCPToolset) ensureServerStarted(ctx context.Context, sessionID stri
 // ensureServerStartedSandbox handles sandbox-mode startup with per-session state.
 // Caller must hold l.mu.
 func (l *LazyMCPToolset) ensureServerStartedSandbox(ctx context.Context, sessionID string) error {
-	// Check if this session already has state
-	if l.perSession != nil {
-		if state, ok := l.perSession[sessionID]; ok && state.started {
-			return state.startErr
-		}
-	}
-
-	if l.debugMode {
-		slog.Debug("starting MCP server on demand (sandbox)", "component", "lazy-mcp", "server", l.serverName, "session", sessionID)
-	}
-
-	// Choose: fleet direct client vs pool
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	// Readiness must be rechecked even when this logical session has tools.
 	if l.sandboxClient != nil {
 		return l.startInContainerDirect(ctx, sessionID)
 	}
 	return l.startInContainer(ctx, sessionID)
+}
+
+// readySandboxTools reuses only a healthy connection to the same physical
+// owner. Startup/handshake is safe to retry; user methods never enter this loop.
+// Caller holds l.mu. The context bounds readiness, backoff and handshake.
+func (l *LazyMCPToolset) readySandboxTools(ctx context.Context, logicalID, ownerID string) error {
+	if state := l.perSession[logicalID]; state != nil {
+		if state.permanent {
+			return state.startErr
+		}
+		if state.started && state.startErr == nil && state.ownerID == ownerID && state.transport != nil && !state.transport.IsClosed() {
+			return nil
+		}
+		if state.transport != nil {
+			_ = state.transport.Close()
+		}
+	}
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := l.startInSandbox(ctx, logicalID, ownerID)
+		if err == nil {
+			return nil
+		}
+		state := l.perSession[logicalID]
+		if state.permanent || !isTransientMCPError(err) || attempt >= maxMCPRetries {
+			return err
+		}
+		timer := time.NewTimer(mcpRetryBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // startOnHost starts the MCP server on the host using the stored server config.
@@ -381,47 +414,57 @@ func (l *LazyMCPToolset) startOnHost(ctx context.Context) error {
 func (l *LazyMCPToolset) startInContainer(ctx context.Context, sessionID string) error {
 	// Get or create the ToolNodeClient for this session, then wait for the
 	// container to be ready. Only waits for container creation, NOT node startup.
-	client := l.sandboxPool.GetOrCreate(sessionID)
+	if l.sandboxPool == nil {
+		return fmt.Errorf("sandbox MCP pool is not configured")
+	}
+	client := sandbox.GetPoolClientFromContext(ctx, l.sandboxPool, sessionID)
 	if client == nil {
-		return l.setSessionError(sessionID, fmt.Errorf("sandbox pool returned nil client for session %s", sessionID))
+		return fmt.Errorf("sandbox pool returned nil client for session %s", sessionID)
 	}
 
-	if err := client.EnsureReady(sessionID); err != nil {
-		return l.setSessionError(sessionID, fmt.Errorf("failed to get container for MCP server '%s': %w", l.serverName, err))
+	if err := sandbox.EnsureToolClientReady(ctx, client, sessionID); err != nil {
+		return fmt.Errorf("failed to get container for MCP server '%s': %w", l.serverName, err)
 	}
 
-	return l.startInSandbox(ctx, sessionID)
+	return l.readySandboxTools(ctx, sessionID, sandbox.CanonicalSessionID(client, sessionID))
 }
 
 // startInContainerDirect starts the MCP server inside a specific container
 // using a direct LazyNodeClient (fleet mode). Caller must hold l.mu.
 func (l *LazyMCPToolset) startInContainerDirect(ctx context.Context, sessionID string) error {
-	_, err := l.sandboxClient.EnsureContainerReady(sessionID)
-	if err != nil {
-		return l.setSessionError(sessionID, fmt.Errorf("failed to get container for MCP server '%s': %w", l.serverName, err))
+	client := l.sandboxClient
+	if err := sandbox.EnsureToolClientReady(ctx, client, sessionID); err != nil {
+		return fmt.Errorf("failed to get container for MCP server '%s': %w", l.serverName, err)
 	}
 
-	return l.startInSandbox(ctx, sessionID)
+	return l.readySandboxTools(ctx, sessionID, sandbox.CanonicalSessionID(client, sessionID))
 }
 
 // startInSandbox is the shared implementation for starting an MCP server
 // inside a sandbox using the abstract Backend interface. Both pool-based
 // and direct-client paths converge here. Works for both Incus and K8s.
 // Caller must hold l.mu.
-func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) error {
+func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID, ownerID string) error {
 	if l.debugMode {
 		slog.Debug("connecting MCP server in sandbox", "component", "lazy-mcp", "server", l.serverName, "session", sessionID)
 	}
 
 	serverCfg, err := l.resolvedServerConfig(ctx)
 	if err != nil {
-		return l.setSessionError(sessionID, fmt.Errorf("failed to resolve credentials for MCP server '%s': %w", l.serverName, err))
+		err = l.setSessionError(sessionID, fmt.Errorf("failed to resolve credentials for MCP server '%s': %w", l.serverName, err))
+		l.perSession[sessionID].permanent = true
+		return err
+	}
+	if strings.TrimSpace(serverCfg.Command) == "" || (serverCfg.Enabled != nil && !*serverCfg.Enabled) || (serverCfg.Transport != "" && serverCfg.Transport != "stdio") {
+		err = l.setSessionError(sessionID, fmt.Errorf("invalid or disabled sandbox MCP server '%s' configuration", l.serverName))
+		l.perSession[sessionID].permanent = true
+		return err
 	}
 
-	// Create backend-agnostic transport (uses Backend.ExecInteractive).
+	// Create backend-agnostic transport (uses Backend.ExecStreaming).
 	// Diagnostics use the resolved config so real credential values emitted by
 	// child processes are scrubbed before logging.
-	transport, stderrBuf := sandbox.NewBackendMCPTransport(l.sandboxBackend, sessionID, serverCfg)
+	transport, stderrBuf := sandbox.NewBackendMCPTransport(l.sandboxBackend, ownerID, serverCfg)
 
 	// Create ADK mcptoolset using our transport
 	toolset, err := mcptoolset.New(mcptoolset.Config{
@@ -463,6 +506,7 @@ func (l *LazyMCPToolset) startInSandbox(ctx context.Context, sessionID string) e
 	}
 	l.perSession[sessionID] = &sessionMCPState{
 		transport: transport,
+		ownerID:   ownerID,
 		liveTools: liveTools,
 		started:   true,
 	}
@@ -671,5 +715,17 @@ func (p *lazyProxyTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 	if !ok {
 		return nil, fmt.Errorf("live tool '%s' does not implement Run", p.entry.Name)
 	}
-	return runner.Run(ctx, args)
+	// Capture this invocation's connection so an old failing call cannot close
+	// a concurrently replaced logical session. Never replay after Run begins.
+	var transport *sandbox.BackendMCPTransport
+	p.toolset.mu.Lock()
+	if state := p.toolset.perSession[sessionID]; state != nil && state.liveTools[p.entry.Name] == liveTool {
+		transport = state.transport
+	}
+	p.toolset.mu.Unlock()
+	result, err := runner.Run(ctx, args)
+	if transport != nil && (transport.IsClosed() || isTransientMCPError(err)) {
+		_ = transport.Close()
+	}
+	return result, err
 }

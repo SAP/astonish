@@ -1422,3 +1422,25 @@ func TestLoadHistory_StampsToolFoldRouting(t *testing.T) {
 		t.Errorf("agent routing = (%q, %q), want (strong, opus)", agent.RoutingTier, agent.RoutingModel)
 	}
 }
+
+func TestDelegationExactAttemptHistory(t *testing.T) {
+	tr := NewTranscript()
+	start := NewDelegationStart([]DelegationTask{{Name: "same", TaskID: "task", BatchID: "b"}})
+	tr.Apply(start)
+	first := Event{Kind: KindDelegation, DelegationType: "task_text", DelegationBatchID: "b", DelegationTaskID: "task", DelegationAttempt: 1, DelegationText: "first", DelegationSequence: 1}
+	tr.Apply(first)
+	second := first
+	second.DelegationAttempt = 2
+	second.DelegationText = "second"
+	second.DelegationChildSessionID = "child2"
+	tr.Apply(second)
+	tr.Apply(second)
+	tasks := tr.Items[0].DelegationTasks
+	if len(tasks) != 2 || len(tasks[1].Activity) != 1 || tasks[0].Activity[0].Text != "first" || tasks[1].ChildSessionID != "child2" {
+		t.Fatalf("attempts mixed: %+v", tasks)
+	}
+	tr.LoadHistory([]HistoryMsg{{Delegation: &start}, {Delegation: &first}, {Delegation: &second}})
+	if len(tr.Items[0].DelegationTasks) != 2 {
+		t.Fatal("history lost attempts")
+	}
+}

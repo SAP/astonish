@@ -33,8 +33,13 @@ import (
 
 // SeedBaseLayerFromImage exports the sandbox image filesystem into
 // layers/@base/rootfs so the overlay entrypoint has a lowerdir. Idempotent
-// if that directory already exists and is non-empty.
+// if that directory already exists and is non-empty. Initial seeding pulls the
+// configured image so first-time installs work without a preloaded local image.
 func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
+	return db.seedBaseLayerFromImage(ctx, true)
+}
+
+func (db *DockerBackend) seedBaseLayerFromImage(ctx context.Context, pull bool) error {
 	rootfs := db.layerRootfs(sandbox.BaseTemplateID)
 	if entries, err := os.ReadDir(rootfs); err == nil && len(entries) > 0 {
 		return nil
@@ -44,8 +49,10 @@ func (db *DockerBackend) SeedBaseLayerFromImage(ctx context.Context) error {
 	}
 
 	image := db.cfg.SandboxImage
-	if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "pull", image); err != nil {
-		return fmt.Errorf("sandbox/docker: docker pull %s: %w", image, err)
+	if pull {
+		if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "pull", image); err != nil {
+			return fmt.Errorf("sandbox/docker: docker pull %s: %w", image, err)
+		}
 	}
 
 	tmpName := "astonish-seed-base"
@@ -97,7 +104,8 @@ func seedCreateArgs(name, image string) []string {
 }
 
 // ReseedBaseLayerFromImage deletes the current @base layer and re-exports the
-// sandbox image. Used by `astonish sandbox refresh` / reset.
+// locally available sandbox image. Used by `astonish sandbox refresh` / reset
+// after a local runtime build; it must not pull over that just-built image.
 func (db *DockerBackend) ReseedBaseLayerFromImage(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -106,7 +114,7 @@ func (db *DockerBackend) ReseedBaseLayerFromImage(ctx context.Context) error {
 	if err := os.RemoveAll(baseDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("sandbox/docker: remove @base: %w", err)
 	}
-	return db.SeedBaseLayerFromImage(ctx)
+	return db.seedBaseLayerFromImage(ctx, false)
 }
 
 // ensureParentLayers seeds @base from the sandbox image when a parent chain
@@ -146,7 +154,6 @@ func (db *DockerBackend) BuildTemplate(ctx context.Context, spec sandbox.Templat
 		labels[k] = v
 	}
 	labels["astonish.io/purpose"] = "template-builder"
-	db.pruneDanglingOverlayVolumes(ctx)
 	if err := db.ensureParentLayers(ctx, spec.ParentLayers); err != nil {
 		return nil, err
 	}
@@ -200,7 +207,7 @@ func captureLayerError(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "no space left") {
-		return fmt.Errorf("sandbox/docker: capture layer: no space left on device (need room for the overlay snapshot on the layers volume). Free Docker disk: docker volume prune -f && docker system prune, or increase the Docker Desktop disk image: %w", err)
+		return fmt.Errorf("sandbox/docker: capture layer: no space left on device (need room for the overlay snapshot on the layers volume). Reclaim disk through session-aware explicit cleanup, or increase Docker disk capacity: %w", err)
 	}
 	return fmt.Errorf("sandbox/docker: capture layer: %w", err)
 }
@@ -248,7 +255,7 @@ func overlayAptPrepScript() string {
 		"avail=$(df -Pm / | awk 'NR==2 { print $4 }')",
 		`echo "overlay free space: ${avail}MB"`,
 		`if [ -n "$avail" ] && [ "$avail" -lt 2048 ]; then`,
-		`  echo "E: overlay has ${avail}MB free; the core package install needs about 2GB. Increase Docker Desktop disk or run: docker system prune" >&2`,
+		`  echo "E: overlay has ${avail}MB free; the core package install needs about 2GB. Increase Docker disk capacity or use session-aware explicit cleanup" >&2`,
 		"  exit 100",
 		"fi",
 		"mkdir -p /etc/apt/apt.conf.d /etc/dpkg/dpkg.cfg.d /usr/sbin",

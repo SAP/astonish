@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/a2aclient"
@@ -219,7 +220,11 @@ func providerToolsForMode(codeMode bool, toolIndex *agent.ToolIndex, preferred [
 	if toolIndex == nil {
 		return nil, fmt.Errorf("initialize fixed tool bridge: tool index is nil")
 	}
-	return fixedProviderTools(toolIndex)
+	bridge, err := fixedProviderTools(toolIndex)
+	if err != nil {
+		return nil, err
+	}
+	return append(directCodeTools(preferred, nil), bridge...), nil
 }
 
 func directCodeTools(preferred []tool.Tool, groups []*agent.ToolGroup) []tool.Tool {
@@ -244,13 +249,19 @@ func directCodeTools(preferred []tool.Tool, groups []*agent.ToolGroup) []tool.To
 }
 
 func mainThreadToolAllowlist(codeMode bool) map[string]bool {
-	if !codeMode {
-		return map[string]bool{}
+	// Delegation and basic file operations are main-thread capabilities, not
+	// deferred domain integrations. Keep their full schemas visible in every mode.
+	allow := map[string]bool{
+		"delegate_tasks": true,
+		"read_file":      true,
+		"write_file":     true,
+		"edit_file":      true,
+		"load_file":      true,
 	}
-	return map[string]bool{
-		"read_file":             true,
-		"write_file":            true,
-		"edit_file":             true,
+	if !codeMode {
+		return allow
+	}
+	for name := range map[string]bool{
 		"shell_command":         true,
 		"grep_search":           true,
 		"find_files":            true,
@@ -277,7 +288,10 @@ func mainThreadToolAllowlist(codeMode bool) map[string]bool {
 		"skill_lookup":          true,
 		"create_skill":          true,
 		"perplexity_web_search": true,
+	} {
+		allow[name] = true
 	}
+	return allow
 }
 
 // optionalCredentialResolver preserves a nil interface when the optional
@@ -337,14 +351,84 @@ func NewWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	return result, err
 }
 
-func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
-	phaseStarted := time.Now()
-	var cleanups []func()
-	cleanup := func() {
-		// Run cleanups in reverse order (LIFO, like defer)
+// mcpCleanupRegistry owns both initial and dynamically discovered toolsets.
+// Registration after shutdown immediately disposes the toolset and refuses to
+// publish it. Cleanup callbacks run outside the lock and at most once.
+type mcpCleanupRegistry struct {
+	mu       sync.Mutex
+	closed   bool
+	cleanups []func()
+	once     sync.Once
+}
+
+func (r *mcpCleanupRegistry) add(cleanup func()) bool {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		cleanup()
+		return false
+	}
+	r.cleanups = append(r.cleanups, cleanup)
+	r.mu.Unlock()
+	return true
+}
+
+func (r *mcpCleanupRegistry) Cleanup() {
+	r.once.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		cleanups := r.cleanups
+		r.cleanups = nil
+		r.mu.Unlock()
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			cleanups[i]()
 		}
+	})
+}
+
+func wireMCPToolset(lt *agent.LazyMCPToolset, pool sandbox.ToolNodePool) {
+	if pool != nil {
+		lt.SetSandboxPool(pool)
+	}
+}
+
+func newDelegateMCPGroup(serverName string, entries []cache.ToolEntry, cfg config.MCPServerConfig, debug bool, resolver credentials.CredentialResolver, pool sandbox.ToolNodePool, cleanups *mcpCleanupRegistry) *agent.ToolGroup {
+	lt := agent.NewLazyMCPToolset(serverName, entries, cfg, debug)
+	lt.SetCredentialResolver(resolver)
+	wireMCPToolset(lt, pool)
+	if !cleanups.add(lt.Cleanup) {
+		return nil
+	}
+	return &agent.ToolGroup{
+		Name:        "mcp:" + serverName,
+		Description: fmt.Sprintf("MCP server: %s (%d tools)", serverName, lt.ToolCount()),
+		Toolsets:    []tool.Toolset{agent.NewSanitizedToolset(lt, debug)},
+	}
+}
+
+func aliasBackendChildSession(pool sandbox.ToolNodePool, mgr *browser.Manager, parentID, childID string) {
+	// The parent's client is already owner-pinned even before provisioning.
+	// Browser aliases are one-hop, so nested children must point to the owner.
+	owner := sandbox.CanonicalSessionID(pool.GetOrCreate(parentID), parentID)
+	pool.Alias(childID, parentID)
+	mgr.AliasSession(childID, owner)
+}
+
+func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactoryResult, error) {
+	phaseStarted := time.Now()
+	var cleanups []func()
+	mcpCleanups := &mcpCleanupRegistry{}
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			// Stop accepting dynamically discovered MCP groups before disposing
+			// their sandbox/backend dependencies.
+			mcpCleanups.Cleanup()
+			// Run remaining cleanups in reverse order (LIFO, like defer).
+			for i := len(cleanups) - 1; i >= 0; i-- {
+				cleanups[i]()
+			}
+		})
 	}
 
 	// --- 0. Initialize credential store (must happen before LLM — secrets are scrubbed from config after migration) ---
@@ -646,7 +730,13 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	var subAgentMgr *agent.SubAgentManager
 	var fleetOnlyTools []tool.Tool // fleet-only tools (run_fleet_phase), assigned to SubAgentManager.FleetTools
 	if cfg.AppConfig.SubAgents.IsSubAgentsEnabled() {
-		delegateTool, delegateErr := tools.GetDelegateTasksTool()
+		subAgentCfg := agent.SubAgentConfig{
+			MaxDepth:      cfg.AppConfig.SubAgents.MaxDepth,
+			MaxConcurrent: cfg.AppConfig.SubAgents.MaxConcurrent,
+			TaskTimeout:   cfg.AppConfig.SubAgents.TaskTimeout(),
+		}
+		subAgentMgr = agent.NewSubAgentManager(subAgentCfg)
+		delegateTool, delegateErr := tools.NewDelegateTasksToolForManager(subAgentMgr)
 		if delegateErr != nil {
 			if cfg.DebugMode {
 				slog.Warn("failed to create delegate_tasks tool", "error", delegateErr)
@@ -694,12 +784,6 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 				coreTools = append(coreTools, gpFinalize)
 			}
 
-			subAgentCfg := agent.SubAgentConfig{
-				MaxDepth:      cfg.AppConfig.SubAgents.MaxDepth,
-				MaxConcurrent: cfg.AppConfig.SubAgents.MaxConcurrent,
-				TaskTimeout:   cfg.AppConfig.SubAgents.TaskTimeout(),
-			}
-			subAgentMgr = agent.NewSubAgentManager(subAgentCfg)
 		}
 	}
 
@@ -823,11 +907,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// Each server is registered as its own tool group (mcp:<name>)
 		// in section 4b below, wrapped in SanitizedToolset at that point.
 	}
-	cleanups = append(cleanups, func() {
-		for _, lt := range lazyToolsets {
-			lt.Cleanup()
-		}
-	})
+	for _, lt := range lazyToolsets {
+		mcpCleanups.add(lt.Cleanup)
+	}
 
 	// Track startup notices
 	var startupNotices []string
@@ -1051,7 +1133,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			// inside the session's sandbox (same as Incus path). SSE
 			// transports are unaffected (isSSETransport check inside).
 			for _, lt := range lazyToolsets {
-				lt.SetSandboxPool(pool)
+				wireMCPToolset(lt, pool)
 			}
 			if len(lazyToolsets) > 0 {
 				slog.Info("sandbox MCP routing enabled for backend",
@@ -1618,11 +1700,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	if err != nil {
 		return nil, err
 	}
-	if cfg.CodeMode {
-		mainThreadTools = providerTools
-	} else {
-		mainThreadTools = append(mainThreadTools, providerTools...)
-	}
+	mainThreadTools = providerTools
 
 	// --- 6. Create ChatAgent ---
 	chatAgent := agent.NewChatAgent(
@@ -1764,7 +1842,11 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if mcpCfg != nil {
 			capturedMCPCfg := mcpCfg
 			capturedDebugMode := cfg.DebugMode
-			capturedCredStore := credStore
+			capturedPool := backendSandboxPool
+			if sandboxNodePool != nil {
+				capturedPool = sandbox.AsNodePool(sandboxNodePool)
+			}
+			capturedCredStore := optionalCredentialResolver(credStore)
 			subAgentMgr.MCPGroupResolver = func(ctx context.Context, serverName string) *agent.ToolGroup {
 				serverCfg, exists := capturedMCPCfg.MCPServers[serverName]
 				if !exists || !serverCfg.IsEnabled() {
@@ -1816,17 +1898,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 					return nil
 				}
 				// Build the ToolGroup on-the-fly
-				lt := agent.NewLazyMCPToolset(serverName, cachedTools, serverCfg, capturedDebugMode)
-				if capturedCredStore != nil {
-					lt.SetCredentialResolver(capturedCredStore)
-				}
-				sanitized := agent.NewSanitizedToolset(lt, capturedDebugMode)
-				groupName := "mcp:" + serverName
-				return &agent.ToolGroup{
-					Name:        groupName,
-					Description: fmt.Sprintf("MCP server: %s (%d tools)", serverName, lt.ToolCount()),
-					Toolsets:    []tool.Toolset{sanitized},
-				}
+				return newDelegateMCPGroup(serverName, cachedTools, serverCfg, capturedDebugMode, capturedCredStore, capturedPool, mcpCleanups)
 			}
 		}
 
@@ -1891,14 +1963,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		if toolIndex != nil {
 			subAgentMgr.ToolIndex = toolIndex
 		}
-		// Sub-agents retain their existing discovery behavior; the fixed bridge is
-		// specific to ChatAgent's stable model-visible declarations.
-		if toolIndex != nil {
-			idx := toolIndex
-			subAgentMgr.SearchToolsFactory = func() (tool.Tool, error) {
-				return tools.NewSearchToolsTool(idx)
-			}
-		}
+		// Discovery and execution share the immutable child catalog, even when
+		// no global semantic index is configured.
+		subAgentMgr.SearchToolsFactory = tools.NewScopedSearchToolsTool
 		// Wire skill awareness into sub-agents so they can load skill
 		// content on demand (e.g., git/github skills for repo operations).
 		if skillLookupTool != nil {
@@ -1946,19 +2013,9 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 			}
 		} else if backendSandboxPool != nil {
 			pool := backendSandboxPool
-			bmgr := browserMgr // capture for closure
-			sessReg := backendSessRegistry
+			bmgr := browserMgr
 			subAgentMgr.OnChildSession = func(parentSessionID, childSessionID string) {
-				pool.Alias(childSessionID, parentSessionID)
-				bmgr.AliasSession(childSessionID, parentSessionID)
-				// Register the child session in the backend session registry
-				// so Backend.ExecStreaming (MCP servers) and other non-pool
-				// paths can resolve the child to the parent's pod/container.
-				if sessReg != nil {
-					if entry := sessReg.Get(parentSessionID); entry != nil {
-						_ = sessReg.Put(childSessionID, entry.ContainerName, entry.TemplateName)
-					}
-				}
+				aliasBackendChildSession(pool, bmgr, parentSessionID, childSessionID)
 			}
 		}
 		// Wire sub-agent authorization gate for code-mode HITL.

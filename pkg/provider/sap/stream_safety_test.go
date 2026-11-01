@@ -3,10 +3,12 @@ package sap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +46,247 @@ type closeObservedBody struct {
 
 func (b *closeObservedBody) Close() error { b.closed = true; return nil }
 
+type zeroActivityBody struct {
+	reads  atomic.Int32
+	closed atomic.Bool
+}
+
+func (b *zeroActivityBody) Read([]byte) (int, error) {
+	b.reads.Add(1)
+	time.Sleep(2 * time.Millisecond)
+	return 0, nil
+}
+func (b *zeroActivityBody) Close() error { b.closed.Store(true); return nil }
+
+func TestBedrockIdleZeroBytesDoNotResetAndWorkerJoined(t *testing.T) {
+	body := &zeroActivityBody{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	last := time.Now()
+	original := last
+	reader := &bedrockIdleReader{body: body, ctx: ctx, cancel: cancel, idle: 25 * time.Millisecond, heartbeat: time.Second, lastActivity: &last, receivedBytes: true, nextHeartbeat: time.Now().Add(time.Second), report: func() { t.Error("unexpected heartbeat") }}
+	_, err := reader.Read(make([]byte, 8))
+	if !errors.Is(err, ErrBedrockStreamIdle) || last != original || !body.closed.Load() {
+		t.Fatalf("err=%v last=%v closed=%v", err, last, body.closed.Load())
+	}
+	reads := body.reads.Load()
+	time.Sleep(10 * time.Millisecond)
+	if body.reads.Load() != reads {
+		t.Fatal("worker survived idle return")
+	}
+}
+
+func TestBedrockFirstByteLatencyStaysOnOriginalRequest(t *testing.T) {
+	const idle = 40 * time.Millisecond
+	var attempts atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		select {
+		case <-time.After(3 * idle):
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, sapEvents(sapText, sapStop))
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	p := testStreamProvider(server.Client(), server.URL)
+	if err := WithBedrockStreamTiming(idle, 10*time.Millisecond)(p); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var heartbeats atomic.Int32
+	ctx = streaming.WithProgress(ctx, func(progress streaming.Progress) {
+		if progress.Kind == streaming.KindHeartbeat && progress.Phase == streaming.PhaseWaiting {
+			heartbeats.Add(1)
+		}
+	})
+	finals := 0
+	for response, err := range p.GenerateContent(ctx, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response != nil && !response.Partial {
+			finals++
+		}
+	}
+	if attempts.Load() != 1 || finals != 1 || heartbeats.Load() < 2 {
+		t.Fatalf("attempts=%d finals=%d heartbeats=%d", attempts.Load(), finals, heartbeats.Load())
+	}
+}
+
+func TestBedrockIdleHTTP2ActiveReadsAndSlowConsumer(t *testing.T) {
+	const idle = 120 * time.Millisecond
+	for _, slow := range []bool{false, true} {
+		t.Run(fmt.Sprint("slow=", slow), func(t *testing.T) {
+			var attempts atomic.Int32
+			release := make(chan struct{})
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ProtoMajor != 2 {
+					t.Error("expected HTTP/2")
+				}
+				attempts.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				if slow {
+					_, _ = io.WriteString(w, sapEvents(sapText))
+					w.(http.Flusher).Flush()
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+				} else {
+					// Raw SSE comment bytes are activity even without model output.
+					for i := 0; i < 12; i++ {
+						_, _ = io.WriteString(w, ": keepalive\n\n")
+						w.(http.Flusher).Flush()
+						select {
+						case <-time.After(25 * time.Millisecond):
+						case <-r.Context().Done():
+							return
+						}
+					}
+				}
+				if !slow {
+					_, _ = io.WriteString(w, sapEvents(sapText))
+				}
+				_, _ = io.WriteString(w, sapEvents(sapStop))
+			}))
+			server.EnableHTTP2 = true
+			server.StartTLS()
+			defer server.Close()
+			p := testStreamProvider(server.Client(), server.URL)
+			_ = WithBedrockStreamTiming(idle, 15*time.Millisecond)(p)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			var callbacks atomic.Int32
+			var inYield atomic.Bool
+			ctx = streaming.WithProgress(ctx, func(p streaming.Progress) {
+				if inYield.Load() {
+					t.Error("progress raced yield")
+				}
+				callbacks.Add(1)
+				if p.Kind == streaming.KindRecovery {
+					t.Error("active stream recovered")
+				}
+			})
+			finals := 0
+			for response, err := range p.GenerateContent(ctx, &model.LLMRequest{}, true) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response.Partial && slow {
+					inYield.Store(true)
+					time.Sleep(3 * idle)
+					inYield.Store(false)
+					close(release)
+				}
+				if !response.Partial {
+					finals++
+				}
+			}
+			before := callbacks.Load()
+			time.Sleep(30 * time.Millisecond)
+			if callbacks.Load() != before || attempts.Load() != 1 || finals != 1 {
+				t.Fatalf("callbacks=%d/%d attempts=%d finals=%d", before, callbacks.Load(), attempts.Load(), finals)
+			}
+		})
+	}
+}
+
+func TestBedrockIdleHTTP2StopAndYieldCleanup(t *testing.T) {
+	for _, mode := range []string{"cancel waiting", "cancel heartbeat", "yield false", "message stop"} {
+		t.Run(mode, func(t *testing.T) {
+			var attempts atomic.Int32
+			closed := make(chan struct{}, 3)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer func() { closed <- struct{}{} }()
+				if r.ProtoMajor != 2 {
+					t.Error("expected HTTP/2")
+				}
+				attempts.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				if mode == "message stop" {
+					_, _ = io.WriteString(w, sapEvents(sapThinking, `{"type":"message_start","message":{"usage":{"input_tokens":4}}}`, sapStop))
+				} else if mode == "yield false" {
+					_, _ = io.WriteString(w, sapEvents(sapText))
+				} else {
+					_, _ = io.WriteString(w, sapEvents(sapTool, sapToolStop))
+				}
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			server.EnableHTTP2 = true
+			server.StartTLS()
+			defer server.Close()
+			p := testStreamProvider(server.Client(), server.URL)
+			_ = WithBedrockStreamTiming(100*time.Millisecond, 10*time.Millisecond)(p)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			var count atomic.Int32
+			heartbeat := make(chan struct{}, 1)
+			ctx = streaming.WithProgress(ctx, func(p streaming.Progress) {
+				count.Add(1)
+				if p.Kind == streaming.KindHeartbeat {
+					select {
+					case heartbeat <- struct{}{}:
+					default:
+					}
+					if mode == "cancel heartbeat" {
+						cancel()
+					}
+				}
+			})
+			if mode == "cancel waiting" {
+				go func() {
+					select {
+					case <-heartbeat:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+			}
+			var gotErr error
+			calls, tools := 0, 0
+			p.GenerateContent(ctx, &model.LLMRequest{}, true)(func(response *model.LLMResponse, err error) bool {
+				calls++
+				if err != nil {
+					gotErr = err
+				}
+				if response != nil && response.Content != nil {
+					for _, part := range response.Content.Parts {
+						if part.FunctionCall != nil {
+							tools++
+						}
+					}
+				}
+				return mode != "yield false"
+			})
+			if strings.HasPrefix(mode, "cancel") && !errors.Is(gotErr, context.Canceled) {
+				t.Fatalf("cancel lost: %v", gotErr)
+			}
+			if !strings.HasPrefix(mode, "cancel") && gotErr != nil {
+				t.Fatal(gotErr)
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("body not closed")
+			}
+			before := count.Load()
+			time.Sleep(30 * time.Millisecond)
+			if attempts.Load() != 1 || tools != 0 || calls != 1 || count.Load() != before {
+				t.Fatalf("attempts=%d tools=%d calls=%d progress=%d/%d", attempts.Load(), tools, calls, before, count.Load())
+			}
+		})
+	}
+}
+
 func TestBedrockStreamYieldFalseClosesWithoutReplay(t *testing.T) {
 	body := &closeObservedBody{Reader: io.MultiReader(strings.NewReader(sapEvents(sapText)), streamReadFailure{http2.StreamError{StreamID: 1, Code: http2.ErrCodeInternal}})}
 	attempts, calls := 0, 0
@@ -69,7 +312,7 @@ func TestBedrockStreamResetRecovery(t *testing.T) {
 		{"progress and usage only", sapEvents(sapThinking, `{"type":"message_start","message":{"usage":{"input_tokens":4}}}`), false, 2, 1, false},
 		{"buffered tool", sapEvents(sapTool, sapToolStop), false, 2, 1, false},
 		{"after output continues", sapEvents(sapText), false, 2, 2, false},
-		{"bounded", "", true, 3, 0, true},
+		{"bounded", "", true, maxBedrockStreamSegments, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			attempts, partials := 0, 0

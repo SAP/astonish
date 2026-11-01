@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { ChevronDown, Loader, Check, Wrench, ListTodo, RotateCcw, Code, Globe, GitFork, FileUp } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -6,18 +6,8 @@ import { markdownComponents } from './markdownComponents'
 import type { SubTaskExecutionMessage, SubTaskEvent } from './chatTypes'
 import { fetchSubtaskEvents } from '../../api/studioChat'
 
-// Task status derived from events
-interface TaskState {
-  name: string
-  description: string
-  events: SubTaskEvent[]
-  status: 'pending' | 'running' | 'complete' | 'failed'
-  retrying?: boolean
-  evaluating?: boolean
-  duration?: string
-  error?: string
-  startTimestamp?: number
-}
+import { deriveDelegationTasks } from './toolActivity'
+import type { DelegationTask as TaskState } from './toolActivity'
 
 // Format a timestamp to HH:MM
 function formatTime(ts?: number): string {
@@ -55,120 +45,65 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
   const [fetchedEvents, setFetchedEvents] = useState<Record<string, SubTaskEvent[]>>({})
   const [loadingTasks, setLoadingTasks] = useState<Set<string>>(new Set())
 
-  // Lazy-fetch tool events for a task when it's expanded and has no tool detail.
-  // This happens after page refresh — only the summary text is available from the
-  // delegate_tasks response, but the full child session has all tool calls.
-  const loadTaskEvents = useCallback(async (taskName: string) => {
-    if (!sessionId || fetchedEvents[taskName] || loadingTasks.has(taskName)) return
-    setLoadingTasks(prev => new Set(prev).add(taskName))
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const requests = useRef(new Map<string, AbortController>())
+  useEffect(() => {
+    setLoadingTasks(new Set())
+    setSelectedAttempts({})
+    return () => { requests.current.forEach(c => c.abort()); requests.current.clear() }
+  }, [sessionId, data.batch_id])
+  const [selectedAttempts, setSelectedAttempts] = useState<Record<string, number>>({})
+  const taskStates = useMemo(() => deriveDelegationTasks(data), [data])
+  const visibleTaskStates = taskStates.map(task => {
+    const selected = task.attempts.find(a => a.attempt === (selectedAttempts[task.id] ?? task.attempt))
+    return selected ? { ...task, ...selected } : task
+  })
+  const detailKey = (task: TaskState) => JSON.stringify([sessionId, data.batch_id, task.id, task.attempt, task.child_session_id])
+  const visibleDetailKeys = JSON.stringify(visibleTaskStates.map(detailKey))
+  useEffect(() => {
+    const visible = new Set<string>(JSON.parse(visibleDetailKeys))
+    requests.current.forEach((controller, key) => {
+      if (!visible.has(key)) {
+        controller.abort()
+        requests.current.delete(key)
+        setLoadingTasks(prev => { const next = new Set(prev); next.delete(key); return next })
+      }
+    })
+  }, [visibleDetailKeys])
+  const loadTaskEvents = useCallback(async (task: TaskState) => {
+    const key = JSON.stringify([sessionId, data.batch_id, task.id, task.attempt, task.child_session_id])
+    if (!sessionId || requests.current.has(key)) return
+    const controller = new AbortController()
+    requests.current.set(key, controller)
+    setLoadingTasks(prev => new Set(prev).add(key))
+    setErrors(prev => ({ ...prev, [key]: '' }))
     try {
-      const events = await fetchSubtaskEvents(sessionId, taskName)
-      // Convert API response to SubTaskEvent format
-      const mapped: SubTaskEvent[] = events.map(e => ({
-        type: e.type,
-        task_name: taskName,
-        tool_name: e.tool_name,
-        tool_args: e.tool_args,
-        tool_result: e.tool_result,
-        text: e.text,
-      }))
-      setFetchedEvents(prev => ({ ...prev, [taskName]: mapped }))
-    } catch {
-      // Silently fail — the summary text is still visible
+      const selector = task.child_session_id
+        ? { child_session_id: task.child_session_id }
+        : task.task_id
+          ? { batch_id: data.batch_id, task_id: task.task_id, attempt: task.attempt }
+          : { task_name: task.name }
+      const events = await fetchSubtaskEvents(sessionId, selector, controller.signal)
+      if (!controller.signal.aborted) setFetchedEvents(prev => ({ ...prev, [key]: events.map(e => ({ ...e, task_name: task.name })) }))
+    } catch (error) {
+      if (!controller.signal.aborted) setErrors(prev => ({ ...prev, [key]: error instanceof Error ? error.message : 'Unable to load execution detail' }))
     } finally {
-      setLoadingTasks(prev => {
-        const next = new Set(prev)
-        next.delete(taskName)
-        return next
-      })
-    }
-  }, [sessionId, fetchedEvents, loadingTasks])
-
-  // Derive task states from the event stream
-  const taskStates = useMemo(() => {
-    const taskMap: Record<string, TaskState> = {}
-    const taskOrder: string[] = []
-
-    // Restored history messages may omit `tasks`/`events` (e.g. a delegate_tasks
-    // call whose buffered plan could not be matched serializes with the array
-    // absent). Guard against non-arrays so a missing field never throws
-    // "tasks is not iterable" and blanks the whole chat.
-    const tasks = Array.isArray(data.tasks) ? data.tasks : []
-    const events = Array.isArray(data.events) ? data.events : []
-
-    for (const t of tasks) {
-      if (!taskMap[t.name]) {
-        taskMap[t.name] = {
-          name: t.name,
-          description: t.description,
-          events: [],
-          status: 'pending',
-        }
-        taskOrder.push(t.name)
+      if (requests.current.get(key) === controller) {
+        requests.current.delete(key)
+        setLoadingTasks(prev => { const next = new Set(prev); next.delete(key); return next })
       }
     }
-
-    for (const evt of events) {
-      if (evt.type === 'delegation_start' || evt.type === 'delegation_complete') continue
-
-      const taskName = evt.task_name || '_unknown'
-      if (!taskMap[taskName]) {
-        taskMap[taskName] = {
-          name: taskName,
-          description: '',
-          events: [],
-          status: 'pending',
-        }
-        taskOrder.push(taskName)
-      }
-
-      const task = taskMap[taskName]
-      task.events.push(evt)
-
-      if (evt.type === 'task_start') {
-        task.status = 'running'
-        task.retrying = false
-        task.evaluating = false
-        task.startTimestamp = evt.timestamp
-      } else if (evt.type === 'task_retry') {
-        task.status = 'running'
-        task.retrying = true
-        task.evaluating = false
-        task.error = undefined
-        task.duration = undefined
-      } else if (evt.type === 'evaluating') {
-        task.status = 'running'
-        task.evaluating = true
-        task.retrying = false
-      } else if (evt.type === 'task_complete') {
-        task.status = 'complete'
-        task.retrying = false
-        task.duration = evt.duration
-      } else if (evt.type === 'task_failed') {
-        task.status = 'failed'
-        task.retrying = false
-        task.duration = evt.duration
-        task.error = evt.error
-      }
-    }
-
-    return taskOrder.map(name => taskMap[name])
-  }, [data.events, data.tasks])
+  }, [sessionId, data.batch_id])
 
   const completedCount = taskStates.filter(t => t.status === 'complete').length
   const totalCount = taskStates.length
   const allDone = data.status !== 'running'
 
-  const toggleTask = (name: string) => {
-    const willExpand = !expandedTasks[name]
-    setExpandedTasks(prev => ({ ...prev, [name]: willExpand }))
-    // Lazy-load detail if expanding a task that has no tool events (post-refresh)
-    if (willExpand) {
-      const task = taskStates.find(t => t.name === name)
-      if (task && !task.events.some(e => e.type === 'task_tool_call' || e.type === 'task_tool_result')) {
-        loadTaskEvents(name)
-      }
-    }
+  const toggleTask = (task: TaskState) => {
+    const key = detailKey(task)
+    const willExpand = !expandedTasks[key]
+    setExpandedTasks(prev => ({ ...prev, [key]: willExpand }))
+    if (willExpand && !fetchedEvents[key] && !task.events.some(e => e.type === 'task_tool_call' || e.type === 'task_tool_result')) loadTaskEvents(task)
   }
 
   const toggleContent = (eventKey: string) => {
@@ -330,7 +265,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-2.5">
         {data.status === 'running' && <Loader size={15} className="animate-spin shrink-0" style={{ color: 'var(--brand)' }} />}
-        {(data.status === 'complete' || data.status === 'partial') && <Check size={15} className="text-green-400 shrink-0" />}
+        {(totalCount > 0 && completedCount === totalCount) && <Check size={15} className="text-green-400 shrink-0" />}
         {data.status === 'error' && <span className="text-red-400 font-bold shrink-0">!</span>}
         <GitFork size={15} className="shrink-0" style={{ color: 'var(--text-muted)' }} />
         <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Task Delegation</span>
@@ -339,17 +274,19 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
         </span>
       </div>
 
+      {totalCount === 0 && <div role="alert">Delegation details are missing or invalid.</div>}
+      {taskStates.some(t => t.status === 'interrupted') && <div role="status">Delegation interrupted</div>}
       {/* Timeline */}
       <div
         className="px-4 pb-3"
         style={{ borderTop: '1px solid var(--border-color)' }}
       >
-        {taskStates.map((task, taskIdx) => {
-          const isExpanded = expandedTasks[task.name] === true
+        {visibleTaskStates.map((task, taskIdx) => {
+          const isExpanded = expandedTasks[detailKey(task)] === true
           const isLast = taskIdx === taskStates.length - 1
 
           return (
-            <div key={task.name} className="relative group/task">
+            <div key={task.id} className="relative group/task">
               {/* Vertical connector line */}
               {!isLast && (
                 <div
@@ -366,10 +303,12 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
               )}
 
               {/* Task row */}
-              <button
-                onClick={() => toggleTask(task.name)}
-                className="w-full flex items-center gap-3 py-2 text-left cursor-pointer relative z-10"
-              >
+              <div data-testid={`delegation-task-row-${task.id}`} className="flex items-center gap-2 relative z-10">
+                <button
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleTask(task)}
+                  className="min-w-0 flex-1 flex items-center gap-3 py-2 text-left cursor-pointer"
+                >
                 {/* Status dot */}
                 {statusDot(task.status)}
 
@@ -405,6 +344,7 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                       {task.evaluating ? '⟳ Evaluating…' : task.retrying ? 'retrying' : 'running'}
                     </span>
                   )}
+                  {task.status === 'interrupted' && <span>interrupted</span>}
                   {task.status === 'failed' && (
                     <span className="text-[11px] text-red-400 truncate max-w-[120px]">{task.error || 'failed'}</span>
                   )}
@@ -427,8 +367,38 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                     <ChevronDown size={12} className="rotate-[-90deg]" style={{ color: 'var(--text-muted)' }} />
                   )}
                 </span>
-              </button>
+                </button>
 
+                {task.attempts.length > 1 && (
+                  <div aria-label={`Attempts for ${task.name}`} className="flex shrink-0 items-center gap-1 rounded-md border p-0.5" style={{ borderColor: 'var(--border-color)', background: 'var(--surface-secondary)' }}>
+                    {task.attempts.map(attempt => (
+                      <button
+                        key={attempt.attempt}
+                        aria-pressed={task.attempt === attempt.attempt}
+                        className="rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap"
+                        style={{
+                          color: task.attempt === attempt.attempt ? 'var(--text-primary)' : 'var(--text-muted)',
+                          background: task.attempt === attempt.attempt ? 'var(--bg-tertiary)' : 'transparent',
+                        }}
+                        onClick={() => {
+                          const selected = { ...task, ...attempt }
+                          if (detailKey(selected) !== detailKey(task)) {
+                            const oldKey = detailKey(task)
+                            requests.current.get(oldKey)?.abort()
+                            requests.current.delete(oldKey)
+                            setLoadingTasks(prev => { const next = new Set(prev); next.delete(oldKey); return next })
+                          }
+                          setSelectedAttempts(prev => ({ ...prev, [task.id]: attempt.attempt! }))
+                          setExpandedTasks(prev => ({ ...prev, [detailKey(selected)]: true }))
+                          if (!attempt.events.some(e => e.type === 'task_tool_call') && !fetchedEvents[detailKey(selected)]) loadTaskEvents(selected)
+                        }}
+                      >
+                        Attempt {attempt.attempt}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {/* Expanded task details */}
               {isExpanded && (
                 <div className="ml-[28px] pb-2 relative z-10">
@@ -436,21 +406,24 @@ export default function TaskPlanPanel({ data, sessionId }: { data: SubTaskExecut
                     <div className="text-xs py-1" style={{ color: 'var(--text-muted)' }}>Waiting to start...</div>
                   )}
                   {/* Show loading indicator while fetching child session events */}
-                  {loadingTasks.has(task.name) && (
+                  {loadingTasks.has(detailKey(task)) && (
                     <div className="flex items-center gap-2 text-xs py-2" style={{ color: 'var(--text-muted)' }}>
                       <Loader size={10} className="animate-spin" />
                       <span>Loading execution detail...</span>
                     </div>
                   )}
+                  {errors[detailKey(task)] && <div role="alert">{errors[detailKey(task)]} <button onClick={() => loadTaskEvents(task)}>Retry</button></div>}
+                  {fetchedEvents[detailKey(task)]?.length === 0 && <div>No execution detail recorded.</div>}
+                  {!sessionId && !task.events.length && <div>Execution detail unavailable.</div>}
                   {/* Render lazy-fetched events (tool calls from child session) */}
-                  {fetchedEvents[task.name] && fetchedEvents[task.name].map((evt, evtIdx) =>
+                  {fetchedEvents[detailKey(task)] && fetchedEvents[detailKey(task)].map((evt, evtIdx) =>
                     renderTaskEvent(evt, taskIdx, evtIdx)
                   )}
                   {/* Render inline events — suppress task_text when fetched events are available
                       (the fetched events already include the full output, avoiding duplication) */}
                   {task.events
-                    .filter(evt => !(fetchedEvents[task.name] && evt.type === 'task_text'))
-                    .map((evt, evtIdx) => renderTaskEvent(evt, taskIdx, evtIdx + (fetchedEvents[task.name]?.length || 0)))}
+                    .filter(evt => !(fetchedEvents[detailKey(task)] && evt.type === 'task_text'))
+                    .map((evt, evtIdx) => renderTaskEvent(evt, taskIdx, evtIdx + (fetchedEvents[detailKey(task)]?.length || 0)))}
                 </div>
               )}
             </div>

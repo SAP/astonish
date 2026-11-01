@@ -5,12 +5,37 @@ package backendpool_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/mock"
 )
+
+func TestPruneOrphansForBackend_RequiresAuthoritativeSnapshot(t *testing.T) {
+	st, err := sandbox.NewLocalSessionStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalSessionStore: %v", err)
+	}
+	registry := sandbox.NewSessionRegistryFromStore(st)
+	if err := registry.Put("must-survive", "pod-survive", "@base"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	mb := mock.New()
+	_, _ = mb.CreateSession(context.Background(), sandbox.SessionSpec{SessionID: "must-survive"})
+
+	pruned, err := sandbox.PruneOrphansForBackend(context.Background(), mb, registry, nil)
+	if !errors.Is(err, sandbox.ErrOrphanPruneAuthorityUnavailable) {
+		t.Fatalf("PruneOrphansForBackend() error = %v, want %v", err, sandbox.ErrOrphanPruneAuthorityUnavailable)
+	}
+	if pruned != 0 {
+		t.Fatalf("pruned = %d, want 0", pruned)
+	}
+	if calls := mb.DestroySessionCalls(); len(calls) != 0 {
+		t.Fatalf("DestroySession calls = %v, want none", calls)
+	}
+}
 
 // TestPruneOrphansForBackend_DeletesUnreferenced creates three mock sessions,
 // marks only one as alive, and verifies that the other two (non-pinned) are

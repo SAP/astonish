@@ -5,6 +5,9 @@
 #   - Core dev tools (docker.io, jq, unzip, socat, etc.)
 #   - CloakBrowser (anti-detection stealth Chromium) + KasmVNC (VNC/web access)
 #
+# The native supervisor does not consume the overlay initialization marker.
+# It uses its existing workspace PVC path, not the Docker/K8s overlay wrapper.
+#
 # The OpenShell gateway handles:
 #   - Supervisor sideloading (via init-container or ImageVolume)
 #   - Workspace PVC provisioning (via Agent Sandbox CRD)

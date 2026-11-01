@@ -339,9 +339,8 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 
 	// 6l. Reports
 	sb.WriteString("\n## Reports\n\n")
-	sb.WriteString("For any report, analysis, review, summary, or document the user may share or export: save it as a `.md` file via `write_file`, then emit an `astonish-report` fence in your reply. Both steps are required every time. Reports may include mermaid diagrams for flows and architectures.\n\n")
-	sb.WriteString("```astonish-report\npath: <exact path passed to write_file>\ntitle: <human-readable title>\n```\n\n")
-	sb.WriteString("The fence's `path` MUST match the `file_path` you used. Without the fence the file appears as a small download card instead of an inline report. Without `write_file` the fence is ignored. Do NOT use `astonish-app` for reports — that fence is for interactive UIs.\n")
+	sb.WriteString("Reports: small, clearly bounded files may use `write_file` normally. For large, multi-section, or uncertain output, write a bounded initial Markdown file ending with a unique `<!-- ASTONISH_CONTINUE:<random-id> -->` marker. Each `edit_file` must replace exactly that marker with one bounded semantic section plus the exact same marker. After interruption or compaction, inspect/read the file and continue at the marker. Never claim completion or emit a report fence while the marker remains. The final edit removes it; only then emit the exact-path/title `astonish-report` fence and a concise response.\n\n")
+	sb.WriteString("```astonish-report\npath: <exact path>\ntitle: <title>\n```\n")
 
 	// ── Tier 3: Per-Turn Dynamic ─────────────────────────────────
 

@@ -1,5 +1,11 @@
 # Smart Tiered Compaction
 
+## Durable growing-file survival
+
+Plan survival and output survival are separate contracts. `PLAN.md` preserves approved implementation phases; a large generated Markdown document preserves its own output progress. Its unique HTML continuation marker identifies the only insertion point, and all bytes before that marker are the durable checkpoint. The compactor does not need to retain section bodies, an expected count, a ledger, a generation ID, or a hash.
+
+After compaction or provider retry, the model reads or inspects the destination, locates the marker, and checks the surrounding tail before deciding which semantic section comes next. Each `edit_file` operation replaces exactly the marker with one section plus the unchanged marker; the final edit removes it. Retries are not automatically idempotent, so any uncertain tool result requires inspection before retrying. The partial file remains visible and usable throughout.
+
 ## Overview
 
 Smart Compaction replaces the monolithic "summarize everything old" approach with a **3-tier, LLM-powered, task-aware** compaction system. Each piece of conversation history is compressed to a level appropriate for its role in the session:

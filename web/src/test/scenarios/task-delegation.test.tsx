@@ -20,11 +20,58 @@ import simpleDelegation from '../fixtures/scenarios/delegation/simple-delegation
 import multiTaskParallel from '../fixtures/scenarios/delegation/multi-task-parallel.json'
 import taskFailure from '../fixtures/scenarios/delegation/task-failure.json'
 
+import taskRetry from '../fixtures/scenarios/delegation/task-retry.json'
+import { reduceDelegationProgress, normalizeDelegationHistory, deriveDelegationTasks, groupChronologicalActivity } from '../../components/chat/toolActivity'
+import type { ChatMsg, SubTaskEvent } from '../../components/chat/chatTypes'
+
 describe('Task Delegation Scenarios', () => {
   let result: RenderChatResult
 
   afterEach(() => {
     if (result) result.cleanup()
+  })
+
+  it.each(['done', 'error'])('interrupts unfinished delegation on %s', async terminal => {
+    const start = simpleDelegation.events.filter(e => e.type === 'session' || (e.type === 'subtask_progress' && ['delegation_start', 'task_start'].includes(e.data.event_type || ''))) as FixtureEvent[]
+    result = renderChat({ scenarioEvents: [...start, { type: terminal, data: terminal === 'error' ? { error: 'stream failed' } : { done: true } }] })
+    await result.sendMessage('start work')
+    await waitFor(() => expect(screen.getByText('Delegation interrupted')).toBeInTheDocument())
+    expect(screen.getByText('0/1 task')).toBeInTheDocument()
+  })
+
+  it('reuses names across batches with identical live/reconnect/history counts and order', () => {
+    const records = taskRetry.events.filter(e => e.type === 'subtask_progress').map(e => ({ ...e.data, type: e.data.event_type })) as SubTaskEvent[]
+    const second = records.map(e => ({ ...e, batch_id: 'retry-second', child_session_id: e.child_session_id ? `second-${e.child_session_id}` : undefined }))
+    const all = [...records, ...second]
+    const live = all.reduce(reduceDelegationProgress, [] as ChatMsg[])
+    const replay = all.reduce(reduceDelegationProgress, live)
+    const history = normalizeDelegationHistory([...live, ...live])
+    expect(replay).toEqual(live)
+    expect(history).toEqual(live)
+    expect(live).toHaveLength(2)
+    for (const panel of live) {
+      if (panel.type !== 'subtask_execution') throw new Error('Expected dedicated delegation')
+      const [task] = deriveDelegationTasks(panel)
+      expect(task.name).toBe('API Call')
+      expect(task.attempts.map(a => a.status)).toEqual(['failed', 'complete'])
+      expect(task.attempts.map(a => a.child_session_id)).toEqual(panel.batch_id === 'retry' ? ['api-1', 'api-2'] : ['second-api-1', 'second-api-2'])
+    }
+    const grouped = groupChronologicalActivity([{ type: 'tool_call', toolName: 'read_file', toolArgs: {} }, { type: 'tool_result', toolName: 'read_file', toolResult: 'ok' }, ...live])
+    expect(grouped.filter(g => g.kind === 'passthrough')).toHaveLength(2)
+    expect(grouped.flatMap(g => g.kind === 'activity' ? g.steps.map(s => s.toolName) : [])).toEqual(['read_file'])
+  })
+
+  it.each([simpleDelegation, multiTaskParallel, taskFailure, taskRetry])('fixture $name carries stable identities', fixture => {
+    for (const event of fixture.events as FixtureEvent[]) {
+      if (event.type !== 'subtask_progress') continue
+      expect(event.data.batch_id).toBeTruthy()
+      expect(event.data.sequence).toBeTypeOf('number')
+      if (event.data.task_name) {
+        expect(event.data.task_id).toBeTruthy()
+        expect(event.data.child_session_id).toBeTruthy()
+        expect(event.data.attempt).toBeTypeOf('number')
+      }
+    }
   })
 
   describe('D1: Simple Delegation', () => {

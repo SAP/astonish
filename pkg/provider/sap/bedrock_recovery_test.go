@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/provider/llmerror"
+	"github.com/SAP/astonish/pkg/provider/streaming"
 	"golang.org/x/net/http2"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -99,6 +100,237 @@ func TestBedrockStreamHTTP2Continuation(t *testing.T) {
 	}
 	if strings.Contains(string(payloads[1]["messages"]), "lost") {
 		t.Fatal("incomplete tool replayed")
+	}
+}
+
+func TestBedrockStreamIdleHTTP2Recovery(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			t.Errorf("expected HTTP/2, got %s", r.Proto)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts.Add(1) == 1 {
+			_, _ = io.WriteString(w, sapEvents(sapThinking, sapTool, sapToolStop))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		_, _ = io.WriteString(w, sapEvents(sapText, sapStop))
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	p := testStreamProvider(server.Client(), server.URL)
+	if err := WithBedrockStreamTiming(80*time.Millisecond, 10*time.Millisecond)(p); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var progress []streaming.Progress
+	ctx = streaming.WithProgress(ctx, func(p streaming.Progress) { progress = append(progress, p) })
+	finals, tools := 0, 0
+	for response, err := range p.GenerateContent(ctx, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !response.Partial {
+			finals++
+		}
+		for _, part := range response.Content.Parts {
+			if part.FunctionCall != nil {
+				tools++
+			}
+		}
+	}
+	heartbeats, recoveries := 0, 0
+	for _, p := range progress {
+		if p.Kind == streaming.KindHeartbeat {
+			heartbeats++
+		}
+		if p.Kind == streaming.KindRecovery {
+			recoveries++
+			if p.Attempt != 2 || p.MaxAttempts != maxBedrockStreamSegments {
+				t.Fatalf("bad recovery: %+v", p)
+			}
+		}
+	}
+	if attempts.Load() != 2 || finals != 1 || tools != 0 || heartbeats == 0 || recoveries != 1 {
+		t.Fatalf("attempts=%d finals=%d tools=%d heartbeat=%d recovery=%d", attempts.Load(), finals, tools, heartbeats, recoveries)
+	}
+}
+
+func TestBedrockStreamIdleAfterPartialTextContinuesWithoutReplay(t *testing.T) {
+	attempts := 0
+	client := &http.Client{Transport: streamRoundTrip(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			body := io.MultiReader(strings.NewReader(sapEvents(sapText)), streamReadFailure{ErrBedrockStreamIdle})
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(body)}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sapEvents(`{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}`, sapStop)))}, nil
+	})}
+
+	var live, final strings.Builder
+	var gotErr error
+	for response, err := range testStreamProvider(client, "http://provider.test").GenerateContent(context.Background(), &model.LLMRequest{}, true) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		if response == nil || response.Content == nil {
+			continue
+		}
+		for _, part := range response.Content.Parts {
+			if response.Partial {
+				live.WriteString(part.Text)
+			} else {
+				final.WriteString(part.Text)
+			}
+		}
+	}
+	if attempts != 2 || live.String() != "hello world" || final.String() != live.String() || gotErr != nil {
+		t.Fatalf("attempts=%d live=%q final=%q err=%v", attempts, live.String(), final.String(), gotErr)
+	}
+}
+
+func TestBedrockIdleHTTP2ContinuationAndExhaustion(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		text, exhaust, reset bool
+	}{
+		{"continuation", true, false, false},
+		{"exhaustion before text", false, true, false},
+		{"exhaustion after text", true, true, false},
+		{"idle and reset share budget", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			payloads := make(chan []byte, maxBedrockStreamSegments)
+			closed := make(chan struct{}, maxBedrockStreamSegments)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer func() { closed <- struct{}{} }()
+				if r.ProtoMajor != 2 {
+					t.Errorf("expected HTTP/2")
+				}
+				payload, _ := io.ReadAll(r.Body)
+				payloads <- payload
+				n := attempts.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				if !tc.exhaust && n == 2 {
+					_, _ = io.WriteString(w, sapEvents(`{"type":"content_block_delta","delta":{"type":"text_delta","text":" done"}}`, sapTool, sapToolStop, sapStop))
+					return
+				}
+				if tc.text {
+					_, _ = io.WriteString(w, sapEvents(sapText))
+				}
+				_, _ = io.WriteString(w, sapEvents(sapTool, sapToolStop))
+				w.(http.Flusher).Flush()
+				if tc.reset && n == 2 {
+					panic(http.ErrAbortHandler)
+				}
+				<-r.Context().Done()
+			}))
+			server.EnableHTTP2 = true
+			server.StartTLS()
+			defer server.Close()
+			p := testStreamProvider(server.Client(), server.URL)
+			if err := WithBedrockStreamTiming(70*time.Millisecond, 15*time.Millisecond)(p); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			var live, final strings.Builder
+			var gotErr error
+			tools, finals, recoveries := 0, 0, 0
+			ctx = streaming.WithProgress(ctx, func(p streaming.Progress) {
+				if p.Kind == streaming.KindRecovery {
+					recoveries++
+					if p.Attempt != recoveries+1 || p.MaxAttempts != maxBedrockStreamSegments || p.Phase != streaming.PhaseRecovering {
+						t.Errorf("recovery=%+v", p)
+					}
+				}
+			})
+			for response, err := range p.GenerateContent(ctx, &model.LLMRequest{}, true) {
+				if err != nil {
+					gotErr = err
+					continue
+				}
+				if !response.Partial {
+					finals++
+				}
+				for _, part := range response.Content.Parts {
+					if part.FunctionCall != nil {
+						tools++
+					}
+					if response.Partial {
+						live.WriteString(part.Text)
+					} else {
+						final.WriteString(part.Text)
+					}
+				}
+			}
+			if tc.text && !tc.exhaust {
+				if gotErr != nil || attempts.Load() != 2 || tools != 1 || finals != 1 || recoveries != 1 || live.String() != "hello done" || final.String() != live.String() {
+					t.Fatalf("attempts=%d tools=%d finals=%d recoveries=%d text=%q final=%q err=%v", attempts.Load(), tools, finals, recoveries, live.String(), final.String(), gotErr)
+				}
+			} else if tc.text {
+				if attempts.Load() != maxBedrockStreamSegments || tools != 0 || finals != 0 || recoveries != maxBedrockStreamSegments-1 || !errors.Is(gotErr, ErrBedrockStreamIdle) {
+					t.Fatalf("attempts=%d tools=%d finals=%d recoveries=%d text=%q err=%v", attempts.Load(), tools, finals, recoveries, live.String(), gotErr)
+				}
+				var interrupted *llmerror.InterruptedStreamError
+				if !errors.As(gotErr, &interrupted) || llmerror.IsRetryable(gotErr) {
+					t.Fatalf("unsafe error: %v", gotErr)
+				}
+			} else if tc.exhaust {
+				if attempts.Load() != maxBedrockStreamSegments || tools != 0 || finals != 0 || recoveries != maxBedrockStreamSegments-1 || !errors.Is(gotErr, ErrBedrockStreamIdle) {
+					t.Fatalf("attempts=%d tools=%d finals=%d recoveries=%d err=%v", attempts.Load(), tools, finals, recoveries, gotErr)
+				}
+				var interrupted *llmerror.InterruptedStreamError
+				if errors.As(gotErr, &interrupted) || llmerror.IsRetryable(gotErr) {
+					t.Fatalf("unsafe error: %v", gotErr)
+				}
+			} else if gotErr != nil || attempts.Load() != 2 || tools != 1 || finals != 1 || live.String() != "hello done" || final.String() != live.String() {
+				t.Fatalf("attempts=%d tools=%d finals=%d text=%q final=%q err=%v", attempts.Load(), tools, finals, live.String(), final.String(), gotErr)
+			}
+			for n := 0; n < int(attempts.Load()); n++ {
+				select {
+				case <-closed:
+				case <-time.After(time.Second):
+					t.Fatal("attempt handler not closed")
+				}
+				payload := <-payloads
+				var request struct {
+					Messages []struct{ Role, Content string }
+				}
+				if err := json.Unmarshal(payload, &request); err != nil {
+					t.Fatal(err)
+				}
+				if tc.text && n > 0 {
+					if len(request.Messages) != 2 || request.Messages[0].Role != "assistant" || request.Messages[0].Content != strings.Repeat("hello", n) {
+						t.Fatalf("bad continuation: %s", payload)
+					}
+				} else if len(request.Messages) != 0 {
+					t.Fatalf("unexpected history: %s", payload)
+				}
+			}
+		})
+	}
+}
+
+func TestBedrockStreamTimingValidation(t *testing.T) {
+	for _, timing := range [][2]time.Duration{{0, time.Second}, {time.Second, 0}, {-1, time.Second}, {time.Second, -1}} {
+		p, err := NewProviderWithConfig(context.Background(), "model", "", "", "", "", "", WithBedrockStreamTiming(timing[0], timing[1]))
+		if p != nil || err == nil || !strings.Contains(err.Error(), "must be positive") {
+			t.Fatalf("p=%v err=%v", p, err)
+		}
+	}
+	p := &Provider{}
+	if err := WithBedrockStreamTiming(time.Second, time.Millisecond)(p); err != nil || p.bedrockIdleTimeout != time.Second || p.bedrockHeartbeatInterval != time.Millisecond {
+		t.Fatalf("timing not applied: %v", err)
+	}
+	if defaultBedrockIdleTimeout != 120*time.Second || defaultBedrockHeartbeatInterval != 15*time.Second {
+		t.Fatal("unexpected defaults")
 	}
 }
 
@@ -256,7 +488,7 @@ func TestBedrockStreamContinuationBounded(t *testing.T) {
 		}
 	}
 	var interrupted *llmerror.InterruptedStreamError
-	if attempts != 3 || finals != 0 || !errors.As(finalErr, &interrupted) || llmerror.IsRetryable(finalErr) {
+	if attempts != maxBedrockStreamSegments || finals != 0 || !errors.As(finalErr, &interrupted) || llmerror.IsRetryable(finalErr) {
 		t.Fatalf("attempts=%d finals=%d error=%v", attempts, finals, finalErr)
 	}
 }

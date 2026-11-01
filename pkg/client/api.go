@@ -1,10 +1,13 @@
 package client
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 // --- Session API ---
@@ -42,12 +45,83 @@ func (c *Client) GetSession(id string) (map[string]any, error) {
 // StudioMessage is a simplified chat message from GET /api/studio/sessions/{id}.
 // Mirrors pkg/api.StudioMessage fields needed by the terminal app.
 type StudioMessage struct {
-	Type       string `json:"type"`
-	Content    string `json:"content,omitempty"`
-	ToolName   string `json:"toolName,omitempty"`
-	ToolID     string `json:"toolId,omitempty"`
-	ToolArgs   any    `json:"toolArgs,omitempty"`
-	ToolResult any    `json:"toolResult,omitempty"`
+	Tasks           []SubtaskInfo   `json:"tasks,omitempty"`
+	Events          []SubtaskEvent  `json:"events,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	SubtaskProgress json.RawMessage `json:"subtaskProgress,omitempty"`
+	BatchID         string          `json:"batchId,omitempty"`
+	TaskID          string          `json:"taskId,omitempty"`
+	ChildSessionID  string          `json:"childSessionId,omitempty"`
+	Attempt         int             `json:"attempt,omitempty"`
+	Type            string          `json:"type"`
+	Content         string          `json:"content,omitempty"`
+	ToolName        string          `json:"toolName,omitempty"`
+	ToolID          string          `json:"toolId,omitempty"`
+	ToolArgs        any             `json:"toolArgs,omitempty"`
+	ToolResult      any             `json:"toolResult,omitempty"`
+}
+
+// SubtaskInfo and SubtaskEvent mirror Studio's snake-case delegation payload.
+type SubtaskInfo struct {
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+}
+type SubtaskEvent struct {
+	BatchID        string         `json:"batch_id,omitempty"`
+	TaskID         string         `json:"task_id,omitempty"`
+	ChildSessionID string         `json:"child_session_id,omitempty"`
+	Attempt        int            `json:"attempt,omitempty"`
+	CallID         string         `json:"call_id,omitempty"`
+	Sequence       int64          `json:"sequence,omitempty"`
+	Type           string         `json:"type"`
+	TaskName       string         `json:"task_name,omitempty"`
+	Status         string         `json:"status,omitempty"`
+	Duration       string         `json:"duration,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	Text           string         `json:"text,omitempty"`
+	ToolName       string         `json:"tool_name,omitempty"`
+	ToolArgs       map[string]any `json:"tool_args,omitempty"`
+	ToolResult     any            `json:"tool_result,omitempty"`
+}
+
+// GetSubtaskEvents loads one exact attempt using the same authentication and
+// tenant headers as the session request. Context cancellation closes the request.
+func (c *Client) GetSubtaskEvents(ctx context.Context, parentID string, task SubtaskInfo) ([]SubtaskEvent, error) {
+	q := url.Values{"task_name": {task.Name}, "child_session_id": {task.ChildSessionID}, "batch_id": {task.BatchID}, "task_id": {task.TaskID}, "attempt": {strconv.Itoa(task.Attempt)}}
+	path := "/api/studio/sessions/" + url.PathEscape(parentID) + "/subtask-events?" + q.Encode()
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := c.buildRequest(http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.httpClient.Do(req.WithContext(ctx))
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && c.cached != nil && attempt == 0 {
+			resp.Body.Close()
+			if err := c.refresh(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return nil, parseErrorResponse(resp)
+		}
+		var result struct {
+			Events []SubtaskEvent `json:"events"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, err
+		}
+		return result.Events, nil
+	}
+	return nil, fmt.Errorf("subtask authentication failed")
 }
 
 // UsageSummary is cumulative token usage from a Studio session detail response.

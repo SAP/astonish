@@ -120,19 +120,28 @@ export interface BrowserHandoffMessage {
 
 // ---- Sub-task execution (delegate_tasks) progress ----
 
-export interface SubTaskExecutionMessage {
+export interface DelegationIdentity {
+  batch_id?: string
+  task_id?: string
+  child_session_id?: string
+  attempt?: number
+  call_id?: string
+  sequence?: number
+}
+
+export interface SubTaskExecutionMessage extends DelegationIdentity {
   type: 'subtask_execution'
   events: SubTaskEvent[]
   tasks: SubTaskInfo[]        // All tasks in the delegation (from delegation_start)
   status: string              // 'running' | 'complete' | 'error' | 'partial'
 }
 
-export interface SubTaskInfo {
+export interface SubTaskInfo extends DelegationIdentity {
   name: string
   description: string
 }
 
-export interface SubTaskEvent {
+export interface SubTaskEvent extends DelegationIdentity {
   type: string                // delegation_start, delegation_complete, task_start, task_complete, task_failed, task_tool_call, task_tool_result, task_text
   task_name?: string
   status?: string

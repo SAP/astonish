@@ -30,6 +30,7 @@ type teamSessionStore struct {
 }
 
 var _ store.SessionStore = (*teamSessionStore)(nil)
+var _ store.SessionIDEnumerator = (*teamSessionStore)(nil)
 
 // ---------------------------------------------------------------------------
 // teamSession implements adksession.Session interface
@@ -635,17 +636,25 @@ func (s *teamSessionStore) ResolveSessionID(ctx context.Context, partial string)
 }
 
 func (s *teamSessionStore) AllSessionIDs(ctx context.Context) map[string]bool {
+	ids, err := s.AllSessionIDsStrict(ctx)
+	if err != nil {
+		return nil
+	}
+	return ids
+}
+
+func (s *teamSessionStore) AllSessionIDsStrict(ctx context.Context) (map[string]bool, error) {
 	ents, err := s.client.Session.Query().
 		Select(session.FieldID).
 		All(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list all session IDs: %w", err)
 	}
 	ids := make(map[string]bool, len(ents))
 	for _, e := range ents {
 		ids[e.ID] = true
 	}
-	return ids
+	return ids, nil
 }
 
 func (s *teamSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDays int) []string {

@@ -59,6 +59,7 @@ type SessionSummary struct {
 
 // HistoryEntry is one message loaded when resuming a session.
 type HistoryEntry struct {
+	Delegation *events.Event
 	// Kind: user | agent | tool_call | tool_result | system | thinking | artifact
 	Kind     string
 	Text     string
@@ -79,6 +80,10 @@ type HistoryEntry struct {
 	RoutingTier     string // "strong", "medium", or "weak"
 	RoutingModel    string // display name of the model used
 	RoutingIsStrong bool   // true when RoutingTier == "strong"
+}
+
+type DelegationDetailBackend interface {
+	LoadDelegationDetail(context.Context, events.DelegationTaskState) ([]events.DelegationActivity, error)
 }
 
 // Attachment is a file/image payload to send with a chat turn.

@@ -641,9 +641,65 @@ func studioDetailToHistory(detail *client.SessionDetail) []backend.HistoryEntry 
 	return out
 }
 
+func (b *platformBackend) LoadDelegationDetail(ctx context.Context, task events.DelegationTaskState) ([]events.DelegationActivity, error) {
+	b.mu.Lock()
+	c, parent := b.client, b.sessionID
+	b.mu.Unlock()
+	rows, err := c.GetSubtaskEvents(ctx, parent, client.SubtaskInfo{BatchID: task.BatchID, TaskID: task.TaskID, ChildSessionID: task.ChildSessionID, Attempt: task.Attempt, Name: task.Name})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]events.DelegationActivity, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, events.DelegationActivity{Type: strings.TrimPrefix(row.Type, "task_"), CallID: row.CallID, Sequence: row.Sequence, ToolName: row.ToolName, Args: row.ToolArgs, Result: row.ToolResult, Text: row.Text})
+	}
+	return out, nil
+}
+
 func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry {
 	out := make([]backend.HistoryEntry, 0, len(msgs))
-	for _, m := range msgs {
+	for mi, m := range msgs {
+		if m.Type == "subtask_execution" {
+			batch := m.BatchID
+			for _, row := range m.Events {
+				if row.BatchID != "" {
+					batch = row.BatchID
+					break
+				}
+			}
+			if batch == "" {
+				batch = fmt.Sprintf("history-%d", mi)
+			}
+			tasks := make([]events.DelegationTask, 0, len(m.Tasks))
+			for _, task := range m.Tasks {
+				tasks = append(tasks, events.DelegationTask{Name: task.Name, Description: task.Description, BatchID: batch, TaskID: task.TaskID, ChildSessionID: task.ChildSessionID, Attempt: task.Attempt})
+			}
+			start := events.Event{Kind: events.KindDelegation, DelegationType: "start", DelegationBatchID: batch, DelegationTasks: tasks}
+			out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &start})
+			for _, row := range m.Events {
+				if row.Type == "delegation_start" {
+					continue
+				}
+				if row.BatchID == "" {
+					row.BatchID = batch
+				}
+				raw, _ := json.Marshal(row)
+				for _, ev := range mapSSEToEvents(&client.SSEEvent{Type: "subtask_progress", Data: string(raw)}, false) {
+					e := ev
+					out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &e})
+				}
+			}
+			done := events.Event{Kind: events.KindDelegation, DelegationType: "done", DelegationBatchID: batch, DelegationStatus: m.Status}
+			out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &done})
+			continue
+		}
+		if len(m.SubtaskProgress) > 0 {
+			for _, ev := range mapSSEToEvents(&client.SSEEvent{Type: "subtask_progress", Data: string(m.SubtaskProgress)}, false) {
+				e := ev
+				out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &e})
+			}
+			continue
+		}
 		switch m.Type {
 		case "user", "agent", "system", "thinking":
 			if strings.TrimSpace(m.Content) == "" && m.Type != "thinking" {
@@ -969,67 +1025,47 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			}
 			return []events.Event{events.NewStatus(text)}
 		}
-	case "subtask_progress":
-		var payload struct {
-			EventType string `json:"event_type"`
-			TaskName  string `json:"task_name"`
+	case "delegation", "subtask_progress":
+		var p struct {
+			EventType      string                  `json:"event_type"`
+			Type           string                  `json:"type"`
+			BatchID        string                  `json:"batch_id"`
+			TaskID         string                  `json:"task_id"`
+			ChildSessionID string                  `json:"child_session_id"`
+			CallID         string                  `json:"call_id"`
+			Sequence       int64                   `json:"sequence"`
+			TaskName       string                  `json:"task_name"`
+			Status         string                  `json:"status"`
+			Duration       string                  `json:"duration"`
+			LastActivity   string                  `json:"last_activity"`
+			Error          string                  `json:"error"`
+			Reason         string                  `json:"reason"`
+			Attempt        int                     `json:"attempt"`
+			NoActivity     bool                    `json:"no_activity"`
+			Tasks          []events.DelegationTask `json:"tasks"`
+			ToolName       string                  `json:"tool_name"`
+			ToolArgs       map[string]any          `json:"tool_args"`
+			ToolResult     any                     `json:"tool_result"`
+			Text           string                  `json:"text"`
 		}
-		if json.Unmarshal(data, &payload) == nil {
-			if payload.EventType == "task_start" && payload.TaskName != "" {
-				return []events.Event{
-					{Kind: events.KindSubagent, ToolName: payload.TaskName, Text: payload.TaskName},
-					events.NewStatus(fmt.Sprintf("Working: %s…", payload.TaskName)),
-				}
+		if json.Unmarshal(data, &p) != nil {
+			return nil
+		}
+		if p.Type == "" {
+			p.Type = p.EventType
+		}
+		switch p.Type {
+		case "delegation_start":
+			p.Type = "start"
+		case "delegation_complete":
+			p.Type = "done"
+		}
+		switch p.Type {
+		case "start", "done", "task_start", "task_state", "task_retry", "evaluating", "task_complete", "task_failed", "task_tool_call", "task_tool_result", "task_text":
+			if p.Reason == "" {
+				p.Reason = p.Error
 			}
-		}
-	case "delegation":
-		var payload struct {
-			Type         string `json:"type"`
-			TaskName     string `json:"task_name"`
-			Status       string `json:"status"`
-			Duration     string `json:"duration"`
-			LastActivity string `json:"last_activity"`
-			Error        string `json:"error"`
-			Reason       string `json:"reason"`
-			Attempt      int    `json:"attempt"`
-			NoActivity   bool   `json:"no_activity"`
-			Tasks        []struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				PlanStep    string `json:"plan_step"`
-			} `json:"tasks"`
-			ToolName   string         `json:"tool_name"`
-			ToolArgs   map[string]any `json:"tool_args"`
-			ToolResult any            `json:"tool_result"`
-			Text       string         `json:"text"`
-		}
-		if json.Unmarshal(data, &payload) == nil {
-			switch payload.Type {
-			case "start":
-				tasks := make([]events.DelegationTask, len(payload.Tasks))
-				for i, t := range payload.Tasks {
-					tasks[i] = events.DelegationTask{Name: t.Name, Description: t.Description, PlanStep: t.PlanStep}
-				}
-				return []events.Event{events.NewDelegationStart(tasks)}
-			case "task_start", "task_state", "task_retry", "evaluating":
-				return []events.Event{events.NewDelegationTaskState(payload.Type, payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, payload.Reason, payload.Attempt, payload.NoActivity)}
-			case "task_complete":
-				return []events.Event{events.NewDelegationTaskState("task_complete", payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, "", payload.Attempt, false)}
-			case "task_failed":
-				reason := payload.Reason
-				if reason == "" {
-					reason = payload.Error
-				}
-				return []events.Event{events.NewDelegationTaskState("task_failed", payload.TaskName, payload.Status, payload.Duration, payload.LastActivity, reason, payload.Attempt, payload.NoActivity)}
-			case "task_tool_call":
-				return []events.Event{events.NewDelegationTaskActivity("task_tool_call", payload.TaskName, payload.ToolName, payload.ToolArgs, nil, "")}
-			case "task_tool_result":
-				return []events.Event{events.NewDelegationTaskActivity("task_tool_result", payload.TaskName, payload.ToolName, nil, payload.ToolResult, "")}
-			case "task_text":
-				return []events.Event{events.NewDelegationTaskActivity("task_text", payload.TaskName, "", nil, nil, payload.Text)}
-			case "done":
-				return []events.Event{events.NewDelegation("done")}
-			}
+			return []events.Event{{Kind: events.KindDelegation, DelegationType: p.Type, DelegationTasks: p.Tasks, DelegationBatchID: p.BatchID, DelegationTaskID: p.TaskID, DelegationChildSessionID: p.ChildSessionID, DelegationCallID: p.CallID, DelegationSequence: p.Sequence, DelegationTaskName: p.TaskName, DelegationStatus: p.Status, DelegationDuration: p.Duration, DelegationLastActivity: p.LastActivity, DelegationError: p.Reason, DelegationAttempt: p.Attempt, DelegationNoActivity: p.NoActivity, DelegationToolName: p.ToolName, DelegationToolArgs: p.ToolArgs, DelegationToolResult: p.ToolResult, DelegationText: p.Text}}
 		}
 	case "docs_update":
 		// Slide cards are a Studio-only rendering surface. The terminal client

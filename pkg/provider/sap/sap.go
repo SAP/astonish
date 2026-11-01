@@ -106,13 +106,39 @@ func invalidateModelCache() {
 
 // Provider implements the model.LLM interface for SAP AI Core.
 type Provider struct {
-	openaiProvider *openai.Provider
-	httpClient     *http.Client
-	baseURL        string
-	deploymentID   string
-	modelName      string
-	authConfig     *sapTransport
+	openaiProvider           *openai.Provider
+	httpClient               *http.Client
+	baseURL                  string
+	deploymentID             string
+	modelName                string
+	authConfig               *sapTransport
+	bedrockIdleTimeout       time.Duration
+	bedrockHeartbeatInterval time.Duration
 }
+
+const (
+	defaultBedrockIdleTimeout       = 120 * time.Second
+	defaultBedrockHeartbeatInterval = 15 * time.Second
+)
+
+// ProviderOption configures a SAP provider without changing existing callers.
+type ProviderOption func(*Provider) error
+
+// WithBedrockStreamTiming sets read-idle and heartbeat intervals for SAP Bedrock
+// streams only. Both must be positive; it does not impose a request deadline.
+func WithBedrockStreamTiming(idle, heartbeat time.Duration) ProviderOption {
+	return func(p *Provider) error {
+		if idle <= 0 || heartbeat <= 0 {
+			return errors.New("Bedrock stream timing intervals must be positive")
+		}
+		p.bedrockIdleTimeout, p.bedrockHeartbeatInterval = idle, heartbeat
+		return nil
+	}
+}
+
+// ErrBedrockStreamIdle means an upstream response-body Read made no progress
+// within the configured interval. It is recoverable only inside this adapter.
+var ErrBedrockStreamIdle = errors.New("SAP Bedrock stream read idle")
 
 // NewProvider creates a new SAP AI Core provider.
 func NewProvider(ctx context.Context, modelName string) (model.LLM, error) {
@@ -133,8 +159,26 @@ func newOpenAIProvider(client *goopenai.Client, modelName string) *openai.Provid
 	return openai.NewOpenAIProvider(client, modelName, true)
 }
 
+const defaultResourceGroup = "default"
+
+func effectiveResourceGroup(resourceGroup string) string {
+	if resourceGroup = strings.TrimSpace(resourceGroup); resourceGroup != "" {
+		return resourceGroup
+	}
+	return defaultResourceGroup
+}
+
 // NewProviderWithConfig creates a new SAP AI Core provider with explicit configuration.
-func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (model.LLM, error) {
+func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string, options ...ProviderOption) (model.LLM, error) {
+	resourceGroup = effectiveResourceGroup(resourceGroup)
+	configured := &Provider{bedrockIdleTimeout: defaultBedrockIdleTimeout, bedrockHeartbeatInterval: defaultBedrockHeartbeatInterval}
+	for _, option := range options {
+		if option != nil {
+			if err := option(configured); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if !strings.HasSuffix(baseURL, "/v2") {
 		if strings.HasSuffix(baseURL, "/") {
 			baseURL += "v2"
@@ -180,15 +224,18 @@ func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecre
 			Transport: transport,
 			// No timeout for streaming - data flows continuously
 		},
-		baseURL:      baseURL,
-		deploymentID: deploymentID,
-		modelName:    modelName,
-		authConfig:   transport,
+		baseURL:                  baseURL,
+		deploymentID:             deploymentID,
+		modelName:                modelName,
+		authConfig:               transport,
+		bedrockIdleTimeout:       configured.bedrockIdleTimeout,
+		bedrockHeartbeatInterval: configured.bedrockHeartbeatInterval,
 	}, nil
 }
 
 // resolveDeploymentIDWithConfig finds the deployment ID for a given model name using explicit config.
 func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (string, error) {
+	resourceGroup = effectiveResourceGroup(resourceGroup)
 	// Check map first
 	if mapped, ok := ModelIDMap[modelName]; ok {
 		modelName = mapped
@@ -211,7 +258,16 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 		baseURL += "/v2"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/lm/deployments", nil)
+	requestURL, err := url.Parse(baseURL + "/lm/deployments")
+	if err != nil {
+		return "", err
+	}
+	query := requestURL.Query()
+	query.Set("status", "RUNNING")
+	query.Set("resourceGroup", resourceGroup)
+	requestURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL.String(), nil)
 	if err != nil {
 		return "", err
 	}
@@ -539,6 +595,7 @@ func ResolveDeploymentID(ctx context.Context, modelName string) (string, error) 
 
 // ListModels fetches the list of available models from running deployments.
 func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]string, error) {
+	resourceGroup = effectiveResourceGroup(resourceGroup)
 	t := &sapTransport{
 		base:          http.DefaultTransport,
 		clientID:      clientID,
@@ -761,36 +818,167 @@ func (p *Provider) generateBedrockContent(ctx context.Context, req *model.LLMReq
 	}
 }
 
+// bedrockIdleReader keeps parsing, progress and yield on the iterator goroutine.
+// Only the blocking upstream Read runs in a worker. No read-ahead occurs while
+// parsing or yielding, so a slow consumer cannot trigger an idle recovery.
+// HTTP response bodies guarantee Close unblocks Read; every worker is joined.
+type bedrockIdleReader struct {
+	body            io.ReadCloser
+	ctx             context.Context
+	cancel          context.CancelFunc
+	idle, heartbeat time.Duration
+	lastActivity    *time.Time
+	receivedBytes   bool
+	nextHeartbeat   time.Time
+	report          func()
+	closeOnce       sync.Once
+}
+
+func (r *bedrockIdleReader) Close() error {
+	r.closeOnce.Do(func() { r.cancel(); _ = r.body.Close() })
+	return nil
+}
+
+func (r *bedrockIdleReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	idle := time.NewTimer(r.idle)
+	if !r.receivedBytes {
+		if !idle.Stop() {
+			<-idle.C
+		}
+	}
+	defer idle.Stop()
+	heartbeat := time.NewTimer(max(time.Until(r.nextHeartbeat), 0))
+	defer heartbeat.Stop()
+	type result struct {
+		n   int
+		err error
+	}
+	for {
+		done := make(chan result, 1)
+		go func() { n, err := r.body.Read(p); done <- result{n, err} }()
+		for {
+			select {
+			case got := <-done:
+				if err := r.ctx.Err(); err != nil {
+					return 0, err
+				}
+				if got.n > 0 {
+					r.receivedBytes = true
+					*r.lastActivity = time.Now()
+				}
+				if got.n > 0 || got.err != nil {
+					return got.n, got.err
+				}
+				// A zero-byte read is not activity; keep the same idle timer.
+				goto nextRead
+			case <-r.ctx.Done():
+				_ = r.Close()
+				<-done
+				return 0, r.ctx.Err()
+			case <-idle.C:
+				// Prefer bytes already received over a simultaneously ready timer.
+				select {
+				case got := <-done:
+					if err := r.ctx.Err(); err != nil {
+						return 0, err
+					}
+					if got.n > 0 {
+						r.receivedBytes = true
+						*r.lastActivity = time.Now()
+						return got.n, got.err
+					}
+					if got.err != nil {
+						return 0, got.err
+					}
+				default:
+					_ = r.Close()
+					<-done
+				}
+				_ = r.Close()
+				return 0, ErrBedrockStreamIdle
+			case <-heartbeat.C:
+				if r.ctx.Err() == nil {
+					r.report()
+				}
+				r.nextHeartbeat = time.Now().Add(r.heartbeat)
+				heartbeat.Reset(r.heartbeat)
+			}
+		}
+	nextRead:
+	}
+}
+
 // generateBedrockStream owns reset recovery. Before output it may replay; after
 // text it makes an explicit continuation request, never replays the original.
 // Tools remain buffered by the parser until a successful message_stop.
+const (
+	maxBedrockConsecutiveFailures = 3
+	maxBedrockStreamSegments      = 12
+)
+
 func (p *Provider) generateBedrockStream(ctx context.Context, payload []byte, yield func(*model.LLMResponse, error) bool) {
-	const maxAttempts = 3
+	started := time.Now()
+	idle, heartbeat := p.bedrockIdleTimeout, p.bedrockHeartbeatInterval
+	if idle <= 0 {
+		idle = defaultBedrockIdleTimeout
+	}
+	if heartbeat <= 0 {
+		heartbeat = defaultBedrockHeartbeatInterval
+	}
 	originalPayload := payload
 	visible := false
 	var completedText strings.Builder
 	fail := func(err error) {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		if visible {
 			err = fmt.Errorf("sap-bedrock %w", llmerror.NewInterruptedStream(err))
 		}
 		yield(nil, err)
 	}
 	endpoint := fmt.Sprintf("%s/inference/deployments/%s/invoke-with-response-stream", p.baseURL, p.deploymentID)
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	consecutiveFailures := 0
+	for segment := 0; segment < maxBedrockStreamSegments; segment++ {
 		var attemptText strings.Builder
 		if err := ctx.Err(); err != nil {
 			fail(err)
 			return
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+		attemptCtx, cancelAttempt := context.WithCancel(ctx)
+		lastActivity := time.Now()
+		report := func(progress providerstreaming.Progress) {
+			if ctx.Err() != nil {
+				return
+			}
+			if progress.Kind == "" {
+				progress.Kind = providerstreaming.KindPhase
+			}
+			progress.Attempt, progress.MaxAttempts = segment+1, maxBedrockStreamSegments
+			progress.Elapsed, progress.LastActivity = time.Since(started), time.Since(lastActivity)
+			providerstreaming.Report(ctx, progress)
+		}
+		req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
 		if err != nil {
-			yield(nil, err)
+			cancelAttempt()
+			fail(err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("AI-Resource-Group", p.authConfig.resourceGroup)
 		resp, streamErr := p.httpClient.Do(req)
 		if streamErr == nil {
+			reader := &bedrockIdleReader{body: resp.Body, ctx: attemptCtx, cancel: cancelAttempt, idle: idle, heartbeat: heartbeat, lastActivity: &lastActivity, nextHeartbeat: time.Now().Add(heartbeat)}
+			reader.report = func() {
+				report(providerstreaming.Progress{Kind: providerstreaming.KindHeartbeat, Phase: providerstreaming.PhaseWaiting})
+			}
+			resp.Body = reader
 			if resp.StatusCode != http.StatusOK {
 				body, readErr := io.ReadAll(resp.Body)
 				resp.Body.Close()
@@ -800,7 +988,11 @@ func (p *Provider) generateBedrockStream(ctx context.Context, payload []byte, yi
 				fail(llmerror.NewFromResponse("sap-bedrock", resp, body))
 				return
 			}
-			for response, parseErr := range bedrock.ParseStreamWithProgress(resp.Body, func(progress providerstreaming.Progress) { providerstreaming.Report(ctx, progress) }) {
+			for response, parseErr := range bedrock.ParseStreamWithProgress(resp.Body, report) {
+				if ctx.Err() != nil {
+					streamErr = ctx.Err()
+					break
+				}
 				if parseErr != nil {
 					streamErr = parseErr
 					break
@@ -833,14 +1025,24 @@ func (p *Provider) generateBedrockStream(ctx context.Context, payload []byte, yi
 				return
 			}
 		}
+		cancelAttempt()
 		if ctx.Err() != nil {
 			streamErr = ctx.Err()
 		}
-		if attempt == maxAttempts-1 || !isTransientStreamReset(streamErr) {
+		if !(isTransientStreamReset(streamErr) || errors.Is(streamErr, ErrBedrockStreamIdle)) {
 			fail(streamErr)
 			return
 		}
+		madeProgress := attemptText.Len() > 0
 		completedText.WriteString(attemptText.String())
+		// Partial visible text is continued with an explicit assistant-prefix
+		// request below. This avoids replaying the original request while allowing
+		// idle watchdog failures to recover exactly like HTTP/2 stream resets.
+		if madeProgress {
+			consecutiveFailures = 0
+		} else {
+			consecutiveFailures++
+		}
 		if completedText.Len() > 0 {
 			payload, err = bedrockContinuationPayload(originalPayload, completedText.String())
 			if err != nil {
@@ -848,8 +1050,15 @@ func (p *Provider) generateBedrockStream(ctx context.Context, payload []byte, yi
 				return
 			}
 		}
-		slog.Warn("SAP Bedrock stream reset; recovering", "attempt", attempt+2, "max_attempts", maxAttempts, "continuation", completedText.Len() > 0)
-		timer := time.NewTimer(time.Duration(attempt+1) * 50 * time.Millisecond)
+		if segment == maxBedrockStreamSegments-1 {
+			fail(fmt.Errorf("SAP Bedrock stream exceeded %d productive continuation segments: %w", maxBedrockStreamSegments, streamErr))
+			return
+		}
+		if ctx.Err() == nil {
+			providerstreaming.Report(ctx, providerstreaming.Progress{Kind: providerstreaming.KindRecovery, Phase: providerstreaming.PhaseRecovering, Attempt: segment + 2, MaxAttempts: maxBedrockStreamSegments, Elapsed: time.Since(started), LastActivity: time.Since(lastActivity)})
+		}
+		slog.Warn("SAP Bedrock stream interrupted; recovering", "segment", segment+2, "max_segments", maxBedrockStreamSegments, "consecutive_failures", consecutiveFailures, "idle", errors.Is(streamErr, ErrBedrockStreamIdle), "continuation", completedText.Len() > 0)
+		timer := time.NewTimer(time.Duration(min(consecutiveFailures+1, maxBedrockConsecutiveFailures)) * 50 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

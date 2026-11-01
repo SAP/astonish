@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -65,10 +67,37 @@ type SubAgentConfig struct {
 
 // SubTaskProgressEvent represents a structured lifecycle event for sub-task
 // plan visualization in the UI. These are higher-level than raw ADK events.
+// Delegation event/status constants preserve the existing wire vocabulary.
+type DelegationEventType string
+type DelegationStatus string
+
+const (
+	DelegationStart    DelegationEventType = "delegation_start"
+	DelegationComplete DelegationEventType = "delegation_complete"
+	TaskQueued         DelegationStatus    = "queued"
+	TaskRunning        DelegationStatus    = "running"
+	TaskWaiting        DelegationStatus    = "waiting_on_model"
+	TaskEvaluating     DelegationStatus    = "evaluating"
+	TaskRetrying       DelegationStatus    = "retrying"
+	TaskComplete       DelegationStatus    = "complete"
+	TaskFailed         DelegationStatus    = "failed"
+	TaskCancelled      DelegationStatus    = "cancelled"
+)
+
+// DelegationSequence is shared by all attempts in a batch.
+type DelegationSequence struct{ value atomic.Uint64 }
+
+func (s *DelegationSequence) Next() uint64 { return s.value.Add(1) }
+
 type SubTaskProgressEvent struct {
-	Type     string `json:"type"`                // "delegation_start", "task_start", "task_complete", "task_failed", "task_retry", "evaluating", "task_tool_call", "task_tool_result", "task_text", "plan_announced", "plan_step_update"
-	TaskName string `json:"task_name,omitempty"` // Name of the sub-task (matches SubAgentTask.Name)
-	PlanStep string `json:"plan_step,omitempty"` // Plan step this task belongs to (for progress tracking)
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	Sequence       uint64 `json:"sequence,omitempty"`
+	Type           string `json:"type"`                // "delegation_start", "task_start", "task_complete", "task_failed", "task_retry", "evaluating", "task_tool_call", "task_tool_result", "task_text", "plan_announced", "plan_step_update"
+	TaskName       string `json:"task_name,omitempty"` // Name of the sub-task (matches SubAgentTask.Name)
+	PlanStep       string `json:"plan_step,omitempty"` // Plan step this task belongs to (for progress tracking)
 	// SessionID identifies the parent session that owns this delegation.
 	// Populated by RunTask from the context so that the progress callback
 	// can route events to the correct session when multiple sessions share
@@ -102,9 +131,13 @@ type SubTaskProgressEvent struct {
 
 // SubTaskInfo provides a summary of a task for the delegation_start event.
 type SubTaskInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	PlanStep    string `json:"plan_step,omitempty"` // Which plan step this task belongs to
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	PlanStep       string `json:"plan_step,omitempty"` // Which plan step this task belongs to
 }
 
 // PlanFileChange describes a single file a plan phase will touch, along with
@@ -173,13 +206,15 @@ type PlanStepInfo struct {
 
 // SubAgentTask describes a single sub-agent task to execute.
 type SubAgentTask struct {
-	Name         string   // Short identifier for the sub-agent (e.g. "researcher", "coder")
-	Instructions string   // Task-specific instructions for the sub-agent
-	Description  string   // Brief description of what to accomplish
-	ToolFilter   []string // Specific tool names to include (empty = all allowed)
-	Model        string   // Override model (empty = use parent's model)
-	Provider     string   // Override provider (empty = use parent's provider)
-	PlanStep     string   // Plan step this task belongs to (for progress tracking)
+	BatchID, TaskID, ChildSessionID string
+	Sequence                        *DelegationSequence
+	Name                            string   // Short identifier for the sub-agent (e.g. "researcher", "coder")
+	Instructions                    string   // Task-specific instructions for the sub-agent
+	Description                     string   // Brief description of what to accomplish
+	ToolFilter                      []string // Specific tool names to include (empty = all allowed)
+	Model                           string   // Override model (empty = use parent's model)
+	Provider                        string   // Override provider (empty = use parent's provider)
+	PlanStep                        string   // Plan step this task belongs to (for progress tracking)
 
 	// CustomPrompt, when true, uses Instructions directly as the LLM system prompt
 	// instead of wrapping it with buildChildPrompt(). This is used by fleet agents
@@ -222,16 +257,25 @@ type SubAgentTask struct {
 }
 
 // TaskResult holds the outcome of a single sub-agent task execution.
+type TaskAttempt struct {
+	ChildSessionID string `json:"child_session_id"`
+	Attempt        int    `json:"attempt"`
+	Status         string `json:"status"`
+	Duration       string `json:"duration"`
+	Error          string `json:"error,omitempty"`
+}
 type TaskResult struct {
-	Name             string          // Matches SubAgentTask.Name
-	Status           string          // "success", "error", "timeout"
-	Result           string          // Final text output from the sub-agent
-	Trace            *ExecutionTrace // Execution trace for the sub-agent's work
-	ToolCalls        int             // Number of tool calls made
-	Duration         time.Duration   // Wall clock time for the task
-	Error            string          // Error message if Status != "success"
-	Attempts         int             // Number of task attempts made
-	InactivityReason string          // Non-empty when the inactivity watchdog cancelled the task
+	BatchID, TaskID, ChildSessionID string
+	AttemptHistory                  []TaskAttempt
+	Name                            string          // Matches SubAgentTask.Name
+	Status                          string          // "success", "error", "timeout"
+	Result                          string          // Final text output from the sub-agent
+	Trace                           *ExecutionTrace // Execution trace for the sub-agent's work
+	ToolCalls                       int             // Number of tool calls made
+	Duration                        time.Duration   // Wall clock time for the task
+	Error                           string          // Error message if Status != "success"
+	Attempts                        int             // Number of task attempts made
+	InactivityReason                string          // Non-empty when the inactivity watchdog cancelled the task
 }
 
 // ToolGroup defines a named group of tools that sub-agents can request.
@@ -299,7 +343,7 @@ type SubAgentManager struct {
 
 	// SearchToolsFactory creates a catalog-only child search_tools instance.
 	// Set by the launcher; nil = search_tools not available to sub-agents.
-	SearchToolsFactory func() (tool.Tool, error)
+	SearchToolsFactory func(*ChildToolScope) (tool.Tool, error)
 
 	// SkillLookupTool is injected into every sub-agent so it can load
 	// skill content on demand when it encounters a matching task (e.g.,
@@ -378,10 +422,14 @@ func IsExcludedChildTool(name string) bool {
 	return excludedChildTools[name]
 }
 
-// effectiveTaskLLM returns the LLM for child sub-agents. When TaskLLM is set
-// (Auto routing Task tier), children use the task-tier routing LLM. Otherwise
-// they inherit the parent's orchestrator-level LLM.
-func (m *SubAgentManager) effectiveTaskLLM() model.LLM {
+// effectiveTaskLLM returns the LLM for child sub-agents. A request-scoped
+// override is the resolved parent model for this invocation and must win over
+// factory-time defaults. When no request override is present, TaskLLM supplies
+// the Auto-routing task tier; otherwise children inherit the manager default.
+func (m *SubAgentManager) effectiveTaskLLM(ctx context.Context) model.LLM {
+	if requestLLM := LLMFromContext(ctx); requestLLM != nil {
+		return requestLLM
+	}
 	if v := m.taskLLMValue.Load(); v != nil {
 		return v.(model.LLM)
 	}
@@ -477,6 +525,25 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 	defer cancel()
 	ctx = delegationCtx
 
+	sequence := &DelegationSequence{}
+	batchID := uuid.NewString()
+	for i := range tasks {
+		if tasks[i].BatchID == "" {
+			tasks[i].BatchID = batchID
+		}
+		if tasks[i].TaskID == "" {
+			tasks[i].TaskID = uuid.NewString()
+		}
+		if tasks[i].ChildSessionID == "" {
+			tasks[i].ChildSessionID = uuid.NewString()
+		}
+		if tasks[i].Sequence == nil {
+			tasks[i].Sequence = sequence
+		}
+		if tasks[i].ParentID == "" {
+			tasks[i].ParentID = store.SessionIDFromContext(ctx)
+		}
+	}
 	results := make([]TaskResult, len(tasks))
 	var wg sync.WaitGroup
 
@@ -490,9 +557,9 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 					Type:      "task_state",
 					TaskName:  t.Name,
 					PlanStep:  t.PlanStep,
-					Status:    "queued",
+					Status:    string(TaskQueued),
 					Attempt:   1,
-					SessionID: store.SessionIDFromContext(ctx),
+					SessionID: t.ParentID, BatchID: t.BatchID, TaskID: t.TaskID, ChildSessionID: t.ChildSessionID, Sequence: t.Sequence.Next(),
 				})
 			}
 
@@ -501,10 +568,18 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 			case m.sem <- struct{}{}:
 				defer func() { <-m.sem }()
 			case <-ctx.Done():
+				status, state := "cancelled", TaskCancelled
+				if ctx.Err() == context.DeadlineExceeded {
+					status, state = "timeout", TaskFailed
+				}
 				results[idx] = TaskResult{
+					BatchID: t.BatchID, TaskID: t.TaskID, ChildSessionID: t.ChildSessionID,
 					Name:   t.Name,
-					Status: "timeout",
-					Error:  "context cancelled before task started",
+					Status: status,
+					Error:  fmt.Sprintf("%v before task started", ctx.Err()),
+				}
+				if m.SubTaskProgress != nil {
+					m.SubTaskProgress(SubTaskProgressEvent{Type: "task_failed", Status: string(state), TaskName: t.Name, SessionID: t.ParentID, BatchID: t.BatchID, TaskID: t.TaskID, ChildSessionID: t.ChildSessionID, Attempt: 1, Sequence: t.Sequence.Next(), Error: results[idx].Error})
 				}
 				return
 			}
@@ -517,36 +592,46 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 			// Auto-retry: if the task failed with a retryable error and was
 			// making progress (had tool calls or partial output), evaluate
 			// whether to continue or restart with a different approach.
-			if isRetryableFailure(result) && hasProgress(result) {
+			if ctx.Err() == nil && isRetryableFailure(result) && hasProgress(result) {
 				// Emit evaluating event so the UI shows the task is being analyzed
 				if m.SubTaskProgress != nil {
 					m.SubTaskProgress(SubTaskProgressEvent{
 						Type:       "evaluating",
 						TaskName:   t.Name,
 						PlanStep:   t.PlanStep,
-						Status:     "evaluating",
+						Status:     string(TaskEvaluating),
 						Attempt:    1,
 						Error:      result.Error,
 						NoActivity: result.InactivityReason != "",
-						SessionID:  store.SessionIDFromContext(ctx),
+						SessionID:  t.ParentID, BatchID: t.BatchID, TaskID: t.TaskID, ChildSessionID: t.ChildSessionID, Sequence: t.Sequence.Next(),
 					})
 				}
 
 				// Evaluate whether the task was making progress or was stuck
-				evalAction, evalReason, evalGuidance := evaluateTimeoutResult(ctx, m.LLM, t, result)
+				checkpoint := childRetryCheckpoint(result, m.Redactor)
+				evalResult := result
+				evalResult.Result = checkpoint
+				evalResult.Error = result.Error
+				if m.Redactor != nil {
+					evalResult.Error = m.Redactor.Redact(evalResult.Error)
+				}
+				evalResult.Error = childUTF8Prefix(evalResult.Error, childCheckpointExcerptBytes)
+				evalResult.Trace = nil
+				evalAction, evalReason, evalGuidance := evaluateTimeoutResult(ctx, m.LLM, t, evalResult)
 
 				// Emit task_retry event so the UI knows
+				retryChildID := uuid.NewString()
 				if m.SubTaskProgress != nil {
 					m.SubTaskProgress(SubTaskProgressEvent{
 						Type:       "task_retry",
 						TaskName:   t.Name,
 						PlanStep:   t.PlanStep,
-						Status:     "retrying",
+						Status:     string(TaskRetrying),
 						Attempt:    2,
 						Error:      result.Error,
 						Reason:     evalReason,
 						NoActivity: result.InactivityReason != "",
-						SessionID:  store.SessionIDFromContext(ctx),
+						SessionID:  t.ParentID, BatchID: t.BatchID, TaskID: t.TaskID, ChildSessionID: retryChildID, Sequence: t.Sequence.Next(),
 					})
 				}
 
@@ -560,22 +645,17 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 					"eval_reason", evalReason,
 				)
 
-				// Build retry prompt based on evaluation decision
+				// Both restart and continuation preserve bounded verified evidence.
 				retryTask := t
-				if evalAction == "restart" {
-					// Fresh start — do not carry forward partial output
-					retryTask.Description = buildRestartPrompt(t.Description, result, evalGuidance)
-				} else {
-					// Continue — carry forward partial context
-					prompt := buildRetryPrompt(t.Description, result)
-					if evalGuidance != "" {
-						prompt += "\n\nAdditional guidance: " + evalGuidance
-					}
-					retryTask.Description = prompt
+				retryTask.ChildSessionID = retryChildID
+				if m.Redactor != nil {
+					evalGuidance = m.Redactor.Redact(evalGuidance)
 				}
+				retryTask.Description = t.Description + "\n\n" + checkpoint + "\nAdditional guidance: " + childUTF8Prefix(evalGuidance, childCheckpointExcerptBytes)
 				retryTask.Attempt = 2
-				result = m.RunTask(ctx, retryTask)
-				result.Attempts = 2
+				if ctx.Err() == nil {
+					result = mergeChildAttempts(result, m.RunTask(ctx, retryTask))
+				}
 			}
 
 			results[idx] = result
@@ -624,7 +704,33 @@ func isRetryableFailure(r TaskResult) bool {
 // hasProgress returns true if the task made meaningful progress before failing
 // (had tool calls or produced partial output).
 func hasProgress(r TaskResult) bool {
-	return r.ToolCalls > 0 || len(r.Result) > 0
+	if r.Trace != nil {
+		r.Trace.mu.Lock()
+		defer r.Trace.mu.Unlock()
+		for _, step := range r.Trace.Steps {
+			if usefulChildStep(step) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func usefulChildStep(step TraceStep) bool {
+	if childDiscoveryHelper(step.ToolName) || !step.Success || step.Error != "" || len(step.ToolResult) == 0 {
+		return false
+	}
+	if err, ok := step.ToolResult["error"]; ok && err != nil && err != "" {
+		return false
+	}
+	if step.ToolResult["isError"] == true || step.ToolResult["success"] == false {
+		return false
+	}
+	switch step.ToolResult["status"] {
+	case "error", "failed", "authorization_denied":
+		return false
+	}
+	return true
 }
 
 func retryReason(r TaskResult) string {
@@ -652,35 +758,6 @@ func isRawContextDeadlineExceeded(err error) bool {
 	errStr := err.Error()
 	return strings.Contains(errStr, "context deadline exceeded") ||
 		strings.Contains(errStr, "timeout awaiting response headers")
-}
-
-// buildRetryPrompt creates a continuation prompt that includes partial context
-// from the first attempt so the retried sub-agent can pick up where it left off.
-func buildRetryPrompt(originalDescription string, firstAttempt TaskResult) string {
-	var sb strings.Builder
-	sb.WriteString("CONTINUATION: Your previous attempt was interrupted (")
-	sb.WriteString(firstAttempt.Status)
-	if firstAttempt.Error != "" {
-		sb.WriteString(": ")
-		sb.WriteString(firstAttempt.Error)
-	}
-	sb.WriteString(").\n\n")
-
-	// Include partial output from first attempt (truncated to avoid bloating the prompt)
-	if firstAttempt.Result != "" {
-		partial := firstAttempt.Result
-		const maxPartialLen = 2000
-		if len(partial) > maxPartialLen {
-			partial = partial[:maxPartialLen] + "\n... (truncated)"
-		}
-		sb.WriteString("Here is what you accomplished before the interruption:\n")
-		sb.WriteString(partial)
-		sb.WriteString("\n\n")
-	}
-
-	sb.WriteString("Continue from where you left off. Do NOT repeat work already done above. Original task:\n")
-	sb.WriteString(originalDescription)
-	return sb.String()
 }
 
 // evaluateTimeoutPrompt is the system prompt used when evaluating whether a
@@ -837,28 +914,24 @@ func parseEvaluationResponse(response string) (action string, reason string, gui
 	return action, reason, guidance
 }
 
-// buildRestartPrompt creates a fresh-start prompt for a task that was stuck.
-// Unlike buildRetryPrompt, it does NOT carry forward partial output — the task
-// starts completely fresh with corrective guidance.
-func buildRestartPrompt(originalDescription string, failedAttempt TaskResult, guidance string) string {
-	var sb strings.Builder
-	sb.WriteString("RESTART: Your previous attempt at this task was stopped because it was not converging.\n\n")
-	if guidance != "" {
-		sb.WriteString("The previous approach failed. Try a DIFFERENT approach: ")
-		sb.WriteString(guidance)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString("Do NOT repeat the approach that failed. Original task:\n")
-	sb.WriteString(originalDescription)
-	return sb.String()
-}
-
 // RunTask executes a single sub-agent task synchronously.
 // It creates a child session, builds a filtered ChatAgent, runs the full
 // agent loop, collects the output and trace, then returns the result.
-func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskResult {
+func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (result TaskResult) {
 	start := time.Now()
-	parentSessionID := store.SessionIDFromContext(ctx)
+	parentSessionID := task.ParentID
+	if parentSessionID == "" {
+		parentSessionID = store.SessionIDFromContext(ctx)
+	}
+	if task.TaskID == "" {
+		task.TaskID = uuid.NewString()
+	}
+	if task.ChildSessionID == "" {
+		task.ChildSessionID = uuid.NewString()
+	}
+	if task.Sequence == nil {
+		task.Sequence = &DelegationSequence{}
+	}
 	attempt := task.Attempt
 	if attempt <= 0 {
 		attempt = 1
@@ -868,6 +941,9 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	emitProgress := func(evt SubTaskProgressEvent) {
 		if m.SubTaskProgress != nil {
 			evt.SessionID = parentSessionID
+			evt.BatchID, evt.TaskID, evt.ChildSessionID = task.BatchID, task.TaskID, task.ChildSessionID
+			evt.Attempt = attempt
+			evt.Sequence = task.Sequence.Next()
 			m.SubTaskProgress(evt)
 		}
 	}
@@ -877,27 +953,33 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		Type:     "task_start",
 		TaskName: task.Name,
 		PlanStep: task.PlanStep,
-		Status:   "running",
+		Status:   string(TaskRunning),
 		Attempt:  attempt,
 	})
 
 	// Emit task_complete or task_failed on every exit path
-	var result TaskResult
 	defer func() {
+		result.BatchID, result.TaskID, result.ChildSessionID = task.BatchID, task.TaskID, task.ChildSessionID
+		result.AttemptHistory = []TaskAttempt{{ChildSessionID: task.ChildSessionID, Attempt: attempt, Status: result.Status, Duration: result.Duration.Round(100 * time.Millisecond).String(), Error: result.Error}}
 		if result.Attempts == 0 {
 			result.Attempts = attempt
 		}
 		evtType := "task_complete"
-		state := "complete"
+		state := TaskComplete
 		if result.Status != "success" {
 			evtType = "task_failed"
-			state = "failed"
+			state = TaskFailed
+			if ctx.Err() == context.Canceled {
+				state = TaskCancelled
+				result.Status = "cancelled"
+				result.AttemptHistory[0].Status = result.Status
+			}
 		}
 		emitProgress(SubTaskProgressEvent{
 			Type:       evtType,
 			TaskName:   task.Name,
 			PlanStep:   task.PlanStep,
-			Status:     state,
+			Status:     string(state),
 			Duration:   result.Duration.Round(100 * time.Millisecond).String(),
 			Error:      result.Error,
 			Attempt:    result.Attempts,
@@ -917,12 +999,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
 	var liveState atomic.Value
-	liveState.Store("running")
+	liveState.Store(TaskRunning)
 	var inactivityTriggered atomic.Bool
 	watchdogDone := make(chan struct{})
 	defer close(watchdogDone)
 
-	markMeaningfulActivity := func(state string) {
+	markMeaningfulActivity := func(state DelegationStatus) {
 		lastActivity.Store(time.Now().UnixNano())
 		if state != "" {
 			liveState.Store(state)
@@ -940,12 +1022,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 				return
 			case now := <-ticker.C:
 				idle := now.Sub(time.Unix(0, lastActivity.Load()))
-				state, _ := liveState.Load().(string)
+				state, _ := liveState.Load().(DelegationStatus)
 				emitProgress(SubTaskProgressEvent{
 					Type:         "task_state",
 					TaskName:     task.Name,
 					PlanStep:     task.PlanStep,
-					Status:       state,
+					Status:       string(state),
 					Duration:     time.Since(start).Truncate(time.Second).String(),
 					LastActivity: idle.Truncate(time.Second).String(),
 					Attempt:      attempt,
@@ -981,46 +1063,32 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		return result
 	}
 
-	// Resolve tools for the child from requested groups/names
-	childTools := task.OverrideTools
+	// Freeze allowed wrapped instances before constructing any discovery helper.
+	scope, resolveWarnings, scopeErr := m.childToolScope(taskCtx, task)
+	if scopeErr != nil {
+		return TaskResult{Name: task.Name, Status: "error", Error: scopeErr.Error(), Duration: time.Since(start)}
+	}
+	var childTools []tool.Tool
 	var childToolsets []tool.Toolset
-	if task.OverrideToolsets != nil {
-		childToolsets = task.OverrideToolsets
-	}
-	var resolveWarnings []string
-	if childTools == nil {
-		// If the parent specified tool groups, use those directly.
-		// If the parent specified nothing (empty ToolFilter), auto-discover
-		// tools using the ToolIndex based on the task description.
-		toolFilter := task.ToolFilter
-		if len(toolFilter) == 0 && m.ToolIndex != nil && task.Description != "" {
-			discoveredGroups, err := m.ToolIndex.SearchGroupsHybrid(taskCtx, task.Description, 12, 0.005)
-			if err != nil {
-				result = TaskResult{
-					Name:     task.Name,
-					Status:   "error",
-					Error:    fmt.Sprintf("discover tool groups: %v", err),
-					Duration: time.Since(start),
-				}
-				return result
-			}
-			if len(discoveredGroups) > 0 {
-				toolFilter = discoveredGroups
-			}
+	seenDeclarations := map[string]bool{}
+	for _, e := range scope.entries {
+		if !seenDeclarations[e.tool.Name()] {
+			childTools = append(childTools, e.tool)
+			seenDeclarations[e.tool.Name()] = true
 		}
-		childTools, childToolsets, resolveWarnings = m.resolveTools(taskCtx, toolFilter)
 	}
-
-	// Sub-agent search is catalog-only; declarations are fixed when the child is created.
+	bridge, bridgeErr := NewScopedProgressiveToolBridge(scope)
+	if bridgeErr != nil {
+		return TaskResult{Name: task.Name, Status: "error", Error: bridgeErr.Error()}
+	}
+	childTools = append(childTools, bridge...)
 	if m.SearchToolsFactory != nil {
-		childSearchTool, stErr := m.SearchToolsFactory()
-		if stErr == nil {
-			childTools = append(childTools, childSearchTool)
-		} else {
-			slog.Warn("failed to create child search_tools", "task", task.Name, "error", stErr)
+		childSearchTool, stErr := m.SearchToolsFactory(scope)
+		if stErr != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: stErr.Error()}
 		}
+		childTools = append(childTools, childSearchTool)
 	}
-
 	// Inject skill_lookup into every sub-agent so it can load skill content
 	// on demand (e.g., git/github skills for repository operations).
 	if m.SkillLookupTool != nil {
@@ -1063,8 +1131,11 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		userID = ctxUID
 	}
 
-	childSessionID := uuid.NewString()
-	createState := map[string]any{}
+	childSessionID := task.ChildSessionID
+	createState := map[string]any{"batch_id": task.BatchID, "task_id": task.TaskID, "child_session_id": childSessionID, "attempt": attempt}
+	if parentSessionID != "" {
+		createState[persistentsession.StateKeyParentID] = parentSessionID
+	}
 	if task.ParentID != "" {
 		createState[persistentsession.StateKeyParentID] = task.ParentID
 	}
@@ -1133,6 +1204,10 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		beforeModelCallbacks = append(beforeModelCallbacks, taskCompactor.BeforeModelCallback())
 	}
 
+	trace := NewExecutionTrace(task.Description)
+	var progressMu sync.Mutex
+	progressSeen := map[string]bool{}
+
 	// Per-call restore functions keyed by FunctionCallID so parallel
 	// tool calls don't clobber each other's restore closures.
 	var restoreFuncs sync.Map // map[string]func()
@@ -1169,7 +1244,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	if m.FileArtifactCapture != nil {
 		capture := m.FileArtifactCapture
 		afterToolCallbacks = append(afterToolCallbacks, func(ctx tool.Context, t tool.Tool, input, output map[string]any, err error) (map[string]any, error) {
-			if err != nil {
+			if err != nil || !usefulChildStep(TraceStep{ToolName: t.Name(), Success: true, ToolResult: output}) {
 				return output, err
 			}
 			switch t.Name() {
@@ -1345,12 +1420,55 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 		})
 	}
 
+	afterToolCallbacks = append(afterToolCallbacks, func(_ tool.Context, t tool.Tool, input, output map[string]any, err error) (map[string]any, error) {
+		trace.RecordStep(t.Name(), input, output, err)
+		step := TraceStep{ToolName: t.Name(), ToolArgs: input, ToolResult: output, Success: err == nil}
+		if usefulChildStep(step) {
+			key := fmt.Sprintf("%s:%v:%v", t.Name(), input, output)
+			progressMu.Lock()
+			if !progressSeen[key] {
+				progressSeen[key] = true
+				markMeaningfulActivity("waiting_on_model")
+			}
+			progressMu.Unlock()
+		}
+		return output, err
+	})
+
+	// ADK invokes callbacks for execute_tool, not its logical target. Resolve
+	// against the same immutable scope before authorization, credentials and
+	// artifact capture; keep nested argument maps shared for restore semantics.
+	for i, callback := range beforeToolCallbacks {
+		beforeToolCallbacks[i] = func(ctx tool.Context, called tool.Tool, args map[string]any) (map[string]any, error) {
+			logical, input, err := childEffectiveToolCall(ctx, scope, called, args)
+			if err != nil {
+				return nil, err
+			}
+			return callback(ctx, logical, input)
+		}
+	}
+	afterCallbacks := afterToolCallbacks
+	afterToolCallbacks = []llmagent.AfterToolCallback{func(ctx tool.Context, called tool.Tool, input, output map[string]any, callErr error) (map[string]any, error) {
+		logical, args, err := childEffectiveToolCall(ctx, scope, called, input)
+		if err != nil {
+			return output, callErr
+		}
+		for _, callback := range afterCallbacks {
+			updated, updatedErr := callback(ctx, logical, args, output, callErr)
+			if updated != nil {
+				output = updated
+			}
+			callErr = updatedErr
+		}
+		return output, callErr
+	}}
+
 	// Create child LLM agent via ADK.
 	// InstructionProvider bypasses ADK InjectSessionState (see chat_agent_run).
 	childInstr := childPrompt
 	childAgent, err := llmagent.New(llmagent.Config{
 		Name:  task.Name,
-		Model: m.effectiveTaskLLM(),
+		Model: m.effectiveTaskLLM(taskCtx),
 		InstructionProvider: func(_ adkagent.ReadonlyContext) (string, error) {
 			return childInstr, nil
 		},
@@ -1396,19 +1514,18 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 	// runner is re-invoked on the SAME session so the LLM preserves full
 	// conversation history (unlike the outer task-level retry in RunTasks which
 	// creates a fresh session with a continuation prompt).
-	trace := NewExecutionTrace(task.Description)
 	var outputParts []string
 	var toolCallCount int
 	maxRetries := m.Config.MaxRetries
 
 	for attemptIdx := range maxRetries {
 		retried := false
-		liveState.Store("waiting_on_model")
+		liveState.Store(TaskWaiting)
 		emitProgress(SubTaskProgressEvent{
 			Type:     "task_state",
 			TaskName: task.Name,
 			PlanStep: task.PlanStep,
-			Status:   "waiting_on_model",
+			Status:   string(TaskWaiting),
 			Attempt:  attempt,
 		})
 		for event, runErr := range r.Run(taskCtx, userID, childSessionID, userMsg, adkagent.RunConfig{}) {
@@ -1416,12 +1533,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 				// Check for retryable LLM errors (rate limit, server overload, timeout)
 				if llmerror.IsRetryable(runErr) && attemptIdx < maxRetries-1 {
 					wait := retryBackoff(attemptIdx, runErr)
-					liveState.Store("retrying")
+					liveState.Store(TaskRetrying)
 					emitProgress(SubTaskProgressEvent{
 						Type:     "task_state",
 						TaskName: task.Name,
 						PlanStep: task.PlanStep,
-						Status:   "retrying",
+						Status:   string(TaskRetrying),
 						Attempt:  attempt,
 						Reason:   runErr.Error(),
 					})
@@ -1446,12 +1563,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 				// (SAP AI Core gateway timeouts surface as non-wrapped context errors)
 				if isRawContextDeadlineExceeded(runErr) && attemptIdx < maxRetries-1 {
 					wait := retryBackoff(attemptIdx, runErr)
-					liveState.Store("retrying")
+					liveState.Store(TaskRetrying)
 					emitProgress(SubTaskProgressEvent{
 						Type:     "task_state",
 						TaskName: task.Name,
 						PlanStep: task.PlanStep,
-						Status:   "retrying",
+						Status:   string(TaskRetrying),
 						Attempt:  attempt,
 						Reason:   runErr.Error(),
 					})
@@ -1527,7 +1644,6 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					}
 					// Record tool calls in trace
 					if part.FunctionCall != nil {
-						markMeaningfulActivity("running")
 						toolCallCount++
 						args := make(map[string]any)
 						if part.FunctionCall.Args != nil {
@@ -1535,10 +1651,10 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 								args[k] = v
 							}
 						}
-						trace.RecordStep(part.FunctionCall.Name, args, nil, nil)
 						// Emit task_tool_call progress event
 						emitProgress(SubTaskProgressEvent{
 							Type:     "task_tool_call",
+							CallID:   part.FunctionCall.ID,
 							TaskName: task.Name,
 							ToolName: part.FunctionCall.Name,
 							ToolArgs: args,
@@ -1546,20 +1662,10 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) TaskRe
 					}
 					// Record tool results in trace
 					if part.FunctionResponse != nil {
-						markMeaningfulActivity("waiting_on_model")
-						// Update the last trace step with the result
-						trace.mu.Lock()
-						if len(trace.Steps) > 0 {
-							lastStep := &trace.Steps[len(trace.Steps)-1]
-							if lastStep.ToolName == part.FunctionResponse.Name {
-								lastStep.ToolResult = part.FunctionResponse.Response
-								lastStep.Success = true
-							}
-						}
-						trace.mu.Unlock()
 						// Emit task_tool_result progress event
 						emitProgress(SubTaskProgressEvent{
 							Type:       "task_tool_result",
+							CallID:     part.FunctionResponse.ID,
 							TaskName:   task.Name,
 							ToolName:   part.FunctionResponse.Name,
 							ToolResult: part.FunctionResponse.Response,
@@ -1941,4 +2047,332 @@ func (m *SubAgentManager) buildChildPrompt(ctx context.Context, task SubAgentTas
 	}
 
 	return sb.String()
+}
+
+// ChildToolScope is an invocation-local catalog of the exact executable instances
+// selected for a child. Entries are private: discovery cannot widen this boundary.
+type ChildToolScope struct{ entries []childToolEntry }
+type childToolEntry struct {
+	tool  tool.Tool
+	group string
+}
+
+func (s *ChildToolScope) resolve(ctx adkagent.ReadonlyContext, name string) (tool.Tool, string, error) {
+	var match *childToolEntry
+	for i := range s.entries {
+		e := &s.entries[i]
+		if name != e.tool.Name() && name != e.group+"/"+e.tool.Name() {
+			continue
+		}
+		if match != nil {
+			return nil, "", fmt.Errorf("tool %q is ambiguous", name)
+		}
+		match = e
+	}
+	if match == nil {
+		return nil, "", fmt.Errorf("tool %q is outside the child scope", name)
+	}
+	if isToolDisabled(ctx, name, match.tool.Name(), match.group+"/"+match.tool.Name()) {
+		return nil, "", fmt.Errorf("tool %q is disabled", name)
+	}
+	if IsMCPGroupInaccessible(ctx, match.group) {
+		return nil, "", fmt.Errorf("tool %q is inaccessible", name)
+	}
+	return match.tool, match.group, nil
+}
+
+// Matches returns a fresh, access-filtered snapshot. Every result is executable
+// through this scope's bridge, including request-local and sandbox-wrapped tools.
+func (s *ChildToolScope) Matches(ctx context.Context) []ToolMatch {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	readCtx := &minimalReadonlyContext{Context: ctx}
+	var matches []ToolMatch
+	for _, e := range s.entries {
+		name := e.tool.Name()
+		if strings.HasPrefix(e.group, "mcp:") || e.group == "a2a" {
+			name = e.group + "/" + name
+		}
+		if _, _, err := s.resolve(readCtx, name); err != nil {
+			continue
+		}
+		matches = append(matches, ToolMatch{ToolName: name, GroupName: e.group, Description: e.tool.Description(), Score: 1})
+	}
+	return matches
+}
+
+func childDiscoveryHelper(name string) bool {
+	return name == "search_tools" || name == "describe_tools" || name == executeToolName || name == "skill_lookup"
+}
+
+func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask) (*ChildToolScope, []string, error) {
+	if len(task.ToolFilter) == 0 && task.OverrideTools == nil && task.OverrideToolsets == nil && m.ToolIndex != nil && task.Description != "" {
+		discovered, err := m.ToolIndex.SearchGroupsHybrid(ctx, task.Description, 12, 0.005)
+		if err != nil {
+			return nil, nil, fmt.Errorf("discover tool groups: %w", err)
+		}
+		task.ToolFilter = discovered
+	}
+	groups := make(map[string]*ToolGroup, len(m.ToolGroups))
+	for name, g := range m.ToolGroups {
+		groups[name] = g
+	}
+	for name, g := range RequestMCPGroupsFromContext(ctx) {
+		groups[name] = g
+	}
+	// Only the selected request search tool joins web; unrelated request tools do not.
+	if po := PromptOverridesFromContext(ctx); po != nil {
+		webName := m.WebSearchToolName
+		if po.WebSearchToolName != "" {
+			webName = po.WebSearchToolName
+		}
+		webDisabled := po.WebSearchAvailable != nil && !*po.WebSearchAvailable
+		for _, t := range po.AdditionalTools {
+			if t == nil || (webDisabled && t.Name() == webName) {
+				continue
+			}
+			group := "request"
+			if t.Name() == webName {
+				group = "web"
+			}
+			old := groups[group]
+			copy := &ToolGroup{Name: group}
+			if old != nil {
+				*copy = *old
+				copy.Tools = append([]tool.Tool(nil), old.Tools...)
+			}
+			copy.Tools = append(copy.Tools, t)
+			groups[group] = copy
+		}
+	}
+	// Resolve lazy explicitly requested groups into this local map only.
+	for _, token := range task.ToolFilter {
+		group := strings.SplitN(token, "/", 2)[0]
+		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil {
+			groups[group] = m.MCPGroupResolver(ctx, strings.TrimPrefix(group, "mcp:"))
+		}
+	}
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var catalog []childToolEntry
+	readCtx := &minimalReadonlyContext{Context: ctx}
+	for _, name := range names {
+		g := groups[name]
+		if g == nil {
+			continue
+		}
+		for _, t := range g.Tools {
+			catalog = append(catalog, childToolEntry{t, name})
+		}
+		// Overrides already contain the executable wrappers. Never initialize
+		// ambient toolsets just to discover their names (or fall back to them).
+		if task.OverrideTools != nil || task.OverrideToolsets != nil || IsMCPGroupInaccessible(ctx, name) {
+			continue
+		}
+		needsToolsets := false
+		for _, token := range task.ToolFilter {
+			if token == name || strings.HasPrefix(token, name+"/") {
+				needsToolsets = true
+				break
+			}
+			// Only an unresolved bare tool name needs catalog-wide lookup.
+			if groups[token] != nil || strings.Contains(token, "/") {
+				continue
+			}
+			known := false
+			for _, candidate := range groups {
+				if candidate == nil {
+					continue
+				}
+				for _, t := range candidate.Tools {
+					if t != nil && t.Name() == token {
+						known = true
+					}
+				}
+			}
+			if !known {
+				needsToolsets = true
+			}
+		}
+		if !needsToolsets {
+			continue
+		}
+		for _, ts := range g.Toolsets {
+			tools, err := ts.Tools(readCtx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolve child toolset %s: %w", ts.Name(), err)
+			}
+			for _, t := range tools {
+				catalog = append(catalog, childToolEntry{t, name})
+			}
+		}
+	}
+	for _, t := range m.FleetTools {
+		for _, token := range task.ToolFilter {
+			if t.Name() == token {
+				catalog = append(catalog, childToolEntry{t, "fleet"})
+				break
+			}
+		}
+	}
+	if task.OverrideTools != nil || task.OverrideToolsets != nil {
+		// Overrides replace the catalog, never fall back to host/global instances.
+		original := catalog
+		catalog = nil
+		add := func(t tool.Tool, group string) {
+			if group == "" {
+				group = "override"
+				for _, e := range original {
+					if t != nil && e.tool != nil && e.tool.Name() == t.Name() {
+						group = e.group
+						break
+					}
+				}
+			}
+			catalog = append(catalog, childToolEntry{t, group})
+		}
+		for _, t := range task.OverrideTools {
+			add(t, "")
+		}
+		for _, ts := range task.OverrideToolsets {
+			group := ""
+			for _, name := range names {
+				if g := groups[name]; g != nil {
+					for _, original := range g.Toolsets {
+						if original.Name() == ts.Name() {
+							group = name
+						}
+					}
+				}
+			}
+			tools, err := ts.Tools(readCtx)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, t := range tools {
+				add(t, group)
+			}
+		}
+	}
+	scope := &ChildToolScope{}
+	seen := map[string]bool{}
+	matched := map[string]bool{}
+	for _, e := range catalog {
+		if e.tool == nil {
+			continue
+		}
+		name := e.tool.Name()
+		if childDiscoveryHelper(name) || (excludedChildTools[name] && e.group != "fleet") {
+			continue
+		}
+		allowed := len(task.ToolFilter) == 0 && (task.OverrideTools != nil || task.OverrideToolsets != nil)
+		for _, token := range task.ToolFilter {
+			if token == name || token == e.group || token == e.group+"/"+name {
+				allowed = true
+				matched[token] = true
+			}
+		}
+		key := e.group + "/" + name
+		if !allowed || seen[key] || isToolDisabled(readCtx, name, key) || IsMCPGroupInaccessible(ctx, e.group) {
+			continue
+		}
+		seen[key] = true
+		scope.entries = append(scope.entries, e)
+	}
+	var warnings []string
+	for _, token := range task.ToolFilter {
+		if !matched[token] {
+			warnings = append(warnings, fmt.Sprintf("tool or group %q is unavailable in the child scope", token))
+		}
+	}
+	return scope, warnings, nil
+}
+
+func childEffectiveToolCall(ctx adkagent.ReadonlyContext, scope *ChildToolScope, called tool.Tool, args map[string]any) (tool.Tool, map[string]any, error) {
+	if called.Name() != executeToolName {
+		return called, args, nil
+	}
+	decoded, err := decodeExecuteToolArgs(args)
+	if err != nil {
+		return nil, nil, err
+	}
+	logical, _, err := scope.resolve(ctx, decoded.Name)
+	return logical, decoded.Arguments, err
+}
+
+const childCheckpointBytes = 12 * 1024
+const childCheckpointExcerptBytes = 1024
+const childCheckpointSteps = 8
+
+func childUTF8Prefix(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+	return text[:limit]
+}
+
+func childRetryCheckpoint(result TaskResult, redactor *credentials.Redactor) string {
+	clean := func(text string) string {
+		if redactor != nil {
+			text = redactor.Redact(text)
+		}
+		return childUTF8Prefix(text, childCheckpointExcerptBytes)
+	}
+	var b strings.Builder
+	b.WriteString("Verified tool-result checkpoint (do not repeat completed work):\n")
+	if result.Trace != nil {
+		result.Trace.mu.Lock()
+		steps := append([]TraceStep(nil), result.Trace.Steps...)
+		result.Trace.mu.Unlock()
+		var useful []TraceStep
+		for _, step := range steps {
+			if usefulChildStep(step) {
+				useful = append(useful, step)
+			}
+		}
+		if len(useful) > childCheckpointSteps {
+			useful = useful[len(useful)-childCheckpointSteps:]
+		}
+		for _, step := range useful {
+			// Paths, URLs and artifact references are retained in bounded result excerpts;
+			// arguments are omitted because they may contain credentials or large inputs.
+			data, _ := json.Marshal(step.ToolResult)
+			b.WriteString(clean(step.ToolName) + ": " + clean(string(data)) + "\n")
+		}
+	}
+	if result.Result != "" {
+		b.WriteString("Partial answer: " + clean(result.Result) + "\n")
+	}
+	b.WriteString("Unresolved blocker: " + clean(retryReason(result)) + "\nNext action: finish the original task using the results above; do not repeat discovery or successful actions.\n")
+	return childUTF8Prefix(b.String(), childCheckpointBytes)
+}
+
+func mergeChildAttempts(first, last TaskResult) TaskResult {
+	last.AttemptHistory = append(append([]TaskAttempt(nil), first.AttemptHistory...), last.AttemptHistory...)
+	last.ToolCalls += first.ToolCalls
+	last.Duration += first.Duration
+	last.Attempts = 2
+	if first.Trace != nil {
+		merged := NewExecutionTrace(first.Trace.UserRequest)
+		first.Trace.mu.Lock()
+		merged.Steps = append(merged.Steps, first.Trace.Steps...)
+		merged.StartedAt = first.Trace.StartedAt
+		first.Trace.mu.Unlock()
+		if last.Trace != nil {
+			last.Trace.mu.Lock()
+			merged.Steps = append(merged.Steps, last.Trace.Steps...)
+			merged.EndedAt = last.Trace.EndedAt
+			merged.FinalOutput = last.Trace.FinalOutput
+			last.Trace.mu.Unlock()
+		}
+		last.Trace = merged
+	}
+	return last
 }

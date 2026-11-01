@@ -11,6 +11,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -76,6 +77,10 @@ func TryDestroySession(appCfg *config.AppConfig, sessionID string, sessRegistry 
 	}
 }
 
+// ErrOrphanPruneAuthorityUnavailable means destructive pruning was requested
+// without an authoritative chat-session snapshot.
+var ErrOrphanPruneAuthorityUnavailable = errors.New("sandbox: authoritative live-session snapshot unavailable")
+
 // PruneOrphansForBackend is a backend-agnostic orphan reaper. It compares
 // sandbox sessions tracked in the registry against the set of
 // existingSessionIDs (which come from the chat/session store) and destroys
@@ -98,6 +103,9 @@ func PruneOrphansForBackend(ctx context.Context, b Backend, registry *SessionReg
 // current behavior. HTTP prune must pass the caller's org and team so a
 // platform admin cannot delete another tenant's containers by accident.
 func PruneOrphansForBackendFiltered(ctx context.Context, b Backend, registry *SessionRegistry, existingSessionIDs map[string]bool, filter *SessionFilter) (int, error) {
+	if existingSessionIDs == nil {
+		return 0, ErrOrphanPruneAuthorityUnavailable
+	}
 	entries := registry.List()
 	pruned := 0
 

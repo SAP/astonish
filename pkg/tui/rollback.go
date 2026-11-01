@@ -169,6 +169,7 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 	entries := make([]events.HistoryMsg, 0, len(msg.entries))
 	for _, e := range msg.entries {
 		entries = append(entries, events.HistoryMsg{
+			Delegation:       e.Delegation,
 			Kind:             e.Kind,
 			Text:             e.Text,
 			ToolName:         e.ToolName,
@@ -187,6 +188,7 @@ func (m model) applyRolledBack(msg rolledBackMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 	m.planMode = false
+	m.delegationDetail = delegationDetailState{}
 	m.tr.Reset()
 	m.tr.LoadHistory(entries)
 	m.info = m.backend.Info()

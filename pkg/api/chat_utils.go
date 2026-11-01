@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	persistentsession "github.com/SAP/astonish/pkg/session"
@@ -49,7 +50,9 @@ var userTimestampRe = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}
 // until the matching FunctionResponse arrives, so we can reconstruct a
 // complete subtask_execution message.
 type pendingDelegation struct {
-	tasks []SubTaskInfoMsg // task plan from the call args
+	batchID      string
+	messageIndex int
+	tasks        []SubTaskInfoMsg // task plan from the call args
 }
 
 // eventsToMessages transforms ADK session events into a flat message list for the frontend.
@@ -217,7 +220,10 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 				// message instead.
 				if toolName == "delegate_tasks" {
 					pd := extractDelegationPlan(toolArgs)
+					pd.batchID = part.FunctionCall.ID
 					pendingDelegations[part.FunctionCall.ID] = pd
+					pd.messageIndex = len(messages)
+					messages = append(messages, buildSubTaskExecutionMessage(pd, nil))
 					continue
 				}
 
@@ -234,9 +240,9 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					continue
 				}
 
-				// Buffer write_file/edit_file calls to emit artifact messages
-				// when their FunctionResponse confirms success.
-				if toolName == "write_file" || toolName == "edit_file" {
+				// Buffer file mutations and load_file calls so the restored
+				// chat emits the same Files-section artifact as live delivery.
+				if toolName == "write_file" || toolName == "edit_file" || toolName == "load_file" {
 					p := extractFilePath(toolName, toolArgs)
 					if p != "" {
 						pendingWriteFiles[part.FunctionCall.ID] = pendingWriteFile{
@@ -266,8 +272,12 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 						pendingDelegations[part.FunctionResponse.ID],
 						part.FunctionResponse.Response,
 					)
+					if pd := pendingDelegations[part.FunctionResponse.ID]; pd != nil {
+						messages[pd.messageIndex] = msg
+					} else {
+						messages = append(messages, msg)
+					}
 					delete(pendingDelegations, part.FunctionResponse.ID)
-					messages = append(messages, msg)
 					continue
 				}
 
@@ -287,17 +297,11 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					ToolResult: summarizeToolResult(resp),
 				})
 
-				// Emit inline artifact message for successful write_file/edit_file
+				// Emit an artifact message after a successful file mutation or
+				// explicit load_file delivery to the Files section.
 				if pw, ok := pendingWriteFiles[part.FunctionResponse.ID]; ok {
 					delete(pendingWriteFiles, part.FunctionResponse.ID)
-					// Only emit if the tool succeeded (no error in response)
-					hasError := false
-					if resp != nil {
-						if _, errField := resp["error"]; errField {
-							hasError = true
-						}
-					}
-					if !hasError {
+					if common.ToolResultSucceeded(part.FunctionResponse.Response, nil) {
 						messages = append(messages, StudioMessage{
 							Type:     "artifact",
 							Content:  pw.path,
@@ -360,108 +364,91 @@ func extractDelegationPlan(args map[string]any) *pendingDelegation {
 // buildSubTaskExecutionMessage reconstructs a subtask_execution message from
 // a buffered delegation plan and the delegate_tasks response.
 func buildSubTaskExecutionMessage(pd *pendingDelegation, resp map[string]any) StudioMessage {
-	msg := StudioMessage{
-		Type:   "subtask_execution",
-		Status: "complete",
-	}
-
-	// Use tasks from the buffered call if available
+	msg := StudioMessage{Type: "subtask_execution", Status: "interrupted"}
+	batchID := strVal(resp["batch_id"])
 	if pd != nil {
-		msg.Tasks = pd.tasks
-	}
-
-	// Build synthetic events from the response results
-	var events []SubTaskEventMsg
-
-	// Opening event
-	events = append(events, SubTaskEventMsg{
-		Type: "delegation_start",
-	})
-
-	if resp != nil {
-		// Extract overall status
-		if status, ok := resp["status"].(string); ok {
-			msg.Status = status
+		msg.Tasks = append([]SubTaskInfoMsg(nil), pd.tasks...)
+		if batchID == "" {
+			batchID = pd.batchID
 		}
-
-		// Extract per-task results
-		if resultsRaw, ok := resp["results"]; ok {
-			if resultsList, ok := resultsRaw.([]any); ok {
-				for _, r := range resultsList {
-					rMap, ok := r.(map[string]any)
-					if !ok {
-						continue
-					}
-					taskName, _ := rMap["name"].(string)
-					taskStatus, _ := rMap["status"].(string)
-					taskDuration, _ := rMap["duration"].(string)
-					taskError, _ := rMap["error"].(string)
-					taskResult, _ := rMap["result"].(string)
-
-					// Emit task_start
-					events = append(events, SubTaskEventMsg{
-						Type:     "task_start",
-						TaskName: taskName,
-					})
-
-					// Emit task_text with the sub-agent's result output (if any)
-					if taskResult != "" {
-						events = append(events, SubTaskEventMsg{
-							Type:     "task_text",
-							TaskName: taskName,
-							Text:     taskResult,
-						})
-					}
-
-					// Emit task_complete or task_failed
-					if taskStatus == "success" {
-						events = append(events, SubTaskEventMsg{
-							Type:     "task_complete",
-							TaskName: taskName,
-							Duration: taskDuration,
-						})
-					} else {
-						events = append(events, SubTaskEventMsg{
-							Type:     "task_failed",
-							TaskName: taskName,
-							Duration: taskDuration,
-							Error:    taskError,
-						})
-					}
-				}
+	}
+	if status := strVal(resp["status"]); status != "" {
+		msg.Status = status
+	}
+	if _, ok := resp["error"]; ok {
+		msg.Status = "error"
+	}
+	for i := range msg.Tasks {
+		msg.Tasks[i].BatchID = batchID
+		if msg.Tasks[i].TaskID == "" {
+			msg.Tasks[i].TaskID = fmt.Sprintf("%s/task-%d", batchID, i+1)
+		}
+	}
+	events := []SubTaskEventMsg{{Type: "delegation_start"}}
+	results, _ := resp["results"].([]any)
+	for ri, raw := range results {
+		r, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := strVal(r["name"])
+		taskID := strVal(r["task_id"])
+		if taskID == "" {
+			taskID = fmt.Sprintf("%s/task-%d", batchID, ri+1)
+		}
+		info := SubTaskInfoMsg{BatchID: batchID, TaskID: taskID, Name: name, ChildSessionID: strVal(r["child_session_id"]), Attempt: toInt(r["attempts"])}
+		if info.Attempt == 0 {
+			info.Attempt = 1
+		}
+		found := false
+		for i := range msg.Tasks {
+			if msg.Tasks[i].TaskID == taskID || msg.Tasks[i].Name == name {
+				info.Description = msg.Tasks[i].Description
+				msg.Tasks[i] = info
+				found = true
+				break
 			}
 		}
+		if !found {
+			msg.Tasks = append(msg.Tasks, info)
+		}
+		history, _ := r["attempt_history"].([]any)
+		if len(history) == 0 {
+			history = []any{map[string]any{"attempt": info.Attempt, "child_session_id": info.ChildSessionID, "status": r["status"], "duration": r["duration"], "error": r["error"]}}
+		}
+		for ai, rawAttempt := range history {
+			a, ok := rawAttempt.(map[string]any)
+			if !ok {
+				continue
+			}
+			attempt := toInt(a["attempt"])
+			if attempt == 0 {
+				attempt = ai + 1
+			}
+			evt := SubTaskEventMsg{TaskName: name, TaskID: taskID, ChildSessionID: strVal(a["child_session_id"]), Attempt: attempt, Type: "task_start"}
+			events = append(events, evt)
+			if ai == len(history)-1 && strVal(r["result"]) != "" {
+				text := evt
+				text.Type = "task_text"
+				text.Text = strVal(r["result"])
+				events = append(events, text)
+			}
+			evt.Status = strVal(a["status"])
+			evt.Duration = strVal(a["duration"])
+			evt.Error = strVal(a["error"])
+			evt.Type = "task_failed"
+			if evt.Status == "success" || evt.Status == "complete" {
+				evt.Type = "task_complete"
+			}
+			events = append(events, evt)
+		}
 	}
-
-	// Closing event
-	events = append(events, SubTaskEventMsg{
-		Type:   "delegation_complete",
-		Status: msg.Status,
-	})
-
+	events = append(events, SubTaskEventMsg{Type: "delegation_complete", Status: msg.Status, Error: strVal(resp["error"])})
+	for i := range events {
+		events[i].BatchID = batchID
+		events[i].Sequence = uint64(i + 1)
+	}
 	msg.Events = events
-
-	// If we didn't get tasks from the call args (edge case: missing FunctionCall ID match),
-	// try to reconstruct task names from the response results.
-	if len(msg.Tasks) == 0 && resp != nil {
-		if resultsRaw, ok := resp["results"]; ok {
-			if resultsList, ok := resultsRaw.([]any); ok {
-				for _, r := range resultsList {
-					rMap, ok := r.(map[string]any)
-					if !ok {
-						continue
-					}
-					name, _ := rMap["name"].(string)
-					if name != "" {
-						msg.Tasks = append(msg.Tasks, SubTaskInfoMsg{
-							Name: name,
-						})
-					}
-				}
-			}
-		}
-	}
-
 	return msg
 }
 
@@ -611,7 +598,7 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 			if part.FunctionCall != nil {
 				identity := uiTools.call(part.FunctionCall)
 				name := identity.name
-				if name == "write_file" || name == "edit_file" {
+				if name == "write_file" || name == "edit_file" || name == "load_file" {
 					path := extractFilePath(name, identity.args)
 					if path != "" {
 						pending[part.FunctionCall.ID] = pendingWrite{
@@ -636,12 +623,10 @@ func collectArtifacts(events session.Events) []ArtifactInfo {
 				}
 				delete(pending, part.FunctionResponse.ID)
 
-				// Check if the tool succeeded (no error in response)
+				// Artifact publication requires a completed successful response.
 				resp := part.FunctionResponse.Response
-				if resp != nil {
-					if _, hasErr := resp["error"]; hasErr {
-						continue
-					}
+				if !common.ToolResultSucceeded(resp, nil) {
+					continue
 				}
 
 				switch pw.toolName {
@@ -705,10 +690,8 @@ func extractFilePath(toolName string, args map[string]any) string {
 	}
 	var p string
 	switch toolName {
-	case "write_file":
-		p, _ = args["file_path"].(string)
-	case "edit_file":
-		p, _ = args["path"].(string)
+	case "write_file", "read_file", "edit_file", "load_file":
+		p = common.FileToolPath(args)
 	}
 	if p == "" {
 		return ""
@@ -1225,8 +1208,8 @@ func readArtifactContentFromEventSlice(events []*session.Event, filePath string)
 				args := identity.args
 				switch identity.name {
 				case "write_file":
-					p, _ := args["file_path"].(string)
-					if filepath.Clean(p) != cleanTarget {
+					p := common.FileToolPath(args)
+					if p == "" || filepath.Clean(p) != cleanTarget {
 						continue
 					}
 					previous := pendingMutation{previousContent: content, previousKnown: known}
@@ -1237,8 +1220,8 @@ func readArtifactContentFromEventSlice(events []*session.Event, filePath string)
 						pending[part.FunctionCall.ID] = previous
 					}
 				case "edit_file":
-					p, _ := args["path"].(string)
-					if !known || filepath.Clean(p) != cleanTarget {
+					p := common.FileToolPath(args)
+					if !known || p == "" || filepath.Clean(p) != cleanTarget {
 						continue
 					}
 					updated, ok := applyEditFileFallback(content, args)

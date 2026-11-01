@@ -3,6 +3,10 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	adkagent "google.golang.org/adk/agent"
@@ -15,6 +19,227 @@ import (
 
 	"github.com/SAP/astonish/pkg/store"
 )
+
+type aliasVaultStore struct{ store.CredentialStore }
+
+func (*aliasVaultStore) List(context.Context) map[string]store.CredentialType { return nil }
+
+type aliasVaultBackend struct {
+	Backend
+	owner string
+}
+
+func (b *aliasVaultBackend) PushFile(_ context.Context, id, _ string, r io.Reader, _ os.FileMode) error {
+	b.owner = id
+	_, err := io.ReadAll(r)
+	return err
+}
+
+type aliasVaultClient struct {
+	argumentSpyClient
+	readyID string
+}
+
+func (*aliasVaultClient) SandboxSessionID() string { return "parent" }
+func (c *aliasVaultClient) EnsureReadyContext(ctx context.Context, id string) error {
+	c.readyID = id
+	return ctx.Err()
+}
+
+type aliasVaultPool struct {
+	spyPool
+	client  *aliasVaultClient
+	backend Backend
+}
+
+func (p *aliasVaultPool) GetOrCreate(string) ToolNodeClient { return p.client }
+func (p *aliasVaultPool) GetBackend() Backend               { return p.backend }
+
+func TestNodeToolRun_AliasedHTTPVaultUsesCanonicalOwner(t *testing.T) {
+	backend := &aliasVaultBackend{}
+	client := &aliasVaultClient{}
+	nt := NewNodeToolWithPool(testTool{name: "http_request"}, &aliasVaultPool{client: client, backend: backend})
+	previous := NetworkPolicyPreSeeder
+	t.Cleanup(func() { NetworkPolicyPreSeeder = previous })
+	var policyOwner string
+	NetworkPolicyPreSeeder = func(_ context.Context, id string) { policyOwner = id }
+	ctx := store.WithCredentialStore(context.Background(), &aliasVaultStore{})
+	_, err := nt.Run(testToolContext{Context: ctx, sessionID: "child"}, map[string]any{"url": "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.owner != "parent" || policyOwner != "parent" || !client.called || client.args["_caller"] != "agent-1" {
+		t.Fatalf("vault=%q policy=%q client=%+v", backend.owner, policyOwner, client)
+	}
+}
+
+func TestNodeToolRun_ReadinessCancellationBeforeDispatch(t *testing.T) {
+	client := &aliasVaultClient{}
+	nt := NewNodeToolWithPool(testTool{name: "read_file"}, &aliasVaultPool{client: client})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := nt.Run(testToolContext{Context: ctx, sessionID: "child"}, map[string]any{"path": "/file"})
+	if err != context.Canceled || client.called {
+		t.Fatalf("err=%v called=%v", err, client.called)
+	}
+}
+
+type argumentTestTool struct {
+	testTool
+	required  string
+	localArgs any
+}
+
+func (t *argumentTestTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name: t.Name(),
+		ParametersJsonSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{t.required: map[string]any{"type": "string"}},
+			"required":   []string{t.required},
+		},
+	}
+}
+
+func (t *argumentTestTool) Run(_ tool.Context, args any) (map[string]any, error) {
+	t.localArgs = args
+	return map[string]any{"local": true}, nil
+}
+
+type argumentSpyClient struct {
+	stubClient
+	ready, called bool
+	args          map[string]any
+}
+
+func (c *argumentSpyClient) EnsureReady(string) error {
+	c.ready = true
+	return nil
+}
+
+func (c *argumentSpyClient) Call(_, _ string, args map[string]any) (json.RawMessage, error) {
+	c.called = true
+	c.args = args
+	return json.RawMessage(`{"ok":true}`), nil
+}
+
+type argumentSpyPool struct {
+	spyPool
+	client *argumentSpyClient
+}
+
+func (p *argumentSpyPool) GetOrCreate(sessionID string) ToolNodeClient {
+	p.spyPool.GetOrCreate(sessionID)
+	return p.client
+}
+
+func TestNodeToolRun_ValidatesBeforeSandboxDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, required, want string
+		args                 any
+	}{
+		{"missing", "path", `required argument "path" is missing`, map[string]any{}},
+		{"null", "path", `required argument "path" must not be null`, map[string]any{"path": nil}},
+		{"nil", "path", `required argument "path" is missing`, nil},
+		{"typed nil", "path", `required argument "path" is missing`, map[string]any(nil)},
+		{"struct missing", "path", `required argument "path" is missing`, struct{ Title string }{Title: "title"}},
+		{"before caller injection", "_caller", `required argument "_caller" is missing`, map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &argumentSpyClient{}
+			pool := &argumentSpyPool{client: client}
+			original := &argumentTestTool{testTool: testTool{name: "load_file"}, required: tc.required}
+			nt := NewNodeToolWithPool(original, pool)
+			ctx := testToolContext{Context: context.Background(), sessionID: "session-args"}
+			_, err := nt.Run(ctx, tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Run error = %v, want %s", err, tc.want)
+			}
+			if pool.method != "" || client.ready || client.called {
+				t.Errorf("invalid args touched sandbox: acquisition=%q ready=%v called=%v", pool.method, client.ready, client.called)
+			}
+			if args, ok := tc.args.(map[string]any); ok {
+				if _, injected := args["_caller"]; injected {
+					t.Error("invalid arguments were mutated with caller metadata")
+				}
+			}
+		})
+	}
+}
+
+func TestNodeToolRun_ClonesArgumentsBeforeCallerInjection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args any
+	}{
+		{"map", map[string]any{"path": "/sandbox/report.md"}},
+		{"existing caller", map[string]any{"path": "/sandbox/report.md", "_caller": "original"}},
+		{"struct", struct {
+			Path string `json:"path"`
+		}{Path: "/sandbox/report.md"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, _ := json.Marshal(tc.args)
+			client := &argumentSpyClient{}
+			nt := NewNodeToolWithPool(&argumentTestTool{testTool: testTool{name: "load_file"}, required: "path"}, &argumentSpyPool{client: client})
+			result, err := nt.Run(testToolContext{Context: context.Background(), sessionID: "session-args"}, tc.args)
+			if err != nil || result["ok"] != true {
+				t.Fatalf("Run = %v, %v", result, err)
+			}
+			if !client.ready || !client.called || client.args["path"] != "/sandbox/report.md" || client.args["_caller"] != "agent-1" {
+				t.Errorf("incorrect dispatch: %+v", client)
+			}
+			after, _ := json.Marshal(tc.args)
+			if string(before) != string(after) {
+				t.Errorf("arguments mutated: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestNodeToolRun_NoSessionPreservesLocalFallback(t *testing.T) {
+	original := &argumentTestTool{testTool: testTool{name: "load_file"}, required: "path"}
+	pool := &argumentSpyPool{client: &argumentSpyClient{}}
+	nt := NewNodeToolWithPool(original, pool)
+	args := struct{ Title string }{Title: "unchanged"}
+	result, err := nt.Run(nil, args)
+	if err != nil || result["local"] != true || !reflect.DeepEqual(original.localArgs, args) {
+		t.Fatalf("local fallback = %v, %v; args=%#v", result, err, original.localArgs)
+	}
+	if pool.method != "" {
+		t.Fatal("local fallback acquired a sandbox client")
+	}
+}
+
+func TestWrapTools_LoadFile(t *testing.T) {
+	load := &argumentTestTool{testTool: testTool{name: "load_file"}, required: "path"}
+	host := testTool{name: "memory_search"}
+	pool := &spyPool{}
+	client := &LazyNodeClient{}
+	for _, tc := range []struct {
+		name    string
+		wrapped []tool.Tool
+	}{
+		{"pool", WrapToolsWithPool([]tool.Tool{load, host}, pool)},
+		{"fleet", WrapToolsWithNodeClient([]tool.Tool{load, host}, client)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nt, ok := tc.wrapped[0].(*NodeTool)
+			if !ok {
+				t.Fatalf("load_file not sandbox wrapped: %T", tc.wrapped[0])
+			}
+			if nt.Tool != load || !reflect.DeepEqual(nt.Declaration(), load.Declaration()) {
+				t.Error("wrapper did not preserve tool/schema")
+			}
+			if tc.name == "pool" && nt.pool != pool || tc.name == "fleet" && nt.lazyClient != client {
+				t.Error("wrapper lost routing client")
+			}
+			if tc.wrapped[1] != host {
+				t.Error("host tool unexpectedly wrapped")
+			}
+		})
+	}
+}
 
 // spyPool records which ToolNodePool method was called and with what args.
 type spyPool struct {

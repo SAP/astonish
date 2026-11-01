@@ -14,6 +14,46 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestDelegationTransportHistoryAndDetail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/subtask-events") {
+			if r.URL.Query().Get("child_session_id") != "child" || r.URL.Query().Get("attempt") != "2" || r.URL.Query().Get("batch_id") != "b" || r.URL.Query().Get("task_id") != "t" {
+				t.Errorf("query: %s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"events":[{"type":"tool_call","call_id":"c","tool_name":"read_file"},{"type":"tool_result","call_id":"c","tool_name":"read_file","tool_result":"ok"}]}`))
+			return
+		}
+		w.Write([]byte(`{"id":"parent","messages":[{"type":"subtask_execution","status":"complete","tasks":[{"name":"same","batch_id":"b","task_id":"t","attempt":1}],"events":[{"type":"task_failed","batch_id":"b","task_id":"t","task_name":"same","attempt":1},{"type":"task_complete","batch_id":"b","task_id":"t","task_name":"same","child_session_id":"child","attempt":2}]}]}`))
+	}))
+	defer server.Close()
+	b := &platformBackend{client: client.NewWithConfig(server.URL), sessionID: "parent"}
+	detail, err := b.client.GetSessionDetail("parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr events.Transcript
+	for _, row := range studioMessagesToHistory(detail.Messages) {
+		if row.Delegation != nil {
+			tr.Apply(*row.Delegation)
+		}
+	}
+	if len(tr.Items) != 1 || len(tr.Items[0].DelegationTasks) != 2 {
+		t.Fatalf("history: %+v", tr.Items)
+	}
+	task := tr.Items[0].DelegationTasks[1]
+	activity, err := b.LoadDelegationDetail(context.Background(), task)
+	if err != nil || len(activity) != 2 || activity[1].CallID != "c" {
+		t.Fatalf("activity %v: %v", activity, err)
+	}
+}
+
+func TestDelegationRemoteProgressRegression(t *testing.T) {
+	evs := mapSSEToEvents(&client.SSEEvent{Type: "subtask_progress", Data: `{"type":"delegation_start","batch_id":"b","tasks":[{"name":"same","task_id":"t"}]}`}, false)
+	if len(evs) != 1 || evs[0].Kind != events.KindDelegation {
+		t.Fatalf("remote delegation missing: %+v", evs)
+	}
+}
+
 func TestMapSSEToEvents_TextAndTools(t *testing.T) {
 	evs := mapSSEToEvents(&client.SSEEvent{
 		Type: "text",

@@ -487,6 +487,31 @@ func newFileStoreBackend(t *testing.T, dir, userID string) *localAgentBackend {
 // seedSession creates a code-mode session for the backend's user and appends a
 // user message, returning the session ID. It also sets a title the way RunTurn
 // does, so ListSessions has something meaningful to show.
+func TestDelegationLocalOwnedDetail(t *testing.T) {
+	ctx := context.Background()
+	b := newFileStoreBackend(t, t.TempDir(), "owner")
+	b.sessionID = seedSession(t, b, "parent")
+	child, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{AppName: codeAppName, UserID: "owner", State: map[string]any{persistentsession.StateKeyParentID: b.sessionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := &adksession.Event{ID: "call", Author: "agent", LLMResponse: adkmodel.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c", Name: "read_file"}}}}}}
+	if err := b.sessionSvc.AppendEvent(ctx, child.Session, ev); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: child.Session.ID()})
+	if err != nil || len(rows) != 1 || rows[0].CallID != "c" {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: b.sessionID}); err == nil {
+		t.Fatal("accepted non-child")
+	}
+	b.userID = "other"
+	if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: child.Session.ID()}); err == nil {
+		t.Fatal("accepted foreign parent")
+	}
+}
+
 func seedSession(t *testing.T, b *localAgentBackend, text string) string {
 	t.Helper()
 	ctx := context.Background()

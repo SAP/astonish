@@ -2,17 +2,25 @@ package launcher
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/sandbox"
+	astonishtools "github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
 )
 
 func TestLogChatFactoryInitialization(t *testing.T) {
@@ -109,12 +117,13 @@ func TestSubAgentCredentialStoreWiring(t *testing.T) {
 }
 
 func TestMainThreadToolAllowlistByMode(t *testing.T) {
-	if allow := mainThreadToolAllowlist(false); len(allow) != 0 {
-		t.Fatalf("platform/chat main-thread allowlist = %#v, want all domain tools deferred", allow)
+	platformAllow := mainThreadToolAllowlist(false)
+	if len(platformAllow) != 5 || !platformAllow["delegate_tasks"] {
+		t.Fatalf("platform/chat main-thread allowlist = %#v, want delegate_tasks and four basic file tools", platformAllow)
 	}
 
 	allow := mainThreadToolAllowlist(true)
-	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "announce_completion", "codegraph_explore"} {
+	for _, name := range []string{"read_file", "write_file", "shell_command", "announce_plan", "announce_completion", "codegraph_explore", "delegate_tasks"} {
 		if !allow[name] {
 			t.Errorf("code-mode main-thread allowlist is missing %q", name)
 		}
@@ -123,6 +132,66 @@ func TestMainThreadToolAllowlistByMode(t *testing.T) {
 		if allow[name] {
 			t.Errorf("code-mode main-thread allowlist unexpectedly exposes bridge tool %q", name)
 		}
+	}
+}
+
+func TestBasicFileToolSchemasDirectByMode(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	coreTools, err := astonishtools.GetInternalTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileNames := []string{"read_file", "write_file", "edit_file", "load_file"}
+	for _, tc := range []struct {
+		name     string
+		codeMode bool
+	}{
+		{name: "Studio"},
+		{name: "Code", codeMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allow := mainThreadToolAllowlist(tc.codeMode)
+			var preferred []tool.Tool
+			for _, candidate := range coreTools {
+				if allow[candidate.Name()] {
+					preferred = append(preferred, candidate)
+				}
+			}
+			providerTools, err := providerToolsForMode(tc.codeMode, agent.NewLexicalToolIndex(), preferred, []*agent.ToolGroup{{Name: "core", Tools: coreTools}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			visible := make(map[string]tool.Tool)
+			for _, candidate := range providerTools {
+				if visible[candidate.Name()] != nil {
+					t.Errorf("duplicate provider declaration for %q", candidate.Name())
+				}
+				visible[candidate.Name()] = candidate
+			}
+			for _, name := range fileNames {
+				if !allow[name] {
+					t.Errorf("main-thread allowlist is missing %q", name)
+				}
+				declared, ok := visible[name].(interface {
+					Declaration() *genai.FunctionDeclaration
+				})
+				if !ok || declared.Declaration() == nil || declared.Declaration().ParametersJsonSchema == nil {
+					t.Errorf("%q is missing its direct provider-visible schema", name)
+				}
+			}
+			if !tc.codeMode {
+				for _, name := range []string{"shell_command", "grep_search", "find_files", "web_fetch", "http_request"} {
+					if allow[name] || visible[name] != nil {
+						t.Errorf("Studio must keep unrelated tool %q deferred", name)
+					}
+				}
+				for _, name := range []string{"search_tools", "describe_tools", "execute_tool"} {
+					if visible[name] == nil {
+						t.Errorf("Studio is missing deferred-tool bridge %q", name)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -172,6 +241,27 @@ func TestProviderToolsForCodeModeOmitsBridge(t *testing.T) {
 	}
 }
 
+func TestProviderToolsForChatModeIncludesDirectDelegateSchema(t *testing.T) {
+	delegate, err := astonishtools.GetDelegateTasksTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerTools, err := providerToolsForMode(false, agent.NewLexicalToolIndex(), []tool.Tool{delegate}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerTools[0].Name() != "delegate_tasks" {
+		t.Fatalf("first direct chat tool = %q, want delegate_tasks", providerTools[0].Name())
+	}
+	type declaredTool interface {
+		Declaration() *genai.FunctionDeclaration
+	}
+	declared, ok := providerTools[0].(declaredTool)
+	if !ok || declared.Declaration() == nil || declared.Declaration().ParametersJsonSchema == nil {
+		t.Fatal("direct delegate_tasks tool is missing its provider-visible schema")
+	}
+}
+
 func TestFixedProviderToolsContract(t *testing.T) {
 	providerTools, err := providerToolsForMode(false, agent.NewLexicalToolIndex(), nil, nil)
 	if err != nil {
@@ -186,6 +276,137 @@ func TestFixedProviderToolsContract(t *testing.T) {
 			t.Fatalf("provider-visible tool %d = %q, want %q", i, got, name)
 		}
 	}
+}
+
+func TestDelegateSandboxAlias_BeforeBind(t *testing.T) {
+	pool := sandbox.NewBackendPool(&delegateMCPTestBackend{}, sandbox.ResourceLimits{})
+	mgr := browser.NewManager(browser.DefaultConfig())
+	aliasBackendChildSession(pool, mgr, "parent", "child")
+	parent, child := pool.GetOrCreate("parent"), pool.GetOrCreate("child")
+	if child != parent || sandbox.CanonicalSessionID(child, "child") != "parent" {
+		t.Fatal("unbound child must share the parent-owned client")
+	}
+}
+
+func TestNestedBrowserUsesCanonicalOwner(t *testing.T) {
+	pool := sandbox.NewBackendPool(&delegateMCPTestBackend{}, sandbox.ResourceLimits{})
+	mgr := browser.NewManager(browser.DefaultConfig())
+	aliasBackendChildSession(pool, mgr, "parent", "child")
+	aliasBackendChildSession(pool, mgr, "child", "grandchild")
+	mgr.EnsureSessionID("grandchild")
+	if mgr.SessionID() != "parent" {
+		t.Fatalf("browser owner = %q, want parent", mgr.SessionID())
+	}
+}
+
+type delegateMCPTestContext struct {
+	tool.Context
+	ctx context.Context
+}
+
+func (c delegateMCPTestContext) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c delegateMCPTestContext) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c delegateMCPTestContext) Err() error                  { return c.ctx.Err() }
+func (c delegateMCPTestContext) Value(key any) any           { return c.ctx.Value(key) }
+
+func (delegateMCPTestContext) SessionID() string { return "delegate" }
+
+type delegateMCPReadyClient struct {
+	sandbox.ToolNodeClient
+	calls int
+}
+
+func (c *delegateMCPReadyClient) EnsureReady(id string) error {
+	c.calls++
+	return errors.New("factory sandbox readiness probe")
+}
+
+type delegateMCPTestBackend struct{ sandbox.Backend }
+
+func TestDelegateMCPGroupResolver_WiresSandboxPool(t *testing.T) {
+	client := &delegateMCPReadyClient{}
+	pool := sandbox.NewSingleClientPool(client, &delegateMCPTestBackend{})
+	registry := &mcpCleanupRegistry{}
+	defer registry.Cleanup()
+	group := newDelegateMCPGroup("factory-probe", []cache.ToolEntry{{Name: "probe"}}, config.MCPServerConfig{Command: "must-not-start-on-host"}, false, nil, pool, registry)
+	if group == nil || group.Name != "mcp:factory-probe" {
+		t.Fatal("missing group")
+	}
+	ts, err := group.Toolsets[0].Tools(nil)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("Tools = %v, %v", ts, err)
+	}
+	runner := ts[0].(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	})
+	ctx := delegateMCPTestContext{ctx: context.Background()}
+	result, err := runner.Run(ctx, map[string]any{})
+	if client.calls == 0 {
+		t.Fatalf("dynamic group did not use sandbox pool: result=%v err=%v", result, err)
+	}
+}
+
+func TestDelegateMCPGroupResolver_NoSandboxPreservation(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	defer registry.Cleanup()
+	group := newDelegateMCPGroup("host", []cache.ToolEntry{{Name: "probe"}}, config.MCPServerConfig{}, false, nil, nil, registry)
+	if group == nil || len(group.Toolsets) != 1 {
+		t.Fatal("host group not preserved")
+	}
+	// Listing declarations remains lazy: no backend, process or network required.
+	ts, err := group.Toolsets[0].Tools(nil)
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("Tools = %v, %v", ts, err)
+	}
+}
+
+func TestDynamicMCPCleanupClosesAll(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	const count = 100
+	var closed [count]atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range closed {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			registry.add(func() { closed[i].Add(1) })
+		}(i)
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); <-start; registry.Cleanup() }()
+	close(start)
+	wg.Wait()
+	registry.Cleanup()
+	for i := range closed {
+		if got := closed[i].Load(); got != 1 {
+			t.Fatalf("cleanup %d ran %d times", i, got)
+		}
+	}
+	if group := newDelegateMCPGroup("late", nil, config.MCPServerConfig{}, false, nil, nil, registry); group != nil {
+		t.Fatal("resolver published a group after cleanup")
+	}
+}
+
+func TestDynamicMCPCleanupResolverOverlap(t *testing.T) {
+	registry := &mcpCleanupRegistry{}
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	registry.add(func() { close(entered); <-release })
+	go func() { registry.Cleanup(); close(done) }()
+	<-entered
+	var late atomic.Int32
+	if registry.add(func() { late.Add(1) }) {
+		t.Fatal("late registration accepted")
+	}
+	if late.Load() != 1 {
+		t.Fatal("late cleanup was lost while shutdown was in progress")
+	}
+	if group := newDelegateMCPGroup("overlap", nil, config.MCPServerConfig{}, false, nil, nil, registry); group != nil {
+		t.Fatal("overlapping resolver published group")
+	}
+	close(release)
+	<-done
 }
 
 func TestSkillLookupMode(t *testing.T) {

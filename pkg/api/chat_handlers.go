@@ -249,18 +249,28 @@ type AttachmentInfo struct {
 
 // SubTaskInfoMsg describes a single task in a delegation plan (for history reconstruction).
 type SubTaskInfoMsg struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
 }
 
 // SubTaskEventMsg is a synthetic event reconstructed from persisted delegate_tasks data.
 type SubTaskEventMsg struct {
-	Type     string `json:"type"`                // delegation_start, delegation_complete, task_start, task_complete, task_failed, task_text
-	TaskName string `json:"task_name,omitempty"` // which task this event belongs to
-	Status   string `json:"status,omitempty"`    // for delegation_complete
-	Duration string `json:"duration,omitempty"`  // for task_complete/task_failed
-	Error    string `json:"error,omitempty"`     // for task_failed
-	Text     string `json:"text,omitempty"`      // for task_text (sub-agent result output)
+	BatchID        string `json:"batch_id,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	Sequence       uint64 `json:"sequence,omitempty"`
+	Type           string `json:"type"`                // delegation_start, delegation_complete, task_start, task_complete, task_failed, task_text
+	TaskName       string `json:"task_name,omitempty"` // which task this event belongs to
+	Status         string `json:"status,omitempty"`    // for delegation_complete
+	Duration       string `json:"duration,omitempty"`  // for task_complete/task_failed
+	Error          string `json:"error,omitempty"`     // for task_failed
+	Text           string `json:"text,omitempty"`      // for task_text (sub-agent result output)
 }
 
 // PlanStepMsg describes a step in the execution plan (for history reconstruction).
@@ -628,6 +638,42 @@ func (cm *ChatManager) fileStore() *persistentsession.FileStore {
 	}
 	fs, _ := cm.components.SessionService.(*persistentsession.FileStore)
 	return fs
+}
+
+func resolveStudioRequestLLM(r *http.Request, req StudioChatRequest, sessionID string, isNew bool, pool *provider.Pool) (model.LLM, error) {
+	svc := store.FromRequest(r)
+	if svc == nil || pool == nil {
+		return nil, nil
+	}
+
+	appCfg := provider.ResolveEffectiveConfig(r.Context(), svc.PlatformSettings, svc.OrgSettings, svc.Settings)
+	var userDefault provider.UserDefaultSettings
+	if svc.PersonalSettings != nil {
+		if ps, err := svc.PersonalSettings.Get(r.Context()); err == nil {
+			userDefault = ps
+		}
+	}
+	appCfg = provider.ApplyUserDefault(appCfg, userDefault)
+
+	pinProvider, pinModel := strings.TrimSpace(req.Provider), strings.TrimSpace(req.Model)
+	if isNew && (pinProvider != "" || pinModel != "") {
+		if err := persistSessionPin(r, sessionID, pinProvider, pinModel); err != nil {
+			slog.Warn("failed to persist pre-chat session pin",
+				"session", sessionID, "provider", pinProvider, "model", pinModel, "error", err)
+		}
+	} else if pinProvider == "" && pinModel == "" && !isNew {
+		pinProvider, pinModel = readSessionPin(r, sessionID)
+	}
+	appCfg = provider.ApplyProviderOverride(appCfg, pinProvider, pinModel)
+	if appCfg.General.DefaultProvider == "" {
+		return nil, fmt.Errorf("no AI model configured — run /model to choose a provider and model")
+	}
+
+	resolvedLLM, err := pool.Get(r.Context(), appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve configured model %s/%s: %w", appCfg.General.DefaultProvider, appCfg.General.DefaultModel, err)
+	}
+	return resolvedLLM, nil
 }
 
 // StudioChatHandler handles POST /api/studio/chat with SSE streaming.
@@ -1501,48 +1547,19 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.emitEvent("app_preview", seededAppPreview)
 	}
 
-	// Per-request LLM resolution: In platform mode, resolve the effective
-	// provider/model based on the team → org → platform hierarchy and inject
-	// it into the runner context. This ensures each team uses their configured
-	// model regardless of what other teams/admins have set.
-	if svc := store.FromRequest(r); svc != nil && cm.llmPool != nil {
-		appCfg := provider.ResolveEffectiveConfig(r.Context(), svc.PlatformSettings, svc.OrgSettings, svc.Settings)
-		var userDefault provider.UserDefaultSettings
-		if svc.PersonalSettings != nil {
-			if ps, psErr := svc.PersonalSettings.Get(r.Context()); psErr == nil {
-				userDefault = ps
-			}
+	// Resolve and inject the request's configured model. Platform startup may use
+	// a placeholder because it has no tenant context; a request with tenant
+	// settings must never fall through to that placeholder when resolution fails.
+	if store.FromRequest(r) != nil && cm.llmPool != nil {
+		resolvedLLM, llmErr := resolveStudioRequestLLM(r, req, sessionID, isNew, cm.llmPool)
+		if llmErr != nil {
+			slog.Warn("per-request LLM resolution failed", "session", sessionID, "error", llmErr)
+			SendErrorSSE(w, flusher, llmErr.Error())
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
 		}
-		appCfg = provider.ApplyUserDefault(appCfg, userDefault)
-
-		// Resolve per-session pin: request-body override for the first message,
-		// otherwise the stored pin (personal-first, team fallback — studio chat
-		// sessions live in the personal store).
-		pinProvider, pinModel := req.Provider, req.Model
-		if isNew && (pinProvider != "" || pinModel != "") {
-			if err := persistSessionPin(r, sessionID, pinProvider, pinModel); err != nil {
-				slog.Warn("failed to persist pre-chat session pin",
-					"session", sessionID, "provider", pinProvider, "model", pinModel, "error", err)
-			}
-		} else if pinProvider == "" && pinModel == "" && !isNew {
-			pinProvider, pinModel = readSessionPin(r, sessionID)
-		}
-		appCfg = provider.ApplyProviderOverride(appCfg, pinProvider, pinModel)
-
-		if appCfg.General.DefaultProvider != "" {
-			resolvedLLM, llmErr := cm.llmPool.Get(r.Context(), appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
-			if llmErr != nil {
-				slog.Warn("per-request LLM resolution failed, using default",
-					"provider", appCfg.General.DefaultProvider,
-					"model", appCfg.General.DefaultModel,
-					"error", llmErr)
-			} else {
-				runner.InjectLLM(resolvedLLM)
-				slog.Debug("per-request LLM injected",
-					"provider", appCfg.General.DefaultProvider,
-					"model", appCfg.General.DefaultModel)
-			}
-		}
+		runner.InjectLLM(resolvedLLM)
+		slog.Debug("per-request LLM injected", "model", resolvedLLM.Name())
 	}
 
 	registry := getChatRunnerRegistry()

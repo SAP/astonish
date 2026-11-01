@@ -172,7 +172,7 @@ The daemon writes a PID file on startup and removes it on clean shutdown. This e
 The daemon runs periodic maintenance:
 
 - **Expired session cleanup**: Removes sessions older than the configured TTL.
-- **Orphan container pruning**: Removes sandbox containers whose sessions no longer exist.
+- **Orphan container pruning**: Removes sandbox containers whose sessions no longer exist. In platform mode, `entstore.Store.AllChatSessionIDs` supplies the platform-admin authoritative inventory through scoped org/team/personal stores: every existing organization's team chats and member personal chats are included regardless of organization status. Suspension (or a decommissioned status while data is retained) does not make a stored chat an orphan. Any unreadable organization, team, or personal scope invalidates the entire snapshot; partial inventory must never authorize deletion. This maintenance inventory does not broaden tenant-facing access.
 - **Interval**: Configurable, default is every few hours.
 
 ## Key Files

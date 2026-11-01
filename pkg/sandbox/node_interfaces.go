@@ -27,8 +27,64 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"reflect"
 )
+
+// SandboxSessionOwner is optional: logical delegates can share one immutable
+// physical sandbox without changing ToolNodeClient's required interface.
+type SandboxSessionOwner interface {
+	SandboxSessionID() string
+}
+
+// ContextReadyToolClient optionally lets callers abandon a readiness wait.
+type ContextReadyToolClient interface {
+	EnsureReadyContext(context.Context, string) error
+}
+
+func nilToolClient(client ToolNodeClient) bool {
+	if client == nil {
+		return true
+	}
+	v := reflect.ValueOf(client)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+// CanonicalSessionID resolves physical ownership, with a legacy logical-ID
+// fallback for nil clients, unsupported capabilities, and unbound owners.
+func CanonicalSessionID(client ToolNodeClient, logicalID string) string {
+	if !nilToolClient(client) {
+		if owner, ok := client.(SandboxSessionOwner); ok {
+			if id := owner.SandboxSessionID(); id != "" {
+				return id
+			}
+		}
+	}
+	return logicalID
+}
+
+// EnsureToolClientReady prefers cancellable readiness while preserving legacy
+// clients. It never changes logical attribution or retries tool execution.
+func EnsureToolClientReady(ctx context.Context, client ToolNodeClient, logicalID string) error {
+	if nilToolClient(client) {
+		return fmt.Errorf("sandbox tool client is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	owner := CanonicalSessionID(client, logicalID)
+	if ready, ok := client.(ContextReadyToolClient); ok {
+		return ready.EnsureReadyContext(ctx, owner)
+	}
+	return client.EnsureReady(owner)
+}
 
 // ToolNodeClient is the minimal surface a NodeTool needs from whatever object
 // services its tool calls. Both *LazyNodeClient (Incus) and future

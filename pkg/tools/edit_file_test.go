@@ -35,6 +35,45 @@ func readTestFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+func TestWriteFileThenRepeatedEditFileContinuationMarker(t *testing.T) {
+	resetTestCache(t)
+	path := filepath.Join(t.TempDir(), "large.md")
+	const marker = "<!-- CONTINUE_7f61c2 -->"
+
+	if _, err := WriteFile(nil, WriteFileArgs{
+		FilePath: path,
+		Content:  "# Report\n\nFirst section.\n\n" + marker,
+	}); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	for _, section := range []string{
+		"## Second\n\nSecond section.\n\n",
+		"## Third\n\nThird section.\n\n",
+	} {
+		if _, err := EditFile(nil, EditFileArgs{
+			Path:      path,
+			OldString: marker,
+			NewString: section + marker,
+		}); err != nil {
+			t.Fatalf("EditFile() growth error = %v", err)
+		}
+	}
+
+	if _, err := EditFile(nil, EditFileArgs{
+		Path:      path,
+		OldString: marker,
+		NewString: "",
+	}); err != nil {
+		t.Fatalf("EditFile() marker removal error = %v", err)
+	}
+
+	want := "# Report\n\nFirst section.\n\n## Second\n\nSecond section.\n\n## Third\n\nThird section.\n\n"
+	if got := readTestFile(t, path); got != want {
+		t.Fatalf("final file = %q, want %q", got, want)
+	}
+}
+
 func TestEditFile_ExactSingleMatch(t *testing.T) {
 	resetTestCache(t)
 	dir := t.TempDir()

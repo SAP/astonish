@@ -119,6 +119,9 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# util-linux provides the inherited exclusive overlay lock used by PID 1.
+RUN command -v flock
+
 RUN mkdir -p /usr/lib/astonish
 COPY --from=treesitter-builder /tmp/libastonish-treesitter.so /usr/lib/astonish/libastonish-treesitter.so
 

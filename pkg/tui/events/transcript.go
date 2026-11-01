@@ -98,21 +98,27 @@ type Item struct {
 
 // DelegationTaskState tracks the live status of one delegated sub-task.
 type DelegationTaskState struct {
-	Name         string
-	Description  string
-	Status       string    // queued, running, waiting_on_model, retrying, complete, failed
-	StartedAt    time.Time // when the task was delegated (for live timer)
-	Duration     string    // latest elapsed/final duration
-	LastActivity string    // age since meaningful activity
-	Error        string    // failure/retry reason
-	Attempt      int       // 1-based attempt
-	NoActivity   bool      // inactivity watchdog warning
+	BatchID        string
+	TaskID         string
+	ChildSessionID string
+	Sequence       int64
+	Name           string
+	Description    string
+	Status         string    // queued, running, waiting_on_model, retrying, complete, failed
+	StartedAt      time.Time // when the task was delegated (for live timer)
+	Duration       string    // latest elapsed/final duration
+	LastActivity   string    // age since meaningful activity
+	Error          string    // failure/retry reason
+	Attempt        int       // 1-based attempt
+	NoActivity     bool      // inactivity watchdog warning
 	// Activity log: tool calls and text output from this sub-task.
 	Activity []DelegationActivity
 }
 
 // DelegationActivity is one activity entry for a delegated sub-task.
 type DelegationActivity struct {
+	CallID   string
+	Sequence int64
 	Type     string         // "tool_call", "tool_result", "text"
 	ToolName string         // for tool_call/tool_result
 	Args     map[string]any // for tool_call
@@ -527,17 +533,19 @@ func (t *Transcript) applyLoadedRouting(e HistoryMsg, kinds ...ItemKind) {
 // applyDelegation handles KindDelegation events to maintain both the inline
 // ItemDelegation transcript block and the Transcript-level status fields.
 func (t *Transcript) applyDelegation(ev Event) {
+	defer t.refreshDelegationSummary()
 	switch ev.DelegationType {
 	case "start":
 		now := time.Now()
 		tasks := make([]DelegationTaskState, len(ev.DelegationTasks))
 		for i, task := range ev.DelegationTasks {
 			tasks[i] = DelegationTaskState{
-				Name:        task.Name,
+				Name:    task.Name,
+				BatchID: firstNonEmpty(task.BatchID, ev.DelegationBatchID), TaskID: task.TaskID, ChildSessionID: task.ChildSessionID,
 				Description: task.Description,
 				Status:      "queued",
 				StartedAt:   now,
-				Attempt:     1,
+				Attempt:     max(1, task.Attempt),
 			}
 		}
 		// Insert the inline item into the transcript thread.
@@ -546,15 +554,10 @@ func (t *Transcript) applyDelegation(ev Event) {
 			DelegationTasks: tasks,
 		})
 		t.delegationItemIdx = len(t.Items) - 1
-		// Keep the Transcript-level slice for the status bar (independent copy
-		// so updateDelegationTask doesn't double-apply mutations).
-		delegCopy := make([]DelegationTaskState, len(tasks))
-		copy(delegCopy, tasks)
-		t.Delegation = delegCopy
-		t.DelegationActive = true
+		// Summary is derived from all inline batches below.
 		t.Status = "Delegating tasks…"
 	case "task_start", "task_state", "task_retry", "evaluating":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			if task.StartedAt.IsZero() {
 				task.StartedAt = time.Now()
 			}
@@ -580,7 +583,7 @@ func (t *Transcript) applyDelegation(ev Event) {
 			task.NoActivity = ev.DelegationNoActivity
 		})
 	case "task_complete":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			task.Status = "complete"
 			task.Duration = ev.DelegationDuration
 			task.LastActivity = ev.DelegationLastActivity
@@ -591,7 +594,7 @@ func (t *Transcript) applyDelegation(ev Event) {
 			task.NoActivity = false
 		})
 	case "task_failed":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			task.Status = "failed"
 			task.Duration = ev.DelegationDuration
 			task.LastActivity = ev.DelegationLastActivity
@@ -602,44 +605,144 @@ func (t *Transcript) applyDelegation(ev Event) {
 			task.NoActivity = ev.DelegationNoActivity
 		})
 	case "task_tool_call":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			task.Activity = append(task.Activity, DelegationActivity{
+				CallID: ev.DelegationCallID, Sequence: ev.DelegationSequence,
 				Type: "tool_call", ToolName: ev.DelegationToolName, Args: ev.DelegationToolArgs,
 			})
 		})
 	case "task_tool_result":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			task.Activity = append(task.Activity, DelegationActivity{
+				CallID: ev.DelegationCallID, Sequence: ev.DelegationSequence,
 				Type: "tool_result", ToolName: ev.DelegationToolName, Result: ev.DelegationToolResult,
 			})
 		})
 	case "task_text":
-		t.updateDelegationTask(ev.DelegationTaskName, func(task *DelegationTaskState) {
+		t.updateDelegationTask(ev, func(task *DelegationTaskState) {
 			task.Activity = append(task.Activity, DelegationActivity{
+				CallID: ev.DelegationCallID, Sequence: ev.DelegationSequence,
 				Type: "text", Text: ev.DelegationText,
 			})
 		})
 	case "done":
-		t.DelegationActive = false
+		for i := range t.Items {
+			for j := range t.Items[i].DelegationTasks {
+				task := &t.Items[i].DelegationTasks[j]
+				if ev.DelegationBatchID != "" && task.BatchID != ev.DelegationBatchID {
+					continue
+				}
+				if delegationPending(task.Status) {
+					task.Status = "interrupted"
+				}
+			}
+		}
 	}
 }
 
-// updateDelegationTask finds a task by name in both the Transcript-level
-// Delegation slice and the inline ItemDelegation item, applying fn to each.
-func (t *Transcript) updateDelegationTask(name string, fn func(*DelegationTaskState)) {
-	for i := range t.Delegation {
-		if t.Delegation[i].Name == name {
-			fn(&t.Delegation[i])
-			break
+func delegationPending(status string) bool {
+	switch status {
+	case "complete", "success", "failed", "cancelled", "interrupted":
+		return false
+	default:
+		return true
+	}
+}
+
+// refreshDelegationSummary derives the status bar from all batches and their latest attempts.
+func (t *Transcript) refreshDelegationSummary() {
+	t.Delegation = nil
+	t.DelegationActive = false
+	for _, item := range t.Items {
+		latest := make(map[string]int)
+		for _, task := range item.DelegationTasks {
+			key := task.TaskID
+			if key == "" {
+				key = task.Name
+			}
+			if idx, ok := latest[key]; ok {
+				if task.Attempt >= t.Delegation[idx].Attempt {
+					t.Delegation[idx] = task
+				}
+			} else {
+				latest[key] = len(t.Delegation)
+				t.Delegation = append(t.Delegation, task)
+			}
 		}
 	}
-	if t.delegationItemIdx >= 0 && t.delegationItemIdx < len(t.Items) {
-		for i := range t.Items[t.delegationItemIdx].DelegationTasks {
-			if t.Items[t.delegationItemIdx].DelegationTasks[i].Name == name {
-				fn(&t.Items[t.delegationItemIdx].DelegationTasks[i])
+	for _, task := range t.Delegation {
+		if delegationPending(task.Status) {
+			t.DelegationActive = true
+		}
+	}
+}
+
+// updateDelegationTask targets an immutable batch/task/attempt. Legacy name-only
+// events are accepted only when they identify one row unambiguously.
+func (t *Transcript) updateDelegationTask(ev Event, fn func(*DelegationTaskState)) {
+	itemIdx, taskIdx := -1, -1
+	for i := range t.Items {
+		if t.Items[i].Kind != ItemDelegation {
+			continue
+		}
+		for j := range t.Items[i].DelegationTasks {
+			task := &t.Items[i].DelegationTasks[j]
+			if ev.DelegationBatchID != "" && task.BatchID != ev.DelegationBatchID {
+				continue
+			}
+			if ev.DelegationTaskID != "" {
+				if task.TaskID != ev.DelegationTaskID {
+					continue
+				}
+			} else if task.Name != ev.DelegationTaskName {
+				continue
+			}
+			if ev.DelegationTaskID != "" && ev.DelegationAttempt > 0 && task.Attempt != ev.DelegationAttempt {
+				continue
+			}
+			if itemIdx >= 0 {
+				return
+			}
+			itemIdx, taskIdx = i, j
+		}
+	}
+	// A retry adds an attempt rather than overwriting the earlier attempt's log.
+	if itemIdx < 0 && ev.DelegationTaskID != "" && ev.DelegationAttempt > 0 {
+		for i := range t.Items {
+			for j := range t.Items[i].DelegationTasks {
+				old := t.Items[i].DelegationTasks[j]
+				if old.BatchID == ev.DelegationBatchID && old.TaskID == ev.DelegationTaskID {
+					old.Attempt = ev.DelegationAttempt
+					old.Activity = nil
+					old.Sequence = 0
+					old.ChildSessionID = ""
+					old.Status = "queued"
+					old.StartedAt = time.Time{}
+					old.Duration, old.Error, old.LastActivity = "", "", ""
+					old.NoActivity = false
+					t.Items[i].DelegationTasks = append(t.Items[i].DelegationTasks, old)
+					itemIdx, taskIdx = i, len(t.Items[i].DelegationTasks)-1
+					break
+				}
+			}
+			if itemIdx >= 0 {
 				break
 			}
 		}
+	}
+	if itemIdx < 0 {
+		return
+	}
+	task := &t.Items[itemIdx].DelegationTasks[taskIdx]
+	if ev.DelegationSequence > 0 && ev.DelegationSequence <= task.Sequence {
+		return
+	}
+	if ev.DelegationChildSessionID != "" {
+		task.ChildSessionID = ev.DelegationChildSessionID
+	}
+	fn(task)
+	if ev.DelegationSequence > 0 {
+		task.Sequence = ev.DelegationSequence
 	}
 }
 
@@ -1413,13 +1516,14 @@ func (t *Transcript) Reset() {
 
 // HistoryMsg is a finalized transcript entry loaded when resuming a session.
 type HistoryMsg struct {
-	Kind     string // user | agent | tool_call | tool_result | system | thinking | artifact
-	Text     string
-	ToolName string
-	ToolID   string
-	Args     map[string]any
-	Result   any
-	Artifact *Artifact
+	Delegation *Event
+	Kind       string // user | agent | tool_call | tool_result | system | thinking | artifact
+	Text       string
+	ToolName   string
+	ToolID     string
+	Args       map[string]any
+	Result     any
+	Artifact   *Artifact
 	// Plan fields are present when Kind is "plan".
 	PlanStatus       PlanStatus
 	Options          []string
@@ -1437,6 +1541,10 @@ type HistoryMsg struct {
 func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 	t.Reset()
 	for _, e := range entries {
+		if e.Delegation != nil {
+			t.Apply(*e.Delegation)
+			continue
+		}
 		switch e.Kind {
 		case "user":
 			t.Apply(NewUser(e.Text))
@@ -1475,6 +1583,16 @@ func (t *Transcript) LoadHistory(entries []HistoryMsg) {
 			t.Apply(Event{Kind: KindArtifact, Text: e.Text, Artifact: e.Artifact})
 		}
 	}
+	// Restored unfinished attempts are interrupted, not active workers.
+	for i := range t.Items {
+		for j := range t.Items[i].DelegationTasks {
+			task := &t.Items[i].DelegationTasks[j]
+			if delegationPending(task.Status) {
+				task.Status = "interrupted"
+			}
+		}
+	}
+	t.refreshDelegationSummary()
 	t.finalizeRunningSteps()
 	t.finalizeProvisionalAgents()
 	t.Streaming = false

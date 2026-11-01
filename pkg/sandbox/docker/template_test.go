@@ -3,11 +3,47 @@ package docker_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/docker"
 )
+
+func TestBuildTemplateDoesNotPruneRetainedSessionVolumes(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "docker.log")
+	runtime := filepath.Join(t.TempDir(), "docker")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$ASTONISH_TEST_DOCKER_LOG"
+# Fail only creation; the absence of volume enumeration/removal is the contract.
+if [ "$1" = inspect ]; then echo 'No such container' >&2; exit 1; fi
+if [ "$1" = container ]; then exit 42; fi
+`
+	if err := os.WriteFile(runtime, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ASTONISH_TEST_DOCKER_LOG", log)
+	layers := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(layers, "parent", "rootfs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := docker.New(docker.Config{Sessions: newTestRegistry(t), LayersDir: layers, UppersDir: t.TempDir(), ContainerRuntimePath: runtime, SandboxImage: "test-image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BuildTemplate(t.Context(), sandbox.TemplateBuildSpec{TemplateID: "unrelated", ParentLayers: []string{"parent"}}); err == nil {
+		t.Fatal("expected fixture creation failure")
+	}
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"volume ls", "volume rm", "prune"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("build performed global cleanup: %s", raw)
+		}
+	}
+}
 
 func TestAliasLayer_CreatesRelativeSymlink(t *testing.T) {
 	r := newTestRegistry(t)
@@ -83,5 +119,61 @@ func TestDeleteTemplate_RefusesBase(t *testing.T) {
 	}
 	if err := b.DeleteTemplate(t.Context(), sandbox.BaseTemplateID, true); err == nil {
 		t.Fatal("DeleteTemplate(@base) succeeded, want error")
+	}
+}
+
+func TestReseedBaseLayerFromImage_UsesLocalRuntimeImageWithoutPull(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	runtimePath := filepath.Join(binDir, "docker")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$ASTONISH_TEST_DOCKER_LOG"
+case "$1" in
+  export)
+    work=$(mktemp -d)
+    printf 'fresh-runtime' > "$work/runtime-marker"
+    tar -C "$work" -cf - .
+    rm -rf "$work"
+    ;;
+esac
+`
+	if err := os.WriteFile(runtimePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ASTONISH_TEST_DOCKER_LOG", logPath)
+
+	r := newTestRegistry(t)
+	layersDir := t.TempDir()
+	b, err := docker.New(docker.Config{
+		Sessions:             r,
+		LayersDir:            layersDir,
+		UppersDir:            t.TempDir(),
+		SandboxImage:         "ghcr.io/sap/astonish-sandbox-base:latest",
+		ContainerRuntimePath: runtimePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRoot := filepath.Join(layersDir, sandbox.BaseTemplateID, "rootfs")
+	if err := os.MkdirAll(staleRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRoot, "stale-marker"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.ReseedBaseLayerFromImage(t.Context()); err != nil {
+		t.Fatalf("ReseedBaseLayerFromImage: %v", err)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logBytes), "pull ") {
+		t.Fatalf("refresh must not pull over the locally built runtime image; docker calls:\n%s", logBytes)
+	}
+	if got, err := os.ReadFile(filepath.Join(staleRoot, "runtime-marker")); err != nil || string(got) != "fresh-runtime" {
+		t.Fatalf("reseeded base marker = %q, %v", got, err)
 	}
 }

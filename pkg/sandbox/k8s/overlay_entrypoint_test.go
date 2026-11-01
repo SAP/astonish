@@ -1,9 +1,186 @@
 package k8s
 
 import (
+	"archive/tar"
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestEntrypointInitialization executes the generated initialization section,
+// stopping before privileged mounts. Host adapters only normalize GNU tar flags
+// and provide flock(2) on macOS; state decisions run the real generated shell.
+func TestEntrypointInitialization(t *testing.T) {
+	for _, scenario := range []string{"stale-archive", "legacy-adoption", "initialized-empty", "corruption", "interrupted-restore", "published-restore", "concurrent-mount", "identity-mismatch", "archive-only", "legacy-archive-path"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			overlay := filepath.Join(root, "overlay")
+			upper := filepath.Join(overlay, "upper")
+			persist := filepath.Join(root, "persist")
+			bin := filepath.Join(root, "bin")
+			for _, dir := range []string{upper, persist, bin} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			put := func(path, contents string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The archive is uncompressed here; the live Docker acceptance uses zstd.
+			var archive bytes.Buffer
+			tw := tar.NewWriter(&archive)
+			payload := "baseline"
+			if err := tw.WriteHeader(&tar.Header{Name: "sentinel", Mode: 0755, Size: int64(len(payload))}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tw.Write([]byte(payload)); err != nil {
+				t.Fatal(err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			put(filepath.Join(persist, "upper.tar.zst"), archive.String())
+			nativeTar, err := exec.LookPath("tar")
+			if err != nil {
+				t.Fatal(err)
+			}
+			adapter := "#!/bin/sh\nexec " + shellQuote(nativeTar) + " -xf \"$7\" -C \"$9\"\n"
+			// Actual invocation: --numeric-owner --xattrs --acls -I zstd -xf FILE -C DIR.
+			if err := os.WriteFile(filepath.Join(bin, "tar"), []byte(adapter), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := exec.LookPath("flock"); err != nil {
+				python, err := exec.LookPath("python3")
+				if err != nil {
+					t.Fatal("flock or python3 required")
+				}
+				shim := "#!" + python + "\nimport fcntl,sys\ntry: fcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(1)\n"
+				if err := os.WriteFile(filepath.Join(bin, "flock"), []byte(shim), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// No mount is performed in this fixture.
+			if err := os.WriteFile(filepath.Join(bin, "mountpoint"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			identity := "version=1\nsession=fixture\nchain=base\n"
+			marker := filepath.Join(overlay, ".astonish-overlay-v1")
+			switch scenario {
+			case "stale-archive":
+				put(marker, identity)
+				put(filepath.Join(upper, "sentinel"), "latest")
+			case "legacy-adoption":
+				put(filepath.Join(upper, ".hidden"), "latest")
+			case "initialized-empty":
+				put(marker, identity)
+			case "corruption":
+				put(filepath.Join(persist, "upper.tar.zst"), "corrupt")
+			case "interrupted-restore":
+				put(filepath.Join(overlay, ".astonish-restore-in-progress"), identity)
+				if err := os.Mkdir(filepath.Join(overlay, ".astonish-restore-staging"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				put(filepath.Join(overlay, ".astonish-restore-staging", "partial"), "partial")
+			case "published-restore":
+				put(filepath.Join(overlay, ".astonish-restore-in-progress"), identity)
+				put(filepath.Join(upper, "sentinel"), "latest")
+			case "legacy-archive-path":
+				if err := os.Mkdir(filepath.Join(persist, "fixture"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(persist, "upper.tar.zst"), filepath.Join(persist, "fixture", "upper.tar.zst")); err != nil {
+					t.Fatal(err)
+				}
+			case "identity-mismatch":
+				put(marker, strings.ReplaceAll(identity, "fixture", "another"))
+				put(filepath.Join(upper, "sentinel"), "latest")
+			}
+			script := EntrypointScript(EntrypointScriptOptions{UpperDir: upper, WorkDir: filepath.Join(overlay, "work"), UppersMount: persist, MountPoint: filepath.Join(root, "mount")})
+			end := strings.Index(script, "# Ensure /dev, /proc, /sys")
+			if end < 0 {
+				t.Fatal("initialization boundary missing")
+			}
+			script = script[:end]
+			run := func(extra string) *exec.Cmd {
+				cmd := exec.Command("sh", "-c", script+extra)
+				cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "ASTONISH_SESSION_ID=fixture", "ASTONISH_LAYER_CHAIN=base")
+				return cmd
+			}
+			if scenario == "concurrent-mount" {
+				ready := filepath.Join(root, "ready")
+				cmd := run("touch " + shellQuote(ready) + "\nexec sleep 10\n")
+				if err := cmd.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					if _, err := os.Stat(ready); err == nil {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("first composer not ready")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if out, err := run("").CombinedOutput(); err == nil || !strings.Contains(string(out), "already owned") {
+					t.Fatalf("concurrent composer: %s %v", out, err)
+				}
+				return
+			}
+			out, err := run("").CombinedOutput()
+			if scenario == "corruption" || scenario == "identity-mismatch" {
+				if err == nil {
+					t.Fatalf("wanted failure: %s", out)
+				}
+				if scenario == "corruption" {
+					if _, err := os.Stat(marker); !os.IsNotExist(err) {
+						t.Fatal("corrupt restore initialized")
+					}
+					entries, _ := os.ReadDir(upper)
+					if len(entries) != 0 {
+						t.Fatal("partial upper published")
+					}
+					put(filepath.Join(persist, "upper.tar.zst"), archive.String())
+					if out, err := run("").CombinedOutput(); err != nil {
+						t.Fatalf("retry %s %v", out, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("generated script: %s %v", out, err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "initialized-empty" || scenario == "legacy-adoption" {
+				if _, err := os.Stat(filepath.Join(upper, "sentinel")); !os.IsNotExist(err) {
+					t.Fatal("stale archive overlaid authoritative upper")
+				}
+				return
+			}
+			got, err := os.ReadFile(filepath.Join(upper, "sentinel"))
+			want := "baseline"
+			if scenario == "stale-archive" || scenario == "published-restore" {
+				want = "latest"
+			}
+			if err != nil || string(got) != want {
+				t.Fatalf("sentinel %q %v", got, err)
+			}
+			if _, err := os.Stat(filepath.Join(upper, "partial")); !os.IsNotExist(err) {
+				t.Fatal("interrupted partial adopted")
+			}
+		})
+	}
+}
 
 // TestEntrypointScript_Defaults locks in the canonical script shape
 // emitted when callers pass the zero-value options. This is the script
@@ -34,7 +211,7 @@ func TestEntrypointScript_Defaults(t *testing.T) {
 		{"resume tarball path", `RESUME_TAR="$UPPERS_DIR/upper.tar.zst"`},
 		{"legacy resume fallback", `RESUME_TAR="$UPPERS_DIR/$ASTONISH_SESSION_ID/upper.tar.zst"`},
 		{"resume guard", `if [ -f "$RESUME_TAR" ]; then`},
-		{"resume tar cmd", `tar --numeric-owner --xattrs --acls -I zstd -xf "$RESUME_TAR" -C "$UPPER_DIR"`},
+		{"resume tar cmd", `tar --numeric-owner --xattrs --acls -I zstd -xf "$RESUME_TAR" -C "$STAGING_DIR"`},
 		{"awk reversal", `awk -F, -v dir="$LAYERS_DIR"`},
 		{"awk body top-first", `for (i = NF; i > 0; i--)`},
 		{"pre-seed bottom layer", `BOTTOM_LAYER="${LOWER##*:}"`},

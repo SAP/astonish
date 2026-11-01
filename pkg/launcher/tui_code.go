@@ -3252,6 +3252,18 @@ func (b *localAgentBackend) ListModels(ctx context.Context, providerName string)
 	return provider.ListModelsForProvider(ctx, providerName, b.appConfig)
 }
 
+func (b *localAgentBackend) ModelContextWindows(ctx context.Context, providerName string, models []string) map[string]backend.ModelContextWindow {
+	windows := make(map[string]backend.ModelContextWindow, len(models))
+	for _, modelName := range models {
+		if ctx.Err() != nil {
+			break
+		}
+		resolved := provider.ResolveContextWindowCachedFull(ctx, providerName, modelName, b.appConfig)
+		windows[modelName] = backend.ModelContextWindow{Size: resolved.Size, IsFallback: resolved.IsFallback}
+	}
+	return windows
+}
+
 func (b *localAgentBackend) SetModelPin(ctx context.Context, providerName, modelName string) (string, string, error) {
 	providerName = strings.TrimSpace(providerName)
 	modelName = strings.TrimSpace(modelName)

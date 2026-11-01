@@ -192,6 +192,13 @@ func (b *lazyCodeBackend) ListModels(ctx context.Context, provider string) ([]st
 	return b.inner.ListModels(ctx, provider)
 }
 
+func (b *lazyCodeBackend) ModelContextWindows(ctx context.Context, provider string, models []string) map[string]backend.ModelContextWindow {
+	if inner, ok := b.inner.(backend.ModelContextBackend); ok {
+		return inner.ModelContextWindows(ctx, provider, models)
+	}
+	return nil
+}
+
 func (b *lazyCodeBackend) SetModelPin(ctx context.Context, provider, model string) (string, string, error) {
 	if b.inner == nil {
 		return "", "", fmt.Errorf("code backend not opened")

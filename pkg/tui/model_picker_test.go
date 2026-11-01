@@ -162,6 +162,66 @@ func newModelPickerTestModel(t *testing.T, b backend.Backend) model {
 // Existing model-picker tests (kept)
 // ---------------------------------------------------------------------------
 
+type pickerContextBackend struct {
+	modelCatalogBackend
+	contextCalls int
+}
+
+func (b *pickerContextBackend) ModelContextWindows(_ context.Context, _ string, models []string) map[string]backend.ModelContextWindow {
+	b.contextCalls++
+	return map[string]backend.ModelContextWindow{
+		"gpt-6-astra": {Size: 1_100_000},
+		"gpt-4o":      {Size: 900_000},
+		"unknown":     {Size: 200_000, IsFallback: true},
+	}
+}
+
+func TestModelPickerLoadsContextBeforeRendering(t *testing.T) {
+	b := &pickerContextBackend{modelCatalogBackend: modelCatalogBackend{
+		providers: []string{"corporate-sap"},
+		models:    map[string][]string{"corporate-sap": {"gpt-6-astra", "gpt-4o", "unknown"}},
+	}}
+	m := newModelPickerTestModel(t, b)
+	next, cmd := m.handleSlash("/model")
+	m = next.(model)
+	for _, msg := range executeBatch(cmd) {
+		next, _ = m.Update(msg)
+		m = next.(model)
+	}
+	for i, item := range m.modelPicker.items {
+		if item == "corporate-sap" {
+			m.modelPicker.cursor = i
+		}
+	}
+	next, cmd = m.selectModelPickerItem()
+	m = next.(model)
+	if !m.modelPicker.loading {
+		t.Fatal("model load must stay asynchronous")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	out := stripANSI(m.renderModelPickerOverlay())
+	for _, want := range []string{"gpt-6-astra", "1.1M", "900.0k", "200.0k (fallback)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("picker missing %q:\n%s", want, out)
+		}
+	}
+	m.modelPicker.filter = "astra"
+	m.modelPicker.rebuildItems()
+	out = stripANSI(m.renderModelPickerOverlay())
+	if !strings.Contains(out, "1.1M") || strings.Contains(out, "(fallback)") {
+		t.Fatalf("filtered catalog label: %s", out)
+	}
+	if b.contextCalls != 1 {
+		t.Fatalf("render fetched metadata: %d calls", b.contextCalls)
+	}
+	next, _ = m.applyModelModelsLoaded(modelModelsLoadedMsg{provider: "other", models: []string{"wrong"}})
+	m = next.(model)
+	if !strings.Contains(stripANSI(m.renderModelPickerOverlay()), "1.1M") {
+		t.Fatal("stale provider result overwrote metadata")
+	}
+}
+
 func TestModelSlashCommandOpensPicker(t *testing.T) {
 	b := &modelCatalogBackend{
 		staticBackend: staticBackend{info: backend.Info{Provider: "openai", Model: "gpt-4o"}},

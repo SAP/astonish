@@ -35,6 +35,7 @@ type modelPickerState struct {
 	step             string // "provider" | "model" | "add-type" | "add-form" | "oauth"
 	providers        []string
 	models           []string
+	contextWindows   map[string]backend.ModelContextWindow
 	items            []string // filtered list currently shown
 	filter           string
 	cursor           int
@@ -75,9 +76,10 @@ type modelProvidersLoadedMsg struct {
 }
 
 type modelModelsLoadedMsg struct {
-	provider string
-	models   []string
-	err      error
+	provider       string
+	models         []string
+	contextWindows map[string]backend.ModelContextWindow
+	err            error
 }
 
 type modelPinAppliedMsg struct {
@@ -203,7 +205,11 @@ func (m model) loadModelProvidersCmd() tea.Cmd {
 func (m model) loadModelModelsCmd(provider string) tea.Cmd {
 	return func() tea.Msg {
 		models, err := m.backend.ListModels(m.ctx, provider)
-		return modelModelsLoadedMsg{provider: provider, models: models, err: err}
+		var windows map[string]backend.ModelContextWindow
+		if metadata, ok := m.backend.(backend.ModelContextBackend); ok && err == nil && len(models) > 0 {
+			windows = metadata.ModelContextWindows(m.ctx, provider, models)
+		}
+		return modelModelsLoadedMsg{provider: provider, models: models, contextWindows: windows, err: err}
 	}
 }
 
@@ -400,6 +406,7 @@ func (m model) applyModelModelsLoaded(msg modelModelsLoadedMsg) (tea.Model, tea.
 	}
 	m.modelPicker.err = ""
 	m.modelPicker.models = append([]string(nil), msg.models...)
+	m.modelPicker.contextWindows = msg.contextWindows
 	m.modelPicker.filter = ""
 	m.modelPicker.cursor = 0
 	m.modelPicker.rebuildItems()
@@ -1231,13 +1238,19 @@ func (m model) renderModelStep(body *strings.Builder, th Theme, h int) {
 				m.modelPicker.selectedProvider == m.modelPicker.currentProvider {
 				suffix = th.Muted.Render("  (current)")
 			}
-			// Context window label: show resolved size next to each model.
-			cwLabel := ""
-			if cw := provider.ResolveFromStaticMap(item); cw > 0 {
-				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(cw)))
-			} else {
-				cwLabel = th.Muted.Render("  " + formatTokenCount(int64(provider.DefaultContextWindow)) + " (fallback)")
+			// Rendering uses metadata loaded with this provider's model list.
+			cw, ok := m.modelPicker.contextWindows[item]
+			if !ok || cw.Size <= 0 {
+				cw = backend.ModelContextWindow{Size: provider.ResolveFromStaticMap(item)}
+				if cw.Size <= 0 {
+					cw = backend.ModelContextWindow{Size: provider.DefaultContextWindow, IsFallback: true}
+				}
 			}
+			label := "  " + formatTokenCount(int64(cw.Size))
+			if cw.IsFallback {
+				label += " (fallback)"
+			}
+			cwLabel := th.Muted.Render(label)
 			body.WriteString(style.Render(mark+item) + cwLabel + suffix + "\n")
 		}
 		if end < len(m.modelPicker.items) {

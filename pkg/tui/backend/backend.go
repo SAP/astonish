@@ -9,6 +9,18 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+// ModelContextWindow is a resolved picker capacity and its fallback provenance.
+type ModelContextWindow struct {
+	Size       int
+	IsFallback bool
+}
+
+// ModelContextBackend optionally enriches already-discovered model IDs. The TUI
+// invokes it in its load command, never during rendering.
+type ModelContextBackend interface {
+	ModelContextWindows(ctx context.Context, provider string, models []string) map[string]ModelContextWindow
+}
+
 // Info is static session metadata shown in the TUI header / footer.
 type Info struct {
 	SessionID string

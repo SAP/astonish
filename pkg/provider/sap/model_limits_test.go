@@ -294,19 +294,13 @@ func TestGenerateVertexContent_LearnsNoToolsAndRetries(t *testing.T) {
 
 func TestListModelsWithMetadata_UsesLearnedMax(t *testing.T) {
 	// Reset cache
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 
 	mem := newMemLimits()
 	SetModelLimitsStore(mem)
 	t.Cleanup(func() {
 		SetModelLimitsStore(nil)
-		sapModelCacheMu.Lock()
-		sapModelCache = nil
-		sapModelCacheTime = time.Time{}
-		sapModelCacheMu.Unlock()
+		invalidateModelCache()
 	})
 	_ = mem.UpsertMaxOutput(context.Background(), sapAICoreProviderType, "gemini-image-meta", 32768, "learned_400")
 
@@ -354,19 +348,13 @@ func TestListModelsWithMetadata_UsesLearnedMax(t *testing.T) {
 }
 
 func TestListModelsWithMetadata_UsesLearnedSupportsTools(t *testing.T) {
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 
 	mem := newMemLimits()
 	SetModelLimitsStore(mem)
 	t.Cleanup(func() {
 		SetModelLimitsStore(nil)
-		sapModelCacheMu.Lock()
-		sapModelCache = nil
-		sapModelCacheTime = time.Time{}
-		sapModelCacheMu.Unlock()
+		invalidateModelCache()
 	})
 	_ = mem.UpsertSupportsTools(context.Background(), sapAICoreProviderType, "gemini-image-meta-tools", false, "learned_400")
 

@@ -1,18 +1,177 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/mux"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/provider/sap"
 	"github.com/SAP/astonish/pkg/store"
 )
+
+type sapCatalogHTTPModelLimits struct {
+	store.ModelLimitsStore // Unexpected writes fail rather than touching durable state.
+}
+
+func (sapCatalogHTTPModelLimits) Get(_ context.Context, provider, model string) (*store.ModelLimitEntry, error) {
+	if provider != "sap_ai_core" || model != "gpt-6-astra" {
+		return nil, nil
+	}
+	supportsTools := false
+	return &store.ModelLimitEntry{MaxOutputTokens: 3210, ContextWindow: 4096, SupportsTools: &supportsTools, Source: "learned_400"}, nil
+}
+
+// TestSAPCatalogMetadataHTTP crosses both loopback HTTP boundaries: the platform
+// metadata route resolves scoped settings, then SAP discovery and catalog calls
+// use real OAuth HTTP requests. No external provider or database is required.
+func TestSAPCatalogMetadataHTTP(t *testing.T) {
+	assertFileUnchanged := isolateIndependentSettingsConfig(t)
+	sap.SetModelLimitsStore(sapCatalogHTTPModelLimits{})
+	t.Cleanup(func() { sap.SetModelLimitsStore(nil) })
+
+	var mu sync.Mutex
+	calls := make(map[string]int)
+	catalogOutage := true
+	sapServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		group := r.Header.Get("AI-Resource-Group")
+		calls[group+":"+r.URL.Path]++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/oauth/token" {
+			if r.Method != http.MethodPost || r.ParseForm() != nil || r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_id") != "loopback-client" || r.Form.Get("client_secret") != "loopback-secret" {
+				t.Errorf("invalid OAuth request: method=%s", r.Method)
+				http.Error(w, "invalid OAuth request", http.StatusUnauthorized)
+				return
+			}
+			fmt.Fprint(w, `{"access_token":"loopback-token","expires_in":3600,"token_type":"Bearer"}`)
+			return
+		}
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer loopback-token" || group == "" {
+			t.Errorf("invalid SAP request: method=%s path=%s group=%q", r.Method, r.URL.Path, group)
+			http.Error(w, "invalid SAP request", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v2/lm/deployments":
+			if r.URL.Query().Get("status") != "RUNNING" || r.URL.Query().Get("resourceGroup") != group {
+				t.Errorf("deployment query did not scope running models: %s", r.URL.RawQuery)
+			}
+			if group == "empty" {
+				fmt.Fprint(w, `{"resources":[]}`)
+				return
+			}
+			fmt.Fprint(w, `{"resources":[{"id":"running-deployment","configurationId":"astra-config","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-6-astra"}}}}},{"id":"stopped-deployment","status":"STOPPED","details":{"resources":{"backendDetails":{"model":{"name":"undeployed-model"}}}}}]}`)
+		case "/v2/lm/configurations/astra-config":
+			fmt.Fprint(w, `{"id":"astra-config","parameterBindings":[{"key":"modelName","value":"gpt-6-astra"}]}`)
+		case "/v2/lm/scenarios/foundation-models/models":
+			if group == "outage" && catalogOutage {
+				http.Error(w, "catalog unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			capacity := 1100000
+			if group == "independent" {
+				capacity = 222222
+			}
+			fmt.Fprintf(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"name":"latest","isLatest":true,"contextLength":%d}]},{"model":"undeployed-model","versions":[{"name":"latest","isLatest":true,"contextLength":9999999}]}]}`, capacity)
+		default:
+			t.Errorf("unexpected SAP path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer sapServer.Close()
+
+	providers := make(map[string]map[string]string)
+	for _, group := range []string{"primary", "independent", "outage", "empty"} {
+		providers["SAP-"+group] = map[string]string{
+			"type": "sap_ai_core", "client_id": "loopback-client", "client_secret": "loopback-secret",
+			"auth_url": sapServer.URL, "base_url": sapServer.URL, "resource_group": group,
+		}
+	}
+	svc := &store.Services{
+		Mode:             store.ModePlatform,
+		PlatformSettings: &providerMatrixPlatformStore{value: &store.PlatformSettings{Providers: providers}},
+		OrgSettings:      &providerMatrixOrgStore{value: &store.OrgSettings{}},
+		Settings:         &urgentSettingsStore{value: &store.TeamSettings{}},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/api/providers/{providerId}/models-metadata", func(w http.ResponseWriter, r *http.Request) {
+		ctx := store.WithTenantContext(store.WithServices(r.Context(), svc), &store.TenantContext{OrgSlug: "catalog-org", TeamSlug: "catalog-team"})
+		ListProviderModelsWithMetadataHandler(w, r.WithContext(ctx))
+	}).Methods(http.MethodGet)
+	platformServer := httptest.NewServer(router)
+	defer platformServer.Close()
+	client := &http.Client{Timeout: 15 * time.Second}
+	fetch := func(t *testing.T, group string) []sap.ModelInfo {
+		t.Helper()
+		resp, err := client.Get(platformServer.URL + "/api/providers/SAP-" + group + "/models-metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var result struct {
+			Provider    string          `json:"provider"`
+			HasMetadata bool            `json:"has_metadata"`
+			Models      []sap.ModelInfo `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("decode metadata (status=%d): %v", resp.StatusCode, err)
+		}
+		if resp.StatusCode != http.StatusOK || !result.HasMetadata || result.Provider != "SAP-"+group {
+			t.Fatalf("invalid metadata envelope: status=%d result=%+v", resp.StatusCode, result)
+		}
+		return result.Models
+	}
+	assertModel := func(t *testing.T, models []sap.ModelInfo, capacity int) {
+		t.Helper()
+		if len(models) != 1 || models[0].ID != "gpt-6-astra" || models[0].Name != "gpt-6-astra" {
+			t.Fatalf("metadata must contain only deployed models: %+v", models)
+		}
+		model := models[0]
+		if model.ContextLength != capacity || model.MaxOutputTokens != 3210 || model.SupportsTools == nil || *model.SupportsTools {
+			t.Fatalf("catalog capacity/learned output and tools not preserved: %+v, want capacity=%d", model, capacity)
+		}
+	}
+	t.Run("catalog-capacity", func(t *testing.T) { assertModel(t, fetch(t, "primary"), 1100000) })
+	t.Run("independent-resource-group", func(t *testing.T) {
+		assertModel(t, fetch(t, "independent"), 222222)
+		assertModel(t, fetch(t, "primary"), 1100000)
+	})
+	t.Run("catalog-outage-and-recovery", func(t *testing.T) {
+		assertModel(t, fetch(t, "outage"), sap.GetModelConfig("gpt-6-astra").ContextWindow)
+		mu.Lock()
+		catalogOutage = false
+		mu.Unlock()
+		assertModel(t, fetch(t, "outage"), 1100000)
+	})
+	t.Run("empty-deployments", func(t *testing.T) {
+		if models := fetch(t, "empty"); len(models) != 0 {
+			t.Fatalf("catalog manufactured models without deployments: %+v", models)
+		}
+	})
+	mu.Lock()
+	for _, group := range []string{"primary", "independent", "outage", "empty"} {
+		for _, path := range []string{"/v2/lm/deployments", "/v2/lm/scenarios/foundation-models/models"} {
+			if calls[group+":"+path] == 0 {
+				t.Errorf("SAP %s did not receive %s", group, path)
+			}
+		}
+	}
+	mu.Unlock()
+	assertFileUnchanged()
+}
 
 // isolateIndependentSettingsConfig prevents settings resets from starting provider
 // initialization and confines any unexpected file access to this test's directory.

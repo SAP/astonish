@@ -22,7 +22,27 @@ Each provider/model combination has a known context window size. The system trac
 - **Prompt budgeting**: The system prompt builder can estimate remaining capacity.
 - **Error prevention**: Avoid sending requests that exceed the model's limit.
 
-Context window sizes are maintained in a registry within each provider adapter.
+Context budgets and Code mode indicators share `pkg/provider/context_window.go`. Resolution precedence is an explicit `general.context_length` override, provider API metadata, an exact SAP model configuration (for SAP instances) followed by the shared curated model map, then the universal 200,000-token default. Only the universal default is marked `IsFallback`; a known model whose conservative capacity happens to be 200k is not.
+
+For SAP AI Core, authoritative capacity comes from the authenticated `GET /v2/lm/scenarios/foundation-models/models` catalog's `versions[].contextLength`, matching the exact `model` ID. A unique latest version must have a positive capacity. Without a latest designation, the available positive capacities must agree; ambiguous latest entries, invalid latest capacity, or differing positive lengths are not guessed or resolved by taking the largest value. Model-name-only configuration cannot establish pinned deployment-version accuracy.
+
+Successful catalog maps, including empty maps, and deployment metadata lists use one-hour connection-scoped caches. Connection identity includes normalized base/auth URLs, client ID, client secret and effective resource group in a SHA-256 fingerprint; secret inputs are not logged. Failed catalog requests are not cached, and SAP context resolution bypasses the generic indefinite provider-name/model cache, so credential rotation, overrides and outage recovery are not stranded there. Local Code mode retains environment fallback; confined platform contexts refuse operator environment credentials.
+
+The platform model metadata response overlays catalog capacity onto **running deployments only**: undeployed catalog models are never added. Catalog failure preserves deployment discovery and static fallback. Independently learned maximum-output and tool-support limits remain intact; capacity enrichment does not alter generation defaults. Existing Studio and terminal formatting display 1,100,000 as `1.1M` without new UI or transport fields.
+
+The Code `/model` picker loads capacities for discovered IDs through the optional `backend.ModelContextBackend` capability, implemented by the local backend and forwarded by the lazy Code wrapper. It uses the same resolver and fallback provenance as the header, stores values with the selected provider's model list, and performs no network requests while rendering or filtering. Backends without that capability retain static display hints.
+
+Deterministic checks use loopback OAuth/catalog/deployment servers, the actual platform HTTP handler and Code backend, and the existing renderers:
+
+```bash
+go test -race ./pkg/provider/... -count=1 -timeout=10m
+go test ./pkg/api -run TestSAPCatalogMetadataHTTP -count=1
+go test ./pkg/launcher -run TestCodeSAPCatalogContext -count=1
+go test ./pkg/tui -run 'TestRenderHeader.*(SAP|Fallback)|TestFormatTokenCount' -count=1
+(cd web && npm test -- src/test/scenarios/panel-interactions.test.tsx && npm run typecheck)
+```
+
+The 1,100,000 fixture verifies propagation, not any model's production capacity; a real model's value remains whatever its authenticated SAP catalog reports.
 
 ### Why Canonical Tool Serialization
 

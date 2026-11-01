@@ -1319,12 +1319,243 @@ func TestProvider_Name(t *testing.T) {
 
 // ---------- ListModelsWithMetadata ----------
 
+func TestSAPCatalogContextWindow(t *testing.T) {
+	cases := []struct {
+		name, versions string
+		want           int
+	}{
+		{"latest", `[{"contextLength":9000000},{"name":"latest","isLatest":true,"contextLength":1100000}]`, 1100000},
+		{"sole", `[{"contextLength":123456}]`, 123456},
+		{"same", `[{"contextLength":123456},{"contextLength":123456}]`, 123456},
+		{"missing", `[{}]`, 0},
+		{"zero", `[{"isLatest":true,"contextLength":0}]`, 0},
+		{"negative", `[{"contextLength":-1}]`, 0},
+		{"ambiguous", `[{"contextLength":100},{"contextLength":200}]`, 0},
+		{"two latest", `[{"isLatest":true,"contextLength":100},{"isLatest":true,"contextLength":100}]`, 0},
+		{"invalid latest", `[{"isLatest":true},{"contextLength":100}]`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var authCalls, catalogCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth/token" {
+					if r.Method != http.MethodPost {
+						t.Error("OAuth method")
+					}
+					_ = r.ParseForm()
+					if r.Form.Get("client_id") != "id" || r.Form.Get("client_secret") != "secret" {
+						t.Error("OAuth fields")
+					}
+					fmt.Fprintf(w, `{"access_token":"tok-%d","expires_in":3600}`, authCalls.Add(1))
+					return
+				}
+				if r.URL.Path != "/v2/lm/scenarios/foundation-models/models" || r.Method != http.MethodGet || r.Header.Get("AI-Resource-Group") != "default" {
+					t.Errorf("catalog request %s", r.URL)
+				}
+				if catalogCalls.Add(1) == 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer tok-2" {
+					t.Error("renewed authorization missing")
+				}
+				fmt.Fprintf(w, `{"resources":[{"model":"exact","displayName":"friendly","executableId":"executable","versions":%s}]}`, tc.versions)
+			}))
+			defer srv.Close()
+			for _, suffix := range []string{"", "/", "/v2", "/v2/"} {
+				got, err := GetModelContextWindow(context.Background(), "exact", "id", "secret", srv.URL+"/", srv.URL+suffix, "")
+				if err != nil || got != tc.want {
+					t.Fatalf("got=%d want=%d err=%v", got, tc.want, err)
+				}
+			}
+			for _, name := range []string{"friendly", "executable", "Exact", "absent"} {
+				got, err := GetModelContextWindow(context.Background(), name, "id", "secret", srv.URL, srv.URL, "default")
+				if err != nil || got != 0 {
+					t.Fatalf("non-ID matched: %s %d %v", name, got, err)
+				}
+			}
+			if authCalls.Load() != 2 || catalogCalls.Load() != 2 {
+				t.Fatal("normalized cache or 401 recovery failed")
+			}
+		})
+	}
+	for _, body := range []string{"secret-not-json", strings.Repeat("x", maxSAPCatalogResponseBytes+1)} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/oauth/token" {
+				fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+				return
+			}
+			fmt.Fprint(w, body)
+		}))
+		_, err := GetModelContextWindow(context.Background(), "exact", "id", "secret", srv.URL, srv.URL, "default")
+		srv.Close()
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("unsanitized/absent error: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := GetModelContextWindow(ctx, "exact", "id", "secret", "https://invalid", "https://invalid", ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+	if _, err := GetModelContextWindow(context.Background(), "exact", "", "", "", "", ""); err == nil {
+		t.Fatal("incomplete credentials accepted")
+	}
+}
+
+func TestSAPCatalogCacheIsolation(t *testing.T) {
+	var calls atomic.Int32
+	var unavailable atomic.Bool
+	var empty atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+			return
+		}
+		calls.Add(1)
+		if unavailable.Load() {
+			http.Error(w, "secret", http.StatusServiceUnavailable)
+			return
+		}
+		if empty.Load() {
+			fmt.Fprint(w, `{"resources":[]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"resources":[{"model":"m","versions":[{"contextLength":%d}]}]}`, calls.Load())
+	}))
+	defer srv.Close()
+	lookup := func(id, secret, group string) int {
+		t.Helper()
+		got, err := GetModelContextWindow(context.Background(), "m", id, secret, srv.URL, srv.URL, group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		id, secret, group string
+		want              int
+	}{
+		{"a", "secret", "rg", 1},
+		{"a", "secret", "rg", 1}, // Same connection must reuse the catalog.
+		{"b", "secret", "rg", 2},
+		{"a", "rotated", "rg", 3},
+		{"a", "secret", "other", 4},
+	} {
+		if got := lookup(tc.id, tc.secret, tc.group); got != tc.want {
+			t.Fatalf("connection context = %d, want %d", got, tc.want)
+		}
+	}
+	key := sapConnectionKey("a", "secret", srv.URL, srv.URL, "rg")
+	sapModelCacheMu.Lock()
+	e := sapCatalogCache[key]
+	e.FetchedAt = time.Now().Add(-2 * time.Hour)
+	sapCatalogCache[key] = e
+	sapModelCacheMu.Unlock()
+	if lookup("a", "secret", "rg") != 5 {
+		t.Fatal("expired catalog not refreshed")
+	}
+	unavailable.Store(true)
+	if _, err := GetModelContextWindow(context.Background(), "m", "failed", "secret", srv.URL, srv.URL, "rg"); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("outage=%v", err)
+	}
+	unavailable.Store(false)
+	if lookup("failed", "secret", "rg") != 7 {
+		t.Fatal("failure cached")
+	}
+	empty.Store(true)
+	for range 2 {
+		if lookup("empty", "secret", "rg") != 0 {
+			t.Fatal("empty catalog returned context")
+		}
+	}
+	if calls.Load() != 8 {
+		t.Fatal("empty catalog not cached")
+	}
+	// Public metadata returns deep copies, even of optional capability pointers.
+	v := false
+	models := []ModelInfo{{ID: "m", SupportsTools: &v}}
+	copy := copySAPModels(models)
+	*copy[0].SupportsTools = true
+	copy[0].ID = "changed"
+	if *models[0].SupportsTools || models[0].ID != "m" {
+		t.Fatal("metadata copy aliases cached values")
+	}
+	invalidateModelCache()
+	if lookup("a", "secret", "rg") != 5 {
+		t.Fatal("learned-limit invalidation discarded catalog")
+	}
+}
+
+func TestListModelsWithMetadata_CatalogOutage(t *testing.T) {
+	var down atomic.Bool
+	down.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+		case "/v2/lm/deployments":
+			fmt.Fprint(w, `{"resources":[{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-6-astra"}}}}}]}`)
+		default:
+			if down.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprint(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"contextLength":1100000}]}]}`)
+		}
+	}))
+	defer srv.Close()
+	for _, want := range []int{200000, 1100000} {
+		models, err := ListModelsWithMetadata(context.Background(), "id", "secret", srv.URL, srv.URL, "default")
+		if err != nil || len(models) != 1 || models[0].ContextLength != want {
+			t.Fatalf("outage recovery: %+v %v", models, err)
+		}
+		down.Store(false)
+	}
+}
+
+func TestListModelsWithMetadata_CatalogContext(t *testing.T) {
+	invalidateModelCache()
+	t.Cleanup(invalidateModelCache)
+	mem := newMemLimits()
+	SetModelLimitsStore(mem)
+	t.Cleanup(func() { SetModelLimitsStore(nil) })
+	_ = mem.UpsertMaxOutput(context.Background(), sapAICoreProviderType, "gpt-6-astra", 32768, "learned_400")
+	_ = mem.UpsertSupportsTools(context.Background(), sapAICoreProviderType, "gpt-6-astra", false, "learned_400")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+		case "/v2/lm/deployments":
+			fmt.Fprint(w, `{"resources":[{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-6-astra"}}}}},{"status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-4o"}}}}}]}`)
+		case "/v2/lm/scenarios/foundation-models/models":
+			fmt.Fprint(w, `{"resources":[{"model":"gpt-6-astra","versions":[{"isLatest":true,"contextLength":1100000}]},{"model":"gpt-4o","versions":[{"isLatest":true,"contextLength":128000}]},{"model":"undeployed","versions":[{"contextLength":9000000}]}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	models, err := ListModelsWithMetadata(context.Background(), "id", "secret", srv.URL, srv.URL, "default")
+	if err != nil || len(models) != 2 {
+		t.Fatalf("models=%v error=%v", models, err)
+	}
+	for _, m := range models {
+		want := 128000
+		if m.ID == "gpt-6-astra" {
+			want = 1100000
+			if m.MaxOutputTokens != 32768 || m.SupportsTools == nil || *m.SupportsTools {
+				t.Fatalf("learned limits lost: %+v", m)
+			}
+		}
+		if m.ContextLength != want {
+			t.Errorf("%s context=%d, want catalog %d", m.ID, m.ContextLength, want)
+		}
+	}
+}
+
 func TestListModelsWithMetadata_EnrichesConfig(t *testing.T) {
 	// Reset cache for this test
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1379,13 +1610,14 @@ func TestListModelsWithMetadata_EnrichesConfig(t *testing.T) {
 
 func TestListModelsWithMetadata_UsesCache(t *testing.T) {
 	cached := []ModelInfo{{ID: "cached-model", Name: "cached-model", ContextLength: 100, MaxOutputTokens: 50}}
+	key := sapConnectionKey("id", "secret", "https://auth.invalid", "https://api.invalid", "default")
 	sapModelCacheMu.Lock()
-	sapModelCache = cached
-	sapModelCacheTime = time.Now()
+	sapModelCache[key] = sapMetadataCacheEntry{Models: cached, FetchedAt: time.Now()}
+	sapCatalogCache[key] = sapCatalogCacheEntry{Windows: map[string]int{}, FetchedAt: time.Now()}
 	sapModelCacheMu.Unlock()
 
-	// No servers needed — should return cache
-	models, err := ListModelsWithMetadata(context.Background(), "", "", "", "", "")
+	// No servers needed — should return this connection's cache.
+	models, err := ListModelsWithMetadata(context.Background(), "id", "secret", "https://auth.invalid", "https://api.invalid", "default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1394,8 +1626,5 @@ func TestListModelsWithMetadata_UsesCache(t *testing.T) {
 	}
 
 	// Clean up
-	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
-	sapModelCacheMu.Unlock()
+	invalidateModelCache()
 }

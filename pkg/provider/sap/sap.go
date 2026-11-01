@@ -3,6 +3,7 @@ package sap
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,8 +100,7 @@ func requestWithoutTools(req *model.LLMRequest) *model.LLMRequest {
 // the next UI fetch picks up newly learned limits.
 func invalidateModelCache() {
 	sapModelCacheMu.Lock()
-	sapModelCache = nil
-	sapModelCacheTime = time.Time{}
+	sapModelCache = make(map[[32]byte]sapMetadataCacheEntry)
 	sapModelCacheMu.Unlock()
 }
 
@@ -620,31 +620,187 @@ type ModelInfo struct {
 	SupportsTools   *bool  `json:"supports_tools,omitempty"`
 }
 
-// Model cache for SAP AI Core
+const maxSAPCatalogResponseBytes = 8 << 20
+
+// Catalog metadata and deployment metadata have independent lifetimes. Learning
+// an output limit invalidates deployment metadata without discarding the catalog.
+type sapCatalogVersion struct {
+	Name          string `json:"name"`
+	IsLatest      bool   `json:"isLatest"`
+	ContextLength int    `json:"contextLength"`
+}
+
+type sapCatalogResponse struct {
+	Resources []struct {
+		Model    string              `json:"model"`
+		Versions []sapCatalogVersion `json:"versions"`
+	} `json:"resources"`
+}
+
+type sapCatalogCacheEntry struct {
+	Windows   map[string]int
+	FetchedAt time.Time
+}
+
+type sapMetadataCacheEntry struct {
+	Models    []ModelInfo
+	FetchedAt time.Time
+}
+
 var (
-	sapModelCacheMu   sync.RWMutex
-	sapModelCache     []ModelInfo
-	sapModelCacheTime time.Time
-	sapModelCacheTTL  = 1 * time.Hour
+	sapModelCacheMu  sync.RWMutex
+	sapModelCache    = make(map[[32]byte]sapMetadataCacheEntry)
+	sapCatalogCache  = make(map[[32]byte]sapCatalogCacheEntry)
+	sapModelCacheTTL = time.Hour
 )
 
-// ListModelsWithMetadata fetches running deployments and enriches with ModelConfigs metadata
-func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]ModelInfo, error) {
-	// Check cache first
+func normalizedSAPBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(baseURL, "/v2") {
+		baseURL += "/v2"
+	}
+	return baseURL
+}
+
+func sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup string) [32]byte {
+	// JSON framing avoids collisions between values containing separators.
+	identity, _ := json.Marshal([]string{normalizedSAPBaseURL(baseURL), strings.TrimRight(authURL, "/"), clientID, clientSecret, effectiveResourceGroup(resourceGroup)})
+	return sha256.Sum256(identity)
+}
+
+func catalogVersionContext(versions []sapCatalogVersion) int {
+	latestCount, latest, positive := 0, 0, 0
+	ambiguous := false
+	for _, v := range versions {
+		if v.IsLatest {
+			latestCount++
+			latest = v.ContextLength
+		}
+		if v.ContextLength > 0 {
+			if positive != 0 && positive != v.ContextLength {
+				ambiguous = true
+			}
+			positive = v.ContextLength
+		}
+	}
+	if latestCount == 1 {
+		return max(latest, 0)
+	}
+	if latestCount > 1 || ambiguous {
+		return 0
+	}
+	return positive
+}
+
+// GetModelContextWindow returns the catalog capacity for an exact model ID.
+// Zero means no unambiguous positive metadata is available; no static default
+// is returned here, so callers can distinguish metadata from fallback values.
+func GetModelContextWindow(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (int, error) {
+	windows, err := fetchSAPCatalog(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
+	return windows[modelName], err
+}
+
+func fetchSAPCatalog(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) (map[string]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if clientID == "" || clientSecret == "" || authURL == "" || baseURL == "" {
+		return nil, errors.New("SAP catalog: configuration incomplete")
+	}
+	key := sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup)
 	sapModelCacheMu.RLock()
-	if len(sapModelCache) > 0 && time.Since(sapModelCacheTime) < sapModelCacheTTL {
-		cached := make([]ModelInfo, len(sapModelCache))
-		copy(cached, sapModelCache)
+	cached, ok := sapCatalogCache[key]
+	sapModelCacheMu.RUnlock()
+	if ok && time.Since(cached.FetchedAt) < sapModelCacheTTL {
+		return cached.Windows, nil // Immutable after insertion; never exposed publicly.
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, normalizedSAPBaseURL(baseURL)+"/lm/scenarios/foundation-models/models", nil)
+	if err != nil {
+		return nil, errors.New("SAP catalog: invalid URL")
+	}
+	client := &http.Client{Transport: &sapTransport{base: httpool.Transport(), clientID: clientID, clientSecret: clientSecret, authURL: authURL, resourceGroup: effectiveResourceGroup(resourceGroup)}}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("SAP catalog: request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SAP catalog: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSAPCatalogResponseBytes+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("SAP catalog: unreadable response")
+	}
+	if len(body) > maxSAPCatalogResponseBytes {
+		return nil, errors.New("SAP catalog: response too large")
+	}
+	var result sapCatalogResponse
+	if json.Unmarshal(body, &result) != nil {
+		return nil, errors.New("SAP catalog: invalid response")
+	}
+	windows := make(map[string]int)
+	seen := make(map[string]bool)
+	for _, resource := range result.Resources {
+		if resource.Model == "" {
+			continue
+		}
+		if seen[resource.Model] {
+			windows[resource.Model] = 0 // Duplicate resources cannot establish an authority.
+			continue
+		}
+		seen[resource.Model] = true
+		windows[resource.Model] = catalogVersionContext(resource.Versions)
+	}
+	sapModelCacheMu.Lock()
+	sapCatalogCache[key] = sapCatalogCacheEntry{Windows: windows, FetchedAt: time.Now()}
+	sapModelCacheMu.Unlock()
+	return windows, nil
+}
+
+func copySAPModels(models []ModelInfo) []ModelInfo {
+	result := append([]ModelInfo(nil), models...)
+	for i := range result {
+		if result[i].SupportsTools != nil {
+			v := *result[i].SupportsTools
+			result[i].SupportsTools = &v
+		}
+	}
+	return result
+}
+
+// ListModelsWithMetadata fetches running deployments and overlays catalog context
+// capacity. Catalog outages preserve discovery and static fallback metadata.
+func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]ModelInfo, error) {
+	if clientID == "" || clientSecret == "" || authURL == "" || baseURL == "" {
+		return nil, errors.New("SAP metadata: configuration incomplete")
+	}
+	key := sapConnectionKey(clientID, clientSecret, authURL, baseURL, resourceGroup)
+	// Check cache first; never retain a list beyond its catalog's expiry.
+	sapModelCacheMu.RLock()
+	cached, ok := sapModelCache[key]
+	catalog, catalogOK := sapCatalogCache[key]
+	if ok && catalogOK && time.Since(cached.FetchedAt) < sapModelCacheTTL && time.Since(catalog.FetchedAt) < sapModelCacheTTL {
+		result := copySAPModels(cached.Models)
 		sapModelCacheMu.RUnlock()
-		return cached, nil
+		return result, nil
 	}
 	sapModelCacheMu.RUnlock()
 
 	// Fetch model IDs using existing ListModels
-	modelIDs, err := ListModels(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
+	modelIDs, err := ListModels(ctx, clientID, clientSecret, authURL, normalizedSAPBaseURL(baseURL), resourceGroup)
 	if err != nil {
 		return nil, err
 	}
+
+	windows, catalogErr := fetchSAPCatalog(ctx, clientID, clientSecret, authURL, baseURL, resourceGroup)
 
 	// Enrich with ModelConfigs metadata; learned limits override MaxOutputTokens
 	// and SupportsTools when known.
@@ -652,6 +808,10 @@ func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL
 	limits := getModelLimitsStore()
 	for _, id := range modelIDs {
 		config := GetModelConfig(id)
+		contextLength := config.ContextWindow
+		if windows[id] > 0 {
+			contextLength = windows[id]
+		}
 		maxOut := config.MaxTokens
 		var supportsTools *bool
 		if limits != nil {
@@ -667,19 +827,21 @@ func ListModelsWithMetadata(ctx context.Context, clientID, clientSecret, authURL
 		models = append(models, ModelInfo{
 			ID:              id,
 			Name:            id,
-			ContextLength:   config.ContextWindow,
+			ContextLength:   contextLength,
 			MaxOutputTokens: maxOut,
 			SupportsTools:   supportsTools,
 		})
 	}
 
-	// Update cache
-	sapModelCacheMu.Lock()
-	sapModelCache = models
-	sapModelCacheTime = time.Now()
-	sapModelCacheMu.Unlock()
+	// Do not cache fallback lists caused by a catalog outage: the next fetch
+	// should recover immediately when the catalog becomes available.
+	if catalogErr == nil {
+		sapModelCacheMu.Lock()
+		sapModelCache[key] = sapMetadataCacheEntry{Models: copySAPModels(models), FetchedAt: time.Now()}
+		sapModelCacheMu.Unlock()
+	}
 
-	return models, nil
+	return copySAPModels(models), nil
 }
 
 func (p *Provider) generateBedrockContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {

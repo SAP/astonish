@@ -84,39 +84,47 @@ func TestNewLLMError(t *testing.T) {
 	}
 }
 
-func TestExpiredTokenRetryClassification(t *testing.T) {
+func TestExpiredTokenRequiresCredentialRecovery(t *testing.T) {
 	tests := []struct {
 		name, message, body string
 		code                int
-		want                bool
 	}{
-		{"reported_plain_text", "invalid character 'J' looking for beginning of value", "Jwt is expired: Jwt is expired", 401, true},
-		{"jwt_message", "JWT expired", "", 401, true},
-		{"json_code", "Unauthorized", `{"error":{"code":"token_expired"}}`, 401, true},
-		{"access_token", "The access token has expired", "", 401, true},
-		{"invalid_key", "Invalid API key", "", 401, false},
-		{"bare_unauthorized", "Unauthorized", "", 401, false},
-		{"unrelated_expiry", "Subscription has expired", "", 401, false},
-		{"forbidden", "JWT is expired", "", 403, false},
-		{"bad_request", "JWT is expired", "", 400, false},
+		{"reported_plain_text", "invalid character 'J' looking for beginning of value", "Jwt is expired: Jwt is expired", 401},
+		{"jwt_message", "JWT expired", "", 401},
+		{"json_code", "Unauthorized", `{"error":{"code":"token_expired"}}`, 401},
+		{"access_token", "The access token has expired", "", 401},
+		{"invalid_key", "Invalid API key", "", 401},
+		{"bare_unauthorized", "Unauthorized", "", 401},
+		{"unrelated_expiry", "Subscription has expired", "", 401},
+		{"forbidden", "JWT is expired", "", 403},
+		{"bad_request", "JWT is expired", "", 400},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := NewLLMError("test", tt.code, tt.message, tt.body)
-			if err.Retryable != tt.want || IsRetryable(fmt.Errorf("provider: %w", err)) != tt.want {
-				t.Fatalf("retryable = %v, want %v: %v", err.Retryable, tt.want, err)
+			wrapped := fmt.Errorf("provider: %w", err)
+			if err.Retryable || IsRetryable(wrapped) {
+				t.Errorf("must not retry without credential recovery: %v", err)
 			}
-			if tt.code == 401 && !IsAuthError(err) {
-				t.Fatal("expiry must retain authentication classification")
+			if IsAuthError(wrapped) != (tt.code == 401 || tt.code == 403) {
+				t.Errorf("authentication classification changed: %v", err)
+			}
+			if StatusCode(wrapped) != tt.code || err.Message != tt.message || err.Body != tt.body || err.Provider != "test" {
+				t.Errorf("lost diagnostics: %+v", err)
 			}
 			if IsRetryable(NewInterruptedStream(err)) {
 				t.Fatal("must not replay after output")
 			}
 		})
 	}
-	resp := &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Header: make(http.Header)}
-	if !IsRetryable(NewFromResponse("test", resp, []byte("Jwt is expired: Jwt is expired"))) {
-		t.Fatal("HTTP response body must participate in expiry classification")
+	resp := &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized", Header: http.Header{"Retry-After": []string{"30"}}}
+	const body = "Jwt is expired: Jwt is expired"
+	err := NewFromResponse("test", resp, []byte(body))
+	if IsRetryable(err) || !IsAuthError(err) {
+		t.Errorf("HTTP expiry response requires credential recovery: %v", err)
+	}
+	if err.Body != body || !strings.Contains(err.Error(), body) || GetRetryAfter(err) != 30*time.Second {
+		t.Fatalf("HTTP expiry response lost diagnostics: %+v", err)
 	}
 }
 

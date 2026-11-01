@@ -9,10 +9,306 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SAP/astonish/pkg/provider/httpool"
+	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
+	"github.com/sashabaranov/go-openai"
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
+
+func TestCopilotGenerationAuthRecovery(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
+			var rotations atomic.Int32
+			tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := rotations.Add(1)
+				json.NewEncoder(w).Encode(CopilotTokenResponse{Token: fmt.Sprintf("token-%d", n), ExpiresAt: time.Now().Add(time.Hour).Unix()})
+			}))
+			defer tokens.Close()
+			var calls int
+			var bodies, auths []string
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, string(b))
+				auths = append(auths, r.Header.Get("Authorization"))
+				calls++
+				for header, want := range map[string]string{"Copilot-Integration-Id": "vscode-chat", "Editor-Version": "vscode/1.107.0", "Editor-Plugin-Version": "copilot-chat/0.35.0", "OpenAI-Intent": "conversation-panel", "User-Agent": userAgent} {
+					if r.Header.Get(header) != want {
+						t.Errorf("%s=%q", header, r.Header.Get(header))
+					}
+				}
+				if calls == 2 {
+					w.WriteHeader(401)
+					fmt.Fprint(w, `{"error":{"message":"revoked","type":"authentication_error"}}`)
+					return
+				}
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{"id":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+				}
+			}))
+			defer api.Close()
+			tr := NewCopilotTransport("github")
+			tr.copilotTokenURL = tokens.URL
+			cfg := openai.DefaultConfig("placeholder")
+			cfg.BaseURL = api.URL
+			cfg.HTTPClient = &http.Client{Transport: tr}
+			p := openai_provider.NewProvider(openai.NewClientWithConfig(cfg), "gpt-4o", true)
+			req := &model.LLMRequest{Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hello"}}}}}
+			for i := 0; i < 3; i++ {
+				seen := false
+				for response, err := range p.GenerateContent(context.Background(), req, streaming) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if response != nil && response.Content != nil {
+						seen = true
+					}
+				}
+				if !seen {
+					t.Fatal("no generation output")
+				}
+			}
+			if calls != 4 || rotations.Load() != 2 || bodies[1] != bodies[2] || auths[0] != "Bearer token-1" || auths[1] != "Bearer token-1" || auths[2] != "Bearer token-2" || auths[3] != "Bearer token-2" {
+				t.Fatalf("calls=%d rotations=%d auth=%v bodies=%v", calls, rotations.Load(), auths, bodies)
+			}
+		})
+	}
+}
+
+func TestCopilotTransport_ProactiveRefreshThen401(t *testing.T) {
+	var rotations atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := rotations.Add(1)
+		json.NewEncoder(w).Encode(CopilotTokenResponse{Token: fmt.Sprint(n), ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	}))
+	defer tokens.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer 2" {
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer api.Close()
+	tr := NewCopilotTransport("github")
+	tr.copilotTokenURL = tokens.URL
+	resp, err := (&http.Client{Transport: tr}).Get(api.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || rotations.Load() != 2 {
+		t.Fatalf("status=%d rotations=%d", resp.StatusCode, rotations.Load())
+	}
+}
+
+func TestCopilotTransport_Simultaneous401SingleRotation(t *testing.T) {
+	var rotations atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rotations.Add(1)
+		json.NewEncoder(w).Encode(CopilotTokenResponse{Token: "new", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	}))
+	defer tokens.Close()
+	const count = 8
+	var arrived atomic.Int32
+	release := make(chan struct{})
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer old" {
+			if arrived.Add(1) == count {
+				close(release)
+			}
+			<-release
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer api.Close()
+	tr := NewCopilotTransport("github")
+	tr.sessionToken = "old"
+	tr.sessionExpiresAt = time.Now().Add(time.Hour)
+	tr.copilotTokenURL = tokens.URL
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := (&http.Client{Transport: tr}).Get(api.URL)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Errorf("status=%d", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+	if rotations.Load() != 1 {
+		t.Fatalf("rotations=%d", rotations.Load())
+	}
+}
+
+func TestCopilotTransport_SecondRejectionAndLaterRecovery(t *testing.T) {
+	var rotations, calls atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := rotations.Add(1)
+		json.NewEncoder(w).Encode(CopilotTokenResponse{Token: fmt.Sprint(n), ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	}))
+	defer tokens.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(401)
+		} else {
+			w.WriteHeader(200)
+		}
+	}))
+	defer api.Close()
+	tr := NewCopilotTransport("github")
+	tr.sessionToken = "old"
+	tr.sessionExpiresAt = time.Now().Add(time.Hour)
+	tr.copilotTokenURL = tokens.URL
+	for _, want := range []int{401, 200} {
+		resp, err := (&http.Client{Transport: tr}).Get(api.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("status=%d want=%d", resp.StatusCode, want)
+		}
+	}
+	if rotations.Load() != 2 {
+		t.Fatalf("rotations=%d", rotations.Load())
+	}
+}
+
+func TestCopilotTransport_CancellationAndUnavailableReplay(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); w.WriteHeader(401) }))
+	defer api.Close()
+	tr := NewCopilotTransport("github")
+	tr.sessionToken = "old"
+	tr.sessionExpiresAt = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", api.URL, nil)
+	if _, err := tr.RoundTrip(req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel=%v", err)
+	}
+	req, _ = http.NewRequest("POST", api.URL, io.NopCloser(strings.NewReader("body")))
+	if _, err := tr.RoundTrip(req); !errors.Is(err, httpool.ErrAuthReplayUnavailable) {
+		t.Fatalf("replay=%v", err)
+	}
+	tr.mu.Lock()
+	cached := tr.sessionToken
+	tr.mu.Unlock()
+	if cached != "" {
+		t.Fatal("rejected token retained")
+	}
+}
+
+func TestCopilotTransport_MalformedRenewal(t *testing.T) {
+	for _, response := range []CopilotTokenResponse{{Token: "token"}, {Token: "token", ExpiresAt: time.Now().Add(-time.Hour).Unix()}, {ExpiresAt: time.Now().Add(time.Hour).Unix()}} {
+		t.Run(fmt.Sprint(response), func(t *testing.T) {
+			tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(response) }))
+			defer tokens.Close()
+			tr := NewCopilotTransport("github")
+			tr.copilotTokenURL = tokens.URL
+			if _, err := tr.acquireToken(context.Background(), ""); !errors.Is(err, ErrReauthRequired) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestCopilotModelListingRecovery(t *testing.T) {
+	var rotations atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := rotations.Add(1)
+		json.NewEncoder(w).Encode(CopilotTokenResponse{Token: fmt.Sprint(n), ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	}))
+	defer tokens.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer 2" {
+			w.WriteHeader(401)
+			return
+		}
+		if r.Header.Get("OpenAI-Intent") != "conversation-panel" {
+			t.Error("missing discovery header")
+		}
+		fmt.Fprint(w, `{"data":[{"id":"b"},{"id":"a"}]}`)
+	}))
+	defer api.Close()
+	models, err := listModelsFromURL(context.Background(), "github", api.URL, tokens.URL)
+	if err != nil || strings.Join(models, ",") != "a,b" || rotations.Load() != 2 {
+		t.Fatalf("models=%v error=%v rotations=%d", models, err, rotations.Load())
+	}
+}
+
+func TestCopilotTransport_ReactiveRenewalFailureAndRecovery(t *testing.T) {
+	var attempts atomic.Int32
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(403)
+			return
+		}
+		json.NewEncoder(w).Encode(CopilotTokenResponse{Token: "new", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	}))
+	defer tokens.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer new" {
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer api.Close()
+	tr := NewCopilotTransport("github")
+	tr.sessionToken = "old"
+	tr.sessionExpiresAt = time.Now().Add(time.Hour)
+	tr.copilotTokenURL = tokens.URL
+	if _, err := (&http.Client{Transport: tr}).Get(api.URL); !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("error=%v", err)
+	}
+	resp, err := (&http.Client{Transport: tr}).Get(api.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || attempts.Load() != 2 {
+		t.Fatalf("status=%d attempts=%d", resp.StatusCode, attempts.Load())
+	}
+}
+
+func TestCopilotTransport_CancellationDuringRenewal(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-release; w.WriteHeader(500) }))
+	defer tokens.Close()
+	tr := NewCopilotTransport("github")
+	tr.copilotTokenURL = tokens.URL
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := tr.acquireToken(ctx, ""); done <- err }()
+	<-started
+	cancel()
+	err := <-done
+	close(release)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}
 
 func TestRequestDeviceCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

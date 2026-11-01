@@ -3,6 +3,7 @@ package sap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -829,7 +831,451 @@ func TestSAPGPT6FunctionToolsUseResponsesAPI(t *testing.T) {
 	}
 }
 
+// ---------- Auth recovery edge cases ----------
+
+func TestSapTransport_DoesNotRecover403(t *testing.T) {
+	var authCalls atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "forbidden", http.StatusForbidden) }))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 403 || authCalls.Load() != 0 || tr.token != "old" {
+		t.Fatal("403 caused auth renewal")
+	}
+}
+
+func TestSapTransport_TokenExpiryBuffer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{authURL: srv.URL}
+	before := time.Now()
+	if _, err := tr.getToken(); err != nil {
+		t.Fatal(err)
+	}
+	if tr.expiresAt.Before(before.Add(3570*time.Second)) || tr.expiresAt.After(time.Now().Add(3570*time.Second)) {
+		t.Fatal("30-second expiry buffer not applied")
+	}
+}
+
+func TestSapTransport_Concurrent401SingleRenewal(t *testing.T) {
+	const workers = 12
+	var authCalls atomic.Int32
+	var rejected atomic.Int32
+	barrier := make(chan struct{})
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer old" {
+			if rejected.Add(1) == workers {
+				close(barrier)
+			}
+			<-barrier
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status %d", resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+	if authCalls.Load() != 1 {
+		t.Fatalf("renewals=%d, want 1", authCalls.Load())
+	}
+	// A delayed rejection must not clear a newer cached token.
+	tr.invalidateToken("old")
+	tok, err := tr.getTokenForRequest(context.Background(), "old")
+	if err != nil || tok != "new" || authCalls.Load() != 1 {
+		t.Fatalf("newer token not reused: %q %v", tok, err)
+	}
+}
+
+func TestSapTransport_RefreshFailureInvalidatesRejectedToken(t *testing.T) {
+	var authCalls atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authCalls.Add(1) == 1 {
+			http.Error(w, "secret token old client-secret", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := tr.RoundTrip(req)
+	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "old") {
+		t.Fatalf("unsanitized/missing auth failure: %v", err)
+	}
+	tr.mu.Lock()
+	cached := tr.token
+	tr.mu.Unlock()
+	if cached != "" {
+		t.Fatal("rejected token remains cached")
+	}
+	tok, err := tr.getToken()
+	if err != nil || tok != "new" || authCalls.Load() != 2 {
+		t.Fatalf("later exchange: %q %v", tok, err)
+	}
+}
+
+func TestSapTransport_Second401IsTerminal(t *testing.T) {
+	var authCalls, requests atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authCalls.Add(1)
+		fmt.Fprint(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	defer tokenSrv.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "terminal", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, token: "old", expiresAt: time.Now().Add(time.Hour)}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 401 || string(body) != "terminal\n" || authCalls.Load() != 1 || requests.Load() != 2 {
+		t.Fatalf("unbounded/lost terminal response: %d %s", resp.StatusCode, body)
+	}
+	tr.mu.Lock()
+	cached := tr.token
+	tr.mu.Unlock()
+	if cached != "" {
+		t.Fatal("second rejected token cached")
+	}
+}
+
+func TestSapTransport_RefreshCancellation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-release }))
+	defer srv.Close()
+	defer close(release)
+	tr := &sapTransport{base: http.DefaultTransport, authURL: srv.URL}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := tr.getTokenForRequest(ctx, ""); done <- err }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("exchange ignored request cancellation")
+	}
+}
+
+func TestSapTransport_RejectsInvalidTokenResponse(t *testing.T) {
+	for _, body := range []string{`{"access_token":"","expires_in":3600}`, `{"access_token":"secret","expires_in":0}`, `{"access_token":"secret","expires_in":-1}`, `{"access_token":"secret","expires_in":9223372036854775807}`, `{"access_token":"secret","expires_in":"oops"}`, `not-json secret`, strings.Repeat("x", maxSAPAuthResponseBytes+1)} {
+		t.Run(fmt.Sprintf("case-%d", len(body)), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+			defer srv.Close()
+			tr := &sapTransport{authURL: srv.URL, token: "old", expiresAt: time.Now().Add(-time.Second)}
+			_, err := tr.getToken()
+			if err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("invalid/unsanitized response: %v", err)
+			}
+			if tr.token != "" {
+				t.Fatal("invalid token cached")
+			}
+		})
+	}
+}
+
+func TestSAPDiscovery401Recovery(t *testing.T) {
+	for _, mode := range []string{"configured", "environment", "models"} {
+		t.Run(mode, func(t *testing.T) {
+			var authCalls, requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/oauth/token" {
+					fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, authCalls.Add(1))
+					return
+				}
+				if r.URL.Path != "/v2/lm/deployments" || r.Header.Get("AI-Resource-Group") != "a & b" || r.URL.Query().Get("resourceGroup") != "a & b" || r.URL.Query().Get("status") != "RUNNING" {
+					t.Errorf("discovery endpoint/filters changed: %s", r.URL)
+				}
+				if requests.Add(1) == 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer token-2" {
+					t.Error("missing renewed token")
+				}
+				fmt.Fprint(w, `{"resources":[{"id":"deployment","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"gpt-4o"}}}}}]}`)
+			}))
+			defer srv.Close()
+			var err error
+			switch mode {
+			case "configured":
+				var id string
+				id, err = resolveDeploymentIDWithConfig(context.Background(), "gpt-4o", "id", "secret", srv.URL, srv.URL, "a & b")
+				if err == nil && id != "deployment" {
+					t.Fatalf("id=%q", id)
+				}
+			case "environment":
+				t.Setenv("AICORE_CLIENT_ID", "id")
+				t.Setenv("AICORE_CLIENT_SECRET", "secret")
+				t.Setenv("AICORE_AUTH_URL", srv.URL)
+				t.Setenv("AICORE_BASE_URL", srv.URL)
+				t.Setenv("AICORE_RESOURCE_GROUP", "a & b")
+				var id string
+				id, err = ResolveDeploymentID(context.Background(), "gpt-4o")
+				if err == nil && id != "deployment" {
+					t.Fatalf("id=%q", id)
+				}
+			case "models":
+				var models []string
+				models, err = ListModels(context.Background(), "id", "secret", srv.URL, srv.URL, "a & b")
+				if err == nil && (len(models) != 1 || models[0] != "gpt-4o") {
+					t.Fatalf("models=%v", models)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authCalls.Load() != 2 || requests.Load() != 2 {
+				t.Fatalf("auth=%d discovery=%d", authCalls.Load(), requests.Load())
+			}
+		})
+	}
+}
+
+func TestSAPGenerationAuthRecovery(t *testing.T) {
+	for _, name := range []string{"gpt-4o", "gemini-2.5-pro", "anthropic--claude-3-sonnet"} {
+		for _, stream := range []bool{false, true} {
+			for _, expired := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t/expired=%t", name, stream, expired), func(t *testing.T) {
+					var authCalls, generationCalls atomic.Int32
+					var rejectNext atomic.Bool
+					var mu sync.Mutex
+					var rejectedBody, replayBody, rejectedPath, replayPath, rejectedQuery, replayQuery string
+					var rejectedHeader, replayHeader http.Header
+					var awaitingReplay bool
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/oauth/token" {
+							fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, authCalls.Add(1))
+							return
+						}
+						if r.URL.Path == "/v2/lm/deployments" {
+							fmt.Fprintf(w, `{"resources":[{"id":"dep","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":%q}}}}}]}`, name)
+							return
+						}
+						generationCalls.Add(1)
+						body, _ := io.ReadAll(r.Body)
+						if r.Header.Get("AI-Resource-Group") != "group" {
+							t.Error("resource group missing")
+						}
+						if rejectNext.Swap(false) {
+							mu.Lock()
+							rejectedBody = string(body)
+							rejectedPath = r.URL.Path
+							rejectedQuery = r.URL.RawQuery
+							rejectedHeader = r.Header.Clone()
+							awaitingReplay = true
+							mu.Unlock()
+							http.Error(w, `{"error":{"message":"server expired token"}}`, http.StatusUnauthorized)
+							return
+						}
+						mu.Lock()
+						if awaitingReplay {
+							replayBody = string(body)
+							replayPath = r.URL.Path
+							replayQuery = r.URL.RawQuery
+							replayHeader = r.Header.Clone()
+							awaitingReplay = false
+						}
+						mu.Unlock()
+						w.Header().Set("Content-Type", "application/json")
+						switch {
+						case strings.HasPrefix(name, "gpt-"):
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprint(w, "data: {\"id\":\"chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+							} else {
+								fmt.Fprint(w, `{"id":"chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+							}
+						case strings.HasPrefix(name, "gemini-"):
+							response := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprintf(w, "data: %s\n\n", response)
+							} else {
+								fmt.Fprint(w, response)
+							}
+						default:
+							if stream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input_tokens\":1}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\ndata: {\"type\":\"message_stop\"}\n\n")
+							} else {
+								fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}],"role":"assistant","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+							}
+						}
+					}))
+					defer srv.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					llm, err := NewProviderWithConfig(ctx, name, "id", "secret", srv.URL, srv.URL, "group")
+					if err != nil {
+						t.Fatal(err)
+					}
+					p := llm.(*Provider)
+					req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("unchanged prompt", genai.RoleUser)}}
+					generate := func() {
+						t.Helper()
+						var text strings.Builder
+						for response, err := range p.GenerateContent(ctx, req, stream) {
+							if err != nil {
+								t.Fatal(err)
+							}
+							if response != nil && response.Content != nil {
+								for _, part := range response.Content.Parts {
+									if part != nil {
+										text.WriteString(part.Text)
+									}
+								}
+							}
+						}
+						if !strings.Contains(text.String(), "ok") {
+							t.Fatalf("no generated content: %q", text.String())
+						}
+					}
+					generate() // Same instance succeeds before rejection.
+					beforeAuth := authCalls.Load()
+					if expired {
+						p.authConfig.mu.Lock()
+						p.authConfig.expiresAt = time.Now().Add(-time.Second)
+						p.authConfig.mu.Unlock()
+					}
+					rejectNext.Store(true)
+					generate() // Server rejection must be transparent even after proactive refresh.
+					generate() // New token is retained for subsequent generation.
+					wantAuth := beforeAuth + 1
+					if expired {
+						wantAuth++
+					}
+					if authCalls.Load() != wantAuth || generationCalls.Load() != 4 {
+						t.Fatalf("auth=%d want=%d generation=%d want=4", authCalls.Load(), wantAuth, generationCalls.Load())
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					if rejectedBody == "" || rejectedBody != replayBody || rejectedPath != replayPath || rejectedQuery != replayQuery {
+						t.Fatal("generation request changed during replay")
+					}
+					if rejectedHeader.Get("Authorization") == replayHeader.Get("Authorization") {
+						t.Fatal("replay used rejected token")
+					}
+					rejectedHeader.Del("Authorization")
+					replayHeader.Del("Authorization")
+					oldHeaders, _ := json.Marshal(rejectedHeader)
+					newHeaders, _ := json.Marshal(replayHeader)
+					if string(oldHeaders) != string(newHeaders) {
+						t.Fatalf("non-auth headers changed: %s vs %s", oldHeaders, newHeaders)
+					}
+				})
+			}
+		}
+	}
+}
+
 // ---------- BaseURL normalization ----------
+
+func TestSapTransport_Reactive401Recovery(t *testing.T) {
+	testSAPTransportRecovery(t, false)
+}
+
+func TestSapTransport_RefreshThen401Recovery(t *testing.T) {
+	testSAPTransportRecovery(t, true)
+}
+
+func testSAPTransportRecovery(t *testing.T, expired bool) {
+	var authCalls atomic.Int32
+	var requests atomic.Int32
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := authCalls.Add(1)
+		fmt.Fprintf(w, `{"access_token":"token-%d","expires_in":3600}`, n)
+	}))
+	defer tokenSrv.Close()
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"prompt":"unchanged"}` {
+			t.Errorf("replay body changed: %s", body)
+		}
+		if r.Header.Get("AI-Resource-Group") != "group" || r.URL.Query().Get("api-version") != "2024-12-01-preview" {
+			t.Error("missing decoration")
+		}
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer token-2" {
+			t.Errorf("retry token = %s", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+	tr := &sapTransport{base: http.DefaultTransport, authURL: tokenSrv.URL, resourceGroup: "group", token: "token-1", expiresAt: time.Now().Add(time.Hour)}
+	if expired {
+		tr.expiresAt = time.Now().Add(-time.Second)
+	} else {
+		authCalls.Store(1)
+	}
+	req, _ := http.NewRequest(http.MethodPost, targetSrv.URL+"/chat/completions?custom=preserved", strings.NewReader(`{"prompt":"unchanged"}`))
+	req.Header.Set("Authorization", "original")
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after renewal", resp.StatusCode)
+	}
+	if requests.Load() != 2 || authCalls.Load() != 2 {
+		t.Fatalf("requests=%d auth=%d", requests.Load(), authCalls.Load())
+	}
+	if req.Header.Get("Authorization") != "original" || req.URL.Query().Get("api-version") != "" {
+		t.Error("caller request mutated")
+	}
+}
 
 func TestNewProviderWithConfig_BaseURLNormalization(t *testing.T) {
 	t.Parallel()

@@ -2,11 +2,126 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	"github.com/SAP/astonish/pkg/provider/httpool"
+	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/config"
 )
+
+func TestResolveOAuthConfig(t *testing.T) {
+	t.Setenv("XAI_OAUTH_ACCESS_TOKEN", "env-access")
+	t.Setenv("XAI_OAUTH_REFRESH_TOKEN", "env-refresh")
+	t.Setenv("XAI_OAUTH_CLIENT_ID", "env-client")
+	t.Setenv("GITHUB_COPILOT_TOKEN", "env-github")
+	resolved, err := resolveOAuthConfig(context.Background(), "xai_oauth", nil)
+	if err != nil || resolved.accessToken != "env-access" || resolved.refreshToken != "env-refresh" || resolved.clientID != "env-client" {
+		t.Fatalf("resolved=%+v error=%v", resolved, err)
+	}
+	resolved, err = resolveOAuthConfig(WithConfinedProviderSecrets(context.Background()), "xai_oauth", config.ProviderConfig{"access_token": "explicit", "expires_at": "malformed"})
+	if err != nil || resolved.accessToken != "explicit" || resolved.refreshToken != "" || resolved.clientID != xai_oauth.DefaultClientID || !resolved.expiresAt.IsZero() {
+		t.Fatalf("confined=%+v error=%v", resolved, err)
+	}
+	resolved, err = resolveOAuthConfig(context.Background(), "xai_oauth", config.ProviderConfig{"access_token": "a", "refresh_token": "r", "client_id": "c", "expires_at": "2099-01-01T00:00:00Z"})
+	if err != nil || resolved.accessToken != "a" || resolved.refreshToken != "r" || resolved.clientID != "c" || resolved.expiresAt.IsZero() {
+		t.Fatalf("explicit=%+v error=%v", resolved, err)
+	}
+	for _, kind := range []string{"xai_oauth", "copilot_oauth"} {
+		ctx := WithConfinedProviderSecrets(context.Background())
+		cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"tenant": {"type": kind}}}
+		if _, err := GetProvider(ctx, "tenant", "", cfg); err == nil {
+			t.Errorf("%s generation inherited env", kind)
+		}
+		if _, err := ListModelsForProvider(ctx, "tenant", cfg); err == nil {
+			t.Errorf("%s listing inherited env", kind)
+		}
+		if _, err := TestProviderConnection(ctx, kind, nil); err == nil {
+			t.Errorf("%s test inherited env", kind)
+		}
+	}
+	resolved, err = resolveOAuthConfig(context.Background(), "copilot_oauth", nil)
+	if err != nil || resolved.githubToken != "env-github" {
+		t.Fatalf("copilot=%+v error=%v", resolved, err)
+	}
+}
+
+// Route only the fixed OAuth hosts to a local TLS fixture. No credentials or
+// requests can escape to production, including through environment proxies.
+func TestFactoryOAuthDiscoveryRecoveryAndPersistence(t *testing.T) {
+	t.Setenv("XAI_OAUTH_ACCESS_TOKEN", "")
+	t.Setenv("XAI_OAUTH_REFRESH_TOKEN", "")
+	t.Setenv("XAI_OAUTH_CLIENT_ID", "")
+	var tokenCalls, modelCalls, callbacks int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host == "auth.x.ai" {
+			tokenCalls++
+			r.ParseForm()
+			if r.FormValue("client_id") != xai_oauth.DefaultClientID || r.FormValue("refresh_token") != "refresh" {
+				t.Errorf("form=%v", r.Form)
+			}
+			fmt.Fprintf(w, `{"access_token":"renewed-%d","refresh_token":"rotated","expires_in":3600}`, tokenCalls)
+			return
+		}
+		if r.Host != "api.x.ai" {
+			t.Errorf("unexpected host %q", r.Host)
+			w.WriteHeader(500)
+			return
+		}
+		modelCalls++
+		if r.Header.Get("Authorization") == "Bearer old" {
+			w.WriteHeader(401)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"id":"grok"}]}`)
+	}))
+	defer server.Close()
+	transport := httpool.Transport().(*http.Transport)
+	oldDial, oldTLS, oldProxy := transport.DialContext, transport.TLSClientConfig, transport.Proxy
+	transport.CloseIdleConnections()
+	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.TLSClientConfig.ServerName = "example.com"
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(address)
+		if host != "api.x.ai" && host != "auth.x.ai" {
+			return nil, fmt.Errorf("external connection forbidden: %s", address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	defer func() {
+		transport.CloseIdleConnections()
+		transport.DialContext = oldDial
+		transport.TLSClientConfig = oldTLS
+		transport.Proxy = oldProxy
+	}()
+	cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"subscription": {"type": "xai_oauth", "access_token": "old", "refresh_token": "refresh", "expires_at": "2099-01-01T00:00:00Z"}}, ProviderTokenRefresh: func(name, access, refresh string, expiry time.Time) error {
+		callbacks++
+		if name != "subscription" || !strings.HasPrefix(access, "renewed-") || refresh != "rotated" || !expiry.After(time.Now()) {
+			t.Errorf("callback=%q %q %q %v", name, access, refresh, expiry)
+		}
+		return nil
+	}}
+	models, err := ListModelsForProvider(context.Background(), "SUBSCRIPTION", cfg)
+	if err != nil || len(models) != 1 || callbacks != 1 || tokenCalls != 1 || modelCalls != 2 {
+		t.Fatalf("models=%v err=%v callbacks=%d tokens=%d modelsCalls=%d", models, err, callbacks, tokenCalls, modelCalls)
+	}
+	// Connection test consumes supplied renewal credentials but must not persist.
+	models, err = TestProviderConnection(context.Background(), "xai_oauth", map[string]string{"access_token": "old", "refresh_token": "refresh", "expires_at": "2099-01-01T00:00:00Z"})
+	if err != nil || len(models) != 1 || callbacks != 1 || tokenCalls != 2 || modelCalls != 4 {
+		t.Fatalf("connection models=%v err=%v callbacks=%d tokens=%d modelCalls=%d", models, err, callbacks, tokenCalls, modelCalls)
+	}
+	// Access-only setup remains compatible, with no renewal or callback.
+	if _, err = TestProviderConnection(context.Background(), "xai_oauth", map[string]string{"access_token": "accepted"}); err != nil || callbacks != 1 || tokenCalls != 2 {
+		t.Fatalf("access-only err=%v callbacks=%d tokens=%d", err, callbacks, tokenCalls)
+	}
+}
 
 func TestGetProviderDisplayName(t *testing.T) {
 	tests := []struct {

@@ -38,7 +38,7 @@ HTTP connection pooling (`httpool`) is used to reuse TCP connections across LLM 
 
 The `pkg/provider/llmerror` package defines structured error types for LLM API failures:
 
-- **Retryable errors**: 429 (rate limit), transient server failures, timeouts, and 401 responses explicitly reporting JWT/token expiry. The agent engine retries these with exponential backoff within its existing three-attempt budget. Token-expiry detection checks both the message and raw body, including non-JSON gateway responses such as `Jwt is expired`; it does not refresh credentials itself. Ordinary invalid-key 401s and all 403s remain non-retryable, and failures after emitted model output must never replay.
+- **Retryable errors**: 429 (rate limit), transient server failures, and timeouts. The agent engine retries these with exponential backoff within its existing three-attempt budget. Authentication failures, including plain-text or JSON JWT/token-expiry 401 responses, are not credential-blind retry triggers. Renewable providers recover in their HTTP transport before SDK error classification; exhausted authentication failures remain terminal, and failures after emitted model output must never blindly replay.
 - **Context length errors**: The request exceeded the model's context window.
 - **Authentication errors**: Invalid API key or expired credentials.
 - **Unknown tool errors**: The model hallucinated a tool name that doesn't exist.
@@ -85,26 +85,54 @@ ChatAgent creation:
   NewLLM(providerName, modelName) -> model.LLM interface
 ```
 
+### Authentication Renewal and Recovery
+
+Renewable adapters use `httpool.RoundTripWithToken` below the SDK layer for generation and model discovery. Before each request they check cached expiration and acquire usable credentials when needed. If the first response rejects authentication, they invalidate the exact rejected credential, renew it (or reuse a newer valid credential installed by another request), and replay the identical request **once**. Reactive renewal still runs if proactive renewal happened immediately before that rejected request. A successful replay is returned normally, without exposing the intermediate authentication failure or introducing UI/SSE events.
+
+| Authentication path | Renewal mechanism | Proactive check | Reactive recovery |
+|---|---|---|---|
+| SAP AI Core, including its OpenAI, Vertex and Bedrock model paths | OAuth client-credentials exchange | 30-second expiry buffer | HTTP 401 only; SAP permission-denied 403 is not expiry |
+| xAI OAuth | Refresh-token exchange with rotation and persistence callback | 60-second buffer; legacy missing expiry triggers renewal when a refresh token exists | HTTP 401/403 with a refresh token |
+| GitHub Copilot OAuth | Persistent GitHub token exchanged for a session token | Missing expiry or 60-second buffer | HTTP 401/403 |
+| Static API-key/token adapters, including access-token-only xAI setup | No configured renewal mechanism | No arbitrary token regeneration | Authentication rejection is terminal; no blind same-credential retry |
+| Direct AWS/GCP credential-chain adapters | SDK-owned credential lifecycle | Existing SDK behavior | Not integrated with this shared replay helper |
+
+Token caches and exchanges are mutex-protected. Compare-and-invalidate ensures a late rejection of an older token does not discard a newer credential or unnecessarily rotate it again. Renewal rejects empty tokens and invalid/nonpositive lifetimes; token exchange diagnostics do not expose raw secret-bearing responses. xAI refresh-token rotation updates the cache atomically. Persistence callbacks run outside the token mutex, with serialized notifications and generation checks so delayed older callbacks cannot overwrite newer persisted credentials; callbacks can read/reenter an already-valid transport.
+
+The helper clones request headers and URL before decoration. It closes the first rejected response before renewal, recreates nonempty request bodies only through `GetBody`, and preserves nil/`http.NoBody` requests. A non-replayable body fails with `ErrAuthReplayUnavailable` after invalidating the rejected token: it is never sent empty or buffered without a bound. Cancellation is preserved and unsent bodies are closed. Successful response bodies are neither read nor consumed by authentication recovery, so a successful stream is delivered once; errors inside an already-started stream do not trigger authentication replay.
+
+A second authentication rejection invalidates the renewed cached token and returns the final response without another replay. Renewal failures retain OAuth reauthentication sentinels and context-cancellation identity; OAuth model discovery and generation retain their existing final reauthentication handling. A subsequent request can attempt fresh acquisition, but outer authentication classification cannot restart an identical doomed retry loop. Existing provider constructors, access-token-only `ListModels` signatures, configuration/persistence contracts and tenant-confined environment resolution remain unchanged; renewable xAI listing uses `ListModelsWithOAuth`.
+
+Deterministic tests exercise the actual adapters and transports against loopback token and inference endpoints, using the same provider instance across rejection, renewal, identical replay and later successful calls. They cover streaming/non-streaming generation, model discovery, concurrent rejection, refresh failure, second rejection, cancellation, body ownership and static-key failure. They do not exercise production credentials, prove overnight upstream reliability, or establish why the original upstream token was rejected.
+
+```bash
+go test -race ./pkg/provider/... -count=1 -timeout=10m
+go test ./pkg/tui -run 'Test.*(Reauth|OAuth)' -count=1
+```
+
 ### Error Handling Flow
 
 ```
-LLM API call fails
+Renewable provider HTTP request:
+  Check expiry -> acquire token -> send request
+  First eligible auth rejection -> renew -> replay once
+  Success -> return response/stream normally
+  Renewal failure or second rejection -> final error
     |
     v
-llmerror.Classify(err):
-  - Rate limit (429) -> RetryableError{Wait: Retry-After header}
-  - Server error (502, 503) -> RetryableError{Wait: exponential backoff}
-  - Context length -> ContextLengthError
-  - Explicit JWT/token expiry (401) -> retryable within existing budget
-  - Other auth error -> AuthError
-  - Unknown tool -> UnknownToolError
+SDK / llmerror classification:
+  - Rate limit (429) -> retryable, Retry-After header
+  - Transient server error / timeout -> retryable, exponential backoff
+  - Context length -> context overflow
+  - Authentication failure, including JWT/token expiry -> non-retryable
+  - Unknown tool -> unknown-tool error
     |
     v
 Agent engine:
-  - RetryableError -> wait and retry (up to 3x)
-  - UnknownToolError -> inject synthetic error response, let LLM self-correct
-  - ContextLengthError -> trigger compaction
-  - AuthError -> surface to user
+  - Retryable error -> wait and retry (existing bounded budget)
+  - Unknown tool -> inject synthetic error response, let LLM self-correct
+  - Context overflow -> trigger compaction
+  - Final authentication error -> surface to user / existing OAuth reauth handling
 ```
 
 ## Streaming Safety and Generation Progress

@@ -242,20 +242,15 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 	}
 
 	t := &sapTransport{
-		base:          http.DefaultTransport,
+		base:          httpool.Transport(),
 		clientID:      clientID,
 		clientSecret:  clientSecret,
 		authURL:       authURL,
 		resourceGroup: resourceGroup,
 	}
 
-	token, err := t.getToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to get token for deployment lookup: %w", err)
-	}
-
 	if !strings.HasSuffix(baseURL, "/v2") {
-		baseURL += "/v2"
+		baseURL = strings.TrimRight(baseURL, "/") + "/v2"
 	}
 
 	requestURL, err := url.Parse(baseURL + "/lm/deployments")
@@ -271,10 +266,8 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", resourceGroup)
 
-	client := httpool.Client(10 * time.Second)
+	client := &http.Client{Transport: t, Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -345,77 +338,85 @@ type sapTransport struct {
 }
 
 func (t *sapTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	token, err := t.getToken()
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", t.resourceGroup)
-
-	// SAP AI Core requires specific path adjustment sometimes, but let's try standard OpenAI path first
-	// Standard: BaseURL + /chat/completions
-	// Constructed: .../inference/deployments/{id}/chat/completions
-	// This should match SAP AI Core API
-
-	// Inject api-version for Azure OpenAI models if missing
-	if strings.Contains(req.URL.Path, "/chat/completions") {
-		q := req.URL.Query()
-		if q.Get("api-version") == "" {
-			q.Set("api-version", "2024-12-01-preview")
-			req.URL.RawQuery = q.Encode()
+	return httpool.RoundTripWithToken(req, t.base, t.getTokenForRequest, t.invalidateToken, func(clone *http.Request, token string) {
+		clone.Header.Set("Authorization", "Bearer "+token)
+		clone.Header.Set("AI-Resource-Group", t.resourceGroup)
+		if strings.Contains(clone.URL.Path, "/chat/completions") {
+			q := clone.URL.Query()
+			if q.Get("api-version") == "" {
+				q.Set("api-version", "2024-12-01-preview")
+				clone.URL.RawQuery = q.Encode()
+			}
 		}
-	}
+	}, func(status int) bool { return status == http.StatusUnauthorized })
+}
 
-	return t.base.RoundTrip(req)
+func (t *sapTransport) invalidateToken(rejected string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.token == rejected {
+		t.token = ""
+		t.expiresAt = time.Time{}
+	}
 }
 
 func (t *sapTransport) getToken() (string, error) {
+	return t.getTokenForRequest(context.Background(), "")
+}
+
+const maxSAPAuthResponseBytes = 1 << 20
+
+func (t *sapTransport) getTokenForRequest(ctx context.Context, rejected string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
-	if t.token != "" && time.Now().Before(t.expiresAt) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if t.token != "" && t.token != rejected && time.Now().Before(t.expiresAt) {
 		return t.token, nil
 	}
-
-	// Fetch new token
-	data := url.Values{}
-	data.Set("grant_type", "client_credentials")
-	data.Set("client_id", t.clientID)
-	data.Set("client_secret", t.clientSecret)
-
-	authReq, err := http.NewRequest("POST", t.authURL+"/oauth/token", strings.NewReader(data.Encode()))
+	// Clear stale/rejected state before exchange, including every failure path.
+	t.token = ""
+	t.expiresAt = time.Time{}
+	data := url.Values{"grant_type": {"client_credentials"}, "client_id": {t.clientID}, "client_secret": {t.clientSecret}}
+	authReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(t.authURL, "/")+"/oauth/token", strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", err
+		return "", errors.New("SAP token exchange: invalid authentication URL")
 	}
 	authReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	client := httpool.Client(10 * time.Second)
-	resp, err := client.Do(authReq)
+	resp, err := httpool.Client(10 * time.Second).Do(authReq)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("SAP token exchange failed")
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return "", fmt.Errorf("failed to get token: %s, body: %s", resp.Status, string(body))
+		return "", fmt.Errorf("SAP token exchange failed: HTTP %d", resp.StatusCode)
 	}
-
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSAPAuthResponseBytes+1))
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("SAP token exchange: unreadable response")
+	}
+	if len(body) > maxSAPAuthResponseBytes {
+		return "", errors.New("SAP token exchange: response too large")
+	}
 	var result struct {
 		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+	if json.Unmarshal(body, &result) != nil {
+		return "", errors.New("SAP token exchange: invalid response")
 	}
-
+	if strings.TrimSpace(result.AccessToken) == "" || result.ExpiresIn <= 0 || result.ExpiresIn > int64((1<<63-1)/time.Second) || result.AccessToken == rejected {
+		return "", errors.New("SAP token exchange: invalid token or lifetime")
+	}
 	t.token = result.AccessToken
-	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Add(-30 * time.Second) // Buffer
-
+	t.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn)*time.Second - 30*time.Second)
 	return t.token, nil
 }
 
@@ -518,95 +519,18 @@ var ModelIDMap = map[string]string{
 
 // ResolveDeploymentID finds the deployment ID for a given model name.
 func ResolveDeploymentID(ctx context.Context, modelName string) (string, error) {
-	// Check map first
-	if mapped, ok := ModelIDMap[modelName]; ok {
-		modelName = mapped
-	}
-
-	// We need a temporary transport to get the token
-	t := &sapTransport{
-		base:          http.DefaultTransport,
-		clientID:      os.Getenv("AICORE_CLIENT_ID"),
-		clientSecret:  os.Getenv("AICORE_CLIENT_SECRET"),
-		authURL:       os.Getenv("AICORE_AUTH_URL"),
-		resourceGroup: os.Getenv("AICORE_RESOURCE_GROUP"),
-	}
-
-	token, err := t.getToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to get token for deployment lookup: %w", err)
-	}
-
-	baseURL := os.Getenv("AICORE_BASE_URL")
-	if !strings.HasSuffix(baseURL, "/v2") {
-		baseURL += "/v2"
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/lm/deployments", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", t.resourceGroup)
-
-	client := httpool.Client(10 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			body = []byte(fmt.Sprintf("<unreadable: %v>", readErr))
-		}
-		return "", fmt.Errorf("failed to list deployments: %s, body: %s", resp.Status, string(body))
-	}
-
-	var result struct {
-		Resources []struct {
-			ID      string `json:"id"`
-			Details struct {
-				Resources struct {
-					BackendDetails struct {
-						Model struct {
-							Name string `json:"name"`
-						} `json:"model"`
-					} `json:"backendDetails"`
-				} `json:"resources"`
-			} `json:"details"`
-			Status string `json:"status"`
-		} `json:"resources"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	for _, res := range result.Resources {
-		if res.Status == "RUNNING" && res.Details.Resources.BackendDetails.Model.Name == modelName {
-			return res.ID, nil
-		}
-	}
-
-	return "", fmt.Errorf("no running deployment found for model: %s", modelName)
+	return resolveDeploymentIDWithConfig(ctx, modelName, os.Getenv("AICORE_CLIENT_ID"), os.Getenv("AICORE_CLIENT_SECRET"), os.Getenv("AICORE_AUTH_URL"), os.Getenv("AICORE_BASE_URL"), os.Getenv("AICORE_RESOURCE_GROUP"))
 }
 
 // ListModels fetches the list of available models from running deployments.
 func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, resourceGroup string) ([]string, error) {
 	resourceGroup = effectiveResourceGroup(resourceGroup)
 	t := &sapTransport{
-		base:          http.DefaultTransport,
+		base:          httpool.Transport(),
 		clientID:      clientID,
 		clientSecret:  clientSecret,
 		authURL:       authURL,
 		resourceGroup: resourceGroup,
-	}
-
-	token, err := t.getToken()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
 	if !strings.HasSuffix(baseURL, "/v2") {
@@ -617,17 +541,20 @@ func ListModels(ctx context.Context, clientID, clientSecret, authURL, baseURL, r
 		}
 	}
 
-	requestURL := fmt.Sprintf("%s/lm/deployments?status=RUNNING&resourceGroup=%s", baseURL, resourceGroup)
-	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+	requestURL, err := url.Parse(baseURL + "/lm/deployments")
+	if err != nil {
+		return nil, err
+	}
+	query := requestURL.Query()
+	query.Set("status", "RUNNING")
+	query.Set("resourceGroup", resourceGroup)
+	requestURL.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", resourceGroup)
-	// Token will be added by the transport
-
-	client := httpool.Client(10 * time.Second)
+	client := &http.Client{Transport: t, Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch deployments: %w", err)

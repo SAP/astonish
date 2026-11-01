@@ -31,8 +31,18 @@ func ListModels(ctx context.Context, accessToken string) ([]string, error) {
 	return listModelsFromURL(ctx, accessToken, apiBaseURL+"/models")
 }
 
-// listModelsFromURL is the internal implementation that accepts a custom URL for testing.
+// ListModelsWithOAuth lists models with the same renewal and recovery as inference.
+func ListModelsWithOAuth(ctx context.Context, clientID, accessToken, refreshToken string, expiresAt time.Time, onRefresh func(string, string, time.Time)) ([]string, error) {
+	transport := NewOAuthTransport(clientID, accessToken, refreshToken, expiresAt, onRefresh)
+	return listModelsWithClient(ctx, accessToken, apiBaseURL+"/models", &http.Client{Transport: transport, Timeout: 30 * time.Second})
+}
+
+// listModelsFromURL preserves access-only setup behavior.
 func listModelsFromURL(ctx context.Context, accessToken, endpoint string) ([]string, error) {
+	return listModelsWithClient(ctx, accessToken, endpoint, httpool.Client(30*time.Second))
+}
+
+func listModelsWithClient(ctx context.Context, accessToken, endpoint string, client *http.Client) ([]string, error) {
 	if accessToken == "" {
 		return nil, fmt.Errorf("access token is required")
 	}
@@ -45,7 +55,6 @@ func listModelsFromURL(ctx context.Context, accessToken, endpoint string) ([]str
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := httpool.Client(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("models request failed: %w", err)

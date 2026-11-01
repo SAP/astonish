@@ -225,17 +225,20 @@ func refreshAccessTokenFromURL(ctx context.Context, clientID, refreshToken, endp
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("refresh request returned HTTP %d", resp.StatusCode)
+	}
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("parse refresh response: %w", err)
 	}
 
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("refresh failed: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
+		return nil, fmt.Errorf("OAuth refresh rejected")
 	}
 
-	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("empty access_token in refresh response")
+	if strings.TrimSpace(tokenResp.AccessToken) == "" || tokenResp.ExpiresIn <= 0 || tokenResp.ExpiresIn > int((time.Duration(1<<63-1))/time.Second) {
+		return nil, fmt.Errorf("invalid access_token or lifetime in refresh response")
 	}
 
 	return &tokenResp, nil

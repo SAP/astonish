@@ -34,7 +34,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sashabaranov/go-openai v1.43.0
-	github.com/slack-go/slack v0.30.1
+	github.com/slack-go/slack v0.32.0
 	github.com/stephenafamo/goldmark-pdf v0.4.2
 	github.com/ysmood/gson v0.7.3
 	github.com/yuin/goldmark v1.8.6

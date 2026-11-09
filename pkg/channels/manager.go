@@ -1161,6 +1161,8 @@ func (m *ChannelManager) handleCommand(ctx context.Context, msg InboundMessage, 
 
 	cc := CommandContext{
 		ChannelID:      msg.ChannelID,
+		ThreadID:       msg.ThreadID,
+		MessageID:      msg.ID,
 		ChatID:         msg.ChatID,
 		SenderID:       msg.SenderID,
 		SenderName:     msg.SenderName,

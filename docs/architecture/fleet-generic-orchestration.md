@@ -18,7 +18,7 @@
 - §4.2 SSE location corrected — `FleetSessionStreamHandler` in `fleet_session_handlers.go`, NOT `chat_runner.go`.
 - §4.4 added — `FleetStores` update explicit.
 - §4.5 added — `pkg/daemon/run.go` wiring explicit.
-- §5.3 corrected — `FleetExecutionPanel` is a Perplexity vertical timeline today; parallel = multi-column redesign, not simple lane addition.
+- §5.3 corrected — `FleetExecutionPanel` is a vertical timeline today; parallel = multi-column redesign, not simple lane addition.
 - §7 tests — `//go:build e2e` (no `integration` tag); YAML round-trip test for `software-dev.yaml` added.
 - §8 M13 removed; M8/M9 SSE + frontend-handlers merged per `web/src/AGENTS.md` same-commit contract; renumbered to 12 milestones total.
 - §9 invariants extended with `Channel` interface stability, `FleetRecoverFunc` stability, SSE same-commit contract, `monitor_state.go` untouched.
@@ -684,12 +684,12 @@ export async function listFleetSessionMailbox(sessionId: string, recipient: stri
 
 ### 5.3 `FleetExecutionPanel.tsx` — Per-Agent Lanes (significant visual redesign)
 
-**Correction:** the current `FleetExecutionPanel` is a **Perplexity-inspired vertical phase timeline** — a continuous vertical line with circular status dots, expandable phase details, per-agent icons, tool-call rendering, and inline markdown. It is NOT a horizontal lane layout today. Adding parallel lanes is a substantial visual refactor, not a small tweak.
+**Correction:** the current `FleetExecutionPanel` is a **vertical phase timeline** — a continuous vertical line with circular status dots, expandable phase details, per-agent icons, tool-call rendering, and inline markdown. It is NOT a horizontal lane layout today. Adding parallel lanes is a substantial visual refactor, not a small tweak.
 
 Design:
 
-- When `session.max_parallel_agents ≤ 1` (or the SSE stream never emits `fleet_agent_started` with `lane_index >= 0`), the current single-column Perplexity timeline is rendered unchanged. This is the regression floor.
-- When parallelism > 1, switch to a **multi-column layout**: one column per parallelizable agent lane, each column an independent vertical Perplexity-style timeline. Non-parallelizable agents share a "coordinator" column pinned left.
+- When `session.max_parallel_agents ≤ 1` (or the SSE stream never emits `fleet_agent_started` with `lane_index >= 0`), the current single-column timeline is rendered unchanged. This is the regression floor.
+- When parallelism > 1, switch to a **multi-column layout**: one column per parallelizable agent lane, each column an independent vertical timeline. Non-parallelizable agents share a "coordinator" column pinned left.
 - Task-board events (`fleet_task_posted`, `fleet_task_claimed`, `fleet_task_completed`) render as pill-shaped nodes on a separate "Tasks" strip below the columns.
 - Both layouts share the phase-card component (`PlanPanel.tsx` / `TaskPlanPanel.tsx`); only the containing flex/grid changes.
 
@@ -817,7 +817,7 @@ Update `BuildAgentPrompt` to render capability/execution/memory/task sections. V
 Add new handlers (`PatchFleetPlanAgentHandler`, `FleetSessionTasksHandler`, `FleetSessionMailboxHandler`) and their routes. Add the six new SSE events to `FleetSessionStreamHandler`. Simultaneously add the matching frontend TS types (`web/src/components/fleet/fleetUtils.ts`) and the SSE event handlers in `StudioChat.tsx` / `FleetExecutionPanel.tsx` receiving side. Add API client (`web/src/api/fleetChat.ts` additions). Extend `SaveFleetPlanArgs` (§4.3). No visual changes yet — handlers may be no-ops that store the event, awaiting M9. Ship.
 
 **M9 — Frontend: FleetExecutionPanel per-agent lanes visual redesign.**
-Multi-column layout when parallelism > 1; single-column Perplexity timeline preserved when ≤ 1. Task-board pill strip. Delegate polish to `shared/frontend` skill during M9. Ship.
+Multi-column layout when parallelism > 1; single-column timeline preserved when ≤ 1. Task-board pill strip. Delegate polish to `shared/frontend` skill during M9. Ship.
 
 **M10 — Frontend: TemplateDetail / PlanDetail refactor into tabs + per-agent drawer editor.**
 Overview / Settings / Agents tabs with URL-hash routing. Drawer save calls `PATCH /api/fleet-plans/{key}/agents/{agent_key}`. Live validation. Ship.

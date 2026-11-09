@@ -19,9 +19,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/google/uuid"
 
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/xai_oauth"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/SAP/astonish/pkg/tui/render"
@@ -238,6 +240,14 @@ type model struct {
 	// -1 means no item was pinned last frame.
 	stickyPinnedIdx int
 
+	botProposalSeen map[uuid.UUID]bool
+	botCancel       context.CancelFunc
+	botGeneration   uint64
+	botEvents       <-chan botWatchMsg
+	botSnapshots    <-chan botSnapshotMsg
+	botSnapshot     *store.BotSnapshot
+	botSnapshotErr  error
+	bots            botsState
 	// overlays
 	sessions         sessionsState
 	rollback         rollbackState
@@ -405,6 +415,9 @@ type artifactContentLoadedMsg struct {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
+	if m.botSelected() {
+		cmds = append(cmds, func() tea.Msg { return botStartMsg{} })
+	}
 	if m.info.IsResumed && m.info.SessionID != "" {
 		cmds = append(cmds, m.loadInitialHistoryCmd())
 	}
@@ -437,6 +450,70 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case botSnapshotMsg:
+		return m.applyBotSnapshot(msg)
+	case botAdmissionMsg:
+		return m.applyBotAdmission(msg)
+	case botOverviewMsg:
+		return m.applyBotOverview(msg)
+	case botStartMsg:
+		return m.startBotWatch()
+	case botWatchMsg:
+		return m.applyBotWatch(msg)
+	case botsLoadedMsg:
+		if msg.generation != m.botGeneration || !m.bots.open || msg.requestID != m.bots.requestID {
+			return m, nil
+		}
+		m.bots.loading = false
+		if msg.err != nil {
+			m.bots.err = msg.err.Error()
+		} else {
+			m.bots.runItems = msg.runs
+			m.bots.items = msg.items
+			m.bots.decisions = msg.approvals
+			m.bots.proposalItems = msg.proposals
+			m.bots.snapshot = msg.snapshot
+			if msg.snapshot != nil {
+				m.botSnapshot = msg.snapshot
+				m.botSnapshotErr = nil
+			}
+		}
+		return m, nil
+	case botSelectedMsg:
+		if msg.generation != m.botGeneration {
+			return m, nil
+		}
+		m.bots.loading = false
+		if msg.err != nil {
+			m.bots.err = msg.err.Error()
+			return m, nil
+		}
+		m.bots = botsState{}
+		return m.startBotWatch()
+	case botDecisionMsg:
+		if msg.generation != m.botGeneration || !m.bots.open || msg.requestID != m.bots.requestID {
+			return m, nil
+		}
+		m.bots.loading = false
+		m.bots.confirm = ""
+		if msg.err != nil {
+			m.bots.err = msg.err.Error()
+			return m, nil
+		}
+		if msg.continuation == store.BotContinuationBlockedByPause {
+			m.tr.Apply(events.NewSystem("Approval saved. Continuation blocked while paused; the Bot was not activated."))
+			m.refreshViewport()
+		} else if msg.continuation == store.BotContinuationQueued {
+			m.tr.Apply(events.NewSystem("Approval saved; continuation queued."))
+			m.refreshViewport()
+		}
+		if m.bots.exceptions {
+			return m.openBotExceptions()
+		}
+		if m.bots.proposals {
+			return m.openBotProposals()
+		}
+		return m.botCommand("/bots approvals")
 	case delegationDetailLoadedMsg:
 		if !m.delegationDetail.open || m.delegationDetail.request != msg.request {
 			return m, nil
@@ -492,6 +569,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.delegationDetail.open {
 			return m.handleDelegationDetailKey(msg)
+		}
+		if m.bots.open {
+			return m.handleBotsKey(msg)
 		}
 		// Sessions / model picker overlays capture keys first.
 		if m.sessions.open {
@@ -606,8 +686,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// While streaming, only allow cancel / scroll keys through textarea limited.
-		if m.tr.Streaming {
+		// Bot streams are observations: keep the composer available for local
+		// commands even when persisted text is partial.
+		if m.tr.Streaming && !m.botSelected() {
 			switch msg.String() {
 			case "pgup", "pgdown", "up", "down":
 				var cmd tea.Cmd
@@ -1013,6 +1094,9 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
+	if m.botCap() != nil {
+		extra = append(extra, botsSlashCommand)
+	}
 	if m.webSearchAdmin() != nil {
 		extra = append(extra, webSearchSlashCommand)
 	}
@@ -2036,6 +2120,34 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		// Image-only turn still needs a visible/user message marker.
 		text = strings.TrimSpace(rawValue)
 	}
+	if m.botSelected() {
+		// Observed text can be partial indefinitely. Local commands must remain
+		// usable while the daemon streams; ordinary input must not enter history.
+		if strings.HasPrefix(text, "/") {
+			return m.handleSlash(text)
+		}
+		if b := m.botCap().SelectedBot(); b.Status != store.BotActive && b.Status != store.BotPaused && b.Status != store.BotDraft {
+			m.tr.Apply(events.NewSystem("This Bot cannot converse in its current state."))
+			m.refreshViewport()
+			return m, nil
+		}
+		admission, err := m.backend.RunTurn(m.ctx, text, backend.TurnOptions{Attachments: attachments})
+		if err != nil {
+			// Preserve the composer and never echo a rejected admission.
+			m.tr.Apply(events.NewError(err.Error()))
+		} else {
+			m.history = append(m.history, text)
+			m.historyIdx = -1
+			m.ta.Reset()
+			m.pastedBlocks = nil
+			m.pastedImages = nil
+		}
+		m.refreshViewport()
+		if err == nil && admission != nil {
+			return m, waitBotAdmission(admission, m.botGeneration)
+		}
+		return m, nil
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
@@ -2127,7 +2239,12 @@ func (m model) collectSubmitAttachments(composerValue string) []backend.Attachme
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	m.ta.Reset()
 	switch {
+	case text == "/bots" || strings.HasPrefix(text, "/bots "):
+		return m.botCommand(text)
 	case text == "/help" || text == "/?":
+		if m.botCap() != nil {
+			m.tr.Apply(events.NewSystem("/bots — remote picker; /bots approvals — exact durable decisions; /bots detach — leave work running"))
+		}
 		m.tr.Apply(events.NewSystem(helpText(m.webSearchAdmin() != nil, m.rollbackCap() != nil, m.compactionCap() != nil, m.localSkillsCap() != nil)))
 	case text == "/files":
 		cwd, _ := os.Getwd()
@@ -4200,6 +4317,9 @@ func (m model) viewContent() string {
 		m.layoutDelegationDetail()
 		return m.paintBackground(m.renderDelegationDetail())
 	}
+	if m.bots.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderBotsOverlay(), lipgloss.WithWhitespaceChars(" ")))
+	}
 	if m.sessions.open {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
@@ -4428,6 +4548,11 @@ func (m model) renderHeader() string {
 	centerPlain := ""
 	if m.tr != nil && m.tr.Title != "" {
 		centerPlain = m.tr.Title
+	}
+	if m.botSelected() {
+		centerPlain = m.botHeaderTitle()
+		rightPlain = m.botHeaderStatus()
+		rightW = lipgloss.Width(rightPlain)
 	}
 	centerW := lipgloss.Width(centerPlain)
 

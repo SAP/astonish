@@ -98,6 +98,7 @@ type backendNodeClient struct {
 	image      string
 	limits     ResourceLimits
 	sessionEnv map[string]string
+	botHome    *BotHomeBinding
 
 	mu                    sync.Mutex
 	state                 backendReadinessState
@@ -159,8 +160,16 @@ func (c *backendNodeClient) startPrepareLocked() *backendPrepareAttempt {
 	spec := SessionSpec{
 		SessionID: c.sessionID, Type: SessionTypeChat, TemplateID: c.templateID,
 		LayerChain: append([]string(nil), c.layerChain...), Image: c.image,
-		Limits: c.limits, Env: env,
+		Limits: c.limits, Env: env, BotHome: c.botHome.Clone(),
 		NetworkAllowEndpoints: append([]NetworkAllowEndpoint(nil), c.networkAllowEndpoints...),
+	}
+	// BotHome is bound only after the caller authorizes the owner and run lease.
+	// Carry that pinned identity into backend isolation metadata as well as the
+	// retained-home mount. Personal mode intentionally has no org/team scope.
+	if spec.BotHome != nil {
+		spec.OrgSlug = spec.BotHome.Scope.OrgID
+		spec.TeamSlug = spec.BotHome.Scope.TeamID
+		spec.UserID = spec.BotHome.Scope.UserID
 	}
 	go c.provision(ctx, c.backend, spec, a)
 	return a
@@ -510,6 +519,7 @@ type backendPool struct {
 
 	mu      sync.Mutex
 	clients map[string]*backendNodeClient // keyed by sessionID
+	homes   map[string]*BotHomeBinding    // staged without pinning template selection
 	closed  bool
 }
 
@@ -533,6 +543,46 @@ func NewBackendPool(b Backend, limits ResourceLimits, registries ...*SessionRegi
 		registry: registry,
 		clients:  make(map[string]*backendNodeClient),
 	}
+}
+
+// SetBotHome must run before BindSession/EnsureReady. Rebinding the same value
+// is idempotent; changing a prepared owner is rejected, including via aliases.
+func (p *backendPool) SetBotHome(sessionID string, binding *BotHomeBinding) error {
+	if binding == nil {
+		return nil
+	}
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	if _, ok := p.backend.(BotHomeBackend); !ok || p.backend.Kind() != binding.Backend {
+		return ErrBotHomeUnsupported
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || sessionID == "" {
+		return fmt.Errorf("sandbox: bot home requires an open pool and session ID")
+	}
+	c := p.clients[sessionID]
+	if c == nil {
+		if p.homes == nil {
+			p.homes = make(map[string]*BotHomeBinding)
+		}
+		if old := p.homes[sessionID]; old != nil && !old.Equal(binding) {
+			return fmt.Errorf("sandbox: bot home binding is immutable")
+		}
+		p.homes[sessionID] = binding.Clone()
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.botHome.Equal(binding) {
+		return nil
+	}
+	if c.state != backendUnbound || c.botHome != nil {
+		return fmt.Errorf("sandbox: bot home binding is immutable after binding or preparation")
+	}
+	c.botHome = binding.Clone()
+	return nil
 }
 
 func (p *backendPool) GetOrCreate(sessionID string) ToolNodeClient {
@@ -587,6 +637,8 @@ func (p *backendPool) getOrCreate(sessionID, template string, chain []string, im
 	}
 	c := newBackendNodeClient(p.backend, template, chain, image, p.limits, nil)
 	c.sessionID = sessionID // pin before any aliased child can bind
+	c.botHome = p.homes[sessionID].Clone()
+	delete(p.homes, sessionID)
 	p.clients[sessionID] = c
 	return c
 }
@@ -599,6 +651,7 @@ func (p *backendPool) Remove(sessionID string) {
 		return
 	}
 	p.mu.Lock()
+	delete(p.homes, sessionID)
 	c, ok := p.clients[sessionID]
 	if !ok {
 		p.mu.Unlock()
@@ -625,6 +678,7 @@ func (p *backendPool) Cleanup() {
 	p.closed = true
 	clients := p.clients
 	p.clients = nil
+	p.homes = nil
 	p.mu.Unlock()
 
 	// Destroy in parallel — session destroy can be slow (k8s pod delete +

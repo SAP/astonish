@@ -39,6 +39,62 @@ func (_c *SessionCreate) SetNillableUserID(v *uuid.UUID) *SessionCreate {
 	return _c
 }
 
+// SetBotID sets the "bot_id" field.
+func (_c *SessionCreate) SetBotID(v uuid.UUID) *SessionCreate {
+	_c.mutation.SetBotID(v)
+	return _c
+}
+
+// SetNillableBotID sets the "bot_id" field if the given value is not nil.
+func (_c *SessionCreate) SetNillableBotID(v *uuid.UUID) *SessionCreate {
+	if v != nil {
+		_c.SetBotID(*v)
+	}
+	return _c
+}
+
+// SetBotRunID sets the "bot_run_id" field.
+func (_c *SessionCreate) SetBotRunID(v uuid.UUID) *SessionCreate {
+	_c.mutation.SetBotRunID(v)
+	return _c
+}
+
+// SetNillableBotRunID sets the "bot_run_id" field if the given value is not nil.
+func (_c *SessionCreate) SetNillableBotRunID(v *uuid.UUID) *SessionCreate {
+	if v != nil {
+		_c.SetBotRunID(*v)
+	}
+	return _c
+}
+
+// SetPurpose sets the "purpose" field.
+func (_c *SessionCreate) SetPurpose(v session.Purpose) *SessionCreate {
+	_c.mutation.SetPurpose(v)
+	return _c
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_c *SessionCreate) SetNillablePurpose(v *session.Purpose) *SessionCreate {
+	if v != nil {
+		_c.SetPurpose(*v)
+	}
+	return _c
+}
+
+// SetRetention sets the "retention" field.
+func (_c *SessionCreate) SetRetention(v session.Retention) *SessionCreate {
+	_c.mutation.SetRetention(v)
+	return _c
+}
+
+// SetNillableRetention sets the "retention" field if the given value is not nil.
+func (_c *SessionCreate) SetNillableRetention(v *session.Retention) *SessionCreate {
+	if v != nil {
+		_c.SetRetention(*v)
+	}
+	return _c
+}
+
 // SetTitle sets the "title" field.
 func (_c *SessionCreate) SetTitle(v string) *SessionCreate {
 	_c.mutation.SetTitle(v)
@@ -313,6 +369,14 @@ func (_c *SessionCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *SessionCreate) defaults() {
+	if _, ok := _c.mutation.Purpose(); !ok {
+		v := session.DefaultPurpose
+		_c.mutation.SetPurpose(v)
+	}
+	if _, ok := _c.mutation.Retention(); !ok {
+		v := session.DefaultRetention
+		_c.mutation.SetRetention(v)
+	}
 	if _, ok := _c.mutation.Title(); !ok {
 		v := session.DefaultTitle
 		_c.mutation.SetTitle(v)
@@ -361,6 +425,22 @@ func (_c *SessionCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *SessionCreate) check() error {
+	if _, ok := _c.mutation.Purpose(); !ok {
+		return &ValidationError{Name: "purpose", err: errors.New(`team: missing required field "Session.purpose"`)}
+	}
+	if v, ok := _c.mutation.Purpose(); ok {
+		if err := session.PurposeValidator(v); err != nil {
+			return &ValidationError{Name: "purpose", err: fmt.Errorf(`team: validator failed for field "Session.purpose": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.Retention(); !ok {
+		return &ValidationError{Name: "retention", err: errors.New(`team: missing required field "Session.retention"`)}
+	}
+	if v, ok := _c.mutation.Retention(); ok {
+		if err := session.RetentionValidator(v); err != nil {
+			return &ValidationError{Name: "retention", err: fmt.Errorf(`team: validator failed for field "Session.retention": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Title(); !ok {
 		return &ValidationError{Name: "title", err: errors.New(`team: missing required field "Session.title"`)}
 	}
@@ -437,6 +517,22 @@ func (_c *SessionCreate) createSpec() (*Session, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UserID(); ok {
 		_spec.SetField(session.FieldUserID, field.TypeUUID, value)
 		_node.UserID = &value
+	}
+	if value, ok := _c.mutation.BotID(); ok {
+		_spec.SetField(session.FieldBotID, field.TypeUUID, value)
+		_node.BotID = &value
+	}
+	if value, ok := _c.mutation.BotRunID(); ok {
+		_spec.SetField(session.FieldBotRunID, field.TypeUUID, value)
+		_node.BotRunID = &value
+	}
+	if value, ok := _c.mutation.Purpose(); ok {
+		_spec.SetField(session.FieldPurpose, field.TypeEnum, value)
+		_node.Purpose = value
+	}
+	if value, ok := _c.mutation.Retention(); ok {
+		_spec.SetField(session.FieldRetention, field.TypeEnum, value)
+		_node.Retention = value
 	}
 	if value, ok := _c.mutation.Title(); ok {
 		_spec.SetField(session.FieldTitle, field.TypeString, value)

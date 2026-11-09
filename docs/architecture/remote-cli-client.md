@@ -2,6 +2,18 @@
 
 This document describes the architecture for making the Astonish CLI a thin client to an Astonish platform server (local install or cloud). User-facing commands that need a running platform require `astonish login`.
 
+## Bot control plane
+
+`astonish bots` and `astonish chat --bot` are authenticated, remote-only clients of
+`/api/studio/bots`. See [Bot terminal/client](bot-terminal-client.md) for commands,
+reviewed durable decisions, cursor replay, mode boundaries, and subprocess/PTY
+acceptance. No local runtime or daemon scheduler is started by either command.
+Explicit `test-once` and `conversation` commands use reviewed version/scope-bound
+confirmation and the separate draft-test/paused-conversation endpoints; neither
+activates recurrence. Terminal home input uses the same endpoints according to
+lifecycle, while selected execution traces remain read-only. Context-aware snapshot
+requests and cursor-bound watches are cancelled on viewer detach, not server runs.
+
 ## Overview
 
 Single binary (`astonish`):

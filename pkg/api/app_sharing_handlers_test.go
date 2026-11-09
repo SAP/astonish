@@ -129,6 +129,11 @@ func newMockTeamDataStore() *mockTeamDataStore {
 	return &mockTeamDataStore{apps: newMockAppStore(), appPins: make(map[string]*store.AppPin)}
 }
 
+func (m *mockTeamDataStore) BotTemplates() store.BotTemplateStore { return nil }
+
+func (m *mockTeamDataStore) Bots() store.BotStore     { return nil }
+func (m *mockPersonalDataStore) Bots() store.BotStore { return nil }
+
 func (m *mockTeamDataStore) Sessions() store.SessionStore       { return nil }
 func (m *mockTeamDataStore) Memories() store.MemoryStore        { return nil }
 func (m *mockTeamDataStore) Credentials() store.CredentialStore { return nil }

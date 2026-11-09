@@ -1,6 +1,5 @@
 // Package scheduler implements a job scheduler for Astonish.
-// It supports two execution modes: "routine" (run a flow with fixed params)
-// and "adaptive" (LLM-driven agentic chat turn with stored instructions).
+// It supports routine flows, adaptive chat, fleet polling, and Bot admission.
 package scheduler
 
 import (
@@ -30,6 +29,10 @@ const (
 	// and starts headless fleet sessions for new work items. The job's Payload.Flow
 	// field holds the fleet plan key.
 	ModeFleetPoll JobMode = "fleet_poll"
+
+	// ModeBotTrigger admits a scheduled occurrence through a trusted callback.
+	// It does not execute a Bot or produce a run report.
+	ModeBotTrigger JobMode = "bot_trigger"
 )
 
 // JobSchedule defines when a job runs.
@@ -49,6 +52,11 @@ type JobPayload struct {
 	Params map[string]string `json:"params,omitempty"`
 	// Instructions is the prompt/task description for adaptive mode.
 	Instructions string `json:"instructions,omitempty"`
+	// BotID, BotVersion and BotTriggerID bind a Bot-trigger row to a saved
+	// immutable version/trigger. The callback must revalidate this binding.
+	BotID        string `json:"bot_id,omitempty"`
+	BotVersion   int64  `json:"bot_version,omitempty"`
+	BotTriggerID string `json:"bot_trigger_id,omitempty"`
 }
 
 // JobDelivery defines where to send job results.

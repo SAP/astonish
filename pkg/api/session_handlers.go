@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/session"
 )
@@ -51,18 +54,31 @@ func resolveSessionStore(svc *store.Services, sessionID string, requests ...*htt
 	if svc == nil {
 		return nil
 	}
-	allowed := func(meta *store.SessionMeta) bool {
-		// The request-less caller is the separately superadmin-gated cache
-		// diagnostics endpoint. All ordinary session consumers pass a request.
+	ctx := context.TODO()
+	if len(requests) > 0 && requests[0] != nil {
+		ctx = requests[0].Context()
+	}
+	allowed := func(meta *store.SessionMeta, scope store.BotScope) bool {
+		if meta.HasBotLinkage() {
+			return len(requests) > 0 && botSessionReadAllowed(requests[0], svc, meta, scope)
+		}
+		// Preserve ordinary Chat support/owner behavior.
 		return len(requests) == 0 || sessionOwnerAllowed(requests[0], meta.UserID)
 	}
 	if svc.PersonalSessions != nil {
-		if meta, err := svc.PersonalSessions.GetSessionMeta(context.TODO(), sessionID); err == nil && meta != nil && allowed(meta) {
-			return svc.PersonalSessions
+		meta, err := svc.PersonalSessions.GetSessionMeta(ctx, sessionID)
+		if err != nil {
+			return nil
+		}
+		if meta != nil {
+			if allowed(meta, store.BotScopePersonal) {
+				return svc.PersonalSessions
+			}
+			return nil // A denied private record must not fall through to team scope.
 		}
 	}
 	if svc.Sessions != nil {
-		if meta, err := svc.Sessions.GetSessionMeta(context.TODO(), sessionID); err == nil && meta != nil && allowed(meta) {
+		if meta, err := svc.Sessions.GetSessionMeta(ctx, sessionID); err == nil && meta != nil && allowed(meta, store.BotScopeTeam) {
 			return svc.Sessions
 		}
 	}
@@ -102,6 +118,9 @@ func requireSessionIDOwner(w http.ResponseWriter, r *http.Request, sessionID str
 				respondError(w, http.StatusNotFound, "Session not found")
 				return false
 			}
+			if meta.HasBotLinkage() {
+				return true
+			} // Already resolved against the scoped Bot above.
 			return requireSessionOwner(w, r, meta.UserID)
 		}
 		// Scoped storage misses must not fall through to daemon-local data.
@@ -242,7 +261,11 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusNotFound, "Session not found")
 			return
 		}
-		if !requireSessionOwner(w, r, meta.UserID) {
+		if meta.HasBotLinkage() {
+			// Authorization used the viewer; storage Get still uses the recorded
+			// execution owner, preserving teamSessionStore.Get's owner constraint.
+			userID = meta.UserID
+		} else if !requireSessionOwner(w, r, meta.UserID) {
 			return
 		}
 
@@ -1076,6 +1099,15 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fileName := filepath.Base(cleanPath)
 
+	if content, handled := readRetainedBotArtifact(r, sessionID); handled {
+		if content == nil {
+			respondError(w, http.StatusNotFound, "file not found")
+		} else {
+			serveArtifactDownload(w, fileName, content)
+		}
+		return
+	}
+
 	// Tier 1: Try serving directly from host filesystem
 	if content, ok := readLocalArtifact(r, cleanPath); ok {
 		serveArtifactDownload(w, fileName, content)
@@ -1104,7 +1136,7 @@ func StudioArtifactDownloadHandler(w http.ResponseWriter, r *http.Request) {
 		// 3b: Platform mode — read from PG session store
 		if svc := store.FromRequest(r); svc != nil {
 			if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-				if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+				if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 					serveArtifactDownload(w, fileName, []byte(content))
 					return
 				}
@@ -1177,6 +1209,16 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if content, handled := readRetainedBotArtifact(r, sessionID); handled {
+		if content == nil {
+			respondError(w, http.StatusNotFound, "file not found")
+		} else {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write(content)
+		}
+		return
+	}
+
 	// Tier 1: Try reading from host filesystem
 	if content, ok := readLocalArtifact(r, cleanPath); ok { // #nosec G304 -- path validated by validateArtifactPath
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1208,7 +1250,7 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 		// 3b: Platform mode — read from PG session store
 		if svc := store.FromRequest(r); svc != nil {
 			if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-				if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+				if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 					fmt.Fprint(w, content)
 					return
@@ -1220,9 +1262,105 @@ func StudioArtifactContentHandler(w http.ResponseWriter, r *http.Request) {
 	respondError(w, http.StatusNotFound, "file not found")
 }
 
+// readRetainedBotArtifact resolves storage identity exclusively from a persisted
+// report in the authorized session scope. It does not resume disposable compute.
+// A matched report is authoritative: failures must not return stale transcript bytes.
+func readRetainedBotArtifact(r *http.Request, sessionID string) ([]byte, bool) {
+	svc := store.FromRequest(r)
+	meta, err := botSessionMetadata(r.Context(), svc, sessionID)
+	if err != nil {
+		return nil, true
+	}
+	if meta == nil || meta.Purpose != store.SessionPurposeBotRun {
+		return nil, false
+	}
+	ss := resolveSessionStore(svc, sessionID, r)
+	if ss == nil {
+		return nil, true
+	}
+	repo := svc.Bots
+	if ss == svc.PersonalSessions {
+		repo = svc.PersonalBots
+	}
+	if repo == nil {
+		return nil, true
+	}
+	botID, err := uuid.Parse(meta.BotID)
+	if err != nil {
+		return nil, true
+	}
+	b, err := repo.Get(r.Context(), botID)
+	if err != nil || b == nil || b.ID != botID || b.OwnerID.String() != meta.UserID {
+		return nil, true
+	}
+	runID, err := uuid.Parse(meta.BotRunID)
+	if err != nil {
+		return nil, true
+	}
+	run, err := repo.GetRun(r.Context(), b.ID, runID)
+	if err != nil || run == nil || run.ID != runID || run.BotID != b.ID || run.SessionID.String() != sessionID {
+		return nil, true
+	}
+	requested := r.URL.Query().Get("path")
+	for _, artifact := range run.Report.Artifacts {
+		// Relative report paths and their canonical in-sandbox /root spelling
+		// identify the same artifact; neither is ever passed through as a host path.
+		if requested != artifact.RelativePath && requested != "/root/"+artifact.RelativePath {
+			continue
+		}
+		home := b.Home
+		if artifact.ID == uuid.Nil || home.ID == uuid.Nil || home.BotID != b.ID || home.Scope != b.Scope || home.Revision < 1 || artifact.HomeID != home.ID || sandbox.ValidateBotHomeArtifactPath(artifact.RelativePath) != nil {
+			return nil, true
+		}
+		digest, err := hex.DecodeString(artifact.SHA256)
+		if err != nil || len(digest) != sha256.Size {
+			return nil, true
+		}
+		tc := store.TenantContextFrom(r.Context())
+		if tc == nil {
+			return nil, true
+		}
+		binding := &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: tc.OrgSlug, TeamID: tc.TeamSlug, UserID: b.OwnerID.String(), BotID: b.ID.String()}, Backend: sandbox.BackendKind(home.Backend), Ref: home.StorageKey}
+		if binding.Validate() != nil {
+			return nil, true
+		}
+		backend, cleanup, err := sandboxBackendForAuthorizedRequest(r)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		reader, ok := backend.(sandbox.BotHomeArtifactBackend)
+		if err == nil && ok {
+			data, readErr := reader.ReadBotHomeArtifact(r.Context(), binding, artifact.RelativePath, sandbox.MaxBotHomeArtifactBytes)
+			actual := sha256.Sum256(data)
+			if readErr == nil && int64(len(data)) <= sandbox.MaxBotHomeArtifactBytes && strings.EqualFold(artifact.SHA256, hex.EncodeToString(actual[:])) {
+				return append([]byte{}, data...), true
+			}
+			return nil, true
+		}
+		// Deployments without this optional capability retain transcript access,
+		// but only if the reconstructed bytes match the authoritative report.
+		if text, ok := readAuthorizedSessionArtifact(r, ss, sessionID, requested); ok {
+			actual := sha256.Sum256([]byte(text))
+			if strings.EqualFold(artifact.SHA256, hex.EncodeToString(actual[:])) {
+				return []byte(text), true
+			}
+		}
+		return nil, true
+	}
+	return nil, false // Preserve ordinary transcript artifacts not in a report.
+}
+
 func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID string) bool {
 	if !requireSessionIDOwner(w, r, sessionID) {
 		return false
+	}
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return false
+	} else if meta != nil {
+		// Authorized Bot history can reconstruct artifacts without granting any
+		// right to resume or inspect the disposable compute associated with it.
+		return true
 	}
 	reg := sandboxRegistryFromRequest(r)
 	var err error
@@ -1246,6 +1384,9 @@ func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID st
 // tenant checks happen before this function is called.
 func readFromSandboxContainer(r *http.Request, sessionID, filePath string) ([]byte, bool) {
 	if sessionID == "" || filePath == "" {
+		return nil, false
+	}
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil || meta != nil {
 		return nil, false
 	}
 
@@ -1346,6 +1487,13 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), sessionID); err != nil {
+		respondError(w, http.StatusNotFound, "Session not found")
+		return
+	} else if meta != nil {
+		respondError(w, http.StatusServiceUnavailable, "Bot PDF rendering requires an authorized render adapter")
+		return
+	}
 	// Read the source markdown content using the same 3-tier fallback.
 	var mdContent []byte
 
@@ -1375,7 +1523,7 @@ func StudioArtifactPDFHandler(w http.ResponseWriter, r *http.Request) {
 		if mdContent == nil {
 			if svc := store.FromRequest(r); svc != nil {
 				if ss := resolveSessionStore(svc, sessionID, r); ss != nil {
-					if content, ok := readArtifactContentFromSessionStore(ss, studioChatAppName, effectiveUserID(r), sessionID, cleanPath); ok {
+					if content, ok := readAuthorizedSessionArtifact(r, ss, sessionID, cleanPath); ok {
 						mdContent = []byte(content)
 					}
 				}

@@ -7,6 +7,120 @@
 
 ---
 
+## Retained Bot homes (opt-in foundation)
+
+Ordinary sessions keep the gateway-managed `/sandbox` workspace and existing
+certificate behavior. Bot runs may additionally supply a backend-issued
+`sandbox.BotHomeBinding`. The OpenShell `Config` requires both
+`BotHomeMountsEnabled: true` and `BotHomeClaimName: <retained-pvc>`; absence is
+`ErrBotHomeUnsupported`, not an ephemeral fallback. These fields are backend
+configuration; deployment/app-config wiring must supply them explicitly.
+
+The operator provisions the claim in the gateway's sandbox namespace and keeps
+it independent of sandbox owner references and run cleanup. The gateway must
+support the existing `SandboxTemplate.driver_config` schema:
+
+```yaml
+kubernetes:
+  volumes:
+    - name: astonish-bot-home
+      persistent_volume_claim:
+        claim_name: retained-homes
+        read_only: false
+  containers:
+    agent:
+      volume_mounts:
+        - name: astonish-bot-home
+          mount_path: /home/astonish
+          sub_path: bot-homes/<sha256-of-complete-authorized-scope>
+          read_only: false
+```
+
+The shared claim root is never exposed. No user-provided mount destination,
+subdirectory, or arbitrary claim is accepted in a binding. Certificate mounts
+remain read-only; collisions with the home path/volume name or reuse of its claim
+are rejected, including ConfigMap path collisions. `HOME=/home/astonish` is set
+only for Bot sessions and that explicit path is included in Landlock's writable
+set. The process remains the image's `sandbox:sandbox` identity; operators must
+ensure the scoped directory is writable by that image UID/GID (and the gateway
+supervisor's writable-path preparation works with the storage driver). No root
+agent or shared-root initialization is introduced.
+
+Session registry metadata retains the full validated binding in its opaque
+`BotHomeBinding.StorageKey`. Stop/recreate and backend restart reconstruct the
+same claim/subdirectory and image. Gateway sandbox names remain lifecycle keys;
+gateway-assigned UUIDs remain exec keys. Before adoption, reuse or successful
+creation/recreation, the returned persisted template must prove the expected
+mount envelope, HOME, home scope hash and full-session hash. Missing template
+metadata, dropped mounts, ownership mismatch or unsupported gateways fail closed.
+Stop/destroy never delete the retained PVC or its Bot directory. Runtime
+sub-path enforcement and write survival cannot be inferred from template echo.
+
+Focused tests cover config/protobuf serialization, nil compatibility, traversal
+and certificate collisions, dropped mount rejection, adoption and recovery. A
+live gateway/storage drill (write sentinel, delete/recreate compute, read sentinel,
+check UID and absence of sibling access) remains required before deployment;
+this foundation does not claim that live verification or modify infrastructure.
+
+## Offline Bot artifact reads and purge boundary
+
+`bot_home_operations.go` implements `BotHomeArtifactBackend` using a unique,
+one-minute gateway helper (not an attached run). It composes normal certificate
+configuration with exactly one **read-only** home PVC/sub-path mount, sets
+`HOME=/home/astonish`, requests `sandbox:sandbox`, and disables network rules and
+writable `/home` preparation. Get/Delete use the sandbox name; Exec uses its UUID.
+Persisted HOME, labels and driver configuration must match before exec. The
+isolated Python reader then requires the actual `/proc/self/mountinfo` entry to
+be read-only with the expected scoped root, and verifies effective UID/GID and
+home directory ownership. Missing evidence fails closed; template echo is not
+runtime mount proof.
+
+Reads accept canonical relative paths and positive limits up to 16 MiB. Realpath
+containment, pinned directory descriptors, `O_NOFOLLOW` on every component and
+regular-file checks reject symlinks (even internal ones), directories and special
+files. Reads are bounded to limit+1 and return no bytes on failure. Helpers receive
+an independently bounded cleanup attempt even after cancellation. Ambiguous
+create failures require persisted ownership proof before cleanup; unreachable
+gateways can still leave helpers and require operational reconciliation. This is
+not a claim that a cleanup RPC proves the pod has already terminated.
+
+`DeleteBotHome` validates scope/binding but always returns `ErrBotHomeUnsupported`
+without creating a helper or mutating storage. Safe purge is blocked by:
+
+- `client_grpc.go:ListSandboxes` now traverses the existing offset API:
+  `proto/openshell/v1/openshell.proto` defines `uint32 limit`, `uint32 offset`
+  and `label_selector` on the request; the response contains only `sandboxes`.
+  There is **no continuation token, total count or snapshot revision**. The client
+  requests 500 entries per page, advances by the actual returned count (including
+  short/server-clamped pages), and stops only at an empty page. Missing/repeated
+  IDs or names, oversized pages, cancellation, RPC failure or exhaustion of the
+  1,000-request budget return an error and **no partial inventory**. This fixes
+  first-page truncation for a stable inventory, but offset changes during
+  concurrent create/delete can still omit entries without detectable duplicates.
+  Successful traversal, local session records or a label-filtered listing are
+  therefore not proof of no attached run.
+- There is no gateway atomic attachment exclusion/lease spanning inventory and
+  purge. A list-then-delete check races a concurrent run attachment. The next
+  coordination prerequisite is gateway-enforced, scope-keyed attachment exclusion
+  with fencing honored by every creator/resumer/helper, held through authoritative
+  detachment verification and storage deletion. A process-local lock or an
+  Astonish-only lease cannot exclude direct gateway clients; offset traversal also
+  needs protection from concurrent inventory mutation (or a gateway snapshot).
+  These are required gateway capabilities, not implemented by this change.
+- The create-time PVC/sub-path API has no existing-only mount or scoped storage
+  existence/deletion operation. Creating a helper can materialize an absent
+  directory; mounting only the scoped directory cannot remove its mount root.
+  Repeated purge therefore cannot be claimed idempotent. Mounting the shared
+  claim root or impersonating certificate storage is not an acceptable workaround.
+
+The reader also cannot promise that gateway helper provisioning will never
+materialize a missing subdirectory; it never writes artifact contents itself.
+Operators must provide compatible scoped ownership and an image containing
+Python 3; no root chown or host fallback is attempted. Mock lifecycle tests and
+local reader-algorithm tests do not verify gateway mounting, supervisor behavior,
+PVC survival or Linux mountinfo visibility. No live gateway was configured for
+this implementation; those remain deployment acceptance requirements.
+
 ## 1. Context & Motivation
 
 The K8s backend (`pkg/sandbox/k8s/`) creates and manages sandbox pods

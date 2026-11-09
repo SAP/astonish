@@ -2,12 +2,25 @@
 
 ## Overview
 
-Astonish ships a **fullscreen terminal chat app** comparable to Claude Code, Codex, OpenCode, and Grok Build. It has two entry points that share the same `pkg/tui` presentation layer:
+Astonish ships a **fullscreen terminal chat app**. It has two entry points that share the same `pkg/tui` presentation layer:
 
 - **`astonish chat`** — platform-backed. Even a local installation requires authentication (`astonish login <url>`); the agent runs on the platform and the TUI streams Studio SSE.
-- **`astonish code`** — **local code mode**. The single binary runs the agent loop **in-process** and executes its compiled-in tools directly on the host filesystem in the working directory. There is no daemon, no HTTP, and no login. This is the Claude-Code-style local coding path.
+- **`astonish code`** — **local code mode**. The single binary runs the agent loop **in-process** and executes its compiled-in tools directly on the host filesystem in the working directory. There is no daemon, no HTTP, and no login.
 
-**Entry:** `astonish chat` (requires login) or `astonish code` (no login). On an interactive TTY with an existing login, bare `astonish` opens the platform chat app.
+**Entry:** `astonish chat` (requires login) or `astonish code` (no login). Bare `astonish` opens local code mode when stdin/stdout are TTYs, regardless of login.
+
+### Remote Bot workspace
+
+`chat --bot UUID_OR_UNIQUE_NAME` and the platform-only `/bots` picker use the
+same transcript renderer. Active home messages queue a run; `/bots runs` opens
+its read-only execution trace and the published report returns home. Paused home
+messages use the tool-free conversation endpoint without activation. Draft testing
+requires the separate reviewed CLI action. Native Goals, Schedule, status and
+Decisions overlays share authoritative Bot snapshots; the header refreshes lifecycle
+and pending counts with cancellation and stale-selection guards. `/bots detach`
+closes only the viewer. See [Bot terminal/client](bot-terminal-client.md) for consent,
+ordered runtime-envelope replay, commands and real subprocess/PTY acceptance.
+Local Code has no Bot execution capability.
 
 ## Delegation detail adapters
 
@@ -47,7 +60,7 @@ flowchart TB
     Agent[ChatAgent / tools / sandbox]
   end
   login --> chat
-  bare --> chat
+  bare --> LocalCode[RunCodeTUI: host tools, no login]
   chat --> RunTUI
   RunTUI --> PlatformBE
   RunTUI --> App
@@ -72,11 +85,11 @@ flowchart TB
 
 ### Auth requirement
 
-If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`. Bare `astonish` only launches the TUI when both stdin/stdout are TTYs and the CLI is already logged in; otherwise it keeps normal help/error behavior for scripts. **`astonish code` has no auth requirement** — it never contacts a platform.
+If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login), `astonish chat` exits with instructions to run `astonish login <url>`. Bare `astonish` launches local code only when stdin/stdout are TTYs, independent of login; otherwise it keeps normal help/error behavior for scripts. **`astonish code` has no auth requirement** — it never contacts a platform.
 
 ## Code mode (local, in-process)
 
-`astonish code` runs the entire agent locally in the same process, like Claude Code / Codex / OpenCode / Grok Build. It reuses the same `pkg/tui` presentation and event model as platform chat; only the backend differs.
+`astonish code` runs the entire agent locally in the same process. It reuses the same `pkg/tui` presentation and event model as platform chat; only the backend differs.
 
 **Flow:** `cmd/astonish/code.go:handleCodeCommand` → `launcher.RunCodeTUI` →
 
@@ -125,9 +138,9 @@ The catalog of provider types offered by the overlay is `codeProviderTypes()` in
 
 **Sessions.** Code-mode sessions are **persisted to disk** via a `session.FileStore` (wrapped by `common.NewAutoInitService`) rooted at `<sessionsDir>/code/`, under the app name `astonish_code`. They survive restarts and are isolated from Studio/chat sessions two ways: the distinct app name, and the dedicated `code/` subdirectory. Sessions are **scoped per working directory**: `RunCodeTUI` derives the session `userID` from a stable hash of the absolute working directory (`codeUserIDForDir`), and `FileStore.List` filters by `(appName, userID)`, so sessions from one project never appear in another. **Startup is always a fresh session** — code mode does not auto-resume the last conversation. `ListSessions` enumerates persisted sessions for the current directory (via `FileStore.ListSessionMetas`, newest-first, with titles and message counts) and `ResumeSession` loads a chosen transcript, powering the `/sessions` picker. A new session's title is derived from its first user message (`deriveSessionTitle` → `FileStore.SetSessionTitle`). All session-service calls route through `effectiveUserID()` (falling back to the base `local_user` when unscoped, e.g. in tests). Because the store is a `FileStore`, code-mode transcripts also get on-disk credential redaction wired by the factory.
 
-**Safety model.** Tools run unsandboxed with the user's own permissions. Safety comes from two code-mode authorization gates (see [Tool & folder authorization](#tool--folder-authorization-code-mode)): non-read-only tools require per-tool authorization, and paths outside the project working directory require folder-access authorization. `--auto-approve` / `--yolo` bypasses both gates (matching Claude Code).
+**Safety model.** Tools run unsandboxed with the user's own permissions. Safety comes from two code-mode authorization gates (see [Tool & folder authorization](#tool--folder-authorization-code-mode)): non-read-only tools require per-tool authorization, and paths outside the project working directory require folder-access authorization. `--auto-approve` / `--yolo` bypasses both gates.
 
-**Project guidance (AGENTS.md).** Code mode follows the [agents.md](https://agents.md) convention used by Claude Code, opencode, and Codex: at startup it loads project instructions into the system prompt. `RunCodeTUI` builds the agent with `LoadProjectContext: true`, and the factory calls `agent.LoadProjectContext(workspaceDir)`, which:
+**Project guidance (AGENTS.md).** Code mode follows the [agents.md](https://agents.md) convention: at startup it loads project instructions into the system prompt. `RunCodeTUI` builds the agent with `LoadProjectContext: true`, and the factory calls `agent.LoadProjectContext(workspaceDir)`, which:
 
 - walks **upward** from the working directory to the project root (the first ancestor containing `.git`), reading the nearest `AGENTS.md` at each level (falling back to `CLAUDE.md` when a directory has no `AGENTS.md`);
 - prepends the global `~/.config/astonish/AGENTS.md` (honoring `XDG_CONFIG_HOME`) at lowest precedence;

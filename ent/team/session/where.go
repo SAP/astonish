@@ -71,6 +71,16 @@ func UserID(v uuid.UUID) predicate.Session {
 	return predicate.Session(sql.FieldEQ(FieldUserID, v))
 }
 
+// BotID applies equality check predicate on the "bot_id" field. It's identical to BotIDEQ.
+func BotID(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldBotID, v))
+}
+
+// BotRunID applies equality check predicate on the "bot_run_id" field. It's identical to BotRunIDEQ.
+func BotRunID(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldBotRunID, v))
+}
+
 // Title applies equality check predicate on the "title" field. It's identical to TitleEQ.
 func Title(v string) predicate.Session {
 	return predicate.Session(sql.FieldEQ(FieldTitle, v))
@@ -184,6 +194,146 @@ func UserIDIsNil() predicate.Session {
 // UserIDNotNil applies the NotNil predicate on the "user_id" field.
 func UserIDNotNil() predicate.Session {
 	return predicate.Session(sql.FieldNotNull(FieldUserID))
+}
+
+// BotIDEQ applies the EQ predicate on the "bot_id" field.
+func BotIDEQ(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldBotID, v))
+}
+
+// BotIDNEQ applies the NEQ predicate on the "bot_id" field.
+func BotIDNEQ(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldNEQ(FieldBotID, v))
+}
+
+// BotIDIn applies the In predicate on the "bot_id" field.
+func BotIDIn(vs ...uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldIn(FieldBotID, vs...))
+}
+
+// BotIDNotIn applies the NotIn predicate on the "bot_id" field.
+func BotIDNotIn(vs ...uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldNotIn(FieldBotID, vs...))
+}
+
+// BotIDGT applies the GT predicate on the "bot_id" field.
+func BotIDGT(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldGT(FieldBotID, v))
+}
+
+// BotIDGTE applies the GTE predicate on the "bot_id" field.
+func BotIDGTE(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldGTE(FieldBotID, v))
+}
+
+// BotIDLT applies the LT predicate on the "bot_id" field.
+func BotIDLT(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldLT(FieldBotID, v))
+}
+
+// BotIDLTE applies the LTE predicate on the "bot_id" field.
+func BotIDLTE(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldLTE(FieldBotID, v))
+}
+
+// BotIDIsNil applies the IsNil predicate on the "bot_id" field.
+func BotIDIsNil() predicate.Session {
+	return predicate.Session(sql.FieldIsNull(FieldBotID))
+}
+
+// BotIDNotNil applies the NotNil predicate on the "bot_id" field.
+func BotIDNotNil() predicate.Session {
+	return predicate.Session(sql.FieldNotNull(FieldBotID))
+}
+
+// BotRunIDEQ applies the EQ predicate on the "bot_run_id" field.
+func BotRunIDEQ(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldBotRunID, v))
+}
+
+// BotRunIDNEQ applies the NEQ predicate on the "bot_run_id" field.
+func BotRunIDNEQ(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldNEQ(FieldBotRunID, v))
+}
+
+// BotRunIDIn applies the In predicate on the "bot_run_id" field.
+func BotRunIDIn(vs ...uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldIn(FieldBotRunID, vs...))
+}
+
+// BotRunIDNotIn applies the NotIn predicate on the "bot_run_id" field.
+func BotRunIDNotIn(vs ...uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldNotIn(FieldBotRunID, vs...))
+}
+
+// BotRunIDGT applies the GT predicate on the "bot_run_id" field.
+func BotRunIDGT(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldGT(FieldBotRunID, v))
+}
+
+// BotRunIDGTE applies the GTE predicate on the "bot_run_id" field.
+func BotRunIDGTE(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldGTE(FieldBotRunID, v))
+}
+
+// BotRunIDLT applies the LT predicate on the "bot_run_id" field.
+func BotRunIDLT(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldLT(FieldBotRunID, v))
+}
+
+// BotRunIDLTE applies the LTE predicate on the "bot_run_id" field.
+func BotRunIDLTE(v uuid.UUID) predicate.Session {
+	return predicate.Session(sql.FieldLTE(FieldBotRunID, v))
+}
+
+// BotRunIDIsNil applies the IsNil predicate on the "bot_run_id" field.
+func BotRunIDIsNil() predicate.Session {
+	return predicate.Session(sql.FieldIsNull(FieldBotRunID))
+}
+
+// BotRunIDNotNil applies the NotNil predicate on the "bot_run_id" field.
+func BotRunIDNotNil() predicate.Session {
+	return predicate.Session(sql.FieldNotNull(FieldBotRunID))
+}
+
+// PurposeEQ applies the EQ predicate on the "purpose" field.
+func PurposeEQ(v Purpose) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldPurpose, v))
+}
+
+// PurposeNEQ applies the NEQ predicate on the "purpose" field.
+func PurposeNEQ(v Purpose) predicate.Session {
+	return predicate.Session(sql.FieldNEQ(FieldPurpose, v))
+}
+
+// PurposeIn applies the In predicate on the "purpose" field.
+func PurposeIn(vs ...Purpose) predicate.Session {
+	return predicate.Session(sql.FieldIn(FieldPurpose, vs...))
+}
+
+// PurposeNotIn applies the NotIn predicate on the "purpose" field.
+func PurposeNotIn(vs ...Purpose) predicate.Session {
+	return predicate.Session(sql.FieldNotIn(FieldPurpose, vs...))
+}
+
+// RetentionEQ applies the EQ predicate on the "retention" field.
+func RetentionEQ(v Retention) predicate.Session {
+	return predicate.Session(sql.FieldEQ(FieldRetention, v))
+}
+
+// RetentionNEQ applies the NEQ predicate on the "retention" field.
+func RetentionNEQ(v Retention) predicate.Session {
+	return predicate.Session(sql.FieldNEQ(FieldRetention, v))
+}
+
+// RetentionIn applies the In predicate on the "retention" field.
+func RetentionIn(vs ...Retention) predicate.Session {
+	return predicate.Session(sql.FieldIn(FieldRetention, vs...))
+}
+
+// RetentionNotIn applies the NotIn predicate on the "retention" field.
+func RetentionNotIn(vs ...Retention) predicate.Session {
+	return predicate.Session(sql.FieldNotIn(FieldRetention, vs...))
 }
 
 // TitleEQ applies the EQ predicate on the "title" field.

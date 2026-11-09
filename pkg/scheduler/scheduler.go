@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/robfig/cron/v3"
 )
 
@@ -184,7 +185,22 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) (string, error) {
 	s.logger.Printf("[scheduler] Executing job %q (mode: %s)", job.Name, job.Mode)
 
 	now := time.Now()
+	// Snapshot the occurrence before invoking a callback that may race edits.
+	req, requestErr := botTriggerRequest(job, now)
+	ctx, ack := WithBotAcknowledgement(ctx)
 	result, execErr := s.execute(ctx, job)
+	if job.Mode == ModeBotTrigger && *ack == BotScheduleAcknowledged {
+		return result, execErr
+	}
+	if job.Mode == ModeBotTrigger && execErr != nil && requestErr == nil {
+		if failures, ok := s.store.(store.BotScheduleFailureStore); ok {
+			_, err := failures.FailBotSchedule(ctx, store.BotScheduledOccurrence{JobID: req.JobID, BotID: req.BotID, Version: req.Version, TriggerID: req.TriggerID, OccurrenceAt: req.OccurrenceAt}, now, execErr.Error(), store.BotScheduleRetry)
+			if err != nil {
+				s.logger.Printf("[scheduler] Failed to record Bot admission failure: %v", err)
+			}
+			return result, execErr
+		}
+	}
 
 	// Update runtime state in the store
 	stored := s.store.Get(job.ID)
@@ -207,8 +223,10 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) (string, error) {
 			stored.Name, len(result))
 	}
 
-	// Compute next run from when execution started
-	stored.NextRun = s.computeNextRun(stored, now)
+	// Failed Bot admission retries the same durable occurrence.
+	if stored.Mode != ModeBotTrigger || execErr == nil {
+		stored.NextRun = s.computeNextRun(stored, now)
+	}
 
 	if err := s.store.Update(stored); err != nil {
 		s.logger.Printf("[scheduler] Failed to update job state for %q: %v", stored.Name, err)
@@ -221,7 +239,7 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) (string, error) {
 func (s *Scheduler) refreshNextRuns() {
 	jobs := s.store.List()
 	for _, job := range jobs {
-		if !job.Enabled {
+		if !job.Enabled || (job.Mode == ModeBotTrigger && job.NextRun != nil) {
 			continue
 		}
 		nextRun := s.computeNextRun(job, time.Now())
@@ -262,6 +280,9 @@ func (s *Scheduler) RefreshNextRun(jobID string) {
 // The base time determines the reference point: use time.Now() for schedule changes,
 // or job.LastRun for post-execution scheduling.
 func (s *Scheduler) computeNextRun(job *Job, base time.Time) *time.Time {
+	if job.Mode == ModeBotTrigger && job.Schedule.Cron == store.BotDeadlineSchedule {
+		return nil // The owned goal supplies its single persisted occurrence.
+	}
 	schedule, err := s.parser.Parse(job.Schedule.Cron)
 	if err != nil {
 		s.logger.Printf("[scheduler] Invalid cron for job %q: %v", job.Name, err)

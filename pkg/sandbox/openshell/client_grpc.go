@@ -231,10 +231,13 @@ func (c *grpcGatewayClient) GetSandboxStatus(ctx context.Context, sandboxID stri
 	phase := status.GetPhase()
 
 	return &SandboxStatus{
-		State:     mapPhaseToState(phase),
-		Message:   phaseMessage(phase, status),
-		PodName:   status.GetAgentPod(),
-		GatewayID: meta.GetId(),
+		State:        mapPhaseToState(phase),
+		Message:      phaseMessage(phase, status),
+		PodName:      status.GetAgentPod(),
+		GatewayID:    meta.GetId(),
+		DriverConfig: sandbox.GetSpec().GetTemplate().GetDriverConfig().AsMap(),
+		Env:          sandbox.GetSpec().GetTemplate().GetEnvironment(),
+		Labels:       sandbox.GetSpec().GetTemplate().GetLabels(),
 	}, nil
 }
 
@@ -434,32 +437,72 @@ func (c *grpcExecStreamConn) Close() error {
 // ListSandboxes
 // ---------------------------------------------------------------------------
 
-func (c *grpcGatewayClient) ListSandboxes(ctx context.Context, labelSelector string) ([]SandboxSummary, error) {
-	resp, err := c.client.ListSandboxes(ctx, &pb.ListSandboxesRequest{
-		LabelSelector: labelSelector,
-		Limit:         500,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("gateway ListSandboxes: %w", err)
-	}
+const (
+	gatewayInventoryPageSize = 500
+	gatewayInventoryMaxPages = 1000
+)
 
-	sandboxes := resp.GetSandboxes()
-	summaries := make([]SandboxSummary, 0, len(sandboxes))
-	for _, s := range sandboxes {
-		meta := s.GetMetadata()
-		status := s.GetStatus()
-		summary := SandboxSummary{
-			ID:     meta.GetId(),
-			Name:   meta.GetName(),
-			Labels: meta.GetLabels(),
-			Phase:  status.GetPhase().String(),
+func (c *grpcGatewayClient) ListSandboxes(ctx context.Context, labelSelector string) ([]SandboxSummary, error) {
+	// The gateway exposes offsets, not snapshot tokens or a total. An empty
+	// page ends traversal; a short page may merely reflect a server-side cap.
+	// This is not atomic detachment evidence for home purge.
+	summaries := make([]SandboxSummary, 0)
+	seenIDs := make(map[string]struct{})
+	seenNames := make(map[string]struct{})
+	var offset uint32
+	for page := 0; page < gatewayInventoryMaxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("gateway ListSandboxes: %w", err)
 		}
-		if ms := meta.GetCreatedAtMs(); ms > 0 {
-			summary.CreatedAt = time.UnixMilli(ms)
+		resp, err := c.client.ListSandboxes(ctx, &pb.ListSandboxesRequest{
+			LabelSelector: labelSelector,
+			Limit:         gatewayInventoryPageSize,
+			Offset:        offset,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("gateway ListSandboxes offset %d: %w", offset, err)
 		}
-		summaries = append(summaries, summary)
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("gateway ListSandboxes: %w", err)
+		}
+		if resp == nil {
+			return nil, errors.New("gateway ListSandboxes: nil response")
+		}
+		sandboxes := resp.GetSandboxes()
+		if len(sandboxes) == 0 {
+			return summaries, nil
+		}
+		if len(sandboxes) > gatewayInventoryPageSize {
+			return nil, errors.New("gateway ListSandboxes: page exceeds requested limit")
+		}
+		for _, s := range sandboxes {
+			meta := s.GetMetadata()
+			if meta.GetId() == "" || meta.GetName() == "" {
+				return nil, errors.New("gateway ListSandboxes: missing sandbox identity")
+			}
+			if _, exists := seenIDs[meta.GetId()]; exists {
+				return nil, errors.New("gateway ListSandboxes: repeated sandbox ID; inventory is unstable or offset ignored")
+			}
+			if _, exists := seenNames[meta.GetName()]; exists {
+				return nil, errors.New("gateway ListSandboxes: repeated sandbox name; inventory is unstable")
+			}
+			seenIDs[meta.GetId()] = struct{}{}
+			seenNames[meta.GetName()] = struct{}{}
+			summary := SandboxSummary{
+				ID:     meta.GetId(),
+				Name:   meta.GetName(),
+				Labels: meta.GetLabels(),
+				Phase:  s.GetStatus().GetPhase().String(),
+			}
+			if ms := meta.GetCreatedAtMs(); ms > 0 {
+				summary.CreatedAt = time.UnixMilli(ms)
+			}
+			summaries = append(summaries, summary)
+		}
+		// The fixed page/request bounds keep this sum below uint32 overflow.
+		offset += uint32(len(sandboxes))
 	}
-	return summaries, nil
+	return nil, errors.New("gateway ListSandboxes: page budget exhausted before empty terminal page")
 }
 
 // ---------------------------------------------------------------------------

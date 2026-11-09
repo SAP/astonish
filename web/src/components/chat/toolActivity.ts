@@ -394,12 +394,20 @@ function isVisibleBoundaryType(type: string): boolean {
     type === 'distill_preview'
 }
 
+// Canonical server publication identity, already carried by both replay and live
+// Bot envelopes. This is a display boundary only, never a markdown/harness gate.
+const BOT_REPORT_INVOCATION = /^bot-report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function isBotReportMessage(msg: ChatMsg): boolean {
+  return msg.type === 'agent' && BOT_REPORT_INVOCATION.test(msg.invocationId ?? '')
+}
+
 export function isHardBreak(msg: ChatMsg): boolean {
-  return isHardBreakType(msg.type)
+  return isBotReportMessage(msg) || isHardBreakType(msg.type)
 }
 
 export function isSoftNote(msg: ChatMsg): boolean {
-  return isSoftNoteType(msg.type)
+  return !isBotReportMessage(msg) && isSoftNoteType(msg.type)
 }
 
 /** True when content hosts (or is streaming into) an astonish-app fence. */

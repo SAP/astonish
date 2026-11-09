@@ -222,6 +222,12 @@ func pathsMatch(a, b string) bool {
 	return filepath.Base(a) == filepath.Base(b) || filepath.Clean(a) == filepath.Clean(b)
 }
 
+// ResolveAdaptiveReportBody reuses adaptive marker resolution with captured
+// report bodies only. It deliberately has no host-filesystem fallback.
+func ResolveAdaptiveReportBody(text string, bodies map[string]string) string {
+	return preferDeliveryBody(text, bodies, nil, nil)
+}
+
 func bytesTrimSpace(b []byte) []byte {
 	return []byte(strings.TrimSpace(string(b)))
 }

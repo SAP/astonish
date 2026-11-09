@@ -210,7 +210,7 @@ func TestChainScenario3_ConfiguredBase_TeamTemplate(t *testing.T) {
 	}
 
 	// 3. Create team template with parent=@base (well-known UUID).
-	baseID := getBaseTemplateID(t, ctx, tplStore)
+	baseID := getSandboxChainBaseTemplateID(t, ctx, tplStore)
 	teamTpl := &store.SandboxTemplate{
 		Slug:             "team-general",
 		Scope:            store.SandboxTemplateScopeTeam,
@@ -260,7 +260,7 @@ func TestChainScenario4_FreshInstall_TeamTemplate(t *testing.T) {
 	}
 
 	// Create team template with parent=@base.
-	baseID := getBaseTemplateID(t, ctx, tplStore)
+	baseID := getSandboxChainBaseTemplateID(t, ctx, tplStore)
 	teamTpl := &store.SandboxTemplate{
 		Slug:             "team-general",
 		Scope:            store.SandboxTemplateScopeTeam,
@@ -292,9 +292,9 @@ func TestChainScenario4_FreshInstall_TeamTemplate(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// getBaseTemplateID retrieves the well-known @base template's UUID from the
+// getSandboxChainBaseTemplateID retrieves the well-known @base template's UUID from the
 // platform database (seeded by entstore.BootstrapPlatform).
-func getBaseTemplateID(t *testing.T, ctx context.Context, templates store.SandboxTemplateStore) string {
+func getSandboxChainBaseTemplateID(t *testing.T, ctx context.Context, templates store.SandboxTemplateStore) string {
 	t.Helper()
 	roots, err := templates.ListRoots(ctx)
 	if err != nil {

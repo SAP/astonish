@@ -1,3 +1,4 @@
+import { BotStatus } from '../api/bots'
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Send, Plus, Trash2, MessageSquare, ChevronRight, ChevronDown, Loader, Square, Copy, Check, Code, RotateCcw, Clock, Search, Users, User, Info, FileText, Globe, ListChecks, AppWindow, Brain, Paperclip, X, Bug } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -30,9 +31,10 @@ import AppsPanel from './chat/AppsPanel'
 import HarnessPanel from './chat/HarnessPanel'
 import HarnessPlaceholder from './chat/HarnessPlaceholder'
 import ChatErrorBoundary from './chat/ChatErrorBoundary'
-import YesNoCard from './chat/questions/YesNoCard'
-import SingleSelectCard from './chat/questions/SingleSelectCard'
-import QuestionOptionThumb from './chat/questions/QuestionOptionThumb'
+import QuestionCard from './chat/questions/QuestionCard'
+import { mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
+import BotOperationResult from './bots/BotOperationResult'
+import { mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
   deriveLatestHarness,
   harnessFocusEquals,
@@ -54,6 +56,9 @@ import ModelCredentialBanner from './chat/ModelCredentialBanner'
 import DebugPanel from './chat/DebugPanel'
 import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
+import { connectBotEvents } from '../api/botEvents'
+import BotWorkspace from './bots/BotWorkspace'
+import BotDraftDialog from './bots/BotDraftDialog'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
 
 function normalizeBlueprintScenes(raw: unknown): TutorialBlueprintPreviewMessage['scenes'] {
@@ -288,6 +293,10 @@ interface PendingAttachment {
 
 interface StudioChatProps {
   theme: string
+  hideSidebar?: boolean
+  botRoute?: import('./bots/botRoute').BotRoute
+  userId?: string
+  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; renderReview?: (kind: 'proposal' | 'approval', id: string) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
   initialSessionId?: string | null
   pendingChatMessage?: { message: string; systemContext?: string } | null
   onPendingChatMessageConsumed?: () => void
@@ -332,7 +341,44 @@ function writeDebugPreference(enabled: boolean) {
   catch { /* Browser storage may be unavailable in restricted contexts. */ }
 }
 
-export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false }: StudioChatProps) {
+export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false, hideSidebar = false, botRoute, botThread, userId }: StudioChatProps) {
+  const [promoteOpen, setPromoteOpen] = useState(false)
+  const [sourceIntake, setSourceIntake] = useState<{ scope: import('../api/bots').BotScope; resumeId?: string } | null>(null)
+  useEffect(() => {
+    if (hideSidebar) return
+    // A second sidebar action must not remount/reset an unfinished editor.
+    // The current intake has explicit Save and close / Discard actions.
+    const open = (event: Event) => setSourceIntake(current => current || (event as CustomEvent).detail)
+    window.addEventListener('astonish:source-intake', open)
+    return () => window.removeEventListener('astonish:source-intake', open)
+  }, [hideSidebar])
+  const [botConnection, setBotConnection] = useState('loading')
+  const [botCursor, setBotCursor] = useState('')
+  const [botSubmitting, setBotSubmitting] = useState(false)
+  const [botSendError, setBotSendError] = useState('')
+  const [botRunStates, setBotRunStates] = useState<BotRunStates>({})
+  const [botOperations, setBotOperations] = useState<BotOperations>({})
+  useEffect(() => { setBotOperations({}); setBotRunStates({}) }, [botThread?.botId, initialSessionId])
+  useEffect(() => {
+    if (!botThread || !initialSessionId) return
+    setBotOperations(prev => (botThread.operations || []).reduce((states, state) => mergeBotOperation(states, state, botThread.botId, initialSessionId!), prev))
+  }, [botThread?.operations, botThread?.botId, initialSessionId])
+  useEffect(() => {
+    if (!botThread || !initialSessionId) return
+    setBotRunStates(prev => (botThread.runStates || []).reduce((states, state) => mergeBotRunState(states, state, botThread.botId, initialSessionId!), prev))
+  }, [botThread?.runStates, botThread?.botId, initialSessionId])
+  const botBusy = botThread?.status !== 'stopped' && botThread?.status !== 'deleted' && (botRunsBusy(botRunStates) || botOperationsBusy(botOperations))
+  const botSubmittingRef = useRef(false)
+  const botThreadRef = useRef(botThread)
+  botThreadRef.current = botThread
+  const botOperationsRef = useRef(botOperations)
+  botOperationsRef.current = botOperations
+  useEffect(() => {
+    botThreadRef.current?.onOperationsChange?.(Object.values(botOperations))
+  }, [botOperations])
+  const savedChatSession = useRef(initialSessionId)
+  if (!botRoute) savedChatSession.current = initialSessionId
+  if (botRoute) initialSessionId = savedChatSession.current
   // Session state
   const [sessions, setSessions] = useState<SidebarSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialSessionId || null)
@@ -353,6 +399,20 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
   // Chat state
   const [messages, setMessages] = useState<ChatMsg[]>([])
+  useEffect(() => {
+    if (!botThread || botConnection !== 'live') return
+    setMessages(prev => {
+      let next = prev
+      for (const operation of Object.values(botOperations)) {
+        if (next.some(m => m.type === 'bot_operation' && m.operationId === operation.operation_id)) continue
+        const source = operation.source_user_event_id
+        const at = source && source !== '00000000-0000-0000-0000-000000000000' ? next.findIndex(m => m.type === 'user' && m.eventId === source) : -1
+        const card: ChatMsg = { type: 'bot_operation', operationId: operation.operation_id, eventId: `operation/${operation.operation_id}` }
+        next = at < 0 ? [...next, card] : [...next.slice(0, at + 1), card, ...next.slice(at + 1)]
+      }
+      return next
+    })
+  }, [botOperations, botConnection, botThread?.botId])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [activeAppId, setActiveAppId] = useState<string | null>(null) // ID of app currently being refined
@@ -427,6 +487,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const streamGenRef = useRef(0)
 
   const startSessionMemoryPolling = useCallback((sessionId: string | null | undefined) => {
+    if (botThreadRef.current) return
     if (!sessionId) {
       setIsConsolidatingMemories(false)
       return
@@ -802,6 +863,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [])
 
   useEffect(() => {
+    if (botThread) {
+      if (initialSessionId) reconnectToChatRunner(initialSessionId)
+      return () => { ++streamGenRef.current; abortRef.current?.abort(); abortRef.current = null }
+    }
     loadSessions()
 
     const init = async () => {
@@ -1042,6 +1107,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               questionId: m.questionId || m.QuestionID || '',
               kind: (m.kind || m.questionKind || m.QuestionKind || 'yesno') as ChatQuestionMessage['kind'],
               prompt: m.prompt || m.Prompt || '',
+              allow_custom_answer: m.allow_custom_answer as boolean | undefined,
               options: (m.options || m.Options || []) as ChatQuestionMessage['options'],
             } as ChatQuestionMessage
           }
@@ -1096,11 +1162,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       setSessionArtifacts([])
       setSessionStartTime(Date.now())
     }
-    setIsStreaming(true)
+    if (!botThreadRef.current) setIsStreaming(true)
     setGenerationProgress(null)
     const streamGen = ++streamGenRef.current
 
-    const controller = connectChatStream({
+    const connectStream: typeof connectChatStream = botThreadRef.current
+      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; setBotConnection(state); setBotCursor(cursor) } })
+      : connectChatStream
+    const controller = connectStream({
       sessionId,
       onEvent: (eventType, data) => {
         // Discard events from a stale stream (session was switched)
@@ -1109,6 +1178,27 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           setGenerationProgress(null)
           setMessages(finalizeStreamingAgentText)
         }
+        if (botThreadRef.current && eventType === 'bot_operation') {
+          setBotOperations(prev => mergeBotOperation(prev, data, botThreadRef.current!.botId, sessionId))
+          return
+        }
+        if (botThreadRef.current && eventType === 'bot_run_state') {
+          setBotRunStates(prev => mergeBotRunState(prev, data as unknown as BotRunState, botThreadRef.current!.botId, sessionId))
+          return
+        }
+        if (botThreadRef.current && eventType === 'bot_review') {
+          if (data.kind !== 'proposal' && data.kind !== 'approval') return
+          const kind = data.kind
+          const reviewId = String(data.review_id || data.reviewId || '')
+          if (reviewId) setMessages(prev => prev.some(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId) ? prev : [...finalizeStreamingAgentText(prev), { type: 'bot_review', kind, reviewId, eventId: String(data.eventId || reviewId) }])
+          return
+        }
+        // Bot ADK envelopes feed this same reducer, never a second transcript store.
+        if (botThreadRef.current && eventType === 'user_message') {
+          setMessages(prev => [...finalizeStreamingAgentText(prev), { type: 'user', content: String(data.text || ''), eventId: String(data.eventId || '') }])
+          return
+        }
+        if (botThreadRef.current && eventType === 'turn_complete') { setMessages(finalizeStreamingAgentText); return }
         // Reuse the exact same event handling as sendMessage's onEvent
         switch (eventType) {
           case 'session':
@@ -1344,6 +1434,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               questionId: data.questionId as string,
               kind: data.kind as ChatQuestionMessage['kind'],
               prompt: data.prompt as string,
+              allow_custom_answer: data.allow_custom_answer as boolean | undefined,
               options: (data.options as ChatQuestionMessage['options']) || [],
             } as ChatQuestionMessage])
             break
@@ -1446,6 +1537,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat reconnect stream error:', err)
+        if (botThreadRef.current) {
+          setMessages(prev => [...prev, { type: 'error', content: err.message }])
+          setIsStreaming(false)
+          return
+        }
         void fetchSessionStatus(sessionId).then(status => {
           if (streamGenRef.current !== streamGen) return
           if (status.running && attempt < 3) {
@@ -1710,51 +1806,38 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // --- Attachment handlers ---
 
   const validateAndAddFiles = useCallback((files: FileList | File[]) => {
+    if (botSubmittingRef.current) return
+    if (botThreadRef.current?.toolFree) {
+      setBotSendError('Attachments are unavailable in tool-free conversation; files were not attached.')
+      return
+    }
+    if (botThreadRef.current?.readOnly) {
+      setMessages(prev => [...prev, { type: 'error', content: 'This Bot thread is read-only; files were not attached.' }])
+      return
+    }
     const fileArray = Array.from(files)
     const errors: string[] = []
 
-    setAttachments(prev => {
-      const remaining = MAX_ATTACHMENTS - prev.length
-      if (remaining <= 0) {
-        errors.push(`Maximum ${MAX_ATTACHMENTS} files allowed`)
-        return prev
+    const prev = attachments
+    const remaining = MAX_ATTACHMENTS - prev.length
+    const toAdd: PendingAttachment[] = []
+    for (const file of fileArray.slice(0, Math.max(0, remaining))) {
+      if (file.size > MAX_FILE_SIZE || file.size === 0) {
+        errors.push(`${file.name}: files must be non-empty and at most 10 MB`)
+        continue
       }
-
-      const toAdd: typeof prev = []
-      for (const file of fileArray.slice(0, remaining)) {
-        if (file.size > MAX_FILE_SIZE) {
-          errors.push(`${file.name} exceeds 10 MB limit`)
-          continue
-        }
-        // Check MIME type or extension
-        const isAcceptedMime = ACCEPTED_MIME_TYPES.some(t => file.type.startsWith(t.replace('*', '')))
-        const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-        const isAcceptedExt = ACCEPTED_EXTENSIONS.split(',').includes(ext)
-        if (!isAcceptedMime && !isAcceptedExt) {
-          errors.push(`${file.name}: unsupported file type`)
-          continue
-        }
-
-        const id = crypto.randomUUID()
-        let preview: string | null = null
-        if (file.type.startsWith('image/')) {
-          preview = URL.createObjectURL(file)
-        }
-        toAdd.push({ id, file, preview, mimeType: file.type || 'application/octet-stream', name: file.name })
+      const isAcceptedMime = ACCEPTED_MIME_TYPES.some(t => file.type.startsWith(t.replace('*', '')))
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+      if (!isAcceptedMime && !ACCEPTED_EXTENSIONS.split(',').includes(ext)) {
+        errors.push(`${file.name}: unsupported file type`)
+        continue
       }
-
-      if (fileArray.length > remaining) {
-        errors.push(`Only ${remaining} more file(s) can be added`)
-      }
-
-      return [...prev, ...toAdd]
-    })
-
-    // Show errors as console warnings (could be toast in the future)
-    if (errors.length > 0) {
-      console.warn('Attachment errors:', errors)
+      toAdd.push({ id: crypto.randomUUID(), file, preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : null, mimeType: file.type || 'application/octet-stream', name: file.name })
     }
-  }, [])
+    if (fileArray.length > remaining) errors.push(`Maximum ${MAX_ATTACHMENTS} files allowed; some files were not attached`)
+    setAttachments([...prev, ...toAdd])
+    if (errors.length > 0) setMessages(prev => [...prev, { type: 'error', content: errors.join('; ') }])
+  }, [attachments])
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => {
@@ -1822,6 +1905,25 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // --- End attachment handlers ---
 
   const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[] } = {}) => {
+    if (botThreadRef.current) {
+      if (botSubmittingRef.current || botThreadRef.current.readOnly || (!text.trim() && attachments.length === 0)) return
+      if (botThreadRef.current.toolFree && attachments.length) { setBotSendError('Attachments are unavailable in tool-free conversation. Remove them before sending.'); return }
+      botSubmittingRef.current = true
+      setBotSubmitting(true); setBotSendError('')
+      try {
+        const payloads = await prepareAttachmentPayloads()
+        const thread = botThreadRef.current
+        const generation = streamGenRef.current
+        const receipt = await thread.onSend(text.trim(), payloads.length ? payloads : undefined, Object.values(botOperationsRef.current))
+        if (generation !== streamGenRef.current || thread.botId !== botThreadRef.current?.botId) return
+        if (receipt) setBotRunStates(prev => mergeBotReceipt(prev, receipt, thread.botId, activeSessionId || ''))
+        setInput('')
+        clearAttachments()
+      }
+      catch (e) { setBotSendError(e instanceof Error ? e.message : String(e)) }
+      finally { botSubmittingRef.current = false; setBotSubmitting(false) }
+      return
+    }
     if (!text.trim() && attachments.length === 0) return
     const userMsg = text.trim()
 
@@ -2417,6 +2519,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               questionId: data.questionId as string,
               kind: data.kind as ChatQuestionMessage['kind'],
               prompt: data.prompt as string,
+              allow_custom_answer: data.allow_custom_answer as boolean | undefined,
               options: (data.options as ChatQuestionMessage['options']) || [],
             } as ChatQuestionMessage])
             break
@@ -2583,6 +2686,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     e.preventDefault()
     if (isStreaming && !isFleetMode) return
 
+    if (botThread) { void sendMessage(input); return }
+
     // In fleet mode, send as human message to the fleet
     if (isFleetMode && input.trim()) {
       sendFleetHumanMessage(input)
@@ -2618,6 +2723,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setInput(val)
     autoResize(e.target)
 
+    if (botThread) { setShowSlashPopup(false); return }
     if (val === '/') {
       setShowSlashPopup(true)
       setSlashFilter('')
@@ -2705,11 +2811,12 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   )
 
   const liveStreamStatus = useMemo(() => {
-    if (!isStreaming) return null
+    if (!(botThread ? botBusy : isStreaming)) return null
+    if (botThread) return 'Working…'
     const activity = activityByStart.get(lastActivityStart)
     const running = activity?.steps.find(step => step.status === 'running')
     return running ? liveActivityHint(running) : generationProgress || 'Thinking…'
-  }, [isStreaming, activityByStart, lastActivityStart, generationProgress])
+  }, [isStreaming, botThread, botBusy, activityByStart, lastActivityStart, generationProgress])
 
   const renderAgentMessage = (msg: AgentMessage & { invocationId?: string }, index: number, placement: 'transcript' | 'activity') => {
                 // Collect web source URLs for citation pill
@@ -2894,26 +3001,35 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       className="bg-grad-app flex flex-1 overflow-hidden"
     >
       {/* Session Sidebar */}
-      <SessionSidebar
+      {!hideSidebar && <SessionSidebar
         sessions={filteredSessions}
-        activeSessionId={activeSessionId}
+        activeSessionId={botRoute ? null : activeSessionId}
+        activeBotId={botRoute?.botId}
+        activeBotScope={botRoute?.scope}
         sessionFilter={sessionFilter}
         onSessionFilterChange={setSessionFilter}
         isLoadingSessions={isLoadingSessions}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-        onSelectSession={(session) => handleSelectSession(session.id)}
-        onNewSession={handleNewSession}
+        onSelectSession={(session) => { if (botRoute) window.location.hash = `/chat/${encodeURIComponent(session.id)}`; else void handleSelectSession(session.id) }}
+        onNewSession={() => { if (botRoute) window.location.hash = '/chat'; else handleNewSession() }}
         onDeleteSession={handleDeleteSession}
         onStartFleet={() => { setFleetDialogMessage(''); setShowFleetDialog(true) }}
         theme={theme}
-      />
+      />}
 
+      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotDraftDialog inline open scope={sourceIntake.scope} resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
+      {botRoute && <div className={sourceIntake ? 'hidden' : 'contents'}><BotWorkspace key={`${botRoute.scope}/${botRoute.botId}`} route={botRoute} theme={theme} userId={userId} /></div>}
+      {/* Keep ordinary Chat mounted and hidden: unsent text and attachments survive Bot navigation. */}
+      <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>
       {/* Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {botThread && <p role="status" className="px-3 py-1 text-xs text-muted-foreground">Bot transcript: {botConnection} {botCursor && `· cursor ${botCursor}`} {botThread.readOnly && '· Read-only'}</p>}
+        {!botThread && !botRoute && activeSessionId && <Button variant="ghost" size="sm" onClick={() => setPromoteOpen(true)}>Promote Chat to Bot draft</Button>}
+        {promoteOpen && <BotDraftDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
         {/* Toolbar bar — always visible */}
         <div
-          className="flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5"
+          className={botThread ? 'hidden' : 'flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5'}
         >
           {/* Left side — pre-chat model picker */}
           <div className="flex items-center gap-1.5">
@@ -3115,12 +3231,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               <Loader size={24} className="animate-spin text-primary" />
             </div>
           ) : messages.length === 0 ? (
-            <HomePage
+            botThread ? <p className="text-muted-foreground">No Bot messages yet. Execution requires explicit activation.</p> : <HomePage
               userDisplayName={userDisplayName || undefined}
               onSuggestionClick={(text) => { setInput(text); inputRef.current?.focus() }}
             />
           ) : (
             messages.map((msg, index) => {
+              if (msg.type === 'bot_operation') { const operation = botOperations[msg.operationId]; return operation && botThread ? <BotOperationResult key={msg.eventId} operation={operation} scope={botThread.scope} readOnly={botThread.readOnly || !!botThread.decisionsReadOnly} onChange={next => setBotOperations(prev => mergeBotOperation(prev, next, botThread.botId, initialSessionId || ''))} /> : null }
+              if (msg.type === 'bot_review') return <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId)}</div>
               // Turn-level activity fold: render block at segment start; skip covered indices.
               const activityAt = activityByStart.get(index)
               if (activityAt) {
@@ -3493,6 +3611,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
               if (msg.type === 'chat_question') {
                 const questionMsg = msg as ChatQuestionMessage
+                if (botThread) return <p key={index} className="rounded border border-border p-3">{questionMsg.prompt} — Review this checkpoint in the Decision inbox above.</p>
                 if (isChatQuestionAnswered(messages, index)) {
                   return (
                     <div key={index} className="space-y-1" data-testid="ask-user-answered">
@@ -3512,31 +3631,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 return (
                   <ChatErrorBoundary key={index}>
                     <div className="my-3 w-full max-w-2xl">
-                      {questionMsg.kind === 'yesno' ? (
-                        <YesNoCard
-                          prompt={questionMsg.prompt}
-                          disabled={questionMsg.answered}
-                          onAnswer={(yes) =>
-                            handleQuestionAnswer(questionMsg, yes ? 'Yes' : 'No', yes ? 'yes' : 'no')
-                          }
-                        />
-                      ) : (
-                        <SingleSelectCard
-                          prompt={questionMsg.prompt}
-                          disabled={questionMsg.answered}
-                          options={(Array.isArray(questionMsg.options) ? questionMsg.options : []).map((o) => ({
-                            id: o.id,
-                            label: o.label,
-                            description: o.description,
-                            thumbnail: o.thumbnail ? (
-                              <QuestionOptionThumb thumbnail={o.thumbnail} label={o.label} />
-                            ) : undefined,
-                          }))}
-                          onSelect={(optionId, label) =>
-                            handleQuestionAnswer(questionMsg, label, optionId)
-                          }
-                        />
-                      )}
+                      <QuestionCard key={`${activeSessionId}/${questionMsg.questionId}`} question={questionMsg} answered={questionMsg.answered} onAnswer={({ answer, label }) => handleQuestionAnswer(questionMsg, label, answer)} />
                     </div>
                   </ChatErrorBoundary>
                 )
@@ -3647,7 +3742,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           )}
 
           {/* Streaming indicator — brand tokens so pack switch updates color */}
-          {isStreaming && !isFleetMode && messages[messages.length - 1]?.type !== 'fleet_execution' && (
+          {liveStreamStatus && !isFleetMode && messages[messages.length - 1]?.type !== 'fleet_execution' && (
             <div
               className="thinking-indicator flex items-center gap-2 px-3 py-2 w-fit max-w-full"
               data-testid="thinking-indicator"
@@ -3681,6 +3776,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
+          {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Draft ? 'Draft · ready to discuss setup.' : botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
+          {botSendError && <p role="alert" className="mb-2 text-sm text-destructive">{botSendError}</p>}
           {/* Drag overlay */}
           {isDragOver && (
             <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
@@ -3760,7 +3857,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             onSubmit={handleSubmit}
             className="flex items-end gap-2.5 rounded-[var(--radius-lg)] border border-[color:var(--border-soft)] bg-[color:var(--input-bg)] p-2.5 pl-3.5 shadow-[var(--input-shadow)]"
           >
-            {isStreaming && (
+            {isStreaming && !botThread && (
               <Button
                 type="button"
                 variant="destructive"
@@ -3786,7 +3883,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               type="button"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming && !isFleetMode}
+              disabled={!!botThread?.toolFree || botSubmitting || !!botThread?.readOnly || (isStreaming && !isFleetMode)}
               className="size-8 shrink-0 rounded-[10px] p-0"
               title="Attach files (images, PDFs, text files)"
             >
@@ -3833,8 +3930,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                   }
                 }
               }}
-              disabled={isStreaming && !isFleetMode}
+              disabled={botSubmitting || !!botThread?.readOnly || (isStreaming && !isFleetMode)}
               placeholder={
+                botThread ? (botThread.readOnly ? 'Read-only Bot thread' : botThread.toolFree ? (botThread.status === BotStatus.Draft ? 'Discuss this draft Bot’s setup…' : botThread.status === BotStatus.Paused ? 'Discuss this Bot’s setup while autonomous work is paused…' : 'Discuss this Bot’s setup…') : 'Send instructions to request a Bot run…') :
                 isFleetMode
                   ? fleetState?.state === 'waiting_for_customer'
                     ? `${fleetState.active_agent || 'An agent'} is waiting for your response...`
@@ -3853,7 +3951,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             <Button
               data-testid="send-button"
               type="submit"
-              disabled={(isStreaming && !isFleetMode) || (!input.trim() && attachments.length === 0)}
+              disabled={botSubmitting || !!botThread?.readOnly || (isStreaming && !isFleetMode) || (!input.trim() && attachments.length === 0)}
               className="send-gradient size-8 shrink-0 rounded-[10px] p-0 text-white hover:opacity-90"
               aria-label="Send message"
             >
@@ -3875,23 +3973,23 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           containerWidth={chatLayoutWidth}
           sidebarWidth={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH}
           onClose={closeHarness}
-          onAppSave={(name: string) => sendMessage(`__app_save__:${name}`)}
-          onDistillSave={() => sendMessage('__distill_save__')}
+          onAppSave={(name: string) => { if (!botThread) void sendMessage(`__app_save__:${name}`) }}
+          onDistillSave={() => { if (!botThread) void sendMessage('__distill_save__') }}
           onDistillRequestChanges={() => {
             if (inputRef.current) {
               inputRef.current.focus()
               inputRef.current.placeholder = 'Describe what you want to change in the flow...'
             }
           }}
-          onDistillCancel={() => sendMessage('__distill_cancel__')}
-          onTutorialApprove={() => sendMessage('__tutorial_blueprint_approve__')}
+          onDistillCancel={() => { if (!botThread) void sendMessage('__distill_cancel__') }}
+          onTutorialApprove={() => { if (!botThread) void sendMessage('__tutorial_blueprint_approve__') }}
           onTutorialRequestChanges={() => {
             if (inputRef.current) {
               inputRef.current.focus()
               inputRef.current.placeholder = 'Describe how to revise the Scene | Voiceover | Visual blueprint...'
             }
           }}
-          onTutorialCancel={() => sendMessage('__tutorial_blueprint_cancel__')}
+          onTutorialCancel={() => { if (!botThread) void sendMessage('__tutorial_blueprint_cancel__') }}
           onOpenReportInFiles={(path) => {
             setFilePanelInitialPath(path)
             setFilePanelOpen(true)
@@ -3933,6 +4031,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onClose={() => setAppsPanelOpen(false)}
         />
       )}
+      </div>
     </div>
 
     {/* Fleet start dialog */}

@@ -958,8 +958,8 @@ const MIN_ELEMENT_SIZE = 16
 export function freeResize(start: Geom, corner: ResizeCorner, dx: number, dy: number): Geom {
   let x = start.x
   let y = start.y
-  let w = start.w
-  let h = start.h
+  let w: number
+  let h: number
 
   if (corner.endsWith('e')) {
     w = Math.max(MIN_ELEMENT_SIZE, Math.round(start.w + dx))

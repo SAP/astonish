@@ -9,6 +9,10 @@ The agent execution engine is the core of Astonish -- it processes user messages
 
 Both agents are built on top of **Google's Agent Development Kit (ADK)**, specifically wrapping ADK's `llmagent` for LLM interaction and `runner` for session-aware execution.
 
+## Bot runtime composition
+
+`launcher.NewBotChatAgentFactory` reuses ChatAgent/ChatRunner with fresh owner-scoped services, a pinned model and a guarded catalogue; it bypasses ordinary host/global initialization. `botFactoryBinding` rechecks current Bot/version/lease/isolation and preserves narrowed child policy without inheriting viewer credentials or model overrides. Delegates, flow LLMs and parent/child compaction use the same bound budgeted model; consequential grants are not inherited by children. Durable approval resume dispatches the saved exact action once, then runs a report-only turn, rather than replaying the original task. Runtime events persist atomically under the lease before publication. These contracts do not imply all Chat tools or Studio/terminal surfaces are ready: see [runtime status](bots.md) and [exact adapter limits](bot-production-adapters.md).
+
 ## Key Design Decisions
 
 ### Why Wrap ADK Instead of Using It Directly
@@ -28,7 +32,7 @@ ADK's callback system (BeforeToolCallbacks, AfterToolCallbacks, BeforeModelCallb
 
 The system prompt uses a deliberate tiered architecture to balance token efficiency with comprehensive guidance:
 
-- **Tier 1 (Session Snapshot)**: Identity, behavior rules, environment information, capability summaries, and other static inputs. In the cache-stable path, the exact built prompt is persisted in session state and reused after resume. Studio and Code both include a short always-on **Live Evidence** block here (`LiveEvidenceSection`): claim-done needs this turn's tool output; running surfaces need a live observation or a drill; CloakBrowser is not `chromium` on PATH. This is not a substitute for Tier 2 how-tos — it exists because vector retrieval does not fire on a `which chromium` probe. Keep it short; do not copy Grok Build's full work-policy essay into Studio.
+- **Tier 1 (Session Snapshot)**: Identity, behavior rules, environment information, capability summaries, and other static inputs. In the cache-stable path, the exact built prompt is persisted in session state and reused after resume. Studio and Code both include a short always-on **Live Evidence** block here (`LiveEvidenceSection`): claim-done needs this turn's tool output; running surfaces need a live observation or a drill; CloakBrowser is not `chromium` on PATH. This is not a substitute for Tier 2 how-tos — it exists because vector retrieval does not fire on a `which chromium` probe. Keep it short; detailed work-policy guidance belongs in specialized execution workflows, not the Studio core prompt.
 - **Tier 2 (Indexed Guidance)**: Detailed how-to documentation for each capability (browser, credentials, scheduling, etc.). Stored as `memory/guidance/*.md` files indexed in the vector store and retrieved only when relevant.
 - **Tier 3 (Per-Turn Context)**: Catalog matches, channel/scheduler hints, session instructions, skill indexes, and mode guidance are a marked user-role event persisted byte-for-byte and hidden from transcript, memory, reflection, and distillation views. Live-surface follow-up injectors (`inspect-live-surface`) land here when the user text matches. Native non-Code automatic memory (guidance and general retrieval) is instead a request-local suffix; Code retains its combined persisted context.
 
@@ -38,14 +42,14 @@ Every provider and session uses this cache-stable path. There is no legacy dynam
 
 The platform base prompt separates **selection policy** (whether to answer, investigate, act, ask, delegate or create a report) from **execution contracts** (how a selected tool or artifact must be used). Ordinary conversation and supplied-text transformations do not require ritual tool calls. Clear authorized work should be carried out; low-risk choices need no menu, while consequential ambiguity needs a focused question. The assistant should speak naturally in the user's language, give useful depth, and avoid unnecessary preambles, generic praise and automatic follow-up offers. Capability discovery is not proof of access or successful execution, and authorization does not extend to unspecified disclosures or actions.
 
-This local iteration draws on the user-supplied `~/Downloads/system_prompt.md` reference, described by the user as Muse's prompt. Its provenance and any prompt-only explanation of Muse's behavior are not independently verified. The comparison motivating the change is:
+This local iteration draws on a user-supplied behavioral reference. Its provenance and any prompt-only explanation of runtime behavior are not independently verified. The design rationale is:
 
-| Reference region | Astonish adaptation |
+| Principle | Astonish requirement |
 | --- | --- |
-| Lines 25–61: respect, due diligence and proportionate follow-through | Execute clear authorized work, scale investigation to consequence, keep requirements until delivered or blocked |
-| Lines 198–228: context-sensitive writing | Direct answers, natural warmth, substantive depth, sparse progress messages |
-| Retrieved context and authority distinction | Use specific remembered details as correctable evidence, not permission to override the task or safeguards |
-| Deferred specialized tools (user's accompanying description) | No loading changes: retain Astonish's fixed `search_tools` → `describe_tools` → `execute_tool` bridge |
+| Proportionate follow-through | Execute clear authorized work, scale investigation to consequence, keep requirements until delivered or blocked |
+| Context-sensitive writing | Direct answers, natural warmth, substantive depth, sparse progress messages |
+| Context is not authority | Use remembered details as correctable evidence, not permission to override safeguards |
+| Deferred specialized tools | Retain the fixed `search_tools` → `describe_tools` → `execute_tool` bridge |
 
 Only `SystemPromptBuilder.Build` platform policy changes; Code's override, shared capability helpers, compact Live Evidence block, tool schemas/loading, authorization, credential substitution and external MCP protocol remain intact. Slide intake and generative-UI requirements remain verbatim specialized workflows. Report selection is narrower: requested reports/reviews/documents and substantial reusable deliverables still require both `write_file` and a matching `astonish-report` fence; casual summaries do not. Read-only modes return analysis without claiming a saved artifact. SSE, Studio and terminal rendering are unchanged.
 
@@ -67,7 +71,7 @@ Compaction is only a compatibility concern: `BeforeModelCallbackWithReservedToke
 
 ### Local validation and manual acceptance
 
-This iteration is local only: no deployment, promotion, cluster provisioning or E2E test changes. The live baseline was deferred at the user's direction after the selected Kubernetes context lacked the dedicated E2E namespaces. No live-model before/after comparison was performed; passing structural tests does not establish improved judgment, tone or Muse parity.
+This iteration is local only: no deployment, promotion, cluster provisioning or E2E test changes. The live baseline was deferred at the user's direction after the selected Kubernetes context lacked the dedicated E2E namespaces. No live-model before/after comparison was performed; passing structural tests does not establish improved judgment or tone.
 
 Local verification commands:
 

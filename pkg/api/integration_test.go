@@ -1554,15 +1554,39 @@ func TestChatChronologyHTTPAcceptance_ActionableBoundary(t *testing.T) {
 	if allow.MustEval(`function(){return !!this.closest('[data-testid="tool-activity-block"]') || this.disabled}`).Bool() {
 		t.Fatal("approval hidden inside activity or disabled")
 	}
+	// Interactive boundaries retain their preceding explanation in the main
+	// transcript (toolActivity's explicit contract since 31848c60), unlike
+	// ordinary intermediate text such as "After approval." below.
+	assertExplanation := func() {
+		t.Helper()
+		before := page.MustElementR("p", "^Before approval\\.$")
+		if !before.MustVisible() || before.MustEval(`function(){return !!this.closest('[data-testid="tool-activity-block"]')}`).Bool() {
+			t.Fatal("pre-approval explanation must be visible outside the activity fold")
+		}
+		if !before.MustEval(`function(){
+			const blocks = [...document.querySelectorAll('[data-testid="tool-activity-block"]')];
+			const approvals = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === 'Allow');
+			const explanations = [...document.querySelectorAll('p')].filter(p => p.textContent === 'Before approval.');
+			const follows = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+			return explanations.length === 1 && blocks.length === 2 && approvals.length === 1
+				&& blocks.every(b => !b.textContent.includes('Before approval.'))
+				&& follows(this, blocks[0]) && follows(blocks[0], approvals[0])
+				&& follows(approvals[0], blocks[1]);
+		}`).Bool() {
+			t.Fatal("expected one explanation outside both folds, ordered explanation → first fold → approval → second fold")
+		}
+	}
+	assertExplanation() // Visible without opening either fold.
 	for _, block := range blocks {
 		block.MustElement("button").MustClick()
 	}
-	blocks[0].MustElementR("p", "Before approval")
-	blocks[1].MustElementR("p", "After approval")
-	if !allow.MustEval(`function(){const b=document.querySelectorAll('[data-testid="tool-activity-block"]');return !!(b[0].compareDocumentPosition(this)&Node.DOCUMENT_POSITION_FOLLOWING) && !!(this.compareDocumentPosition(b[1])&Node.DOCUMENT_POSITION_FOLLOWING)}`).Bool() {
-		t.Fatal("approval order changed")
+	assertExplanation() // Expanding must not duplicate or move the explanation.
+	blocks[0].MustElementR("code", "^boundary_one$")
+	blocks[1].MustElementR("p", "^After approval\\.$")
+	if !blocks[1].MustEval(`function(){const text=[...this.querySelectorAll('p')].find(p=>p.textContent==='After approval.');const tool=[...this.querySelectorAll('code')].find(c=>c.textContent==='boundary_two');return !!text && !!tool && !!(text.compareDocumentPosition(tool)&Node.DOCUMENT_POSITION_FOLLOWING)}`).Bool() {
+		t.Fatal("post-approval intermediate explanation must precede its tool inside the second fold")
 	}
-	t.Log("executed 1/1 actionable-boundary browser case using scripted HTTP/SSE; approval stays actionable between two folds")
+	t.Log("executed 1/1 actionable-boundary browser case using scripted HTTP/SSE; explanation stays visible outside folds and precedes first fold, actionable approval and second fold")
 }
 
 func TestMemoryHTTPAcceptance_Baseline(t *testing.T) {

@@ -4,7 +4,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
+import BotSidebar from '../bots/BotSidebar'
 import type { ChatSession } from '../../api/studioChat'
+import type { BotScope } from '../../api/bots'
 
 // Extended ChatSession with optional fleet fields
 interface SidebarSession extends ChatSession {
@@ -15,6 +17,8 @@ interface SidebarSession extends ChatSession {
 interface SessionSidebarProps {
   sessions: SidebarSession[]
   activeSessionId: string | null
+  activeBotId?: string
+  activeBotScope?: BotScope
   sessionFilter: string
   onSessionFilterChange: (filter: string) => void
   isLoadingSessions: boolean
@@ -44,6 +48,8 @@ function formatTimeAgo(dateStr: string): string {
 export default function SessionSidebar({
   sessions,
   activeSessionId,
+  activeBotId,
+  activeBotScope,
   sessionFilter,
   onSessionFilterChange,
   isLoadingSessions,
@@ -57,6 +63,7 @@ export default function SessionSidebar({
   if (sidebarCollapsed) {
     return (
       <div className="flex w-12 flex-col items-center gap-2 border-r border-border bg-[color:var(--sidebar-background)] py-3">
+        <BotSidebar activeId={activeBotId} activeScope={activeBotScope} collapsed onExpand={onToggleSidebar} />
         <Button type="button" variant="ghost" size="icon" onClick={onToggleSidebar} title="Show sidebar" aria-label="Show sidebar">
           <ChevronRight />
         </Button>
@@ -69,8 +76,9 @@ export default function SessionSidebar({
 
   return (
     <div className="flex w-[260px] min-w-[260px] flex-shrink-0 flex-col border-r border-border bg-[color:var(--sidebar-background)]">
+      <BotSidebar activeId={activeBotId} activeScope={activeBotScope} />
       <div className="flex items-center justify-between px-[18px] pt-4 pb-3">
-        <span className="text-[13px] font-semibold text-foreground">Conversations</span>
+        <span className="text-[13px] font-semibold text-foreground">Chats</span>
         <div className="flex items-center gap-0.5">
           <Button type="button" variant="ghost" size="icon" onClick={onStartFleet} title="Start fleet session" aria-label="Start fleet session" className="size-7 text-muted-foreground">
             <Users className="size-4" />

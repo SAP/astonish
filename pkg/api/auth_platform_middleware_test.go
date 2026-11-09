@@ -20,6 +20,20 @@ func testPlatformAuth(t *testing.T) *PlatformAuth {
 	}
 }
 
+func TestPlatformAuthEvidenceRequiresVerifiedAdapter(t *testing.T) {
+	claims := &PlatformClaims{UserID: "user", OrgSlug: "org", DefaultTeamSlug: "team"}
+	ctx, err := buildAuthenticatedContext(context.Background(), claims, "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := execution.AuthenticationEvidenceFromContext(ctx); ok {
+		t.Fatal("bare claims minted verification evidence")
+	}
+	if _, err := buildVerifiedTokenContext(context.Background(), claims, "team"); err == nil {
+		t.Fatal("token without expiry accepted")
+	}
+}
+
 func TestBuildAuthenticatedContextRejectsIncompletePrincipal(t *testing.T) {
 	t.Parallel()
 

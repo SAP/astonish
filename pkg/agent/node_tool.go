@@ -11,6 +11,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
@@ -116,6 +117,10 @@ func (a *AstonishAgent) handleToolNode(ctx context.Context, node *config.Node, s
 	if selectedTool == nil && a.Toolsets != nil {
 		roCtx := &minimalReadonlyContext{Context: ctx}
 		for _, ts := range a.Toolsets {
+			if err := botSafeToolset(ctx, ts); err != nil {
+				yield(nil, err)
+				return false
+			}
 			tools, err := ts.Tools(roCtx)
 			if err == nil {
 				for _, t := range tools {
@@ -267,6 +272,12 @@ func (a *AstonishAgent) handleToolNode(ctx context.Context, node *config.Node, s
 		return false
 	}
 
+	var authorizedAction execution.ActionDescriptor
+	if err := authorizeBotTool(ctx, botExecutableIdentity(selectedTool), resolvedArgs, &authorizedAction); err != nil {
+		yield(nil, err)
+		return false
+	}
+
 	// Resolve {{CREDENTIAL:name:field}} placeholders in tool args.
 	// Tool-type nodes bypass ADK's tool lifecycle (no BeforeToolCallback),
 	// so we must substitute credentials here before execution.
@@ -298,7 +309,12 @@ func (a *AstonishAgent) handleToolNode(ctx context.Context, node *config.Node, s
 		a.PendingSecrets.SubstituteAndRestore(resolvedArgs)
 	}
 
-	toolResult, err := runnable.Run(toolCtx, resolvedArgs)
+	dispatchCtx, err := botAuthorizedInvocationContext(toolCtx, botExecutableIdentity(selectedTool), resolvedArgs, authorizedAction)
+	if err != nil {
+		yield(nil, err)
+		return false
+	}
+	toolResult, err := runnable.Run(dispatchCtx, resolvedArgs)
 	if err != nil {
 		if node.ContinueOnError {
 			// Capture error as result instead of failing

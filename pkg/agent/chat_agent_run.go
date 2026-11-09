@@ -420,7 +420,15 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			promptBuilder.MCPAccessFilter = nil // personal mode — no filtering
 		}
 
-		instruction, promptStateEvent := stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		var instruction string
+		var promptStateEvent *session.Event
+		if promptBuilder.applyBotPrompt(turnOverrides) {
+			// Bot metadata is invocation-local system context, never a replayed
+			// user event or a stale session-stable prompt from an earlier version.
+			instruction = promptBuilder.Build()
+		} else {
+			instruction, promptStateEvent = stableSystemPrompt(ctx.Session().State(), promptBuilder.Build)
+		}
 		if promptStateEvent != nil && !yield(promptStateEvent, nil) {
 			finishPromptPersistence(context.Canceled)
 			return
@@ -1046,6 +1054,20 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// keys and fail with "state key does not exist".
 		// Same pattern as node_llm.go for flow agents.
 		instr := instruction
+		beforeToolCallbacks = botNativeCallbacks(beforeToolCallbacks, func(ctx tool.Context, called tool.Tool, args map[string]any) (tool.Tool, string, map[string]any, error) {
+			if called.Name() == executeToolName {
+				decoded, err := decodeExecuteToolArgs(args)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				resolved, group, err := (deferredToolResolver{index: c.ToolIndex}).resolve(ctx, decoded.Name)
+				if err != nil {
+					return nil, "", nil, err
+				}
+				return resolved, BotToolIdentity(group, resolved.Name()), decoded.Arguments, nil
+			}
+			return called, botExecutableIdentity(called), args, nil
+		})
 		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
@@ -1054,7 +1076,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return instr, nil
 			},
 			Tools:                mainThreadTools,
-			Toolsets:             c.Toolsets,
+			Toolsets:             botGuardToolsets(c.Toolsets),
 			BeforeToolCallbacks:  beforeToolCallbacks,
 			BeforeModelCallbacks: beforeModelCallbacks,
 			AfterToolCallbacks: []llmagent.AfterToolCallback{

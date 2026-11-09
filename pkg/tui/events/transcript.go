@@ -2,6 +2,7 @@ package events
 
 import (
 	"fmt"
+	"github.com/SAP/astonish/pkg/store"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,8 +39,11 @@ type ToolStep struct {
 
 // Item is one visual block in the transcript.
 type Item struct {
-	Kind    ItemKind
-	Content string
+	InvocationID   string // canonical publication boundary, when present
+	EventID        string // stable persisted publication row
+	BotOperationID string
+	Kind           ItemKind
+	Content        string
 
 	// Activity fold fields (ItemActivity).
 	Steps   []ToolStep
@@ -128,14 +132,17 @@ type DelegationActivity struct {
 
 // Transcript is the reduced UI state built from a stream of Events.
 type Transcript struct {
-	Items     []Item
-	SessionID string
-	Title     string
-	Status    string // live status line (Thinking…, Running X…)
-	Streaming bool
-	Provider  string
-	Model     string
-	LastUsage *Usage
+	BotID         string
+	BotOperations map[string]store.BotOperationView
+	BotRunStates  map[string]store.BotRunState
+	Items         []Item
+	SessionID     string
+	Title         string
+	Status        string // live status line (Thinking…, Running X…)
+	Streaming     bool
+	Provider      string
+	Model         string
+	LastUsage     *Usage
 	// ContextTokens is the current context-window occupancy: the token count of
 	// the most recent LLM request/response in the latest turn (input + output).
 	// Unlike LastUsage (which accumulates across the whole session), this tracks
@@ -201,7 +208,19 @@ func NewTranscript() *Transcript {
 // Apply reduces a single event into the transcript. It is pure aside from
 // mutating t; safe to call from the bubbletea Update path.
 func (t *Transcript) Apply(ev Event) {
+	defer t.restoreBotOperationState()
+	defer t.restoreBotRunState()
+	if ev.Kind == KindBotOperation {
+		t.applyBotOperation(ev.BotOperation)
+		return
+	}
+	if ev.Kind == KindBotRunState {
+		t.applyBotRunState(ev.BotRunState)
+		return
+	}
 	switch ev.Kind {
+	case KindBotReport:
+		t.appendBotReport(ev)
 	case KindSession:
 		if ev.SessionID != "" {
 			t.SessionID = ev.SessionID
@@ -474,12 +493,18 @@ func (t *Transcript) stampCurrentCall(ev Event) {
 		return
 	}
 	last := &t.Items[n-1]
+	if IsBotReportInvocation(last.InvocationID) {
+		return
+	}
 	if last.Kind == ItemAgent || last.Kind == ItemPlan {
 		stampItemRouting(last, ev.RoutingModel, ev.RoutingIsStrong, ev.RoutingTier)
 		return
 	}
 	for i := n - 1; i >= 0; i-- {
 		it := &t.Items[i]
+		if IsBotReportInvocation(it.InvocationID) {
+			return
+		}
 		switch it.Kind {
 		case ItemUser:
 			return
@@ -789,6 +814,9 @@ func (t *Transcript) addUsage(usage *Usage) {
 // File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
+		if IsBotReportInvocation(t.Items[i].InvocationID) {
+			return i + 1
+		}
 		switch t.Items[i].Kind {
 		case ItemUser, ItemError, ItemApproval, ItemNetworkDenial, ItemArtifact, ItemSystem, ItemPlan, ItemCompaction:
 			return i + 1
@@ -853,7 +881,7 @@ func (t *Transcript) appendAgentText(text string) {
 	// chronologically. Never provisional, never reordered below tools.
 	if t.LinearThread {
 		t.nextTextReplaces = false
-		if n := len(t.Items); n > 0 && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
+		if n := len(t.Items); n > 0 && !IsBotReportInvocation(t.Items[n-1].InvocationID) && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
 			// If the new text is a plan document but the last item is plain
 			// agent text, start a fresh ItemPlan instead of appending. The plan
 			// is a distinct visual block, not a continuation of prior prose.
@@ -888,7 +916,7 @@ func (t *Transcript) appendAgentText(text string) {
 	t.nextTextReplaces = false
 
 	// Sticky agent already at end (common after tools reordered layout).
-	if n := len(t.Items); n > 0 && t.Items[n-1].Kind == ItemAgent {
+	if n := len(t.Items); n > 0 && !IsBotReportInvocation(t.Items[n-1].InvocationID) && t.Items[n-1].Kind == ItemAgent {
 		if replace {
 			t.Items[n-1].Content = text
 		} else {
@@ -1490,6 +1518,9 @@ func (t *Transcript) ClearApproval() {
 
 // Reset clears transcript items and turn state (used for /new and session switch).
 func (t *Transcript) Reset() {
+	t.BotID = ""
+	t.BotOperations = nil
+	t.BotRunStates = nil
 	t.Items = nil
 	t.Title = ""
 	t.Status = ""

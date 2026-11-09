@@ -122,11 +122,18 @@ func (s *Store) RestorePlatformBackup(ctx context.Context, archivePath string, o
 }
 
 func restoreActionForEntry(entry backup.Entry, opts PlatformRestoreOptions) (string, string) {
+	switch entry.Entity {
+	case "bots", "bot_runs", "bot_approvals", "bot_outbox":
+		return "restore_quiesced", "Bot execution authority is invalidated; undelivered work requires reconciliation"
+	}
 	if isTransientRestoreEntity(entry.Entity) && !opts.IncludeTransient {
 		return "skip", "transient runtime or security state is skipped by default"
 	}
-	if entry.Entity == "scheduled_jobs" && !opts.EnableScheduledJobs {
-		return "restore_disabled", "scheduled jobs are restored paused by default"
+	if entry.Entity == "scheduled_jobs" {
+		if !opts.EnableScheduledJobs {
+			return "restore_disabled", "scheduled jobs are restored paused by default"
+		}
+		return "restore", "ordinary jobs may be enabled; Bot-owned jobs always restore paused"
 	}
 	return "restore", ""
 }

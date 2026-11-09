@@ -100,6 +100,12 @@ func TestValidationLLMFromComponentsRejectsUnconfiguredChatPlaceholder(t *testin
 }
 
 func TestValidateSkillHandlerPlatformScope(t *testing.T) {
+	// Missing-provider behavior must not depend on the developer's host config.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	resetSkillValidationRateLimit(t)
+	previous := GetChatManager()
+	globalChatManager = &ChatManager{}
+	t.Cleanup(func() { globalChatManager = previous })
 	platformSkills := &apiSkillStore{skills: []store.Skill{{
 		Name:             "openstack",
 		Content:          "---\nname: openstack\ndescription: OpenStack API access\n---\nUse the API.",

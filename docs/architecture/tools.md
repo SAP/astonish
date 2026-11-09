@@ -4,7 +4,21 @@
 
 Astonish provides 60+ built-in tools that give the AI agent the ability to interact with the filesystem, execute commands, manage processes, make HTTP requests, control a browser, send emails, and more. Tools follow a consistent architecture based on Google ADK's tool interface, with a key innovation: most tools execute inside sandbox containers via a transparent proxy layer.
 
+## Bot dispatch boundary
+
+`launcher.BotCatalogueTools` reuses isolated internal/process schemas and request-scoped adapters; `botBoundTool` checks owner scope, live lease/isolation, exact action policy and shared tool budget before dispatch. Native and progressive dispatch retain the wrapper. Sandbox tools pin the run session, never a delegate/viewer sandbox or host fallback. HTTP and MCP synchronize the owner vault and resolve symbolic credentials inside the node; MCP supports uncached discovery and stdio/SSE/streamableHTTP there.
+
+Bot runs now have working scoped `memory_save/search/get/delete`, `announce_plan`, `update_plan`, `announce_completion` and `read_task_result` adapters. Memory reads prefilter to the Bot's sessions; mutations require the current run lease and protect prior-run evidence. Plans persist in session state and project `PLAN.md` through the bound sandbox tool; verify commands pass through guarded `shell_command`, not a daemon-host verifier. Delegated results are request-local. The production classifier recognizes constrained memory save/delete and read effects for memory retrieval, plan bookkeeping, result retrieval, `filter_json` and `git_diff_add_line_numbers`; other tools remain unknown unless a trusted classifier proves their constraints. Discoverability is neither implementation nor permission, and plan authorization never authorizes its verification command's effects.
+
+Trusted result evidence uses a per-attempt server-side ledger, not model prose or remote result JSON. ChatRunner consumes observations by actual function-call ID, validates captured report artifact bytes/path/digest and home ownership, and preserves unverified effects explicitly. Scoped Bot notifications require live destination authority immediately before transport: only the owner's enabled, verified private Telegram link is currently supported; Slack rooms fail closed because member/workspace linkage does not prove room authority. See [runtime evidence and notification limits](bots.md#trusted-runtime-evidence) and [exact unsupported tools and fixture limits](bot-production-adapters.md). Ordinary Chat's catalogue is unchanged. The named two-run runtime acceptance and latest main-thread six-package suite passed; final full Phase 3 verification, real sandbox/provider coverage and full Bot Studio/terminal acceptance remain pending.
+
 ## Key Design Decisions
+
+### Bot target and credential snapshot binding
+
+Invocation-local handoffs retain the full classified action digest and are consumed once. Bound and lazy MCP terminal boundaries reclassify the approved credential references (not resolved secrets) and reject changed targets, recipients or effects without consuming the durable grant twice. Email additionally compares the executable adapter's trusted account fingerprint with the approved target; no model-supplied fingerprint supplies authority. After credential-vault provisioning, email checks the current account, cancellation, live lease and isolation again immediately before the node call.
+
+Drill credential injection resolves one static owner-scoped credential snapshot and includes its process-keyed HMAC reference, suite mapping and pinned sandbox in the exact approval. Materialization uses that same snapshot without a credential-store refresh. Rotation before retry requires a new matching approval; rotation after authorization cannot substitute the approved bytes. Pending approval records contain only the opaque keyed reference, never resolved credentials or an unkeyed password hash. Process restart invalidates these payload approvals (a fresh key requires fresh approval); unsupported dynamic fields and environment injection fail closed.
 
 ### Why the ADK FunctionTool Pattern
 

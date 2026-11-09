@@ -8,6 +8,10 @@
 # Test binary
 *.test
 
+# Python test/interpreter caches
+__pycache__/
+*.py[cod]
+
 # Coverage
 *.out
 coverage.html

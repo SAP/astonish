@@ -2,8 +2,8 @@
 
 > **Status: Implemented.**
 > This document specifies the code intelligence system for Astonish
-> Fleet agents. It is based on analysis of Grok (xAI), OpenClaude, and
-> OpenClaw's production implementations. The primary system is
+> Fleet agents. The design prioritizes sandbox-native structural navigation
+> and bounded per-session resource use. The primary system is
 > **tree-sitter** - zero-config, low-memory, always-on
 > structural code understanding (`pkg/codeintel`). LSP is documented as a
 > future evaluation target, gated on observed failure patterns.
@@ -100,11 +100,7 @@ development scenarios:
 | **JavaScript** | `tree-sitter-javascript` | Aider-derived | Node services, scripts, configs |
 | **Python** | `tree-sitter-python` | Aider-derived | ML/data services, automation |
 
-**Comparison with prior art:**
-- Grok covers: Rust, TypeScript, JavaScript, Go, Python (5 languages)
-- OpenClaude covers: TypeScript, TSX, JavaScript, Python (4 languages)
-- OpenClaw covers: TypeScript (via LSP only)
-- **Astonish:** Go, TypeScript, JavaScript, Python (4 languages)
+Language scope follows Astonish workloads rather than feature parity with other systems.
 
 TSX is handled by the TypeScript grammar (tree-sitter-typescript includes
 TSX support). Rust can be added later if demand appears.
@@ -607,32 +603,22 @@ Options to mitigate (if LSP proves necessary):
 3. **Per-template opt-in** - only templates marked "heavy development"
    get LSP; lightweight templates use tree-sitter only
 
-### 9.4. What other cloud platforms do
+### 9.4. Deployment resource trade-offs
 
-| Platform | LSP? | Notes |
-|----------|------|-------|
-| Grok (xAI) | Yes | Runs locally, not multi-tenant cloud |
-| OpenClaude | Yes | Runs locally, not multi-tenant cloud |
-| OpenClaw | Yes | Runs on host (not in sandbox), single-user |
-| **Astonish** | **Deferred** | Multi-tenant cloud; memory cost is prohibitive without mitigation |
+A local single-user process and a multi-tenant worker have different resource budgets. Astonish must measure per-session language-server memory and enforce isolation before enabling LSP. The estimates above are planning assumptions, not a measured capacity guarantee.
 
-All three platforms that use LSP run **locally on user hardware** where
-memory is abundant and not shared. Astonish is the only one operating as
-a multi-tenant cloud service where per-session memory directly impacts
-cost and density.
+## 10. Design summary
 
-## 10. Comparison with Prior Art
+| Concern | Astonish design |
+|---------|-----------------|
+| Structural navigation | Tree-sitter with scope and reference graphs |
+| Initial languages | Go, TypeScript/TSX, JavaScript and Python |
+| Context ranking | Token-budgeted repository map |
+| LSP | Deferred pending observed need and resource validation |
+| Execution boundary | Sandbox-native for Fleet; local host for Code mode |
+| Resource model | Bounded per-session indexing and lazy initialization |
 
-| Aspect | Grok (xAI) | OpenClaude | OpenClaw | Astonish (planned) |
-|--------|------------|------------|----------|-------------------|
-| Tree-sitter | Native Rust | WASM | Bash only | **Native Go** |
-| Languages | 5 (Rust,TS,JS,Go,Py) | 4 (TS,TSX,JS,Py) | 0 | **4 (Go,TS,JS,Py)** |
-| Code graph | Scope graph | PageRank | None | **Both** |
-| Auto-inject context | No | Yes (RepoMap) | No | **Yes, opt-in** |
-| LSP | Yes (6 ops) | Yes (9 ops) | Yes (3 ops) | **Deferred** |
-| LSP runs where | Host | Host | Host | N/A (sandbox if added) |
-| Execution env | Local | Local | Local | **Multi-tenant cloud** |
-| Memory model | Unlimited | Unlimited | Unlimited | **Constrained per-session** |
+Historical research informed the design, but does not establish production behavior or resource limits. The repository contracts and measured workload evidence govern implementation decisions.
 
 ## 11. Open Questions
 
@@ -658,9 +644,6 @@ cost and density.
 
 ## 12. References
 
-- Grok tree-sitter implementation: `/root/grok-build/crates/codegen/xai-codebase-graph/`
-- OpenClaude RepoMap: `/root/openclaude/src/context/repoMap/`
-- OpenClaw LSP integration: `/root/openclaw/src/agents/agent-bundle-lsp-runtime.ts`
 - Aider tree-sitter queries: MIT licensed, basis for `.scm` query files
 - Runtime FFI: `github.com/ebitengine/purego` (`pkg/codeintel/internal/treesitter`)
 - Tree-sitter grammars: `github.com/tree-sitter/tree-sitter-{go,typescript,javascript,python}`

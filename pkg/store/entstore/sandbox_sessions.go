@@ -19,6 +19,14 @@ type teamSandboxSessionStore struct {
 }
 
 func (s *teamSandboxSessionStore) Put(ctx context.Context, sess *store.SandboxSession) error {
+	var binding map[string]any
+	if sess.BotHomeBinding != nil {
+		var err error
+		binding, err = botJSONMap(sess.BotHomeBinding)
+		if err != nil {
+			return err
+		}
+	}
 	// Upsert: try update first, if 0 rows affected, insert.
 	n, err := s.client.SandboxSession.Update().
 		Where(sandboxsession.IDEQ(sess.SessionID)).
@@ -37,6 +45,11 @@ func (s *teamSandboxSessionStore) Put(ctx context.Context, sess *store.SandboxSe
 		// Update optional fields on existing row.
 		mut := s.client.SandboxSession.Update().Where(sandboxsession.IDEQ(sess.SessionID))
 		applyOptionalFields(mut, sess)
+		if binding != nil {
+			mut.SetBotHomeBinding(binding)
+		} else {
+			mut.ClearBotHomeBinding()
+		}
 		if _, err := mut.Save(ctx); err != nil {
 			return fmt.Errorf("sandbox session put (update optionals): %w", err)
 		}
@@ -78,6 +91,9 @@ func (s *teamSandboxSessionStore) Put(ctx context.Context, sess *store.SandboxSe
 		create.SetExposedPorts(portsToAny(sess.ExposedPorts))
 	}
 
+	if binding != nil {
+		create.SetBotHomeBinding(binding)
+	}
 	if _, err := create.Save(ctx); err != nil {
 		return fmt.Errorf("sandbox session put (insert): %w", err)
 	}
@@ -271,6 +287,14 @@ func entSandboxToStore(row *teament.SandboxSession) *store.SandboxSession {
 		sess.CreatedBy = row.CreatedBy.String()
 	}
 	sess.ExposedPorts = anyToPorts(row.ExposedPorts)
+	if row.BotHomeBinding != nil {
+		sess.BotHomeBinding = new(store.BotHomeBinding)
+		// Invalid registry metadata stays visibly linked but unusable; it must
+		// never be treated as an ordinary session or execution authority.
+		if err := botDecode(row.BotHomeBinding, sess.BotHomeBinding); err != nil {
+			*sess.BotHomeBinding = store.BotHomeBinding{}
+		}
+	}
 	return sess
 }
 

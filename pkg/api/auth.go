@@ -266,6 +266,10 @@ func AuthMiddleware(am *AuthManager, next http.Handler) http.Handler {
 			return
 		}
 
+		if isBotWebhookIngress(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Slack webhooks are authenticated by Slack request signatures in the channel handler.
 		if path == "/api/slack/events" || path == "/api/slack/commands" {
 			next.ServeHTTP(w, r)

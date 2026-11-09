@@ -227,8 +227,12 @@ func buildTurnContextContentForMode(overrides *PromptOverrides, relevantTools, r
 
 	if overrides != nil {
 		add("Output Constraints", overrides.ChannelHints)
-		add("Execution Context", overrides.SchedulerHints)
-		add("Session Task", overrides.SessionContext)
+		// Bot execution hints/persona belong only to the cloned system prompt.
+		// Do not persist them as user-role events, including external rendering.
+		if overrides.Bot == nil {
+			add("Execution Context", overrides.SchedulerHints)
+			add("Session Task", overrides.SessionContext)
+		}
 		add("Available Skills For This Request", overrides.SkillIndex)
 		var modes []string
 		if overrides.PlanMode {

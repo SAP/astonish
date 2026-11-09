@@ -185,7 +185,7 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 		// instead of seeing the misleading generic "tool name is required".
 		return nil, fmt.Errorf("execute_tool requires a %q field naming the tool to run (from describe_tools), with its parameters under %q", "name", "arguments")
 	}
-	resolved, _, err := b.resolver.resolve(ctx, args.Name)
+	resolved, group, err := b.resolver.resolve(ctx, args.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +194,10 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 		return nil, fmt.Errorf("tool %q is not executable", resolved.Name())
 	}
 	if err := common.ValidateToolArguments(resolved, args.Arguments); err != nil {
+		return nil, err
+	}
+	ctx, err = authorizeBotInvocation(ctx, BotToolIdentity(group, resolved.Name()), args.Arguments)
+	if err != nil {
 		return nil, err
 	}
 	return runner.Run(ctx, args.Arguments)

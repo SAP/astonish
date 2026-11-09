@@ -42,26 +42,26 @@ func defaultSandboxPolicy(cfg config.SandboxOpenShellConfig) *SandboxPolicySpec 
 		},
 		Filesystem: &FilesystemSpec{
 			IncludeWorkdir: true,
-		ReadOnly: []string{
-			"/usr",
-			"/bin",
-			"/sbin",
-			"/lib",
-			"/lib64",
-			"/etc",
-			"/opt",
-			// Device nodes needed by standard library functions.
-			"/dev/urandom",
-		},
-		ReadWrite: []string{
-			"/sandbox",
-			"/tmp",
-			"/var/tmp",
-			"/home",
-			"/run",
-			// /dev/null must be read-write — shell redirections (>/dev/null)
-			// require write access, not just read.
-			"/dev/null",
+			ReadOnly: []string{
+				"/usr",
+				"/bin",
+				"/sbin",
+				"/lib",
+				"/lib64",
+				"/etc",
+				"/opt",
+				// Device nodes needed by standard library functions.
+				"/dev/urandom",
+			},
+			ReadWrite: []string{
+				"/sandbox",
+				"/tmp",
+				"/var/tmp",
+				"/home",
+				"/run",
+				// /dev/null must be read-write — shell redirections (>/dev/null)
+				// require write access, not just read.
+				"/dev/null",
 				// PTY device nodes — required for shell_command's interactive
 				// terminal support (password prompts, interactive CLIs).
 				// The supervisor pre-opens PathFds for these paths BEFORE
@@ -109,6 +109,16 @@ func defaultSandboxPolicy(cfg config.SandboxOpenShellConfig) *SandboxPolicySpec 
 		}
 	}
 
+	return policy
+}
+
+// botHomePolicy leaves normal sessions unchanged. The supervisor prepares the
+// explicit writable home for the image's sandbox user before privilege drop.
+func botHomePolicy(policy *SandboxPolicySpec, binding *sandbox.BotHomeBinding) *SandboxPolicySpec {
+	if binding != nil {
+		policy.Filesystem.ReadWrite = append(policy.Filesystem.ReadWrite, botHomeMountPath)
+		policy.Process = &ProcessSpec{RunAsUser: "sandbox", RunAsGroup: "sandbox"}
+	}
 	return policy
 }
 

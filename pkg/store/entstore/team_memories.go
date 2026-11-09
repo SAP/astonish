@@ -68,7 +68,12 @@ func (m *teamMemoryStore) hybridSearch(ctx context.Context, query string, maxRes
 	return m.SearchPrepared(ctx, prepared, maxResults, minScore, category)
 }
 
-func (m *teamMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+func (m *teamMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) (results []store.MemorySearchResult, err error) {
+	defer func() {
+		if err == nil {
+			err = m.hydrateMemoryAttribution(ctx, results)
+		}
+	}()
 	if query.SemanticQuery != "" && len(query.Embedding) == 0 {
 		return nil, fmt.Errorf("semantic query requires embedding")
 	}
@@ -255,7 +260,7 @@ func (m *teamMemoryStore) sqliteHybridSearch(ctx context.Context, query string, 
 		}
 		prepared.Embedding = embedding
 	}
-	return m.sqlitePreparedSearch(ctx, prepared, maxResults, minScore, category)
+	return m.SearchPrepared(ctx, prepared, maxResults, minScore, category)
 }
 
 func (m *teamMemoryStore) sqlitePreparedSearch(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
@@ -446,6 +451,11 @@ func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 }
 
 func (m *teamMemoryStore) Add(ctx context.Context, entry store.MemoryEntry) error {
+	metadata, err := prepareMemoryAttribution(ctx, teamBotDB{client: m.client}, entry)
+	if err != nil {
+		return err
+	}
+	entry.Metadata = metadata
 	create := m.client.Memory.Create().
 		SetChunkText(entry.Content).
 		SetNillableCategory(nilStrPtr(entry.Category)).
@@ -661,10 +671,11 @@ func (m *teamMemoryStore) Close() error {
 // entMemoryToResult converts a team Memory entity to store.MemorySearchResult.
 func entMemoryToResult(e *teament.Memory) store.MemorySearchResult {
 	r := store.MemorySearchResult{
-		ID:        e.ID.String(),
-		Snippet:   e.ChunkText,
-		Scope:     "team",
-		CreatedAt: e.CreatedAt.Format(time.RFC3339),
+		Attribution: memoryAttributionResult(e.Metadata),
+		ID:          e.ID.String(),
+		Snippet:     e.ChunkText,
+		Scope:       "team",
+		CreatedAt:   e.CreatedAt.Format(time.RFC3339),
 	}
 	if e.Category != nil {
 		r.Category = *e.Category

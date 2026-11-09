@@ -70,6 +70,10 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 		return nil, ErrNotImplementedYet
 	}
 
+	if err := b.validateBotHome(ctx, spec.BotHome); err != nil {
+		return nil, err
+	}
+
 	// Default TemplateID to BaseTemplateID when not set. This is required
 	// for the PG-backed session registry (template_id is NOT NULL).
 	if spec.TemplateID == "" {
@@ -81,15 +85,34 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 	// idle-evicted), drop the row and create a fresh sandbox — otherwise
 	// EnsureReady succeeds while PushFile/vault fail with "sandbox not found".
 	if existing, err := b.sessions.GetSession(spec.SessionID); err == nil && existing != nil {
+		storedHome, homeErr := botHomeFromStore(existing)
+		if homeErr != nil {
+			return nil, homeErr
+		}
+		if !storedHome.Equal(spec.BotHome) {
+			return nil, fmt.Errorf("openshell: session bot home binding is immutable")
+		}
 		probeName := existing.ContainerName
 		if probeName == "" {
 			probeName = sandboxName(spec.SessionID)
 		}
 		st, getErr := b.gateway.GetSandboxStatus(ctx, probeName)
 		if getErr == nil && st != nil && st.State != SandboxStateGone && st.State != SandboxStateFailed {
+			if spec.BotHome != nil {
+				if err := b.checkBotHomeStatus(ctx, spec.SessionID, spec.BotHome, st); err != nil {
+					return nil, err
+				}
+				existing.PodName = st.GatewayID
+				if err := b.sessions.PutSession(existing); err != nil {
+					return nil, err
+				}
+			}
 			return sessionFromStore(existing), nil
 		}
 		if getErr != nil && !isNotFound(getErr) {
+			if spec.BotHome != nil {
+				return nil, fmt.Errorf("openshell: verify retained home: %w", getErr)
+			}
 			// Transient gateway error — keep the record rather than racing a recreate.
 			return sessionFromStore(existing), nil
 		}
@@ -109,6 +132,11 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 	driverCfg, err := applyCertBundles(b.cfg.AppConfig, env)
 	if err != nil {
 		return nil, fmt.Errorf("openshell: cert_bundles: %w", err)
+	}
+
+	driverCfg, err = b.composeBotHome(ctx, spec.BotHome, env, driverCfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build labels. Sanitize session ID for K8s label compliance (values
@@ -135,15 +163,17 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 		image = spec.Image
 	}
 
+	botHomeLabels(labels, spec.SessionID, spec.BotHome)
 	// Create the sandbox via the gateway.
 	resp, err := b.gateway.CreateSandbox(ctx, CreateSandboxRequest{
 		Name:         name,
 		Image:        image,
 		Env:          env,
 		Labels:       labels,
-		Policy:       mergeSessionNetworkAllows(defaultSandboxPolicy(b.cfg.AppConfig), spec.NetworkAllowEndpoints),
+		Policy:       mergeSessionNetworkAllows(botHomePolicy(defaultSandboxPolicy(b.cfg.AppConfig), spec.BotHome), spec.NetworkAllowEndpoints),
 		DriverConfig: driverCfg,
 	})
+	created := err == nil
 	if err != nil {
 		if !isAlreadyExists(err) {
 			return nil, fmt.Errorf("openshell: create sandbox: %w", err)
@@ -154,6 +184,11 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 		if getErr != nil {
 			return nil, fmt.Errorf("openshell: create sandbox: already exists and get failed: %w", getErr)
 		}
+		if spec.BotHome != nil {
+			if err := validateBotHomeAdoption(st, driverCfg, labels); err != nil {
+				return nil, err
+			}
+		}
 		resp = &CreateSandboxResponse{
 			SandboxID: name,
 			GatewayID: st.GatewayID,
@@ -161,24 +196,38 @@ func (b *OpenShellBackend) CreateSession(ctx context.Context, spec sandbox.Sessi
 		}
 	}
 
+	if spec.BotHome != nil {
+		st, err := b.gateway.GetSandboxStatus(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("openshell: verify created bot home: %w", err)
+		}
+		if err := validateBotHomeAdoption(st, driverCfg, labels); err != nil {
+			return nil, err
+		}
+		resp.SandboxID, resp.GatewayID = name, st.GatewayID
+	}
+
 	// Register the session in the store.
 	// ContainerName stores the sandbox name (for Get/Delete/WaitForReady).
 	// PodName stores the gateway UUID (for ExecSandbox).
 	rec := &store.SandboxSession{
-		SessionID:     spec.SessionID,
-		ChatSessionID: spec.SessionID,
-		Backend:       string(sandbox.BackendKindOpenShell),
-		ContainerName: resp.SandboxID,
-		PodName:       resp.GatewayID,
-		TemplateID:    spec.TemplateID,
-		Image:         image,
-		State:         store.SandboxSessionStateCreating,
-		CreatedAt:     time.Now().UTC(),
+		BotHomeBinding: botHomeToStore(spec.BotHome),
+		SessionID:      spec.SessionID,
+		ChatSessionID:  spec.SessionID,
+		Backend:        string(sandbox.BackendKindOpenShell),
+		ContainerName:  resp.SandboxID,
+		PodName:        resp.GatewayID,
+		TemplateID:     spec.TemplateID,
+		Image:          image,
+		State:          store.SandboxSessionStateCreating,
+		CreatedAt:      time.Now().UTC(),
 	}
 
 	if err := b.sessions.PutSession(rec); err != nil {
-		// Best-effort cleanup.
-		_ = b.gateway.DeleteSandbox(ctx, resp.SandboxID)
+		// Never delete adopted compute on a registry write failure.
+		if created {
+			_ = b.gateway.DeleteSandbox(ctx, resp.SandboxID)
+		}
 		return nil, fmt.Errorf("openshell: register session: %w", err)
 	}
 
@@ -202,8 +251,27 @@ func (b *OpenShellBackend) StartSession(ctx context.Context, sessionID string) e
 		return fmt.Errorf("openshell: session %s not found", sessionID)
 	}
 
+	binding, err := botHomeFromStore(rec)
+	if err != nil {
+		return err
+	}
+	if err := b.validateBotHome(ctx, binding); err != nil {
+		return err
+	}
+
 	// Already running or being created (CreateSession just succeeded)? No-op.
 	if rec.State == store.SandboxSessionStateRunning || rec.State == store.SandboxSessionStateCreating {
+		if binding != nil {
+			st, err := b.gateway.GetSandboxStatus(ctx, rec.ContainerName)
+			if err != nil {
+				return err
+			}
+			if err := b.checkBotHomeStatus(ctx, sessionID, binding, st); err != nil {
+				return err
+			}
+			rec.PodName = st.GatewayID
+			return b.sessions.PutSession(rec)
+		}
 		return nil
 	}
 
@@ -215,10 +283,16 @@ func (b *OpenShellBackend) StartSession(ctx context.Context, sessionID string) e
 		return fmt.Errorf("openshell: cert_bundles: %w", err)
 	}
 
+	driverCfg, err = b.composeBotHome(ctx, binding, env, driverCfg)
+	if err != nil {
+		return err
+	}
+
 	labels := map[string]string{
 		"astonish.io/type":       "session",
 		"astonish.io/session-id": sanitizeLabelValue(sessionID),
 	}
+	botHomeLabels(labels, sessionID, binding)
 
 	// Resolve the container image: prefer the image stored in the session
 	// record (set at CreateSession time), fall back to the global config.
@@ -232,7 +306,7 @@ func (b *OpenShellBackend) StartSession(ctx context.Context, sessionID string) e
 		Image:        image,
 		Env:          env,
 		Labels:       labels,
-		Policy:       defaultSandboxPolicy(b.cfg.AppConfig),
+		Policy:       botHomePolicy(defaultSandboxPolicy(b.cfg.AppConfig), binding),
 		DriverConfig: driverCfg,
 	})
 	if err != nil {
@@ -244,11 +318,27 @@ func (b *OpenShellBackend) StartSession(ctx context.Context, sessionID string) e
 		if getErr != nil {
 			return fmt.Errorf("openshell: restart sandbox for session %s: already exists and get failed: %w", sessionID, getErr)
 		}
+		if binding != nil {
+			if err := validateBotHomeAdoption(st, driverCfg, labels); err != nil {
+				return err
+			}
+		}
 		resp = &CreateSandboxResponse{
 			SandboxID: sandboxName(sessionID),
 			GatewayID: st.GatewayID,
 			PodName:   st.PodName,
 		}
+	}
+
+	if binding != nil {
+		st, err := b.gateway.GetSandboxStatus(ctx, sandboxName(sessionID))
+		if err != nil {
+			return fmt.Errorf("openshell: verify resumed bot home: %w", err)
+		}
+		if err := validateBotHomeAdoption(st, driverCfg, labels); err != nil {
+			return err
+		}
+		resp.SandboxID, resp.GatewayID = sandboxName(sessionID), st.GatewayID
 	}
 
 	// Update session state and backend ref.

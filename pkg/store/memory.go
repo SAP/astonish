@@ -19,28 +19,30 @@ const (
 
 // MemoryEntry represents a memory chunk to be stored.
 type MemoryEntry struct {
-	Content    string         `json:"content"`
-	Category   string         `json:"category,omitempty"`
-	SourcePath string         `json:"sourcePath,omitempty"`
-	Embedding  []float32      `json:"-"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	CreatedBy  string         `json:"createdBy,omitempty"` // user ID (for team memories)
-	SessionID  string         `json:"sessionId,omitempty"` // session that created this memory
+	Attribution *MemoryAttribution `json:"attribution,omitempty"`
+	Content     string             `json:"content"`
+	Category    string             `json:"category,omitempty"`
+	SourcePath  string             `json:"sourcePath,omitempty"`
+	Embedding   []float32          `json:"-"`
+	Metadata    map[string]any     `json:"metadata,omitempty"`
+	CreatedBy   string             `json:"createdBy,omitempty"` // user ID (for team memories)
+	SessionID   string             `json:"sessionId,omitempty"` // session that created this memory
 }
 
 // MemorySearchResult represents a single result from memory search.
 type MemorySearchResult struct {
-	ID        string  `json:"id,omitempty"`
-	Path      string  `json:"path"`
-	StartLine int     `json:"startLine"`
-	EndLine   int     `json:"endLine"`
-	Score     float64 `json:"score"`
-	Snippet   string  `json:"snippet"`
-	Category  string  `json:"category,omitempty"`
-	Scope     string  `json:"scope,omitempty"`      // "personal", "team", "org" (multi-tenant)
-	CreatedBy string  `json:"created_by,omitempty"` // user ID of the creator
-	CreatedAt string  `json:"created_at,omitempty"` // RFC3339 timestamp
-	SessionID string  `json:"session_id,omitempty"` // session that created this memory
+	Attribution *MemoryAttribution `json:"attribution,omitempty"`
+	ID          string             `json:"id,omitempty"`
+	Path        string             `json:"path"`
+	StartLine   int                `json:"startLine"`
+	EndLine     int                `json:"endLine"`
+	Score       float64            `json:"score"`
+	Snippet     string             `json:"snippet"`
+	Category    string             `json:"category,omitempty"`
+	Scope       string             `json:"scope,omitempty"`      // "personal", "team", "org" (multi-tenant)
+	CreatedBy   string             `json:"created_by,omitempty"` // user ID of the creator
+	CreatedAt   string             `json:"created_at,omitempty"` // RFC3339 timestamp
+	SessionID   string             `json:"session_id,omitempty"` // session that created this memory
 }
 
 // PreparedMemoryQuery separates the text used for semantic retrieval from the

@@ -25,6 +25,7 @@ const (
 	AuthMethodChannel     AuthMethod = "channel_link"
 	AuthMethodLocalOS     AuthMethod = "local_os"
 	AuthMethodOAuth       AuthMethod = "oauth"
+	AuthMethodBotMandate  AuthMethod = "bot_mandate"
 )
 
 // Surface identifies the transport that initiated an execution.
@@ -55,11 +56,19 @@ type Principal struct {
 	Roles          []string
 	Scopes         []string
 	Authenticated  bool
+	mandate        *BotMandate
 }
 
 // Validate rejects incomplete or internally inconsistent identities before they
 // are allowed to access tenant-scoped execution resources.
 func (p Principal) Validate() error {
+	if p.Authentication == AuthMethodBotMandate {
+		if err := p.validateMandate(); err != nil {
+			return err
+		}
+	} else if p.mandate != nil {
+		return fmt.Errorf("mandate authentication method changed")
+	}
 	if !p.Authenticated {
 		return fmt.Errorf("principal is not authenticated")
 	}

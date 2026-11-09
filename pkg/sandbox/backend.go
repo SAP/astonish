@@ -264,8 +264,10 @@ type Session struct {
 
 // SessionSpec is the CreateSession argument bundle.
 type SessionSpec struct {
-	SessionID string      `json:"session_id"` // caller-chosen UUID
-	Type      SessionType `json:"type"`
+	// BotHome is optional and backend-issued; nil keeps ordinary session behavior.
+	BotHome   *BotHomeBinding `json:"bot_home,omitempty"`
+	SessionID string          `json:"session_id"` // caller-chosen UUID
+	Type      SessionType     `json:"type"`
 	// TemplateID identifies the template/layer to use as the session's
 	// base filesystem. Empty string is normalised to BaseTemplateID
 	// ("@base") by all backend implementations — callers need not set it

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
@@ -30,6 +31,11 @@ import (
 // 9. On missing/invalid token: returns 401 for API requests.
 func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Exact POST endpoint only; its handler always enforces the signature guard.
+		if isBotWebhookIngress(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// An OAuth protocol adapter may already have validated a scoped Astonish
 		// bearer and attached its canonical principal. Do not reinterpret that
 		// token as a legacy platform JWT or replace it with the local identity.
@@ -52,6 +58,9 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 				return
 			}
 			ctx, err := buildAuthenticatedContext(r.Context(), claims, claims.DefaultTeamSlug)
+			if err == nil {
+				ctx, err = execution.WithAuthenticationEvidence(ctx, execution.AuthenticationEvidence{Method: execution.AuthMethodLocalOS, LocalLoopback: true, ExpiresAt: time.Now().Add(store.DefaultBotRuntime)})
+			}
 			if err != nil {
 				respondError(w, http.StatusInternalServerError, "failed to build local user context")
 				return
@@ -102,7 +111,7 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 		}
 
 		// Populate authenticated context and serve.
-		ctx, err := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+		ctx, err := buildVerifiedTokenContext(r.Context(), claims, teamSlug)
 		if err != nil {
 			respondError(w, http.StatusForbidden, err.Error())
 			return
@@ -271,6 +280,18 @@ func buildAuthenticatedContext(ctx context.Context, claims *PlatformClaims, team
 	return principalCtx, nil
 }
 
+// buildVerifiedTokenContext is called only after JWT validation and membership checks.
+func buildVerifiedTokenContext(ctx context.Context, claims *PlatformClaims, teamSlug string) (context.Context, error) {
+	ctx, err := buildAuthenticatedContext(ctx, claims, teamSlug)
+	if err != nil {
+		return nil, err
+	}
+	if claims.ExpiresAt == nil {
+		return nil, fmt.Errorf("verified token expiry required")
+	}
+	return execution.WithAuthenticationEvidence(ctx, execution.AuthenticationEvidence{Method: execution.AuthMethodPlatformJWT, ExpiresAt: claims.ExpiresAt.Time})
+}
+
 // handleLoopbackAuth handles authentication for loopback (localhost) requests.
 // Returns true if the request was handled (served or error written), false if
 // the caller should fall through to normal auth (for "never" mode).
@@ -300,7 +321,7 @@ func (pa *PlatformAuth) handleLoopbackAuth(w http.ResponseWriter, r *http.Reques
 				respondError(w, http.StatusForbidden, err.Error())
 				return true
 			}
-			ctx, err := buildAuthenticatedContext(r.Context(), claims, teamSlug)
+			ctx, err := buildVerifiedTokenContext(r.Context(), claims, teamSlug)
 			if err != nil {
 				respondError(w, http.StatusForbidden, err.Error())
 				return true

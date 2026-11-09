@@ -17,7 +17,6 @@ import (
 	"github.com/SAP/astonish/pkg/credentials"
 	adrill "github.com/SAP/astonish/pkg/drill"
 	persistentsession "github.com/SAP/astonish/pkg/session"
-	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -1159,23 +1158,6 @@ func readArtifactContentFromSession(fs *persistentsession.FileStore, userID, ses
 	return readArtifactContentFromEvents(getResp.Session.Events(), filePath)
 }
 
-// readArtifactContentFromSessionStore is the platform-mode equivalent of
-// readArtifactContentFromSession. It accepts a store.SessionStore (which may
-// be backed by PostgreSQL) and uses ReadTranscriptEvents to load events, then
-// reconstructs the latest known content for the requested path.
-func readArtifactContentFromSessionStore(ss store.SessionStore, appName, userID, sessionID, filePath string) (string, bool) {
-	if ss == nil {
-		return "", false
-	}
-
-	events, err := ss.ReadTranscriptEvents(context.TODO(), appName, userID, sessionID)
-	if err != nil {
-		return "", false
-	}
-
-	return readArtifactContentFromEventSlice(events, filePath)
-}
-
 func readArtifactContentFromEvents(events session.Events, filePath string) (string, bool) {
 	if events == nil {
 		return "", false
@@ -1469,10 +1451,11 @@ type chatQuestionOptionPayload struct {
 
 // chatQuestionPayload is the JSON structure persisted inside the text event.
 type chatQuestionPayload struct {
-	QuestionID string                      `json:"questionId"`
-	Kind       string                      `json:"kind"` // "yesno" | "select"
-	Prompt     string                      `json:"prompt"`
-	Options    []chatQuestionOptionPayload `json:"options,omitempty"`
+	AllowCustomAnswer *bool                       `json:"allow_custom_answer,omitempty"`
+	QuestionID        string                      `json:"questionId"`
+	Kind              string                      `json:"kind"` // "yesno" | "select"
+	Prompt            string                      `json:"prompt"`
+	Options           []chatQuestionOptionPayload `json:"options,omitempty"`
 }
 
 // persistChatQuestion serializes a chat question as a structured text event so
@@ -1517,11 +1500,12 @@ func tryParseChatQuestionMessage(text string) *StudioMessage {
 		options = append(options, opt)
 	}
 	return &StudioMessage{
-		Type:         "chat_question",
-		QuestionID:   payload.QuestionID,
-		QuestionKind: payload.Kind,
-		Prompt:       payload.Prompt,
-		Options:      options,
+		Type:              "chat_question",
+		QuestionID:        payload.QuestionID,
+		AllowCustomAnswer: payload.AllowCustomAnswer,
+		QuestionKind:      payload.Kind,
+		Prompt:            payload.Prompt,
+		Options:           options,
 	}
 }
 

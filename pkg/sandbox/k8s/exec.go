@@ -178,6 +178,10 @@ func (b *K8sBackend) Exec(ctx context.Context, sessionID string, opts sandbox.Ex
 		return nil, fmt.Errorf("sandbox/k8s: Exec: session %q has no pod", sessionID)
 	}
 
+	opts.Command, opts.WorkDir, err = b.homeExecCommand(ctx, sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
 	res, err := b.execInPod(ctx, rec.PodName, opts)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox/k8s: Exec(%s): %w", sessionID, err)
@@ -267,6 +271,10 @@ func (b *K8sBackend) ExecInteractive(ctx context.Context, sessionID string, opts
 		return nil, fmt.Errorf("sandbox/k8s: ExecInteractive: session %q has no pod", sessionID)
 	}
 
+	opts.Command, opts.WorkDir, err = b.homeExecCommand(ctx, sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
 	command := wrapCommand(opts.Command, opts.WorkDir, opts.Env)
 
 	wantStderr := opts.SeparateStderr != nil
@@ -346,6 +354,10 @@ func (b *K8sBackend) ExecStreaming(ctx context.Context, sessionID string, opts s
 		return nil, fmt.Errorf("sandbox/k8s: ExecStreaming: session %q has no pod", sessionID)
 	}
 
+	opts.Command, opts.WorkDir, err = b.homeExecCommand(ctx, sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
 	command := wrapCommand(opts.Command, opts.WorkDir, opts.Env)
 
 	wantStderr := opts.SeparateStderr != nil
@@ -513,6 +525,19 @@ func decodeExitError(err error) (int, error) {
 		return codeErr.ExitStatus(), nil
 	}
 	return -1, err
+}
+
+// homeExecCommand resolves the immutable retained binding, never inferring it
+// from chat mode or HOME supplied by a caller.
+func (b *K8sBackend) homeExecCommand(ctx context.Context, id string, command []string, workDir string) ([]string, string, error) {
+	home, err := b.sessionBotHome(ctx, id, nil, true)
+	if err != nil {
+		return nil, "", err
+	}
+	if home != nil {
+		return sandbox.RetainedBotHomeCommand(command, workDir), "", nil
+	}
+	return command, workDir, nil
 }
 
 // wrapCommand emits a /bin/sh -c wrapper that applies WorkDir and Env

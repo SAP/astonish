@@ -29,6 +29,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	emailpkg "github.com/SAP/astonish/pkg/email"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/fleet"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/mailer"
@@ -239,6 +240,10 @@ func Run(cfg RunConfig) error {
 		}
 	}
 	defer entStore.Close()
+	svc.BotMandatePolicy = newProductionBotMandatePolicy(entStore, appCfg)
+	svc.BotTurnRegistry = execution.NewBotTurnAuthorizationRegistry(256)
+	defer svc.BotTurnRegistry.Close()
+	// BotInteractiveReady is enabled only by complete API/launcher composition.
 	backend = entStore
 	logStartupPhase("platform-store", "complete", storeStarted)
 	// Persist/learn per-model token limits from provider 400 responses (SAP Vertex).
@@ -1071,6 +1076,23 @@ func Run(cfg RunConfig) error {
 		}()
 	}
 
+	// Bot execution owns its lifetime and resources independently of channels.
+	var botWorker *BotWorker
+	if daemonMode != config.DaemonModeAPI {
+		var botCleanup func()
+		botWorker, botCleanup, err = newProductionBotWorker(backend, appCfg, svc.BotTurnRegistry)
+		if err != nil {
+			logger.Printf("Bots: execution unavailable: %v", err)
+		} else {
+			defer botCleanup()
+			svc.BotHomeSetup = botWorker.provisionHome
+			setBotInteractiveReady(svc, botWorker)
+			botWorker.Start(ctx)
+			defer botWorker.Stop()
+			logger.Printf("Bots: durable model-only worker started (tool actions unavailable)")
+		}
+	}
+
 	// --- Initialize scheduler if enabled ---
 	// Skipped in API mode — only default and worker modes run the scheduler.
 	var mtSched *MultiTenantScheduler
@@ -1146,6 +1168,9 @@ func Run(cfg RunConfig) error {
 
 		// Create and start the multi-tenant scheduler
 		mtSched = NewMultiTenantScheduler(backend, schedExec, deliver, log.Default())
+		if botWorker != nil {
+			mtSched.SetBotSchedulerCallbacks(botWorker.SchedulerCallbacks())
+		}
 		if appCfg.Sandbox.OpenShell.GatewayAddr != "" {
 			mtSched.SetGatewayConfig(openshell.GRPCClientConfig{
 				Addr: appCfg.Sandbox.OpenShell.GatewayAddr,

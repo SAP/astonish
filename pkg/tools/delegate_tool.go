@@ -188,7 +188,7 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 	// costs ~30k tokens (full context resent), so inlining results under this
 	// size is almost always cheaper than summarizing and round-tripping.
 	const summarizeThreshold = 20000 // chars
-	store := GetTaskResultStore()
+	store := taskResultsFromContext(ctx)
 
 	resultItems := make([]SubTaskResultItem, len(results))
 	successCount := 0

@@ -17,6 +17,22 @@ type ToolExecutor interface {
 	Execute(ctx context.Context, name string, args map[string]interface{}) (any, error)
 }
 
+// TerminalToolExecutor optionally latches a dispatch authority failure. Unlike
+// ordinary tool errors, a terminal error stops all tests, retries and cleanup
+// dispatch, even for tutorial/continue-on-failure suites. Ordinary executors keep
+// their existing semantics by not implementing this interface.
+type TerminalToolExecutor interface {
+	ToolExecutor
+	TerminalError() error
+}
+
+func (sr *SuiteRunner) terminalError() error {
+	if e, ok := sr.toolExecutor.(TerminalToolExecutor); ok {
+		return e.TerminalError()
+	}
+	return nil
+}
+
 // LLMProvider abstracts an LLM for semantic assertion evaluation.
 // Any provider that can generate a text completion implements this.
 type LLMProvider interface {
@@ -95,7 +111,9 @@ func (sr *SuiteRunner) RunSuite(ctx context.Context, suite *LoadedSuite, tests [
 	sr.executeTests(ctx, report, suite, tests)
 
 	// Best-effort: kill background sessions started by test steps.
-	sr.killBackgroundSessions(ctx)
+	if sr.terminalError() == nil {
+		sr.killBackgroundSessions(ctx)
+	}
 
 	report.FinishedAt = time.Now()
 	report.Duration = report.FinishedAt.Sub(report.StartedAt).Milliseconds()
@@ -104,12 +122,15 @@ func (sr *SuiteRunner) RunSuite(ctx context.Context, suite *LoadedSuite, tests [
 	report.ComputeStatus()
 	report.ComputeSummary()
 
-	return report, nil
+	return report, sr.terminalError()
 }
 
 // executeTests runs all tests and appends results to the report.
 func (sr *SuiteRunner) executeTests(ctx context.Context, report *SuiteReport, suite *LoadedSuite, tests []LoadedTest) {
 	for _, test := range tests {
+		if sr.terminalError() != nil {
+			break
+		}
 		if err := ValidateTest(&test); err != nil {
 			report.Tests = append(report.Tests, TestReport{
 				Name:       test.Config.Description,
@@ -125,6 +146,9 @@ func (sr *SuiteRunner) executeTests(ctx context.Context, report *SuiteReport, su
 		// Parameterized tests: run once per parameter set
 		if len(test.Config.Parameters) > 0 {
 			for i, paramSet := range test.Config.Parameters {
+				if sr.terminalError() != nil {
+					break
+				}
 				testReport := sr.runParameterizedTest(ctx, &test, suite, paramSet, i)
 				report.Tests = append(report.Tests, testReport)
 			}
@@ -192,7 +216,7 @@ func (sr *SuiteRunner) runTest(ctx context.Context, test *LoadedTest, suite *Loa
 	report.Tags = tags
 
 	retriesLeft := maxRetries
-	for retriesLeft > 0 && report.Status == "failed" && sr.shouldRetry(report) {
+	for retriesLeft > 0 && sr.terminalError() == nil && report.Status == "failed" && sr.shouldRetry(report) {
 		retriesLeft--
 		report.Retries++
 		if sr.verbose {
@@ -261,6 +285,10 @@ func (sr *SuiteRunner) runTestAttempt(ctx context.Context, test *LoadedTest, sui
 	for _, node := range nodes {
 		stepResult := sr.executeStep(testCtx, node, stepTimeout, autoWait, autoWaitTimeout, tutorial, ts)
 		report.Steps = append(report.Steps, stepResult)
+		if sr.terminalError() != nil {
+			allPassed = false
+			break
+		}
 
 		if stepResult.Status == "failed" || stepResult.Status == "error" {
 			allPassed = false
@@ -300,7 +328,7 @@ func (sr *SuiteRunner) runTestAttempt(ctx context.Context, test *LoadedTest, sui
 		}
 	}
 
-	if tutorial {
+	if tutorial && sr.terminalError() == nil {
 		sr.finalizeTutorialRecording(testCtx, ts)
 		var cutList []config.TutorialSceneSpec
 		if test.Config.DrillConfig != nil {
@@ -446,7 +474,11 @@ func (sr *SuiteRunner) executeStep(ctx context.Context, node config.Node, stepTi
 				"selector": waitTarget,
 				"timeout":  autoWaitTimeout,
 			}
-			sr.toolExecutor.Execute(stepCtx, "browser_wait_for", waitArgs) // best-effort
+			sr.toolExecutor.Execute(stepCtx, "browser_wait_for", waitArgs) // best-effort for ordinary executors
+			if err := sr.terminalError(); err != nil {
+				result.Status, result.Error = "error", err.Error()
+				return result
+			}
 		}
 	}
 

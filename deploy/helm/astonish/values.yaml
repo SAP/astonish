@@ -215,6 +215,13 @@ sandbox:
       size: 50Gi
       accessMode: ReadWriteMany
       pvcName: astonish-uppers
+    # Independent retained Bot homes. Never mounted into ordinary sessions.
+    homes:
+      enabled: false
+      existingClaim: ""
+      pvcName: astonish-bot-homes
+      size: 50Gi
+      accessMode: ReadWriteMany
 
   # One-shot Job that seeds astonish-layers/@base/rootfs from the sandbox
   # image. Runs as a Helm post-install / post-upgrade hook so bumping
@@ -246,6 +253,18 @@ sandbox:
     # Enables the OpenShell subchart deployment.
     # Also gates the Chart.yaml dependency condition.
     enabled: false
+
+    # Independent retained Bot homes; does NOT enable/deploy the gateway.
+    # Requires gateway support for writable PVC volume_mounts with sub_path.
+    # Ordinary sessions and ephemeralWorkspace retain their current behavior.
+    botHomes:
+      enabled: false
+      existingClaim: ""       # reuse a claim; Helm will not create or own it
+      pvcName: astonish-openshell-bot-homes
+      namespace: ""           # empty = namespaces.sandbox; other namespaces rejected
+      storageClassName: ""    # empty = sandbox.storage.storageClassName
+      size: 50Gi
+      accessMode: ReadWriteMany # ReadWriteOnce only for single-node placement
 
     # Override gRPC address. Empty = auto-derived from release name:
     #   "{release}-openshell.{namespace}.svc.cluster.local:8080"

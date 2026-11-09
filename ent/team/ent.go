@@ -15,6 +15,15 @@ import (
 	"github.com/SAP/astonish/ent/team/a2aagent"
 	"github.com/SAP/astonish/ent/team/app"
 	"github.com/SAP/astonish/ent/team/appstate"
+	"github.com/SAP/astonish/ent/team/bot"
+	"github.com/SAP/astonish/ent/team/botapproval"
+	"github.com/SAP/astonish/ent/team/botgoal"
+	"github.com/SAP/astonish/ent/team/botintake"
+	"github.com/SAP/astonish/ent/team/botoutbox"
+	"github.com/SAP/astonish/ent/team/botrun"
+	"github.com/SAP/astonish/ent/team/bottemplate"
+	"github.com/SAP/astonish/ent/team/bottrackeditem"
+	"github.com/SAP/astonish/ent/team/botversion"
 	"github.com/SAP/astonish/ent/team/cachediagnostic"
 	"github.com/SAP/astonish/ent/team/chatsessionevent"
 	"github.com/SAP/astonish/ent/team/credential"
@@ -105,6 +114,15 @@ func checkColumn(t, c string) error {
 			a2aagent.Table:            a2aagent.ValidColumn,
 			app.Table:                 app.ValidColumn,
 			appstate.Table:            appstate.ValidColumn,
+			bot.Table:                 bot.ValidColumn,
+			botapproval.Table:         botapproval.ValidColumn,
+			botgoal.Table:             botgoal.ValidColumn,
+			botintake.Table:           botintake.ValidColumn,
+			botoutbox.Table:           botoutbox.ValidColumn,
+			botrun.Table:              botrun.ValidColumn,
+			bottemplate.Table:         bottemplate.ValidColumn,
+			bottrackeditem.Table:      bottrackeditem.ValidColumn,
+			botversion.Table:          botversion.ValidColumn,
 			cachediagnostic.Table:     cachediagnostic.ValidColumn,
 			chatsessionevent.Table:    chatsessionevent.ValidColumn,
 			credential.Table:          credential.ValidColumn,

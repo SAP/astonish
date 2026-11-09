@@ -56,7 +56,7 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 	if e == nil || e.Agent == nil {
 		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Error: "progressive executor is not configured"}
 	}
-	resolved, _, err := e.Resolver.resolve(ctx, name)
+	resolved, group, err := e.Resolver.resolve(ctx, name)
 	if err != nil {
 		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Error: err.Error()}
 	}
@@ -74,6 +74,11 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 	}
 	if args == nil {
 		args = map[string]any{}
+	}
+
+	var authorizedAction execution.ActionDescriptor
+	if err := authorizeBotTool(ctx, BotToolIdentity(group, resolved.Name()), args, &authorizedAction); err != nil {
+		return botPolicyProgressiveResult(resolved.Name(), err)
 	}
 
 	var restores []func()
@@ -102,6 +107,12 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 
 	if err := common.ValidateToolArguments(resolved, args); err != nil {
 		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Tool: resolved.Name(), Error: err.Error()}
+	}
+	// Bind the private lazy handoff to effective post-substitution arguments;
+	// durable approval above remains bound to credential references.
+	ctx, err = botAuthorizedInvocationContext(ctx, BotToolIdentity(group, resolved.Name()), args, authorizedAction)
+	if err != nil {
+		return botPolicyProgressiveResult(resolved.Name(), err)
 	}
 	output, err := runner.Run(ctx, args)
 	output = e.Agent.finalizeProgressiveToolOutput(resolved, args, output, err)

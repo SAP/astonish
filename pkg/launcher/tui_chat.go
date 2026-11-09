@@ -21,6 +21,8 @@ import (
 // Chat always talks to an authenticated Astonish platform (Studio REST/SSE) —
 // there is no in-process / "personal" chat path.
 type ChatConfig struct {
+	Bot         string
+	BotScope    string
 	AutoApprove bool
 	SessionID   string // Resume existing session (empty = new on first message)
 	DebugMode   bool
@@ -63,7 +65,13 @@ func RunChatTUI(ctx context.Context, cfg *ChatConfig) error {
 	if lb := newLazyCodeBackend(); lb != nil {
 		altBackend = lb
 	}
-	return tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend})
+	remote := newBotPlatformBackend(b, cfg.BotScope)
+	if cfg.Bot != "" {
+		if _, err := remote.SelectBot(ctx, cfg.Bot); err != nil {
+			return err
+		}
+	}
+	return tui.Run(ctx, tui.Config{Backend: remote, AltBackend: altBackend})
 }
 
 // newPlatformBackend creates a platformBackend for use as the primary or alt
@@ -85,13 +93,13 @@ func newPlatformBackend() backend.Backend {
 		team = remoteCfg.Team
 		user = remoteCfg.UserEmail
 	}
-	return &platformBackend{
+	return newBotPlatformBackend(&platformBackend{
 		client:    c,
 		serverURL: serverURL,
 		org:       org,
 		team:      team,
 		user:      user,
-	}
+	}, "personal")
 }
 
 // newLazyCodeBackend returns a backend that lazily initializes the full local

@@ -1,0 +1,74 @@
+{
+  "jobs": [
+    {
+      "id": "1d23ad23-d18a-5f86-9e06-b9d4c1e1d9fe",
+      "mode": "bot_trigger",
+      "status": "active",
+      "schedule": "0 0 * * 1",
+      "next_run_at": "2026-11-16 00:00:00 +0000 UTC",
+      "payload": "{\"bot_id\":\"cf981cdc-e762-4846-8fe8-0b971f07afa1\",\"bot_trigger_id\":\"b3c98d96-e3af-5de1-9e07-6f3351d135bc\",\"bot_version\":3,\"team_slug\":\"general\",\"timezone\":\"UTC\"}"
+    },
+    {
+      "id": "2512fae7-6868-42ea-9fbe-774e4763fbb7",
+      "mode": "bot_trigger",
+      "status": "paused",
+      "schedule": "0 0 1 6 *",
+      "next_run_at": null,
+      "payload": "{\"bot_id\":\"cf981cdc-e762-4846-8fe8-0b971f07afa1\",\"bot_trigger_id\":\"1bbf65ab-42ca-4f0d-b0b9-b9f024c1bad9\",\"bot_version\":3,\"team_slug\":\"general\",\"timezone\":\"UTC\"}"
+    }
+  ],
+  "bot": {
+    "id": "cf981cdc-e762-4846-8fe8-0b971f07afa1",
+    "status": "active",
+    "version": 3,
+    "home_session_id": "d23b58cf-f89c-4611-a093-975128242f01"
+  },
+  "version": {
+    "bot_id": "cf981cdc-e762-4846-8fe8-0b971f07afa1",
+    "version": 3,
+    "triggers": [
+      {
+        "id": "1bbf65ab-42ca-4f0d-b0b9-b9f024c1bad9",
+        "kind": "cron",
+        "schedule_id": "2512fae7-6868-42ea-9fbe-774e4763fbb7",
+        "instructions": "Historical June reminder; leave disabled.",
+        "cron": "0 0 1 6 *",
+        "timezone": "UTC",
+        "enabled": false,
+        "fingerprint": "a7feb301bf6e1816f787ddd63882875c5673ad58aeb70f92ee2cec32cab23876",
+        "catch_up_once": false
+      },
+      {
+        "id": "b3c98d96-e3af-5de1-9e07-6f3351d135bc",
+        "kind": "cron",
+        "schedule_id": "1d23ad23-d18a-5f86-9e06-b9d4c1e1d9fe",
+        "instructions": "Post a reminder saying \"preservation witness\" in this Bot's home chat.",
+        "cron": "0 0 * * 1",
+        "timezone": "UTC",
+        "enabled": true,
+        "fingerprint": "e83b7547b3b2d7ec7ca3d269d2d3a738ccee1277302b9d9b16c2bf0bd2ab21fa",
+        "catch_up_once": false
+      }
+    ]
+  },
+  "stale_disk_jobs": [
+    {
+      "id": "2512fae7-6868-42ea-9fbe-774e4763fbb7",
+      "name": "bot-cf981cdc-e762-4846-8fe8-0b971f07afa1-1bbf65ab-42ca-4f0d-b0b9-b9f024c1bad9",
+      "schedule": "0 0 1 6 *",
+      "mode": "bot_trigger",
+      "payload": "{\"bot_id\":\"cf981cdc-e762-4846-8fe8-0b971f07afa1\",\"bot_trigger_id\":\"1bbf65ab-42ca-4f0d-b0b9-b9f024c1bad9\",\"bot_version\":2,\"team_slug\":\"general\",\"timezone\":\"UTC\"}",
+      "status": "paused",
+      "last_run_at": null,
+      "next_run_at": null,
+      "created_at": "2026-11-09 14:20:24.558148568 +0000 UTC m=+18.724258032",
+      "updated_at": "2026-11-09 14:20:24.558180401 +0000 UTC m=+18.724289865"
+    }
+  ],
+  "stale_disk_bot": {
+    "id": "cf981cdc-e762-4846-8fe8-0b971f07afa1",
+    "status": "draft",
+    "version": 2,
+    "home_session_id": "d23b58cf-f89c-4611-a093-975128242f01"
+  }
+}

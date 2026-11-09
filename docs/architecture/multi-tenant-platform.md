@@ -35,6 +35,14 @@ Personal mode is 100% backward compatible. Platform mode activates when `storage
 
 ---
 
+## Bot repository scope (current Ent implementation)
+
+Both `TeamDataStore` and `PersonalDataStore` expose `Bots()`. TenantMiddleware puts them into distinct request-scoped `Services.Bots` and `Services.PersonalBots` fields, without mutating the base service bundle. Personal Bot routing also works when no team is selected; a missing private store never falls back to team storage. `BotStoreFromContext` requires an explicit scope and returns nil for unavailable or unknown scopes.
+
+Each repository operation requires an authenticated execution Principal matching the routed organization and, for shared Bots, the routed team. The router-installed membership callback reads the current user status, organization status and organization membership; team operations additionally resolve current team membership and role. Cached repository handles do not cache authorization. Personal repositories also bind the actor to the routed owner, including when the actor has administrative roles. Team members can read shared Bots, while configuration/destructive operations require the accountable owner or team owner/admin. Platform-admin claims alone do not grant Bot access.
+
+These are repository and middleware guarantees, tested with temporary SQLite and a real HTTP middleware harness using controlled authenticated contexts. Production Bot endpoints, Bot session authorization, unattended service-principal execution and PostgreSQL acceptance remain separate pending work; this wiring does not activate Bots.
+
 ## Database Architecture
 
 ### Layout
@@ -1280,6 +1288,14 @@ The user is prompted (in Studio UI or CLI) to either migrate or start fresh. Mig
 **Phase 8B Status: COMPLETE** — All 10 tasks done. CLI + UI wizards both support deployment mode selection with automated DB bootstrap.
 
 ---
+
+### First-user registration publication
+
+Builtin `POST /api/auth/register` uses the optional `store.FirstUserBootstrap` capability for the first account. The Ent backend serializes contenders with a platform-database transaction (SQLite writer lock before reading the directory; PostgreSQL transaction advisory lock) and rechecks initialization under that lock. It prepares the organization, General-team and personal schemas, then commits General/admin membership before atomically publishing the user/superadmin, organization and owner membership in the platform directory. Workers enumerate that directory and therefore cannot discover a half-provisioned first tenant.
+
+Preparation failures return HTTP 500 without publishing a login user or initialized setup state; unpublished schema files may remain and are reusable on retry. A competing bootstrap winner returns HTTP 409 (or registration-policy HTTP 403 when observed before bootstrap). Backends without the capability fail closed. This is a publication barrier across databases, not distributed schema rollback or repair of already partially initialized installations. Non-first-user registration and membership authorization are unchanged.
+
+SQLite regression coverage: `pkg/daemon/registration_bootstrap_http_test.go` exercises public HTTP registration with worker polling, corrupt-team-database failure/retry, login, General membership, team Bot creation and personal start-from-title admission; `registration_concurrent_http_test.go` races independent HTTP servers and connection pools. PostgreSQL bootstrap execution requires separate integration verification.
 
 ## Known Deferred Work
 

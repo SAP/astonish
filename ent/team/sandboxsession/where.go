@@ -195,6 +195,16 @@ func ChatSessionIDContainsFold(v string) predicate.SandboxSession {
 	return predicate.SandboxSession(sql.FieldContainsFold(FieldChatSessionID, v))
 }
 
+// BotHomeBindingIsNil applies the IsNil predicate on the "bot_home_binding" field.
+func BotHomeBindingIsNil() predicate.SandboxSession {
+	return predicate.SandboxSession(sql.FieldIsNull(FieldBotHomeBinding))
+}
+
+// BotHomeBindingNotNil applies the NotNil predicate on the "bot_home_binding" field.
+func BotHomeBindingNotNil() predicate.SandboxSession {
+	return predicate.SandboxSession(sql.FieldNotNull(FieldBotHomeBinding))
+}
+
 // BackendEQ applies the EQ predicate on the "backend" field.
 func BackendEQ(v string) predicate.SandboxSession {
 	return predicate.SandboxSession(sql.FieldEQ(FieldBackend, v))

@@ -1,4 +1,60 @@
-# Migration Management (Atlas)
+# Migration Management
+
+## Employee-operation persistence acceptance — 2026-11-08
+
+`TestIntegrationPostgresBotEmployeeOperations` uses the production router with actual PostgreSQL personal/team schemas, never SQLite under a PostgreSQL label. It requires the existing fail-closed disposable guard: loopback-only nondefault port, `postgres` database, `astonish_activation_final` bootstrap role, no TLS/fallback hosts, and explicit disposable consent. Run only against a newly owned temporary pgvector server; never use a production DSN or reset a user database. The suite exercises operation/occurrence transaction rollback, concurrent retries, router reopen, mandate revocation and deletion cleanup. Current concurrent schedule insertion failures are acceptance blockers, not a reason to regenerate schemas or remove constraints. No schema migration changes are made by this test addition.
+
+## Current Ent workflow
+
+The active store is `pkg/store/entstore`, using Ent schemas under
+`ent/{platform,org,team,personal}/schema`. Generate clients and migration
+metadata with `make ent-generate`; do not hand-edit generated clients.
+The scoped router reconciles schemas when provisioning or opening a database.
+PostgreSQL open paths preserve existing columns and extra indexes by skipping
+ModifyColumn, DropIndex and DropColumn. SQLite reconciliation retains existing
+rows and applies additive schema changes.
+
+Bot schema version 1 adds personal/team Bot aggregates, immutable version
+records, goals/tracked items, runs, approvals and outbox records; team scope
+also adds templates. Existing sessions receive nullable Bot linkage plus
+`purpose=chat` and `retention=standard` defaults. Existing scheduler modes remain
+valid alongside `bot_trigger`; this does not enable Bot execution or convert jobs.
+
+`pkg/store/entstore/bot_migrate.go` wraps team/personal reconciliation with a
+`bot_schema_version` marker. A newer marker is rejected before Ent changes;
+a failed reconciliation is never stamped. Both open and provisioning paths use
+the wrapper. The marker is migration metadata, not an application data store.
+Do not downgrade a deployment to an older binary that predates this guard.
+
+Verification:
+
+```sh
+make ent-generate
+go test ./pkg/store/entstore -run '^TestBot(Migration|Schema)' -count=1 -v
+go test ./pkg/store/... ./pkg/memory/... -count=1
+```
+
+Current tests prove a simulated pre-Bot SQLite database can reopen, preserve
+Chat/job rows, reject newer versions and avoid stamping a failed migration.
+PostgreSQL upgrade/claim tests and old-backup compatibility remain required
+before the Bot persistence phase is complete. Do not weaken backup hash checks.
+
+## Title-start/run-state compatibility
+
+This change adds no DDL, generated Ent changes, or Bot schema-version bump.
+Existing transcript JSON carries `bot_run_state` schema_version=1 state-only
+envelopes. Old clients ignore unknown metadata; new clients ignore unknown
+versions for rendering but advance replay cursors. Ordinary Chat remains unchanged.
+No startup or GET backfills historical state or initializes legacy drafts.
+`start_from_title:true` is explicit create-only admission, not a migration of old
+create keys. Imports and default CreateDraft stay inert. Snapshot fields
+`run_states` and `history_cursor` are additive read-only projections. PostgreSQL
+requires a separate disposable-database run; SQLite proof is not PostgreSQL proof.
+
+## Historical Atlas workflow (not the active Ent implementation)
+
+The remainder documents the former sqlitestore/pgstore workflow. Its paths and
+commands are historical reference, not instructions for current Bot changes.
 
 Astonish uses [Atlas](https://atlasgo.io/) as a dev-time schema diff tool to generate SQL migration files. At runtime, the existing `migrate()` functions in sqlitestore/pgstore apply migrations unchanged — Atlas is never imported into the binary.
 

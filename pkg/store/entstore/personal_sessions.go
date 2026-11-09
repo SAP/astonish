@@ -249,7 +249,7 @@ func (ss *personalSessionStore) Get(ctx context.Context, req *adksession.GetRequ
 
 func (ss *personalSessionStore) List(ctx context.Context, req *adksession.ListRequest) (*adksession.ListResponse, error) {
 	query := ss.client.Session.Query().
-		Where(session.ParentIDIsNil()).
+		Where(session.ParentIDIsNil(), session.BotIDIsNil(), session.BotRunIDIsNil(), session.PurposeEQ(session.PurposeChat)).
 		Order(session.ByCreatedAt(sql.OrderDesc()))
 
 	if req.UserID != "" {
@@ -282,6 +282,9 @@ func (ss *personalSessionStore) List(ctx context.Context, req *adksession.ListRe
 }
 
 func (ss *personalSessionStore) Delete(ctx context.Context, req *adksession.DeleteRequest) error {
+	if err := ss.allowOrdinarySessionDelete(ctx, req.SessionID); err != nil {
+		return err
+	}
 	_, _ = ss.client.CacheDiagnostic.Delete().
 		Where(cachediagnostic.SessionIDEQ(req.SessionID)).
 		Exec(ctx)
@@ -332,7 +335,7 @@ func (ss *personalSessionStore) AppendEvent(ctx context.Context, sess adksession
 
 func (ss *personalSessionStore) ListSessionMetas(ctx context.Context, appName, userID string) ([]store.SessionMeta, error) {
 	query := ss.client.Session.Query().
-		Where(session.ParentIDIsNil()).
+		Where(session.ParentIDIsNil(), session.BotIDIsNil(), session.BotRunIDIsNil(), session.PurposeEQ(session.PurposeChat)).
 		Order(session.ByUpdatedAt(sql.OrderDesc()))
 
 	if userID != "" {
@@ -401,6 +404,9 @@ func (ss *personalSessionStore) ListChildren(ctx context.Context, parentID strin
 }
 
 func (ss *personalSessionStore) AddSessionMeta(ctx context.Context, meta store.SessionMeta) error {
+	if meta.HasBotLinkage() {
+		return store.ErrBotForbidden
+	}
 	id := meta.ID
 	if id == "" {
 		id = uuid.NewString()
@@ -454,7 +460,11 @@ func (ss *personalSessionStore) UpdateSessionMeta(ctx context.Context, sessionID
 	}
 
 	meta := personalEntSessionToMeta(ent)
+	original := meta
 	fn(&meta)
+	if meta.BotID != original.BotID || meta.BotRunID != original.BotRunID || meta.Purpose != original.Purpose || meta.Retention != original.Retention || (original.HasBotLinkage() && (meta.UserID != original.UserID || meta.ParentID != original.ParentID)) {
+		return store.ErrBotForbidden
+	}
 
 	var userID *uuid.UUID
 	if meta.UserID != "" {
@@ -485,7 +495,24 @@ func (ss *personalSessionStore) UpdateSessionMeta(ctx context.Context, sessionID
 		Exec(ctx)
 }
 
+func (ss *personalSessionStore) allowOrdinarySessionDelete(ctx context.Context, id string) error {
+	row, err := ss.client.Session.Get(ctx, id)
+	if personalent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if row.BotID != nil || row.BotRunID != nil || row.Retention == session.RetentionBot || row.Purpose != session.PurposeChat {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+
 func (ss *personalSessionStore) RemoveSessionMeta(ctx context.Context, sessionID string) error {
+	if err := ss.allowOrdinarySessionDelete(ctx, sessionID); err != nil {
+		return err
+	}
 	_, _ = ss.client.CacheDiagnostic.Delete().
 		Where(cachediagnostic.SessionIDEQ(sessionID)).
 		Exec(ctx)
@@ -653,7 +680,7 @@ func (ss *personalSessionStore) AllSessionIDsStrict(ctx context.Context) (map[st
 func (ss *personalSessionStore) CleanupExpiredSessions(ctx context.Context, maxAgeDays int) []string {
 	cutoff := time.Now().UTC().AddDate(0, 0, -maxAgeDays)
 	ents, err := ss.client.Session.Query().
-		Where(session.CreatedAtLT(cutoff)).
+		Where(session.CreatedAtLT(cutoff), session.RetentionEQ(session.RetentionStandard), session.PurposeEQ(session.PurposeChat), session.BotIDIsNil(), session.BotRunIDIsNil()).
 		Select(session.FieldID).
 		All(ctx)
 	if err != nil {
@@ -750,6 +777,18 @@ func personalEntSessionToMeta(e *personalent.Session) store.SessionMeta {
 		IssueNumber:  e.IssueNumber,
 		Repo:         e.Repo,
 		WorkspaceDir: e.WorkspaceDir,
+	}
+	if e.BotID != nil {
+		m.BotID = e.BotID.String()
+	}
+	if e.BotRunID != nil {
+		m.BotRunID = e.BotRunID.String()
+	}
+	if e.Purpose != session.PurposeChat {
+		m.Purpose = store.SessionPurpose(e.Purpose)
+	}
+	if e.Retention != session.RetentionStandard {
+		m.Retention = store.SessionRetention(e.Retention)
 	}
 	if e.UserID != nil {
 		m.UserID = e.UserID.String()

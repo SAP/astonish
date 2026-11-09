@@ -17,6 +17,7 @@ interface InvocationScopedMessage {
 
 export interface UserMessage extends InvocationScopedMessage {
   type: 'user'
+  eventId?: string
   content: string
   attachments?: AttachmentInfo[]
 }
@@ -334,7 +335,8 @@ export interface ChatQuestionOption {
 export interface ChatQuestionMessage {
   type: 'chat_question'
   questionId: string
-  kind: 'yesno' | 'select'
+  kind: 'yesno' | 'select' | 'text'
+  allow_custom_answer?: boolean
   prompt: string
   options: ChatQuestionOption[]
   answered?: boolean
@@ -419,7 +421,12 @@ export interface NetworkDenialMessage {
   sandbox_name: string
 }
 
+export interface BotOperationMessage { type: 'bot_operation'; operationId: string; eventId: string }
+export interface BotReviewMessage { type: 'bot_review'; kind: 'proposal' | 'approval'; reviewId: string; eventId: string }
+
 export type ChatMsg = InvocationScopedMessage & (
+  | BotOperationMessage
+  | BotReviewMessage
   | FleetMessageItem
   | UserMessage
   | AgentMessage

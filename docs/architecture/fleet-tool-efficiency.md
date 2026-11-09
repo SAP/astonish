@@ -20,7 +20,7 @@ Each `read_file` call on a large file (e.g., 1911-line Vue component = 58KB) tri
 3. Truncation to 50KB by `TruncateToolResponsesCallback` (losing the tail)
 4. The full 50KB injected into the LLM context window
 
-In session `8bf63fbf`, the dev agent called `read_file` on the same file **58 times** (35 times on another), consuming ~5.4MB of input tokens on a single file. This is the dominant source of slowness vs. interactive coding tools like Cursor.
+In session `8bf63fbf`, the dev agent called `read_file` on the same file **58 times** (35 times on another), consuming ~5.4MB of input tokens on a single file. This is the dominant source of slowness.
 
 **Root causes:**
 1. `edit_file` returns only `{"success": true, "replacements": 1}` — no verification context, so the agent re-reads to confirm.
@@ -38,21 +38,19 @@ In session `8bf63fbf`, the dev agent called `read_file` on the same file **58 ti
 
 ---
 
-## Prior Art: OpenClaude (Claude Code)
+## Design rationale
 
-Analysis of `/root/openclaude` reveals how Claude Code solves the same problem:
+Historical research suggested these mechanisms; source identities and quotations are omitted here. That research is not independent evidence of production performance. These requirements follow Astonish's repeated-read problem and sandbox constraints.
 
-| Mechanism | OpenClaude Implementation | Relevance to Astonish |
-|-----------|--------------------------|----------------------|
-| Line-range reads | `offset` (1-indexed start) + `limit` (line count) params | Direct adoption |
-| Line numbers in output | `{lineNum}→{content}` format via `addLineNumbers()` | Direct adoption |
-| Mtime-based dedup | LRU cache (100 entries, 25MB) checked on each read; returns `"file_unchanged"` stub if mtime matches | Adopt with disk-persistence for K8s |
-| "Must read first" guard | Edit fails if file hasn't been read in current session | Adopt — prevents blind edits |
-| Edit response | Minimal: `"The file has been updated successfully."` — NO verification context | Diverge — we add context for non-Claude models |
-| Post-compaction restore | Re-inject 5 most recent files as attachments after compaction | Future consideration |
-| Cache key design | `offset: undefined` on Edit/Write entries distinguishes them from Read entries; dedup only fires on Read-sourced entries | Adopt this pattern |
-
-Key insight from their telemetry: *"~18% of Read calls are same-file collisions (up to 2.64% of fleet cache_creation)"* — confirming the problem exists at scale.
+| Mechanism | Astonish requirement |
+|-----------|---------------------|
+| Line-range reads | 1-indexed `offset` plus line-count `limit` |
+| Numbered output | Stable line numbers for precise follow-up edits |
+| Mtime dedup | Persist bounded read metadata inside the sandbox for per-call processes |
+| Read-before-edit guard | Reject blind edits until the target has been read |
+| Edit response | Include compact verification context for deletions and replacements |
+| Compaction recovery | Allow fresh reads when prior content is no longer in context |
+| Cache provenance | Deduplicate only read-sourced entries, never mutation entries |
 
 ---
 
@@ -101,7 +99,7 @@ After `os.WriteFile` succeeds:
 
 #### Impact
 
-Eliminates the "did my edit work?" re-read pattern and makes deletions/replacements obvious (same shape as OpenCode / Grok Build diffs). Estimated: **~50% reduction** in post-edit reads.
+Eliminates the "did my edit work?" re-read pattern and makes deletions/replacements obvious. Estimated: **~50% reduction** in post-edit reads.
 
 ### Layer 1b: `write_file` Auto-Verify Response
 
@@ -152,7 +150,7 @@ type ReadFileResult struct {
 }
 ```
 
-Semantics (matching OpenClaude's proven interface):
+Semantics:
 - `offset`: 1-indexed start line (default: 1)
 - `limit`: number of lines to return (default: all remaining)
 
@@ -217,7 +215,7 @@ Cache key: `"{path}:{offset}:{limit}"` (where 0 means "not specified").
 - `mtime_ns`: file modification time at the moment of the read (nanosecond precision from `os.Stat`)
 - `total_lines`: total line count at time of read
 - `offset`, `limit`: the range that was read
-- `source`: `"read"` for entries created by `read_file`, `"edit"` or `"write"` for entries created by mutations (following OpenClaude's `offset: undefined` pattern — dedup only fires on `source: "read"` entries)
+- `source`: `"read"` for entries created by `read_file`, `"edit"` or `"write"` for entries created by mutations (dedup only fires on `source: "read"` entries)
 
 #### Flow
 
@@ -280,7 +278,7 @@ Before `edit_file` proceeds, it checks the cache for a `source: "read"` entry fo
 }
 ```
 
-This prevents hallucinated edits where the LLM guesses file content without reading it. After a successful read, the cache entry exists and subsequent edits proceed normally. This matches OpenClaude's proven pattern.
+This prevents hallucinated edits where the LLM guesses file content without reading it. After a successful read, the cache entry exists and subsequent edits proceed normally.
 
 #### The `force` Parameter
 
@@ -437,7 +435,6 @@ Layers 1 and 2 are independent and can be implemented in parallel. Layer 3 depen
 ## References
 
 - Fleet session `8bf63fbf` analysis (issue #77, "Show existing positions in Options Chain")
-- OpenClaude (`/root/openclaude`) — `FileReadTool.ts`, `FileEditTool.ts`, `fileStateCache.ts`, `readFileInRange.ts`
 - ADK tool execution: `google.golang.org/adk@v0.3.0/internal/llminternal/base_flow.go`
 - In-container tool dispatch: `pkg/tools/internal.go:ExecuteTool()`
 - Container node server: `cmd/astonish/node.go`

@@ -432,8 +432,8 @@ func resolveField(resolver CredentialResolver, name, field, fallback string) str
 			return cred.Password
 		}
 	case "token":
-		// For OAuth auth-code and Keystone, get a fresh (possibly refreshed) token
-		if cred.Type == CredOAuthAuthCode {
+		// OAuth and Keystone tokens may need refreshing before substitution.
+		if cred.Type == CredOAuthAuthCode || cred.Type == CredOAuthClientCreds {
 			_, headerValue, err := resolver.Resolve(name)
 			if err == nil {
 				// Extract token from "Bearer <token>"

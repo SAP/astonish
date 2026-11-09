@@ -53,7 +53,12 @@ func (ms *personalMemoryStore) hybridSearch(ctx context.Context, query string, m
 	return ms.SearchPrepared(ctx, prepared, maxResults, minScore, category)
 }
 
-func (ms *personalMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+func (ms *personalMemoryStore) SearchPrepared(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) (results []store.MemorySearchResult, err error) {
+	defer func() {
+		if err == nil {
+			err = ms.hydrateMemoryAttribution(ctx, results)
+		}
+	}()
 	if query.SemanticQuery != "" && len(query.Embedding) == 0 {
 		return nil, fmt.Errorf("semantic query requires embedding")
 	}
@@ -238,7 +243,7 @@ func (ms *personalMemoryStore) sqliteHybridSearch(ctx context.Context, query str
 		}
 		prepared.Embedding = embedding
 	}
-	return ms.sqlitePreparedSearch(ctx, prepared, maxResults, minScore, category)
+	return ms.SearchPrepared(ctx, prepared, maxResults, minScore, category)
 }
 
 func (ms *personalMemoryStore) sqlitePreparedSearch(ctx context.Context, query store.PreparedMemoryQuery, maxResults int, minScore float64, category string) ([]store.MemorySearchResult, error) {
@@ -428,6 +433,11 @@ func (ms *personalMemoryStore) loadResultsByIDs(ctx context.Context, scored []sc
 }
 
 func (ms *personalMemoryStore) Add(ctx context.Context, entry store.MemoryEntry) error {
+	metadata, err := prepareMemoryAttribution(ctx, personalBotDB{client: ms.client}, entry)
+	if err != nil {
+		return err
+	}
+	entry.Metadata = metadata
 	create := ms.client.Memory.Create().
 		SetChunkText(entry.Content)
 
@@ -639,10 +649,11 @@ func (ms *personalMemoryStore) Close() error {
 
 func personalMemoryToSearchResult(e *personalent.Memory) store.MemorySearchResult {
 	r := store.MemorySearchResult{
-		ID:        e.ID.String(),
-		Snippet:   e.ChunkText,
-		Scope:     "personal",
-		CreatedAt: e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		Attribution: memoryAttributionResult(e.Metadata),
+		ID:          e.ID.String(),
+		Snippet:     e.ChunkText,
+		Scope:       "personal",
+		CreatedAt:   e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 	if e.Category != nil {
 		r.Category = *e.Category

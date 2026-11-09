@@ -161,6 +161,10 @@ type Config struct {
 	// "astonish-uppers".
 	UppersPVCName string
 
+	// HomesPVCName opts in to retained Bot homes on an independent RWX claim.
+	// Empty disables retained homes; ordinary sessions are unchanged.
+	HomesPVCName string
+
 	// SandboxImage is the container image used for sandbox pods. It
 	// MUST ship the astonish-sandbox-entrypoint binary and the node
 	// runtime. Defaults to
@@ -289,6 +293,9 @@ func New(cfg Config) (*K8sBackend, error) {
 		return nil, errors.New("sandbox/k8s: Sessions registry is required")
 	}
 	cfg.applyDefaults()
+	if err := validateHomesConfig(cfg); err != nil {
+		return nil, err
+	}
 	return &K8sBackend{
 		cfg:                 cfg,
 		client:              cfg.Client,
@@ -331,6 +338,7 @@ func init() {
 			SandboxImage:          fc.K8s.SandboxImage,
 			LayersPVCName:         fc.K8s.LayersPVCName,
 			UppersPVCName:         fc.K8s.UppersPVCName,
+			HomesPVCName:          fc.K8s.HomesPVCName,
 			// Phase F: portable overlay knobs.
 			OverlayMode:        OverlayMode(fc.K8s.OverlayMode),
 			Privileged:         fc.K8s.PrivilegedPods,

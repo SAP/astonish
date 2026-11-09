@@ -3,6 +3,12 @@
 // events into transcript state; it never talks to ADK or HTTP directly.
 package events
 
+import "github.com/SAP/astonish/pkg/store"
+
+const KindBotOperation Kind = "bot_operation"
+const KindBotRunState Kind = "bot_run_state"
+const KindBotReport Kind = "bot_report"
+
 // Kind identifies a chat event. Values mirror Studio SSE types where possible
 // so the remote backend can map 1:1 and soft-degrade unknown kinds.
 type Kind string
@@ -99,6 +105,10 @@ type DelegationTask struct {
 
 // Event is one unit of chat progress. Fields are optional by Kind.
 type Event struct {
+	InvocationID             string // canonical publication identity for KindBotReport
+	EventID                  string // stable persisted publication row
+	BotOperation             *store.BotOperationView
+	BotRunState              *store.BotRunState
 	DelegationBatchID        string
 	DelegationTaskID         string
 	DelegationChildSessionID string

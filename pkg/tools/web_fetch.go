@@ -45,7 +45,13 @@ type WebFetchResult struct {
 }
 
 // WebFetch fetches a URL and extracts readable content from it.
-func WebFetch(_ tool.Context, args WebFetchArgs) (WebFetchResult, error) {
+func WebFetch(ctx tool.Context, args WebFetchArgs) (WebFetchResult, error) {
+	var policy *RoutineReadPolicy
+	if ctx != nil {
+		if p, ok := ctx.Value(routineReadKey{}).(RoutineReadPolicy); ok {
+			policy = &p
+		}
+	}
 	// Validate URL
 	if args.URL == "" {
 		return WebFetchResult{}, fmt.Errorf("url is required")
@@ -61,8 +67,10 @@ func WebFetch(_ tool.Context, args WebFetchArgs) (WebFetchResult, error) {
 	}
 
 	// SSRF protection: block private/loopback IPs
-	if err := checkSSRF(parsedURL.Hostname()); err != nil {
-		return WebFetchResult{}, err
+	if policy == nil {
+		if err := checkSSRF(parsedURL.Hostname()); err != nil {
+			return WebFetchResult{}, err
+		}
 	}
 
 	// Defaults
@@ -79,8 +87,18 @@ func WebFetch(_ tool.Context, args WebFetchArgs) (WebFetchResult, error) {
 		maxChars = webFetchDefaultMaxChars
 	}
 
-	// Fetch the URL
-	body, finalURL, contentType, statusCode, err := fetchURL(args.URL)
+	// Fetch through the constrained transport when composed, but preserve the
+	// ordinary extraction, limits and untrusted-content result contract.
+	var body, finalURL, contentType string
+	var statusCode int
+	truncated := false
+	if policy != nil {
+		var r HttpRequestResult
+		r, err = routineReadRequest(ctx, HttpRequestArgs{URL: args.URL, MaxBytes: webFetchMaxResponseBytes}, *policy)
+		body, finalURL, contentType, statusCode, truncated = r.Body, r.FinalURL, r.ContentType, r.StatusCode, r.Truncated
+	} else {
+		body, finalURL, contentType, statusCode, err = fetchURL(args.URL)
+	}
 	if err != nil {
 		return WebFetchResult{}, fmt.Errorf("fetch failed: %w", err)
 	}
@@ -108,7 +126,6 @@ func WebFetch(_ tool.Context, args WebFetchArgs) (WebFetchResult, error) {
 	}
 
 	// Truncate
-	truncated := false
 	if len(content) > maxChars {
 		content = content[:maxChars]
 		content += "\n\n[Content truncated. Original length exceeded the limit.]"

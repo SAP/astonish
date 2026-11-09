@@ -96,11 +96,18 @@ data:
         sandbox_image: {{ include "astonish.sandbox.image" . | quote }}
         layers_pvc_name: {{ .Values.sandbox.storage.layers.pvcName | quote }}
         uppers_pvc_name: {{ .Values.sandbox.storage.uppers.pvcName | quote }}
+        {{- if .Values.sandbox.storage.homes.enabled }}
+        homes_pvc_name: {{ default .Values.sandbox.storage.homes.pvcName .Values.sandbox.storage.homes.existingClaim | quote }}
+        {{- end }}
       {{- end }}
       {{- if eq .Values.sandbox.backend "openshell" }}
       openshell:
         gateway_addr: {{ include "astonish.openshell.gatewayAddr" . | quote }}
         gateway_tls: false
+        {{- if .Values.sandbox.openshell.botHomes.enabled }}
+        bot_home_mounts_enabled: true
+        bot_home_claim_name: {{ default .Values.sandbox.openshell.botHomes.pvcName .Values.sandbox.openshell.botHomes.existingClaim | quote }}
+        {{- end }}
         sandbox_image: {{ printf "%s:%s" .Values.sandbox.openshell.image.repository .Values.sandbox.openshell.image.tag | quote }}
         {{- if .Values.sandbox.openshell.registry.url }}
         registry:

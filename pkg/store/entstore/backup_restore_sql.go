@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/backup"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 func restoreLogicalEntries(ctx context.Context, db *sql.DB, dialect Dialect, schema string, targetScope backup.Scope, files map[string][]byte, entries []backup.Entry, opts PlatformRestoreOptions, result *backup.RestoreResult) error {
@@ -69,6 +72,9 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 			row["status"] = "paused"
 		}
 		row = remapRestoreRow(entry.Scope, targetScope, entry.Entity, row, opts)
+		if err := quiesceRestoredBotRow(entry.Entity, row); err != nil {
+			return 0, fmt.Errorf("quiesce %s record %s: %w", entry.Entity, record.ID, err)
+		}
 		if err := insertLogicalRow(ctx, tx, dialect, schema, entry.Entity, row); err != nil {
 			return 0, fmt.Errorf("insert %s record %s: %w", entry.Entity, record.ID, err)
 		}
@@ -78,6 +84,164 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 		return 0, err
 	}
 	return count, nil
+}
+
+// Restoring a control-plane archive is not consent to resume execution. These
+// rules are unconditional, including --include-transient/--enable-scheduled-jobs.
+// Both dialects apply them inside the scope import transaction.
+func quiesceRestoredBotRow(table string, row map[string]any) error {
+	const reason = "backup restore: held for reconciliation; external effects and physical cleanup are unverified"
+	switch table {
+	case "bots":
+		if err := advanceRestoredBotCounter(row, "fence"); err != nil {
+			return err
+		}
+		row["lease_expires_at"] = nil
+		row["cleanup_complete"] = false
+		// Keep active_run_id as a teardown barrier: import cannot prove that the
+		// source deployment's container has stopped or that its home was recovered.
+		if store.BotStatus(fmt.Sprint(row["status"])) == store.BotActive {
+			row["status"] = string(store.BotPaused)
+			if err := advanceRestoredBotCounter(row, "revision"); err != nil {
+				return err
+			}
+		}
+		data, err := restoredBotDocument(row["data"])
+		if err != nil {
+			return err
+		}
+		data["restore_reconciliation_required"] = true
+		row["data"] = data
+	case "bot_runs":
+		if err := advanceRestoredBotCounter(row, "fence"); err != nil {
+			return err
+		}
+		row["worker_id"], row["lease_expires_at"] = "", nil
+		status := store.RunStatus(fmt.Sprint(row["status"]))
+		switch status {
+		case store.RunQueued, store.RunRunning, store.RunWaitingApproval:
+			status = store.RunInterrupted
+		case store.RunInterrupted, store.RunSucceeded, store.RunPartial, store.RunFailed, store.RunSkipped, store.RunCancelled:
+		default:
+			return fmt.Errorf("unknown Bot run status %q", status)
+		}
+		row["status"] = string(status)
+		data, save, err := restoredBotStoredDocument(row["data"])
+		if err != nil {
+			return err
+		}
+		run, err := restoredBotDocument(data["Run"])
+		if err != nil {
+			return err
+		}
+		run["status"] = string(status)
+		run["lease"] = map[string]any{"bot_id": row["bot_id"], "run_id": row["id"], "fence": row["fence"], "worker_id": "", "expires_at": time.Time{}.UTC().Format(time.RFC3339Nano)}
+		if status == store.RunInterrupted {
+			report, err := restoredBotDocument(run["report"])
+			if err != nil {
+				return err
+			}
+			unverified, _ := report["unverified"].([]any)
+			report["unverified"] = append(unverified, reason)
+			run["report"] = report
+		}
+		data["Run"] = run
+		row["data"], err = save()
+		if err != nil {
+			return err
+		}
+	case "bot_approvals":
+		status := store.ApprovalStatus(fmt.Sprint(row["status"]))
+		if status == store.ApprovalPending || status == store.ApprovalApproved {
+			status = store.ApprovalRevoked
+		}
+		data, save, err := restoredBotStoredDocument(row["data"])
+		if err != nil {
+			return err
+		}
+		row["status"], data["status"] = string(status), string(status)
+		row["data"], err = save()
+		if err != nil {
+			return err
+		}
+	case "bot_outbox":
+		if err := advanceRestoredBotCounter(row, "fence"); err != nil {
+			return err
+		}
+		row["worker_id"], row["lease_expires_at"] = "", nil
+		if row["delivered_at"] == nil {
+			// Preserve activity, payload, deduplication keys and receipts. Do not
+			// invent a delivered receipt or erase uncertain dispatch/notify intents.
+			row["available_at"] = "9999-12-31T23:59:59Z"
+			row["last_error"] = reason
+		}
+	case "scheduled_jobs":
+		if fmt.Sprint(row["mode"]) == "bot_trigger" {
+			row["status"], row["next_run_at"] = "paused", nil
+		}
+	}
+	return nil
+}
+
+// restoredBotStoredDocument preserves the precision-protecting bot_document
+// envelope used by botJSONMap. Only the returned document may be edited; save
+// writes it back without exposing counters to Ent's float64 JSON-map decoding.
+func restoredBotStoredDocument(value any) (map[string]any, func() (map[string]any, error), error) {
+	outer, err := restoredBotDocument(value)
+	if err != nil {
+		return nil, nil, err
+	}
+	encoded, wrapped := outer["bot_document"]
+	if !wrapped {
+		return outer, func() (map[string]any, error) { return outer, nil }, nil
+	}
+	text, ok := encoded.(string)
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid bot_document envelope")
+	}
+	doc, err := restoredBotDocument(text)
+	if err != nil {
+		return nil, nil, err
+	}
+	return doc, func() (map[string]any, error) {
+		encoded, err := json.Marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		outer["bot_document"] = string(encoded)
+		return outer, nil
+	}, nil
+}
+
+// JSON columns are text in SQLite exports and objects in PostgreSQL exports.
+// Decode with UseNumber so counters and evidence are not rounded through float64.
+func restoredBotDocument(value any) (map[string]any, error) {
+	if doc, ok := value.(map[string]any); ok && doc != nil {
+		return doc, nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("missing Bot JSON object")
+	}
+	var doc map[string]any
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("null Bot JSON object")
+	}
+	return doc, nil
+}
+
+func advanceRestoredBotCounter(row map[string]any, key string) error {
+	value, err := strconv.ParseInt(fmt.Sprint(row[key]), 10, 64)
+	if err != nil || value < 0 || value == 1<<63-1 {
+		return fmt.Errorf("invalid Bot %s counter", key)
+	}
+	row[key] = value + 1
+	return nil
 }
 
 func insertLogicalRow(ctx context.Context, tx *sql.Tx, dialect Dialect, schema, table string, row map[string]any) error {

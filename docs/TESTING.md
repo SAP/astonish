@@ -4,6 +4,31 @@ A comprehensive guide to Astonish's test suite — what exists, why it exists, a
 
 ---
 
+## Persisted Bot intake browser acceptance
+
+Build the SPA with `cd web && npm run build`, then from the repository root run:
+
+```bash
+ASTONISH_BOT_BROWSER_ACCEPTANCE=1 go test ./pkg/api \
+  -run '^(TestBotWorkspaceBrowserAcceptance|TestBotUnfinishedIntakeHTTPAcceptance)$' \
+  -count=1 -timeout=8m
+```
+
+Set `ASTONISH_BOT_BROWSER_PATH` if Chromium is not auto-discovered. This opt-in
+fails rather than skips when the built SPA or browser is missing. The browser
+uses real scoped Bot HTTP handlers and temporary SQLite, with controlled auth
+and readiness (no external provider or daemon worker).
+
+The workspace acceptance enters incomplete blank/persona and Chat-promotion
+forms, presses Escape, checks the persisted owner/scope/content via HTTP,
+reloads, and verifies Resume intake restores exact values. Cancel alone retains
+the saved copy; explicit Discard removes it, remains absent after another reload,
+and leaves the Bot list unchanged. Browser local storage contains only the
+scoped ID/scope pointer. Existing reviewed creation, promotion, exact approval,
+source-Chat preservation, and workspace coverage remain in the same sequence.
+The companion HTTP acceptance covers cross-owner/scope access, mutation races,
+and reopen persistence; these are not claimed as browser account-switch tests.
+
 ## Quick Reference
 
 ```bash

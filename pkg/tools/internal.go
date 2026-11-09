@@ -3,6 +3,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +20,8 @@ import (
 	"github.com/SAP/astonish/pkg/codeintel"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/email"
+	astonishmcp "github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/pathscope"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -359,10 +363,11 @@ type LoadFileArgs struct {
 }
 
 type LoadFileResult struct {
-	Path       string `json:"path,omitempty"`
-	Title      string `json:"title,omitempty"`
-	SizeBytes  int64  `json:"size_bytes,omitempty"`
-	TotalLines int    `json:"total_lines"`
+	InspectedSHA256 string `json:"inspected_sha256,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Title           string `json:"title,omitempty"`
+	SizeBytes       int64  `json:"size_bytes,omitempty"`
+	TotalLines      int    `json:"total_lines"`
 }
 
 // LoadFile publishes a file to the user-facing Files section WITHOUT returning
@@ -391,6 +396,8 @@ func LoadFile(ctx tool.Context, args LoadFileArgs) (LoadFileResult, error) {
 		return LoadFileResult{}, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
+	digest := sha256.New()
+	var bytesRead int64
 	buffer := make([]byte, 32*1024)
 	totalLines := 0
 	endsWithNewline := false
@@ -398,6 +405,8 @@ func LoadFile(ctx tool.Context, args LoadFileArgs) (LoadFileResult, error) {
 		n, readErr := file.Read(buffer)
 		if n > 0 {
 			chunk := buffer[:n]
+			bytesRead += int64(n)
+			_, _ = digest.Write(chunk)
 			totalLines += bytes.Count(chunk, []byte{'\n'})
 			endsWithNewline = bytes.HasSuffix(chunk, []byte{'\n'})
 		}
@@ -408,14 +417,19 @@ func LoadFile(ctx tool.Context, args LoadFileArgs) (LoadFileResult, error) {
 			break
 		}
 	}
+	after, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(info, after) || after.Size() != bytesRead || info.Size() != bytesRead || !info.ModTime().Equal(after.ModTime()) {
+		return LoadFileResult{}, fmt.Errorf("file changed during inspection")
+	}
 	if info.Size() > 0 && !endsWithNewline {
 		totalLines++
 	}
 	return LoadFileResult{
-		Path:       args.Path,
-		Title:      strings.TrimSpace(args.Title),
-		SizeBytes:  info.Size(),
-		TotalLines: totalLines,
+		InspectedSHA256: hex.EncodeToString(digest.Sum(nil)),
+		Path:            args.Path,
+		Title:           strings.TrimSpace(args.Title),
+		SizeBytes:       info.Size(),
+		TotalLines:      totalLines,
 	}, nil
 }
 
@@ -427,6 +441,8 @@ type WriteFileArgs struct {
 }
 
 type WriteFileResult struct {
+	ContentChanged      *bool  `json:"content_changed,omitempty"`
+	ReadbackSHA256      string `json:"readback_sha256,omitempty"`
 	Message             string `json:"message"`
 	Path                string `json:"path,omitempty"`
 	Created             bool   `json:"created,omitempty"`
@@ -481,11 +497,13 @@ func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
 	// Capture pre-write content so overwrite can return a unified-style hunk.
 	var oldContent string
 	existed := false
+	prewriteKnown := true
 	if data, err := os.ReadFile(args.FilePath); err == nil {
 		existed = true
 		oldContent = string(data)
 	} else if !os.IsNotExist(err) {
-		// Permission or other read errors: still allow write, but treat as create for the hunk.
+		// Preserve write behavior, but do not attest a change without a baseline.
+		prewriteKnown = false
 		existed = false
 	}
 
@@ -500,6 +518,14 @@ func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
 	if err := os.WriteFile(args.FilePath, []byte(finalContent), 0644); err != nil {
 		return WriteFileResult{}, fmt.Errorf("failed to write to file %s: %w", args.FilePath, err)
 	}
+
+	// Read back the actual node filesystem, not the supplied argument. This is
+	// part of the same approved write operation, never a second tool dispatch.
+	observed, verifyErr := os.ReadFile(args.FilePath)
+	if verifyErr != nil || !bytes.Equal(observed, []byte(finalContent)) {
+		return WriteFileResult{}, fmt.Errorf("write occurred but content readback could not be verified: %v", verifyErr)
+	}
+	digest := sha256.Sum256(observed)
 
 	// Invalidate cache entries for this path and update with source="write"
 	cache := LoadFileReadCache()
@@ -533,7 +559,14 @@ func WriteFile(ctx tool.Context, args WriteFileArgs) (WriteFileResult, error) {
 	if created {
 		msg = fmt.Sprintf("Created %s", args.FilePath)
 	}
+	var contentChanged *bool
+	if prewriteKnown {
+		changed := !existed || oldContent != finalContent
+		contentChanged = &changed
+	}
 	return WriteFileResult{
+		ContentChanged:      contentChanged,
+		ReadbackSHA256:      hex.EncodeToString(digest[:]),
 		Message:             msg,
 		Path:                args.FilePath,
 		Created:             created,
@@ -865,6 +898,16 @@ func FilterJson(ctx tool.Context, args FilterJsonArgs) (FilterJsonResult, error)
 // --- Get Pull Request Files Tool ---
 
 func GetInternalTools() ([]tool.Tool, error) {
+	return getInternalTools(true)
+}
+
+// GetIsolatedInternalTools constructs the same tool schemas without reading or
+// mutating daemon-global configuration. Callers must sandbox effectful tools.
+func GetIsolatedInternalTools() ([]tool.Tool, error) {
+	return getInternalTools(false)
+}
+
+func getInternalTools(loadHostConfig bool) ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
 		Description: "Read a file's contents with line numbers into the model's context for inspection. Large files are auto-capped to a bounded window when no limit is given — page with offset/limit, or (preferred) use grep_search/code_definition to jump straight to the relevant lines. To publish a file to the user's Files section WITHOUT reading it into context, use load_file instead.",
@@ -947,17 +990,19 @@ func GetInternalTools() ([]tool.Tool, error) {
 	}
 
 	codeIntelEnabled := true
-	if appCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && appCfg != nil {
-		codeIntelEnabled = appCfg.CodeIntel.IsEnabled()
-		if appCfg.CodeIntel.LibraryPath != "" {
-			// Prefer configured path over the hard-coded default; the loader
-			// in pkg/codeintel reads ASTONISH_TREESITTER_LIB.
-			_ = os.Setenv("ASTONISH_TREESITTER_LIB", appCfg.CodeIntel.LibraryPath)
-		}
-		// Honor security.allow_private_networks for personal/CLI mode (no sandbox).
-		// In sandbox mode this is set unconditionally by the node process.
-		if appCfg.Security.IsPrivateNetworkAllowed() {
-			SetAllowPrivateNetworks(true)
+	if loadHostConfig {
+		if appCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && appCfg != nil {
+			codeIntelEnabled = appCfg.CodeIntel.IsEnabled()
+			if appCfg.CodeIntel.LibraryPath != "" {
+				// Prefer configured path over the hard-coded default; the loader
+				// in pkg/codeintel reads ASTONISH_TREESITTER_LIB.
+				_ = os.Setenv("ASTONISH_TREESITTER_LIB", appCfg.CodeIntel.LibraryPath)
+			}
+			// Honor security.allow_private_networks for personal/CLI mode (no sandbox).
+			// In sandbox mode this is set unconditionally by the node process.
+			if appCfg.Security.IsPrivateNetworkAllowed() {
+				SetAllowPrivateNetworks(true)
+			}
 		}
 	}
 
@@ -1188,6 +1233,20 @@ func ExecuteTool(ctx context.Context, name string, args map[string]interface{}, 
 			return nil, fmt.Errorf("invalid args for process_kill: %w", err)
 		}
 		return processKill(nil, toolArgs)
+
+	case email.NodeOperation:
+		var request email.NodeRequest
+		if err := toStruct(args, &request); err != nil {
+			return nil, err
+		}
+		return nodeEmail(ctx, request)
+
+	case astonishmcp.NodeOperation:
+		var request astonishmcp.NodeRequest
+		if err := toStruct(args, &request); err != nil {
+			return nil, err
+		}
+		return nodeMCP(ctx, request)
 
 	case "http_request":
 		var toolArgs HttpRequestArgs

@@ -16,6 +16,8 @@ const (
 	FieldID = "id"
 	// FieldChatSessionID holds the string denoting the chat_session_id field in the database.
 	FieldChatSessionID = "chat_session_id"
+	// FieldBotHomeBinding holds the string denoting the bot_home_binding field in the database.
+	FieldBotHomeBinding = "bot_home_binding"
 	// FieldBackend holds the string denoting the backend field in the database.
 	FieldBackend = "backend"
 	// FieldContainerName holds the string denoting the container_name field in the database.
@@ -52,6 +54,7 @@ const (
 var Columns = []string{
 	FieldID,
 	FieldChatSessionID,
+	FieldBotHomeBinding,
 	FieldBackend,
 	FieldContainerName,
 	FieldTemplateID,

@@ -4,6 +4,58 @@
 
 Astonish supports 12+ LLM providers through a factory pattern that creates ADK-compatible `model.LLM` instances. Each provider adapter handles the specifics of API authentication, request formatting, streaming, and error mapping, while presenting a uniform interface to the rest of the system.
 
+## Startup defaults and scope
+
+`api.EffectiveAppConfigFromContext` and the HTTP helper share one resolution path: explicitly supplied platform → org → team → personal defaults cascade even when no team store exists. Empty fields inherit. Host YAML providers/defaults are a fallback only for trusted file-backed single-tenant deployments; SQLite and PostgreSQL are both multi-user and must not implicitly inherit host credentials when scoped stores are absent. An empty platform installation has no deployable default and Studio pre-warm defers LLM binding; this is not a reason to block serving configuration/auth endpoints. Config resolution never persists its effective result.
+
+## Skill-validation provider isolation
+
+Platform skill validation resolves the request's effective provider cascade even when the global ChatManager is warm. A global/operator model cannot substitute for a missing scoped provider: validation returns HTTP 503 without persisting status or consuming its success cooldown. Non-platform requests retain warm-model reuse. Missing-provider tests isolate host configuration; SQLite/PostgreSQL cases additionally exercise host-only defaults and a warm global model.
+
+## Bot per-run budget wrapper
+
+`NewBudgetLLM(inner, budget, BudgetLLMOptions)` is a per-run decorator, never a pooled provider mutation. It reserves conservative input/output/cost before dispatch, clones request output limits and settles cumulative usage maxima (including thought/tool-prompt tokens), not the sum of repeated stream metadata. Missing/incomplete usage, cancellation or interruption retains the conservative reservation. Providers unable to enforce a reduced output allowance fail before dispatch. Parent, delegate, flow and compaction calls share the run ledger; approval continuation restores committed totals, not a new allowance.
+
+Unknown price is not zero cost. Production Bot readiness rejects `MaxModelCostMicros` until a conservative price oracle is supplied. Hidden billable retries beneath the decorator cannot be individually metered; billable retries must re-enter it. Controlled provider tests establish wrapper behavior, not external billing accuracy or every provider's output-limit enforcement. See [Phase 3 boundaries](bots.md).
+
+The default input estimator (`pkg/provider/budget_input.go`) starts with the full request JSON byte bound. After a successfully settled, completely consumed response with non-partial positive prompt usage, that **per-decorator** observation may price the identical prompt prefix again at its full observed input count. This is not a cached-token discount or a learned bytes/token ratio. SHA-256 snapshots require identical model name, request model, serialized non-history configuration (including system instructions and model-facing tool declarations), and every complete prior history message. Appended messages are charged at JSON byte length plus 64 tokens per message and 256 tokens of framing headroom. Changed/compacted history or configuration falls back to the byte bound; explicit `EstimateInput` callbacks remain authoritative and do not learn. One immutable observation is retained behind a mutex, with no prompt text copied into long-lived state. Runtime tool implementations excluded by ADK JSON are not model input.
+
+This assumes the same effective provider's prompt accounting is stable for an identical serialized prefix; it does not establish tokenizer-exact bounds for arbitrary provider-side transformations or hidden same-name model changes. Remote/cached/media requests still require a model-aware estimator, and cold or changed large prompts can still conservatively fail admission. Finite run/mandate token limits, output clamping, actual-usage settlement, unknown-cost rejection and overrun blocking are unchanged. Tests cover the observed 80,920 reservation → 33,018 settlement shape followed by an append-only continuation under the same 100,000-token limit, plus invalidation and concurrent accounting. This is controlled regression evidence, not a live schedule acceptance claim.
+
+## Serial generation for Bot checkpoints
+
+`botApprovalCaptureModel` clones each parent-turn request and sets the typed
+`common.ParallelToolCallsOption` boolean to `false` using ADK's existing
+`GenerateContentConfig.HTTPOptions.ExtraBody` extension carrier. ADK v1.9.0 /
+GenAI v1.76.0 has no native parallel-call configuration field. The shared OpenAI
+adapter explicitly reads this one boolean and emits `parallel_tool_calls: false`
+on both Chat Completions and Responses requests when function tools are present,
+including LiteLLM and positively detected compatible Responses routes. It does
+not enable arbitrary ExtraBody forwarding. Absent values retain provider defaults;
+malformed explicit values fail before HTTP dispatch. Explicit `true` remains
+available to non-checkpoint callers, but checkpoint capture overrides it locally.
+Tool-less requests omit the parameter.
+
+This is per request, not a pooled model setting. Budget clamping, swappable models
+and tool canonicalization preserve it. Ordinary Chat, auxiliary Bot calls and
+provider factory/cache identities are unchanged. Native Google strips the
+OpenAI-only extension before GenAI dispatch to avoid an unsupported native field;
+native Anthropic/Bedrock/Vertex converters do not forward it. This change does
+**not** establish serial-generation support for those native protocols. All still
+retain the checkpoint's complete-response batch rejection before execution.
+OpenAI-compatible servers that reject the option fail normally; there is no retry
+that removes the constraint. Servers that ignore it cannot bypass batch rejection.
+
+`TestBotApprovalCaptureSerialProviderWire` exercises actual serialized requests
+through capture → budget → swappable model → OpenAI/LiteLLM/compatible adapters →
+a loopback HTTP fixture, including compatible Responses discovery. It asserts
+single-action identity, rejects malicious multi-action replies with no forwarded
+response, proves pending checkpoints make no further request, and reuses the same
+provider with ordinary Chat to prove no setting leak. `TestParallelToolCallsWire`
+covers streaming/non-streaming, both endpoints, absent/true/false/malformed options
+and tool-less requests. These are controlled tests, not external provider or live
+employee-journey acceptance.
+
 ## Key Design Decisions
 
 ### Why a Factory Pattern

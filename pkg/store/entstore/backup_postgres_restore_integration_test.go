@@ -5,6 +5,7 @@ package entstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/pgutil"
 )
@@ -166,6 +168,175 @@ func TestIntegrationPostgresBackupRestoreLogical(t *testing.T) {
 	assertPostgresTableContains(t, targetOrgDB, teamSchemaName("ops"), "flows", "name", "backup-flow")
 }
 
+// TestIntegrationBotPostgresBackupRecovery is an explicit acceptance gate, not
+// an optional smoke check. It requires a disposable admin-capable test DSN.
+func TestIntegrationBotPostgresBackupRecovery(t *testing.T) {
+	if os.Getenv("ASTONISH_TEST_DSN") == "" {
+		t.Fatal("ASTONISH_TEST_DSN is required: use an isolated admin-capable PostgreSQL test instance, never production")
+	}
+	ctx := context.Background()
+	source := setupPostgresBackupRestoreStore(t, "bots_source")
+	owner, orgID := uuid.New(), uuid.NewString()
+	if err := source.Users().Create(ctx, &store.User{ID: owner.String(), Email: "bot-recovery@example.test", DisplayName: "Bot owner", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Organizations().Create(ctx, &store.Organization{ID: orgID, Name: "Bot recovery", Slug: "restorepg", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Organizations().AddMember(ctx, owner.String(), orgID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.ProvisionOrg(ctx, orgID, "restorepg"); err != nil {
+		t.Fatal(err)
+	}
+	org, err := source.ForOrg("restorepg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := &store.Team{ID: uuid.NewString(), Name: "Ops", Slug: "ops", SchemaName: teamSchemaName("ops")}
+	if err := org.Teams().CreateTeam(ctx, team); err != nil {
+		t.Fatal(err)
+	}
+	if err := org.Teams().AddMember(ctx, &store.TeamMembership{UserID: owner.String(), TeamID: team.ID, Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := org.ProvisionTeam(ctx, "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if err := org.ProvisionPersonalSchema(ctx, owner.String()); err != nil {
+		t.Fatal(err)
+	}
+	principal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "restorepg", TeamSlug: "ops", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type fixture struct {
+		bot    *store.Bot
+		run    *store.BotRun
+		lease  store.BotLease
+		worker context.Context
+		schema string
+	}
+	fixtures := map[store.BotScope]fixture{}
+	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
+		var repo *botRepository
+		schema := teamSchemaName("ops")
+		if scope == store.BotScopeTeam {
+			repo = org.ForTeam("ops").Bots().(*teamBotStore).repository()
+		} else {
+			repo = org.ForUser(owner.String()).Bots().(*personalBotStore).repository()
+			schema = personalSchemaName(owner.String())
+		}
+		// Only readiness is injected. Draft/activation/admission/lease/approval
+		// writes use the real PostgreSQL repository and live router authorization.
+		repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
+		v := store.DefaultBotVersion()
+		v.Charter = "Preserve evidence without replaying effects"
+		b, err := repo.CreateDraft(principal, store.BotCreateRequest{Name: "Recovery", OwnerID: owner, Version: v, IdempotencyKey: "recovery"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err = repo.Activate(principal, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Reviewed test activation"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := repo.RequestRun(principal, store.BotRunRequest{BotID: b.ID, Version: 1, Trigger: store.TriggerManual, IdempotencyKey: "running", Instructions: "Observe only"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker := execution.WithBotRunIdentity(principal, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: 1, ActorID: owner.String(), OrgSlug: "restorepg", TeamSlug: "ops"})
+		lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "source-worker", ExpiresAt: time.Now().Add(4 * time.Minute)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, recipient := range []string{"pending", "approved"} {
+			action := execution.ActionDescriptor{Tool: "send", Effect: execution.EffectSend, Recipient: recipient, Arguments: []byte(`{"amount":9007199254740993}`)}
+			digest, err := action.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := repo.RequestApproval(worker, lease, store.BotApproval{BotID: b.ID, RunID: run.ID, Version: 1, Action: action, ActionDigest: digest, ExpiresAt: time.Now().Add(time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recipient == "approved" {
+				if _, err := repo.DecideApproval(principal, store.BotApprovalDecision{BotID: b.ID, ApprovalID: a.ID, ActorID: owner, ActionDigest: digest, Status: store.ApprovalApproved}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if _, err := repo.RequestRun(principal, store.BotRunRequest{BotID: b.ID, Version: 1, Trigger: store.TriggerManual, IdempotencyKey: "queued", Instructions: "Wait"}); err != nil {
+			t.Fatal(err)
+		}
+		fixtures[scope] = fixture{bot: b, run: run, lease: lease, worker: worker, schema: schema}
+	}
+	archive := filepath.Join(t.TempDir(), "bots.astonish-backup")
+	if err := source.ExportPlatformBackup(ctx, archive, PlatformBackupExportOptions{Backend: "postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	target := setupPostgresBackupRestoreStore(t, "bots_target")
+	if _, err := target.RestorePlatformBackup(ctx, archive, PlatformRestoreOptions{IncludeTransient: true, EnableScheduledJobs: true}); err != nil {
+		t.Fatal(err)
+	}
+	restoredOrg, err := target.ForOrg("restorepg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := target.openRestorePostgresDB("restorepg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for scope, f := range fixtures {
+		var repo store.BotStore = restoredOrg.ForTeam("ops").Bots()
+		var other store.BotStore = restoredOrg.ForUser(owner.String()).Bots()
+		if scope == store.BotScopePersonal {
+			repo, other = other, repo
+		}
+		b, err := repo.Get(principal, f.bot.ID)
+		if err != nil || b.Status != store.BotPaused {
+			t.Fatalf("restored Bot: %+v %v", b, err)
+		}
+		runs, err := repo.ListRuns(principal, b.ID, store.BotPage{})
+		if err != nil || len(runs) != 2 {
+			t.Fatalf("runs: %+v %v", runs, err)
+		}
+		for _, run := range runs {
+			if run.Status != store.RunInterrupted || run.Lease.WorkerID != "" || !run.Lease.ExpiresAt.IsZero() || len(run.Report.Unverified) == 0 {
+				t.Fatalf("unsafe run: %+v", run)
+			}
+		}
+		approvals, err := repo.ListApprovals(principal, b.ID, store.BotPage{})
+		if err != nil || len(approvals) != 2 {
+			t.Fatalf("approvals: %+v %v", approvals, err)
+		}
+		for _, a := range approvals {
+			digest, err := a.Action.Digest()
+			if err != nil || digest != a.ActionDigest || a.Status != store.ApprovalRevoked {
+				t.Fatalf("unsafe approval: %+v %v", a, err)
+			}
+		}
+		if _, err := repo.RenewLease(f.worker, f.lease, time.Now().Add(time.Minute)); !errors.Is(err, store.ErrBotConflict) {
+			t.Fatalf("source worker lease survived restore: %v", err)
+		}
+		if _, err := other.Get(principal, b.ID); !errors.Is(err, store.ErrBotNotFound) {
+			t.Fatalf("cross-scope leak: %v", err)
+		}
+		var eligible int
+		query := fmt.Sprintf(`SELECT COUNT(*) FROM %s.bot_outbox WHERE delivered_at IS NULL AND available_at <= now()`, quoteIdent(DialectPostgres, f.schema))
+		if err := db.QueryRowContext(ctx, query).Scan(&eligible); err != nil {
+			t.Fatal(err)
+		}
+		if eligible != 0 {
+			t.Fatal("restored outbox eligible for replay")
+		}
+		activity, err := repo.ListActivity(principal, b.ID, 0, 100)
+		if err != nil || len(activity) < 5 {
+			t.Fatalf("lost history: %+v %v", activity, err)
+		}
+	}
+}
+
 func setupPostgresBackupRestoreStore(t *testing.T, name string) *Store {
 	t.Helper()
 	baseDSN := os.Getenv("ASTONISH_TEST_DSN")
@@ -195,7 +366,7 @@ func setupPostgresBackupRestoreStore(t *testing.T, name string) *Store {
 	if err != nil {
 		t.Fatalf("NewPlatformServices error = %v", err)
 	}
-	t.Cleanup(func() { es.Close() })
+	t.Cleanup(func() { closePostgresFixtureStore(t, es) })
 	return es
 }
 
@@ -203,18 +374,24 @@ func dropPostgresBackupTestDB(t *testing.T, baseDSN, dbName string) {
 	t.Helper()
 	adminDSN, err := pgutil.ReplaceDSNDatabase(baseDSN, "postgres")
 	if err != nil {
+		t.Errorf("cleanup database %q: admin DSN: %v", dbName, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
+		t.Errorf("cleanup database %q: connect: %v", dbName, err)
 		return
 	}
 	defer conn.Close(ctx)
-	_, _ = conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, dbName)
+	if _, err := conn.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, dbName); err != nil {
+		t.Errorf("cleanup database %q: terminate: %v", dbName, err)
+	}
 	query := "DROP DATABASE IF EXISTS " + pgx.Identifier{dbName}.Sanitize()
-	_, _ = conn.Exec(ctx, query) //nolint:gosec // dbName is generated by this test and quoted as a PostgreSQL identifier.
+	if _, err := conn.Exec(ctx, query); err != nil { //nolint:gosec // Generated database name, quoted as a PostgreSQL identifier.
+		t.Errorf("cleanup database %q: drop: %v", dbName, err)
+	}
 }
 
 func orgDBNameForSuffix(suffix, orgSlug string) string {

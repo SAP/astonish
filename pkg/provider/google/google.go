@@ -63,7 +63,7 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			req.Config.ResponseMIMEType = ""
 		}
 	}
-	return p.model.GenerateContent(ctx, req, stream)
+	return p.model.GenerateContent(ctx, common.WithoutParallelToolCalls(req), stream)
 }
 
 // NewProvider creates a new Google GenAI provider.

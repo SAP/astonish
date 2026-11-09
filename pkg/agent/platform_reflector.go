@@ -39,10 +39,7 @@ func (r *PlatformReflector) merger() *MemoryMerger {
 // otherwise falls back to the reflector's default LLM. This ensures the
 // reflector uses the team's configured model in platform mode.
 func (r *PlatformReflector) effectiveLLM(ctx context.Context) model.LLM {
-	if override := LLMFromContext(ctx); override != nil {
-		return override
-	}
-	return r.LLM
+	return auxiliaryLLM(ctx, r.LLM)
 }
 
 // MemorySaveOrMergeFunc returns a store.MemorySaveOrMergeFunc that tools can use

@@ -1,0 +1,112 @@
+import { beforeEach, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import BotDraftDialog from '../BotDraftDialog'
+import * as api from '@/api/bots'
+import * as adaptive from '@/api/botAdaptive'
+import { sourceBackend } from './sourceBackend'
+vi.mock('@/api/bots', async original => ({ ...await original<typeof api>(), createBot: vi.fn(), botLifecycle: vi.fn() }))
+vi.mock('@/api/botAdaptive', () => ({ reviewAdaptiveJob: vi.fn(), convertAdaptiveJob: vi.fn() }))
+const source = '8bf773eb-5842-4e74-b3f3-9fb6513ca581'
+const preview: adaptive.BotAdaptiveReview = { source_job_id: source, updated_at: '2026-11-05T22:00:00.123456789Z', schedule: { cron: '0 9 * * *', timezone: 'Europe/Berlin' }, instructions: 'Check official releases' }
+let backend: ReturnType<typeof sourceBackend>
+beforeEach(() => {
+  vi.clearAllMocks(); localStorage.clear(); window.location.hash = '#/bots'
+  vi.mocked(adaptive.reviewAdaptiveJob).mockResolvedValue(preview)
+  backend = sourceBackend()
+})
+async function prepare() {
+  fireEvent.click(screen.getByRole('button', { name: 'Convert adaptive schedule' }))
+  fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Watcher' } })
+  fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
+  fireEvent.change(screen.getByLabelText('Adaptive job ID'), { target: { value: source } })
+  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch source preview' }))
+  await screen.findByText('Check official releases')
+}
+async function review() { fireEvent.click(screen.getByRole('button', { name: 'Review draft' })); await screen.findByRole('checkbox') }
+function save() { fireEvent.click(screen.getByRole('checkbox')); fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' })) }
+it('previews exact source, retains it on failure, retries identical revision and never activates', async () => {
+  backend.failDecision('Commit rolled back')
+  render(<BotDraftDialog inline open onClose={vi.fn()} />)
+  await prepare()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(screen.getByText(/0 9 \* \* \* · Europe\/Berlin/)).toBeInTheDocument()
+  expect(screen.getByText(/rollback retains the original unchanged/)).toBeInTheDocument()
+  expect(backend.decisions).toHaveLength(0)
+  await review()
+  expect(screen.getByRole('button', { name: 'Save reviewed draft' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+  expect(screen.getByLabelText('Adaptive job ID')).toHaveValue(source)
+  await review(); save()
+  expect(await screen.findByRole('alert')).toHaveTextContent('Commit rolled back')
+  expect(window.location.hash).toBe('#/bots')
+  expect(backend.proposals[0].request).toEqual({ mode: 'adaptive', source_id: source, name: 'Watcher', charter: 'Observe', carryover: { summary: '', memories: [], goals: [], artifacts: [] }, idempotency_key: expect.any(String) })
+  backend.failDecision('')
+  fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' }))
+  await waitFor(() => expect(backend.decisions).toHaveLength(2))
+  expect(backend.decisions[1]).toEqual(backend.decisions[0])
+  expect(backend.proposals).toHaveLength(1)
+  await waitFor(() => expect(window.location.hash).toContain('new'))
+  expect(api.createBot).not.toHaveBeenCalled(); expect(api.botLifecycle).not.toHaveBeenCalled()
+  expect(adaptive.convertAdaptiveJob).not.toHaveBeenCalled()
+})
+it('invalidates stale source review on conflict and requires fresh explicit consent', async () => {
+  backend.failDecision('conflict', 409)
+  render(<BotDraftDialog open onClose={vi.fn()} />)
+  await prepare(); await review(); save()
+  expect(await screen.findByRole('alert')).toHaveTextContent('Fetch a fresh source preview')
+  expect(screen.getByLabelText('Bot name')).toHaveValue('Watcher')
+  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch source preview' }))
+  await screen.findByText('Check official releases'); await review()
+  expect(screen.getByRole('checkbox')).not.toBeChecked()
+})
+it('saves adaptive source on Escape and restores without preview or consent', async () => {
+  const close = vi.fn()
+  const { unmount } = render(<BotDraftDialog inline open onClose={close} />)
+  await prepare(); await review(); fireEvent.click(screen.getByRole('checkbox'))
+  fireEvent.keyDown(screen.getByRole('region', { name: 'Create a Bot draft' }), { key: 'Escape' })
+  await waitFor(() => expect(close).toHaveBeenCalled())
+  const [id, stored] = [...backend.saved.entries()][0]
+  expect(stored.content).toMatchObject({ mode: 'adaptive', source_id: source, name: 'Watcher', charter: 'Observe' })
+  expect(stored.content).not.toHaveProperty('reviewed')
+  unmount()
+  render(<BotDraftDialog inline open resumeId={id} onClose={vi.fn()} />)
+  await waitFor(() => expect(screen.getByLabelText('Adaptive job ID')).toHaveValue(source))
+  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  expect(screen.queryByText('Check official releases')).not.toBeInTheDocument()
+  expect(backend.decisions).toHaveLength(0)
+  expect(api.createBot).not.toHaveBeenCalled(); expect(api.botLifecycle).not.toHaveBeenCalled()
+})
+it('renews request identity after edited content and explicitly reviews team conversion', async () => {
+  backend.failDecision('Retry')
+  render(<BotDraftDialog inline open scope="team" onClose={vi.fn()} />)
+  await prepare(); await review()
+  expect(screen.getByRole('checkbox')).toHaveAccessibleName(/for the team.*consent to pausing/)
+  save(); await screen.findByRole('alert')
+  expect(backend.decisions[0].reviewed_for_team).toBe(true)
+  expect(backend.proposals[0].scope).toBe('team')
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+  fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe new scope' } })
+  await review()
+  expect(screen.getByRole('checkbox')).not.toBeChecked()
+  save()
+  await waitFor(() => expect(backend.decisions).toHaveLength(2))
+  expect(backend.proposals[1].request.idempotency_key).not.toBe(backend.proposals[0].request.idempotency_key)
+  expect(api.botLifecycle).not.toHaveBeenCalled()
+})
+it('blocks conversion on lookup failure and invalidates preview after selecting another source', async () => {
+  vi.mocked(adaptive.reviewAdaptiveJob).mockRejectedValueOnce(new Error('Not found'))
+  render(<BotDraftDialog open onClose={vi.fn()} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Convert adaptive schedule' }))
+  fireEvent.change(screen.getByLabelText('Adaptive job ID'), { target: { value: source } })
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch source preview' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Source was not changed. Not found')
+  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Fetch source preview' }))
+  await screen.findByText('Check official releases')
+  fireEvent.change(screen.getByLabelText('Adaptive job ID'), { target: { value: 'another' } })
+  expect(screen.queryByText('Check official releases')).not.toBeInTheDocument()
+  expect(backend.proposals).toHaveLength(0)
+  expect(adaptive.convertAdaptiveJob).not.toHaveBeenCalled()
+})

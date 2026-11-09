@@ -667,6 +667,8 @@ fi
 `)
 	}
 
+	b.WriteString(botHomeMountScript)
+
 	b.WriteString(`# --- 3. Hand off to workload ------------------------------------------
 # ASTONISH_HANDOFF / ASTONISH_HANDOFF_ARGS allow the pod manifest to
 # override the PID-1 process after overlay composition WITHOUT

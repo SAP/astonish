@@ -25,6 +25,10 @@ func (Session) Fields() []ent.Field {
 		field.UUID("user_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+		field.UUID("bot_id", uuid.UUID{}).Optional().Nillable(),
+		field.UUID("bot_run_id", uuid.UUID{}).Optional().Nillable(),
+		field.Enum("purpose").Values("chat", "bot_home", "bot_run").Default("chat"),
+		field.Enum("retention").Values("standard", "bot").Default("standard"),
 		field.String("title").
 			Default(""),
 		field.Int("message_count").

@@ -41,9 +41,11 @@ const (
 // Store is the top-level unified store implementation.
 // It satisfies store.PlatformBackend.
 type Store struct {
-	dialect        Dialect
-	platformClient *platforment.Client
-	platformDB     *sql.DB
+	botActivationMu        sync.RWMutex
+	botActivationReadiness store.BotActivationReadiness
+	dialect                Dialect
+	platformClient         *platforment.Client
+	platformDB             *sql.DB
 
 	// Platform DSN for deriving org/team/personal connections.
 	platformDSN string

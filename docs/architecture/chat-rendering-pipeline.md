@@ -136,6 +136,10 @@ go test ./pkg/api -run 'TestChat(GenerationProgress|StreamDelivery)'
 
 Key cases are `TestChatGenerationProgressHTTP`, `TestChatGenerationProgressThoughtIsBoundedAndPrivate`, `TestChatStreamDeliveryOverflow`, `TestChatStreamDeliveryCompletionDuringReplay`, `TestChatStreamDeliveryHistoryCursor`, `TestChatStreamDeliveryLateSubscription`, `TestChatStreamDeliveryTitleAfterDone`, `TestChatStreamDeliveryDisconnect`, `TestChatStreamDeliveryWriteFailure`, and `TestChatStreamDeliveryHeartbeat`. These commands name regression coverage, not a recorded live-provider pass count.
 
+### Delegation call chronology
+
+Studio reserves each delegation panel with `subtask_progress` / `delegation_pending` at the persisted FunctionCall position, before parallel workers publish their lifecycle events. The reservation carries only batch identity: real `delegation_start` supplies task identities and sequence. Existing batch-keyed projection updates that position instead of appending in worker scheduling order. Both normal and continuation runner loops use this rule; restored history already reserves the same FunctionCall positions. No text matching or alphabetical sorting is involved. Terminal SSE mapping ignores this presentation-only subtype, preserving its existing real-start lifecycle. `TestChatDelegationCallOrderHTTP`, the toolActivity reverse-start case, and `TestDelegationPendingDoesNotDuplicateTerminalLifecycle` cover this boundary; `TestChatDelegationRegressionBrowser` exercises reconnect and persisted reload.
+
 ### Chronological activity acceptance
 
 The focused phase runs the eight projection/component/scenario suites named in the execution plan, builds the SPA, then runs `TestChatChronologyHTTPAcceptance*` with browser opt-in. The isolated harness serves the built SPA on loopback with temporary SQLite databases and browser profiles; it does not use the user's daemon or existing chats. Explicit opt-in fails on missing SPA/browser prerequisites rather than skipping.

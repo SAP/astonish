@@ -1,0 +1,156 @@
+# Bots — deployed acceptance catalog (specification §17).
+# All entries remain missing: the composed tests/e2e/bots lifecycle is partial
+# and not live-verified; no entire BOTS-001–010 journey is proven by it.
+# Partial deployed tests: tests/e2e/bots/live_lifecycle_test.go::TestBotsLiveLifecycle
+# and tests/e2e/bots/bots_test.go::TestBotsLiveKubernetesRetainedHome.
+# These names and the controlled fixtures below are NOT passing scenario refs.
+# See docs/architecture/bot-release-checklist.md for §§5–16 and operator gates.
+# Historical tracker: Phases 1–6 passed; Phase 7 running. No phase closed here.
+# Current bounded proof: .tmp/employee-writer-live.md and
+# .tmp/employee-writer-final-status.json / employee-writer-final-receipts.json:
+# 17/17 owned employee checks, not a full BOTS-001–010 scenario invocation.
+# Production external adapter remains blocked despite four controlled cases in
+# .tmp/employee-external-uncertainty-acceptance.md; Kubernetes remains unverified.
+# Evidence comments below are exact partial references, not qualifying test_refs.
+scenarios:
+  # Controlled anchor: pkg/api/bot_promotion_handlers_test.go::TestBotReviewedPromotionHTTP
+  - id: BOTS-001
+    title: "Promote a Chat with only reviewed charter, goals and memory"
+    user_story: |
+      As an owner, I review a Chat promotion and create an inactive Bot.
+      Only the selected charter, goals and memories carry over; no source
+      credentials, grants or recurring work become enabled without consent.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_runtime_acceptance_test.go::TestBotRuntimeHTTPAcceptance
+  # Historical component: pkg/sandbox/docker/bot_home_live_test.go::TestBotHomeDockerPersistenceLive
+  # Partial owned proof: .tmp/employee-writer-final-receipts.json
+  # schedule-natural, offline-restart-tick, reauth-same-home, historical-disabled-schedule.
+  # PG: pkg/store/entstore/bot_authorized_schedule_queue_postgres_test.go::TestIntegrationPostgresBotQueuedScheduleReconciliation
+  # .tmp/employee-latest-postgres-final.md records its repeated race pass, not this whole journey.
+  - id: BOTS-002
+    title: "Two scheduled runs use fresh compute without overlap or replay"
+    user_story: |
+      As an owner, I activate a reviewed schedule and observe two real runs.
+      They retain my Bot home but use distinct compute, never overlap and
+      publish each outcome once, including after daemon restart.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_notifications_acceptance_test.go::TestBotNotifications
+  - id: BOTS-003
+    title: "An unchanged run reports in the thread without notifying me"
+    user_story: |
+      As an owner with on-change notifications, I receive a full unchanged
+      run report in my Bot thread and no external ping. Selecting always
+      is a separate policy choice and remains auditable.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_notifications_acceptance_test.go::TestBotNotifications
+  - id: BOTS-004
+    title: "A threshold change notifies once with evidence and a decision"
+    user_story: |
+      As an owner, I receive one useful notification for a verified change
+      above my threshold at my authorized destination, with evidence and
+      a decision option. Ambiguous delivery never authorizes blind resend.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_policy_all_dispatch_test.go::TestBotPolicyAllDispatchPaths
+  # Partial local denial: .tmp/employee-writer-denied-final-validation.json;
+  # .tmp/employee-writer-approved-once-validation.json is a new local memory operation,
+  # not proof of external native/flow/MCP/delegation effects at every autonomy level.
+  - id: BOTS-005
+    title: "Unapproved consequential actions are denied across tool paths"
+    user_story: |
+      As an owner, I can inspect logged denials when native, flow, MCP or
+      delegated work attempts an unapproved send, spend, delete or publish.
+      No effect occurs, at any autonomy level; unsafe adapters stay unavailable.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Partial anchor: pkg/api/bot_handlers_test.go::TestBotStorageHTTPAcceptance
+  # Controlled follow-up: pkg/daemon/bot_correction_followup_test.go::TestBotCorrectionFollowupHTTPWorker
+  # That HTTP/worker journey controls model and sandbox; deployed real-provider
+  # correction and its effect on the next autonomous run remain unproven.
+  # Partial owned routine-memory receipt: .tmp/employee-writer-final-receipts.json;
+  # .tmp/employee-writer-approved-once-validation.json proves local retirement once.
+  # PG recall filtering: pkg/store/entstore/bot_latest_memory_postgres_test.go::TestIntegrationPostgresBotLatestForgottenRecall
+  # Recorded pass: .tmp/employee-latest-postgres-final.md. Whole goal/correction journey remains missing.
+  - id: BOTS-006
+    title: "A correction changes memory, goals and the next actual run"
+    user_story: |
+      As an owner, I correct a claim and its affected goal, then observe
+      a subsequent autonomous run using the corrected evidence and not
+      repeating superseded advice or follow-ups. A saved reply is not enough.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_scheduled_browser_test.go::TestBotScheduledWorkspaceBrowserAcceptance
+  # Partial owned pause/while-paused/resume: .tmp/employee-writer-final-receipts.json;
+  # .tmp/employee-writer-paused-validation.json and .tmp/employee-writer-resume-validation.json.
+  # Quiet-window/restart preservation does not alone prove every pause-during-dispatch/30s obligation.
+  - id: BOTS-007
+    title: "Pause stops autonomous work within one tick and retains history"
+    user_story: |
+      As an owner, I pause during work and within 30 seconds see no new
+      scheduled admission or subsequent autonomous action. Home and history
+      remain readable; conversation and approval do not implicitly resume it.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchors: pkg/api/bot_handlers_test.go::TestBotStorageHTTPAcceptance
+  # pkg/api/bot_runtime_access_test.go::TestBotTeamSessionAccess
+  # Partial permanent-delete proof: .tmp/employee-writer-delete-validation.json,
+  # .tmp/employee-writer-peer-validation.json, .tmp/employee-writer-peer-volume-validation.json,
+  # .tmp/employee-writer-volume-deletion-validation.json. This proves owned Docker purge/peer
+  # preservation, not retained 30-day restore, cross-team recovery or direct Kubernetes.
+  - id: BOTS-008
+    title: "Retained deletion, scoped homes and safe restoration"
+    user_story: |
+      As an owner, I restore a deleted Bot within its 30-day window to
+      paused state and cannot restore after expiry. Another team cannot
+      read its home, memories or credentials. Authorized purge and recovery
+      preserve scope boundaries on Docker and direct Kubernetes.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchor: pkg/api/bot_runner_resume_safety_test.go::TestBotResumeNoReplayAfterEffect
+  # Controlled external uncertainty: pkg/api/bot_external_uncertainty_acceptance_test.go::TestBotExternalUncertaintyLoopbackAcceptance
+  # .tmp/employee-external-uncertainty-acceptance.md: four passes, one approved effect,
+  # two rejected replays/two read-only reconciliations; negatives have zero effects.
+  # In-memory approvals/test-only classification are not human UI/durable production proof.
+  # Production provider/resource adapter remains blocked; no blanket scenario promotion.
+  - id: BOTS-009
+    title: "Blocked or rate-limited work stops and reports unverified facts"
+    user_story: |
+      As an owner, I see an honest partial report after a rate limit,
+      login wall or bot wall. The Bot neither retries past the limit nor
+      presents an unverified snippet as live evidence or hides child failures.
+    priority: P0
+    status: missing
+    test_refs: []
+
+  # Controlled anchors: pkg/bot/budget_test.go::TestSharedRunBudgetConcurrentParentChild
+  # pkg/daemon/bot_worker_lifecycle_test.go::TestBotWorkerResumedBudgetExhausted
+  # Production monetary cost caps are unavailable without a conservative oracle.
+  - id: BOTS-010
+    title: "Runs show usage and enforce budgets across children and resume"
+    user_story: |
+      As an owner, I inspect token usage and honest cost availability in
+      Runs. Budget exhaustion stops parent and child work with partial
+      progress and resume cannot reset the allowance. Unsupported monetary
+      caps are rejected rather than treating unknown provider prices as zero.
+    priority: P0
+    status: missing
+    test_refs: []

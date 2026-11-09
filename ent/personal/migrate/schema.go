@@ -65,6 +65,316 @@ var (
 			},
 		},
 	}
+	// BotsColumns holds the columns for the "bots" table.
+	BotsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "owner_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"draft", "active", "paused", "stopped", "deleted"}, Default: "draft"},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "version", Type: field.TypeInt64, Default: 1},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "home_session_id", Type: field.TypeString, Unique: true},
+		{Name: "home_binding", Type: field.TypeJSON, Nullable: true},
+		{Name: "create_key", Type: field.TypeString, Unique: true},
+		{Name: "last_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "fence", Type: field.TypeInt64, Default: 0},
+		{Name: "active_run_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "lease_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
+		{Name: "purge_after", Type: field.TypeTime, Nullable: true},
+		{Name: "cleanup_complete", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// BotsTable holds the schema information for the "bots" table.
+	BotsTable = &schema.Table{
+		Name:       "bots",
+		Columns:    BotsColumns,
+		PrimaryKey: []*schema.Column{BotsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "bot_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotsColumns[3]},
+			},
+			{
+				Name:    "bot_owner_id",
+				Unique:  false,
+				Columns: []*schema.Column{BotsColumns[1]},
+			},
+			{
+				Name:    "bot_purge_after",
+				Unique:  false,
+				Columns: []*schema.Column{BotsColumns[16]},
+			},
+		},
+	}
+	// BotApprovalsColumns holds the columns for the "bot_approvals" table.
+	BotApprovalsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "version", Type: field.TypeInt64},
+		{Name: "action_digest", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "approved", "denied", "expired", "revoked", "consumed"}, Default: "pending"},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+		{Name: "run_id", Type: field.TypeUUID},
+	}
+	// BotApprovalsTable holds the schema information for the "bot_approvals" table.
+	BotApprovalsTable = &schema.Table{
+		Name:       "bot_approvals",
+		Columns:    BotApprovalsColumns,
+		PrimaryKey: []*schema.Column{BotApprovalsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_approvals_bots_approvals",
+				Columns:    []*schema.Column{BotApprovalsColumns[7]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "bot_approvals_bot_runs_approvals",
+				Columns:    []*schema.Column{BotApprovalsColumns[8]},
+				RefColumns: []*schema.Column{BotRunsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botapproval_run_id_action_digest",
+				Unique:  true,
+				Columns: []*schema.Column{BotApprovalsColumns[8], BotApprovalsColumns[2]},
+			},
+			{
+				Name:    "botapproval_bot_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotApprovalsColumns[7], BotApprovalsColumns[3]},
+			},
+		},
+	}
+	// BotGoalsColumns holds the columns for the "bot_goals" table.
+	BotGoalsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "title", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "completed"}, Default: "active"},
+		{Name: "due_at", Type: field.TypeTime, Nullable: true},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotGoalsTable holds the schema information for the "bot_goals" table.
+	BotGoalsTable = &schema.Table{
+		Name:       "bot_goals",
+		Columns:    BotGoalsColumns,
+		PrimaryKey: []*schema.Column{BotGoalsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_goals_bots_goals",
+				Columns:    []*schema.Column{BotGoalsColumns[8]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botgoal_bot_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotGoalsColumns[8], BotGoalsColumns[3]},
+			},
+			{
+				Name:    "botgoal_due_at",
+				Unique:  false,
+				Columns: []*schema.Column{BotGoalsColumns[4]},
+			},
+		},
+	}
+	// BotIntakesColumns holds the columns for the "bot_intakes" table.
+	BotIntakesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "owner_id", Type: field.TypeUUID},
+		{Name: "revision", Type: field.TypeInt64},
+		{Name: "content", Type: field.TypeBytes, Nullable: true},
+		{Name: "discarded", Type: field.TypeBool, Default: false},
+		{Name: "mutation_hash", Type: field.TypeString},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+	}
+	// BotIntakesTable holds the schema information for the "bot_intakes" table.
+	BotIntakesTable = &schema.Table{
+		Name:       "bot_intakes",
+		Columns:    BotIntakesColumns,
+		PrimaryKey: []*schema.Column{BotIntakesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botintake_owner_id",
+				Unique:  false,
+				Columns: []*schema.Column{BotIntakesColumns[1]},
+			},
+		},
+	}
+	// BotOutboxColumns holds the columns for the "bot_outbox" table.
+	BotOutboxColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "sequence", Type: field.TypeInt64},
+		{Name: "kind", Type: field.TypeString},
+		{Name: "deduplication_key", Type: field.TypeString},
+		{Name: "payload", Type: field.TypeJSON},
+		{Name: "available_at", Type: field.TypeTime},
+		{Name: "delivered_at", Type: field.TypeTime, Nullable: true},
+		{Name: "worker_id", Type: field.TypeString, Default: ""},
+		{Name: "fence", Type: field.TypeInt64, Default: 0},
+		{Name: "lease_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "last_error", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotOutboxTable holds the schema information for the "bot_outbox" table.
+	BotOutboxTable = &schema.Table{
+		Name:       "bot_outbox",
+		Columns:    BotOutboxColumns,
+		PrimaryKey: []*schema.Column{BotOutboxColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_outbox_bots_outbox",
+				Columns:    []*schema.Column{BotOutboxColumns[13]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botoutbox_bot_id_sequence",
+				Unique:  true,
+				Columns: []*schema.Column{BotOutboxColumns[13], BotOutboxColumns[1]},
+			},
+			{
+				Name:    "botoutbox_bot_id_deduplication_key",
+				Unique:  true,
+				Columns: []*schema.Column{BotOutboxColumns[13], BotOutboxColumns[3]},
+			},
+			{
+				Name:    "botoutbox_available_at_delivered_at",
+				Unique:  false,
+				Columns: []*schema.Column{BotOutboxColumns[5], BotOutboxColumns[6]},
+			},
+		},
+	}
+	// BotRunsColumns holds the columns for the "bot_runs" table.
+	BotRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "version", Type: field.TypeInt64},
+		{Name: "session_id", Type: field.TypeString, Unique: true},
+		{Name: "idempotency_key", Type: field.TypeString},
+		{Name: "request_hash", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"queued", "running", "waiting_approval", "interrupted", "succeeded", "partial", "failed", "skipped", "cancelled"}, Default: "queued"},
+		{Name: "fence", Type: field.TypeInt64, Default: 0},
+		{Name: "worker_id", Type: field.TypeString, Default: ""},
+		{Name: "lease_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotRunsTable holds the schema information for the "bot_runs" table.
+	BotRunsTable = &schema.Table{
+		Name:       "bot_runs",
+		Columns:    BotRunsColumns,
+		PrimaryKey: []*schema.Column{BotRunsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_runs_bots_runs",
+				Columns:    []*schema.Column{BotRunsColumns[12]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botrun_bot_id_idempotency_key",
+				Unique:  true,
+				Columns: []*schema.Column{BotRunsColumns[12], BotRunsColumns[3]},
+			},
+			{
+				Name:    "botrun_bot_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotRunsColumns[12], BotRunsColumns[5]},
+			},
+			{
+				Name:    "botrun_lease_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{BotRunsColumns[8]},
+			},
+		},
+	}
+	// BotTrackedItemsColumns holds the columns for the "bot_tracked_items" table.
+	BotTrackedItemsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"open", "blocked", "completed", "cancelled"}, Default: "open"},
+		{Name: "due_at", Type: field.TypeTime, Nullable: true},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "goal_id", Type: field.TypeUUID},
+	}
+	// BotTrackedItemsTable holds the schema information for the "bot_tracked_items" table.
+	BotTrackedItemsTable = &schema.Table{
+		Name:       "bot_tracked_items",
+		Columns:    BotTrackedItemsColumns,
+		PrimaryKey: []*schema.Column{BotTrackedItemsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_tracked_items_bot_goals_tracked_items",
+				Columns:    []*schema.Column{BotTrackedItemsColumns[5]},
+				RefColumns: []*schema.Column{BotGoalsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "bottrackeditem_goal_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotTrackedItemsColumns[5], BotTrackedItemsColumns[2]},
+			},
+		},
+	}
+	// BotVersionsColumns holds the columns for the "bot_versions" table.
+	BotVersionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "version", Type: field.TypeInt64},
+		{Name: "schema_version", Type: field.TypeInt, Default: 1},
+		{Name: "definition", Type: field.TypeJSON},
+		{Name: "content_hash", Type: field.TypeString},
+		{Name: "created_by", Type: field.TypeUUID},
+		{Name: "change_reason", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotVersionsTable holds the schema information for the "bot_versions" table.
+	BotVersionsTable = &schema.Table{
+		Name:       "bot_versions",
+		Columns:    BotVersionsColumns,
+		PrimaryKey: []*schema.Column{BotVersionsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_versions_bots_versions",
+				Columns:    []*schema.Column{BotVersionsColumns[8]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botversion_bot_id_version",
+				Unique:  true,
+				Columns: []*schema.Column{BotVersionsColumns[8], BotVersionsColumns[1]},
+			},
+		},
+	}
 	// CacheDiagnosticsColumns holds the columns for the "cache_diagnostics" table.
 	CacheDiagnosticsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -271,7 +581,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "schedule", Type: field.TypeString},
-		{Name: "mode", Type: field.TypeEnum, Enums: []string{"routine", "adaptive", "fleet_poll"}, Default: "routine"},
+		{Name: "mode", Type: field.TypeEnum, Enums: []string{"routine", "adaptive", "fleet_poll", "bot_trigger"}, Default: "routine"},
 		{Name: "payload", Type: field.TypeJSON},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "paused", "completed", "failed"}, Default: "active"},
 		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
@@ -305,6 +615,10 @@ var (
 	SessionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
 		{Name: "user_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "bot_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "bot_run_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "purpose", Type: field.TypeEnum, Enums: []string{"chat", "bot_home", "bot_run"}, Default: "chat"},
+		{Name: "retention", Type: field.TypeEnum, Enums: []string{"standard", "bot"}, Default: "standard"},
 		{Name: "title", Type: field.TypeString, Default: ""},
 		{Name: "message_count", Type: field.TypeInt, Default: 0},
 		{Name: "parent_id", Type: field.TypeString, Nullable: true},
@@ -328,7 +642,7 @@ var (
 			{
 				Name:    "session_updated_at",
 				Unique:  false,
-				Columns: []*schema.Column{SessionsColumns[14]},
+				Columns: []*schema.Column{SessionsColumns[18]},
 			},
 		},
 	}
@@ -398,6 +712,14 @@ var (
 	Tables = []*schema.Table{
 		AppsTable,
 		AppStateTable,
+		BotsTable,
+		BotApprovalsTable,
+		BotGoalsTable,
+		BotIntakesTable,
+		BotOutboxTable,
+		BotRunsTable,
+		BotTrackedItemsTable,
+		BotVersionsTable,
 		CacheDiagnosticsTable,
 		CredentialsTable,
 		DecksTable,
@@ -419,6 +741,34 @@ func init() {
 	AppStateTable.ForeignKeys[0].RefTable = AppsTable
 	AppStateTable.Annotation = &entsql.Annotation{
 		Table: "app_state",
+	}
+	BotsTable.Annotation = &entsql.Annotation{
+		Table: "bots",
+	}
+	BotApprovalsTable.ForeignKeys[0].RefTable = BotsTable
+	BotApprovalsTable.ForeignKeys[1].RefTable = BotRunsTable
+	BotApprovalsTable.Annotation = &entsql.Annotation{
+		Table: "bot_approvals",
+	}
+	BotGoalsTable.ForeignKeys[0].RefTable = BotsTable
+	BotGoalsTable.Annotation = &entsql.Annotation{
+		Table: "bot_goals",
+	}
+	BotOutboxTable.ForeignKeys[0].RefTable = BotsTable
+	BotOutboxTable.Annotation = &entsql.Annotation{
+		Table: "bot_outbox",
+	}
+	BotRunsTable.ForeignKeys[0].RefTable = BotsTable
+	BotRunsTable.Annotation = &entsql.Annotation{
+		Table: "bot_runs",
+	}
+	BotTrackedItemsTable.ForeignKeys[0].RefTable = BotGoalsTable
+	BotTrackedItemsTable.Annotation = &entsql.Annotation{
+		Table: "bot_tracked_items",
+	}
+	BotVersionsTable.ForeignKeys[0].RefTable = BotsTable
+	BotVersionsTable.Annotation = &entsql.Annotation{
+		Table: "bot_versions",
 	}
 	CacheDiagnosticsTable.ForeignKeys[0].RefTable = SessionsTable
 	CacheDiagnosticsTable.Annotation = &entsql.Annotation{

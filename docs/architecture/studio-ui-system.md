@@ -1,5 +1,9 @@
 # Studio UI System
 
+## Bot Chat interaction contract — 2026-11-07
+
+A simple title creates and starts one durable Chat turn without an activation panel. Queued/running persisted run state drives the existing thinking indicator, including before tokens and after reload; connectivity never signals completion. Waiting `ask_user` replaces thinking with shared Chat question cards (yes/no, selected option IDs and supported custom text), never prose-derived controls. No is input, not permission denial. Empty Home is idle unless queued state exists; terminal state clears thinking; failed submissions retain retryable answers and read-only views cannot submit. Retries reconcile canonical events rather than duplicating titles/questions. Terminal clients consume the same durable run/question contract. Legacy control-only turns and ordinary Chat remain compatible; schedules retain separate consent. Fresh real-provider title-first acceptance remains pending, independent of historical control-conversation receipts.
+
 ## Overview
 
 Astonish Studio uses a source-owned UI system built on `shadcn/ui`, Tailwind CSS v4, and product CSS tokens. This document owns:

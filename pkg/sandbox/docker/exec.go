@@ -30,9 +30,16 @@ func (db *DockerBackend) Exec(ctx context.Context, sessionID string, opts sandbo
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
-	args := buildDockerExecArgs(cname, opts.WorkDir, opts.Env, false, wrapShell(opts.Command))
+	command, workDir, err := db.homeExecCommand(sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	args := buildDockerExecArgs(cname, workDir, opts.Env, false, command)
 	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, args...)
 
 	var stdout, stderr bytes.Buffer
@@ -42,7 +49,7 @@ func (db *DockerBackend) Exec(ctx context.Context, sessionID string, opts sandbo
 		cmd.Stdin = opts.Stdin
 	}
 
-	err := cmd.Run()
+	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -68,18 +75,25 @@ func (db *DockerBackend) ExecInteractive(ctx context.Context, sessionID string, 
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	// -i -t allocates a PTY and attaches stdin.
 	args := []string{"exec", "-i", "-t"}
-	if opts.WorkDir != "" {
-		args = append(args, "-w", opts.WorkDir)
+	command, workDir, err := db.homeExecCommand(sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if workDir != "" {
+		args = append(args, "-w", workDir)
 	}
 	for k, v := range opts.Env {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
 	}
 	args = append(args, cname)
-	args = append(args, wrapShell(opts.Command)...)
+	args = append(args, command...)
 
 	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, args...)
 	return newExecStream(ctx, cmd, opts.SeparateStderr, true)
@@ -94,18 +108,25 @@ func (db *DockerBackend) ExecStreaming(ctx context.Context, sessionID string, op
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	// -i without -t: interactive stdin but no PTY.
 	args := []string{"exec", "-i"}
-	if opts.WorkDir != "" {
-		args = append(args, "-w", opts.WorkDir)
+	command, workDir, err := db.homeExecCommand(sessionID, opts.Command, opts.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if workDir != "" {
+		args = append(args, "-w", workDir)
 	}
 	for k, v := range opts.Env {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
 	}
 	args = append(args, cname)
-	args = append(args, wrapShell(opts.Command)...)
+	args = append(args, command...)
 
 	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, args...)
 	return newExecStream(ctx, cmd, opts.SeparateStderr, false)
@@ -119,6 +140,9 @@ func (db *DockerBackend) PushFile(ctx context.Context, sessionID, path string, c
 		return err
 	}
 	if err := db.requireRegisteredSession(sessionID); err != nil {
+		return err
+	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
 		return err
 	}
 	cname := containerName(sessionID)
@@ -158,6 +182,9 @@ func (db *DockerBackend) PullFile(ctx context.Context, sessionID, path string) (
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return nil, err
 	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	cname := containerName(sessionID)
 
 	// Stream via docker exec + cat.
@@ -193,6 +220,9 @@ func (db *DockerBackend) PullArtifact(ctx context.Context, sessionID, path strin
 	if len(names) != 1 || names[0] != containerName(sessionID) {
 		return nil, fmt.Errorf("sandbox/docker: artifact session %q is not uniquely registered by label", sessionID)
 	}
+	if err := db.prepareBotHomeExec(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	args := []string{"exec", names[0], astonishShell, "cat", path}
 	content, err := runDocker(ctx, db.cfg.ContainerRuntimePath, args...)
 	if err != nil {
@@ -223,6 +253,19 @@ func (db *DockerBackend) requireRegisteredSession(sessionID string) error {
 		return fmt.Errorf("sandbox/docker: session %q is not registered", sessionID)
 	}
 	return nil
+}
+
+// homeExecCommand leaves ordinary sessions byte-for-byte compatible. Retained
+// sessions apply cwd inside chroot, not Docker's outer container namespace.
+func (db *DockerBackend) homeExecCommand(id string, command []string, workDir string) ([]string, string, error) {
+	m, err := db.readSessionMetadata(id)
+	if err != nil {
+		return nil, "", err
+	}
+	if m != nil && m.BotHome != nil {
+		return sandbox.RetainedBotHomeCommand(command, workDir), "", nil
+	}
+	return wrapShell(command), workDir, nil
 }
 
 func wrapShell(command []string) []string {

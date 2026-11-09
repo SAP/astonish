@@ -4,6 +4,57 @@
 
 Astonish uses a YAML-based configuration system with two main config types: the application config (`config.yaml`) for global settings, and agent configs (flow YAML files) for workflow definitions. Configuration is loaded from `~/.config/astonish/` and supports provider credentials, channel settings, sandbox options, scheduler jobs, MCP servers, and more.
 
+## OpenShell retained Bot home configuration
+
+Bot-home storage is **off by default**, independent of ordinary session storage.
+The real `LoadAppConfig` → `BackendFromAppConfig` → registered OpenShell factory
+path carries these application YAML settings to `openshell.Config`:
+
+```yaml
+sandbox:
+  backend: openshell
+  openshell:
+    bot_home_mounts_enabled: true
+    bot_home_claim_name: astonish-openshell-bot-homes
+```
+
+Both settings are required to use Bot homes; a claim name alone does not opt in.
+There are no new environment variables or secrets. Helm emits only these
+non-secret settings into the existing application ConfigMap.
+
+For chart-managed storage, set `sandbox.enabled=true`, `sandbox.backend=openshell`
+and `sandbox.openshell.botHomes.enabled=true`. The `botHomes` values are:
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Enable retained Bot home mounts, not the gateway deployment |
+| `existingClaim` | `""` | Reuse an operator-managed claim without creating or owning it |
+| `pvcName` | `astonish-openshell-bot-homes` | Name of a new retained claim |
+| `namespace` | `""` | Defaults to `namespaces.sandbox`; any other namespace is rejected |
+| `storageClassName` | `""` | Inherit `sandbox.storage.storageClassName` for new claims |
+| `size` | `50Gi` | Positive whole storage quantity for a new claim |
+| `accessMode` | `ReadWriteMany` | RWX recommended; RWO requires single-node placement |
+
+The chart validates namespace/name syntax, claim collisions with workspace,
+layers, uppers, Kubernetes homes and cert bundles, writable access modes and new
+claim storage class/size. `ReadOnlyMany` and `ReadWriteOncePod` are unsupported:
+Bot sessions need writes and multiple Bots may share the claim concurrently.
+Existing claims must already have suitable access modes and filesystem permissions.
+The chart cannot prove a StorageClass supports RWX, that an existing PVC is bound,
+or that an external gateway uses the configured sandbox namespace.
+
+New claims carry `helm.sh/resource-policy: keep`, no Sandbox owner reference,
+and are not deleted by run cleanup. Keep is not a backup: operators own backup,
+retained-claim adoption on reinstall, and immutable access-mode/storage-class
+migration. Prefer `existingClaim` to adopt an already retained claim.
+
+Neither `sandbox.openshell.enabled` (gateway subchart), normal session `/sandbox`
+volumes, `ephemeralWorkspace`/Kyverno emptyDir behavior, certificate mounts nor the
+Kubernetes backend's `sandbox.storage.homes` settings are changed by this opt-in.
+Before enabling it, verify the gateway supports scoped writable `volume_mounts`
+with `sub_path`, correct scope-directory permissions, and actual data survival
+across pod recreation. See [OpenShell backend](openshell-sandbox-backend.md).
+
 ## Key Design Decisions
 
 ### Why YAML

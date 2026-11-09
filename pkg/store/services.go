@@ -1,5 +1,10 @@
 package store
 
+import (
+	"context"
+	"github.com/SAP/astonish/pkg/execution"
+)
+
 // Services is the central dependency container for Astonish.
 //
 // It replaces the package-level Set*/Get* globals that were previously used
@@ -23,6 +28,27 @@ type Services struct {
 	// Regular chat sessions are always created here. Fleet sub-sessions
 	// remain in the team-scoped Sessions store.
 	PersonalSessions SessionStore
+
+	// Bots and PersonalBots are distinct scoped repositories. Missing private
+	// capability must never fall back to the team repository.
+	Bots         BotStore
+	PersonalBots BotStore
+	// Scope-specific trusted adapters; nil disables durable mandate authority.
+	BotMandates         BotMandateRuntime
+	PersonalBotMandates BotMandateRuntime
+	BotMandatePolicy    BotMandatePolicyResolver
+	// BotAuthorizedOperationFactory composes the trusted scope-bound issuer; nil fails closed.
+	BotAuthorizedOperationFactory func(context.Context, *Services, BotScope) (BotAuthorizedOperationStore, error)
+	// BotHomeSetup is trusted startup composition; nil fails closed. Request
+	// clones preserve it, but never derive it from client data.
+	BotHomeSetup BotHomeSetupFunc
+	// BotTurnRegistry is shared by HTTP admission and the interactive worker.
+	BotTurnRegistry *execution.BotTurnAuthorizationRegistry
+	// BotInteractiveReady is explicitly enabled only once the complete factory,
+	// dispatcher and worker are wired. A registry alone is NOT readiness.
+	BotInteractiveReady bool
+	// BotTemplates contains reviewed team definitions, never private Bot state.
+	BotTemplates BotTemplateStore
 
 	// Memory provides access to the vector + BM25 memory search system.
 	Memory MemoryStore

@@ -13,6 +13,14 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"github.com/SAP/astonish/ent/personal/app"
 	"github.com/SAP/astonish/ent/personal/appstate"
+	"github.com/SAP/astonish/ent/personal/bot"
+	"github.com/SAP/astonish/ent/personal/botapproval"
+	"github.com/SAP/astonish/ent/personal/botgoal"
+	"github.com/SAP/astonish/ent/personal/botintake"
+	"github.com/SAP/astonish/ent/personal/botoutbox"
+	"github.com/SAP/astonish/ent/personal/botrun"
+	"github.com/SAP/astonish/ent/personal/bottrackeditem"
+	"github.com/SAP/astonish/ent/personal/botversion"
 	"github.com/SAP/astonish/ent/personal/cachediagnostic"
 	"github.com/SAP/astonish/ent/personal/credential"
 	"github.com/SAP/astonish/ent/personal/deck"
@@ -39,6 +47,14 @@ const (
 	// Node types.
 	TypeApp              = "App"
 	TypeAppState         = "AppState"
+	TypeBot              = "Bot"
+	TypeBotApproval      = "BotApproval"
+	TypeBotGoal          = "BotGoal"
+	TypeBotIntake        = "BotIntake"
+	TypeBotOutbox        = "BotOutbox"
+	TypeBotRun           = "BotRun"
+	TypeBotTrackedItem   = "BotTrackedItem"
+	TypeBotVersion       = "BotVersion"
 	TypeCacheDiagnostic  = "CacheDiagnostic"
 	TypeCredential       = "Credential"
 	TypeDeck             = "Deck"
@@ -1608,6 +1624,8294 @@ func (m *AppStateMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown AppState edge %s", name)
+}
+
+// BotMutation represents an operation that mutates the Bot nodes in the graph.
+type BotMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	owner_id          *uuid.UUID
+	name              *string
+	status            *bot.Status
+	revision          *int64
+	addrevision       *int64
+	version           *int64
+	addversion        *int64
+	schema_version    *int
+	addschema_version *int
+	home_session_id   *string
+	home_binding      *map[string]interface{}
+	create_key        *string
+	last_seq          *int64
+	addlast_seq       *int64
+	fence             *int64
+	addfence          *int64
+	active_run_id     *uuid.UUID
+	lease_expires_at  *time.Time
+	data              *map[string]interface{}
+	deleted_at        *time.Time
+	purge_after       *time.Time
+	cleanup_complete  *bool
+	created_at        *time.Time
+	updated_at        *time.Time
+	clearedFields     map[string]struct{}
+	versions          map[uuid.UUID]struct{}
+	removedversions   map[uuid.UUID]struct{}
+	clearedversions   bool
+	goals             map[uuid.UUID]struct{}
+	removedgoals      map[uuid.UUID]struct{}
+	clearedgoals      bool
+	runs              map[uuid.UUID]struct{}
+	removedruns       map[uuid.UUID]struct{}
+	clearedruns       bool
+	approvals         map[uuid.UUID]struct{}
+	removedapprovals  map[uuid.UUID]struct{}
+	clearedapprovals  bool
+	outbox            map[uuid.UUID]struct{}
+	removedoutbox     map[uuid.UUID]struct{}
+	clearedoutbox     bool
+	done              bool
+	oldValue          func(context.Context) (*Bot, error)
+	predicates        []predicate.Bot
+}
+
+var _ ent.Mutation = (*BotMutation)(nil)
+
+// botOption allows management of the mutation configuration using functional options.
+type botOption func(*BotMutation)
+
+// newBotMutation creates new mutation for the Bot entity.
+func newBotMutation(c config, op Op, opts ...botOption) *BotMutation {
+	m := &BotMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBot,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotID sets the ID field of the mutation.
+func withBotID(id uuid.UUID) botOption {
+	return func(m *BotMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *Bot
+		)
+		m.oldValue = func(ctx context.Context) (*Bot, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().Bot.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBot sets the old Bot of the mutation.
+func withBot(node *Bot) botOption {
+	return func(m *BotMutation) {
+		m.oldValue = func(context.Context) (*Bot, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of Bot entities.
+func (m *BotMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().Bot.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (m *BotMutation) SetOwnerID(u uuid.UUID) {
+	m.owner_id = &u
+}
+
+// OwnerID returns the value of the "owner_id" field in the mutation.
+func (m *BotMutation) OwnerID() (r uuid.UUID, exists bool) {
+	v := m.owner_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerID returns the old "owner_id" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldOwnerID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
+	}
+	return oldValue.OwnerID, nil
+}
+
+// ResetOwnerID resets all changes to the "owner_id" field.
+func (m *BotMutation) ResetOwnerID() {
+	m.owner_id = nil
+}
+
+// SetName sets the "name" field.
+func (m *BotMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *BotMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *BotMutation) ResetName() {
+	m.name = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *BotMutation) SetStatus(b bot.Status) {
+	m.status = &b
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *BotMutation) Status() (r bot.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldStatus(ctx context.Context) (v bot.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *BotMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *BotMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *BotMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *BotMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *BotMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *BotMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *BotMutation) SetVersion(i int64) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *BotMutation) Version() (r int64, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *BotMutation) AddVersion(i int64) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *BotMutation) AddedVersion() (r int64, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *BotMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetSchemaVersion sets the "schema_version" field.
+func (m *BotMutation) SetSchemaVersion(i int) {
+	m.schema_version = &i
+	m.addschema_version = nil
+}
+
+// SchemaVersion returns the value of the "schema_version" field in the mutation.
+func (m *BotMutation) SchemaVersion() (r int, exists bool) {
+	v := m.schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSchemaVersion returns the old "schema_version" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldSchemaVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSchemaVersion: %w", err)
+	}
+	return oldValue.SchemaVersion, nil
+}
+
+// AddSchemaVersion adds i to the "schema_version" field.
+func (m *BotMutation) AddSchemaVersion(i int) {
+	if m.addschema_version != nil {
+		*m.addschema_version += i
+	} else {
+		m.addschema_version = &i
+	}
+}
+
+// AddedSchemaVersion returns the value that was added to the "schema_version" field in this mutation.
+func (m *BotMutation) AddedSchemaVersion() (r int, exists bool) {
+	v := m.addschema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSchemaVersion resets all changes to the "schema_version" field.
+func (m *BotMutation) ResetSchemaVersion() {
+	m.schema_version = nil
+	m.addschema_version = nil
+}
+
+// SetHomeSessionID sets the "home_session_id" field.
+func (m *BotMutation) SetHomeSessionID(s string) {
+	m.home_session_id = &s
+}
+
+// HomeSessionID returns the value of the "home_session_id" field in the mutation.
+func (m *BotMutation) HomeSessionID() (r string, exists bool) {
+	v := m.home_session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHomeSessionID returns the old "home_session_id" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldHomeSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHomeSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHomeSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHomeSessionID: %w", err)
+	}
+	return oldValue.HomeSessionID, nil
+}
+
+// ResetHomeSessionID resets all changes to the "home_session_id" field.
+func (m *BotMutation) ResetHomeSessionID() {
+	m.home_session_id = nil
+}
+
+// SetHomeBinding sets the "home_binding" field.
+func (m *BotMutation) SetHomeBinding(value map[string]interface{}) {
+	m.home_binding = &value
+}
+
+// HomeBinding returns the value of the "home_binding" field in the mutation.
+func (m *BotMutation) HomeBinding() (r map[string]interface{}, exists bool) {
+	v := m.home_binding
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHomeBinding returns the old "home_binding" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldHomeBinding(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHomeBinding is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHomeBinding requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHomeBinding: %w", err)
+	}
+	return oldValue.HomeBinding, nil
+}
+
+// ClearHomeBinding clears the value of the "home_binding" field.
+func (m *BotMutation) ClearHomeBinding() {
+	m.home_binding = nil
+	m.clearedFields[bot.FieldHomeBinding] = struct{}{}
+}
+
+// HomeBindingCleared returns if the "home_binding" field was cleared in this mutation.
+func (m *BotMutation) HomeBindingCleared() bool {
+	_, ok := m.clearedFields[bot.FieldHomeBinding]
+	return ok
+}
+
+// ResetHomeBinding resets all changes to the "home_binding" field.
+func (m *BotMutation) ResetHomeBinding() {
+	m.home_binding = nil
+	delete(m.clearedFields, bot.FieldHomeBinding)
+}
+
+// SetCreateKey sets the "create_key" field.
+func (m *BotMutation) SetCreateKey(s string) {
+	m.create_key = &s
+}
+
+// CreateKey returns the value of the "create_key" field in the mutation.
+func (m *BotMutation) CreateKey() (r string, exists bool) {
+	v := m.create_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreateKey returns the old "create_key" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldCreateKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreateKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreateKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreateKey: %w", err)
+	}
+	return oldValue.CreateKey, nil
+}
+
+// ResetCreateKey resets all changes to the "create_key" field.
+func (m *BotMutation) ResetCreateKey() {
+	m.create_key = nil
+}
+
+// SetLastSeq sets the "last_seq" field.
+func (m *BotMutation) SetLastSeq(i int64) {
+	m.last_seq = &i
+	m.addlast_seq = nil
+}
+
+// LastSeq returns the value of the "last_seq" field in the mutation.
+func (m *BotMutation) LastSeq() (r int64, exists bool) {
+	v := m.last_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeq returns the old "last_seq" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldLastSeq(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeq: %w", err)
+	}
+	return oldValue.LastSeq, nil
+}
+
+// AddLastSeq adds i to the "last_seq" field.
+func (m *BotMutation) AddLastSeq(i int64) {
+	if m.addlast_seq != nil {
+		*m.addlast_seq += i
+	} else {
+		m.addlast_seq = &i
+	}
+}
+
+// AddedLastSeq returns the value that was added to the "last_seq" field in this mutation.
+func (m *BotMutation) AddedLastSeq() (r int64, exists bool) {
+	v := m.addlast_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetLastSeq resets all changes to the "last_seq" field.
+func (m *BotMutation) ResetLastSeq() {
+	m.last_seq = nil
+	m.addlast_seq = nil
+}
+
+// SetFence sets the "fence" field.
+func (m *BotMutation) SetFence(i int64) {
+	m.fence = &i
+	m.addfence = nil
+}
+
+// Fence returns the value of the "fence" field in the mutation.
+func (m *BotMutation) Fence() (r int64, exists bool) {
+	v := m.fence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFence returns the old "fence" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldFence(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFence: %w", err)
+	}
+	return oldValue.Fence, nil
+}
+
+// AddFence adds i to the "fence" field.
+func (m *BotMutation) AddFence(i int64) {
+	if m.addfence != nil {
+		*m.addfence += i
+	} else {
+		m.addfence = &i
+	}
+}
+
+// AddedFence returns the value that was added to the "fence" field in this mutation.
+func (m *BotMutation) AddedFence() (r int64, exists bool) {
+	v := m.addfence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetFence resets all changes to the "fence" field.
+func (m *BotMutation) ResetFence() {
+	m.fence = nil
+	m.addfence = nil
+}
+
+// SetActiveRunID sets the "active_run_id" field.
+func (m *BotMutation) SetActiveRunID(u uuid.UUID) {
+	m.active_run_id = &u
+}
+
+// ActiveRunID returns the value of the "active_run_id" field in the mutation.
+func (m *BotMutation) ActiveRunID() (r uuid.UUID, exists bool) {
+	v := m.active_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActiveRunID returns the old "active_run_id" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldActiveRunID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActiveRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActiveRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActiveRunID: %w", err)
+	}
+	return oldValue.ActiveRunID, nil
+}
+
+// ClearActiveRunID clears the value of the "active_run_id" field.
+func (m *BotMutation) ClearActiveRunID() {
+	m.active_run_id = nil
+	m.clearedFields[bot.FieldActiveRunID] = struct{}{}
+}
+
+// ActiveRunIDCleared returns if the "active_run_id" field was cleared in this mutation.
+func (m *BotMutation) ActiveRunIDCleared() bool {
+	_, ok := m.clearedFields[bot.FieldActiveRunID]
+	return ok
+}
+
+// ResetActiveRunID resets all changes to the "active_run_id" field.
+func (m *BotMutation) ResetActiveRunID() {
+	m.active_run_id = nil
+	delete(m.clearedFields, bot.FieldActiveRunID)
+}
+
+// SetLeaseExpiresAt sets the "lease_expires_at" field.
+func (m *BotMutation) SetLeaseExpiresAt(t time.Time) {
+	m.lease_expires_at = &t
+}
+
+// LeaseExpiresAt returns the value of the "lease_expires_at" field in the mutation.
+func (m *BotMutation) LeaseExpiresAt() (r time.Time, exists bool) {
+	v := m.lease_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseExpiresAt returns the old "lease_expires_at" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldLeaseExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseExpiresAt: %w", err)
+	}
+	return oldValue.LeaseExpiresAt, nil
+}
+
+// ClearLeaseExpiresAt clears the value of the "lease_expires_at" field.
+func (m *BotMutation) ClearLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	m.clearedFields[bot.FieldLeaseExpiresAt] = struct{}{}
+}
+
+// LeaseExpiresAtCleared returns if the "lease_expires_at" field was cleared in this mutation.
+func (m *BotMutation) LeaseExpiresAtCleared() bool {
+	_, ok := m.clearedFields[bot.FieldLeaseExpiresAt]
+	return ok
+}
+
+// ResetLeaseExpiresAt resets all changes to the "lease_expires_at" field.
+func (m *BotMutation) ResetLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	delete(m.clearedFields, bot.FieldLeaseExpiresAt)
+}
+
+// SetData sets the "data" field.
+func (m *BotMutation) SetData(value map[string]interface{}) {
+	m.data = &value
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *BotMutation) Data() (r map[string]interface{}, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldData(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *BotMutation) ResetData() {
+	m.data = nil
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (m *BotMutation) SetDeletedAt(t time.Time) {
+	m.deleted_at = &t
+}
+
+// DeletedAt returns the value of the "deleted_at" field in the mutation.
+func (m *BotMutation) DeletedAt() (r time.Time, exists bool) {
+	v := m.deleted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletedAt returns the old "deleted_at" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldDeletedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletedAt: %w", err)
+	}
+	return oldValue.DeletedAt, nil
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (m *BotMutation) ClearDeletedAt() {
+	m.deleted_at = nil
+	m.clearedFields[bot.FieldDeletedAt] = struct{}{}
+}
+
+// DeletedAtCleared returns if the "deleted_at" field was cleared in this mutation.
+func (m *BotMutation) DeletedAtCleared() bool {
+	_, ok := m.clearedFields[bot.FieldDeletedAt]
+	return ok
+}
+
+// ResetDeletedAt resets all changes to the "deleted_at" field.
+func (m *BotMutation) ResetDeletedAt() {
+	m.deleted_at = nil
+	delete(m.clearedFields, bot.FieldDeletedAt)
+}
+
+// SetPurgeAfter sets the "purge_after" field.
+func (m *BotMutation) SetPurgeAfter(t time.Time) {
+	m.purge_after = &t
+}
+
+// PurgeAfter returns the value of the "purge_after" field in the mutation.
+func (m *BotMutation) PurgeAfter() (r time.Time, exists bool) {
+	v := m.purge_after
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurgeAfter returns the old "purge_after" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldPurgeAfter(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurgeAfter is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurgeAfter requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurgeAfter: %w", err)
+	}
+	return oldValue.PurgeAfter, nil
+}
+
+// ClearPurgeAfter clears the value of the "purge_after" field.
+func (m *BotMutation) ClearPurgeAfter() {
+	m.purge_after = nil
+	m.clearedFields[bot.FieldPurgeAfter] = struct{}{}
+}
+
+// PurgeAfterCleared returns if the "purge_after" field was cleared in this mutation.
+func (m *BotMutation) PurgeAfterCleared() bool {
+	_, ok := m.clearedFields[bot.FieldPurgeAfter]
+	return ok
+}
+
+// ResetPurgeAfter resets all changes to the "purge_after" field.
+func (m *BotMutation) ResetPurgeAfter() {
+	m.purge_after = nil
+	delete(m.clearedFields, bot.FieldPurgeAfter)
+}
+
+// SetCleanupComplete sets the "cleanup_complete" field.
+func (m *BotMutation) SetCleanupComplete(b bool) {
+	m.cleanup_complete = &b
+}
+
+// CleanupComplete returns the value of the "cleanup_complete" field in the mutation.
+func (m *BotMutation) CleanupComplete() (r bool, exists bool) {
+	v := m.cleanup_complete
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCleanupComplete returns the old "cleanup_complete" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldCleanupComplete(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCleanupComplete is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCleanupComplete requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCleanupComplete: %w", err)
+	}
+	return oldValue.CleanupComplete, nil
+}
+
+// ResetCleanupComplete resets all changes to the "cleanup_complete" field.
+func (m *BotMutation) ResetCleanupComplete() {
+	m.cleanup_complete = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *BotMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *BotMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the Bot entity.
+// If the Bot object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *BotMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// AddVersionIDs adds the "versions" edge to the BotVersion entity by ids.
+func (m *BotMutation) AddVersionIDs(ids ...uuid.UUID) {
+	if m.versions == nil {
+		m.versions = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.versions[ids[i]] = struct{}{}
+	}
+}
+
+// ClearVersions clears the "versions" edge to the BotVersion entity.
+func (m *BotMutation) ClearVersions() {
+	m.clearedversions = true
+}
+
+// VersionsCleared reports if the "versions" edge to the BotVersion entity was cleared.
+func (m *BotMutation) VersionsCleared() bool {
+	return m.clearedversions
+}
+
+// RemoveVersionIDs removes the "versions" edge to the BotVersion entity by IDs.
+func (m *BotMutation) RemoveVersionIDs(ids ...uuid.UUID) {
+	if m.removedversions == nil {
+		m.removedversions = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.versions, ids[i])
+		m.removedversions[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedVersions returns the removed IDs of the "versions" edge to the BotVersion entity.
+func (m *BotMutation) RemovedVersionsIDs() (ids []uuid.UUID) {
+	for id := range m.removedversions {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// VersionsIDs returns the "versions" edge IDs in the mutation.
+func (m *BotMutation) VersionsIDs() (ids []uuid.UUID) {
+	for id := range m.versions {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetVersions resets all changes to the "versions" edge.
+func (m *BotMutation) ResetVersions() {
+	m.versions = nil
+	m.clearedversions = false
+	m.removedversions = nil
+}
+
+// AddGoalIDs adds the "goals" edge to the BotGoal entity by ids.
+func (m *BotMutation) AddGoalIDs(ids ...uuid.UUID) {
+	if m.goals == nil {
+		m.goals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.goals[ids[i]] = struct{}{}
+	}
+}
+
+// ClearGoals clears the "goals" edge to the BotGoal entity.
+func (m *BotMutation) ClearGoals() {
+	m.clearedgoals = true
+}
+
+// GoalsCleared reports if the "goals" edge to the BotGoal entity was cleared.
+func (m *BotMutation) GoalsCleared() bool {
+	return m.clearedgoals
+}
+
+// RemoveGoalIDs removes the "goals" edge to the BotGoal entity by IDs.
+func (m *BotMutation) RemoveGoalIDs(ids ...uuid.UUID) {
+	if m.removedgoals == nil {
+		m.removedgoals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.goals, ids[i])
+		m.removedgoals[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedGoals returns the removed IDs of the "goals" edge to the BotGoal entity.
+func (m *BotMutation) RemovedGoalsIDs() (ids []uuid.UUID) {
+	for id := range m.removedgoals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// GoalsIDs returns the "goals" edge IDs in the mutation.
+func (m *BotMutation) GoalsIDs() (ids []uuid.UUID) {
+	for id := range m.goals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetGoals resets all changes to the "goals" edge.
+func (m *BotMutation) ResetGoals() {
+	m.goals = nil
+	m.clearedgoals = false
+	m.removedgoals = nil
+}
+
+// AddRunIDs adds the "runs" edge to the BotRun entity by ids.
+func (m *BotMutation) AddRunIDs(ids ...uuid.UUID) {
+	if m.runs == nil {
+		m.runs = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.runs[ids[i]] = struct{}{}
+	}
+}
+
+// ClearRuns clears the "runs" edge to the BotRun entity.
+func (m *BotMutation) ClearRuns() {
+	m.clearedruns = true
+}
+
+// RunsCleared reports if the "runs" edge to the BotRun entity was cleared.
+func (m *BotMutation) RunsCleared() bool {
+	return m.clearedruns
+}
+
+// RemoveRunIDs removes the "runs" edge to the BotRun entity by IDs.
+func (m *BotMutation) RemoveRunIDs(ids ...uuid.UUID) {
+	if m.removedruns == nil {
+		m.removedruns = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.runs, ids[i])
+		m.removedruns[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedRuns returns the removed IDs of the "runs" edge to the BotRun entity.
+func (m *BotMutation) RemovedRunsIDs() (ids []uuid.UUID) {
+	for id := range m.removedruns {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// RunsIDs returns the "runs" edge IDs in the mutation.
+func (m *BotMutation) RunsIDs() (ids []uuid.UUID) {
+	for id := range m.runs {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetRuns resets all changes to the "runs" edge.
+func (m *BotMutation) ResetRuns() {
+	m.runs = nil
+	m.clearedruns = false
+	m.removedruns = nil
+}
+
+// AddApprovalIDs adds the "approvals" edge to the BotApproval entity by ids.
+func (m *BotMutation) AddApprovalIDs(ids ...uuid.UUID) {
+	if m.approvals == nil {
+		m.approvals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.approvals[ids[i]] = struct{}{}
+	}
+}
+
+// ClearApprovals clears the "approvals" edge to the BotApproval entity.
+func (m *BotMutation) ClearApprovals() {
+	m.clearedapprovals = true
+}
+
+// ApprovalsCleared reports if the "approvals" edge to the BotApproval entity was cleared.
+func (m *BotMutation) ApprovalsCleared() bool {
+	return m.clearedapprovals
+}
+
+// RemoveApprovalIDs removes the "approvals" edge to the BotApproval entity by IDs.
+func (m *BotMutation) RemoveApprovalIDs(ids ...uuid.UUID) {
+	if m.removedapprovals == nil {
+		m.removedapprovals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.approvals, ids[i])
+		m.removedapprovals[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedApprovals returns the removed IDs of the "approvals" edge to the BotApproval entity.
+func (m *BotMutation) RemovedApprovalsIDs() (ids []uuid.UUID) {
+	for id := range m.removedapprovals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ApprovalsIDs returns the "approvals" edge IDs in the mutation.
+func (m *BotMutation) ApprovalsIDs() (ids []uuid.UUID) {
+	for id := range m.approvals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetApprovals resets all changes to the "approvals" edge.
+func (m *BotMutation) ResetApprovals() {
+	m.approvals = nil
+	m.clearedapprovals = false
+	m.removedapprovals = nil
+}
+
+// AddOutboxIDs adds the "outbox" edge to the BotOutbox entity by ids.
+func (m *BotMutation) AddOutboxIDs(ids ...uuid.UUID) {
+	if m.outbox == nil {
+		m.outbox = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.outbox[ids[i]] = struct{}{}
+	}
+}
+
+// ClearOutbox clears the "outbox" edge to the BotOutbox entity.
+func (m *BotMutation) ClearOutbox() {
+	m.clearedoutbox = true
+}
+
+// OutboxCleared reports if the "outbox" edge to the BotOutbox entity was cleared.
+func (m *BotMutation) OutboxCleared() bool {
+	return m.clearedoutbox
+}
+
+// RemoveOutboxIDs removes the "outbox" edge to the BotOutbox entity by IDs.
+func (m *BotMutation) RemoveOutboxIDs(ids ...uuid.UUID) {
+	if m.removedoutbox == nil {
+		m.removedoutbox = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.outbox, ids[i])
+		m.removedoutbox[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedOutbox returns the removed IDs of the "outbox" edge to the BotOutbox entity.
+func (m *BotMutation) RemovedOutboxIDs() (ids []uuid.UUID) {
+	for id := range m.removedoutbox {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// OutboxIDs returns the "outbox" edge IDs in the mutation.
+func (m *BotMutation) OutboxIDs() (ids []uuid.UUID) {
+	for id := range m.outbox {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetOutbox resets all changes to the "outbox" edge.
+func (m *BotMutation) ResetOutbox() {
+	m.outbox = nil
+	m.clearedoutbox = false
+	m.removedoutbox = nil
+}
+
+// Where appends a list predicates to the BotMutation builder.
+func (m *BotMutation) Where(ps ...predicate.Bot) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.Bot, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (Bot).
+func (m *BotMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotMutation) Fields() []string {
+	fields := make([]string, 0, 19)
+	if m.owner_id != nil {
+		fields = append(fields, bot.FieldOwnerID)
+	}
+	if m.name != nil {
+		fields = append(fields, bot.FieldName)
+	}
+	if m.status != nil {
+		fields = append(fields, bot.FieldStatus)
+	}
+	if m.revision != nil {
+		fields = append(fields, bot.FieldRevision)
+	}
+	if m.version != nil {
+		fields = append(fields, bot.FieldVersion)
+	}
+	if m.schema_version != nil {
+		fields = append(fields, bot.FieldSchemaVersion)
+	}
+	if m.home_session_id != nil {
+		fields = append(fields, bot.FieldHomeSessionID)
+	}
+	if m.home_binding != nil {
+		fields = append(fields, bot.FieldHomeBinding)
+	}
+	if m.create_key != nil {
+		fields = append(fields, bot.FieldCreateKey)
+	}
+	if m.last_seq != nil {
+		fields = append(fields, bot.FieldLastSeq)
+	}
+	if m.fence != nil {
+		fields = append(fields, bot.FieldFence)
+	}
+	if m.active_run_id != nil {
+		fields = append(fields, bot.FieldActiveRunID)
+	}
+	if m.lease_expires_at != nil {
+		fields = append(fields, bot.FieldLeaseExpiresAt)
+	}
+	if m.data != nil {
+		fields = append(fields, bot.FieldData)
+	}
+	if m.deleted_at != nil {
+		fields = append(fields, bot.FieldDeletedAt)
+	}
+	if m.purge_after != nil {
+		fields = append(fields, bot.FieldPurgeAfter)
+	}
+	if m.cleanup_complete != nil {
+		fields = append(fields, bot.FieldCleanupComplete)
+	}
+	if m.created_at != nil {
+		fields = append(fields, bot.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, bot.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case bot.FieldOwnerID:
+		return m.OwnerID()
+	case bot.FieldName:
+		return m.Name()
+	case bot.FieldStatus:
+		return m.Status()
+	case bot.FieldRevision:
+		return m.Revision()
+	case bot.FieldVersion:
+		return m.Version()
+	case bot.FieldSchemaVersion:
+		return m.SchemaVersion()
+	case bot.FieldHomeSessionID:
+		return m.HomeSessionID()
+	case bot.FieldHomeBinding:
+		return m.HomeBinding()
+	case bot.FieldCreateKey:
+		return m.CreateKey()
+	case bot.FieldLastSeq:
+		return m.LastSeq()
+	case bot.FieldFence:
+		return m.Fence()
+	case bot.FieldActiveRunID:
+		return m.ActiveRunID()
+	case bot.FieldLeaseExpiresAt:
+		return m.LeaseExpiresAt()
+	case bot.FieldData:
+		return m.Data()
+	case bot.FieldDeletedAt:
+		return m.DeletedAt()
+	case bot.FieldPurgeAfter:
+		return m.PurgeAfter()
+	case bot.FieldCleanupComplete:
+		return m.CleanupComplete()
+	case bot.FieldCreatedAt:
+		return m.CreatedAt()
+	case bot.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case bot.FieldOwnerID:
+		return m.OldOwnerID(ctx)
+	case bot.FieldName:
+		return m.OldName(ctx)
+	case bot.FieldStatus:
+		return m.OldStatus(ctx)
+	case bot.FieldRevision:
+		return m.OldRevision(ctx)
+	case bot.FieldVersion:
+		return m.OldVersion(ctx)
+	case bot.FieldSchemaVersion:
+		return m.OldSchemaVersion(ctx)
+	case bot.FieldHomeSessionID:
+		return m.OldHomeSessionID(ctx)
+	case bot.FieldHomeBinding:
+		return m.OldHomeBinding(ctx)
+	case bot.FieldCreateKey:
+		return m.OldCreateKey(ctx)
+	case bot.FieldLastSeq:
+		return m.OldLastSeq(ctx)
+	case bot.FieldFence:
+		return m.OldFence(ctx)
+	case bot.FieldActiveRunID:
+		return m.OldActiveRunID(ctx)
+	case bot.FieldLeaseExpiresAt:
+		return m.OldLeaseExpiresAt(ctx)
+	case bot.FieldData:
+		return m.OldData(ctx)
+	case bot.FieldDeletedAt:
+		return m.OldDeletedAt(ctx)
+	case bot.FieldPurgeAfter:
+		return m.OldPurgeAfter(ctx)
+	case bot.FieldCleanupComplete:
+		return m.OldCleanupComplete(ctx)
+	case bot.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case bot.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown Bot field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case bot.FieldOwnerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerID(v)
+		return nil
+	case bot.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case bot.FieldStatus:
+		v, ok := value.(bot.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case bot.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case bot.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case bot.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSchemaVersion(v)
+		return nil
+	case bot.FieldHomeSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHomeSessionID(v)
+		return nil
+	case bot.FieldHomeBinding:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHomeBinding(v)
+		return nil
+	case bot.FieldCreateKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreateKey(v)
+		return nil
+	case bot.FieldLastSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeq(v)
+		return nil
+	case bot.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFence(v)
+		return nil
+	case bot.FieldActiveRunID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActiveRunID(v)
+		return nil
+	case bot.FieldLeaseExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseExpiresAt(v)
+		return nil
+	case bot.FieldData:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	case bot.FieldDeletedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletedAt(v)
+		return nil
+	case bot.FieldPurgeAfter:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurgeAfter(v)
+		return nil
+	case bot.FieldCleanupComplete:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCleanupComplete(v)
+		return nil
+	case bot.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case bot.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown Bot field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, bot.FieldRevision)
+	}
+	if m.addversion != nil {
+		fields = append(fields, bot.FieldVersion)
+	}
+	if m.addschema_version != nil {
+		fields = append(fields, bot.FieldSchemaVersion)
+	}
+	if m.addlast_seq != nil {
+		fields = append(fields, bot.FieldLastSeq)
+	}
+	if m.addfence != nil {
+		fields = append(fields, bot.FieldFence)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case bot.FieldRevision:
+		return m.AddedRevision()
+	case bot.FieldVersion:
+		return m.AddedVersion()
+	case bot.FieldSchemaVersion:
+		return m.AddedSchemaVersion()
+	case bot.FieldLastSeq:
+		return m.AddedLastSeq()
+	case bot.FieldFence:
+		return m.AddedFence()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case bot.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	case bot.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	case bot.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSchemaVersion(v)
+		return nil
+	case bot.FieldLastSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLastSeq(v)
+		return nil
+	case bot.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFence(v)
+		return nil
+	}
+	return fmt.Errorf("unknown Bot numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(bot.FieldHomeBinding) {
+		fields = append(fields, bot.FieldHomeBinding)
+	}
+	if m.FieldCleared(bot.FieldActiveRunID) {
+		fields = append(fields, bot.FieldActiveRunID)
+	}
+	if m.FieldCleared(bot.FieldLeaseExpiresAt) {
+		fields = append(fields, bot.FieldLeaseExpiresAt)
+	}
+	if m.FieldCleared(bot.FieldDeletedAt) {
+		fields = append(fields, bot.FieldDeletedAt)
+	}
+	if m.FieldCleared(bot.FieldPurgeAfter) {
+		fields = append(fields, bot.FieldPurgeAfter)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotMutation) ClearField(name string) error {
+	switch name {
+	case bot.FieldHomeBinding:
+		m.ClearHomeBinding()
+		return nil
+	case bot.FieldActiveRunID:
+		m.ClearActiveRunID()
+		return nil
+	case bot.FieldLeaseExpiresAt:
+		m.ClearLeaseExpiresAt()
+		return nil
+	case bot.FieldDeletedAt:
+		m.ClearDeletedAt()
+		return nil
+	case bot.FieldPurgeAfter:
+		m.ClearPurgeAfter()
+		return nil
+	}
+	return fmt.Errorf("unknown Bot nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotMutation) ResetField(name string) error {
+	switch name {
+	case bot.FieldOwnerID:
+		m.ResetOwnerID()
+		return nil
+	case bot.FieldName:
+		m.ResetName()
+		return nil
+	case bot.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case bot.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case bot.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case bot.FieldSchemaVersion:
+		m.ResetSchemaVersion()
+		return nil
+	case bot.FieldHomeSessionID:
+		m.ResetHomeSessionID()
+		return nil
+	case bot.FieldHomeBinding:
+		m.ResetHomeBinding()
+		return nil
+	case bot.FieldCreateKey:
+		m.ResetCreateKey()
+		return nil
+	case bot.FieldLastSeq:
+		m.ResetLastSeq()
+		return nil
+	case bot.FieldFence:
+		m.ResetFence()
+		return nil
+	case bot.FieldActiveRunID:
+		m.ResetActiveRunID()
+		return nil
+	case bot.FieldLeaseExpiresAt:
+		m.ResetLeaseExpiresAt()
+		return nil
+	case bot.FieldData:
+		m.ResetData()
+		return nil
+	case bot.FieldDeletedAt:
+		m.ResetDeletedAt()
+		return nil
+	case bot.FieldPurgeAfter:
+		m.ResetPurgeAfter()
+		return nil
+	case bot.FieldCleanupComplete:
+		m.ResetCleanupComplete()
+		return nil
+	case bot.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case bot.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown Bot field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotMutation) AddedEdges() []string {
+	edges := make([]string, 0, 5)
+	if m.versions != nil {
+		edges = append(edges, bot.EdgeVersions)
+	}
+	if m.goals != nil {
+		edges = append(edges, bot.EdgeGoals)
+	}
+	if m.runs != nil {
+		edges = append(edges, bot.EdgeRuns)
+	}
+	if m.approvals != nil {
+		edges = append(edges, bot.EdgeApprovals)
+	}
+	if m.outbox != nil {
+		edges = append(edges, bot.EdgeOutbox)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case bot.EdgeVersions:
+		ids := make([]ent.Value, 0, len(m.versions))
+		for id := range m.versions {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeGoals:
+		ids := make([]ent.Value, 0, len(m.goals))
+		for id := range m.goals {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeRuns:
+		ids := make([]ent.Value, 0, len(m.runs))
+		for id := range m.runs {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeApprovals:
+		ids := make([]ent.Value, 0, len(m.approvals))
+		for id := range m.approvals {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeOutbox:
+		ids := make([]ent.Value, 0, len(m.outbox))
+		for id := range m.outbox {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 5)
+	if m.removedversions != nil {
+		edges = append(edges, bot.EdgeVersions)
+	}
+	if m.removedgoals != nil {
+		edges = append(edges, bot.EdgeGoals)
+	}
+	if m.removedruns != nil {
+		edges = append(edges, bot.EdgeRuns)
+	}
+	if m.removedapprovals != nil {
+		edges = append(edges, bot.EdgeApprovals)
+	}
+	if m.removedoutbox != nil {
+		edges = append(edges, bot.EdgeOutbox)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case bot.EdgeVersions:
+		ids := make([]ent.Value, 0, len(m.removedversions))
+		for id := range m.removedversions {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeGoals:
+		ids := make([]ent.Value, 0, len(m.removedgoals))
+		for id := range m.removedgoals {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeRuns:
+		ids := make([]ent.Value, 0, len(m.removedruns))
+		for id := range m.removedruns {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeApprovals:
+		ids := make([]ent.Value, 0, len(m.removedapprovals))
+		for id := range m.removedapprovals {
+			ids = append(ids, id)
+		}
+		return ids
+	case bot.EdgeOutbox:
+		ids := make([]ent.Value, 0, len(m.removedoutbox))
+		for id := range m.removedoutbox {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 5)
+	if m.clearedversions {
+		edges = append(edges, bot.EdgeVersions)
+	}
+	if m.clearedgoals {
+		edges = append(edges, bot.EdgeGoals)
+	}
+	if m.clearedruns {
+		edges = append(edges, bot.EdgeRuns)
+	}
+	if m.clearedapprovals {
+		edges = append(edges, bot.EdgeApprovals)
+	}
+	if m.clearedoutbox {
+		edges = append(edges, bot.EdgeOutbox)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotMutation) EdgeCleared(name string) bool {
+	switch name {
+	case bot.EdgeVersions:
+		return m.clearedversions
+	case bot.EdgeGoals:
+		return m.clearedgoals
+	case bot.EdgeRuns:
+		return m.clearedruns
+	case bot.EdgeApprovals:
+		return m.clearedapprovals
+	case bot.EdgeOutbox:
+		return m.clearedoutbox
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown Bot unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotMutation) ResetEdge(name string) error {
+	switch name {
+	case bot.EdgeVersions:
+		m.ResetVersions()
+		return nil
+	case bot.EdgeGoals:
+		m.ResetGoals()
+		return nil
+	case bot.EdgeRuns:
+		m.ResetRuns()
+		return nil
+	case bot.EdgeApprovals:
+		m.ResetApprovals()
+		return nil
+	case bot.EdgeOutbox:
+		m.ResetOutbox()
+		return nil
+	}
+	return fmt.Errorf("unknown Bot edge %s", name)
+}
+
+// BotApprovalMutation represents an operation that mutates the BotApproval nodes in the graph.
+type BotApprovalMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	version       *int64
+	addversion    *int64
+	action_digest *string
+	status        *botapproval.Status
+	data          *map[string]interface{}
+	expires_at    *time.Time
+	created_at    *time.Time
+	clearedFields map[string]struct{}
+	bot           *uuid.UUID
+	clearedbot    bool
+	run           *uuid.UUID
+	clearedrun    bool
+	done          bool
+	oldValue      func(context.Context) (*BotApproval, error)
+	predicates    []predicate.BotApproval
+}
+
+var _ ent.Mutation = (*BotApprovalMutation)(nil)
+
+// botapprovalOption allows management of the mutation configuration using functional options.
+type botapprovalOption func(*BotApprovalMutation)
+
+// newBotApprovalMutation creates new mutation for the BotApproval entity.
+func newBotApprovalMutation(c config, op Op, opts ...botapprovalOption) *BotApprovalMutation {
+	m := &BotApprovalMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotApproval,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotApprovalID sets the ID field of the mutation.
+func withBotApprovalID(id uuid.UUID) botapprovalOption {
+	return func(m *BotApprovalMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotApproval
+		)
+		m.oldValue = func(ctx context.Context) (*BotApproval, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotApproval.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotApproval sets the old BotApproval of the mutation.
+func withBotApproval(node *BotApproval) botapprovalOption {
+	return func(m *BotApprovalMutation) {
+		m.oldValue = func(context.Context) (*BotApproval, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotApprovalMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotApprovalMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotApproval entities.
+func (m *BotApprovalMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotApprovalMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotApprovalMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotApproval.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *BotApprovalMutation) SetBotID(u uuid.UUID) {
+	m.bot = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *BotApprovalMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldBotID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *BotApprovalMutation) ResetBotID() {
+	m.bot = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *BotApprovalMutation) SetRunID(u uuid.UUID) {
+	m.run = &u
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *BotApprovalMutation) RunID() (r uuid.UUID, exists bool) {
+	v := m.run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldRunID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *BotApprovalMutation) ResetRunID() {
+	m.run = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *BotApprovalMutation) SetVersion(i int64) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *BotApprovalMutation) Version() (r int64, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *BotApprovalMutation) AddVersion(i int64) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *BotApprovalMutation) AddedVersion() (r int64, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *BotApprovalMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetActionDigest sets the "action_digest" field.
+func (m *BotApprovalMutation) SetActionDigest(s string) {
+	m.action_digest = &s
+}
+
+// ActionDigest returns the value of the "action_digest" field in the mutation.
+func (m *BotApprovalMutation) ActionDigest() (r string, exists bool) {
+	v := m.action_digest
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionDigest returns the old "action_digest" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldActionDigest(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionDigest is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionDigest requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionDigest: %w", err)
+	}
+	return oldValue.ActionDigest, nil
+}
+
+// ResetActionDigest resets all changes to the "action_digest" field.
+func (m *BotApprovalMutation) ResetActionDigest() {
+	m.action_digest = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *BotApprovalMutation) SetStatus(b botapproval.Status) {
+	m.status = &b
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *BotApprovalMutation) Status() (r botapproval.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldStatus(ctx context.Context) (v botapproval.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *BotApprovalMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetData sets the "data" field.
+func (m *BotApprovalMutation) SetData(value map[string]interface{}) {
+	m.data = &value
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *BotApprovalMutation) Data() (r map[string]interface{}, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldData(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *BotApprovalMutation) ResetData() {
+	m.data = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *BotApprovalMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *BotApprovalMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *BotApprovalMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotApprovalMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotApprovalMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotApproval entity.
+// If the BotApproval object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotApprovalMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotApprovalMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// ClearBot clears the "bot" edge to the Bot entity.
+func (m *BotApprovalMutation) ClearBot() {
+	m.clearedbot = true
+	m.clearedFields[botapproval.FieldBotID] = struct{}{}
+}
+
+// BotCleared reports if the "bot" edge to the Bot entity was cleared.
+func (m *BotApprovalMutation) BotCleared() bool {
+	return m.clearedbot
+}
+
+// BotIDs returns the "bot" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BotID instead. It exists only for internal usage by the builders.
+func (m *BotApprovalMutation) BotIDs() (ids []uuid.UUID) {
+	if id := m.bot; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBot resets all changes to the "bot" edge.
+func (m *BotApprovalMutation) ResetBot() {
+	m.bot = nil
+	m.clearedbot = false
+}
+
+// ClearRun clears the "run" edge to the BotRun entity.
+func (m *BotApprovalMutation) ClearRun() {
+	m.clearedrun = true
+	m.clearedFields[botapproval.FieldRunID] = struct{}{}
+}
+
+// RunCleared reports if the "run" edge to the BotRun entity was cleared.
+func (m *BotApprovalMutation) RunCleared() bool {
+	return m.clearedrun
+}
+
+// RunIDs returns the "run" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// RunID instead. It exists only for internal usage by the builders.
+func (m *BotApprovalMutation) RunIDs() (ids []uuid.UUID) {
+	if id := m.run; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetRun resets all changes to the "run" edge.
+func (m *BotApprovalMutation) ResetRun() {
+	m.run = nil
+	m.clearedrun = false
+}
+
+// Where appends a list predicates to the BotApprovalMutation builder.
+func (m *BotApprovalMutation) Where(ps ...predicate.BotApproval) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotApprovalMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotApprovalMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotApproval, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotApprovalMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotApprovalMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotApproval).
+func (m *BotApprovalMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotApprovalMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.bot != nil {
+		fields = append(fields, botapproval.FieldBotID)
+	}
+	if m.run != nil {
+		fields = append(fields, botapproval.FieldRunID)
+	}
+	if m.version != nil {
+		fields = append(fields, botapproval.FieldVersion)
+	}
+	if m.action_digest != nil {
+		fields = append(fields, botapproval.FieldActionDigest)
+	}
+	if m.status != nil {
+		fields = append(fields, botapproval.FieldStatus)
+	}
+	if m.data != nil {
+		fields = append(fields, botapproval.FieldData)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, botapproval.FieldExpiresAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botapproval.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotApprovalMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botapproval.FieldBotID:
+		return m.BotID()
+	case botapproval.FieldRunID:
+		return m.RunID()
+	case botapproval.FieldVersion:
+		return m.Version()
+	case botapproval.FieldActionDigest:
+		return m.ActionDigest()
+	case botapproval.FieldStatus:
+		return m.Status()
+	case botapproval.FieldData:
+		return m.Data()
+	case botapproval.FieldExpiresAt:
+		return m.ExpiresAt()
+	case botapproval.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotApprovalMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botapproval.FieldBotID:
+		return m.OldBotID(ctx)
+	case botapproval.FieldRunID:
+		return m.OldRunID(ctx)
+	case botapproval.FieldVersion:
+		return m.OldVersion(ctx)
+	case botapproval.FieldActionDigest:
+		return m.OldActionDigest(ctx)
+	case botapproval.FieldStatus:
+		return m.OldStatus(ctx)
+	case botapproval.FieldData:
+		return m.OldData(ctx)
+	case botapproval.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case botapproval.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotApproval field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotApprovalMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botapproval.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case botapproval.FieldRunID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case botapproval.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case botapproval.FieldActionDigest:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionDigest(v)
+		return nil
+	case botapproval.FieldStatus:
+		v, ok := value.(botapproval.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case botapproval.FieldData:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	case botapproval.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case botapproval.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotApproval field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotApprovalMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, botapproval.FieldVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotApprovalMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botapproval.FieldVersion:
+		return m.AddedVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotApprovalMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botapproval.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotApproval numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotApprovalMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotApprovalMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotApprovalMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown BotApproval nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotApprovalMutation) ResetField(name string) error {
+	switch name {
+	case botapproval.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case botapproval.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case botapproval.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case botapproval.FieldActionDigest:
+		m.ResetActionDigest()
+		return nil
+	case botapproval.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case botapproval.FieldData:
+		m.ResetData()
+		return nil
+	case botapproval.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case botapproval.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotApproval field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotApprovalMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.bot != nil {
+		edges = append(edges, botapproval.EdgeBot)
+	}
+	if m.run != nil {
+		edges = append(edges, botapproval.EdgeRun)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotApprovalMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case botapproval.EdgeBot:
+		if id := m.bot; id != nil {
+			return []ent.Value{*id}
+		}
+	case botapproval.EdgeRun:
+		if id := m.run; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotApprovalMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotApprovalMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotApprovalMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedbot {
+		edges = append(edges, botapproval.EdgeBot)
+	}
+	if m.clearedrun {
+		edges = append(edges, botapproval.EdgeRun)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotApprovalMutation) EdgeCleared(name string) bool {
+	switch name {
+	case botapproval.EdgeBot:
+		return m.clearedbot
+	case botapproval.EdgeRun:
+		return m.clearedrun
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotApprovalMutation) ClearEdge(name string) error {
+	switch name {
+	case botapproval.EdgeBot:
+		m.ClearBot()
+		return nil
+	case botapproval.EdgeRun:
+		m.ClearRun()
+		return nil
+	}
+	return fmt.Errorf("unknown BotApproval unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotApprovalMutation) ResetEdge(name string) error {
+	switch name {
+	case botapproval.EdgeBot:
+		m.ResetBot()
+		return nil
+	case botapproval.EdgeRun:
+		m.ResetRun()
+		return nil
+	}
+	return fmt.Errorf("unknown BotApproval edge %s", name)
+}
+
+// BotGoalMutation represents an operation that mutates the BotGoal nodes in the graph.
+type BotGoalMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	revision             *int64
+	addrevision          *int64
+	title                *string
+	status               *botgoal.Status
+	due_at               *time.Time
+	data                 *map[string]interface{}
+	created_at           *time.Time
+	updated_at           *time.Time
+	clearedFields        map[string]struct{}
+	bot                  *uuid.UUID
+	clearedbot           bool
+	tracked_items        map[uuid.UUID]struct{}
+	removedtracked_items map[uuid.UUID]struct{}
+	clearedtracked_items bool
+	done                 bool
+	oldValue             func(context.Context) (*BotGoal, error)
+	predicates           []predicate.BotGoal
+}
+
+var _ ent.Mutation = (*BotGoalMutation)(nil)
+
+// botgoalOption allows management of the mutation configuration using functional options.
+type botgoalOption func(*BotGoalMutation)
+
+// newBotGoalMutation creates new mutation for the BotGoal entity.
+func newBotGoalMutation(c config, op Op, opts ...botgoalOption) *BotGoalMutation {
+	m := &BotGoalMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotGoal,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotGoalID sets the ID field of the mutation.
+func withBotGoalID(id uuid.UUID) botgoalOption {
+	return func(m *BotGoalMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotGoal
+		)
+		m.oldValue = func(ctx context.Context) (*BotGoal, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotGoal.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotGoal sets the old BotGoal of the mutation.
+func withBotGoal(node *BotGoal) botgoalOption {
+	return func(m *BotGoalMutation) {
+		m.oldValue = func(context.Context) (*BotGoal, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotGoalMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotGoalMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotGoal entities.
+func (m *BotGoalMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotGoalMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotGoalMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotGoal.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *BotGoalMutation) SetBotID(u uuid.UUID) {
+	m.bot = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *BotGoalMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldBotID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *BotGoalMutation) ResetBotID() {
+	m.bot = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *BotGoalMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *BotGoalMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *BotGoalMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *BotGoalMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *BotGoalMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetTitle sets the "title" field.
+func (m *BotGoalMutation) SetTitle(s string) {
+	m.title = &s
+}
+
+// Title returns the value of the "title" field in the mutation.
+func (m *BotGoalMutation) Title() (r string, exists bool) {
+	v := m.title
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTitle returns the old "title" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldTitle(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTitle is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTitle requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTitle: %w", err)
+	}
+	return oldValue.Title, nil
+}
+
+// ResetTitle resets all changes to the "title" field.
+func (m *BotGoalMutation) ResetTitle() {
+	m.title = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *BotGoalMutation) SetStatus(b botgoal.Status) {
+	m.status = &b
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *BotGoalMutation) Status() (r botgoal.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldStatus(ctx context.Context) (v botgoal.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *BotGoalMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetDueAt sets the "due_at" field.
+func (m *BotGoalMutation) SetDueAt(t time.Time) {
+	m.due_at = &t
+}
+
+// DueAt returns the value of the "due_at" field in the mutation.
+func (m *BotGoalMutation) DueAt() (r time.Time, exists bool) {
+	v := m.due_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDueAt returns the old "due_at" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldDueAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDueAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDueAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDueAt: %w", err)
+	}
+	return oldValue.DueAt, nil
+}
+
+// ClearDueAt clears the value of the "due_at" field.
+func (m *BotGoalMutation) ClearDueAt() {
+	m.due_at = nil
+	m.clearedFields[botgoal.FieldDueAt] = struct{}{}
+}
+
+// DueAtCleared returns if the "due_at" field was cleared in this mutation.
+func (m *BotGoalMutation) DueAtCleared() bool {
+	_, ok := m.clearedFields[botgoal.FieldDueAt]
+	return ok
+}
+
+// ResetDueAt resets all changes to the "due_at" field.
+func (m *BotGoalMutation) ResetDueAt() {
+	m.due_at = nil
+	delete(m.clearedFields, botgoal.FieldDueAt)
+}
+
+// SetData sets the "data" field.
+func (m *BotGoalMutation) SetData(value map[string]interface{}) {
+	m.data = &value
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *BotGoalMutation) Data() (r map[string]interface{}, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldData(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *BotGoalMutation) ResetData() {
+	m.data = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotGoalMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotGoalMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotGoalMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *BotGoalMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *BotGoalMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the BotGoal entity.
+// If the BotGoal object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotGoalMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *BotGoalMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// ClearBot clears the "bot" edge to the Bot entity.
+func (m *BotGoalMutation) ClearBot() {
+	m.clearedbot = true
+	m.clearedFields[botgoal.FieldBotID] = struct{}{}
+}
+
+// BotCleared reports if the "bot" edge to the Bot entity was cleared.
+func (m *BotGoalMutation) BotCleared() bool {
+	return m.clearedbot
+}
+
+// BotIDs returns the "bot" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BotID instead. It exists only for internal usage by the builders.
+func (m *BotGoalMutation) BotIDs() (ids []uuid.UUID) {
+	if id := m.bot; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBot resets all changes to the "bot" edge.
+func (m *BotGoalMutation) ResetBot() {
+	m.bot = nil
+	m.clearedbot = false
+}
+
+// AddTrackedItemIDs adds the "tracked_items" edge to the BotTrackedItem entity by ids.
+func (m *BotGoalMutation) AddTrackedItemIDs(ids ...uuid.UUID) {
+	if m.tracked_items == nil {
+		m.tracked_items = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.tracked_items[ids[i]] = struct{}{}
+	}
+}
+
+// ClearTrackedItems clears the "tracked_items" edge to the BotTrackedItem entity.
+func (m *BotGoalMutation) ClearTrackedItems() {
+	m.clearedtracked_items = true
+}
+
+// TrackedItemsCleared reports if the "tracked_items" edge to the BotTrackedItem entity was cleared.
+func (m *BotGoalMutation) TrackedItemsCleared() bool {
+	return m.clearedtracked_items
+}
+
+// RemoveTrackedItemIDs removes the "tracked_items" edge to the BotTrackedItem entity by IDs.
+func (m *BotGoalMutation) RemoveTrackedItemIDs(ids ...uuid.UUID) {
+	if m.removedtracked_items == nil {
+		m.removedtracked_items = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.tracked_items, ids[i])
+		m.removedtracked_items[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedTrackedItems returns the removed IDs of the "tracked_items" edge to the BotTrackedItem entity.
+func (m *BotGoalMutation) RemovedTrackedItemsIDs() (ids []uuid.UUID) {
+	for id := range m.removedtracked_items {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// TrackedItemsIDs returns the "tracked_items" edge IDs in the mutation.
+func (m *BotGoalMutation) TrackedItemsIDs() (ids []uuid.UUID) {
+	for id := range m.tracked_items {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetTrackedItems resets all changes to the "tracked_items" edge.
+func (m *BotGoalMutation) ResetTrackedItems() {
+	m.tracked_items = nil
+	m.clearedtracked_items = false
+	m.removedtracked_items = nil
+}
+
+// Where appends a list predicates to the BotGoalMutation builder.
+func (m *BotGoalMutation) Where(ps ...predicate.BotGoal) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotGoalMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotGoalMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotGoal, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotGoalMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotGoalMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotGoal).
+func (m *BotGoalMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotGoalMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.bot != nil {
+		fields = append(fields, botgoal.FieldBotID)
+	}
+	if m.revision != nil {
+		fields = append(fields, botgoal.FieldRevision)
+	}
+	if m.title != nil {
+		fields = append(fields, botgoal.FieldTitle)
+	}
+	if m.status != nil {
+		fields = append(fields, botgoal.FieldStatus)
+	}
+	if m.due_at != nil {
+		fields = append(fields, botgoal.FieldDueAt)
+	}
+	if m.data != nil {
+		fields = append(fields, botgoal.FieldData)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botgoal.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, botgoal.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotGoalMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botgoal.FieldBotID:
+		return m.BotID()
+	case botgoal.FieldRevision:
+		return m.Revision()
+	case botgoal.FieldTitle:
+		return m.Title()
+	case botgoal.FieldStatus:
+		return m.Status()
+	case botgoal.FieldDueAt:
+		return m.DueAt()
+	case botgoal.FieldData:
+		return m.Data()
+	case botgoal.FieldCreatedAt:
+		return m.CreatedAt()
+	case botgoal.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotGoalMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botgoal.FieldBotID:
+		return m.OldBotID(ctx)
+	case botgoal.FieldRevision:
+		return m.OldRevision(ctx)
+	case botgoal.FieldTitle:
+		return m.OldTitle(ctx)
+	case botgoal.FieldStatus:
+		return m.OldStatus(ctx)
+	case botgoal.FieldDueAt:
+		return m.OldDueAt(ctx)
+	case botgoal.FieldData:
+		return m.OldData(ctx)
+	case botgoal.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case botgoal.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotGoal field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotGoalMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botgoal.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case botgoal.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case botgoal.FieldTitle:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTitle(v)
+		return nil
+	case botgoal.FieldStatus:
+		v, ok := value.(botgoal.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case botgoal.FieldDueAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDueAt(v)
+		return nil
+	case botgoal.FieldData:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	case botgoal.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case botgoal.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotGoalMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, botgoal.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotGoalMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botgoal.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotGoalMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botgoal.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotGoalMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(botgoal.FieldDueAt) {
+		fields = append(fields, botgoal.FieldDueAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotGoalMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotGoalMutation) ClearField(name string) error {
+	switch name {
+	case botgoal.FieldDueAt:
+		m.ClearDueAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotGoalMutation) ResetField(name string) error {
+	switch name {
+	case botgoal.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case botgoal.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case botgoal.FieldTitle:
+		m.ResetTitle()
+		return nil
+	case botgoal.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case botgoal.FieldDueAt:
+		m.ResetDueAt()
+		return nil
+	case botgoal.FieldData:
+		m.ResetData()
+		return nil
+	case botgoal.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case botgoal.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotGoalMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.bot != nil {
+		edges = append(edges, botgoal.EdgeBot)
+	}
+	if m.tracked_items != nil {
+		edges = append(edges, botgoal.EdgeTrackedItems)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotGoalMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case botgoal.EdgeBot:
+		if id := m.bot; id != nil {
+			return []ent.Value{*id}
+		}
+	case botgoal.EdgeTrackedItems:
+		ids := make([]ent.Value, 0, len(m.tracked_items))
+		for id := range m.tracked_items {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotGoalMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.removedtracked_items != nil {
+		edges = append(edges, botgoal.EdgeTrackedItems)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotGoalMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case botgoal.EdgeTrackedItems:
+		ids := make([]ent.Value, 0, len(m.removedtracked_items))
+		for id := range m.removedtracked_items {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotGoalMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedbot {
+		edges = append(edges, botgoal.EdgeBot)
+	}
+	if m.clearedtracked_items {
+		edges = append(edges, botgoal.EdgeTrackedItems)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotGoalMutation) EdgeCleared(name string) bool {
+	switch name {
+	case botgoal.EdgeBot:
+		return m.clearedbot
+	case botgoal.EdgeTrackedItems:
+		return m.clearedtracked_items
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotGoalMutation) ClearEdge(name string) error {
+	switch name {
+	case botgoal.EdgeBot:
+		m.ClearBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotGoalMutation) ResetEdge(name string) error {
+	switch name {
+	case botgoal.EdgeBot:
+		m.ResetBot()
+		return nil
+	case botgoal.EdgeTrackedItems:
+		m.ResetTrackedItems()
+		return nil
+	}
+	return fmt.Errorf("unknown BotGoal edge %s", name)
+}
+
+// BotIntakeMutation represents an operation that mutates the BotIntake nodes in the graph.
+type BotIntakeMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	owner_id      *uuid.UUID
+	revision      *int64
+	addrevision   *int64
+	content       *[]byte
+	discarded     *bool
+	mutation_hash *string
+	created_at    *time.Time
+	updated_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*BotIntake, error)
+	predicates    []predicate.BotIntake
+}
+
+var _ ent.Mutation = (*BotIntakeMutation)(nil)
+
+// botintakeOption allows management of the mutation configuration using functional options.
+type botintakeOption func(*BotIntakeMutation)
+
+// newBotIntakeMutation creates new mutation for the BotIntake entity.
+func newBotIntakeMutation(c config, op Op, opts ...botintakeOption) *BotIntakeMutation {
+	m := &BotIntakeMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotIntake,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotIntakeID sets the ID field of the mutation.
+func withBotIntakeID(id uuid.UUID) botintakeOption {
+	return func(m *BotIntakeMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotIntake
+		)
+		m.oldValue = func(ctx context.Context) (*BotIntake, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotIntake.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotIntake sets the old BotIntake of the mutation.
+func withBotIntake(node *BotIntake) botintakeOption {
+	return func(m *BotIntakeMutation) {
+		m.oldValue = func(context.Context) (*BotIntake, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotIntakeMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotIntakeMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotIntake entities.
+func (m *BotIntakeMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotIntakeMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotIntakeMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotIntake.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (m *BotIntakeMutation) SetOwnerID(u uuid.UUID) {
+	m.owner_id = &u
+}
+
+// OwnerID returns the value of the "owner_id" field in the mutation.
+func (m *BotIntakeMutation) OwnerID() (r uuid.UUID, exists bool) {
+	v := m.owner_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerID returns the old "owner_id" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldOwnerID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
+	}
+	return oldValue.OwnerID, nil
+}
+
+// ResetOwnerID resets all changes to the "owner_id" field.
+func (m *BotIntakeMutation) ResetOwnerID() {
+	m.owner_id = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *BotIntakeMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *BotIntakeMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *BotIntakeMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *BotIntakeMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *BotIntakeMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetContent sets the "content" field.
+func (m *BotIntakeMutation) SetContent(b []byte) {
+	m.content = &b
+}
+
+// Content returns the value of the "content" field in the mutation.
+func (m *BotIntakeMutation) Content() (r []byte, exists bool) {
+	v := m.content
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContent returns the old "content" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldContent(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContent: %w", err)
+	}
+	return oldValue.Content, nil
+}
+
+// ClearContent clears the value of the "content" field.
+func (m *BotIntakeMutation) ClearContent() {
+	m.content = nil
+	m.clearedFields[botintake.FieldContent] = struct{}{}
+}
+
+// ContentCleared returns if the "content" field was cleared in this mutation.
+func (m *BotIntakeMutation) ContentCleared() bool {
+	_, ok := m.clearedFields[botintake.FieldContent]
+	return ok
+}
+
+// ResetContent resets all changes to the "content" field.
+func (m *BotIntakeMutation) ResetContent() {
+	m.content = nil
+	delete(m.clearedFields, botintake.FieldContent)
+}
+
+// SetDiscarded sets the "discarded" field.
+func (m *BotIntakeMutation) SetDiscarded(b bool) {
+	m.discarded = &b
+}
+
+// Discarded returns the value of the "discarded" field in the mutation.
+func (m *BotIntakeMutation) Discarded() (r bool, exists bool) {
+	v := m.discarded
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDiscarded returns the old "discarded" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldDiscarded(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDiscarded is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDiscarded requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDiscarded: %w", err)
+	}
+	return oldValue.Discarded, nil
+}
+
+// ResetDiscarded resets all changes to the "discarded" field.
+func (m *BotIntakeMutation) ResetDiscarded() {
+	m.discarded = nil
+}
+
+// SetMutationHash sets the "mutation_hash" field.
+func (m *BotIntakeMutation) SetMutationHash(s string) {
+	m.mutation_hash = &s
+}
+
+// MutationHash returns the value of the "mutation_hash" field in the mutation.
+func (m *BotIntakeMutation) MutationHash() (r string, exists bool) {
+	v := m.mutation_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMutationHash returns the old "mutation_hash" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldMutationHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMutationHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMutationHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMutationHash: %w", err)
+	}
+	return oldValue.MutationHash, nil
+}
+
+// ResetMutationHash resets all changes to the "mutation_hash" field.
+func (m *BotIntakeMutation) ResetMutationHash() {
+	m.mutation_hash = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotIntakeMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotIntakeMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotIntakeMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *BotIntakeMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *BotIntakeMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the BotIntake entity.
+// If the BotIntake object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotIntakeMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *BotIntakeMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the BotIntakeMutation builder.
+func (m *BotIntakeMutation) Where(ps ...predicate.BotIntake) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotIntakeMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotIntakeMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotIntake, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotIntakeMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotIntakeMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotIntake).
+func (m *BotIntakeMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotIntakeMutation) Fields() []string {
+	fields := make([]string, 0, 7)
+	if m.owner_id != nil {
+		fields = append(fields, botintake.FieldOwnerID)
+	}
+	if m.revision != nil {
+		fields = append(fields, botintake.FieldRevision)
+	}
+	if m.content != nil {
+		fields = append(fields, botintake.FieldContent)
+	}
+	if m.discarded != nil {
+		fields = append(fields, botintake.FieldDiscarded)
+	}
+	if m.mutation_hash != nil {
+		fields = append(fields, botintake.FieldMutationHash)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botintake.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, botintake.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotIntakeMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botintake.FieldOwnerID:
+		return m.OwnerID()
+	case botintake.FieldRevision:
+		return m.Revision()
+	case botintake.FieldContent:
+		return m.Content()
+	case botintake.FieldDiscarded:
+		return m.Discarded()
+	case botintake.FieldMutationHash:
+		return m.MutationHash()
+	case botintake.FieldCreatedAt:
+		return m.CreatedAt()
+	case botintake.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotIntakeMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botintake.FieldOwnerID:
+		return m.OldOwnerID(ctx)
+	case botintake.FieldRevision:
+		return m.OldRevision(ctx)
+	case botintake.FieldContent:
+		return m.OldContent(ctx)
+	case botintake.FieldDiscarded:
+		return m.OldDiscarded(ctx)
+	case botintake.FieldMutationHash:
+		return m.OldMutationHash(ctx)
+	case botintake.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case botintake.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotIntake field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotIntakeMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botintake.FieldOwnerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerID(v)
+		return nil
+	case botintake.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case botintake.FieldContent:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContent(v)
+		return nil
+	case botintake.FieldDiscarded:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDiscarded(v)
+		return nil
+	case botintake.FieldMutationHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMutationHash(v)
+		return nil
+	case botintake.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case botintake.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotIntake field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotIntakeMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, botintake.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotIntakeMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botintake.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotIntakeMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botintake.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotIntake numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotIntakeMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(botintake.FieldContent) {
+		fields = append(fields, botintake.FieldContent)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotIntakeMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotIntakeMutation) ClearField(name string) error {
+	switch name {
+	case botintake.FieldContent:
+		m.ClearContent()
+		return nil
+	}
+	return fmt.Errorf("unknown BotIntake nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotIntakeMutation) ResetField(name string) error {
+	switch name {
+	case botintake.FieldOwnerID:
+		m.ResetOwnerID()
+		return nil
+	case botintake.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case botintake.FieldContent:
+		m.ResetContent()
+		return nil
+	case botintake.FieldDiscarded:
+		m.ResetDiscarded()
+		return nil
+	case botintake.FieldMutationHash:
+		m.ResetMutationHash()
+		return nil
+	case botintake.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case botintake.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotIntake field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotIntakeMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotIntakeMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotIntakeMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotIntakeMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotIntakeMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotIntakeMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotIntakeMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown BotIntake unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotIntakeMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown BotIntake edge %s", name)
+}
+
+// BotOutboxMutation represents an operation that mutates the BotOutbox nodes in the graph.
+type BotOutboxMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	sequence          *int64
+	addsequence       *int64
+	kind              *string
+	deduplication_key *string
+	payload           *map[string]interface{}
+	available_at      *time.Time
+	delivered_at      *time.Time
+	worker_id         *string
+	fence             *int64
+	addfence          *int64
+	lease_expires_at  *time.Time
+	attempts          *int
+	addattempts       *int
+	last_error        *string
+	created_at        *time.Time
+	clearedFields     map[string]struct{}
+	bot               *uuid.UUID
+	clearedbot        bool
+	done              bool
+	oldValue          func(context.Context) (*BotOutbox, error)
+	predicates        []predicate.BotOutbox
+}
+
+var _ ent.Mutation = (*BotOutboxMutation)(nil)
+
+// botoutboxOption allows management of the mutation configuration using functional options.
+type botoutboxOption func(*BotOutboxMutation)
+
+// newBotOutboxMutation creates new mutation for the BotOutbox entity.
+func newBotOutboxMutation(c config, op Op, opts ...botoutboxOption) *BotOutboxMutation {
+	m := &BotOutboxMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotOutbox,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotOutboxID sets the ID field of the mutation.
+func withBotOutboxID(id uuid.UUID) botoutboxOption {
+	return func(m *BotOutboxMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotOutbox
+		)
+		m.oldValue = func(ctx context.Context) (*BotOutbox, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotOutbox.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotOutbox sets the old BotOutbox of the mutation.
+func withBotOutbox(node *BotOutbox) botoutboxOption {
+	return func(m *BotOutboxMutation) {
+		m.oldValue = func(context.Context) (*BotOutbox, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotOutboxMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotOutboxMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotOutbox entities.
+func (m *BotOutboxMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotOutboxMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotOutboxMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotOutbox.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *BotOutboxMutation) SetBotID(u uuid.UUID) {
+	m.bot = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *BotOutboxMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldBotID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *BotOutboxMutation) ResetBotID() {
+	m.bot = nil
+}
+
+// SetSequence sets the "sequence" field.
+func (m *BotOutboxMutation) SetSequence(i int64) {
+	m.sequence = &i
+	m.addsequence = nil
+}
+
+// Sequence returns the value of the "sequence" field in the mutation.
+func (m *BotOutboxMutation) Sequence() (r int64, exists bool) {
+	v := m.sequence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSequence returns the old "sequence" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldSequence(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSequence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSequence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSequence: %w", err)
+	}
+	return oldValue.Sequence, nil
+}
+
+// AddSequence adds i to the "sequence" field.
+func (m *BotOutboxMutation) AddSequence(i int64) {
+	if m.addsequence != nil {
+		*m.addsequence += i
+	} else {
+		m.addsequence = &i
+	}
+}
+
+// AddedSequence returns the value that was added to the "sequence" field in this mutation.
+func (m *BotOutboxMutation) AddedSequence() (r int64, exists bool) {
+	v := m.addsequence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSequence resets all changes to the "sequence" field.
+func (m *BotOutboxMutation) ResetSequence() {
+	m.sequence = nil
+	m.addsequence = nil
+}
+
+// SetKind sets the "kind" field.
+func (m *BotOutboxMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *BotOutboxMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *BotOutboxMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetDeduplicationKey sets the "deduplication_key" field.
+func (m *BotOutboxMutation) SetDeduplicationKey(s string) {
+	m.deduplication_key = &s
+}
+
+// DeduplicationKey returns the value of the "deduplication_key" field in the mutation.
+func (m *BotOutboxMutation) DeduplicationKey() (r string, exists bool) {
+	v := m.deduplication_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeduplicationKey returns the old "deduplication_key" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldDeduplicationKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeduplicationKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeduplicationKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeduplicationKey: %w", err)
+	}
+	return oldValue.DeduplicationKey, nil
+}
+
+// ResetDeduplicationKey resets all changes to the "deduplication_key" field.
+func (m *BotOutboxMutation) ResetDeduplicationKey() {
+	m.deduplication_key = nil
+}
+
+// SetPayload sets the "payload" field.
+func (m *BotOutboxMutation) SetPayload(value map[string]interface{}) {
+	m.payload = &value
+}
+
+// Payload returns the value of the "payload" field in the mutation.
+func (m *BotOutboxMutation) Payload() (r map[string]interface{}, exists bool) {
+	v := m.payload
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPayload returns the old "payload" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldPayload(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPayload is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPayload requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPayload: %w", err)
+	}
+	return oldValue.Payload, nil
+}
+
+// ResetPayload resets all changes to the "payload" field.
+func (m *BotOutboxMutation) ResetPayload() {
+	m.payload = nil
+}
+
+// SetAvailableAt sets the "available_at" field.
+func (m *BotOutboxMutation) SetAvailableAt(t time.Time) {
+	m.available_at = &t
+}
+
+// AvailableAt returns the value of the "available_at" field in the mutation.
+func (m *BotOutboxMutation) AvailableAt() (r time.Time, exists bool) {
+	v := m.available_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAvailableAt returns the old "available_at" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldAvailableAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAvailableAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAvailableAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAvailableAt: %w", err)
+	}
+	return oldValue.AvailableAt, nil
+}
+
+// ResetAvailableAt resets all changes to the "available_at" field.
+func (m *BotOutboxMutation) ResetAvailableAt() {
+	m.available_at = nil
+}
+
+// SetDeliveredAt sets the "delivered_at" field.
+func (m *BotOutboxMutation) SetDeliveredAt(t time.Time) {
+	m.delivered_at = &t
+}
+
+// DeliveredAt returns the value of the "delivered_at" field in the mutation.
+func (m *BotOutboxMutation) DeliveredAt() (r time.Time, exists bool) {
+	v := m.delivered_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveredAt returns the old "delivered_at" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldDeliveredAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveredAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveredAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveredAt: %w", err)
+	}
+	return oldValue.DeliveredAt, nil
+}
+
+// ClearDeliveredAt clears the value of the "delivered_at" field.
+func (m *BotOutboxMutation) ClearDeliveredAt() {
+	m.delivered_at = nil
+	m.clearedFields[botoutbox.FieldDeliveredAt] = struct{}{}
+}
+
+// DeliveredAtCleared returns if the "delivered_at" field was cleared in this mutation.
+func (m *BotOutboxMutation) DeliveredAtCleared() bool {
+	_, ok := m.clearedFields[botoutbox.FieldDeliveredAt]
+	return ok
+}
+
+// ResetDeliveredAt resets all changes to the "delivered_at" field.
+func (m *BotOutboxMutation) ResetDeliveredAt() {
+	m.delivered_at = nil
+	delete(m.clearedFields, botoutbox.FieldDeliveredAt)
+}
+
+// SetWorkerID sets the "worker_id" field.
+func (m *BotOutboxMutation) SetWorkerID(s string) {
+	m.worker_id = &s
+}
+
+// WorkerID returns the value of the "worker_id" field in the mutation.
+func (m *BotOutboxMutation) WorkerID() (r string, exists bool) {
+	v := m.worker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkerID returns the old "worker_id" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldWorkerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkerID: %w", err)
+	}
+	return oldValue.WorkerID, nil
+}
+
+// ResetWorkerID resets all changes to the "worker_id" field.
+func (m *BotOutboxMutation) ResetWorkerID() {
+	m.worker_id = nil
+}
+
+// SetFence sets the "fence" field.
+func (m *BotOutboxMutation) SetFence(i int64) {
+	m.fence = &i
+	m.addfence = nil
+}
+
+// Fence returns the value of the "fence" field in the mutation.
+func (m *BotOutboxMutation) Fence() (r int64, exists bool) {
+	v := m.fence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFence returns the old "fence" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldFence(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFence: %w", err)
+	}
+	return oldValue.Fence, nil
+}
+
+// AddFence adds i to the "fence" field.
+func (m *BotOutboxMutation) AddFence(i int64) {
+	if m.addfence != nil {
+		*m.addfence += i
+	} else {
+		m.addfence = &i
+	}
+}
+
+// AddedFence returns the value that was added to the "fence" field in this mutation.
+func (m *BotOutboxMutation) AddedFence() (r int64, exists bool) {
+	v := m.addfence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetFence resets all changes to the "fence" field.
+func (m *BotOutboxMutation) ResetFence() {
+	m.fence = nil
+	m.addfence = nil
+}
+
+// SetLeaseExpiresAt sets the "lease_expires_at" field.
+func (m *BotOutboxMutation) SetLeaseExpiresAt(t time.Time) {
+	m.lease_expires_at = &t
+}
+
+// LeaseExpiresAt returns the value of the "lease_expires_at" field in the mutation.
+func (m *BotOutboxMutation) LeaseExpiresAt() (r time.Time, exists bool) {
+	v := m.lease_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseExpiresAt returns the old "lease_expires_at" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldLeaseExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseExpiresAt: %w", err)
+	}
+	return oldValue.LeaseExpiresAt, nil
+}
+
+// ClearLeaseExpiresAt clears the value of the "lease_expires_at" field.
+func (m *BotOutboxMutation) ClearLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	m.clearedFields[botoutbox.FieldLeaseExpiresAt] = struct{}{}
+}
+
+// LeaseExpiresAtCleared returns if the "lease_expires_at" field was cleared in this mutation.
+func (m *BotOutboxMutation) LeaseExpiresAtCleared() bool {
+	_, ok := m.clearedFields[botoutbox.FieldLeaseExpiresAt]
+	return ok
+}
+
+// ResetLeaseExpiresAt resets all changes to the "lease_expires_at" field.
+func (m *BotOutboxMutation) ResetLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	delete(m.clearedFields, botoutbox.FieldLeaseExpiresAt)
+}
+
+// SetAttempts sets the "attempts" field.
+func (m *BotOutboxMutation) SetAttempts(i int) {
+	m.attempts = &i
+	m.addattempts = nil
+}
+
+// Attempts returns the value of the "attempts" field in the mutation.
+func (m *BotOutboxMutation) Attempts() (r int, exists bool) {
+	v := m.attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttempts returns the old "attempts" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttempts: %w", err)
+	}
+	return oldValue.Attempts, nil
+}
+
+// AddAttempts adds i to the "attempts" field.
+func (m *BotOutboxMutation) AddAttempts(i int) {
+	if m.addattempts != nil {
+		*m.addattempts += i
+	} else {
+		m.addattempts = &i
+	}
+}
+
+// AddedAttempts returns the value that was added to the "attempts" field in this mutation.
+func (m *BotOutboxMutation) AddedAttempts() (r int, exists bool) {
+	v := m.addattempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttempts resets all changes to the "attempts" field.
+func (m *BotOutboxMutation) ResetAttempts() {
+	m.attempts = nil
+	m.addattempts = nil
+}
+
+// SetLastError sets the "last_error" field.
+func (m *BotOutboxMutation) SetLastError(s string) {
+	m.last_error = &s
+}
+
+// LastError returns the value of the "last_error" field in the mutation.
+func (m *BotOutboxMutation) LastError() (r string, exists bool) {
+	v := m.last_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastError returns the old "last_error" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldLastError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastError: %w", err)
+	}
+	return oldValue.LastError, nil
+}
+
+// ResetLastError resets all changes to the "last_error" field.
+func (m *BotOutboxMutation) ResetLastError() {
+	m.last_error = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotOutboxMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotOutboxMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotOutbox entity.
+// If the BotOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotOutboxMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotOutboxMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// ClearBot clears the "bot" edge to the Bot entity.
+func (m *BotOutboxMutation) ClearBot() {
+	m.clearedbot = true
+	m.clearedFields[botoutbox.FieldBotID] = struct{}{}
+}
+
+// BotCleared reports if the "bot" edge to the Bot entity was cleared.
+func (m *BotOutboxMutation) BotCleared() bool {
+	return m.clearedbot
+}
+
+// BotIDs returns the "bot" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BotID instead. It exists only for internal usage by the builders.
+func (m *BotOutboxMutation) BotIDs() (ids []uuid.UUID) {
+	if id := m.bot; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBot resets all changes to the "bot" edge.
+func (m *BotOutboxMutation) ResetBot() {
+	m.bot = nil
+	m.clearedbot = false
+}
+
+// Where appends a list predicates to the BotOutboxMutation builder.
+func (m *BotOutboxMutation) Where(ps ...predicate.BotOutbox) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotOutboxMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotOutboxMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotOutbox, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotOutboxMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotOutboxMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotOutbox).
+func (m *BotOutboxMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotOutboxMutation) Fields() []string {
+	fields := make([]string, 0, 13)
+	if m.bot != nil {
+		fields = append(fields, botoutbox.FieldBotID)
+	}
+	if m.sequence != nil {
+		fields = append(fields, botoutbox.FieldSequence)
+	}
+	if m.kind != nil {
+		fields = append(fields, botoutbox.FieldKind)
+	}
+	if m.deduplication_key != nil {
+		fields = append(fields, botoutbox.FieldDeduplicationKey)
+	}
+	if m.payload != nil {
+		fields = append(fields, botoutbox.FieldPayload)
+	}
+	if m.available_at != nil {
+		fields = append(fields, botoutbox.FieldAvailableAt)
+	}
+	if m.delivered_at != nil {
+		fields = append(fields, botoutbox.FieldDeliveredAt)
+	}
+	if m.worker_id != nil {
+		fields = append(fields, botoutbox.FieldWorkerID)
+	}
+	if m.fence != nil {
+		fields = append(fields, botoutbox.FieldFence)
+	}
+	if m.lease_expires_at != nil {
+		fields = append(fields, botoutbox.FieldLeaseExpiresAt)
+	}
+	if m.attempts != nil {
+		fields = append(fields, botoutbox.FieldAttempts)
+	}
+	if m.last_error != nil {
+		fields = append(fields, botoutbox.FieldLastError)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botoutbox.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotOutboxMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botoutbox.FieldBotID:
+		return m.BotID()
+	case botoutbox.FieldSequence:
+		return m.Sequence()
+	case botoutbox.FieldKind:
+		return m.Kind()
+	case botoutbox.FieldDeduplicationKey:
+		return m.DeduplicationKey()
+	case botoutbox.FieldPayload:
+		return m.Payload()
+	case botoutbox.FieldAvailableAt:
+		return m.AvailableAt()
+	case botoutbox.FieldDeliveredAt:
+		return m.DeliveredAt()
+	case botoutbox.FieldWorkerID:
+		return m.WorkerID()
+	case botoutbox.FieldFence:
+		return m.Fence()
+	case botoutbox.FieldLeaseExpiresAt:
+		return m.LeaseExpiresAt()
+	case botoutbox.FieldAttempts:
+		return m.Attempts()
+	case botoutbox.FieldLastError:
+		return m.LastError()
+	case botoutbox.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotOutboxMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botoutbox.FieldBotID:
+		return m.OldBotID(ctx)
+	case botoutbox.FieldSequence:
+		return m.OldSequence(ctx)
+	case botoutbox.FieldKind:
+		return m.OldKind(ctx)
+	case botoutbox.FieldDeduplicationKey:
+		return m.OldDeduplicationKey(ctx)
+	case botoutbox.FieldPayload:
+		return m.OldPayload(ctx)
+	case botoutbox.FieldAvailableAt:
+		return m.OldAvailableAt(ctx)
+	case botoutbox.FieldDeliveredAt:
+		return m.OldDeliveredAt(ctx)
+	case botoutbox.FieldWorkerID:
+		return m.OldWorkerID(ctx)
+	case botoutbox.FieldFence:
+		return m.OldFence(ctx)
+	case botoutbox.FieldLeaseExpiresAt:
+		return m.OldLeaseExpiresAt(ctx)
+	case botoutbox.FieldAttempts:
+		return m.OldAttempts(ctx)
+	case botoutbox.FieldLastError:
+		return m.OldLastError(ctx)
+	case botoutbox.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotOutbox field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotOutboxMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botoutbox.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case botoutbox.FieldSequence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSequence(v)
+		return nil
+	case botoutbox.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case botoutbox.FieldDeduplicationKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeduplicationKey(v)
+		return nil
+	case botoutbox.FieldPayload:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPayload(v)
+		return nil
+	case botoutbox.FieldAvailableAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAvailableAt(v)
+		return nil
+	case botoutbox.FieldDeliveredAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveredAt(v)
+		return nil
+	case botoutbox.FieldWorkerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkerID(v)
+		return nil
+	case botoutbox.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFence(v)
+		return nil
+	case botoutbox.FieldLeaseExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseExpiresAt(v)
+		return nil
+	case botoutbox.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttempts(v)
+		return nil
+	case botoutbox.FieldLastError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastError(v)
+		return nil
+	case botoutbox.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotOutboxMutation) AddedFields() []string {
+	var fields []string
+	if m.addsequence != nil {
+		fields = append(fields, botoutbox.FieldSequence)
+	}
+	if m.addfence != nil {
+		fields = append(fields, botoutbox.FieldFence)
+	}
+	if m.addattempts != nil {
+		fields = append(fields, botoutbox.FieldAttempts)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotOutboxMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botoutbox.FieldSequence:
+		return m.AddedSequence()
+	case botoutbox.FieldFence:
+		return m.AddedFence()
+	case botoutbox.FieldAttempts:
+		return m.AddedAttempts()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotOutboxMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botoutbox.FieldSequence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSequence(v)
+		return nil
+	case botoutbox.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFence(v)
+		return nil
+	case botoutbox.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttempts(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotOutboxMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(botoutbox.FieldDeliveredAt) {
+		fields = append(fields, botoutbox.FieldDeliveredAt)
+	}
+	if m.FieldCleared(botoutbox.FieldLeaseExpiresAt) {
+		fields = append(fields, botoutbox.FieldLeaseExpiresAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotOutboxMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotOutboxMutation) ClearField(name string) error {
+	switch name {
+	case botoutbox.FieldDeliveredAt:
+		m.ClearDeliveredAt()
+		return nil
+	case botoutbox.FieldLeaseExpiresAt:
+		m.ClearLeaseExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotOutboxMutation) ResetField(name string) error {
+	switch name {
+	case botoutbox.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case botoutbox.FieldSequence:
+		m.ResetSequence()
+		return nil
+	case botoutbox.FieldKind:
+		m.ResetKind()
+		return nil
+	case botoutbox.FieldDeduplicationKey:
+		m.ResetDeduplicationKey()
+		return nil
+	case botoutbox.FieldPayload:
+		m.ResetPayload()
+		return nil
+	case botoutbox.FieldAvailableAt:
+		m.ResetAvailableAt()
+		return nil
+	case botoutbox.FieldDeliveredAt:
+		m.ResetDeliveredAt()
+		return nil
+	case botoutbox.FieldWorkerID:
+		m.ResetWorkerID()
+		return nil
+	case botoutbox.FieldFence:
+		m.ResetFence()
+		return nil
+	case botoutbox.FieldLeaseExpiresAt:
+		m.ResetLeaseExpiresAt()
+		return nil
+	case botoutbox.FieldAttempts:
+		m.ResetAttempts()
+		return nil
+	case botoutbox.FieldLastError:
+		m.ResetLastError()
+		return nil
+	case botoutbox.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotOutboxMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.bot != nil {
+		edges = append(edges, botoutbox.EdgeBot)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotOutboxMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case botoutbox.EdgeBot:
+		if id := m.bot; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotOutboxMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotOutboxMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotOutboxMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedbot {
+		edges = append(edges, botoutbox.EdgeBot)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotOutboxMutation) EdgeCleared(name string) bool {
+	switch name {
+	case botoutbox.EdgeBot:
+		return m.clearedbot
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotOutboxMutation) ClearEdge(name string) error {
+	switch name {
+	case botoutbox.EdgeBot:
+		m.ClearBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotOutboxMutation) ResetEdge(name string) error {
+	switch name {
+	case botoutbox.EdgeBot:
+		m.ResetBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotOutbox edge %s", name)
+}
+
+// BotRunMutation represents an operation that mutates the BotRun nodes in the graph.
+type BotRunMutation struct {
+	config
+	op               Op
+	typ              string
+	id               *uuid.UUID
+	version          *int64
+	addversion       *int64
+	session_id       *string
+	idempotency_key  *string
+	request_hash     *string
+	status           *botrun.Status
+	fence            *int64
+	addfence         *int64
+	worker_id        *string
+	lease_expires_at *time.Time
+	data             *map[string]interface{}
+	created_at       *time.Time
+	updated_at       *time.Time
+	clearedFields    map[string]struct{}
+	bot              *uuid.UUID
+	clearedbot       bool
+	approvals        map[uuid.UUID]struct{}
+	removedapprovals map[uuid.UUID]struct{}
+	clearedapprovals bool
+	done             bool
+	oldValue         func(context.Context) (*BotRun, error)
+	predicates       []predicate.BotRun
+}
+
+var _ ent.Mutation = (*BotRunMutation)(nil)
+
+// botrunOption allows management of the mutation configuration using functional options.
+type botrunOption func(*BotRunMutation)
+
+// newBotRunMutation creates new mutation for the BotRun entity.
+func newBotRunMutation(c config, op Op, opts ...botrunOption) *BotRunMutation {
+	m := &BotRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotRunID sets the ID field of the mutation.
+func withBotRunID(id uuid.UUID) botrunOption {
+	return func(m *BotRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotRun
+		)
+		m.oldValue = func(ctx context.Context) (*BotRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotRun sets the old BotRun of the mutation.
+func withBotRun(node *BotRun) botrunOption {
+	return func(m *BotRunMutation) {
+		m.oldValue = func(context.Context) (*BotRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotRun entities.
+func (m *BotRunMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotRunMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotRunMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *BotRunMutation) SetBotID(u uuid.UUID) {
+	m.bot = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *BotRunMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldBotID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *BotRunMutation) ResetBotID() {
+	m.bot = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *BotRunMutation) SetVersion(i int64) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *BotRunMutation) Version() (r int64, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *BotRunMutation) AddVersion(i int64) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *BotRunMutation) AddedVersion() (r int64, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *BotRunMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetSessionID sets the "session_id" field.
+func (m *BotRunMutation) SetSessionID(s string) {
+	m.session_id = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *BotRunMutation) SessionID() (r string, exists bool) {
+	v := m.session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *BotRunMutation) ResetSessionID() {
+	m.session_id = nil
+}
+
+// SetIdempotencyKey sets the "idempotency_key" field.
+func (m *BotRunMutation) SetIdempotencyKey(s string) {
+	m.idempotency_key = &s
+}
+
+// IdempotencyKey returns the value of the "idempotency_key" field in the mutation.
+func (m *BotRunMutation) IdempotencyKey() (r string, exists bool) {
+	v := m.idempotency_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdempotencyKey returns the old "idempotency_key" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldIdempotencyKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdempotencyKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdempotencyKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdempotencyKey: %w", err)
+	}
+	return oldValue.IdempotencyKey, nil
+}
+
+// ResetIdempotencyKey resets all changes to the "idempotency_key" field.
+func (m *BotRunMutation) ResetIdempotencyKey() {
+	m.idempotency_key = nil
+}
+
+// SetRequestHash sets the "request_hash" field.
+func (m *BotRunMutation) SetRequestHash(s string) {
+	m.request_hash = &s
+}
+
+// RequestHash returns the value of the "request_hash" field in the mutation.
+func (m *BotRunMutation) RequestHash() (r string, exists bool) {
+	v := m.request_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestHash returns the old "request_hash" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldRequestHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestHash: %w", err)
+	}
+	return oldValue.RequestHash, nil
+}
+
+// ResetRequestHash resets all changes to the "request_hash" field.
+func (m *BotRunMutation) ResetRequestHash() {
+	m.request_hash = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *BotRunMutation) SetStatus(b botrun.Status) {
+	m.status = &b
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *BotRunMutation) Status() (r botrun.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldStatus(ctx context.Context) (v botrun.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *BotRunMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetFence sets the "fence" field.
+func (m *BotRunMutation) SetFence(i int64) {
+	m.fence = &i
+	m.addfence = nil
+}
+
+// Fence returns the value of the "fence" field in the mutation.
+func (m *BotRunMutation) Fence() (r int64, exists bool) {
+	v := m.fence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFence returns the old "fence" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldFence(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFence: %w", err)
+	}
+	return oldValue.Fence, nil
+}
+
+// AddFence adds i to the "fence" field.
+func (m *BotRunMutation) AddFence(i int64) {
+	if m.addfence != nil {
+		*m.addfence += i
+	} else {
+		m.addfence = &i
+	}
+}
+
+// AddedFence returns the value that was added to the "fence" field in this mutation.
+func (m *BotRunMutation) AddedFence() (r int64, exists bool) {
+	v := m.addfence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetFence resets all changes to the "fence" field.
+func (m *BotRunMutation) ResetFence() {
+	m.fence = nil
+	m.addfence = nil
+}
+
+// SetWorkerID sets the "worker_id" field.
+func (m *BotRunMutation) SetWorkerID(s string) {
+	m.worker_id = &s
+}
+
+// WorkerID returns the value of the "worker_id" field in the mutation.
+func (m *BotRunMutation) WorkerID() (r string, exists bool) {
+	v := m.worker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkerID returns the old "worker_id" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldWorkerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkerID: %w", err)
+	}
+	return oldValue.WorkerID, nil
+}
+
+// ResetWorkerID resets all changes to the "worker_id" field.
+func (m *BotRunMutation) ResetWorkerID() {
+	m.worker_id = nil
+}
+
+// SetLeaseExpiresAt sets the "lease_expires_at" field.
+func (m *BotRunMutation) SetLeaseExpiresAt(t time.Time) {
+	m.lease_expires_at = &t
+}
+
+// LeaseExpiresAt returns the value of the "lease_expires_at" field in the mutation.
+func (m *BotRunMutation) LeaseExpiresAt() (r time.Time, exists bool) {
+	v := m.lease_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseExpiresAt returns the old "lease_expires_at" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldLeaseExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseExpiresAt: %w", err)
+	}
+	return oldValue.LeaseExpiresAt, nil
+}
+
+// ClearLeaseExpiresAt clears the value of the "lease_expires_at" field.
+func (m *BotRunMutation) ClearLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	m.clearedFields[botrun.FieldLeaseExpiresAt] = struct{}{}
+}
+
+// LeaseExpiresAtCleared returns if the "lease_expires_at" field was cleared in this mutation.
+func (m *BotRunMutation) LeaseExpiresAtCleared() bool {
+	_, ok := m.clearedFields[botrun.FieldLeaseExpiresAt]
+	return ok
+}
+
+// ResetLeaseExpiresAt resets all changes to the "lease_expires_at" field.
+func (m *BotRunMutation) ResetLeaseExpiresAt() {
+	m.lease_expires_at = nil
+	delete(m.clearedFields, botrun.FieldLeaseExpiresAt)
+}
+
+// SetData sets the "data" field.
+func (m *BotRunMutation) SetData(value map[string]interface{}) {
+	m.data = &value
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *BotRunMutation) Data() (r map[string]interface{}, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldData(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *BotRunMutation) ResetData() {
+	m.data = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotRunMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotRunMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotRunMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *BotRunMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *BotRunMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the BotRun entity.
+// If the BotRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotRunMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *BotRunMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// ClearBot clears the "bot" edge to the Bot entity.
+func (m *BotRunMutation) ClearBot() {
+	m.clearedbot = true
+	m.clearedFields[botrun.FieldBotID] = struct{}{}
+}
+
+// BotCleared reports if the "bot" edge to the Bot entity was cleared.
+func (m *BotRunMutation) BotCleared() bool {
+	return m.clearedbot
+}
+
+// BotIDs returns the "bot" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BotID instead. It exists only for internal usage by the builders.
+func (m *BotRunMutation) BotIDs() (ids []uuid.UUID) {
+	if id := m.bot; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBot resets all changes to the "bot" edge.
+func (m *BotRunMutation) ResetBot() {
+	m.bot = nil
+	m.clearedbot = false
+}
+
+// AddApprovalIDs adds the "approvals" edge to the BotApproval entity by ids.
+func (m *BotRunMutation) AddApprovalIDs(ids ...uuid.UUID) {
+	if m.approvals == nil {
+		m.approvals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.approvals[ids[i]] = struct{}{}
+	}
+}
+
+// ClearApprovals clears the "approvals" edge to the BotApproval entity.
+func (m *BotRunMutation) ClearApprovals() {
+	m.clearedapprovals = true
+}
+
+// ApprovalsCleared reports if the "approvals" edge to the BotApproval entity was cleared.
+func (m *BotRunMutation) ApprovalsCleared() bool {
+	return m.clearedapprovals
+}
+
+// RemoveApprovalIDs removes the "approvals" edge to the BotApproval entity by IDs.
+func (m *BotRunMutation) RemoveApprovalIDs(ids ...uuid.UUID) {
+	if m.removedapprovals == nil {
+		m.removedapprovals = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.approvals, ids[i])
+		m.removedapprovals[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedApprovals returns the removed IDs of the "approvals" edge to the BotApproval entity.
+func (m *BotRunMutation) RemovedApprovalsIDs() (ids []uuid.UUID) {
+	for id := range m.removedapprovals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ApprovalsIDs returns the "approvals" edge IDs in the mutation.
+func (m *BotRunMutation) ApprovalsIDs() (ids []uuid.UUID) {
+	for id := range m.approvals {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetApprovals resets all changes to the "approvals" edge.
+func (m *BotRunMutation) ResetApprovals() {
+	m.approvals = nil
+	m.clearedapprovals = false
+	m.removedapprovals = nil
+}
+
+// Where appends a list predicates to the BotRunMutation builder.
+func (m *BotRunMutation) Where(ps ...predicate.BotRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotRun).
+func (m *BotRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotRunMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.bot != nil {
+		fields = append(fields, botrun.FieldBotID)
+	}
+	if m.version != nil {
+		fields = append(fields, botrun.FieldVersion)
+	}
+	if m.session_id != nil {
+		fields = append(fields, botrun.FieldSessionID)
+	}
+	if m.idempotency_key != nil {
+		fields = append(fields, botrun.FieldIdempotencyKey)
+	}
+	if m.request_hash != nil {
+		fields = append(fields, botrun.FieldRequestHash)
+	}
+	if m.status != nil {
+		fields = append(fields, botrun.FieldStatus)
+	}
+	if m.fence != nil {
+		fields = append(fields, botrun.FieldFence)
+	}
+	if m.worker_id != nil {
+		fields = append(fields, botrun.FieldWorkerID)
+	}
+	if m.lease_expires_at != nil {
+		fields = append(fields, botrun.FieldLeaseExpiresAt)
+	}
+	if m.data != nil {
+		fields = append(fields, botrun.FieldData)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botrun.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, botrun.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botrun.FieldBotID:
+		return m.BotID()
+	case botrun.FieldVersion:
+		return m.Version()
+	case botrun.FieldSessionID:
+		return m.SessionID()
+	case botrun.FieldIdempotencyKey:
+		return m.IdempotencyKey()
+	case botrun.FieldRequestHash:
+		return m.RequestHash()
+	case botrun.FieldStatus:
+		return m.Status()
+	case botrun.FieldFence:
+		return m.Fence()
+	case botrun.FieldWorkerID:
+		return m.WorkerID()
+	case botrun.FieldLeaseExpiresAt:
+		return m.LeaseExpiresAt()
+	case botrun.FieldData:
+		return m.Data()
+	case botrun.FieldCreatedAt:
+		return m.CreatedAt()
+	case botrun.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botrun.FieldBotID:
+		return m.OldBotID(ctx)
+	case botrun.FieldVersion:
+		return m.OldVersion(ctx)
+	case botrun.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case botrun.FieldIdempotencyKey:
+		return m.OldIdempotencyKey(ctx)
+	case botrun.FieldRequestHash:
+		return m.OldRequestHash(ctx)
+	case botrun.FieldStatus:
+		return m.OldStatus(ctx)
+	case botrun.FieldFence:
+		return m.OldFence(ctx)
+	case botrun.FieldWorkerID:
+		return m.OldWorkerID(ctx)
+	case botrun.FieldLeaseExpiresAt:
+		return m.OldLeaseExpiresAt(ctx)
+	case botrun.FieldData:
+		return m.OldData(ctx)
+	case botrun.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case botrun.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botrun.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case botrun.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case botrun.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case botrun.FieldIdempotencyKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdempotencyKey(v)
+		return nil
+	case botrun.FieldRequestHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestHash(v)
+		return nil
+	case botrun.FieldStatus:
+		v, ok := value.(botrun.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case botrun.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFence(v)
+		return nil
+	case botrun.FieldWorkerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkerID(v)
+		return nil
+	case botrun.FieldLeaseExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseExpiresAt(v)
+		return nil
+	case botrun.FieldData:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	case botrun.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case botrun.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotRunMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, botrun.FieldVersion)
+	}
+	if m.addfence != nil {
+		fields = append(fields, botrun.FieldFence)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotRunMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botrun.FieldVersion:
+		return m.AddedVersion()
+	case botrun.FieldFence:
+		return m.AddedFence()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botrun.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	case botrun.FieldFence:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFence(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(botrun.FieldLeaseExpiresAt) {
+		fields = append(fields, botrun.FieldLeaseExpiresAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotRunMutation) ClearField(name string) error {
+	switch name {
+	case botrun.FieldLeaseExpiresAt:
+		m.ClearLeaseExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotRunMutation) ResetField(name string) error {
+	switch name {
+	case botrun.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case botrun.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case botrun.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case botrun.FieldIdempotencyKey:
+		m.ResetIdempotencyKey()
+		return nil
+	case botrun.FieldRequestHash:
+		m.ResetRequestHash()
+		return nil
+	case botrun.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case botrun.FieldFence:
+		m.ResetFence()
+		return nil
+	case botrun.FieldWorkerID:
+		m.ResetWorkerID()
+		return nil
+	case botrun.FieldLeaseExpiresAt:
+		m.ResetLeaseExpiresAt()
+		return nil
+	case botrun.FieldData:
+		m.ResetData()
+		return nil
+	case botrun.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case botrun.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.bot != nil {
+		edges = append(edges, botrun.EdgeBot)
+	}
+	if m.approvals != nil {
+		edges = append(edges, botrun.EdgeApprovals)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotRunMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case botrun.EdgeBot:
+		if id := m.bot; id != nil {
+			return []ent.Value{*id}
+		}
+	case botrun.EdgeApprovals:
+		ids := make([]ent.Value, 0, len(m.approvals))
+		for id := range m.approvals {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.removedapprovals != nil {
+		edges = append(edges, botrun.EdgeApprovals)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotRunMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case botrun.EdgeApprovals:
+		ids := make([]ent.Value, 0, len(m.removedapprovals))
+		for id := range m.removedapprovals {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedbot {
+		edges = append(edges, botrun.EdgeBot)
+	}
+	if m.clearedapprovals {
+		edges = append(edges, botrun.EdgeApprovals)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotRunMutation) EdgeCleared(name string) bool {
+	switch name {
+	case botrun.EdgeBot:
+		return m.clearedbot
+	case botrun.EdgeApprovals:
+		return m.clearedapprovals
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotRunMutation) ClearEdge(name string) error {
+	switch name {
+	case botrun.EdgeBot:
+		m.ClearBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotRunMutation) ResetEdge(name string) error {
+	switch name {
+	case botrun.EdgeBot:
+		m.ResetBot()
+		return nil
+	case botrun.EdgeApprovals:
+		m.ResetApprovals()
+		return nil
+	}
+	return fmt.Errorf("unknown BotRun edge %s", name)
+}
+
+// BotTrackedItemMutation represents an operation that mutates the BotTrackedItem nodes in the graph.
+type BotTrackedItemMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	revision      *int64
+	addrevision   *int64
+	status        *bottrackeditem.Status
+	due_at        *time.Time
+	data          *map[string]interface{}
+	clearedFields map[string]struct{}
+	goal          *uuid.UUID
+	clearedgoal   bool
+	done          bool
+	oldValue      func(context.Context) (*BotTrackedItem, error)
+	predicates    []predicate.BotTrackedItem
+}
+
+var _ ent.Mutation = (*BotTrackedItemMutation)(nil)
+
+// bottrackeditemOption allows management of the mutation configuration using functional options.
+type bottrackeditemOption func(*BotTrackedItemMutation)
+
+// newBotTrackedItemMutation creates new mutation for the BotTrackedItem entity.
+func newBotTrackedItemMutation(c config, op Op, opts ...bottrackeditemOption) *BotTrackedItemMutation {
+	m := &BotTrackedItemMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotTrackedItem,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotTrackedItemID sets the ID field of the mutation.
+func withBotTrackedItemID(id uuid.UUID) bottrackeditemOption {
+	return func(m *BotTrackedItemMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotTrackedItem
+		)
+		m.oldValue = func(ctx context.Context) (*BotTrackedItem, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotTrackedItem.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotTrackedItem sets the old BotTrackedItem of the mutation.
+func withBotTrackedItem(node *BotTrackedItem) bottrackeditemOption {
+	return func(m *BotTrackedItemMutation) {
+		m.oldValue = func(context.Context) (*BotTrackedItem, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotTrackedItemMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotTrackedItemMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotTrackedItem entities.
+func (m *BotTrackedItemMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotTrackedItemMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotTrackedItemMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotTrackedItem.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetGoalID sets the "goal_id" field.
+func (m *BotTrackedItemMutation) SetGoalID(u uuid.UUID) {
+	m.goal = &u
+}
+
+// GoalID returns the value of the "goal_id" field in the mutation.
+func (m *BotTrackedItemMutation) GoalID() (r uuid.UUID, exists bool) {
+	v := m.goal
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGoalID returns the old "goal_id" field's value of the BotTrackedItem entity.
+// If the BotTrackedItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotTrackedItemMutation) OldGoalID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGoalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGoalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGoalID: %w", err)
+	}
+	return oldValue.GoalID, nil
+}
+
+// ResetGoalID resets all changes to the "goal_id" field.
+func (m *BotTrackedItemMutation) ResetGoalID() {
+	m.goal = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *BotTrackedItemMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *BotTrackedItemMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the BotTrackedItem entity.
+// If the BotTrackedItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotTrackedItemMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *BotTrackedItemMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *BotTrackedItemMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *BotTrackedItemMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *BotTrackedItemMutation) SetStatus(b bottrackeditem.Status) {
+	m.status = &b
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *BotTrackedItemMutation) Status() (r bottrackeditem.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the BotTrackedItem entity.
+// If the BotTrackedItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotTrackedItemMutation) OldStatus(ctx context.Context) (v bottrackeditem.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *BotTrackedItemMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetDueAt sets the "due_at" field.
+func (m *BotTrackedItemMutation) SetDueAt(t time.Time) {
+	m.due_at = &t
+}
+
+// DueAt returns the value of the "due_at" field in the mutation.
+func (m *BotTrackedItemMutation) DueAt() (r time.Time, exists bool) {
+	v := m.due_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDueAt returns the old "due_at" field's value of the BotTrackedItem entity.
+// If the BotTrackedItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotTrackedItemMutation) OldDueAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDueAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDueAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDueAt: %w", err)
+	}
+	return oldValue.DueAt, nil
+}
+
+// ClearDueAt clears the value of the "due_at" field.
+func (m *BotTrackedItemMutation) ClearDueAt() {
+	m.due_at = nil
+	m.clearedFields[bottrackeditem.FieldDueAt] = struct{}{}
+}
+
+// DueAtCleared returns if the "due_at" field was cleared in this mutation.
+func (m *BotTrackedItemMutation) DueAtCleared() bool {
+	_, ok := m.clearedFields[bottrackeditem.FieldDueAt]
+	return ok
+}
+
+// ResetDueAt resets all changes to the "due_at" field.
+func (m *BotTrackedItemMutation) ResetDueAt() {
+	m.due_at = nil
+	delete(m.clearedFields, bottrackeditem.FieldDueAt)
+}
+
+// SetData sets the "data" field.
+func (m *BotTrackedItemMutation) SetData(value map[string]interface{}) {
+	m.data = &value
+}
+
+// Data returns the value of the "data" field in the mutation.
+func (m *BotTrackedItemMutation) Data() (r map[string]interface{}, exists bool) {
+	v := m.data
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldData returns the old "data" field's value of the BotTrackedItem entity.
+// If the BotTrackedItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotTrackedItemMutation) OldData(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldData is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldData requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldData: %w", err)
+	}
+	return oldValue.Data, nil
+}
+
+// ResetData resets all changes to the "data" field.
+func (m *BotTrackedItemMutation) ResetData() {
+	m.data = nil
+}
+
+// ClearGoal clears the "goal" edge to the BotGoal entity.
+func (m *BotTrackedItemMutation) ClearGoal() {
+	m.clearedgoal = true
+	m.clearedFields[bottrackeditem.FieldGoalID] = struct{}{}
+}
+
+// GoalCleared reports if the "goal" edge to the BotGoal entity was cleared.
+func (m *BotTrackedItemMutation) GoalCleared() bool {
+	return m.clearedgoal
+}
+
+// GoalIDs returns the "goal" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// GoalID instead. It exists only for internal usage by the builders.
+func (m *BotTrackedItemMutation) GoalIDs() (ids []uuid.UUID) {
+	if id := m.goal; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetGoal resets all changes to the "goal" edge.
+func (m *BotTrackedItemMutation) ResetGoal() {
+	m.goal = nil
+	m.clearedgoal = false
+}
+
+// Where appends a list predicates to the BotTrackedItemMutation builder.
+func (m *BotTrackedItemMutation) Where(ps ...predicate.BotTrackedItem) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotTrackedItemMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotTrackedItemMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotTrackedItem, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotTrackedItemMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotTrackedItemMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotTrackedItem).
+func (m *BotTrackedItemMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotTrackedItemMutation) Fields() []string {
+	fields := make([]string, 0, 5)
+	if m.goal != nil {
+		fields = append(fields, bottrackeditem.FieldGoalID)
+	}
+	if m.revision != nil {
+		fields = append(fields, bottrackeditem.FieldRevision)
+	}
+	if m.status != nil {
+		fields = append(fields, bottrackeditem.FieldStatus)
+	}
+	if m.due_at != nil {
+		fields = append(fields, bottrackeditem.FieldDueAt)
+	}
+	if m.data != nil {
+		fields = append(fields, bottrackeditem.FieldData)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotTrackedItemMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case bottrackeditem.FieldGoalID:
+		return m.GoalID()
+	case bottrackeditem.FieldRevision:
+		return m.Revision()
+	case bottrackeditem.FieldStatus:
+		return m.Status()
+	case bottrackeditem.FieldDueAt:
+		return m.DueAt()
+	case bottrackeditem.FieldData:
+		return m.Data()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotTrackedItemMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case bottrackeditem.FieldGoalID:
+		return m.OldGoalID(ctx)
+	case bottrackeditem.FieldRevision:
+		return m.OldRevision(ctx)
+	case bottrackeditem.FieldStatus:
+		return m.OldStatus(ctx)
+	case bottrackeditem.FieldDueAt:
+		return m.OldDueAt(ctx)
+	case bottrackeditem.FieldData:
+		return m.OldData(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotTrackedItem field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotTrackedItemMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case bottrackeditem.FieldGoalID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGoalID(v)
+		return nil
+	case bottrackeditem.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case bottrackeditem.FieldStatus:
+		v, ok := value.(bottrackeditem.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case bottrackeditem.FieldDueAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDueAt(v)
+		return nil
+	case bottrackeditem.FieldData:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetData(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotTrackedItemMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, bottrackeditem.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotTrackedItemMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case bottrackeditem.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotTrackedItemMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case bottrackeditem.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotTrackedItemMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(bottrackeditem.FieldDueAt) {
+		fields = append(fields, bottrackeditem.FieldDueAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotTrackedItemMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotTrackedItemMutation) ClearField(name string) error {
+	switch name {
+	case bottrackeditem.FieldDueAt:
+		m.ClearDueAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotTrackedItemMutation) ResetField(name string) error {
+	switch name {
+	case bottrackeditem.FieldGoalID:
+		m.ResetGoalID()
+		return nil
+	case bottrackeditem.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case bottrackeditem.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case bottrackeditem.FieldDueAt:
+		m.ResetDueAt()
+		return nil
+	case bottrackeditem.FieldData:
+		m.ResetData()
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotTrackedItemMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.goal != nil {
+		edges = append(edges, bottrackeditem.EdgeGoal)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotTrackedItemMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case bottrackeditem.EdgeGoal:
+		if id := m.goal; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotTrackedItemMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotTrackedItemMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotTrackedItemMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedgoal {
+		edges = append(edges, bottrackeditem.EdgeGoal)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotTrackedItemMutation) EdgeCleared(name string) bool {
+	switch name {
+	case bottrackeditem.EdgeGoal:
+		return m.clearedgoal
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotTrackedItemMutation) ClearEdge(name string) error {
+	switch name {
+	case bottrackeditem.EdgeGoal:
+		m.ClearGoal()
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotTrackedItemMutation) ResetEdge(name string) error {
+	switch name {
+	case bottrackeditem.EdgeGoal:
+		m.ResetGoal()
+		return nil
+	}
+	return fmt.Errorf("unknown BotTrackedItem edge %s", name)
+}
+
+// BotVersionMutation represents an operation that mutates the BotVersion nodes in the graph.
+type BotVersionMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *uuid.UUID
+	version           *int64
+	addversion        *int64
+	schema_version    *int
+	addschema_version *int
+	definition        *map[string]interface{}
+	content_hash      *string
+	created_by        *uuid.UUID
+	change_reason     *string
+	created_at        *time.Time
+	clearedFields     map[string]struct{}
+	bot               *uuid.UUID
+	clearedbot        bool
+	done              bool
+	oldValue          func(context.Context) (*BotVersion, error)
+	predicates        []predicate.BotVersion
+}
+
+var _ ent.Mutation = (*BotVersionMutation)(nil)
+
+// botversionOption allows management of the mutation configuration using functional options.
+type botversionOption func(*BotVersionMutation)
+
+// newBotVersionMutation creates new mutation for the BotVersion entity.
+func newBotVersionMutation(c config, op Op, opts ...botversionOption) *BotVersionMutation {
+	m := &BotVersionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBotVersion,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBotVersionID sets the ID field of the mutation.
+func withBotVersionID(id uuid.UUID) botversionOption {
+	return func(m *BotVersionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BotVersion
+		)
+		m.oldValue = func(ctx context.Context) (*BotVersion, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BotVersion.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBotVersion sets the old BotVersion of the mutation.
+func withBotVersion(node *BotVersion) botversionOption {
+	return func(m *BotVersionMutation) {
+		m.oldValue = func(context.Context) (*BotVersion, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BotVersionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BotVersionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("personal: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BotVersion entities.
+func (m *BotVersionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BotVersionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BotVersionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BotVersion.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *BotVersionMutation) SetBotID(u uuid.UUID) {
+	m.bot = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *BotVersionMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldBotID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *BotVersionMutation) ResetBotID() {
+	m.bot = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *BotVersionMutation) SetVersion(i int64) {
+	m.version = &i
+	m.addversion = nil
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *BotVersionMutation) Version() (r int64, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// AddVersion adds i to the "version" field.
+func (m *BotVersionMutation) AddVersion(i int64) {
+	if m.addversion != nil {
+		*m.addversion += i
+	} else {
+		m.addversion = &i
+	}
+}
+
+// AddedVersion returns the value that was added to the "version" field in this mutation.
+func (m *BotVersionMutation) AddedVersion() (r int64, exists bool) {
+	v := m.addversion
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *BotVersionMutation) ResetVersion() {
+	m.version = nil
+	m.addversion = nil
+}
+
+// SetSchemaVersion sets the "schema_version" field.
+func (m *BotVersionMutation) SetSchemaVersion(i int) {
+	m.schema_version = &i
+	m.addschema_version = nil
+}
+
+// SchemaVersion returns the value of the "schema_version" field in the mutation.
+func (m *BotVersionMutation) SchemaVersion() (r int, exists bool) {
+	v := m.schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSchemaVersion returns the old "schema_version" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldSchemaVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSchemaVersion: %w", err)
+	}
+	return oldValue.SchemaVersion, nil
+}
+
+// AddSchemaVersion adds i to the "schema_version" field.
+func (m *BotVersionMutation) AddSchemaVersion(i int) {
+	if m.addschema_version != nil {
+		*m.addschema_version += i
+	} else {
+		m.addschema_version = &i
+	}
+}
+
+// AddedSchemaVersion returns the value that was added to the "schema_version" field in this mutation.
+func (m *BotVersionMutation) AddedSchemaVersion() (r int, exists bool) {
+	v := m.addschema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSchemaVersion resets all changes to the "schema_version" field.
+func (m *BotVersionMutation) ResetSchemaVersion() {
+	m.schema_version = nil
+	m.addschema_version = nil
+}
+
+// SetDefinition sets the "definition" field.
+func (m *BotVersionMutation) SetDefinition(value map[string]interface{}) {
+	m.definition = &value
+}
+
+// Definition returns the value of the "definition" field in the mutation.
+func (m *BotVersionMutation) Definition() (r map[string]interface{}, exists bool) {
+	v := m.definition
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefinition returns the old "definition" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldDefinition(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefinition is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefinition requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefinition: %w", err)
+	}
+	return oldValue.Definition, nil
+}
+
+// ResetDefinition resets all changes to the "definition" field.
+func (m *BotVersionMutation) ResetDefinition() {
+	m.definition = nil
+}
+
+// SetContentHash sets the "content_hash" field.
+func (m *BotVersionMutation) SetContentHash(s string) {
+	m.content_hash = &s
+}
+
+// ContentHash returns the value of the "content_hash" field in the mutation.
+func (m *BotVersionMutation) ContentHash() (r string, exists bool) {
+	v := m.content_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContentHash returns the old "content_hash" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldContentHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContentHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContentHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContentHash: %w", err)
+	}
+	return oldValue.ContentHash, nil
+}
+
+// ResetContentHash resets all changes to the "content_hash" field.
+func (m *BotVersionMutation) ResetContentHash() {
+	m.content_hash = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *BotVersionMutation) SetCreatedBy(u uuid.UUID) {
+	m.created_by = &u
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *BotVersionMutation) CreatedBy() (r uuid.UUID, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldCreatedBy(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *BotVersionMutation) ResetCreatedBy() {
+	m.created_by = nil
+}
+
+// SetChangeReason sets the "change_reason" field.
+func (m *BotVersionMutation) SetChangeReason(s string) {
+	m.change_reason = &s
+}
+
+// ChangeReason returns the value of the "change_reason" field in the mutation.
+func (m *BotVersionMutation) ChangeReason() (r string, exists bool) {
+	v := m.change_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChangeReason returns the old "change_reason" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldChangeReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChangeReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChangeReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChangeReason: %w", err)
+	}
+	return oldValue.ChangeReason, nil
+}
+
+// ResetChangeReason resets all changes to the "change_reason" field.
+func (m *BotVersionMutation) ResetChangeReason() {
+	m.change_reason = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BotVersionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BotVersionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BotVersion entity.
+// If the BotVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BotVersionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BotVersionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// ClearBot clears the "bot" edge to the Bot entity.
+func (m *BotVersionMutation) ClearBot() {
+	m.clearedbot = true
+	m.clearedFields[botversion.FieldBotID] = struct{}{}
+}
+
+// BotCleared reports if the "bot" edge to the Bot entity was cleared.
+func (m *BotVersionMutation) BotCleared() bool {
+	return m.clearedbot
+}
+
+// BotIDs returns the "bot" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BotID instead. It exists only for internal usage by the builders.
+func (m *BotVersionMutation) BotIDs() (ids []uuid.UUID) {
+	if id := m.bot; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBot resets all changes to the "bot" edge.
+func (m *BotVersionMutation) ResetBot() {
+	m.bot = nil
+	m.clearedbot = false
+}
+
+// Where appends a list predicates to the BotVersionMutation builder.
+func (m *BotVersionMutation) Where(ps ...predicate.BotVersion) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BotVersionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BotVersionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BotVersion, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BotVersionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BotVersionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BotVersion).
+func (m *BotVersionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BotVersionMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.bot != nil {
+		fields = append(fields, botversion.FieldBotID)
+	}
+	if m.version != nil {
+		fields = append(fields, botversion.FieldVersion)
+	}
+	if m.schema_version != nil {
+		fields = append(fields, botversion.FieldSchemaVersion)
+	}
+	if m.definition != nil {
+		fields = append(fields, botversion.FieldDefinition)
+	}
+	if m.content_hash != nil {
+		fields = append(fields, botversion.FieldContentHash)
+	}
+	if m.created_by != nil {
+		fields = append(fields, botversion.FieldCreatedBy)
+	}
+	if m.change_reason != nil {
+		fields = append(fields, botversion.FieldChangeReason)
+	}
+	if m.created_at != nil {
+		fields = append(fields, botversion.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BotVersionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case botversion.FieldBotID:
+		return m.BotID()
+	case botversion.FieldVersion:
+		return m.Version()
+	case botversion.FieldSchemaVersion:
+		return m.SchemaVersion()
+	case botversion.FieldDefinition:
+		return m.Definition()
+	case botversion.FieldContentHash:
+		return m.ContentHash()
+	case botversion.FieldCreatedBy:
+		return m.CreatedBy()
+	case botversion.FieldChangeReason:
+		return m.ChangeReason()
+	case botversion.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BotVersionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case botversion.FieldBotID:
+		return m.OldBotID(ctx)
+	case botversion.FieldVersion:
+		return m.OldVersion(ctx)
+	case botversion.FieldSchemaVersion:
+		return m.OldSchemaVersion(ctx)
+	case botversion.FieldDefinition:
+		return m.OldDefinition(ctx)
+	case botversion.FieldContentHash:
+		return m.OldContentHash(ctx)
+	case botversion.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case botversion.FieldChangeReason:
+		return m.OldChangeReason(ctx)
+	case botversion.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BotVersion field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotVersionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case botversion.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case botversion.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case botversion.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSchemaVersion(v)
+		return nil
+	case botversion.FieldDefinition:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefinition(v)
+		return nil
+	case botversion.FieldContentHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContentHash(v)
+		return nil
+	case botversion.FieldCreatedBy:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case botversion.FieldChangeReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChangeReason(v)
+		return nil
+	case botversion.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotVersion field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BotVersionMutation) AddedFields() []string {
+	var fields []string
+	if m.addversion != nil {
+		fields = append(fields, botversion.FieldVersion)
+	}
+	if m.addschema_version != nil {
+		fields = append(fields, botversion.FieldSchemaVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BotVersionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case botversion.FieldVersion:
+		return m.AddedVersion()
+	case botversion.FieldSchemaVersion:
+		return m.AddedSchemaVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BotVersionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case botversion.FieldVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddVersion(v)
+		return nil
+	case botversion.FieldSchemaVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSchemaVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BotVersion numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BotVersionMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BotVersionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BotVersionMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown BotVersion nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BotVersionMutation) ResetField(name string) error {
+	switch name {
+	case botversion.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case botversion.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case botversion.FieldSchemaVersion:
+		m.ResetSchemaVersion()
+		return nil
+	case botversion.FieldDefinition:
+		m.ResetDefinition()
+		return nil
+	case botversion.FieldContentHash:
+		m.ResetContentHash()
+		return nil
+	case botversion.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case botversion.FieldChangeReason:
+		m.ResetChangeReason()
+		return nil
+	case botversion.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BotVersion field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BotVersionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.bot != nil {
+		edges = append(edges, botversion.EdgeBot)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BotVersionMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case botversion.EdgeBot:
+		if id := m.bot; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BotVersionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BotVersionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BotVersionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedbot {
+		edges = append(edges, botversion.EdgeBot)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BotVersionMutation) EdgeCleared(name string) bool {
+	switch name {
+	case botversion.EdgeBot:
+		return m.clearedbot
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BotVersionMutation) ClearEdge(name string) error {
+	switch name {
+	case botversion.EdgeBot:
+		m.ClearBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotVersion unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BotVersionMutation) ResetEdge(name string) error {
+	switch name {
+	case botversion.EdgeBot:
+		m.ResetBot()
+		return nil
+	}
+	return fmt.Errorf("unknown BotVersion edge %s", name)
 }
 
 // CacheDiagnosticMutation represents an operation that mutates the CacheDiagnostic nodes in the graph.
@@ -8454,6 +16758,10 @@ type SessionMutation struct {
 	typ                      string
 	id                       *string
 	user_id                  *uuid.UUID
+	bot_id                   *uuid.UUID
+	bot_run_id               *uuid.UUID
+	purpose                  *session.Purpose
+	retention                *session.Retention
 	title                    *string
 	message_count            *int
 	addmessage_count         *int
@@ -8632,6 +16940,176 @@ func (m *SessionMutation) UserIDCleared() bool {
 func (m *SessionMutation) ResetUserID() {
 	m.user_id = nil
 	delete(m.clearedFields, session.FieldUserID)
+}
+
+// SetBotID sets the "bot_id" field.
+func (m *SessionMutation) SetBotID(u uuid.UUID) {
+	m.bot_id = &u
+}
+
+// BotID returns the value of the "bot_id" field in the mutation.
+func (m *SessionMutation) BotID() (r uuid.UUID, exists bool) {
+	v := m.bot_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotID returns the old "bot_id" field's value of the Session entity.
+// If the Session object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SessionMutation) OldBotID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotID: %w", err)
+	}
+	return oldValue.BotID, nil
+}
+
+// ClearBotID clears the value of the "bot_id" field.
+func (m *SessionMutation) ClearBotID() {
+	m.bot_id = nil
+	m.clearedFields[session.FieldBotID] = struct{}{}
+}
+
+// BotIDCleared returns if the "bot_id" field was cleared in this mutation.
+func (m *SessionMutation) BotIDCleared() bool {
+	_, ok := m.clearedFields[session.FieldBotID]
+	return ok
+}
+
+// ResetBotID resets all changes to the "bot_id" field.
+func (m *SessionMutation) ResetBotID() {
+	m.bot_id = nil
+	delete(m.clearedFields, session.FieldBotID)
+}
+
+// SetBotRunID sets the "bot_run_id" field.
+func (m *SessionMutation) SetBotRunID(u uuid.UUID) {
+	m.bot_run_id = &u
+}
+
+// BotRunID returns the value of the "bot_run_id" field in the mutation.
+func (m *SessionMutation) BotRunID() (r uuid.UUID, exists bool) {
+	v := m.bot_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotRunID returns the old "bot_run_id" field's value of the Session entity.
+// If the Session object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SessionMutation) OldBotRunID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotRunID: %w", err)
+	}
+	return oldValue.BotRunID, nil
+}
+
+// ClearBotRunID clears the value of the "bot_run_id" field.
+func (m *SessionMutation) ClearBotRunID() {
+	m.bot_run_id = nil
+	m.clearedFields[session.FieldBotRunID] = struct{}{}
+}
+
+// BotRunIDCleared returns if the "bot_run_id" field was cleared in this mutation.
+func (m *SessionMutation) BotRunIDCleared() bool {
+	_, ok := m.clearedFields[session.FieldBotRunID]
+	return ok
+}
+
+// ResetBotRunID resets all changes to the "bot_run_id" field.
+func (m *SessionMutation) ResetBotRunID() {
+	m.bot_run_id = nil
+	delete(m.clearedFields, session.FieldBotRunID)
+}
+
+// SetPurpose sets the "purpose" field.
+func (m *SessionMutation) SetPurpose(s session.Purpose) {
+	m.purpose = &s
+}
+
+// Purpose returns the value of the "purpose" field in the mutation.
+func (m *SessionMutation) Purpose() (r session.Purpose, exists bool) {
+	v := m.purpose
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurpose returns the old "purpose" field's value of the Session entity.
+// If the Session object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SessionMutation) OldPurpose(ctx context.Context) (v session.Purpose, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurpose is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurpose requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurpose: %w", err)
+	}
+	return oldValue.Purpose, nil
+}
+
+// ResetPurpose resets all changes to the "purpose" field.
+func (m *SessionMutation) ResetPurpose() {
+	m.purpose = nil
+}
+
+// SetRetention sets the "retention" field.
+func (m *SessionMutation) SetRetention(s session.Retention) {
+	m.retention = &s
+}
+
+// Retention returns the value of the "retention" field in the mutation.
+func (m *SessionMutation) Retention() (r session.Retention, exists bool) {
+	v := m.retention
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRetention returns the old "retention" field's value of the Session entity.
+// If the Session object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SessionMutation) OldRetention(ctx context.Context) (v session.Retention, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRetention is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRetention requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRetention: %w", err)
+	}
+	return oldValue.Retention, nil
+}
+
+// ResetRetention resets all changes to the "retention" field.
+func (m *SessionMutation) ResetRetention() {
+	m.retention = nil
 }
 
 // SetTitle sets the "title" field.
@@ -9336,9 +17814,21 @@ func (m *SessionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SessionMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 18)
 	if m.user_id != nil {
 		fields = append(fields, session.FieldUserID)
+	}
+	if m.bot_id != nil {
+		fields = append(fields, session.FieldBotID)
+	}
+	if m.bot_run_id != nil {
+		fields = append(fields, session.FieldBotRunID)
+	}
+	if m.purpose != nil {
+		fields = append(fields, session.FieldPurpose)
+	}
+	if m.retention != nil {
+		fields = append(fields, session.FieldRetention)
 	}
 	if m.title != nil {
 		fields = append(fields, session.FieldTitle)
@@ -9389,6 +17879,14 @@ func (m *SessionMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case session.FieldUserID:
 		return m.UserID()
+	case session.FieldBotID:
+		return m.BotID()
+	case session.FieldBotRunID:
+		return m.BotRunID()
+	case session.FieldPurpose:
+		return m.Purpose()
+	case session.FieldRetention:
+		return m.Retention()
 	case session.FieldTitle:
 		return m.Title()
 	case session.FieldMessageCount:
@@ -9426,6 +17924,14 @@ func (m *SessionMutation) OldField(ctx context.Context, name string) (ent.Value,
 	switch name {
 	case session.FieldUserID:
 		return m.OldUserID(ctx)
+	case session.FieldBotID:
+		return m.OldBotID(ctx)
+	case session.FieldBotRunID:
+		return m.OldBotRunID(ctx)
+	case session.FieldPurpose:
+		return m.OldPurpose(ctx)
+	case session.FieldRetention:
+		return m.OldRetention(ctx)
 	case session.FieldTitle:
 		return m.OldTitle(ctx)
 	case session.FieldMessageCount:
@@ -9467,6 +17973,34 @@ func (m *SessionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetUserID(v)
+		return nil
+	case session.FieldBotID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotID(v)
+		return nil
+	case session.FieldBotRunID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotRunID(v)
+		return nil
+	case session.FieldPurpose:
+		v, ok := value.(session.Purpose)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurpose(v)
+		return nil
+	case session.FieldRetention:
+		v, ok := value.(session.Retention)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRetention(v)
 		return nil
 	case session.FieldTitle:
 		v, ok := value.(string)
@@ -9619,6 +18153,12 @@ func (m *SessionMutation) ClearedFields() []string {
 	if m.FieldCleared(session.FieldUserID) {
 		fields = append(fields, session.FieldUserID)
 	}
+	if m.FieldCleared(session.FieldBotID) {
+		fields = append(fields, session.FieldBotID)
+	}
+	if m.FieldCleared(session.FieldBotRunID) {
+		fields = append(fields, session.FieldBotRunID)
+	}
 	if m.FieldCleared(session.FieldParentID) {
 		fields = append(fields, session.FieldParentID)
 	}
@@ -9648,6 +18188,12 @@ func (m *SessionMutation) ClearField(name string) error {
 	case session.FieldUserID:
 		m.ClearUserID()
 		return nil
+	case session.FieldBotID:
+		m.ClearBotID()
+		return nil
+	case session.FieldBotRunID:
+		m.ClearBotRunID()
+		return nil
 	case session.FieldParentID:
 		m.ClearParentID()
 		return nil
@@ -9670,6 +18216,18 @@ func (m *SessionMutation) ResetField(name string) error {
 	switch name {
 	case session.FieldUserID:
 		m.ResetUserID()
+		return nil
+	case session.FieldBotID:
+		m.ResetBotID()
+		return nil
+	case session.FieldBotRunID:
+		m.ResetBotRunID()
+		return nil
+	case session.FieldPurpose:
+		m.ResetPurpose()
+		return nil
+	case session.FieldRetention:
+		m.ResetRetention()
 		return nil
 	case session.FieldTitle:
 		m.ResetTitle()

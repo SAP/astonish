@@ -101,6 +101,12 @@ export function parseHash(hash: string): RouterPath {
     return { view: 'settings', params: { section } }
   }
 
+  if (view === 'chat' && parts[1] === 'bots' && (parts[2] === 'personal' || parts[2] === 'team') && parts[3]) {
+    try {
+      return { view: 'chat', params: { botId: decodeURIComponent(parts[3]), botScope: parts[2], ...(parts[4] === 'runs' && parts[5] ? { runId: decodeURIComponent(parts[5]) } : {}) } }
+    } catch { return { view: 'chat', params: {} } }
+  }
+
   if (view === 'chat') {
     return { view: 'chat', params: { sessionId: parts[1] ? decodeURIComponent(parts[1]) : '' } }
   }

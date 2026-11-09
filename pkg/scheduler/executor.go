@@ -76,6 +76,9 @@ type Executor struct {
 	// FleetPoll is the function to call for fleet_poll mode execution.
 	// Injected by the daemon to avoid import cycles.
 	FleetPoll FleetPollFunc
+	// BotTrigger admits a persisted scheduled occurrence, never executes it.
+	// Nil fails closed. Production daemon composition is not installed here.
+	BotTrigger BotTriggerFunc
 	// FlowResolver resolves a flow name to raw YAML from the platform store.
 	// When set (platform mode), routine jobs use this instead of filesystem resolution.
 	// When nil (personal mode), resolveFlowPath() is used as the fallback.
@@ -114,6 +117,8 @@ func (e *Executor) Execute(ctx context.Context, job *Job) (string, error) {
 		result, err = e.executeAdaptive(ctx, job)
 	case ModeFleetPoll:
 		result, err = e.executeFleetPoll(ctx, job)
+	case ModeBotTrigger:
+		result, err = e.executeBotTrigger(ctx, job)
 	default:
 		return "", fmt.Errorf("unknown job mode: %s", job.Mode)
 	}

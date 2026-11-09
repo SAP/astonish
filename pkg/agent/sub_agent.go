@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
@@ -432,11 +433,13 @@ func IsExcludedChildTool(name string) bool {
 	return excludedChildTools[name]
 }
 
-// effectiveTaskLLM returns the LLM for child sub-agents. A request-scoped
-// override is the resolved parent model for this invocation and must win over
-// factory-time defaults. When no request override is present, TaskLLM supplies
-// the Auto-routing task tier; otherwise children inherit the manager default.
+// effectiveTaskLLM returns the LLM for child sub-agents. Interactive Bot children
+// require the trusted, identity-bound shared-budget auxiliary capability. Otherwise
+// a request-scoped override wins over factory defaults and the Auto-routing tier.
 func (m *SubAgentManager) effectiveTaskLLM(ctx context.Context) model.LLM {
+	if _, interactive := execution.BotTurnAuthorizerFromContext(ctx); interactive {
+		return auxiliaryLLM(ctx, nil)
+	}
 	if requestLLM := LLMFromContext(ctx); requestLLM != nil {
 		return requestLLM
 	}
@@ -1021,14 +1024,14 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		}
 	}
 
-	go func() {
+	go func(watchCtx context.Context) {
 		ticker := time.NewTicker(m.Config.HeartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-watchdogDone:
 				return
-			case <-taskCtx.Done():
+			case <-watchCtx.Done():
 				return
 			case now := <-ticker.C:
 				idle := now.Sub(time.Unix(0, lastActivity.Load()))
@@ -1060,7 +1063,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 				}
 			}
 		}
-	}()
+	}(taskCtx)
 
 	// Depth check
 	if task.ParentDepth >= m.Config.MaxDepth {
@@ -1073,10 +1076,42 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		return result
 	}
 
+	// Interactive children inherit the original caller's live Chat authority,
+	// not an autonomous policy. Check it before discovery or session creation;
+	// the frozen child scope below remains the executable catalog ceiling.
+	if auth, interactive := execution.BotTurnAuthorizerFromContext(taskCtx); interactive {
+		if _, ok := execution.BotRunIdentityFromContext(taskCtx); !ok || execution.RunPolicyFromContext(taskCtx) != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: "invalid interactive execution binding"}
+		}
+		if err := auth.Authorize(taskCtx, execution.CapabilityChat); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
+
+	if mandate := BotPolicyRuntimeFromContext(taskCtx).Mandate; mandate != nil {
+		if err := mandate.Check(taskCtx); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
 	// Freeze allowed wrapped instances before constructing any discovery helper.
 	scope, resolveWarnings, scopeErr := m.childToolScope(taskCtx, task)
 	if scopeErr != nil {
 		return TaskResult{Name: task.Name, Status: "error", Error: scopeErr.Error(), Duration: time.Since(start)}
+	}
+	_, interactiveChild := execution.BotTurnAuthorizerFromContext(taskCtx)
+	if botExecutionContext(taskCtx) && !interactiveChild {
+		identities := []string{"search_tools", "describe_tools", "skill_lookup"}
+		for _, e := range scope.entries {
+			identities = append(identities, BotToolIdentity(e.group, e.tool.Name()))
+		}
+		for _, e := range scope.metadata {
+			identities = append(identities, BotToolIdentity(e.GroupName, e.ToolName))
+		}
+		policy, err := execution.RunPolicyFromContext(taskCtx).Narrow(identities)
+		if err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+		taskCtx = execution.WithRunPolicy(taskCtx, policy)
 	}
 	var childTools []tool.Tool
 	var childToolsets []tool.Toolset
@@ -1457,6 +1492,25 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			return callback(ctx, logical, input)
 		}
 	}
+	beforeToolCallbacks = botNativeCallbacks(beforeToolCallbacks, func(ctx tool.Context, called tool.Tool, args map[string]any) (tool.Tool, string, map[string]any, error) {
+		if called.Name() == executeToolName {
+			decoded, err := decodeExecuteToolArgs(args)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			resolved, group, err := scope.resolve(ctx, decoded.Name)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			return resolved, BotToolIdentity(group, resolved.Name()), decoded.Arguments, nil
+		}
+		for _, e := range scope.entries {
+			if e.tool == called {
+				return called, BotToolIdentity(e.group, called.Name()), args, nil
+			}
+		}
+		return called, botExecutableIdentity(called), args, nil
+	})
 	afterCallbacks := afterToolCallbacks
 	afterToolCallbacks = []llmagent.AfterToolCallback{func(ctx tool.Context, called tool.Tool, input, output map[string]any, callErr error) (map[string]any, error) {
 		logical, args, err := childEffectiveToolCall(ctx, scope, called, input)
@@ -1772,7 +1826,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 					groupNames = append(groupNames, group)
 					continue
 				}
-				if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+				if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 					if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
 						effectiveGroups[group] = resolved
 						groupNames = append(groupNames, group)
@@ -1786,7 +1840,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 			// Specific tool via mcp:server/tool — include group toolset + bare name.
 			if _, isGroup := effectiveGroups[group]; isGroup {
 				groupNames = append(groupNames, group)
-			} else if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil {
+			} else if serverName, ok := mcpServerNameFromGroup(group); ok && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 				if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
 					effectiveGroups[group] = resolved
 					groupNames = append(groupNames, group)
@@ -1799,7 +1853,7 @@ func (m *SubAgentManager) resolveTools(ctx context.Context, request []string) ([
 
 		if _, isGroup := effectiveGroups[name]; isGroup {
 			groupNames = append(groupNames, name)
-		} else if serverName, isMCP := mcpServerNameFromGroup(name); isMCP && m.MCPGroupResolver != nil {
+		} else if serverName, isMCP := mcpServerNameFromGroup(name); isMCP && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 			// Fallback: the LLM requested an MCP group that wasn't in ToolGroups
 			// at init time (race with async discovery). Try to resolve it now.
 			if resolved := m.MCPGroupResolver(ctx, serverName); resolved != nil {
@@ -2364,6 +2418,22 @@ func childDiscoveryHelper(name string) bool {
 }
 
 func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask) (*ChildToolScope, []string, error) {
+	if botExecutionContext(ctx) {
+		for _, g := range m.ToolGroups {
+			if g != nil {
+				for _, ts := range g.Toolsets {
+					if err := botSafeToolset(ctx, ts); err != nil {
+						return nil, nil, err
+					}
+				}
+			}
+		}
+		for _, ts := range task.OverrideToolsets {
+			if err := botSafeToolset(ctx, ts); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if task.ToolSelectionMode != ChildToolSelectionStrict && task.ToolSelectionMode != ChildToolSelectionPreferred {
 		return nil, nil, fmt.Errorf("invalid tool selection %q", task.ToolSelectionMode)
 	}
@@ -2431,7 +2501,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 	}
 	// The index is metadata only; executables come from invocation groups or
 	// the permitted MCP resolver, never cached index Tool instances.
-	if preferred && m.MCPGroupResolver != nil {
+	if preferred && m.MCPGroupResolver != nil && !botExecutionContext(ctx) {
 		for _, entry := range metadata {
 			if groups[entry.GroupName] == nil && strings.HasPrefix(entry.GroupName, "mcp:") {
 				deferred[entry.GroupName] = &ToolGroup{Name: entry.GroupName}
@@ -2444,7 +2514,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		if parts := strings.SplitN(token, "/", 2); len(parts) == 2 && (denied[parts[1]] || childDiscoveryHelper(parts[1]) || excludedChildTools[parts[1]] || isToolDisabled(&minimalReadonlyContext{Context: ctx}, parts[1], token)) {
 			continue
 		}
-		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil && task.OverrideTools == nil && task.OverrideToolsets == nil && !IsMCPGroupInaccessible(ctx, group) {
+		if groups[group] == nil && strings.HasPrefix(group, "mcp:") && m.MCPGroupResolver != nil && !botExecutionContext(ctx) && task.OverrideTools == nil && task.OverrideToolsets == nil && !IsMCPGroupInaccessible(ctx, group) {
 			groups[group] = m.MCPGroupResolver(ctx, strings.TrimPrefix(group, "mcp:"))
 		}
 	}
@@ -2562,7 +2632,7 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 	if preferred {
 		scope.metadata = metadata
 	}
-	if preferred && task.OverrideTools == nil && task.OverrideToolsets == nil {
+	if preferred && task.OverrideTools == nil && task.OverrideToolsets == nil && !botExecutionContext(ctx) {
 		scope.resolver = m.MCPGroupResolver
 	}
 	seen := map[string]bool{}

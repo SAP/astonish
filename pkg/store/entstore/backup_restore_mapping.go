@@ -85,6 +85,9 @@ func remapRestoreRow(scope backup.Scope, targetScope backup.Scope, table string,
 	if len(opts.MapOrg) == 0 && len(opts.MapTeam) == 0 && len(opts.MapUser) == 0 {
 		return row
 	}
+	if isBotRestoreRow(table, row) {
+		return remapBotRestoreRow(scope, targetScope, table, row, opts)
+	}
 	out := make(map[string]any, len(row))
 	for key, value := range row {
 		out[key] = remapRestoreValue(value, opts)
@@ -118,6 +121,74 @@ func remapRestoreRow(scope backup.Scope, targetScope backup.Scope, table string,
 				out[column] = targetScope.UserID
 			}
 		}
+	}
+	return out
+}
+
+// Bot documents contain reviewed content and historical identities, not generic
+// scope strings. Never recursively substitute names, evidence, action arguments,
+// hashes, storage keys or attribution inside these documents.
+func isBotRestoreRow(table string, row map[string]any) bool {
+	switch table {
+	case "bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates":
+		return true
+	case "sessions":
+		id, _ := row["bot_id"].(string)
+		return id != ""
+	case "scheduled_jobs":
+		return row["mode"] == "bot_trigger"
+	}
+	return false
+}
+
+func remapBotRestoreRow(scope, target backup.Scope, table string, row map[string]any, opts PlatformRestoreOptions) map[string]any {
+	out := make(map[string]any, len(row))
+	for key, value := range row {
+		out[key] = value
+	}
+	mapOwner := func(value any) any {
+		id, ok := value.(string)
+		if !ok || id == "" {
+			return value
+		}
+		if scope.Kind == "personal" && id == scope.UserID {
+			return target.UserID
+		}
+		if mapped := opts.MapUser[scope.OrgSlug+"/"+id]; mapped != "" {
+			org, user, ok := strings.Cut(mapped, "/")
+			if ok && org == target.OrgSlug {
+				return user
+			}
+		}
+		return value
+	}
+	switch table {
+	case "bots":
+		out["owner_id"] = mapOwner(row["owner_id"])
+		// Read positions belong to current viewers. Preserve historical actors
+		// everywhere else. On a cursor collision reset to unread rather than
+		// accidentally hide activity from the mapped viewer.
+		if data, err := restoredBotDocument(row["data"]); err == nil {
+			copied := make(map[string]any, len(data))
+			for k, v := range data {
+				copied[k] = v
+			}
+			if cursors, ok := data["read_cursors"].(map[string]any); ok {
+				mapped := make(map[string]any, len(cursors))
+				for viewer, cursor := range cursors {
+					key := mapOwner(viewer).(string)
+					if _, exists := mapped[key]; exists {
+						mapped[key] = "0"
+					} else {
+						mapped[key] = cursor
+					}
+				}
+				copied["read_cursors"] = mapped
+			}
+			out["data"] = copied
+		}
+	case "sessions":
+		out["user_id"] = mapOwner(row["user_id"])
 	}
 	return out
 }

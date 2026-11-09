@@ -1,0 +1,28 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.storage.homes.enabled }}
+{{- if ne .Values.sandbox.backend "k8s" }}
+{{- fail "sandbox.storage.homes is supported only by the k8s backend" }}
+{{- end }}
+{{- $claim := default .Values.sandbox.storage.homes.pvcName .Values.sandbox.storage.homes.existingClaim }}
+{{- if or (not $claim) (eq $claim .Values.sandbox.storage.layers.pvcName) (eq $claim .Values.sandbox.storage.uppers.pvcName) }}
+{{- fail "retained Bot homes require an independent PVC" }}
+{{- end }}
+{{- if not .Values.sandbox.storage.homes.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  namespace: {{ include "astonish.namespace.sandbox" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "astonish.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bot-homes
+spec:
+  accessModes:
+    - {{ .Values.sandbox.storage.homes.accessMode }}
+  storageClassName: {{ .Values.sandbox.storage.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.sandbox.storage.homes.size }}
+{{- end }}
+{{- end }}

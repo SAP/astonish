@@ -703,6 +703,10 @@ func (p *lazyProxyTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		}, nil
 	}
 
+	if err := authorizeBotLazyInvocation(ctx, BotToolIdentity("mcp:"+p.toolset.serverName, p.Name()), args); err != nil {
+		return nil, err
+	}
+
 	sessionID := ctx.SessionID()
 	liveTool, err := p.toolset.getLiveTool(ctx, p.entry.Name, sessionID)
 	if err != nil {

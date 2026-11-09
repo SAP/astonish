@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SAP/astonish/pkg/a2aclient"
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/chatruntime"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
@@ -186,10 +186,11 @@ type StudioMessage struct {
 	// bubble; the chosen label re-enters the agent loop as an ordinary user
 	// message (no dedicated endpoint). Reload infers answered from that following
 	// user message so the selectable card is not remounted.
-	QuestionID   string               `json:"questionId,omitempty"`
-	QuestionKind string               `json:"questionKind,omitempty"` // "yesno" | "select"
-	Prompt       string               `json:"prompt,omitempty"`
-	Options      []ChatQuestionOption `json:"options,omitempty"`
+	QuestionID        string               `json:"questionId,omitempty"`
+	AllowCustomAnswer *bool                `json:"allow_custom_answer,omitempty"`
+	QuestionKind      string               `json:"questionKind,omitempty"` // "yesno" | "select" | "text"
+	Prompt            string               `json:"prompt,omitempty"`
+	Options           []ChatQuestionOption `json:"options,omitempty"`
 }
 
 // ChatQuestionOption is one selectable answer in a chat_question card. For a
@@ -1204,277 +1205,61 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectChatFiles(files)
 	}
 
-	// Inject tenant-scoped credential store into the runner context so that
-	// credential tools (list_credentials, resolve_credential, etc.) can access
-	// the correct store for this team/org in platform mode.
-	// The BeforeToolCallback in chat_agent_run.go also checks this context value
-	// for credential placeholder substitution ({{CREDENTIAL:...}} tokens),
-	// falling back to the agent's file-based CredentialStore field.
-	//
-	// In platform mode, we inject a merged store (personal-first, team-fallback)
-	// so the LLM resolves the user's personal credentials first, then team creds.
-	// Writes from chat always go to the personal store.
-	if svc := injectRequestDocsStores(runner, r); svc != nil {
-		if svc.PersonalCredentials != nil || svc.Credentials != nil {
-			merged := store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials)
-			runner.InjectCredentialStore(merged)
-
-			// Hydrate the shared Redactor from the PG-backed credential store.
-			// This ensures the Redactor knows about all credential values for
-			// this user's session — critical for tool output redaction and
-			// preventing secret leakage into session history.
-			if chatAgent.Redactor != nil {
-				chatAgent.Redactor.HydrateFromStore(merged)
-			}
-		}
-	}
-
-	// Inject the Redactor into the runner context so that memory_save can
-	// call Placeholderize() to replace raw credential values with actionable
-	// {{CREDENTIAL:name:field}} tokens before persisting to memory.
-	if chatAgent.Redactor != nil {
-		runner.InjectRedactor(chatAgent.Redactor)
-	}
-
-	// Inject tenant-scoped memory stores into the runner context so that
-	// memory_search, memory_save tools, and the KnowledgeSearch callback can
-	// use the PG-backed stores (team + three-tier) in platform mode.
+	// Resolve the same scoped inputs used by non-HTTP Chat consumers. Identity,
+	// session admission, streaming, and scheduler transport stay in the API.
+	var runtimeServices *store.Services
 	if svc := store.FromRequest(r); svc != nil {
-		memStore := svc.Memory
-		memoryScope := store.MemoryScopeTeam
-		// Determine memory scope: body field takes precedence, then header (deprecated fallback).
-		// Default is "team" — personal mode must be explicitly requested per-session.
-		requestedScope := requestedMemoryScope
-		// If personal memory mode is active, the memory_save tool should
-		// write to the user's personal store instead of team.
-		// The ThreeTierSearcher remains unchanged (always searches all tiers).
-		if requestedScope == "personal" && svc.TenantRouter != nil {
-			if orgStore, err := svc.TenantRouter.ForOrg(principal.OrgSlug); err == nil {
-				memStore = orgStore.ForUser(principal.Subject).Memories()
-				memoryScope = store.MemoryScopePersonal
+		copy := *svc
+		copy.FleetSetupProfiles = getSetupProfileStore(svc)
+		copy.FleetSetupDrafts = getSetupDraftStore(svc)
+		runtimeServices = &copy
+	}
+	pu := GetPlatformUser(r)
+	canDeleteTeamMemory := pu != nil && CanManageTeam(r, pu)
+	canDeleteOrgMemory := pu != nil && CanManageOrg(pu)
+	runtimeOptions := chatruntime.BuildOptions{
+		Principal: principal, Services: runtimeServices,
+		ResourceScope: chatruntime.ResourceScopePersonal,
+		MemoryScope:   store.MemoryScope(requestedMemoryScope),
+		AppConfig:     effectiveAppConfig(r), MCPConfig: loadMCPConfigForRequest(r),
+		Pool: comp.SandboxPool, FilesystemSkills: comp.FilesystemSkills,
+		CredentialResolver: credentialResolverForRequest(r), Redactor: chatAgent.Redactor,
+		FallbackPolicy: chatruntime.FallbackAllowed, Debug: chatAgent.DebugMode,
+		Templates: chatruntime.SandboxSelectors{TemplateLayerChain: resolveTemplateLayerChain, TemplateImage: resolveTemplateImage, BaseLayerChain: resolveBaseLayerChain, BaseImage: resolveBaseImage},
+		MemoryDeleteAuthorizer: func(_ context.Context, entry *store.MemorySearchResult, scope string) error {
+			allowed := scope == string(store.MemoryScopePersonal)
+			if scope == string(store.MemoryScopeTeam) {
+				allowed = entry.CreatedBy == principal.Subject || canDeleteTeamMemory
 			}
-		}
-		runner.InjectMemoryStoresWithScope(memStore, memoryScope, svc.MemorySearcher)
-		if svc.TenantRouter != nil && principal.Kind != execution.PrincipalKindService && principal.Subject != "" {
-			if orgStore, err := svc.TenantRouter.ForOrg(principal.OrgSlug); err == nil {
-				runner.InjectMemoryStoresByScope(store.MemoryStoresByScope{
-					Personal: orgStore.ForUser(principal.Subject).Memories(),
-					Team:     svc.Memory,
-					Org:      orgStore.OrgMemories(),
-				})
-				pu := GetPlatformUser(r)
-				canDeleteTeamMemory := pu != nil && CanManageTeam(r, pu)
-				canDeleteOrgMemory := pu != nil && CanManageOrg(pu)
-				runner.InjectMemoryDeleteAuthorizer(func(_ context.Context, entry *store.MemorySearchResult, scope string) error {
-					canDelete := false
-					switch scope {
-					case string(store.MemoryScopePersonal):
-						canDelete = true
-					case string(store.MemoryScopeTeam):
-						canDelete = entry.CreatedBy == principal.Subject || canDeleteTeamMemory
-					case string(store.MemoryScopeOrg):
-						canDelete = entry.CreatedBy == principal.Subject || canDeleteOrgMemory
-					}
-					if canDelete {
-						return nil
-					}
-					return fmt.Errorf("permission denied: you can only delete memories you created or that you have admin access to")
-				})
+			if scope == string(store.MemoryScopeOrg) {
+				allowed = entry.CreatedBy == principal.Subject || canDeleteOrgMemory
 			}
-		}
-
-		// Inject the cross-session memory merge function so that memory_save
-		// performs dedup/merge instead of blind inserts. This requires the
-		// PlatformReflector (which provides the LLM for merge calls).
-		if chatAgent.PlatformReflector != nil {
-			runner.InjectMemorySaveOrMerge(chatAgent.PlatformReflector.MemorySaveOrMergeFunc())
-		}
-	}
-
-	// Inject composite flow store (personal-first, team-fallback) into the runner
-	// context so that run_flow, search_flows, etc. resolve personal flows first
-	// and save to personal. Users promote to team explicitly.
-	if svc := store.FromRequest(r); svc != nil && (svc.PersonalFlows != nil || svc.Flows != nil) {
-		runner.InjectFlowStore(store.NewCompositeFlowStore(svc.PersonalFlows, svc.Flows))
-	}
-
-	// Inject team-only flow store for drill tools (drills are team-scoped artifacts).
-	if svc := store.FromRequest(r); svc != nil && svc.Flows != nil {
-		runner.InjectTeamFlowStore(svc.Flows)
-	}
-
-	// Inject tenant-scoped drill report store into the runner context so that
-	// the run_drill tool can persist execution results to the database.
-	if svc := store.FromRequest(r); svc != nil && svc.DrillReports != nil {
-		runner.InjectDrillReportStore(svc.DrillReports)
-	}
-
-	// DB-backed skills are a platform-only runtime capability. Overlay them on
-	// the exact filesystem slice used to initialize this component set.
-	if svc := store.FromRequest(r); svc != nil && svc.Mode == store.ModePlatform {
-		runner.InjectSkillStores(svc.PlatformSkills, svc.Skills, svc.TeamSkills)
-		runner.InjectSkillIndex(buildMergedSkillIndex(r.Context(), comp.FilesystemSkills, svc.PlatformSkills, svc.Skills, svc.TeamSkills))
-	}
-
-	// Inject tenant-scoped MCP server stores into the runner context so that
-	// the chat agent can resolve MCP server configs from platform, org, and
-	// team stores. Platform-tier servers (e.g. standard servers like Tavily
-	// installed at scope=platform) cascade down into every org/team chat.
-	if svc := store.FromRequest(r); svc != nil && (svc.PlatformMCPServers != nil || svc.MCPServers != nil || svc.TeamMCPServers != nil) {
-		runner.InjectMCPServerStores(svc.PlatformMCPServers, svc.MCPServers, svc.TeamMCPServers)
-	}
-
-	// Inject tenant-scoped A2A agent stores so the chat agent can resolve
-	// A2A agents from platform, org, and team stores (same cascade pattern as MCP).
-	if svc := store.FromRequest(r); svc != nil && (svc.PlatformA2AAgents != nil || svc.A2AAgents != nil || svc.TeamA2AAgents != nil) {
-		runner.InjectA2AAgentStores(svc.PlatformA2AAgents, svc.A2AAgents, svc.TeamA2AAgents)
-	}
-
-	// Per-request MCP tool groups: the singleton agent is often pre-warmed for
-	// a default team without this team's MCP servers / cached tools. Attach
-	// LazyMCP groups from the request stores so search_tools and main-thread
-	// injection see the real catalog (e.g. mcp:email / send_email).
-	{
-		var pool sandbox.ToolNodePool
-		if cm.components != nil {
-			pool = cm.components.SandboxPool
-		}
-		debug := false
-		if chatAgent != nil {
-			debug = chatAgent.DebugMode
-		}
-		if groups := buildRequestMCPToolGroups(r, pool, debug); len(groups) > 0 {
-			runner.InjectRequestMCPGroups(groups)
-		}
-	}
-
-	// Per-request A2A agent tools: load from tenant stores and inject as a
-	// request-scoped tool group so search_tools / dynamic injection see them.
-	if svc := store.FromRequest(r); svc != nil {
-		a2aStores := &store.A2AAgentStores{
-			Platform: svc.PlatformA2AAgents,
-			Org:      svc.A2AAgents,
-			Team:     svc.TeamA2AAgents,
-		}
-		if a2aTools := a2aclient.GetA2AToolsFromStores(r.Context(), a2aStores); len(a2aTools) > 0 {
-			a2aGroups := map[string]*agent.ToolGroup{
-				"a2a": {
-					Name:        "a2a",
-					Description: "Remote A2A agent skills (invoke external agents via the A2A protocol)",
-					Tools:       a2aTools,
-				},
+			if allowed {
+				return nil
 			}
-			runner.InjectRequestMCPGroups(a2aGroups)
-
-			// Build a brief listing for the system prompt so the LLM knows
-			// A2A agents are available without needing search_tools first.
-			var toolNames []string
-			for _, t := range a2aTools {
-				toolNames = append(toolNames, t.Name())
-			}
-			runner.InjectA2AToolsPrompt(toolNames)
-		}
+			return fmt.Errorf("permission denied: you can only delete memories you created or that you have admin access to")
+		},
 	}
-
-	// Per-request web search: platform General/WebSearchTool must apply to every
-	// user, not only the browser session that first pre-warmed the singleton agent.
-	// Also late-bind the Perplexity tool if it was configured after agent init.
-	if appCfg := effectiveAppConfig(r); appCfg != nil {
-		applyPerRequestWebSearch(runner, chatAgent, appCfg)
+	if chatAgent.PlatformReflector != nil {
+		runtimeOptions.MemorySaveOrMerge = chatAgent.PlatformReflector.MemorySaveOrMergeFunc()
 	}
-
-	// Inject tenant-scoped network policy stores into the runner context so that
-	// denial detection can auto-approve/deny based on configured rules rather
-	// than always prompting the user.
-	if svc := store.FromRequest(r); svc != nil && (svc.PlatformNetworkPolicies != nil || svc.NetworkPolicies != nil || svc.TeamNetworkPolicies != nil) {
-		runner.InjectNetworkPolicyStores(svc.PlatformNetworkPolicies, svc.NetworkPolicies, svc.TeamNetworkPolicies)
+	runtimeInputs, runtimeErr := chatruntime.Build(r.Context(), runtimeOptions)
+	if runtimeErr != nil {
+		SendErrorSSE(w, flusher, "Failed to resolve scoped Chat runtime")
+		return
 	}
-
-	// Inject gateway config for auto-approve (policy-allowed endpoints bypass the dialog).
-	if appCfg := effectiveAppConfig(r); appCfg != nil && appCfg.Sandbox.OpenShell.GatewayAddr != "" {
-		runner.InjectGatewayConfig(openshell.GRPCClientConfig{
-			Addr: appCfg.Sandbox.OpenShell.GatewayAddr,
-			TLS:  appCfg.Sandbox.OpenShell.OpenShellGatewayTLS(),
-		})
+	runner.ctx, runtimeErr = runtimeInputs.Bind(runner.ctx)
+	// Session storage may use a transport-specific local user ID rather than
+	// the authenticated principal subject. Preserve that existing child-session key.
+	if runtimeErr == nil {
+		runner.InjectUserID(userID)
 	}
-
-	// Inject team + personal scheduler stores so schedule_job can create
-	// personal jobs (default) or team jobs, and list/update across both lanes.
-	if svc := store.FromRequest(r); svc != nil {
-		if svc.Scheduler != nil {
-			runner.InjectSchedulerStore(svc.Scheduler)
-		}
-		if svc.PersonalScheduler != nil {
-			runner.InjectPersonalSchedulerStore(svc.PersonalScheduler)
-		}
+	if runtimeErr != nil {
+		SendErrorSSE(w, flusher, "Failed to bind scoped Chat runtime")
+		return
 	}
-
-	// Inject tenant-scoped fleet stores into the runner context so that
-	// fleet tools (save_fleet_plan, list_fleets) can read/write from the DB.
-	if svc := store.FromRequest(r); svc != nil && (svc.FleetTemplates != nil || svc.FleetPlans != nil) {
-		runner.InjectFleetStores(svc.FleetTemplates, svc.FleetPlans)
-	}
-
-	// Inject setup stores, including API fallback stores when DB-backed stores
-	// are unavailable, so setup tools update the same drafts created by handlers.
-	if svc := store.FromRequest(r); svc != nil {
-		runner.InjectFleetSetupStores(getSetupProfileStore(svc), getSetupDraftStore(svc))
-	}
-
-	// Inject the team's custom sandbox template so that chat containers use
-	// the team's pre-configured image rather than always falling back to @base.
-	if svc := store.FromRequest(r); svc != nil && svc.Settings != nil {
-		if settings, err := svc.Settings.Get(r.Context()); err == nil && settings.TemplateName != "" {
-			runner.InjectSandboxTemplate(settings.TemplateName)
-			// On K8s, resolve the template name → layer chain via the
-			// platform DB so the pod gets a real layer chain (not the
-			// human-readable template name which is not a valid layer ID).
-			if chain := resolveTemplateLayerChain(r.Context(), settings.TemplateName); len(chain) > 0 {
-				runner.InjectSandboxLayerChain(chain)
-			}
-			// On OpenShell, resolve the template name → custom image ref.
-			if img := resolveTemplateImage(r.Context(), settings.TemplateName); img != "" {
-				runner.InjectSandboxImage(img)
-			}
-		}
-	}
-
-	// Resolve @base configuration layer. When the admin has run Configure
-	// Base Sandbox, the resulting delta layer is stored as @base's
-	// top_layer_id. Sessions must include it in their chain so they see
-	// the installed tools. Only applies when no team-template chain was
-	// already injected (team templates include @base in their own chain).
-	if chain := resolveBaseLayerChain(r.Context()); len(chain) > 0 {
-		runner.InjectSandboxLayerChainIfEmpty(chain)
-	}
-	// On OpenShell, resolve @base's custom image if set by admin.
-	if img := resolveBaseImage(r.Context()); img != "" {
-		runner.InjectSandboxImageIfEmpty(img)
-	}
-
-	// Inject per-team disabled tool list so the agent filters them out.
-	if svc := store.FromRequest(r); svc != nil && svc.Settings != nil {
-		if settings, err := svc.Settings.Get(r.Context()); err == nil && len(settings.DisabledTools) > 0 {
-			runner.InjectDisabledTools(settings.DisabledTools)
-		}
-	}
-
-	// Inject the per-request session service so that sub-agents (delegate_tasks)
-	// create child sessions in the correct store (pgstore PersonalSessions in
-	// platform mode) rather than the factory-time default (FileStore).
-	if svc := store.FromRequest(r); svc != nil && svc.PersonalSessions != nil {
-		runner.InjectSessionService(svc.PersonalSessions)
-	}
-
-	// Inject the effective user ID so sub-agents create child sessions with the
-	// correct user_id (UUID in platform mode). Without this, the SubAgentManager
-	// would use its factory-time default ("console_user") which fails pgstore's
-	// UUID column constraint.
-	runner.InjectUserID(userID)
-
-	// Inject org/team slugs so tools can resolve team membership in platform mode.
-	if tc := store.TenantContextFrom(r.Context()); tc != nil {
-		runner.InjectTenantSlugs(tc.OrgSlug, tc.TeamSlug)
+	if appCfg := runtimeOptions.AppConfig; appCfg != nil && appCfg.Sandbox.OpenShell.GatewayAddr != "" {
+		runner.InjectGatewayConfig(openshell.GRPCClientConfig{Addr: appCfg.Sandbox.OpenShell.GatewayAddr, TLS: appCfg.Sandbox.OpenShell.OpenShellGatewayTLS()})
 	}
 
 	// Inject RunJobFunc so schedule_job test execution works in platform mode.
@@ -1596,7 +1381,7 @@ func StudioChatStreamHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "session ID required")
 		return
 	}
-	if !requireSessionIDOwner(w, r, sessionID) {
+	if !requireChatRuntimeSessionOwner(w, r, sessionID) {
 		return
 	}
 
@@ -1630,7 +1415,7 @@ func StudioChatStatusHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "session ID required")
 		return
 	}
-	if !requireSessionIDOwner(w, r, sessionID) {
+	if !requireChatRuntimeSessionOwner(w, r, sessionID) {
 		return
 	}
 
@@ -1952,52 +1737,7 @@ func extractAppFromSystemContext(systemContext string) (code, title string) {
 // buildMergedSkillIndex overlays platform, org, and team DB skills on the
 // filesystem base. Names are matched case-insensitively and later scopes win.
 func buildMergedSkillIndex(ctx context.Context, filesystem []skills.Skill, platformStore, orgStore, teamStore store.SkillStore) string {
-	all := append([]skills.Skill(nil), filesystem...)
-
-	for _, tier := range []struct {
-		name  string
-		store store.SkillStore
-	}{
-		{name: "platform", store: platformStore},
-		{name: "org", store: orgStore},
-		{name: "team", store: teamStore},
-	} {
-		if tier.store == nil {
-			continue
-		}
-		stored, err := tier.store.LoadAll(ctx)
-		if err != nil {
-			continue
-		}
-		for _, s := range stored {
-			all = append(all, skills.Skill{
-				Name:        s.Name,
-				Description: s.Description,
-				OS:          s.OS,
-				RequireBins: s.RequireBins,
-				RequireEnv:  s.RequireEnv,
-				Source:      tier.name,
-			})
-		}
-	}
-
-	seen := make(map[string]struct{}, len(all))
-	deduped := make([]skills.Skill, 0, len(all))
-	for i := len(all) - 1; i >= 0; i-- {
-		name := strings.ToLower(strings.TrimSpace(all[i].Name))
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		deduped = append(deduped, all[i])
-	}
-	for i, j := 0, len(deduped)-1; i < j; i, j = i+1, j-1 {
-		deduped[i], deduped[j] = deduped[j], deduped[i]
-	}
-	return skills.BuildSkillIndex(deduped)
+	return chatruntime.BuildMergedSkillIndex(ctx, filesystem, platformStore, orgStore, teamStore)
 }
 
 // readSessionPin returns the persisted provider/model pin for a session, or
@@ -2125,18 +1865,6 @@ func sessionProviderHasCredential(ctx context.Context, svc *store.Services, name
 	return false
 }
 
-// applyPerRequestWebSearch publishes the cascade-selected web tools into the
-// runner prompt and ensures the Perplexity tool is registered when selected.
-// This closes the gap where a singleton ChatAgent pre-warmed before platform
-// web settings were saved (or with a different tenant context) would leave
-// some browser sessions without web search while others worked.
-func applyPerRequestWebSearch(runner *ChatRunner, _ *agent.ChatAgent, appCfg *config.AppConfig) {
-	if runner == nil || appCfg == nil {
-		return
-	}
-	runner.ctx = withPerRequestWebSearchContext(runner.ctx, appCfg)
-}
-
 // resolveSessionEffectiveModel returns the effective provider/model for a
 // studio chat session after the full cascade (platform → org → team →
 // user-default → session-pin). Empty sessionID skips the pin lookup.
@@ -2197,7 +1925,10 @@ func GetSessionModelStatusHandler(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "session ID required")
 		return
 	}
-	if !requireSessionIDOwner(w, r, sessionID) {
+	if handleBotHomeModel(w, r, sessionID, botModelRead) {
+		return
+	}
+	if !requireChatRuntimeSessionOwner(w, r, sessionID) {
 		return
 	}
 
@@ -2276,6 +2007,9 @@ func PatchSessionModelHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := mux.Vars(r)["id"]
 	if sessionID == "" || !validSessionID.MatchString(sessionID) {
 		respondError(w, http.StatusBadRequest, "invalid session ID")
+		return
+	}
+	if handleBotHomeModel(w, r, sessionID, botModelConfigure) {
 		return
 	}
 	if !requireSessionIDOwner(w, r, sessionID) {

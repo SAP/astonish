@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -27,6 +28,24 @@ var (
 	globalTaskResultStore *TaskResultStore
 	taskResultStoreOnce   sync.Once
 )
+
+type taskResultContextKey struct{}
+
+// NewTaskResultStore creates an invocation-owned store with no global goroutine.
+func NewTaskResultStore() *TaskResultStore {
+	return &TaskResultStore{results: make(map[string]*storedResult)}
+}
+func WithTaskResultStore(ctx context.Context, s *TaskResultStore) context.Context {
+	return context.WithValue(ctx, taskResultContextKey{}, s)
+}
+func taskResultsFromContext(ctx context.Context) *TaskResultStore {
+	if ctx != nil {
+		if s, ok := ctx.Value(taskResultContextKey{}).(*TaskResultStore); ok && s != nil {
+			return s
+		}
+	}
+	return GetTaskResultStore()
+}
 
 // GetTaskResultStore returns the singleton store.
 func GetTaskResultStore() *TaskResultStore {

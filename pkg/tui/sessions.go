@@ -41,6 +41,12 @@ type historyLoadedMsg struct {
 }
 
 func (m model) openSessionsPicker() (tea.Model, tea.Cmd) {
+	if m.botSelected() {
+		m.detachBotWatch()
+		m.botCap().DetachBot()
+		m.tr.Reset()
+		m.info = m.backend.Info()
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}
@@ -149,6 +155,11 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startNewSession() (tea.Model, tea.Cmd) {
+	if m.botSelected() {
+		m.detachBotWatch()
+		m.botCap().DetachBot()
+		m.tr.Reset()
+	}
 	if m.tr.Streaming && !m.tr.Awaiting {
 		return m, nil
 	}

@@ -372,12 +372,14 @@ const (
 // chat session in {team_schema}.sessions. In personal mode and in the
 // common one-chat-one-sandbox case, callers MAY set SessionID == ChatSessionID.
 type SandboxSession struct {
-	SessionID     string `json:"session_id"`
-	ChatSessionID string `json:"chat_session_id"`
-	Backend       string `json:"backend"` // "incus" | "k8s"
-	ContainerName string `json:"container_name,omitempty"`
-	TemplateID    string `json:"template_id"`
-	UpperLayerID  string `json:"upper_layer_id,omitempty"`
+	// BotHomeBinding is opaque registry metadata, never authority to run compute.
+	BotHomeBinding *BotHomeBinding `json:"bot_home_binding,omitempty"`
+	SessionID      string          `json:"session_id"`
+	ChatSessionID  string          `json:"chat_session_id"`
+	Backend        string          `json:"backend"` // "incus" | "k8s"
+	ContainerName  string          `json:"container_name,omitempty"`
+	TemplateID     string          `json:"template_id"`
+	UpperLayerID   string          `json:"upper_layer_id,omitempty"`
 	// Image is the container image used to create this session (OpenShell).
 	// Stored so that StartSession can recreate with the correct image.
 	Image        string              `json:"image,omitempty"`

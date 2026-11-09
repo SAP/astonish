@@ -135,6 +135,93 @@ describe('astonish-client', () => {
     expect(new Headers(init.headers).get('Authorization')).toBe('Bearer tok');
   });
 
+  it.each(['\n', '\r\n'])('preserves Bot envelopes without executing replayed approvals (%j)', async (newline) => {
+    const transcript = {
+      ID: 'event-1', InvocationID: 'run-1', Author: 'execution-owner',
+      Actions: { StateDelta: { bot_runtime_event: {
+        type: 'approval', payload: { id: 'approval-1', status: 'pending' },
+      } } },
+    };
+    const metadata = { sessionId: 's1', botId: 'bot-1', purpose: 'bot_run' };
+    const frames = [
+      `event:session\ndata:${JSON.stringify(metadata)}\n\n`,
+      `id: s1:1\nevent: transcript\ndata: ${JSON.stringify(transcript)}\n\n`,
+      ': heartbeat\n\n',
+      'id:s1:1\nevent:replay_complete\ndata:{\ndata: "persisted":true}\n\n',
+      'event: approval\ndata: {"id":"live-approval"}\n\n',
+      'event: done\ndata: {"status":"complete"}\n\n',
+    ].join('').replaceAll('\n', newline);
+    const bytes = new TextEncoder().encode(frames);
+    const stream = new ReadableStream({
+      start(controller) {
+        // Every byte boundary is exercised, including a split CRLF delimiter.
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, body: stream });
+    const onEvent = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    connectChat({ sessionId: 's1', onEvent, onDone, onError });
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+    expect(onError).not.toHaveBeenCalled();
+    expect(onEvent.mock.calls).toEqual([
+      ['session', metadata], ['transcript', transcript],
+      ['replay_complete', { persisted: true }],
+      ['approval', { id: 'live-approval' }], ['done', { status: 'complete' }],
+    ]);
+    // No Bot attach, approval resolution, or implicit continuation request.
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('http://localhost:9393/api/studio/chat');
+    expect(JSON.parse(init.body).autoApprove).toBe(false);
+  });
+
+  it('ignores malformed and unknown events without losing subsequent errors or text', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode([
+          'event: transcript\ndata: not-json\n\n',
+          'event: transcript\ndata: null\n\n',
+          'event: transcript\ndata: []\n\n',
+          'event: transcript\ndata: "not an object"\n\n',
+          'event: future_event\ndata: {"status":"pending"}\n\n',
+          'event: error_info\ndata: {"message":"Permission denied"}\n\n',
+          'event: text\ndata: {"text":"Still connected"}\n\n',
+        ].join('')));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, body: stream });
+    const onEvent = vi.fn();
+    const onDone = vi.fn();
+    connectChat({ onEvent, onDone });
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+    expect(onEvent.mock.calls).toEqual([
+      ['error_info', { message: 'Permission denied' }],
+      ['text', { text: 'Still connected' }],
+    ]);
+  });
+
+  it('forwards an empty Bot replay marker without fabricating a transcript or approval', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'id: s1:0\nevent: replay_complete\ndata: {"persisted":true}\n\n',
+        ));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, body: stream });
+    const onEvent = vi.fn();
+    const onDone = vi.fn();
+    connectChat({ onEvent, onDone });
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+    expect(onEvent.mock.calls).toEqual([['replay_complete', { persisted: true }]]);
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+  });
+
   it('sessionIdFromEvent prefers sessionId and falls back to id', () => {
     expect(sessionIdFromEvent({ sessionId: 'live', id: 'fixture' })).toBe('live');
     expect(sessionIdFromEvent({ id: 'fixture' })).toBe('fixture');

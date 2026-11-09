@@ -21,6 +21,8 @@ type SandboxSession struct {
 	ID string `json:"id,omitempty"`
 	// ChatSessionID holds the value of the "chat_session_id" field.
 	ChatSessionID string `json:"chat_session_id,omitempty"`
+	// BotHomeBinding holds the value of the "bot_home_binding" field.
+	BotHomeBinding map[string]interface{} `json:"bot_home_binding,omitempty"`
 	// Backend holds the value of the "backend" field.
 	Backend string `json:"backend,omitempty"`
 	// ContainerName holds the value of the "container_name" field.
@@ -59,7 +61,7 @@ func (*SandboxSession) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case sandboxsession.FieldCreatedBy:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case sandboxsession.FieldExposedPorts:
+		case sandboxsession.FieldBotHomeBinding, sandboxsession.FieldExposedPorts:
 			values[i] = new([]byte)
 		case sandboxsession.FieldPinned:
 			values[i] = new(sql.NullBool)
@@ -95,6 +97,14 @@ func (_m *SandboxSession) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field chat_session_id", values[i])
 			} else if value.Valid {
 				_m.ChatSessionID = value.String
+			}
+		case sandboxsession.FieldBotHomeBinding:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field bot_home_binding", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.BotHomeBinding); err != nil {
+					return fmt.Errorf("unmarshal field bot_home_binding: %w", err)
+				}
 			}
 		case sandboxsession.FieldBackend:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -226,6 +236,9 @@ func (_m *SandboxSession) String() string {
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
 	builder.WriteString("chat_session_id=")
 	builder.WriteString(_m.ChatSessionID)
+	builder.WriteString(", ")
+	builder.WriteString("bot_home_binding=")
+	builder.WriteString(fmt.Sprintf("%v", _m.BotHomeBinding))
 	builder.WriteString(", ")
 	builder.WriteString("backend=")
 	builder.WriteString(_m.Backend)

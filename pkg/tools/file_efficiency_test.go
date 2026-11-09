@@ -130,7 +130,7 @@ func TestLoadFile_MetadataStates(t *testing.T) {
 			}
 			for key := range fields {
 				switch key {
-				case "path", "title", "size_bytes", "total_lines":
+				case "path", "title", "size_bytes", "total_lines", "inspected_sha256":
 				default:
 					t.Errorf("non-metadata field %q", key)
 				}

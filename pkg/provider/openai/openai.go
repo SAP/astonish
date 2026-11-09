@@ -112,6 +112,15 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			Tools:    tools,
 		}
 
+		parallelToolCalls, err := common.ParallelToolCalls(req)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if parallelToolCalls != nil && len(tools) > 0 {
+			openAIReq.ParallelToolCalls = *parallelToolCalls
+		}
+
 		// StreamOptions is only valid when streaming is enabled.
 		// Some providers (e.g., OpenAI, OpenRouter) reject it otherwise.
 		if streaming {
@@ -152,6 +161,9 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 
 		if p.useResponsesAPI {
 			responseReq := toResponsesRequest(req, p.model, messages, tools, openAIReq.MaxCompletionTokens)
+			if len(tools) > 0 {
+				responseReq.ParallelToolCalls = parallelToolCalls
+			}
 			if streaming {
 				p.generateResponsesStream(ctx, responseReq, yield)
 				return

@@ -61,20 +61,42 @@ type CacheDiagnosticUsage struct {
 	TotalTokens     int32 `json:"totalTokens"`
 }
 
+type SessionPurpose string
+type SessionRetention string
+
+const (
+	SessionPurposeChat       SessionPurpose   = "chat"
+	SessionPurposeBotHome    SessionPurpose   = "bot_home"
+	SessionPurposeBotRun     SessionPurpose   = "bot_run"
+	SessionRetentionStandard SessionRetention = "standard"
+	SessionRetentionBot      SessionRetention = "bot"
+)
+
+// Bot linkage is a server-owned projection. Ordinary metadata writes cannot
+// attach a session to a Bot or remove its retention classification.
 type SessionMeta struct {
-	ID           string    `json:"id"`
-	AppName      string    `json:"appName"`
-	UserID       string    `json:"userId"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	Title        string    `json:"title,omitempty"`
-	MessageCount int       `json:"messageCount"`
-	ParentID     string    `json:"parentId,omitempty"`
-	FleetKey     string    `json:"fleetKey,omitempty"`
-	FleetName    string    `json:"fleetName,omitempty"`
-	IssueNumber  int       `json:"issueNumber,omitempty"`
-	Repo         string    `json:"repo,omitempty"`
-	WorkspaceDir string    `json:"workspaceDir,omitempty"`
+	BotID        string           `json:"botId,omitempty"`
+	BotRunID     string           `json:"botRunId,omitempty"`
+	Purpose      SessionPurpose   `json:"purpose,omitempty"`
+	Retention    SessionRetention `json:"retention,omitempty"`
+	ID           string           `json:"id"`
+	AppName      string           `json:"appName"`
+	UserID       string           `json:"userId"`
+	CreatedAt    time.Time        `json:"createdAt"`
+	UpdatedAt    time.Time        `json:"updatedAt"`
+	Title        string           `json:"title,omitempty"`
+	MessageCount int              `json:"messageCount"`
+	ParentID     string           `json:"parentId,omitempty"`
+	FleetKey     string           `json:"fleetKey,omitempty"`
+	FleetName    string           `json:"fleetName,omitempty"`
+	IssueNumber  int              `json:"issueNumber,omitempty"`
+	Repo         string           `json:"repo,omitempty"`
+	WorkspaceDir string           `json:"workspaceDir,omitempty"`
+}
+
+// HasBotLinkage includes incomplete records so malformed metadata fails closed.
+func (m SessionMeta) HasBotLinkage() bool {
+	return m.BotID != "" || m.BotRunID != "" || m.Purpose == SessionPurposeBotHome || m.Purpose == SessionPurposeBotRun || m.Retention == SessionRetentionBot
 }
 
 // SessionIDEnumerator returns an authoritative session-ID snapshot. Implementations

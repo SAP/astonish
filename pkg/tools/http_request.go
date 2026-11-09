@@ -3,10 +3,12 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	nurl "net/url"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 )
 
@@ -61,6 +65,7 @@ type HttpRequestArgs struct {
 }
 
 type HttpRequestResult struct {
+	FinalURL    string            `json:"final_url,omitempty"`
 	StatusCode  int               `json:"status_code"`
 	Status      string            `json:"status"`
 	Headers     map[string]string `json:"headers"`
@@ -80,7 +85,47 @@ func HttpRequest(ctx tool.Context, args HttpRequestArgs) (HttpRequestResult, err
 }
 
 // httpRequest is the shared implementation used by ADK tools and astonish node.
-func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, error) {
+func httpRequest(ctx context.Context, args HttpRequestArgs) (result HttpRequestResult, err error) {
+	if p, ok := ctx.Value(routineReadKey{}).(RoutineReadPolicy); ok {
+		return routineReadRequest(ctx, args, p)
+	}
+	redactor := credentials.NewRedactor()
+	if cs := getEffectiveCredStore(ctx); cs != nil {
+		redactor.HydrateFromStore(cs)
+		resolver := httpCredentialResolver{CredentialResolver: credentials.NewStoreAdapter(cs), redactor: redactor, ctx: ctx, store: cs}
+		raw, marshalErr := json.Marshal(args)
+		if marshalErr != nil {
+			return result, marshalErr
+		}
+		var values map[string]any
+		if err = json.Unmarshal(raw, &values); err != nil {
+			return result, err
+		}
+		values = credentials.SubstituteMap(values, resolver)
+		if len(credentials.UnresolvedCredentialNames(values)) != 0 {
+			return result, fmt.Errorf("unresolved HTTP credential placeholder")
+		}
+		raw, err = json.Marshal(values)
+		if err != nil {
+			return result, err
+		}
+		if err = json.Unmarshal(raw, &args); err != nil {
+			return result, err
+		}
+	}
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%s", redactor.Redact(err.Error()))
+		}
+		result.Body = redactor.Redact(result.Body)
+		result.Status = redactor.Redact(result.Status)
+		result.ContentType = redactor.Redact(result.ContentType)
+		cleanHeaders := make(map[string]string, len(result.Headers))
+		for k, v := range result.Headers {
+			cleanHeaders[redactor.Redact(k)] = redactor.Redact(v)
+		}
+		result.Headers = cleanHeaders
+	}()
 	if args.URL == "" {
 		return HttpRequestResult{}, fmt.Errorf("url is required")
 	}
@@ -143,7 +188,7 @@ func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, 
 		defer cleanup()
 	}
 
-	req, err := http.NewRequest(method, args.URL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, args.URL, bodyReader)
 	if err != nil {
 		return HttpRequestResult{}, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -171,6 +216,7 @@ func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, 
 			return HttpRequestResult{}, fmt.Errorf("credential store is not available — cannot resolve credential %q", args.Credential)
 		}
 		headerKey, headerValue, err := cs.Resolve(ctx, args.Credential)
+		registerHTTPAuthSecret(redactor, args.Credential, headerValue)
 		if err != nil {
 			return HttpRequestResult{}, fmt.Errorf("failed to resolve credential %q: %w", args.Credential, err)
 		}
@@ -178,12 +224,29 @@ func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, 
 	}
 
 	redirectCount := 0
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Resolve and validate at dial time as well: a preflight lookup alone allows
+	// DNS rebinding. Sandbox private-network access remains an explicit node policy.
+	if !httpReqSkipSSRF && !httpReqAllowPrivateNetworks {
+		transport.Proxy = nil
+		transport.DialContext = httpRequestPublicDial
+	}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(next *http.Request, via []*http.Request) error {
 			redirectCount++
 			if redirectCount > httpReqMaxRedirects {
 				return fmt.Errorf("too many redirects (max %d)", httpReqMaxRedirects)
+			}
+			// Custom auth headers and credential-bearing bodies must never be
+			// forwarded to a different origin (including TLS downgrade).
+			if next.URL.Scheme != parsedURL.Scheme || !strings.EqualFold(next.URL.Host, parsedURL.Host) {
+				return fmt.Errorf("cross-origin redirect blocked")
+			}
+			if !httpReqSkipSSRF && !httpReqAllowPrivateNetworks {
+				return checkSSRF(next.URL.Hostname())
 			}
 			return nil
 		},
@@ -234,6 +297,58 @@ func httpRequest(ctx context.Context, args HttpRequestArgs) (HttpRequestResult, 
 		DurationMs:  durationMs,
 		Truncated:   truncated,
 	}, nil
+}
+
+// httpCredentialResolver records freshly issued tokens at the node boundary,
+// before either response data or transport diagnostics can leave the sandbox.
+type httpCredentialResolver struct {
+	credentials.CredentialResolver
+	redactor *credentials.Redactor
+	ctx      context.Context
+	store    store.CredentialStore
+}
+
+func (r httpCredentialResolver) Resolve(name string) (string, string, error) {
+	key, value, err := r.store.Resolve(r.ctx, name)
+	registerHTTPAuthSecret(r.redactor, name, value)
+	return key, value, err
+}
+
+func registerHTTPAuthSecret(r *credentials.Redactor, name, value string) {
+	r.AddSecret(name+"/resolved-token", value)
+	if strings.HasPrefix(value, "Bearer ") || strings.HasPrefix(value, "Basic ") {
+		_, token, _ := strings.Cut(value, " ")
+		r.AddSecret(name+"/resolved-token", token)
+	}
+}
+
+func httpRequestPublicDial(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("HTTP destination has no addresses")
+	}
+	for _, addr := range ips {
+		ip := addr.IP
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return nil, fmt.Errorf("URL resolves to a private/loopback address — blocked for security")
+		}
+	}
+	dialer := &net.Dialer{Timeout: httpReqDefaultTimeout}
+	for _, addr := range ips {
+		var conn net.Conn
+		conn, err = dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+	}
+	return nil, err
 }
 
 func buildHTTPRequestBody(args HttpRequestArgs) (io.Reader, string, func(), error) {

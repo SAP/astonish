@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/singleflight"
+
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	entschema "entgo.io/ent/dialect/sql/schema"
@@ -421,6 +423,9 @@ type orgDataStore struct {
 	teams map[string]*teamDataStore
 	users map[string]*personalDataStore
 
+	teamFlight singleflight.Group
+	userFlight singleflight.Group
+
 	credKeyOnce sync.Once
 	credKey     []byte // cached per-org credential DEK
 }
@@ -515,76 +520,64 @@ func (o *orgDataStore) getOrCreateCredentialKey() []byte {
 
 func (o *orgDataStore) ForTeam(teamSlug string) store.TeamDataStore {
 	o.mu.RLock()
-	if ts, ok := o.teams[teamSlug]; ok {
-		o.mu.RUnlock()
-		return ts
-	}
+	ts, ok := o.teams[teamSlug]
 	o.mu.RUnlock()
-
-	// Acquire write lock and double-check to prevent duplicate opens.
-	o.mu.Lock()
-	if ts, ok := o.teams[teamSlug]; ok {
-		o.mu.Unlock()
+	if ok {
 		return ts
 	}
-	o.mu.Unlock()
-
-	ts, err := o.openTeamDB(teamSlug)
+	// Serialize the entire open/migration for this scope, not just cache writes.
+	// Different teams and personal scopes remain independent; failures are not cached.
+	result, err, _ := o.teamFlight.Do(teamSlug, func() (interface{}, error) {
+		o.mu.RLock()
+		ts, ok := o.teams[teamSlug]
+		o.mu.RUnlock()
+		if ok {
+			return ts, nil
+		}
+		ts, err := o.openTeamDB(teamSlug)
+		if err != nil {
+			return nil, err
+		}
+		o.mu.Lock()
+		o.teams[teamSlug] = ts
+		o.mu.Unlock()
+		return ts, nil
+	})
 	if err != nil {
 		slog.Error("open team database", "team", teamSlug, "org", o.orgSlug, "error", err)
 		return nil
 	}
-
-	o.mu.Lock()
-	// Final check: another goroutine may have inserted while we opened.
-	if existing, ok := o.teams[teamSlug]; ok {
-		o.mu.Unlock()
-		// Close the duplicate we just opened.
-		if ts.db != nil {
-			ts.db.Close()
-		}
-		return existing
-	}
-	o.teams[teamSlug] = ts
-	o.mu.Unlock()
-	return ts
+	return result.(*teamDataStore)
 }
 
 func (o *orgDataStore) ForUser(userID string) store.PersonalDataStore {
 	o.mu.RLock()
-	if ps, ok := o.users[userID]; ok {
-		o.mu.RUnlock()
-		return ps
-	}
+	ps, ok := o.users[userID]
 	o.mu.RUnlock()
-
-	// Acquire write lock and double-check to prevent duplicate opens.
-	o.mu.Lock()
-	if ps, ok := o.users[userID]; ok {
-		o.mu.Unlock()
+	if ok {
 		return ps
 	}
-	o.mu.Unlock()
-
-	ps, err := o.openPersonalDB(userID)
+	result, err, _ := o.userFlight.Do(userID, func() (interface{}, error) {
+		o.mu.RLock()
+		ps, ok := o.users[userID]
+		o.mu.RUnlock()
+		if ok {
+			return ps, nil
+		}
+		ps, err := o.openPersonalDB(userID)
+		if err != nil {
+			return nil, err
+		}
+		o.mu.Lock()
+		o.users[userID] = ps
+		o.mu.Unlock()
+		return ps, nil
+	})
 	if err != nil {
 		slog.Error("open personal database", "user", userID, "org", o.orgSlug, "error", err)
 		return nil
 	}
-
-	o.mu.Lock()
-	// Final check: another goroutine may have inserted while we opened.
-	if existing, ok := o.users[userID]; ok {
-		o.mu.Unlock()
-		// Close the duplicate we just opened.
-		if ps.db != nil {
-			ps.db.Close()
-		}
-		return existing
-	}
-	o.users[userID] = ps
-	o.mu.Unlock()
-	return ps
+	return result.(*personalDataStore)
 }
 
 func (o *orgDataStore) OrgMemories() store.MemoryStore {
@@ -661,7 +654,7 @@ func (o *orgDataStore) ProvisionTeam(ctx context.Context, slug string) error {
 			slog.Warn("ProvisionTeam: could not ensure pgvector extension", "team", slug, "error", err)
 		}
 
-		if err := client.Schema.Create(ctx); err != nil {
+		if err := migrateBotSchema(ctx, db, o.dialect, func() error { return client.Schema.Create(ctx) }); err != nil {
 			return fmt.Errorf("migrate team schema: %w", err)
 		}
 
@@ -707,7 +700,7 @@ func (o *orgDataStore) ProvisionTeam(ctx context.Context, slug string) error {
 		client := teament.NewClient(teament.Driver(drv))
 		defer client.Close()
 
-		if err := client.Schema.Create(ctx); err != nil {
+		if err := migrateBotSchema(ctx, db, o.dialect, func() error { return client.Schema.Create(ctx) }); err != nil {
 			return fmt.Errorf("migrate team schema: %w", err)
 		}
 		if err := o.parentStore.applySQLiteExtras(ctx, ScopeTeam, db); err != nil {
@@ -790,7 +783,7 @@ func (o *orgDataStore) ProvisionPersonalSchema(ctx context.Context, userID strin
 			slog.Warn("ProvisionPersonalSchema: could not ensure pgvector extension", "user", userID, "error", err)
 		}
 
-		if err := client.Schema.Create(ctx); err != nil {
+		if err := migrateBotSchema(ctx, db, o.dialect, func() error { return client.Schema.Create(ctx) }); err != nil {
 			return fmt.Errorf("migrate personal schema: %w", err)
 		}
 
@@ -837,7 +830,7 @@ func (o *orgDataStore) ProvisionPersonalSchema(ctx context.Context, userID strin
 		client := personalent.NewClient(personalent.Driver(drv))
 		defer client.Close()
 
-		if err := client.Schema.Create(ctx); err != nil {
+		if err := migrateBotSchema(ctx, db, o.dialect, func() error { return client.Schema.Create(ctx) }); err != nil {
 			return fmt.Errorf("migrate personal schema: %w", err)
 		}
 		if err := o.parentStore.applySQLiteExtras(ctx, ScopePersonal, db); err != nil {
@@ -913,9 +906,10 @@ func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
 		// to tolerate SERIAL-vs-IDENTITY differences on legacy tables; skip
 		// DropIndex/DropColumn to preserve pg_extras indexes and restore
 		// Ent defaults that WithSkipChanges overrides.
-		if err := client.Schema.Create(context.Background(),
-			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
-		); err != nil {
+		if err := migrateBotSchema(context.Background(), db, o.dialect, func() error {
+			return client.Schema.Create(context.Background(),
+				entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn))
+		}); err != nil {
 			db.Close()
 			client.Close()
 			return nil, fmt.Errorf("auto-migrate team schema %s: %w", schemaName, err)
@@ -954,13 +948,14 @@ func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
 		drv := entsql.OpenDB(dialect.SQLite, db)
 		client := teament.NewClient(teament.Driver(drv))
 
-		// Auto-migrate: create missing tables/columns. If this fails, the DB
-		// has an incompatible schema from a previous version and must be removed.
-		if err := client.Schema.Create(context.Background()); err != nil {
+		// Reconcile additively; preserve existing data on migration failure.
+		if err := migrateBotSchema(context.Background(), db, o.dialect, func() error {
+			return client.Schema.Create(context.Background())
+		}); err != nil {
 			client.Close()
 			db.Close()
 			return nil, fmt.Errorf("team database %q has an incompatible schema from a previous version — "+
-				"please delete or move the file and restart: %w", dbPath, err)
+				"preserve the database and review the migration error before restarting: %w", dbPath, err)
 		}
 		if err := o.parentStore.applySQLiteExtras(context.Background(), ScopeTeam, db); err != nil {
 			client.Close()
@@ -1033,9 +1028,10 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 
 		// Auto-migrate: create any missing tables/columns. Skip ModifyColumn,
 		// DropIndex, DropColumn to preserve pg_extras indexes and Ent defaults.
-		if err := client.Schema.Create(context.Background(),
-			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
-		); err != nil {
+		if err := migrateBotSchema(context.Background(), db, o.dialect, func() error {
+			return client.Schema.Create(context.Background(),
+				entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn))
+		}); err != nil {
 			db.Close()
 			client.Close()
 			return nil, fmt.Errorf("auto-migrate personal schema %s: %w", schemaName, err)
@@ -1048,6 +1044,7 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 
 		return &personalDataStore{
 			userID:    userID,
+			parentOrg: o,
 			client:    client,
 			db:        db,
 			dialect:   o.dialect,
@@ -1076,13 +1073,14 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 		drv := entsql.OpenDB(dialect.SQLite, db)
 		client := personalent.NewClient(personalent.Driver(drv))
 
-		// Auto-migrate: create missing tables/columns. If this fails, the DB
-		// has an incompatible schema from a previous version and must be removed.
-		if err := client.Schema.Create(context.Background()); err != nil {
+		// Reconcile additively; preserve existing data on migration failure.
+		if err := migrateBotSchema(context.Background(), db, o.dialect, func() error {
+			return client.Schema.Create(context.Background())
+		}); err != nil {
 			client.Close()
 			db.Close()
 			return nil, fmt.Errorf("personal database %q has an incompatible schema from a previous version — "+
-				"please delete or move the file and restart: %w", dbPath, err)
+				"preserve the database and review the migration error before restarting: %w", dbPath, err)
 		}
 		if err := o.parentStore.applySQLiteExtras(context.Background(), ScopePersonal, db); err != nil {
 			client.Close()
@@ -1092,6 +1090,7 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 
 		return &personalDataStore{
 			userID:    userID,
+			parentOrg: o,
 			client:    client,
 			db:        db,
 			dialect:   o.dialect,
@@ -1135,6 +1134,68 @@ type teamDataStore struct {
 	client    *teament.Client
 	db        *sql.DB
 	parentOrg *orgDataStore
+}
+
+// botMembership checks current account and org state for every repository call.
+// No JWT role or cached data-store handle substitutes for current membership.
+func (o *orgDataStore) botMembership(ctx context.Context, userID string) (string, error) {
+	if o == nil || o.parentStore == nil {
+		return "", store.ErrBotForbidden
+	}
+	user, err := o.parentStore.Users().GetByID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if user == nil || user.Status != "active" {
+		return "", store.ErrBotForbidden
+	}
+	org, err := o.parentStore.Organizations().GetBySlug(ctx, o.orgSlug)
+	if err != nil {
+		return "", err
+	}
+	if org == nil || org.Status != "active" {
+		return "", store.ErrBotForbidden
+	}
+	role, err := o.parentStore.Organizations().GetMemberRole(ctx, userID, org.ID)
+	if err != nil {
+		return "", err
+	}
+	if role != "owner" && role != "admin" && role != "member" {
+		return "", store.ErrBotForbidden
+	}
+	return role, nil
+}
+func (t *teamDataStore) BotTemplates() store.BotTemplateStore {
+	// Reuse the same live membership callback as the team's Bot repository.
+	bots := t.Bots().(*teamBotStore)
+	return &teamBotTemplateStore{client: t.client, auth: bots.auth}
+}
+
+func (t *teamDataStore) Bots() store.BotStore {
+	return &teamBotStore{client: t.client, credentials: t.Credentials(), auth: botRepositoryAuth{orgSlug: t.orgSlug, teamSlug: t.teamSlug, scope: store.BotScopeTeam, checkDelivery: t.parentOrg.parentStore.checkBotDelivery, readiness: t.parentOrg.parentStore.checkBotActivation, check: func(ctx context.Context, userID string) (string, error) {
+		if _, err := t.parentOrg.botMembership(ctx, userID); err != nil {
+			return "", err
+		}
+		teams := t.parentOrg.Teams()
+		team, err := teams.GetTeamBySlug(ctx, t.teamSlug)
+		if err != nil {
+			return "", err
+		}
+		if team == nil {
+			return "", store.ErrBotForbidden
+		}
+		return teams.GetMemberRole(ctx, userID, team.ID)
+	}}}
+}
+func (p *personalDataStore) Bots() store.BotStore {
+	auth := botRepositoryAuth{userID: p.userID, scope: store.BotScopePersonal}
+	if p.parentOrg != nil {
+		auth.orgSlug = p.parentOrg.orgSlug
+		auth.check = p.parentOrg.botMembership
+		auth.readiness = p.parentOrg.parentStore.checkBotActivation
+		auth.checkDelivery = p.parentOrg.parentStore.checkBotDelivery
+	}
+	return &personalBotStore{client: p.client, credentials: p.Credentials(), auth: auth}
 }
 
 func (t *teamDataStore) Sessions() store.SessionStore {
@@ -1231,6 +1292,7 @@ func (t *teamDataStore) SetAppPin(ctx context.Context, appSlug, provider, model 
 // ===========================================================================
 
 type personalDataStore struct {
+	parentOrg *orgDataStore
 	userID    string
 	client    *personalent.Client
 	db        *sql.DB

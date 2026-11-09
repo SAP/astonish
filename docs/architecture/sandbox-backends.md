@@ -54,6 +54,8 @@ A single-host Docker OverlayFS model cannot satisfy cloud requirements: session 
 
 This document specifies a **pluggable sandbox backend architecture** with **Docker OverlayFS** for local/personal mode and a **Kubernetes** backend for cloud-native platform deployments.
 
+Direct Kubernetes retained Bot homes are an opt-in, scope-hashed PVC subpath separate from upper layers; see [Kubernetes retained Bot home foundation](kubernetes-bot-homes.md) for mounting, recovery, retention, and verification boundaries.
+
 The goal is capability parity: every operation that works on Docker OverlayFS works on K8s. The deployment choice is an operator decision, not a feature compromise.
 
 ### Why elevated capabilities (and four ways to get them)
@@ -148,6 +150,19 @@ required `Backend`, `ToolNodeClient` and `ToolNodePool` signatures are unchanged
 Logical delegate IDs still key attribution and MCP state/cleanup. Physical file,
 shell, credential, MCP and browser operations use the same owner. Dynamic delegate
 MCP discovery uses the active sandbox pool and a shutdown-safe cleanup registry.
+
+For retained Bot homes, `BotHomeManager.binding` derives org/team/user from the
+trusted execution principal and verifies the backend binding against owner storage;
+`BindRun` additionally validates the live run lease before `BindBotHome`. The pool
+copies this immutable binding's scope into `SessionSpec.OrgSlug`, `TeamSlug`, and
+`UserID` on every preparation snapshot, including recreation. Docker therefore
+receives the same org/team identity for its labels and org bridge network as the
+retained home's scope hash. Tool arguments, viewing users, and arbitrary labels
+are not authority. Personal mode intentionally keeps org/team empty; do not invent
+tenant identity merely to satisfy a candidate-node wrapper. Such a wrapper must
+remain fail-closed and use a separately trusted explicit launch namespace when
+personal execution needs candidate mounts. Home hashes, bindings and mount refs
+are unchanged.
 
 Readiness is coordinated per attempt, bounded to five minutes, and precedes
 execution. Running containers still wait for overlay readiness; creating/resuming
@@ -340,6 +355,43 @@ Local sessions are `DockerBackend` in `pkg/sandbox/docker/`. `CreateSession` sta
 Personal mode (`astonish daemon run`) uses this backend. Empty `sandbox.backend` and legacy `incus` both select Docker.
 
 Platform mode local/self-hosted deployments set `sandbox.backend: docker` (or leave it empty).
+
+### 4.1 Durable Bot HOME acceptance
+
+Docker implements the optional `BotHomeBackend.EnsureBotHome` capability. A
+server-derived organization/team/user/Bot scope selects an independently retained,
+label-validated local named volume. Each run mounts it at `/root` inside the
+composed overlay (`HOME=/root`); scratch and the run's overlay volume remain
+run-specific. `DestroySession` removes the run resources, **not** this home.
+Volume ownership or driver mismatches fail closed rather than adopting storage.
+
+The designated live harness accepts `ASTONISH_PERSISTENCE_SCENARIO=bot-home`:
+
+```bash
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_PERSISTENCE_SCENARIO=bot-home \
+ASTONISH_SANDBOX_IMAGE='<existing local sandbox-base image or sha256 ID>' \
+ASTONISH_BOT_HOME_TEST_LAYERS='/absolute/existing/sandbox/layers' \
+go test ./pkg/sandbox/docker -run '^TestDockerPersistenceAcceptance$' -count=1 -v -timeout=5m
+```
+
+Image and layers are explicit prerequisites; missing inputs fail instead of
+skipping an explicitly enabled test. The layers must contain
+`@base/rootfs/bin/sh`, are mounted read-only, and are never reseeded by this
+scenario. The image is resolved to its local ID before container creation; the
+fixture does not pull or build. It uses a temporary registry/uppers directory and
+unique run IDs/Bot scopes, not existing user sessions. Through the production
+backend factory it writes HOME and scratch markers, destroys run A, reopens the
+registry/backend, verifies the same home in physically distinct run B, and proves
+a second Bot cannot observe or overwrite B's bytes. Cleanup removes only its own
+containers, overlay volumes, and test-home volumes, with bounded error checks.
+`TestBotHomeDockerPersistenceLive` runs the same fixture when explicitly enabled.
+
+**Current boundary:** this proves mounted retained HOME, not artifact retrieval
+without a run or an authorized home-purge API. Those optional capabilities are
+not yet implemented here; test-only `docker volume rm` cleanup is not a production
+purge capability. Kubernetes and OpenShell durable-home parity is not established
+by the Docker fixture and must not be inferred from ordinary session persistence.
 
 ## 5. K8s Backend
 

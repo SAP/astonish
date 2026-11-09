@@ -43,7 +43,7 @@ type SchedulerJob struct {
 	TestFirst bool              `json:"test_first,omitempty"`
 
 	// Delivery configuration
-	DeliveryMode   string              `json:"delivery_mode,omitempty"`    // owner, team, members, target
+	DeliveryMode   string              `json:"delivery_mode,omitempty"`   // owner, team, members, target
 	MemberIDs      []string            `json:"member_ids,omitempty"`      // for "members" mode
 	ChannelFilter  []string            `json:"channel_filter,omitempty"`  // restrict to these channel types
 	MemberChannels map[string][]string `json:"member_channels,omitempty"` // per-member channel overrides
@@ -76,7 +76,7 @@ func getEffectiveSchedulerStore(ctx context.Context) store.SchedulerStore {
 	if ctx == nil {
 		return nil
 	}
-	return store.SchedulerStoreFromContext(ctx)
+	return guardBotSchedules(store.SchedulerStoreFromContext(ctx))
 }
 
 // getPersonalSchedulerStore returns the user's personal SchedulerStore from context.
@@ -84,7 +84,7 @@ func getPersonalSchedulerStore(ctx context.Context) store.SchedulerStore {
 	if ctx == nil {
 		return nil
 	}
-	return store.PersonalSchedulerStoreFromContext(ctx)
+	return guardBotSchedules(store.PersonalSchedulerStoreFromContext(ctx))
 }
 
 // resolveSchedulerStore picks the store for the given scope.
@@ -314,21 +314,21 @@ func scheduleJob(ctx tool.Context, args ScheduleJobArgs) (ScheduleJobResult, err
 
 	// Create job
 	job := &SchedulerJob{
-		Name:           args.Name,
-		Mode:           args.Mode,
-		Cron:           args.Schedule,
-		Timezone:       args.Timezone,
-		Flow:           args.Flow,
-		Params:         args.Params,
-		Instr:          args.Instructions,
-		Channel:        args.Channel,
-		Target:         args.Target,
-		Enabled:        !args.TestFirst,
-		TestFirst:      args.TestFirst,
-		DeliveryMode:   args.DeliveryMode,
-		MemberIDs:      args.DeliveryMembers,
-		ChannelFilter:  args.DeliveryChannels,
-		Scope:          jobScope,
+		Name:          args.Name,
+		Mode:          args.Mode,
+		Cron:          args.Schedule,
+		Timezone:      args.Timezone,
+		Flow:          args.Flow,
+		Params:        args.Params,
+		Instr:         args.Instructions,
+		Channel:       args.Channel,
+		Target:        args.Target,
+		Enabled:       !args.TestFirst,
+		TestFirst:     args.TestFirst,
+		DeliveryMode:  args.DeliveryMode,
+		MemberIDs:     args.DeliveryMembers,
+		ChannelFilter: args.DeliveryChannels,
+		Scope:         jobScope,
 	}
 
 	// Default delivery mode to "owner" if not specified

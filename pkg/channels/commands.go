@@ -40,6 +40,9 @@ type CommandContext struct {
 	ChannelID string
 	// ChatID is the chat/conversation where the command was issued.
 	ChatID string
+	// ThreadID and MessageID are normalized by the authenticated adapter, never command arguments.
+	ThreadID  string
+	MessageID string
 	// SenderID is the normalized sender identifier.
 	SenderID string
 	// SenderName is the human-readable sender name.
@@ -192,6 +195,7 @@ func DefaultCommands() *CommandRegistry {
 	r.Register(newSessionCommand())
 	r.Register(distillCommand())
 	r.Register(jobsCommand())
+	r.Register(botRunCommand())
 	r.Register(authorizeCommand())
 	RegisterRoutingCommands(r)
 	r.Register(helpCommand(r))

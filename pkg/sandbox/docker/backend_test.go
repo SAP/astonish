@@ -331,6 +331,9 @@ func TestDockerPersistenceAcceptance(t *testing.T) {
 		scenario = "all"
 	}
 	switch scenario {
+	case "bot-home":
+		runBotHomeDockerPersistence(t)
+		return
 	case "baseline", "owner", "persistence", "consumers", "all":
 	default:
 		t.Fatalf("unknown persistence scenario %q", scenario)

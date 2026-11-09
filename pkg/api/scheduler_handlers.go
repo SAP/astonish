@@ -40,8 +40,8 @@ func GetExecutor() *scheduler.Executor {
 // Used by the RunJobFunc in chat_handlers.go to construct a local executor on
 // API pods that don't have the global scheduler Executor.
 var (
-	runHeadlessMu   sync.RWMutex
-	runHeadlessFn   scheduler.RunHeadlessFunc
+	runHeadlessMu sync.RWMutex
+	runHeadlessFn scheduler.RunHeadlessFunc
 )
 
 // SetRunHeadlessFunc registers the headless runner function.
@@ -156,6 +156,10 @@ func SchedulerJobHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if update.Mode == string(scheduler.ModeBotTrigger) {
+			respondError(w, http.StatusForbidden, "Bot schedules require reviewed Bot trigger controls")
+			return
+		}
 		if update.Name != "" {
 			existing.Name = update.Name
 		}
@@ -381,6 +385,10 @@ func SchedulerJobPublishHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if store.BotOwnedSchedule(personalJob) {
+		respondError(w, http.StatusForbidden, "Bot schedules cannot be published")
+		return
+	}
 	if existing := svc.Scheduler.GetByName(ctx, personalJob.Name); existing != nil {
 		respondError(w, http.StatusConflict, "a team job with this name already exists")
 		return
@@ -464,6 +472,10 @@ func SchedulerJobForkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if store.BotOwnedSchedule(teamJob) {
+		respondError(w, http.StatusForbidden, "Bot schedules cannot be forked")
+		return
+	}
 	if existing := svc.PersonalScheduler.GetByName(ctx, teamJob.Name); existing != nil {
 		respondError(w, http.StatusConflict, "a personal job with this name already exists")
 		return
@@ -526,6 +538,10 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request, svc *store.Services
 	}
 	if err := json.NewDecoder(r.Body).Decode(&flat); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if flat.Mode == string(scheduler.ModeBotTrigger) {
+		respondError(w, http.StatusForbidden, "Bot schedules require reviewed Bot trigger controls")
 		return
 	}
 	if flat.Scope != "" {
@@ -630,6 +646,10 @@ func findSchedulerJob(ctx context.Context, svc *store.Services, jobID string) (*
 
 // authorizeSchedulerMutate enforces personal-owner or team-admin for mutations.
 func authorizeSchedulerMutate(w http.ResponseWriter, r *http.Request, scope string, job *store.ScheduledJob) bool {
+	if store.BotOwnedSchedule(job) {
+		respondError(w, http.StatusForbidden, "Bot schedules require reviewed Bot trigger controls")
+		return false
+	}
 	if scope == store.JobScopeTeam {
 		return RequireTeamAdmin(w, r)
 	}

@@ -34,6 +34,11 @@ type backendSlot struct {
 // other slot, restores its state (lazy-opening the backend on first visit), and
 // swaps the accent theme so the UI color changes instantly.
 func (m model) switchBackend() (tea.Model, tea.Cmd) {
+	m.detachBotWatch()
+	m.bots = botsState{}
+	if cap := m.botCap(); cap != nil {
+		cap.DetachBot()
+	}
 	// Cancel any in-flight turn before switching — we don't need the returned
 	// model/cmd since switchBackend rebuilds state from the slot anyway.
 	//nolint:staticcheck // returned model unused; we overwrite state below.

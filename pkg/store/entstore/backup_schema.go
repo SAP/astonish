@@ -69,6 +69,122 @@ func sqliteSchemaHash(ctx context.Context, db *sql.DB) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// sqlitePreBotSchemaHash reconstructs only the known additive Bot v1 delta.
+// It retains every other table, column type, nullability, primary key and order;
+// this is not a general subset-schema compatibility check.
+func sqlitePreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope) (string, error) {
+	tables, err := sqliteUserTables(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, table := range tables {
+		if preBotAddedTable(table, scope.Kind) {
+			continue
+		}
+		columns, err := sqliteTableSchema(ctx, db, table)
+		if err != nil {
+			return "", err
+		}
+		var kept []string
+		for _, column := range columns {
+			fields := strings.SplitN(column, ":", 3)
+			if len(fields) != 3 {
+				return "", fmt.Errorf("invalid schema column %q", column)
+			}
+			name := fields[1]
+			if table == "sessions" && (name == "bot_id" || name == "bot_run_id" || name == "purpose" || name == "retention") {
+				continue
+			}
+			if scope.Kind == "team" && table == "sandbox_sessions" && name == "bot_home_binding" {
+				continue
+			}
+			kept = append(kept, fmt.Sprintf("%03d:%s:%s", len(kept), name, fields[2]))
+		}
+		parts = append(parts, table+"("+strings.Join(kept, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func preBotAddedTable(table, scope string) bool {
+	switch table {
+	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox":
+		return scope == "team" || scope == "personal"
+	case "bot_templates":
+		return scope == "team"
+	}
+	return false
+}
+
+func sqlitePreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if scope.Kind != "team" && scope.Kind != "personal" {
+		return false, nil
+	}
+	if archive.Version != "sqlite:"+backup.ArchiveFormat || archive.Hash == "" {
+		return false, nil
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
+			return false, nil
+		}
+	}
+	hash, err := sqlitePreBotSchemaHash(ctx, db, scope)
+	return err == nil && hash == archive.Hash, err
+}
+
+// postgresPreBotSchemaHash uses the existing PostgreSQL archive representation
+// (table names and ordered column names), removing only the known Bot v1 delta.
+// It is deliberately not a subset-schema compatibility check.
+func postgresPreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope) (string, error) {
+	schema := postgresSchemaForScope(scope)
+	tables, err := userTables(ctx, db, DialectPostgres, schema)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, table := range tables {
+		if preBotAddedTable(table, scope.Kind) {
+			continue
+		}
+		columns, err := tableColumns(ctx, db, DialectPostgres, schema, table)
+		if err != nil {
+			return "", err
+		}
+		var kept []string
+		for _, name := range columns {
+			if table == "sessions" && (name == "bot_id" || name == "bot_run_id" || name == "purpose" || name == "retention") {
+				continue
+			}
+			if scope.Kind == "team" && table == "sandbox_sessions" && name == "bot_home_binding" {
+				continue
+			}
+			kept = append(kept, name)
+		}
+		parts = append(parts, table+"("+strings.Join(kept, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func postgresPreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if scope.Kind != "team" && scope.Kind != "personal" {
+		return false, nil
+	}
+	if archive.Version != "postgres:"+backup.ArchiveFormat || archive.Hash == "" {
+		return false, nil
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
+			return false, nil
+		}
+	}
+	hash, err := postgresPreBotSchemaHash(ctx, db, scope)
+	return err == nil && hash == archive.Hash, err
+}
+
 func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quoteSQLiteIdent(table)+")")
 	if err != nil {

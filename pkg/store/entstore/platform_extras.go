@@ -158,21 +158,26 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 
 			// Create a request-scoped clone with tenant-specific stores
 			reqSvc := &store.Services{
-				Mode:                    store.ModePlatform,
-				Platform:                baseSvc.Platform,
-				TenantRouter:            baseSvc.TenantRouter,
-				Audit:                   orgStore.OrgAudit(),
-				Skills:                  orgStore.OrgSkills(),
-				OrgSlideTemplates:       orgStore.OrgSlideTemplates(),
-				MCPServers:              orgStore.OrgMCPServers(),
-				A2AAgents:               orgStore.OrgA2AAgents(),
-				PlatformMCPServers:      s.PlatformMCPServers(),
-				PlatformSkills:          s.PlatformSkills(),
-				PlatformSlideTemplates:  s.PlatformSlideTemplates(),
-				PlatformSettings:        s.PlatformSettings(),
-				OrgSettings:             s.OrgSettings(tc.OrgSlug),
-				NetworkPolicies:         orgStore.OrgNetworkPolicies(),
-				PlatformNetworkPolicies: s.PlatformNetworkPolicies(),
+				BotAuthorizedOperationFactory: baseSvc.BotAuthorizedOperationFactory,
+				BotHomeSetup:                  baseSvc.BotHomeSetup,
+				BotInteractiveReady:           baseSvc.BotInteractiveReady,
+				BotMandatePolicy:              baseSvc.BotMandatePolicy,
+				BotTurnRegistry:               baseSvc.BotTurnRegistry,
+				Mode:                          store.ModePlatform,
+				Platform:                      baseSvc.Platform,
+				TenantRouter:                  baseSvc.TenantRouter,
+				Audit:                         orgStore.OrgAudit(),
+				Skills:                        orgStore.OrgSkills(),
+				OrgSlideTemplates:             orgStore.OrgSlideTemplates(),
+				MCPServers:                    orgStore.OrgMCPServers(),
+				A2AAgents:                     orgStore.OrgA2AAgents(),
+				PlatformMCPServers:            s.PlatformMCPServers(),
+				PlatformSkills:                s.PlatformSkills(),
+				PlatformSlideTemplates:        s.PlatformSlideTemplates(),
+				PlatformSettings:              s.PlatformSettings(),
+				OrgSettings:                   s.OrgSettings(tc.OrgSlug),
+				NetworkPolicies:               orgStore.OrgNetworkPolicies(),
+				PlatformNetworkPolicies:       s.PlatformNetworkPolicies(),
 			}
 
 			// Populate team-scoped stores if team is known
@@ -182,6 +187,8 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 					http.Error(w, `{"error":"team database unavailable"}`, http.StatusServiceUnavailable)
 					return
 				}
+				reqSvc.Bots = teamStore.Bots()
+				reqSvc.BotTemplates = teamStore.BotTemplates()
 				reqSvc.Sessions = teamStore.Sessions()
 				reqSvc.Memory = teamStore.Memories()
 				reqSvc.Credentials = teamStore.Credentials()
@@ -212,6 +219,7 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 						http.Error(w, `{"error":"personal database unavailable"}`, http.StatusServiceUnavailable)
 						return
 					}
+					reqSvc.PersonalBots = personalStore.Bots()
 					reqSvc.PersonalSessions = personalStore.Sessions()
 					reqSvc.PersonalDocs = personalStore.Docs()
 					reqSvc.PersonalFlows = personalStore.Flows()
@@ -234,6 +242,17 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 					Org:      orgStore.OrgMemories(),
 					Embed:    s.embedFunc,
 				})
+			}
+
+			// Personal Bot ownership does not depend on a selected team. Keep this
+			// separate from the existing Chat dependency bundle above.
+			if tc.UserID != "" && reqSvc.PersonalBots == nil {
+				personalStore := orgStore.ForUser(tc.UserID)
+				if personalStore == nil {
+					http.Error(w, `{"error":"personal database unavailable"}`, http.StatusServiceUnavailable)
+					return
+				}
+				reqSvc.PersonalBots = personalStore.Bots()
 			}
 
 			// Inject into request context

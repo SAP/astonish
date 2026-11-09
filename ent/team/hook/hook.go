@@ -45,6 +45,114 @@ func (f AppStateFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.AppStateMutation", m)
 }
 
+// The BotFunc type is an adapter to allow the use of ordinary
+// function as Bot mutator.
+type BotFunc func(context.Context, *team.BotMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotMutation", m)
+}
+
+// The BotApprovalFunc type is an adapter to allow the use of ordinary
+// function as BotApproval mutator.
+type BotApprovalFunc func(context.Context, *team.BotApprovalMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotApprovalFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotApprovalMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotApprovalMutation", m)
+}
+
+// The BotGoalFunc type is an adapter to allow the use of ordinary
+// function as BotGoal mutator.
+type BotGoalFunc func(context.Context, *team.BotGoalMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotGoalFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotGoalMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotGoalMutation", m)
+}
+
+// The BotIntakeFunc type is an adapter to allow the use of ordinary
+// function as BotIntake mutator.
+type BotIntakeFunc func(context.Context, *team.BotIntakeMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotIntakeFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotIntakeMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotIntakeMutation", m)
+}
+
+// The BotOutboxFunc type is an adapter to allow the use of ordinary
+// function as BotOutbox mutator.
+type BotOutboxFunc func(context.Context, *team.BotOutboxMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotOutboxFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotOutboxMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotOutboxMutation", m)
+}
+
+// The BotRunFunc type is an adapter to allow the use of ordinary
+// function as BotRun mutator.
+type BotRunFunc func(context.Context, *team.BotRunMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotRunFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotRunMutation", m)
+}
+
+// The BotTemplateFunc type is an adapter to allow the use of ordinary
+// function as BotTemplate mutator.
+type BotTemplateFunc func(context.Context, *team.BotTemplateMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotTemplateFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotTemplateMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotTemplateMutation", m)
+}
+
+// The BotTrackedItemFunc type is an adapter to allow the use of ordinary
+// function as BotTrackedItem mutator.
+type BotTrackedItemFunc func(context.Context, *team.BotTrackedItemMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotTrackedItemFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotTrackedItemMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotTrackedItemMutation", m)
+}
+
+// The BotVersionFunc type is an adapter to allow the use of ordinary
+// function as BotVersion mutator.
+type BotVersionFunc func(context.Context, *team.BotVersionMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotVersionFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotVersionMutation", m)
+}
+
 // The CacheDiagnosticFunc type is an adapter to allow the use of ordinary
 // function as CacheDiagnostic mutator.
 type CacheDiagnosticFunc func(context.Context, *team.CacheDiagnosticMutation) (team.Value, error)

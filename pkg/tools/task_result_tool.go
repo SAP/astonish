@@ -18,8 +18,8 @@ type ReadTaskResultOutput struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func readTaskResult(_ tool.Context, args ReadTaskResultArgs) (ReadTaskResultOutput, error) {
-	store := GetTaskResultStore()
+func readTaskResult(ctx tool.Context, args ReadTaskResultArgs) (ReadTaskResultOutput, error) {
+	store := taskResultsFromContext(ctx)
 
 	if args.ResultID == "" {
 		// List available results

@@ -13,6 +13,8 @@ import {
   groupToolActivity,
   hasAppFence,
   isAppProgressAgent,
+  isHardBreak,
+  isSoftNote,
   isHardBreakType,
   isHousekeepingNote,
   isSoftNoteType,
@@ -28,6 +30,24 @@ import {
 } from '../toolActivity'
 
 describe('delegation identity', () => {
+  it('keeps persisted call positions when parallel workers start in reverse order', () => {
+    const records = [
+      { type: 'delegation_pending', batch_id: 'alpha' },
+      { type: 'delegation_pending', batch_id: 'beta' },
+      ...['beta', 'alpha'].map(batch_id => ({ type: 'delegation_start', batch_id, sequence: 1, tasks: [{ name: 'same', description: '', task_id: `${batch_id}/task`, child_session_id: `${batch_id}/child` }] })),
+      ...['beta', 'alpha'].map(batch_id => ({ type: 'task_complete', batch_id, sequence: 2, task_id: `${batch_id}/task`, attempt: 1 })),
+    ]
+    const live = records.reduce(reduceDelegationProgress, [] as ChatMsg[])
+    const restored = normalizeDelegationHistory(live)
+    for (const messages of [live, restored]) {
+      expect(messages.map(m => m.type === 'subtask_execution' && m.batch_id)).toEqual(['alpha', 'beta'])
+      for (const panel of messages) {
+        if (panel.type !== 'subtask_execution') throw new Error('missing delegation')
+        expect(deriveDelegationTasks(panel)).toHaveLength(1)
+        expect(deriveDelegationTasks(panel)[0]).toMatchObject({ task_id: `${panel.batch_id}/task`, status: 'complete' })
+      }
+    }
+  })
   it('merges duplicate history panels and preserves other tools', () => {
     const panel = { type: 'subtask_execution' as const, batch_id: 'batch', tasks: [{ task_id: 'task', name: 'same', description: '' }], status: 'complete', events: [{ type: 'task_complete', batch_id: 'batch', task_id: 'task', sequence: 1 }] }
     const tool: ChatMsg = { type: 'tool_call', toolName: 'read_file', toolArgs: {} }
@@ -75,6 +95,51 @@ describe('delegation identity', () => {
     const messages = [{ type: 'delegation_start', batch_id: 'a' }, { type: 'delegation_start', batch_id: 'b' }, { type: 'task_text', batch_id: 'a', task_id: 't', text: 'first' }].reduce(reduceDelegationProgress, [] as ChatMsg[])
     expect(messages).toHaveLength(2)
     expect((messages[0] as any).events).toHaveLength(2)
+  })
+})
+
+describe('scheduled Bot report boundaries', () => {
+  const scheduling: ChatMsg[] = [
+    { type: 'user', content: 'Schedule weather' },
+    { type: 'tool_call', toolName: 'schedule_job', toolArgs: {} },
+    { type: 'tool_result', toolName: 'schedule_job', toolResult: { status: 'pending' } },
+    { type: 'agent', content: 'Schedule requested', invocationId: 'interactive', _streaming: false },
+  ]
+  const reports: ChatMsg[] = [1, 2, 3].map(n => ({
+    type: 'agent', content: 'Identical weather summary',
+    invocationId: `bot-report:00000000-0000-4000-8000-00000000000${n}`, _streaming: false,
+  }))
+
+  it('keeps every independent report outside scheduling activity for each live and restored prefix', () => {
+    for (let count = 1; count <= reports.length; count++) {
+      const live = [...scheduling, ...reports.slice(0, count)]
+      for (const input of [live, structuredClone(live)]) {
+        const before = structuredClone(input)
+        const projection = buildChronologicalActivityRenderIndex(input)
+        expect([...projection.activityByStart.values()].flatMap(g => g.coveredIndices)).toEqual([1, 2])
+        for (let i = scheduling.length; i < input.length; i++) {
+          expect(projection.skipIndices.has(i)).toBe(false)
+          expect(projection.activityByStart.has(i)).toBe(false)
+        }
+        expect(input).toEqual(before)
+      }
+    }
+  })
+
+  it.each([true, false, undefined])('uses report identity regardless of transient streaming state %s', streaming => {
+    const report = { ...reports[0], _streaming: streaming } as ChatMsg
+    expect(isHardBreak(report)).toBe(true)
+    expect(isSoftNote(report)).toBe(false)
+  })
+
+  it.each([undefined, 'interactive', 'bot-report:', 'bot-report:not-a-run-id'])('does not classify prose or invalid report identity %s', invocationId => {
+    const note: ChatMsg = { type: 'agent', invocationId, content: '# Run report — succeeded\nRun: 00000000-0000-4000-8000-000000000001' }
+    expect(isHardBreak(note)).toBe(false)
+    expect(isSoftNote(note)).toBe(true)
+    const groups = groupChronologicalActivity([...scheduling, note, { type: 'agent', content: 'Final ordinary answer', invocationId: 'another-interactive-turn' }])
+    expect(groups[1].kind).toBe('activity')
+    if (groups[1].kind !== 'activity') throw new Error('missing scheduling activity')
+    expect(groups[1].entries.filter(e => e.kind === 'message').map(e => e.index)).toEqual([3, 4])
   })
 })
 

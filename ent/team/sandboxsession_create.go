@@ -28,6 +28,12 @@ func (_c *SandboxSessionCreate) SetChatSessionID(v string) *SandboxSessionCreate
 	return _c
 }
 
+// SetBotHomeBinding sets the "bot_home_binding" field.
+func (_c *SandboxSessionCreate) SetBotHomeBinding(v map[string]interface{}) *SandboxSessionCreate {
+	_c.mutation.SetBotHomeBinding(v)
+	return _c
+}
+
 // SetBackend sets the "backend" field.
 func (_c *SandboxSessionCreate) SetBackend(v string) *SandboxSessionCreate {
 	_c.mutation.SetBackend(v)
@@ -370,6 +376,10 @@ func (_c *SandboxSessionCreate) createSpec() (*SandboxSession, *sqlgraph.CreateS
 	if value, ok := _c.mutation.ChatSessionID(); ok {
 		_spec.SetField(sandboxsession.FieldChatSessionID, field.TypeString, value)
 		_node.ChatSessionID = value
+	}
+	if value, ok := _c.mutation.BotHomeBinding(); ok {
+		_spec.SetField(sandboxsession.FieldBotHomeBinding, field.TypeJSON, value)
+		_node.BotHomeBinding = value
 	}
 	if value, ok := _c.mutation.Backend(); ok {
 		_spec.SetField(sandboxsession.FieldBackend, field.TypeString, value)

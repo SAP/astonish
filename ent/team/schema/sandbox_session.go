@@ -23,6 +23,7 @@ func (SandboxSession) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("chat_session_id").
 			NotEmpty(),
+		field.JSON("bot_home_binding", map[string]any{}).Optional(),
 		field.String("backend").
 			Default("incus"),
 		field.String("container_name").

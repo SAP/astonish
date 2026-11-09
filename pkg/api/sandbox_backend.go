@@ -195,6 +195,15 @@ func sandboxSessionVisible(r *http.Request, registry *sandbox.SessionRegistry, s
 	if !isPlatformMode(r) {
 		return true
 	}
+	chatID := sess.ChatSessionID
+	if chatID == "" {
+		chatID = sess.SessionID
+	}
+	if meta, err := botSessionMetadata(r.Context(), store.FromRequest(r), chatID); err != nil || meta != nil {
+		// Bot compute belongs to a fenced run, not to a viewer or CreatedBy.
+		// Dedicated runtime/home adapters will authorize physical run access.
+		return false
+	}
 	if allowed, synthetic := syntheticSandboxVisible(r, sess.SessionID); synthetic {
 		return allowed
 	}

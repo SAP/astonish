@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 )
 
 // pgSchedulerAdapter wraps a store.SchedulerStore (PostgreSQL-backed) and
@@ -92,6 +92,9 @@ func storeJobToSchedulerJob(sj *store.ScheduledJob) *scheduler.Job {
 			Flow:         sj.Payload.Flow,
 			Params:       sj.Payload.Params,
 			Instructions: sj.Payload.Instructions,
+			BotID:        sj.Payload.BotID,
+			BotVersion:   sj.Payload.BotVersion,
+			BotTriggerID: sj.Payload.BotTriggerID,
 		},
 		Delivery: scheduler.JobDelivery{
 			Channel:        sj.Delivery.Channel,
@@ -127,6 +130,9 @@ func schedulerJobToStoreJob(j *scheduler.Job) *store.ScheduledJob {
 			Flow:         j.Payload.Flow,
 			Params:       j.Payload.Params,
 			Instructions: j.Payload.Instructions,
+			BotID:        j.Payload.BotID,
+			BotVersion:   j.Payload.BotVersion,
+			BotTriggerID: j.Payload.BotTriggerID,
 		},
 		Delivery: store.JobDelivery{
 			Channel:        j.Delivery.Channel,

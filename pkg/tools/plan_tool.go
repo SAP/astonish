@@ -91,6 +91,11 @@ type AnnouncePlanResult struct {
 }
 
 func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, error) {
+	callbacks := scopedPlanCallbacks(ctx)
+	planStateCallback, planProgressCallback, graphPlanAcceptanceLookup := callbacks.State, callbacks.Progress, callbacks.Acceptance
+	if planStateCallback == nil {
+		return AnnouncePlanResult{Status: "no_active_plan"}, nil
+	}
 	// Defense in depth: the ChatAgent BeforeTool gate normally rejects this call,
 	// but checking the request-scoped flag here prevents a stale/racing invocation
 	// from replacing PlanState even if it reaches the function body directly.
@@ -222,7 +227,9 @@ type UpdatePlanResult struct {
 	Steps   []string `json:"steps,omitempty"`
 }
 
-func updatePlan(_ tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
+func updatePlan(ctx tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
+	callbacks := scopedPlanCallbacks(ctx)
+	planStepUpdateCallback, planKnownStepsCallback, planProgressCallback := callbacks.Update, callbacks.KnownSteps, callbacks.Progress
 	if planStepUpdateCallback == nil {
 		return UpdatePlanResult{Status: "no_active_plan"}, nil
 	}
@@ -277,7 +284,8 @@ func SetPlanCompletionCallback(fn func(outcomeObserved, unverified string) agent
 	planCompletionCallback = fn
 }
 
-func announceCompletion(_ tool.Context, args AnnounceCompletionArgs) (AnnounceCompletionResult, error) {
+func announceCompletion(ctx tool.Context, args AnnounceCompletionArgs) (AnnounceCompletionResult, error) {
+	planCompletionCallback := scopedPlanCallbacks(ctx).Complete
 	if planCompletionCallback == nil {
 		return AnnounceCompletionResult{Status: "no_active_plan"}, nil
 	}

@@ -16,6 +16,22 @@ type Tx struct {
 	App *AppClient
 	// AppState is the client for interacting with the AppState builders.
 	AppState *AppStateClient
+	// Bot is the client for interacting with the Bot builders.
+	Bot *BotClient
+	// BotApproval is the client for interacting with the BotApproval builders.
+	BotApproval *BotApprovalClient
+	// BotGoal is the client for interacting with the BotGoal builders.
+	BotGoal *BotGoalClient
+	// BotIntake is the client for interacting with the BotIntake builders.
+	BotIntake *BotIntakeClient
+	// BotOutbox is the client for interacting with the BotOutbox builders.
+	BotOutbox *BotOutboxClient
+	// BotRun is the client for interacting with the BotRun builders.
+	BotRun *BotRunClient
+	// BotTrackedItem is the client for interacting with the BotTrackedItem builders.
+	BotTrackedItem *BotTrackedItemClient
+	// BotVersion is the client for interacting with the BotVersion builders.
+	BotVersion *BotVersionClient
 	// CacheDiagnostic is the client for interacting with the CacheDiagnostic builders.
 	CacheDiagnostic *CacheDiagnosticClient
 	// Credential is the client for interacting with the Credential builders.
@@ -171,6 +187,14 @@ func (tx *Tx) Client() *Client {
 func (tx *Tx) init() {
 	tx.App = NewAppClient(tx.config)
 	tx.AppState = NewAppStateClient(tx.config)
+	tx.Bot = NewBotClient(tx.config)
+	tx.BotApproval = NewBotApprovalClient(tx.config)
+	tx.BotGoal = NewBotGoalClient(tx.config)
+	tx.BotIntake = NewBotIntakeClient(tx.config)
+	tx.BotOutbox = NewBotOutboxClient(tx.config)
+	tx.BotRun = NewBotRunClient(tx.config)
+	tx.BotTrackedItem = NewBotTrackedItemClient(tx.config)
+	tx.BotVersion = NewBotVersionClient(tx.config)
 	tx.CacheDiagnostic = NewCacheDiagnosticClient(tx.config)
 	tx.Credential = NewCredentialClient(tx.config)
 	tx.Deck = NewDeckClient(tx.config)

@@ -18,12 +18,24 @@ import (
 
 // Request represents the Bedrock request payload for Anthropic models.
 type Request struct {
-	AnthropicVersion string    `json:"anthropic_version"`
-	MaxTokens        int       `json:"max_tokens"`
-	Messages         []Message `json:"messages"`
-	System           string    `json:"system,omitempty"`
-	Temperature      *float64  `json:"temperature,omitempty"`
-	Tools            []Tool    `json:"tools,omitempty"`
+	AnthropicVersion string      `json:"anthropic_version"`
+	MaxTokens        int         `json:"max_tokens"`
+	Messages         []Message   `json:"messages"`
+	System           string      `json:"system,omitempty"`
+	Temperature      *float64    `json:"temperature,omitempty"`
+	Tools            []Tool      `json:"tools,omitempty"`
+	ToolChoice       *ToolChoice `json:"tool_choice,omitempty"`
+}
+
+// ToolChoiceType is the native Anthropic tool-selection mode.
+type ToolChoiceType string
+
+const ToolChoiceAuto ToolChoiceType = "auto"
+
+// ToolChoice permits a final answer without requiring a tool invocation.
+type ToolChoice struct {
+	Type                   ToolChoiceType `json:"type"`
+	DisableParallelToolUse bool           `json:"disable_parallel_tool_use"`
 }
 
 // Message represents a message in the Bedrock conversation.
@@ -77,6 +89,10 @@ type Response struct {
 // ConvertRequest converts an ADK LLMRequest to a Bedrock Request.
 // maxTokens can be 0 to use the default (8192)
 func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) (*Request, error) {
+	parallelToolCalls, err := common.ParallelToolCalls(req)
+	if err != nil {
+		return nil, err
+	}
 	canonicalReq, err := common.CanonicalizeRequestTools(req)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize tools: %w", err)
@@ -291,6 +307,13 @@ func ConvertRequest(req *model.LLMRequest, maxTokens int, skipTemperature bool) 
 		}
 	}
 
+	// Translate only the explicit per-request option; preserve ordinary defaults.
+	if parallelToolCalls != nil && len(bedrockReq.Tools) > 0 {
+		bedrockReq.ToolChoice = &ToolChoice{
+			Type:                   ToolChoiceAuto,
+			DisableParallelToolUse: !*parallelToolCalls,
+		}
+	}
 	return bedrockReq, nil
 }
 

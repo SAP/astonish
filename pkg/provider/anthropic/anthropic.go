@@ -387,6 +387,10 @@ func valueOrZero(value *int) int {
 }
 
 func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*Request, error) {
+	parallelToolCalls, err := common.ParallelToolCalls(req)
+	if err != nil {
+		return nil, err
+	}
 	canonicalReq, err := common.CanonicalizeRequestTools(req)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize tools: %w", err)
@@ -513,25 +517,46 @@ func (p *Provider) toAnthropicRequest(req *model.LLMRequest, streaming bool) (*R
 		}
 	}
 
+	// Translate only the explicit per-request option; preserve ordinary defaults.
+	var toolChoice *ToolChoice
+	if parallelToolCalls != nil && len(tools) > 0 {
+		toolChoice = &ToolChoice{
+			Type:                   ToolChoiceAuto,
+			DisableParallelToolUse: !*parallelToolCalls,
+		}
+	}
 	return &Request{
-		Model:     p.model,
-		Messages:  messages,
-		System:    system,
-		MaxTokens: 64000,
-		Stream:    streaming,
-		Tools:     tools,
+		Model:      p.model,
+		ToolChoice: toolChoice,
+		Messages:   messages,
+		System:     system,
+		MaxTokens:  64000,
+		Stream:     streaming,
+		Tools:      tools,
 	}, nil
 }
 
 // Structs for Anthropic API
 
 type Request struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	System    string    `json:"system,omitempty"`
-	MaxTokens int       `json:"max_tokens"`
-	Stream    bool      `json:"stream,omitempty"`
-	Tools     []Tool    `json:"tools,omitempty"`
+	Model      string      `json:"model"`
+	Messages   []Message   `json:"messages"`
+	System     string      `json:"system,omitempty"`
+	MaxTokens  int         `json:"max_tokens"`
+	Stream     bool        `json:"stream,omitempty"`
+	Tools      []Tool      `json:"tools,omitempty"`
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
+}
+
+// ToolChoiceType is the native Anthropic tool-selection mode.
+type ToolChoiceType string
+
+const ToolChoiceAuto ToolChoiceType = "auto"
+
+// ToolChoice permits a final answer without requiring a tool invocation.
+type ToolChoice struct {
+	Type                   ToolChoiceType `json:"type"`
+	DisableParallelToolUse bool           `json:"disable_parallel_tool_use"`
 }
 
 type Tool struct {

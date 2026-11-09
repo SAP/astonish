@@ -90,11 +90,23 @@ ordinary-Chat isolation using local HTTP fixtures only.
 forwarding any tool call. Multiple calls (including calls split across response
 objects) remain unsupported, as do serialized responses over 4 MiB. Errors retain
 `store.ErrBotUnsupported` identity but distinguish the serial-call constraint from
-the response-size constraint. They omit tool arguments and response text. A bare
+the response-size constraint via native `bot.CheckpointResponseError` evidence.
+The committed report has additive `failure.kind: execution_format` metadata and
+explains that the model response could not be processed. None of the tool requests
+**from that response** ran; earlier work and its evidence remain intact. This is
+not an approval request and does not cause an automatic retry. Technical details
+contain only the rejected call count or response size/limit, never arguments or
+response text. ChatRunner suppresses the duplicate raw error event/transcript row
+only for recognized native failures in Bot runs, leaving one committed report for
+Studio and terminal clients. String lookalikes and bare unsupported errors keep
+ordinary error behavior. A bare
 legacy `bot capability unsupported` event cannot recover the discarded response
 or establish the attempted tool identity; do not infer that identity from tool
 suggestions or reserved token usage. `TestBotApprovalCaptureUnsupportedResponseDiagnostic`
 and `TestBotApprovalCaptureSerialResponseUnchanged` guard this boundary.
+`TestBotCheckpointFailureAdapter` covers first-response and post-work batch/size
+rejections; `TestBotCheckpointFailureCommittedHTTP` covers personal/team SQLite
+commit, single Home report publication, retained prior evidence and no replay.
 
 ## Wire and storage compatibility
 

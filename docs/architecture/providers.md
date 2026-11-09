@@ -38,14 +38,26 @@ malformed explicit values fail before HTTP dispatch. Explicit `true` remains
 available to non-checkpoint callers, but checkpoint capture overrides it locally.
 Tool-less requests omit the parameter.
 
+Direct Anthropic's separate request builder and the Bedrock protocol converter
+used by SAP AI Core Claude translate the same explicit boolean to native
+`tool_choice: {"type":"auto", "disable_parallel_tool_use": !parallelToolCalls}`.
+The optional object is emitted only when converted function tools are nonempty;
+explicit `true` emits `disable_parallel_tool_use: false`, while absent options
+leave native defaults untouched. `auto` permits a final answer without forcing a
+tool call. Both builders reject malformed options before HTTP dispatch and do not
+forward arbitrary ExtraBody fields or the top-level OpenAI parameter. SAP uses
+this payload on `/invoke` and `/invoke-with-response-stream`; direct Anthropic
+uses `/v1/messages`. This is SAP-native coverage, not a claim of a separate direct
+AWS Bedrock runtime adapter.
+
 This is per request, not a pooled model setting. Budget clamping, swappable models
 and tool canonicalization preserve it. Ordinary Chat, auxiliary Bot calls and
-provider factory/cache identities are unchanged. Native Google strips the
+provider factory/cache identities are unchanged. Native Google only strips the
 OpenAI-only extension before GenAI dispatch to avoid an unsupported native field;
-native Anthropic/Bedrock/Vertex converters do not forward it. This change does
-**not** establish serial-generation support for those native protocols. All still
-retain the checkpoint's complete-response batch rejection before execution.
-OpenAI-compatible servers that reject the option fail normally; there is no retry
+it does not translate it into native serial enforcement. The Vertex converter
+still does not forward it. Serial-generation support is not established for
+Google/Vertex. All retain the checkpoint's complete-response batch rejection
+before execution. Servers that reject the option fail normally; there is no retry
 that removes the constraint. Servers that ignore it cannot bypass batch rejection.
 
 `TestBotApprovalCaptureSerialProviderWire` exercises actual serialized requests
@@ -55,8 +67,13 @@ single-action identity, rejects malicious multi-action replies with no forwarded
 response, proves pending checkpoints make no further request, and reuses the same
 provider with ordinary Chat to prove no setting leak. `TestParallelToolCallsWire`
 covers streaming/non-streaming, both endpoints, absent/true/false/malformed options
-and tool-less requests. These are controlled tests, not external provider or live
-employee-journey acceptance.
+and tool-less requests. `TestConvertRequestParallelToolCalls` and
+`TestToAnthropicRequestParallelToolCalls` cover native conversion, explicit option
+validation, source immutability and unchanged non-option fields.
+`TestSAPAnthropicParallelToolCallsWire` and `TestAnthropicParallelToolCallsWire`
+exercise actual loopback HTTP requests in streaming and non-streaming modes,
+including ordinary-request reuse and rejection before HTTP for malformed values.
+These are controlled tests, not external provider or live employee-journey acceptance.
 
 ## Key Design Decisions
 

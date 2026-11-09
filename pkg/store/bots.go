@@ -252,7 +252,10 @@ type BotUsage struct {
 }
 type BotReportFailureKind string
 
-const BotReportFailureBudget BotReportFailureKind = "budget"
+const (
+	BotReportFailureBudget          BotReportFailureKind = "budget"
+	BotReportFailureExecutionFormat BotReportFailureKind = "execution_format"
+)
 
 type BotReportFailure struct {
 	Kind             BotReportFailureKind `json:"kind"`

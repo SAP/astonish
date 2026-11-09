@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"iter"
 	"sync"
 	"time"
@@ -114,11 +113,11 @@ func (m *botApprovalCaptureModel) GenerateContent(ctx context.Context, r *model.
 			// response-shape constraint failed. Never include model arguments or
 			// response text: those can contain credentials and untrusted content.
 			if calls > 1 {
-				yield(nil, fmt.Errorf("%w: checkpoint capture rejected multiple tool calls (count=%d); serial tool calls required", store.ErrBotUnsupported, calls))
+				yield(nil, &bot.CheckpointResponseError{Reason: bot.CheckpointResponseMultipleCalls, ToolCalls: calls})
 				return
 			}
 			if size > 4<<20 {
-				yield(nil, fmt.Errorf("%w: checkpoint capture response exceeds 4194304-byte limit", store.ErrBotUnsupported))
+				yield(nil, &bot.CheckpointResponseError{Reason: bot.CheckpointResponseTooLarge, ResponseBytes: size, LimitBytes: 4 << 20})
 				return
 			}
 			responses = append(responses, response)

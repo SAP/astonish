@@ -1109,7 +1109,10 @@ runLoop:
 			lastRunErr = runErr
 			_, botRun := execution.BotRunIdentityFromContext(cr.ctx)
 			_, budgetFailure := bot.BudgetFailureMessage(runErr)
-			if !botRun || !budgetFailure {
+			_, checkpointFailure := bot.CheckpointFailureMessage(runErr)
+			// Native Bot stops are published once, from the committed report.
+			// Ordinary Chat and text-only lookalikes retain normal error handling.
+			if !botRun || (!budgetFailure && !checkpointFailure) {
 				cr.emitEvent("error", map[string]any{"error": runErr.Error()})
 				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
 			}

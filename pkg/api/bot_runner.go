@@ -89,6 +89,11 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		report.Summary = message
 		report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureBudget, TechnicalDetails: bot.BudgetFailureDetails(cause)}
 	}
+	if message, ok := bot.CheckpointFailureMessage(cause); ok && class != bot.ErrorInterrupted {
+		class = bot.ErrorPermanent
+		report.Summary = message
+		report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureExecutionFormat, TechnicalDetails: bot.CheckpointFailureDetails(cause)}
+	}
 	failure := &bot.RunError{Class: class, Message: cause.Error(), Cause: cause, TerminalForAttempt: true}
 	status := store.RunFailed
 	if class == bot.ErrorInterrupted {

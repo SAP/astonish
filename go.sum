@@ -124,8 +124,8 @@ github.com/dlclark/regexp2/v2 v2.2.1 h1:mf4KkFUj0gJuarK8P+LgiS+Lit7m9N1yAwEfPbee
 github.com/dlclark/regexp2/v2 v2.2.1/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/dustin/go-humanize v1.1.0 h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg=
 github.com/dustin/go-humanize v1.1.0/go.mod h1:hc1CvRkJMsgxqjmjMQF3QNRAZBwY8AXBAzKYoSX9sFI=
-github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
-github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+github.com/ebitengine/purego v0.11.3 h1:OB+JLpdm7ioymhyA+6s5kbb/uOuYycAgL8NNTFc5MLg=
+github.com/ebitengine/purego v0.11.3/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/emersion/go-imap/v2 v2.0.0-beta.8 h1:5IXZK1E33DyeP526320J3RS7eFlCYGFgtbrfapqDPug=
 github.com/emersion/go-imap/v2 v2.0.0-beta.8/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/emersion/go-message v0.18.2 h1:rl55SQdjd9oJcIoQNhubD2Acs1E6IzlZISRTK7x/Lpg=

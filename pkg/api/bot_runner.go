@@ -83,12 +83,18 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		class = bot.ErrorInterrupted
 	}
+	report := store.BotReport{Summary: "Run did not complete; execution requires review."}
+	if message, ok := bot.BudgetFailureMessage(cause); ok && class != bot.ErrorInterrupted {
+		class = bot.ErrorBudget
+		report.Summary = message
+		report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureBudget, TechnicalDetails: bot.BudgetFailureDetails(cause)}
+	}
 	failure := &bot.RunError{Class: class, Message: cause.Error(), Cause: cause, TerminalForAttempt: true}
 	status := store.RunFailed
 	if class == bot.ErrorInterrupted {
 		status = store.RunInterrupted
 	}
-	return bot.RunResult{Status: status, Failure: failure, Report: store.BotReport{Summary: "Run did not complete; execution requires review."}}, failure
+	return bot.RunResult{Status: status, Failure: failure, Report: report}, failure
 }
 
 func validateBotChatRequest(ctx context.Context, req bot.RunRequest, sink bot.EventSink) error {

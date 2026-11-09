@@ -250,14 +250,23 @@ type BotUsage struct {
 	OutputTokens int64  `json:"output_tokens"`
 	CostMicros   *int64 `json:"cost_micros,omitempty"`
 }
+type BotReportFailureKind string
+
+const BotReportFailureBudget BotReportFailureKind = "budget"
+
+type BotReportFailure struct {
+	Kind             BotReportFailureKind `json:"kind"`
+	TechnicalDetails string               `json:"technical_details,omitempty"`
+}
 type BotReport struct {
-	Summary       string        `json:"summary"`
-	Changed       []BotEvidence `json:"changed"`
-	Unchanged     []BotEvidence `json:"unchanged"`
-	Unverified    []string      `json:"unverified"`
-	Artifacts     []BotArtifact `json:"artifacts"`
-	NeedsApproval []uuid.UUID   `json:"needs_approval"`
-	NextRunAt     *time.Time    `json:"next_run_at,omitempty"`
+	Failure       *BotReportFailure `json:"failure,omitempty"`
+	Summary       string            `json:"summary"`
+	Changed       []BotEvidence     `json:"changed"`
+	Unchanged     []BotEvidence     `json:"unchanged"`
+	Unverified    []string          `json:"unverified"`
+	Artifacts     []BotArtifact     `json:"artifacts"`
+	NeedsApproval []uuid.UUID       `json:"needs_approval"`
+	NextRunAt     *time.Time        `json:"next_run_at,omitempty"`
 }
 type BotRun struct {
 	// MandateRef is persisted only in the private repository envelope.

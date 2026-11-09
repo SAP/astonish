@@ -47,6 +47,13 @@ func RenderReport(run store.BotRun) string {
 			fmt.Fprintf(&b, "- %s\n", id)
 		}
 	}
+	if failure := run.Report.Failure; failure != nil && strings.TrimSpace(failure.TechnicalDetails) != "" {
+		b.WriteString("\n### Technical details\n\n")
+		// Indentation keeps native markdown fences inert.
+		for _, line := range strings.Split(strings.ReplaceAll(failure.TechnicalDetails, "\r", ""), "\n") {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
 	if run.Report.NextRunAt != nil {
 		fmt.Fprintf(&b, "\nNext run: %s\n", run.Report.NextRunAt.UTC().Format(time.RFC3339))
 	}

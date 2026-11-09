@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/execution"
@@ -767,7 +768,8 @@ func (cr *ChatRunner) Run(
 			Name: "bot_policy_outcomes",
 			OnToolErrorCallback: func(_ adktool.Context, _ adktool.Tool, _ map[string]any, err error) (map[string]any, error) {
 				var policyErr *agent.BotPolicyError
-				if errors.As(err, &policyErr) {
+				_, budgetFailure := bot.BudgetFailureMessage(err)
+				if errors.As(err, &policyErr) || budgetFailure {
 					cr.recordRunError(err)
 				}
 				return nil, nil
@@ -1105,8 +1107,12 @@ runLoop:
 		if runErr != nil {
 			cr.recordRunError(runErr)
 			lastRunErr = runErr
-			cr.emitEvent("error", map[string]any{"error": runErr.Error()})
-			persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
+			_, botRun := execution.BotRunIdentityFromContext(cr.ctx)
+			_, budgetFailure := bot.BudgetFailureMessage(runErr)
+			if !botRun || !budgetFailure {
+				cr.emitEvent("error", map[string]any{"error": runErr.Error()})
+				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
+			}
 			break
 		}
 

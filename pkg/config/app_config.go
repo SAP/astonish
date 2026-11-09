@@ -48,7 +48,7 @@ type AppConfig struct {
 type BotMandateConfig execution.BotMandateLimits
 
 func DefaultBotMandateConfig() BotMandateConfig {
-	return BotMandateConfig{MinScheduleIntervalSeconds: 60, MaxSchedules: 8, MaxDailyRuns: 1440, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 300, MaxToolCalls: 100, MaxTokens: 100000, MaxTotalToolCalls: 144000, MaxTotalTokens: 144000000}
+	return BotMandateConfig{MinScheduleIntervalSeconds: 60, MaxSchedules: 8, MaxDailyRuns: 1440, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 300, MaxToolCalls: 100, MaxTokens: 1_000_000, MaxTotalToolCalls: 144000, MaxTotalTokens: 1_440_000_000}
 }
 func (c BotMandateConfig) Validate() error { return execution.BotMandateLimits(c).Validate() }
 func (c BotMandateConfig) ValidateWithin(operator BotMandateConfig) error {

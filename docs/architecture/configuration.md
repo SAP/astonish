@@ -4,6 +4,22 @@
 
 Astonish uses a YAML-based configuration system with two main config types: the application config (`config.yaml`) for global settings, and agent configs (flow YAML files) for workflow definitions. Configuration is loaded from `~/.config/astonish/` and supports provider credentials, channel settings, sandbox options, scheduler jobs, MCP servers, and more.
 
+## Bot mandate ceilings
+
+Omitting the top-level `bot_mandates` object selects
+`config.DefaultBotMandateConfig`: **1,000,000 tokens per run** and
+**1,440,000,000 aggregate tokens**, with unchanged runtime, tool-call and authority
+ceilings. An explicit object replaces all defaults and must supply all nine
+positive capacity fields; a two-token-field-only override is invalid. Explicit
+lower ceilings are not upgraded, and zero is rejected rather than defaulted.
+Spend and authority fields may remain omitted at zero/false.
+
+Aggregate token/tool usage is lifetime cumulative on the Bot, not daily; only
+daily-run counts reset each day. A new authenticated owner message on an existing
+Bot receives current-policy limits, while already pinned runs, resumes and
+schedule grants retain their stored limits and usage. No stored-record migration
+is performed. See [Bot mandate defaults and complete YAML example](../bot-mandates.md#finite-operator-ceilings).
+
 ## OpenShell retained Bot home configuration
 
 Bot-home storage is **off by default**, independent of ordinary session storage.

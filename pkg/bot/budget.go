@@ -104,7 +104,7 @@ func (b *SharedRunBudget) Check(ctx context.Context) error {
 		return err
 	}
 	if b.tokens != nil && (b.inputUsed >= *b.tokens || b.outputUsed >= *b.tokens-b.inputUsed) {
-		return fmt.Errorf("%w: tokens", ErrBudgetExceeded)
+		return b.tokenFailure(BudgetExhausted, nil, nil)
 	}
 	if b.tools != nil && b.toolsUsed >= *b.tools {
 		return fmt.Errorf("%w: tools", ErrBudgetExceeded)
@@ -140,11 +140,11 @@ func (b *SharedRunBudget) ReserveModel(ctx context.Context, r execution.BudgetRe
 	}
 	if b.tokens != nil {
 		if b.inputUsed >= *b.tokens || b.outputUsed >= *b.tokens-b.inputUsed {
-			return execution.BudgetReservation{}, fmt.Errorf("%w: tokens", ErrBudgetExceeded)
+			return execution.BudgetReservation{}, b.tokenFailure(BudgetInputDoesNotFit, &r.InputTokens, &r.OutputTokens)
 		}
 		remaining := *b.tokens - b.inputUsed - b.outputUsed
 		if remaining <= r.InputTokens {
-			return execution.BudgetReservation{}, fmt.Errorf("%w: tokens", ErrBudgetExceeded)
+			return execution.BudgetReservation{}, b.tokenFailure(BudgetInputDoesNotFit, &r.InputTokens, &r.OutputTokens)
 		}
 		r.OutputTokens = min(r.OutputTokens, remaining-r.InputTokens)
 	}
@@ -204,7 +204,10 @@ func (b *SharedRunBudget) SettleModel(_ context.Context, id uuid.UUID, usage exe
 	b.costHeld = b.add(b.costHeld-old.heldCost, heldCost)
 	usage.CostMicros = copyBudgetInt(usage.CostMicros)
 	b.charges[id] = modelCharge{usage: usage, heldCost: heldCost, settled: true}
-	if b.overflow || b.tokens != nil && (b.inputUsed > *b.tokens || b.outputUsed > *b.tokens-b.inputUsed) || b.cost != nil && b.costHeld > *b.cost {
+	if !b.overflow && b.tokens != nil && (b.inputUsed > *b.tokens || b.outputUsed > *b.tokens-b.inputUsed) {
+		return b.tokenFailure(BudgetSettlementOverrun, nil, nil)
+	}
+	if b.overflow || b.cost != nil && b.costHeld > *b.cost {
 		return ErrBudgetExceeded
 	}
 	if b.cost != nil && b.unknownCosts > 0 {

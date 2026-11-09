@@ -1,5 +1,11 @@
 # Bot runtime report evidence
 
+## Budget-stop evidence
+
+`bot.BudgetLimitError` snapshots token limit, accounted usage (including holds), remaining allowance and optional request estimates at enforcement under the meter lock. `BudgetFailureMessage` recognizes native typed errors, existing mandate token quota dimensions, and legacy budget sentinels—not error text. First-call rejection is not consumption. Unknown/overflow/runtime/tool cases receive a nonnumeric fallback; no current configuration defaults are consulted.
+
+`BotChatRuntimeAdapter` freezes that explanation in `BotReport.Summary` and adds optional `Failure` (`kind=budget`, safe technical details). Native causes remain on `RunError`, with failed status and prior observed effects retained. Diagnostics contain selected enforcement facts, never arbitrary wrapped provider messages or request bodies; `RenderReport` indents them as code. No scheduler state or retry policy changes. Deadline cancellation and pre-admission failures retain their existing lifecycle; this is not a universal pre-claim/runtime reporting redesign.
+
 `BotChatRuntimeAdapter` installs a per-attempt `bot.ToolOutcomes` ledger in the execution context. A trusted server tool calls `bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), outcome)` **after** independently observing its effects. ChatRunner consumes that entry only when the corresponding current tool response arrives. ADK JSON-round-trips function-tool results, so attestations travel out-of-band rather than being reconstructed from result JSON. The launcher explicitly transfers only this ledger across its owner-context isolation boundary using `bot.WithToolOutcomesFromContext`; ambient viewer values remain discarded.
 
 Model prose, tool arguments, remote JSON and serialized transcript replays cannot create ledger entries. They never populate `Changed` or `Unchanged`. Unknown outcomes remain `Unverified`, making a completed tool-bearing run partial rather than asserting success. Recognized verified outcomes can succeed; later execution failures retain already-observed evidence without changing the failure status.

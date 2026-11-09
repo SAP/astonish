@@ -1,5 +1,9 @@
 # Bot live transcript events
 
+## Budget-stop presentation ownership
+
+For recognized native Bot budget failures, the committed `bot-report:<run UUID>` report is the single user-facing explanation. ChatRunner retains the native completion error but emits neither the generic Chat `error` nor the synthetic `[Error: ...]` model row for this case. Ordinary Chat and nonbudget failures are unchanged. Live and restored clients render the same saved report; limits are frozen from enforcement evidence, not recomputed from current defaults. Existing historical raw errors are not rewritten. Optional report failure diagnostics are rendered once as code; no new SSE kind or client-side string deduplication is introduced.
+
 ## Chat-first projection
 
 New `/messages` admissions use `presentation=home_interactive` and atomically persist their canonical user event plus run/outbox. The receipt carries `user_event_id` and `history_cursor`; retries and stream replay must not create duplicate echoes. Interactive output projects to ordered Home history while run traces remain inspectable. Empty presentation keeps legacy projection, and scheduled outcomes remain distinct. Inline proposal/approval references resolve authoritative records; replayed text never grants authority. See [Chat-first contracts](bot-chat-first.md).

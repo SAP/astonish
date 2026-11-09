@@ -45,6 +45,11 @@ type BotMandateQuotaStore interface {
 
 // BotMandateQuotaError identifies a finite quota gate without disguising it as
 // a permission failure. Existing forbidden classification remains compatible.
+const (
+	BotQuotaRunTokens   = "run_tokens"
+	BotQuotaTotalTokens = "total_tokens"
+)
+
 type BotMandateQuotaError struct {
 	Dimension              string
 	Used, Requested, Limit int64

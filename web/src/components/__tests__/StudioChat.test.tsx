@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react'
+import budgetStop from '../../../../pkg/api/testdata/bot_budget_stop.json'
 import StudioChat from '../StudioChat'
 import BotWorkspace from '../bots/BotWorkspace'
 import * as snapshots from '../../api/botSnapshot'
@@ -216,6 +217,41 @@ describe('StudioChat', () => {
     fireEvent.click(screen.getByTestId('send-button'))
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.queryByText('note.txt')).not.toBeInTheDocument())
+  })
+
+  it.each(['live', 'restored'] as const)('shows one explanatory budget-stop report through the actual %s Bot mapper', async mode => {
+    const transport = await vi.importActual<typeof import('../../api/botEvents')>('../../api/botEvents')
+    vi.mocked(connectBotEvents).mockImplementationOnce(transport.connectBotEvents)
+    let source!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({ start(controller) { source = controller } })
+    const fetch = vi.spyOn(teamContext, 'teamFetch').mockResolvedValueOnce(new Response(body))
+    const frame = `id: bot-home:1\nevent: transcript\ndata: ${JSON.stringify(budgetStop.event)}\n\n`
+    const replayComplete = 'id: bot-home:1\nevent: replay_complete\ndata: {"persisted":true}\n\n'
+    const send = async (text: string) => act(async () => { source.enqueue(new TextEncoder().encode(text)) })
+    const view = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
+    const assertReport = () => {
+      const bubbles = screen.getAllByTestId('agent-message-bubble')
+      expect(bubbles).toHaveLength(budgetStop.expected_reports)
+      const report = bubbles[0]
+      expect(report).toBeVisible()
+      expect(report.closest('[data-testid="tool-activity-block"]')).toBeNull()
+      // Semantic evidence, not the formatter's exact paragraph wording.
+      for (const fact of ['Budget limit reached', 'run budget: 71 tokens', 'Used or reserved: 0 tokens', 'Remaining: 71 tokens', 'Estimated next input: 80 tokens', 'Technical details', 'limit=71', 'accounted=0', 'requested=90']) expect(report).toHaveTextContent(fact)
+      expect(report.textContent).toMatch(/increase this Bot’s token budget|shorten the task/i)
+      expect(report.textContent).not.toMatch(/\[Error:|Run did not complete; execution requires review/)
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    }
+    try {
+      if (mode === 'live') await send('id: bot-home:0\nevent: replay_complete\ndata: {"persisted":true}\n\n')
+      await send(frame + (mode === 'restored' ? replayComplete : ''))
+      assertReport()
+      await send(frame + replayComplete)
+      assertReport()
+      expect(screen.getByText(/Bot transcript: live · cursor bot-home:1/)).toBeInTheDocument()
+    } finally {
+      view.unmount()
+      fetch.mockRestore()
+    }
   })
 
   it.each(['live', 'restored'] as const)('keeps three scheduled reports outside the scheduling fold using real %s Bot envelopes', async mode => {

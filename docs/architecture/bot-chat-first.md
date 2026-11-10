@@ -1,5 +1,11 @@
 # Chat-first Bot contracts
 
+## Work assessment boundary
+
+Tool-free requirement extraction and candidate assessment set `Config.ResponseJsonSchema` to closed, required-field JSON schemas (including verdict/method enums) and retain the 8,192-token output limit and shared budget. The OpenAI-compatible adapter translates this explicit opt-in into `response_format.type=json_schema` with `strict:true`; Responses API requests use `text.format`. MIME-only ordinary Chat, tools, and provider capability flags remain unchanged. `ResponseSchema` is not used by this path. Proxies/models may reject or ignore schema enforcement: native constrained decoding is not guaranteed by an HTTP 200. Malformed output still fails closed, with no assessment retry or action replay; identity, coverage and evidence validation remain mandatory. Controlled wire tests prove the request contract, not live LiteLLM/Claude enforcement.
+
+Newly claimed work retains a private requirement snapshot. Its conversation uses canonical owner input, questions and run status while draft generation/review/correction remains in the run trace. Only committed assessed output becomes a final Home report; older runs without the work contract retain historical conversational reply reuse. This is not a mandatory owner-review ceremony: quality correction uses existing authority and budgets, and questions remain reserved for genuine missing input or permissions. See [live publication](bot-live-events.md#assessed-work-publication). The older interactive-output mirroring descriptions below describe legacy runs where no work contract is present.
+
 Implementation contract, 2026-11-06. This describes current code, not full release acceptance. The neutral [interaction research](../research/bot-chat-first-ux.md) remains a design study, not a live audit.
 
 ## Opt-in authenticated interactive runtime
@@ -15,6 +21,8 @@ Interactive delegated children preserve the Bot/run identity and original truste
 `TestBotInteractiveChatHTTPAcceptance`, `TestBotInteractiveAuthorityHTTPAcceptance` and `TestBotInteractiveQuestionHTTPAcceptance` exercise HTTP/SQLite/worker composition with controlled model/node resources. Their presence is not a passing acceptance claim: current integration must pass these before readiness is enabled. External sandbox, provider and MCP services require separate live evidence.
 
 ## Minimal creation and durable conversation
+
+For newly created Bots with an omitted or whitespace-only charter, the generated default assigns responsibility for the owner's goals and useful, verified outcomes. Routine work inside the authorized mandate and existing permissions does not require extra review; genuine ambiguity or work outside that scope requires clarification or authorization. Neither a request nor the charter itself grants external-side-effect permissions. Title-first creation prefixes the title only to this generated default. Custom charters are preserved verbatim, including explicit review requirements. Existing persisted charters are not migrated or rewritten; permission defaults, reviewer enforcement, admission, and start behavior are unchanged. `TestBotMinimalCreateDefaults` and `TestBotDefaultCharterHTTPAcceptance` cover defaults, both creation modes, custom/legacy text preservation, and unchanged permissions.
 
 `POST /api/studio/bots` accepts a name and idempotency key without requiring a charter, physical Home or recurrence. With interactive composition, `CreateDraftAndStart` atomically commits the draft/Home, canonical title event, queued `chat_interactive` turn and dispatch. Retries return the same Bot and turn; changed payloads conflict and admission failure rolls back. Model defaults are inherited and missing prerequisites fail closed. Creation starts useful authorized Chat work, not autonomous activation. Source/template/promotion intake and legacy metadata-only creation remain inert unless explicitly started.
 

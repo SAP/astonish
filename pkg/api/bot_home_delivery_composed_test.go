@@ -43,6 +43,11 @@ type composedHomeModel struct {
 
 func (*composedHomeModel) Name() string { return "home-composed" }
 func (m *composedHomeModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
+		return len(w.Candidate.Observations) > 0 && (w.Candidate.Text == "Boston weather: 12 C, clear (controlled observation)." || w.Candidate.Text == "Review the disabled every-minute Boston weather schedule for this Home chat.")
+	}); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		part := &genai.Part{Text: "Boston weather: 12 C, clear (controlled observation)."}
 		if m.schedule {

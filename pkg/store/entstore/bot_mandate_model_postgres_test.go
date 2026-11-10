@@ -16,7 +16,7 @@ func TestIntegrationPostgresBotMandateModelReservation(t *testing.T) {
 	requireDraftActivationPostgres(t)
 	eachSpendScope(t, func(t *testing.T, scope store.BotScope) {
 		f := newPostgresBotServicesFixture(t, scope, 100, 100)
-		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "fixture complete"}}); err != nil {
+		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "fixture complete")}); err != nil {
 			t.Fatal(err)
 		}
 		policy := func(c context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {

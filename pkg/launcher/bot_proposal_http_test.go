@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -213,7 +214,9 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			}, Prepare: func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
 				t.Fatal("control-only provisioned external tools")
 				return nil, store.ErrBotForbidden
-			}, WrapModel: func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) { return m, nil }})
+			}, WrapModel: func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) {
+				return continuityAssessmentModel{m}, nil
+			}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -226,6 +229,9 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("runtime: %v %+v", err, result)
 			}
+			if llm.calls != 2 || result.Status != store.RunSucceeded || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
+				t.Fatalf("proposal receipt bypassed controlled production/review: calls=%d result=%+v", llm.calls, result)
+			}
 			if !llm.sawReference || proposal.ID == uuid.Nil {
 				t.Fatalf("model did not receive saved reference: %+v", result)
 			}
@@ -235,10 +241,20 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			if scope == store.BotScopePersonal {
 				sessions = services.PersonalSessions
 			}
-			transcript, err := sessions.(store.BotTranscriptReader).ReadBotTranscript(ctx, b.HomeSessionID, 0, 200)
+			// Unreviewed producer/tool details stay in the source run; canonical
+			// review cards remain independently replayable from Home below.
+			transcript, err := sessions.(store.BotTranscriptReader).ReadBotTranscript(ctx, run.SessionID, 0, 200)
 			if err != nil {
 				t.Fatal(err)
 			}
+			homeTranscript, err := sessions.(store.BotTranscriptReader).ReadBotTranscript(ctx, b.HomeSessionID, 0, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Row cursors order the canonical Home review and source-run tool
+			// output without requiring raw producer output to leak into Home.
+			transcript = append(transcript, homeTranscript...)
+			sort.Slice(transcript, func(i, j int) bool { return transcript[i].Cursor < transcript[j].Cursor })
 			persistedReference := false
 			reviews := map[string]int{}
 			for _, row := range transcript {

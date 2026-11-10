@@ -35,6 +35,7 @@ const (
 )
 
 type BotPublication struct {
+	Suppressed     bool              `json:"suppressed,omitempty"`
 	ReportSequence int64             `json:"report_sequence,omitempty"`
 	BotID          BotID             `json:"bot_id"`
 	RunID          RunID             `json:"run_id"`

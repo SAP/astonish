@@ -28,7 +28,7 @@ func TestBotSnapshotPagesAndViewerReadState(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Latest durable outcome"}}); err != nil {
+			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "Latest durable outcome")}); err != nil {
 				t.Fatal(err)
 			}
 			snapshot, err := repo.Snapshot(ctx, run.BotID)

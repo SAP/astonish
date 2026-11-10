@@ -159,8 +159,8 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	makeSupervisor := func(llm model.LLM) *bot.Supervisor {
 		adapter, err := api.NewBotChatRuntimeAdapter(func(_ context.Context, _ bot.RunRequest) (*api.BotChatResources, error) {
 			constructed.Add(1)
-			chat := agent.NewChatAgent(llm, []tool.Tool{ask, read, write}, nil, ss, &agent.SystemPromptBuilder{}, false, false)
-			return &api.BotChatResources{Agent: chat, SessionService: ss, AppName: "astonish", Cleanup: func() { cleaned.Add(1) }}, nil
+			chat := agent.NewChatAgent(approvalWorkAssessmentModel{LLM: llm}, []tool.Tool{ask, read, write}, nil, ss, &agent.SystemPromptBuilder{}, false, false)
+			return &api.BotChatResources{Work: scoped.(store.BotWorkStore), Agent: chat, SessionService: ss, AppName: "astonish", Cleanup: func() { cleaned.Add(1) }}, nil
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -307,7 +307,7 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	}
 	final := &questionModel{continued: true, t: t}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Status != store.RunPartial || result.Report.Summary != "Completed the safe destination work." || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
+	if err != nil || result.Status != store.RunPartial || !strings.HasPrefix(result.Report.Summary, "Work could not be verified:") || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || len(result.Report.Unverified) == 0 || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
 		t.Fatalf("unexpected continuation %+v err=%v model=%d constructed=%d", result, err, final.calls, constructed.Load())
 	}
 	scoped, ss = reopen()

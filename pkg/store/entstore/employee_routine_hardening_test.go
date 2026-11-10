@@ -78,7 +78,7 @@ func TestEmployeeRoutineExplicitRevokeAndExpiry(t *testing.T) {
 				}
 				return
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 				t.Fatal(err)
 			}
 			now := time.Now()
@@ -122,7 +122,7 @@ func TestEmployeeRoutineDeniedSurvivesRuntimeRestart(t *testing.T) {
 	if _, err = restarted.EnqueueAuthorizedOperation(worker, q); !errors.Is(err, store.ErrBotForbidden) {
 		t.Fatalf("denial reasked: %v", err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured, denied"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured, denied")}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := r.db.GetBot(owner, q.MandateRef.BotID)

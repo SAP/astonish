@@ -3,10 +3,12 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -14,7 +16,51 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
+
+// The executable-tool assertions below remain direct. Settle their source run
+// through the real quality controller rather than forging a successful commit.
+type resumeReceiptModel struct{ model.LLM }
+
+func (resumeReceiptModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("The selected control was captured and remains pending; no schedule has been applied.", "model"), TurnComplete: true}, nil)
+	}
+}
+
+func settleResumeSource(t *testing.T, f *botFactoryFixture, repo store.BotStore, worker context.Context) {
+	t.Helper()
+	f.req.Authorization = interactiveFactoryAuthorization{}
+	f.req.Principal = f.req.Mandate.Authorization.Principal(execution.SurfaceStudio)
+	worker, err := execution.WithPrincipal(worker, f.req.Principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.sessions.Get(worker, &session.GetRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: f.req.Bot.HomeSessionID.String()}); err != nil {
+		if _, err := f.sessions.Create(worker, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: f.req.Bot.HomeSessionID.String()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.cfg.WrapModel = func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) {
+		return continuityAssessmentModel{resumeReceiptModel{m}}, nil
+	}
+	factory, err := NewBotChatAgentFactory(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := api.NewBotChatRuntimeAdapter(factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := adapter.Start(worker, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
+	if err != nil || result.Status != store.RunSucceeded || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
+		t.Fatalf("source receipt did not pass quality: %+v %v", result, err)
+	}
+	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: f.req.Run.Lease, Status: result.Status, Report: result.Report, Usage: result.Usage}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestResumeTargetSchemaIdentity(t *testing.T) {
 	for _, schema := range []bool{false, true} {
@@ -45,7 +91,7 @@ func TestResumeFactoryListsCanonicalTargetThroughStore(t *testing.T) {
 				f.services.Bots = repo
 			}
 			policy := func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
-				return store.BotMandatePolicy{TTL: time.Hour, Scopes: []string{string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{"read_file", "schedule_job", "list_scheduled_jobs", "propose_bot_control", entstore.RoutineControlResource(store.BotControlResumeTasks)}}}, Limits: store.BotMandateLimits{MinScheduleIntervalSeconds: 60, MaxSchedules: 4, MaxDailyRuns: 4, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 60, MaxToolCalls: 20, MaxTokens: 100, MaxTotalToolCalls: 30, MaxTotalTokens: 150}}, nil
+				return store.BotMandatePolicy{TTL: time.Hour, Scopes: []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{"read_file", "schedule_job", "list_scheduled_jobs", "propose_bot_control", entstore.RoutineControlResource(store.BotControlResumeTasks)}}}, Limits: store.BotMandateLimits{MinScheduleIntervalSeconds: 60, MaxSchedules: 4, MaxDailyRuns: 4, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 60, MaxToolCalls: 20, MaxTokens: 100, MaxTotalToolCalls: 30, MaxTotalTokens: 150}}, nil
 			}
 			owner, err := execution.WithAuthenticationEvidence(f.ctx, execution.AuthenticationEvidence{Method: f.req.Principal.Authentication, ExpiresAt: time.Now().Add(time.Hour)})
 			if err != nil {
@@ -112,9 +158,7 @@ func TestResumeFactoryListsCanonicalTargetThroughStore(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: f.req.Run.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
-				t.Fatal(err)
-			}
+			settleResumeSource(t, f, repo, worker)
 			op, err = rt.ApplyAuthorizedOperation(owner, ref, op.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -187,9 +231,7 @@ func TestResumeFactoryListsCanonicalTargetThroughStore(t *testing.T) {
 				jobs = f.services.PersonalScheduler
 			}
 			before, _ := json.Marshal(jobs.Get(owner, scheduleID.String()).Payload)
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: f.req.Run.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
-				t.Fatal(err)
-			}
+			settleResumeSource(t, f, repo, worker)
 			saved, err = rt.ApplyAuthorizedOperation(owner, ref, saved.ID)
 			if err != nil || saved.Status != store.BotOperationApplied {
 				t.Fatalf("resume not applied: %+v %v", saved, err)

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import BotWorkspace from '../BotWorkspace'
+import BotWorkspace, { BotQualityDetails } from '../BotWorkspace'
 import BotDraftDialog from '../BotDraftDialog'
 import BotSidebar from '../BotSidebar'
 import { BotGoals, BotSchedule } from '../BotPanels'
@@ -73,6 +73,26 @@ async function openDetails(panel: string) {
   const names = panel === 'Memory & charter' ? ['Memory & charter', 'Configuration'] : panel === 'Runs' ? ['Runs & activity'] : panel === 'Thread' ? [] : [panel]
   for (const name of names) { const summary = screen.getByText(name, { selector: 'summary' }); (summary.parentElement as HTMLDetailsElement).open = true }
 }
+describe('Bot quality assessment', () => {
+  it('keeps legacy, unknown, blocked and unavailable assessment distinct from pass', () => {
+    const q: api.BotQualityReport = { schema_version: 1, work_revision: 5, requirements_digest: 'sources', candidate_digest: 'output', outcome: api.BotQualityOutcome.Accepted, repairs: 1, criteria: [{ criterion_id: 'sources', verdict: api.BotCriterionVerdict.Satisfied, method: api.BotAssessmentMethod.Model, evidence_refs: ['observation:0'], explanation: 'Checked the original source' }] }
+    const view = render(<BotQualityDetails />)
+    expect(screen.getByText(/Not assessed/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={q} />)
+    expect(screen.getByText(/Requirements checked/)).toBeInTheDocument()
+    expect(screen.getByText('Model assessment')).toBeInTheDocument()
+    expect(screen.getByText(/Evidence: observation:0/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={{ ...q, limitations: ['Missing current source'] }} />)
+    expect(screen.getByText(/Requirements remain unmet or unverified/)).toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={{ ...q, schema_version: 99 }} />)
+    expect(screen.getByText(/Assessment unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText('Model assessment')).not.toBeInTheDocument()
+    view.rerender(<BotQualityDetails quality={q} unavailable />)
+    expect(screen.queryByText(/Requirements checked/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+})
+
 describe('Bot workspace', () => {
   it('prepares a draft with an existing conversation but no physical home and retains the acknowledged revision', async () => {
     const empty = { ...bot, home_session_id: '82c09d23-63e1-42d8-8baa-5f540fabc645', home: null }

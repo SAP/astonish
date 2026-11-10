@@ -13,7 +13,9 @@ import (
 	teamevent "github.com/SAP/astonish/ent/team/sessionevent"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/genai"
 	"time"
 )
 
@@ -102,6 +104,26 @@ func (s *personalBotStore) AppendBotRunEvent(ctx context.Context, lease store.Bo
 	return s.repository().appendBotRunEvent(ctx, lease, id, event)
 }
 
+type botWorkTranscriptKey struct{}
+type botWorkOwnerInputKey struct{}
+
+// workTranscriptContext is private routing metadata derived from the stored run,
+// never from model content or a serialized runtime envelope.
+func workTranscriptContext(ctx context.Context, work *store.BotWorkState) context.Context {
+	return context.WithValue(ctx, botWorkTranscriptKey{}, work != nil)
+}
+
+func mirrorBotRunEvent(ctx context.Context, r store.BotRun, e *adksession.Event) bool {
+	work, _ := ctx.Value(botWorkTranscriptKey{}).(bool)
+	if work {
+		// Owner admissions/answers and approval cards have their own canonical
+		// repository writers. No producer text, tool result or artifact is final.
+		ownerInput, _ := ctx.Value(botWorkOwnerInputKey{}).(bool)
+		return ownerInput || (e.Content == nil && botHomeRunStateEvent(r, e))
+	}
+	return (r.Intent != store.BotIntentRegular || r.Presentation == store.BotRunPresentationHomeInteractive) && (e.Content != nil || botHomeArtifactEvent(r, e) || botHomeRunStateEvent(r, e))
+}
+
 type botTranscriptDB interface {
 	fenceTranscript(context.Context, store.BotLease, time.Time) error
 	appendRunTranscript(context.Context, store.Bot, store.BotRun, *adksession.Event) error
@@ -135,7 +157,15 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 		if run.Run.SessionID != id {
 			return store.ErrBotForbidden
 		}
-		return adapter.appendRunTranscript(ctx, rec.Bot, run.Run, event)
+		projectCtx := workTranscriptContext(ctx, run.Work)
+		// Legacy explicit /conversation and /test-run have no canonical admission
+		// row. Preserve only the exact persisted owner assignment, never role alone
+		// or model-generated correction instructions, under one deterministic ID.
+		if run.Work != nil && run.Run.UserEventID == "" && run.Run.Intent != store.BotIntentRegular && !event.Partial && event.Author == "user" && event.Content != nil && event.Content.Role == "user" && len(event.Content.Parts) == 1 && event.Content.Parts[0] != nil && event.Content.Parts[0].Text == run.Instructions && event.Actions.StateDelta["_astonish_turn_context"] != true {
+			event = &adksession.Event{ID: "bot-work-input:" + run.Run.ID.String(), Author: "user", Timestamp: run.Run.CreatedAt, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(run.Instructions, "user")}}
+			projectCtx = context.WithValue(projectCtx, botWorkOwnerInputKey{}, true)
+		}
+		return adapter.appendRunTranscript(projectCtx, rec.Bot, run.Run, event)
 	})
 }
 func (d teamBotDB) fenceTranscript(ctx context.Context, l store.BotLease, now time.Time) error {
@@ -187,7 +217,7 @@ func (d teamBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r store
 	target := r.SessionID.String()
 	targets := []string{target}
 
-	if (r.Intent != store.BotIntentRegular || r.Presentation == store.BotRunPresentationHomeInteractive) && (e.Content != nil || botHomeArtifactEvent(r, e) || botHomeRunStateEvent(r, e)) {
+	if mirrorBotRunEvent(ctx, r, e) {
 		exists, err := d.client.Session.Query().Where(teamsession.IDEQ(b.HomeSessionID.String()), teamsession.BotIDEQ(b.ID), teamsession.UserIDEQ(b.OwnerID), teamsession.PurposeEQ(teamsession.PurposeBotHome)).Exist(ctx)
 		if err != nil {
 			return err
@@ -238,7 +268,7 @@ func (d personalBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r s
 	target := r.SessionID.String()
 	targets := []string{target}
 
-	if (r.Intent != store.BotIntentRegular || r.Presentation == store.BotRunPresentationHomeInteractive) && (e.Content != nil || botHomeArtifactEvent(r, e) || botHomeRunStateEvent(r, e)) {
+	if mirrorBotRunEvent(ctx, r, e) {
 		exists, err := d.client.Session.Query().Where(personalsession.IDEQ(b.HomeSessionID.String()), personalsession.BotIDEQ(b.ID), personalsession.UserIDEQ(b.OwnerID), personalsession.PurposeEQ(personalsession.PurposeBotHome)).Exist(ctx)
 		if err != nil {
 			return err

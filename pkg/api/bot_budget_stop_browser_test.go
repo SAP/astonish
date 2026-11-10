@@ -24,7 +24,8 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// Keep the shared Studio/terminal fixture tied to the native report formatter.
+// Keep the historical Studio/terminal fixture tied to the diagnostic formatter.
+// New employee messages use RenderReport; saved historical transcripts are not rewritten.
 func TestBotBudgetStopFixtureMatchesFormatter(t *testing.T) {
 	raw, err := os.ReadFile("testdata/bot_budget_stop.json")
 	if err != nil {
@@ -52,8 +53,8 @@ func TestBotBudgetStopFixtureMatchesFormatter(t *testing.T) {
 	run := store.BotRun{ID: fixture.RunID, Status: store.RunFailed}
 	run.Report.Summary = summary
 	run.Report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureBudget, TechnicalDetails: bot.BudgetFailureDetails(failure)}
-	if len(fixture.Event.Content.Parts) != 1 || fixture.Event.Content.Parts[0].Text != bot.RenderReport(run) {
-		t.Fatalf("shared client fixture drifted from native formatter:\n%s", bot.RenderReport(run))
+	if len(fixture.Event.Content.Parts) != 1 || fixture.Event.Content.Parts[0].Text != bot.RenderDiagnosticReport(run) {
+		t.Fatalf("historical client fixture drifted from diagnostic formatter:\n%s", bot.RenderDiagnosticReport(run))
 	}
 }
 
@@ -226,13 +227,15 @@ func TestBotBudgetStopBrowserAcceptance(t *testing.T) {
 			t.Fatalf("visible report bubbles=%d", count)
 		}
 		text := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"]').innerText`).Str()
-		for _, fact := range []string{"run budget: 71 tokens", "Used or reserved: 0 tokens", "Remaining: 71 tokens", "Estimated next input: 80 tokens", "increase this Bot’s token budget", "Technical details", "limit=71", "accounted=0", "requested=90"} {
+		for _, fact := range []string{"run budget: 71 tokens", "Used or reserved: 0 tokens", "Remaining: 71 tokens", "Estimated next input: 80 tokens", "increase this Bot’s token budget"} {
 			if !strings.Contains(text, fact) {
 				t.Fatalf("missing %q: %s", fact, text)
 			}
 		}
-		if strings.Count(text, "Run report") != 1 || strings.Contains(text, "[Error:") || strings.Contains(text, "Run did not complete; execution requires review") {
-			t.Fatal(text)
+		for _, unwanted := range []string{"Run report", "Technical details", "limit=71", "accounted=0", "requested=90", "[Error:", "Run did not complete; execution requires review"} {
+			if strings.Contains(text, unwanted) {
+				t.Fatalf("employee message leaked %q: %s", unwanted, text)
+			}
 		}
 		if page.MustEval(`() => !!document.querySelector('[role="alert"], [data-sonner-toast], [data-testid="error-message"]')`).Bool() {
 			t.Fatalf("budget denial became a toast/raw error: %s", page.MustEval(`() => Array.from(document.querySelectorAll('[role="alert"], [data-sonner-toast], [data-testid="error-message"]')).map(e => e.outerHTML).join('\n')`).Str())

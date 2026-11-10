@@ -24,10 +24,16 @@ func TestBotBudgetReportPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			publisher := &bot.Publisher{Store: repo, Now: func() time.Time { return *now }}
+			var first *store.BotPublication
 			for range 2 {
-				if _, err = publisher.Publish(ctx, run.BotID, run.ID); err != nil {
+				publication, err := publisher.Publish(ctx, run.BotID, run.ID)
+				if err != nil {
 					t.Fatal(err)
 				}
+				if first != nil && (publication.EventID != first.EventID || publication.ReportSequence != first.ReportSequence || publication.Text != first.Text) {
+					t.Fatal("publication retry changed canonical receipt")
+				}
+				first = publication
 			}
 			after, err := repo.Get(ctx, run.BotID)
 			if err != nil {
@@ -41,17 +47,17 @@ func TestBotBudgetReportPublication(t *testing.T) {
 				t.Fatalf("want one canonical row got %d", len(rows))
 			}
 			e := rows[0].Event
-			if e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil {
+			if e == nil || e.ID != first.EventID || e.Author != "assistant" || e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil {
 				t.Fatalf("not canonical %+v", e)
 			}
 			text := e.Content.Parts[0].Text
-			for _, want := range []string{message, "accounted=30", "requested=70", "limit=91", "Technical details"} {
-				if !strings.Contains(text, want) {
-					t.Errorf("missing %q: %s", want, text)
-				}
+			if text != strings.TrimSpace(message)+"\n" || text != first.Text {
+				t.Fatalf("unexpected employee message: %q", text)
 			}
-			if strings.Contains(text, "[Error:") {
-				t.Fatal(text)
+			for _, unwanted := range []string{"Run report", run.ID.String(), "accounted=30", "requested=70", "limit=91", "Technical details", "[Error:"} {
+				if strings.Contains(text, unwanted) {
+					t.Errorf("diagnostic %q leaked into employee message: %s", unwanted, text)
+				}
 			}
 			restored, err := repo.GetRun(ctx, run.BotID, run.ID)
 			if err != nil {
@@ -59,6 +65,15 @@ func TestBotBudgetReportPublication(t *testing.T) {
 			}
 			if restored.Status != store.RunFailed || restored.Report.Failure == nil || restored.Report.Summary != message || restored.Usage.InputTokens != 30 {
 				t.Fatalf("lost persistence %+v", restored)
+			}
+			if restored.Report.Failure.Kind != store.BotReportFailureBudget || restored.Report.Failure.TechnicalDetails != report.Failure.TechnicalDetails {
+				t.Fatalf("lost budget diagnostics: %+v", restored.Report.Failure)
+			}
+			diagnostic := bot.RenderDiagnosticReport(*restored)
+			for _, want := range []string{message, "Run report", run.ID.String(), "accounted=30", "requested=70", "limit=91", "Technical details"} {
+				if !strings.Contains(diagnostic, want) {
+					t.Errorf("diagnostic report missing %q: %s", want, diagnostic)
+				}
 			}
 		})
 	}

@@ -30,6 +30,11 @@ func TestBotPromptHomeDeliveryModes(t *testing.T) {
 					t.Errorf("background=%v: contract %q", tc.background, want)
 				}
 			}
+			for _, want := range []string{"inspect actual sources", "request specific corrections", "deliver truthfully", "Model assessment is judgment", "Do not repeat writes or sends", "One occurrence does not complete an ongoing goal"} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("missing responsibility guidance %q", want)
+				}
+			}
 			if !strings.Contains(prompt, "unknown effects are never allowed") {
 				t.Fatal("lost authority boundary")
 			}

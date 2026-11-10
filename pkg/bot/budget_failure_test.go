@@ -83,15 +83,24 @@ func TestBudgetFailureQuotaAndReport(t *testing.T) {
 		if err := json.Unmarshal(raw, &restored); err != nil {
 			t.Fatal(err)
 		}
-		rendered := RenderReport(store.BotRun{Status: store.RunFailed, Report: restored})
+		rendered := RenderDiagnosticReport(store.BotRun{Status: store.RunFailed, Report: restored})
 		if strings.Count(rendered, message) != 1 || strings.Contains(rendered, "secret wrapper") || !strings.Contains(rendered, "### Technical details") {
 			t.Fatal(rendered)
+		}
+		employeeMessage := RenderReport(store.BotRun{Status: store.RunFailed, Report: restored})
+		if employeeMessage != strings.TrimSpace(message)+"\n" {
+			t.Fatalf("employee message lost budget explanation or gained audit details: %s", employeeMessage)
+		}
+		for _, unwanted := range []string{"Run report", "Technical details", "secret wrapper", restored.Failure.TechnicalDetails} {
+			if strings.Contains(employeeMessage, unwanted) {
+				t.Fatalf("employee message leaked %q: %s", unwanted, employeeMessage)
+			}
 		}
 	}
 	if _, ok := BudgetFailureMessage(errors.New(ErrBudgetExceeded.Error())); ok {
 		t.Fatal("string classified")
 	}
-	report := RenderReport(store.BotRun{Report: store.BotReport{Failure: &store.BotReportFailure{TechnicalDetails: "```\n# untrusted"}}})
+	report := RenderDiagnosticReport(store.BotRun{Report: store.BotReport{Failure: &store.BotReportFailure{TechnicalDetails: "```\n# untrusted"}}})
 	if strings.Contains(report, "\n# untrusted") || !strings.Contains(report, "    # untrusted") {
 		t.Fatal(report)
 	}

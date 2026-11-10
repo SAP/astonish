@@ -5,8 +5,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestBotWorkQualityOverview(t *testing.T) {
+	m := model{theme: DefaultTheme(), width: 110, height: 40, ready: true}
+	m.bots.overview = botOverviewGoals
+	m.bots.snapshot = &store.BotSnapshot{Bot: store.Bot{Name: "Analyst"}}
+	if !strings.Contains(stripANSI(m.renderBotOverview()), "No assessed result yet.") {
+		t.Fatal("missing empty state")
+	}
+	m.bots.snapshot.LatestOutcome = &store.BotRun{Status: store.RunSucceeded}
+	if !strings.Contains(stripANSI(m.renderBotOverview()), "Not assessed") {
+		t.Fatal("legacy inferred pass")
+	}
+	m.bots.snapshot.LatestOutcome.Report.Quality = &store.BotQualityReport{SchemaVersion: 1, Outcome: store.BotWorkBlocked, Limitations: []string{"Current source unavailable"}}
+	out := stripANSI(m.renderBotOverview())
+	for _, text := range []string{"Requirements remain unmet", "Current source unavailable", "Esc close"} {
+		if !strings.Contains(out, text) {
+			t.Fatal("missing", text)
+		}
+	}
+	m.bots.err = "offline"
+	if strings.Contains(stripANSI(m.renderBotOverview()), "Current source unavailable") {
+		t.Fatal("stale assessment shown as current after error")
+	}
+}
 
 func TestBotScheduledReportsRenderDistinctAfterActivity(t *testing.T) {
 	for _, replay := range []bool{false, true} {

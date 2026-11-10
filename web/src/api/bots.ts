@@ -26,11 +26,36 @@ export interface BotVersion {
   triggers: BotTrigger[] | null
 }
 export interface BotEvidence { kind: 'observation' | 'owner_confirmation' | 'inference'; summary: string; source: string; observed_at: string; actor_id: string }
+export const BotQualityOutcome = { Preparing: 'preparing', Producing: 'producing', CandidateReady: 'candidate_ready', Reviewing: 'reviewing', RepairReady: 'repair_ready', Repairing: 'repairing', Accepted: 'accepted', Blocked: 'blocked', Interrupted: 'interrupted' } as const
+export const BotCriterionVerdict = { Satisfied: 'satisfied', Failed: 'failed', Unverified: 'unverified' } as const
+export const BotAssessmentMethod = { Mechanical: 'mechanical_observation', Model: 'model_assessment' } as const
+export interface BotCriterionAssessment {
+  criterion_id: string
+  verdict: typeof BotCriterionVerdict[keyof typeof BotCriterionVerdict]
+  method: typeof BotAssessmentMethod[keyof typeof BotAssessmentMethod]
+  evidence_refs: string[] | null
+  explanation: string
+}
+export interface BotQualityReport {
+  schema_version: number; work_revision: number; requirements_digest: string; candidate_digest?: string
+  outcome: typeof BotQualityOutcome[keyof typeof BotQualityOutcome]
+  criteria?: BotCriterionAssessment[] | null; repairs: number; limitations?: string[] | null
+}
+export interface BotReport {
+  summary: string; changed: BotEvidence[] | null; unchanged: BotEvidence[] | null; unverified: string[] | null; next_run_at?: string
+  quality?: BotQualityReport
+}
+export function botQualitySummary(q?: BotQualityReport): string {
+  if (!q) return 'Not assessed'
+  if (q.schema_version !== 1) return 'Assessment unavailable'
+  if (q.outcome !== BotQualityOutcome.Accepted || !q.criteria?.length || q.limitations?.length || q.criteria.some(c => c.verdict !== BotCriterionVerdict.Satisfied || !c.evidence_refs?.length || !Object.values(BotAssessmentMethod).includes(c.method))) return 'Requirements remain unmet or unverified'
+  return `Requirements checked · ${q.repairs} correction attempts. Model assessments are judgments, not guarantees.`
+}
 export interface BotRun {
   id: string; bot_id: string; session_id: string; version: number; trigger: string
   status: 'queued' | 'running' | 'waiting_approval' | 'interrupted' | 'succeeded' | 'partial' | 'failed' | 'skipped' | 'cancelled'
   created_at: string; started_at?: string; finished_at?: string; provider: string; model: string
-  report: { summary: string; changed: BotEvidence[] | null; unchanged: BotEvidence[] | null; unverified: string[] | null; next_run_at?: string }
+  report: BotReport
   usage: { tool_calls: number; input_tokens: number; output_tokens: number; cost_micros?: number }
 }
 export interface BotApproval {

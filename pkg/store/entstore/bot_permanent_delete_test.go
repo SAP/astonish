@@ -18,10 +18,18 @@ func permanentTestVersion() store.BotVersion {
 	return v
 }
 
-func TestBotPermanentVerifiedPurge(t *testing.T) {
+func TestBotWorkPurge(t *testing.T) { testBotPermanentVerifiedPurge(t) }
+
+func TestBotPermanentVerifiedPurge(t *testing.T) { testBotPermanentVerifiedPurge(t) }
+
+func testBotPermanentVerifiedPurge(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			repo, owner, _, run, lease, now := botRunFixture(t, scope)
+			repo, owner, worker, run, lease, now := botRunFixture(t, scope)
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil || work == nil {
+				t.Fatalf("missing work before purge: %v", err)
+			}
 			reservedKeys := []string{"mandate:test:1", "mandate-revoked:test:1", "mandate-operation:test:1", "mandate-reservation:test", "mandate-quota:test:1"}
 			if err := repo.db.Transaction(owner, func(tx botDraftDB) error {
 				rec, err := tx.GetBot(owner, run.BotID)
@@ -95,6 +103,9 @@ func TestBotPermanentVerifiedPurge(t *testing.T) {
 			}
 			if err = repo.PurgeDeleted(owner, deleted.ID, deleted.Revision); err != nil {
 				t.Fatal(err)
+			}
+			if _, err = repo.db.ReadRun(owner, run.BotID, run.ID); !errors.Is(err, store.ErrBotNotFound) {
+				t.Fatalf("private work envelope survived purge: %v", err)
 			}
 			for _, key := range reservedKeys {
 				if _, err = repo.db.FindActivity(owner, deleted.ID, key); !errors.Is(err, store.ErrBotNotFound) {

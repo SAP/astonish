@@ -82,6 +82,7 @@ export function dispatchBotTranscript(event: BotTranscript, emit: SSEEventCallba
 export interface BotStreamOptions {
   botId: string; sessionId: string; scope: BotScope
   onEvent: SSEEventCallback; onError?: (error: Error) => void; onDone?: () => void
+  onReplayComplete?: () => void
   onState?: (state: 'loading' | 'live' | 'reconnecting' | 'error', cursor: string) => void
 }
 // One cursor per mounted thread. Reconnect resumes after the last applied row;
@@ -118,7 +119,7 @@ export function connectBotEvents(options: BotStreamOptions): AbortController {
           const lines = frame.split(/\r?\n/)
           const field = (name: string) => lines.filter(l => l.startsWith(`${name}:`)).map(l => l.slice(name.length + 1).replace(/^ /, '')).join('\n')
           const type = field('event'), id = field('id'), data = field('data')
-          if (type === 'replay_complete') { cursor = id || cursor; retry = 0; options.onState?.('live', cursor); continue }
+          if (type === 'replay_complete') { cursor = id || cursor; retry = 0; options.onReplayComplete?.(); options.onState?.('live', cursor); continue }
           if (type !== 'transcript' || !id || id === cursor) continue
           // Malformed durable data fails closed: never advance past an unapplied row.
           dispatchBotTranscript(JSON.parse(data) as BotTranscript, options.onEvent, mapper, id)

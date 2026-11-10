@@ -9,6 +9,24 @@ const userRow = (camel: boolean, text: string, marker?: unknown): BotTranscript 
   ? { author: 'user', invocationId: 'turn', content: { role: 'user', parts: [{ text }] }, actions: { stateDelta: { _astonish_turn_context: marker } } }
   : { Author: 'user', InvocationID: 'turn', Content: { role: 'user', parts: [{ text }] }, Actions: { StateDelta: { _astonish_turn_context: marker } } }))
 
+it('distinguishes chunked replay completion from per-row live connectivity', async () => {
+  const emit = vi.fn(), state = vi.fn(), replay = vi.fn()
+  let writer!: ReadableStreamDefaultController<Uint8Array>
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(new ReadableStream({ start(c) { writer = c } })))
+  const controller = connectBotEvents({ botId: 'bot', sessionId: 'home', scope: 'personal', onEvent: emit, onState: state, onReplayComplete: replay })
+  const push = (text: string) => writer.enqueue(new TextEncoder().encode(text))
+  try {
+    push(`id: home:1\nevent: transcript\ndata: ${JSON.stringify(userRow(false, 'initial'))}\n\n`)
+    await vi.waitFor(() => expect(state).toHaveBeenCalledWith('live', 'home:1'))
+    expect(replay).not.toHaveBeenCalled()
+    push('id: home:1\nevent: replay_com')
+    await Promise.resolve()
+    expect(replay).not.toHaveBeenCalled()
+    push('plete\ndata: {}\n\n')
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1))
+  } finally { controller.abort() }
+})
+
 it.each([false, true])('hides only boolean-marked context without completion (camel: %s)', camel => {
   for (const runtime of [false, true]) {
     const mapper = createBotTranscriptMapper(), emit = vi.fn()

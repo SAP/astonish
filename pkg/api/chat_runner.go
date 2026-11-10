@@ -51,14 +51,16 @@ type ChatEvent struct {
 // ChatCompletion is execution evidence, independent of the transport's done event.
 // A final model answer is required; a tool result or closed stream is not success.
 type ChatCompletion struct {
-	FinalText     string
-	Err           error
-	Blocked       bool
-	Final         bool
-	Usage         store.BotUsage
-	Report        store.BotReport
-	reportBodies  map[string]string
-	toolResponses int64
+	FinalText       string
+	FinalEventID    string
+	Err             error
+	Blocked         bool
+	Final           bool
+	Usage           store.BotUsage
+	Report          store.BotReport
+	reportBodies    map[string]string
+	toolResponses   int64
+	pendingControls []botWorkPendingControl
 }
 
 // ChatRunner manages a single background agent execution for a Studio chat session.
@@ -218,6 +220,7 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 		cr.completion.Final = !toolPart && strings.TrimSpace(text.String()) != ""
 		if cr.completion.Final {
 			cr.completion.FinalText = text.String()
+			cr.completion.FinalEventID = event.ID
 		}
 	}
 }

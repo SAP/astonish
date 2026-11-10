@@ -20,7 +20,7 @@ func TestIntegrationPostgresBotEmployeeOperations(t *testing.T) {
 	requireDraftActivationPostgres(t)
 	eachSpendScope(t, func(t *testing.T, scope store.BotScope) {
 		f := newPostgresBotServicesFixture(t, scope, 100, 100)
-		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "fixture complete"}}); err != nil {
+		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "fixture complete")}); err != nil {
 			t.Fatal(err)
 		}
 		f.owner = store.WithBotMandateAdmission(mandateOwnerContext(t, f.owner), authorizedSchedulePolicy)
@@ -52,7 +52,7 @@ func TestIntegrationPostgresBotEmployeeOperations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+		if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, worker, lease, "captured")}); err != nil {
 			t.Fatal(err)
 		}
 		before, err := f.repo.db.GetBot(f.owner, b.ID)

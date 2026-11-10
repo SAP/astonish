@@ -45,7 +45,10 @@ func TestBotHomeArtifactEventBoundary(t *testing.T) {
 		})
 	}
 }
-func TestBotHomeArtifactProjection(t *testing.T) {
+func TestBotHomeArtifactProjection(t *testing.T)      { testBotHomeArtifactProjection(t, false) }
+func TestBotWorkDraftArtifactProjection(t *testing.T) { testBotHomeArtifactProjection(t, true) }
+
+func testBotHomeArtifactProjection(t *testing.T, workEnabled bool) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, _, ctx, initial, _ := runtimeFixture(t, scope)
@@ -62,6 +65,9 @@ func TestBotHomeArtifactProjection(t *testing.T) {
 			lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "attachment", ExpiresAt: time.Now().Add(time.Minute)})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !workEnabled {
+				legacyWorkFixture(t, repo, worker, lease)
 			}
 			var reader store.BotTranscriptReader
 			switch d := repo.db.(type) {
@@ -100,13 +106,21 @@ func TestBotHomeArtifactProjection(t *testing.T) {
 						}
 					}
 				}
-				if count != 1 {
-					t.Errorf("session %s: expected one durable artifact, got %d", sid, count)
+				want := 1
+				if workEnabled && sid == b.HomeSessionID {
+					want = 0
+				}
+				if count != want {
+					t.Errorf("session %s: expected %d durable artifacts, got %d", sid, want, count)
 				}
 			}
 			live, err := reader.ReadBotTranscript(ctx, b.HomeSessionID, cursor, 200)
-			if err != nil || len(live) != 1 {
-				t.Fatalf("live home artifact absent: %d %v", len(live), err)
+			wantLive := 1
+			if workEnabled {
+				wantLive = 0
+			}
+			if err != nil || len(live) != wantLive {
+				t.Fatalf("live home artifact count: got %d want %d error %v", len(live), wantLive, err)
 			}
 			otherVersion := store.DefaultBotVersion()
 			otherVersion.Charter = "Unrelated Bot"

@@ -282,9 +282,12 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	input.Run.Lease = lease
 	input.Run.Status = store.RunRunning
 	input.Run.StartedAt = &now
-	request := RunRequest{Mandate: prepared.Mandate, Bot: input.Bot, Version: input.Version, Run: input.Run, Principal: p, Authorization: prepared.Authorization, Interactive: prepared.Mandate == nil && input.Run.IsInteractiveChat(), Policy: prepared.Policy, Budget: prepared.Budget, Goals: input.Goals, Instructions: input.Instructions, Attachments: input.Attachments, Now: now}
+	request := RunRequest{Work: input.Work.Clone(), Mandate: prepared.Mandate, Bot: input.Bot, Version: input.Version, Run: input.Run, Principal: p, Authorization: prepared.Authorization, Interactive: prepared.Mandate == nil && input.Run.IsInteractiveChat(), Policy: prepared.Policy, Budget: prepared.Budget, Goals: input.Goals, Instructions: input.Instructions, Attachments: input.Attachments, Now: now}
 	result := zero
-	if input.Run.RequiresPhysicalHome() {
+	if workStore, ok := s.config.Store.(store.BotWorkStore); ok {
+		request.Work, err = workStore.LoadWork(runCtx, lease)
+	}
+	if err == nil && input.Run.RequiresPhysicalHome() {
 		err = s.config.Homes.BindRun(runCtx, HomeRunBinding{Home: home, PhysicalSessionID: input.Run.SessionID, Lease: lease})
 	}
 	if err == nil {

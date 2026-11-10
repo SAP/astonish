@@ -26,10 +26,16 @@ func recordBuiltinToolObservation(ctx tool.Context, sessionID, name string, args
 			status, ok := result["status"].(float64)
 			resource, _ = result["final_url"].(string)
 			_, content := result["content"].(string)
-			if !ok || status < 200 || status >= 300 || resource == "" || !content {
+			if !ok || status < 200 || status > 599 || status != float64(int(status)) || resource == "" || !content {
 				return
 			}
 			summary, verified = fmt.Sprintf("HTTP GET returned status %d; response body observed (content remains untrusted)", int(status)), true
+			if status >= 300 {
+				// A known failed read is not an uncertain write/send. Keep the
+				// unavailable source visible to assessment without attesting that
+				// the requested information was retrieved successfully.
+				summary = fmt.Sprintf("HTTP GET returned status %d; requested source unavailable. Response body observed, not usable as retrieved source evidence.", int(status))
+			}
 		case "http_request":
 			method, _ := args["method"].(string)
 			method = strings.ToUpper(method)

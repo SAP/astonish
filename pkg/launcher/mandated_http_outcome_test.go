@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,7 +98,11 @@ func TestMandatedHTTPOutcomeThroughRunner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if failedStatus {
+			if failedStatus && tc.name == "web_fetch" {
+				if result.Status != store.RunSucceeded || len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 1 || len(result.Report.Changed) != 0 || !strings.Contains(result.Report.Unchanged[0].Summary, "source unavailable") {
+					t.Fatalf("known unavailable read lost observation: %+v", result)
+				}
+			} else if failedStatus {
 				if result.Status != store.RunPartial || len(result.Report.Unverified) != 1 || len(result.Report.Unchanged) != 0 || len(result.Report.Changed) != 0 {
 					t.Fatalf("failed status upgraded: %+v", result)
 				}

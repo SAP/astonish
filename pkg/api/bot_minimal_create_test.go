@@ -47,7 +47,7 @@ func TestBotMinimalCreateDefaults(t *testing.T) {
 				if got.Charter != test.charter {
 					t.Fatal("explicit charter changed")
 				}
-			} else if !strings.HasPrefix(got.Charter, "Discuss ") {
+			} else if got.Charter != "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects." {
 				t.Fatalf("default: %q", got.Charter)
 			}
 			want := store.DefaultBotVersion()

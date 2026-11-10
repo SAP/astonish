@@ -20,7 +20,7 @@ func TestResumeCaptureRejectsTriggerIDBeforePending(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "scheduled"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "scheduled")}); err != nil {
 				t.Fatal(err)
 			}
 			created, err = s.ApplyAuthorizedOperation(owner, q.MandateRef, created.ID)
@@ -123,7 +123,7 @@ func TestResumeCaptureRejectsTriggerIDBeforePending(t *testing.T) {
 			if err != nil || op.Status != store.BotOperationPending || op.Decision != store.BotOperationExecute {
 				t.Fatalf("canonical target: %+v %v", op, err)
 			}
-			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "captured")}); err != nil {
 				t.Fatal(err)
 			}
 			op, err = s.ApplyAuthorizedOperation(owner, ref, op.ID)

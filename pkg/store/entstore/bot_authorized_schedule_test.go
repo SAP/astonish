@@ -71,7 +71,7 @@ func TestBotAuthorizedScheduleBusyRetryReadiness(t *testing.T) {
 			if _, err = s.TransitionBotOperation(context.Background(), q.MandateRef, o.ID, 1, store.BotOperationApplying, store.BotOperationReceipt{Status: store.BotOperationApplying}); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("generic transition %v", err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			s.readiness = func(context.Context, store.Bot, store.BotVersion) error { return store.ErrBotUnsupported }
@@ -128,7 +128,7 @@ func TestBotAuthorizedScheduleRevokedAndDenied(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			if err = s.RevokeBotMandate(owner, q.MandateRef); err != nil {

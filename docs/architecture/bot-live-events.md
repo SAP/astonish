@@ -1,8 +1,20 @@
 # Bot live transcript events
 
+## Assessed work publication
+
+Runs with a private pinned work contract persist producer/reviewer/correction content and draft artifact envelopes only in their run transcript. The shared repository routing decision applies to both personal/team stores and both ADK content and runtime envelopes. Canonical owner messages, answers, approval cards and state transitions retain their separate trusted writers; rejected drafts are not hidden only in a client reducer.
+
+Successful work commits require the persisted accepted assessment, matching work revision, requirement/candidate digests, final text and artifact identities. Model assessments remain labelled judgments, not effect attestations. Work-enabled publication does not reuse an earlier conversational reply: it uses the existing immutable report-sequence intent and canonical `bot-report:<run UUID>` boundary. Legacy runs without work state keep their existing reply reuse. Controlled HTTP tests exercise draft exclusion before review and on restore, three independently identified identical final reports, and replay-safe reconciliation; this is not deployed real-model evidence.
+
 ## Budget-stop presentation ownership
 
-For recognized native Bot budget failures, the committed `bot-report:<run UUID>` report is the single user-facing explanation. ChatRunner retains the native completion error but emits neither the generic Chat `error` nor the synthetic `[Error: ...]` model row for this case. Ordinary Chat and nonbudget failures are unchanged. Live and restored clients render the same saved report; limits are frozen from enforcement evidence, not recomputed from current defaults. Existing historical raw errors are not rewritten. Optional report failure diagnostics are rendered once as code; no new SSE kind or client-side string deduplication is introduced.
+For recognized native Bot budget failures, the committed `bot-report:<run UUID>` report is the single user-facing explanation. ChatRunner retains the native completion error but emits neither the generic Chat `error` nor the synthetic `[Error: ...]` model row for this case. Ordinary Chat and nonbudget failures are unchanged. Live and restored clients render the same saved report; limits are frozen from enforcement evidence, not recomputed from current defaults. Existing historical raw errors are not rewritten. Optional report failure diagnostics remain stored and are available through the explicit diagnostic formatter, not appended to new employee messages; no new SSE kind or client-side string deduplication is introduced.
+
+## Employee messages versus diagnostics
+
+`bot.RenderReport` publishes the committed summary for Home and terminal, with plain-language uncertainty and pending-authorization notices when needed. Empty summaries use status-aware completion, approval, or noncompletion text; missing results never become an inferred success. New messages do not append the run-report audit wrapper, quality assessments, evidence references, artifact hashes, technical failure details, approval IDs, or scheduling metadata. Meaningful failure explanations and next steps in the summary remain visible; a message never grants approval authority.
+
+`bot.RenderDiagnosticReport` retains the detailed representation, including quality judgments, evidence and code-formatted failure diagnostics. Structured `BotReport` data remains persisted. Historical Studio/terminal fixtures (`bot_budget_stop.json` and `bot_checkpoint_failure.json`) intentionally match this diagnostic format: saved transcript text is replayed unchanged, not re-rendered or migrated to concise prose. New live and restored publication uses the same saved `RenderReport` message.
 
 ## Chat-first projection
 

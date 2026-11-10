@@ -406,7 +406,11 @@ func (s botScheduleTools) enqueue(ctx tool.Context, b *store.Bot, operation stor
 	if err != nil {
 		return botScheduleChangeResult{}, err
 	}
-	capture := bot.ScheduleCapture{OperationID: op.ID, BotID: b.ID, SourceRunID: s.request.Run.ID, OwnerID: b.OwnerID, Operation: operation, Status: store.BotOperationPending, Revision: op.Revision, ObservedAt: time.Now().UTC()}
+	payloadJSON, err := json.Marshal(op.Payload)
+	if err != nil {
+		return botScheduleChangeResult{}, err
+	}
+	capture := bot.ScheduleCapture{PayloadJSON: string(payloadJSON), OperationID: op.ID, BotID: b.ID, SourceRunID: s.request.Run.ID, OwnerID: b.OwnerID, Operation: operation, Status: store.BotOperationPending, Revision: op.Revision, ObservedAt: time.Now().UTC()}
 	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, ScheduleCapture: &capture})
 	return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: string(store.BotOperationPending), Message: capture.Acknowledgment()}, OperationID: op.ID.String()}, nil
 }

@@ -19,7 +19,7 @@ func TestAuthorizedScheduleDirectSourceAndTitleBoundary(t *testing.T) {
 			if err != nil || m.Provenance.InitiationKind != store.BotInitiationKindDirectOwnerMessage || m.ScheduleCommand != nil {
 				t.Fatalf("ordinary source: %+v %v", m, err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "done")}); err != nil {
 				t.Fatal(err)
 			}
 			// The marker is private to title admission, never supplied in JSON.
@@ -78,7 +78,7 @@ func TestAuthorizedScheduleFiniteQuotaAndScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err = s.ApplyAuthorizedOperation(context.Background(), q.MandateRef, queued.ID); err != nil {

@@ -37,6 +37,11 @@ type correctionFollowupModel struct {
 
 func (*correctionFollowupModel) Name() string { return "controlled" }
 func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool {
+		return w.Candidate.Text == "Delivery is Thursday" || w.Candidate.Text == "Delivery is Friday" || w.Candidate.Text == "No delivery fact in active context."
+	}); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var prompt string
 		if r.Config != nil && r.Config.SystemInstruction != nil {

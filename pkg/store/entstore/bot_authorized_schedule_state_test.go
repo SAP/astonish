@@ -29,7 +29,7 @@ func nextAuthorizedSchedule(t *testing.T, r *botRepository, s *botAuthorizedOper
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "queued")}); err != nil {
 		t.Fatal(err)
 	}
 	applied, err := s.ApplyAuthorizedOperation(context.Background(), q.MandateRef, pending.ID)
@@ -46,7 +46,7 @@ func TestBotAuthorizedSchedulePreservesDisabledAndPaused(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err = s.ApplyAuthorizedOperation(context.Background(), q.MandateRef, o.ID); err != nil {

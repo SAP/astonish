@@ -20,7 +20,7 @@ func TestPausedGoalCaptureRequiresCompletionCriteria(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "schedule captured"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "schedule captured")}); err != nil {
 				t.Fatal(err)
 			}
 			schedule, err = s.ApplyAuthorizedOperation(owner, q.MandateRef, schedule.ID)
@@ -87,7 +87,7 @@ func TestPausedGoalCaptureRequiresCompletionCriteria(t *testing.T) {
 			if err != nil || op.Status != store.BotOperationPending || op.Decision != store.BotOperationExecute {
 				t.Fatalf("corrected capture: %+v %v", op, err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 				t.Fatal(err)
 			}
 			if err = s.ReconcileAuthorizedOperations(owner, b.ID, 32); err != nil {

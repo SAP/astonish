@@ -30,7 +30,7 @@ func TestBotControlProposalReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = scoped.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+			if err = scoped.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, scoped.(interface{ repository() *botRepository }).repository(), worker, lease, "ready")}); err != nil {
 				t.Fatal(err)
 			}
 			scoped, _ = reopen()
@@ -97,7 +97,7 @@ func TestBotControlProposalReceiptRollback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 				t.Fatal(err)
 			}
 			original := r.db

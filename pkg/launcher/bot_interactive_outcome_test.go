@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,9 @@ func (p *interactiveOutcomePool) Alias(string, string)                      {}
 func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if code, err := strconv.Atoi(r.URL.Query().Get("status")); err == nil && code >= 100 {
+			w.WriteHeader(code)
+		}
 		_, _ = w.Write([]byte(`{"weather":"clear"}`))
 	}))
 	defer server.Close()
@@ -47,10 +52,12 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 		name    string
 		strip   bool
 		partial bool
+		status  int
 	}{
+		{name: "web_fetch", status: 401}, {name: "web_fetch", status: 429},
 		{name: "web_fetch"}, {name: "read_file"}, {name: "write_file"}, {name: "write_file", strip: true, partial: true}, {name: "shell_command", partial: true},
 	} {
-		t.Run(tc.name+map[bool]string{true: "_no_receipt"}[tc.strip], func(t *testing.T) {
+		t.Run(tc.name+strconv.Itoa(tc.status)+map[bool]string{true: "_no_receipt"}[tc.strip], func(t *testing.T) {
 			f := newBotFactoryFixture(t)
 			f.req.Run.ExecutionMode = execution.BotExecutionModeChatInteractive
 			f.req.Run.CallerCeiling = &execution.BotCallerCeiling{Principal: f.req.Principal, ExpiresAt: time.Now().Add(time.Hour)}
@@ -68,7 +75,7 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			args := map[string]any{"path": path}
 			switch tc.name {
 			case "web_fetch":
-				args = map[string]any{"url": "http://93.184.216.34/weather", "mode": "raw"}
+				args = map[string]any{"url": "http://93.184.216.34/weather?status=" + strconv.Itoa(tc.status), "mode": "raw"}
 			case "write_file":
 				args["content"] = "changed"
 			case "shell_command":
@@ -101,6 +108,9 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			}
 			if result.Status != want {
 				t.Fatalf("status=%s want=%s report=%+v", result.Status, want, result.Report)
+			}
+			if tc.status >= 300 && (len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 1 || !strings.Contains(result.Report.Unchanged[0].Summary, "source unavailable")) {
+				t.Fatalf("known unavailable source became uncertain effect: %+v", result.Report)
 			}
 			if !tc.partial && tc.name != "write_file" && len(result.Report.Unchanged) != 1 {
 				t.Fatalf("read observation missing: %+v", result.Report)

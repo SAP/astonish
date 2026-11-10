@@ -69,8 +69,15 @@ func (m *pausedScheduleReadModel) GenerateContent(_ context.Context, r *model.LL
 				} `json:"triggers"`
 			}
 			for _, part := range r.Config.SystemInstruction.Parts {
-				start := strings.Index(part.Text, `{"lifecycle_status"`)
+				section := strings.Index(part.Text, "## Current Bot control state\n")
+				if section < 0 {
+					continue
+				}
+				// The current-goal fields precede lifecycle_status; JSON field order
+				// is not the fixture's contract.
+				start := strings.Index(part.Text[section:], "\n{")
 				if start >= 0 {
+					start += section
 					if err := json.NewDecoder(strings.NewReader(part.Text[start:])).Decode(&facts); err != nil {
 						m.t.Fatal(err)
 					}

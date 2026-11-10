@@ -1710,7 +1710,7 @@ func TestBotCommitRunAtomicAndIdempotent(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, worker, run, lease, _ := botRunFixture(t, scope)
-			q := store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Checked the source; unchanged"}, Usage: store.BotUsage{ToolCalls: 2, InputTokens: 12, OutputTokens: 8}}
+			q := store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "Checked the source; unchanged"), Usage: store.BotUsage{ToolCalls: 2, InputTokens: 12, OutputTokens: 8}}
 			if err := repo.CommitRun(worker, q); err != nil {
 				t.Fatal(err)
 			}
@@ -1937,6 +1937,8 @@ func TestBotCommitRejectsFalseSuccessAndMalformedResult(t *testing.T) {
 	cases := []store.BotRunCommit{
 		{Lease: lease, Status: store.RunQueued, Report: store.BotReport{Summary: "queued"}},
 		{Lease: lease, Status: store.RunSucceeded},
+		// Caller-supplied accepted metadata is not persisted assessment evidence.
+		{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Forged accepted answer", Quality: &store.BotQualityReport{Outcome: store.BotWorkAccepted}}},
 		{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Done", Unverified: []string{"not checked"}}},
 		{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Summary: "Partial"}, Usage: store.BotUsage{InputTokens: -1}},
 		{Lease: lease, Status: store.RunWaitingApproval, Report: store.BotReport{Summary: "Wait"}},
@@ -1951,16 +1953,19 @@ func TestBotCommitRejectsFalseSuccessAndMalformedResult(t *testing.T) {
 
 func TestBotConcurrentCompletionKeepsOneOutcome(t *testing.T) {
 	repo, ctx, worker, run, lease, _ := botRunFixture(t, store.BotScopePersonal)
+	report := acceptedWorkReport(t, repo, worker, lease, "reviewed outcome")
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	var wg sync.WaitGroup
-	for _, summary := range []string{"first outcome", "second outcome"} {
+	// Both contenders use the exact reviewed candidate, but their accounting
+	// differs. They are valid competing commits, not an unreviewed draft race.
+	for _, inputTokens := range []int64{11, 12} {
 		wg.Add(1)
-		go func(summary string) {
+		go func(inputTokens int64) {
 			defer wg.Done()
 			<-start
-			results <- repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: summary}})
-		}(summary)
+			results <- repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report, Usage: store.BotUsage{InputTokens: inputTokens}})
+		}(inputTokens)
 	}
 	close(start)
 	wg.Wait()
@@ -1969,6 +1974,8 @@ func TestBotConcurrentCompletionKeepsOneOutcome(t *testing.T) {
 	for err := range results {
 		if err == nil {
 			wins++
+		} else if !errors.Is(err, store.ErrBotConflict) {
+			t.Errorf("unexpected competing commit error: %v", err)
 		}
 	}
 	if wins != 1 {

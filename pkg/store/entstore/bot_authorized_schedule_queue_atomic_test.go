@@ -63,7 +63,7 @@ func applyQueuedScheduleWithBarriers(t *testing.T, r *botRepository, s *botAutho
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal("busy apply mutated runs", err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "captured")}); err != nil {
 		t.Fatal(err)
 	}
 	before, err = r.ListRuns(owner, id, store.BotPage{})

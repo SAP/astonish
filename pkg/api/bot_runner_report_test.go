@@ -16,7 +16,7 @@ import (
 )
 
 func TestBotRuntimeReport(t *testing.T) {
-	for _, scenario := range []string{"verified", "unverified", "spoof", "invalid", "foreign-home"} {
+	for _, scenario := range []string{"verified", "unverified", "spoof", "invalid", "foreign-home", "missing-artifact-id", "bad-digest", "unsafe-path"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, req, ss := botChatTestRequest(t)
 			req.Bot.Home.ID = uuid.New()

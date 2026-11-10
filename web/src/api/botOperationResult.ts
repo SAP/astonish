@@ -1,6 +1,8 @@
 export const OperationStatus = { Pending: 'pending', Applying: 'applying', Applied: 'applied', Blocked: 'blocked', Failed: 'failed', Cancelled: 'cancelled' } as const
 export const OperationDecision = { Execute: 'execute', Clarify: 'clarify', RequireAuthorization: 'require_authorization', Deny: 'deny' } as const
+export const OperationPresentation = { Internal: 'internal', Conversation: 'conversation' } as const
 export interface BotOperationView {
+  presentation?: typeof OperationPresentation[keyof typeof OperationPresentation]
   schema_version: 1; bot_id: string; home_session_id: string; operation_id: string
   revision: number; state_sequence: number; source_run_id?: string; source_user_event_id?: string
   operation: string; status: typeof OperationStatus[keyof typeof OperationStatus]
@@ -12,7 +14,7 @@ export type BotOperations = Record<string, BotOperationView>
 export function isBotOperation(value: unknown): value is BotOperationView {
   if (!value || typeof value !== 'object') return false
   const s = value as BotOperationView
-  return s.schema_version === 1 && typeof s.bot_id === 'string' && typeof s.home_session_id === 'string' && !!s.operation_id && typeof s.operation_id === 'string' && typeof s.operation === 'string' && typeof s.summary === 'string' && Object.values(OperationStatus).includes(s.status) && Object.values(OperationDecision).includes(s.decision) && Number.isSafeInteger(s.revision) && s.revision > 0 && Number.isSafeInteger(s.state_sequence) && s.state_sequence > 0
+  return (s.presentation === undefined || Object.values(OperationPresentation).includes(s.presentation)) && s.schema_version === 1 && typeof s.bot_id === 'string' && typeof s.home_session_id === 'string' && !!s.operation_id && typeof s.operation_id === 'string' && typeof s.operation === 'string' && typeof s.summary === 'string' && Object.values(OperationStatus).includes(s.status) && Object.values(OperationDecision).includes(s.decision) && Number.isSafeInteger(s.revision) && s.revision > 0 && Number.isSafeInteger(s.state_sequence) && s.state_sequence > 0
 }
 // Operation heads are independent: terminal A cannot clear queued B. A snapshot
 // and reconnect replay share this same reducer; neither may roll a head back.

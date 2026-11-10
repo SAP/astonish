@@ -30,7 +30,7 @@ func TestBotScheduledMandateExactAdmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			applied, err := s.ApplyAuthorizedOperation(owner, q.MandateRef, op.ID)
@@ -99,7 +99,7 @@ func TestBotAuthorizedPendingBackoff(t *testing.T) {
 	if same.Revision != blocked.Revision {
 		t.Fatal("backoff ignored")
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 		t.Fatal(err)
 	}
 	now := r.clock().Add(61 * time.Second)

@@ -493,7 +493,7 @@ func (t *Transcript) stampCurrentCall(ev Event) {
 		return
 	}
 	last := &t.Items[n-1]
-	if IsBotReportInvocation(last.InvocationID) {
+	if last.isBotPublication() {
 		return
 	}
 	if last.Kind == ItemAgent || last.Kind == ItemPlan {
@@ -502,7 +502,7 @@ func (t *Transcript) stampCurrentCall(ev Event) {
 	}
 	for i := n - 1; i >= 0; i-- {
 		it := &t.Items[i]
-		if IsBotReportInvocation(it.InvocationID) {
+		if it.isBotPublication() {
 			return
 		}
 		switch it.Kind {
@@ -814,7 +814,7 @@ func (t *Transcript) addUsage(usage *Usage) {
 // File diffs stay inside the soft turn (do not hard-break).
 func (t *Transcript) turnStart() int {
 	for i := len(t.Items) - 1; i >= 0; i-- {
-		if IsBotReportInvocation(t.Items[i].InvocationID) {
+		if t.Items[i].isBotPublication() {
 			return i + 1
 		}
 		switch t.Items[i].Kind {
@@ -881,7 +881,7 @@ func (t *Transcript) appendAgentText(text string) {
 	// chronologically. Never provisional, never reordered below tools.
 	if t.LinearThread {
 		t.nextTextReplaces = false
-		if n := len(t.Items); n > 0 && !IsBotReportInvocation(t.Items[n-1].InvocationID) && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
+		if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
 			// If the new text is a plan document but the last item is plain
 			// agent text, start a fresh ItemPlan instead of appending. The plan
 			// is a distinct visual block, not a continuation of prior prose.
@@ -916,7 +916,7 @@ func (t *Transcript) appendAgentText(text string) {
 	t.nextTextReplaces = false
 
 	// Sticky agent already at end (common after tools reordered layout).
-	if n := len(t.Items); n > 0 && !IsBotReportInvocation(t.Items[n-1].InvocationID) && t.Items[n-1].Kind == ItemAgent {
+	if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && t.Items[n-1].Kind == ItemAgent {
 		if replace {
 			t.Items[n-1].Content = text
 		} else {

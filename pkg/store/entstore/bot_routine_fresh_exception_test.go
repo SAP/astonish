@@ -87,7 +87,7 @@ func TestRoutineDeniedFreshOwnerException(t *testing.T) {
 				if err != nil || !reflect.DeepEqual(same, denied) {
 					t.Fatalf("exact replay changed denial: %+v %v", same, err)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "denied"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "denied")}); err != nil {
 					t.Fatal(err)
 				}
 				before, err := r.db.GetBot(owner, b.ID)
@@ -144,7 +144,7 @@ func TestRoutineDeniedFreshOwnerException(t *testing.T) {
 				if _, err = restarted.ApplyAuthorizedOperation(owner, ref, fresh.ID); !errors.Is(err, store.ErrBotConflict) {
 					t.Fatalf("auto-granted fresh request: %v", err)
 				}
-				if err = r.CommitRun(freshWorker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "fresh authorization required"}}); err != nil {
+				if err = r.CommitRun(freshWorker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, freshWorker, lease, "fresh authorization required")}); err != nil {
 					t.Fatal(err)
 				}
 				decision := BotRoutineExceptionDecision{MandateRef: ref, OperationID: fresh.ID, ExpectedRevision: fresh.Revision, PayloadDigest: fresh.Provenance.PayloadDigest, Approve: true, ExpiresAt: time.Now().Add(time.Minute)}

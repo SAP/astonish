@@ -26,7 +26,7 @@ func TestOwnerMessagePriority(t *testing.T) {
 				}
 				if scenario == "interactive" {
 					// Finish the fixture's autonomous writer, then claim a real owner turn.
-					if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+					if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "done")}); err != nil {
 						t.Fatal(err)
 					}
 					msg, err := repo.AdmitMessage(ctx, store.BotMessageRequest{BotID: old.BotID, Version: old.Version, IdempotencyKey: "first-owner", Instructions: "hello"})

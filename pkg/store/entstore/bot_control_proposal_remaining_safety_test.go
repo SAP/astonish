@@ -30,7 +30,7 @@ func pendingControlSafety(t *testing.T, r *botRepository, ctx context.Context, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -39,7 +39,7 @@ func pendingControlSafety(t *testing.T, r *botRepository, ctx context.Context, b
 func scheduledControlSafety(t *testing.T, scope store.BotScope) (*botRepository, context.Context, *store.Bot, string) {
 	t.Helper()
 	r, ctx, worker, run, lease, _ := botRunFixture(t, scope)
-	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "done")}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := r.Get(ctx, run.BotID)

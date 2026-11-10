@@ -14,7 +14,7 @@ func TestInteractiveAccountingDurableLedgerAndReplay(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
 			first := f.turn()
-			if first.Usage.ToolCalls != 1 || first.Usage.InputTokens != 10 || first.Usage.OutputTokens != 6 {
+			if first.Usage.ToolCalls != 1 || first.Usage.InputTokens != 20 || first.Usage.OutputTokens != 12 {
 				t.Fatalf("initial ledger: %+v", first.Usage)
 			}
 			replay := f.turn()
@@ -34,7 +34,7 @@ func TestInteractiveAccountingDurableLedgerAndReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if second.ID == first.ID || f.pool.calls != 2 || second.Usage.ToolCalls != 1 || second.Usage.InputTokens != 10 || second.Usage.OutputTokens != 6 {
+			if second.ID == first.ID || f.pool.calls != 2 || second.Usage.ToolCalls != 1 || second.Usage.InputTokens != 20 || second.Usage.OutputTokens != 12 {
 				t.Fatalf("existing-session new turn: %+v calls=%d", second.Usage, f.pool.calls)
 			}
 			original, err := f.repo.GetRun(f.ctx, f.b.ID, first.ID)

@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -25,6 +27,61 @@ func TestBostonQuestionProjection(t *testing.T) {
 	}
 	if err := json.Unmarshal(approvalsData, &saved); err != nil {
 		t.Fatal(err)
+	}
+	for _, format := range []struct {
+		name   string
+		render func(store.BotRun) string
+	}{
+		{"concise", bot.RenderReport},
+		{"historical", bot.RenderDiagnosticReport},
+	} {
+		for _, warning := range []bool{false, true} {
+			name := format.name + "/without-warning"
+			if warning {
+				name = format.name + "/with-warning"
+			}
+			t.Run(name, func(t *testing.T) {
+				a := saved.Approvals[0]
+				waiting := store.BotRun{ID: a.RunID, Status: store.RunWaitingApproval, Report: store.BotReport{
+					Summary: "Question awaits the explicit Bot owner's typed answer; no execution resources are held. Continuation uses the saved conversation under current tool policy.", NeedsApproval: []uuid.UUID{a.ID},
+				}}
+				if warning {
+					waiting.Report.Unverified = []string{"Tool ask_user returned without independently verified outcome metadata."}
+				}
+				e := session.Event{ID: "waiting-receipt", InvocationID: "bot-report:" + a.RunID.String(), Author: "assistant"}
+				text := format.render(waiting)
+				e.Content = genai.NewContentFromText(text, "model")
+				projected := projectBotQuestionTranscript(&e, saved.Approvals)
+				if projected.Content != nil || projected.ID != e.ID || projected.InvocationID != e.InvocationID {
+					t.Fatalf("waiting receipt not projected with canonical identity intact: %+v", projected)
+				}
+				if e.Content == nil || e.Content.Parts[0].Text != text {
+					t.Fatal("mutated stored receipt")
+				}
+				if projectBotQuestionTranscript(&e, nil) != &e {
+					t.Fatal("hidden without canonical review")
+				}
+				a.Status = store.ApprovalApproved
+				if projectBotQuestionTranscript(&e, []store.BotApproval{a}).Content != nil {
+					t.Fatal("waiting receipt reappeared after answer")
+				}
+				unrelated := e
+				unrelated.InvocationID = "bot-report:" + uuid.NewString()
+				if projectBotQuestionTranscript(&unrelated, saved.Approvals) != &unrelated {
+					t.Fatal("hid unrelated run")
+				}
+				user := e
+				user.Author = "user"
+				if projectBotQuestionTranscript(&user, saved.Approvals) != &user {
+					t.Fatal("hid human quotation")
+				}
+				failure := e
+				failure.Content = genai.NewContentFromText(text+"\nGenuine failure", "model")
+				if projectBotQuestionTranscript(&failure, saved.Approvals) != &failure {
+					t.Fatal("hid genuine failure")
+				}
+			})
+		}
 	}
 	hidden := 0
 	for _, line := range strings.Split(string(data), "\n") {

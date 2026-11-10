@@ -84,6 +84,9 @@ func TestBotRunStateAllStatusesAndFailedCAS(t *testing.T) {
 				repo, ctx, worker, run, lease, now := botRunFixture(t, scope)
 				assertRunStateSequence(t, repo, ctx, *run, store.RunQueued, store.RunRunning)
 				q := store.BotRunCommit{Lease: lease, Status: status, Report: store.BotReport{Summary: "observed outcome"}}
+				if status == store.RunSucceeded {
+					q.Report = acceptedWorkReport(t, repo, worker, lease, q.Report.Summary)
+				}
 				if status == store.RunWaitingApproval {
 					action := execution.ActionDescriptor{Tool: "send", Effect: execution.EffectSend, Arguments: json.RawMessage(`{}`)}
 					digest, _ := action.Digest()
@@ -197,7 +200,7 @@ func TestBotRunStateConfigurationQuiesce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review ready"}}); err != nil {
+			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "review ready")}); err != nil {
 				t.Fatal(err)
 			}
 			queued, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: run.BotID, Version: run.Version, Trigger: store.TriggerManual, Instructions: "pending work", IdempotencyKey: "pending"})

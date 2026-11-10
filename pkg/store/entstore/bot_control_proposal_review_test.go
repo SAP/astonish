@@ -61,7 +61,7 @@ func TestBotControlProposalMaliciousPayloadAndDecision(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "review")}); err != nil {
 				t.Fatal(err)
 			}
 			before, err := r.Get(ctx, run.BotID)
@@ -182,7 +182,7 @@ func TestBotControlProposalSchedulePayloadPermissions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "review")}); err != nil {
 					t.Fatal(err)
 				}
 				if _, err = r.ConfirmControlProposal(ctx, store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}); !errors.Is(err, want) {
@@ -203,7 +203,7 @@ func TestBotControlProposalSchedulePayloadPermissions(t *testing.T) {
 
 func TestBotControlProposalMemberInitiatingActor(t *testing.T) {
 	r, owner, worker, initial, lease, _ := botRunFixture(t, store.BotScopeTeam)
-	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "done")}); err != nil {
 		t.Fatal(err)
 	}
 	principal, _ := execution.PrincipalFromContext(owner)
@@ -235,7 +235,7 @@ func TestBotControlProposalMemberInitiatingActor(t *testing.T) {
 	if p.SourceUserID != memberID {
 		t.Fatalf("worker owner spoofed source: %s want %s", p.SourceUserID, memberID)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 		t.Fatal(err)
 	}
 	d := store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}

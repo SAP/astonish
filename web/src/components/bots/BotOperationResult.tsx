@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { BotScope } from '@/api/bots'
 import { decideBotOperation } from '@/api/botReviews'
-import { OperationDecision, OperationStatus, operationLabel, type BotOperationView } from '@/api/botOperationResult'
+import { OperationDecision, OperationPresentation, OperationStatus, operationLabel, type BotOperationView } from '@/api/botOperationResult'
 import { useBotClock } from './useBotClock'
 
 const labels = { pending: 'Pending', applying: 'Applying', applied: 'Applied', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled' }
@@ -22,6 +22,9 @@ export default function BotOperationResult({ operation, scope, readOnly, onChang
     catch { setError('Decision could not be verified. Refresh the conversation before trying again.') }
     finally { setBusy(false) }
   }
+  // Conversation publications belong to StudioChat's ordinary agent renderer.
+  // This leaf owns only legacy results and actionable authorization cards.
+  if (!needsDecision && (operation.presentation === OperationPresentation.Internal || operation.presentation === OperationPresentation.Conversation)) return null
   const schedule = operation.status === OperationStatus.Applied ? operation.verified_schedule : undefined
   return <article aria-label="Operation result" data-operation-id={operation.operation_id} className="my-3 border border-border rounded-lg p-4 space-y-2 text-sm">
     <h3 className="font-semibold">{label || 'Operation'} · {labels[operation.status]}</h3>

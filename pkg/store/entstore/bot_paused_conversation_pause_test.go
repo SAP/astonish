@@ -85,7 +85,7 @@ func TestRoutinePauseAlreadyPausedConversation(t *testing.T) {
 			if _, err := r.GetVersion(worker, b.ID, b.Version); err != nil {
 				t.Fatal("current version unreadable", err)
 			}
-			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Celsius"}}); err != nil {
+			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "Celsius")}); err != nil {
 				t.Fatal("conversation cannot finish", err)
 			}
 			// Another explicit conversation can still be stopped using the exact-run path.

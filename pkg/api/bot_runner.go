@@ -26,12 +26,15 @@ import (
 // must belong to this request. SessionService is the existing scoped store; the
 // adapter never creates/replaces sessions or changes their execution owner.
 type BotChatResources struct {
-	Authorization  execution.BotTurnAuthorizer
-	Transcript     store.BotTranscriptStore
-	Agent          *agent.ChatAgent
-	SessionService session.Service
-	AppName        string
-	Cleanup        func()
+	// AssessmentContext is a trusted, owner-bound read, never a model tool.
+	AssessmentContext func(context.Context) (json.RawMessage, store.BotEvidence, error)
+	Work              store.BotWorkStore
+	Authorization     execution.BotTurnAuthorizer
+	Transcript        store.BotTranscriptStore
+	Agent             *agent.ChatAgent
+	SessionService    session.Service
+	AppName           string
+	Cleanup           func()
 	// PolicyRuntime is prepared by the trusted factory and must be the same
 	// runtime installed on its bound tools. Nil preserves explicit context wiring.
 	PolicyRuntime *agent.BotPolicyRuntime
@@ -100,6 +103,20 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		status = store.RunInterrupted
 	}
 	return bot.RunResult{Status: status, Failure: failure, Report: report}, failure
+}
+
+// botChatFactoryFailure distinguishes a setup dependency's deadline from the
+// worker-owned run deadline. Keep this at the factory boundary: no model/tool
+// execution has started, and a dependency timeout must not imply a canceled run.
+func botChatFactoryFailure(ctx context.Context, cause error) (bot.RunResult, error) {
+	if ctx.Err() == nil && errors.Is(cause, context.DeadlineExceeded) && !errors.Is(cause, context.Canceled) {
+		const message = "Run could not start because a setup dependency timed out."
+		// Preserve the cause for diagnostics without putting endpoint URLs or
+		// credentials from HTTP errors into the report or public error message.
+		failure := &bot.RunError{Class: bot.ErrorPermanent, Message: message, Cause: cause, TerminalForAttempt: true}
+		return bot.RunResult{Status: store.RunFailed, Failure: failure, Report: store.BotReport{Summary: message}}, failure
+	}
+	return botChatFailure(bot.ErrorPermanent, cause)
 }
 
 func validateBotChatRequest(ctx context.Context, req bot.RunRequest, sink bot.EventSink) error {
@@ -209,7 +226,7 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		defer resources.Cleanup()
 	}
 	if err != nil {
-		return botChatFailure(bot.ErrorPermanent, err)
+		return botChatFactoryFailure(ctx, err)
 	}
 	if resources == nil || resources.Agent == nil || resources.Agent.LLM == nil || resources.SessionService == nil || resources.AppName == "" || resources.Cleanup == nil {
 		return botChatFailure(bot.ErrorPermanent, store.ErrBotUnsupported)
@@ -251,7 +268,8 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	}
 	// The factory contract supplies the shared-budget model. Capture/resume
 	// decorators below are parent-turn behavior and must not wrap auxiliary calls.
-	ctx = agent.WithBotAuxiliaryLLM(ctx, resources.Agent.LLM)
+	auxiliary := resources.Agent.LLM
+	ctx = agent.WithBotAuxiliaryLLM(ctx, auxiliary)
 	if capture != nil {
 		resources.Agent.LLM = &botApprovalCaptureModel{LLM: resources.Agent.LLM, capture: capture}
 	}
@@ -262,12 +280,31 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		}
 		resources.Agent.LLM = &botResumeModel{LLM: resources.Agent.LLM, action: action}
 	}
+	var sequence int64
+	produce := func(attemptReq bot.RunRequest, attemptInteraction *store.BotApproval, completion *ChatCompletion) (bot.RunResult, error) {
+		return runBotChatAttempt(ctx, attemptReq, resources, sink, capture, existing, attemptInteraction, resume, &sequence, completion)
+	}
+	return runBotWork(ctx, req, resources, auxiliary, resume && interaction == nil, func(attemptReq bot.RunRequest, completion *ChatCompletion) (bot.RunResult, error) {
+		result, err := produce(attemptReq, interaction, completion)
+		interaction = nil // an owner answer is consumed only once
+		if conversation, ok := resources.SessionService.(botConversationSessions); ok {
+			conversation.internalInput = true
+			resources.SessionService = conversation
+			resources.Agent.SessionService = conversation
+		}
+		return result, err
+	})
+}
+
+func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotChatResources, sink bot.EventSink, capture *botApprovalCapture, existing *session.GetResponse, interaction *store.BotApproval, resume bool, sequence *int64, completed *ChatCompletion) (result bot.RunResult, err error) {
+	if capture != nil {
+		ctx = context.WithValue(ctx, botApprovalCaptureKey{}, capture)
+	}
 	cr := newChatRunner(req.Run.SessionID.String(), req.Bot.OwnerID.String(), resources.AppName, false)
 	cr.cancel() // discard constructor's background context: Bot lifetime is worker-owned
 	cr.ctx, cr.cancel = context.WithCancel(context.WithValue(ctx, appNameContextKey, resources.AppName))
 	defer cr.cancel()
 	turnID := uuid.New()
-	var sequence int64
 	cr.SetEventSink(func(eventCtx context.Context, event ChatEvent) error {
 		payload, err := json.Marshal(event.Data)
 		if err != nil {
@@ -278,8 +315,8 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 				return err
 			}
 		}
-		sequence++
-		return sink(eventCtx, bot.RuntimeEvent{SessionID: req.Run.SessionID, RunID: req.Run.ID, TurnID: turnID, Sequence: sequence, Type: event.Type, Payload: payload})
+		*sequence++
+		return sink(eventCtx, bot.RuntimeEvent{SessionID: req.Run.SessionID, RunID: req.Run.ID, TurnID: turnID, Sequence: *sequence, Type: event.Type, Payload: payload})
 	})
 	cr.ctx = agent.WithPromptOverrides(cr.ctx, agent.NewBotPromptOverrides(agent.PromptOverridesFromContext(cr.ctx), req))
 	message := genai.NewContentFromText(req.Instructions, "user")
@@ -307,6 +344,39 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	// No title model call and no interactive auto-approval in Bot mode.
 	cr.Run(resources.Agent, resources.SessionService, resources.Agent.LLM, nil, message, req.Instructions, false, "", nil, false)
 	completion := cr.Completion()
+	// Continuations must assess the actual saved source responses and the owner
+	// answer, not only this invocation's final prose. These are untrusted data.
+	if resume && req.Work != nil {
+		if completion.reportBodies == nil {
+			completion.reportBodies = make(map[string]string)
+		}
+		for i := 0; i < existing.Session.Events().Len(); i++ {
+			e := existing.Session.Events().At(i)
+			if e == nil || e.Partial || e.Content == nil {
+				continue
+			}
+			for _, part := range e.Content.Parts {
+				if part == nil || part.FunctionResponse == nil {
+					continue
+				}
+				raw, marshalErr := json.Marshal(part.FunctionResponse.Response)
+				if marshalErr != nil {
+					completion.Report.Unverified = append(completion.Report.Unverified, "Saved source response unavailable for assessment.")
+					continue
+				}
+				completion.reportBodies["tool-response:"+part.FunctionResponse.ID] = string(raw)
+			}
+		}
+		if interaction != nil {
+			raw, marshalErr := json.Marshal(interaction.Response)
+			if marshalErr != nil {
+				completion.Report.Unverified = append(completion.Report.Unverified, "Owner answer unavailable for assessment.")
+			} else {
+				completion.reportBodies["tool-response:owner-answer:"+interaction.ID.String()] = string(raw)
+			}
+		}
+	}
+	*completed = completion
 	// Preserve observed accounting on every exit, including blocked/failed runs.
 	// The shared budget remains authoritative for children and auxiliary calls.
 	observed := botCompletionReport(completion, req)
@@ -407,6 +477,7 @@ type botConversationSessions struct {
 	userEventID string
 	// The admission ID remains the history boundary; an owner answer is a
 	// distinct durable input, never a replacement for the admitted task.
+	internalInput bool
 	answerEventID string
 }
 
@@ -508,7 +579,7 @@ func (s botConversationSessions) AppendEvent(ctx context.Context, sess session.S
 	if wrapped, ok := sess.(*botConversationSession); ok {
 		if s.userEventID != "" && !e.Partial && e.Content != nil {
 			copy := *e
-			if e.Author == "user" && e.Actions.StateDelta["_astonish_turn_context"] != true {
+			if e.Author == "user" && !s.internalInput && e.Actions.StateDelta["_astonish_turn_context"] != true {
 				copy.ID = s.userEventID
 				if s.answerEventID != "" {
 					copy.ID = s.answerEventID

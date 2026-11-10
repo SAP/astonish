@@ -40,7 +40,10 @@ type triggerExecutionModel struct {
 }
 
 func (*triggerExecutionModel) Name() string { return "controlled" }
-func (m *triggerExecutionModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *triggerExecutionModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool { return w.Candidate.Text == triggerExecutionAnswer }); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		if m.succeed {
@@ -217,7 +220,7 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 		if err != nil || saved.Status != wantStatus || saved.Report.Summary == "" || saved.FinishedAt == nil || llm.calls <= before {
 			t.Fatalf("worker did not execute %+v calls=%d %v", saved, llm.calls, err)
 		}
-		if llm.succeed && (saved.Report.Summary != triggerExecutionAnswer || len(saved.Report.Unverified) != 0 || saved.Usage.ToolCalls != 0 || saved.Usage.InputTokens != 5 || saved.Usage.OutputTokens != 3) {
+		if llm.succeed && (saved.Report.Summary != triggerExecutionAnswer || len(saved.Report.Unverified) != 0 || saved.Usage.ToolCalls != 0 || saved.Usage.InputTokens != 19 || saved.Usage.OutputTokens != 9) {
 			t.Fatalf("successful report/accounting not persisted truthfully: %+v", saved)
 		}
 		events, err := org.ForUser(owner).Sessions().ReadTranscriptEvents(auth, "astonish", owner, saved.SessionID.String())

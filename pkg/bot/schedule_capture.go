@@ -20,6 +20,8 @@ type ScheduleCapture struct {
 	Status      store.BotOperationStatus
 	Revision    int64
 	ObservedAt  time.Time
+	// PayloadJSON is an immutable snapshot of the independently read operation.
+	PayloadJSON string
 }
 
 func (c ScheduleCapture) ValidFor(id execution.BotRunIdentity) bool {

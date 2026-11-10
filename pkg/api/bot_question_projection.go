@@ -25,17 +25,18 @@ func projectBotQuestionTranscript(e *session.Event, approvals []store.BotApprova
 				}
 			}
 		}
-		// Compare the typed publication renderer, not a prefix of arbitrary text.
+		// Compare both current and historical typed renderers, not arbitrary prefixes.
+		// Saved diagnostic receipts remain recognizable after employee prose changes.
 		// Only the known waiting receipt (including its historical ask_user warning)
 		// is redundant. Any additional failure/evidence remains visible.
 		if e.Author == "assistant" && e.InvocationID == "bot-report:"+a.RunID.String() && len(e.Content.Parts) == 1 {
 			waiting := store.BotRun{ID: a.RunID, Status: store.RunWaitingApproval, Report: store.BotReport{Summary: "Question awaits the explicit Bot owner's typed answer; no execution resources are held. Continuation uses the saved conversation under current tool policy.", NeedsApproval: []uuid.UUID{a.ID}}}
 			p := e.Content.Parts[0]
-			if p != nil && p.Text == bot.RenderReport(waiting) {
+			if p != nil && (p.Text == bot.RenderReport(waiting) || p.Text == bot.RenderDiagnosticReport(waiting)) {
 				hide = true
 			}
 			waiting.Report.Unverified = []string{"Tool ask_user returned without independently verified outcome metadata."}
-			if p != nil && p.Text == bot.RenderReport(waiting) {
+			if p != nil && (p.Text == bot.RenderReport(waiting) || p.Text == bot.RenderDiagnosticReport(waiting)) {
 				hide = true
 			}
 		}

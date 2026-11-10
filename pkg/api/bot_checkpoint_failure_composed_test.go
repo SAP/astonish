@@ -21,7 +21,10 @@ import (
 type checkpointHTTPModel struct{ calls int }
 
 func (*checkpointHTTPModel) Name() string { return "checkpoint-http" }
-func (m *checkpointHTTPModel) GenerateContent(_ context.Context, _ *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *checkpointHTTPModel) GenerateContent(_ context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := journeyWorkAssessment(req); ok {
+		return func(yield func(*model.LLMResponse, error) bool) { yield(response, nil) }
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		parts := []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}

@@ -116,7 +116,7 @@ func TestIntegrationPostgresBotChatModel(t *testing.T) {
 			if _, err := f.repo.LoadResumeApproval(ctx, fresh); err != nil {
 				t.Fatal(err)
 			}
-			if err := f.repo.CommitRun(ctx, store.BotRunCommit{Lease: fresh, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Custom answer resumed once"}}); err != nil {
+			if err := f.repo.CommitRun(ctx, store.BotRunCommit{Lease: fresh, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, ctx, fresh, "Custom answer resumed once")}); err != nil {
 				t.Fatal(err)
 			}
 			f.reopenReviewed(t)

@@ -264,10 +264,11 @@ func handleGenerateLinkCode(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "email":
-		// Validate email address
-		emailAddr := strings.TrimSpace(strings.ToLower(req.Email))
-		if emailAddr == "" || !strings.Contains(emailAddr, "@") {
-			respondError(w, http.StatusBadRequest, "valid email address is required")
+		// Omitted recipient means the authenticated account's live email, never
+		// an address supplied by a Bot or cached login profile.
+		emailAddr, err := channelLinkEmail(r.Context(), getPlatformBackend(), user.ID, req.Email)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "valid account email is required; update your profile or provide an email")
 			return
 		}
 

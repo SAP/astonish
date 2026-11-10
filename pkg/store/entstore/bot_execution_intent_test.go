@@ -133,7 +133,7 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 						t.Fatal("draft consume", err)
 					}
 				}
-				if err := repo.CommitRun(c, store.BotRunCommit{Lease: l, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Reply"}}); err != nil {
+				if err := repo.CommitRun(c, store.BotRunCommit{Lease: l, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, c, l, "Reply")}); err != nil {
 					t.Fatal("commit", err)
 				}
 				after, err := repo.Get(ctx, b.ID)

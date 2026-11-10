@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -89,10 +90,17 @@ func (m model) renderBotOverview() string {
 				}
 			}
 		} else {
-			s.WriteString("\nSchedules and lifecycle changes require review in Studio (/bots config).")
+			s.WriteString("\nSchedules and lifecycle changes follow the Bot's delegated authority; exceptional decisions appear in Chat.")
 		}
 		if snap.LatestOutcome != nil {
-			fmt.Fprintf(&s, "\nLatest run: %s [%s]", snap.LatestOutcome.ID, snap.LatestOutcome.Status)
+			fmt.Fprintf(&s, "\nLatest run: %s [%s]\nQuality: %s", snap.LatestOutcome.ID, snap.LatestOutcome.Status, bot.QualitySummary(snap.LatestOutcome.Report.Quality))
+			if q := snap.LatestOutcome.Report.Quality; q != nil && q.SchemaVersion == store.BotWorkSchemaVersion {
+				for _, limitation := range q.Limitations {
+					fmt.Fprintf(&s, "\nUnresolved: %s", limitation)
+				}
+			}
+		} else {
+			s.WriteString("\nNo assessed result yet.")
 		}
 	}
 	s.WriteString("\n\nEsc close · /bots config opens configuration link")

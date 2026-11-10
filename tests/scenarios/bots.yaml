@@ -13,6 +13,13 @@
 # .tmp/employee-external-uncertainty-acceptance.md; Kubernetes remains unverified.
 # Evidence comments below are exact partial references, not qualifying test_refs.
 scenarios:
+  # Quality follow-up (outside the fixed BOTS-001–010 release contract):
+  # local_bot_smoke_launcher.py --verify-bot-quality --config CONFIG.
+  # Six quality receipts plus all 17 fresh employee receipts; no --state.
+  # Coverage remains missing until a fresh real-model invocation proves saved
+  # standards, defective-draft correction, offline recurring assessment, reload,
+  # cadence preservation and changed requirements governing later work.
+
   # Controlled anchor: pkg/api/bot_promotion_handlers_test.go::TestBotReviewedPromotionHTTP
   - id: BOTS-001
     title: "Promote a Chat with only reviewed charter, goals and memory"

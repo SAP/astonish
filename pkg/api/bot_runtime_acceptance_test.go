@@ -76,9 +76,13 @@ type journeyModel struct {
 }
 
 func (*journeyModel) Name() string { return "journey-model" }
-func (m *journeyModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *journeyModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls.Add(1)
+		if response, ok := journeyWorkAssessment(req); ok {
+			yield(response, nil)
+			return
+		}
 		part := &genai.Part{Text: "```astonish-report\npath: reports/receipt.md\n```"}
 		if !m.report {
 			m.report = true
@@ -86,6 +90,40 @@ func (m *journeyModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil)
 	}
+}
+
+// Controlled assessor validates the actual receipt body; it never bypasses the
+// production controller or writes a verdict directly to the store.
+func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
+	if req.Config == nil || req.Config.SystemInstruction == nil || len(req.Config.SystemInstruction.Parts) == 0 || len(req.Contents) != 1 {
+		return nil, false
+	}
+	prompt := req.Config.SystemInstruction.Parts[0].Text
+	var output any
+	if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+		var contract store.BotWorkContract
+		_ = json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &contract)
+		sources := []string{"assignment", "charter"}
+		for _, a := range contract.Attachments {
+			sources = append(sources, a.SourceID)
+		}
+		for _, g := range contract.Goals {
+			sources = append(sources, "goal:"+g.ID.String())
+		}
+		output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "receipt", SourceIDs: sources, Text: "Execute the exact approved action and report the observed receipt."}}}
+	} else if strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
+		var work store.BotWorkState
+		_ = json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work)
+		verdict := store.BotCriterionUnverified
+		if work.Candidate != nil && work.Candidate.Text == "Exact approved action receipt observed." && len(work.Candidate.Observations) > 0 && len(work.Candidate.Artifacts) == 1 && work.Candidate.Bodies[work.Candidate.Artifacts[0].ID.String()] == work.Candidate.Text {
+			verdict = store.BotCriterionSatisfied
+		}
+		output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "receipt", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected captured receipt and actual observed effect."}}}
+	} else {
+		return nil, false
+	}
+	raw, _ := json.Marshal(output)
+	return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 }
 
 type journeyClassifier struct{}
@@ -567,7 +605,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		if q.Target != target || !strings.Contains(q.Body, "Exact receipt read back") {
+		if q.ID == uuid.Nil || q.BotID != b.ID || q.RunID != runID || q.Decision != store.NotificationSend || q.Target != target || q.Body != "Exact approved action receipt observed.\n" {
 			t.Errorf("wrong publication: %+v", q)
 		}
 		sends.Add(1)
@@ -703,6 +741,9 @@ type chatFirstModel struct{ requests []string }
 
 func (*chatFirstModel) Name() string { return "chat-first" }
 func (m *chatFirstModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool { return w.Candidate.Text == "Acknowledged safely" }); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		raw, _ := json.Marshal(req.Contents)
 		m.requests = append(m.requests, string(raw))

@@ -1,5 +1,19 @@
 # Bot interactive question checkpoints
 
+## Work assessment continuity
+
+A question suspends the existing producing/repairing phase; its pinned original
+assignment, criteria and consumed repair count remain unchanged. On authorized
+continuation the controller includes captured saved tool responses and the typed
+owner answer as untrusted assessment data, in addition to the new candidate.
+Internal correction prompts have distinct transcript identities and never replace
+the original owner admission or answer. Prior observations and uncertainty are
+aggregated once. A semantic quality pass cannot override uncertain execution.
+Exact-action continuation remains one approved invocation plus tool-free reporting
+and assessment: failed assessment reports the gap, never another action or read.
+Interrupted work is not automatically replayed. `TestBotInteractiveQuestionHTTPAcceptance`
+checks actual answer content reaches inspection before the final commit.
+
 ## Chat-first combined decision
 
 The compact review path uses `POST .../approvals/{approvalID}/approve-and-continue` to approve the saved digest/typed response and request the matching checkpoint continuation together. It cannot authorize unrelated actions or activate a paused Bot. The legacy `/decision` followed by explicit run resume remains compatible; descriptions below of decision-only behavior refer to that legacy path. See [Chat-first contracts](bot-chat-first.md).

@@ -72,11 +72,11 @@ func TestBotSupervisorExecutesValidatedExternalAdmissions(t *testing.T) {
 				if err != nil || !input.ExternalAdmissionValidated {
 					t.Fatalf("missing persisted admission: %+v %v", input, err)
 				}
-				adapter := &runtimeTestAdapter{start: func(_ context.Context, q botdomain.RunRequest, _ botdomain.EventSink) (botdomain.RunResult, error) {
+				adapter := &runtimeTestAdapter{start: func(c context.Context, q botdomain.RunRequest, _ botdomain.EventSink) (botdomain.RunResult, error) {
 					if q.Instructions != def.Instructions || q.Run.Trigger != kind {
 						t.Fatal("dispatch input replaced saved admission")
 					}
-					return botdomain.RunResult{Status: store.RunSucceeded, Report: store.BotReport{Summary: "Executed validated admission"}}, nil
+					return botdomain.RunResult{Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, c, q.Run.Lease, "Executed validated admission")}, nil
 				}}
 				// Neither an external kind alone nor a validated marker without the
 				// persisted trigger identity is enough to execute.

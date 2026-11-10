@@ -35,7 +35,7 @@ func TestBotAuthorizedScheduleQueuedReconciliation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 					t.Fatal(err)
 				}
 				if _, err = s.ApplyAuthorizedOperation(context.Background(), q.MandateRef, pending.ID); err != nil {
@@ -156,7 +156,7 @@ func exerciseQueuedScheduleReconciliation(t *testing.T, r *botRepository, s *bot
 		if e != nil {
 			t.Fatal(e)
 		}
-		if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "same occurrence executed once"}}); err != nil {
+		if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "same occurrence executed once")}); err != nil {
 			t.Fatal(err)
 		}
 		if err = s.RevokeBotMandate(owner, pin); err != nil {

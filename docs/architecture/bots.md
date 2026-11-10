@@ -1,5 +1,17 @@
 # Bots inside Chat
 
+## Durable work requirements (implementation in progress)
+
+First claims now pin the saved assignment, charter and goal identities/revisions into the private run JSON envelope. `BotWorkStore` reads and updates this state only under the current scoped worker identity, live lease and revision CAS. Reads return detached copies; updates cannot replace source requirements or rewrite an already submitted candidate. Public run JSON does not expose the private work record. Existing reports and in-flight legacy continuations are not retroactively assessed.
+
+The bounded state machine is preparing → producing → candidate-ready → reviewing → accepted, with reviewing → repair-ready → repairing → candidate-ready for at most two corrections. Missing evidence or limits produce blocked work; recovery records interruption without replaying effects. Criteria retain source references and exclusions of unrelated goals require reasons. Assignment and charter cannot be excluded. The assessment input limit is 32 KiB of source contract, 64 criteria and 1 MiB of candidate content; oversized sources are retained with an explicit blocker, never silently dropped to obtain a pass.
+
+Internal work preparation and review calls carry a typed `bot.ModelCallPurposeAssessment` context value. Launcher reads it before owner rebinding and omits only producer control-prompt enrichment; the assessor system remains exact. Both live binding checks, owner scope, isolation, the wrapped provider and shared run budget remain unchanged. Purpose is not an authorization grant and is never inferred from prompt text.
+
+Candidate digests bind actual captured text, artifact bytes and observation references. Semantic model assessment is distinct from mechanical observation and is not an authorization grant or factual proof. Successful runtime/tool execution alone is not an assessment. The optional public `BotReport.Quality` contract is additive; absent quality means not assessed. Run-owned work is retained and purged with its existing run envelope, without new tables, schema migration, global skill storage or separate retention machinery.
+
+At this stage only persistence and validation are implemented. The review controller, publication enforcement and Studio/terminal projection remain subsequent implementation phases; this section does not claim live employee-quality acceptance or close earlier release limitations.
+
 ## Employee operations status — 2026-11-09
 
 **Owned employee acceptance is VERIFIED 17/17; production external-effect acceptance remains BLOCKED.** `.tmp/employee-writer-live.md` and `.tmp/employee-writer-final-status.json` record launcher `1bce8324` exit 0 at 15:00:54 UTC on fresh candidate `e3d37bb03f12eef37a912f5c13b114256c0f33e74617cdfac2a5917331b1bad7`, Bot `a3975bd1-0c26-4cc4-a635-ee040d7b2b64` / Home `c8457742-dbee-46fc-9d2e-551555571163`. Title-first useful work, legacy read/adoption, natural scheduling, restart before login, routine memory/cadence, pause/resume with historically disabled recurrence preserved, denial/no-repeat, a newly approved local effect once, and hard-delete/peer preservation have candidate-bound evidence. The main Bot/Home were deleted by acceptance. Canonical writer-namespace observations show 13 succeeded runs and 1 interrupted run; terminal is not synonymous with succeeded. See the [seventeen-check reconciliation](bot-release-checklist.md#employee-operations-final-gate-boundary--2026-11-09) for exact receipts and physical-volume validation.

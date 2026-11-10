@@ -31,7 +31,7 @@ func reviewedControl(t *testing.T, r *botRepository, ctx context.Context, payloa
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review ready"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "review ready")}); err != nil {
 		t.Fatal(err)
 	}
 	applied, err := r.ConfirmControlProposal(ctx, store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest})
@@ -45,7 +45,7 @@ func TestBotControlProposalScheduleGoalConfiguration(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			r, ctx, worker, run, lease, _ := botRunFixture(t, scope)
-			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+			if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "done")}); err != nil {
 				t.Fatal(err)
 			}
 			b, _ := r.Get(ctx, run.BotID)
@@ -119,7 +119,7 @@ func TestBotControlProposalConcurrentDecision(t *testing.T) {
 			if _, err = r.ConfirmControlProposal(worker, d); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("worker: %v", err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 				t.Fatal(err)
 			}
 			var wg sync.WaitGroup

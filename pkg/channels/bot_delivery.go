@@ -17,6 +17,13 @@ func (m *ChannelManager) SendBotNotification(ctx context.Context, authority stor
 	if err := authority.AuthorizeBotDelivery(ctx, id, binding); err != nil {
 		return err
 	}
+	if binding.Channel == store.BotDeliveryChannelEmail {
+		if m == nil || !m.Status()[store.BotDeliveryChannelEmail].Connected {
+			return fmt.Errorf("%w: email channel transport is not configured or connected", store.ErrBotUnsupported)
+		}
+		// Reply resolves recipients from mailbox content; use only the reviewed address.
+		message.ReplyTo = ""
+	}
 	target := Target{ChannelID: binding.Channel, ChatID: binding.ChatID, ThreadID: binding.ThreadID}
 	message.ThreadID = binding.ThreadID
 	return m.Send(ctx, target, message)

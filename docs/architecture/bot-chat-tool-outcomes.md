@@ -1,5 +1,58 @@
 # Interactive Chat tool outcome accounting
 
+## Bounded deliverable assessment
+
+For work-enabled Bot runs, `runBotWork` loads the lease-scoped pinned contract
+before production. A tool-free preparation call extracts source-linked criteria;
+every candidate is captured and persisted before a separate tool-free inspection.
+Inspection receives original requirements, actual tool/source/delegate responses,
+immutable artifact bodies and mechanical observations. A successful write is not
+a quality verdict, and delegated output is still candidate work.
+
+At most two correction attempts are consumed durably before execution. Each uses
+a fresh ChatRunner and invocation identity, but one active-run registration,
+resource cleanup, ordered event sequence, authority and shared budget. Preparation,
+inspection, children and compaction all use the same owner-bound metered model.
+Malformed/forged assessments, missing evidence, oversized inputs, unavailable
+work storage and exhausted limits cannot produce an accepted result. Model
+judgments are explicitly `model_assessment`, never mechanical attestations.
+Prior unverified effects remain partial even after content passes inspection;
+uncertain effects prevent corrective replay. Exact-action continuations cannot
+perform additional repairs or reads. The repository separately verifies the exact
+accepted candidate and quality identity at commit, then publishes the final report.
+
+`TestBotWorkRuntimeHTTPAcceptance` uses real HTTP admission/readback, personal/team
+SQLite, worker, factory and ChatRunner with a controlled provider. It forces
+fail→repair→pass, finite exhaustion, malformed/forged verdicts, missing evidence
+and authority revocation. `TestBotWorkControllerSafety` additionally covers captured
+source content, unavailable storage, exact-action limits, unknown-effect no-replay,
+interruption and a real shared BudgetLLM denying review. These controlled tests
+are not real-model semantic certification or deployment evidence.
+
+## Factory dependency timeouts
+
+Factory setup errors matching `context.DeadlineExceeded` are failed attempts,
+not interrupted runs, while the worker-owned run context remains healthy. The
+report and error message identify a setup dependency timeout without exposing
+endpoint URLs; the wrapped cause remains available for diagnostics. Actual run
+cancellation/deadline classification, terminal-attempt behavior, retries and
+authority are unchanged. `TestBotChatRuntimeAdapterFactoryDependencyTimeout`
+exercises a short HTTP client timeout, zero model/tool usage, cleanup and a fresh
+successful run; `TestBotChatRuntimeAdapterFactoryRunInterruption` preserves true
+cancellation and the adapter-owned deadline.
+
+## Known unavailable web sources
+
+The pinned built-in `web_fetch` transport also records a completed non-2xx
+HTTP response (with valid status, final URL and body) as an unchanged observation:
+**requested source unavailable**, not successful retrieval. This prevents a known
+401/429 read failure from being misclassified as an uncertain write/send and
+blocking an otherwise assessed alternate-source result. The raw response and
+limitation remain available to the reviewer; required missing information still
+fails assessment. Transport errors, malformed responses, unknown tools and
+non-read HTTP methods retain their existing uncertainty handling. This does not
+certify article freshness or relax the final assessment/publication gate.
+
 ## Routine control capture
 
 Mandated routine controls use server-only `bot.RoutineCapture` metadata, separate from schedule captures and applied-operation receipts. `launcher.verifyRoutineCapture` compares an independent authorized-operation read with the enqueue result and request, including pending/execute state, payload digest, source run, owner, mandate, idempotency key and provenance. Missing, mismatched or already-applied routine readback cannot produce a pending attestation. The per-call ledger snapshots and consumes metadata once; returned JSON cannot create it.

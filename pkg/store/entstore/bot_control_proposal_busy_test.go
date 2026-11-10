@@ -56,7 +56,7 @@ func TestBotControlProposalBusyRetry(t *testing.T) {
 				if _, err = r.ConfirmControlProposal(ctx, bad); !errors.Is(err, store.ErrBotConflict) || errors.Is(err, store.ErrBotBusy) {
 					t.Fatalf("digest mismatch must remain changed: %v", err)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 					t.Fatal(err)
 				}
 				original := r.db

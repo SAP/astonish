@@ -16,7 +16,7 @@ import (
 func remainingProposal(t *testing.T, scope store.BotScope, op store.BotControlOperation, status store.BotStatus) (*botRepository, context.Context, *store.BotControlProposal) {
 	t.Helper()
 	r, ctx, worker, run, lease, _ := botRunFixture(t, scope)
-	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "done")}); err != nil {
 		t.Fatal(err)
 	}
 	if status != store.BotActive {
@@ -81,7 +81,7 @@ func remainingProposal(t *testing.T, scope store.BotScope, op store.BotControlOp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review ready"}}); err != nil {
+	if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "review ready")}); err != nil {
 		t.Fatal(err)
 	}
 	return r, ctx, p

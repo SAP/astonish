@@ -140,6 +140,7 @@ func ValidateVersion(v store.BotVersion) error {
 }
 
 type RunRequest struct {
+	Work          *store.BotWorkState
 	Mandate       *MandateExecution
 	Bot           store.Bot
 	Version       store.BotVersion

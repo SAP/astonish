@@ -53,6 +53,7 @@ func publicationFixture(t *testing.T, scope store.BotScope, report store.BotRepo
 	}
 	version.Delivery = store.DeliveryPolicy{Notify: store.NotifyOnChange, Preferences: prefs, Bindings: []store.BotChannelBinding{binding}}
 	seedPublicationVersion(t, repo, ctx, *version)
+	report.Quality = acceptedWorkReport(t, repo, worker, lease, report.Summary).Quality
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report}); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +208,7 @@ func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, wor
 	if err := repo.ConsumeApproval(worker, store.BotApprovalConsumption{Lease: fresh, ApprovalID: approval.ID, Version: run.Version, ActionDigest: digest}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: fresh, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Final verified outcome"}}); err != nil {
+	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: fresh, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, fresh, "Final verified outcome")}); err != nil {
 		t.Fatal(err)
 	}
 	final, err := publisher.Publish(ctx, run.BotID, run.ID)
@@ -257,11 +258,35 @@ func TestBotPublicationNoChange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.EventID != second.EventID || !strings.Contains(first.Text, "stable observation") || len(notifier.calls) != 0 || second.Notifications[0].State != store.BotNotificationSkipped {
+			if first.EventID != second.EventID || first.ReportSequence == 0 || first.ReportSequence != second.ReportSequence || first.Text != "No change\n" || second.Text != first.Text || len(notifier.calls) != 0 || len(second.Notifications) != 1 || second.Notifications[0].State != store.BotNotificationSkipped {
 				t.Fatalf("unexpected publication %+v calls=%d", second, len(notifier.calls))
 			}
-			if count := publicationTranscriptCount(t, repo, ctx, run.BotID); count != 1 {
-				t.Fatalf("home transcript count=%d", count)
+			for _, unwanted := range []string{"Run report", run.ID.String(), "stable observation", "Quality assessment"} {
+				if strings.Contains(second.Text, unwanted) {
+					t.Errorf("diagnostic %q leaked into employee message", unwanted)
+				}
+			}
+			saved, err := repo.GetRun(ctx, run.BotID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.Report.Summary != "No change" || len(saved.Report.Unchanged) != 1 || saved.Report.Unchanged[0].Summary != "stable observation" {
+				t.Fatalf("lost unchanged evidence: %+v", saved.Report)
+			}
+			if !strings.Contains(botdomain.RenderDiagnosticReport(*saved), "stable observation") {
+				t.Error("diagnostic rendering lost unchanged evidence")
+			}
+			b, err := repo.Get(ctx, run.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := reviewTranscript(t, ctx, repo, *b)
+			if len(rows) != 1 {
+				t.Fatalf("home transcript count=%d", len(rows))
+			}
+			e := rows[0].Event
+			if e == nil || e.ID != second.EventID || e.Author != "assistant" || e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil || e.Content.Parts[0].Text != second.Text {
+				t.Fatalf("not a canonical employee message: %+v", e)
 			}
 		})
 	}

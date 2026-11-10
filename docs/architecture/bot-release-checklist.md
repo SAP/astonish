@@ -1,5 +1,13 @@
 # Bot specification traceability and release checklist
 
+## Quality ownership gate — 2026-11-10
+
+Latest retry: network capacity was restored through separately authorized exact unused acceptance-network removal. Candidate `3eb1a6420c5d951eec44e35df184f7dab24ffd52838bb3058df178bc3c0afc27` fetched actual weather and passed three early employee checks, then stopped on non-JSON pending-control assessment output from the configured proxy/model despite explicit schema forwarding. Source capture happened once and correction did not replay it; output remained partial. The owned daemon was stopped (exited 0), evidence retained in `.tmp/astonish-chat-first-3frthzdz` and `.tmp/bot-employee-results.md`. Provider constrained-output reliability and the complete live quality journey remain unverified. The network failure below is historical, not the latest blocker.
+
+Persistent requirements, bounded review/correction, draft-safe publication and Studio/terminal quality projection passed their controlled phase gates. Full Go tests, lint, frontend checks and focused races also passed. This does not establish real-model recurring quality: the fresh `--verify-bot-quality` attempt on candidate `03e8d12dbfa623337e2d231fcda67e03e7a46f174890752ed316e12f4b2bd09a` exited 1 before Bot model/tool execution because Docker could not allocate the new organization's network (`all predefined address pools have been fully subnetted`). The uniquely owned test daemon was stopped and observed exited 0; no shared cleanup or normal-daemon deployment was performed. Evidence and exact resource identity are retained in `.tmp/bot-employee-results.md` and `.tmp/astonish-chat-first-qlu4wh8d`.
+
+The live quality gate remains blocked, PostgreSQL work-state testing is compiled but unexecuted, and the external-effect/Kubernetes/deployed release obligations below remain unchanged. A new fresh invocation after separately authorized capacity remediation is required; old employee receipts and controlled assessments cannot satisfy it.
+
 ## Employee operations final-gate boundary — 2026-11-09
 
 **Owned employee acceptance: VERIFIED 17/17; production external-effect acceptance: BLOCKED.** `.tmp/employee-writer-live.md` records launcher `1bce8324` exit 0 at 15:00:54 UTC; `.tmp/employee-writer-final-status.json` and `employee-writer-final-receipts.json` bind all seventeen checks to candidate `e3d37bb03f12eef37a912f5c13b114256c0f33e74617cdfac2a5917331b1bad7`, root `.tmp/astonish-chat-first-bz706voj`, writer container `eab3723e7a51bfaff8106d358953d03ca835c6a6fe884eaf49c732867545423c`, Bot `a3975bd1-0c26-4cc4-a635-ee040d7b2b64` and Home `c8457742-dbee-46fc-9d2e-551555571163`. This is the updated seventeen-check final-phase contract, not fourteen checks or a union of old candidates.

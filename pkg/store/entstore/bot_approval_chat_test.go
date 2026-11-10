@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,64 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
+
+// approvalWorkAssessmentModel keeps assessment outside the scripted action turns.
+// These fixtures prove durable authority/continuation, not external-effect quality:
+// a controlled read/write receipt alone must never become verified completion.
+type approvalWorkAssessmentModel struct{ model.LLM }
+
+func (m approvalWorkAssessmentModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	var prompt string
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			prompt += part.Text
+		}
+	}
+	prepare := strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1")
+	if !prepare && !strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
+		return m.LLM.GenerateContent(ctx, req, stream)
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 {
+			yield(nil, store.ErrBotInvalid)
+			return
+		}
+		input := []byte(req.Contents[0].Parts[0].Text)
+		var output any
+		if prepare {
+			var contract store.BotWorkContract
+			if err := json.Unmarshal(input, &contract); err != nil {
+				yield(nil, err)
+				return
+			}
+			sources := []string{"assignment", "charter"}
+			for _, a := range contract.Attachments {
+				sources = append(sources, a.SourceID)
+			}
+			for _, goal := range contract.Goals {
+				sources = append(sources, "goal:"+goal.ID.String())
+			}
+			output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "approved-work", SourceIDs: sources, Text: contract.Instructions}}}
+		} else {
+			var work store.BotWorkState
+			if err := json.Unmarshal(input, &work); err != nil {
+				yield(nil, err)
+				return
+			}
+			if work.Candidate == nil || len(work.Criteria) != 1 {
+				yield(nil, store.ErrBotInvalid)
+				return
+			}
+			output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: work.Criteria[0].ID, Verdict: store.BotCriterionUnverified, Method: store.BotAssessmentModel, Explanation: "Controlled tool receipt does not independently verify the requested external outcome."}}}
+		}
+		raw, err := json.Marshal(output)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), TurnComplete: true}, nil)
+	}
+}
 
 type approvalModel struct {
 	calls  int
@@ -117,8 +176,8 @@ func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
 	}
 	makeSupervisor := func(llm model.LLM) *bot.Supervisor {
 		adapter, err := api.NewBotChatRuntimeAdapter(func(_ context.Context, _ bot.RunRequest) (*api.BotChatResources, error) {
-			chat := agent.NewChatAgent(llm, []tool.Tool{action}, nil, ss, &agent.SystemPromptBuilder{}, false, false)
-			return &api.BotChatResources{Agent: chat, SessionService: ss, AppName: "astonish", Cleanup: func() {}}, nil
+			chat := agent.NewChatAgent(approvalWorkAssessmentModel{LLM: llm}, []tool.Tool{action}, nil, ss, &agent.SystemPromptBuilder{}, false, false)
+			return &api.BotChatResources{Work: scoped.(store.BotWorkStore), Agent: chat, SessionService: ss, AppName: "astonish", Cleanup: func() {}}, nil
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -167,7 +226,7 @@ func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
 	}
 	final := &approvalModel{report: true}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Report.Summary != "Exact receipt observed." || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
+	if err != nil || result.Status != store.RunPartial || !strings.HasPrefix(result.Report.Summary, "Work could not be verified:") || len(result.Report.Unverified) == 0 || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
 		t.Fatalf("result=%+v err=%v prior=%d sent=%d model=%d", result, err, prior.Load(), sent.Load(), final.calls)
 	}
 	scoped, ss = reopen()

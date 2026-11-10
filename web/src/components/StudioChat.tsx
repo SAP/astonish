@@ -32,7 +32,8 @@ import HarnessPanel from './chat/HarnessPanel'
 import HarnessPlaceholder from './chat/HarnessPlaceholder'
 import ChatErrorBoundary from './chat/ChatErrorBoundary'
 import QuestionCard from './chat/questions/QuestionCard'
-import { mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
+import { isBotOperation, mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
+import { projectBotOperation } from './chat/botOperationProjection'
 import BotOperationResult from './bots/BotOperationResult'
 import { mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
@@ -357,8 +358,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const [botSubmitting, setBotSubmitting] = useState(false)
   const [botSendError, setBotSendError] = useState('')
   const [botRunStates, setBotRunStates] = useState<BotRunStates>({})
+  const [botReplayComplete, setBotReplayComplete] = useState(false)
   const [botOperations, setBotOperations] = useState<BotOperations>({})
-  useEffect(() => { setBotOperations({}); setBotRunStates({}) }, [botThread?.botId, initialSessionId])
+  useEffect(() => { setBotOperations({}); setBotRunStates({}); setBotReplayComplete(false) }, [botThread?.botId, initialSessionId])
   useEffect(() => {
     if (!botThread || !initialSessionId) return
     setBotOperations(prev => (botThread.operations || []).reduce((states, state) => mergeBotOperation(states, state, botThread.botId, initialSessionId!), prev))
@@ -400,19 +402,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // Chat state
   const [messages, setMessages] = useState<ChatMsg[]>([])
   useEffect(() => {
-    if (!botThread || botConnection !== 'live') return
-    setMessages(prev => {
-      let next = prev
-      for (const operation of Object.values(botOperations)) {
-        if (next.some(m => m.type === 'bot_operation' && m.operationId === operation.operation_id)) continue
-        const source = operation.source_user_event_id
-        const at = source && source !== '00000000-0000-0000-0000-000000000000' ? next.findIndex(m => m.type === 'user' && m.eventId === source) : -1
-        const card: ChatMsg = { type: 'bot_operation', operationId: operation.operation_id, eventId: `operation/${operation.operation_id}` }
-        next = at < 0 ? [...next, card] : [...next.slice(0, at + 1), card, ...next.slice(at + 1)]
-      }
-      return next
-    })
-  }, [botOperations, botConnection, botThread?.botId])
+    if (!botThread || !botReplayComplete) return
+    setMessages(prev => Object.values(botOperations).filter(operation => operation.bot_id === botThread.botId && operation.home_session_id === initialSessionId).reduce((next, operation) => projectBotOperation(next, operation), prev))
+  }, [botOperations, botReplayComplete, botThread?.botId, initialSessionId])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [activeAppId, setActiveAppId] = useState<string | null>(null) // ID of app currently being refined
@@ -1159,6 +1151,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     // retry replays persisted events into the existing reducers.
     if (attempt === 0) {
       setMessages([])
+      setBotReplayComplete(false)
       setSessionArtifacts([])
       setSessionStartTime(Date.now())
     }
@@ -1167,7 +1160,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     const streamGen = ++streamGenRef.current
 
     const connectStream: typeof connectChatStream = botThreadRef.current
-      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; setBotConnection(state); setBotCursor(cursor) } })
+      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); setBotConnection(state); setBotCursor(cursor) } })
       : connectChatStream
     const controller = connectStream({
       sessionId,
@@ -1179,7 +1172,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           setMessages(finalizeStreamingAgentText)
         }
         if (botThreadRef.current && eventType === 'bot_operation') {
-          setBotOperations(prev => mergeBotOperation(prev, data, botThreadRef.current!.botId, sessionId))
+          const botId = botThreadRef.current.botId
+          if (!isBotOperation(data) || data.bot_id !== botId || data.home_session_id !== sessionId) return
+          const previous = botOperationsRef.current[data.operation_id]
+          if (previous && (data.revision < previous.revision || data.state_sequence < previous.state_sequence)) return
+          const heads = mergeBotOperation(botOperationsRef.current, data, botId, sessionId)
+          botOperationsRef.current = heads
+          setBotOperations(heads)
+          // Replay placement is independent of head advancement: snapshots can
+          // preload this exact head before its durable transcript row arrives.
+          setMessages(prev => projectBotOperation(finalizeStreamingAgentText(prev), heads[data.operation_id], true))
           return
         }
         if (botThreadRef.current && eventType === 'bot_run_state') {
@@ -2830,7 +2832,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
                 // Stable key per soft+tool run so content replace doesn't remount chrome
                 return (
-                  <div key={`${activeSessionId}-agent-${index}`} className="space-y-1 min-w-0" data-message-index={index}>
+                  <div key={`${activeSessionId}-agent-${index}`} className="space-y-1 min-w-0" data-message-index={index} data-operation-id={msg.operationId}>
                     <div className="flex items-center justify-between">
                       <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
                       <div className="flex gap-1">

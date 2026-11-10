@@ -205,6 +205,15 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		}
 		now := publicationTime(q.Now, r)
 		p := &store.BotPublication{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: botdomain.RenderReport(saved.Run), PublishedAt: now}
+		if ack := saved.Run.Report.Acknowledgment; ack != nil && ack.Kind == store.BotReportAcknowledgmentSchedulePending && len(ack.OperationIDs) > 0 {
+			p.Suppressed = true
+			p.Text = ""
+			if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
+				return err
+			}
+			result = p
+			return nil
+		}
 		// A committed schedule receipt is a distinct source-bound Home event, not
 		// the model's conversational reply, and never authorizes delivery.
 		scheduleReceipt, err := authorizedSchedulePublication(ctx, tx, rec, q.RunID, sequence)
@@ -226,8 +235,12 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			evaluation.Decision = store.NotificationSkip
 			evaluation.Reason = "Owner conversation does not authorize external notifications"
 		}
+		stored, err := tx.ReadRun(ctx, q.BotID, q.RunID)
+		if err != nil {
+			return err
+		}
 		var reply *adksession.Event
-		if !scheduleReceipt && saved.Run.UsesHomeHistory() && saved.Run.Status == store.RunSucceeded {
+		if stored.Work == nil && !scheduleReceipt && saved.Run.UsesHomeHistory() && saved.Run.Status == store.RunSucceeded {
 			reply, err = persistedConversationReply(ctx, tx, rec.Bot, saved.Run)
 			if err != nil {
 				return err

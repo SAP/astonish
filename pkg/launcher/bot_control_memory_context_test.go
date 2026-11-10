@@ -28,6 +28,8 @@ func TestBotCurrentMemoryCorrectionTargets(t *testing.T) {
 			f.req.Bot.Scope = scope
 			r := botMemoryTargetRepo{repo}
 			f.services.Bots, f.services.PersonalBots = r, r
+			goal := store.BotGoal{ID: uuid.New(), BotID: f.req.Bot.ID, Revision: 3, Title: "Delivery responsibility", CompletionCriteria: "Committed standard: cite the delivery source"}
+			repo.goals = []store.BotGoal{goal}
 			row := store.MemorySearchResult{ID: uuid.NewString(), Snippet: "Delivery is Friday", Category: "facts", SessionID: f.req.Run.SessionID.String(), Scope: string(scope)}
 			memory := &botPromptMemoryStore{rows: []store.MemorySearchResult{row}}
 			f.services.Memory = memory
@@ -51,6 +53,9 @@ func TestBotCurrentMemoryCorrectionTargets(t *testing.T) {
 				if !strings.Contains(system, want) {
 					t.Errorf("provider context missing %q: %s", want, system)
 				}
+			}
+			if !strings.Contains(system, goal.CompletionCriteria) || repo.goals[0].CompletionCriteria != goal.CompletionCriteria || repo.goals[0].Revision != goal.Revision {
+				t.Fatal("memory correction displaced or mutated repository responsibility")
 			}
 			if strings.Contains(system, store.MemoryContentFingerprint(row)) || strings.Contains(system, "Delivery is Friday") {
 				t.Fatal("stale memory source reached provider")

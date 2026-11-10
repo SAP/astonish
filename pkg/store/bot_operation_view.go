@@ -11,6 +11,21 @@ import (
 const BotOperationViewSchemaVersion = 1
 const BotOperationKey = "bot_operation"
 
+type BotOperationPresentation string
+
+const (
+	BotOperationPresentationInternal     BotOperationPresentation = "internal"
+	BotOperationPresentationConversation BotOperationPresentation = "conversation"
+)
+
+func isScheduleOperation(op BotControlOperation) bool {
+	switch op {
+	case BotControlScheduleCreate, BotControlScheduleEdit, BotControlSchedulePause, BotControlScheduleRemove:
+		return true
+	}
+	return false
+}
+
 type BotMandateSummary struct {
 	Available bool `json:"available"`
 }
@@ -35,6 +50,7 @@ type BotOperationScheduleView struct {
 
 // BotOperationView is a closed presentation allowlist, never execution authority.
 type BotOperationView struct {
+	Presentation      BotOperationPresentation   `json:"presentation,omitempty"`
 	SchemaVersion     int                        `json:"schema_version"`
 	BotID             uuid.UUID                  `json:"bot_id"`
 	HomeSessionID     uuid.UUID                  `json:"home_session_id"`
@@ -53,6 +69,23 @@ type BotOperationView struct {
 }
 
 func (v BotOperationView) Validate() error {
+	if v.Presentation != "" {
+		if !isScheduleOperation(v.Operation) || v.Decision == BotOperationRequireAuthorization {
+			return ErrBotInvalid
+		}
+		switch v.Presentation {
+		case BotOperationPresentationInternal:
+			if v.Status != BotOperationPending && v.Status != BotOperationApplying {
+				return ErrBotInvalid
+			}
+		case BotOperationPresentationConversation:
+			if v.Status == BotOperationPending || v.Status == BotOperationApplying || (v.Status == BotOperationApplied && v.VerifiedSchedule == nil) {
+				return ErrBotInvalid
+			}
+		default:
+			return ErrBotInvalid
+		}
+	}
 	if v.SchemaVersion != BotOperationViewSchemaVersion || v.BotID == uuid.Nil || v.HomeSessionID == uuid.Nil || v.OperationID == uuid.Nil || v.Revision < 1 || v.StateSequence < 1 || !v.Status.Valid() || !v.Decision.Valid() {
 		return ErrBotInvalid
 	}
@@ -104,7 +137,45 @@ func ProjectBotOperation(b Bot, o BotOperation, sequence int64) (BotOperationVie
 		}
 		v.Exception = &BotOperationExceptionView{OperationID: e.OperationID, PayloadDigest: e.PayloadDigest, ExpiresAt: e.ExpiresAt, Fields: botOperationFields(o.Payload)}
 	}
+	if isScheduleOperation(o.Payload.Operation) && o.Decision != BotOperationRequireAuthorization {
+		switch o.Status {
+		case BotOperationPending, BotOperationApplying:
+			v.Presentation = BotOperationPresentationInternal
+		case BotOperationApplied:
+			if v.VerifiedSchedule != nil {
+				v.Presentation = BotOperationPresentationConversation
+				v.Summary = scheduleOperationSummary(o.Payload, *v.VerifiedSchedule)
+			}
+		case BotOperationFailed, BotOperationBlocked:
+			v.Presentation = BotOperationPresentationConversation
+			v.Summary = "I couldn't complete the schedule change. No schedule change was verified."
+		case BotOperationCancelled:
+			v.Presentation = BotOperationPresentationConversation
+			v.Summary = "The schedule change was cancelled."
+		}
+	}
 	return v, v.Validate()
+}
+
+func scheduleOperationSummary(p BotControlPayload, s BotOperationScheduleView) string {
+	if s.Removed {
+		return "I've removed the schedule."
+	}
+	if !s.Enabled {
+		return "I've paused the schedule."
+	}
+	verb := "updated"
+	if p.Operation == BotControlScheduleCreate {
+		verb = "created"
+	}
+	summary := "I've " + verb + " the schedule."
+	if p.Schedule != nil && p.Schedule.Trigger.Cron == "* * * * *" {
+		summary += " It runs every minute."
+	}
+	if s.NextRun != nil {
+		summary += " Next run: " + s.NextRun.UTC().Format("2006-01-02 15:04 UTC") + "."
+	}
+	return summary
 }
 func NewBotOperationEvent(v BotOperationView, at time.Time) (*session.Event, error) {
 	if err := v.Validate(); err != nil {

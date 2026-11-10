@@ -14,6 +14,41 @@ import (
 	"github.com/google/uuid"
 )
 
+// reviewedRecoveryReply supplies a controlled text assessment for a lifecycle
+// test that has no model. It uses the actual fenced work transition contract.
+func reviewedRecoveryReply(t *testing.T, repo store.BotStore, ctx context.Context, lease store.BotLease, text string) store.BotReport {
+	t.Helper()
+	ws := repo.(store.BotWorkStore)
+	w, err := ws.LoadWork(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := func(n *store.BotWorkState) {
+		t.Helper()
+		w, err = ws.SaveWork(ctx, store.BotWorkUpdate{Lease: lease, ExpectedRevision: w.Revision, State: *n})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := w.Clone()
+	n.Phase = store.BotWorkProducing
+	n.Criteria = []store.BotWorkCriterion{{ID: "reply", SourceIDs: []string{"assignment", "charter"}, Text: "Reply without tools"}}
+	save(n)
+	n = w.Clone()
+	n.Phase = store.BotWorkCandidateReady
+	n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: text}
+	n.Candidate.Digest = n.Candidate.ContentDigest()
+	save(n)
+	n = w.Clone()
+	n.Phase = store.BotWorkReviewing
+	save(n)
+	n = w.Clone()
+	n.Phase = store.BotWorkAccepted
+	n.Review = &store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "reply", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Controlled tool-free reply"}}}
+	save(n)
+	return store.BotReport{Summary: text, Quality: &store.BotQualityReport{SchemaVersion: w.SchemaVersion, WorkRevision: w.Revision, RequirementsDigest: w.RequirementsDigest, CandidateDigest: w.Candidate.Digest, Outcome: w.Phase, Criteria: w.Review.Criteria}}
+}
+
 func TestBotWorkerResumedBudgetExhausted(t *testing.T) {
 	cap := int64(4)
 	started := time.Now().Add(-time.Second)
@@ -205,7 +240,7 @@ func testBotWorkerRecoveryAfterReopen(t *testing.T, paused bool) {
 				if err = repo.CommitRun(workerCtx, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded}); err == nil {
 					t.Fatal("stale worker committed")
 				}
-				if err = repo.CommitRun(conversationCtx, store.BotRunCommit{Lease: newLease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "No tools needed"}}); err != nil {
+				if err = repo.CommitRun(conversationCtx, store.BotRunCommit{Lease: newLease, Status: store.RunSucceeded, Report: reviewedRecoveryReply(t, repo, conversationCtx, newLease, "No tools needed")}); err != nil {
 					t.Fatal(err)
 				}
 				final, err := repo.Get(auth, b.ID)

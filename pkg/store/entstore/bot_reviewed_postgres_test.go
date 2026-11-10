@@ -124,7 +124,7 @@ func TestIntegrationPostgresBotControlProposals(t *testing.T) {
 				if _, err = f.repo.ConfirmControlProposal(f.owner, d); !errors.Is(err, store.ErrBotConflict) {
 					t.Fatalf("live source: %v", err)
 				}
-				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review ready"}}); err != nil {
+				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "review ready")}); err != nil {
 					t.Fatal(err)
 				}
 				f.reopenReviewed(t)
@@ -345,7 +345,7 @@ func TestIntegrationPostgresBotMessagesReviewed(t *testing.T) {
 	requireReviewedPostgres(t)
 	eachSpendScope(t, func(t *testing.T, scope store.BotScope) {
 		f := newPostgresBotServicesFixture(t, scope, 100, 100)
-		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+		if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "done")}); err != nil {
 			t.Fatal(err)
 		}
 		b, err := f.repo.Get(f.owner, f.run.BotID)

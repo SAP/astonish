@@ -193,7 +193,7 @@ func TestBotTranscriptAtomicFence(t *testing.T) {
 			if count() != before {
 				t.Fatal("rejected append left transcript rows")
 			}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "done")}); err != nil {
 				t.Fatal(err)
 			}
 			if err := repo.appendBotRunEvent(worker, lease, run.SessionID, event); !errors.Is(err, store.ErrBotConflict) {

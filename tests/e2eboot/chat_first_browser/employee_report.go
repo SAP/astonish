@@ -37,6 +37,9 @@ func employeeReportBubbles(page *rod.Page) []employeeReportBubble {
 }
 
 func employeeReportExactlyOnce(history string, home string, run store.BotRun, bubbles []employeeReportBubble) error {
+	if err := employeeFinalOnlyHistory(history); err != nil {
+		return err
+	}
 	if run.ID == uuid.Nil || strings.TrimSpace(run.Report.Summary) == "" {
 		return fmt.Errorf("report has no run identity or summary")
 	}
@@ -92,6 +95,18 @@ func employeeReportExactlyOnce(history string, home string, run store.BotRun, bu
 		}
 		identities = max(identities, textIdentities)
 		if identities == 0 {
+			// Other canonical runs may share the Home; an unlabelled assistant
+			// draft is not another report and must not hide beside the final one.
+			otherReport := false
+			for _, line := range strings.Split(bubble.Text, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "Run: ") {
+					_, err := uuid.Parse(strings.TrimPrefix(strings.TrimSpace(line), "Run: "))
+					otherReport = otherReport || err == nil
+				}
+			}
+			if !otherReport {
+				return fmt.Errorf("private draft assistant bubble in Home")
+			}
 			continue
 		}
 		count += identities

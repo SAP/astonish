@@ -16,7 +16,7 @@ func TestRoutineResumeAfterPausedResponsibilityUpdate(t *testing.T) {
 			r, s, owner, worker, q := authorizedScheduleFixture(t, scope)
 			finish := func() {
 				t.Helper()
-				if err := r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+				if err := r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 					t.Fatal(err)
 				}
 			}

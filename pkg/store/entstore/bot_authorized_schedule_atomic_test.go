@@ -38,7 +38,7 @@ func TestBotAuthorizedScheduleAtomicRollbackAndSourceDigest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "queued"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "queued")}); err != nil {
 				t.Fatal(err)
 			}
 			before, _ := r.db.GetBot(context.Background(), q.MandateRef.BotID)

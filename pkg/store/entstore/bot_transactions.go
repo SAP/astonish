@@ -76,7 +76,8 @@ type botStoredRecord struct {
 }
 
 type botStoredRun struct {
-	ContinuationRequests       map[string]string `json:"continuation_requests,omitempty"`
+	Work                       *store.BotWorkState `json:"work,omitempty"`
+	ContinuationRequests       map[string]string   `json:"continuation_requests,omitempty"`
 	ExternalAdmissionValidated bool
 	Run                        store.BotRun
 	RequestHash                string
@@ -458,6 +459,22 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 				after = runs[len(runs)-1].ID
 			}
 		}
+		// Only first claims initialize work. Legacy in-flight/checkpoint attempts
+		// remain legacy; an existing contract is never regenerated on continuation.
+		if run.Work == nil && run.Run.StartedAt == nil && len(run.Run.Checkpoint) == 0 {
+			version, err := tx.ReadVersion(ctx, req.BotID, run.Run.Version)
+			if err != nil {
+				return err
+			}
+			goals, err := tx.ReadGoals(ctx, req.BotID)
+			if err != nil {
+				return err
+			}
+			run.Work = store.NewBotWorkState(store.BotWorkContract{BotID: req.BotID, RunID: req.RunID, Version: run.Run.Version, AdmissionEventID: run.Run.UserEventID, Instructions: run.Instructions, Charter: version.Charter, Goals: goals, Attachments: store.PinBotWorkAttachments(run.Attachments)})
+			if err := run.Work.Validate(); err != nil {
+				return err
+			}
+		}
 		lease = store.BotLease{BotID: req.BotID, RunID: req.RunID, WorkerID: req.WorkerID, Fence: rec.Fence + 1, ExpiresAt: req.ExpiresAt.UTC()}
 		run.Run.Status = store.RunRunning
 		run.Run.StartedAt = &now
@@ -760,6 +777,10 @@ func (r *botRepository) ConsumeApproval(ctx context.Context, q store.BotApproval
 // events cannot call this without an explicit status and report. Side-effect
 // delivery is deferred: this transaction records publication intent only.
 func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) error {
+	// A caller cannot supply publication suppression authority.
+	if q.Report.Acknowledgment != nil {
+		return store.ErrBotInvalid
+	}
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
@@ -839,6 +860,13 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 				}
 			}
 		}
+		if err := validateBotWorkCommit(saved.Work, q); err != nil {
+			return err
+		}
+		q.Report.Acknowledgment, err = scheduleAcknowledgment(ctx, tx, rec, saved.Run, saved.Work, q)
+		if err != nil {
+			return err
+		}
 		saved.Run.Status = q.Status
 		saved.Run.Report = q.Report
 		saved.Run.Usage = q.Usage
@@ -863,6 +891,54 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		return insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityReport, Payload: payload, CreatedAt: now}, fmt.Sprintf("result:%s:%d", q.Lease.RunID, q.Lease.Fence))
 	})
 }
+
+// validateBotWorkCommit binds a successful publication to the exact reviewed
+// candidate. Quality never overrides execution failures or pending authority.
+func validateBotWorkCommit(work *store.BotWorkState, q store.BotRunCommit) error {
+	if work == nil {
+		if q.Report.Quality != nil {
+			return store.ErrBotInvalid
+		}
+		return nil
+	}
+	if err := work.Validate(); err != nil {
+		return err
+	}
+	quality := q.Report.Quality
+	if q.Status == store.RunSucceeded && (work.Phase != store.BotWorkAccepted || quality == nil) {
+		return store.ErrBotInvalid
+	}
+	if quality != nil {
+		if quality.SchemaVersion != work.SchemaVersion || quality.WorkRevision != work.Revision || quality.RequirementsDigest != work.RequirementsDigest || quality.Outcome != work.Phase || quality.Repairs != work.Repairs || !reflect.DeepEqual(quality.Limitations, work.Unresolved) {
+			return store.ErrBotInvalid
+		}
+		if work.Candidate == nil {
+			if quality.CandidateDigest != "" {
+				return store.ErrBotInvalid
+			}
+		} else if quality.CandidateDigest != work.Candidate.Digest {
+			return store.ErrBotInvalid
+		}
+		if work.Review == nil {
+			if len(quality.Criteria) != 0 {
+				return store.ErrBotInvalid
+			}
+		} else if !reflect.DeepEqual(quality.Criteria, work.Review.Criteria) {
+			return store.ErrBotInvalid
+		}
+	}
+	if q.Status == store.RunSucceeded || (quality != nil && quality.Outcome == store.BotWorkAccepted) {
+		if work.Candidate == nil || q.Report.Summary != work.Candidate.Text || !reflect.DeepEqual(q.Report.Artifacts, work.Candidate.Artifacts) {
+			return store.ErrBotInvalid
+		}
+	}
+	// Unassessed artifacts stay in the run trace rather than becoming deliverables.
+	if len(q.Report.Artifacts) > 0 && (work.Phase != store.BotWorkAccepted || quality == nil || work.Candidate == nil || !reflect.DeepEqual(q.Report.Artifacts, work.Candidate.Artifacts)) {
+		return store.ErrBotInvalid
+	}
+	return nil
+}
+
 func validBotArtifactPath(p string) bool {
 	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\\\x00") {
 		return false
@@ -906,6 +982,11 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 		}
 		if rec.LeaseExpiresAt == nil || now.Before(*rec.LeaseExpiresAt) || now.Before(saved.Run.Lease.ExpiresAt) {
 			return store.ErrBotConflict
+		}
+		if saved.Work != nil && saved.Work.Phase != store.BotWorkAccepted && saved.Work.Phase != store.BotWorkBlocked && saved.Work.Phase != store.BotWorkInterrupted {
+			saved.Work.Phase = store.BotWorkInterrupted
+			saved.Work.Revision++
+			saved.Work.Unresolved = append(saved.Work.Unresolved, "Run interrupted; verify prior effects before any authorized continuation.")
 		}
 		saved.Run.Status = store.RunInterrupted
 		saved.CommitHash = "recovered"

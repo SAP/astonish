@@ -14,7 +14,7 @@ func TestBotInteractivePromptUsesCurrentChatWork(t *testing.T) {
 	if !builder.applyBotPrompt(po) {
 		t.Fatal("missing bot prompt")
 	}
-	for _, want := range []string{"useful work for the current request", "ask_user", "Do not require task_once"} {
+	for _, want := range []string{"useful work for the current request", "ask_user", "Do not require task_once", "Do not create goals for greetings or control messages", "neither owner sample approval nor mandatory skill creation", "never permissions or consent"} {
 		if !strings.Contains(builder.SchedulerHints, want) {
 			t.Fatalf("missing %q", want)
 		}

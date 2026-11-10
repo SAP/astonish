@@ -185,7 +185,7 @@ func TestBotNotifications(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report}); err != nil {
+				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: notificationReviewedReport(t, worker, repo, lease, report)}); err != nil {
 					t.Fatal(err)
 				}
 				var calls atomic.Int32

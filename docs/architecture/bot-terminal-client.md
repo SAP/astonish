@@ -1,5 +1,11 @@
 # Remote Bot CLI and terminal Chat
 
+## Assessed deliverables
+
+Bot Home final reports carry the same committed quality summary in Studio and terminal. `bot.QualitySummary` is shared by the report formatter and terminal overview, distinguishing checked requirements, unresolved requirements, absent legacy assessment and unknown schema. Model assessments are labelled judgments rather than independent mechanical evidence. The overview shows committed limitations; errors/loading do not present a stale assessment as current. Existing Escape/navigation and owner-only actions remain unchanged, and local Code mode has no Bot quality workflow.
+
+Studio's existing Details renders the additive report assessment, evidence references and limitations using the same persisted report as the transcript. No new SSE event, approval button or client-side draft suppression is introduced. The controlled browser/PTY quality gates exercise rendering and replay, not real-provider recurring work or deployment readiness.
+
 `astonish bots` is remote-only. `pkg/client.Bots` uses the existing authenticated client and `/api/studio/bots`, never a local execution runtime. `--scope personal|team` selects storage scope; authentication and configured team headers remain unchanged. Exact UUIDs are fetched directly; exact names resolve across all list pages. Ambiguous names return candidate UUIDs, scopes and states. `--json` emits machine-readable output without update banners.
 
 ## Commands and explicit consent

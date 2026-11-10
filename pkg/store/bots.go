@@ -261,15 +261,28 @@ type BotReportFailure struct {
 	Kind             BotReportFailureKind `json:"kind"`
 	TechnicalDetails string               `json:"technical_details,omitempty"`
 }
+type BotReportAcknowledgmentKind string
+
+const BotReportAcknowledgmentSchedulePending BotReportAcknowledgmentKind = "schedule_pending"
+
+// BotReportAcknowledgment is assigned by CommitRun from accepted private work and
+// scoped operation provenance, never trusted from a caller or model report.
+type BotReportAcknowledgment struct {
+	Kind         BotReportAcknowledgmentKind `json:"kind"`
+	OperationIDs []uuid.UUID                 `json:"operation_ids"`
+}
+
 type BotReport struct {
-	Failure       *BotReportFailure `json:"failure,omitempty"`
-	Summary       string            `json:"summary"`
-	Changed       []BotEvidence     `json:"changed"`
-	Unchanged     []BotEvidence     `json:"unchanged"`
-	Unverified    []string          `json:"unverified"`
-	Artifacts     []BotArtifact     `json:"artifacts"`
-	NeedsApproval []uuid.UUID       `json:"needs_approval"`
-	NextRunAt     *time.Time        `json:"next_run_at,omitempty"`
+	Acknowledgment *BotReportAcknowledgment `json:"acknowledgment,omitempty"`
+	Quality        *BotQualityReport        `json:"quality,omitempty"`
+	Failure        *BotReportFailure        `json:"failure,omitempty"`
+	Summary        string                   `json:"summary"`
+	Changed        []BotEvidence            `json:"changed"`
+	Unchanged      []BotEvidence            `json:"unchanged"`
+	Unverified     []string                 `json:"unverified"`
+	Artifacts      []BotArtifact            `json:"artifacts"`
+	NeedsApproval  []uuid.UUID              `json:"needs_approval"`
+	NextRunAt      *time.Time               `json:"next_run_at,omitempty"`
 }
 type BotRun struct {
 	// MandateRef is persisted only in the private repository envelope.

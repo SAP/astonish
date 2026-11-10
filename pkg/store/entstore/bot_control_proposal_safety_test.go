@@ -21,7 +21,7 @@ func TestBotControlProposalTerminalReceipts(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "ready"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "ready")}); err != nil {
 					t.Fatal(err)
 				}
 				if kind == "expired" {

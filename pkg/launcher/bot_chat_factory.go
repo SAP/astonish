@@ -31,10 +31,12 @@ import (
 // Models must resolve its session pin without swapping a shared provider.
 // Cleanup releases per-attempt resources, not the persistent session or Bot home.
 type BotChatScope struct {
-	Services *store.Services
-	Sessions session.Service
-	Models   bot.ModelResolver
-	Cleanup  func()
+	// OwnerEmail reads fresh account/link facts; it neither grants nor sends.
+	OwnerEmail func(context.Context) (store.BotOwnerEmailDelivery, error)
+	Services   *store.Services
+	Sessions   session.Service
+	Models     bot.ModelResolver
+	Cleanup    func()
 }
 
 // BotChatSafeResources contains only explicitly supplied, mechanically guarded
@@ -256,7 +258,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			}
 			owner = agent.WithBotPolicyRuntime(owner, safe.PolicyRuntime)
 		}
-		binding := &botFactoryBinding{owner: owner, req: req, verifyIsolation: safe.VerifyIsolation}
+		binding := &botFactoryBinding{owner: owner, req: req, ownerEmail: scoped.OwnerEmail, verifyIsolation: safe.VerifyIsolation}
 		llm := &botFactoryLLM{LLM: wrapped, binding: binding}
 		// Bound tool contexts resolve values from owner, not the caller; install
 		// the same metered auxiliary capability there before publishing resources.
@@ -275,7 +277,11 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			repo = services.PersonalBots
 		}
 		transcript, _ := repo.(store.BotTranscriptStore)
-		return &api.BotChatResources{Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		work, _ := repo.(store.BotWorkStore)
+		if req.Work != nil && work == nil {
+			return nil, fmt.Errorf("%w: pinned Bot work store unavailable", store.ErrBotUnsupported)
+		}
+		return &api.BotChatResources{AssessmentContext: binding.assessmentContext, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
 }
 
@@ -378,6 +384,7 @@ type botWiredInjection struct {
 	credentials   store.CredentialStore
 }
 type botFactoryBinding struct {
+	ownerEmail      func(context.Context) (store.BotOwnerEmailDelivery, error)
 	owner           context.Context
 	req             bot.RunRequest
 	verifyIsolation func(context.Context) error
@@ -463,15 +470,22 @@ type botFactoryLLM struct {
 
 func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Invocation-only purpose controls prompt composition, never authority.
+		// Read before bind deliberately discards later viewer context values.
+		purpose := bot.ModelCallPurposeFromContext(ctx)
 		bound := l.binding.bind(ctx)
 		if err := l.binding.check(bound); err != nil {
 			yield(nil, err)
 			return
 		}
-		request, err := l.binding.withCurrentControlContext(bound, req)
-		if err != nil {
-			yield(nil, err)
-			return
+		request := req
+		if purpose != bot.ModelCallPurposeAssessment {
+			var err error
+			request, err = l.binding.withCurrentControlContext(bound, req)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 		}
 		// A failed metadata read must not mask revoked execution authority.
 		if err := l.binding.check(bound); err != nil {

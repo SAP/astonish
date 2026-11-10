@@ -41,6 +41,9 @@ type workerTestModel struct {
 
 func (*workerTestModel) Name() string { return "controlled" }
 func (m *workerTestModel) GenerateContent(ctx context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, nil); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		m.owner = store.UserIDFromContext(ctx)

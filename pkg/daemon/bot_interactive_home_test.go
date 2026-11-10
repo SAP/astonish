@@ -42,15 +42,17 @@ func (b *autoHomeBackend) EnsureBotHome(_ context.Context, s sandbox.BotHomeScop
 
 type autoHomeRuntime struct {
 	bot.Runtime
+	t     *testing.T
+	repo  store.BotStore
 	calls int
 }
 
-func (r *autoHomeRuntime) Start(_ context.Context, q bot.RunRequest, _ bot.EventSink) (bot.RunResult, error) {
+func (r *autoHomeRuntime) Start(ctx context.Context, q bot.RunRequest, _ bot.EventSink) (bot.RunResult, error) {
 	r.calls++
 	if q.Bot.Home.ID == uuid.Nil {
 		return bot.RunResult{}, errors.New("runtime without home")
 	}
-	return bot.RunResult{Status: store.RunSucceeded, Report: store.BotReport{Summary: "Home ready"}}, nil
+	return bot.RunResult{Status: store.RunSucceeded, Report: reviewedRecoveryReply(r.t, r.repo, ctx, q.Run.Lease, "Home ready")}, nil
 }
 
 func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
@@ -90,7 +92,7 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			}
 			registry := execution.NewBotTurnAuthorizationRegistry(32)
 			backend := &autoHomeBackend{}
-			runtime := &autoHomeRuntime{}
+			runtime := &autoHomeRuntime{t: t, repo: ods.ForUser(owner).Bots()}
 			worker := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "auto-worker", TurnRegistry: registry}, runtime: runtime}
 			svc.BotHomeSetup = worker.provisionHome
 			svc.BotInteractiveReady = true

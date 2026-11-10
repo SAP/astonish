@@ -30,7 +30,7 @@ func TestBotControlProposalReviewAndReplay(t *testing.T) {
 			if _, err = r.ConfirmControlProposal(ctx, d); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("live source accepted: %v", err)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "proposal ready"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "proposal ready")}); err != nil {
 				t.Fatal(err)
 			}
 			bad := d

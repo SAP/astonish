@@ -114,6 +114,7 @@ func testMandateWorkerRestartHTTP(t *testing.T) {
 	repo := org.ForTeam(p.TeamSlug).Bots()
 	// The verifier, quota, leases and factory are real; only the model and home backend are controlled.
 	mdl := &interactiveHTTPModel{name: "web_fetch", args: map[string]any{"url": upstream.URL}, principal: execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}, t: t}
+	mdl.assessment = f.model.assessment
 	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: f.pool, MandatePolicy: policy, WorkerID: "restart-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
 	}, Prepare: func(c context.Context, r bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {

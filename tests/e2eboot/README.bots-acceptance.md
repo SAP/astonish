@@ -1,5 +1,91 @@
 # Bot release acceptance
 
+## Owner messages during scheduled work
+
+Ordinary employee messages use the native Home composer without waiting for global
+execution idle. Every-minute reports may take longer than a minute; queued or
+running recurring work must not prevent the harness from exercising owner-priority
+admission. The harness still clicks once, requires the exact persisted owner event
+and new manual Home run, and refuses replay. It does not pause or edit schedules to
+manufacture an idle window. Physical idle/deletion barriers and source-termination
+checks before operation application remain unchanged.
+
+Controlled native-browser regression (not real-provider completion proof):
+
+```sh
+ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 go test ./tests/e2eboot/chat_first_browser -run 'TestEmployeeOwnerSend.*' -count=1 -v
+```
+
+This keeps recurring rows running/queued while one native Send POST admits the
+exact queued owner run; a historical identical message cannot supply admission.
+
+## Fresh real-model quality contract (not yet live-certified)
+
+After the broad backend/frontend/lint and strict controlled publication, runtime,
+browser and PTY gates pass, run **without `--state`**:
+
+```sh
+LOCAL_BOT_STARTUP_TIMEOUT_SECONDS=300 python3 -B tests/e2eboot/local_bot_smoke_launcher.py --verify-bot-quality --config .tmp/bot-employee-acceptance.json
+```
+
+This is a distinct `bot-quality-live-v1` contract, not a reinterpretation of old
+employee evidence. The existing explicit config must provide the Linux ARM64
+candidate and Docker CLI, native browser, read-only base layers, pinned embedding
+cache and real provider URL/model/key. Config is validated without printing its
+secrets; no credentials or shared configuration are changed. Missing prerequisites
+block. `--state`, refresh/restart flags and other verification modes are rejected.
+The quality driver has a bounded 60-minute outer deadline (individual stages keep
+shorter deadlines); no normal `:9393` daemon or shared Docker cleanup is involved.
+
+All **17 original employee checks** still execute in this fresh journey and are
+retained under `employee` in the final evidence. In addition, these six exact
+quality receipts are mandatory:
+
+- `persistent-requirements`: original assignment plus saved goal identity/revision.
+- `supplied-draft-corrected`: real-model inspection/correction of a supplied stale,
+  unsourced, incorrect weather sample using captured observations and a committed
+  accepted quality report. The harness does not tell the reviewer what verdict to
+  emit, or assume the probabilistic producer must fail its first internal review.
+- `three-offline-assessed-results`: three new exact-trigger executions after actual
+  browser closure and the owned daemon restart, read from scoped SQLite before login.
+- `live-reload-final-only`: the three canonical reports each appear once on login
+  and reload; raw run drafts and the supplied defective sample cannot be assistant
+  Home answers.
+- `cadence-preserves-requirements`: the cadence-only change leaves the exact source
+  goal identity, revision and content unchanged (run-specific contract digests are
+  deliberately not compared across occurrences).
+- `owner-update-next-run`: a later owner criterion revision (wind speed) governs a
+  fresh scheduled report without another owner reminder.
+
+Every quality receipt binds the launch nonce, Bot/Home, daemon/browser hashes,
+source filename and SHA-256 of actual saved bytes. Missing/skipped/duplicate,
+foreign, old-candidate and manually resumed evidence fails closed. Observers only
+read persisted private Work and public committed reports; they never inject quality
+verdicts or mutate database state. Model semantic assessment is not factual proof;
+controlled HTTP tests remain responsible for deterministic fail→repair→pass,
+uncertainty and exhaustion coverage. Production external effects, deployed/Kubernetes
+certification and PostgreSQL coverage are separate obligations.
+
+Both employee and quality title gates read real tool evidence from the private
+run-session stream, not Home. Persisted run/Bot/session/Home/source identities and
+source invocation must agree; HTTP/web-fetch call IDs, names and successful bodies
+must pair, and the fetched URL must match a captured report observation. Home must
+contain the exact canonical `bot-report:<run>` publication once, with no private
+draft/tool messages. Model quality assertions alone never satisfy this gate.
+
+Read-only replay of a captured title failure (does not certify live DOM):
+
+```sh
+ASTONISH_EMPLOYEE_PRIVATE_EVIDENCE=/absolute/owned/evidence/root go test ./tests/e2eboot/chat_first_browser -run TestEmployeePrivate -count=1
+```
+
+Harness-only checks (no live launch/provisioning):
+
+```sh
+python3 -B -m unittest discover -s tests/e2eboot -p '*_test.py'
+go test ./tests/e2eboot/chat_first_browser -run 'TestQuality|TestEmployee' -count=1
+```
+
 ## Owned launcher readiness and diagnostic resume
 
 `LOCAL_BOT_STARTUP_TIMEOUT_SECONDS` sets startup and restart readiness waiting:

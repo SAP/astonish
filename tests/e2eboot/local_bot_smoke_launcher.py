@@ -30,6 +30,13 @@ REQUIRED_EVIDENCE = ('minimal-conversation', 'responsibility-confirmed', 'tool-a
                      'memory-next-answer', 'details-no-reconnect', 'paused-restart-bytes')
 
 
+from quality_live_contract import QUALITY_CONTRACT, QUALITY_REQUIRED, strict_json, validate_quality_evidence as _validate_quality_evidence
+
+
+def validate_quality_evidence(state, actual):
+    _validate_quality_evidence(state, actual, validate_employee_evidence)
+
+
 EMPLOYEE_CONTRACT = 'bot-employee-v1'
 EMPLOYEE_REQUIRED = ('title-weather', 'candidate-node', 'schedule-natural', 'offline-restart-tick',
                      'reauth-same-home', 'routine-memory', 'cadence-change', 'pause',
@@ -841,8 +848,11 @@ def main(argv=None):
     parser.add_argument('--config', type=Path, help='explicit JSON paths, provider URL/model/key; validated before startup')
     parser.add_argument('--verify-chat-model', action='store_true', help='title-first real-provider acceptance (not legacy policy acceptance)')
     parser.add_argument('--verify-bot-employee', action='store_true', help='fresh employee workflow; strict versioned evidence, no legacy review scheduling')
+    parser.add_argument('--verify-bot-quality', action='store_true', help='fresh isolated real-model quality contract; no diagnostic resume')
     parser.add_argument('--employee-command', choices=('read', 'restart-tick', 'restart-paused', 'restart-denied'), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.verify_bot_quality and (not args.config or args.state or args.verify_bot_employee or args.verify_chat_model or args.verify_chat_first or args.restart_owned or args.refresh_browser or args.employee_command):
+        parser.error('--verify-bot-quality requires --config and fresh execution; forbids --state and other modes')
     if args.employee_command:
         if not args.state or args.config or args.verify_bot_employee or args.verify_chat_model or args.verify_chat_first or args.restart_owned or args.refresh_browser:
             parser.error('--employee-command requires only --state')
@@ -859,7 +869,7 @@ def main(argv=None):
             os.environ.update(config_environment(json.loads(args.config.read_text())))
         except Exception as error:
             parser.error('configuration preflight failed: ' + str(error))
-    verify_browser = args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee
+    verify_browser = args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee or args.verify_bot_quality
     if args.refresh_browser:
         if not args.state or args.restart_owned: parser.error('--refresh-browser requires --state and forbids --restart-owned')
         refresh_browser(json.loads(args.state.read_text()))
@@ -876,8 +886,10 @@ def main(argv=None):
     try:
         if args.verify_bot_employee and args.state:
             validate_employee_resume(state, args.state, os.environ)
-        if args.verify_bot_employee:
+        if args.verify_bot_employee or args.verify_bot_quality:
             state['workflow'] = EMPLOYEE_CONTRACT
+        if args.verify_bot_quality:
+            state['quality_nonce'] = secrets.token_hex(32)
         setup(state)
         if verify_browser:
             env = dict(os.environ, CHAT_FIRST_STATE=str(root / 'state.json'))
@@ -889,6 +901,9 @@ def main(argv=None):
             if args.verify_bot_employee:
                 state['workflow'] = EMPLOYEE_CONTRACT
                 env['BOT_EMPLOYEE_ACCEPTANCE'] = '1'
+            if args.verify_bot_quality:
+                state['workflow'] = QUALITY_CONTRACT
+                env['BOT_QUALITY_ACCEPTANCE'] = '1'
             browser = root / 'bin/chat-first-browser'
             if not state.get('browser_sha256'):
                 subprocess.run(['go', 'build', '-o', str(browser), './tests/e2eboot/chat_first_browser'], cwd=REPO, check=True, timeout=180)
@@ -897,13 +912,13 @@ def main(argv=None):
                 raise RuntimeError('resume browser candidate changed')
             private_json(root / 'state.json', state)
             try:
-                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=1800)
+                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=3600 if args.verify_bot_quality else 1800)
             finally:
                 # The browser owns the durable Bot checkpoint even on failure.
                 state = json.loads((root / 'state.json').read_text())
             # Partial browser work never counts as whole-workflow acceptance.
-            actual = json.loads((root / 'browser-evidence.json').read_text())
-            (validate_employee_evidence if args.verify_bot_employee else validate_chat_model_evidence if args.verify_chat_model else validate_evidence)(state, actual)
+            actual = strict_json((root / 'browser-evidence.json').read_text())
+            (validate_quality_evidence if args.verify_bot_quality else validate_employee_evidence if args.verify_bot_employee else validate_chat_model_evidence if args.verify_chat_model else validate_evidence)(state, actual)
             inspect_owned(state)
             state['status'] = 'diagnostic-verified' if state.get('diagnostic_resume') else 'verified'
         private_json(root / 'state.json', state)

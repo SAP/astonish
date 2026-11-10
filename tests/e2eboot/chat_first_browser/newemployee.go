@@ -224,8 +224,11 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 		s := snapshot()
 		history := capture("title-history", "/api/studio/sessions/"+s.Bot.HomeSessionID.String())
 		stream := capture("title-events", botPath+"/sessions/"+r.SessionID.String()+"/stream?scope=personal")
-		if !employeeWebEvidence(history) || !employeeWebEvidence(stream) {
-			panic("title lacks real correlated web result")
+		must(employeeTitleEvidence(history, stream, s.Bot, r))
+		// Commit/readback can precede the viewer's next SSE poll. Wait for the
+		// exact DOM postcondition under the existing deadline; do not replay work.
+		if employeeReportExactlyOnce(history, s.Bot.HomeSessionID.String(), r, employeeReportBubbles(page())) != nil {
+			return false
 		}
 		if len(s.PendingProposals) > 0 || len(s.PendingApprovals) > 0 {
 			panic("title unexpectedly requires configuration/review")
@@ -295,6 +298,10 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	legacyReceipt("existing-bot-adoption", "New natural owner message admitted exact successful Home turn with persisted mandate and applied schedule", "employee-legacy-adoption-disk.json + employee-legacy-schedule-operation.json")
 	page().MustNavigate(home)
 	page().MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+	quality := startQuality(root, home, state, func(key, message string) store.BotRun {
+		boundedWait("quality idle", 6*time.Minute, func() bool { return employeeExecutionIdle(readOwned("quality-idle", "read"), id) })
+		return employeeSend(page, home, key, message, snapshot, runs, capture, func() { actions[key] = true; checkpoint() }, saveEvidence)
+	}, readOwned, runs)
 	stage("employee-natural-schedule")
 	before := map[uuid.UUID]bool{}
 	for _, r := range runs() {
@@ -399,7 +406,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 			}
 			if r.Status == store.RunSucceeded {
 				tick = r
-				return true
+				return quality.offline(offline, uuid.MustParse(id), expectedTrigger, restartedAt)
 			}
 		}
 		return false
@@ -416,6 +423,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	must(err)
 	must(os.WriteFile(filepath.Join(root, "employee-reauth-report-bubbles.json"), reportEvidence, 0600))
 	must(employeeReportExactlyOnce(history, snapshot().Bot.HomeSessionID.String(), tick, reportBubbles))
+	quality.restored(page(), history, snapshot().Bot.HomeSessionID.String())
 	receipt("reauth-same-home", "One login after offline evidence; scheduled result appears once in unchanged Home", "employee-reauth-history.json + employee-reauth-report-bubbles.json")
 	idle := func() {
 		boundedWait("employee idle (execution ownership cleared)", 6*time.Minute, func() bool {
@@ -423,7 +431,8 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 		})
 	}
 	send := func(key, message string) store.BotRun {
-		idle()
+		// Owner messages use the native priority queue even while recurring work
+		// is queued/running. Global idle is a teardown barrier, not admission.
 		if actions[key] {
 			panic("refusing duplicate employee action: " + key)
 		}
@@ -472,6 +481,10 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 		panic("two-minute cadence not persisted")
 	}
 	receipt("cadence-change", "Natural cadence edit persisted enabled two-minute trigger and next run", "employee-cadence-change.json + employee-cadence-version.json")
+	if quality != nil {
+		quality.cadence(readOwned("quality-cadence", "read"))
+		quality.ownerUpdate(send, readOwned, runs)
+	}
 	legacy.change("cadence", "Change only the new weekly preservation witness reminder to every Tuesday at midnight UTC. Leave the historical June reminder disabled.", store.BotControlScheduleEdit)
 	legacy.change("pause", "Pause all background work until I ask you to resume.", store.BotControlPriorityPause)
 	boundedWait("legacy pause stopped", 4*time.Minute, func() bool { return employeePauseStopped(legacy.disk("paused-stopped"), legacy.fixture.BotID.String()) })
@@ -802,6 +815,8 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	evidence["unverified"] = false
 	evidence["status"] = "verified"
 	checkpoint()
+	quality.finish(evidence)
+	save()
 }
 
 var employeeRequired = []string{"title-weather", "candidate-node", "schedule-natural", "offline-restart-tick", "reauth-same-home", "routine-memory", "cadence-change", "pause", "while-paused", "resume", "exception-denied-no-repeat", "exception-approved-once", "hard-delete-preserves-peer", "terminal-evidence", "existing-bot-read-no-authority", "existing-bot-adoption", "historical-disabled-schedule"}

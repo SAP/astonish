@@ -90,6 +90,9 @@ func toResponsesRequest(req *model.LLMRequest, modelName string, messages []open
 		responseReq.Temperature = req.Config.Temperature
 		if req.Config.ResponseMIMEType == "application/json" && len(responseTools) == 0 {
 			responseReq.Text = &openai.ResponseTextConfig{Format: &openai.ResponseTextFormat{Type: "json_object"}}
+			if req.Config.ResponseJsonSchema != nil {
+				responseReq.Text.Format = &openai.ResponseTextFormat{Type: "json_schema", Name: "structured_response", Schema: req.Config.ResponseJsonSchema, Strict: true}
+			}
 		}
 	}
 	return responseReq

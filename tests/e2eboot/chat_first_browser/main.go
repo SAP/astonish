@@ -48,9 +48,13 @@ func main() {
 	l := launcher.New().Bin(os.Getenv("ASTONISH_BOT_BROWSER_PATH")).Headless(true).UserDataDir(filepath.Join(root, "chrome-profile")).Set("no-first-run")
 	control, err := l.Launch()
 	must(err)
-	defer l.Cleanup()
+	defer func() {
+		// Cleanup waits for process exit. Kill first even if CDP has disconnected.
+		l.Kill()
+		l.Cleanup()
+	}()
 	b := rod.New().ControlURL(control).MustConnect()
-	defer b.MustClose()
+	defer func() { _ = b.Timeout(5 * time.Second).Close() }()
 	basePage := b.MustPage()
 	page := independentPageTimeout(basePage, 40*time.Second)
 	go basePage.EachEvent(func(e *proto.RuntimeExceptionThrown) {
@@ -100,7 +104,8 @@ func main() {
 				fmt.Fprintf(f, "\n- BLOCKED `%s`: %v. Snapshot: `%s/browser-blocked.txt`.\n", stage, failure, root)
 				f.Close()
 			}
-			_ = b.Close()
+			_ = b.Timeout(5 * time.Second).Close()
+			l.Kill()
 			l.Cleanup()
 			os.Exit(1)
 		}
@@ -125,7 +130,7 @@ func main() {
 	must(authenticate())
 	page.MustNavigate(base + "/#/chat").MustReload()
 	page.MustElementR("button", "^New Bot$").MustVisible()
-	if os.Getenv("BOT_EMPLOYEE_ACCEPTANCE") == "1" {
+	if os.Getenv("BOT_EMPLOYEE_ACCEPTANCE") == "1" || os.Getenv("BOT_QUALITY_ACCEPTANCE") == "1" {
 		setStage("employee-fresh", 30*time.Minute)
 		newEmployeeWorkflow(basePage, api, state, statePath, root, base, evidence, save, pass)
 		return

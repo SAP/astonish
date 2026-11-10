@@ -121,7 +121,7 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	llm := &homeDeliveryModel{t: t}
 	f.cfg.ContextWindow = 200000
 	f.cfg.WrapModel = func(_ context.Context, _ model.LLM, budget execution.RunBudget) (model.LLM, error) {
-		return provider.NewBudgetLLM(llm, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
+		return provider.NewBudgetLLM(continuityAssessmentModel{llm}, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
 	}
 	fetches := 0
 	fetch, err := functiontool.New(functiontool.Config{Name: "http_request", Description: "Read controlled weather fixture"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
@@ -153,8 +153,11 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	if result.Status != store.RunSucceeded || result.Report.Summary != homeWeatherAnswer || len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 1 {
 		t.Fatalf("result=%+v", result)
 	}
+	if result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
+		t.Fatalf("weather report bypassed quality review: %+v", result.Report.Quality)
+	}
 	usage := meter.Usage()
-	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens+usage.OutputTokens != 40554 {
+	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens+usage.OutputTokens != 40554+20 {
 		t.Fatalf("calls=%d fetches=%d usage=%+v", llm.calls, fetches, usage)
 	}
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: usage}); err != nil {

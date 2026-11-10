@@ -310,7 +310,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 					if backend.calls != before {
 						t.Fatal("nonterminal source allocated home")
 					}
-					if e = repo.CommitRun(wctx, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "review ready"}}); e != nil {
+					if e = repo.CommitRun(wctx, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: reviewedRecoveryReply(t, repo, wctx, lease, "review ready")}); e != nil {
 						t.Fatal(e)
 					}
 					db.SetBotActivationReadiness(func(_ context.Context, b store.Bot, _ store.BotVersion) error {

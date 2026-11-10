@@ -39,7 +39,7 @@ func newDraftActivationPostgres(t *testing.T, scope store.BotScope) (*postgresBo
 	f := newPostgresBotServicesFixture(t, scope, 100, 100)
 	// Reuse routing/provisioning, not its active test Bot. Finish that unrelated
 	// fixture run and create the actual test subject through CreateDraft only.
-	if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Fixture provisioning complete"}}); err != nil {
+	if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "Fixture provisioning complete")}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
@@ -72,7 +72,7 @@ func postgresDraftProposal(t *testing.T, f *postgresBotServicesFixture, b *store
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Ready for exact confirmation"}}); err != nil {
+	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "Ready for exact confirmation")}); err != nil {
 		t.Fatal(err)
 	}
 	return proposal

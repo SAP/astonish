@@ -15,7 +15,7 @@ func TestEmployeeRoutineMandatePrimitives(t *testing.T) {
 		t.Run(string(op), func(t *testing.T) {
 			r, s, owner, worker, q := authorizedScheduleFixture(t, store.BotScopePersonal)
 			// Issue a new canonical mandate with the exact own-control ceiling.
-			if err := r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "done"}}); err != nil {
+			if err := r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "done")}); err != nil {
 				t.Fatal(err)
 			}
 			policy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
@@ -56,7 +56,7 @@ func TestEmployeeRoutineMandatePrimitives(t *testing.T) {
 			if o.Decision != store.BotOperationExecute {
 				t.Fatal(o)
 			}
-			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+			if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 				t.Fatal(err)
 			}
 			applied, err := s.ApplyAuthorizedOperation(owner, q.MandateRef, o.ID)
@@ -89,7 +89,7 @@ func TestEmployeeRoutineException(t *testing.T) {
 				if o.Decision != store.BotOperationRequireAuthorization || o.Status != store.BotOperationBlocked {
 					t.Fatalf("%+v", o)
 				}
-				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "captured"}}); err != nil {
+				if err = r.CommitRun(worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, q.Lease, "captured")}); err != nil {
 					t.Fatal(err)
 				}
 				for i := 0; i < 2; i++ {

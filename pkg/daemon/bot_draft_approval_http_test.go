@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
@@ -38,6 +39,9 @@ type draftApprovalHTTPModel struct {
 }
 
 func (m *draftApprovalHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, nil); ok {
+		return response
+	}
 	if !m.attempt {
 		return m.workerTestModel.GenerateContent(ctx, r, stream)
 	}
@@ -112,11 +116,15 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			}
 			llm := &draftApprovalHTTPModel{attempt: true}
 			var effects atomic.Int64
-			target, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Harmless counted exact action"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+			target, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Harmless counted exact action"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
 				if args["body"] != "exact" {
 					return nil, fmt.Errorf("changed exact arguments: %v", args)
 				}
 				effects.Add(1)
+				if effects.Load() != 1 {
+					return nil, fmt.Errorf("exact action repeated")
+				}
+				bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Changed: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Counted exact action receipt", Source: "fixture://exact-counter", ObservedAt: time.Now(), ActorID: owner}}})
 				return map[string]any{"receipt": "controlled exact action"}, nil
 			})
 			if err != nil {
@@ -297,9 +305,9 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			poll()
 			assertState(store.BotDraft)
 			saved = getRun(run.ID)
-			// A plain callback receipt is deliberately not verified outcome metadata;
-			// production reports partial rather than upgrading it to proven success.
-			if saved.Status != store.RunPartial || len(saved.Report.Unverified) != 1 || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentDraftTest || effects.Load() != 1 || llm.calls != 2 {
+			// The fixture independently observes the exact resumed effect. The
+			// earlier blocked invocation is not an executed uncertain action.
+			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality == nil || saved.Report.Quality.Outcome != store.BotWorkAccepted || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentDraftTest || effects.Load() != 1 || llm.calls != 2 {
 				t.Fatalf("resume run=%+v effects=%d calls=%d", saved, effects.Load(), llm.calls)
 			}
 			all = approvals()

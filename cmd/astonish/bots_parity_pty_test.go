@@ -28,7 +28,11 @@ import (
 // This is a real Execute subprocess, not a model/reducer test. The fixture
 // admits work separately from publishing durable chronology so optimistic
 // echoes and duplicate watch replay can be detected in a forced terminal frame.
-func TestBotParityPTYAcceptance(t *testing.T) {
+func TestBotParityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, false) }
+
+func TestBotWorkQualityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, true) }
+
+func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 	for _, status := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused} {
 		t.Run(string(status), func(t *testing.T) {
 			home := t.TempDir()
@@ -86,10 +90,28 @@ func TestBotParityPTYAcceptance(t *testing.T) {
 							return
 						}
 						snap := store.BotSnapshot{Bot: bot}
+						if quality {
+							// Transport compatibility fixture only: unlike the browser
+							// acceptance this does not certify WorkStore publication.
+							latest := run
+							latest.Report.Quality = &store.BotQualityReport{SchemaVersion: store.BotWorkSchemaVersion, Outcome: store.BotWorkAccepted, Criteria: []store.BotCriterionAssessment{{CriterionID: "receipt", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:receipt"}}}}
+							if panelState.Load() == 1 {
+								latest.Report.Quality.Limitations = []string{"Receipt freshness unavailable"}
+							}
+							if panelState.Load() == 3 {
+								latest.Report.Quality = nil
+							}
+							if panelState.Load() == 4 {
+								latest.Report.Quality.SchemaVersion = 999
+							}
+							snap.LatestOutcome = &latest
+						}
 						if panelState.Load() == 0 {
 							snap.UnreadCount = 4
 							snap.PendingApprovals = []store.BotApproval{{ID: uuid.New()}}
-							snap.LatestOutcome = &run
+							if !quality {
+								snap.LatestOutcome = &run
+							}
 						}
 						if headerState.Load() == 1 {
 							snap.Bot.Status = store.BotPaused
@@ -314,6 +336,21 @@ func TestBotParityPTYAcceptance(t *testing.T) {
 				send("\r")
 			}
 			wait("Durable parity home")
+			if quality {
+				for _, tc := range []struct {
+					state int32
+					want  string
+				}{{0, "Requirements checked"}, {1, "Requirements remain unmet or unverified"}, {3, "Not assessed"}, {4, "Assessment unavailable"}} {
+					panelState.Store(tc.state)
+					send("/bots status\r")
+					wait(tc.want)
+					if tc.state == 1 {
+						wait("Receipt freshness unavailable")
+					}
+					escape()
+				}
+				panelState.Store(0)
+			}
 			send("parity-message\r")
 			select {
 			case <-admitted:

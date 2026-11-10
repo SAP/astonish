@@ -69,6 +69,9 @@ func (t *botProposalTool) capture(ctx tool.Context, args botProposalArgs) (map[s
 	if err := args.Payload.Validate(); err != nil {
 		return nil, err
 	}
+	if t.binding.req.Mandate != nil && args.Payload.Operation == store.BotControlSchedulePause {
+		return nil, fmt.Errorf("%w: use priority_pause to pause all background work, or update_scheduled_job with enabled=false for a selected schedule; schedule_pause here is a legacy review route", store.ErrBotInvalid)
+	}
 	if t.binding.req.Mandate != nil && args.Payload.Operation == store.BotControlResume {
 		return nil, fmt.Errorf("%w: use resume_tasks with resume_targets.schedule_ids from current Bot control state for explicitly requested tasks; legacy resume cannot resume mandated recurrence", store.ErrBotInvalid)
 	}
@@ -120,7 +123,11 @@ func (t *botProposalTool) capture(ctx tool.Context, args botProposalArgs) (map[s
 			if err := verifyRoutineCapture(q, op, saved); err != nil {
 				return nil, err
 			}
-			capture := bot.RoutineCapture{OperationID: saved.ID, BotID: ref.BotID, SourceRunID: q.Lease.RunID, OwnerID: t.binding.req.Bot.OwnerID, Operation: saved.Payload.Operation, Status: saved.Status, Revision: saved.Revision, ObservedAt: time.Now().UTC()}
+			payloadJSON, err := json.Marshal(saved.Payload)
+			if err != nil {
+				return nil, err
+			}
+			capture := bot.RoutineCapture{PayloadJSON: string(payloadJSON), OperationID: saved.ID, BotID: ref.BotID, SourceRunID: q.Lease.RunID, OwnerID: t.binding.req.Bot.OwnerID, Operation: saved.Payload.Operation, Status: saved.Status, Revision: saved.Revision, ObservedAt: time.Now().UTC()}
 			bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, RoutineCapture: &capture})
 			return map[string]any{"operation_id": saved.ID.String(), "bot_id": ref.BotID.String(), "digest": saved.Provenance.PayloadDigest, "status": saved.Status, "decision": saved.Decision, "message": capture.Acknowledgment()}, nil
 		}

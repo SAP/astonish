@@ -14,12 +14,88 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestBotWorkPostgresCASAndReopen exercises only databases owned by the existing
+// disposable fixture; the guard rejects ordinary development/production DSNs.
+func TestBotWorkPostgresCASAndReopen(t *testing.T) {
+	requireDraftActivationPostgres(t)
+	eachSpendScope(t, func(t *testing.T, scope store.BotScope) {
+		f := newPostgresBotServicesFixture(t, scope, 100, 100)
+		workStore := f.bots.(store.BotWorkStore)
+		original, err := workStore.LoadWork(f.worker, f.lease)
+		if err != nil || original == nil {
+			t.Fatalf("load pinned work: %+v %v", original, err)
+		}
+		if original.Phase != store.BotWorkPreparing || original.Contract.BotID != f.run.BotID || original.Contract.RunID != f.run.ID || original.Contract.Instructions != "Observe ledger" {
+			t.Fatalf("unexpected pinned contract: %+v", original)
+		}
+		next := original.Clone()
+		next.Phase = store.BotWorkProducing
+		next.Criteria = []store.BotWorkCriterion{{ID: "ledger", SourceIDs: []string{"assignment", "charter"}, Text: original.Contract.Instructions}}
+		const attempts = 8
+		start, results := make(chan struct{}), make(chan error, attempts)
+		for range attempts {
+			go func() {
+				<-start
+				_, e := workStore.SaveWork(f.worker, store.BotWorkUpdate{Lease: f.lease, ExpectedRevision: original.Revision, State: *next.Clone()})
+				results <- e
+			}()
+		}
+		close(start)
+		successes := 0
+		for range attempts {
+			if e := <-results; e == nil {
+				successes++
+			} else if !errors.Is(e, store.ErrBotConflict) {
+				t.Errorf("CAS race: %v", e)
+			}
+		}
+		if successes != 1 {
+			t.Fatalf("CAS winners=%d want 1", successes)
+		}
+		saved, err := workStore.LoadWork(f.worker, f.lease)
+		if err != nil || saved == nil || saved.Revision != original.Revision+1 || saved.Phase != store.BotWorkProducing || !reflect.DeepEqual(saved.Contract, original.Contract) || !reflect.DeepEqual(saved.Criteria, next.Criteria) {
+			t.Fatalf("CAS snapshot: %+v %v", saved, err)
+		}
+		changed := saved.Clone()
+		changed.Contract.Instructions = "weakened instructions"
+		if _, err = workStore.SaveWork(f.worker, store.BotWorkUpdate{Lease: f.lease, ExpectedRevision: saved.Revision, State: *changed}); !errors.Is(err, store.ErrBotInvalid) {
+			t.Fatalf("mutable assignment: %v", err)
+		}
+		foreign := f.lease
+		foreign.RunID = uuid.New()
+		if _, err = workStore.LoadWork(f.worker, foreign); err == nil {
+			t.Fatal("foreign run read accepted")
+		}
+		if _, err = workStore.SaveWork(f.worker, store.BotWorkUpdate{Lease: foreign, ExpectedRevision: saved.Revision, State: *saved.Clone()}); err == nil {
+			t.Fatal("foreign run write accepted")
+		}
+		staleLease := f.lease
+		staleLease.Fence++
+		if _, err = workStore.SaveWork(f.worker, store.BotWorkUpdate{Lease: staleLease, ExpectedRevision: saved.Revision, State: *saved.Clone()}); err == nil {
+			t.Fatal("unowned fence write accepted")
+		}
+		f.reopenReviewed(t)
+		workStore = f.bots.(store.BotWorkStore)
+		restored, err := workStore.LoadWork(f.worker, f.lease)
+		if err != nil || !reflect.DeepEqual(saved, restored) {
+			t.Fatalf("snapshot changed after close/reopen: %+v %v", restored, err)
+		}
+		if _, err = workStore.SaveWork(f.worker, store.BotWorkUpdate{Lease: f.lease, ExpectedRevision: original.Revision, State: *next}); !errors.Is(err, store.ErrBotConflict) {
+			t.Fatalf("stale revision after reopen: %v", err)
+		}
+		restored, err = workStore.LoadWork(f.worker, f.lease)
+		if err != nil || !reflect.DeepEqual(saved, restored) {
+			t.Fatalf("rejected update changed reopened work: %+v %v", restored, err)
+		}
+	})
+}
+
 // All late-change cases use actual routed PG stores and the ownership-guarded DSN.
 func latestPostgresAuthorizedFixture(t *testing.T, scope store.BotScope) (*postgresBotServicesFixture, *botAuthorizedOperationRuntime, store.BotAuthorizedOperationRequest) {
 	t.Helper()
 	requireDraftActivationPostgres(t)
 	f := newPostgresBotServicesFixture(t, scope, 100, 100)
-	if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "fixture complete"}}); err != nil {
+	if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "fixture complete")}); err != nil {
 		t.Fatal(err)
 	}
 	f.owner = store.WithBotMandateAdmission(mandateOwnerContext(t, f.owner), authorizedSchedulePolicy)
@@ -124,7 +200,7 @@ func TestIntegrationPostgresBotLatestSourceBoundDenial(t *testing.T) {
 				if err != nil || !reflect.DeepEqual(same, denied) {
 					t.Fatalf("denial replay: %+v %v", same, err)
 				}
-				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "denied"}}); err != nil {
+				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, q.Lease, "denied")}); err != nil {
 					t.Fatal(err)
 				}
 				before, err := f.repo.db.GetBot(f.owner, b.ID)
@@ -177,7 +253,7 @@ func TestIntegrationPostgresBotLatestSourceBoundDenial(t *testing.T) {
 				if _, err = s.ApplyAuthorizedOperation(f.owner, ref, fresh.ID); !errors.Is(err, store.ErrBotConflict) {
 					t.Fatalf("auto-granted: %v", err)
 				}
-				if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "authorization required"}}); err != nil {
+				if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, worker, lease, "authorization required")}); err != nil {
 					t.Fatal(err)
 				}
 				latestPostgresReopen(t, f, s)
@@ -236,7 +312,7 @@ func TestIntegrationPostgresBotLatestPausedCapture(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "scheduled"}}); err != nil {
+				if err = f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, q.Lease, "scheduled")}); err != nil {
 					t.Fatal(err)
 				}
 				created, err = s.ApplyAuthorizedOperation(f.owner, q.MandateRef, created.ID)
@@ -334,7 +410,7 @@ func TestIntegrationPostgresBotLatestPausedCapture(t *testing.T) {
 				if _, err = s.ApplyAuthorizedOperation(f.owner, ref, op.ID); !errors.Is(err, store.ErrBotBusy) {
 					t.Fatalf("applied before source completion: %v", err)
 				}
-				if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Captured pending, not applied"}}); err != nil {
+				if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, worker, lease, "Captured pending, not applied")}); err != nil {
 					t.Fatal(err)
 				}
 				latestPostgresReopen(t, f, s)

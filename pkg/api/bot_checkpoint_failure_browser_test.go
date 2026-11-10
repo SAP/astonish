@@ -28,7 +28,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// Keep the shared Studio/terminal fixture tied to the native report formatter.
+// Keep the historical Studio/terminal fixture tied to the diagnostic formatter.
+// New employee messages use RenderReport; saved historical transcripts are not rewritten.
 func TestBotCheckpointFailureFixtureMatchesFormatter(t *testing.T) {
 	raw, err := os.ReadFile("testdata/bot_checkpoint_failure.json")
 	if err != nil {
@@ -55,8 +56,8 @@ func TestBotCheckpointFailureFixtureMatchesFormatter(t *testing.T) {
 	run := store.BotRun{ID: fixture.RunID, Status: store.RunFailed}
 	run.Report.Summary = summary
 	run.Report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureExecutionFormat, TechnicalDetails: bot.CheckpointFailureDetails(failure)}
-	if len(fixture.Event.Content.Parts) != 1 || fixture.Event.Content.Parts[0].Text != bot.RenderReport(run) {
-		t.Fatalf("shared client fixture drifted from native formatter:\n%s", bot.RenderReport(run))
+	if len(fixture.Event.Content.Parts) != 1 || fixture.Event.Content.Parts[0].Text != bot.RenderDiagnosticReport(run) {
+		t.Fatalf("historical client fixture drifted from diagnostic formatter:\n%s", bot.RenderDiagnosticReport(run))
 	}
 }
 
@@ -246,13 +247,15 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 			t.Fatalf("visible report bubbles=%d", count)
 		}
 		text := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"]').innerText`).Str()
-		for _, fact := range []string{"multiple tool requests in one response", "one tool request at a time", "None of the tool requests from that response were executed", "Earlier work may already have completed", "No approval is needed", "has not been automatically retried", "Technical details", "count=2", "serial tool calls required"} {
+		for _, fact := range []string{"multiple tool requests in one response", "one tool request at a time", "None of the tool requests from that response were executed", "Earlier work may already have completed", "No approval is needed", "has not been automatically retried"} {
 			if !strings.Contains(text, fact) {
 				t.Fatalf("missing %q: %s", fact, text)
 			}
 		}
-		if strings.Count(text, "Run report") != 1 || strings.Contains(text, "private-rejected-argument") || strings.Contains(text, "[Error:") || strings.Contains(text, "Run did not complete; execution requires review") {
-			t.Fatal(text)
+		for _, unwanted := range []string{"Run report", "Technical details", "count=2", "serial tool calls required", "private-rejected-argument", "[Error:", "Run did not complete; execution requires review"} {
+			if strings.Contains(text, unwanted) {
+				t.Fatalf("employee message leaked %q: %s", unwanted, text)
+			}
 		}
 		if page.MustEval(`() => !!document.querySelector('[role="alert"], [data-sonner-toast], [data-testid="error-message"]')`).Bool() {
 			t.Fatalf("checkpoint failure became a toast/raw error: %s", page.MustEval(`() => Array.from(document.querySelectorAll('[role="alert"], [data-sonner-toast], [data-testid="error-message"]')).map(e => e.outerHTML).join('\n')`).Str())

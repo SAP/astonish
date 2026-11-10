@@ -22,7 +22,7 @@ func TestIntegrationPostgresBotLatestPausedScheduleAuthority(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				f := newPostgresBotServicesFixture(t, scope, 100, 100)
-				if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "fixture complete"}}); err != nil {
+				if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "fixture complete")}); err != nil {
 					t.Fatal(err)
 				}
 				currentAllows := allowed

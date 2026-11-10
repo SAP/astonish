@@ -34,6 +34,9 @@ type intentAttemptModel struct {
 }
 
 func (m *intentAttemptModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, nil); ok {
+		return response
+	}
 	m.requests = append(m.requests, append([]*genai.Content(nil), r.Contents...))
 	if m.attempt == "" {
 		return m.workerTestModel.GenerateContent(ctx, r, stream)
@@ -195,13 +198,14 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 					seen := false
 					for _, content := range llm.requests[len(llm.requests)-1] {
 						for _, part := range content.Parts {
-							if part.Text == "durable controlled result" {
+							if strings.TrimSpace(part.Text) == "durable controlled result" || strings.TrimSpace(part.Text) == "[assistant] said: durable controlled result" || strings.Contains(part.Text, "\n\ndurable controlled result\n") {
 								seen = true
 							}
 						}
 					}
 					if !seen {
-						t.Fatal("conversation model never saw prior Bot home history")
+						raw, _ := json.Marshal(llm.requests[len(llm.requests)-1])
+						t.Fatalf("conversation model never saw prior Bot home history: %s", raw)
 					}
 				}
 				saved, err := repo.GetRun(auth, b.ID, run.ID)
@@ -226,7 +230,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 						if part.Text == "Owner says hello" {
 							user = true
 						}
-						if part.Text == "durable controlled result" {
+						if strings.TrimSpace(part.Text) == "durable controlled result" || strings.TrimSpace(part.Text) == "[assistant] said: durable controlled result" || strings.Contains(part.Text, "\n\ndurable controlled result\n") {
 							assistant = true
 						}
 					}
@@ -264,7 +268,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 							if part.Text == "Owner says hello" {
 								priorUsers++
 							}
-							if part.Text == "durable controlled result" {
+							if strings.TrimSpace(part.Text) == "durable controlled result" || strings.TrimSpace(part.Text) == "[assistant] said: durable controlled result" || strings.Contains(part.Text, "\n\ndurable controlled result\n") {
 								priorModels++
 							}
 						}
@@ -282,6 +286,9 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 							continue
 						}
 						for _, part := range event.Content.Parts {
+							if strings.HasPrefix(event.InvocationID, "bot-report:") && (strings.TrimSpace(part.Text) == "durable controlled result" || strings.Contains(part.Text, "\n\ndurable controlled result\n")) {
+								models++
+							}
 							switch part.Text {
 							case "Owner says hello":
 								oldUsers++

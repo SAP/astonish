@@ -141,7 +141,7 @@ func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 	v := store.DefaultBotVersion()
 	v.Charter = q.Definition.Charter
 	if strings.TrimSpace(v.Charter) == "" {
-		v.Charter = "Discuss your goals and draft proposals for explicit review. Do not take external actions without separately reviewed permissions."
+		v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
 		if q.StartFromTitle {
 			v.Charter = strings.TrimSpace(q.Name) + "\n\n" + v.Charter
 		}

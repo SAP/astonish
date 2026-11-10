@@ -31,11 +31,15 @@ import (
 )
 
 type interactiveHTTPModel struct {
-	name      string
-	args      map[string]any
-	called    bool
-	principal execution.Principal
-	t         *testing.T
+	qualityMode string
+	productions int
+	reviews     int
+	assessment  func(*model.LLMRequest) (*model.LLMResponse, bool)
+	name        string
+	args        map[string]any
+	called      bool
+	principal   execution.Principal
+	t           *testing.T
 }
 
 func (*interactiveHTTPModel) Name() string { return "interactive-http" }
@@ -45,7 +49,21 @@ func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.L
 		if p.Subject != m.principal.Subject || p.Authentication != m.principal.Authentication || p.Surface != m.principal.Surface {
 			m.t.Errorf("provider lost original principal: %+v", p)
 		}
+		if m.assessment != nil {
+			if response, ok := m.assessment(req); ok {
+				yield(response, nil)
+				return
+			}
+		}
 		part := &genai.Part{Text: "Observed scoped result."}
+		if m.qualityMode != "" {
+			m.productions++
+			part.Text = "Defective: the receipt says imaginary."
+			if m.productions > 1 && m.qualityMode != "limits" {
+				part.Text = "Corrected: the receipt says isolated receipt."
+			}
+			m.called = true
+		}
 		if !m.called {
 			m.called = true
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: m.name, Args: m.args}}
@@ -161,6 +179,7 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 	router.HandleFunc(root+"/{botID}/sessions/{sessionID}/stream", api.BotHistoryStreamHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}/sessions/{sessionID}/events", api.BotEventsHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}", api.BotGetHandler).Methods("GET")
+	router.HandleFunc(root+"/{botID}/runs/{runID}", api.BotRunHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}/messages", api.BotMessageHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/activate", api.BotActivateHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/pause", api.BotPauseHandler).Methods("POST")
@@ -213,6 +232,37 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 		t.Fatal(err)
 	}
 	mdl := &interactiveHTTPModel{name: toolName, args: args, principal: principal, t: t}
+	mdl.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+		if req.Config == nil || req.Config.SystemInstruction == nil {
+			return nil, false
+		}
+		prompt := req.Config.SystemInstruction.Parts[0].Text
+		var output any
+		if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+			output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "scoped-result", SourceIDs: []string{"assignment", "charter"}, Text: "Use the requested scoped tool and truthfully report its result."}}}
+		} else if strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
+			var work store.BotWorkState
+			if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work); err != nil {
+				t.Fatal(err)
+			}
+			verdict := store.BotCriterionUnverified
+			if work.Candidate.Text == "Observed scoped result." && len(work.Candidate.Observations) > 0 {
+				verdict = store.BotCriterionSatisfied
+			}
+			if toolName == "ask_user" && work.Candidate.Text == "Observed scoped result." {
+				for key, body := range work.Candidate.Bodies {
+					if strings.HasPrefix(key, "tool-response:owner-answer:") && strings.Contains(body, "Quarterly report") {
+						verdict = store.BotCriterionSatisfied
+					}
+				}
+			}
+			output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "scoped-result", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected scoped result against observed tool response."}}}
+		} else {
+			return nil, false
+		}
+		raw, _ := json.Marshal(output)
+		return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
+	}
 	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {

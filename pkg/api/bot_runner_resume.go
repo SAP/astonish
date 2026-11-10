@@ -27,6 +27,23 @@ type botApprovalCapture struct {
 	req      bot.RunRequest
 	approval *store.BotApproval
 	conflict bool
+	// Only RequestApproval, reached before execution, can attest nonexecution.
+	invocation      *genai.FunctionCall
+	nonexecutedID   string
+	nonexecutedTool string
+	seenCallIDs     map[string]bool
+}
+
+type botApprovalCaptureKey struct{}
+
+func (c *botApprovalCapture) takeNonexecution(id, name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if id == "" || id != c.nonexecutedID || name != c.nonexecutedTool || c.conflict {
+		return false
+	}
+	c.nonexecutedID = "" // one response, never a reusable exemption
+	return true
 }
 
 func (c *botApprovalCapture) RequestApproval(ctx context.Context, id execution.BotRunIdentity, a execution.ActionDescriptor, digest string) (uuid.UUID, error) {
@@ -48,6 +65,23 @@ func (c *botApprovalCapture) RequestApproval(ctx context.Context, id execution.B
 		return uuid.Nil, err
 	}
 	c.approval = saved
+	// The policy guard returns immediately after this request, before the tool
+	// body or budget reservation. Match its exact action to the serial model
+	// invocation; model text and serialized response maps are not evidence.
+	if call := c.invocation; call != nil && call.ID != "" {
+		args, marshalErr := json.Marshal(call.Args)
+		candidate := a
+		candidate.Tool, candidate.Arguments = call.Name, args
+		want, wantErr := a.Digest()
+		got, gotErr := candidate.Digest()
+		callMatches := true
+		if toolCtx, ok := ctx.(interface{ FunctionCallID() string }); ok {
+			callMatches = toolCtx.FunctionCallID() == call.ID
+		}
+		if marshalErr == nil && wantErr == nil && gotErr == nil && want == digest && got == digest && callMatches {
+			c.nonexecutedID, c.nonexecutedTool = call.ID, call.Name
+		}
+	}
 	return saved.ID, nil
 }
 func (c *botApprovalCapture) checkpoint() (bot.RunResult, bool) {
@@ -122,6 +156,37 @@ func (m *botApprovalCaptureModel) GenerateContent(ctx context.Context, r *model.
 			}
 			responses = append(responses, response)
 		}
+		m.capture.mu.Lock()
+		m.capture.invocation = nil
+		for _, response := range responses {
+			if response == nil || response.Content == nil {
+				continue
+			}
+			for _, part := range response.Content.Parts {
+				if part == nil || part.FunctionCall == nil {
+					continue
+				}
+				call := part.FunctionCall
+				if call.ID == "" {
+					call.ID = uuid.NewString()
+				}
+				if m.capture.seenCallIDs == nil {
+					m.capture.seenCallIDs = make(map[string]bool)
+				}
+				if !m.capture.seenCallIDs[call.ID] {
+					// Freeze arguments before yielding control to callbacks.
+					raw, _ := json.Marshal(call)
+					var snapshot genai.FunctionCall
+					decoder := json.NewDecoder(bytes.NewReader(raw))
+					decoder.UseNumber()
+					if decoder.Decode(&snapshot) == nil {
+						m.capture.invocation = &snapshot
+					}
+				}
+				m.capture.seenCallIDs[call.ID] = true
+			}
+		}
+		m.capture.mu.Unlock()
 		for _, response := range responses {
 			if !yield(response, nil) {
 				return

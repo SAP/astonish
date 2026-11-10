@@ -34,6 +34,9 @@ type employeeOperationsModel struct {
 }
 
 func (m *employeeOperationsModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, nil); ok {
+		return response
+	}
 	if !m.capture {
 		return m.workerTestModel.GenerateContent(ctx, r, stream)
 	}

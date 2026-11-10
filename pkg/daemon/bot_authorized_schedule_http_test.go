@@ -44,6 +44,9 @@ type authorizedScheduleHTTPModel struct {
 }
 
 func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, nil); ok {
+		return response
+	}
 	if m.pausedRead != nil {
 		return m.pausedRead.GenerateContent(ctx, r, stream)
 	}
@@ -536,6 +539,9 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil || result.Status != store.RunSucceeded {
 				t.Fatalf("future run %+v %v", result, err)
 			}
+			if result.Report.Summary != "durable controlled result" || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
+				t.Fatalf("scheduled result lacks reviewed controlled content: %+v", result.Report)
+			}
 			events, err := ss.ReadTranscriptEvents(auth, "astonish", owner.String(), b.HomeSessionID.String())
 			if err != nil {
 				t.Fatal(err)
@@ -551,7 +557,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 				if e.Content != nil {
 					for _, p := range e.Content.Parts {
 						scheduleReport = scheduleReport || strings.Contains(p.Text, "Schedule schedule_create applied")
-						runReport = runReport || p.Text == "durable controlled result"
+						runReport = runReport || p.Text == bot.RenderReport(*result)
 					}
 				}
 			}

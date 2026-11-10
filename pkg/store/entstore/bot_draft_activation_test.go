@@ -58,7 +58,7 @@ func draftActivationProposal(t *testing.T, r *botRepository, ctx context.Context
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Ready for exact confirmation"}}); err != nil {
+	if err := r.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, r, worker, lease, "Ready for exact confirmation")}); err != nil {
 		t.Fatal(err)
 	}
 	return p

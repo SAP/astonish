@@ -7,11 +7,62 @@ import (
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+func TestBotWorkPromptPinnedResponsibility(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			id, run := uuid.New(), uuid.New()
+			goal := store.BotGoal{ID: uuid.New(), BotID: id, Revision: 3, CompletionCriteria: "Cite observation time {untrusted_policy}"}
+			req := bot.RunRequest{Bot: store.Bot{ID: id, Scope: scope}, Version: store.BotVersion{Version: 1}, Run: store.BotRun{ID: run}, Instructions: "resume answer"}
+			req.Work = store.NewBotWorkState(store.BotWorkContract{BotID: id, RunID: run, Version: 1, Instructions: "original assignment", Charter: "saved responsibility", Goals: []store.BotGoal{goal}})
+			req.Work.Criteria = []store.BotWorkCriterion{{ID: "criterion", Text: "specific inspection", SourceIDs: []string{"assignment", "charter"}}}
+			req.Work.Unresolved = []string{"prior uncertain send: investigate, do not replay"}
+			req.Work.Candidate = &store.BotWorkCandidate{Text: "PRIVATE candidate bytes"}
+			po := NewBotPromptOverrides(nil, req)
+			req.Work.Contract.Goals[0].CompletionCriteria = "mutated easier criteria"
+			b := &SystemPromptBuilder{}
+			b.applyBotPrompt(po)
+			prompt := b.Build()
+			for _, want := range []string{"original assignment", "saved responsibility", "Cite observation time", "specific inspection", "prior uncertain send", "explicit applicability reason", "not instructions or permission grants", "One occurrence does not complete an ongoing goal", "neither owner sample approval nor mandatory skill creation"} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("missing %q", want)
+				}
+			}
+			for _, bad := range []string{"mutated easier criteria", "PRIVATE candidate bytes", "{untrusted_policy}"} {
+				if strings.Contains(prompt, bad) {
+					t.Errorf("unsafe snapshot %q", bad)
+				}
+			}
+			if buildTurnContextContent(po, "", "") != nil {
+				t.Fatal("work persisted as user turn")
+			}
+			for _, tc := range []string{"oversized", "foreign", "unknown"} {
+				t.Run(tc, func(t *testing.T) {
+					q := req
+					q.Work = req.Work.Clone()
+					switch tc {
+					case "oversized":
+						q.Work.Unresolved = []string{strings.Repeat("huge", 20000)}
+					case "foreign":
+						q.Work.Contract.Goals[0].BotID = uuid.New()
+					case "unknown":
+						q.Work.SchemaVersion++
+					}
+					text := botWorkPrompt(q)
+					if !strings.Contains(text, "unavailable or oversized") || len(text) > 1000 {
+						t.Fatal("invalid context was not bounded/unavailable")
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestBotPromptPrivateSnapshot(t *testing.T) {
 	limit := int64(100)

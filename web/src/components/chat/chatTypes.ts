@@ -34,6 +34,9 @@ export interface AgentMessage {
   type: 'agent'
   content: string
   _streaming?: boolean
+  // Durable Bot publication identity; never merged into incremental text.
+  operationId?: string
+  operationReplay?: boolean
 }
 
 export interface ToolCallMessage {

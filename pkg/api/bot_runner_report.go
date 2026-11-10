@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -22,7 +23,26 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		return
 	}
 	cr.completion.toolResponses++
+	// Capture the actual returned source/delegate content, not just outcome claims.
+	// Oversized content is explicitly unverified and blocks work acceptance.
+	if raw, err := json.Marshal(response.Response); err == nil {
+		if len(raw) > store.BotWorkMaxCandidateBytes {
+			cr.completion.Report.Unverified = append(cr.completion.Report.Unverified, "Required tool response content exceeds assessment limit.")
+		} else {
+			if cr.completion.reportBodies == nil {
+				cr.completion.reportBodies = make(map[string]string)
+			}
+			cr.completion.reportBodies["tool-response:"+response.ID] = string(raw)
+		}
+	}
 	outcome, ok := bot.TakeToolOutcome(cr.ctx, response.ID)
+	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {
+		// Consume only identity-bound, guard-captured nonexecution. An existing
+		// ledger outcome (especially a failed effect) always remains authoritative.
+		if capture.takeNonexecution(response.ID, response.Name) && !ok {
+			return
+		}
+	}
 	if !ok || !outcome.Verified {
 		cr.completion.Report.Unverified = append(cr.completion.Report.Unverified, fmt.Sprintf("Tool %s returned without independently verified outcome metadata.", response.Name))
 		if ok {
@@ -41,6 +61,7 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 			report.Unverified = append(report.Unverified, "Routine enqueue receipt did not match the current run and pending tool response.")
 			return
 		}
+		cr.completion.pendingControls = append(cr.completion.pendingControls, botWorkPendingControl{OperationID: capture.OperationID.String(), Operation: capture.Operation, Acknowledgment: capture.Acknowledgment(), Payload: json.RawMessage(capture.PayloadJSON)})
 		report.Unchanged = append(report.Unchanged, capture.Observation())
 		if report.Summary != "" {
 			report.Summary += "\n\n"
@@ -58,6 +79,7 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		}
 		// This observation is of a pending record, not a changed schedule. The
 		// server acknowledgment, not premature model 'Done', owns the summary.
+		cr.completion.pendingControls = append(cr.completion.pendingControls, botWorkPendingControl{OperationID: capture.OperationID.String(), Operation: capture.Operation, Acknowledgment: capture.Acknowledgment(), Payload: json.RawMessage(capture.PayloadJSON)})
 		report.Unchanged = append(report.Unchanged, capture.Observation())
 		if report.Summary != "" {
 			report.Summary += "\n\n"

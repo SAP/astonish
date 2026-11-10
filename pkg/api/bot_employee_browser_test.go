@@ -7,6 +7,8 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,6 +50,27 @@ type employeeBrowserModel struct {
 
 func (*employeeBrowserModel) Name() string { return "interactive-http" }
 func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool { return w.Candidate.Text == "Your request has been recorded." }); ok {
+		return response
+	}
+	if req.Config != nil && req.Config.SystemInstruction != nil && len(req.Config.SystemInstruction.Parts) > 0 && strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_WORK_PENDING_REVIEW_V1") {
+		var work store.BotWorkState
+		if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work); err != nil || work.Candidate == nil {
+			m.t.Fatalf("pending assessment input: %v", err)
+		}
+		current := store.BotWorkReview{CandidateDigest: work.Candidate.Digest}
+		deferred := store.BotWorkReview{CandidateDigest: work.Candidate.Digest}
+		for _, criterion := range work.Criteria {
+			assessment := store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Controlled model assessed the server-captured pending payload; application is deferred."}
+			current.Criteria = append(current.Criteria, assessment)
+			assessment.Verdict = store.BotCriterionUnverified
+			deferred.Criteria = append(deferred.Criteria, assessment)
+		}
+		raw, _ := json.Marshal(map[string]any{"current_turn": current, "deferred_application": deferred})
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
+		}
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if m.question.Load() {
 			m.calls.Add(1)
@@ -81,7 +104,248 @@ func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.L
 	}
 }
 
-func TestBotEmployeeBrowserAcceptance(t *testing.T) { runEmployeeBrowser(t, "routine") }
+// TestBotWorkQualityBrowserAcceptance serves the built Studio against isolated
+// production Bot handlers/store/worker. Only model and identity/settings are controlled.
+func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
+	if os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
+		t.Skip("set ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 after npm run build")
+	}
+	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
+	if bin == "" {
+		t.Fatal("ASTONISH_BOT_BROWSER_PATH is required")
+	}
+	for _, mode := range []string{"checked", "limitations"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, store.BotScopePersonal)
+			defer f.worker.Stop()
+			f.model.qualityMode = "publication"
+			if mode == "limitations" {
+				f.model.qualityMode = "limits"
+			}
+			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+				if req.Config == nil || req.Config.SystemInstruction == nil {
+					return nil, false
+				}
+				prompt := req.Config.SystemInstruction.Parts[0].Text
+				var result any
+				switch {
+				case strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1"):
+					result = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "receipt", SourceIDs: []string{"assignment", "charter"}, Text: "Return the supplied exact receipt"}}}
+				case strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1"):
+					var work store.BotWorkState
+					if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work); err != nil {
+						t.Fatal(err)
+					}
+					verdict := store.BotCriterionFailed
+					if work.Candidate.Text == "Corrected: the receipt says isolated receipt." {
+						verdict = store.BotCriterionSatisfied
+					}
+					result = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "receipt", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Use the supplied exact receipt"}}}
+				default:
+					return nil, false
+				}
+				raw, _ := json.Marshal(result)
+				return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, true
+			}
+			var pkg struct {
+				Version string `json:"version"`
+			}
+			raw, err := os.ReadFile("../../web/package.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = json.Unmarshal(raw, &pkg); err != nil {
+				t.Fatal(err)
+			}
+			dist, _ := filepath.Abs(filepath.Join("../../web/dist", pkg.Version))
+			if _, err = os.Stat(filepath.Join(dist, "index.html")); err != nil {
+				t.Fatal(err)
+			}
+			u, _ := url.Parse(f.server.URL)
+			proxy := httputil.NewSingleHostReverseProxy(u)
+			principal, _ := execution.PrincipalFromContext(f.ctx)
+			ods, err := f.db.ForOrg(principal.OrgSlug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc := &store.Services{TenantRouter: f.db, Bots: f.repo, PersonalBots: f.repo, Sessions: ods.ForTeam(principal.TeamSlug).Sessions(), PersonalSessions: ods.ForUser(principal.Subject).Sessions(), BotTurnRegistry: f.registry, BotInteractiveReady: true}
+			router := mux.NewRouter()
+			// Compatibility probes adapt only the read DTO; successful publication
+			// still comes exclusively from the production worker/work state machine.
+			var compatibility atomic.Int32
+			router.HandleFunc("/api/studio/bots/{botID}/snapshot", func(w http.ResponseWriter, r *http.Request) {
+				if compatibility.Load() == 0 {
+					api.BotSnapshotHandler(w, r)
+					return
+				}
+				rec := httptest.NewRecorder()
+				api.BotSnapshotHandler(rec, r)
+				var snap store.BotSnapshot
+				if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &snap) != nil {
+					t.Error("snapshot read failed")
+					http.Error(w, "snapshot", 500)
+					return
+				}
+				if snap.LatestOutcome != nil {
+					if compatibility.Load() == 1 {
+						snap.LatestOutcome.Report.Quality = nil
+					} else {
+						snap.LatestOutcome.Report.Quality = &store.BotQualityReport{SchemaVersion: 999}
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(snap)
+			}).Methods("GET")
+			for _, route := range []struct {
+				path string
+				h    http.HandlerFunc
+			}{
+				{"", api.BotListHandler}, {"/{botID}/activity", api.BotActivityHandler}, {"/{botID}/read", api.BotReadCursorHandler}, {"/{botID}/versions/{version}", api.BotGetVersionHandler}, {"/{botID}/runs", api.BotRunsHandler}, {"/{botID}/proposals", api.BotControlProposalsHandler}, {"/{botID}/approvals", api.BotApprovalsHandler}, {"/{botID}/goals", api.BotGoalsHandler},
+			} {
+				router.HandleFunc("/api/studio/bots"+route.path, route.h).Methods("GET")
+			}
+			router.PathPrefix("/").Handler(proxy)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/api/studio/bots") {
+					ctx, cancel := context.WithCancel(f.ctx)
+					defer cancel()
+					stop := context.AfterFunc(r.Context(), cancel)
+					defer stop()
+					router.ServeHTTP(w, r.WithContext(store.WithServices(ctx, svc)))
+					return
+				}
+				var v any
+				switch r.URL.Path {
+				case "/api/auth/setup-status":
+					v = map[string]any{"initialized": true, "auth_mode": "builtin"}
+				case "/api/auth/me":
+					v = map[string]any{"user": map[string]any{"id": principal.Subject, "email": "quality@example.test", "display_name": "Owner", "role": "owner", "platform_role": "user"}, "org": map[string]any{"slug": principal.OrgSlug}, "team": principal.TeamSlug}
+				case "/api/orgs":
+					v = map[string]any{"orgs": []any{}, "active_org": principal.OrgSlug}
+				case "/api/teams":
+					v = []any{map[string]any{"slug": principal.TeamSlug, "name": "Team"}}
+				case "/api/settings/status":
+					v = map[string]any{"setupRequired": false}
+				case "/api/version":
+					v = map[string]any{"version": "dev"}
+				case "/api/agents", "/api/tools":
+					v = []any{}
+				case "/api/settings/config":
+					v = map[string]any{}
+				case "/api/settings/providers/effective":
+					v = map[string]any{"providers": map[string]any{}}
+				}
+				if v != nil {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(v)
+					return
+				}
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					proxy.ServeHTTP(w, r)
+					return
+				}
+				path := filepath.Join(dist, filepath.Clean("/"+r.URL.Path))
+				if info, e := os.Stat(path); e == nil && !info.IsDir() {
+					http.FileServer(http.Dir(dist)).ServeHTTP(w, r)
+					return
+				}
+				http.ServeFile(w, r, filepath.Join(dist, "index.html"))
+			}))
+			defer server.Close()
+			launch := browserlauncher.New().Bin(bin).UserDataDir(t.TempDir()).Headless(true).Leakless(false)
+			control, err := launch.Launch()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer launch.Cleanup()
+			browser := rod.New().ControlURL(control).MustConnect()
+			defer browser.Close()
+			page := browser.MustPage(server.URL + "/#/chat/bots/personal/" + f.b.ID.String()).Timeout(40 * time.Second)
+			page = page.WithPanic(func(v any) {
+				text, _ := page.CancelTimeout().Eval(`()=>document.body.innerText`)
+				t.Fatalf("browser: %v\n%v", v, text)
+			})
+			page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+			var ids []string
+			count := 3
+			if mode == "limitations" {
+				count = 1
+			}
+			for i := 0; i < count; i++ {
+				f.model.productions = 0
+				var receipt store.BotMessageReceipt
+				if err = json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Report the supplied text: isolated receipt.","idempotency_key":"browser-quality-%d"}`, f.b.Version, i), 202), &receipt); err != nil {
+					t.Fatal(err)
+				}
+				if err = f.worker.Poll(f.ctx); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, "bot-report:"+receipt.Run.ID.String())
+			}
+			want := "Requirements checked"
+			if mode == "limitations" {
+				want = "Requirements remain unmet or unverified"
+			}
+			homeText := "Corrected: the receipt says isolated receipt."
+			if mode == "limitations" {
+				homeText = "Work could not be verified"
+			}
+			page.MustElementR("body", homeText).MustVisible()
+			if mode == "checked" {
+				page.MustWait(`()=>document.body.innerText.split('Corrected: the receipt says isolated receipt.').length === 4`)
+			}
+			assertHome := func() {
+				t.Helper()
+				text := page.MustEval(`()=>document.body.innerText`).Str()
+				for _, internal := range []string{"Run report", "Quality assessment", "candidate:", "### Unchanged"} {
+					if strings.Contains(text, internal) {
+						t.Fatalf("Home leaked diagnostic %q: %s", internal, text)
+					}
+				}
+				if strings.Contains(text, "Defective: the receipt says imaginary.") {
+					t.Fatal("draft leaked into Home")
+				}
+				if mode == "checked" && strings.Count(text, "Corrected: the receipt says isolated receipt.") != 3 {
+					t.Fatalf("distinct final reports lost/duplicated: %s", text)
+				}
+				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
+				for _, id := range ids {
+					if strings.Count(history, id) != 1 {
+						t.Fatalf("canonical report identity %s count=%d", id, strings.Count(history, id))
+					}
+				}
+				if page.MustEval(`()=>document.querySelectorAll('[data-review-id]').length`).Int() != 0 {
+					t.Fatal("quality introduced owner approval")
+				}
+			}
+			assertHome()
+			page.MustReload()
+			page.MustElementR("body", homeText).MustVisible()
+			assertHome()
+			page.MustElement(`[data-testid="chat-input"]`).MustInput("keep quality draft")
+			page.MustEval(`()=>{window.qualityComposer=document.querySelector('[data-testid="chat-input"]'); return true}`)
+			page.MustElementR("button", "^Details$").MustClick()
+			page.MustElementR("summary", "Runs & activity").MustClick()
+			page.MustElementR(`[aria-label="Quality assessment"] summary`, want).MustVisible()
+			for _, tc := range []struct {
+				state int32
+				want  string
+			}{{1, "Not assessed"}, {2, "Assessment unavailable"}} {
+				compatibility.Store(tc.state)
+				page.MustElementR("button", "Refresh Bot").MustClick()
+				page.MustElementR(`[aria-label="Quality assessment"] summary`, tc.want).MustVisible()
+			}
+			page.MustElementR("button", "^Close$").MustClick()
+			if !page.MustEval(`()=>window.qualityComposer===document.querySelector('[data-testid="chat-input"]') && window.qualityComposer.value==='keep quality draft'`).Bool() {
+				t.Fatal("Details remounted/lost composer")
+			}
+			t.Logf("built Studio live/reload: %s, canonical reports=%d, no rejected drafts or new approvals; legacy/unknown DTO compatibility and preserved composer", mode, count)
+		})
+	}
+}
+
+func TestBotScheduleConfirmedOnlyBrowserAcceptance(t *testing.T) { runEmployeeBrowser(t, "routine") }
+func TestBotEmployeeBrowserAcceptance(t *testing.T)              { runEmployeeBrowser(t, "routine") }
 func TestBotEmployeeEscalationBrowserAcceptance(t *testing.T) {
 	for _, decision := range []string{"approve", "deny", "serverexpiry", "stalerace"} {
 		t.Run(decision, func(t *testing.T) { runEmployeeBrowser(t, decision) })
@@ -144,11 +408,17 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		// Candidate readiness runs after CommitRun; a model return or policy callback
 		// alone is not evidence of a committed source outcome.
 		if scenario == "routine" && sourceReturned.Load() {
-			applyOnce.Do(func() { close(applyReached) })
-			select {
-			case <-applyRelease:
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			runs, readErr := f.repo.ListRuns(auth, f.b.ID, store.BotPage{})
+			if readErr != nil {
+				return nil, readErr
+			}
+			if len(runs) == 1 && runs[0].FinishedAt != nil {
+				applyOnce.Do(func() { close(applyReached) })
+				select {
+				case <-applyRelease:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
 			}
 		}
 		return m, nil
@@ -343,7 +613,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	defer browser.Close()
 	page := browser.MustPage(server.URL + "/#/chat/bots/" + string(scope) + "/" + f.b.ID.String()).Timeout(35 * time.Second)
 	page = page.WithPanic(func(v any) {
-		text, _ := page.CancelTimeout().Eval(`()=>document.body.innerText`)
+		text, _ := page.CancelTimeout().Timeout(3 * time.Second).Eval(`()=>JSON.stringify({home:document.body.innerText,scheduleReplay:window.scheduleReplay,scheduleReadyState:window.scheduleStream?.readyState,scheduleEvents:window.scheduleEvents})`)
 		t.Fatalf("browser: %v\n%v", v, text)
 	})
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
@@ -380,12 +650,19 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("model capture timeout")
 	}
-	page.MustElement(`[data-operation-id]`).MustVisible()
+	assertNoSchedulePending := func() {
+		t.Helper()
+		if !page.MustEval(`()=>{const w=document.querySelector('[aria-label="Bot workspace"]');return !w.querySelector('[data-operation-id]') && !/durably queued|Change queued|Applying change|No schedule change is verified|Work is still pending|Your request has been recorded/.test(w.innerText)}`).Bool() {
+			t.Fatalf("pending schedule leaked into Home: %s", page.MustEval(`()=>document.querySelector('[aria-label="Bot workspace"]').innerText`).Str())
+		}
+	}
 	if scenario == "routine" {
-		page.MustElementR(`[data-operation-id] h3`, "Pending").MustVisible()
+		assertNoSchedulePending()
 		if page.MustEval(`()=>document.querySelectorAll('[data-review-id]').length`).Int() != 0 {
 			t.Fatal("routine demanded review")
 		}
+	} else {
+		page.MustElement(`[data-operation-id]`).MustVisible()
 	}
 	release()
 	if scenario == "routine" {
@@ -401,30 +678,31 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			t.Fatalf("source readback: %v %v", committedRuns, e)
 		}
 		source, e := f.repo.GetRun(auth, f.b.ID, committedRuns[0].ID)
-		wantSourceStatus := store.RunPartial
-		if revisionProbe {
-			// Deferred schedule capture is an observed pending operation, not an
-			// unverified mutation; the worker commits it separately below.
-			wantSourceStatus = store.RunSucceeded
-		}
-		if e != nil || source.Status != wantSourceStatus || source.FinishedAt == nil {
+		if e != nil || source.Status != store.RunSucceeded || source.FinishedAt == nil {
 			t.Fatalf("source must be durably terminal before apply: %+v %v", source, e)
 		}
 		reportJSON, _ := json.Marshal(source.Report)
-		t.Logf("persisted source report: %s", reportJSON)
-		if revisionProbe {
-			if len(source.Report.Unverified) != 0 || len(source.Report.Changed) != 0 || len(source.Report.Unchanged) != 1 {
-				t.Fatalf("pending capture must not claim an applied change: %s", reportJSON)
-			}
-		} else if len(source.Report.Unverified) != 1 || source.Report.Unverified[0] != "Tool execute_tool returned without independently verified outcome metadata." || len(source.Report.Changed) != 0 {
-			t.Fatalf("unexpected source outcome: %s", reportJSON)
+		if len(source.Report.Unverified) != 0 || len(source.Report.Changed) != 0 || len(source.Report.Unchanged) != 1 || source.Report.Acknowledgment == nil || source.Report.Acknowledgment.Kind != store.BotReportAcknowledgmentSchedulePending || len(source.Report.Acknowledgment.OperationIDs) != 1 {
+			t.Fatalf("expected pure server-marked schedule acknowledgment, not an applied change: %s", reportJSON)
 		}
-		page.MustElementR(`[data-operation-id] h3`, "Pending").MustVisible()
+		var pending store.BotSnapshot
+		if err := json.Unmarshal(f.request("GET", f.path+"/snapshot", "", 200), &pending); err != nil {
+			t.Fatal(err)
+		}
+		if len(pending.Operations) != 1 || pending.Operations[0].Presentation != store.BotOperationPresentationInternal || pending.Operations[0].OperationID != source.Report.Acknowledgment.OperationIDs[0] || pending.Operations[0].SourceRunID != source.ID || pending.Operations[0].SourceUserEventID == "" {
+			t.Fatalf("pending snapshot lost internal identity: %+v", pending.Operations)
+		}
+		assertNoSchedulePending()
 		page.MustElement(`[data-testid="thinking-indicator"]`).MustVisible()
-		if page.MustEval(`()=>document.querySelectorAll('[data-operation-id]').length`).Int() != 1 {
-			t.Fatal("pending operation duplicated")
-		}
-		t.Logf("source durably committed status=%s finished=%s while operation remains Pending and workspace remains working", source.Status, source.FinishedAt)
+		page.MustReload()
+		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+		page.MustElement(`[data-testid="thinking-indicator"]`).MustVisible()
+		assertNoSchedulePending()
+		// Observe the same production SSE endpoint as Studio, without intercepting
+		// or replacing fetch. Keep it open across the actual worker application.
+		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);window.scheduleStream.addEventListener('transcript',e=>window.scheduleEvents.push(JSON.parse(e.data)));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
+		page.MustWait(`()=>window.scheduleReplay`)
+		t.Logf("pure acknowledgment committed status=%s; pending snapshot retains operation=%s/source=%s; live and reload show working with zero pending cards/prose", source.Status, pending.Operations[0].OperationID, source.ID)
 		unblockApply()
 	}
 	if err = <-poll; err != nil {
@@ -553,9 +831,44 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	if scenario == "deny" {
 		expected = "Cancelled"
 	}
-	page.MustElementR(`[data-operation-id] h3`, expected).MustVisible()
+	assertFinalOperation := func() {
+		t.Helper()
+		if scenario != "routine" {
+			page.MustElementR(`[data-operation-id] h3`, expected).MustVisible()
+			return
+		}
+		page.MustElementR(`[data-operation-id] [data-testid="agent-message-bubble"]`, "I've created the schedule. It runs every minute. Next run:").MustVisible()
+		if !page.MustEval(`()=>{const w=document.querySelector('[aria-label="Bot workspace"]'); return w.querySelectorAll('[data-operation-id]').length===1 && w.querySelectorAll('[data-operation-id] [data-testid="agent-message-bubble"]').length===1 && !w.querySelector('[data-operation-id] h3') && !/durably queued|Change queued|Applying change|No schedule change is verified|Work is still pending|Your request has been recorded/.test(w.innerText) && w.innerText.split("I've created the schedule.").length===2}`).Bool() {
+			t.Fatal("schedule must appear exactly once as friendly confirmed prose, without pending acknowledgment or technical card")
+		}
+		for _, id := range []string{ops[0].ID.String(), ops[0].Provenance.SourceRunID.String(), ops[0].Provenance.PayloadDigest} {
+			if page.MustEval(`id=>document.querySelector('[aria-label="Bot workspace"]').innerText.includes(id)`, id).Bool() {
+				t.Fatalf("internal identity leaked into visible schedule: %s", id)
+			}
+		}
+	}
+	assertFinalOperation()
 	if scenario == "routine" {
-		page.MustElementR(`[data-operation-id] p`, "Next run:").MustVisible()
+		var applied store.BotSnapshot
+		if err := json.Unmarshal(f.request("GET", f.path+"/snapshot", "", 200), &applied); err != nil {
+			t.Fatal(err)
+		}
+		if len(applied.Operations) != 1 || applied.Operations[0].Presentation != store.BotOperationPresentationConversation || applied.Operations[0].Status != store.BotOperationApplied || applied.Operations[0].OperationID != ops[0].ID || applied.Operations[0].SourceRunID != runs[0].ID || applied.Operations[0].VerifiedSchedule == nil {
+			t.Fatalf("applied snapshot lost confirmed identity: %+v", applied.Operations)
+		}
+		waitScheduleSSE := func(predicate string) {
+			t.Helper()
+			if err := page.Timeout(8 * time.Second).Wait(rod.Eval(predicate)); err != nil {
+				diagnostic, diagnosticErr := page.CancelTimeout().Timeout(3 * time.Second).Eval(`()=>JSON.stringify({readyState:window.scheduleStream?.readyState,replay:window.scheduleReplay,events:window.scheduleEvents,home:document.querySelector('[aria-label="Bot workspace"]')?.innerText})`)
+				t.Fatalf("schedule SSE wait: %v; diagnostic=%v diagnosticError=%v", err, diagnostic, diagnosticErr)
+			}
+		}
+		waitScheduleSSE(`()=>window.scheduleEvents.some(e=>e.Actions?.StateDelta?.bot_operation?.presentation==='conversation')`)
+		if !page.MustEval(`(id, source)=>{const rows=window.scheduleEvents;const ops=rows.map(e=>e.Actions?.StateDelta?.bot_operation).filter(Boolean);return ops.some(o=>o.operation_id===id && o.presentation==='internal' && o.source_run_id===source) && ops.filter(o=>o.operation_id===id && o.presentation==='conversation' && o.status==='applied').length===1 && !rows.some(e=>e.Content?.parts?.some(p=>/durably queued|Your request has been recorded/.test(p.text||'')))}`, ops[0].ID.String(), runs[0].ID.String()).Bool() {
+			t.Fatalf("SSE lost internal heads, duplicated confirmation, or published pending prose: %s", page.MustEval(`()=>JSON.stringify(window.scheduleEvents)`).Str())
+		}
+		page.MustEval(`()=>window.scheduleStream.close()`)
+		t.Log("production SSE retained internal pending identity and emitted exactly one applied conversation event, with no pending prose")
 		jobs := ods.ForUser(principal.Subject).ScheduledJobs().List(auth)
 		if len(jobs) != 1 || !jobs[0].Enabled || jobs[0].NextRun == nil {
 			t.Fatalf("schedule readback %+v", jobs)
@@ -576,7 +889,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	}
 	before := m.calls.Load()
 	page.MustReload()
-	page.MustElementR(`[data-operation-id] h3`, expected).MustVisible()
+	assertFinalOperation()
 	if page.MustEval(`()=>document.querySelectorAll('[data-operation-id]').length`).Int() != 1 || m.calls.Load() != before {
 		t.Fatal("reload duplicated operation or replayed model")
 	}
@@ -588,7 +901,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			page.MustSetViewport(width, 844, 1, false)
 			page.MustEval(`dark=>document.documentElement.classList.toggle('dark',dark)`, dark)
 			page.MustElement(`[data-operation-id]`).MustVisible()
-			if !page.MustEval(`()=>{const c=document.querySelector('[data-operation-id]'); const r=c.getBoundingClientRect(); const title=c.querySelector('h3'); return r.width>100 && !!title && getComputedStyle(title).fontSize !== '0px' && c.scrollWidth<=c.clientWidth+2}`).Bool() {
+			if !page.MustEval(`()=>{const c=document.querySelector('[data-operation-id]'); const r=c.getBoundingClientRect(); const title=c.querySelector('h3, [data-testid="agent-message-bubble"]'); return r.width>100 && !!title && getComputedStyle(title).fontSize !== '0px' && c.scrollWidth<=c.clientWidth+2}`).Bool() {
 				t.Log("screenshot readability diagnostic: operation card geometry requires manual review")
 			}
 			dir := "../../.tmp/employee-browser-artifacts"

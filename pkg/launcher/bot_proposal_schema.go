@@ -78,12 +78,12 @@ func botMandatedProposalInputSchema() *jsonschema.Schema {
 	operation := payload.Properties["operation"]
 	values := operation.Enum[:0]
 	for _, value := range operation.Enum {
-		if value != store.BotControlResume {
+		if value != store.BotControlResume && value != store.BotControlSchedulePause {
 			values = append(values, value)
 		}
 	}
 	operation.Enum = values
-	operation.Description = "For explicit resumption of selected recurring tasks use resume_tasks, not legacy resume or activate."
+	operation.Description = "To pause all background work use priority_pause; to pause a selected schedule use update_scheduled_job with enabled=false, not the legacy schedule_pause proposal. For explicit resumption of selected recurring tasks use resume_tasks, not legacy resume or activate."
 	payload.Description = "Provide exactly the branch matching operation. Mandated routine controls return durable operation status and decision; pending is not applied. Resume only the explicitly requested tasks using resume_tasks and current schedule IDs; no separate lifecycle resume or owner review is needed within the mandate. Out-of-ceiling operations still require bounded authorization. Never supply authority, owner, scope, grants or proposal status."
 	payload.AllOf = append(payload.AllOf, &jsonschema.Schema{
 		If:   &jsonschema.Schema{Properties: map[string]*jsonschema.Schema{"operation": {Enum: []any{store.BotControlResumeTasks}}}, Required: []string{"operation"}},

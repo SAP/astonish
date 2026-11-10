@@ -112,7 +112,7 @@ func TestBotMessageReviewProjectionAndPublication(t *testing.T) {
 				}
 				home, err := reader.ReadBotTranscript(ctx, b.HomeSessionID, 0, 200)
 				home = separateRunStates(t, home, 3)
-				if err != nil || len(home) != 3 {
+				if err != nil || len(home) != 2 {
 					t.Fatalf("home duplicated or trace leaked: %d %v", len(home), err)
 				}
 				run, err := reader.ReadBotTranscript(ctx, first.Run.SessionID, 0, 200)
@@ -122,22 +122,36 @@ func TestBotMessageReviewProjectionAndPublication(t *testing.T) {
 				}
 				replay, err := reader.ReadBotTranscript(ctx, b.HomeSessionID, second.HistoryCursor, 200)
 				replay = separateRunStates(t, replay, 2)
-				if err != nil || len(replay) != 1 || replay[0].Event.ID != reply.ID {
+				if err != nil || len(replay) != 0 {
 					t.Fatalf("reconnect replay: %+v %v", replay, err)
 				}
-				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: store.BotReport{Summary: "Actual answer"}}); err != nil {
+				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "Actual answer")}); err != nil {
 					t.Fatal(err)
 				}
+				var publishedID string
 				for i := 0; i < 2; i++ {
 					pub, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: b.ID, RunID: first.Run.ID})
-					if err != nil || pub.EventID != reply.ID {
+					if err != nil || pub.EventID == reply.ID || (publishedID != "" && pub.EventID != publishedID) {
 						t.Fatalf("interactive publication: %+v %v", pub, err)
 					}
+					publishedID = pub.EventID
 				}
 				home, err = reader.ReadBotTranscript(ctx, b.HomeSessionID, 0, 200)
 				home = separateRunStates(t, home, 4)
 				if err != nil || len(home) != 3 {
 					t.Fatalf("publication duplicated reply: %d %v", len(home), err)
+				}
+				acceptedCount := 0
+				for _, row := range home {
+					if row.Event.ID == reply.ID || row.Event.ID == trace.ID {
+						t.Fatal("private draft or trace leaked into Home")
+					}
+					if row.Event.ID == publishedID {
+						acceptedCount++
+					}
+				}
+				if acceptedCount != 1 {
+					t.Fatalf("accepted publication count: %d", acceptedCount)
 				}
 				saved, err := repo.GetRun(ctx, b.ID, first.Run.ID)
 				if err != nil || saved.HistoryCursor != first.HistoryCursor || saved.UserEventID != first.UserEventID {

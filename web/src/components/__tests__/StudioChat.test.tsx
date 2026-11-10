@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, act, waitFor, fireEvent, within } from '@testing-library/react'
 import budgetStop from '../../../../pkg/api/testdata/bot_budget_stop.json'
 import StudioChat from '../StudioChat'
 import BotWorkspace from '../bots/BotWorkspace'
@@ -106,6 +106,112 @@ describe('StudioChat', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it.each(['dark', 'light'])('renders one confirmed schedule message through live, stale snapshot, and reload (%s)', async theme => {
+    const operation = { schema_version: 1 as const, bot_id: 'bot', home_session_id: 'bot-home', operation_id: 'one', revision: 1, state_sequence: 1, operation: 'schedule_create', status: 'pending' as const, decision: 'execute' as const, presentation: 'internal' as const, summary: 'Change queued.', source_user_event_id: 'human' }
+    const applied = { ...operation, status: 'applied' as const, presentation: 'conversation' as const, revision: 3, state_sequence: 6, summary: "I've created the schedule. It runs every minute. Next run: 2026-11-10 22:31 UTC.", verified_schedule: { trigger_id: 'trigger', schedule_id: 'schedule', version: 1, enabled: true, removed: false, next_run: '2026-11-10T22:31:00Z' } }
+    const onSend = vi.fn()
+    const props = { theme, hideSidebar: true, initialSessionId: 'bot-home' }
+    const thread = { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend }
+    const view = render(<StudioChat {...props} botThread={{ ...thread, operations: [operation] }} />)
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    await act(async () => {
+      stream.onEvent('user_message', { text: 'Keep my entire quoted instruction', eventId: 'human' })
+      stream.onEvent('bot_operation', { ...operation, operation_id: 'two', summary: 'Second schedule' })
+      stream.onEvent('bot_operation', { ...operation, status: 'applying', revision: 2, state_sequence: 2, summary: 'Applying change.' })
+      stream.onEvent('bot_run_state', { schema_version: 1, bot_id: 'bot', home_session_id: 'bot-home', session_id: 'bot-home', run_id: 'run', presentation: 'home_interactive', status: 'succeeded', state_sequence: 5 })
+      stream.onState?.('live', 'cursor')
+    })
+    expect(screen.queryByRole('article', { name: 'Operation result' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-message-bubble')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Change queued|Applying change|Second schedule/)).not.toBeInTheDocument()
+    expect(screen.getByText('Working…')).toBeInTheDocument()
+    await act(async () => {
+      stream.onState?.('reconnecting', 'cursor')
+      stream.onEvent('bot_operation', applied)
+      stream.onEvent('bot_operation', operation)
+      stream.onState?.('live', 'new-cursor')
+    })
+    view.rerender(<StudioChat {...props} botThread={{ ...thread, operations: [operation] }} />)
+    expect(screen.getAllByTestId('agent-message-bubble')).toHaveLength(1)
+    expect(screen.getByText(applied.summary)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /Create schedule/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Schedule enabled/)).not.toBeInTheDocument()
+    expect(screen.getByText('Working…')).toBeInTheDocument() // independent pending operation two
+    expect(screen.getByText('Keep my entire quoted instruction')).toBeInTheDocument()
+    view.unmount()
+    render(<StudioChat {...props} botThread={{ ...thread, operations: [applied] }} />)
+    const restored = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    await act(async () => {
+      restored.onEvent('bot_operation', operation)
+      restored.onEvent('bot_operation', applied)
+      restored.onState?.('live', 'new-cursor')
+    })
+    expect(screen.getAllByTestId('agent-message-bubble')).toHaveLength(1)
+    expect(screen.getByText(applied.summary)).toBeInTheDocument()
+    expect(screen.queryByRole('article', { name: 'Operation result' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Working…')).not.toBeInTheDocument()
+    await act(async () => {
+      restored.onEvent('text', { text: 'An unrelated report remains visible.' })
+      restored.onEvent('error', { error: 'An unrelated failure remains visible.' })
+    })
+    expect(screen.getByText('An unrelated report remains visible.')).toBeInTheDocument()
+    expect(screen.getByText(/An unrelated failure remains visible/)).toBeInTheDocument()
+  })
+
+  it.each(['dark', 'light'])('restores schedule confirmation in durable order with normal assistant controls after chunked reload (%s)', async theme => {
+    const pending = { schema_version: 1 as const, bot_id: 'bot', home_session_id: 'bot-home', operation_id: 'schedule', revision: 1, state_sequence: 3, operation: 'schedule_create', status: 'pending' as const, decision: 'execute' as const, presentation: 'internal' as const, summary: 'Queued privately', source_user_event_id: 'source' }
+    const final = { ...pending, revision: 2, state_sequence: 4, status: 'applied' as const, presentation: 'conversation' as const, summary: 'Schedule confirmed every minute.' }
+    const props = { theme, hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), operations: [final] } }
+    const first = render(<StudioChat {...props} />)
+    first.unmount()
+    const view = render(<StudioChat {...props} />)
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    const chunk = async (type: string, data: Record<string, unknown>, cursor: string) => act(async () => {
+      stream.onEvent(type, data)
+      stream.onState?.('live', cursor) // connectivity is not replay completion
+    })
+    await chunk('user_message', { text: 'Initial greeting', eventId: 'initial' }, 'bot-home:1')
+    expect(screen.queryByText(final.summary)).not.toBeInTheDocument()
+    await chunk('user_message', { text: 'Schedule my reports', eventId: 'source' }, 'bot-home:2')
+    await chunk('bot_operation', pending, 'bot-home:3')
+    expect(screen.queryByText(final.summary)).not.toBeInTheDocument()
+    await chunk('bot_operation', final, 'bot-home:4') // equal snapshot head must still insert
+    for (const text of ['First scheduled report', 'Second scheduled report']) {
+      await chunk('text', { text }, text)
+      await chunk('turn_complete', {}, text)
+    }
+    await chunk('bot_operation', pending, 'stale')
+    await chunk('bot_operation', final, 'duplicate')
+    await act(async () => stream.onReplayComplete?.())
+    const bubbles = screen.getAllByTestId('agent-message-bubble')
+    expect(bubbles.map(b => b.textContent)).toEqual([final.summary, 'First scheduled report', 'Second scheduled report'])
+    expect(screen.getByText('Schedule my reports').compareDocumentPosition(bubbles[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(bubbles[0].getAttribute('style')).toBe(bubbles[1].getAttribute('style'))
+    const confirmation = bubbles[0].parentElement!
+    expect(within(confirmation).getByTitle('Copy')).toBeEnabled()
+    fireEvent.click(within(confirmation).getByTitle('Show raw markdown'))
+    expect(within(confirmation).getByTitle('Show formatted')).toBeEnabled()
+    expect(confirmation.querySelector('pre')).toHaveTextContent(final.summary)
+    view.rerender(<StudioChat {...props} initialSessionId="other-home" botThread={{ ...props.botThread, operations: [] }} />)
+    expect(screen.queryByText(final.summary)).not.toBeInTheDocument()
+    await chunk('bot_operation', final, 'old-stream')
+    expect(screen.queryByText(final.summary)).not.toBeInTheDocument()
+  })
+
+  it('waits for replay_complete before placing a snapshot-only confirmation after its source', async () => {
+    const operation = { schema_version: 1 as const, bot_id: 'bot', home_session_id: 'bot-home', operation_id: 'only-snapshot', revision: 2, state_sequence: 4, operation: 'schedule_create', status: 'applied' as const, decision: 'execute' as const, presentation: 'conversation' as const, summary: 'Snapshot confirmation', source_user_event_id: 'source' }
+    render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, operations: [operation], onSend: vi.fn() }} />)
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    for (const [text, eventId] of [['Initial greeting', 'initial'], ['Schedule reports', 'source']]) {
+      await act(async () => { stream.onEvent('user_message', { text, eventId }); stream.onState?.('live', eventId) })
+      expect(screen.queryByText(operation.summary)).not.toBeInTheDocument()
+    }
+    await act(async () => { stream.onEvent('text', { text: 'Later report' }); stream.onEvent('turn_complete', {}); stream.onReplayComplete?.() })
+    expect(screen.getAllByTestId('agent-message-bubble').map(b => b.textContent)).toEqual([operation.summary, 'Later report'])
+    await act(async () => stream.onReplayComplete?.())
+    expect(screen.getAllByText(operation.summary)).toHaveLength(1)
+  })
+
   it('merges snapshot and reconnect operation heads once while pending survives source run completion', async () => {
     const operation = { schema_version: 1 as const, bot_id: 'bot', home_session_id: 'bot-home', operation_id: 'one', revision: 1, state_sequence: 1, operation: 'schedule_create', status: 'pending' as const, decision: 'execute' as const, summary: 'First schedule', source_user_event_id: 'human' }
     render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, operations: [operation], onSend: vi.fn() }} />)
@@ -115,6 +221,7 @@ describe('StudioChat', () => {
       stream.onEvent('bot_operation', { ...operation, operation_id: 'two', summary: 'Second schedule' })
       stream.onEvent('bot_run_state', { schema_version: 1, bot_id: 'bot', home_session_id: 'bot-home', session_id: 'bot-home', run_id: 'run', presentation: 'home_interactive', status: 'succeeded', state_sequence: 5 })
       stream.onState?.('live', 'cursor')
+      stream.onReplayComplete?.()
     })
     expect(screen.getAllByRole('article', { name: 'Operation result' })).toHaveLength(2)
     expect(screen.getByText('Working…')).toBeInTheDocument()

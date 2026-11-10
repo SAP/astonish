@@ -399,7 +399,7 @@ function isVisibleBoundaryType(type: string): boolean {
 const BOT_REPORT_INVOCATION = /^bot-report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function isBotReportMessage(msg: ChatMsg): boolean {
-  return msg.type === 'agent' && BOT_REPORT_INVOCATION.test(msg.invocationId ?? '')
+  return msg.type === 'agent' && (!!msg.operationId || BOT_REPORT_INVOCATION.test(msg.invocationId ?? ''))
 }
 
 export function isHardBreak(msg: ChatMsg): boolean {

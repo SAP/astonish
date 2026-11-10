@@ -157,6 +157,19 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			openAIReq.ResponseFormat = &openai.ChatCompletionResponseFormat{
 				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
 			}
+			// Explicit JSON Schema opts in to structured output. MIME-only Chat
+			// and tool-bearing requests retain their existing behavior.
+			if req.Config.ResponseJsonSchema != nil {
+				schema, err := json.Marshal(req.Config.ResponseJsonSchema)
+				if err != nil {
+					yield(nil, fmt.Errorf("encode response JSON schema: %w", err))
+					return
+				}
+				openAIReq.ResponseFormat = &openai.ChatCompletionResponseFormat{
+					Type:       openai.ChatCompletionResponseFormatTypeJSONSchema,
+					JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{Name: "structured_response", Schema: json.RawMessage(schema), Strict: true},
+				}
+			}
 		}
 
 		if p.useResponsesAPI {

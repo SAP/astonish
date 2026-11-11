@@ -27,8 +27,14 @@ Local Code has no Bot execution capability.
 Both backends implement `backend.DelegationDetailBackend`. Platform detail requests use
 `GET /api/studio/sessions/{parent}/subtask-events` with `child_session_id`, `batch_id`,
 `task_id`, `attempt`, and `task_name`, preserving authentication and tenant headers.
-Local detail reads verify parent ownership, app namespace, and child membership before
-reading through the session service. Ambiguous legacy name-only selection fails closed.
+Local detail reads verify the `astonish_code` parent's project owner and persisted
+child membership before reading through the session service. Child reads use the
+indexed app/user identity: code-owned children and shared-runner `astonish` children
+under the project owner or system fallback are supported within the local code store.
+This does not change delegate creation, model selection, or platform authorization.
+Supplied attempt selectors must match available state. After restart, FileStore may
+lack initial-state keys; an exact authorized child ID still selects that attempt,
+while tuple-only lookups require those keys. Ambiguous name-only selection fails closed.
 Studio `subtask_execution` tasks/events and local persisted `attempt_history` are
 normalized into the same terminal delegation events; individual attempts remain selectable.
 Interleaved child tool results pair by call ID, not tool name. Completed restored summaries

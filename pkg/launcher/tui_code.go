@@ -33,6 +33,7 @@ import (
 	xai_oauth "github.com/SAP/astonish/pkg/provider/xai_oauth"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools/ripgrep"
 	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -2583,7 +2584,7 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 	if err != nil {
 		return nil, err
 	}
-	childID := ""
+	var selected session.Session
 	for _, child := range children {
 		if task.ChildSessionID != "" && child.ID != task.ChildSessionID {
 			continue
@@ -2591,49 +2592,49 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 		if task.Name != "" && child.Title != task.Name {
 			continue
 		}
-		if child.UserID != owner || child.AppName != codeAppName {
+		// The shared delegate runner stores children under "astonish", using
+		// either the request owner or its system fallback. Parent ownership and
+		// persisted membership above still scope reads to this code session.
+		const delegateAppName = "astonish"
+		sharedRunner := child.AppName == delegateAppName && (child.UserID == owner || child.UserID == store.SystemUserID)
+		if !sharedRunner && (child.UserID != owner || child.AppName != codeAppName) {
 			return nil, fmt.Errorf("child session not owned")
 		}
-		// Validate every supplied selector against persisted immutable attempt metadata.
-		candidate, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: owner, SessionID: child.ID})
+		candidate, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: child.AppName, UserID: child.UserID, SessionID: child.ID})
 		if getErr != nil || candidate == nil || candidate.Session == nil {
 			continue
 		}
+		// FileStore restores state from event deltas, so initial attempt keys
+		// can be absent after restart. An exact, owned child ID still selects
+		// that attempt; tuple-only lookups require all supplied keys to exist.
 		matches := true
 		for key, want := range map[string]string{"batch_id": task.BatchID, "task_id": task.TaskID} {
 			if want != "" {
 				got, stateErr := candidate.Session.State().Get(key)
-				if stateErr != nil || got != want {
+				if (stateErr != nil && task.ChildSessionID == "") || (stateErr == nil && got != want) {
 					matches = false
 				}
 			}
 		}
 		if task.Attempt > 0 {
 			got, stateErr := candidate.Session.State().Get("attempt")
-			if stateErr != nil || fmt.Sprint(got) != fmt.Sprint(task.Attempt) {
+			if (stateErr != nil && task.ChildSessionID == "") || (stateErr == nil && fmt.Sprint(got) != fmt.Sprint(task.Attempt)) {
 				matches = false
 			}
 		}
 		if !matches {
 			continue
 		}
-		if childID != "" {
+		if selected != nil {
 			return nil, fmt.Errorf("ambiguous task; select an exact attempt")
 		}
-		childID = child.ID
+		selected = candidate.Session
 	}
-	if childID == "" {
+	if selected == nil {
 		return nil, fmt.Errorf("child is not a member of this session")
 	}
-	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: owner, SessionID: childID})
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil || resp.Session == nil {
-		return nil, nil
-	}
 	var out []events.DelegationActivity
-	for ev := range resp.Session.Events().All() {
+	for ev := range selected.Events().All() {
 		if ev == nil {
 			continue
 		}

@@ -2,13 +2,105 @@ package launcher
 
 import (
 	"context"
-	persistentsession "github.com/SAP/astonish/pkg/session"
-	"github.com/SAP/astonish/pkg/tui/events"
+	"fmt"
+	"testing"
+
 	adkmodel "google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
-	"testing"
+
+	persistentsession "github.com/SAP/astonish/pkg/session"
+	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestDelegationLocalRunnerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, app, user string
+		allowed         bool
+	}{
+		{"code owner", codeAppName, "owner", true},
+		{"shared runner", "astonish", store.SystemUserID, true},
+		{"request scoped runner", "astonish", "owner", true},
+		{"foreign owner", "astonish", "other", false},
+		{"foreign code owner", codeAppName, "other", false},
+		{"foreign app", "other_app", "owner", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			b := newFileStoreBackend(t, dir, "owner")
+			b.sessionID = seedSession(t, b, "parent")
+			var tasks []events.DelegationTaskState
+			for attempt := 1; attempt <= 2; attempt++ {
+				child, err := b.sessionSvc.Create(ctx, &adksession.CreateRequest{
+					AppName: tc.app, UserID: tc.user,
+					State: map[string]any{persistentsession.StateKeyParentID: b.sessionID, "batch_id": "batch", "task_id": "task", "attempt": attempt},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := b.fileStore.SetSessionTitle(ctx, child.Session.ID(), "bot-ui-build"); err != nil {
+					t.Fatal(err)
+				}
+				callID := fmt.Sprintf("call-%d", attempt)
+				for i, part := range []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: callID, Name: "read_file", Args: map[string]any{"path": "README.md"}}},
+					{FunctionResponse: &genai.FunctionResponse{ID: callID, Name: "read_file", Response: map[string]any{"content": "read result"}}},
+					{Text: fmt.Sprintf("attempt %d finished", attempt)},
+				} {
+					ev := &adksession.Event{ID: fmt.Sprintf("event-%d", i), Author: "agent", LLMResponse: adkmodel.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}}
+					if err := b.sessionSvc.AppendEvent(ctx, child.Session, ev); err != nil {
+						t.Fatal(err)
+					}
+				}
+				tasks = append(tasks, events.DelegationTaskState{Name: "bot-ui-build", ChildSessionID: child.Session.ID(), BatchID: "batch", TaskID: "task", Attempt: attempt})
+			}
+			for _, restored := range []bool{false, true} {
+				if restored {
+					parent := b.sessionID
+					b = newFileStoreBackend(t, dir, "owner")
+					b.sessionID = parent
+				}
+				for _, task := range tasks {
+					rows, err := b.LoadDelegationDetail(ctx, task)
+					if !tc.allowed {
+						if err == nil {
+							t.Fatal("accepted foreign child identity")
+						}
+						continue
+					}
+					callID := fmt.Sprintf("call-%d", task.Attempt)
+					if err != nil || len(rows) != 3 || rows[0].Type != "tool_call" || rows[0].CallID != callID || rows[1].Type != "tool_result" || rows[1].CallID != callID || rows[2].Text != fmt.Sprintf("attempt %d finished", task.Attempt) {
+						t.Fatalf("restored=%v attempt=%d: rows=%+v err=%v", restored, task.Attempt, rows, err)
+					}
+					if restored {
+						tupleOnly := task
+						tupleOnly.ChildSessionID = ""
+						if _, err := b.LoadDelegationDetail(ctx, tupleOnly); err == nil {
+							t.Fatal("accepted tuple-only lookup without persisted metadata")
+						}
+					}
+					if !restored {
+						bad := task
+						bad.Attempt = 3
+						if _, err := b.LoadDelegationDetail(ctx, bad); err == nil {
+							t.Fatal("accepted mismatched attempt")
+						}
+					}
+				}
+				if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{Name: "bot-ui-build"}); err == nil {
+					t.Fatal("accepted ambiguous name-only selection")
+				}
+			}
+			// A shared runner identity never authorizes a child of another parent.
+			b.sessionID = seedSession(t, b, "unrelated parent")
+			if _, err := b.LoadDelegationDetail(ctx, tasks[0]); err == nil {
+				t.Fatal("accepted child of another parent")
+			}
+		})
+	}
+}
 
 func TestDelegationLocalExactSelectors(t *testing.T) {
 	ctx := context.Background()

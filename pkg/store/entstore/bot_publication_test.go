@@ -258,7 +258,7 @@ func TestBotPublicationNoChange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.EventID != second.EventID || first.ReportSequence == 0 || first.ReportSequence != second.ReportSequence || first.Text != "No change\n" || second.Text != first.Text || len(notifier.calls) != 0 || len(second.Notifications) != 1 || second.Notifications[0].State != store.BotNotificationSkipped {
+			if first.EventID != second.EventID || first.ReportSequence == 0 || first.ReportSequence != second.ReportSequence || first.Text != "No change" || second.Text != first.Text || len(notifier.calls) != 0 || len(second.Notifications) != 1 || second.Notifications[0].State != store.BotNotificationSkipped {
 				t.Fatalf("unexpected publication %+v calls=%d", second, len(notifier.calls))
 			}
 			for _, unwanted := range []string{"Run report", run.ID.String(), "stable observation", "Quality assessment"} {

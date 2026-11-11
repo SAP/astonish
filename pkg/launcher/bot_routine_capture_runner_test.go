@@ -250,6 +250,13 @@ func runRoutineGoalSource(t *testing.T, scope store.BotScope, mixed bool) (*botF
 	if err != nil || source.Status != result.Status || len(source.Report.Changed) != 0 {
 		t.Fatalf("worker rewrote source: %+v %v", source, err)
 	}
+	if !mixed && (source.Report.Acknowledgment == nil || source.Report.Acknowledgment.Kind != store.BotReportAcknowledgmentControlPending) {
+		work, _ := repo.(store.BotWorkStore).LoadWork(worker, lease)
+		t.Fatalf("real tool envelope did not bind acknowledgment: report=%+v work=%+v", source.Report, work)
+	}
+	if mixed && source.Report.Acknowledgment != nil {
+		t.Fatal("mixed tool failure hidden")
+	}
 	return f, repo, owner
 }
 func TestBotWorkResponsibilityContinuityRunner(t *testing.T) {

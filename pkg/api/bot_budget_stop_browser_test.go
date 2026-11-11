@@ -221,13 +221,14 @@ func TestBotBudgetStopBrowserAcceptance(t *testing.T) {
 		}
 	}
 	check := func() {
-		page.MustElementR(`[data-testid="agent-message-bubble"] h3`, "^Budget limit reached$").MustVisible()
+		want := "I couldn't confirm completion of the requested work. The next model request would not fit the remaining token budget. Shorten the task or review the token budget before starting another run."
+		page.MustWait(`want => [...document.querySelectorAll('[data-testid="agent-message-bubble"]')].some(e => e.innerText.trim() === want)`, want)
 		page.MustWait(`() => !document.querySelector('[data-testid="thinking-indicator"]')`)
 		if count := page.MustEval(`() => document.querySelectorAll('[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]').length`).Int(); count != 1 {
 			t.Fatalf("visible report bubbles=%d", count)
 		}
 		text := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"]').innerText`).Str()
-		for _, fact := range []string{"run budget: 71 tokens", "Used or reserved: 0 tokens", "Remaining: 71 tokens", "Estimated next input: 80 tokens", "increase this Bot’s token budget"} {
+		for _, fact := range []string{"couldn't confirm completion", "would not fit the remaining token budget", "Shorten the task or review the token budget before starting another run"} {
 			if !strings.Contains(text, fact) {
 				t.Fatalf("missing %q: %s", fact, text)
 			}

@@ -307,7 +307,7 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	}
 	final := &questionModel{continued: true, t: t}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Status != store.RunPartial || !strings.HasPrefix(result.Report.Summary, "Work could not be verified:") || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || len(result.Report.Unverified) == 0 || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
+	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || len(result.Report.Unverified) == 0 || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
 		t.Fatalf("unexpected continuation %+v err=%v model=%d constructed=%d", result, err, final.calls, constructed.Load())
 	}
 	scoped, ss = reopen()

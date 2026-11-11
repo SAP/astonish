@@ -191,7 +191,11 @@ func prepareBotWorkContract(ctx context.Context, req bot.RunRequest, llm model.L
 
 func reviewBotCandidate(ctx context.Context, req bot.RunRequest, llm model.LLM, w *store.BotWorkState, usage *store.BotUsage) (*store.BotWorkReview, error) {
 	var review store.BotWorkReview
-	if err := botWorkJSON(ctx, req, llm, botWorkReviewPrompt, w, &review, usage); err != nil {
+	prompt := botWorkReviewPrompt
+	if w.Candidate != nil && len(w.Candidate.RuntimeBlockers) > 0 {
+		prompt = botWorkBlockedReviewPrompt
+	}
+	if err := botWorkJSON(ctx, req, llm, prompt, w, &review, usage); err != nil {
 		return nil, err
 	}
 	for i, criterion := range review.Criteria {
@@ -218,11 +222,34 @@ func botWorkQuality(w *store.BotWorkState) *store.BotQualityReport {
 	if w.Review != nil {
 		q.Criteria = append([]store.BotCriterionAssessment(nil), w.Review.Criteria...)
 	}
+	if w.Phase == store.BotWorkAccepted {
+		q.ResponseOutcome = store.BotWorkResponseSucceeded
+	}
+	if response := w.VerifiedBlockedResponse(); response != nil {
+		q.ResponseOutcome, q.BlockedResponse = store.BotWorkResponseVerifiedBlocker, response
+	}
 	return q
 }
 
 func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResources, auxiliary model.LLM, exactAction bool, produce botWorkProducer) (result bot.RunResult, err error) {
 	var w *store.BotWorkState
+	// Runs after evidence/quality aggregation and before the supervisor commits.
+	// The auxiliary model is the same already-metered owner model, never a new
+	// client or authority. Setup failures use botChatFailure's fallback instead.
+	defer func() {
+		cause := err
+		if cause == nil && result.Failure != nil {
+			cause = result.Failure
+		}
+		var narrator model.LLM
+		if resources.Agent != nil && w != nil {
+			narrator = auxiliary
+		}
+		message := bot.ComposeEmployeeMessage(ctx, result.Status, result.Report, cause, bot.EmployeeMessageOptions{
+			LLM: narrator, Boundary: func(ctx context.Context) error { return botWorkBoundary(ctx, req) }, Work: w, Usage: &result.Usage,
+		})
+		result.Report.EmployeeMessage = &message
+	}()
 	if resources.Work != nil {
 		w, err = resources.Work.LoadWork(ctx, req.Run.Lease)
 		if err != nil {
@@ -234,7 +261,19 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 			return botChatFailure(bot.ErrorPermanent, errors.New("pinned Bot work is unavailable"))
 		}
 		var completion ChatCompletion
-		return produce(req, &completion) // historical/injected runs only
+		result, err = produce(req, &completion) // historical/injected runs only
+		// Aggregate continuation evidence before composing the envelope. Doing
+		// this in resumeInteraction changes the source after it was reviewed.
+		if _, resumed := ctx.Value(botResumeInteractionKey{}).(*store.BotApproval); resumed {
+			result.Report.Changed = append(append([]store.BotEvidence(nil), req.Run.Report.Changed...), result.Report.Changed...)
+			result.Report.Unchanged = append(append([]store.BotEvidence(nil), req.Run.Report.Unchanged...), result.Report.Unchanged...)
+			result.Report.Artifacts = append(append([]store.BotArtifact(nil), req.Run.Report.Artifacts...), result.Report.Artifacts...)
+			result.Report.Unverified = append(append([]string(nil), req.Run.Report.Unverified...), result.Report.Unverified...)
+			if result.Status == store.RunSucceeded && len(result.Report.Unverified) > 0 {
+				result.Status = store.RunPartial
+			}
+		}
+		return result, err
 	}
 	if w.Contract.BotID != req.Bot.ID || w.Contract.RunID != req.Run.ID || w.Contract.Version != req.Run.Version {
 		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
@@ -291,8 +330,10 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 		// Keep typed budget/cancellation identity for the supervisor's durable
 		// failure report, even when a boundary also prevents saving work state.
 		class := bot.ErrorBlocked
-		if errors.Is(cause, bot.ErrBudgetExceeded) {
+		if _, budgetFailure := bot.BudgetFailureMessage(cause); budgetFailure {
 			class = bot.ErrorBudget
+		} else if _, checkpointFailure := bot.CheckpointFailureMessage(cause); checkpointFailure {
+			class = bot.ErrorPermanent
 		} else if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 			class = bot.ErrorInterrupted
 		}
@@ -307,7 +348,10 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 		if class != bot.ErrorBlocked {
 			return botChatFailure(class, cause)
 		}
-		return bot.RunResult{Status: store.RunPartial, Report: store.BotReport{Summary: "Work could not be verified: " + strings.Join(w.Unresolved, "; "), Unverified: append([]string(nil), w.Unresolved...)}}, nil
+		if response := w.VerifiedBlockedResponse(); response != nil {
+			return bot.RunResult{Status: store.RunPartial, Report: store.BotReport{Summary: response.Text, Unverified: append([]string(nil), w.Unresolved...)}}, nil
+		}
+		return bot.RunResult{Status: store.RunPartial, Report: store.BotReport{Summary: "I couldn't verify the requested result. I can't confirm that all requested work is complete.", Failure: &store.BotReportFailure{Kind: store.BotReportFailureOperational, TechnicalDetails: strings.Join(w.Unresolved, "; ")}, Unverified: append([]string(nil), w.Unresolved...)}}, nil
 	}
 	if w.Phase == store.BotWorkPreparing {
 		next := w.Clone()
@@ -398,6 +442,18 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 			if criterion.Verdict != store.BotCriterionSatisfied {
 				next.Unresolved = append(next.Unresolved, criterion.CriterionID+": "+criterion.Explanation)
 			}
+		}
+		if assessment := review.BlockedResponse; assessment != nil && assessment.Verdict != store.BotCriterionSatisfied && len(next.Unresolved) > 0 {
+			// Repair the communication defect, not the unavailable infrastructure.
+			next.Unresolved = append(next.Unresolved, "Blocker explanation: "+assessment.Explanation)
+		}
+		if !exactAction && len(completion.pendingControls) == 0 && len(unverified) == 0 && !botWorkHasRejectedCitations(review) && next.HasVerifiedBlockedResponse() {
+			next.Phase = store.BotWorkBlocked
+			next.ResponseOutcome = store.BotWorkResponseVerifiedBlocker
+			if err := save(next); err != nil {
+				return block(err)
+			}
+			return bot.RunResult{Status: store.RunPartial, Report: store.BotReport{Summary: w.Candidate.Text, Unverified: append([]string(nil), w.Unresolved...)}}, nil
 		}
 		if len(next.Unresolved) == 0 && len(unverified) == 0 {
 			next.Phase = store.BotWorkAccepted

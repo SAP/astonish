@@ -214,7 +214,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					// errors nor synthetic [Error:] transcript rows may accompany the report.
 					for range 2 {
 						history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-						if strings.Count(history, "### Budget limit reached") != 1 || strings.Contains(history, "[Error:") || strings.Contains(history, "event: error") {
+						if run.Report.EmployeeMessage == nil || strings.Count(history, run.Report.EmployeeMessage.Text) != 1 || strings.Contains(history, "[Error:") || strings.Contains(history, "event: error") {
 							t.Fatalf("duplicate/raw Home failure: %s", history)
 						}
 						if !strings.Contains(history, "bot-report:"+run.ID.String()) {

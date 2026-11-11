@@ -781,6 +781,10 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 	if q.Report.Acknowledgment != nil {
 		return store.ErrBotInvalid
 	}
+	// Public round-trips cannot mint review provenance, even on commit retry.
+	if m := q.Report.EmployeeMessage; m != nil && m.Origin == store.BotEmployeeMessageModel && !m.HasTrustedReviewAttestation() {
+		return store.ErrBotInvalid
+	}
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
@@ -863,10 +867,14 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		if err := validateBotWorkCommit(saved.Work, q); err != nil {
 			return err
 		}
+		if err := q.Report.ValidateEmployeeMessage(q.Status, saved.Work); err != nil {
+			return err
+		}
 		q.Report.Acknowledgment, err = scheduleAcknowledgment(ctx, tx, rec, saved.Run, saved.Work, q)
 		if err != nil {
 			return err
 		}
+		q.Report.FinalizeEmployeeMessage(q.Status, saved.Work)
 		saved.Run.Status = q.Status
 		saved.Run.Report = q.Report
 		saved.Run.Usage = q.Usage
@@ -895,6 +903,9 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 // validateBotWorkCommit binds a successful publication to the exact reviewed
 // candidate. Quality never overrides execution failures or pending authority.
 func validateBotWorkCommit(work *store.BotWorkState, q store.BotRunCommit) error {
+	if err := store.ValidateBotWorkCompletion(work, q); err != nil {
+		return err
+	}
 	if work == nil {
 		if q.Report.Quality != nil {
 			return store.ErrBotInvalid
@@ -992,6 +1003,9 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 		saved.CommitHash = "recovered"
 		saved.Run.Report.Summary = "Run interrupted; effects must be checked before resuming."
 		saved.Run.Report.Unverified = append(saved.Run.Report.Unverified, "Work after the last checkpoint has not been verified.")
+		saved.Run.Report.Acknowledgment = nil
+		message := store.NewBotEmployeeFallback(saved.Run.Status, saved.Run.Report, store.BotEmployeeReasonInterrupted)
+		saved.Run.Report.EmployeeMessage = &message
 		for i := range saved.Run.Todos {
 			if saved.Run.Todos[i].Status == store.BotTodoInProgress {
 				saved.Run.Todos[i].Status = store.BotTodoBlocked
@@ -1281,6 +1295,14 @@ func quiescedBotRun(saved botStoredRun, stop bool, now time.Time) botStoredRun {
 			saved.Run.Todos[i].Status = store.BotTodoBlocked
 			saved.Run.Todos[i].UnblocksWhen = "Owner authorizes resumption after prior effects are checked"
 		}
+	}
+	reason := store.BotEmployeeReasonOwnerCancelled
+	if wasRunning {
+		reason = store.BotEmployeeReasonInterrupted
+	}
+	if wasRunning || saved.Run.Status == store.RunCancelled {
+		message := store.NewBotEmployeeFallback(saved.Run.Status, saved.Run.Report, reason)
+		saved.Run.Report.EmployeeMessage = &message
 	}
 	saved.CommitHash = ""
 	return saved

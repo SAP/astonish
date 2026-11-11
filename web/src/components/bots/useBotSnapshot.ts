@@ -1,3 +1,4 @@
+import { botLocalFailure } from '../chat/botEmployeeFeedback'
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import { BotAPIError, type BotActivity, type BotScope } from '@/api/bots'
 import { getBotSnapshot, readBotActivityPage, writeBotReadCursor, type BotSnapshot } from '@/api/botSnapshot'
@@ -57,7 +58,7 @@ class SnapshotEntry {
         }
         if (active()) this.publish({ data: snapshot, activity, loading: false })
       } catch (error) {
-        if (active()) this.publish({ ...(error instanceof BotAPIError && [401, 403, 404].includes(error.status) ? empty : this.state), loading: false, error: error instanceof Error ? error.message : String(error) })
+        if (active()) this.publish({ ...(error instanceof BotAPIError && [401, 403, 404].includes(error.status) ? empty : this.state), loading: false, error: botLocalFailure(error).message })
       } finally { if (active()) this.inflight = undefined }
     })()
     return this.inflight

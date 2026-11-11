@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -18,11 +17,11 @@ func decodeBotAttachmentRequest(w http.ResponseWriter, r *http.Request, out any)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil {
-		http.Error(w, "Invalid Bot request body", http.StatusBadRequest)
+		botHTTPError(w, store.ErrBotInvalid)
 		return false
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		http.Error(w, "Expected one JSON object", http.StatusBadRequest)
+		botHTTPError(w, store.ErrBotInvalid)
 		return false
 	}
 	return true
@@ -30,12 +29,12 @@ func decodeBotAttachmentRequest(w http.ResponseWriter, r *http.Request, out any)
 
 func validateBotAttachments(atts []ChatAttachment) ([]store.ChatFile, error) {
 	if len(atts) > 10 {
-		return nil, fmt.Errorf("Maximum 10 attachments allowed")
+		return nil, store.ErrBotInvalid
 	}
 	for _, a := range atts {
 		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(a.Data))
 		if err != nil || len(raw) == 0 || len(raw) > 10<<20 || strings.TrimSpace(a.Filename) == "" || strings.TrimSpace(a.MimeType) == "" {
-			return nil, fmt.Errorf("Invalid attachment %q: provide a named, non-empty file up to 10 MiB with valid base64 and MIME type", a.Filename)
+			return nil, store.ErrBotInvalid
 		}
 	}
 	return chatFilesFromAttachments(atts), nil

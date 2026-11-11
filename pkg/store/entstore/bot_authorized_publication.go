@@ -19,12 +19,20 @@ func authorizedSchedulePublication(ctx context.Context, tx botDraftDB, rec *botS
 		return false, nil
 	}
 	var payload struct {
-		OperationID uuid.UUID `json:"operation_id"`
+		OperationID       uuid.UUID       `json:"operation_id"`
+		OperationRevision int64           `json:"operation_revision"`
+		Report            store.BotReport `json:"report"`
+		Status            store.RunStatus `json:"status"`
 	}
 	if json.Unmarshal(rows[0].Payload, &payload) != nil || payload.OperationID == uuid.Nil {
 		return false, nil
 	}
 	a, err := tx.FindActivity(ctx, rec.Bot.ID, "authorized-schedule-receipt:"+payload.OperationID.String())
+	routine := false
+	if errors.Is(err, store.ErrBotNotFound) {
+		a, err = tx.FindActivity(ctx, rec.Bot.ID, "authorized-routine-receipt:"+payload.OperationID.String())
+		routine = true
+	}
 	if errors.Is(err, store.ErrBotNotFound) {
 		return false, nil
 	}
@@ -44,6 +52,21 @@ func authorizedSchedulePublication(ctx context.Context, tx botDraftDB, rec *botS
 	o, err := readMandateOperation(ctx, tx, rec, *source.Run.MandateRef, payload.OperationID)
 	if err != nil {
 		return false, err
+	}
+	if m := payload.Report.EmployeeMessage; m != nil {
+		view, err := store.ProjectBotOperation(rec.Bot, *o, sequence)
+		if err != nil || payload.Report.ValidateEmployeeMessageIntegrity(payload.Status) != nil || m.Origin != store.BotEmployeeMessageOperation || m.OperationID != o.ID || m.OperationRevision != o.Revision || payload.OperationRevision != o.Revision || m.Text != view.Summary {
+			return false, store.ErrBotInvalid
+		}
+	}
+	if routine {
+		if !o.HasVerifiedMetadataReceipt() || o.Provenance.SourceRunID != run || o.Provenance.UserEventID != source.Run.UserEventID || o.Provenance.SourceUserID != rec.Bot.OwnerID.String() {
+			return false, store.ErrBotForbidden
+		}
+		if err := verifyRoutineGrant(ctx, tx, *o); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if o.Status != store.BotOperationApplied || o.Receipt == nil || o.Receipt.Schedule == nil || o.Receipt.Schedule.SourceRunID != run {
 		return false, store.ErrBotForbidden

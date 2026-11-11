@@ -74,6 +74,12 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 					t.Fatal(err)
 				}
 				report := acceptedScheduleAcknowledgment(t, r, worker, q, op, nil)
+				work, err := r.LoadWork(worker, q.Lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report.FinalizeEmployeeMessage(store.RunSucceeded, work)
+				original := *report.EmployeeMessage
 				commit := store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}
 				if err := r.CommitRun(worker, commit); err != nil {
 					t.Fatal(err)
@@ -84,6 +90,9 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 				saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
 				if err != nil || saved.Report.Acknowledgment == nil || saved.Report.Acknowledgment.Kind != store.BotReportAcknowledgmentSchedulePending {
 					t.Fatalf("missing server marker: %+v %v", saved, err)
+				}
+				if *report.EmployeeMessage != original || saved.Report.EmployeeMessage == nil || saved.Report.ValidateEmployeeMessage(store.RunSucceeded, work) != nil || saved.Report.EmployeeMessage.SourceDigest == original.SourceDigest {
+					t.Fatal("acknowledgment did not copy/rebind validated envelope")
 				}
 				if ids := saved.Report.Acknowledgment.OperationIDs; len(ids) != 1 || ids[0] != op.ID {
 					t.Fatalf("acknowledgment lost scoped operation reference: %v", ids)
@@ -115,6 +124,18 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 				final, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
 				if err != nil {
 					t.Fatal(err)
+				}
+				outcome, _, err := committedPublicationReport(owner, r.db, q.Lease.BotID, q.Lease.RunID, final.ReportSequence)
+				if err != nil || outcome.Report.EmployeeMessage == nil || outcome.Report.EmployeeMessage.Origin != store.BotEmployeeMessageOperation || outcome.Report.ValidateEmployeeMessageIntegrity(outcome.Status) != nil || final.Text != outcome.Report.EmployeeMessage.Text {
+					t.Fatal("missing receipt-bound employee outcome", err)
+				}
+				retried, err := runtime.ApplyAuthorizedOperation(context.Background(), q.MandateRef, op.ID)
+				if err != nil || retried.Revision != applied.Revision {
+					t.Fatal("operation retry changed receipt", err)
+				}
+				finalAgain, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: final.ReportSequence})
+				if err != nil || finalAgain.EventID != final.EventID || finalAgain.Text != final.Text {
+					t.Fatal("operation publication retry changed outcome", err)
 				}
 				view, err := store.ProjectBotOperation(rec.Bot, *applied, sequence+1)
 				if err != nil || view.Presentation != store.BotOperationPresentationConversation {
@@ -206,6 +227,17 @@ func TestBotScheduleAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
 			pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
 			if err != nil || pub.Suppressed || pub.Text == "" {
 				t.Fatalf("non-ack hidden: %+v %v", pub, err)
+			}
+			if strings.Contains(pub.Text, op.ID.String()) || strings.Contains(pub.Text, "durably queued") || strings.Contains(pub.Text, "Today's requested report is here") {
+				t.Fatalf("raw mixed acknowledgment leaked: %s", pub.Text)
+			}
+			if name == "failed" && !strings.Contains(pub.Text, "model response could not be processed") {
+				t.Fatalf("independent failure was hidden: %s", pub.Text)
+			}
+			if name == "mixed" || name == "tool-error" || name == "extra-body" {
+				if !strings.Contains(pub.Text, "independent result") || !strings.Contains(pub.Text, "reported separately") {
+					t.Fatalf("missing mixed-work limitation: %s", pub.Text)
+				}
 			}
 		})
 	}

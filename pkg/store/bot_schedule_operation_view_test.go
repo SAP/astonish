@@ -72,7 +72,7 @@ func TestBotOperationPresentationValidation(t *testing.T) {
 	}
 	for _, change := range []func(*BotOperationView){
 		func(v *BotOperationView) { v.Presentation = "unknown" },
-		func(v *BotOperationView) { v.Operation = BotControlGoalCreate },
+		func(v *BotOperationView) { v.Operation = BotControlResumeTasks },
 		func(v *BotOperationView) { v.Status = BotOperationFailed },
 		func(v *BotOperationView) { v.Decision = BotOperationRequireAuthorization },
 		func(v *BotOperationView) { v.Presentation = BotOperationPresentationConversation },

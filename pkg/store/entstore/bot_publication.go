@@ -204,8 +204,16 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			return store.ErrBotUnsupported
 		}
 		now := publicationTime(q.Now, r)
-		p := &store.BotPublication{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: botdomain.RenderReport(saved.Run), PublishedAt: now}
-		if ack := saved.Run.Report.Acknowledgment; ack != nil && ack.Kind == store.BotReportAcknowledgmentSchedulePending && len(ack.OperationIDs) > 0 {
+		if saved.Run.Report.EmployeeMessage == nil {
+			// Legacy records stay immutable; only this new publication gets a safe envelope.
+			message := store.NewBotEmployeeFallback(saved.Run.Status, saved.Run.Report, "")
+			saved.Run.Report.EmployeeMessage = &message
+		}
+		if err := saved.Run.Report.ValidateEmployeeMessageIntegrity(saved.Run.Status); err != nil {
+			return err
+		}
+		p := &store.BotPublication{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: saved.Run.Report.EmployeeMessage.Text, PublishedAt: now}
+		if ack := saved.Run.Report.Acknowledgment; ack != nil && (ack.Kind == store.BotReportAcknowledgmentSchedulePending || ack.Kind == store.BotReportAcknowledgmentControlPending) && len(ack.OperationIDs) > 0 {
 			p.Suppressed = true
 			p.Text = ""
 			if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
@@ -219,6 +227,9 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		scheduleReceipt, err := authorizedSchedulePublication(ctx, tx, rec, q.RunID, sequence)
 		if err != nil {
 			return err
+		}
+		if saved.Run.Report.EmployeeMessage.Origin == store.BotEmployeeMessageOperation && !scheduleReceipt {
+			return store.ErrBotInvalid
 		}
 		canonicalOperationEvent := ""
 		if scheduleReceipt {
@@ -316,7 +327,7 @@ func persistedConversationReply(ctx context.Context, db botDraftDB, b store.Bot,
 						text.WriteString(part.Text)
 					}
 				}
-				if strings.TrimSpace(text.String()) == "" {
+				if run.Report.EmployeeMessage == nil || text.String() != run.Report.EmployeeMessage.Text {
 					continue
 				}
 				if id == run.SessionID {

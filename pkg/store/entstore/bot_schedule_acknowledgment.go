@@ -13,10 +13,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// scheduleAcknowledgment binds only an acknowledgment-only accepted candidate to
-// independently stored operations. Candidate bodies are evidence, not authority.
-// Called under the source lease before application; the resulting marker belongs
-// to the immutable committed outcome, so publication order cannot change it.
+// scheduleAcknowledgment also binds the closed routine metadata set. Candidate
+// bodies are evidence, never authority. This runs under the source lease before
+// application; its immutable marker is independent of publication order.
 func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run store.BotRun, work *store.BotWorkState, q store.BotRunCommit) (*store.BotReportAcknowledgment, error) {
 	if q.Status != store.RunSucceeded || q.Report.Failure != nil || len(q.Report.Changed) != 0 || len(q.Report.Unverified) != 0 || len(q.Report.Artifacts) != 0 || len(q.Report.NeedsApproval) != 0 || q.Report.NextRunAt != nil || work == nil || work.Phase != store.BotWorkAccepted || work.Candidate == nil || run.MandateRef == nil {
 		return nil, nil
@@ -48,7 +47,7 @@ func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRe
 		return nil, nil
 	}
 	marker := &store.BotReportAcknowledgment{Kind: store.BotReportAcknowledgmentSchedulePending}
-	seen := map[uuid.UUID]bool{}
+	responses := map[uuid.UUID]map[string]any{}
 	var texts []string
 	for i := 0; i < count; i++ {
 		var body struct {
@@ -57,12 +56,10 @@ func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRe
 			Acknowledgment string                    `json:"acknowledgment"`
 			Payload        store.BotControlPayload   `json:"payload"`
 		}
-		if json.Unmarshal([]byte(c.Bodies[fmt.Sprintf("pending-control:%d", i)]), &body) != nil || body.OperationID == uuid.Nil || seen[body.OperationID] {
+		if json.Unmarshal([]byte(c.Bodies[fmt.Sprintf("pending-control:%d", i)]), &body) != nil || body.OperationID == uuid.Nil || responses[body.OperationID] != nil {
 			return nil, nil
 		}
-		switch body.Operation {
-		case store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlSchedulePause, store.BotControlScheduleRemove:
-		default:
+		if !scheduleOperation(body.Operation) && !store.BotControlConversationalMetadata(body.Operation) {
 			return nil, nil
 		}
 		op, err := readMandateOperation(ctx, tx, rec, *run.MandateRef, body.OperationID)
@@ -75,44 +72,51 @@ func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRe
 		if op.Status != store.BotOperationPending || op.Decision != store.BotOperationExecute || op.Provenance == nil || op.Provenance.SourceRunID != run.ID || op.Provenance.UserEventID != run.UserEventID || op.Provenance.SourceUserID != rec.Bot.OwnerID.String() || op.Payload.Operation != body.Operation || !reflect.DeepEqual(op.Payload, body.Payload) {
 			return nil, nil
 		}
-		if err := verifyAuthorizedGrant(ctx, tx, *op); err != nil {
+		var text string
+		var evidence store.BotEvidence
+		response := map[string]any{"operation_id": op.ID, "status": op.Status}
+		if scheduleOperation(body.Operation) {
+			if verifyAuthorizedGrant(ctx, tx, *op) != nil {
+				return nil, nil
+			}
+			capture := botdomain.ScheduleCapture{OperationID: op.ID, BotID: rec.Bot.ID, SourceRunID: run.ID, OwnerID: rec.Bot.OwnerID, Operation: op.Payload.Operation, ObservedAt: observations[i].ObservedAt}
+			text, evidence = capture.Acknowledgment(), capture.Observation()
+		} else {
+			if verifyRoutineGrant(ctx, tx, *op) != nil {
+				return nil, nil
+			}
+			capture := botdomain.RoutineCapture{OperationID: op.ID, BotID: rec.Bot.ID, SourceRunID: run.ID, OwnerID: rec.Bot.OwnerID, Operation: op.Payload.Operation, Status: op.Status, Revision: op.Revision, ObservedAt: observations[i].ObservedAt}
+			text, evidence = capture.Acknowledgment(), capture.Observation()
+			response["bot_id"], response["digest"], response["decision"] = rec.Bot.ID, op.Provenance.PayloadDigest, op.Decision
+			marker.Kind = store.BotReportAcknowledgmentControlPending
+		}
+		if evidence.ObservedAt.IsZero() || body.Acknowledgment != text || !reflect.DeepEqual(observations[i], evidence) {
 			return nil, nil
 		}
-		capture := botdomain.ScheduleCapture{OperationID: op.ID, BotID: rec.Bot.ID, SourceRunID: run.ID, OwnerID: rec.Bot.OwnerID, Operation: op.Payload.Operation, ObservedAt: c.Observations[i].ObservedAt}
-		if capture.ObservedAt.IsZero() || body.Acknowledgment != capture.Acknowledgment() || !reflect.DeepEqual(c.Observations[i], capture.Observation()) {
-			return nil, nil
-		}
-		texts = append(texts, capture.Acknowledgment())
+		response["message"] = text
+		responses[op.ID] = response
+		texts = append(texts, text)
 		marker.OperationIDs = append(marker.OperationIDs, op.ID)
-		seen[op.ID] = true
 	}
 	if strings.Join(texts, "\n\n") != q.Report.Summary {
 		return nil, nil
 	}
-	// Tool response snapshots are private review context too. Only exact pending
-	// response envelopes for the independently bound operations qualify; errors
-	// and unrelated tool bodies keep the report visible.
+	// Compare complete response envelopes, including routine scope/digest/decision.
+	// Unknown fields, errors and unrelated tool results keep the report visible.
 	for key, raw := range c.Bodies {
 		if !strings.HasPrefix(key, "tool-response:") {
 			continue
 		}
-		var response map[string]json.RawMessage
-		if json.Unmarshal([]byte(raw), &response) != nil || len(response) != 3 {
+		var response map[string]any
+		var identity struct {
+			ID uuid.UUID `json:"operation_id"`
+		}
+		if json.Unmarshal([]byte(raw), &response) != nil || json.Unmarshal([]byte(raw), &identity) != nil || responses[identity.ID] == nil {
 			return nil, nil
 		}
-		var id uuid.UUID
-		var status store.BotOperationStatus
-		var message string
-		if json.Unmarshal(response["operation_id"], &id) != nil || json.Unmarshal(response["status"], &status) != nil || json.Unmarshal(response["message"], &message) != nil || !seen[id] || status != store.BotOperationPending {
-			return nil, nil
-		}
-		matched := false
-		for i, operationID := range marker.OperationIDs {
-			if operationID == id && texts[i] == message {
-				matched = true
-			}
-		}
-		if !matched {
+		expectedRaw, _ := json.Marshal(responses[identity.ID])
+		var expected map[string]any
+		if json.Unmarshal(expectedRaw, &expected) != nil || !reflect.DeepEqual(response, expected) {
 			return nil, nil
 		}
 	}

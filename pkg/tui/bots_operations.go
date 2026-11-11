@@ -110,7 +110,7 @@ func (m model) renderBotExceptions() string {
 			if i == m.bots.cursor {
 				mark = "> "
 			}
-			fmt.Fprintf(&s, "%s%s\n%s\n", mark, v.Summary, v.Blocker)
+			fmt.Fprintf(&s, "%sI need your permission for this exact saved action. Please review its scope below.\n", mark)
 			if i == m.bots.cursor {
 				for _, field := range v.Exception.Fields {
 					value := field.Value

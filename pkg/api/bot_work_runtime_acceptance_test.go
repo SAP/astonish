@@ -111,7 +111,15 @@ func TestBotWorkRuntimeHTTPAcceptance(t *testing.T) {
 					}
 					prompt := req.Config.SystemInstruction.Parts[0].Text
 					var output any
-					if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+					if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+						var source struct {
+							SourceDigest string `json:"source_digest"`
+						}
+						if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &source); err != nil {
+							t.Fatal(err)
+						}
+						output = map[string]any{"source_digest": source.SourceDigest, "choice": 0}
+					} else if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
 						var contract store.BotWorkContract
 						if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &contract); err != nil {
 							t.Fatal(err)

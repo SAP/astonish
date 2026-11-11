@@ -324,7 +324,24 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	return result, errors.Join(err, commitErr)
 }
 
-func supervisorOutcome(result RunResult, err error) RunResult {
+func supervisorOutcome(result RunResult, err error) (out RunResult) {
+	source := result.Report.EmployeeMessageSourceDigest(result.Status)
+	valid := result.Report.ValidateEmployeeMessageIntegrity(result.Status) == nil
+	defer func() {
+		// Do not repair forged runner envelopes. Commit must reject them, even
+		// when an execution error also changes the outcome.
+		if out.Report.EmployeeMessage != nil && !valid {
+			return
+		}
+		if out.Report.EmployeeMessage == nil || source != out.Report.EmployeeMessageSourceDigest(out.Status) {
+			cause := err
+			if cause == nil && out.Failure != nil {
+				cause = out.Failure
+			}
+			message := EmployeeMessageFallback(out.Status, out.Report, cause)
+			out.Report.EmployeeMessage = &message
+		}
+	}()
 	failure := result.Failure
 	if failure == nil {
 		_ = errors.As(err, &failure)

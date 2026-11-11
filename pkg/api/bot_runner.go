@@ -86,7 +86,7 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		class = bot.ErrorInterrupted
 	}
-	report := store.BotReport{Summary: "Run did not complete; execution requires review."}
+	report := store.BotReport{Summary: "I couldn't complete the requested work.", Failure: &store.BotReportFailure{Kind: store.BotReportFailureOperational, TechnicalDetails: cause.Error()}}
 	if message, ok := bot.BudgetFailureMessage(cause); ok && class != bot.ErrorInterrupted {
 		class = bot.ErrorBudget
 		report.Summary = message
@@ -101,7 +101,10 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 	status := store.RunFailed
 	if class == bot.ErrorInterrupted {
 		status = store.RunInterrupted
+		report.Failure.Kind = store.BotReportFailureInterrupted
 	}
+	message := bot.EmployeeMessageFallback(status, report, cause)
+	report.EmployeeMessage = &message
 	return bot.RunResult{Status: status, Failure: failure, Report: report}, failure
 }
 
@@ -114,9 +117,18 @@ func botChatFactoryFailure(ctx context.Context, cause error) (bot.RunResult, err
 		// Preserve the cause for diagnostics without putting endpoint URLs or
 		// credentials from HTTP errors into the report or public error message.
 		failure := &bot.RunError{Class: bot.ErrorPermanent, Message: message, Cause: cause, TerminalForAttempt: true}
-		return bot.RunResult{Status: store.RunFailed, Failure: failure, Report: store.BotReport{Summary: message}}, failure
+		report := store.BotReport{Summary: message, Failure: &store.BotReportFailure{Kind: store.BotReportFailureSetup, TechnicalDetails: cause.Error()}}
+		envelope := bot.EmployeeMessageFallback(store.RunFailed, report, nil)
+		report.EmployeeMessage = &envelope
+		return bot.RunResult{Status: store.RunFailed, Failure: failure, Report: report}, failure
 	}
-	return botChatFailure(bot.ErrorPermanent, cause)
+	result, err := botChatFailure(bot.ErrorPermanent, cause)
+	if result.Status == store.RunFailed && result.Report.Failure.Kind == store.BotReportFailureOperational {
+		result.Report.Failure.Kind = store.BotReportFailureSetup
+		message := bot.EmployeeMessageFallback(result.Status, result.Report, nil)
+		result.Report.EmployeeMessage = &message
+	}
+	return result, err
 }
 
 func validateBotChatRequest(ctx context.Context, req bot.RunRequest, sink bot.EventSink) error {

@@ -1,3 +1,4 @@
+import { botLocalFailure } from '../chat/botEmployeeFeedback'
 import { useCallback, useEffect, useState } from 'react'
 
 export type WorkspaceResource<T> = { data?: T; error?: string; loading: boolean; retry: () => void }
@@ -14,7 +15,7 @@ export function useWorkspaceResource<T>(load: (signal: AbortSignal) => Promise<T
     Promise.resolve().then(() => load(controller.signal)).then(data => {
       if (!controller.signal.aborted) setState({ key, data, loading: false })
     }).catch(error => {
-      if (!controller.signal.aborted) setState(previous => ({ key, data: previous.key === key ? previous.data : undefined, loading: false, error: error instanceof Error ? error.message : String(error) }))
+      if (!controller.signal.aborted) setState(previous => ({ key, data: previous.key === key ? previous.data : undefined, loading: false, error: botLocalFailure(error).message }))
     })
     return () => controller.abort()
   }, [key, revision, attempt]) // eslint-disable-line react-hooks/exhaustive-deps

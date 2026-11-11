@@ -38,7 +38,7 @@ it.each([false, true])('ordinary answer uses existing authority; expired=%s need
   if (expired) {
     fireEvent.click(await screen.findByRole('button', { name: 'Continue interactive' }))
     await waitFor(() => expect(continueInteractive).toHaveBeenCalledWith(activeBot, 'r', expect.any(String), { question_id: 'exact-q', answer: 'Exact custom answer' }))
-  } else expect(await screen.findByRole('status')).toHaveTextContent('Answer saved; continuation queued.')
+  } else expect(await screen.findByRole('status')).toHaveTextContent('I saved your answer and queued the continuation.')
 })
 it('confirms only the saved digest and retains the terminal receipt before refresh', async () => {
   vi.mocked(decideControlProposal).mockResolvedValue({ ...proposal, status: 'applied' })
@@ -60,7 +60,7 @@ it('approves while paused without claiming execution or resuming', async () => {
   vi.mocked(approveAndContinue).mockResolvedValue({ approval: { ...approval, status: 'approved' }, run_id: 'r', continuation: 'blocked_by_pause' })
   render(<BotReviewCard bot={bot} approval={approval} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Approve & continue' }))
-  expect(await screen.findByRole('status')).toHaveTextContent('continuation blocked by pause')
+  expect(await screen.findByRole('status')).toHaveTextContent('I’m still paused')
   expect(approveAndContinue).toHaveBeenCalledWith(bot, approval, undefined)
 })
 it('uses durable option identity for an answer and retains errors for exact retries', async () => {
@@ -69,7 +69,7 @@ it('uses durable option identity for an answer and retains errors for exact retr
   render(<BotReviewCard bot={bot} approval={question} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('radio', { name: 'First' }))
   await waitFor(() => expect(approveAndContinue).toHaveBeenCalledWith(bot, question, 'one'))
-  expect(await screen.findByRole('alert')).toHaveTextContent('Refresh required')
+  expect(await screen.findByRole('alert')).toHaveTextContent('I can’t confirm whether your decision was saved')
 })
 
 it('requires a separate explicit fresh authorization click and retains the exact custom answer', async () => {

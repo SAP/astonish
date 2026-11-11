@@ -317,13 +317,9 @@ func TestBotConversationPublication(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// This old producer reply is not an assessed/validated envelope;
+				// it cannot suppress a new safe employee outcome.
 				wantNew := 1
-				if tc.intent == store.BotIntentConversation && tc.status == store.RunSucceeded && tc.reply {
-					wantNew = 0
-					if p.EventID != reply.ID {
-						t.Errorf("receipt did not reuse actual reply: %s", p.EventID)
-					}
-				}
 				if len(live) != wantNew || len(restored) != len(before)+wantNew {
 					t.Errorf("duplicate publication: live=%d restored=%d before=%d wantNew=%d", len(live), len(restored), len(before), wantNew)
 				}
@@ -335,12 +331,9 @@ func TestBotConversationPublication(t *testing.T) {
 					if e == nil || e.ID != p.EventID || e.Author != "assistant" || e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil {
 						t.Fatalf("not a canonical employee message: %+v", e)
 					}
-					wantText := report.Summary
-					if tc.status == store.RunFailed {
-						wantText += "\n\nI couldn't verify everything, so please don't treat this as a fully completed result."
-					}
+					wantText := store.NewBotEmployeeFallback(tc.status, report, "").Text
 					text := e.Content.Parts[0].Text
-					if text != wantText+"\n" || text != p.Text || text != again.Text {
+					if text != wantText || text != p.Text || text != again.Text {
 						t.Errorf("unexpected employee message: %q", text)
 					}
 					for _, unwanted := range []string{"Run report", run.ID.String(), "diagnostic retained"} {
@@ -364,6 +357,10 @@ func TestBotConversationPublication(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if saved.Run.Report.EmployeeMessage == nil || saved.Run.Report.ValidateEmployeeMessageIntegrity(saved.Run.Status) != nil {
+					t.Fatal("missing durable envelope")
+				}
+				saved.Run.Report.EmployeeMessage = nil
 				if !reflect.DeepEqual(saved.Run.Report, report) || saved.Run.Status != tc.status {
 					t.Error("run diagnostics changed")
 				}

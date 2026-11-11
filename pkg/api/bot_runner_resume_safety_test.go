@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 )
 
 func TestBotResumeNoReplayAfterEffect(t *testing.T) {
-	for _, failure := range []string{"model", "extra-tool"} {
+	for _, failure := range []string{"model", "extra-tool", "tool-error"} {
 		t.Run(failure, func(t *testing.T) {
 			ctx, req, ss := botChatTestRequest(t)
 			s := &resumeTestStore{}
@@ -24,6 +25,9 @@ func TestBotResumeNoReplayAfterEffect(t *testing.T) {
 			var executed, cleaned atomic.Int64
 			action, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Exact fixture"}, func(_ tool.Context, _ map[string]any) (map[string]any, error) {
 				executed.Add(1)
+				if failure == "tool-error" {
+					return nil, errors.New("action outcome uncertain")
+				}
 				return map[string]any{"receipt": "ok"}, nil
 			})
 			if err != nil {
@@ -46,6 +50,12 @@ func TestBotResumeNoReplayAfterEffect(t *testing.T) {
 			result, err := adapter.Resume(ctx, req, sink)
 			if err == nil || result.Status != store.RunPartial || result.Failure == nil || !result.Failure.UncertainEffect || executed.Load() != 1 || s.consumed != 1 {
 				t.Fatalf("%+v %v executed=%d consumed=%d", result, err, executed.Load(), s.consumed)
+			}
+			if err := result.Report.ValidateEmployeeMessageIntegrity(result.Status); err != nil {
+				t.Fatalf("final exact-action outcome has a stale employee envelope: %v", err)
+			}
+			if string(result.Checkpoint) != string(waiting.Checkpoint) {
+				t.Fatal("uncertain action lost its reconciliation checkpoint")
 			}
 			adapter, _ = NewBotChatRuntimeAdapter(botChatTestFactory(t, ss, NewMockLLM(TextTurn("must not run")), []tool.Tool{action}, &cleaned))
 			if _, err := adapter.Resume(ctx, req, sink); err == nil || executed.Load() != 1 {

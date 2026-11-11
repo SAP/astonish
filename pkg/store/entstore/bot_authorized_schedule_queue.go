@@ -62,6 +62,8 @@ func (r *botRepository) reconcileScheduledQueueTx(ctx context.Context, tx botDra
 				saved.Run.Status = store.RunCancelled
 				saved.Run.FinishedAt = &now
 				saved.Run.Report.Summary = "Queued occurrence cancelled because its schedule was superseded."
+				message := store.NewBotEmployeeFallback(saved.Run.Status, saved.Run.Report, store.BotEmployeeReasonSuperseded)
+				saved.Run.Report.EmployeeMessage = &message
 			}
 			db, ok := tx.(botScheduledQueueDB)
 			if !ok {

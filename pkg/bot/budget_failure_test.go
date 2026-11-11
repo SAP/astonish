@@ -88,7 +88,7 @@ func TestBudgetFailureQuotaAndReport(t *testing.T) {
 			t.Fatal(rendered)
 		}
 		employeeMessage := RenderReport(store.BotRun{Status: store.RunFailed, Report: restored})
-		if employeeMessage != strings.TrimSpace(message)+"\n" {
+		if employeeMessage != EmployeeMessageFallback(store.RunFailed, restored, nil).Text+"\n" || !strings.Contains(employeeMessage, "budget") {
 			t.Fatalf("employee message lost budget explanation or gained audit details: %s", employeeMessage)
 		}
 		for _, unwanted := range []string{"Run report", "Technical details", "secret wrapper", restored.Failure.TechnicalDetails} {

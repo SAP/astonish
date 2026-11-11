@@ -40,7 +40,7 @@ func TestCheckpointFailureNativeIdentity(t *testing.T) {
 			t.Fatal("additive report metadata lost")
 		}
 		rendered := RenderReport(store.BotRun{Status: store.RunFailed, Report: restored})
-		if strings.Count(rendered, "### Model response could not be processed") != 1 || strings.Contains(rendered, "### Needs approval") {
+		if rendered != EmployeeMessageFallback(store.RunFailed, restored, nil).Text+"\n" || !strings.Contains(rendered, "model response could not be processed") || strings.Contains(rendered, "###") || strings.Contains(rendered, details) {
 			t.Fatal(rendered)
 		}
 		if _, ok := CheckpointFailureMessage(errors.New(cause.Error())); ok {

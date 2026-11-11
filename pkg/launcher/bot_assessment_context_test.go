@@ -37,6 +37,13 @@ func TestBotAssessmentContext(t *testing.T) {
 			f.services.PersonalScheduler = scheduleListJobs{job: job}
 			owner := store.WithServices(botFactoryOwnerContext(f.ctx, f.req), f.services)
 			binding := &botFactoryBinding{owner: owner, req: f.req, verifyIsolation: func(context.Context) error { return nil }}
+			binding.ownerEmail = func(ctx context.Context) (store.BotOwnerEmailDelivery, error) {
+				principal, ok := execution.PrincipalFromContext(ctx)
+				if !ok || principal.Subject != f.req.Principal.Subject {
+					t.Fatal("email facts lost captured owner")
+				}
+				return store.BotOwnerEmailDelivery{State: store.BotOwnerEmailTransportUnavailable, AccountEmail: "private@example.test", Binding: &store.BotChannelBinding{ID: uuid.New()}, NextStep: "not assessor instructions"}, nil
+			}
 			switch scenario {
 			case "effective-mismatch":
 				job.Enabled = true
@@ -61,6 +68,9 @@ func TestBotAssessmentContext(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"owner_email_delivery":{"state":"transport_unavailable"}`) || strings.Contains(string(raw), "private@example.test") || strings.Contains(string(raw), "not assessor instructions") {
+				t.Fatalf("unsafe or missing email facts: %s", raw)
 			}
 			want := `"effective_enabled":false`
 			if scenario == "effective-mismatch" {

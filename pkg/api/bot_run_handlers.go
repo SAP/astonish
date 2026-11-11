@@ -146,7 +146,7 @@ func BotMessageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	files, err := validateBotAttachments(q.Attachments)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		botHTTPError(w, err)
 		return
 	}
 	if len(files) > 0 && q.Instructions == "" {
@@ -205,7 +205,7 @@ func botRequestRun(w http.ResponseWriter, r *http.Request, intent store.BotExecu
 	}
 	files, err := validateBotAttachments(q.Attachments)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		botHTTPError(w, err)
 		return
 	}
 	if len(files) > 0 && q.Instructions == "" {

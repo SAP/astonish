@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import './scenarioSetup'
+import { botLocalFailure, BotFailureKind } from '@/components/chat/botEmployeeFeedback'
 import StudioChat from '@/components/StudioChat'
 import { teamFetch } from '@/api/teamContext'
 vi.mock('@/api/teamContext', () => ({ teamFetch: vi.fn(), getActiveTeam: () => null }))
@@ -26,7 +27,7 @@ it('paused conversation uses the shared durable watch, deduplicates replay, and 
   expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
   fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'Discuss the plan' } })
   fireEvent.paste(screen.getByTestId('chat-input'), { clipboardData: { items: [{ kind: 'file', getAsFile: () => new File(['hi'], 'note.txt', { type: 'text/plain' }) }] } })
-  expect(screen.getByRole('alert')).toHaveTextContent('files were not attached')
+  expect(screen.getByRole('alert')).toHaveTextContent(botLocalFailure(undefined, BotFailureKind.Attachments).message)
   expect(screen.queryByText('note.txt')).not.toBeInTheDocument()
   expect(screen.getByTestId('chat-input')).toHaveValue('Discuss the plan')
   fireEvent.click(screen.getByTestId('send-button'))

@@ -29,7 +29,7 @@ func TestBotBudgetClassification(t *testing.T) {
 		}
 	}
 	result, _ := botChatFailure(bot.ErrorPermanent, errors.New(bot.ErrBudgetExceeded.Error()))
-	if result.Failure.Class != bot.ErrorPermanent || result.Report.Failure != nil {
+	if result.Failure.Class != bot.ErrorPermanent || result.Report.Failure == nil || result.Report.Failure.Kind != store.BotReportFailureOperational {
 		t.Fatal("text classified as budget")
 	}
 }

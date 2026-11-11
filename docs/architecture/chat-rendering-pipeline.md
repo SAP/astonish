@@ -671,3 +671,12 @@ These rules were established through bugs and fixes. Violating them will break t
 | `web/src/test/fixtures/scenarios/` | JSON fixture files for SSE simulation |
 | `pkg/api/integration_test.go` | Backend integration tests with MockLLM |
 | `pkg/agent/system_prompt_contracts_test.go` | Prompt contract tests + golden file |
+
+
+### Bot client failure boundary
+
+Bot `error` and `error_info` publications are presented as safe first-person assistant messages in Studio; local send/watch failures use the same assistant renderer without inventing persisted messages or pending operations. `botEmployeeFeedback.ts` exposes a typed local envelope (`source: local`, `outcome: unknown`) and reads only typed HTTP status, never error bodies, endpoints, or stacks. A disconnected client cannot conclude that work failed. Authorization failures explain lack of access without fabricating a result. Global request failures without an authenticated Bot do not require a model call.
+
+Authorization cards retain exact action fields, choices, digests, expiry, read-only checks and decision controls. Their surrounding prose and failed decision feedback are safe employee messages; question payload wording and option identities remain unchanged. Workspace resource hooks normalize errors before rendering and preserve their existing data-retention/invalidation behavior. Terminal Bot error items are projected through the ordinary assistant bubble at render time, leaving stored error events and operation heads untouched; ordinary Chat/Code remains diagnostic. Terminal errors lacking structured status use outcome-unknown rather than guessing authorization from strings.
+
+Coverage is client-local: mounted Studio replay/remount, decision matrices and terminal render tests. This does not claim a live daemon/browser drill or exhaustive coverage of every settings panel, historical tool output, or backend-generated legacy summary.

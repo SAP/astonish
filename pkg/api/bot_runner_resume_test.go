@@ -125,6 +125,9 @@ func testBotChatExactApprovalContinuation(t *testing.T, intent store.BotExecutio
 	if err != nil || executed.Load() != 1 || s.consumed != 1 || len(final.Calls) != 1 || result.Report.Summary != "Exact action receipt observed." {
 		t.Fatalf("resume %+v %v executed %d consumed %d model %d", result, err, executed.Load(), s.consumed, len(final.Calls))
 	}
+	if err := result.Report.ValidateEmployeeMessageIntegrity(result.Status); err != nil {
+		t.Fatalf("final exact-action report has a stale employee envelope: %v", err)
+	}
 	if _, err := a.Resume(ctx, req, sink); err == nil {
 		t.Fatal("consumed action replayed")
 	}

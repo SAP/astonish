@@ -302,6 +302,10 @@ func (a *BotChatRuntimeAdapter) resume(ctx context.Context, req bot.RunRequest, 
 		result.Status = store.RunPartial
 		result.Checkpoint = req.Run.Checkpoint
 		result.Failure = &bot.RunError{Class: bot.ErrorPermanent, Message: "Approved action outcome requires reconciliation; never replay.", Cause: err, UncertainEffect: true, TerminalForAttempt: true}
+		// runChat finalized its envelope before the exact-action guard changed
+		// the outcome. Bind fresh producer-owned text to the final partial facts.
+		message := bot.EmployeeMessageFallback(result.Status, result.Report, result.Failure)
+		result.Report.EmployeeMessage = &message
 		return result, result.Failure
 	}
 	if err == nil && !guard.attempted {
@@ -309,8 +313,10 @@ func (a *BotChatRuntimeAdapter) resume(ctx context.Context, req bot.RunRequest, 
 	}
 	// A model report is not independent effect verification. Preserve that
 	// evidence and use the store's partial outcome instead of claiming success.
-	if err == nil && len(result.Report.Unverified) > 0 {
+	if err == nil && len(result.Report.Unverified) > 0 && result.Status != store.RunPartial {
 		result.Status = store.RunPartial
+		message := bot.EmployeeMessageFallback(result.Status, result.Report, nil)
+		result.Report.EmployeeMessage = &message
 	}
 	return result, err
 }

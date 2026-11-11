@@ -406,8 +406,12 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				}
 				poll()
 				assertState(store.BotActive)
-				if getRun(ordinary.ID).Status != store.RunPartial || effects.Load() != 2 {
-					t.Fatal("regular exact continuation did not execute once")
+				completed := getRun(ordinary.ID)
+				if completed.Status != store.RunPartial || effects.Load() != 2 {
+					t.Fatalf("regular exact continuation did not execute once: run=%+v effects=%d", completed, effects.Load())
+				}
+				if completed.FinishedAt == nil || completed.Report.ValidateEmployeeMessageIntegrity(completed.Status) != nil {
+					t.Fatal("regular exact continuation did not persist its final employee envelope")
 				}
 				request("POST", continuePath, continueBody, 409)
 				poll()

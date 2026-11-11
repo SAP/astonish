@@ -546,6 +546,9 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil {
+				t.Fatal("scheduled result has no validated employee message")
+			}
 			scheduleReport, runReport := false, false
 			canonicalSchedule := false
 			for _, e := range events {
@@ -557,7 +560,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 				if e.Content != nil {
 					for _, p := range e.Content.Parts {
 						scheduleReport = scheduleReport || strings.Contains(p.Text, "Schedule schedule_create applied")
-						runReport = runReport || p.Text == bot.RenderReport(*result)
+						runReport = runReport || strings.TrimSpace(p.Text) == strings.TrimSpace(bot.RenderReport(*result))
 					}
 				}
 			}

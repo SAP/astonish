@@ -51,7 +51,7 @@ func TestBotBudgetReportPublication(t *testing.T) {
 				t.Fatalf("not canonical %+v", e)
 			}
 			text := e.Content.Parts[0].Text
-			if text != strings.TrimSpace(message)+"\n" || text != first.Text {
+			if text != store.NewBotEmployeeFallback(store.RunFailed, report, "").Text || text != first.Text {
 				t.Fatalf("unexpected employee message: %q", text)
 			}
 			for _, unwanted := range []string{"Run report", run.ID.String(), "accounted=30", "requested=70", "limit=91", "Technical details", "[Error:"} {

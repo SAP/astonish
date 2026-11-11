@@ -30,7 +30,7 @@ func TestBotCheckpointFailureClassification(t *testing.T) {
 		t.Fatal("wrapper leaked")
 	}
 	result, _ = botChatFailure(bot.ErrorPermanent, errors.Join(context.Canceled, cause))
-	if result.Status != store.RunInterrupted || result.Report.Failure != nil {
+	if result.Status != store.RunInterrupted || result.Report.Failure == nil || result.Report.Failure.Kind != store.BotReportFailureInterrupted {
 		t.Fatal("cancellation lost precedence")
 	}
 }
@@ -52,7 +52,7 @@ func TestBotCheckpointFailureLookalikeUsesNormalError(t *testing.T) {
 		}
 		return nil
 	})
-	if err == nil || result.Report.Failure != nil || rawErrors != 1 {
+	if err == nil || result.Report.Failure == nil || result.Report.Failure.Kind != store.BotReportFailureOperational || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || rawErrors != 1 {
 		t.Fatalf("lookalike suppressed/classified: %+v errors=%d", result, rawErrors)
 	}
 	stored, err := ss.Get(ctx, &session.GetRequest{AppName: studioChatAppName, UserID: req.Bot.OwnerID.String(), SessionID: req.Run.SessionID.String()})

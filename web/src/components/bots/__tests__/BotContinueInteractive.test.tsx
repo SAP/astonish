@@ -20,6 +20,17 @@ it('requires an explicit click, retries exact run with a stable key and current 
   expect(calls[0][1]).toBe('run'); expect(calls[0][2]).toBe(calls[1][2]); expect(calls[1][0].revision).toBe(9)
   expect(screen.getByRole('button', { name: 'Continuation requested' })).toBeDisabled()
 })
+it.each([401, 403, 409, 500])('renders safe employee feedback for continuation failure %s', async status => {
+  vi.mocked(continueInteractive).mockRejectedValue({ status, message: 'secret HTTP /api/private', body: 'stack secret' })
+  render(<BotContinueInteractive bot={bot} runId="run" disabled={false} onChange={vi.fn()} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Continue interactive' }))
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveClass('markdown-body')
+  expect(alert).not.toHaveTextContent(/secret|HTTP|stack|\/api/)
+  expect(screen.getByRole('button', { name: 'Continue interactive' })).toBeEnabled()
+  expect(continueInteractive).toHaveBeenCalledWith(bot, 'run', expect.any(String))
+})
+
 it('closed, read-only or failed snapshot disables authorization', () => {
   render(<BotContinueInteractive bot={bot} runId="run" disabled onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button'))

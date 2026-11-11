@@ -158,8 +158,8 @@ func TestBotWorkMixedPendingPublication(t *testing.T) {
 			if ws.state.Candidate.Bodies[botWorkPendingProducerDraft] != mdl.final {
 				t.Fatal("persisted private draft was lost")
 			}
-			if !tc.accepted && !tc.stale && !strings.Contains(result.Report.Summary, "Mixed prose delivery unsupported") {
-				t.Fatal("mixed delivery limitation not reported explicitly")
+			if !tc.accepted && !tc.stale && (result.Report.Failure == nil || !strings.Contains(result.Report.Failure.TechnicalDetails, "Mixed prose delivery unsupported")) {
+				t.Fatal("mixed delivery diagnostic was lost")
 			}
 			if ws.state.Candidate.Digest != ws.state.Candidate.ContentDigest() {
 				t.Fatal("candidate changed after hashing")

@@ -3,7 +3,6 @@ package entstore
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -239,8 +238,10 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 		}
 		// Existing publication pipeline observes this intent only after the transaction
 		// commits and deduplicates by source run + sequence. No external delivery added.
-		summary := fmt.Sprintf("Schedule %s applied (trigger %s, version %d; enabled=%t, removed=%t).", saved.Payload.Operation, receipt.TriggerID, receipt.Version, receipt.Enabled, receipt.Removed)
-		report := store.BotReport{Summary: summary}
+		report, err := store.BotOperationEmployeeReport(run.Run.Status, *saved)
+		if err != nil {
+			return err
+		}
 		if err = insertPublicationActivity(ctx, tx, rec, run.Run.ID, store.BotActivityReport, "authorized-schedule-receipt:"+id.String(), map[string]any{"run_id": run.Run.ID, "status": run.Run.Status, "report": report, "operation_id": id, "operation_revision": saved.Revision, "intent": store.BotOutboxPublish}, s.repo.clock()); err != nil {
 			return err
 		}

@@ -99,7 +99,7 @@ describe('StudioChat', () => {
     vi.mocked(reviews.sendBotMessage).mockRejectedValueOnce(new Error('Bot changed; reload and review before retrying'))
     fireEvent.change(input, { target: { value: 'Concurrent instruction' } })
     fireEvent.click(screen.getByTestId('send-button'))
-    expect(await screen.findByRole('alert', { name: '' })).toHaveTextContent('Bot changed; reload and review before retrying')
+    expect(await screen.findByRole('alert', { name: '' })).toHaveTextContent('may still be running')
     expect(input).toHaveValue('Concurrent instruction')
     await act(async () => { stream.onEvent('bot_operation', applied) })
     expect(reviews.sendBotMessage).toHaveBeenCalledTimes(2)
@@ -155,7 +155,7 @@ describe('StudioChat', () => {
       restored.onEvent('error', { error: 'An unrelated failure remains visible.' })
     })
     expect(screen.getByText('An unrelated report remains visible.')).toBeInTheDocument()
-    expect(screen.getByText(/An unrelated failure remains visible/)).toBeInTheDocument()
+    expect(screen.getByText(/may still be running/)).toBeInTheDocument()
   })
 
   it.each(['dark', 'light'])('restores schedule confirmation in durable order with normal assistant controls after chunked reload (%s)', async theme => {
@@ -303,7 +303,7 @@ describe('StudioChat', () => {
     fireEvent.submit(screen.getByTestId('send-button').closest('form')!)
     expect(onSend).toHaveBeenCalledTimes(1)
     await act(async () => reject(new Error('Outcome unknown')))
-    expect(screen.getByRole('alert')).toHaveTextContent('Outcome unknown')
+    expect(screen.getByRole('alert')).toHaveTextContent('may still be running')
     expect(screen.getByTestId('chat-input')).toHaveValue('Keep my text')
     expect(screen.queryByTestId('user-message')).not.toBeInTheDocument()
   })
@@ -319,7 +319,7 @@ describe('StudioChat', () => {
     else fireEvent.paste(screen.getByTestId('chat-input'), { clipboardData: { items: [{ kind: 'file', getAsFile: () => file }] } })
     fireEvent.click(screen.getByTestId('send-button'))
     await waitFor(() => expect(onSend).toHaveBeenCalledWith('', [{ filename: 'note.txt', mimeType: 'text/plain', data: 'aGVsbG8=' }], []))
-    await waitFor(() => expect(screen.getByText(/Upload failed/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/may still be running/)).toBeInTheDocument())
     expect(screen.getByText('note.txt')).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('send-button'))
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2))
@@ -854,4 +854,42 @@ describe('StudioChat', () => {
       expect(screen.queryByText('Engineers')).not.toBeInTheDocument()
     })
   })
+})
+
+
+describe('Bot employee failure boundary', () => {
+  it.each(['error', 'error_info'])('renders %s safely on fresh mount and reload', async kind => {
+    for (let replay = 0; replay < 2; replay++) {
+      const view = render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
+      await screen.findByTestId('chat-input')
+      const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+      await act(async () => { stream.onEvent?.(kind, { error: 'secret /api/private HTTP 500', title: 'secret', reason: 'stack trace', originalError: 'secret' }) })
+      expect(screen.getByTestId('agent-message-bubble')).toHaveTextContent('may still be running')
+      expect(screen.queryByText(/secret|stack trace|HTTP 500/)).not.toBeInTheDocument()
+      view.unmount()
+    }
+  })
+  it('retains unsent input and safe access feedback after a rejected send', async () => {
+    render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn().mockRejectedValue({ status: 403, message: 'secret /api/private' }) }} />)
+    const input = await screen.findByTestId('chat-input')
+    fireEvent.change(input, { target: { value: 'Do this' } })
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('can’t access')
+    expect(input).toHaveValue('Do this')
+    expect(screen.queryByText(/secret/)).not.toBeInTheDocument()
+  })
+})
+
+
+it('shows employee uncertainty during Bot reconnect and clears it only when live', async () => {
+  render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
+  await screen.findByTestId('chat-input')
+  const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+  await act(async () => { stream.onState?.('reconnecting', 'saved-cursor') })
+  expect(screen.getByRole('alert')).toHaveTextContent('may still be running')
+  await act(async () => { stream.onError?.(Object.assign(new Error('HTTP secret endpoint'), { status: 403 })) })
+  expect(screen.getByRole('alert')).toHaveTextContent('can’t access')
+  expect(screen.queryByText(/secret endpoint/)).not.toBeInTheDocument()
+  await act(async () => { stream.onState?.('live', 'saved-cursor') })
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })

@@ -19,6 +19,11 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 		return nil, false
 	}
 	prompt := r.Config.SystemInstruction.Parts[0].Text
+	if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+		// Auxiliary narration is not another scripted execution turn. Decline
+		// it here to exercise the production typed fallback without replay.
+		return func(yield func(*model.LLMResponse, error) bool) { yield(nil, store.ErrBotUnsupported) }, true
+	}
 	var output any
 	if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
 		var c store.BotWorkContract

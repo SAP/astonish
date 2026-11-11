@@ -86,10 +86,10 @@ func TestBotCheckpointFailureCommittedHTTP(t *testing.T) {
 			}
 			for range 2 {
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-				if strings.Count(history, "### Model response could not be processed") != 1 || strings.Contains(history, "[Error:") || strings.Contains(history, "event: error") || strings.Contains(history, `"type":"error"`) {
+				if run.Report.EmployeeMessage == nil || strings.Count(history, run.Report.EmployeeMessage.Text) != 1 || strings.Contains(history, "[Error:") || strings.Contains(history, "event: error") || strings.Contains(history, `"type":"error"`) {
 					t.Fatalf("duplicate/raw failure: %s", history)
 				}
-				if !strings.Contains(history, "bot-report:"+run.ID.String()) || !strings.Contains(history, "No approval is needed") || strings.Contains(history, "must-not-leak") {
+				if !strings.Contains(history, "bot-report:"+run.ID.String()) || !strings.Contains(history, "None of the requests from that response were executed") || strings.Contains(history, "must-not-leak") {
 					t.Fatalf("incorrect report: %s", history)
 				}
 			}

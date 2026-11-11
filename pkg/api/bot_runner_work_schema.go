@@ -33,6 +33,19 @@ func botWorkResponseSchema(prompt string, inputs ...[]byte) map[string]any {
 	case botWorkPreparePrompt:
 		criterion = object(map[string]any{"id": text(), "source_ids": map[string]any{"type": "array", "items": enum(sources), "minItems": 1}, "text": text(), "verification_kind": map[string]any{"type": "string", "enum": []string{string(store.BotWorkVerificationModel), string(store.BotWorkVerificationSourceURL), string(store.BotWorkVerificationRetrievalTime)}}, "fulfillment_scope": map[string]any{"type": "string", "enum": []string{string(store.BotWorkCriterionCurrentTurn), string(store.BotWorkCriterionFutureTaskDefinition)}}, "excluded": map[string]any{"type": "boolean"}, "exclusion_reason": text()}, "id", "source_ids", "text", "verification_kind", "fulfillment_scope", "excluded", "exclusion_reason")
 		return object(map[string]any{"criteria": map[string]any{"type": "array", "items": criterion, "maxItems": 64}}, "criteria")
+	case botWorkBlockedReviewPrompt:
+		schema := botWorkResponseSchema(botWorkReviewPrompt, inputs...)
+		assessment := object(map[string]any{
+			"dependency_purpose": enum([]string{string(store.BotWorkDependencyConfigureDelivery), string(store.BotWorkDependencySend), string(store.BotWorkDependencySavePreference), string(store.BotWorkDependencyUnrelated)}),
+			"dependency_verdict": enum([]string{string(store.BotCriterionSatisfied), string(store.BotCriterionFailed), string(store.BotCriterionUnverified)}),
+			"blocker_id":         enum([]string{"owner-email-transport"}), "criterion_ids": map[string]any{"type": "array", "items": enum(ids), "maxItems": 64},
+			"source_id": enum([]string{"assignment"}), "source_quote": text(),
+			"verdict": enum([]string{string(store.BotCriterionSatisfied), string(store.BotCriterionFailed), string(store.BotCriterionUnverified)}),
+			"method":  enum([]string{string(store.BotAssessmentModel)}), "explanation": text(),
+		}, "dependency_purpose", "dependency_verdict", "blocker_id", "criterion_ids", "source_id", "source_quote", "verdict", "method", "explanation")
+		schema["properties"].(map[string]any)["blocked_response"] = map[string]any{"anyOf": []any{assessment, map[string]any{"type": "null"}}}
+		schema["required"] = []string{"candidate_digest", "criteria", "blocked_response"}
+		return schema
 	case botWorkPendingReviewPrompt:
 		review := botWorkResponseSchema(botWorkReviewPrompt, inputs...)
 		return object(map[string]any{"current_turn": review, "deferred_application": review}, "current_turn", "deferred_application")

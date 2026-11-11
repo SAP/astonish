@@ -99,6 +99,11 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		return nil, false
 	}
 	prompt := req.Config.SystemInstruction.Parts[0].Text
+	if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+		// Auxiliary narration is not a production/action retry. Decline the
+		// proposed message so the runtime exercises its typed fallback.
+		return &model.LLMResponse{Content: genai.NewContentFromText("{}", "model"), TurnComplete: true}, true
+	}
 	var output any
 	if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
 		var contract store.BotWorkContract
@@ -605,7 +610,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		if q.ID == uuid.Nil || q.BotID != b.ID || q.RunID != runID || q.Decision != store.NotificationSend || q.Target != target || q.Body != "Exact approved action receipt observed.\n" {
+		if q.ID == uuid.Nil || q.BotID != b.ID || q.RunID != runID || q.Decision != store.NotificationSend || q.Target != target || q.Body != "Exact approved action receipt observed." {
 			t.Errorf("wrong publication: %+v", q)
 		}
 		sends.Add(1)

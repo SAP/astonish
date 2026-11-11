@@ -26,6 +26,29 @@ func isScheduleOperation(op BotControlOperation) bool {
 	return false
 }
 
+// BotControlConversationalMetadata is a presentation-only closed set, not authority.
+// Lifecycle controls and queued task work are deliberately excluded.
+func BotControlConversationalMetadata(op BotControlOperation) bool {
+	switch op {
+	case BotControlResponsibility, BotControlPersona, BotControlGoalCreate, BotControlGoalEdit,
+		BotControlMemoryRemember, BotControlMemoryCorrect, BotControlMemoryForget:
+		return true
+	}
+	return false
+}
+
+func isConversationalOperation(op BotControlOperation) bool {
+	return isScheduleOperation(op) || BotControlConversationalMetadata(op)
+}
+
+// HasVerifiedMetadataReceipt requires the executor's exact mutation resource.
+func (o BotOperation) HasVerifiedMetadataReceipt() bool {
+	if !BotControlConversationalMetadata(o.Payload.Operation) || o.Provenance == nil || o.Provenance.SourceRunID == uuid.Nil || o.Provenance.UserEventID == "" || o.Status != BotOperationApplied || o.Receipt == nil || o.Receipt.Status != o.Status || o.Receipt.Validate() != nil || o.Receipt.Schedule != nil || len(o.Receipt.Postconditions) != 1 {
+		return false
+	}
+	return o.Receipt.Postconditions[0].Resource == "bot_control:"+string(o.Payload.Operation)
+}
+
 type BotMandateSummary struct {
 	Available bool `json:"available"`
 }
@@ -70,7 +93,7 @@ type BotOperationView struct {
 
 func (v BotOperationView) Validate() error {
 	if v.Presentation != "" {
-		if !isScheduleOperation(v.Operation) || v.Decision == BotOperationRequireAuthorization {
+		if !isConversationalOperation(v.Operation) || v.Decision == BotOperationRequireAuthorization {
 			return ErrBotInvalid
 		}
 		switch v.Presentation {
@@ -79,7 +102,7 @@ func (v BotOperationView) Validate() error {
 				return ErrBotInvalid
 			}
 		case BotOperationPresentationConversation:
-			if v.Status == BotOperationPending || v.Status == BotOperationApplying || (v.Status == BotOperationApplied && v.VerifiedSchedule == nil) {
+			if v.Status == BotOperationPending || v.Status == BotOperationApplying || (v.Status == BotOperationApplied && isScheduleOperation(v.Operation) && v.VerifiedSchedule == nil) {
 				return ErrBotInvalid
 			}
 		default:
@@ -154,7 +177,49 @@ func ProjectBotOperation(b Bot, o BotOperation, sequence int64) (BotOperationVie
 			v.Summary = "The schedule change was cancelled."
 		}
 	}
+	if BotControlConversationalMetadata(o.Payload.Operation) && o.Provenance != nil && o.Decision != BotOperationRequireAuthorization {
+		switch o.Status {
+		case BotOperationPending, BotOperationApplying:
+			v.Presentation = BotOperationPresentationInternal
+		case BotOperationApplied:
+			if o.HasVerifiedMetadataReceipt() {
+				v.Presentation = BotOperationPresentationConversation
+				v.Summary = metadataOperationSummary(o.Payload.Operation)
+			}
+		case BotOperationFailed, BotOperationBlocked:
+			v.Presentation = BotOperationPresentationConversation
+			v.Summary = "I couldn't complete the requested update. No change was verified."
+		case BotOperationCancelled:
+			v.Presentation = BotOperationPresentationConversation
+			v.Summary = "The requested update was cancelled."
+		}
+	}
+	report, err := BotOperationEmployeeReport(RunSucceeded, o)
+	if err != nil {
+		return BotOperationView{}, err
+	}
+	v.Summary = report.EmployeeMessage.Text
 	return v, v.Validate()
+}
+
+func metadataOperationSummary(op BotControlOperation) string {
+	switch op {
+	case BotControlResponsibility:
+		return "I've updated my responsibilities."
+	case BotControlPersona:
+		return "I've updated my working style."
+	case BotControlGoalCreate:
+		return "I've added the goal."
+	case BotControlGoalEdit:
+		return "I've updated the goal."
+	case BotControlMemoryRemember:
+		return "I've saved that to my memory."
+	case BotControlMemoryCorrect:
+		return "I've corrected that memory."
+	case BotControlMemoryForget:
+		return "I've removed that from my active memory."
+	}
+	return ""
 }
 
 func scheduleOperationSummary(p BotControlPayload, s BotOperationScheduleView) string {

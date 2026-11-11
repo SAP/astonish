@@ -24,7 +24,7 @@ it.each([false, true])('shows exact bounded fields and expiry for owner/read-onl
     expect(within(card).getByText(field.caption)).toBeVisible()
     expect(within(card).getByText(field.value)).toBeVisible()
   }
-  expect(within(card).getByText('Permission requested for this saved action only.')).toBeVisible()
+  expect(within(card).getByText('I’m asking for permission for this saved action only.')).toBeVisible()
   expect(within(card).getByText('Expires')).toBeVisible()
   expect(within(card).getByText('2099-01-01T00:00:00Z')).toBeVisible()
   expect(card).not.toHaveTextContent('private-digest')
@@ -35,6 +35,6 @@ it.each([false, true])('shows exact bounded fields and expiry for owner/read-onl
 it('keeps the exact expired lifetime visible without decision controls', () => {
   render(<BotOperationResult operation={{ ...operation, exception: { ...operation.exception!, expires_at: '2000-01-01T00:00:00Z' } }} scope="personal" readOnly={false} onChange={vi.fn()} />)
   expect(screen.getByText('2000-01-01T00:00:00Z')).toBeVisible()
-  expect(screen.getByText('This request expired. Ask for a fresh action.')).toBeVisible()
+  expect(screen.getByText('I need a fresh request because this one expired.')).toBeVisible()
   expect(screen.queryByRole('button')).not.toBeInTheDocument()
 })

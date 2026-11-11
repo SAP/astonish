@@ -35,6 +35,11 @@ func (m approvalWorkAssessmentModel) GenerateContent(ctx context.Context, req *m
 			prompt += part.Text
 		}
 	}
+	if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+		// Narration is an auxiliary, tool-free call, not a continuation turn.
+		// This fixture deliberately declines it to exercise the safe fallback.
+		return func(yield func(*model.LLMResponse, error) bool) { yield(nil, store.ErrBotUnsupported) }
+	}
 	prepare := strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1")
 	if !prepare && !strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
 		return m.LLM.GenerateContent(ctx, req, stream)
@@ -226,7 +231,7 @@ func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
 	}
 	final := &approvalModel{report: true}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Status != store.RunPartial || !strings.HasPrefix(result.Report.Summary, "Work could not be verified:") || len(result.Report.Unverified) == 0 || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
+	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || len(result.Report.Unverified) == 0 || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
 		t.Fatalf("result=%+v err=%v prior=%d sent=%d model=%d", result, err, prior.Load(), sent.Load(), final.calls)
 	}
 	scoped, ss = reopen()

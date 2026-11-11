@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -40,6 +41,9 @@ func (b *botFactoryBinding) assessmentContext(ctx context.Context) (json.RawMess
 		Timezone   string `json:"effective_timezone,omitempty"`
 	}
 	snapshot := struct {
+		OwnerEmail struct {
+			State store.BotOwnerEmailState `json:"state"`
+		} `json:"owner_email_delivery"`
 		DataClass string               `json:"data_class"`
 		BotID     string               `json:"bot_id"`
 		RunID     string               `json:"run_id"`
@@ -49,6 +53,15 @@ func (b *botFactoryBinding) assessmentContext(ctx context.Context) (json.RawMess
 		Schedules []scheduleFact       `json:"effective_schedules"`
 		Goals     []botControlGoalFact `json:"current_goals"`
 	}{DataClass: "untrusted_observed_metadata", BotID: current.ID.String(), RunID: b.req.Run.ID.String(), Scope: current.Scope, Version: current.Version, Revision: current.Revision, Schedules: []scheduleFact{}, Goals: []botControlGoalFact{}}
+	snapshot.OwnerEmail.State = store.BotOwnerEmailUnavailable
+	if b.ownerEmail != nil {
+		email, emailErr := b.ownerEmail(bound)
+		if emailErr == nil {
+			snapshot.OwnerEmail.State = email.State
+		} else if errors.Is(emailErr, store.ErrBotForbidden) || errors.Is(emailErr, context.Canceled) || errors.Is(emailErr, context.DeadlineExceeded) {
+			return nil, none, emailErr
+		}
+	}
 	if len(version.Triggers) > 256 {
 		return nil, none, store.ErrBotUnsupported
 	}

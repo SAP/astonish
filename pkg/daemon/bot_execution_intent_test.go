@@ -288,6 +288,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 						for _, part := range event.Content.Parts {
 							if strings.HasPrefix(event.InvocationID, "bot-report:") && (strings.TrimSpace(part.Text) == "durable controlled result" || strings.Contains(part.Text, "\n\ndurable controlled result\n")) {
 								models++
+								continue // canonical report text is also exact plain text now
 							}
 							switch part.Text {
 							case "Owner says hello":

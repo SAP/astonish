@@ -16,8 +16,10 @@ func TestBotEmployeeMessageOmitsInternalReport(t *testing.T) {
 				summary = "I couldn't retrieve today's headlines. Please try again later."
 			}
 			run := store.BotRun{ID: uuid.New(), Status: status, Report: store.BotReport{Summary: summary, Quality: &store.BotQualityReport{SchemaVersion: 1, Outcome: store.BotWorkBlocked, Criteria: []store.BotCriterionAssessment{{CriterionID: "c1", Explanation: "internal review", EvidenceRefs: []string{"candidate:secret"}}}}, Unchanged: []store.BotEvidence{{Summary: "HTTP 429", Source: "https://example.test"}}, Failure: &store.BotReportFailure{TechnicalDetails: "internal stack"}}}
+			message := EmployeeMessageFallback(status, run.Report, nil)
+			run.Report.EmployeeMessage = &message
 			got := RenderReport(run)
-			if strings.TrimSpace(got) != summary {
+			if strings.TrimSpace(got) != message.Text {
 				t.Fatalf("expected just the employee's message, got %s", got)
 			}
 			for _, unwanted := range []string{"Run report", "Quality assessment", "Unchanged", "candidate:secret", run.ID.String(), "internal stack"} {

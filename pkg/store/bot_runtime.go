@@ -229,13 +229,14 @@ type BotCriterionAssessment struct {
 
 // Bodies are private captured bytes; filenames alone are not review evidence.
 type BotWorkCandidate struct {
-	Revision     int64             `json:"revision"`
-	EventID      string            `json:"event_id"`
-	Text         string            `json:"text"`
-	Artifacts    []BotArtifact     `json:"artifacts,omitempty"`
-	Bodies       map[string]string `json:"bodies,omitempty"`
-	Observations []BotEvidence     `json:"observations,omitempty"`
-	Digest       string            `json:"digest"`
+	RuntimeBlockers []BotWorkBlocker  `json:"runtime_blockers,omitempty"`
+	Revision        int64             `json:"revision"`
+	EventID         string            `json:"event_id"`
+	Text            string            `json:"text"`
+	Artifacts       []BotArtifact     `json:"artifacts,omitempty"`
+	Bodies          map[string]string `json:"bodies,omitempty"`
+	Observations    []BotEvidence     `json:"observations,omitempty"`
+	Digest          string            `json:"digest"`
 }
 
 func (c BotWorkCandidate) ContentDigest() string {
@@ -244,26 +245,30 @@ func (c BotWorkCandidate) ContentDigest() string {
 }
 
 type BotWorkReview struct {
-	CandidateDigest string                   `json:"candidate_digest"`
-	Criteria        []BotCriterionAssessment `json:"criteria"`
+	BlockedResponse *BotBlockedResponseAssessment `json:"blocked_response,omitempty"`
+	CandidateDigest string                        `json:"candidate_digest"`
+	Criteria        []BotCriterionAssessment      `json:"criteria"`
 }
 
 type BotWorkState struct {
-	SchemaVersion      int                `json:"schema_version"`
-	Revision           int64              `json:"revision"`
-	Phase              BotWorkPhase       `json:"phase"`
-	Contract           BotWorkContract    `json:"contract"`
-	RequirementsDigest string             `json:"requirements_digest"`
-	Criteria           []BotWorkCriterion `json:"criteria,omitempty"`
-	Candidate          *BotWorkCandidate  `json:"candidate,omitempty"`
-	Review             *BotWorkReview     `json:"review,omitempty"`
-	Repairs            int                `json:"repairs"`
-	Unresolved         []string           `json:"unresolved,omitempty"`
+	ResponseOutcome    BotWorkResponseOutcome `json:"response_outcome,omitempty"`
+	SchemaVersion      int                    `json:"schema_version"`
+	Revision           int64                  `json:"revision"`
+	Phase              BotWorkPhase           `json:"phase"`
+	Contract           BotWorkContract        `json:"contract"`
+	RequirementsDigest string                 `json:"requirements_digest"`
+	Criteria           []BotWorkCriterion     `json:"criteria,omitempty"`
+	Candidate          *BotWorkCandidate      `json:"candidate,omitempty"`
+	Review             *BotWorkReview         `json:"review,omitempty"`
+	Repairs            int                    `json:"repairs"`
+	Unresolved         []string               `json:"unresolved,omitempty"`
 }
 
 // BotQualityReport is a safe final projection, not a replacement for trusted
 // Changed/Unchanged observations or an authority to execute an action.
 type BotQualityReport struct {
+	ResponseOutcome    BotWorkResponseOutcome   `json:"response_outcome,omitempty"`
+	BlockedResponse    *BotWorkBlockedResponse  `json:"blocked_response,omitempty"`
 	SchemaVersion      int                      `json:"schema_version"`
 	WorkRevision       int64                    `json:"work_revision"`
 	RequirementsDigest string                   `json:"requirements_digest"`
@@ -351,6 +356,9 @@ func (w *BotWorkState) Validate() error {
 			}
 		}
 	}
+	if w.ResponseOutcome != "" && (w.ResponseOutcome != BotWorkResponseVerifiedBlocker || w.Phase != BotWorkBlocked || !w.HasVerifiedBlockedResponse()) {
+		return ErrBotInvalid
+	}
 	switch w.Phase {
 	case BotWorkPreparing, BotWorkProducing, BotWorkCandidateReady, BotWorkReviewing, BotWorkRepairReady, BotWorkRepairing, BotWorkAccepted, BotWorkBlocked, BotWorkInterrupted:
 	default:
@@ -396,12 +404,18 @@ func (w *BotWorkState) Validate() error {
 			return ErrBotInvalid
 		}
 	}
+	if err := w.validateBlockers(); err != nil {
+		return err
+	}
 	if w.Review != nil {
 		if err := w.validateReview(); err != nil {
 			return err
 		}
 	}
 	if w.Phase == BotWorkAccepted || w.Phase == BotWorkRepairReady {
+		if w.Phase == BotWorkAccepted && w.Review != nil && w.Review.BlockedResponse != nil && w.Review.BlockedResponse.Verdict == BotCriterionSatisfied {
+			return ErrBotInvalid
+		}
 		if w.Review == nil {
 			return ErrBotInvalid
 		}
@@ -563,6 +577,9 @@ func ValidateBotWorkUpdate(old, next *BotWorkState) error {
 		return err
 	}
 	if !reflect.DeepEqual(old.Contract, next.Contract) || old.RequirementsDigest != next.RequirementsDigest || next.Revision != old.Revision {
+		return ErrBotInvalid
+	}
+	if old.ResponseOutcome != next.ResponseOutcome && (old.Phase != BotWorkReviewing || next.Phase != BotWorkBlocked || next.ResponseOutcome != BotWorkResponseVerifiedBlocker) {
 		return ErrBotInvalid
 	}
 	if old.Phase != BotWorkPreparing && !reflect.DeepEqual(old.Criteria, next.Criteria) {

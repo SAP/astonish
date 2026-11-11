@@ -466,7 +466,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.bots.loading = false
 		if msg.err != nil {
-			m.bots.err = msg.err.Error()
+			m.bots.err = botEmployeeFailure(msg.err)
 		} else {
 			m.bots.runItems = msg.runs
 			m.bots.items = msg.items
@@ -485,7 +485,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.bots.loading = false
 		if msg.err != nil {
-			m.bots.err = msg.err.Error()
+			m.bots.err = botEmployeeFailure(msg.err)
 			return m, nil
 		}
 		m.bots = botsState{}
@@ -497,14 +497,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.bots.loading = false
 		m.bots.confirm = ""
 		if msg.err != nil {
-			m.bots.err = msg.err.Error()
+			m.bots.err = botEmployeeFailure(msg.err)
 			return m, nil
 		}
-		if msg.continuation == store.BotContinuationBlockedByPause {
-			m.tr.Apply(events.NewSystem("Approval saved. Continuation blocked while paused; the Bot was not activated."))
-			m.refreshViewport()
-		} else if msg.continuation == store.BotContinuationQueued {
-			m.tr.Apply(events.NewSystem("Approval saved; continuation queued."))
+		if receipt, ok := botEmployeeApprovalReceipt(msg.continuation); ok {
+			m.tr.Items = append(m.tr.Items, receipt)
 			m.refreshViewport()
 		}
 		if m.bots.exceptions {
@@ -3389,6 +3386,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	}
 
 	for i, it := range m.tr.Items {
+		it = botEmployeeItem(it, m.botSelected())
 		switch it.Kind {
 		case events.ItemUser:
 			// User bubbles are cacheable (content never changes after submit).

@@ -54,18 +54,7 @@ func (a *BotChatRuntimeAdapter) resumeInteraction(ctx context.Context, req bot.R
 	ctx = context.WithValue(ctx, botResumeInteractionKey{}, approval)
 	// Never submit the original task as another user turn.
 	req.Instructions = "Continue the saved conversation from the owner's answer. Do not repeat completed work. The answer does not authorize additional tool permissions."
-	result, err := a.runChat(ctx, req, sink, true)
-	// A restart must not erase evidence (especially uncertain prior effects).
-	if req.Work == nil { // work controller already aggregates the prior ledger
-		result.Report.Changed = append(req.Run.Report.Changed, result.Report.Changed...)
-		result.Report.Unchanged = append(req.Run.Report.Unchanged, result.Report.Unchanged...)
-		result.Report.Artifacts = append(req.Run.Report.Artifacts, result.Report.Artifacts...)
-		result.Report.Unverified = append(req.Run.Report.Unverified, result.Report.Unverified...)
-	}
-	if result.Status == store.RunSucceeded && len(result.Report.Unverified) > 0 {
-		result.Status = store.RunPartial
-	}
-	return result, err
+	return a.runChat(ctx, req, sink, true)
 }
 
 type botResumeInteractionKey struct{}

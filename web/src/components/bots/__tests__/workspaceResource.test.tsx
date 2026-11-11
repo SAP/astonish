@@ -20,10 +20,19 @@ describe('workspace resource identity', () => {
     const { result, rerender } = renderHook(({ id, revision }) => useWorkspaceResource(load, id, revision), { initialProps: { id: 'a', revision: 0 } })
     await waitFor(() => expect(result.current.data).toBe('draft'))
     rerender({ id: 'a', revision: 1 })
-    await waitFor(() => expect(result.current.error).toBe('CAS conflict'))
+    await waitFor(() => expect(result.current.error).toContain('may still be running'))
     expect(result.current.data).toBe('draft')
     rerender({ id: 'b', revision: 1 })
     expect(result.current.data).toBeUndefined()
-    await waitFor(() => expect(result.current.error).toBe('CAS conflict'))
+    await waitFor(() => expect(result.current.error).toContain('may still be running'))
   })
+})
+
+
+it.each([401, 403])('keeps typed access failure %s safe in workspace resources', async status => {
+  const { result } = renderHook(() => useWorkspaceResource(async () => { throw { status, message: 'HTTP secret endpoint' } }, 'bot'))
+  await waitFor(() => expect(result.current.loading).toBe(false))
+  expect(result.current.error).toContain('can’t access')
+  expect(result.current.error).not.toContain('secret')
+  expect(result.current.data).toBeUndefined()
 })

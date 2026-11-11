@@ -234,7 +234,19 @@ func (s *botAuthorizedOperationRuntime) applyRoutineOperation(ctx context.Contex
 		o.Status = store.BotOperationApplied
 		o.Revision++
 		o.Receipt = &store.BotOperationReceipt{Status: o.Status, ObservedAt: s.repo.clock(), Postconditions: []store.BotOperationPostcondition{{Resource: RoutineControlResource(o.Payload.Operation), Revision: rec.Bot.Revision, Verified: true}}}
-		return saveAuthorizedOperation(ctx, tx, rec, *o, s)
+		if err := saveAuthorizedOperation(ctx, tx, rec, *o, s); err != nil {
+			return err
+		}
+		if !o.HasVerifiedMetadataReceipt() {
+			return nil
+		}
+		report, err := store.BotOperationEmployeeReport(run.Run.Status, *o)
+		if err != nil {
+			return err
+		}
+		// Atomic publication intent reuses the already committed canonical operation
+		// event; it does not publish a second prose acknowledgment.
+		return insertPublicationActivity(ctx, tx, rec, run.Run.ID, store.BotActivityReport, "authorized-routine-receipt:"+id.String(), map[string]any{"run_id": run.Run.ID, "status": run.Run.Status, "report": report, "operation_id": id, "operation_revision": o.Revision, "intent": store.BotOutboxPublish}, s.repo.clock())
 	})
 	if err != nil {
 		// Never return an Applied in-memory receipt for a rolled-back transaction.

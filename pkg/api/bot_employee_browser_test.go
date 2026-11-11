@@ -41,6 +41,7 @@ import (
 type employeeBrowserModel struct {
 	calls          atomic.Int64
 	question       atomic.Bool
+	laterReport    atomic.Bool
 	t              *testing.T
 	payload        map[string]any
 	captured       chan struct{}
@@ -50,7 +51,9 @@ type employeeBrowserModel struct {
 
 func (*employeeBrowserModel) Name() string { return "interactive-http" }
 func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool { return w.Candidate.Text == "Your request has been recorded." }); ok {
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
+		return w.Candidate.Text == "Your request has been recorded." || w.Candidate.Text == "Later report: local status is healthy."
+	}); ok {
 		return response
 	}
 	if req.Config != nil && req.Config.SystemInstruction != nil && len(req.Config.SystemInstruction.Parts) > 0 && strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_WORK_PENDING_REVIEW_V1") {
@@ -72,6 +75,11 @@ func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.L
 		}
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
+		if m.laterReport.Load() {
+			m.calls.Add(1)
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("Later report: local status is healthy.", "model"), TurnComplete: true}, nil)
+			return
+		}
 		if m.question.Load() {
 			m.calls.Add(1)
 			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "employee-question", Name: "execute_tool", Args: map[string]any{"name": "ask_user", "arguments": map[string]any{"kind": "text", "prompt": "Which employee report should I prepare next?"}}}}}}}, nil)
@@ -107,6 +115,14 @@ func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.L
 // TestBotWorkQualityBrowserAcceptance serves the built Studio against isolated
 // production Bot handlers/store/worker. Only model and identity/settings are controlled.
 func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
+	runEmployeeQualityBrowser(t, []string{"checked", "limitations"})
+}
+
+func TestBotBlockedExplanationBrowserAcceptance(t *testing.T) {
+	runEmployeeQualityBrowser(t, []string{"blocked"})
+}
+
+func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 	if os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
 		t.Skip("set ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 after npm run build")
 	}
@@ -114,7 +130,7 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 	if bin == "" {
 		t.Fatal("ASTONISH_BOT_BROWSER_PATH is required")
 	}
-	for _, mode := range []string{"checked", "limitations"} {
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, store.BotScopePersonal)
 			defer f.worker.Stop()
@@ -146,6 +162,32 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 				}
 				raw, _ := json.Marshal(result)
 				return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, true
+			}
+			if mode == "blocked" {
+				owner := f.b.OwnerID.String()
+				link := &store.UserChannel{ID: uuid.NewString(), UserID: owner, ChannelType: store.BotDeliveryChannelEmail, ExternalID: owner + "@example.test", Enabled: true}
+				if err := f.db.UserChannels().Link(f.ctx, link); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.UserChannels().Verify(f.ctx, link.ID); err != nil {
+					t.Fatal(err)
+				}
+				llm := &blockedPublicationModel{t: t}
+				worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{
+					Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+					ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 1000, SupportsOutputLimit: true},
+					ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+						return llm, nil
+					},
+					Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+						return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.worker = worker
+				defer worker.Stop()
 			}
 			var pkg struct {
 				Version string `json:"version"`
@@ -268,17 +310,27 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 			page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
 			var ids []string
 			count := 3
-			if mode == "limitations" {
+			if mode != "checked" {
 				count = 1
+			}
+			instructions := "Report the supplied text: isolated receipt."
+			if mode == "blocked" {
+				instructions = "Add email delivery to my recurring report."
 			}
 			for i := 0; i < count; i++ {
 				f.model.productions = 0
 				var receipt store.BotMessageReceipt
-				if err = json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Report the supplied text: isolated receipt.","idempotency_key":"browser-quality-%d"}`, f.b.Version, i), 202), &receipt); err != nil {
+				if err = json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":%q,"idempotency_key":"browser-quality-%d"}`, f.b.Version, instructions, i), 202), &receipt); err != nil {
 					t.Fatal(err)
 				}
 				if err = f.worker.Poll(f.ctx); err != nil {
 					t.Fatal(err)
+				}
+				if mode == "blocked" {
+					run, e := f.repo.GetRun(f.ctx, f.b.ID, receipt.Run.ID)
+					if e != nil || run.Status != store.RunPartial || run.Report.Quality == nil || run.Report.Quality.ResponseOutcome != store.BotWorkResponseVerifiedBlocker || run.Report.Quality.Repairs != 0 || run.Report.Summary != blockedPublicationText {
+						t.Fatalf("lost verified partial blocker: %+v %v", run, e)
+					}
 				}
 				ids = append(ids, "bot-report:"+receipt.Run.ID.String())
 			}
@@ -288,16 +340,19 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 			}
 			homeText := "Corrected: the receipt says isolated receipt."
 			if mode == "limitations" {
-				homeText = "Work could not be verified"
+				homeText = "I couldn't confirm completion of the requested work. The requested result has not been verified. Review the incomplete result before deciding how to continue."
 			}
-			page.MustElementR("body", homeText).MustVisible()
+			if mode == "blocked" {
+				homeText = blockedPublicationText
+			}
+			page.MustWait(`want => [...document.querySelectorAll('[data-testid="agent-message-bubble"]')].some(e => e.innerText.trim() === want)`, homeText)
 			if mode == "checked" {
 				page.MustWait(`()=>document.body.innerText.split('Corrected: the receipt says isolated receipt.').length === 4`)
 			}
 			assertHome := func() {
 				t.Helper()
 				text := page.MustEval(`()=>document.body.innerText`).Str()
-				for _, internal := range []string{"Run report", "Quality assessment", "candidate:", "### Unchanged"} {
+				for _, internal := range []string{"REVIEWER_ONLY", "transport_unavailable", "Run report", "Quality assessment", "candidate:", "### Unchanged"} {
 					if strings.Contains(text, internal) {
 						t.Fatalf("Home leaked diagnostic %q: %s", internal, text)
 					}
@@ -314,14 +369,24 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 						t.Fatalf("canonical report identity %s count=%d", id, strings.Count(history, id))
 					}
 				}
+				if mode != "checked" && page.MustEval(`() => document.querySelectorAll('[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]').length`).Int() != 1 {
+					t.Fatal("incomplete/blocked outcome must be exactly one shared employee bubble")
+				}
 				if page.MustEval(`()=>document.querySelectorAll('[data-review-id]').length`).Int() != 0 {
 					t.Fatal("quality introduced owner approval")
 				}
 			}
 			assertHome()
 			page.MustReload()
-			page.MustElementR("body", homeText).MustVisible()
+			if mode == "blocked" {
+				homeText = blockedPublicationText
+			}
+			page.MustWait(`want => [...document.querySelectorAll('[data-testid="agent-message-bubble"]')].some(e => e.innerText.trim() === want)`, homeText)
 			assertHome()
+			if mode == "blocked" {
+				t.Log("built Studio verified blocker: exact reason, administrator action and unchanged settings; one ordinary bubble live/reload; private runtime/reviewer diagnostics hidden")
+				return
+			}
 			page.MustElement(`[data-testid="chat-input"]`).MustInput("keep quality draft")
 			page.MustEval(`()=>{window.qualityComposer=document.querySelector('[data-testid="chat-input"]'); return true}`)
 			page.MustElementR("button", "^Details$").MustClick()
@@ -344,6 +409,10 @@ func TestBotWorkQualityBrowserAcceptance(t *testing.T) {
 	}
 }
 
+func TestBotResponsibilityConfirmedOnlyBrowserAcceptance(t *testing.T) {
+	runEmployeeBrowser(t, "responsibility")
+}
+
 func TestBotScheduleConfirmedOnlyBrowserAcceptance(t *testing.T) { runEmployeeBrowser(t, "routine") }
 func TestBotEmployeeBrowserAcceptance(t *testing.T)              { runEmployeeBrowser(t, "routine") }
 func TestBotEmployeeEscalationBrowserAcceptance(t *testing.T) {
@@ -356,8 +425,9 @@ func TestBotEmployeeEscalationBrowserAcceptance(t *testing.T) {
 // handlers and a scoped SQLite store. Only identity/settings, model and physical
 // home provisioning are controlled; no browser fetch interception is used.
 func runEmployeeBrowser(t *testing.T, scenario string) {
+	responsibilityProbe := scenario == "responsibility"
 	revisionProbe := scenario == "revision"
-	if revisionProbe {
+	if revisionProbe || responsibilityProbe {
 		scenario = "routine"
 	}
 	probe := newComposerRevisionProbe()
@@ -386,6 +456,15 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		op = store.BotControlScheduleCreate
 		payload = map[string]any{"operation": op, "reason": "Owner requested every minute", "schedule": map[string]any{"trigger": map[string]any{"kind": "cron", "cron": "* * * * *", "timezone": "UTC", "instructions": "Read local status and report"}}}
 	}
+	responsibility := "Read local status and report concisely; after 16:00 America/New_York report the next day's outlook."
+	confirmation := "I've created the schedule."
+	acknowledgmentKind := store.BotReportAcknowledgmentSchedulePending
+	if responsibilityProbe {
+		op = store.BotControlResponsibility
+		payload = map[string]any{"operation": op, "reason": "Owner requested a responsibility update with an explicit timezone", "responsibility": responsibility}
+		confirmation = "I've updated my responsibilities."
+		acknowledgmentKind = store.BotReportAcknowledgmentControlPending
+	}
 	applyReached, applyRelease := make(chan struct{}), make(chan struct{})
 	var applyOnce sync.Once
 	var unblockOnce sync.Once
@@ -396,6 +475,9 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		resources := []string{"propose_bot_control", "ask_user"}
 		if scenario == "routine" {
 			resources = append(resources, "schedule_job")
+		}
+		if responsibilityProbe {
+			resources = append(resources, entstore.RoutineControlResource(store.BotControlResponsibility))
 		}
 		ttl := time.Hour
 		if scenario == "serverexpiry" {
@@ -624,6 +706,9 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	if scenario == "routine" {
 		message = "Schedule every minute to read local status and report"
 	}
+	if responsibilityProbe {
+		message = "Update your responsibility: " + responsibility
+	}
 	page.MustElement(`[data-testid="chat-input"]`).MustInput(message)
 	page.MustElement(`[data-testid="send-button"]`).MustClick()
 	page.MustElement(`[data-testid="thinking-indicator"]`).MustVisible()
@@ -664,8 +749,25 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	} else {
 		page.MustElement(`[data-operation-id]`).MustVisible()
 	}
+	if responsibilityProbe {
+		var pending store.BotSnapshot
+		if err := json.Unmarshal(f.request("GET", f.path+"/snapshot", "", 200), &pending); err != nil {
+			t.Fatal(err)
+		}
+		if len(pending.Operations) != 1 || pending.Operations[0].Operation != store.BotControlResponsibility || pending.Operations[0].Presentation != store.BotOperationPresentationInternal || pending.Operations[0].SourceRunID == uuid.Nil || pending.Operations[0].SourceUserEventID == "" {
+			t.Fatalf("responsibility pending snapshot lost internal source identity: %+v", pending.Operations)
+		}
+		// Metadata commits do not run schedule candidate-readiness. Hold the
+		// controlled model after real capture to exercise pending live/reload.
+		page.MustReload()
+		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+		page.MustElement(`[data-testid="thinking-indicator"]`).MustVisible()
+		assertNoSchedulePending()
+		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);window.scheduleStream.addEventListener('transcript',e=>window.scheduleEvents.push(JSON.parse(e.data)));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
+		page.MustWait(`()=>window.scheduleReplay`)
+	}
 	release()
-	if scenario == "routine" {
+	if scenario == "routine" && !responsibilityProbe {
 		select {
 		case <-applyReached:
 		case e := <-poll:
@@ -682,7 +784,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			t.Fatalf("source must be durably terminal before apply: %+v %v", source, e)
 		}
 		reportJSON, _ := json.Marshal(source.Report)
-		if len(source.Report.Unverified) != 0 || len(source.Report.Changed) != 0 || len(source.Report.Unchanged) != 1 || source.Report.Acknowledgment == nil || source.Report.Acknowledgment.Kind != store.BotReportAcknowledgmentSchedulePending || len(source.Report.Acknowledgment.OperationIDs) != 1 {
+		if len(source.Report.Unverified) != 0 || len(source.Report.Changed) != 0 || len(source.Report.Unchanged) != 1 || source.Report.Acknowledgment == nil || source.Report.Acknowledgment.Kind != acknowledgmentKind || len(source.Report.Acknowledgment.OperationIDs) != 1 {
 			t.Fatalf("expected pure server-marked schedule acknowledgment, not an applied change: %s", reportJSON)
 		}
 		var pending store.BotSnapshot
@@ -712,6 +814,12 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	if err != nil || len(runs) != 1 {
 		t.Fatal("unexpected runs", err)
 	}
+	if responsibilityProbe {
+		source, e := f.repo.GetRun(auth, f.b.ID, runs[0].ID)
+		if e != nil || source.Status != store.RunSucceeded || source.Report.Acknowledgment == nil || source.Report.Acknowledgment.Kind != acknowledgmentKind || len(source.Report.Acknowledgment.OperationIDs) != 1 {
+			t.Fatalf("responsibility source must retain pure control_pending acknowledgment: %+v %v", source, e)
+		}
+	}
 	rt, err := worker.AuthorizedOperations(f.repo)
 	if err != nil {
 		t.Fatal(err)
@@ -720,7 +828,40 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 	if err != nil || len(ops) != 1 {
 		t.Fatalf("operations %+v %v", ops, err)
 	}
+	assertFinalMetadata := func(status store.BotOperationStatus) {
+		t.Helper()
+		var snapshot store.BotSnapshot
+		if err := json.Unmarshal(f.request("GET", f.path+"/snapshot", "", 200), &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Operations) != 1 {
+			t.Fatalf("expected one persisted metadata outcome: %+v", snapshot.Operations)
+		}
+		final := snapshot.Operations[0]
+		if final.OperationID != ops[0].ID || final.SourceRunID != runs[0].ID || final.SourceUserEventID == "" || final.Presentation != store.BotOperationPresentationConversation || final.Status != status || final.Summary == "" {
+			t.Fatalf("final metadata outcome lost conversation identity: %+v", final)
+		}
+		if status == store.BotOperationApplied && final.Summary != "I've added the goal." {
+			t.Fatalf("unexpected approved goal confirmation: %q", final.Summary)
+		}
+		if status == store.BotOperationCancelled && final.Summary != "I couldn't confirm completion of the requested work. You cancelled the pending work. Review the request before starting another run." {
+			t.Fatalf("unexpected cancelled goal confirmation: %q", final.Summary)
+		}
+		page.MustWait(`summary=>{const w=document.querySelector('[aria-label="Bot workspace"]');const ops=w?.querySelectorAll('[data-operation-id]');const bubbles=w?.querySelectorAll('[data-operation-id] [data-testid="agent-message-bubble"]');return ops?.length===1 && bubbles?.length===1 && bubbles[0].innerText.includes(summary)}`, final.Summary)
+		if !page.MustEval(`summary=>{const w=document.querySelector('[aria-label="Bot workspace"]');return !w.querySelector('[data-operation-id] h3') && ![...w.querySelectorAll('[data-operation-id] button')].some(b=>/^(Approve |Deny$)/.test(b.innerText)) && w.innerText.split(summary).length===2}`, final.Summary).Bool() {
+			t.Fatal("final metadata outcome must be exactly one ordinary bubble without a technical card or decision controls")
+		}
+		for _, id := range []string{ops[0].ID.String(), ops[0].Provenance.SourceRunID.String(), ops[0].Provenance.PayloadDigest} {
+			if page.MustEval(`id=>document.querySelector('[aria-label="Bot workspace"]').innerText.includes(id)`, id).Bool() {
+				t.Fatal("final metadata outcome leaked authority identity")
+			}
+		}
+	}
 	if scenario != "routine" {
+		goals, e := f.repo.(store.BotGoalStore).ListGoals(auth, f.b.ID)
+		if e != nil || len(goals) != 0 {
+			t.Fatalf("goal mutated before owner decision: %+v %v", goals, e)
+		}
 		page.MustElementR(`[data-operation-id] h3`, "Blocked").MustVisible()
 		page.MustElementR(`[data-operation-id] dd`, "Ship employee report").MustVisible()
 		exceptionCard := page.MustElement(`[data-operation-id="` + ops[0].ID.String() + `"]`)
@@ -730,7 +871,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		if expiry := exceptionCard.MustElement("time"); expiry.MustText() != ops[0].Exception.ExpiresAt.UTC().Format(time.RFC3339Nano) {
 			t.Fatal("exact exception expiry not visible")
 		}
-		if !strings.Contains(exceptionCard.MustText(), "Permission requested for this saved action only.") {
+		if !strings.Contains(exceptionCard.MustText(), "I’m asking for permission for this saved action only.") {
 			t.Fatal("exception lifetime scope missing")
 		}
 		if page.MustEval(`()=>document.querySelector('[data-operation-id]').innerText.includes('payload_digest')`).Bool() {
@@ -789,14 +930,24 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 				}
 			}
 			page.MustElementR(`[data-operation-id] button`, "^Approve create goal$").MustClick()
-			page.MustElementR(`[data-operation-id] [role="alert"]`, "Decision could not be verified").MustVisible()
+			if scenario == "serverexpiry" {
+				page.MustWait(`() => document.querySelector('[data-operation-id] [role="alert"]')?.innerText.trim() === 'I can’t access this Bot with your current authorization. Please check your access and refresh. I can’t confirm the outcome of your work.'`)
+			} else {
+				// SSE may replace the stale authorization card with the concurrent
+				// denial before the rejected request can render its local alert.
+				page.MustWait(`()=>!!document.querySelector('[data-operation-id] [role="alert"], [data-operation-id] [data-testid="agent-message-bubble"]')`)
+			}
 			// The saved exception shares the mandate expiry; verify rejects the
 			// expired mandate as forbidden before reaching the grant-expiry branch.
 			wantStatus := http.StatusForbidden
 			if scenario == "stalerace" {
 				wantStatus = http.StatusConflict
 			}
-			if int(responseStatus.Load()) != wantStatus || decisionBody.ExpectedRevision != ops[0].Revision || decisionBody.ExpectedRevision <= 0 || decisionBody.PayloadDigest != ops[0].Provenance.PayloadDigest {
+			responseDeadline := time.Now().Add(12 * time.Second)
+			for responseStatus.Load() == 0 && time.Now().Before(responseDeadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if decisions.Load() != 1 || !decisionBody.Approve || int(responseStatus.Load()) != wantStatus || decisionBody.ExpectedRevision != ops[0].Revision || decisionBody.ExpectedRevision <= 0 || decisionBody.PayloadDigest != ops[0].Provenance.PayloadDigest {
 				t.Fatalf("negative decision status=%d coordinates=%+v", responseStatus.Load(), decisionBody)
 			}
 			saved, e := rt.ReadAuthorizedOperation(auth, before.MandateRef, before.ID)
@@ -808,10 +959,32 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 				t.Fatalf("negative goals %v %v", goals, e)
 			}
 			page.MustElement(`[data-operation-id]`).MustVisible()
-			if !page.MustEval(`()=>[...document.querySelectorAll('[data-operation-id] button')].every(b=>b.disabled)`).Bool() {
+			if !page.MustEval(`()=>[...document.querySelectorAll('[data-operation-id] button')].filter(b=>/^(Approve |Deny$)/.test(b.innerText)).every(b=>b.disabled)`).Bool() {
 				t.Fatal("error allows blind retry")
 			}
+			if page.MustEval(`() => !!document.querySelector('[data-operation-id] [role="alert"]')`).Bool() {
+				want := "I can’t access this Bot with your current authorization. Please check your access and refresh. I can’t confirm the outcome of your work."
+				if scenario == "stalerace" {
+					want = "I need you to refresh and review the current saved action before trying again. I can’t confirm this request’s outcome."
+				}
+				if !page.MustEval(`want => document.querySelector('[data-operation-id] [role="alert"]').innerText.trim() === want`, want).Bool() {
+					t.Fatal("rejected decision must show the exact typed employee explanation, not raw server diagnostics")
+				}
+			}
 			t.Logf("%s: HTTP %d, valid revision %d, persisted revision %d status %s unchanged by rejected request; zero goals", scenario, wantStatus, decisionBody.ExpectedRevision, before.Revision, before.Status)
+			if scenario == "stalerace" {
+				// Regardless of whether SSE already replaced the error card,
+				// restore the canonical concurrent denial from persisted history.
+				calls := m.calls.Load()
+				page.MustReload()
+				assertFinalMetadata(store.BotOperationCancelled)
+				page.MustReload()
+				assertFinalMetadata(store.BotOperationCancelled)
+				if m.calls.Load() != calls {
+					t.Fatal("stale decision reload replayed model")
+				}
+				t.Log("concurrent denial restored exactly one ordinary cancelled bubble on repeated reload, without replay")
+			}
 			return
 		}
 		button := "^Deny$"
@@ -819,7 +992,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			button = "^Approve create goal$"
 		}
 		page.MustElementR(`[data-operation-id] button`, button).MustClick()
-		page.MustWait(`()=>!document.querySelector('[data-operation-id] button')`)
+		page.MustWait(`()=>![...document.querySelectorAll('[data-operation-id] button')].some(b=>/^(Approve |Deny$)/.test(b.innerText))`)
 		if decisions.Load() != 1 || decisionBody.PayloadDigest != ops[0].Provenance.PayloadDigest || decisionBody.ExpectedRevision != ops[0].Revision || decisionBody.Approve != (scenario == "approve") {
 			t.Fatalf("decision coordinates incorrect: %+v", decisionBody)
 		}
@@ -827,18 +1000,22 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			t.Fatal(err)
 		}
 	}
-	expected := "Applied"
+	expected := store.BotOperationApplied
 	if scenario == "deny" {
-		expected = "Cancelled"
+		expected = store.BotOperationCancelled
 	}
 	assertFinalOperation := func() {
 		t.Helper()
 		if scenario != "routine" {
-			page.MustElementR(`[data-operation-id] h3`, expected).MustVisible()
+			assertFinalMetadata(expected)
 			return
 		}
-		page.MustElementR(`[data-operation-id] [data-testid="agent-message-bubble"]`, "I've created the schedule. It runs every minute. Next run:").MustVisible()
-		if !page.MustEval(`()=>{const w=document.querySelector('[aria-label="Bot workspace"]'); return w.querySelectorAll('[data-operation-id]').length===1 && w.querySelectorAll('[data-operation-id] [data-testid="agent-message-bubble"]').length===1 && !w.querySelector('[data-operation-id] h3') && !/durably queued|Change queued|Applying change|No schedule change is verified|Work is still pending|Your request has been recorded/.test(w.innerText) && w.innerText.split("I've created the schedule.").length===2}`).Bool() {
+		wantConfirmation := confirmation
+		if !responsibilityProbe {
+			wantConfirmation += " It runs every minute. Next run:"
+		}
+		page.MustElementR(`[data-operation-id] [data-testid="agent-message-bubble"]`, wantConfirmation).MustVisible()
+		if !page.MustEval(`confirmation=>{const w=document.querySelector('[aria-label="Bot workspace"]'); return w.querySelectorAll('[data-operation-id]').length===1 && w.querySelectorAll('[data-operation-id] [data-testid="agent-message-bubble"]').length===1 && !w.querySelector('[data-operation-id] h3') && !/durably queued|Change queued|Applying change|No schedule change is verified|Work is still pending|Your request has been recorded/.test(w.innerText) && w.innerText.split(confirmation).length===2}`, confirmation).Bool() {
 			t.Fatal("schedule must appear exactly once as friendly confirmed prose, without pending acknowledgment or technical card")
 		}
 		for _, id := range []string{ops[0].ID.String(), ops[0].Provenance.SourceRunID.String(), ops[0].Provenance.PayloadDigest} {
@@ -853,7 +1030,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		if err := json.Unmarshal(f.request("GET", f.path+"/snapshot", "", 200), &applied); err != nil {
 			t.Fatal(err)
 		}
-		if len(applied.Operations) != 1 || applied.Operations[0].Presentation != store.BotOperationPresentationConversation || applied.Operations[0].Status != store.BotOperationApplied || applied.Operations[0].OperationID != ops[0].ID || applied.Operations[0].SourceRunID != runs[0].ID || applied.Operations[0].VerifiedSchedule == nil {
+		if len(applied.Operations) != 1 || applied.Operations[0].Presentation != store.BotOperationPresentationConversation || applied.Operations[0].Status != store.BotOperationApplied || applied.Operations[0].OperationID != ops[0].ID || applied.Operations[0].SourceRunID != runs[0].ID || (!responsibilityProbe && applied.Operations[0].VerifiedSchedule == nil) || (responsibilityProbe && applied.Operations[0].VerifiedSchedule != nil) {
 			t.Fatalf("applied snapshot lost confirmed identity: %+v", applied.Operations)
 		}
 		waitScheduleSSE := func(predicate string) {
@@ -870,7 +1047,16 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		page.MustEval(`()=>window.scheduleStream.close()`)
 		t.Log("production SSE retained internal pending identity and emitted exactly one applied conversation event, with no pending prose")
 		jobs := ods.ForUser(principal.Subject).ScheduledJobs().List(auth)
-		if len(jobs) != 1 || !jobs[0].Enabled || jobs[0].NextRun == nil {
+		if responsibilityProbe {
+			current, e := f.repo.Get(auth, f.b.ID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			version, e := f.repo.GetVersion(auth, f.b.ID, current.Version)
+			if e != nil || version.Charter != responsibility || len(jobs) != 0 {
+				t.Fatalf("responsibility readback must preserve exact charter without creating schedules: %+v jobs=%+v err=%v", version, jobs, e)
+			}
+		} else if len(jobs) != 1 || !jobs[0].Enabled || jobs[0].NextRun == nil {
 			t.Fatalf("schedule readback %+v", jobs)
 		}
 	} else {
@@ -881,6 +1067,9 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		}
 		if e != nil || len(goals) != want {
 			t.Fatalf("goals %v %v", goals, e)
+		}
+		if scenario == "approve" && (goals[0].Title != "Ship employee report" || goals[0].CompletionCriteria != "Report delivered") {
+			t.Fatalf("approval mutated a different goal: %+v", goals)
 		}
 	}
 	if revisionProbe {
@@ -912,10 +1101,57 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if e = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%d-dark-%t.png", scenario, width, dark)), shot, 0600); e != nil {
+			artifactScenario := scenario
+			if responsibilityProbe {
+				artifactScenario = "responsibility"
+			}
+			if e = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%d-dark-%t.png", artifactScenario, width, dark)), shot, 0600); e != nil {
 				t.Fatal(e)
 			}
 		}
+	}
+	if responsibilityProbe {
+		m.laterReport.Store(true)
+		page.MustElement(`[data-testid="chat-input"]`).MustInput("Give me the current local status report")
+		page.MustElement(`[data-testid="send-button"]`).MustClick()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			runs, e := f.repo.ListRuns(auth, f.b.ID, store.BotPage{})
+			if e != nil {
+				t.Fatal(e)
+			}
+			if len(runs) == 2 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("later report turn not admitted")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if e := worker.Poll(context.Background()); e != nil {
+			t.Fatal(e)
+		}
+		assertLater := func() {
+			t.Helper()
+			page.MustElementR(`[data-testid="agent-message-bubble"]`, "Later report: local status is healthy.").MustVisible()
+			assertFinalOperation()
+			if !page.MustEval(`() => {
+				const operation=document.querySelector('[data-operation-id]');
+				const report=[...document.querySelectorAll('[data-testid="agent-message-bubble"]')].find(e=>e.innerText.includes('Later report: local status is healthy.'));
+				return !!report && !operation.contains(report) && !!(operation.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING);
+			}`).Bool() {
+				t.Fatal("later report moved or restamped responsibility confirmation")
+			}
+		}
+		assertLater()
+		beforeReload := m.calls.Load()
+		page.MustReload()
+		assertLater()
+		if m.calls.Load() != beforeReload {
+			t.Fatal("later report reload replayed model")
+		}
+		t.Log("responsibility: exact charter committed; one ordinary confirmation live/reload and after later report live/reload; zero pending prose/cards and no replay")
+		return
 	}
 	if scenario == "routine" {
 		m.question.Store(true)

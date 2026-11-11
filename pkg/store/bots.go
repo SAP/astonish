@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -255,6 +257,9 @@ type BotReportFailureKind string
 const (
 	BotReportFailureBudget          BotReportFailureKind = "budget"
 	BotReportFailureExecutionFormat BotReportFailureKind = "execution_format"
+	BotReportFailureOperational     BotReportFailureKind = "operational"
+	BotReportFailureInterrupted     BotReportFailureKind = "interrupted"
+	BotReportFailureSetup           BotReportFailureKind = "setup"
 )
 
 type BotReportFailure struct {
@@ -264,6 +269,7 @@ type BotReportFailure struct {
 type BotReportAcknowledgmentKind string
 
 const BotReportAcknowledgmentSchedulePending BotReportAcknowledgmentKind = "schedule_pending"
+const BotReportAcknowledgmentControlPending BotReportAcknowledgmentKind = "control_pending"
 
 // BotReportAcknowledgment is assigned by CommitRun from accepted private work and
 // scoped operation provenance, never trusted from a caller or model report.
@@ -272,18 +278,102 @@ type BotReportAcknowledgment struct {
 	OperationIDs []uuid.UUID                 `json:"operation_ids"`
 }
 
-type BotReport struct {
-	Acknowledgment *BotReportAcknowledgment `json:"acknowledgment,omitempty"`
-	Quality        *BotQualityReport        `json:"quality,omitempty"`
-	Failure        *BotReportFailure        `json:"failure,omitempty"`
-	Summary        string                   `json:"summary"`
-	Changed        []BotEvidence            `json:"changed"`
-	Unchanged      []BotEvidence            `json:"unchanged"`
-	Unverified     []string                 `json:"unverified"`
-	Artifacts      []BotArtifact            `json:"artifacts"`
-	NeedsApproval  []uuid.UUID              `json:"needs_approval"`
-	NextRunAt      *time.Time               `json:"next_run_at,omitempty"`
+// BotEmployeeMessage is communication, never new evidence or authority. Assessed
+// messages retain the exact candidate text/digest. Model and fallback messages
+// bind only to server-owned outcome facts via SourceDigest, not to new claims.
+type BotEmployeeMessageOrigin string
+
+const (
+	BotEmployeeMessageAssessed  BotEmployeeMessageOrigin = "assessed"
+	BotEmployeeMessageModel     BotEmployeeMessageOrigin = "model"
+	BotEmployeeMessageFallback  BotEmployeeMessageOrigin = "fallback"
+	BotEmployeeMessageOperation BotEmployeeMessageOrigin = "operation"
+)
+
+type BotEmployeeMessage struct {
+	// reviewAttestation exists only in this process after trusted composition; JSON
+	// hashes alone are integrity checks, not evidence that review ran.
+	reviewAttestation    *botEmployeeReviewAttestation
+	Origin               BotEmployeeMessageOrigin `json:"origin"`
+	Text                 string                   `json:"text"`
+	SourceDigest         string                   `json:"source_digest"`
+	CandidateDigest      string                   `json:"candidate_digest,omitempty"`
+	Reason               BotEmployeeFailureReason `json:"reason,omitempty"`
+	TextDigest           string                   `json:"text_digest,omitempty"`
+	ReviewedSourceDigest string                   `json:"reviewed_source_digest,omitempty"`
+	ReviewedTextDigest   string                   `json:"reviewed_text_digest,omitempty"`
+	OperationID          uuid.UUID                `json:"operation_id,omitempty"`
+	OperationRevision    int64                    `json:"operation_revision,omitempty"`
+	FailureKind          BotReportFailureKind     `json:"failure_kind,omitempty"`
 }
+
+type BotReport struct {
+	EmployeeMessage *BotEmployeeMessage      `json:"employee_message,omitempty"`
+	Acknowledgment  *BotReportAcknowledgment `json:"acknowledgment,omitempty"`
+	Quality         *BotQualityReport        `json:"quality,omitempty"`
+	Failure         *BotReportFailure        `json:"failure,omitempty"`
+	Summary         string                   `json:"summary"`
+	Changed         []BotEvidence            `json:"changed"`
+	Unchanged       []BotEvidence            `json:"unchanged"`
+	Unverified      []string                 `json:"unverified"`
+	Artifacts       []BotArtifact            `json:"artifacts"`
+	NeedsApproval   []uuid.UUID              `json:"needs_approval"`
+	NextRunAt       *time.Time               `json:"next_run_at,omitempty"`
+}
+
+// EmployeeMessageSourceDigest binds the immutable communication source, excluding
+// the envelope itself. Committers must validate before changing report fields.
+func (r BotReport) EmployeeMessageSourceDigest(status RunStatus) string {
+	r.EmployeeMessage = nil
+	raw, _ := json.Marshal(struct {
+		Status RunStatus
+		Report BotReport
+	}{status, r})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// ValidateEmployeeMessage checks integrity and assessed-candidate identity. It
+// never substitutes public quality claims for the private validated work state.
+// A nil envelope is allowed for legacy persisted reports.
+func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState) error {
+	m := r.EmployeeMessage
+	if m == nil {
+		return nil
+	}
+	if m.Reason == BotEmployeeReasonEmailTransport && (status != RunPartial || work.ConfirmedRequiredBlocker() == nil) {
+		return ErrBotInvalid
+	}
+	if err := r.ValidateEmployeeMessageIntegrity(status); err != nil {
+		return err
+	}
+	switch m.Origin {
+	case BotEmployeeMessageAssessed:
+		if work == nil || work.Validate() != nil || work.Candidate == nil || m.CandidateDigest != work.Candidate.Digest || m.Text != work.Candidate.Text || r.Summary != work.Candidate.Text || m.FailureKind != "" {
+			return ErrBotInvalid
+		}
+		if status == RunSucceeded && work.Phase == BotWorkAccepted {
+			return nil
+		}
+		if status == RunPartial && work.VerifiedBlockedResponse() != nil {
+			return nil
+		}
+		return ErrBotInvalid
+	case BotEmployeeMessageModel:
+		if !m.HasTrustedReviewAttestation() {
+			return ErrBotInvalid
+		}
+		return nil
+	case BotEmployeeMessageFallback:
+		if m.CandidateDigest != "" {
+			return ErrBotInvalid
+		}
+		return nil
+	default:
+		return ErrBotInvalid
+	}
+}
+
 type BotRun struct {
 	// MandateRef is persisted only in the private repository envelope.
 	MandateRef         *BotMandateRef             `json:"-"`

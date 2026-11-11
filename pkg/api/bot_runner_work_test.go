@@ -115,7 +115,16 @@ func TestBotWorkControllerSafety(t *testing.T) {
 				}
 				return bot.RunResult{Status: store.RunSucceeded, Report: report}, nil
 			})
+			if result.Report.EmployeeMessage == nil {
+				t.Fatal("missing universal employee boundary")
+			}
+			if err := result.Report.ValidateEmployeeMessage(result.Status, ws.state); err != nil {
+				t.Fatalf("unbound employee message: %v", err)
+			}
 			if mode == "repair" || mode == "source-capture" {
+				if result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAssessed || result.Report.EmployeeMessage.Text != result.Report.Summary {
+					t.Fatal("assessed text was rewritten")
+				}
 				if err != nil || result.Status != store.RunSucceeded || ws.state.Phase != store.BotWorkAccepted || !mdl.captured {
 					t.Fatalf("missing accepted actual-content review: %+v %v", result, err)
 				}

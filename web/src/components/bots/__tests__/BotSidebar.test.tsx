@@ -115,7 +115,7 @@ it.each([false, true])('shows accessible empty, loading and retry states (collap
   vi.mocked(bots.listBots).mockRejectedValue(new Error('Offline'))
   render(<BotSidebar collapsed={collapsed} />)
   expect(await screen.findByRole('button', { name: 'Retry Bots' })).toBeInTheDocument()
-  expect(screen.getByRole('alert')).toHaveTextContent('Offline')
+  expect(screen.getByRole('alert')).toHaveTextContent('may still be running')
   expect(screen.getByRole('button', { name: collapsed ? 'Show Bots' : 'New Bot' })).toBeInTheDocument()
   vi.mocked(bots.listBots).mockResolvedValue({ bots: [bot] })
   fireEvent.click(screen.getByRole('button', { name: 'Retry Bots' }))

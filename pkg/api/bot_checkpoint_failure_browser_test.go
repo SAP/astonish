@@ -66,6 +66,14 @@ func TestBotCheckpointFailureFixtureMatchesFormatter(t *testing.T) {
 // deliberately nonconforming model are controlled. No daemon,
 // external model, user Bot, proxy or well-known port is involved.
 func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
+	runEmployeeFailureBrowser(t, false)
+}
+
+func TestBotGenericRuntimeFailureBrowserAcceptance(t *testing.T) {
+	runEmployeeFailureBrowser(t, true)
+}
+
+func runEmployeeFailureBrowser(t *testing.T, generic bool) {
 	dist, bin := chatBrowserPrerequisites(t)
 	env := setupMemoryHTTPAcceptance(t, &MockLLM{}, nil)
 	registry := execution.NewBotTurnAuthorizationRegistry(8)
@@ -155,6 +163,10 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		&genai.FunctionCall{ID: "rejected-one", Name: "read_file", Args: map[string]any{"path": "private-rejected-argument-one"}},
 		&genai.FunctionCall{ID: "rejected-two", Name: "read_file", Args: map[string]any{"path": "private-rejected-argument-two"}},
 	), TextTurn("must not automatically retry"))
+	const privateError = "provider_private_token endpoint=https://internal.example.invalid/private?token=do-not-display"
+	if generic {
+		llm = NewMockLLM(ErrorTurn("INTERNAL", privateError), TextTurn("must not automatically retry"))
+	}
 	budgeted, err := provider.NewBudgetLLM(llm, meter, provider.BudgetLLMOptions{MaxOutputTokens: 10, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 80, nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +194,11 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		return transcript.AppendBotRunEvent(ctx, lease, e.SessionID, row)
 	})
 	var typed *bot.CheckpointResponseError
-	if !errors.Is(failure, store.ErrBotUnsupported) || !errors.As(failure, &typed) || typed.Reason != bot.CheckpointResponseMultipleCalls || typed.ToolCalls != 2 || result.Status != store.RunFailed || result.Failure == nil || result.Failure.Class != bot.ErrorPermanent {
+	if generic {
+		if failure == nil || result.Status != store.RunFailed || result.Failure == nil || !strings.Contains(failure.Error(), privateError) {
+			t.Fatalf("native private runtime failure not exercised: %+v %v", result, failure)
+		}
+	} else if !errors.Is(failure, store.ErrBotUnsupported) || !errors.As(failure, &typed) || typed.Reason != bot.CheckpointResponseMultipleCalls || typed.ToolCalls != 2 || result.Status != store.RunFailed || result.Failure == nil || result.Failure.Class != bot.ErrorPermanent {
 		t.Fatalf("native rejection: %+v %v", result, failure)
 	}
 	if len(llm.Calls) != 1 || toolCalls.Load() != 0 || result.Usage.ToolCalls != 0 {
@@ -195,7 +211,9 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		t.Fatal("missing completion")
 	}
 	for _, e := range observed {
-		if e.Type == "error" {
+		// Generic provider diagnostics may exist in the private run trace; they
+		// must never become a Home message. Checkpoint rejection emits none.
+		if e.Type == "error" && !generic {
 			t.Fatalf("raw error event: %+v", e)
 		}
 	}
@@ -209,7 +227,11 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		}
 	}
 	restored, err := repo.GetRun(owner, id, run.ID)
-	if err != nil || restored.Report.Failure == nil || restored.Report.Failure.Kind != store.BotReportFailureExecutionFormat {
+	wantFailure := store.BotReportFailureExecutionFormat
+	if generic {
+		wantFailure = store.BotReportFailureOperational
+	}
+	if err != nil || restored.Report.Failure == nil || restored.Report.Failure.Kind != wantFailure {
 		t.Fatalf("lost typed failure: %+v %v", restored, err)
 	}
 	// Read both source and Home, not a manually fabricated UI paragraph.
@@ -223,7 +245,7 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		for _, row := range rows {
 			if row.Event.InvocationID == "bot-report:"+run.ID.String() {
 				reports++
-				if row.Event.Content == nil || len(row.Event.Content.Parts) != 1 || row.Event.Content.Parts[0].Text != bot.RenderReport(*restored) {
+				if row.Event.Content == nil || len(row.Event.Content.Parts) != 1 || row.Event.Content.Parts[0].Text != strings.TrimSpace(bot.RenderReport(*restored)) {
 					t.Fatal("publication differs from native formatter")
 				}
 			}
@@ -231,7 +253,7 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(raw), "private-rejected-argument") || strings.Contains(string(raw), "[Error:") || strings.Contains(string(raw), "Run did not complete; execution requires review") {
+			if (!generic || sid == input.Bot.HomeSessionID) && (strings.Contains(string(raw), "provider_private_token") || strings.Contains(string(raw), "internal.example.invalid") || strings.Contains(string(raw), "private-rejected-argument") || strings.Contains(string(raw), "[Error:") || strings.Contains(string(raw), "Run did not complete; execution requires review")) {
 				t.Fatalf("generic error persisted: %s", raw)
 			}
 		}
@@ -241,18 +263,26 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 		}
 	}
 	check := func() {
-		page.MustElementR(`[data-testid="agent-message-bubble"] h3`, "^Model response could not be processed$").MustVisible()
+		want := "I couldn't confirm completion of the requested work. The model returned multiple tool requests, but this run supports one tool request at a time. None of the requests from that response were executed. Review any earlier work before starting another run with serial tool requests."
+		if generic {
+			want = "I couldn't confirm completion of the requested work. An operational failure stopped the work; a safe, specific cause is not available. Review the run diagnostics before deciding how to continue."
+		}
+		page.MustWait(`want => [...document.querySelectorAll('[data-testid="agent-message-bubble"]')].some(e => e.innerText.trim() === want)`, want)
 		page.MustWait(`() => !document.querySelector('[data-testid="thinking-indicator"]')`)
 		if count := page.MustEval(`() => document.querySelectorAll('[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]').length`).Int(); count != 1 {
 			t.Fatalf("visible report bubbles=%d", count)
 		}
 		text := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"]').innerText`).Str()
-		for _, fact := range []string{"multiple tool requests in one response", "one tool request at a time", "None of the tool requests from that response were executed", "Earlier work may already have completed", "No approval is needed", "has not been automatically retried"} {
+		facts := []string{"couldn't confirm completion", "multiple tool requests", "one tool request at a time", "None of the requests from that response were executed", "Review any earlier work", "before starting another run with serial tool requests"}
+		if generic {
+			facts = []string{"couldn't confirm completion", "An operational failure stopped the work", "a safe, specific cause is not available", "Review the run diagnostics before deciding how to continue"}
+		}
+		for _, fact := range facts {
 			if !strings.Contains(text, fact) {
 				t.Fatalf("missing %q: %s", fact, text)
 			}
 		}
-		for _, unwanted := range []string{"Run report", "Technical details", "count=2", "serial tool calls required", "private-rejected-argument", "[Error:", "Run did not complete; execution requires review"} {
+		for _, unwanted := range []string{"provider_private_token", "internal.example.invalid", "do-not-display", "Run report", "Technical details", "count=2", "serial tool calls required", "private-rejected-argument", "[Error:", "Run did not complete; execution requires review"} {
 			if strings.Contains(text, unwanted) {
 				t.Fatalf("employee message leaked %q: %s", unwanted, text)
 			}
@@ -269,6 +299,10 @@ func TestBotCheckpointFailureBrowserAcceptance(t *testing.T) {
 	t.Logf("bot=%s run=%s source=%s home=%s provider_calls=%d input_tokens=%d output_tokens=%d runtime_events=%d publish_attempts=2", id, run.ID, run.SessionID, input.Bot.HomeSessionID, len(llm.Calls), meter.Usage().InputTokens, meter.Usage().OutputTokens, len(observed))
 	if len(llm.Calls) != 1 || toolCalls.Load() != 0 {
 		t.Fatal("reload invoked model")
+	}
+	if generic {
+		t.Log("PASS native private runtime failure; tool_calls=0 approvals=0 checkpoints=0; one exact employee fallback live/reload; raw provider endpoint/token absent; no retry")
+		return
 	}
 	if err = os.MkdirAll("../../.tmp/bot-multicall-followup", 0755); err != nil {
 		t.Fatal(err)

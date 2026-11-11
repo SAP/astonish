@@ -34,24 +34,13 @@ func QualitySummary(q *store.BotQualityReport) string {
 // RenderReport renders the committed employee message for Home and terminal.
 // Detailed evidence stays on BotReport for diagnostics, not in the conversation.
 func RenderReport(run store.BotRun) string {
-	text := strings.TrimSpace(run.Report.Summary)
-	if text == "" {
-		switch run.Status {
-		case store.RunSucceeded:
-			text = "I've finished the requested work."
-		case store.RunWaitingApproval:
-			text = "I need your answer or authorization before I can continue."
-		default:
-			text = "I couldn't complete the requested work."
-		}
+	if run.Report.ValidateEmployeeMessageIntegrity(run.Status) == nil {
+		return run.Report.EmployeeMessage.Text + "\n"
 	}
-	if len(run.Report.Unverified) > 0 {
-		text += "\n\nI couldn't verify everything, so please don't treat this as a fully completed result."
-	}
-	if len(run.Report.NeedsApproval) > 0 && run.Status != store.RunWaitingApproval {
-		text += "\n\nI need your authorization before I can continue with the pending action."
-	}
-	return text + "\n"
+	// This is a new projection, not a rewrite of persisted historical text.
+	// Neither legacy summaries nor malformed envelopes are public authority.
+	message := EmployeeMessageFallback(run.Status, run.Report, nil)
+	return message.Text + "\n"
 }
 
 // RenderDiagnosticReport is the explicit detailed representation, not Home prose.

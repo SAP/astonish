@@ -34,6 +34,8 @@ import ChatErrorBoundary from './chat/ChatErrorBoundary'
 import QuestionCard from './chat/questions/QuestionCard'
 import { isBotOperation, mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
 import { projectBotOperation } from './chat/botOperationProjection'
+import { botFailureMessage, botLocalFailure, BotFailureKind } from './chat/botEmployeeFeedback'
+import BotEmployeeMessage from './bots/BotEmployeeMessage'
 import BotOperationResult from './bots/BotOperationResult'
 import { mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
@@ -1160,7 +1162,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     const streamGen = ++streamGenRef.current
 
     const connectStream: typeof connectChatStream = botThreadRef.current
-      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); setBotConnection(state); setBotCursor(cursor) } })
+      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); if (state === 'reconnecting') setBotSendError(botLocalFailure().message); if (state === 'live') setBotSendError(''); setBotConnection(state); setBotCursor(cursor) } })
       : connectChatStream
     const controller = connectStream({
       sessionId,
@@ -1363,11 +1365,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'error':
             setMessages(interruptActiveDelegations)
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
+            setMessages((prev: ChatMsg[]) => [...prev, botThreadRef.current ? botFailureMessage(data) : { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
             break
 
           case 'error_info':
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error_info', title: data.title, reason: data.reason, suggestion: data.suggestion, originalError: data.originalError }])
+            setMessages((prev: ChatMsg[]) => [...prev, botThreadRef.current ? botFailureMessage(data) : { type: 'error_info', title: data.title, reason: data.reason, suggestion: data.suggestion, originalError: data.originalError }])
             break
 
           case 'distill_preview':
@@ -1540,7 +1542,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setMessages(finalizeStreamingAgentText)
         console.error('Chat reconnect stream error:', err)
         if (botThreadRef.current) {
-          setMessages(prev => [...prev, { type: 'error', content: err.message }])
+          setBotSendError(botLocalFailure(err).message)
           setIsStreaming(false)
           return
         }
@@ -1574,6 +1576,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
+            if (botThreadRef.current) return [...finalized, botFailureMessage()]
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -1810,7 +1813,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const validateAndAddFiles = useCallback((files: FileList | File[]) => {
     if (botSubmittingRef.current) return
     if (botThreadRef.current?.toolFree) {
-      setBotSendError('Attachments are unavailable in tool-free conversation; files were not attached.')
+      setBotSendError(botLocalFailure(undefined, BotFailureKind.Attachments).message)
       return
     }
     if (botThreadRef.current?.readOnly) {
@@ -1909,7 +1912,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[] } = {}) => {
     if (botThreadRef.current) {
       if (botSubmittingRef.current || botThreadRef.current.readOnly || (!text.trim() && attachments.length === 0)) return
-      if (botThreadRef.current.toolFree && attachments.length) { setBotSendError('Attachments are unavailable in tool-free conversation. Remove them before sending.'); return }
+      if (botThreadRef.current.toolFree && attachments.length) { setBotSendError(botLocalFailure(undefined, BotFailureKind.Attachments).message); return }
       botSubmittingRef.current = true
       setBotSubmitting(true); setBotSendError('')
       try {
@@ -1922,7 +1925,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setInput('')
         clearAttachments()
       }
-      catch (e) { setBotSendError(e instanceof Error ? e.message : String(e)) }
+      catch (e) { setBotSendError(botLocalFailure(e).message) }
       finally { botSubmittingRef.current = false; setBotSubmitting(false) }
       return
     }
@@ -2443,7 +2446,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
           case 'error':
             setMessages(interruptActiveDelegations)
-            setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
+            setMessages((prev: ChatMsg[]) => [...prev, botThreadRef.current ? botFailureMessage(data) : { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
             break
 
           case 'error_info':
@@ -2618,6 +2621,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
+            if (botThreadRef.current) return [...finalized, botFailureMessage()]
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -2902,7 +2906,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                         if (!match) {
                           return (
                             <div style={{ color: 'var(--text-primary)' }} className="markdown-body text-sm">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanedContent}</ReactMarkdown>
+                              {botThread ? <BotEmployeeMessage components={markdownComponents}>{cleanedContent}</BotEmployeeMessage> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanedContent}</ReactMarkdown>}
                             </div>
                           )
                         }
@@ -3779,7 +3783,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onDrop={handleDrop}
         >
           {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Draft ? 'Draft · ready to discuss setup.' : botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
-          {botSendError && <p role="alert" className="mb-2 text-sm text-destructive">{botSendError}</p>}
+          {botSendError && <div role="alert">{renderAgentMessage({ type: 'agent', content: botSendError }, messages.length, 'activity')}</div>}
           {/* Drag overlay */}
           {isDragOver && (
             <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">

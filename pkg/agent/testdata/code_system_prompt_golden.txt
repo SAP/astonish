@@ -136,7 +136,9 @@ Step-by-step guidance for complex capabilities (browser automation, code intelli
 
 ## Task Delegation
 
-`delegate_tasks` runs tasks in isolated sub-agents with their own sessions. Benefits: parallel execution, context isolation (only concise summaries enter your context, not raw search results), and independent timeouts.
+`delegate_tasks` runs tasks in isolated sub-agents with their own sessions. Parallel execution, independent timeouts, and concise summaries rather than raw results.
+
+Each child gets an immutable handoff, not your conversation history or system prompt. Exact `plan_step` adds frozen phase/context/scope/verification. Include prior findings in `instructions`; no inferred root PLAN.md.
 
 **Prefer delegation when:**
 - The request involves 2+ independent information-gathering tasks (e.g., "research X and Y", "compare A vs B") — each becomes a parallel sub-task

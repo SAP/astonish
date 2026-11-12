@@ -34,7 +34,7 @@ type SubTaskInput struct {
 	Task         string   `json:"task" jsonschema:"Clear description of what the sub-agent should accomplish. Be specific about the expected output."`
 	Instructions string   `json:"instructions,omitempty" jsonschema:"Additional context or constraints for this sub-agent. Include relevant file paths, API details, or formatting requirements."`
 	Tools        []string `json:"tools,omitempty" jsonschema:"Initial preferred tool group names or individual tools. These are not an allow-list; additional authorized tools remain discoverable. Omitted, null or empty lists request auto-selection."`
-	PlanStep     string   `json:"plan_step,omitempty" jsonschema:"The plan step this task belongs to. Set this to the 'name' of the step from announce_plan that this task contributes to. Multiple tasks can share the same plan_step — the step completes only when ALL tasks with that plan_step finish. If omitted, progress tracking falls back to name-based matching."`
+	PlanStep     string   `json:"plan_step,omitempty" jsonschema:"The exact name of the scoped plan phase this task belongs to. Its full definition and plan constraints are captured for the child; unknown explicit names are rejected. Multiple tasks may share a phase. Delegated finish does not complete it until runtime verification. Omitted steps carry explicit missing metadata; legacy progress may still use name-based matching."`
 }
 
 // DelegateTasksArgs is the input schema for the delegate_tasks tool.
@@ -115,17 +115,19 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 		}, nil
 	}
 
+	// Capture only the invocation-scoped runtime, once for the whole batch.
+	planCapture := agent.CaptureDelegationPlan(ctx)
 	// Convert tool inputs to SubAgentTasks
 	tasks := make([]agent.SubAgentTask, len(args.Tasks))
 	for i, input := range args.Tasks {
-		// Escape curly-brace patterns (e.g., %{http_code} from curl format strings)
-		// to prevent ADK's InjectSessionState from misinterpreting them as state variables.
-		safeTask := agent.EscapeCurlyPlaceholders(input.Task)
-		safeInstructions := agent.EscapeCurlyPlaceholders(input.Instructions)
+		handoff, captureErr := planCapture.ForTask(input.Task, input.Instructions, input.PlanStep)
+		if captureErr != nil {
+			return DelegateTasksResult{Status: "error", Summary: captureErr.Error()}, nil
+		}
 
 		// Capture the parent session ID for event routing — ensures sub-agent
 		// events are forwarded only to the session that initiated the delegation.
-		parentSessionID := ctx.SessionID()
+		parentSessionID := parentID
 		var onEvent func(event *adksession.Event)
 		if manager.EventForwarder != nil {
 			onEvent = func(event *adksession.Event) {
@@ -136,8 +138,9 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 		tasks[i] = agent.SubAgentTask{
 			BatchID: batchID, TaskID: uuid.NewString(), ChildSessionID: uuid.NewString(), Sequence: sequence,
 			Name:              input.Name,
-			Description:       safeTask,
-			Instructions:      safeInstructions,
+			Description:       input.Task,
+			Instructions:      input.Instructions,
+			Handoff:           handoff,
 			ToolFilter:        input.Tools,
 			ToolSelectionMode: agent.ChildToolSelectionPreferred,
 			PlanStep:          input.PlanStep,
@@ -246,7 +249,7 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 
 const delegateTasksDescription = `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent starts with the tool groups or individual tools you specify as preferences (e.g., ["core"], ["browser"], ["core", "web"]). Omitted, null, or empty tools request automatic initial selection based on the task description. These preferences are not an allow-list: when needed, the child can discover, describe, and execute additional tools within the parent's permissions and child restrictions. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.
 
-When a plan is active (you called announce_plan), set the plan_step field on each task to link it to a plan step. Multiple tasks can share the same plan_step — the step is marked complete only when ALL tasks with that plan_step finish. This drives accurate progress tracking in the UI.`
+When a scoped plan is active, set plan_step to the exact step name. Each child receives an immutable snapshot of that phase's full definition and the plan goal, context, exclusions, and verification, captured once per batch. Unknown explicit step names are rejected before dispatch. Children do not inherit your history or system prompt: include prior findings, decisions, and task-specific constraints in instructions. Without a scoped plan or explicit step, missing metadata is recorded; no repository-root PLAN.md is inferred. Multiple tasks can share a step, but delegated finish leaves it running until the runtime verifies it.`
 
 func newDelegateTasksRunner(manager *agent.SubAgentManager) func(tool.Context, DelegateTasksArgs) (DelegateTasksResult, error) {
 	return func(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResult, error) {

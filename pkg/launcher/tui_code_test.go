@@ -500,7 +500,7 @@ func TestDelegationLocalOwnedDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: child.Session.ID()})
-	if err != nil || len(rows) != 1 || rows[0].CallID != "c" {
+	if err != nil || len(rows) != 2 || rows[0].Type != "handoff" || rows[0].Text != "" || rows[1].CallID != "c" {
 		t.Fatalf("%+v %v", rows, err)
 	}
 	if _, err := b.LoadDelegationDetail(ctx, events.DelegationTaskState{ChildSessionID: b.sessionID}); err == nil {

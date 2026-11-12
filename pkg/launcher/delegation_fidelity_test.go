@@ -71,7 +71,7 @@ func TestDelegationLocalRunnerIdentity(t *testing.T) {
 						continue
 					}
 					callID := fmt.Sprintf("call-%d", task.Attempt)
-					if err != nil || len(rows) != 3 || rows[0].Type != "tool_call" || rows[0].CallID != callID || rows[1].Type != "tool_result" || rows[1].CallID != callID || rows[2].Text != fmt.Sprintf("attempt %d finished", task.Attempt) {
+					if err != nil || len(rows) != 4 || rows[0].Type != "handoff" || rows[0].Text != "" || rows[1].Type != "tool_call" || rows[1].CallID != callID || rows[2].Type != "tool_result" || rows[2].CallID != callID || rows[3].Text != fmt.Sprintf("attempt %d finished", task.Attempt) {
 						t.Fatalf("restored=%v attempt=%d: rows=%+v err=%v", restored, task.Attempt, rows, err)
 					}
 					if restored {

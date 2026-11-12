@@ -529,8 +529,10 @@ func redirectLogsForTUI(debug bool) func() {
 // mapSSEToEvents translator, so the TUI renders identically to platform mode
 // with no new mapping code.
 type localAgentBackend struct {
-	result     *ChatFactoryResult
-	sessionSvc session.Service
+	// Sessions whose FileStore state cache predates a local rollback. Guarded by mu.
+	planHistoryTruncated map[string]bool
+	result               *ChatFactoryResult
+	sessionSvc           session.Service
 	// fileStore is the persistent, on-disk session store backing sessionSvc.
 	// Held separately so ListSessions can enumerate session metadata (titles,
 	// counts, timestamps) via ListSessionMetas, which is not part of the ADK
@@ -1576,6 +1578,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		// turns, then drive the turn against that child. The parent transcript
 		// is never rewritten, so /rollback can still reach pre-compaction turns.
 		effectiveID := b.maybeCompactToChild(ctx, sessionID, emit)
+		// Label only this session's known mirror, including a compacted child;
+		// never infer a PLAN.md from the working directory.
+		ctx = agent.WithDelegationPlanSource(ctx, b.planFilePath(effectiveID))
 
 		// File-snapshot boundary for this turn is derived from the *effective*
 		// (possibly post-compaction) session so capture/rollback stay aligned.
@@ -2725,6 +2730,70 @@ func localDelegationHistory(callID string, response map[string]any, callArgs ...
 	return studioMessagesToHistory([]client.StudioMessage{msg})
 }
 
+// localDelegationHandoff projects only the immutable versioned record. Missing,
+// malformed, unsupported, or mismatched records are explicitly unavailable;
+// never reconstruct them from mutable plans or arbitrary session state.
+func (b *localAgentBackend) localDelegationHandoff(selected session.Session, parent, childID, name string) string {
+	value, _ := selected.State().Get(agent.DelegationHandoffStateKey)
+	text, ok := value.(string)
+	if !ok || len(text) == 0 || len(text) > agent.DelegationHandoffMaxBytes {
+		return ""
+	}
+	var record agent.DelegationHandoff
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return ""
+	}
+	if decoder.Decode(new(any)) != io.EOF || record.Version != agent.DelegationHandoffVersion ||
+		record.ParentSessionID != parent || record.ChildSessionID != childID || record.Name != name || record.Attempt < 1 {
+		return ""
+	}
+	// Initial keys can be absent after FileStore reopens. Validate every key
+	// that did persist, without trusting optional selector hints as identity.
+	for key, want := range map[string]string{"batch_id": record.BatchID, "task_id": record.TaskID} {
+		if got, err := selected.State().Get(key); err == nil && got != want {
+			return ""
+		}
+	}
+	if got, err := selected.State().Get("attempt"); err == nil && fmt.Sprint(got) != strconv.Itoa(record.Attempt) {
+		return ""
+	}
+	switch record.Plan.Status {
+	case agent.DelegationPlanMatched:
+		if record.Plan.Step == nil || record.Plan.Document == nil || record.Plan.Step.Name != record.PlanStep || record.Plan.PlanID == "" {
+			return ""
+		}
+	case agent.DelegationPlanMissing, agent.DelegationPlanStepMissing:
+	default:
+		return ""
+	}
+	// Redact decoded strings, not JSON syntax; keep int64 revisions/sequences
+	// exact even above the float64 integer range.
+	var fields map[string]any
+	decoder = json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		return ""
+	}
+	if b.result != nil && b.result.ChatAgent != nil && b.result.ChatAgent.Redactor != nil {
+		fields = b.result.ChatAgent.Redactor.RedactMap(fields)
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func localDelegationOwnerAllowed(child persistentsession.SessionMeta, owner string) bool {
+	// The shared delegate runner uses either the request owner or its system
+	// fallback; persisted membership still scopes reads to this code session.
+	const delegateAppName = "astonish"
+	return (child.AppName == delegateAppName && (child.UserID == owner || child.UserID == store.SystemUserID)) ||
+		(child.AppName == codeAppName && child.UserID == owner)
+}
+
 func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task events.DelegationTaskState) ([]events.DelegationActivity, error) {
 	b.mu.Lock()
 	parent := b.sessionID
@@ -2741,7 +2810,48 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 	if err != nil {
 		return nil, err
 	}
+	var archivedSessions []session.Session
+	if task.ChildSessionID != "" {
+		child, childErr := b.fileStore.GetSessionMeta(task.ChildSessionID)
+		if childErr == nil && child != nil && child.ParentID != parent {
+			if !localDelegationOwnerAllowed(*child, owner) {
+				return nil, fmt.Errorf("child session not owned")
+			}
+			selected, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: child.AppName, UserID: child.UserID, SessionID: child.ID})
+			if getErr != nil || selected == nil || selected.Session == nil || b.localDelegationHandoff(selected.Session, parent, child.ID, child.Title) == "" {
+				return nil, fmt.Errorf("child is not a member of this session")
+			}
+			captured, _ := selected.Session.State().Get(agent.DelegationHandoffStateKey)
+			// Walk only this exact attempt's archive chain, never arbitrary
+			// grandchildren. Every link must retain the runner identity and the
+			// same validated immutable capture, including the original parent.
+			seen := map[string]bool{child.ID: true}
+			ancestorID := child.ParentID
+			for ancestorID != parent {
+				if ancestorID == "" || seen[ancestorID] || len(archivedSessions) >= 64 {
+					return nil, fmt.Errorf("child is not a member of this session")
+				}
+				seen[ancestorID] = true
+				ancestor, metaErr := b.fileStore.GetSessionMeta(ancestorID)
+				if metaErr != nil || ancestor == nil || ancestor.AppName != child.AppName || ancestor.UserID != child.UserID {
+					return nil, fmt.Errorf("archive session not owned")
+				}
+				archive, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: ancestor.AppName, UserID: ancestor.UserID, SessionID: ancestor.ID})
+				if getErr != nil || archive == nil || archive.Session == nil || b.localDelegationHandoff(archive.Session, parent, child.ID, child.Title) == "" {
+					return nil, fmt.Errorf("invalid delegation archive")
+				}
+				archiveCapture, _ := archive.Session.State().Get(agent.DelegationHandoffStateKey)
+				if archiveCapture != captured {
+					return nil, fmt.Errorf("mismatched delegation archive")
+				}
+				archivedSessions = append(archivedSessions, archive.Session)
+				ancestorID = ancestor.ParentID
+			}
+			children = []persistentsession.SessionMeta{*child}
+		}
+	}
 	var selected session.Session
+	var selectedName string
 	for _, child := range children {
 		if task.ChildSessionID != "" && child.ID != task.ChildSessionID {
 			continue
@@ -2749,12 +2859,7 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 		if task.Name != "" && child.Title != task.Name {
 			continue
 		}
-		// The shared delegate runner stores children under "astonish", using
-		// either the request owner or its system fallback. Parent ownership and
-		// persisted membership above still scope reads to this code session.
-		const delegateAppName = "astonish"
-		sharedRunner := child.AppName == delegateAppName && (child.UserID == owner || child.UserID == store.SystemUserID)
-		if !sharedRunner && (child.UserID != owner || child.AppName != codeAppName) {
+		if !localDelegationOwnerAllowed(child, owner) {
 			return nil, fmt.Errorf("child session not owned")
 		}
 		candidate, getErr := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: child.AppName, UserID: child.UserID, SessionID: child.ID})
@@ -2786,12 +2891,33 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 			return nil, fmt.Errorf("ambiguous task; select an exact attempt")
 		}
 		selected = candidate.Session
+		selectedName = child.Title
 	}
 	if selected == nil {
 		return nil, fmt.Errorf("child is not a member of this session")
 	}
-	var out []events.DelegationActivity
-	for ev := range selected.Events().All() {
+	out := []events.DelegationActivity{{Type: "handoff", Text: b.localDelegationHandoff(selected, parent, selected.ID(), selectedName)}}
+	// Archives contain pre-compaction calls/results that the summary cannot
+	// represent. Replay oldest first, deduplicating tail events retained by
+	// compaction so a call/result is not displayed more than once.
+	var detailEvents []*session.Event
+	seenEvents := make(map[string]bool)
+	appendEvents := func(source session.Session) {
+		for ev := range source.Events().All() {
+			if ev == nil || (ev.ID != "" && seenEvents[ev.ID]) {
+				continue
+			}
+			if ev.ID != "" {
+				seenEvents[ev.ID] = true
+			}
+			detailEvents = append(detailEvents, ev)
+		}
+	}
+	for i := len(archivedSessions) - 1; i >= 0; i-- {
+		appendEvents(archivedSessions[i])
+	}
+	appendEvents(selected)
+	for _, ev := range detailEvents {
 		if ev == nil {
 			continue
 		}
@@ -2799,7 +2925,7 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 			if part == nil {
 				continue
 			}
-			a := events.DelegationActivity{Sequence: int64(len(out) + 1)}
+			a := events.DelegationActivity{Sequence: int64(len(out))}
 			switch {
 			case part.FunctionCall != nil:
 				a.Type = "tool_call"
@@ -3009,10 +3135,38 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			}
 		}
 	}
+	// Resolve plan identities and their original anchors before rendering. State
+	// supplies the latest contents, never a new position at the end of the chat.
+	var planState any
+	b.mu.Lock()
+	truncated := b.planHistoryTruncated[id]
+	b.mu.Unlock()
+	if !truncated {
+		planState, _ = resp.Session.State().Get(agent.PlanSnapshotStateKey)
+	}
+	plans, announcementPlans := localHistoryPlans(allEvents, planState)
+
 	var out []backend.HistoryEntry
+	appendPlan := func(p *localHistoryPlan) {
+		s := p.snapshot.Clone()
+		ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
+		out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &ev})
+	}
+	for _, p := range plans {
+		if p.anchor < 0 && p.announcementID == "" {
+			// Inherited state with no retained event belongs before the retained
+			// conversation, not after its final answer.
+			appendPlan(p)
+		}
+	}
 	for i, ev := range allEvents {
 		if ev == nil {
 			continue
+		}
+		for _, p := range plans {
+			if p.anchor == i && p.announcementID == "" {
+				appendPlan(p)
+			}
 		}
 		if lifecycle, ok := ev.Actions.StateDelta[planLifecycleStateKey].(string); ok && latestPlanOutIdx >= 0 {
 			out[latestPlanOutIdx].PlanStatus = events.PlanStatus(lifecycle)
@@ -3115,6 +3269,15 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				// Reconstruct the plan document text from the stored call args,
 				// mirroring the synthetic text event emitted during live execution.
 				if part.FunctionResponse.Name == "announce_plan" {
+					if !localHistoryPlanAnnounced(part.FunctionResponse.Response) {
+						continue
+					}
+					if p := announcementPlans[part.FunctionResponse.ID]; p != nil {
+						if p.announcementID == part.FunctionResponse.ID {
+							appendPlan(p)
+						}
+						continue
+					}
 					args := announcePlanArgs[part.FunctionResponse.ID]
 					if rendered := renderPlanFromArgs(args); rendered != "" {
 						out = append(out, backend.HistoryEntry{
@@ -3136,17 +3299,115 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			}
 		}
 	}
-	// Session state survives compaction and takes precedence over reconstructed
-	// announce_plan text and the best-effort PLAN.md projection.
-	if value, err := resp.Session.State().Get(agent.PlanSnapshotStateKey); err == nil && value != nil {
-		raw, _ := json.Marshal(value)
-		var s agent.PlanSnapshot
-		if json.Unmarshal(raw, &s) == nil && s.PlanID != "" {
-			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
-			out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &ev})
+	return out, nil
+}
+
+// localHistoryPlan keeps identity, authoritative contents, and chronology
+// separate: revisions replace contents without creating a later transcript item.
+type localHistoryPlan struct {
+	snapshot       agent.PlanSnapshot
+	anchor         int
+	announcementID string
+}
+
+func localHistoryPlanSnapshot(value any) (agent.PlanSnapshot, bool) {
+	raw, err := json.Marshal(value)
+	var s agent.PlanSnapshot
+	if err != nil || json.Unmarshal(raw, &s) != nil || s.PlanID == "" {
+		return s, false
+	}
+	return s, true
+}
+
+func localHistoryPlanAnnounced(response map[string]any) bool {
+	// Rejected calls may include the current snapshot; that does not mean the
+	// requested plan was accepted. Only successful calls establish anchors.
+	return response["status"] == "ok"
+}
+
+func localHistoryPlans(allEvents []*session.Event, state any) ([]*localHistoryPlan, map[string]*localHistoryPlan) {
+	var plans []*localHistoryPlan
+	byID := make(map[string]*localHistoryPlan)
+	record := func(value any, index int) *localHistoryPlan {
+		s, ok := localHistoryPlanSnapshot(value)
+		if !ok {
+			return nil
+		}
+		p := byID[s.PlanID]
+		if p == nil {
+			p = &localHistoryPlan{snapshot: s, anchor: index}
+			plans = append(plans, p)
+			byID[s.PlanID] = p
+		} else if s.Sequence >= p.snapshot.Sequence {
+			p.snapshot = s
+		}
+		return p
+	}
+	type announcement struct {
+		id, goal string
+		index    int
+		plan     *localHistoryPlan
+	}
+	var announcements []*announcement
+	args := make(map[string]map[string]any)
+	for i, ev := range allEvents {
+		if ev == nil {
+			continue
+		}
+		record(ev.Actions.StateDelta[agent.PlanSnapshotStateKey], i)
+		for _, part := range eventAllParts(ev) {
+			if part == nil {
+				continue
+			}
+			if call := part.FunctionCall; call != nil && call.Name == "announce_plan" {
+				args[call.ID] = call.Args
+			}
+			if response := part.FunctionResponse; response != nil && response.Name == "announce_plan" && localHistoryPlanAnnounced(response.Response) {
+				goal, _ := args[response.ID]["goal"].(string)
+				announcements = append(announcements, &announcement{id: response.ID, goal: goal, index: i, plan: record(response.Response["snapshot"], i)})
+			}
 		}
 	}
-	return out, nil
+	record(state, -1)
+	matched := make(map[string]*localHistoryPlan)
+	// Explicit response identities take precedence over legacy inference.
+	bind := func(a *announcement, p *localHistoryPlan) {
+		a.plan = p
+		matched[a.id] = p
+		if p.announcementID == "" {
+			p.announcementID = a.id
+		}
+	}
+	for _, a := range announcements {
+		if a.plan != nil {
+			bind(a, a.plan)
+		}
+	}
+	for _, p := range plans {
+		if p.announcementID != "" {
+			continue
+		}
+		// A legacy response has no identity. Prefer its matching goal; if a
+		// revision changed the goal, the latest preceding successful response
+		// is its anchor. Never consume a response already bound to another ID.
+		var candidate *announcement
+		for _, a := range announcements {
+			if a.plan != nil {
+				continue
+			}
+			if a.goal != "" && a.goal == p.snapshot.Goal {
+				candidate = a
+				break
+			}
+			if a.index <= p.anchor || p.anchor < 0 {
+				candidate = a
+			}
+		}
+		if candidate != nil {
+			bind(candidate, p)
+		}
+	}
+	return plans, matched
 }
 
 // eventAllParts returns all genai.Parts from an event's Content (accessible
@@ -3730,6 +3991,14 @@ func (b *localAgentBackend) RollbackTo(ctx context.Context, pointID string) ([]b
 		if _, err := b.fileStore.TruncateEvents(codeAppName, b.effectiveUserID(), ownerID, targetIdx); err != nil {
 			return nil, fmt.Errorf("failed to truncate session: %w", err)
 		}
+		// TruncateEvents leaves cached state intact. History for this session
+		// must use retained event snapshots, never the pre-rollback cache.
+		b.mu.Lock()
+		if b.planHistoryTruncated == nil {
+			b.planHistoryTruncated = make(map[string]bool)
+		}
+		b.planHistoryTruncated[ownerID] = true
+		b.mu.Unlock()
 		// 3) Delete later children in the compaction chain (option A).
 		for _, sid := range toDrop {
 			_ = b.sessionSvc.Delete(ctx, &session.DeleteRequest{

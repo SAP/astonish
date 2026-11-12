@@ -86,6 +86,8 @@ type fileViewerState struct {
 
 // delegationDetailState holds the overlay state for viewing a sub-task's activity.
 type delegationDetailState struct {
+	tab     delegationDetailTab
+	offsets [2]int
 	loading bool
 	err     string
 	request *int
@@ -511,6 +513,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openBotProposals()
 		}
 		return m.botCommand("/bots approvals")
+	case delegationDetailPollMsg:
+		if m.delegationDetail.open && m.delegationDetail.request == msg.request && !m.delegationDetail.loading {
+			return m.fetchDelegationDetail()
+		}
+		return m, nil
 	case delegationDetailLoadedMsg:
 		if !m.delegationDetail.open || m.delegationDetail.request != msg.request {
 			return m, nil
@@ -525,11 +532,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.delegationDetail.err = msg.err.Error()
 		} else {
 			task := &m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks[m.delegationDetail.taskIdx]
-			if len(task.Activity) == 0 || (task.Status == "complete" || task.Status == "failed") && len(msg.activity) > 0 {
-				task.Activity = msg.activity
+			m.delegationDetail.err = ""
+			if task.Status == "complete" || task.Status == "failed" || task.Status == "interrupted" || task.Status == "cancelled" {
+				if len(msg.activity) > 0 {
+					task.Activity = msg.activity
+				}
+			} else {
+				task.Activity = mergeDelegationDetailActivity(msg.activity, task.Activity)
 			}
 		}
 		m.layoutDelegationDetail()
+		if msg.err == nil && m.delegationDetailActive() {
+			request := m.delegationDetail.request
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return delegationDetailPollMsg{request: request} })
+		}
 		return m, nil
 
 	case tea.PasteMsg:
@@ -4887,19 +4903,24 @@ func delegationTaskStatusLine(task events.DelegationTaskState, maxWidth int) str
 	case task.Status == "failed" && task.Error != "":
 		line = task.Error
 	case task.Status == "running" && len(task.Activity) > 0:
-		last := task.Activity[len(task.Activity)-1]
-		switch last.Type {
-		case "tool_call":
-			line = "→ " + delegationToolHint(last.ToolName, last.Args)
-		case "tool_result":
-			line = "→ " + render.ToolDisplayName(last.ToolName) + " done"
-		case "text":
-			t := strings.TrimSpace(last.Text)
-			if idx := strings.IndexByte(t, '\n'); idx >= 0 {
-				t = t[:idx]
-			}
-			if t != "" {
-				line = "→ " + t
+		rows := projectDelegationActivity(task.Activity)
+		if len(rows) > 0 {
+			last := rows[len(rows)-1]
+			if last.step != nil {
+				line = "→ " + delegationToolHint(last.step.Name, last.step.Args)
+				if last.step.Status == "error" {
+					line += " failed"
+				} else if last.step.Status == "complete" {
+					line += " done"
+				}
+			} else {
+				t := strings.TrimSpace(last.text)
+				if idx := strings.IndexByte(t, '\n'); idx >= 0 {
+					t = t[:idx]
+				}
+				if t != "" {
+					line = "→ " + t
+				}
 			}
 		}
 	}
@@ -5105,33 +5126,45 @@ func (m *model) layoutDelegationDetail() {
 	if !m.delegationDetail.open {
 		return
 	}
+	d := &m.delegationDetail
 	w := max(20, m.width-4)
-	h := max(5, m.screenHeight()-4)
-	m.delegationDetail.vp.SetWidth(w)
-	m.delegationDetail.vp.SetHeight(h)
-	if m.delegationDetail.loading {
-		m.delegationDetail.vp.SetContent("Loading attempt activity…")
+	headerHeight := lipgloss.Height(m.renderDelegationDetailHeader())
+	d.vp.SetWidth(w)
+	d.vp.SetHeight(max(1, m.screenHeight()-headerHeight-1))
+	if d.itemIdx < 0 || d.itemIdx >= len(m.tr.Items) || d.taskIdx < 0 || d.taskIdx >= len(m.tr.Items[d.itemIdx].DelegationTasks) {
 		return
 	}
-	if m.delegationDetail.err != "" {
-		m.delegationDetail.vp.SetContent("Could not load activity: " + m.delegationDetail.err + "\nPress r to Retry.")
-		return
+	task := m.tr.Items[d.itemIdx].DelegationTasks[d.taskIdx]
+	offset := d.vp.YOffset()
+	var content string
+	if d.tab == delegationHandoffTab {
+		content = m.renderDelegationHandoff(task, w)
+	} else {
+		content = m.renderDelegationDetailContent(task, w)
 	}
-	// Refresh content from current task state.
-	if m.delegationDetail.itemIdx >= 0 && m.delegationDetail.itemIdx < len(m.tr.Items) {
-		tasks := m.tr.Items[m.delegationDetail.itemIdx].DelegationTasks
-		if m.delegationDetail.taskIdx >= 0 && m.delegationDetail.taskIdx < len(tasks) {
-			atBottom := m.delegationDetail.vp.AtBottom()
-			m.delegationDetail.vp.SetContent(m.renderDelegationDetailContent(tasks[m.delegationDetail.taskIdx], w))
-			if atBottom {
-				m.delegationDetail.vp.GotoBottom()
-			}
-		}
+	if d.loading && len(task.Activity) == 0 {
+		content = "Loading attempt detail…\n\n" + content
 	}
+	if d.err != "" {
+		content = wrapPlain("Could not load detail: "+d.err+"\nPress r to Retry.", w) + "\n\n" + content
+	}
+	d.vp.SetContent(content)
+	d.vp.SetYOffset(offset)
 }
 
 func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "tab", "h":
+		d := &m.delegationDetail
+		d.offsets[d.tab] = d.vp.YOffset()
+		if d.tab == delegationActivityTab {
+			d.tab = delegationHandoffTab
+		} else {
+			d.tab = delegationActivityTab
+		}
+		m.layoutDelegationDetail()
+		d.vp.SetYOffset(d.offsets[d.tab])
+		return m, nil
 	case "r":
 		if !m.delegationDetail.loading {
 			return m.fetchDelegationDetail()
@@ -5172,16 +5205,24 @@ func (m model) renderDelegationDetail() string {
 }
 
 func (m model) renderDelegationDetailHeader() string {
-	th := m.theme
 	w := max(20, m.width)
-	name := m.delegationDetail.taskName
-	left := "⬡ " + name
-	right := "esc back · ↑↓ scroll"
-	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	d := m.delegationDetail
+	label := "⬡ " + d.taskName
+	if d.itemIdx >= 0 && d.itemIdx < len(m.tr.Items) && d.taskIdx >= 0 && d.taskIdx < len(m.tr.Items[d.itemIdx].DelegationTasks) {
+		task := m.tr.Items[d.itemIdx].DelegationTasks[d.taskIdx]
+		label += fmt.Sprintf(" · attempt %d · %s", max(1, task.Attempt), strings.ReplaceAll(task.Status, "_", " "))
 	}
-	return m.paintRow(th.Header.Render(left)+strings.Repeat(" ", gap)+th.Muted.Render(right), w)
+	if d.loading {
+		label += " · Loading"
+	}
+	if d.err != "" {
+		label += " · load failed (r Retry)"
+	}
+	tabs := "[Activity]  Handoff"
+	if d.tab == delegationHandoffTab {
+		tabs = "Activity  [Handoff]"
+	}
+	return m.theme.Header.Render(wrapPlain(label, w)) + "\n" + m.theme.Muted.Render(wrapPlain(tabs+" · tab/h switch · r Retry · esc back · ↑↓ scroll", w))
 }
 
 func (m model) renderDelegationDetailContent(task events.DelegationTaskState, width int) string {
@@ -5239,6 +5280,8 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 		statusIcon = th.Success.Render("✓")
 	case "failed":
 		statusIcon = th.Error.Render("✗")
+	case "queued", "interrupted", "cancelled":
+		statusIcon = th.Muted.Render("○")
 	default:
 		statusIcon = th.Brand.Render("●")
 	}
@@ -5268,84 +5311,16 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 			warning += ": " + task.Error
 		}
 		b.WriteString("  " + th.Error.Render("⚠ "+warning) + "\n")
-	} else if task.Status == "retrying" && task.Error != "" {
-		b.WriteString("  " + th.Muted.Render("Retry reason: "+task.Error) + "\n")
+	} else if task.Error != "" {
+		b.WriteString("  " + th.Error.Render(wrapPlain("Reason: "+task.Error, bodyWidth-2)) + "\n")
+	} else if task.Status == "queued" || task.Status == "waiting_on_model" {
+		b.WriteString(wrapPlain(delegationTaskStatusLine(task, 0), bodyWidth) + "\n")
 	}
 	b.WriteString("\n")
 
-	// Activity log — rendered in the same tool-fold format as the main thread's
-	// renderActivity: ToolStatusLabel + ToolDisplayName + ToolDetailBody for tool
-	// call/result pairs, and render.Markdown for text output.
-	if len(task.Activity) == 0 {
-		b.WriteString("  " + th.Muted.Italic(true).Render("No activity yet…") + "\n")
-		return b.String()
-	}
-
-	// Build ToolStep groups: pair each tool_call with its following tool_result
-	// (same tool name). Standalone text entries are rendered as markdown blocks.
-	consumed := make(map[int]bool)
-	i := 0
-	for i < len(task.Activity) {
-		if consumed[i] {
-			i++
-			continue
-		}
-		act := task.Activity[i]
-		switch act.Type {
-		case "tool_call":
-			// Look ahead for a matching tool_result.
-			step := render.ToolStep{
-				Name:   act.ToolName,
-				Args:   act.Args,
-				Status: "running",
-			}
-			for j := i + 1; j < len(task.Activity); j++ {
-				result := task.Activity[j]
-				if consumed[j] || result.Type != "tool_result" {
-					continue
-				}
-				match := act.CallID != "" && result.CallID == act.CallID
-				if act.CallID == "" && result.CallID == "" {
-					match = j == i+1 && result.ToolName == act.ToolName
-				}
-				if match {
-					step.Result = result.Result
-					step.Status = "complete"
-					consumed[j] = true
-					break
-				}
-			}
-			// Render using the same format as renderActivity expanded view.
-			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
-			if step.Status == "running" {
-				b.WriteString(th.Activity.Width(bodyWidth).Render("  " + line))
-			} else {
-				b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
-			}
-			b.WriteByte('\n')
-			if detail := render.ToolDetailBody(step, bodyWidth-4); detail != "" {
-				b.WriteString(th.Muted.Width(bodyWidth).Render("    " + detail))
-				b.WriteByte('\n')
-			}
-		case "tool_result":
-			// Orphan result (no preceding call in current pass) — render as completed tool.
-			step := render.ToolStep{Name: act.ToolName, Result: act.Result, Status: "complete"}
-			line := render.ToolStatusLabel(step.Status) + "  " + render.ToolDisplayName(step.Name)
-			b.WriteString(th.Muted.Width(bodyWidth).Render("  " + line))
-			b.WriteByte('\n')
-		case "text":
-			// Render text output as styled markdown, matching ItemAgent on the main thread.
-			md := render.Markdown(act.Text, bodyWidth, th.RenderStyles())
-			if md == "" {
-				md = th.Agent.Width(bodyWidth).Render(act.Text)
-			}
-			b.WriteString(md)
-			b.WriteString("\n\n")
-		}
-		i++
-	}
-
-	return padBlock(b.String())
+	// Activity and Handoff are intentionally separate: captured input is never model output.
+	b.WriteString(m.renderDelegationActivity(task, bodyWidth))
+	return wrapPlain(b.String(), width)
 }
 
 // summarizeToolArgs produces a compact one-line summary of tool arguments.

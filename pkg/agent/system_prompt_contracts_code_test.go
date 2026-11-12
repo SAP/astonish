@@ -124,6 +124,13 @@ func TestCodeSystemPromptBuilder_Golden(t *testing.T) {
 	}
 }
 
+func TestCodeSystemPromptContracts_ImmutableDelegationHandoff(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	for _, want := range []string{"immutable handoff", "not your conversation history or system prompt", "prior findings", "frozen phase/context/scope/verification", "no inferred root PLAN.md"} {
+		assertContains(t, prompt, want, "delegation handoff contract")
+	}
+}
+
 // ─── Code-Mode Contract Tests ────────────────────────────────────────────────
 
 func TestCodeSystemPromptContracts_ProjectGuidance(t *testing.T) {

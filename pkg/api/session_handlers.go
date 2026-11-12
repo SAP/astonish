@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/apps"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -569,6 +570,52 @@ func StudioSessionTraceHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(output)
 }
 
+// scopedDelegationHandoff projects only the versioned record, never arbitrary
+// state or a reconstructed parent plan. Invalid/legacy records are unavailable.
+// Redact decoded string values before encoding so quotes/newlines stay valid JSON.
+func scopedDelegationHandoff(value any, parentID, childID string, identity map[string]any, redactor *credentials.Redactor) string {
+	text, ok := value.(string)
+	if !ok || len(text) == 0 || len(text) > agent.DelegationHandoffMaxBytes {
+		return ""
+	}
+	var record agent.DelegationHandoff
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return ""
+	}
+	if decoder.Decode(new(any)) != io.EOF || record.Version != agent.DelegationHandoffVersion ||
+		record.ParentSessionID != parentID || record.ChildSessionID != childID ||
+		record.BatchID != strVal(identity["batch_id"]) || record.TaskID != strVal(identity["task_id"]) ||
+		record.Attempt < 1 || record.Attempt != toInt(identity["attempt"]) {
+		return ""
+	}
+	switch record.Plan.Status {
+	case agent.DelegationPlanMatched:
+		if record.Plan.Step == nil || record.Plan.Document == nil || record.Plan.Step.Name != record.PlanStep || record.Plan.PlanID == "" {
+			return ""
+		}
+	case agent.DelegationPlanMissing, agent.DelegationPlanStepMissing:
+	default:
+		return ""
+	}
+	// UseNumber preserves the captured int64 revision/sequence exactly.
+	var fields map[string]any
+	decoder = json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		return ""
+	}
+	if redactor != nil {
+		fields = redactor.RedactMap(fields)
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 // StudioSubtaskEventsHandler handles GET /api/studio/sessions/{id}/subtask-events.
 // Returns the full tool call/result history for a specific sub-agent task,
 // loaded from the child session. Used by the frontend TaskPlanPanel for
@@ -599,6 +646,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selectedIdentities := make(map[string]map[string]any)
+	selectedHandoffs := make(map[string]any)
 	matchesState := func(svc session.Service, id string) bool {
 		got, err := svc.Get(r.Context(), &session.GetRequest{AppName: studioChatAppName, UserID: effectiveUserID(r), SessionID: id})
 		if err != nil || got == nil || got.Session == nil {
@@ -632,6 +680,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 			identity[key], _ = state.Get(key)
 		}
 		selectedIdentities[id] = identity
+		selectedHandoffs[id], _ = state.Get(agent.DelegationHandoffStateKey)
 		return true
 	}
 	if childID != "" && !validSessionID.MatchString(childID) {
@@ -676,7 +725,9 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// extractChildToolEvents parses ADK session events from a child session
 	// and returns subtask event items (tool calls, results, and text).
 	extractChildToolEvents := func(events []*session.Event) []subtaskEventItem {
-		var items []subtaskEventItem
+		// A handoff row is always first for an authorized selected child. Empty
+		// text explicitly means unavailable (old, malformed or unsupported record).
+		items := []subtaskEventItem{{Type: "handoff", Text: scopedDelegationHandoff(selectedHandoffs[childID], sessionID, childID, selectedIdentities[childID], subtaskRedactor)}}
 		uiTools := newUIToolTracker()
 		for _, evt := range events {
 			if evt.Content == nil {
@@ -712,7 +763,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 					items = append(items, subtaskEventItem{
 						Type: "task_tool_result", CallID: part.FunctionResponse.ID,
 						ToolName:   name,
-						ToolResult: summarizeToolResult(resp),
+						ToolResult: resp, // Preserve structured edits and full result provenance for rich detail.
 					})
 				}
 				if part.Text != "" && evt.Content.Role == "model" {
@@ -784,8 +835,7 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 		events, err := sessionStore.ReadTranscriptEvents(r.Context(), studioChatAppName, userID, matchedChild.ID)
 		if err != nil {
 			slog.Warn("failed to read child session events", "child_id", matchedChild.ID, "error", err)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
+			respondError(w, http.StatusInternalServerError, "Unable to load execution detail")
 			return
 		}
 
@@ -803,6 +853,11 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fs := cm.fileStore()
+	cm.mu.Lock()
+	if cm.components != nil && cm.components.ChatAgent != nil {
+		subtaskRedactor = cm.components.ChatAgent.Redactor
+	}
+	cm.mu.Unlock()
 	if fs == nil {
 		respondError(w, http.StatusInternalServerError, "File store not available")
 		return
@@ -812,6 +867,40 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list child sessions: "+err.Error())
 		return
+	}
+
+	// FileStore compaction inserts archive nodes into parent links. Follow only
+	// archives carrying the exact requested child's captured parent/child identity;
+	// never widen membership to arbitrary grandchildren or another delegate.
+	archiveParents := make(map[string]string)
+	if childID != "" {
+		for i := 0; i < len(children) && i < 64; i++ {
+			candidate := children[i]
+			if candidate.ID == childID || !validSessionID.MatchString(candidate.ID) || candidate.AppName != studioChatAppName || !sessionOwnerAllowed(r, candidate.UserID) || !matchesState(fs, candidate.ID) {
+				continue
+			}
+			if scopedDelegationHandoff(selectedHandoffs[candidate.ID], sessionID, childID, selectedIdentities[candidate.ID], nil) == "" {
+				continue
+			}
+			descendants, err := fs.ListChildren(candidate.ID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to read compacted child")
+				return
+			}
+			for _, descendant := range descendants {
+				seen := false
+				for _, existing := range children {
+					if existing.ID == descendant.ID {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					archiveParents[descendant.ID] = candidate.ID
+					children = append(children, descendant)
+				}
+			}
+		}
 	}
 
 	// Find the last child session matching the task name.
@@ -843,14 +932,37 @@ func StudioSubtaskEventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	childID = matchedChildID
-	transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, matchedChildID+".jsonl")
-	transcript := persistentsession.NewTranscript(transcriptPath)
-	events, err := transcript.ReadEvents()
-	if err != nil {
-		slog.Warn("failed to read child session transcript", "child_id", matchedChildID, "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(subtaskEventsResponse{Events: []subtaskEventItem{}})
-		return
+	// Reconstruct only the validated ancestry that led to this exact child,
+	// not every archive visited while discovering it (which may include branches).
+	chain := []string{childID}
+	for id := archiveParents[childID]; id != ""; id = archiveParents[id] {
+		if scopedDelegationHandoff(selectedHandoffs[childID], sessionID, childID, selectedIdentities[childID], nil) == "" ||
+			scopedDelegationHandoff(selectedHandoffs[id], sessionID, childID, selectedIdentities[childID], nil) == "" {
+			respondError(w, http.StatusNotFound, "Subtask not found")
+			return
+		}
+		chain = append(chain, id)
+	}
+	var events []*session.Event
+	seenEvents := make(map[string]bool)
+	for i := len(chain) - 1; i >= 0; i-- {
+		transcriptPath := filepath.Join(fs.BaseDir(), studioChatAppName, userID, chain[i]+".jsonl")
+		transcript := persistentsession.NewTranscript(transcriptPath)
+		part, err := transcript.ReadEvents()
+		if err != nil {
+			slog.Warn("failed to read child session transcript", "child_id", childID, "transcript_id", chain[i], "error", err)
+			respondError(w, http.StatusInternalServerError, "Unable to load execution detail")
+			return
+		}
+		for _, event := range part {
+			if event == nil || (event.ID != "" && seenEvents[event.ID]) {
+				continue
+			}
+			if event.ID != "" {
+				seenEvents[event.ID] = true
+			}
+			events = append(events, event)
+		}
 	}
 
 	items := extractChildToolEvents(events)

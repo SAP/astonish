@@ -265,8 +265,9 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	if len(base.Catalog) > 0 {
 		sb.WriteString("\n## Task Delegation\n\n")
 		sb.WriteString("`delegate_tasks` runs tasks in isolated sub-agents with their own sessions. ")
-		sb.WriteString("Benefits: parallel execution, context isolation (only concise summaries enter your context, not raw search results), and independent timeouts.\n\n")
+		sb.WriteString("Parallel execution, independent timeouts, and concise summaries rather than raw results.\n\n")
 
+		sb.WriteString("Each child gets an immutable handoff, not your conversation history or system prompt. Exact `plan_step` adds frozen phase/context/scope/verification. Include prior findings in `instructions`; no inferred root PLAN.md.\n\n")
 		sb.WriteString("**Prefer delegation when:**\n")
 		sb.WriteString("- The request involves 2+ independent information-gathering tasks (e.g., \"research X and Y\", \"compare A vs B\") — each becomes a parallel sub-task\n")
 		sb.WriteString("- A task will produce large raw output (web research, multi-page fetches) and you want only a summary back\n")

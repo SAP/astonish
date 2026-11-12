@@ -944,7 +944,9 @@ func (t *Transcript) appendAgentText(text string) {
 	// chronologically. Never provisional, never reordered below tools.
 	if t.LinearThread {
 		t.nextTextReplaces = false
-		if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && (t.Items[n-1].Kind == ItemAgent || t.Items[n-1].Kind == ItemPlan) {
+		// Snapshot-backed plans are complete structured records, not text
+		// streams. Following prose must remain a separate answer.
+		if n := len(t.Items); n > 0 && !t.Items[n-1].isBotPublication() && (t.Items[n-1].Kind == ItemAgent || (t.Items[n-1].Kind == ItemPlan && t.Items[n-1].PlanSnapshot == nil)) {
 			// If the new text is a plan document but the last item is plain
 			// agent text, start a fresh ItemPlan instead of appending. The plan
 			// is a distinct visual block, not a continuation of prior prose.

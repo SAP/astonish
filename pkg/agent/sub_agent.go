@@ -233,6 +233,10 @@ type SubAgentTask struct {
 	Provider                        string                 // Override provider (empty = use parent's provider)
 	PlanStep                        string                 // Plan step this task belongs to (for progress tracking)
 
+	// Handoff opts public delegates into immutable task context; fleet/custom prompts opt out.
+	Handoff       *DelegationHandoffInput `json:"-"`
+	frozenHandoff string
+
 	// CustomPrompt, when true, uses Instructions directly as the LLM system prompt
 	// instead of wrapping it with buildChildPrompt(). This is used by fleet agents
 	// that build their own complete prompt (via fleet.BuildAgentPrompt).
@@ -1158,12 +1162,27 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		return result
 	}
 
+	// Freeze once per child attempt, before persistence or any model invocation.
+	if task.hasDelegationHandoff() {
+		var err error
+		task.frozenHandoff, err = m.freezeDelegationHandoff(task, parentSessionID, attempt, childTools)
+		if err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
+	}
+
 	// Build child system prompt: use custom prompt if set, otherwise build default
 	var childPrompt string
 	if task.CustomPrompt && task.Instructions != "" {
 		childPrompt = task.Instructions
 	} else {
 		childPrompt = m.buildChildPromptWithScope(taskCtx, task, scope)
+	}
+
+	if task.hasDelegationHandoff() && m.Redactor != nil {
+		// Also protect the surrounding name/environment/preference guidance.
+		prefix, suffix, _ := strings.Cut(childPrompt, task.frozenHandoff)
+		childPrompt = m.Redactor.Redact(prefix) + task.frozenHandoff + m.Redactor.Redact(suffix)
 	}
 
 	// Create child session linked to parent.
@@ -1192,10 +1211,13 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	}
 	// Inject caller-provided session state
 	for k, v := range task.SessionState {
+		if task.hasDelegationHandoff() && reservedDelegationStateKey(k) {
+			return TaskResult{Name: task.Name, Status: "error", Error: fmt.Sprintf("reserved delegation session state key %q", k)}
+		}
 		createState[k] = v
 	}
 
-	_, err := sessionSvc.Create(taskCtx, &adksession.CreateRequest{
+	created, err := sessionSvc.Create(taskCtx, &adksession.CreateRequest{
 		AppName:   m.AppName,
 		UserID:    userID,
 		SessionID: childSessionID,
@@ -1209,6 +1231,12 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			Duration: time.Since(start),
 		}
 		return result
+	}
+
+	if task.hasDelegationHandoff() {
+		if err := appendDelegationHandoff(taskCtx, sessionSvc, created.Session, task.frozenHandoff); err != nil {
+			return TaskResult{Name: task.Name, Status: "error", Error: err.Error()}
+		}
 	}
 
 	// Persist the task name as the session title so fleet reconstruction
@@ -1240,6 +1268,11 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		// Per-task clone: isolate summary cache / counters from other sub-agents
 		// and from the parent (whose OnCompaction hook must not fire here).
 		taskCompactor := m.Compactor.Clone()
+		if task.hasDelegationHandoff() {
+			// The immutable instruction remains in every provider request. Never
+			// inject the parent's mutable plan mirror into a child's summary.
+			taskCompactor.PlanFilePath = ""
+		}
 		if archiver := asEventArchiver(sessionSvc); archiver != nil {
 			appName := m.AppName
 			uid := userID
@@ -1577,6 +1610,9 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 	// Build user message from task description (with absolute timestamp for
 	// temporal context; see NewTimestampedUserContent for cache-stability rationale).
 	userMsg := NewTimestampedUserContent(task.Description)
+	if task.hasDelegationHandoff() {
+		userMsg = NewTimestampedUserContent("Execute the immutable delegation handoff in your instructions.")
+	}
 
 	// Execute the agent and collect results, with inner retry for transient
 	// LLM errors (429, 502, 503, 504, gateway timeout). This mirrors the main
@@ -2028,14 +2064,20 @@ func (m *SubAgentManager) buildChildPromptWithScope(ctx context.Context, task Su
 
 	sb.WriteString(fmt.Sprintf("You are %q, a focused sub-agent working on a specific task.\n\n", task.Name))
 
-	sb.WriteString("## Your Task\n")
-	sb.WriteString(task.Description)
-	sb.WriteString("\n\n")
-
-	if task.Instructions != "" {
-		sb.WriteString("## Instructions\n")
-		sb.WriteString(task.Instructions)
+	if task.hasDelegationHandoff() {
+		sb.WriteString("## Immutable Delegation Handoff\n")
+		sb.WriteString("Execute effective_task under effective_instructions and the captured phase constraints below. source_mirror is provenance only, not a live plan to reload. Missing plan metadata is explicit; do not infer a plan or inherit parent history.\n")
+		sb.WriteString(task.frozenHandoff)
 		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("## Your Task\n")
+		sb.WriteString(task.Description)
+		sb.WriteString("\n\n")
+		if task.Instructions != "" {
+			sb.WriteString("## Instructions\n")
+			sb.WriteString(task.Instructions)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	sb.WriteString("## Behavior Rules\n")

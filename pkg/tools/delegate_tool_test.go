@@ -22,6 +22,107 @@ import (
 	"google.golang.org/genai"
 )
 
+type publicHandoffLLM struct {
+	check func(*model.LLMRequest)
+	calls int
+}
+
+func (*publicHandoffLLM) Name() string { return "public-handoff" }
+func (m *publicHandoffLLM) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		if m.check != nil {
+			m.check(req)
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", "model")}, nil)
+	}
+}
+
+func TestDelegateTasksScopedHandoff(t *testing.T) {
+	for _, mode := range []string{"matched", "invalid", "no-step", "unbound", "bound-nil"} {
+		t.Run(mode, func(t *testing.T) {
+			manager := agent.NewSubAgentManager(agent.SubAgentConfig{})
+			manager.SessionService = adksession.InMemoryService()
+			manager.AppName, manager.UserID = "handoff", "user"
+			llm := &publicHandoffLLM{}
+			manager.LLM = llm
+			plan := agent.NewPlanRuntimeFromSnapshot(agent.PlanSnapshot{PlanID: "plan", Revision: 3, Sequence: 8, Goal: "goal", Document: agent.PlanDocumentInfo{Context: "root causes", WhatNotToDo: "no API", Verification: "acceptance"}, Steps: []agent.PlanStepInfo{{Name: "phase", Details: "implement full phase", Verify: "go test", VerifyKind: "unit"}}}, agent.PlanRuntimeOptions{})
+			ctx := context.Background()
+			if mode != "unbound" {
+				ctx = agent.WithPlanRuntime(ctx, plan)
+			}
+			if mode == "bound-nil" {
+				ctx = agent.WithPlanRuntime(ctx, nil)
+			}
+			step := "phase"
+			if mode == "invalid" {
+				step = "typo"
+			}
+			if mode == "no-step" {
+				step = ""
+			}
+			llm.check = func(req *model.LLMRequest) {
+				var text strings.Builder
+				for _, part := range req.Config.SystemInstruction.Parts {
+					text.WriteString(part.Text)
+				}
+				prompt := text.String()
+				if !strings.Contains(prompt, "Immutable Delegation Handoff") || !strings.Contains(prompt, "prior finding exact path") {
+					t.Fatal("missing handoff or findings")
+				}
+				want := string(agent.DelegationPlanMissing)
+				if mode == "matched" {
+					want = string(agent.DelegationPlanMatched)
+					for _, value := range []string{"implement full phase", "root causes", "no API", "acceptance"} {
+						if !strings.Contains(prompt, value) {
+							t.Fatalf("missing %s", value)
+						}
+					}
+				}
+				if mode == "no-step" {
+					want = string(agent.DelegationPlanStepMissing)
+				}
+				if !strings.Contains(prompt, `"status": "`+want+`"`) {
+					t.Fatalf("missing status %s", want)
+				}
+			}
+			inputs := []SubTaskInput{{Name: "worker", Task: "work", Instructions: "prior finding exact path", PlanStep: step}}
+			if mode == "invalid" {
+				// A late invalid step must prevent dispatch of earlier valid tasks too.
+				inputs = append([]SubTaskInput{{Name: "valid", Task: "work", PlanStep: "phase"}}, inputs...)
+			}
+			result, err := delegateTasksWithManager(&toolContextStub{Context: ctx, sessionID: "parent"}, DelegateTasksArgs{Tasks: inputs}, manager)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "invalid" {
+				if result.Status != "error" || llm.calls != 0 || !strings.Contains(result.Summary, "available steps: phase") {
+					t.Fatalf("%+v calls=%d", result, llm.calls)
+				}
+				return
+			}
+			if result.Status != "success" || llm.calls != 1 {
+				t.Fatalf("%+v calls=%d", result, llm.calls)
+			}
+			child, err := manager.SessionService.Get(ctx, &adksession.GetRequest{AppName: manager.AppName, UserID: manager.UserID, SessionID: result.Results[0].ChildSessionID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := child.Session.State().Get(agent.DelegationHandoffStateKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var h agent.DelegationHandoff
+			if err := json.Unmarshal([]byte(value.(string)), &h); err != nil {
+				t.Fatal(err)
+			}
+			if h.ParentSessionID != "parent" || h.BatchID != result.BatchID || h.TaskID != result.Results[0].TaskID {
+				t.Fatalf("identity %+v", h)
+			}
+		})
+	}
+}
+
 func TestDelegateTasks_NilManager(t *testing.T) {
 	// Ensure the manager is nil
 	old := subAgentManagerVar
@@ -258,7 +359,7 @@ func assertDelegateTasksValidation(t *testing.T, tasks []SubTaskInput, summary s
 		events = append(events, event)
 	}
 	ctx := &delegationToolContext{
-		toolContextStub: toolContextStub{sessionID: "parent-session"},
+		toolContextStub: toolContextStub{Context: context.Background(), sessionID: "parent-session"},
 		callID:          "validation-call",
 	}
 	result, err := newDelegateTasksRunner(manager)(ctx, DelegateTasksArgs{Tasks: tasks})
@@ -292,7 +393,7 @@ func TestDelegateTasks_PanicUnwindCompletesWithError(t *testing.T) {
 		}
 	}
 	ctx := &delegationToolContext{
-		toolContextStub: toolContextStub{sessionID: "parent-session"},
+		toolContextStub: toolContextStub{Context: context.Background(), sessionID: "parent-session"},
 		callID:          "panic-call",
 	}
 	func() {

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { AlertCircle, Check, ChevronDown, ChevronRight, Loader } from 'lucide-react'
+import FileEditPreview from './FileEditPreview'
 import {
   activityStats,
   activitySummary,
@@ -195,6 +196,7 @@ export default function ToolActivityBlock({ entries, renderMessage, streaming = 
                 </button>
                 {stepOpen && (
                   <div className="px-3 pb-2 space-y-2">
+                    <FileEditPreview step={step} />
                     {step.args !== undefined && (
                       <div>
                         <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: 'var(--text-muted)' }}>

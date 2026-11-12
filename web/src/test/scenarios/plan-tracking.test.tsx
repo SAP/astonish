@@ -8,7 +8,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { waitFor } from '@testing-library/react'
+import { act, waitFor, screen } from '@testing-library/react'
+import revisionFixture from '../fixtures/scenarios/planning/plan-revisions.json'
+import type { PlanSnapshot } from '../../components/chat/chatTypes'
 // Shared mocks (react-markdown, remark-gfm, HomePage, FleetStartDialog, FleetTemplatePicker, MermaidBlock)
 import './scenarioSetup'
 import { renderChat } from '../helpers/renderChat'
@@ -23,6 +25,53 @@ describe('Plan Tracking Scenarios', () => {
 
   afterEach(() => {
     if (result) result.cleanup()
+  })
+
+  it.each(['live', 'reconnect', 'history'])('renders one authoritative revision from %s without replay rollback', async mode => {
+    const snapshot = revisionFixture.events[1].data.snapshot as PlanSnapshot
+    const next: PlanSnapshot = { ...snapshot, ...snapshot.pending_revision!.candidate, revision: 2, sequence: 11, pending_revision: undefined, document: { ...snapshot.pending_revision!.candidate.document, lifecycle: 'executing' } }
+    const snapshots = [snapshot, next, snapshot, next]
+    const events: FixtureEvent[] = snapshots.map(snapshot => ({ type: 'subtask_progress', data: { event_type: 'plan_snapshot', snapshot } }))
+    events.push({ type: 'done', data: {} })
+    result = renderChat(mode === 'live' ? { scenarioEvents: [revisionFixture.events[0] as FixtureEvent, ...events] } : mode === 'reconnect' ? { initialSessionId: 'revision-session', sessionStatus: { running: true }, reconnectEvents: events } : { initialSessionId: 'revision-session', sessionHistory: { id: 'revision-session', title: 'Revisions', messages: snapshots.map(snapshot => ({ type: 'plan', snapshot })) } })
+    if (mode === 'live') await result.sendMessage('Build')
+    await waitFor(() => expect(screen.getByText('Verify browser behavior')).toBeTruthy())
+    expect(screen.queryByTestId('plan-revision-review')).toBeNull()
+    expect(screen.getAllByText('Execution Plan')).toHaveLength(1)
+    expect(screen.getByText('Verify browser behavior')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Approve plan|Approve revision|Reject revision|Request changes/ })).toBeNull()
+    expect(screen.queryByText('Revision 2')).toBeNull()
+  })
+
+  it.each(['live', 'reconnect'])('updates the same DOM card without scrolling or focusing from %s', async mode => {
+    let stream!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({ start(controller) { stream = controller } })
+    const snapshot = { ...revisionFixture.events[1].data.snapshot as PlanSnapshot, pending_revision: undefined }
+    const route = mode === 'live' ? '/api/studio/chat' : '/api/studio/sessions/revision-session/stream'
+    result = renderChat({ initialSessionId: 'revision-session', sessionStatus: { running: mode === 'reconnect' }, mockConfig: { customHandlers: { [route]: () => new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }) } } })
+    if (mode === 'live') {
+      await waitFor(() => expect(screen.getByTestId('chat-input')).not.toBeDisabled())
+      await result.user.type(screen.getByTestId('chat-input'), 'continue{Enter}')
+    }
+    const emit = async (snapshot: PlanSnapshot) => {
+      await act(async () => { stream.enqueue(new TextEncoder().encode(`event: subtask_progress\ndata: ${JSON.stringify({ event_type: 'plan_snapshot', snapshot })}\n\n`)) })
+    }
+    await emit(snapshot)
+    const goal = await screen.findByText(snapshot.goal)
+    const card = goal.parentElement!.parentElement!
+    const area = screen.getByTestId('message-area')
+    Object.defineProperty(area, 'scrollHeight', { configurable: true, value: 1500 })
+    area.scrollTop = 37
+    area.tabIndex = -1
+    area.focus()
+    await emit({ ...snapshot, goal: 'Quietly updated goal', revision: 2, sequence: 11 })
+    await screen.findByText('Quietly updated goal')
+    expect(screen.getByText('Quietly updated goal').parentElement!.parentElement).toBe(card)
+    expect(area.scrollTop).toBe(37)
+    expect(area).toHaveFocus()
+    expect(screen.getAllByText('Execution Plan')).toHaveLength(1)
+    expect(screen.queryByTestId('plan-revision-review')).toBeNull()
+    await act(async () => { stream.enqueue(new TextEncoder().encode('event: done\ndata: {}\n\n')); stream.close() })
   })
 
   describe('E1 + F1: Plan Announced with Delegation', () => {

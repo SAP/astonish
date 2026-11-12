@@ -24,6 +24,8 @@ import FleetStartDialog from './chat/FleetStartDialog'
 import FleetTemplatePicker from './chat/FleetTemplatePicker'
 import FleetExecutionPanel from './chat/FleetExecutionPanel'
 import TaskPlanPanel from './chat/TaskPlanPanel'
+import { isPlanEvent, reducePlanProgress, normalizePlanHistory, planFromSnapshot } from './chat/planState'
+import type { PlanSnapshot } from './chat/chatTypes'
 import PlanPanel from './chat/PlanPanel'
 import FilePanel from './chat/FilePanel'
 import TodoPanel from './chat/TodoPanel'
@@ -703,6 +705,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // Latest explicit plan or delegation task list. Both surfaces use this same
   // derived state so the inline tracker and header side panel cannot disagree.
   const latestPlanWithSteps = useMemo(() => {
+    const canonical = messages.findLast(m => m.type === 'plan' && m.snapshot)
+    if (canonical?.type === 'plan') return canonical.steps.length > 0 ? canonical : null
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.type === 'plan') {
@@ -922,8 +926,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     loadSessionHistory(sid)
   }, [initialSessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll on new messages — only if user is near the bottom
+  // Plan-only updates replace the existing card without moving the reader.
+  const previousScrollMessages = useRef(messages)
   useEffect(() => {
+    const previous = previousScrollMessages.current
+    previousScrollMessages.current = messages
+    const onlyPlanUpdates = previous.length === messages.length && messages.every((msg, index) =>
+      msg === previous[index] || (msg.type === 'plan' && previous[index]?.type === 'plan'))
+    if (onlyPlanUpdates) return
     if (scrollRef.current && isNearBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
@@ -1111,13 +1121,16 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (m.type === 'image' && m.data && m.mimeType) {
             return { type: 'image', data: m.data, mimeType: m.mimeType } as ImageMessage
           }
+          if ((m.type === 'plan' || m.type === 'plan_snapshot') && m.snapshot) {
+            return planFromSnapshot(m.snapshot as PlanSnapshot)
+          }
           if (m.type === 'plan') {
             return { type: 'plan', goal: m.goal || '', steps: m.steps ?? [], context: m.context, whatNotToDo: m.whatNotToDo, verification: m.verification } as PlanMessage
           }
           return m as unknown as ChatMsg
         })
         const mapped = restored
-        setMessages(collapseDocsUpdates(normalizeDelegationHistory(mapped)))
+        setMessages(collapseDocsUpdates(normalizePlanHistory(normalizeDelegationHistory(mapped))))
         // Restore active app state from session history
         const appPreviews = mapped.filter((m): m is AppPreviewMessage => m.type === 'app_preview')
         if (appPreviews.length > 0) {
@@ -1474,48 +1487,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'subtask_progress': {
-            const stEventType = data.event_type as string
-
-            // ── Plan events ──
-            if (stEventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
-                name: s.name,
-                description: s.description,
-                status: 'pending' as const,
-                details: s.details,
-                files: s.files,
-                verify: s.verify,
-                parallelGroup: s.parallel_group,
-              }))
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'plan',
-                goal: (data.plan_goal as string) || '',
-                steps,
-                context: (data.plan_context as string) || undefined,
-                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
-                verification: (data.plan_verification as string) || undefined,
-              } as PlanMessage])
+            if (isPlanEvent(data.event_type)) {
+              setMessages(prev => reducePlanProgress(prev, data))
               break
             }
-
-            if (stEventType === 'plan_step_update') {
-              const stepName = data.step_name as string
-              const stepStatus = data.step_status as PlanStepInfo['status']
-              setMessages((prev: ChatMsg[]) => {
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  if (prev[i].type === 'plan') {
-                    const plan = prev[i] as PlanMessage
-                    const updatedSteps = plan.steps.map(s =>
-                      s.name === stepName ? { ...s, status: stepStatus } : s
-                    )
-                    return prev.map((m, idx) => idx === i ? { ...plan, steps: updatedSteps } : m)
-                  }
-                }
-                return prev
-              })
-              break
-            }
-
             setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
             break
           }
@@ -1909,7 +1884,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
   // --- End attachment handlers ---
 
-  const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[] } = {}) => {
+  const sendMessage = useCallback(async (text: string, options: { systemContext?: string, pinnedToolGroups?: string[], approvedPlanExecution?: boolean } = {}) => {
     if (botThreadRef.current) {
       if (botSubmittingRef.current || botThreadRef.current.readOnly || (!text.trim() && attachments.length === 0)) return
       if (botThreadRef.current.toolFree && attachments.length) { setBotSendError(botLocalFailure(undefined, BotFailureKind.Attachments).message); return }
@@ -1929,7 +1904,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       finally { botSubmittingRef.current = false; setBotSubmitting(false) }
       return
     }
-    if (!text.trim() && attachments.length === 0) return
+    const planAction = !!options.approvedPlanExecution
+    if (!text.trim() && attachments.length === 0 && !planAction) return
     const userMsg = text.trim()
 
     // Reset scroll position — user expects to see the conversation flow
@@ -1939,7 +1915,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     // Prepare attachments (async base64 encoding)
     let attachmentPayloads: AttachmentPayload[] = []
     let attachmentInfos: AttachmentInfo[] = []
-    if (attachments.length > 0) {
+    if (attachments.length > 0 && !planAction) {
       attachmentPayloads = await prepareAttachmentPayloads()
       // For image previews in local messages, include base64 data for thumbnails
       attachmentInfos = attachments.map(a => ({
@@ -1951,7 +1927,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     }
 
     // Add user message to chat (unless it's a slash command or internal action)
-    if (!userMsg.startsWith('/') && !userMsg.startsWith('__distill_') && !userMsg.startsWith('__app_') && !userMsg.startsWith('__tutorial_blueprint_')) {
+    if (!planAction && !userMsg.startsWith('/') && !userMsg.startsWith('__distill_') && !userMsg.startsWith('__app_') && !userMsg.startsWith('__tutorial_blueprint_')) {
       const userChatMsg: UserMessage = { type: 'user', content: userMsg }
       if (attachmentInfos.length > 0) {
         userChatMsg.attachments = attachmentInfos
@@ -1959,8 +1935,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       setMessages((prev: ChatMsg[]) => [...prev, userChatMsg])
     }
 
-    setInput('')
-    if (inputRef.current) {
+    if (!planAction) setInput('')
+    if (!planAction && inputRef.current) {
       inputRef.current.style.height = 'auto'
     }
     setIsStreaming(true)
@@ -1968,7 +1944,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     setGenerationProgress(null)
 
     // Clear attachments after capturing payloads
-    clearAttachments()
+    if (!planAction) clearAttachments()
 
     let streamSessionId = activeSessionId || ''
     const streamGen = ++streamGenRef.current
@@ -1976,6 +1952,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     const controller = connectChat({
       sessionId: streamSessionId,
       message: userMsg,
+      approvedPlanExecution: options.approvedPlanExecution,
       attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
       systemContext: options.systemContext || activeWizardContext || undefined,
       pinnedToolGroups: options.pinnedToolGroups || activePinnedToolGroups || undefined,
@@ -2375,51 +2352,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             break
 
           case 'subtask_progress': {
-            // Handle plan events and sub-task progress events.
-            // Plan events create/update a PlanMessage; delegation events manage SubTaskExecutionMessage.
-            const eventType = data.event_type as string
-
-            // ── Plan events ──
-            if (eventType === 'plan_announced') {
-              const steps: PlanStepInfo[] = ((data.plan_steps as Array<{ name: string; description: string; details?: string; files?: Array<{ path: string; kind: string }>; verify?: string; parallel_group?: string }>) || []).map(s => ({
-                name: s.name,
-                description: s.description,
-                status: 'pending' as const,
-                details: s.details,
-                files: s.files,
-                verify: s.verify,
-                parallelGroup: s.parallel_group,
-              }))
-              setMessages((prev: ChatMsg[]) => [...prev, {
-                type: 'plan',
-                goal: (data.plan_goal as string) || '',
-                steps,
-                context: (data.plan_context as string) || undefined,
-                whatNotToDo: (data.plan_what_not_to_do as string) || undefined,
-                verification: (data.plan_verification as string) || undefined,
-              } as PlanMessage])
+            if (isPlanEvent(data.event_type)) {
+              setMessages(prev => reducePlanProgress(prev, data))
               break
             }
-
-            if (eventType === 'plan_step_update') {
-              const stepName = data.step_name as string
-              const stepStatus = data.step_status as PlanStepInfo['status']
-              setMessages((prev: ChatMsg[]) => {
-                // Find the most recent plan message
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  if (prev[i].type === 'plan') {
-                    const plan = prev[i] as PlanMessage
-                    const updatedSteps = plan.steps.map(s =>
-                      s.name === stepName ? { ...s, status: stepStatus } : s
-                    )
-                    return prev.map((m, idx) => idx === i ? { ...plan, steps: updatedSteps } : m)
-                  }
-                }
-                return prev
-              })
-              break
-            }
-
             setMessages((prev: ChatMsg[]) => reduceDelegationProgress(prev, data))
             break
           }
@@ -2585,6 +2521,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setGenerationProgress(null)
         setMessages(finalizeStreamingAgentText)
         console.error('Chat stream error:', err)
+        if (planAction) {
+          setIsStreaming(false)
+          return
+        }
         if (!streamSessionId) {
           setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: err.message }])
           setIsStreaming(false)
@@ -3437,7 +3377,9 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               }
 
               if (msg.type === 'plan') {
-                return <PlanPanel key={index} data={msg as PlanMessage} />
+                return <PlanPanel key={`${activeSessionId}-plan-${msg.snapshot?.plan_id || index}`} data={msg} disabled={isStreaming || !!botThread || !activeSessionId}
+                  onApprove={() => { void sendMessage('', { approvedPlanExecution: true }) }}
+                  />
               }
 
               if (msg.type === 'subtask_execution') {

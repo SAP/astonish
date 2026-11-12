@@ -166,6 +166,7 @@ func (b *CodeSystemPromptBuilder) build(base *SystemPromptBuilder) string {
 	}
 	if b.PlanFilePersistence {
 		sb.WriteString("\n**Execution plan (PLAN.md):** Implementation plans are recorded only in Plan mode via `announce_plan` and persisted to a session PLAN.md. In Normal mode you MUST NOT call `announce_plan` — the runtime will refuse it. When executing an approved plan, PLAN.md is inlined in the execution context; follow it phase by phase. Keep it current: for main-thread phases call `update_plan` (running → complete) so the runtime can run verify. Delegated phases stay running until verify passes. After every phase is complete, call `announce_completion`. After a context summary, the inlined PLAN.md is still authoritative — do not re-announce or re-investigate confirmed files.\n")
+		sb.WriteString("\n" + NormalModePlanRevisionGuidance)
 		sb.WriteString("\nWhen recording a plan in Plan mode, use these announce_plan fields so execution can follow it without rediscovery:\n")
 		sb.WriteString("- `context`: REQUIRED (plans are rejected without it). A design-document preamble: the problem being solved, the approach and why you chose it, the concrete user experience (step by step for UI changes), and what stays unchanged. Write 6-12 sentences that make sense to someone who has NOT seen your investigation.\n")
 		sb.WriteString("- `what_not_to_do`: REQUIRED scope guard — name the specific interfaces, files, behaviors, or invariants that must NOT change. Be concrete.\n")

@@ -31,6 +31,26 @@ describe('studioChat API', () => {
     globalThis.fetch = originalFetch
   })
 
+  describe('trusted plan actions', () => {
+    it('does not send obsolete revision decisions from legacy callers', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('', { status: 200 }))
+      const legacy = { sessionId: 's', message: 'continue', planRevisionDecision: { decision: 'approve' } }
+      await new Promise<void>((resolve, reject) => connectChat({ ...legacy, onEvent: vi.fn(), onDone: resolve, onError: reject }))
+      const body = JSON.parse(vi.mocked(globalThis.fetch).mock.calls[0][1]!.body as string)
+      expect(body).toEqual({ sessionId: 's', message: 'continue', autoApprove: false })
+    })
+    it('posts initial approval separately from model and tool approval', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('', { status: 200 }))
+      await new Promise<void>((resolve, reject) => connectChat({ sessionId: 's', approvedPlanExecution: true, onEvent: vi.fn(), onDone: resolve, onError: reject }))
+      const body = JSON.parse(vi.mocked(globalThis.fetch).mock.calls[0][1]!.body as string)
+      expect(body).toEqual({ sessionId: 's', message: '', autoApprove: false, approvedPlanExecution: true })
+    })
+    it('exposes HTTP initial approval failures to the caller for retry', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response('stale_revision', { status: 409 }))
+      await expect(new Promise<void>((resolve, reject) => connectChat({ sessionId: 's', approvedPlanExecution: true, onEvent: vi.fn(), onDone: resolve, onError: reject }))).rejects.toThrow('stale_revision')
+    })
+  })
+
   describe('subtask details', () => {
     it('sends precise identity and preserves a successful empty response', async () => {
       globalThis.fetch = mockFetch({ events: [] })

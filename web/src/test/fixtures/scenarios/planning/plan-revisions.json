@@ -1,0 +1,20 @@
+{
+  "name": "Authoritative plan revisions",
+  "events": [
+    { "type": "session", "data": { "sessionId": "revision-session" } },
+    { "type": "subtask_progress", "data": { "event_type": "plan_snapshot", "snapshot": {
+      "plan_id": "plan-1", "revision": 1, "sequence": 10, "goal": "Ship revision support",
+      "document": { "context": "Existing behavior", "what_not_to_do": "Keep API stable", "verification": "Run old acceptance", "lifecycle": "executing" },
+      "steps": [{ "name": "implement", "description": "Implement feature", "status": "complete", "files": [{ "path": "src/feature.ts", "kind": "modify" }], "verify": "npm test", "verify_kind": "unit", "evidence": "exit 0" }],
+      "pending_revision": {
+        "id": "proposal-1", "base_revision": 1, "reason": "Add browser verification before shipping",
+        "candidate": {
+          "goal": "Ship revision support", "document": { "context": "Updated behavior", "what_not_to_do": "Keep API stable", "verification": "Run browser acceptance" },
+          "steps": [{ "name": "implement", "description": "Implement feature", "files": [{ "path": "src/feature.ts", "kind": "modify" }], "verify": "npm test", "verify_kind": "unit" }, { "name": "browser", "description": "Verify browser behavior", "summary": "Users can review changes", "details": "Exercise approval and rejection", "files": [{ "path": "tests/browser.ts", "kind": "new" }], "outcome": "Approved changes appear", "verify": "npm run browser", "verify_kind": "behavior", "parallel_group": "wave-2" }]
+        },
+        "diff": { "document_changed": true, "structure_changed": true, "added_steps": ["browser"] }
+      }
+    } } },
+    { "type": "done", "data": {} }
+  ]
+}

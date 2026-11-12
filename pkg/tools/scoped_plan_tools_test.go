@@ -41,6 +41,42 @@ func TestScopedPlanCallbacks(t *testing.T) {
 	}
 }
 
+func TestScopedPlanRuntimeAuthoritativeNil(t *testing.T) {
+	base := WithPlanCallbacks(context.Background(), PlanCallbacks{
+		Update: func(string, string) agent.PlanStepApplyResult {
+			t.Fatal("callback fallback")
+			return agent.PlanStepApplyResult{}
+		},
+		Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+			t.Fatal("revision callback fallback")
+			return agent.PlanRevisionResult{}, nil
+		},
+	})
+	ctx := scopedBasicContext{base: agent.WithPlanRuntime(base, nil)}
+	for _, args := range []UpdatePlanArgs{{Step: "phase", Status: "running"}, {Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}}} {
+		result, err := updatePlan(ctx, args)
+		if err != nil || result.Status != "no_active_plan" {
+			t.Fatalf("%+v %v", result, err)
+		}
+	}
+	complete, err := announceCompletion(ctx, AnnounceCompletionArgs{OutcomeObserved: "no fallback"})
+	if err != nil || complete.Status != "no_active_plan" {
+		t.Fatalf("%+v %v", complete, err)
+	}
+}
+
+func TestScopedPlanRuntimeOverridesCallbacks(t *testing.T) {
+	runtime := agent.NewPlanRuntime(agent.NewPlanState("owned", agent.PlanDocumentInfo{PlanID: "owned", Revision: 1, Lifecycle: agent.PlanLifecycleApproved}, []agent.PlanStepInfo{{Name: "phase", Status: "pending"}}), agent.PlanRuntimeOptions{})
+	base := WithPlanCallbacks(context.Background(), PlanCallbacks{Update: func(string, string) agent.PlanStepApplyResult {
+		t.Fatal("callback fallback")
+		return agent.PlanStepApplyResult{}
+	}})
+	result, err := updatePlan(scopedBasicContext{base: agent.WithPlanRuntime(base, runtime)}, UpdatePlanArgs{Step: "phase", Status: "running"})
+	if err != nil || result.Status != "ok" || result.Snapshot == nil || result.Snapshot.Steps[0].Status != "running" {
+		t.Fatalf("%+v %v", result, err)
+	}
+}
+
 func TestScopedTaskResults(t *testing.T) {
 	a, b := NewTaskResultStore(), NewTaskResultStore()
 	id := a.Store("owned", "complete controlled output", "summary")
@@ -58,5 +94,16 @@ func TestScopedTaskResults(t *testing.T) {
 		if err != nil || out.Error == "" || out.Content != "" {
 			t.Fatalf("leaked: %+v %v", out, err)
 		}
+	}
+}
+
+func TestScopedPlanRevisionAppliesScopeImmediately(t *testing.T) {
+	s := agent.PlanSnapshot{PlanID: "owned", Revision: 1, Sequence: 1, Goal: "Hello", Document: agent.PlanDocumentInfo{Lifecycle: agent.PlanLifecycleApproved, Context: "design", WhatNotToDo: "boundaries", Verification: "Hello"}, Steps: []agent.PlanStepInfo{{Name: "greeting", Description: "write", Details: "Hello", Summary: "greeting", Outcome: "Hello", Files: []agent.PlanFileChange{{Path: "/outside/hello.txt", Kind: "new"}}, Verify: "printf Hello", VerifyKind: "behavior", Status: "pending"}}}
+	runtime := agent.NewPlanRuntimeFromSnapshot(s, agent.PlanRuntimeOptions{Verify: func(string) (int, string, error) { t.Fatal("revision invoked verification"); return 0, "", nil }})
+	req := agent.PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: 1, Reason: "new scope", RequiresApproval: true, Steps: s.Definition().Steps}
+	req.Steps[0].Outcome = "HelloWorld"
+	result, err := updatePlan(scopedBasicContext{base: agent.WithPlanRuntime(context.Background(), runtime)}, UpdatePlanArgs{Action: UpdatePlanRevise, Revision: &req})
+	if err != nil || result.Status != "applied" || result.Snapshot == nil || result.Snapshot.Revision != 2 || result.Snapshot.PendingRevision != nil || result.Snapshot.Steps[0].Outcome != "HelloWorld" {
+		t.Fatalf("%+v %v", result, err)
 	}
 }

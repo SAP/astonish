@@ -739,6 +739,10 @@ func (cr *ChatRunner) Run(
 		}
 	}()
 
+	// Preserve an explicitly bound nil runtime; never borrow another session's plan.
+	if runtime, bound := agent.PlanRuntimeFromContext(cr.ctx); bound {
+		defer chatAgent.BindSessionPlanRuntime(cr.SessionID, runtime)()
+	}
 	// Send session info first
 	cr.emitEvent("session", map[string]any{
 		"sessionId": cr.SessionID,
@@ -905,6 +909,9 @@ func (cr *ChatRunner) Run(
 	var representedDelegations sync.Map
 	pendingLiveDelegations := make(map[string]*pendingDelegation)
 	chatAgent.RegisterSubTaskProgress(cr.SessionID, func(evt agent.SubTaskProgressEvent) {
+		if _, bound := agent.PlanRuntimeFromContext(cr.ctx); bound && (evt.Type == "plan_announced" || evt.Type == "plan_step_update") {
+			return
+		}
 		if evt.BatchID != "" {
 			representedDelegations.Store(evt.BatchID, true)
 		}
@@ -1229,8 +1236,9 @@ runLoop:
 						cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 						continue
 					}
-					// Suppress plan tool results — no useful info for the user.
-					if toolName == "announce_plan" {
+					// Accepted plans are represented by their durable snapshot. Rejected
+					// announcements must remain visible rather than silently disappearing.
+					if toolName == "announce_plan" && (part.FunctionResponse.Response["status"] == "ok" || part.FunctionResponse.Response["status"] == "announced") {
 						continue
 					}
 
@@ -1470,7 +1478,7 @@ runLoop:
 							cr.drainImagesAndFlowOutput(chatAgent, sessionService)
 							continue
 						}
-						if toolName == "announce_plan" {
+						if toolName == "announce_plan" && (part.FunctionResponse.Response["status"] == "ok" || part.FunctionResponse.Response["status"] == "announced") {
 							continue
 						}
 						resp := part.FunctionResponse.Response

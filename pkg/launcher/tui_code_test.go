@@ -512,6 +512,25 @@ func TestDelegationLocalOwnedDetail(t *testing.T) {
 	}
 }
 
+func TestLocalPlanSystemContextUsesSnapshot(t *testing.T) {
+	s := agent.PlanSnapshot{Goal: "Accepted session plan", Steps: []agent.PlanStepInfo{{Name: "current-phase", Details: "Use the accepted definition"}}}
+	for _, completed := range []bool{false, true} {
+		text := localPlanSystemContext(s, "", completed)
+		if !strings.Contains(text, s.Goal) || !strings.Contains(text, s.Steps[0].Details) || !strings.Contains(text, "PLAN.md") {
+			t.Fatalf("missing authoritative content: %s", text)
+		}
+		if strings.Contains(text, "NO LONGER in execution mode") != completed {
+			t.Fatalf("incorrect completion context: %s", text)
+		}
+		if !isLocalPlanSystemContext(text) || !isLocalPlanSystemContext(agent.EscapeCurlyPlaceholders(text)) {
+			t.Fatal("generated plan context not recognized")
+		}
+	}
+	if isLocalPlanSystemContext("Preserve this custom task context") {
+		t.Fatal("custom task context must not be replaced")
+	}
+}
+
 func seedSession(t *testing.T, b *localAgentBackend, text string) string {
 	t.Helper()
 	ctx := context.Background()

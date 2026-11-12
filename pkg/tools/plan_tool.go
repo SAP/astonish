@@ -86,14 +86,21 @@ type AnnouncePlanArgs struct {
 
 // AnnouncePlanResult is the output of the announce_plan tool.
 type AnnouncePlanResult struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	Snapshot *agent.PlanSnapshot `json:"snapshot,omitempty"`
+	Status   string              `json:"status"`
+	Message  string              `json:"message,omitempty"`
 }
 
-func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, error) {
+func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (result AnnouncePlanResult, err error) {
 	callbacks := scopedPlanCallbacks(ctx)
+	defer func() {
+		if callbacks.Snapshot != nil {
+			s := callbacks.Snapshot()
+			result.Snapshot = &s
+		}
+	}()
 	planStateCallback, planProgressCallback, graphPlanAcceptanceLookup := callbacks.State, callbacks.Progress, callbacks.Acceptance
-	if planStateCallback == nil {
+	if planStateCallback == nil && callbacks.Announce == nil {
 		return AnnouncePlanResult{Status: "no_active_plan"}, nil
 	}
 	// Defense in depth: the ChatAgent BeforeTool gate normally rejects this call,
@@ -150,8 +157,17 @@ func announcePlan(ctx tool.Context, args AnnouncePlanArgs) (AnnouncePlanResult, 
 		return AnnouncePlanResult{Status: "incomplete_plan", Message: msg}, nil
 	}
 
+	if graphMode {
+		doc.GraphAcceptance = acc
+	}
+
 	// Store the plan in ChatAgent for progression + PLAN.md persistence. A
 	// lifecycle rejection is a no-op: do not emit another approval event.
+	if callbacks.Announce != nil {
+		if err := callbacks.Announce(args.Goal, doc, steps); err != nil {
+			return AnnouncePlanResult{Status: agent.PlanRuntimeErrorCode(err), Message: err.Error()}, nil
+		}
+	}
 	if planStateCallback != nil && !planStateCallback(args.Goal, doc, steps) {
 		return AnnouncePlanResult{Status: "blocked_active_approved_plan"}, nil
 	}
@@ -213,22 +229,68 @@ After a context summary, re-read PLAN.md to recover the plan and mark the next p
 // --- update_plan tool ---
 
 // UpdatePlanArgs is the input schema for the update_plan tool.
+type UpdatePlanAction string
+
+const (
+	UpdatePlanStatus UpdatePlanAction = "status"
+	UpdatePlanRevise UpdatePlanAction = "revise"
+)
+
 type UpdatePlanArgs struct {
-	Step   string `json:"step" jsonschema:"The 'name' of the plan phase to update (exactly as given to announce_plan)."`
-	Status string `json:"status" jsonschema:"New status for the phase: 'running' (you are starting it), 'complete' (finished successfully), or 'failed' (could not complete)."`
+	Action   UpdatePlanAction           `json:"action,omitempty" jsonschema:"status (default) updates progress; revise applies a definition-only revision immediately in Normal mode."`
+	Step     string                     `json:"step,omitempty" jsonschema:"Exact phase name for action=status."`
+	Status   string                     `json:"status,omitempty" jsonschema:"running, complete, or failed for action=status."`
+	Revision *agent.PlanRevisionRequest `json:"revision,omitempty" jsonschema:"Definition-only revision request for action=revise. Mutually exclusive with step and status."`
 }
 
 // UpdatePlanResult is the output of the update_plan tool.
 type UpdatePlanResult struct {
-	Status  string   `json:"status"`
-	Step    string   `json:"step,omitempty"`
-	Applied string   `json:"applied,omitempty"`
-	Message string   `json:"message,omitempty"`
-	Steps   []string `json:"steps,omitempty"`
+	Snapshot *agent.PlanSnapshot `json:"snapshot,omitempty"`
+	Status   string              `json:"status"`
+	Step     string              `json:"step,omitempty"`
+	Applied  string              `json:"applied,omitempty"`
+	Message  string              `json:"message,omitempty"`
+	Steps    []string            `json:"steps,omitempty"`
 }
 
-func updatePlan(ctx tool.Context, args UpdatePlanArgs) (UpdatePlanResult, error) {
+func updatePlan(ctx tool.Context, args UpdatePlanArgs) (result UpdatePlanResult, err error) {
 	callbacks := scopedPlanCallbacks(ctx)
+	defer func() {
+		if callbacks.Snapshot != nil {
+			s := callbacks.Snapshot()
+			result.Snapshot = &s
+		}
+	}()
+	action := args.Action
+	if action == "" {
+		action = UpdatePlanStatus
+	}
+	if action == UpdatePlanRevise {
+		if ctx != nil {
+			if po := agent.PromptOverridesFromContext(ctx); po != nil {
+				if po.Bot != nil {
+					return UpdatePlanResult{Status: "unsupported_bot_revision"}, nil
+				}
+				if po.PlanMode || po.GraphPlanMode || po.AskMode {
+					return UpdatePlanResult{Status: "blocked_revision_mode"}, nil
+				}
+			}
+		}
+		if args.Revision == nil || args.Step != "" || args.Status != "" {
+			return UpdatePlanResult{Status: "invalid_arguments", Message: "revise requires revision and forbids step/status"}, nil
+		}
+		if callbacks.Revise == nil {
+			return UpdatePlanResult{Status: "no_active_plan"}, nil
+		}
+		res, err := callbacks.Revise(*args.Revision)
+		if err != nil {
+			return UpdatePlanResult{Status: agent.PlanRuntimeErrorCode(err), Message: err.Error()}, nil
+		}
+		return UpdatePlanResult{Status: string(res.Kind)}, nil
+	}
+	if action != UpdatePlanStatus || args.Revision != nil || args.Step == "" || args.Status == "" {
+		return UpdatePlanResult{Status: "invalid_arguments", Message: "status requires step and running/complete/failed; revision is forbidden"}, nil
+	}
 	planStepUpdateCallback, planKnownStepsCallback, planProgressCallback := callbacks.Update, callbacks.KnownSteps, callbacks.Progress
 	if planStepUpdateCallback == nil {
 		return UpdatePlanResult{Status: "no_active_plan"}, nil
@@ -273,9 +335,10 @@ type AnnounceCompletionArgs struct {
 }
 
 type AnnounceCompletionResult struct {
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
-	Log     string `json:"log,omitempty"`
+	Snapshot *agent.PlanSnapshot `json:"snapshot,omitempty"`
+	Status   string              `json:"status"`
+	Message  string              `json:"message,omitempty"`
+	Log      string              `json:"log,omitempty"`
 }
 
 var planCompletionCallback func(outcomeObserved, unverified string) agent.PlanCompletionResult
@@ -284,8 +347,15 @@ func SetPlanCompletionCallback(fn func(outcomeObserved, unverified string) agent
 	planCompletionCallback = fn
 }
 
-func announceCompletion(ctx tool.Context, args AnnounceCompletionArgs) (AnnounceCompletionResult, error) {
-	planCompletionCallback := scopedPlanCallbacks(ctx).Complete
+func announceCompletion(ctx tool.Context, args AnnounceCompletionArgs) (result AnnounceCompletionResult, err error) {
+	callbacks := scopedPlanCallbacks(ctx)
+	defer func() {
+		if callbacks.Snapshot != nil {
+			s := callbacks.Snapshot()
+			result.Snapshot = &s
+		}
+	}()
+	planCompletionCallback := callbacks.Complete
 	if planCompletionCallback == nil {
 		return AnnounceCompletionResult{Status: "no_active_plan"}, nil
 	}
@@ -306,6 +376,6 @@ func NewAnnounceCompletionTool() (tool.Tool, error) {
 func NewUpdatePlanTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "update_plan",
-		Description: `Update the status of a phase in the plan you announced with announce_plan. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
+		Description: `Update the active plan. action=status (default) preserves existing step/status progress calls. action=revise applies a definition-only revision immediately in Normal mode, including scope, goal, files, phase order, outcomes and verification changes; it does not execute verification or require revision approval. Use the returned snapshot's identity, revision and phase states. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
 	}, updatePlan)
 }

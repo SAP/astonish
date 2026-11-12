@@ -176,7 +176,7 @@ Before calling announce_plan, run this DESIGN QUALITY SELF-CHECK:
 - [ ] Are there any breaking changes, backward compatibility concerns, or security boundary implications? Surface them explicitly.
 - [ ] For UX/event/stream features: does 'verification' include a unit test of the live event order AND session restore, not only a manual TUI smoke?
 - [ ] Do related surfaces (live vs restore, message vs tool fold, summary vs badge) share one ordered source of truth, named in 'context'?
-- [ ] Revising a locked plan: will you read PLAN.md for exact step names before update_plan? If announce_plan is blocked, update those steps or ask the user to decline and re-announce — do not guess names.
+- [ ] Revising a locked plan: will you use the current snapshot or PLAN.md for exact identity/version and step names, then follow the Normal-mode update_plan revision workflow with approval for scope changes? Do not replace the approved plan with announce_plan; do not guess names.
 - [ ] What does a user or daemon do today that must still work after this change? Is that sequence in 'verification' and in an early 'behavior' phase?
 - [ ] Existing on-disk state (layers, sessions, config) that could be stranded?
 - [ ] Is the first behavior verify as early as possible — before deleting a live subsystem?
@@ -187,6 +187,15 @@ If any check reveals a gap, add the missing phase BEFORE calling announce_plan. 
 File paths must be confirmed: only record a file path in 'details' or 'files' if codegraph_explore, code_definition, find_files, or read_file explicitly returned that exact path this session — do NOT infer paths from symbol names or directory conventions; if a path was not confirmed, call find_files before adding it to the plan. This persists the full plan to a session PLAN.md shown to the user; do NOT hand-write PLAN.md. End by asking the user to exit to Normal mode (shift+tab) before any execution. When executing later, treat PLAN.md as authoritative — do NOT re-investigate files or symbols already confirmed in the plan.
 
 Produce a COMPLETE plan — cover every dependency the change reaches, order phases dependency-first, and surface any human decisions (breaking changes, alternatives with trade-offs, ambiguous requirements) explicitly. Spend effort proportional to blast radius. Stop when you can name the user-visible sequence that proves the job AND the files that implement it — not because a counter tripped. Never re-query codegraph or grep for a fact already established.`
+
+// NormalModePlanRevisionGuidance is shared by Code and approved execution prompts.
+const NormalModePlanRevisionGuidance = `Normal-mode plan revisions:
+- Use update_plan(action="revise", revision={...}) to revise the active plan in Normal mode. This is an optional action; existing step/status progress calls are unchanged. The revision payload contains plan_id, base_revision, reason, and steps (definition-only phase definitions). Never submit status, evidence, or Results as revision definitions.
+- The returned snapshot is authoritative. Use the exact plan identity, revision, and step names from the current returned snapshot or PLAN.md, not conversation history or guessed names. Do not manually edit PLAN.md; announce_plan remains Plan-mode-only, not a revision workaround.
+- All valid revisions apply immediately, including changes to goals, scope, boundaries, outcomes, files, phase membership/order, parallel groups, and verify_kind. Continue using the returned snapshot without presenting a proposal, requesting revision approval, or stopping to await a decision. Initial Plan-mode approval and tool/folder authorization remain unchanged.
+- If busy, do not force or retry a mutation of active work: revisions cannot change running phases. Wait for their execution/verification to settle. If stale, reload the current snapshot or PLAN.md and rebase the revision using its exact identity/version before retrying.
+- Follow the returned phase states after an applied revision. Changes may produce invalidated evidence: reverify affected phases through update_plan(complete), never copy old evidence back. Revision does not add a new completion gate: every phase must still complete with its verify evidence, then announce_completion writes Results from that recorded evidence without running new commands.
+`
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
 // user approves a plan and on every subsequent Normal turn while that plan is
@@ -227,8 +236,9 @@ EXECUTION RULES:
    proceed — do not re-read the surrounding area.
 5. IF A COMPILATION ERROR requires understanding a type or import: use code_definition for that
    one symbol, then continue.
-6. The approved plan is authoritative. Do NOT call announce_plan — it exists only in Plan mode and
-   the runtime will reject it here. Use update_plan to record progress without replacing the plan.
+6. The current applied snapshot is authoritative. Do NOT call announce_plan — it exists only in
+   Plan mode and the runtime will reject it here. Use update_plan for progress or the safe
+   Normal-mode revision workflow below; do not silently change approved scope.
 7. Start implementing. When you finish a phase, call update_plan(complete) so the runtime can run
    that phase's verify — do not declare success in prose first. Delegated work finishing is not
    completion.
@@ -236,7 +246,9 @@ EXECUTION RULES:
    anything you did NOT verify. It records the plan as done and writes ## Results from the verify
    evidence each phase already produced — it does not run new commands. Execution mode ends only
    when that tool writes ## Results.
-9. If verify fails, investigate the failure. Do not mark the phase complete.`
+9. If verify fails, investigate the failure. Do not mark the phase complete.
+
+` + NormalModePlanRevisionGuidance
 
 // BuildPlanExecutionSystemContext returns PlanExecutionSystemContext with the
 // plan path and inlined PLAN.md body filled in. If planPath is empty, falls
@@ -398,11 +410,12 @@ func ApprovedPlanExecutionResearchBlockedMessage(kind string, limit int) string 
 	return fmt.Sprintf("Blocked: approved-plan execution reached its %s research limit (%d). Follow the persisted plan, edit the named files, and use update_plan; do not restart repository discovery.", kind, limit)
 }
 
-// ApprovedPlanExecutionBlockedMessage explains why an approved execution turn
-// may update progress but cannot replace the plan the user approved.
+// ApprovedPlanExecutionBlockedMessage directs progress and safe revisions without
+// replacing the active plan through announce_plan.
 func ApprovedPlanExecutionBlockedMessage() string {
 	return "Blocked: `announce_plan` cannot run while an approved plan is executing. " +
-		"Continue implementing the active plan and use `update_plan` to record phase progress; do not replace the approved plan."
+		"Continue implementing the active plan and use `update_plan` to record phase progress. " +
+		"For a revision, use update_plan(action=\"revise\", revision={...}) with the current snapshot's identity/version; scope changes require trusted UI approval."
 }
 
 // AnnouncePlanNotInPlanModeBlockedMessage is returned when the model calls

@@ -34,6 +34,7 @@ import (
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/tools"
 	"github.com/SAP/astonish/pkg/tools/ripgrep"
 	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -1138,6 +1139,30 @@ func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, er
 	return newID, true, nil
 }
 
+// localPlanSystemContext renders the accepted session definition without reading
+// the best-effort sidecar. Mirror failures must not change what the model sees.
+func localPlanSystemContext(s agent.PlanSnapshot, planPath string, completed bool) string {
+	if planPath == "" {
+		planPath = "PLAN.md"
+	}
+	template := agent.PlanExecutionSystemContext
+	if completed {
+		template = agent.PlanCompletedSystemContext
+	}
+	return strings.NewReplacer("__PLAN_PATH__", planPath, "__PLAN_BODY__",
+		agent.RenderPlanFromInfoWithDoc(s.Goal, s.Document, s.Steps)).Replace(template)
+}
+
+func isLocalPlanSystemContext(text string) bool {
+	for _, template := range []string{agent.PlanExecutionSystemContext, agent.PlanCompletedSystemContext} {
+		prefix, _, _ := strings.Cut(template, "__PLAN_BODY__")
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // RunTurn drives one agent turn in-process and streams TUI events.
 //
 // The heart of code mode: mirror the ChatRunner driver loop from
@@ -1289,6 +1314,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// Wire structured sub-task progress so delegation events flow to the TUI.
 	// This enables the delegation panel that shows task timers and completion status.
 	chatAgent.SubTaskProgressCallback = func(evt agent.SubTaskProgressEvent) {
+		if evt.Type == "plan_step_update" && evt.Error != "" {
+			emit("error", map[string]any{"error": evt.Error, "code": evt.Reason})
+		}
 		if evt.Type == "plan_announced" {
 			return
 		}
@@ -1386,20 +1414,24 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	// false so discovery behaves as regular Normal mode.
 	approvedPlanExecutionExplicit := opts.ApprovedPlanExecution
 	systemContext := opts.SystemContext
-	if planMode || graphPlan {
-		// Planning / revision turns may replace the plan. Approved execution
-		// never reopens that slot — announce_plan is Plan-mode only.
-		chatAgent.AllowActivePlanReplacement()
-	} else if !askMode {
-		if !approvedPlanExecution && b.shouldContinueApprovedPlan(ctx, sessionID, planPath, chatAgent) {
+	// Restore the session snapshot (and repair its best-effort mirror) before
+	// inferring execution or composing any model context. PLAN.md may be stale,
+	// absent, or unwritable after a successful durable revision commit.
+	planRuntime, err := b.localPlanRuntime(ctx, sessionID, emit)
+	if err != nil {
+		close(out)
+		return nil, fmt.Errorf("restore session plan: %w", err)
+	}
+	planSnapshot := planRuntime.Snapshot()
+	if !planMode && !graphPlan && !askMode {
+		if !approvedPlanExecution && len(planSnapshot.Steps) > 0 &&
+			(agent.NormalizePlanLifecycle(planSnapshot.Document.Lifecycle) != "" || b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved) {
 			approvedPlanExecution = true
 		}
 		if approvedPlanExecution {
-			if err := chatAgent.RestoreApprovedPlan(); err != nil {
-				if opts.ApprovedPlanExecution {
-					return nil, fmt.Errorf("restore approved plan: %w", err)
-				}
-				slog.Debug("restore approved plan skipped", "component", "localAgentBackend", "error", err)
+			if planRuntime.PlanState() == nil {
+				close(out)
+				return nil, fmt.Errorf("restore approved plan: no session plan")
 			}
 			// Check whether every phase in the restored plan has reached a
 			// terminal state. If so, the plan is historical context — not an
@@ -1407,15 +1439,13 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			// so the model returns to normal conversation mode instead of
 			// treating every user message as an action to execute.
 			planAllComplete := false
-			if plan := chatAgent.GetActivePlan(); plan != nil && plan.IsFullyAccepted() {
+			if plan := planRuntime.PlanState(); plan != nil && plan.IsFullyAccepted() {
 				planAllComplete = true
 			}
-			if strings.TrimSpace(systemContext) == "" {
-				if planAllComplete {
-					systemContext = agent.BuildPlanCompletedSystemContext(planPath)
-				} else {
-					systemContext = agent.BuildPlanExecutionSystemContext(planPath)
-				}
+			// The TUI may have prebuilt context from the old mirror. Replace that
+			// generated context too, rather than treating it as authoritative.
+			if strings.TrimSpace(systemContext) == "" || isLocalPlanSystemContext(systemContext) {
+				systemContext = localPlanSystemContext(planSnapshot, planPath, planAllComplete)
 			}
 			if planAllComplete {
 				// Demote from active execution to completed-plan reference.
@@ -1433,8 +1463,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		chatAgent.SetActiveGraphPlan(nil)
 	}
 
-	if systemContext != "" || planMode || graphPlan || askMode || approvedPlanExecution {
+	if systemContext != "" || planMode || graphPlan || askMode || approvedPlanExecution || opts.PlanRevisionDecision != nil {
 		ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{
+			PlanRevisionDecision:          opts.PlanRevisionDecision,
 			SessionContext:                agent.EscapeCurlyPlaceholders(systemContext),
 			PlanMode:                      planMode,
 			GraphPlanMode:                 graphPlan,
@@ -1960,6 +1991,81 @@ func cleanCodeSessionTitle(raw string) string {
 // state delta, usage, thinking, errors) and omits Studio-only surfaces
 // (network-denial prompts, tutorial blueprints, app previews) that do not apply
 // when there is no sandbox and no platform.
+// localPlanRuntime restores the authoritative session snapshot before consulting
+// the legacy sidecar. A sidecar failure is reported and repaired on the next turn.
+func (b *localAgentBackend) localPlanRuntime(ctx context.Context, sessionID string, emit func(string, map[string]any)) (*agent.PlanRuntime, error) {
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	path := b.planFilePath(sessionID)
+	mirror := func(s agent.PlanSnapshot) {
+		if path == "" {
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			emit("error", map[string]any{"error": "plan mirror failed (session snapshot saved): " + err.Error()})
+			return
+		}
+		if err := agent.AtomicPlanSnapshotFile(path)(s); err != nil {
+			emit("error", map[string]any{"error": "plan mirror failed (session snapshot saved; retry next turn): " + err.Error()})
+		}
+	}
+	options := agent.PlanRuntimeOptions{Workspace: b.workingDir, CommitSnapshot: func(s agent.PlanSnapshot) error {
+		// Re-fetch by the actual app/user scope rather than a shared agent default.
+		current, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		var value map[string]any
+		if err = json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if err = b.sessionSvc.AppendEvent(ctx, current.Session, &session.Event{ID: fmt.Sprintf("plan-%s-%d", s.PlanID, s.Sequence), Author: "system", Timestamp: time.Now(), Actions: session.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: value}}}); err != nil {
+			return err
+		}
+		mirror(s)
+		if s.Document.Lifecycle != "" {
+			emit("plan_snapshot", map[string]any{"snapshot": s})
+		}
+		return nil
+	}}
+	if value, err := resp.Session.State().Get(agent.PlanSnapshotStateKey); err == nil && value != nil {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		var s agent.PlanSnapshot
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil, err
+		}
+		runtime := agent.NewPlanRuntimeFromSnapshot(s, options)
+		if err := runtime.Bootstrap(); err != nil {
+			return nil, err
+		}
+		mirror(runtime.Snapshot())
+		return runtime, nil
+	}
+	if raw, err := os.ReadFile(path); err == nil {
+		doc, goal, steps, err := agent.ParsePlanDocument(string(raw))
+		if err != nil {
+			return nil, err
+		}
+		runtime := agent.NewPlanRuntime(agent.NewPlanState(goal, doc, steps), options)
+		if err := runtime.Bootstrap(); err != nil {
+			return nil, err
+		}
+		return runtime, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return agent.NewPlanRuntime(nil, options), nil
+}
+
 func (b *localAgentBackend) driveTurn(
 	ctx context.Context,
 	rnr *runner.Runner,
@@ -1970,6 +2076,53 @@ func (b *localAgentBackend) driveTurn(
 	emit func(string, map[string]any),
 	routingLLM *routing.RoutingLLM,
 ) bool {
+	runtime, err := b.localPlanRuntime(ctx, sessionID, emit)
+	if err != nil {
+		emit("error", map[string]any{"error": err.Error()})
+		return false
+	}
+	ctx = agent.WithPlanRuntime(ctx, runtime)
+	// Runtime-bound tools deliberately do not fall back to global callbacks.
+	// Preserve this turn's graph-plan acceptance when creating the initial plan.
+	ctx = tools.WithPlanCallbacks(ctx, tools.PlanCallbacks{Acceptance: func() string {
+		if gp := chatAgent.GetActiveGraphPlan(); gp != nil {
+			return gp.Acceptance()
+		}
+		return ""
+	}})
+	defer chatAgent.BindSessionPlanRuntime(sessionID, runtime)()
+	if po := agent.PromptOverridesFromContext(ctx); po != nil {
+		if po.PlanMode || po.GraphPlanMode {
+			// Request changes returns to planning, not approved execution. The
+			// runtime grants exactly one replacement only for an untouched initial
+			// plan. An ineligible plan stays sealed without blocking research.
+			_ = runtime.AllowInitialPlanReplacement()
+		}
+		if po.PlanRevisionDecision != nil {
+			emit("error", map[string]any{"error": "revision decisions are obsolete; valid Normal-mode revisions apply immediately", "code": agent.PlanRuntimeRevisionObsolete})
+			return false
+		}
+		if po.ApprovedPlanExecution && len(runtime.Snapshot().Steps) > 0 {
+			if err := runtime.SetApproved(); err != nil {
+				emit("error", map[string]any{"error": err.Error()})
+				return false
+			}
+		}
+		// A trusted approval may have just committed a different definition,
+		// or compaction may have moved this turn to a child session. Refresh the
+		// generated context from the effective runtime before model dispatch.
+		if !po.PlanMode && !po.GraphPlanMode && !po.AskMode && po.Bot == nil &&
+			po.ApprovedPlanExecution &&
+			(strings.TrimSpace(po.SessionContext) == "" || isLocalPlanSystemContext(po.SessionContext)) {
+			if plan := runtime.PlanState(); plan != nil {
+				updated := *po
+				updated.ApprovedPlanExecution = true
+				updated.ApprovedPlanCompleted = plan.IsFullyAccepted()
+				updated.SessionContext = agent.EscapeCurlyPlaceholders(localPlanSystemContext(runtime.Snapshot(), b.planFilePath(sessionID), updated.ApprovedPlanCompleted))
+				ctx = agent.WithPromptOverrides(ctx, &updated)
+			}
+		}
+	}
 	seenPartialText := false
 	sawRealUsage := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
@@ -2051,6 +2204,10 @@ func (b *localAgentBackend) driveTurn(
 				})
 			}
 			if part.FunctionResponse != nil {
+				if part.FunctionResponse.Name == "update_plan" || part.FunctionResponse.Name == "announce_completion" {
+					s := runtime.Snapshot()
+					emit("plan", map[string]any{"snapshot": s, "text": agent.RenderPlanFromInfoWithDoc(s.Goal, s.Document, s.Steps)})
+				}
 				if part.FunctionResponse.Name == "announce_plan" {
 					status, _ := part.FunctionResponse.Response["status"].(string)
 					if status != "ok" {
@@ -2065,8 +2222,8 @@ func (b *localAgentBackend) driveTurn(
 					}
 					// Emit the document and pending approval lifecycle atomically.
 					// This prevents a prompt from ever existing without its plan.
-					planPayload := map[string]any{"status": string(events.PlanPending)}
-					if plan := chatAgent.GetActivePlan(); plan != nil {
+					planPayload := map[string]any{"status": string(events.PlanPending), "snapshot": runtime.Snapshot()}
+					if plan := runtime.PlanState(); plan != nil {
 						goal, steps := plan.SnapshotInfo()
 						doc := plan.SnapshotDoc()
 						planPayload["text"] = agent.RenderPlanFromInfoWithDoc(goal, doc, steps)
@@ -2977,6 +3134,16 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 					Result:   part.FunctionResponse.Response,
 				})
 			}
+		}
+	}
+	// Session state survives compaction and takes precedence over reconstructed
+	// announce_plan text and the best-effort PLAN.md projection.
+	if value, err := resp.Session.State().Get(agent.PlanSnapshotStateKey); err == nil && value != nil {
+		raw, _ := json.Marshal(value)
+		var s agent.PlanSnapshot
+		if json.Unmarshal(raw, &s) == nil && s.PlanID != "" {
+			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
+			out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &ev})
 		}
 	}
 	return out, nil

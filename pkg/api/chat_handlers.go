@@ -45,18 +45,20 @@ type ChatAttachment struct {
 
 // StudioChatRequest is the request body for POST /api/studio/chat.
 type StudioChatRequest struct {
-	SessionID        string           `json:"sessionId,omitempty"`
-	Message          string           `json:"message"`
-	Attachments      []ChatAttachment `json:"attachments,omitempty"` // file attachments (base64)
-	AutoApprove      bool             `json:"autoApprove,omitempty"`
-	Debug            bool             `json:"debug,omitempty"`            // platform superadmin-only diagnostics
-	SystemContext    string           `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
-	PlanMode         bool             `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
-	PinnedToolGroups []string         `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
-	Provider         string           `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
-	Model            string           `json:"model,omitempty"`            // per-request model override (pre-chat picker)
-	MemoryScope      string           `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
-	AppName          string           `json:"appName,omitempty"`          // optional app name for session categorization (e.g. "astonish-extension")
+	PlanRevisionDecision  *agent.TrustedPlanRevisionDecision `json:"planRevisionDecision,omitempty"`
+	ApprovedPlanExecution bool                               `json:"approvedPlanExecution,omitempty"`
+	SessionID             string                             `json:"sessionId,omitempty"`
+	Message               string                             `json:"message"`
+	Attachments           []ChatAttachment                   `json:"attachments,omitempty"` // file attachments (base64)
+	AutoApprove           bool                               `json:"autoApprove,omitempty"`
+	Debug                 bool                               `json:"debug,omitempty"`            // platform superadmin-only diagnostics
+	SystemContext         string                             `json:"systemContext,omitempty"`    // per-turn system instructions (not shown to user)
+	PlanMode              bool                               `json:"planMode,omitempty"`         // per-turn plan-mode gate: refuse mutating tools + delegate_tasks
+	PinnedToolGroups      []string                           `json:"pinnedToolGroups,omitempty"` // tool groups to always inject (wizard sessions)
+	Provider              string                             `json:"provider,omitempty"`         // per-request provider override (pre-chat picker)
+	Model                 string                             `json:"model,omitempty"`            // per-request model override (pre-chat picker)
+	MemoryScope           string                             `json:"memoryScope,omitempty"`      // per-session memory scope: "team" (default) or "personal"
+	AppName               string                             `json:"appName,omitempty"`          // optional app name for session categorization (e.g. "astonish-extension")
 }
 
 // StudioSessionResponse is a single session in list responses.
@@ -139,8 +141,9 @@ type StudioMessage struct {
 	Status string            `json:"status,omitempty"` // complete, partial, error
 
 	// plan fields — populated for announce_plan history reconstruction
-	Goal  string        `json:"goal,omitempty"`  // plan title
-	Steps []PlanStepMsg `json:"steps,omitempty"` // plan steps with status
+	Snapshot *agent.PlanSnapshot `json:"snapshot,omitempty"`
+	Goal     string              `json:"goal,omitempty"`  // plan title
+	Steps    []PlanStepMsg       `json:"steps,omitempty"` // plan steps with status
 
 	// distill_preview fields — populated for flow distillation review
 	YAML        string   `json:"yaml,omitempty"`        // generated flow YAML
@@ -690,6 +693,11 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validatePlanChatRequest(req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Resolve the effective app name: use the caller-provided app name if present,
 	// otherwise default to the Studio chat app name. This allows the Chrome extension
 	// to categorize its sessions separately from Studio sessions.
@@ -753,6 +761,14 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	comp := cm.components
 	chatAgent := comp.ChatAgent
 
+	// Serialize only admission, not the lifetime of the SSE viewer. Ordinary
+	// non-plan sessions retain the existing replacement/stop behavior.
+	unlockAdmission := func() {}
+	if req.SessionID != "" {
+		unlockAdmission = lockPlanSession(principal, effectiveApp, req.SessionID)
+	}
+	defer func() { unlockAdmission() }()
+
 	// Resolve session service per-request:
 	// Platform mode: regular chat uses personal sessions (private-first);
 	// fleet sub-sessions use team sessions (shared).
@@ -769,6 +785,19 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sessionService = comp.SessionService
 		titleSetter = cm.fileStore() // may be nil in edge cases
+	}
+
+	if req.SessionID != "" {
+		if active := getChatRunnerRegistry().Get(req.SessionID); active != nil && !active.IsDone() {
+			hasPlan := false
+			if runtime, bound := agent.PlanRuntimeFromContext(active.ctx); bound && runtime != nil {
+				hasPlan = len(runtime.Snapshot().Steps) > 0
+			}
+			if hasPlan || req.PlanMode || req.PlanRevisionDecision != nil || req.ApprovedPlanExecution {
+				respondError(w, http.StatusConflict, "session is running")
+				return
+			}
+		}
 	}
 
 	// Handle slash commands server-side (these are lightweight, no background runner needed)
@@ -905,7 +934,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Intercept tutorial blueprint approval / cancel / revise intents.
 	// Approve emits the approved card then rewrites msg so ChatRunner continues
 	// refine → validate_drill → save_drill in the same SSE stream.
-	if req.SessionID != "" && chatAgent.HasPendingTutorialBlueprint(req.SessionID) {
+	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasPendingTutorialBlueprint(req.SessionID) {
 		handled, rewrite := handleTutorialBlueprintIntent(r, w, flusher, chatAgent, sessionService, userID, req.SessionID, msg)
 		if handled {
 			return
@@ -916,7 +945,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Intercept messages for pending distill review (interactive modification loop).
-	if req.SessionID != "" && chatAgent.HasPendingDistillReview(req.SessionID) {
+	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasPendingDistillReview(req.SessionID) {
 		intent := chatAgent.ClassifyDistillReviewIntent(r.Context(), msg)
 
 		switch intent {
@@ -1056,7 +1085,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Intercept messages for active app refinement (iterative visual app loop).
 	// Unlike distill (which fully intercepts), "refine" falls through to normal
 	// agent flow with context injection; only "save" is handled as early-return.
-	if req.SessionID != "" && chatAgent.HasActiveApp(req.SessionID) {
+	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasActiveApp(req.SessionID) {
 		llmFunc := makeLLMFuncFromModel(comp.LLM)
 		appIntent := chatAgent.ClassifyAppIntent(r.Context(), msg, llmFunc)
 
@@ -1262,6 +1291,33 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectGatewayConfig(openshell.GRPCClientConfig{Addr: appCfg.Sandbox.OpenShell.GatewayAddr, TLS: appCfg.Sandbox.OpenShell.OpenShellGatewayTLS()})
 	}
 
+	planRuntime, planErr := newSessionPlanRuntime(runner.ctx, sessionService, userID, effectiveApp, sessionID, scopedPlanVerifier(runner.ctx, comp.SandboxPool, sessionID), runner.emitEvent)
+	if planErr != nil {
+		SendErrorSSE(w, flusher, planErr.Error())
+		return
+	}
+	if req.PlanMode {
+		// A trusted return to Plan permits one corrected initial announcement.
+		// Ineligible plans stay sealed without blocking read-only research.
+		_ = planRuntime.AllowInitialPlanReplacement()
+	}
+	runner.ctx = agent.WithPlanRuntime(runner.ctx, planRuntime)
+	if d := req.PlanRevisionDecision; d != nil {
+		if _, err := planRuntime.ResolveRevision(d.PlanID, d.ProposalID, d.BaseRevision, d.Decision); err != nil {
+			SendSSE(w, flusher, "error", map[string]any{"error": err.Error(), "code": agent.PlanRuntimeErrorCode(err)})
+			SendSSE(w, flusher, "done", map[string]any{"done": true})
+			return
+		}
+	}
+	if req.ApprovedPlanExecution {
+		planErr = approveInitialSessionPlan(planRuntime)
+		if planErr != nil {
+			SendSSE(w, flusher, "error", map[string]any{"error": planErr.Error(), "code": agent.PlanRuntimeErrorCode(planErr)})
+			SendSSE(w, flusher, "done", map[string]any{"done": true})
+			return
+		}
+	}
+
 	// Inject RunJobFunc so schedule_job test execution works in platform mode.
 	// Uses the same credential injection as cron for the job's scope so
 	// test_first cannot succeed with personal creds then fail on team-only cron.
@@ -1349,6 +1405,8 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	registry := getChatRunnerRegistry()
 	registry.Register(sessionID, runner)
+	unlockAdmission()
+	unlockAdmission = func() {}
 
 	// Also register the runner's cancel in the ChatManager so the stop endpoint
 	// (POST /api/studio/sessions/{id}/stop) can cancel the background runner.

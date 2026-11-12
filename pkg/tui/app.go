@@ -877,6 +877,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// backend keeps working. Coalescing bounds repaints to one per batch.
 		// The drain is bounded and non-blocking so key messages (Esc/cancel) are
 		// never starved: we take only events already buffered, then yield.
+		onlySnapshots := events.Event(msg).Kind == events.KindPlanSnapshot
+		previousItems, previousOffset := len(m.tr.Items), m.vp.YOffset()
+		refresh := func() {
+			m.refreshViewport()
+			if onlySnapshots && len(m.tr.Items) == previousItems && !m.tr.Awaiting {
+				m.vp.SetYOffset(previousOffset)
+			}
+		}
 		m.applyEvent(events.Event(msg))
 		drained := 0
 		for m.eventCh != nil && drained < maxCoalescedEvents {
@@ -886,9 +894,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Channel closed mid-drain: the turn finished. Finalize now.
 					m.eventCh = nil
 					cmd := m.finishTurn()
-					m.refreshViewport()
+					refresh()
 					return m, cmd
 				}
+				onlySnapshots = onlySnapshots && ev.Kind == events.KindPlanSnapshot
 				m.applyEvent(ev)
 				drained++
 			default:
@@ -902,7 +911,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tr.Awaiting {
 			m.layout()
 		}
-		m.refreshViewport()
+		refresh()
 		if m.eventCh != nil {
 			cmds = append(cmds, waitEvent(m.eventCh))
 		}

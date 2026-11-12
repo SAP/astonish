@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -674,6 +675,11 @@ func (b *platformBackend) LoadDelegationDetail(ctx context.Context, task events.
 func studioMessagesToHistory(msgs []client.StudioMessage) []backend.HistoryEntry {
 	out := make([]backend.HistoryEntry, 0, len(msgs))
 	for mi, m := range msgs {
+		if m.Snapshot != nil {
+			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: m.Snapshot}
+			out = append(out, backend.HistoryEntry{Kind: "delegation", Delegation: &ev})
+			continue
+		}
 		if m.Type == "subtask_execution" {
 			batch := m.BatchID
 			for _, row := range m.Events {
@@ -781,13 +787,14 @@ func (b *platformBackend) RunTurn(ctx context.Context, message string, opts back
 	b.mu.Unlock()
 
 	req := &client.ChatRequest{
-		SessionID:     sessionID,
-		Message:       message,
-		AutoApprove:   autoApprove,
-		Debug:         debug,
-		SystemContext: opts.SystemContext,
-		PlanMode:      opts.PlanMode,
-		Attachments:   chatAttachmentsFromBackend(opts.Attachments),
+		SessionID:             sessionID,
+		Message:               message,
+		AutoApprove:           autoApprove,
+		Debug:                 debug,
+		SystemContext:         opts.SystemContext,
+		PlanMode:              opts.PlanMode,
+		ApprovedPlanExecution: opts.ApprovedPlanExecution,
+		Attachments:           chatAttachmentsFromBackend(opts.Attachments),
 	}
 	// Apply pre-session model pin on the first turn of a new session.
 	if sessionID == "" && (pendingProvider != "" || pendingModel != "") {
@@ -1040,7 +1047,26 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			}
 			return []events.Event{events.NewStatus(text)}
 		}
+	case "plan_snapshot":
+		var p struct {
+			Snapshot *agent.PlanSnapshot `json:"snapshot"`
+		}
+		if json.Unmarshal(data, &p) == nil && p.Snapshot != nil {
+			return []events.Event{{Kind: events.KindPlanSnapshot, PlanSnapshot: p.Snapshot}}
+		}
+		var s agent.PlanSnapshot
+		if json.Unmarshal(data, &s) == nil && s.PlanID != "" {
+			return []events.Event{{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}}
+		}
 	case "delegation", "subtask_progress":
+		var snapshot struct {
+			EventType string              `json:"event_type"`
+			Type      string              `json:"type"`
+			Snapshot  *agent.PlanSnapshot `json:"snapshot"`
+		}
+		if json.Unmarshal(data, &snapshot) == nil && (snapshot.EventType == "plan_snapshot" || snapshot.Type == "plan_snapshot") && snapshot.Snapshot != nil {
+			return []events.Event{{Kind: events.KindPlanSnapshot, PlanSnapshot: snapshot.Snapshot}}
+		}
 		var p struct {
 			EventType      string                  `json:"event_type"`
 			Type           string                  `json:"type"`
@@ -1260,6 +1286,12 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			)}
 		}
 	case "plan":
+		var snapshot struct {
+			Snapshot *agent.PlanSnapshot `json:"snapshot"`
+		}
+		if json.Unmarshal(data, &snapshot) == nil && snapshot.Snapshot != nil {
+			return []events.Event{{Kind: events.KindPlanSnapshot, PlanSnapshot: snapshot.Snapshot}}
+		}
 		var payload struct {
 			Text             string            `json:"text"`
 			Status           events.PlanStatus `json:"status"`

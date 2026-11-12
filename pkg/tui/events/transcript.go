@@ -2,6 +2,7 @@ package events
 
 import (
 	"fmt"
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/store"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,7 @@ type ToolStep struct {
 
 // Item is one visual block in the transcript.
 type Item struct {
+	PlanSnapshot   *agent.PlanSnapshot
 	InvocationID   string // canonical publication boundary, when present
 	EventID        string // stable persisted publication row
 	BotOperationID string
@@ -197,6 +199,59 @@ type Transcript struct {
 	delegationItemIdx int
 }
 
+// upsertPlanSnapshot updates a durable plan in place. A snapshot never creates
+// another initial approval, and old/replayed sequences cannot roll state back.
+func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
+	if snapshot == nil || snapshot.PlanID == "" {
+		return
+	}
+	s := snapshot.Clone()
+	s.Document.PlanID, s.Document.Revision, s.Document.Sequence = s.PlanID, s.Revision, s.Sequence
+	s.Document.PendingRevision = s.PendingRevision.Clone()
+	idx := -1
+	for i := range t.Items {
+		it := &t.Items[i]
+		if it.Kind != ItemPlan {
+			continue
+		}
+		if it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == s.PlanID {
+			if it.PlanSnapshot.Sequence >= s.Sequence {
+				return
+			}
+			idx = i
+			break
+		}
+		if it.PlanSnapshot == nil {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		status := PlanApproved
+		if s.Document.Lifecycle == "" && s.PendingRevision == nil {
+			status = PlanPending
+		}
+		t.Items = append(t.Items, Item{Kind: ItemPlan, PlanStatus: status, ApprovalKind: "plan"})
+		idx = len(t.Items) - 1
+		t.copyLastRouting(&t.Items[idx])
+	}
+	it := &t.Items[idx]
+	it.PlanSnapshot = &s
+	it.Content = agent.NewPlanState(s.Goal, s.Document, s.Steps).RenderMarkdown()
+	it.PlanContext, it.PlanWhatNotToDo, it.PlanVerification = s.Document.Context, s.Document.WhatNotToDo, s.Document.Verification
+	if it.PlanStatus == PlanPending && s.Document.Lifecycle == "" && s.PendingRevision == nil && !t.Awaiting {
+		it.ApprovalKind, it.Options = "plan", PlanApprovalOptions()
+		t.Awaiting, t.ApprovalIdx, t.ApprovalCursor = true, idx, 0
+	}
+	if s.Document.Lifecycle != "" || s.PendingRevision != nil {
+		it.PlanStatus = PlanApproved
+		it.ApprovalKind, it.Options = "plan", nil
+		if t.ApprovalIdx == idx {
+			t.ClearApproval()
+		}
+	}
+
+}
+
 // NewTranscript returns an empty transcript ready for reduction.
 func NewTranscript() *Transcript {
 	return &Transcript{
@@ -260,7 +315,12 @@ func (t *Transcript) Apply(ev Event) {
 		if t.Streaming && !t.hasRunningTools() {
 			t.Status = "Thinking…"
 		}
+	case KindPlanSnapshot:
+		t.upsertPlanSnapshot(ev.PlanSnapshot)
 	case KindPlan:
+		if len(ev.Options) == 0 {
+			ev.Options = PlanApprovalOptions()
+		}
 		status := ev.PlanStatus
 		if status == "" {
 			status = PlanPending
@@ -288,6 +348,9 @@ func (t *Transcript) Apply(ev Event) {
 		// Legacy/platform plan approval events are attached to the latest plan
 		// item instead of creating a detached approval item.
 		if ev.ApprovalKind == "plan" {
+			if len(ev.Options) == 0 {
+				ev.Options = PlanApprovalOptions()
+			}
 			for i := len(t.Items) - 1; i >= 0; i-- {
 				if t.Items[i].Kind != ItemPlan {
 					continue

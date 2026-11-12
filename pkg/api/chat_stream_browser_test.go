@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
@@ -231,6 +233,306 @@ func TestChatGenerationProgressBrowser(t *testing.T) {
 	page.MustWait(`() => !document.querySelector('button[title="Stop"]')`)
 	assertComplete()
 	t.Logf("PASS: real browser send → held thinking → held tool arguments → held partial text → one tool call/result → unduplicated final text → persisted reload; browser=%s SPA=%s", bin, dist)
+}
+
+// planRevisionBrowserLLM can hold a model response before its real plan tool
+// call. This leaves a genuine runner/SSE connection to reconnect to; it never
+// manufactures plan events or changes browser fetch/React state.
+type planRevisionBrowserLLM struct {
+	script        *MockLLM
+	mu            sync.Mutex
+	remaining     int
+	held, release chan struct{}
+}
+
+func (m *planRevisionBrowserLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.mu.Lock()
+		var held, release chan struct{}
+		if m.held != nil {
+			if m.remaining == 0 {
+				held, release = m.held, m.release
+				m.held = nil
+			} else {
+				m.remaining--
+			}
+		}
+		m.mu.Unlock()
+		if held != nil {
+			close(held)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+				return
+			}
+		}
+		for response, err := range m.script.GenerateContent(ctx, req, stream) {
+			if !yield(response, err) {
+				return
+			}
+		}
+	}
+}
+
+// TestPlanRevisionBrowserAcceptance runs the built Studio SPA in isolated
+// Chromium against loopback HTTP, SQLite and the real announce_plan/update_plan
+// tools. Only the provider and sandbox transport are deterministic fixtures;
+// the transport runs actual verification commands in a session-specific directory.
+// Build the SPA first, then run:
+// ASTONISH_STREAM_BROWSER_ACCEPTANCE=1 go test ./pkg/api -run '^TestPlanRevisionBrowserAcceptance$' -count=1 -timeout=5m -v
+func TestPlanRevisionBrowserAcceptance(t *testing.T) {
+	if os.Getenv("ASTONISH_STREAM_BROWSER_ACCEPTANCE") != "1" {
+		t.Skip("explicit browser acceptance: set ASTONISH_STREAM_BROWSER_ACCEPTANCE=1")
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	data, err := os.ReadFile("../../web/package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	dist, err := filepath.Abs(filepath.Join("../../web/dist", pkg.Version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dist, "index.html")); err != nil {
+		t.Fatalf("build Studio SPA first: %v", err)
+	}
+	bin := os.Getenv("ASTONISH_STREAM_BROWSER_PATH")
+	if bin == "" {
+		var found bool
+		bin, found = launcher.LookPath()
+		if !found {
+			t.Fatal("browser prerequisite missing; set ASTONISH_STREAM_BROWSER_PATH")
+		}
+	}
+	announce, err := tools.NewAnnouncePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, err := tools.NewUpdatePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := NewMockLLM()
+	provider := &planRevisionBrowserLLM{script: script}
+	env := setupMemoryHTTPAcceptance(t, &MockLLM{funcLLM: provider}, []tool.Tool{announce, update})
+	pool := &planAcceptancePool{root: t.TempDir()}
+	install := func() {
+		if err := GetChatManager().ensureReady(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		GetChatManager().components.SandboxPool = pool
+		env.ChatAgent.PlanVerify = func(string) (int, string, error) {
+			t.Error("browser verification escaped the session sandbox transport")
+			return -1, "", fmt.Errorf("host verification forbidden")
+		}
+	}
+	install()
+	queue := func(turns ...*MockTurn) {
+		script.mu.Lock()
+		script.turns, script.turnIndex = turns, 0
+		script.mu.Unlock()
+	}
+	turn := func(req StudioChatRequest) []ChatEvent {
+		return consumeMemoryAcceptanceSSE(t, env.Request(t, http.MethodPost, "/api/studio/chat", req, memoryIdentityAdmin))
+	}
+	steps := []agent.PlanStepDefinition{
+		{Name: "foundation", Description: "Verified foundation", Details: "Keep the completed foundation", Summary: "Foundation works", Outcome: "Foundation marker exists", Files: []agent.PlanFileChange{{Path: "pkg/lib/foundation.go", Kind: "modify"}}, Verify: "printf FOUNDATION_EVIDENCE > marker; printf FOUNDATION_EVIDENCE", VerifyKind: "unit"},
+		{Name: "delivery", Description: "Delivery phase", Details: "Original implementation", Summary: "Delivery works", Outcome: "Original delivery outcome", Files: []agent.PlanFileChange{{Path: "pkg/lib/delivery.go", Kind: "modify"}}, Verify: "printf DELIVERY_EVIDENCE", VerifyKind: "unit"},
+	}
+	// Set up via real HTTP rather than injecting a snapshot into the SPA.
+	queue(ToolCallTurn("announce_plan", map[string]any{"goal": "Hello", "context": "Preserve verified work while refining delivery", "what_not_to_do": "Do not change the foundation", "verification": "Foundation marker remains", "steps": steps}), TextTurn("Review the revision acceptance plan."))
+	initial := turn(StudioChatRequest{Message: "Plan revision acceptance", PlanMode: true, AutoApprove: true})
+	sid := toString(assertHasEvent(t, initial, "session").Data["sessionId"])
+	assertEventData(t, assertHasEvent(t, initial, "subtask_progress"), "event_type", "plan_snapshot")
+	snapshot := func() agent.PlanSnapshot {
+		for _, msg := range env.Detail(t, sid).Messages {
+			if msg.Snapshot != nil {
+				return msg.Snapshot.Clone()
+			}
+		}
+		t.Fatal("durable plan snapshot missing")
+		return agent.PlanSnapshot{}
+	}
+	page := newStreamBrowserPage(t, env, bin, dist)
+	page.MustNavigate(env.URL + "/#/chat/" + sid)
+	visible := func(text string) {
+		t.Helper()
+		page.MustWait(`text => document.body.innerText.includes(text)`, text)
+	}
+	idle := func() {
+		t.Helper()
+		page.MustWait(`() => !document.querySelector('button[title="Stop"]') && !!document.querySelector('[data-testid="chat-input"]')`)
+	}
+	visible("Hello")
+	queue(TextTurn("Initial plan approved."))
+	page.MustElementR("button", "^(Approve( plan| Plan)?|Start execution|Execute plan|Execute Plan)$").MustClick()
+	visible("Initial plan approved.")
+	idle()
+	if snapshot().Document.Lifecycle != agent.PlanLifecycleApproved {
+		t.Fatal("initial UI approval did not persist")
+	}
+	queue(ToolCallTurn("update_plan", map[string]any{"step": "foundation", "status": "complete"}), TextTurn("Foundation verified."))
+	turn(StudioChatRequest{SessionID: sid, Message: "Verify foundation", AutoApprove: true})
+	before := snapshot()
+	if before.Steps[0].Status != "complete" || !strings.Contains(before.Steps[0].Evidence, "FOUNDATION_EVIDENCE") {
+		t.Fatalf("missing real evidence: %+v", before)
+	}
+	if raw, err := os.ReadFile(filepath.Join(pool.root, sid, "marker")); err != nil || string(raw) != "FOUNDATION_EVIDENCE" {
+		t.Fatalf("verification marker=%q err=%v", raw, err)
+	}
+	page.MustReload()
+	visible("Hello")
+	idle()
+	// Normal mode applies every valid definition change directly, including the
+	// former scope fields and legacy requires_approval=true. No decision is sent.
+	noReview := func() {
+		t.Helper()
+		if page.MustEval(`() => !!document.querySelector('[data-testid="plan-revision-review"]') || [...document.querySelectorAll('button')].some(e => /^(Approve revision|Reject revision|Request changes)$/.test(e.textContent.trim()))`).Bool() {
+			t.Fatal("Normal revision exposed a decision surface")
+		}
+		if n := page.MustEval(`() => [...document.querySelectorAll('span')].filter(e => e.textContent.trim() === 'Execution Plan').length`).Int(); n != 1 {
+			t.Fatalf("plan card count=%d, want 1", n)
+		}
+	}
+	hold := func() (<-chan struct{}, func()) {
+		held, gate := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		release := func() { once.Do(func() { close(gate) }) }
+		t.Cleanup(release)
+		provider.mu.Lock()
+		provider.remaining, provider.held, provider.release = 0, held, gate
+		provider.mu.Unlock()
+		return held, release
+	}
+	waitHeld := func(held <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-held:
+		case <-time.After(20 * time.Second):
+			t.Fatal("provider did not reach revision gate")
+		}
+	}
+	sendRevision := func(r agent.PlanRevisionRequest, final string) {
+		t.Helper()
+		queue(ToolCallTurn("update_plan", map[string]any{"action": "revise", "revision": r}), TextTurn(final))
+		page.MustElement(`[data-testid="chat-input"]`).MustInput(r.Reason).MustType(input.Enter)
+	}
+	r := agent.PlanRevisionRequest{PlanID: before.PlanID, BaseRevision: before.Revision, Reason: "Correct delivery implementation", Steps: before.Definition().Steps}
+	r.Steps[1].Details = "Corrected implementation"
+	held, release := hold()
+	sendRevision(r, "Normal revision recorded.")
+	waitHeld(held)
+	page.MustWait(`() => !!document.querySelector('button[title="Stop"]')`)
+	// Observe the real DOM while the provider is held, not mocked React state.
+	// Scroll away from the stream and focus the composer before the snapshot.
+	page.MustEval(`async () => {
+		window.revisionCard = [...document.querySelectorAll('span')].find(e => e.textContent.trim() === 'Execution Plan');
+		window.revisionScroll = document.querySelector('[data-testid="message-area"]');
+		if (!window.revisionScroll || window.revisionScroll.scrollHeight <= window.revisionScroll.clientHeight + 80) throw new Error('no scrollable transcript');
+		document.querySelector('[data-testid="chat-input"]').focus({preventScroll:true});
+		window.revisionFocus = document.activeElement;
+		window.revisionScroll.scrollTop = 0;
+		window.revisionScroll.dispatchEvent(new Event('scroll'));
+		await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+		window.revisionScrollTop = window.revisionScroll.scrollTop;
+	}`)
+	release()
+	visible("Normal revision recorded.")
+	idle()
+	visible("Corrected implementation")
+	noReview()
+	if !page.MustEval(`() => window.revisionCard.isConnected && document.activeElement === window.revisionFocus && Math.abs(window.revisionScroll.scrollTop-window.revisionScrollTop) < 2`).Bool() {
+		t.Fatal("revision replaced the plan card or stole composer focus/transcript scroll")
+	}
+	normal := snapshot()
+	if normal.Revision != 2 || normal.PendingRevision != nil || normal.Steps[1].Details != "Corrected implementation" || !reflect.DeepEqual(before.Steps[0], normal.Steps[0]) {
+		t.Fatalf("direct implementation revision lost unaffected evidence: %+v", normal)
+	}
+
+	goal := "Hello World"
+	document := normal.Document.Definition()
+	document.Context = "Render Hello World with the expanded delivery contract"
+	r = agent.PlanRevisionRequest{PlanID: normal.PlanID, BaseRevision: normal.Revision, Reason: "Change Hello to Hello World, outcome, files and document", Goal: &goal, Document: &document, RequiresApproval: true, Steps: normal.Definition().Steps}
+	r.Steps[1].Outcome = "Hello World delivery outcome"
+	r.Steps[1].Files = append(r.Steps[1].Files, agent.PlanFileChange{Path: "pkg/lib/world.go", Kind: "new"})
+	held, release = hold()
+	sendRevision(r, "Hello World revision applied immediately.")
+	waitHeld(held)
+	// Close the original SSE connection and attach to the active real runner.
+	page.MustNavigate("about:blank")
+	page.MustNavigate(env.URL + "/#/chat/" + sid)
+	page.MustWait(`() => !!document.querySelector('button[title="Stop"]')`)
+	release()
+	visible("Hello World revision applied immediately.")
+	idle()
+	visible("Render Hello World with the expanded delivery contract")
+	visible("pkg/lib/world.go")
+	noReview()
+	accepted := snapshot()
+	if accepted.PlanID != before.PlanID || accepted.Revision != 3 || accepted.Goal != goal || accepted.PendingRevision != nil || !reflect.DeepEqual(accepted.Document.Definition(), document) || !reflect.DeepEqual(accepted.Definition().Steps, r.Steps) {
+		t.Fatalf("scope/document revision did not apply directly: %+v", accepted)
+	}
+	// Goal/document changes conservatively invalidate all prior phase evidence.
+	if accepted.Steps[0].Status != "pending" || accepted.Steps[0].Evidence != "" {
+		t.Fatal("goal/document revision retained obsolete completion evidence")
+	}
+	queue(TextTurn("Ordinary next turn completed."))
+	page.MustElement(`[data-testid="chat-input"]`).MustInput("Continue ordinary chat without a revision decision").MustType(input.Enter)
+	visible("Ordinary next turn completed.")
+	idle()
+	noReview()
+	if !reflect.DeepEqual(accepted, snapshot()) {
+		t.Fatal("ordinary turn changed plan authority")
+	}
+	page.MustNavigate("about:blank")
+	env.Reopen(t)
+	install()
+	page.MustNavigate(env.URL + "/#/chat/" + sid)
+	visible("Render Hello World with the expanded delivery contract")
+	visible("pkg/lib/world.go")
+	idle()
+	noReview()
+	if !reflect.DeepEqual(accepted, snapshot()) {
+		t.Fatal("direct revision lost after SQLite reopen")
+	}
+
+	// Seed obsolete on-disk data directly: current tools never create proposals.
+	// Restore must neither await a decision nor silently apply its candidate.
+	page.MustNavigate("about:blank")
+	legacy := accepted.Clone()
+	legacy.Sequence++
+	legacy.PendingRevision = &agent.PlanRevisionProposal{ID: "legacy-browser-proposal", BaseRevision: legacy.Revision, Reason: "Obsolete review", Candidate: legacy.Definition()}
+	legacy.PendingRevision.Candidate.Goal = "OBSOLETE CANDIDATE MUST NOT APPLY"
+	svc := env.Services.PersonalSessions
+	stored, err := svc.Get(context.Background(), &session.GetRequest{AppName: studioChatAppName, UserID: env.UserID, SessionID: sid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AppendEvent(context.Background(), stored.Session, &session.Event{ID: "legacy-browser-seed", Author: "system", Timestamp: time.Now(), Actions: session.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: legacy}}}); err != nil {
+		t.Fatal(err)
+	}
+	env.Reopen(t)
+	install()
+	page.MustNavigate(env.URL + "/#/chat/" + sid)
+	visible("Render Hello World with the expanded delivery contract")
+	idle()
+	noReview()
+	queue(TextTurn("Legacy session continues normally."))
+	page.MustElement(`[data-testid="chat-input"]`).MustInput("Continue the restored session").MustType(input.Enter)
+	visible("Legacy session continues normally.")
+	idle()
+	noReview()
+	restored := snapshot()
+	if restored.PendingRevision != nil || restored.Revision != accepted.Revision || !reflect.DeepEqual(restored.Definition(), accepted.Definition()) || !reflect.DeepEqual(restored.Steps, accepted.Steps) {
+		t.Fatalf("legacy proposal blocked restore or changed accepted authority: %+v", restored)
+	}
+	t.Logf("PASS: built SPA + loopback HTTP + SQLite + real plan tools/verifier → initial approval → direct Normal revision, stable card/focus/scroll and preserved unaffected evidence → Hello to Hello World goal/outcome/files/document with ignored requires_approval → active SSE reconnect → ordinary next turn → SQLite reopen → obsolete pending proposal retired without applying; browser=%s SPA=%s", bin, dist)
 }
 
 // newStreamBrowserPage serves the built SPA and real chat handlers. Only unrelated

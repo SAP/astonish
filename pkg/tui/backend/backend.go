@@ -6,6 +6,7 @@ package backend
 import (
 	"context"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
@@ -114,6 +115,7 @@ type ArtifactContent struct {
 
 // TurnOptions configures per-turn behavior for the platform request.
 type TurnOptions struct {
+	PlanRevisionDecision *agent.TrustedPlanRevisionDecision
 	// SystemContext is a per-turn hidden instruction sent to Studio chat. It is
 	// not persisted as a visible user message.
 	SystemContext string

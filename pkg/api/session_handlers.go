@@ -306,7 +306,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			redactor = credentials.NewRedactor()
 			redactor.HydrateFromStore(merged)
 		}
-		messages := eventsToMessages(getResp.Session.Events(), redactor)
+		messages := overlaySessionPlan(eventsToMessages(getResp.Session.Events(), redactor), getResp.Session, redactor)
 		artifacts := collectArtifacts(getResp.Session.Events())
 		// Project persisted astonish-report fences onto matching artifacts so
 		// the frontend can decide which markdown files to embed inline.
@@ -399,7 +399,7 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 	if cm.components != nil && cm.components.ChatAgent != nil {
 		redactor = cm.components.ChatAgent.Redactor
 	}
-	messages := eventsToMessages(getResp.Session.Events(), redactor)
+	messages := overlaySessionPlan(eventsToMessages(getResp.Session.Events(), redactor), getResp.Session, redactor)
 
 	// Collect file artifacts from write_file/edit_file tool calls
 	artifacts := collectArtifacts(getResp.Session.Events())

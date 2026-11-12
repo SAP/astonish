@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -156,7 +157,7 @@ func RenderPlanFromInfoWithDoc(goal string, doc PlanDocumentInfo, steps []PlanSt
 			verifyKind:    s.VerifyKind,
 			evidence:      s.Evidence,
 			parallelGroup: s.ParallelGroup,
-			status:        "pending",
+			status:        s.Status,
 		}
 	}
 	return renderPlanMarkdownWithDoc(goal, doc, internal)
@@ -197,6 +198,17 @@ func downgradeHeadings(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// planDocumentMetadata deliberately excludes narrative and runtime steps. Its
+// proposal contains definition-only values, so metadata cannot recurse.
+type planDocumentMetadata struct {
+	PlanID          string                `json:"plan_id,omitempty"`
+	Revision        int64                 `json:"revision,omitempty"`
+	Sequence        int64                 `json:"sequence,omitempty"`
+	PendingRevision *PlanRevisionProposal `json:"pending_revision,omitempty"`
+	RevisionNote    string                `json:"revision_note,omitempty"`
+	GraphAcceptance string                `json:"graph_acceptance,omitempty"`
+}
+
 // renderPlanMarkdownWithDoc serializes a plan to Markdown, optionally including
 // document-level narrative sections (Context, WhatNotToDo, Verification) and
 // parallel-group headers for phase grouping.
@@ -207,6 +219,21 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 		sb.WriteString(fmt.Sprintf("**Goal:** %s\n\n", goal))
 	}
 	sb.WriteString(fmt.Sprintf("_Last updated: %s_\n\n", planClock().UTC().Format(time.RFC3339)))
+
+	if doc.PlanID != "" || doc.Revision != 0 || doc.Sequence != 0 || doc.PendingRevision != nil || doc.RevisionNote != "" || doc.GraphAcceptance != "" {
+		metadata := planDocumentMetadata{doc.PlanID, doc.Revision, doc.Sequence, doc.PendingRevision, doc.RevisionNote, doc.GraphAcceptance}
+		encoded, _ := json.MarshalIndent(metadata, "", "  ") // only JSON value types
+		sb.WriteString("## Plan Metadata\n\n```json\n" + string(encoded) + "\n```\n\n")
+		if doc.RevisionNote != "" || doc.PendingRevision != nil {
+			sb.WriteString("## Revision\n\n")
+			if doc.RevisionNote != "" {
+				sb.WriteString(downgradeHeadings(doc.RevisionNote) + "\n\n")
+			}
+			if p := doc.PendingRevision; p != nil {
+				sb.WriteString(fmt.Sprintf("Pending proposal %s (base revision %d): %s\n\n", p.ID, p.BaseRevision, p.Reason))
+			}
+		}
+	}
 
 	if progress := renderPlanProgress(steps); progress != "" {
 		sb.WriteString(progress)
@@ -362,7 +389,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 	// flushDetails attaches accumulated indented detail lines to the last phase.
 	flushDetails := func() {
 		if len(steps) > 0 && len(detailLines) > 0 {
-			steps[len(steps)-1].details = strings.Join(detailLines, "\n")
+			steps[len(steps)-1].details = strings.TrimRight(strings.Join(detailLines, "\n"), "\n")
 		}
 		detailLines = nil
 	}
@@ -376,6 +403,8 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 		secVerification = "verification"
 		secResults      = "results"
 		secStatus       = "status"
+		secMetadata     = "metadata"
+		secRevision     = "revision"
 	)
 	currentSection := secNone
 	currentGroup := ""
@@ -384,6 +413,15 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 	flushSection := func() {
 		content := strings.TrimSpace(strings.Join(sectionLines, "\n"))
 		switch currentSection {
+		case secMetadata:
+			content = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(content, "```json"), "```"))
+			var metadata planDocumentMetadata
+			if decodeErr := json.Unmarshal([]byte(content), &metadata); decodeErr != nil {
+				err = fmt.Errorf("invalid plan metadata: %w", decodeErr)
+			} else {
+				doc.PlanID, doc.Revision, doc.Sequence = metadata.PlanID, metadata.Revision, metadata.Sequence
+				doc.PendingRevision, doc.RevisionNote, doc.GraphAcceptance = metadata.PendingRevision, metadata.RevisionNote, metadata.GraphAcceptance
+			}
 		case secContext:
 			doc.Context = content
 		case secWhatNotToDo:
@@ -413,6 +451,10 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 			headerLower := strings.ToLower(header)
 			knownSection := ""
 			switch {
+			case headerLower == "plan metadata":
+				knownSection = secMetadata
+			case headerLower == "revision":
+				knownSection = secRevision
 			case headerLower == "context":
 				knownSection = secContext
 			case headerLower == "phases":
@@ -444,6 +486,11 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 				continue
 			}
 			// Unknown ## header inside a narrative section → treat as content.
+			sectionLines = append(sectionLines, raw)
+			continue
+		}
+
+		if currentSection == secMetadata || currentSection == secRevision {
 			sectionLines = append(sectionLines, raw)
 			continue
 		}
@@ -538,6 +585,9 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 	}
 	flushDetails()
 	flushSection()
+	if err != nil {
+		return doc, goal, nil, err
+	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		return doc, "", nil, fmt.Errorf("failed to scan plan document: %w", scanErr)
 	}

@@ -63,6 +63,7 @@ export interface SessionModelStatus {
 }
 
 export interface ConnectChatParams {
+  approvedPlanExecution?: boolean
   sessionId?: string
   message?: string
   attachments?: AttachmentPayload[]
@@ -256,7 +257,7 @@ export async function fetchSubtaskEvents(sessionId: string, selector: SubtaskSel
   return data.events
 }
 
-export function connectChat({ sessionId, message, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
+export function connectChat({ sessionId, message, approvedPlanExecution, attachments, systemContext, planMode, pinnedToolGroups, autoApprove, provider, model, memoryScope, debug, onEvent, onError, onDone }: ConnectChatParams): AbortController {
   const controller = new AbortController()
 
   const run = async () => {
@@ -265,6 +266,7 @@ export function connectChat({ sessionId, message, attachments, systemContext, pl
         sessionId: sessionId || '',
         message: message || '',
         autoApprove: !!autoApprove,
+        ...(approvedPlanExecution ? { approvedPlanExecution: true } : {}),
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
         ...(memoryScope ? { memoryScope } : {}),

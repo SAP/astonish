@@ -529,9 +529,9 @@ func compactLine(s string, maxRunes int) string {
 }
 
 const (
-	planOptApprove          = "Approve & implement"
-	planOptRequest          = "Request changes"
-	planOptDecline          = "Decline"
+	planOptApprove          = events.PlanOptionApprove
+	planOptRequest          = events.PlanOptionRequestChanges
+	planOptDecline          = events.PlanOptionDecline
 	planChangesHint         = "Describe the changes to the plan…"
 	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
 )

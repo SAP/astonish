@@ -12,6 +12,25 @@ func planModeToolBlocked(name string) bool {
 	return name == "delegate_tasks" || !IsToolSafe(name)
 }
 
+func TestPlanRevisionModeGate(t *testing.T) {
+	for _, po := range []*PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}, {AskMode: true}, {Bot: &BotPromptContext{}}} {
+		if RevisionToolBlocked(po, "update_plan", map[string]any{"action": "revise"}) == "" {
+			t.Fatal("restricted mode admitted revision")
+		}
+		if RevisionToolBlocked(po, "update_plan", map[string]any{"step": "phase", "status": "running"}) != "" {
+			t.Fatal("action gate blocked legacy status")
+		}
+	}
+	if RevisionToolBlocked(nil, "update_plan", map[string]any{"action": "revise"}) != "" {
+		t.Fatal("Normal mode blocked")
+	}
+	for _, name := range []string{"announce_plan", "update_plan", "announce_completion", "gplan_finalize"} {
+		if !IsPlanManagementTool(name) {
+			t.Fatalf("%s can auto-start a phase", name)
+		}
+	}
+}
+
 func TestPlanModeGate_BlocksMutatingTools(t *testing.T) {
 	blocked := []string{
 		"write_file",

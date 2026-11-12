@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/SAP/astonish/pkg/agent"
 	"io"
 	"net/http"
 	"net/url"
@@ -45,20 +46,23 @@ func (c *Client) GetSession(id string) (map[string]any, error) {
 // StudioMessage is a simplified chat message from GET /api/studio/sessions/{id}.
 // Mirrors pkg/api.StudioMessage fields needed by the terminal app.
 type StudioMessage struct {
-	Tasks           []SubtaskInfo   `json:"tasks,omitempty"`
-	Events          []SubtaskEvent  `json:"events,omitempty"`
-	Status          string          `json:"status,omitempty"`
-	SubtaskProgress json.RawMessage `json:"subtaskProgress,omitempty"`
-	BatchID         string          `json:"batchId,omitempty"`
-	TaskID          string          `json:"taskId,omitempty"`
-	ChildSessionID  string          `json:"childSessionId,omitempty"`
-	Attempt         int             `json:"attempt,omitempty"`
-	Type            string          `json:"type"`
-	Content         string          `json:"content,omitempty"`
-	ToolName        string          `json:"toolName,omitempty"`
-	ToolID          string          `json:"toolId,omitempty"`
-	ToolArgs        any             `json:"toolArgs,omitempty"`
-	ToolResult      any             `json:"toolResult,omitempty"`
+	Snapshot        *agent.PlanSnapshot  `json:"snapshot,omitempty"`
+	Goal            string               `json:"goal,omitempty"`
+	Steps           []agent.PlanStepInfo `json:"steps,omitempty"`
+	Tasks           []SubtaskInfo        `json:"tasks,omitempty"`
+	Events          []SubtaskEvent       `json:"events,omitempty"`
+	Status          string               `json:"status,omitempty"`
+	SubtaskProgress json.RawMessage      `json:"subtaskProgress,omitempty"`
+	BatchID         string               `json:"batchId,omitempty"`
+	TaskID          string               `json:"taskId,omitempty"`
+	ChildSessionID  string               `json:"childSessionId,omitempty"`
+	Attempt         int                  `json:"attempt,omitempty"`
+	Type            string               `json:"type"`
+	Content         string               `json:"content,omitempty"`
+	ToolName        string               `json:"toolName,omitempty"`
+	ToolID          string               `json:"toolId,omitempty"`
+	ToolArgs        any                  `json:"toolArgs,omitempty"`
+	ToolResult      any                  `json:"toolResult,omitempty"`
 }
 
 // SubtaskInfo and SubtaskEvent mirror Studio's snake-case delegation payload.
@@ -319,13 +323,15 @@ type ChatAttachment struct {
 
 // ChatRequest represents a message to send to the chat.
 type ChatRequest struct {
-	SessionID     string           `json:"sessionId,omitempty"`
-	Message       string           `json:"message"`
-	AutoApprove   bool             `json:"autoApprove,omitempty"`
-	Debug         bool             `json:"debug,omitempty"`
-	SystemContext string           `json:"systemContext,omitempty"`
-	PlanMode      bool             `json:"planMode,omitempty"`
-	Attachments   []ChatAttachment `json:"attachments,omitempty"`
+	PlanRevisionDecision  *agent.TrustedPlanRevisionDecision `json:"planRevisionDecision,omitempty"`
+	ApprovedPlanExecution bool                               `json:"approvedPlanExecution,omitempty"`
+	SessionID             string                             `json:"sessionId,omitempty"`
+	Message               string                             `json:"message"`
+	AutoApprove           bool                               `json:"autoApprove,omitempty"`
+	Debug                 bool                               `json:"debug,omitempty"`
+	SystemContext         string                             `json:"systemContext,omitempty"`
+	PlanMode              bool                               `json:"planMode,omitempty"`
+	Attachments           []ChatAttachment                   `json:"attachments,omitempty"`
 	// Provider/Model pin a model for this turn (and new sessions).
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`

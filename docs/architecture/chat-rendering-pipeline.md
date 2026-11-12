@@ -220,6 +220,18 @@ At render time, `groupChronologicalActivity` / `buildChronologicalActivityRender
 
 This presentation is shared by local-daemon and platform Studio, in light and dark themes. The older sticky grouping exports remain for compatibility but are not Studio's rendering projection.
 
+### Plan snapshots and direct Normal-mode revisions
+
+`subtask_progress` carries `{event_type: "plan_snapshot", snapshot, plan_id, revision, sequence}`; clients also accept direct `plan_snapshot` events. The snapshot contains the current goal/document/steps and statuses/evidence. `plan_id` identifies the plan, `revision` advances on definition changes, and `sequence` orders committed runtime changes. `planState.ts` (`upsertPlanSnapshot`, `reducePlanProgress`, `normalizePlanHistory`) is shared by send, reconnect and history. Newer sequences replace the matching card in place; duplicate/older snapshots are ignored. Legacy unversioned progress cannot overwrite snapshot authority; missing legacy statuses default to pending.
+
+Session state `astonish_plan_snapshot` is authoritative across restore/compaction; `plan_session_runtime.go` persists a state-delta event before emitting progress. Accepted tool results are the legacy replay fallback. A model's requested complete status, prose, `done` or EOF is not completion evidence. Evidence and legacy nested data are redacted for clients without changing stored authority. Runtime callbacks are session-scoped, including explicit no-runtime bindings; HTTP admission is scoped by authenticated organization/team/subject/app/session, not a global active plan.
+
+Every valid `update_plan({action: "revise", revision: {...}})` in Normal mode updates the existing plan immediately, including goal, outcome, files and document changes. `requires_approval` is deprecated and ignored even when true. There is **no revision review component, modal, decision screen, Approve revision, Reject revision or Request changes action**. The user continues with an ordinary next turn. The card updates at its existing transcript position without taking composer focus or dragging a reader back to the plan. Without a plan there is no revision UI; stale/busy/validation/persistence errors leave the accepted card intact and are ordinary tool errors, not pending approval state.
+
+Send, active SSE reconnect and restored history project the same committed snapshot into one card. Legacy stored `pending_revision` candidates are retired without applying them; restore neither blocks for a decision nor displays obsolete review controls. Initial Plan-mode approval controls and `approvedPlanExecution` are unchanged, as are tool/folder authorization and completion evidence requirements. Plan/Graph-Plan/Ask and bot contexts still cannot revise plans.
+
+The terminal consumes the same snapshots as `KindPlanSnapshot` and also has no revision decision surface; see [terminal direct revisions](terminal-app.md#direct-revisions-normal-mode). The opt-in `TestPlanRevisionBrowserAcceptance` uses the built SPA, an isolated browser and SQLite, loopback HTTP/SSE and real plan tools. Its scripted provider and session-directory transport are fixtures, not a paid-provider or production-sandbox claim. See [revision protocol](code-agent-investigation.md#normal-mode-plan-revision) and canonical journeys in `tests/scenarios/chat.yaml`; actual harness output determines what was exercised.
+
 ### Document Update Events
 
 | Event | Data Shape | Frontend Action |

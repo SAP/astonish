@@ -1,11 +1,78 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
 )
+
+func TestUpdatePlanRevisionModesAndArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		po   *agent.PromptOverrides
+		want string
+	}{
+		{"normal", &agent.PromptOverrides{}, "applied"},
+		{"plan", &agent.PromptOverrides{PlanMode: true}, "blocked_revision_mode"},
+		{"graph", &agent.PromptOverrides{GraphPlanMode: true}, "blocked_revision_mode"},
+		{"ask", &agent.PromptOverrides{AskMode: true}, "blocked_revision_mode"},
+		{"bot", &agent.PromptOverrides{Bot: &agent.BotPromptContext{}}, "unsupported_bot_revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			base := WithPlanCallbacks(context.Background(), PlanCallbacks{
+				Snapshot: func() agent.PlanSnapshot { return agent.PlanSnapshot{PlanID: "owned", Revision: 2} },
+				Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+					calls++
+					return agent.PlanRevisionResult{Kind: agent.PlanRevisionResultApplied}, nil
+				},
+			})
+			ctx := scopedBasicContext{base: agent.WithPromptOverrides(base, tc.po)}
+			result, err := updatePlan(ctx, UpdatePlanArgs{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}})
+			if err != nil || result.Status != tc.want || result.Snapshot == nil || result.Snapshot.PlanID != "owned" {
+				t.Fatalf("%+v %v", result, err)
+			}
+			if (calls == 1) != (tc.want == "applied") {
+				t.Fatalf("unexpected revise calls: %d", calls)
+			}
+		})
+	}
+	ctx := scopedBasicContext{base: WithPlanCallbacks(context.Background(), PlanCallbacks{Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+		t.Fatal("invalid call dispatched")
+		return agent.PlanRevisionResult{}, nil
+	}})}
+	for _, args := range []UpdatePlanArgs{
+		{Action: UpdatePlanRevise},
+		{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}, Step: "phase"},
+		{Action: UpdatePlanRevise, Revision: &agent.PlanRevisionRequest{}, Status: "running"},
+		{Step: "phase", Status: "running", Revision: &agent.PlanRevisionRequest{}},
+		{Action: "approve"},
+	} {
+		result, err := updatePlan(ctx, args)
+		if err != nil || result.Status != "invalid_arguments" {
+			t.Fatalf("%+v: %+v %v", args, result, err)
+		}
+	}
+}
+
+func TestUpdatePlanRevisionDefinitionOnly(t *testing.T) {
+	var args UpdatePlanArgs
+	if err := json.Unmarshal([]byte(`{"action":"revise","revision":{"plan_id":"owned","base_revision":1,"steps":[{"name":"phase","status":"complete","evidence":"forged"}],"results":"forged","pending_revision":{}}}`), &args); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"evidence", "status", "results", "pending_revision"} {
+		if strings.Contains(string(raw), `"`+forbidden+`"`) {
+			t.Fatalf("definition admitted %s: %s", forbidden, raw)
+		}
+	}
+}
 
 func TestUpdatePlanTool_DrivesCallbackAndEmitsEvent(t *testing.T) {
 	// Save and restore package-level callbacks.

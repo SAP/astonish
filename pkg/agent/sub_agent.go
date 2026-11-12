@@ -155,9 +155,15 @@ type PlanFileChange struct {
 // These sections provide context, scope guards, and end-to-end verification
 // guidance that survive context compaction alongside the phase list.
 type PlanDocumentInfo struct {
-	Context      string `json:"context,omitempty"`
-	WhatNotToDo  string `json:"what_not_to_do,omitempty"`
-	Verification string `json:"verification,omitempty"`
+	PlanID          string                `json:"plan_id,omitempty"`
+	Revision        int64                 `json:"revision,omitempty"`
+	Sequence        int64                 `json:"sequence,omitempty"`
+	PendingRevision *PlanRevisionProposal `json:"pending_revision,omitempty"`
+	RevisionNote    string                `json:"revision_note,omitempty"`
+	GraphAcceptance string                `json:"graph_acceptance,omitempty"`
+	Context         string                `json:"context,omitempty"`
+	WhatNotToDo     string                `json:"what_not_to_do,omitempty"`
+	Verification    string                `json:"verification,omitempty"`
 	// Results is written by announce_completion after e2e verification.
 	// Empty means the plan is not fully accepted.
 	Results string `json:"results,omitempty"`

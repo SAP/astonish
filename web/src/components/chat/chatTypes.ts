@@ -265,12 +265,65 @@ export function slidesHarnessLabel(update: Pick<DocsUpdateMessage, 'description'
 // ---- Execution plan (announce_plan / update_plan) ----
 
 export interface PlanMessage {
+  snapshot?: PlanSnapshot     // Canonical source; never infer approval or completion from prose
+  revision?: number
   type: 'plan'
   goal: string                // Plan title (e.g., "Source-Level GitHub Comparison")
   steps: PlanStepInfo[]       // Ordered list of plan steps
   context?: string            // Optional WHY narrative section
   whatNotToDo?: string        // Optional scope guard section
   verification?: string       // Optional end-to-end smoke test section
+}
+
+export const PlanLifecycle = { Approved: 'approved', Executing: 'executing', Completed: 'completed' } as const
+
+export interface PlanStepDefinition {
+  name: string
+  description: string
+  details?: string
+  summary?: string
+  files?: PlanFileInfo[] | null
+  outcome?: string
+  verify?: string
+  verify_kind?: string
+  parallel_group?: string
+}
+export interface PlanDocumentDefinition {
+  context?: string
+  what_not_to_do?: string
+  verification?: string
+}
+export interface PlanDefinition {
+  goal: string
+  document: PlanDocumentDefinition
+  steps: PlanStepDefinition[]
+}
+export interface PlanRevisionProposal {
+  id: string
+  base_revision: number
+  reason: string
+  candidate: PlanDefinition
+  diff: {
+    goal_changed?: boolean
+    document_changed?: boolean
+    structure_changed?: boolean
+    changed_steps?: string[]
+    added_steps?: string[]
+    removed_steps?: string[]
+  }
+}
+export interface PlanSnapshot extends Omit<PlanDefinition, 'steps'> {
+  plan_id: string
+  revision: number
+  sequence: number
+  document: PlanDocumentDefinition & {
+    lifecycle?: string
+    results?: string
+    revision_note?: string
+    graph_acceptance?: string
+  }
+  steps: (PlanStepDefinition & { status?: PlanStepInfo['status']; evidence?: string })[]
+  pending_revision?: PlanRevisionProposal | null
 }
 
 export interface PlanFileInfo {

@@ -17,6 +17,9 @@ import (
 // generic markdown-in-a-box path so history never goes blank.
 func (m model) renderPlanDocument(it events.Item, width int) string {
 	content := it.Content
+	if s := it.PlanSnapshot; s != nil {
+		return m.renderPlanCard(s.Goal, s.Document, s.Steps, it, width)
+	}
 	if doc, goal, steps, err := agent.ParsePlanDocument(content); err == nil && len(steps) > 0 {
 		return m.renderPlanCard(goal, doc, steps, it, width)
 	}

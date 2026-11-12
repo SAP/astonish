@@ -93,12 +93,13 @@ func (b *SystemPromptBuilder) Clone() *SystemPromptBuilder {
 // and applied to the cloned SystemPromptBuilder inside Run().
 // This eliminates shared mutable state across concurrent requests.
 type PromptOverrides struct {
-	Bot             *BotPromptContext // Trusted, immutable Bot context; never a user-role event.
-	ChannelHints    string            // Channel-specific output constraints
-	SchedulerHints  string            // Scheduler-specific output constraints
-	SessionContext  string            // Per-turn session context (fleet wizard, etc.)
-	SkillIndex      string            // Per-request merged skill index (platform + org + team)
-	AdditionalTools []tool.Tool       // Per-request deferred tools resolved through execute_tool
+	PlanRevisionDecision *TrustedPlanRevisionDecision // Trusted transport input; never parsed from prose.
+	Bot                  *BotPromptContext            // Trusted, immutable Bot context; never a user-role event.
+	ChannelHints         string                       // Channel-specific output constraints
+	SchedulerHints       string                       // Scheduler-specific output constraints
+	SessionContext       string                       // Per-turn session context (fleet wizard, etc.)
+	SkillIndex           string                       // Per-request merged skill index (platform + org + team)
+	AdditionalTools      []tool.Tool                  // Per-request deferred tools resolved through execute_tool
 
 	// PinnedToolGroups lists tool groups required by wizard sessions. Deferred
 	// members remain available through the fixed progressive tool bridge.

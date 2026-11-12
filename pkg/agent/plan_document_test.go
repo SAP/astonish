@@ -6,6 +6,20 @@ import (
 	"time"
 )
 
+func TestRenderPlanFromInfoPreservesStatus(t *testing.T) {
+	for _, status := range []string{"pending", "running", "complete", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			_, _, steps, err := ParsePlanDocument(RenderPlanFromInfoWithDoc("goal", PlanDocumentInfo{}, []PlanStepInfo{{Name: "phase", Status: status, Evidence: "exit 0"}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if steps[0].Status != status || steps[0].Evidence != "exit 0" {
+				t.Fatalf("status/evidence lost: %+v", steps[0])
+			}
+		})
+	}
+}
+
 func TestRenderPlanMarkdown_StatusMarkers(t *testing.T) {
 	// Deterministic timestamp.
 	orig := planClock

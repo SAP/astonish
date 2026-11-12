@@ -63,6 +63,12 @@ type pendingDelegation struct {
 // subtask_execution messages that render as TaskPlanPanel in the frontend,
 // preserving the task plan visualization for completed sessions.
 func eventsToMessages(events session.Events, redactor *credentials.Redactor) []StudioMessage {
+	type pendingPlanCall struct {
+		name  string
+		args  map[string]any
+		index int
+	}
+	pendingPlans := make(map[string]pendingPlanCall)
 	var messages []StudioMessage
 	var lastInvocationID string // track invocation boundary for coalescing
 
@@ -82,6 +88,9 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 
 	for i := range events.Len() {
 		event := events.At(i)
+		if snapshot, ok := decodePlanSnapshot(event.Actions.StateDelta[agent.PlanSnapshotStateKey]); ok {
+			messages = overlayPlanSnapshot(messages, snapshot)
+		}
 		if agent.IsTurnContextEvent(event) || event.LLMResponse.Content == nil {
 			continue
 		}
@@ -226,16 +235,11 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					continue
 				}
 
-				// Intercept announce_plan: emit a plan message immediately.
-				if toolName == "announce_plan" {
-					msg := buildPlanMessage(toolArgs)
-					messages = append(messages, msg)
-					continue
-				}
-
-				// Intercept update_plan: update the most recent plan message's step.
-				if toolName == "update_plan" {
-					applyPlanStepUpdate(messages, toolArgs)
+				// Reserve the call position, but only accepted responses can
+				// create a plan or mutate its execution state.
+				if agent.IsPlanManagementTool(toolName) {
+					pendingPlans[part.FunctionCall.ID] = pendingPlanCall{toolName, toolArgs, len(messages)}
+					messages = append(messages, StudioMessage{Type: "plan_pending", ToolID: part.FunctionCall.ID})
 					continue
 				}
 
@@ -280,8 +284,32 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 					continue
 				}
 
-				// Suppress plan tool responses — no useful display info.
-				if toolName == "announce_plan" || toolName == "update_plan" {
+				if agent.IsPlanManagementTool(toolName) {
+					call, pending := pendingPlans[part.FunctionResponse.ID]
+					resp := part.FunctionResponse.Response
+					if s, ok := decodePlanSnapshot(resp["snapshot"]); ok {
+						messages = overlayPlanSnapshot(messages, s)
+					} else if resp["status"] == "ok" || resp["status"] == "announced" {
+						if toolName == "announce_plan" && pending {
+							messages[call.index] = buildPlanMessage(call.args)
+						} else if toolName == "update_plan" {
+							applyPlanStepUpdate(messages, map[string]any{"step": resp["step"], "status": resp["applied"]})
+						}
+					} else if pending {
+						messages[call.index] = StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp}
+					}
+					status, _ := resp["status"].(string)
+					accepted := status == "ok" || status == "announced" || status == "completed" || status == string(agent.PlanRevisionResultApplied) || status == string(agent.PlanRevisionResultProposed) || status == string(agent.PlanRevisionResultNoop)
+					if !accepted {
+						if pending && messages[call.index].Type != "plan" {
+							messages[call.index] = StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp}
+						} else {
+							messages = append(messages, StudioMessage{Type: "tool_result", ToolName: toolName, ToolID: part.FunctionResponse.ID, ToolResult: resp})
+						}
+					} else if pending && messages[call.index].Type == "plan_pending" {
+						messages[call.index].Type = "plan_hidden"
+					}
+					delete(pendingPlans, part.FunctionResponse.ID)
 					continue
 				}
 
@@ -317,10 +345,29 @@ func eventsToMessages(events session.Events, redactor *credentials.Redactor) []S
 		}
 	}
 
-	// Post-process: for completed sessions, promote any remaining "pending" or
-	// "running" plan steps to "complete". The session is done, so all steps
-	// should reflect their final state. Only "failed" steps stay as-is.
-	finalizePlanSteps(messages)
+	filtered := messages[:0]
+	for _, msg := range messages {
+		if redactor != nil {
+			if msg.Snapshot != nil {
+				clean := redactPlanSnapshot(*msg.Snapshot, redactor)
+				msg.Snapshot = &clean
+			}
+			if msg.Type == "plan" {
+				msg.Goal = redactor.RedactNonUser(msg.Goal, false)
+				for i := range msg.Steps {
+					msg.Steps[i].Description = redactor.RedactNonUser(msg.Steps[i].Description, false)
+					msg.Steps[i].Name = redactor.RedactNonUser(msg.Steps[i].Name, false)
+				}
+			}
+			if result, ok := msg.ToolResult.(map[string]any); ok {
+				msg.ToolResult = redactor.RedactMap(result)
+			}
+		}
+		if msg.Type != "plan_hidden" && msg.Type != "plan_pending" {
+			filtered = append(filtered, msg)
+		}
+	}
+	messages = filtered
 
 	return injectTutorialSceneSlideshows(messages, events)
 }
@@ -483,6 +530,22 @@ func buildPlanMessage(args map[string]any) StudioMessage {
 		}
 	}
 
+	// Preserve the complete accepted legacy definition for runtime bootstrap.
+	// Execution fields from the model call are intentionally discarded.
+	raw, _ := json.Marshal(args)
+	var legacy struct {
+		Context      string               `json:"context"`
+		WhatNotToDo  string               `json:"what_not_to_do"`
+		Verification string               `json:"verification"`
+		Steps        []agent.PlanStepInfo `json:"steps"`
+	}
+	if json.Unmarshal(raw, &legacy) == nil && len(legacy.Steps) > 0 {
+		for i := range legacy.Steps {
+			legacy.Steps[i].Status = "pending"
+			legacy.Steps[i].Evidence = ""
+		}
+		msg.Snapshot = &agent.PlanSnapshot{Goal: msg.Goal, Document: agent.PlanDocumentInfo{Context: legacy.Context, WhatNotToDo: legacy.WhatNotToDo, Verification: legacy.Verification}, Steps: legacy.Steps}
+	}
 	return msg
 }
 
@@ -505,24 +568,17 @@ func applyPlanStepUpdate(messages []StudioMessage, args map[string]any) {
 			for j := range messages[i].Steps {
 				if messages[i].Steps[j].Name == stepName {
 					messages[i].Steps[j].Status = stepStatus
+					if s := messages[i].Snapshot; s != nil {
+						for k := range s.Steps {
+							if s.Steps[k].Name == stepName {
+								s.Steps[k].Status = stepStatus
+								s.Steps[k].Evidence, _ = args["evidence"].(string)
+							}
+						}
+					}
 				}
 			}
 			return
-		}
-	}
-}
-
-// finalizePlanSteps promotes any "pending" or "running" plan steps to "complete"
-// for completed session history. Only "failed" steps are left as-is.
-func finalizePlanSteps(messages []StudioMessage) {
-	for i := range messages {
-		if messages[i].Type == "plan" {
-			for j := range messages[i].Steps {
-				s := messages[i].Steps[j].Status
-				if s == "pending" || s == "running" {
-					messages[i].Steps[j].Status = "complete"
-				}
-			}
 		}
 	}
 }

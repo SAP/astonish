@@ -1367,45 +1367,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 		// sub-task lifecycle events, then forward to ChatAgent.SubTaskProgressCallback
 		// (which is set dynamically by ChatRunner.Run() for Studio sessions).
 		subAgentMgr.SubTaskProgress = func(evt agent.SubTaskProgressEvent) {
-			// Drive plan step transitions via explicit plan_step binding.
-			// task_start → resolve step name, register task, mark step "running"
-			// task_complete → mark task done; if all tasks for step done, mark step "complete"
-			if plan := chatAgent.GetActivePlan(); plan != nil {
-				switch evt.Type {
-				case "task_start":
-					// Resolve the plan step: use explicit plan_step if set, else prefix match
-					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
-					if stepName != "" {
-						if emittedStep := plan.StartStep(stepName, evt.TaskName); emittedStep != "" {
-							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
-								Type:       "plan_step_update",
-								StepName:   emittedStep,
-								StepStatus: "running",
-								SessionID:  evt.SessionID,
-							})
-						}
-					}
-				case "task_complete":
-					stepName := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
-					if stepName != "" {
-						if ready := plan.CompleteTask(stepName, evt.TaskName); ready != "" {
-							result := chatAgent.ApplyPlanStepUpdate(ready, "complete")
-							status := result.Applied
-							if status == "" {
-								status = "running"
-							}
-							chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{
-								Type:       "plan_step_update",
-								StepName:   ready,
-								StepStatus: status,
-								SessionID:  evt.SessionID,
-							})
-						}
-					}
-				}
-			}
-			// Forward the original event to the correct session's callback.
-			chatAgent.EmitSubTaskProgress(evt.SessionID, evt)
+			forwardPlanDelegateProgress(chatAgent, evt)
 		}
 		// Wire file artifact capture so sub-agent write_file/edit_file calls
 		// propagate file artifacts to the parent ChatAgent for channel delivery
@@ -2198,4 +2160,59 @@ func parseCachedToolsJSON(data []byte) []cache.ToolEntry {
 		})
 	}
 	return entries
+}
+
+// forwardPlanDelegateProgress keeps delegate lifecycle mutations on the same
+// durable runtime as direct tools. Original worker events are always forwarded.
+func forwardPlanDelegateProgress(chatAgent *agent.ChatAgent, evt agent.SubTaskProgressEvent) {
+	defer chatAgent.EmitSubTaskProgress(evt.SessionID, evt)
+	plan := chatAgent.GetActivePlan()
+	runtime, bound := chatAgent.SessionPlanRuntime(evt.SessionID)
+	if bound {
+		if runtime == nil {
+			return
+		}
+		plan = runtime.PlanState()
+	}
+	if plan == nil || (evt.Type != "task_start" && evt.Type != "task_complete") {
+		return
+	}
+	step := plan.ResolveStepName(evt.PlanStep, evt.TaskName)
+	if step == "" {
+		return
+	}
+	emitError := func(code, message string) {
+		chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: step, Error: message, Reason: code})
+	}
+	if bound {
+		var err error
+		if evt.Type == "task_start" {
+			_, err = runtime.RegisterDelegate(step, evt.TaskName)
+		} else {
+			var ready string
+			ready, err = runtime.FinishDelegate(step, evt.TaskName)
+			if err == nil && ready != "" {
+				result := runtime.UpdateStep(ready, "complete")
+				if result.Code != agent.PlanStepOK {
+					emitError(result.Code, result.Message)
+				}
+			}
+		}
+		if err != nil {
+			emitError(agent.PlanRuntimeErrorCode(err), err.Error())
+		}
+		return // Runtime publishes its snapshot only after persistence succeeds.
+	}
+	if evt.Type == "task_start" {
+		if started := plan.StartStep(step, evt.TaskName); started != "" {
+			chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: started, StepStatus: "running"})
+		}
+	} else if ready := plan.CompleteTask(step, evt.TaskName); ready != "" {
+		result := chatAgent.ApplyPlanStepUpdate(ready, "complete")
+		status := result.Applied
+		if status == "" {
+			status = "running"
+		}
+		chatAgent.EmitSubTaskProgress(evt.SessionID, agent.SubTaskProgressEvent{Type: "plan_step_update", SessionID: evt.SessionID, StepName: ready, StepStatus: status, Error: result.Message})
+	}
 }

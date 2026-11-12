@@ -230,6 +230,44 @@ func TestCodeSystemPromptContracts_PlanFilePersistence(t *testing.T) {
 	assertNotContains(t, noCode.Build(), "Execution plan (PLAN.md):", "PLAN.md guidance absent when PlanFilePersistence is false")
 }
 
+func TestCodeSystemPromptContracts_NormalModePlanRevisions(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"code":      maximalCodeBuilder().Build(),
+		"execution": PlanExecutionSystemContext,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{
+				"update_plan(action=\"revise\", revision={...})",
+				"optional action",
+				"existing step/status progress calls are unchanged",
+				"plan_id", "base_revision", "reason", "steps",
+				"definition-only", "Never submit status, evidence, or Results",
+				"returned snapshot is authoritative",
+				"exact plan identity, revision, and step names",
+				"current returned snapshot or PLAN.md",
+				"All valid revisions apply immediately",
+				"without presenting a proposal, requesting revision approval, or stopping",
+				"Initial Plan-mode approval and tool/folder authorization remain unchanged",
+				"Do not manually edit PLAN.md",
+				"announce_plan remains Plan-mode-only",
+				"busy", "cannot change running phases",
+				"stale", "reload",
+				"invalidated evidence", "reverify",
+				"does not add a new completion gate",
+			} {
+				assertContains(t, prompt, want, "Normal-mode revisions preserve approval and evidence contracts")
+			}
+			assertNotContains(t, prompt, "Use update_plan to record progress without replacing the plan", "progress-only guidance must not prohibit safe revisions")
+		})
+	}
+	assertNotContains(t, GraphPlanModeSystemContext, "ask the user to decline and re-announce", "locked-plan guidance must not require replacement for revisions")
+	assertContains(t, GraphPlanModeSystemContext, "Normal-mode update_plan revision workflow", "locked-plan guidance directs safe revisions")
+	assertContains(t, ApprovedPlanExecutionBlockedMessage(), "action=\"revise\"", "blocked announce guidance directs safe revisions")
+
+	cb := NewCodeSystemPromptBuilder(&SystemPromptBuilder{})
+	assertNotContains(t, cb.Build(), "Normal-mode plan revisions", "revision guidance follows plan persistence setting")
+}
+
 func TestCodeSystemPromptContracts_AuthorizationGuidance(t *testing.T) {
 	cb := maximalCodeBuilder()
 	prompt := cb.Build()
@@ -324,9 +362,14 @@ func TestCodeSystemPromptBuilder_MaximalSize(t *testing.T) {
 	prompt := maximalCodeBuilder().Build()
 	// Code-mode prompt includes all base sections plus: project guidance,
 	// code-nav rules, codegraph-first, stop-exploring, PLAN.md, auth gates,
-	// MCP tools listing. Budget ceiling is higher than chat mode.
-	if len(prompt) > 20000 {
-		t.Errorf("code-mode maximal prompt too large: %d bytes (limit 20000)", len(prompt))
+	// MCP tools listing. Reserve a bounded 2500 bytes for the shared Normal-mode
+	// revision safety contract without relaxing the existing 20000-byte budget
+	// for unrelated prompt sections.
+	if len(NormalModePlanRevisionGuidance) > 2500 {
+		t.Errorf("plan revision guidance too large: %d bytes (limit 2500)", len(NormalModePlanRevisionGuidance))
+	}
+	if size := len(prompt) - len(NormalModePlanRevisionGuidance); size > 20000 {
+		t.Errorf("code-mode maximal prompt excluding revision guidance too large: %d bytes (limit 20000)", size)
 	}
 	if len(prompt) < 6000 {
 		t.Errorf("code-mode maximal prompt suspiciously small: %d bytes (expected > 6000)", len(prompt))

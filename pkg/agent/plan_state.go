@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 	"sync"
 )
@@ -15,10 +16,12 @@ import (
 // Completing a step requires a passing verify command — finishing sub-tasks
 // is not enough.
 type PlanState struct {
-	mu    sync.Mutex
-	goal  string
-	doc   PlanDocumentInfo
-	steps []planStep
+	mu         sync.Mutex
+	generation uint64 // changes on runtime mutations; guards legacy in-flight verify
+	verifying  map[string]bool
+	goal       string
+	doc        PlanDocumentInfo
+	steps      []planStep
 
 	// taskRegistry tracks which tasks belong to each plan step.
 	// Key: step name (lowercase), Value: set of task names (lowercase).
@@ -39,6 +42,7 @@ type PlanState struct {
 }
 
 type planStep struct {
+	epoch         uint64 // guards status ABA while verification executes
 	name          string
 	description   string
 	details       string           // optional richer per-phase content persisted to PLAN.md
@@ -56,7 +60,7 @@ type planStep struct {
 func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *PlanState {
 	ps := &PlanState{
 		goal:           goal,
-		doc:            doc,
+		doc:            doc.Clone(),
 		steps:          make([]planStep, len(steps)),
 		taskRegistry:   make(map[string]map[string]bool),
 		completedTasks: make(map[string]map[string]bool),
@@ -71,7 +75,7 @@ func NewPlanState(goal string, doc PlanDocumentInfo, steps []PlanStepInfo) *Plan
 			description:   s.Description,
 			details:       s.Details,
 			summary:       s.Summary,
-			files:         s.Files,
+			files:         slices.Clone(s.Files),
 			outcome:       s.Outcome,
 			verify:        s.Verify,
 			verifyKind:    NormalizeVerifyKind(s.VerifyKind),
@@ -94,6 +98,10 @@ func (ps *PlanState) SetOnChange(fn func()) {
 
 // notifyChangeLocked invokes the onChange hook. Must be called with ps.mu held.
 func (ps *PlanState) notifyChangeLocked() {
+	ps.generation++
+	if ps.doc.PlanID != "" {
+		ps.doc.Sequence++
+	}
 	if ps.onChange != nil {
 		ps.onChange()
 	}
@@ -119,7 +127,7 @@ func (ps *PlanState) SnapshotInfo() (string, []PlanStepInfo) {
 			Description:   s.description,
 			Details:       s.details,
 			Summary:       s.summary,
-			Files:         s.files,
+			Files:         slices.Clone(s.files),
 			Outcome:       s.outcome,
 			Verify:        s.verify,
 			VerifyKind:    s.verifyKind,
@@ -146,7 +154,7 @@ func (ps *PlanState) StepNames() []string {
 func (ps *PlanState) SnapshotDoc() PlanDocumentInfo {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	return ps.doc
+	return ps.doc.Clone()
 }
 
 // SetResults stores the completion report and persists PLAN.md.
@@ -204,6 +212,9 @@ func (ps *PlanState) IsFullyAccepted() bool {
 func (ps *PlanState) snapshotLocked() (string, []planStep) {
 	steps := make([]planStep, len(ps.steps))
 	copy(steps, ps.steps)
+	for i := range steps {
+		steps[i].files = slices.Clone(steps[i].files)
+	}
 	return ps.goal, steps
 }
 
@@ -241,6 +252,7 @@ func (ps *PlanState) SetStepStatus(stepName, status string) (string, string) {
 	if ps.steps[idx].status == newStatus {
 		return ps.steps[idx].name, newStatus // idempotent, no rewrite needed
 	}
+	ps.steps[idx].epoch++
 	ps.steps[idx].status = newStatus
 	ps.notifyChangeLocked()
 	return ps.steps[idx].name, newStatus
@@ -466,7 +478,7 @@ func (ps *PlanState) StepLookup(stepName string) (PlanStepInfo, bool) {
 		Description:   s.description,
 		Details:       s.details,
 		Summary:       s.summary,
-		Files:         s.files,
+		Files:         slices.Clone(s.files),
 		Outcome:       s.outcome,
 		Verify:        s.verify,
 		VerifyKind:    s.verifyKind,

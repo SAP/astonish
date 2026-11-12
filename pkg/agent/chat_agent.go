@@ -148,6 +148,7 @@ type ChatAgent struct {
 	// AfterToolCallback can automatically mark steps running/complete
 	// without requiring the LLM to call update_plan (saving full round-trips).
 	activePlan                   *PlanState
+	activePlanRuntime            *PlanRuntime
 	activePlanApproved           bool
 	activePlanReplacementAllowed bool
 	activePlanVersion            uint64
@@ -461,6 +462,7 @@ func (c *ChatAgent) SetActivePlan(plan *PlanState) {
 	c.activePlanVersion++
 	version := c.activePlanVersion
 	c.activePlan = plan
+	c.activePlanRuntime = nil
 	c.activePlanApproved = false
 	c.activePlanReplacementAllowed = false
 	c.activePlanMu.Unlock()
@@ -479,6 +481,7 @@ func (c *ChatAgent) TrySetActivePlan(plan *PlanState) bool {
 	c.activePlanVersion++
 	version := c.activePlanVersion
 	c.activePlan = plan
+	c.activePlanRuntime = nil
 	c.activePlanReplacementAllowed = false
 	c.activePlanMu.Unlock()
 
@@ -502,6 +505,18 @@ func (c *ChatAgent) AllowActivePlanReplacement() {
 // MarkActivePlanApproved seals the current plan against replacement.
 // Step status updates via update_plan do not require this seal.
 func (c *ChatAgent) MarkActivePlanApproved() {
+	if runtime := c.GetPlanRuntime(); runtime != nil {
+		if err := runtime.SetApproved(); err != nil {
+			slog.Debug("failed to approve plan", "error", err)
+			return
+		}
+		c.activePlanMu.Lock()
+		if c.activePlanRuntime == runtime {
+			c.activePlanApproved = true
+		}
+		c.activePlanMu.Unlock()
+		return
+	}
 	c.activePlanMu.Lock()
 	plan := c.activePlan
 	if plan != nil {
@@ -544,7 +559,14 @@ func (c *ChatAgent) RestoreApprovedPlan() error {
 	if err != nil {
 		return fmt.Errorf("parse active plan: %w", err)
 	}
-	plan := NewPlanState(goal, doc, steps)
+	// Migrate obsolete persisted proposals before publishing the restored plan.
+	// Never interpret a pending revision as initial execution consent.
+	hadPending := doc.PendingRevision != nil
+	runtime := NewPlanRuntime(NewPlanState(goal, doc, steps), PlanRuntimeOptions{CommitSnapshot: AtomicPlanSnapshotFile(path)})
+	if err := runtime.Bootstrap(); err != nil {
+		return err
+	}
+	plan := runtime.PlanState()
 	c.SetActivePlan(plan)
 	if NormalizePlanLifecycle(doc.Lifecycle) != "" {
 		// Document says this plan was approved — re-seal in memory without
@@ -554,6 +576,9 @@ func (c *ChatAgent) RestoreApprovedPlan() error {
 			c.activePlanApproved = true
 		}
 		c.activePlanMu.Unlock()
+		return nil
+	}
+	if hadPending || doc.PlanID != "" {
 		return nil
 	}
 	// No lifecycle recorded (document written by an older binary): preserve
@@ -631,6 +656,66 @@ func (c *ChatAgent) writePlanFile(content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		slog.Debug("failed to write PLAN.md", "component", "chat_agent", "path", path, "error", err)
 	}
+}
+
+// GetPlanRuntime returns the explicitly installed session runtime. Legacy callers
+// remain supported until their session is bootstrapped with EnsurePlanRuntime.
+func (c *ChatAgent) GetPlanRuntime() *PlanRuntime {
+	if c == nil {
+		return nil
+	}
+	c.activePlanMu.Lock()
+	defer c.activePlanMu.Unlock()
+	return c.activePlanRuntime
+}
+
+// EnsurePlanRuntime upgrades the current legacy plan, durably assigning identity.
+// Scoped/server callers should construct their own runtime and bind it to context
+// instead; this adapter is only for the single-session ChatAgent/Bot path.
+func (c *ChatAgent) EnsurePlanRuntime() (*PlanRuntime, error) {
+	c.activePlanMu.Lock()
+	if c.activePlanRuntime != nil {
+		r := c.activePlanRuntime
+		c.activePlanMu.Unlock()
+		if err := r.Bootstrap(); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
+	p := c.activePlan
+	version := c.activePlanVersion
+	if p == nil {
+		c.activePlanMu.Unlock()
+		return nil, planRuntimeError(PlanRuntimeNoPlan, "no active plan")
+	}
+	r := NewPlanRuntime(p, PlanRuntimeOptions{Workspace: c.WorkingDir, Verify: c.runPlanVerify, CommitSnapshot: func(s PlanSnapshot) error {
+		c.activePlanMu.Lock()
+		defer c.activePlanMu.Unlock()
+		if c.activePlanVersion != version || c.activePlan != p {
+			return planRuntimeError(PlanRuntimeStale, "active plan replaced")
+		}
+		c.planFileMu.Lock()
+		path := c.planFilePath
+		c.planFileMu.Unlock()
+		if path == "" {
+			return nil
+		}
+		return AtomicPlanSnapshotFile(path)(s)
+	}})
+	c.activePlanRuntime = r
+	c.activePlanMu.Unlock()
+	if err := r.Bootstrap(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// RuntimeForContext honors an explicit nil context binding without shared fallback.
+func (c *ChatAgent) RuntimeForContext(ctx context.Context) *PlanRuntime {
+	if r, bound := PlanRuntimeFromContext(ctx); bound {
+		return r
+	}
+	return c.GetPlanRuntime()
 }
 
 // GetActivePlan returns the current plan state, or nil if no plan is active.

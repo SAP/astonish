@@ -8,11 +8,64 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestPlanRevisionTransportAndHistory(t *testing.T) {
+	s := agent.PlanSnapshot{PlanID: "p", Revision: 2, Sequence: 5, Goal: "accepted", PendingRevision: &agent.PlanRevisionProposal{ID: "proposal", BaseRevision: 2}}
+	for _, kind := range []string{"subtask_progress", "plan_snapshot", "plan"} {
+		for _, tag := range []string{"type", "event_type"} {
+			raw, _ := json.Marshal(map[string]any{tag: "plan_snapshot", "snapshot": s})
+			evs := mapSSEToEvents(&client.SSEEvent{Type: kind, Data: string(raw)}, false)
+			if len(evs) != 1 || evs[0].Kind != events.KindPlanSnapshot || evs[0].PlanSnapshot.PendingRevision.ID != "proposal" {
+				t.Fatalf("%s/%s: %+v", kind, tag, evs)
+			}
+		}
+	}
+	rows := studioMessagesToHistory([]client.StudioMessage{{Type: "plan", Snapshot: &s}})
+	if len(rows) != 1 || rows[0].Delegation == nil || rows[0].Delegation.Kind != events.KindPlanSnapshot {
+		t.Fatalf("history: %+v", rows)
+	}
+	tr := events.NewTranscript()
+	tr.LoadHistory([]events.HistoryMsg{{Kind: "delegation", Delegation: rows[0].Delegation}})
+	if tr.Awaiting || tr.Items[0].PlanSnapshot.Goal != "accepted" {
+		t.Fatal("legacy history opened revision review")
+	}
+}
+func TestPlanRevisionRemoteIgnoredInitialApprovalPreserved(t *testing.T) {
+	requests := make(chan client.ChatRequest, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req client.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		requests <- req
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: done\ndata: {}\n\n"))
+	}))
+	defer server.Close()
+	b := &platformBackend{client: client.NewWithConfig(server.URL), sessionID: "scope"}
+	d := &agent.TrustedPlanRevisionDecision{PlanID: "p", ProposalID: "proposal", BaseRevision: 2, Decision: agent.PlanRevisionReject}
+	for _, opts := range []backend.TurnOptions{{PlanRevisionDecision: d}, {ApprovedPlanExecution: true}} {
+		ch, err := b.RunTurn(context.Background(), "", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range ch {
+		}
+		req := <-requests
+		if req.SessionID != "scope" || req.ApprovedPlanExecution != opts.ApprovedPlanExecution {
+			t.Fatalf("request: %+v", req)
+		}
+		if req.PlanRevisionDecision != nil {
+			t.Fatalf("decision: %+v", req)
+		}
+	}
+}
 
 func TestDelegationTransportHistoryAndDetail(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -701,6 +701,16 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			return nil, nil
 		})
 
+		// Revision policy is action-aware even through the progressive wrapper.
+		beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			t, args = c.effectiveToolCall(ctx, t, args)
+			if code := RevisionToolBlocked(turnOverrides, t.Name(), args); code != "" {
+				return map[string]any{"status": code}, nil
+			}
+
+			return nil, nil
+		})
+
 		// Plan-mode hard gate: when the turn is in plan mode, refuse any tool
 		// that is not read-only (and refuse delegate_tasks, which could bypass
 		// the gate via a sub-agent). Returning a result — rather than an error
@@ -965,7 +975,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			plan := c.activePlan
 			c.activePlanMu.Unlock()
 
-			if plan == nil || t.Name() == "announce_plan" || t.Name() == "delegate_tasks" {
+			if runtime, bound := PlanRuntimeFromContext(ctx); bound {
+				if runtime == nil || IsPlanManagementTool(t.Name()) || t.Name() == "delegate_tasks" {
+					return nil, nil
+				}
+				// The runtime atomically persists progress and leaves unapproved
+				// research calls alone; they must not become execution attempts.
+				if _, err := runtime.AdvanceOnToolStart(); err != nil {
+					return map[string]any{"status": PlanRuntimeErrorCode(err), "message": err.Error()}, nil
+				}
+				return nil, nil
+			}
+			if plan == nil || IsPlanManagementTool(t.Name()) || t.Name() == "delegate_tasks" {
 				return nil, nil
 			}
 

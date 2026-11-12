@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestLegacyPlanVerificationIgnoresObsoletePending(t *testing.T) {
+	c := &ChatAgent{PlanVerify: func(string) (int, string, error) { return 0, "verified", nil }}
+	p := NewPlanState("accepted", PlanDocumentInfo{PendingRevision: &PlanRevisionProposal{ID: "obsolete"}}, []PlanStepInfo{{Name: "one", Verify: "true", Status: "pending"}})
+	c.SetActivePlan(p)
+	if name, status := p.SetStepStatus("one", "failed"); name != "one" || status != "failed" {
+		t.Fatal("obsolete candidate blocked legacy status update")
+	}
+	p.SetStepStatus("one", "pending")
+	if name := p.StartStep("one", "worker"); name != "one" {
+		t.Fatal("obsolete candidate blocked legacy delegation")
+	}
+	info, _ := p.StepLookup("one")
+	if got := c.applyLegacyPlanVerification(p, info); got.Code != PlanStepOK || got.Applied != "complete" {
+		t.Fatalf("obsolete pending candidate blocked verification: %+v", got)
+	}
+}
+
 func TestApplyPlanStepUpdate_RunsVerify(t *testing.T) {
 	c := &ChatAgent{
 		PlanVerify: func(command string) (int, string, error) {
@@ -265,6 +282,26 @@ func TestAnnounceCompletion_NoEvidencePlaceholder(t *testing.T) {
 	}
 	if !strings.Contains(plan.SnapshotDoc().Results, "(no evidence recorded)") {
 		t.Fatalf("results = %q", plan.SnapshotDoc().Results)
+	}
+}
+
+func TestApplyPlanStepUpdate_StaleVerificationAfterReplacement(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	c := &ChatAgent{PlanVerify: func(string) (int, string, error) { close(started); <-release; return 0, "old evidence", nil }}
+	old := NewPlanState("old", PlanDocumentInfo{}, []PlanStepInfo{{Name: "one", Verify: "true"}})
+	c.SetActivePlan(old)
+	result := make(chan PlanStepApplyResult)
+	go func() { result <- c.ApplyPlanStepUpdate("one", "complete") }()
+	<-started
+	replacement := NewPlanState("new", PlanDocumentInfo{}, []PlanStepInfo{{Name: "one", Verify: "false"}})
+	c.SetActivePlan(replacement)
+	close(release)
+	if got := <-result; got.Code != PlanRuntimeStale {
+		t.Fatal(got)
+	}
+	info, _ := replacement.StepLookup("one")
+	if info.Status == "complete" || info.Evidence != "" {
+		t.Fatal("stale evidence reached replacement")
 	}
 }
 

@@ -108,7 +108,8 @@ func TestPlanRevisionHTTPAcceptance(t *testing.T) {
 	}
 	snapshot := func(id string) agent.PlanSnapshot {
 		detail := env.Detail(t, id)
-		for _, m := range detail.Messages {
+		for i := len(detail.Messages) - 1; i >= 0; i-- {
+			m := detail.Messages[i]
 			if m.Snapshot != nil {
 				return *m.Snapshot
 			}
@@ -194,7 +195,7 @@ func TestPlanRevisionHTTPAcceptance(t *testing.T) {
 	}
 	revision(false)
 	s = snapshot(id)
-	if s.Revision != 3 || s.Steps[0].Evidence != "" || s.Steps[0].Status != "pending" {
+	if s.Revision != 2 || s.Steps[0].Evidence != "" || s.Steps[0].Status != "pending" {
 		t.Fatalf("revision %+v", s)
 	}
 	beforeScope := snapshot(id)
@@ -255,7 +256,7 @@ func TestPlanRevisionHTTPAcceptance(t *testing.T) {
 	}
 	env.Reopen(t)
 	install()
-	if snapshot(id2).Revision != 1 || snapshot(id).Revision != 4 {
+	if snapshot(id2).Revision != 1 || snapshot(id).Revision != 3 {
 		t.Fatal("independent restore failed")
 	}
 	// First prove lack of approval, independently of verifier availability.
@@ -274,6 +275,24 @@ func TestPlanRevisionHTTPAcceptance(t *testing.T) {
 	turn(StudioChatRequest{SessionID: id2, Message: "Verify", AutoApprove: true})
 	if snapshot(id2).Steps[0].Status == "complete" {
 		t.Fatal("missing sandbox fabricated success")
+	}
+	// Plan mode replaces even an approved plan with failed execution.
+	oldID := snapshot(id2).PlanID
+	args["goal"] = "Replacement after execution"
+	queue(ToolCallTurn("announce_plan", args), TextTurn("Review replacement."))
+	turn(StudioChatRequest{SessionID: id2, Message: "New plan", PlanMode: true, AutoApprove: true})
+	replaced := snapshot(id2)
+	if replaced.PlanID == oldID || replaced.Goal != "Replacement after execution" || replaced.Document.Lifecycle != "" || replaced.Revision != 1 {
+		t.Fatalf("replacement failed: %+v", replaced)
+	}
+	for _, step := range replaced.Steps {
+		if step.Status != "pending" || step.Evidence != "" {
+			t.Fatal("replacement inherited execution")
+		}
+	}
+	env.Reopen(t)
+	if snapshot(id2).PlanID != replaced.PlanID {
+		t.Fatal("replacement lost after reopen")
 	}
 }
 

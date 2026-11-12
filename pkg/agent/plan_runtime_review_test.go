@@ -80,11 +80,11 @@ func TestPlanRuntimeInitialReplacement(t *testing.T) {
 	if err := r.SetApproved(); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Announce("approved replacement", doc, s.Steps); err == nil {
-		t.Fatal("approved replaced")
+	if err := r.Announce("approved replacement", doc, s.Steps); err != nil {
+		t.Fatal(err)
 	}
-	if err := r.AllowInitialPlanReplacement(); err == nil {
-		t.Fatal("approved authorized")
+	if err := r.AllowInitialPlanReplacement(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -118,7 +118,7 @@ func TestPlanRuntimeInitialReplacementConcurrentOneShot(t *testing.T) {
 	}
 }
 
-func TestPlanRuntimeInitialReplacementRejectsExecution(t *testing.T) {
+func TestPlanRuntimeInitialReplacementAllowsPriorExecution(t *testing.T) {
 	for _, mutate := range []func(*PlanSnapshot){
 		func(s *PlanSnapshot) { s.Steps[0].Status = "running" },
 		func(s *PlanSnapshot) { s.Steps[0].Evidence = "exit 0" },
@@ -130,8 +130,8 @@ func TestPlanRuntimeInitialReplacementRejectsExecution(t *testing.T) {
 			s.Steps[i].Evidence = ""
 		}
 		mutate(&s)
-		if err := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{}).AllowInitialPlanReplacement(); err == nil {
-			t.Fatal("unsafe replacement authorized")
+		if err := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{}).AllowInitialPlanReplacement(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

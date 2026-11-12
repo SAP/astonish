@@ -2098,9 +2098,8 @@ func (b *localAgentBackend) driveTurn(
 	defer chatAgent.BindSessionPlanRuntime(sessionID, runtime)()
 	if po := agent.PromptOverridesFromContext(ctx); po != nil {
 		if po.PlanMode || po.GraphPlanMode {
-			// Request changes returns to planning, not approved execution. The
-			// runtime grants exactly one replacement only for an untouched initial
-			// plan. An ineligible plan stays sealed without blocking research.
+			// Plan mode may replace any previous plan with a fresh announcement.
+			// Execution approval belongs to the new plan, not its predecessor.
 			_ = runtime.AllowInitialPlanReplacement()
 		}
 		if po.PlanRevisionDecision != nil {
@@ -2937,7 +2936,7 @@ func (b *localAgentBackend) LoadDelegationDetail(ctx context.Context, task event
 				a.CallID = part.FunctionResponse.ID
 				a.ToolName = part.FunctionResponse.Name
 				a.Result = part.FunctionResponse.Response
-			case part.Text != "" && !part.Thought:
+			case part.Text != "" && !part.Thought && ev.Content != nil && ev.Content.Role == "model":
 				a.Type = "text"
 				a.Text = part.Text
 			default:

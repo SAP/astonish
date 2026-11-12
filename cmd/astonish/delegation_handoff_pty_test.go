@@ -191,7 +191,9 @@ func TestDelegationHandoffCodePTYAcceptance(t *testing.T) {
 	}
 	assertDetail := func(term *handoffPTY) {
 		term.click("greeting-worker")
-		term.wait("[Activity]", "− before-child-edit", "+ after-child-edit", "+1 −1")
+		term.wait("[Activity]", "Edit file")
+		term.send("\x1b[F")
+		term.wait("[Activity]", "− before-child-edit", "+ after-child-edit")
 		term.assertAbsent(parentSecret)
 		term.send("\t")
 		term.wait("[Handoff]", "Immutable handoff", instructions)
@@ -202,7 +204,7 @@ func TestDelegationHandoffCodePTYAcceptance(t *testing.T) {
 		term.send("r")
 		term.assertAbsent(parentSecret)
 		term.send("h")
-		term.wait("[Activity]", "− before-child-edit", "+ after-child-edit", "+1 −1")
+		term.wait("[Activity]", "− before-child-edit", "+ after-child-edit")
 		term.send("\x1b")
 		term.wait("Delegation acceptance finished", "greeting-worker", "Enter send")
 	}
@@ -231,6 +233,7 @@ type handoffPTY struct {
 	cmd     *exec.Cmd
 	mu      sync.Mutex
 	screen  *revisionScreen
+	raw     strings.Builder // ANSI evidence, protected by mu just like the current cells.
 	changed chan struct{}
 	done    chan struct{}
 	once    sync.Once
@@ -255,6 +258,7 @@ func newHandoffPTY(t *testing.T, cmd *exec.Cmd) *handoffPTY {
 					return
 				}
 				p.mu.Lock()
+				p.raw.Write(buf[:n])
 				p.screen.p.Parse(buf[:n])
 				p.mu.Unlock()
 				select {

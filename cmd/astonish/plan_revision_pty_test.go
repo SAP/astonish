@@ -369,5 +369,28 @@ func TestPlanRevisionCodePTYAcceptance(t *testing.T) {
 	send("continue after restart\r")
 	waitScreen("PTY turn 4 ready")
 	assertNoReview()
-	t.Log("Actual Code CLI: initial Enter approval, immediate external Hello-to-HelloWorld goal/outcome/document revision, no review controls, normal continuation and restart verified.")
+	// A new Plan-mode announcement replaces an already approved, resumed plan.
+	previousID := s.PlanID
+	mu.Lock()
+	stage, issued, planningCall = 0, false, 0
+	mu.Unlock()
+	send("/plan\r")
+	send("replace the old plan with a new plan\r")
+	waitScreen("Approve & implement", "Request changes", "Decline")
+	s = state(func(s agent.PlanSnapshot) bool { return s.PlanID != "" && s.PlanID != previousID })
+	if s.Revision != 1 || s.Document.Lifecycle != "" || s.Document.Results != "" {
+		t.Fatalf("replacement is not fresh: %+v", s)
+	}
+	for _, step := range s.Steps {
+		if step.Status != "pending" || step.Evidence != "" {
+			t.Fatal("replacement inherited execution")
+		}
+	}
+	arm(1)
+	send("\r")
+	wait("PTY turn 1 ready")
+	state(func(s agent.PlanSnapshot) bool {
+		return s.Document.Lifecycle == agent.PlanLifecycleApproved && s.Steps[0].Status == "complete"
+	})
+	t.Log("Actual Code CLI: revision, restart, Plan-mode replacement without cancellation, fresh approval and verification passed.")
 }

@@ -516,7 +516,7 @@ func TestPlanInitialRequestChangesLocalAcceptance(t *testing.T) {
 	setCalls("announce_plan", args, 2)
 	run(backend.TurnOptions{PlanMode: true})
 	corrected := snapshot()
-	if corrected.Goal != "Corrected" || corrected.Revision != initial.Revision+1 || corrected.Document.Lifecycle != "" {
+	if corrected.Goal != "Corrected" || corrected.PlanID == initial.PlanID || corrected.Revision != 1 || corrected.Document.Lifecycle != "" {
 		t.Fatalf("replacement slot: %+v", corrected)
 	}
 	blocked, ok := 0, 0
@@ -549,8 +549,8 @@ func TestPlanInitialRequestChangesLocalAcceptance(t *testing.T) {
 	}
 	setCalls("announce_plan", args, 1)
 	run(backend.TurnOptions{PlanMode: true})
-	if snapshot().Revision != corrected.Revision {
-		t.Fatal("Plan mode replaced approved plan")
+	if snapshot().PlanID == corrected.PlanID || snapshot().Document.Lifecycle != "" || snapshot().Steps[0].Status != "pending" {
+		t.Fatal("Plan mode did not replace approved plan with fresh pending plan")
 	}
 }
 

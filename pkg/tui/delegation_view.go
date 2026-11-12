@@ -142,7 +142,7 @@ func (m model) renderDelegationHandoff(task events.DelegationTaskState, width in
 			section("Parallel group", s.ParallelGroup)
 		}
 	}
-	return wrapPlain(b.String(), width)
+	return wrapDelegationStyled(b.String(), width)
 }
 
 // Merge a persisted snapshot with live rows that may have arrived during its
@@ -320,20 +320,47 @@ func (m model) renderDelegationActivity(task events.DelegationTaskState, width i
 		if s.Status == "running" {
 			label += " · pending"
 		}
-		b.WriteString(m.theme.Text.Render(label) + "\n")
+		if s.Status == "error" {
+			b.WriteString(m.theme.Error.Render(label) + "\n")
+		} else if s.Status == "running" {
+			b.WriteString(m.theme.Activity.Render(label) + "\n")
+		} else {
+			b.WriteString(m.theme.Muted.Render(label) + "\n")
+		}
 		if detail := render.ToolDetailBody(s, width); detail != "" {
-			b.WriteString(wrapPlain(detail, width) + "\n")
+			b.WriteString(m.theme.Muted.Render(detail) + "\n")
 		}
 		if s.Status == "complete" && (s.Name == "edit_file" || s.Name == "write_file") {
-			b.WriteString(wrapPlain(render.DiffFromToolStep(s.Name, s.Args, s.Result, width, true, m.info.WorkingDir, m.theme.RenderStyles()), width) + "\n")
+			root := m.workDir
+			if root == "" {
+				root = m.info.WorkingDir
+			}
+			// The captured child workspace is authoritative for its file labels.
+			{
+				for _, a := range task.Activity {
+					if a.Type == "handoff" {
+						var h delegationHandoff
+						if json.Unmarshal([]byte(a.Text), &h) == nil {
+							root = h.WorkDir
+						}
+						break
+					}
+				}
+			}
+			b.WriteString(render.DiffFromToolStep(s.Name, s.Args, s.Result, width, true, root, m.theme.RenderStyles()) + "\n")
 		}
-		if preview := render.ToolResultPreview(s, width); preview != "" {
-			b.WriteString(wrapPlain(preview, width) + "\n")
-		}
-		if render.ToolDetailBody(s, width) == "" {
-			b.WriteString(render.ToolArgsPreview(s, width) + "\n")
+		previewStep := s
+		previewStep.Result = delegationPreviewValue(s.Result, 0)
+		if m.delegationDetail.raw {
+			if preview := render.ToolResultPreview(previewStep, width); preview != "" {
+				b.WriteString(m.theme.Muted.Render(preview) + "\n")
+			}
+		} else if s.Status == "error" {
+			if preview := render.ToolResultPreview(previewStep, width); preview != "" {
+				b.WriteString(m.theme.Error.Render(preview) + "\n")
+			}
 		}
 		b.WriteByte('\n')
 	}
-	return wrapPlain(b.String(), width)
+	return wrapDelegationStyled(b.String(), width)
 }

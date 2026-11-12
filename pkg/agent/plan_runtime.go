@@ -188,8 +188,8 @@ func (r *PlanRuntime) Snapshot() PlanSnapshot {
 	return snapshotPlanLocked(r.plan)
 }
 
-// AllowInitialPlanReplacement is a trusted transport-only, one-shot authorization.
-// It is deliberately not exposed in model tool arguments and is not restored.
+// AllowInitialPlanReplacement authorizes a new announcement from Plan mode.
+// Any prior lifecycle is replaceable; authorization is consumed on durable success.
 func (r *PlanRuntime) AllowInitialPlanReplacement() error {
 	if r == nil {
 		return planRuntimeError(PlanRuntimeNoPlan, "no active plan")
@@ -199,30 +199,7 @@ func (r *PlanRuntime) AllowInitialPlanReplacement() error {
 	if r.plan == nil {
 		return planRuntimeError(PlanRuntimeNoPlan, "no active plan")
 	}
-	r.plan.mu.Lock()
-	defer r.plan.mu.Unlock()
-	if err := r.initialReplaceableLocked(); err != nil {
-		return err
-	}
 	r.allowInitialReplacement = true
-	return nil
-}
-
-func (r *PlanRuntime) initialReplaceableLocked() error {
-	s := snapshotPlanLocked(r.plan)
-	if s.Document.Lifecycle != "" || s.Document.Results != "" || len(r.inFlight) != 0 || len(r.plan.verifying) != 0 {
-		return planRuntimeError(PlanRuntimeReplacementBlocked, "only an unapproved initial plan can be replaced")
-	}
-	for _, step := range s.Steps {
-		if step.Status != "pending" || step.Evidence != "" {
-			return planRuntimeError(PlanRuntimeReplacementBlocked, "execution has already started")
-		}
-	}
-	for _, tasks := range r.plan.taskRegistry {
-		if len(tasks) != 0 {
-			return planRuntimeError(PlanRuntimeReplacementBlocked, "delegation has already started")
-		}
-	}
 	return nil
 }
 
@@ -242,20 +219,8 @@ func (r *PlanRuntime) Announce(goal string, doc PlanDocumentInfo, steps []PlanSt
 	if msg := ValidateAnnouncedPlan(doc, steps); msg != "" {
 		return planRuntimeError(PlanRuntimeInvalid, msg)
 	}
-	if r.plan != nil {
-		r.plan.mu.Lock()
-		defer r.plan.mu.Unlock()
-		if !r.allowInitialReplacement {
-			return planRuntimeError(PlanRuntimeReplacementBlocked, "an active plan already exists")
-		}
-		if err := r.initialReplaceableLocked(); err != nil {
-			return err
-		}
-		current := snapshotPlanLocked(r.plan)
-		next.PlanID, next.Revision, next.Sequence = current.PlanID, current.Revision+1, current.Sequence
-		if current.Document.GraphAcceptance != "" {
-			next.Document.GraphAcceptance = current.Document.GraphAcceptance
-		}
+	if r.plan != nil && !r.allowInitialReplacement {
+		return planRuntimeError(PlanRuntimeReplacementBlocked, "a new plan must be announced in Plan mode")
 	}
 	acceptance := next.Document.GraphAcceptance
 	if acceptance == "" {
@@ -269,20 +234,18 @@ func (r *PlanRuntime) Announce(goal string, doc PlanDocumentInfo, steps []PlanSt
 		next.Steps[i].Status = "pending"
 		next.Steps[i].Evidence = ""
 	}
-	if r.plan == nil {
-		next.PlanID = uuid.NewString()
-		next.Revision = 1
-		next.Sequence = 1
-		syncPlanSnapshotMetadata(&next)
-		if r.options.CommitSnapshot != nil {
-			if err := r.options.CommitSnapshot(next.Clone()); err != nil {
-				return planRuntimeError(PlanRuntimePersistFailed, err.Error())
-			}
+	next.PlanID = uuid.NewString()
+	next.Revision = 1
+	next.Sequence = 1
+	syncPlanSnapshotMetadata(&next)
+	if r.options.CommitSnapshot != nil {
+		if err := r.options.CommitSnapshot(next.Clone()); err != nil {
+			return planRuntimeError(PlanRuntimePersistFailed, err.Error())
 		}
-		r.plan = NewPlanState(next.Goal, next.Document, next.Steps)
-	} else if err := r.commitLocked(next); err != nil {
-		return err
 	}
+	// Detach the previous state so late verification cannot mutate this plan.
+	r.plan = NewPlanState(next.Goal, next.Document, next.Steps)
+	r.inFlight = make(map[string]bool)
 	r.allowInitialReplacement = false
 	return nil
 }
@@ -687,6 +650,9 @@ func (r *PlanRuntime) FinishDelegate(stepName, taskName string) (string, error) 
 		return "", nil
 	}
 	sn, tn := strings.ToLower(p.steps[idx].name), strings.ToLower(taskName)
+	if !p.taskRegistry[sn][tn] {
+		return "", nil // Late completion from a replaced plan is not registered here.
+	}
 	if p.completedTasks[sn][tn] {
 		return "", nil
 	}
@@ -795,7 +761,9 @@ func (r *PlanRuntime) UpdateStep(step, status string) PlanStepApplyResult {
 	defer r.mu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(r.inFlight, step)
+	if r.plan == p {
+		delete(r.inFlight, step)
+	}
 	current := snapshotPlanLocked(p)
 	idx = p.findStepExactLocked(step)
 	if r.plan != p || current.PlanID != capturedID || idx < 0 || p.steps[idx].epoch != capturedEpoch || !implementationEqual(current.Steps[idx].Definition(), info.Definition()) || current.Steps[idx].Status != info.Status || current.Steps[idx].Evidence != info.Evidence || current.Document.Results != "" {

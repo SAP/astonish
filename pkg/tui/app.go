@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image/color"
@@ -86,11 +87,13 @@ type fileViewerState struct {
 
 // delegationDetailState holds the overlay state for viewing a sub-task's activity.
 type delegationDetailState struct {
-	tab     delegationDetailTab
-	offsets [2]int
-	loading bool
-	err     string
-	request *int
+	raw      bool
+	cacheKey string
+	tab      delegationDetailTab
+	offsets  [2]int
+	loading  bool
+	err      string
+	request  *int
 
 	open     bool
 	taskName string
@@ -2712,6 +2715,7 @@ func (m model) composerWrapWidth() int {
 }
 
 func (m *model) refreshViewport() {
+	m.layoutDelegationDetail()
 	if !m.ready {
 		return
 	}
@@ -4337,7 +4341,6 @@ func (m model) viewContent() string {
 		return m.paintBackground(m.renderFileViewer())
 	}
 	if m.delegationDetail.open {
-		m.layoutDelegationDetail()
 		return m.paintBackground(m.renderDelegationDetail())
 	}
 	if m.bots.open {
@@ -5093,6 +5096,7 @@ func (m model) fetchDelegationDetail() (tea.Model, tea.Cmd) {
 	m.delegationDetail.request = request
 	m.delegationDetail.loading = true
 	m.delegationDetail.err = ""
+	m.layoutDelegationDetail()
 	return m, func() tea.Msg {
 		a, err := cap.LoadDelegationDetail(m.ctx, task)
 		return delegationDetailLoadedMsg{request: request, activity: a, err: err}
@@ -5107,8 +5111,6 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 	w := max(20, m.width-4)
 	h := max(5, m.screenHeight()-4)
 	vp := viewport.New(viewport.WithWidth(w), viewport.WithHeight(h))
-	vp.SetContent(m.renderDelegationDetailContent(tasks[taskIdx], w))
-	vp.GotoBottom()
 	m.delegationDetail = delegationDetailState{
 		open:     true,
 		taskName: tasks[taskIdx].Name,
@@ -5116,6 +5118,7 @@ func (m model) openDelegationDetail(itemIdx, taskIdx int) (tea.Model, tea.Cmd) {
 		itemIdx:  itemIdx,
 		vp:       vp,
 	}
+	m.layoutDelegationDetail()
 	if len(tasks[taskIdx].Activity) == 0 || tasks[taskIdx].ChildSessionID != "" {
 		return m.fetchDelegationDetail()
 	}
@@ -5135,6 +5138,13 @@ func (m *model) layoutDelegationDetail() {
 		return
 	}
 	task := m.tr.Items[d.itemIdx].DelegationTasks[d.taskIdx]
+	// Cache by activity identity and scalar presentation state, never by
+	// serializing potentially multi-megabyte tool results.
+	key := fmt.Sprintf("%d/%d/%t/%t/%s/%s/%d/%d/%p", w, d.tab, d.raw, d.loading, d.err, task.Status, task.Sequence, len(task.Activity), task.Activity)
+	if key == d.cacheKey {
+		return
+	}
+	d.cacheKey = key
 	offset := d.vp.YOffset()
 	var content string
 	if d.tab == delegationHandoffTab {
@@ -5154,6 +5164,16 @@ func (m *model) layoutDelegationDetail() {
 
 func (m model) handleDelegationDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "end", "G":
+		m.delegationDetail.vp.GotoBottom()
+		return m, nil
+	case "home", "g":
+		m.delegationDetail.vp.GotoTop()
+		return m, nil
+	case "d":
+		m.delegationDetail.raw = !m.delegationDetail.raw
+		m.layoutDelegationDetail()
+		return m, nil
 	case "tab", "h":
 		d := &m.delegationDetail
 		d.offsets[d.tab] = d.vp.YOffset()
@@ -5222,10 +5242,24 @@ func (m model) renderDelegationDetailHeader() string {
 	if d.tab == delegationHandoffTab {
 		tabs = "Activity  [Handoff]"
 	}
-	return m.theme.Header.Render(wrapPlain(label, w)) + "\n" + m.theme.Muted.Render(wrapPlain(tabs+" · tab/h switch · r Retry · esc back · ↑↓ scroll", w))
+	if d.raw {
+		tabs += " · output shown"
+	}
+	return m.theme.Header.Render(wrapPlain(label, w)) + "\n" + m.theme.Muted.Render(wrapPlain(tabs+" · tab/h switch · d output · r Retry · esc back · ↑↓ scroll", w))
 }
 
 func (m model) renderDelegationDetailContent(task events.DelegationTaskState, width int) string {
+	if task.Description == "" {
+		for _, a := range task.Activity {
+			if a.Type == "handoff" {
+				var h delegationHandoff
+				if json.Unmarshal([]byte(a.Text), &h) == nil && h.Version == 1 {
+					task.Description = h.EffectiveTask
+				}
+				break
+			}
+		}
+	}
 	th := m.theme
 	bodyWidth := width - 4
 	if bodyWidth < 20 {
@@ -5320,7 +5354,7 @@ func (m model) renderDelegationDetailContent(task events.DelegationTaskState, wi
 
 	// Activity and Handoff are intentionally separate: captured input is never model output.
 	b.WriteString(m.renderDelegationActivity(task, bodyWidth))
-	return wrapPlain(b.String(), width)
+	return padBlock(wrapDelegationStyled(b.String(), width-2*contentMarginX))
 }
 
 // summarizeToolArgs produces a compact one-line summary of tool arguments.

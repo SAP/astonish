@@ -1297,8 +1297,8 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.PlanMode {
-		// A trusted return to Plan permits one corrected initial announcement.
-		// Ineligible plans stay sealed without blocking read-only research.
+		// Plan mode permits a fresh announcement regardless of the old lifecycle.
+		// The replacement requires its own execution approval.
 		_ = planRuntime.AllowInitialPlanReplacement()
 	}
 	runner.ctx = agent.WithPlanRuntime(runner.ctx, planRuntime)

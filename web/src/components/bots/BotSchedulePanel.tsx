@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { getBotVersion, listBotGoals, type Bot, type BotGoal, type BotVersion } from '@/api/bots'
+import { listBotSkills, SkillStatus } from '@/api/botSkills'
+import { useWorkspaceResource } from './workspaceResource'
 import { actOnTrigger, canEnableTrigger, HookStatus, isHook, saveTrigger, TriggerKind, type TriggerSpec, type TriggerProof } from '@/api/botTriggers'
 
 type Props = { bot: Bot; version: BotVersion; readOnly: boolean; onChange: () => void }
@@ -10,6 +12,8 @@ const empty = (timezone: string): TriggerSpec => ({ id: '', kind: TriggerKind.Cr
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="block space-y-1 text-sm"><span className="font-medium">{label}</span>{children}</label> }
 
 export default function BotSchedulePanel({ bot, version, readOnly, onChange }: Props) {
+  const skills = useWorkspaceResource(signal => listBotSkills(bot, signal, { limit: 100 }), `${bot.scope}/${bot.id}`, bot.revision)
+  const [legacy, setLegacy] = useState(false)
   const [snapshot, setSnapshot] = useState({ bot, version })
   const [draft, setDraft] = useState<TriggerSpec>(() => empty(version.persona.timezone || 'UTC'))
   const [editing, setEditing] = useState(false), [reviewed, setReviewed] = useState(false)
@@ -31,7 +35,7 @@ export default function BotSchedulePanel({ bot, version, readOnly, onChange }: P
   const current = snapshot.bot
   const blocked = readOnly || busy || stale
   const change = (patch: Partial<TriggerSpec>) => { setDraft(d => ({ ...d, ...patch })); setReviewed(false); setPending(null) }
-  const reset = () => { setDraft(empty(snapshot.version.persona.timezone || 'UTC')); setEditing(false); setReviewed(false) }
+  const reset = () => { setLegacy(false); setDraft(empty(snapshot.version.persona.timezone || 'UTC')); setEditing(false); setReviewed(false) }
   const apply = async (fn: () => Promise<Bot>, message: string, after?: () => void) => {
     if (blocked || lock.current) return
     lock.current = true; setBusy(true); setError(''); setNotice('')
@@ -49,7 +53,7 @@ export default function BotSchedulePanel({ bot, version, readOnly, onChange }: P
     finally { lock.current = false; setBusy(false) }
   }
   const needsSchedule = draft.kind === TriggerKind.Cron || !!draft.poll
-  const valid = !!reason.trim() && !!draft.instructions.trim()
+  const valid = !!reason.trim() && (legacy ? !!draft.instructions.trim() : !!draft.skill_id && !!draft.invocation?.trim() && !skills.loading && !skills.error && !!skills.data?.skills.some(s => s.id === draft.skill_id && s.status === SkillStatus.Active))
     && (!needsSchedule || !!draft.cron?.trim() && !!draft.timezone?.trim())
     && (!isHook(draft) || !!draft.credential_ref?.trim())
     && (draft.kind !== TriggerKind.Deadline || !!draft.goal_id)
@@ -65,14 +69,14 @@ export default function BotSchedulePanel({ bot, version, readOnly, onChange }: P
     {!snapshot.version.triggers?.length && <p>No scheduled triggers.</p>}
     <div className="space-y-3">{snapshot.version.triggers?.map(raw => { const t = raw as TriggerSpec; return <article key={t.id} className="rounded-lg border border-border p-4 space-y-2">
       <div className="flex flex-wrap justify-between gap-2"><h3 className="font-medium">{t.kind} · {t.enabled ? 'enabled' : 'disabled'}</h3><span className="text-xs text-muted-foreground">{t.id}</span></div>
-      {t.cron && <p>{t.cron} · {t.timezone}</p>}<p className="text-sm whitespace-pre-wrap">{t.instructions}</p>
+      {t.cron && <p>{t.cron} · {t.timezone}</p>}{t.skill_id ? <p>Skill: {t.skill_id} · Invocation: {t.invocation}</p> : <p className="text-sm whitespace-pre-wrap">Legacy instructions: {t.instructions}</p>}
       <p className="text-sm">Catch up once: {t.catch_up_once ? 'yes' : 'no'}</p>
       {t.goal_id && <p className="text-sm">Linked goal: {t.goal_id} · deadline managed by the goal</p>}
       {isHook(t) && <p className="text-sm">Dry-run status: {t.hook_status || 'unavailable'} · Credential reference: {t.credential_ref || 'unavailable'}</p>}
       {t.poll && <p className="text-sm break-all">Poll: {t.poll.url} · allowed host: {t.poll.allowed_host}</p>}
       {t.channel_binding && <p className="text-sm">Binding: {t.channel_binding.id} · {t.channel_binding.channel} / {t.channel_binding.chat_id}{t.channel_binding.thread_id ? ` / ${t.channel_binding.thread_id}` : ''}</p>}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" disabled={blocked || t.kind === 'manual'} onClick={() => { setDraft({ ...t }); setEditing(true); setReviewed(false); setPending(null) }}>Edit trigger</Button>
+        <Button size="sm" variant="outline" disabled={blocked || t.kind === 'manual'} onClick={() => { setDraft({ ...t }); setLegacy(!t.skill_id); setEditing(true); setReviewed(false); setPending(null) }}>Edit trigger</Button>
         <Button size="sm" variant="outline" disabled={blocked || !reason.trim() || editing || (!t.enabled && !canEnableTrigger(current, t))} onClick={() => setPending({ trigger: t, action: t.enabled ? 'disable' : 'enable' })}>{t.enabled ? 'Disable trigger' : 'Enable reviewed trigger'}</Button>
         {isHook(t) && <Button size="sm" variant="outline" disabled={blocked || editing || !reason.trim() || t.enabled || t.hook_status !== HookStatus.Disabled} onClick={() => { setPending({ trigger: t, action: 'dry-run' }); setProof({ event_id: '', timestamp: '', signature: '', payload: '' }) }}>Review dry-run</Button>}
         <Button size="sm" variant="outline" disabled={blocked || editing || !reason.trim()} onClick={() => setPending({ trigger: t, action: 'remove' })}>Remove trigger</Button>
@@ -104,7 +108,14 @@ export default function BotSchedulePanel({ bot, version, readOnly, onChange }: P
         {draft.kind === TriggerKind.Webhook && <p className="text-sm text-muted-foreground">Signed events use the authenticated, scoped Bot events endpoint. The credential reference binds the signing credential; this form does not generate or reveal its secret.</p>}
         {draft.kind === TriggerKind.Deadline && <><Field label="Deadline goal"><select className="w-full rounded border border-border bg-background p-2" value={draft.goal_id || ''} onChange={e => change({ goal_id: e.target.value })}><option value="">Select an active goal with a deadline</option>{goals.filter(g => g.status === 'active' && g.due_at).map(g => <option key={g.id} value={g.id}>{g.title} — {g.due_at}</option>)}</select></Field><p className="text-xs text-muted-foreground">Uses the goal’s persisted due date, not a recurring cron. Only active goals with a saved deadline are eligible.</p></>}
         {draft.kind === TriggerKind.Channel && <div className="space-y-2"><p className="text-sm text-muted-foreground">Use an existing linked identity. A binding ID is not a new authorization grant; incoming events are checked by the server.</p>{(['id', 'channel', 'chat_id', 'thread_id'] as const).map(key => <Field key={key} label={{ id: 'Binding ID', channel: 'Channel', chat_id: 'Chat ID', thread_id: 'Thread ID (optional)' }[key]}><Input value={draft.channel_binding?.[key] || ''} onChange={e => change({ channel_binding: { id: '', channel: '', chat_id: '', ...draft.channel_binding, [key]: e.target.value } })} /></Field>)}</div>}
-        <Field label="Schedule instructions"><Textarea aria-label="Schedule instructions" value={draft.instructions} onChange={e => change({ instructions: e.target.value })} placeholder="What should the Bot do when this trigger fires?" /></Field>
+        {!editing && <label className="flex gap-2"><input type="checkbox" checked={legacy} onChange={e => { setLegacy(e.target.checked); change({ skill_id: undefined, invocation: '', instructions: '' }) }} />Use legacy instructions (no skill import)</label>}
+        {legacy ? <Field label="Schedule instructions"><Textarea aria-label="Schedule instructions" value={draft.instructions} onChange={e => change({ instructions: e.target.value })} placeholder="What should the Bot do when this trigger fires?" /></Field> : <>
+          {skills.loading && <p role="status">Loading schedule skills…</p>}{skills.error && <p role="alert">Skills unavailable. <Button type="button" onClick={skills.retry}>Retry schedule skills</Button></p>}
+          <Field label="Schedule skill"><select aria-label="Schedule skill" className="w-full rounded border border-border bg-background p-2" value={draft.skill_id || ''} onChange={e => change({ skill_id: e.target.value, instructions: '' })}><option value="">Select a committed active skill</option>{skills.data?.skills.filter(s => s.status === SkillStatus.Active).map(s => <option key={s.id} value={s.id}>{s.title} · revision {s.head_revision}</option>)}</select></Field>
+          {!skills.loading && !skills.error && !skills.data?.skills.some(s => s.status === SkillStatus.Active) && <p>No active skills. Teach the Bot in Home first, or keep a legacy schedule.</p>}
+          <Field label="Invocation intent"><Input aria-label="Invocation intent" value={draft.invocation || ''} onChange={e => change({ invocation: e.target.value })} /></Field>
+          <p className="text-sm text-muted-foreground">The schedule references the skill, never copies its method. Each run pins a committed revision and retains existing authorization checks.</p>
+        </>}
         {(needsSchedule || draft.kind === TriggerKind.Deadline) && <label className="flex gap-2 text-sm"><input type="checkbox" checked={draft.catch_up_once} onChange={e => change({ catch_up_once: e.target.checked })} />Catch up once after a missed occurrence</label>}
         {editing && <label className="flex gap-2 text-sm"><input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)} />I reviewed these changes. Save disabled and invalidate previous hook approval.</label>}
         <div className="flex gap-2"><Button disabled={!valid || editing && !reviewed}>{editing ? 'Save reviewed changes disabled' : 'Save disabled schedule'}</Button>{editing && <Button type="button" variant="outline" onClick={reset}>Cancel editing</Button>}</div>

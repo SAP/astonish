@@ -37,11 +37,6 @@ type correctionFollowupModel struct {
 
 func (*correctionFollowupModel) Name() string { return "controlled" }
 func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool {
-		return w.Candidate.Text == "Delivery is Thursday" || w.Candidate.Text == "Delivery is Friday" || w.Candidate.Text == "No delivery fact in active context."
-	}); ok {
-		return response
-	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var prompt string
 		if r.Config != nil && r.Config.SystemInstruction != nil {
@@ -212,8 +207,11 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				if e != nil || saved.Status != store.RunSucceeded {
 					t.Fatalf("worker run: %+v %v", saved, e)
 				}
-				if len(llm.prompts) <= before {
-					t.Fatal("no model call")
+				if len(llm.prompts) != before+1 {
+					t.Fatalf("correction followup should need exactly one agent call, not preparation/review: before=%d after=%d", before, len(llm.prompts))
+				}
+				if saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 {
+					t.Fatalf("new followup lost agent work protocol: %+v", saved.Report.Work)
 				}
 				prompt := llm.prompts[before]
 				if !strings.Contains(prompt, want) {

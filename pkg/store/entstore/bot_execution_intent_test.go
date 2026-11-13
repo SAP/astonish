@@ -104,7 +104,11 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 						t.Fatal("draft approval", err)
 					}
 					checkpoint, _ := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: a.ID, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, Version: b.Version, ActionDigest: digest, Fence: l.Fence})
-					if err := repo.CommitRun(c, store.BotRunCommit{Lease: l, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
+					work, err := repo.LoadWork(c, l)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := repo.CommitRun(c, store.BotRunCommit{Lease: l, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
 						t.Fatal(err)
 					}
 					if err := repo.RequeueApprovedRun(ctx, b.ID, run.ID, a.ID); !errors.Is(err, store.ErrBotConflict) {

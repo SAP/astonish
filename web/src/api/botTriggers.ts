@@ -18,6 +18,7 @@ export const canEnableTrigger = (bot: Bot, t: BotTrigger) => bot.status === 'act
 // status must never be replayed on PUT. Every edit is saved disabled and reviewed anew.
 export function triggerDefinition(t: TriggerSpec): TriggerSpec {
   return { id: t.id, kind: t.kind, instructions: t.instructions, enabled: false, catch_up_once: t.catch_up_once,
+    ...(t.skill_id ? { skill_id: t.skill_id, invocation: t.invocation, instructions: '' } : {}),
     ...(t.kind === TriggerKind.Cron || t.poll ? { cron: t.cron, timezone: t.timezone } : {}),
     ...(t.kind === TriggerKind.Deadline ? { goal_id: t.goal_id } : {}),
     ...(isHook(t) ? { credential_ref: t.credential_ref } : {}),

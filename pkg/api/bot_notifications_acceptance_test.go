@@ -51,7 +51,11 @@ func (n notificationHTTPTransport) Send(ctx context.Context, q bot.NotificationR
 // a real HTTP transport. Every database belongs to t.TempDir; linked identities
 // supply live authority. Fixture SQL sets run readiness and immutable snapshots,
 // including hostile legacy targets that the live claim gate must reject.
-func TestBotNotifications(t *testing.T) {
+func TestBotNotifications(t *testing.T) { testBotNotifications(t, false) }
+
+func TestBotAgentDeliveryHTTPAcceptance(t *testing.T) { testBotNotifications(t, true) }
+
+func testBotNotifications(t *testing.T, reopen bool) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, scenario := range []string{"nochange", "threshold-below", "threshold", "defer-once", "completed-goal", "ambiguous", "revoked-binding", "foreign-workspace", "foreign-chat"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
@@ -61,7 +65,7 @@ func TestBotNotifications(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer platform.Close()
+				defer func() { _ = platform.Close() }()
 				org := &store.Organization{ID: uuid.NewString(), Slug: "notifications", Name: "Notifications", Status: "active"}
 				if err := platform.Organizations().Create(ctx, org); err != nil {
 					t.Fatal(err)
@@ -218,6 +222,32 @@ func TestBotNotifications(t *testing.T) {
 					return p
 				}
 				first := publish()
+				if reopen {
+					// Retry from reopened storage, not just a new Publisher instance.
+					// No worker or model is available to redo the completed assignment.
+					if err := platform.Close(); err != nil {
+						t.Fatal(err)
+					}
+					_, platform, err = entstore.NewPlatformServices(ctx, entstore.Config{DSN: filepath.Join(dir, "platform.db"), DataDir: dir})
+					if err != nil {
+						t.Fatal(err)
+					}
+					ods, err = platform.ForOrg(org.Slug)
+					if err != nil {
+						t.Fatal(err)
+					}
+					repo = ods.ForTeam(team.Slug).Bots()
+					if scope == store.BotScopePersonal {
+						repo = ods.ForUser(owner.String()).Bots()
+					}
+					saved, err := repo.GetRun(ctx, b.ID, run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if saved.Status != store.RunSucceeded || saved.Work == nil || saved.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.EmployeeMessage == nil || saved.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent {
+						t.Fatalf("reopen lost committed agent result: %+v", saved)
+					}
+				}
 				if scenario == "defer-once" || scenario == "completed-goal" || scenario == "revoked-binding" {
 					if calls.Load() != 0 || first.Notifications[0].State != store.BotNotificationDeferred {
 						t.Fatal("not deferred")

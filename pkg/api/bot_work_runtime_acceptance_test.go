@@ -1,8 +1,10 @@
 package api_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,8 +13,69 @@ import (
 	"google.golang.org/genai"
 )
 
+// pinLegacyHTTPAttempt restores only the protocol pin of a historical queued
+// attempt in this fixture's owned SQLite file, before the worker has started.
+// Admission, authority, execution, assessment and publication still use production
+// stores and factories. No candidate or verdict is seeded, and production cannot
+// downgrade a run through SaveWork.
+func pinLegacyHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun) {
+	t.Helper()
+	path := filepath.Join(f.dataDir, "orgs", "interactive", "teams", "team.db")
+	if f.scope == store.BotScopePersonal {
+		path = filepath.Join(f.dataDir, "orgs", "interactive", "personal", f.b.OwnerID.String()+".db")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var raw []byte
+	if err := db.QueryRowContext(f.ctx, "SELECT data FROM bot_runs WHERE id = ? AND bot_id = ? AND status = 'queued'", run.ID.String(), run.BotID.String()).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var storage map[string]string
+	if err := json.Unmarshal(raw, &storage); err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(storage["bot_document"]), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope["work"]) != 0 {
+		t.Fatal("fixture attempt already has work")
+	}
+	input, err := f.repo.(store.BotRuntimeStore).LoadRunInput(f.ctx, run.BotID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := store.NewBotWorkState(store.BotWorkContract{BotID: run.BotID, RunID: run.ID, Version: run.Version, Instructions: input.Instructions, Charter: input.Version.Charter})
+	if err := work.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	envelope["work"], err = json.Marshal(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage["bot_document"] = string(updated)
+	updated, err = json.Marshal(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.ExecContext(f.ctx, "UPDATE bot_runs SET data = ? WHERE id = ? AND bot_id = ? AND status = 'queued' AND CAST(data AS TEXT) = ?", string(updated), run.ID.String(), run.BotID.String(), string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("legacy fixture pin: rows=%d err=%v", n, err)
+	}
+}
+
 // Actual HTTP admission/readback, scoped SQLite, production worker, factory and
-// ChatRunner. Only the provider is controlled; no work states/verdicts are seeded.
+// ChatRunner, with an explicit historical protocol pin. No verdicts are seeded.
 func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
@@ -28,6 +91,8 @@ func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
 				prompt := req.Config.SystemInstruction.Parts[0].Text
 				var output any
 				switch {
+				case strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1"):
+					output = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled publication fixture"}
 				case strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1"):
 					output = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "content", SourceIDs: []string{"assignment", "charter"}, Text: "Return the owner supplied receipt text"}}}
 				case strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1"):
@@ -60,6 +125,7 @@ func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
 				if err := json.Unmarshal(raw, &receipt); err != nil {
 					t.Fatal(err)
 				}
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
 				if err := f.worker.Poll(f.ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -111,7 +177,9 @@ func TestBotWorkRuntimeHTTPAcceptance(t *testing.T) {
 					}
 					prompt := req.Config.SystemInstruction.Parts[0].Text
 					var output any
-					if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
+					if strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1") {
+						output = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled quality fixture"}
+					} else if strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE") {
 						var source struct {
 							SourceDigest string `json:"source_digest"`
 						}
@@ -175,6 +243,7 @@ func TestBotWorkRuntimeHTTPAcceptance(t *testing.T) {
 				if err := json.Unmarshal(raw, &receipt); err != nil {
 					t.Fatal(err)
 				}
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
 				if err := f.worker.Poll(f.ctx); err != nil {
 					t.Fatal(err)
 				}

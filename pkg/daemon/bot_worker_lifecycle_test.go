@@ -14,8 +14,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// reviewedRecoveryReply supplies a controlled text assessment for a lifecycle
-// test that has no model. It uses the actual fenced work transition contract.
+// reviewedRecoveryReply supplies a controlled text reply for lifecycle tests
+// without a model, following the persisted protocol (including historical review).
 func reviewedRecoveryReply(t *testing.T, repo store.BotStore, ctx context.Context, lease store.BotLease, text string) store.BotReport {
 	t.Helper()
 	ws := repo.(store.BotWorkStore)
@@ -31,6 +31,15 @@ func reviewedRecoveryReply(t *testing.T, repo store.BotStore, ctx context.Contex
 		}
 	}
 	n := w.Clone()
+	if w.Protocol == store.BotWorkProtocolAgentLedV1 {
+		n.Phase = store.BotWorkFinished
+		n.AgentWork.Disposition = store.AgentWorkAnswered
+		n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: text}
+		n.Candidate.Digest = n.Candidate.ContentDigest()
+		save(n)
+		return store.BotReport{Summary: text, Work: store.BuildBotWorkProjection(w)}
+	}
+	// Only preexisting legacy work follows the historical assessment transitions.
 	n.Phase = store.BotWorkProducing
 	n.Criteria = []store.BotWorkCriterion{{ID: "reply", SourceIDs: []string{"assignment", "charter"}, Text: "Reply without tools"}}
 	save(n)

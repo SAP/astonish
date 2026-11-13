@@ -259,7 +259,11 @@ func (w *BotWorker) loadScope(ctx context.Context, r bot.RunRequest) (*launcher.
 				return nil, err
 			}
 		}
-		return w.config.ResolveModel(c, r.Principal, r.Bot.Scope, p, m)
+		llm, err := w.config.ResolveModel(c, r.Principal, r.Bot.Scope, p, m)
+		if err != nil {
+			return llm, err
+		}
+		return observeBotResolvedModel(r, w.config.WorkerID, p, m, llm), nil
 	}}
 	return &launcher.BotChatScope{Services: svc, Sessions: ss, Models: resolver, OwnerEmail: w.ownerEmailResolver(r), Cleanup: func() {}}, nil
 }

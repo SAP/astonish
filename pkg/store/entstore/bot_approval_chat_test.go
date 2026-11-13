@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,7 +76,22 @@ func (m approvalWorkAssessmentModel) GenerateContent(ctx context.Context, req *m
 				yield(nil, store.ErrBotInvalid)
 				return
 			}
-			output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: work.Criteria[0].ID, Verdict: store.BotCriterionUnverified, Method: store.BotAssessmentModel, Explanation: "Controlled tool receipt does not independently verify the requested external outcome."}}}
+			var content struct {
+				Items []struct {
+					ID   string `json:"id"`
+					Text string `json:"text"`
+				} `json:"content_items"`
+				ExecutionEvidence map[string]string `json:"execution_evidence"`
+			}
+			if err := json.Unmarshal(input, &content); err != nil {
+				yield(nil, err)
+				return
+			}
+			assessments := []approvalContentAssessment{}
+			for _, item := range content.Items {
+				assessments = append(assessments, assessApprovalContent(item.ID, item.Text, content.ExecutionEvidence))
+			}
+			output = map[string]any{"candidate_digest": work.Candidate.Digest, "criteria": []store.BotCriterionAssessment{{CriterionID: work.Criteria[0].ID, Verdict: store.BotCriterionUnverified, Method: store.BotAssessmentModel, Explanation: "Controlled tool receipt does not independently verify the requested external outcome."}}, "content_assessments": assessments}
 		}
 		raw, err := json.Marshal(output)
 		if err != nil {
@@ -83,6 +99,100 @@ func (m approvalWorkAssessmentModel) GenerateContent(ctx context.Context, req *m
 			return
 		}
 		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), TurnComplete: true}, nil)
+	}
+}
+
+type approvalContentClaimType string
+
+const (
+	approvalContentFactual   approvalContentClaimType = "factual"
+	approvalContentExecution approvalContentClaimType = "execution"
+	approvalReceiptText                               = "Exact receipt observed."
+	questionReceiptText                               = "The write tool returned its receipt; the destination outcome remains unverified."
+)
+
+type approvalContentSource struct {
+	Ref   string `json:"ref"`
+	Quote string `json:"quote"`
+}
+
+type approvalContentAssessment struct {
+	ItemID           string                    `json:"item_id"`
+	ClaimType        approvalContentClaimType  `json:"claim_type"`
+	Relevance        store.BotCriterionVerdict `json:"relevance"`
+	Support          store.BotCriterionVerdict `json:"support"`
+	Explanation      string                    `json:"explanation"`
+	Sources          []approvalContentSource   `json:"sources"`
+	ExecutionSources []approvalContentSource   `json:"execution_sources"`
+}
+
+func assessApprovalContent(id, text string, evidence map[string]string) approvalContentAssessment {
+	a := approvalContentAssessment{
+		ItemID: id, ClaimType: approvalContentFactual,
+		Relevance: store.BotCriterionSatisfied, Support: store.BotCriterionUnverified,
+		Explanation: "No captured content passage supports this claim.",
+		Sources:     []approvalContentSource{}, ExecutionSources: []approvalContentSource{},
+	}
+	var receipt string
+	switch text {
+	case approvalReceiptText:
+		receipt = `{"receipt":"ok"}`
+	case questionReceiptText:
+		receipt = `{"written":true}`
+	default:
+		// In particular, completed destination work is not nonfactual formatting
+		// and cannot be corroborated by a controlled transport receipt.
+		return a
+	}
+	a.ClaimType = approvalContentExecution
+	a.Explanation = "The receipt observation lacks matching captured execution evidence."
+	refs := make([]string, 0, len(evidence))
+	for ref := range evidence {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "tool-response:") && evidence[ref] == receipt {
+			a.Support = store.BotCriterionSatisfied
+			a.ExecutionSources = append(a.ExecutionSources, approvalContentSource{Ref: ref, Quote: evidence[ref]})
+			a.Explanation = "Captured receipt supports only the reported tool return, not independently verified completion of the requested external outcome."
+			break
+		}
+	}
+	return a
+}
+
+func TestApprovalWorkAssessmentContentEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, ref, receipt string
+		claim                    approvalContentClaimType
+		support                  store.BotCriterionVerdict
+	}{
+		{"approval receipt", approvalReceiptText, "tool-response:approval", `{"receipt":"ok"}`, approvalContentExecution, store.BotCriterionSatisfied},
+		{"question receipt", questionReceiptText, "tool-response:question", `{"written":true}`, approvalContentExecution, store.BotCriterionSatisfied},
+		{"missing receipt", approvalReceiptText, "", "", approvalContentExecution, store.BotCriterionUnverified},
+		{"wrong receipt", questionReceiptText, "tool-response:question", `{"written":false}`, approvalContentExecution, store.BotCriterionUnverified},
+		{"owner scope is not receipt", approvalReceiptText, "assignment", `{"receipt":"ok"}`, approvalContentExecution, store.BotCriterionUnverified},
+		{"external completion", "Completed the safe destination work.", "tool-response:question", `{"written":true}`, approvalContentFactual, store.BotCriterionUnverified},
+		{"external fact", "The destination contains ten records.", "tool-response:question", `{"written":true}`, approvalContentFactual, store.BotCriterionUnverified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := map[string]string{}
+			if tc.ref != "" {
+				evidence[tc.ref] = tc.receipt
+			}
+			got := assessApprovalContent("body:0:line:0", tc.text, evidence)
+			if got.ItemID != "body:0:line:0" || got.ClaimType != tc.claim || got.Support != tc.support || got.Relevance != store.BotCriterionSatisfied || got.Explanation == "" || got.Sources == nil || len(got.Sources) != 0 || got.ExecutionSources == nil {
+				t.Fatalf("assessment=%+v", got)
+			}
+			if tc.support == store.BotCriterionSatisfied {
+				if len(got.ExecutionSources) != 1 || got.ExecutionSources[0].Ref != tc.ref || got.ExecutionSources[0].Quote != evidence[tc.ref] {
+					t.Fatalf("receipt citation=%+v", got.ExecutionSources)
+				}
+			} else if len(got.ExecutionSources) != 0 {
+				t.Fatalf("unsupported claim cited receipt: %+v", got)
+			}
+		})
 	}
 }
 
@@ -95,7 +205,7 @@ func (*approvalModel) Name() string { return "controlled" }
 func (m *approvalModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
-		part := &genai.Part{Text: "Exact receipt observed."}
+		part := &genai.Part{Text: approvalReceiptText}
 		if !m.report {
 			args := map[string]any{"body": "prior"}
 			if m.calls == 2 {
@@ -160,8 +270,39 @@ func (approvalHome) Delete(context.Context, store.BotHomeBinding) error {
 	return store.ErrBotUnsupported
 }
 
+func assertContinuationProtocolReport(t *testing.T, report store.BotReport, protocol store.BotWorkProtocol, text string) {
+	t.Helper()
+	if (report.Work != nil && report.Work.Protocol != protocol) || (protocol == store.BotWorkProtocolAgentLedV1 && report.Work == nil) {
+		t.Fatalf("continuation changed protocol: %+v", report.Work)
+	}
+	switch protocol {
+	case store.BotWorkProtocolLegacyAssessment:
+		if report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || report.Quality == nil || report.Quality.Repairs != 0 || len(report.Quality.Criteria) != 1 || report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified {
+			t.Fatalf("legacy receipt gained unsupported assessment: %+v", report)
+		}
+	case store.BotWorkProtocolAgentLedV1:
+		// Unattested effects still require the safety fallback in agent mode;
+		// the model's receipt prose is not an execution attestation.
+		if report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || report.Quality != nil || report.Summary != text || len(report.Changed) != 0 {
+			t.Fatalf("agent receipt gained unsupported completion: %+v", report)
+		}
+	default:
+		t.Fatalf("unknown protocol %q", protocol)
+	}
+}
+
 func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
-	ctx, botID, runID, home, reopen := entstore.ApprovalReopenFixture(t)
+	for _, protocol := range []store.BotWorkProtocol{store.BotWorkProtocolLegacyAssessment, store.BotWorkProtocolAgentLedV1} {
+		name := "legacy"
+		if protocol == store.BotWorkProtocolAgentLedV1 {
+			name = "agent"
+		}
+		t.Run(name, func(t *testing.T) { testBotApprovalSQLiteReopenChatRunner(t, protocol) })
+	}
+}
+
+func testBotApprovalSQLiteReopenChatRunner(t *testing.T, protocol store.BotWorkProtocol) {
+	ctx, botID, runID, home, reopen := entstore.ApprovalScopeReopenFixture(t, store.BotScopePersonal, protocol)
 	ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Classifier: approvalClassifier{}, Guard: approvalGuard{}})
 	scoped, ss := reopen()
 	var prior, sent atomic.Int64
@@ -202,6 +343,9 @@ func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
 	if err != nil || waiting.Status != store.RunWaitingApproval || prior.Load() != 1 || sent.Load() != 0 {
 		t.Fatalf("waiting=%+v err=%v prior=%d sent=%d", waiting, err, prior.Load(), sent.Load())
 	}
+	if protocol == store.BotWorkProtocolAgentLedV1 && len(waiting.Report.Unverified) != 0 {
+		t.Fatalf("ordinary read was treated as an unattested effect: %+v", waiting.Report)
+	}
 	saved, err := scoped.GetRun(ctx, botID, runID)
 	if err != nil {
 		t.Fatal(err)
@@ -231,9 +375,10 @@ func TestBotApprovalSQLiteReopenChatRunner(t *testing.T) {
 	}
 	final := &approvalModel{report: true}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || len(result.Report.Unverified) == 0 || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
+	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || len(result.Report.Unverified) == 0 || prior.Load() != 1 || sent.Load() != 1 || final.calls != 1 {
 		t.Fatalf("result=%+v err=%v prior=%d sent=%d model=%d", result, err, prior.Load(), sent.Load(), final.calls)
 	}
+	assertContinuationProtocolReport(t, result.Report, protocol, approvalReceiptText)
 	scoped, ss = reopen()
 	saved, err = scoped.GetRun(ctx, botID, runID)
 	if err != nil || saved.Status != store.RunPartial || saved.Lease.Fence <= oldLease.Fence {

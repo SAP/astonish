@@ -161,7 +161,7 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 		// Legacy explicit /conversation and /test-run have no canonical admission
 		// row. Preserve only the exact persisted owner assignment, never role alone
 		// or model-generated correction instructions, under one deterministic ID.
-		if run.Work != nil && run.Run.UserEventID == "" && run.Run.Intent != store.BotIntentRegular && !event.Partial && event.Author == "user" && event.Content != nil && event.Content.Role == "user" && len(event.Content.Parts) == 1 && event.Content.Parts[0] != nil && event.Content.Parts[0].Text == run.Instructions && event.Actions.StateDelta["_astonish_turn_context"] != true {
+		if run.Work != nil && run.Run.UserEventID == "" && (run.Run.Intent != store.BotIntentRegular || run.Run.Trigger == store.TriggerManual && event.ID == "bot-work-input:"+run.Run.ID.String()) && !event.Partial && event.Author == "user" && event.Content != nil && event.Content.Role == "user" && len(event.Content.Parts) == 1 && event.Content.Parts[0] != nil && event.Content.Parts[0].Text == run.Instructions && event.Actions.StateDelta["_astonish_turn_context"] != true {
 			event = &adksession.Event{ID: "bot-work-input:" + run.Run.ID.String(), Author: "user", Timestamp: run.Run.CreatedAt, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(run.Instructions, "user")}}
 			projectCtx = context.WithValue(projectCtx, botWorkOwnerInputKey{}, true)
 		}
@@ -226,7 +226,8 @@ func (d teamBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r store
 			return store.ErrBotForbidden
 		}
 		target = b.HomeSessionID.String()
-		if r.Presentation == store.BotRunPresentationHomeInteractive || botHomeArtifactEvent(r, e) {
+		ownerInput, _ := ctx.Value(botWorkOwnerInputKey{}).(bool)
+		if r.Presentation == store.BotRunPresentationHomeInteractive || botHomeArtifactEvent(r, e) || ownerInput {
 			targets = append(targets, target)
 		} else {
 			targets = []string{target}
@@ -277,7 +278,8 @@ func (d personalBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r s
 			return store.ErrBotForbidden
 		}
 		target = b.HomeSessionID.String()
-		if r.Presentation == store.BotRunPresentationHomeInteractive || botHomeArtifactEvent(r, e) {
+		ownerInput, _ := ctx.Value(botWorkOwnerInputKey{}).(bool)
+		if r.Presentation == store.BotRunPresentationHomeInteractive || botHomeArtifactEvent(r, e) || ownerInput {
 			targets = append(targets, target)
 		} else {
 			targets = []string{target}

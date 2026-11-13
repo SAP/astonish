@@ -21,7 +21,7 @@ func ApprovalReopenFixture(t *testing.T) (context.Context, store.BotID, store.Ru
 	return ApprovalScopeReopenFixture(t, store.BotScopePersonal)
 }
 
-func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope) (context.Context, store.BotID, store.RunID, store.BotHomeBinding, func() (store.BotStore, store.SessionStore)) {
+func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ...store.BotWorkProtocol) (context.Context, store.BotID, store.RunID, store.BotHomeBinding, func() (store.BotStore, store.SessionStore)) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "approval.db")
 	owner := uuid.New()
@@ -96,6 +96,44 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope) (context.Con
 	run, err := scoped.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: 1, Trigger: store.TriggerManual, IdempotencyKey: "run", Instructions: "Read once, then send body exact."})
 	if err != nil {
 		t.Fatal(err)
+	}
+	protocol := store.BotWorkProtocolAgentLedV1
+	if len(protocols) > 1 {
+		t.Fatal("at most one fixture protocol is supported")
+	}
+	if len(protocols) == 1 {
+		protocol = protocols[0]
+	}
+	switch protocol {
+	case store.BotWorkProtocolAgentLedV1:
+		// Newly admitted attempts select the current protocol at first claim.
+	case store.BotWorkProtocolLegacyAssessment:
+		// Simulate a persisted pre-agent attempt before the runtime claims it.
+		// Production APIs must never downgrade an in-flight work protocol.
+		var saved *botStoredRun
+		if scope == store.BotScopeTeam {
+			saved, err = (teamBotDB{client: teamClient}).ReadRun(ctx, b.ID, run.ID)
+		} else {
+			saved, err = (personalBotDB{client: client}).ReadRun(ctx, b.ID, run.ID)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved.Work = store.NewBotWorkState(store.BotWorkContract{BotID: b.ID, RunID: run.ID, Version: run.Version, Instructions: saved.Instructions, Charter: version.Charter})
+		data, err := botJSONMap(*saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scope == store.BotScopeTeam {
+			err = teamClient.BotRun.UpdateOneID(run.ID).SetData(data).Exec(ctx)
+		} else {
+			err = client.BotRun.UpdateOneID(run.ID).SetData(data).Exec(ctx)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown fixture protocol %q", protocol)
 	}
 	return ctx, b.ID, run.ID, home, reopen
 }

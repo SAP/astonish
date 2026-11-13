@@ -182,6 +182,8 @@ type DeliveryPolicy struct {
 	Bindings    []BotChannelBinding `json:"bindings"`
 }
 type TriggerSpec struct {
+	SkillID        *uuid.UUID         `json:"skill_id,omitempty"`
+	Invocation     string             `json:"invocation,omitempty"`
 	ID             uuid.UUID          `json:"id"`
 	Kind           TriggerKind        `json:"kind"`
 	ScheduleID     *uuid.UUID         `json:"schedule_id,omitempty"`
@@ -284,6 +286,7 @@ type BotReportAcknowledgment struct {
 type BotEmployeeMessageOrigin string
 
 const (
+	BotEmployeeMessageAgent     BotEmployeeMessageOrigin = "agent"
 	BotEmployeeMessageAssessed  BotEmployeeMessageOrigin = "assessed"
 	BotEmployeeMessageModel     BotEmployeeMessageOrigin = "model"
 	BotEmployeeMessageFallback  BotEmployeeMessageOrigin = "fallback"
@@ -308,6 +311,9 @@ type BotEmployeeMessage struct {
 }
 
 type BotReport struct {
+	Work *BotWorkProjection `json:"work,omitempty"`
+	// Skill is assigned from committed repository state, never model claims.
+	Skill           *BotSkillReceipt         `json:"skill,omitempty"`
 	EmployeeMessage *BotEmployeeMessage      `json:"employee_message,omitempty"`
 	Acknowledgment  *BotReportAcknowledgment `json:"acknowledgment,omitempty"`
 	Quality         *BotQualityReport        `json:"quality,omitempty"`
@@ -348,6 +354,11 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 		return err
 	}
 	switch m.Origin {
+	case BotEmployeeMessageAgent:
+		if work == nil || work.Protocol != BotWorkProtocolAgentLedV1 || work.Candidate == nil || m.CandidateDigest != work.Candidate.Digest {
+			return ErrBotInvalid
+		}
+		return ValidateBotWorkCompletion(work, BotRunCommit{Lease: BotLease{BotID: work.Contract.BotID, RunID: work.Contract.RunID}, Status: status, Report: r})
 	case BotEmployeeMessageAssessed:
 		if work == nil || work.Validate() != nil || work.Candidate == nil || m.CandidateDigest != work.Candidate.Digest || m.Text != work.Candidate.Text || r.Summary != work.Candidate.Text || m.FailureKind != "" {
 			return ErrBotInvalid
@@ -375,6 +386,9 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 }
 
 type BotRun struct {
+	Work       *BotWorkProjection `json:"work,omitempty"`
+	SkillID    *uuid.UUID         `json:"skill_id,omitempty"`
+	Invocation string             `json:"invocation,omitempty"`
 	// MandateRef is persisted only in the private repository envelope.
 	MandateRef         *BotMandateRef             `json:"-"`
 	ContinuationReason BotContinuationReason      `json:"continuation_reason,omitempty"`
@@ -486,6 +500,8 @@ type BotLifecycleRequest struct {
 	Now              time.Time
 }
 type BotRunRequest struct {
+	SkillID        *uuid.UUID         `json:",omitempty"`
+	Invocation     string             `json:",omitempty"`
 	Intent         BotExecutionIntent `json:",omitempty"`
 	BotID          BotID
 	Version        int64
@@ -504,14 +520,16 @@ type BotClaimRequest struct {
 	ExpiresAt time.Time
 }
 type BotRunCommit struct {
-	Lease      BotLease
-	Status     RunStatus
-	Report     BotReport
-	Usage      BotUsage
-	Todos      []BotTodo
-	Checkpoint json.RawMessage
-	Activity   []BotActivity
-	Outbox     []BotOutboxEntry
+	// Omitted for legacy commits to preserve their idempotency hashes.
+	ModelSelection *SessionPin `json:",omitempty"`
+	Lease          BotLease
+	Status         RunStatus
+	Report         BotReport
+	Usage          BotUsage
+	Todos          []BotTodo
+	Checkpoint     json.RawMessage
+	Activity       []BotActivity
+	Outbox         []BotOutboxEntry
 }
 type BotApprovalDecision struct {
 	Response     *BotInteractionResponse

@@ -33,6 +33,13 @@ func botWorkMechanicalRequirementGrounded(contract store.BotWorkContract, criter
 			if field.MatchString(contract.Instructions) {
 				return true
 			}
+			if contract.Skill != nil {
+				for _, expectation := range contract.Skill.Snapshot.Expectations {
+					if expectation.Provenance.Level == store.BotSkillOwnerSpecified && field.MatchString(expectation.Text) {
+						return true
+					}
+				}
+			}
 		case "charter":
 			if field.MatchString(contract.Charter) {
 				return true

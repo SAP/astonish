@@ -44,6 +44,12 @@ func TestBotConversationAnswerDoesNotReuseAdmissionID(t *testing.T) {
 			if transcript.events[1].Content != input.Content {
 				t.Fatal("changed structured model answer")
 			}
+			if err := s.AppendEvent(context.Background(), wrapped, input); err != nil {
+				t.Fatal(err)
+			}
+			if wrapped.Events().Len() != 2 {
+				t.Fatal("repeated admission duplicated in-memory events")
+			}
 		})
 	}
 }

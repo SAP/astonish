@@ -18,6 +18,7 @@ import (
 var botsSlashCommand = slashCommand{Name: "bots", Description: "Browse remote Bots; /bots runs, home, approvals, stop-run, detach"}
 
 type botsState struct {
+	skills                   *botSkillsState
 	exceptions               bool
 	continueRun              bool
 	answerText               string
@@ -90,6 +91,8 @@ func (m model) botCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch text {
+	case "/bots skills":
+		return m.openBotSkills()
 	case "/bots exceptions":
 		return m.openBotExceptions()
 	case "/bots goals":
@@ -238,6 +241,9 @@ func (m model) applyBotWatch(v botWatchMsg) (tea.Model, tea.Cmd) {
 	return m, waitBotEvent(m.botEvents)
 }
 func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.bots.skills != nil {
+		return m.handleBotSkillsKey(msg.String())
+	}
 	key := msg.String()
 	if key == "esc" || key == "ctrl+c" {
 		m.bots = botsState{}
@@ -247,6 +253,9 @@ func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.bots.overview != botOverviewNone {
+		if key == "r" {
+			return m.openBotOverview(m.bots.overview)
+		}
 		return m, nil
 	}
 	if m.bots.exceptions {
@@ -374,6 +383,9 @@ func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m model) renderBotsOverlay() string {
+	if m.bots.skills != nil {
+		return m.renderBotSkills()
+	}
 	if m.bots.exceptions {
 		return m.renderBotExceptions()
 	}

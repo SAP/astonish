@@ -465,6 +465,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.startBotWatch()
 	case botWatchMsg:
 		return m.applyBotWatch(msg)
+	case botSkillsLoadedMsg:
+		return m.applyBotSkills(msg)
 	case botsLoadedMsg:
 		if msg.generation != m.botGeneration || !m.bots.open || msg.requestID != m.bots.requestID {
 			return m, nil
@@ -2151,7 +2153,13 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		if strings.HasPrefix(text, "/") {
 			return m.handleSlash(text)
 		}
-		if b := m.botCap().SelectedBot(); b.Status != store.BotActive && b.Status != store.BotPaused && b.Status != store.BotDraft {
+		b := m.botCap().SelectedBot()
+		if m.info.SessionID != "" && m.info.SessionID != b.HomeSessionID.String() {
+			m.tr.Apply(events.NewSystem("selected run trace is read-only; /bots home to converse"))
+			m.refreshViewport()
+			return m, nil
+		}
+		if b.Status != store.BotActive && b.Status != store.BotPaused && b.Status != store.BotDraft {
 			m.tr.Apply(events.NewSystem("This Bot cannot converse in its current state."))
 			m.refreshViewport()
 			return m, nil

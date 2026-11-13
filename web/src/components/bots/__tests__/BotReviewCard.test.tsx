@@ -65,11 +65,13 @@ it('approves while paused without claiming execution or resuming', async () => {
 })
 it('uses durable option identity for an answer and retains errors for exact retries', async () => {
   const question = { ...approval, interaction: { kind: 'chat_question' as const, question_id: 'q', payload: { kind: 'select' as const, prompt: 'Choose', options: [{ id: 'one', label: 'First' }] } } }
-  vi.mocked(approveAndContinue).mockRejectedValue(new Error('Refresh required'))
+  vi.mocked(approveAndContinue).mockRejectedValue(new Error('secret /api/private diagnostic', { cause: new Error('secret nested cause') }))
   render(<BotReviewCard bot={bot} approval={question} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('radio', { name: 'First' }))
   await waitFor(() => expect(approveAndContinue).toHaveBeenCalledWith(bot, question, 'one'))
   expect(await screen.findByRole('alert')).toHaveTextContent('I can’t confirm whether your decision was saved')
+  expect(screen.getByRole('alert')).not.toHaveTextContent(/secret|\/api\/private|nested cause/)
+  expect(screen.queryByText(/secret|\/api\/private|nested cause/)).not.toBeInTheDocument()
 })
 
 it('requires a separate explicit fresh authorization click and retains the exact custom answer', async () => {

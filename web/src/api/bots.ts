@@ -16,6 +16,7 @@ export interface Bot {
 export interface BotPersona { avatar?: string; language: string; timezone: string; soul: string; identity: string; user: string }
 export interface BotTrigger {
   id: string; kind: 'manual' | 'cron' | 'hook' | 'webhook' | 'channel' | 'goal_deadline'
+  skill_id?: string; invocation?: string
   instructions: string; enabled: boolean; catch_up_once: boolean; cron?: string; timezone?: string; hook_status?: string
 }
 export interface BotVersion {
@@ -41,9 +42,35 @@ export interface BotQualityReport {
   outcome: typeof BotQualityOutcome[keyof typeof BotQualityOutcome]
   criteria?: BotCriterionAssessment[] | null; repairs: number; limitations?: string[] | null
 }
+export const BotWorkProtocol = { Agent: 'agent_led_v1' } as const
+export const WorkPhase = { Working: 'working', Finished: 'finished', Blocked: 'blocked', Interrupted: 'interrupted' } as const
+export const WorkDisposition = { Answered: 'answered', Complete: 'complete', Partial: 'partial', Blocked: 'blocked' } as const
+export const WorkItemStatus = { Pending: 'pending', Working: 'in_progress', Complete: 'completed', Blocked: 'blocked', Cancelled: 'cancelled' } as const
+export const WorkCheckStatus = { Returned: 'returned', Failed: 'failed', Interrupted: 'interrupted' } as const
+export const WorkCheckKind = { Feedback: 'model_feedback', Observation: 'mechanical_observation' } as const
+export const WorkContinuation = { Owner: 'owner_request', Schedule: 'existing_schedule', Approval: 'existing_approval' } as const
+export interface BotWorkProjection {
+  schema_version: number; protocol: string; bot_id: string; run_id: string; work_revision: number
+  phase: typeof WorkPhase[keyof typeof WorkPhase]; disposition?: typeof WorkDisposition[keyof typeof WorkDisposition]; candidate_digest?: string
+  items?: { id: string; summary: string; status: typeof WorkItemStatus[keyof typeof WorkItemStatus]; reason?: string; evidence_refs?: string[] }[]
+  remaining?: { id: string; source_run_id: string; work_item_id?: string; summary: string; reason: string; continuation: typeof WorkContinuation[keyof typeof WorkContinuation]; continuation_id?: string }[]
+  checks?: { id: string; call_id: string; kind: typeof WorkCheckKind[keyof typeof WorkCheckKind]; status: typeof WorkCheckStatus[keyof typeof WorkCheckStatus]; judgment: 'supported' | 'needs_work' | 'unverified'; summary: string; draft_digest: string; evidence_refs?: string[]; observed_at: string }[]
+}
+export function botWorkSummary(work?: BotWorkProjection): string {
+  if (!work) return 'No work result yet'
+  if (work.schema_version !== 1 || work.protocol !== BotWorkProtocol.Agent) return 'Work details unavailable'
+  if (work.disposition === WorkDisposition.Complete) return 'Completed by agent'
+  if (work.disposition === WorkDisposition.Answered) return 'Answer provided'
+  if (work.disposition === WorkDisposition.Partial) return 'Partial answer'
+  if (work.disposition === WorkDisposition.Blocked) return 'Blocked'
+  if (work.phase === WorkPhase.Interrupted) return 'Interrupted'
+  if (work.phase === WorkPhase.Blocked) return 'Blocked'
+  return work.phase === WorkPhase.Working ? 'Work in progress' : 'Work details unavailable'
+}
 export interface BotReport {
   summary: string; changed: BotEvidence[] | null; unchanged: BotEvidence[] | null; unverified: string[] | null; next_run_at?: string
   quality?: BotQualityReport
+  skill?: import('./botSkills').BotSkillReceipt
 }
 export function botQualitySummary(q?: BotQualityReport): string {
   if (!q) return 'Not assessed'
@@ -55,6 +82,7 @@ export interface BotRun {
   id: string; bot_id: string; session_id: string; version: number; trigger: string
   status: 'queued' | 'running' | 'waiting_approval' | 'interrupted' | 'succeeded' | 'partial' | 'failed' | 'skipped' | 'cancelled'
   created_at: string; started_at?: string; finished_at?: string; provider: string; model: string
+  work?: BotWorkProjection
   report: BotReport
   usage: { tool_calls: number; input_tokens: number; output_tokens: number; cost_micros?: number }
 }

@@ -97,7 +97,7 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := bots.(store.BotSourceIntakeStore)
-			p, err := source.ProposeSourceIntake(ctx, store.BotSourceIntakeRequest{Mode: store.BotIntakeAdaptive, SourceID: uuid.MustParse(job.ID), Name: "Replacement", Charter: "Observe", IdempotencyKey: "receipt"}, nil)
+			p, err := source.ProposeSourceIntake(ctx, store.BotSourceIntakeRequest{Mode: store.BotIntakeAdaptive, SourceID: uuid.MustParse(job.ID), Name: "Replacement", Charter: "Observe", IdempotencyKey: "receipt", SkillSeed: testIntakeSkillSeed()}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,6 +125,16 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 			case *teamBotStore:
 				db = teamBotDB{client: b.client}
 			}
+			switch d := db.(type) {
+			case personalBotDB:
+				if d.client.BotSkill.Query().CountX(ctx) != 0 || d.client.BotSkillRevision.Query().CountX(ctx) != 0 {
+					t.Fatal("skills escaped receipt rollback")
+				}
+			case teamBotDB:
+				if d.client.BotSkill.Query().CountX(ctx) != 0 || d.client.BotSkillRevision.Query().CountX(ctx) != 0 {
+					t.Fatal("skills escaped receipt rollback")
+				}
+			}
 			key, _ := botHash([]string{owner.String(), sourceDraftKey(p)})
 			if _, err := db.FindCreate(ctx, key); !errors.Is(err, store.ErrBotNotFound) {
 				t.Fatalf("replacement escaped rollback: %v", err)
@@ -141,6 +151,11 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 			if err != nil || replay.BotID == nil || *replay.BotID != *applied.BotID {
 				t.Fatalf("reopen receipt %+v %v", replay, err)
 			}
+			b, err := bots.Get(ctx, *replay.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertIntakeSeed(t, ctx, bots, b)
 		})
 	}
 }

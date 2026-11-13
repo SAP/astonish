@@ -2,10 +2,11 @@ package bot
 
 import (
 	"context"
-	"github.com/SAP/astonish/pkg/store"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // ToolOutcomeKey is reserved for server-generated tool metadata. Remote JSON,
@@ -22,6 +23,8 @@ type ToolOutcome struct {
 	Unverified []string
 	Artifacts  []ToolReportArtifact
 	NextRunAt  *time.Time
+	// SourceAccess records transport facts, never source usefulness or truth.
+	SourceAccess []store.BotSourceAccessFact
 	// ScheduleCapture attests only durable enqueue, never a scheduler mutation.
 	ScheduleCapture *ScheduleCapture
 	RoutineCapture  *RoutineCapture
@@ -71,6 +74,7 @@ func RecordToolOutcome(ctx context.Context, callID string, outcome ToolOutcome) 
 	if ledger == nil || callID == "" {
 		return
 	}
+	outcome.SourceAccess = append([]store.BotSourceAccessFact(nil), outcome.SourceAccess...)
 	if outcome.ScheduleCapture != nil {
 		capture := *outcome.ScheduleCapture
 		outcome.ScheduleCapture = &capture

@@ -91,8 +91,11 @@ remain blocked, not falsely complete.
 The purge transaction removes exact Bot-attributed sessions, their memory rows
 (and database-maintained retrieval indexes), events/cache diagnostics, owned
 trigger jobs, approvals/proposals, runs, tracked items, goals, versions, outbox,
-and finally the root (including documents, cursors and cleanup metadata). It
-follows persisted parent edges through exclusively owned descendants, but rejects
+Bot-local skill revisions and skill roots, and finally the root (including
+documents, cursors and cleanup metadata). Skill deletion uses the exact Bot ID
+inside the same transaction; another Bot's skills and the shared skill library
+are not swept. The session purge follows persisted parent edges through
+exclusively owned descendants, but rejects
 explicit foreign Bot/user attribution. Shared credentials, owner-private unfinished intake
 records with no Bot ownership link, published copies, external effects, backups,
 and required audit/security records are not exclusively Bot-owned and are not
@@ -110,3 +113,14 @@ transaction rollback restores children, then verifies zero target rows and
 retrieval matches plus unchanged unrelated rows after success. Existing cleanup
 barrier tests and `TestBotPermanentVerifiedPurge` cover active-run fencing and
 service-attested cleanup separately.
+
+`TestBotSkillRecoveryHTTPAcceptance` additionally restores mapped skill-bearing
+archives into independent SQLite deployments in both Personal and Team scopes,
+reopens twice, checks immutable history and scope isolation, requests exact
+permanent deletion over HTTP (202), supplies a controlled service-only cleanup
+attestation, and retries to committed purge (204). After reopen, the target's
+skill route is 404 while another Bot's skill and the original source deployment
+remain readable. A fresh logical export contains only the other Bot's skill root
+and revision; the original archive still contains both Bots' history. This
+attestation proves the database/HTTP deletion contract,
+not physical-home cleanup; it does not replace the live backend gates above.

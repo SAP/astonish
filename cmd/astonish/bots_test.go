@@ -414,7 +414,14 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	listState.Store(2)
 	send("/bots\r")
-	wait("forbidden")
+	// The picker shows safe uncertainty feedback, not the raw HTTP denial.
+	wait("I can’t confirm the latest outcome right now. Please refresh before trying again;")
+	outputMu.Lock()
+	denialOutput := output.String()[outputStart:]
+	outputMu.Unlock()
+	if strings.Contains(denialOutput, "forbidden") {
+		t.Fatal("PTY leaked raw permission-denial diagnostics")
+	}
 	send("\x1b")
 	time.Sleep(150 * time.Millisecond)
 	listState.Store(0)

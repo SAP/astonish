@@ -213,7 +213,10 @@ func TestBotComposerRevisionPTYAcceptance(t *testing.T) {
 	release.Do(func() { close(releaseOld) })
 	wait("status unavailable")
 	send("retain this conflict draft\r")
-	wait("Bot changed; reload and review before retrying.")
+	wait("I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.")
+	if feedback := read(); strings.Contains(feedback, "server error (") || strings.Contains(feedback, "Bot changed; reload and review before retrying.") {
+		t.Fatalf("composer exposed raw conflict diagnostic: %s", feedback)
+	}
 	time.Sleep(200 * time.Millisecond)
 	if posts.Load() != 2 {
 		t.Fatalf("CAS auto-replayed: %d posts", posts.Load())

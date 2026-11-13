@@ -9,6 +9,7 @@ import (
 // BotSourceIntakeRequest is an explicit selected/redacted snapshot, never a transcript
 // import. The server binds this selection to the live source revision and actor.
 type BotSourceIntakeRequest struct {
+	SkillSeed        *BotSkillSeed `json:"skill_seed,omitempty"`
 	Mode             BotIntakeMode `json:"mode"`
 	SourceID         uuid.UUID     `json:"source_id"`
 	TemplateRevision int64         `json:"template_revision,omitempty"`

@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/SAP/astonish/pkg/store"
-	"github.com/google/uuid"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 )
 
 func qualityFixture(t *testing.T) (employeeDiskRow, *store.BotWorkState, store.BotRun) {
@@ -54,6 +57,93 @@ func TestQualityWorkStrictIdentityAndSource(t *testing.T) {
 		}
 	}
 }
+func TestEmployeeRunPrivateWorkIsNotPublicAuthority(t *testing.T) {
+	_, w, r := qualityFixture(t)
+	r.SessionID = uuid.New()
+	r.Work = &store.BotWorkProjection{SchemaVersion: 1, Protocol: store.BotWorkProtocolAgentLedV1, BotID: r.BotID, RunID: r.ID, Phase: store.BotWorkWorking}
+	private := map[string]any{
+		"id": uuid.NewString(), "bot_id": uuid.NewString(), "session_id": uuid.NewString(),
+		"status": store.RunFailed, "working_notes": "PRIVATE-NOTES", "contract": w.Contract,
+	}
+	for _, key := range []string{"run", "Run"} {
+		for _, wrapped := range []bool{false, true} {
+			encode := func(run any, extra map[string]any) employeeDiskRow {
+				doc := map[string]any{key: run, "work": private}
+				for k, v := range extra {
+					doc[k] = v
+				}
+				raw := employeeDiskJSON(t, doc)
+				if wrapped {
+					raw = employeeDiskJSON(t, map[string]string{"bot_document": raw})
+				}
+				return employeeDiskRow{ID: r.ID.String(), BotID: r.BotID.String(), Data: raw}
+			}
+			got := employeeRun(encode(r, nil))
+			if !reflect.DeepEqual(got, r) {
+				t.Fatal("private work changed the public run or projection")
+			}
+			missing := r
+			missing.SessionID = uuid.Nil
+			missing.Work = nil
+			got = employeeRun(encode(missing, nil))
+			if got.SessionID != uuid.Nil || got.Work != nil {
+				t.Fatal("private work supplied a missing public session or projection")
+			}
+			private["id"], private["bot_id"] = r.ID.String(), r.BotID.String()
+			for _, missingID := range []string{"id", "bot_id"} {
+				bad := r
+				if missingID == "id" {
+					bad.ID = uuid.Nil
+				} else {
+					bad.BotID = uuid.Nil
+				}
+				employeeDiskMustPanic(t, encode(bad, nil))
+			}
+			// The sole overlap exception is work. Every other public field,
+			// including case aliases, remains an ambiguous flat/nested document.
+			runType := reflect.TypeFor[store.BotRun]()
+			for i := 0; i < runType.NumField(); i++ {
+				field := strings.Split(runType.Field(i).Tag.Get("json"), ",")[0]
+				if field == "-" || field == "work" {
+					continue
+				}
+				for _, alias := range []string{field, strings.ToUpper(field)} {
+					employeeDiskMustPanic(t, encode(r, map[string]any{alias: "conflict"}))
+				}
+			}
+			employeeDiskMustPanic(t, encode(r, map[string]any{"Work": private}))
+		}
+	}
+}
+
+func TestQualityWorkRequiresPrivateEnvelope(t *testing.T) {
+	row, w, r := qualityFixture(t)
+	for _, wrapped := range []bool{false, true} {
+		valid := row
+		if wrapped {
+			valid.Data = employeeDiskJSON(t, map[string]string{"bot_document": row.Data})
+		}
+		if _, _, err := qualityWork(valid); err != nil {
+			t.Fatal(err)
+		}
+		// Even a full private snapshot placed in a flat public run cannot
+		// masquerade as private evidence for an accepted quality report.
+		var flat map[string]any
+		if err := json.Unmarshal([]byte(employeeDiskJSON(t, r)), &flat); err != nil {
+			t.Fatal(err)
+		}
+		flat["work"] = w
+		invalid := row
+		invalid.Data = employeeDiskJSON(t, flat)
+		if wrapped {
+			invalid.Data = employeeDiskJSON(t, map[string]string{"bot_document": invalid.Data})
+		}
+		if _, _, err := qualityWork(invalid); err == nil {
+			t.Fatal("flat public work supplied private quality evidence")
+		}
+	}
+}
+
 func TestQualityFinalOnlyRejectsDraftButAllowsOwnerSample(t *testing.T) {
 	_, _, r := qualityFixture(t)
 	for _, id := range []string{r.ID.String(), r.ID.String() + ":repair"} {

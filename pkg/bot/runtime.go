@@ -131,6 +131,11 @@ func ValidateVersion(v store.BotVersion) error {
 			return fmt.Errorf("%w: negative budget", store.ErrBotInvalid)
 		}
 	}
+	for _, tr := range v.Triggers {
+		if err := store.ValidateSkillSelection(tr.SkillID, tr.Invocation); err != nil {
+			return err
+		}
+	}
 	switch v.Delivery.Notify {
 	case store.NotifyNever, store.NotifyOnChange, store.NotifyOnDecision, store.NotifyAlways:
 	default:
@@ -139,7 +144,122 @@ func ValidateVersion(v store.BotVersion) error {
 	return nil
 }
 
+// BotWorkServices is an optional, already scoped capability. Implementations
+// resolve identity/lease from the run, never from model arguments, and serialize
+// mutations with the work revision. Reads and feedback do not authorize actions.
+type BotWorkServices interface {
+	Read(context.Context, BotWorkReadRequest) (*BotWorkReadResult, error)
+	Update(context.Context, BotWorkChangeRequest) (*store.BotWorkProjection, error)
+	Evidence(context.Context, BotEvidenceReadRequest) (*BotEvidenceReadResult, error)
+	Check(context.Context, BotWorkCheckRequest) (*store.BotWorkCheckReceipt, error)
+	SelectSkill(context.Context, BotWorkSkillSelection) (*store.BotSkillInvocation, error)
+	StageLearning(context.Context, BotWorkLearningProposal) error
+}
+
+type botWorkServicesKey struct{}
+
+// WithBotWorkServices carries only the request-local capability; it grants no authority.
+func WithBotWorkServices(ctx context.Context, service BotWorkServices) context.Context {
+	return context.WithValue(ctx, botWorkServicesKey{}, service)
+}
+func BotWorkServicesFromContext(ctx context.Context) BotWorkServices {
+	service, _ := ctx.Value(botWorkServicesKey{}).(BotWorkServices)
+	return service
+}
+func WithBotWorkServicesFromContext(dst, src context.Context) context.Context {
+	if service := BotWorkServicesFromContext(src); service != nil {
+		return WithBotWorkServices(dst, service)
+	}
+	return dst
+}
+
+// Discovery is bounded separately from work/evidence and never grants authority.
+const BotWorkSkillIndexLimit = 20
+const BotWorkSkillIndexMaxBytes = 12000
+
+type BotWorkSkillHead struct {
+	ID           uuid.UUID            `json:"id"`
+	Title        string               `json:"title"`
+	Status       store.BotSkillStatus `json:"status"`
+	HeadRevision int64                `json:"head_revision"`
+}
+
+type BotWorkReadResult struct {
+	PriorSkillID          *uuid.UUID                       `json:"prior_skill_id,omitempty"`
+	SkillIndex            []BotWorkSkillHead               `json:"skill_index,omitempty"`
+	SkillNext             string                           `json:"skill_next,omitempty"`
+	SkillIndexUnavailable bool                             `json:"skill_index_unavailable,omitempty"`
+	Work                  *store.BotWorkProjection         `json:"work"`
+	Notes                 string                           `json:"notes,omitempty"`
+	Evidence              []store.BotWorkEvidenceReference `json:"evidence,omitempty"`
+	NextCursor            string                           `json:"next_cursor,omitempty"`
+	Previous              *store.BotWorkProjection         `json:"previous,omitempty"`
+}
+
+type BotWorkReadRequest struct {
+	Cursor string
+	Limit  int
+}
+type BotWorkChangeKind string
+
+const (
+	BotWorkUpsertItem     BotWorkChangeKind = "upsert_item"
+	BotWorkCancelItem     BotWorkChangeKind = "cancel_item"
+	BotWorkReplaceNotes   BotWorkChangeKind = "replace_notes"
+	BotWorkSetDisposition BotWorkChangeKind = "set_disposition"
+	BotWorkSetRemaining   BotWorkChangeKind = "set_remaining"
+)
+
+type BotWorkChangeRequest struct {
+	ExpectedRevision int64
+	CallID           string // supplied by the bound ToolContext, not a public tool argument
+	Kind             BotWorkChangeKind
+	Item             *store.BotWorkItem
+	Notes            string
+	Disposition      store.AgentWorkDisposition
+	Remaining        []store.BotWorkObligation
+}
+type BotEvidenceReadRequest struct {
+	CallID        string
+	Offset, Limit int
+}
+type BotEvidenceReadResult struct {
+	Reference  store.BotWorkEvidenceReference `json:"reference"`
+	Content    string                         `json:"content"`
+	Offset     int                            `json:"offset"`
+	TotalBytes int                            `json:"total_bytes"`
+	Truncated  bool                           `json:"truncated"`
+}
+type BotWorkCheckRequest struct {
+	CallID, Question, DraftText string
+	EvidenceRefs                []string
+}
+type BotWorkSkillSelection struct {
+	SkillID          uuid.UUID
+	ExpectedRevision int64
+	CallID           string
+}
+type BotOwnerFeedbackScope string
+
+const (
+	BotOwnerFeedbackScopeSkill BotOwnerFeedbackScope = "skill"
+	BotOwnerFeedbackScopeRun   BotOwnerFeedbackScope = "run"
+)
+
+type BotWorkLearningProposal struct {
+	SkillID                                          uuid.UUID
+	OwnerFeedbackScope                               BotOwnerFeedbackScope
+	CallID                                           string
+	ExpectedRevision                                 int64
+	Title, Responsibility                            string
+	Method, EvaluationRules                          []string
+	OutputFormat                                     string
+	EvidenceRefs, OwnerQuotes, ReplaceExpectationIDs []string
+}
+
 type RunRequest struct {
+	// Skill is a detached, repository-pinned method; never an authority grant.
+	Skill         *store.BotSkillInvocation
 	Work          *store.BotWorkState
 	Mandate       *MandateExecution
 	Bot           store.Bot
@@ -169,12 +289,16 @@ type RuntimeEvent struct {
 type EventSink func(context.Context, RuntimeEvent) error
 
 type RunResult struct {
-	Status     store.RunStatus
-	Report     store.BotReport
-	Usage      store.BotUsage
-	Checkpoint json.RawMessage
-	Todos      []store.BotTodo
-	Failure    *RunError
+	// ModelSelection is the successful owner-scoped factory selection, not usage or pricing.
+	ModelSelection *store.SessionPin
+	// SkillLearning is uncommitted until the scoped repository accepts it.
+	SkillLearning *store.BotSkillLearning
+	Status        store.RunStatus
+	Report        store.BotReport
+	Usage         store.BotUsage
+	Checkpoint    json.RawMessage
+	Todos         []store.BotTodo
+	Failure       *RunError
 }
 
 // Runtime methods return on checkpoint or completion, not viewer disconnection.

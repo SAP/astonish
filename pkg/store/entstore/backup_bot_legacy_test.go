@@ -14,7 +14,11 @@ import (
 
 // This creates a real pre-Bot archive, rather than merely changing its declared
 // hash. The source has no Bot tables/columns; the target is a current deployment.
-func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) {
+func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) { testBotLegacyArchive(t, true) }
+
+func TestBotSkillRestoreSQLitePreSkillArchive(t *testing.T) { testBotLegacyArchive(t, false) }
+
+func testBotLegacyArchive(t *testing.T, preBot bool) {
 	ctx := context.Background()
 	open := func(dir string) *Store {
 		t.Helper()
@@ -82,6 +86,13 @@ func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) {
 		if i == 0 {
 			statements = append(statements, "DROP TABLE bot_templates", "ALTER TABLE sandbox_sessions DROP COLUMN bot_home_binding")
 		}
+		if !preBot {
+			statements = nil
+		}
+		statements = append([]string{"DROP TABLE bot_skill_revisions", "DROP TABLE bot_skills"}, statements...)
+		if !preBot {
+			statements = append(statements, "UPDATE bot_schema_version SET version=1")
+		}
 		for _, stmt := range statements {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
 				_ = db.Close()
@@ -101,7 +112,7 @@ func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range summary.Manifest.Entries {
-		if preBotAddedTable(entry.Entity, entry.Scope.Kind) {
+		if preBot && preBotAddedTable(entry.Entity, entry.Scope.Kind) {
 			t.Fatalf("fixture is not pre-Bot: %s", entry.Entity)
 		}
 	}
@@ -135,6 +146,31 @@ func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if !preBot {
+			scope := backup.Scope{Kind: "team", OrgSlug: "legacy", TeamSlug: "ops"}
+			if path == paths[1] {
+				scope = backup.Scope{Kind: "personal", OrgSlug: "legacy", UserID: owner}
+			}
+			if err := checkSQLiteScopeSchemaCompatible(ctx, summary.Manifest, db, scope); err != nil {
+				t.Fatal(err)
+			}
+			for _, table := range []string{"bot_skills", "bot_skill_revisions"} {
+				bad := summary.Manifest
+				bad.Entries = append(append([]backup.Entry(nil), bad.Entries...), backup.Entry{Scope: scope, Entity: table})
+				if err := checkSQLiteScopeSchemaCompatible(ctx, bad, db, scope); err == nil {
+					t.Fatal("skill-bearing old archive accepted")
+				}
+			}
+			if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN unrelated TEXT"); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkSQLiteScopeSchemaCompatible(ctx, summary.Manifest, db, scope); err == nil {
+				t.Fatal("arbitrary schema drift accepted")
+			}
+			if _, err := db.Exec("ALTER TABLE sessions DROP COLUMN unrelated"); err != nil {
+				t.Fatal(err)
+			}
+		}
 		var version, bots int
 		if err := db.QueryRow(`SELECT version FROM bot_schema_version WHERE id='bots'`).Scan(&version); err != nil {
 			_ = db.Close()
@@ -147,7 +183,7 @@ func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if version != store.BotSchemaVersion || bots != 0 {
+		if version != botMigrationVersion || bots != 0 {
 			t.Fatalf("upgrade state: version=%d bots=%d", version, bots)
 		}
 	}

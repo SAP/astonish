@@ -8,6 +8,53 @@ import (
 	"testing"
 )
 
+func TestBotAgentWorkEmployeeBinding(t *testing.T) {
+	for _, disposition := range []AgentWorkDisposition{AgentWorkAnswered, AgentWorkComplete, AgentWorkPartial, AgentWorkBlocked} {
+		w := NewBotAgentWorkState(attachmentWorkContract())
+		w.Phase = BotWorkFinished
+		w.AgentWork.Disposition = disposition
+		status := RunSucceeded
+		if disposition == AgentWorkPartial || disposition == AgentWorkBlocked {
+			status = RunPartial
+		}
+		if disposition == AgentWorkBlocked {
+			w.Phase = BotWorkBlocked
+			w.Unresolved = []string{"Source unavailable"}
+		}
+		w.Candidate = &BotWorkCandidate{Revision: 1, EventID: "final", Text: "Here is the result and its limitations."}
+		w.Candidate.Digest = w.Candidate.ContentDigest()
+		r := BotReport{Summary: w.Candidate.Text, Work: BuildBotWorkProjection(w)}
+		r.EmployeeMessage = &BotEmployeeMessage{Origin: BotEmployeeMessageAgent, Text: r.Summary, CandidateDigest: w.Candidate.Digest, SourceDigest: r.EmployeeMessageSourceDigest(status)}
+		if err := r.ValidateEmployeeMessage(status, w); err != nil {
+			t.Fatalf("%s: %v", disposition, err)
+		}
+		if r.ValidateEmployeeMessage(status, nil) == nil {
+			t.Fatal("public report substituted for private work")
+		}
+		raw, _ := json.Marshal(r)
+		var restored BotReport
+		if json.Unmarshal(raw, &restored) != nil || restored.ValidateEmployeeMessageIntegrity(status) != nil {
+			t.Fatal("publication roundtrip lost integrity")
+		}
+		restored.Work.CandidateDigest = "other"
+		restored.EmployeeMessage.SourceDigest = restored.EmployeeMessageSourceDigest(status)
+		if restored.ValidateEmployeeMessage(status, w) == nil {
+			t.Fatal("changed result accepted")
+		}
+		if r.EmployeeMessage.HasTrustedReviewAttestation() {
+			t.Fatal("agent result invented a review")
+		}
+		r.FinalizeEmployeeMessage(status, w)
+		if r.EmployeeMessage.Origin != BotEmployeeMessageAgent || r.ValidateEmployeeMessageIntegrity(status) != nil {
+			t.Fatal("agent origin lost on finalization")
+		}
+		r.EmployeeMessage.Origin = BotEmployeeMessageAssessed
+		if r.ValidateEmployeeMessage(status, w) == nil {
+			t.Fatal("agent work presented as legacy assessed")
+		}
+	}
+}
+
 func TestEmployeeMessageValidation(t *testing.T) {
 	for _, reason := range []BotEmployeeFailureReason{"", BotEmployeeReasonCost, BotEmployeeReasonInput, BotEmployeeReasonOverrun, BotEmployeeReasonMultipleCalls, BotEmployeeReasonTooLarge, BotEmployeeReasonForbidden, BotEmployeeReasonOwnerCancelled, BotEmployeeReasonSuperseded} {
 		report := BotReport{Summary: "private diagnostic https://secret.invalid"}

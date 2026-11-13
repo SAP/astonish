@@ -19,8 +19,8 @@ import (
 // The existing harness generates and cleans up all platform/org databases.
 func preBotPostgresFixture(t *testing.T) (*Store, string, []backup.Scope, backup.Manifest) {
 	t.Helper()
-	if os.Getenv("ASTONISH_TEST_DSN") == "" {
-		t.Fatal("ASTONISH_TEST_DSN is required: use isolated disposable PostgreSQL, never production")
+	if os.Getenv("ASTONISH_TEST_DSN") == "" || os.Getenv("ASTONISH_BOTS_TEST_DB_ISOLATED") != "1" {
+		t.Fatal("ASTONISH_TEST_DSN and ASTONISH_BOTS_TEST_DB_ISOLATED=1 required: use isolated disposable PostgreSQL, never production")
 	}
 	ctx := context.Background()
 	s := setupPostgresBackupRestoreStore(t, "prebot_source")
@@ -70,7 +70,7 @@ func preBotPostgresFixture(t *testing.T) (*Store, string, []backup.Scope, backup
 	for _, scope := range scopes {
 		schema := quoteIdent(DialectPostgres, postgresSchemaForScope(scope)) + "."
 		// Reconstruct an actual immediate pre-Bot database, not just its hash.
-		for _, table := range []string{"bot_approvals", "bot_runs", "bot_tracked_items", "bot_goals", "bot_versions", "bot_outbox", "bots", "bot_schema_version"} {
+		for _, table := range []string{"bot_skill_revisions", "bot_skills", "bot_approvals", "bot_runs", "bot_tracked_items", "bot_goals", "bot_versions", "bot_outbox", "bots", "bot_schema_version"} {
 			execPreBotPostgres(t, db, "DROP TABLE "+schema+quoteIdent(DialectPostgres, table))
 		}
 		for _, column := range []string{"bot_id", "bot_run_id", "purpose", "retention"} {
@@ -146,7 +146,7 @@ func assertPreBotPostgresRows(t *testing.T, s *Store, owner string, scopes []bac
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdent(DialectPostgres, schema)+".bots").Scan(&bots); err != nil {
 			t.Fatal(err)
 		}
-		if version != store.BotSchemaVersion || bots != 0 {
+		if version != botMigrationVersion || bots != 0 {
 			t.Fatalf("%s: version=%d bots=%d", scope.Kind, version, bots)
 		}
 	}

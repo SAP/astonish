@@ -1911,7 +1911,11 @@ func TestBotCheckpointWaitPreservesApprovals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Report: store.BotReport{Summary: "Please review", NeedsApproval: []uuid.UUID{a.ID}}, Checkpoint: []byte(`{"step":"send"}`)}
+	work, err := repo.LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Report: store.BotReport{Summary: "Please review", Work: store.BuildBotWorkProjection(work), NeedsApproval: []uuid.UUID{a.ID}}, Checkpoint: []byte(`{"step":"send"}`)}
 	if err := repo.CommitRun(worker, q); err != nil {
 		t.Fatal(err)
 	}

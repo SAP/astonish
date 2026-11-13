@@ -1,5 +1,87 @@
 # Bot release acceptance
 
+## Strict agent all-stage gate (not yet live-certified)
+
+```sh
+ASTONISH_BOTS_TEST_DB_ISOLATED=1 \
+ASTONISH_TEST_DSN="$DISPOSABLE_BOT_TEST_DSN" \
+python3 -B tests/e2eboot/employee_http_acceptance.py --agent-stage all \
+  --config "${LOCAL_BOT_AGENT_CONFIG:?Set an explicit private isolated configuration}"
+```
+
+`bots_acceptance.sh --agent-stage all --config /absolute/private/config.json`
+forwards to the same gate. `--preflight`, `--local-only`, other stage families,
+and `--state` cannot turn this into a partial pass. Individual `execution`,
+`progress`, `learning`, `continuity`, and `postgres` stages remain available;
+they do not constitute full agent acceptance and do not accept `--config`.
+
+The all-stage config must already exist as an absolute, private (0600),
+non-symlink JSON file using the launcher's version 1 provider configuration.
+It must identify the intended AI Core provider/model and explicit executable,
+browser, base-layer and verified embedding assets. The driver validates it
+before any test subprocess or paid call; missing files, malformed data, wrong
+provider identity, and missing disposable PostgreSQL opt-in block with exit 2.
+There is no ambient config/credential fallback and no normal-daemon discovery.
+Validation errors are redacted rather than echoing secret-bearing values/paths.
+
+Every invocation runs these dependent gates, stopping on the first failure:
+
+1. Exact controlled `execution`, `progress`, and `learning` HTTP suites.
+2. Exact SQLite/scheduler `continuity` and guarded integration `postgres` suites.
+3. `npm run build` in `web`, then
+   `bot_skill_surface_acceptance.py --browser --terminal --agent` against built
+   Studio and the real remote-command PTY.
+4. A fresh `local_bot_smoke_launcher.py --verify-bot-agent --config CONFIG`,
+   without state reuse or any employee/quality/skills fallback mode. The launcher
+   must validate its own current-invocation live receipts and provider parity;
+   an unavailable journey or failed sample is a failure, not a diagnostic pass.
+
+No historical receipts or restored evidence satisfy this orchestration. Go gates
+use `-count=1`, exact package/test run-pass evidence, and reject skipped, missing,
+foreign or duplicate events. Provider secrets and production database/cluster
+settings are not passed to controlled suites; only the explicit disposable test
+DSN reaches PostgreSQL tests. The live launcher receives the explicit config path,
+not copied credentials. A successful all-stage result is agent acceptance,
+not Kubernetes certification or the unrelated full Bot release gate. Python
+harness unit tests alone do not certify provider, browser, PTY or database behavior.
+
+
+## Retained-source inspection in the fresh agent invocation
+
+After capturing the three stock samples and remaining journey evidence, the agent
+browser harness saves `browser-evidence.json` and emits
+`STAGE=agent-grounding-inspection` with the assessment path and deadline. If all
+three stock samples are `diagnostic-observed`, it waits for
+`ROOT/agent-grounding-assessment.json`, a regular non-symlink file with mode 0600.
+The optional `LOCAL_BOT_AGENT_INSPECTION_TIMEOUT_SECONDS` environment variable
+sets this bounded wait (default 600 seconds, integer range 1..1800); the launcher
+already inherits it into the browser. Invalid configuration is rejected before
+agent work starts. Failed or incomplete stock diagnostics skip the wait, not the
+final semantic checks.
+
+An accountable human or agent must inspect the retained answers and fetched source
+bodies, then atomically publish the assessment using the exact schema in
+`agent_grounding_contract.py`. Bind it to the current nonce, candidate hashes,
+run identities and source digests; inventory all answer content, decisive source
+quotations and temporal support. Record unsupported/unverified claims honestly.
+Each sample also requires a `task_adequacy` judgment under `bot-agent-grounding-v2`:
+`task` must equal the original `Stock Market News` prompt, `useful_full_result`
+must be the JSON boolean `true`, and `rationale` and `limitations` must be
+nonblank. The named human/agent evaluator must explain why the complete answer
+usefully fulfills the original task, not merely why some peripheral facts are
+supported, and assess disclosed limitations against that judgment. There is no
+required recommendation or topic count. Negative or missing adequacy fails even
+when every claim is supported; an honest partial result is not full acceptance.
+See `README.agent-candidate.md` for the exact schema.
+This checkpoint generates no assessment, makes no model calls while waiting,
+and grants no passing receipt. File arrival only permits structural validation
+of the accountable evaluator's recorded semantic judgments; the code cannot
+establish entailment or task adequacy mechanically. Malformed, unsupported or
+inadequate assessments still fail. Missing assessment
+at the deadline or unsafe file permissions block final acceptance in this
+invocation; a later file cannot rescue it. This is acceptance tooling only, not a
+production Bot reviewer or publication prerequisite.
+
 ## Owner messages during scheduled work
 
 Ordinary employee messages use the native Home composer without waiting for global
@@ -452,3 +534,99 @@ Run focused driver regression tests without credentials:
 bash -n tests/e2eboot/bots_acceptance.sh
 python3 -B tests/e2eboot/bots_acceptance_driver_test.py
 ```
+
+## Fresh skills final acceptance (separate from full Bot release)
+
+Run from the repository root, after the operator provisions the explicit local
+launcher configuration documented above and a **disposable admin-capable**
+PostgreSQL test instance:
+
+```sh
+ASTONISH_TEST_DSN="$DISPOSABLE_SKILLS_TEST_DSN" \
+ASTONISH_BOTS_TEST_DB_ISOLATED=1 \
+python3 -B tests/e2eboot/bots_acceptance_driver.py \
+  --skills-stage all --config /absolute/path/to/isolated-bot-config.json
+```
+
+The equivalent entrypoint is `employee_http_acceptance.py --skills-stage all
+--config ...`. `skills_acceptance_driver.py` implements both. No infrastructure,
+provider configuration, proxy, credentials or normal daemon at `:9393` is
+provisioned or modified by the driver. Supply the candidate Linux arm64 binary,
+Linux Docker CLI, native browser, sandbox layers, verified embedding cache and
+explicit provider URL/model/key in the config; do not substitute normal user Bot
+state. The local launcher creates its own root, port, candidate container and
+browser profile. Its only skills mode is fresh execution: `--state`,
+`--refresh-browser`, restart-only commands and all other verify modes are rejected.
+Config JSON rejects duplicate keys. No browser path or model credentials are
+inferred from the normal daemon configuration.
+
+`all` requires, in the current invocation and with uncached exact Go run/pass
+identities: storage and runtime HTTP skill scenarios, daemon scheduling scenarios,
+personal/team recovery, integration-tagged PostgreSQL pre-skill archive and
+personal/team recovery, the browser + remote terminal surface gate, then the
+fresh real-model journey. Missing, foreign, duplicate/replayed, skipped or failed
+mandatory Go cases fail closed. PostgreSQL is run with
+`ASTONISH_REQUIRE_SKILL_POSTGRES=1`; absent DSN or isolation acknowledgement blocks
+before execution. There is no DSN skip waiver. The surface wrapper remains
+`tests/e2eboot/bot_skill_surface_acceptance.py` and always checks both surfaces.
+
+To execute only the fresh real-model journey (not complete skills acceptance):
+
+```sh
+python3 -B tests/e2eboot/local_bot_smoke_launcher.py \
+  --verify-bot-skills --config /absolute/path/to/isolated-bot-config.json
+```
+
+The journey preserves **17 employee + 6 quality receipts** and adds seven
+mandatory, candidate/browser-hash and fresh-nonce-bound skill receipts:
+
+1. `assignment-without-schedule`: natural owner responsibility, accepted assessed
+   output, actual saved skill revision and zero scheduler jobs/cron runs.
+2. `reuse-pinned-skill`: a distinct manual request reuses the same immutable skill.
+3. `owner-feedback-revision`: humidity feedback advances the same skill with exact
+   owner run/event provenance, retains prior expectations and immutable history.
+4. `owned-restart-three-scheduled`: schedule is a thin enabled invocation of that
+   skill; native browser closes, only the owned daemon restarts, then three distinct
+   scheduled assessed outcomes are observed read-only before login.
+5. `manual-and-scheduled-outcomes`: each manual/scheduled pin and public receipt
+   matches its actual immutable revision from authenticated Bot skill endpoints.
+6. `schedule-removal-manual`: natural schedule removal retains the skill; a new
+   manual report succeeds without recreating jobs.
+7. `skill-inspection-readonly`: actual list/head/revision/run endpoints and Skills
+   UI inspect the same Bot, reject foreign/duplicate history, and leave head/runs
+   unchanged across reload.
+
+All mutations are owner messages through the real product. No acceptance SQL or
+seeded model verdict creates skill success. The read-only observer reads private
+run work; authenticated endpoints independently verify immutable revisions and
+committed learning revisions. A persisted selection with no new learning is valid
+only when its digest matches the pin; deferred/rejected/conflicting learning is
+not a pass. Hashed source documents also bind receipt run identities, preventing
+an unhashed manual/scheduled-ID substitution.
+
+For scoped recovery/PG proof (neither means full acceptance):
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py --skills-stage recovery
+ASTONISH_TEST_DSN="$DISPOSABLE_SKILLS_TEST_DSN" ASTONISH_BOTS_TEST_DB_ISOLATED=1 \
+  python3 -B tests/e2eboot/bots_acceptance_driver.py --skills-stage postgres
+```
+
+These reject `--config`; `all` requires it. A successful scoped result explicitly
+prints `full_skills_acceptance: false`. Harness unit tests need no live daemon,
+provider or PostgreSQL:
+
+```sh
+python3 -B -m unittest discover -s tests/e2eboot -p '*test.py'
+go test ./tests/e2eboot/chat_first_browser -run 'Test(Skills|Quality)' -count=1
+```
+
+**Release checklist:** do not mark skills accepted until `all` exits zero with
+fresh evidence and all earlier Bot release gates remain satisfied. Unit harness
+success and earlier controlled/runtime phases are not real-model acceptance.
+The live journey and PostgreSQL final acceptance were **not executed** as part of
+this harness implementation. The full browser harness package currently also
+exposes `TestEmployeeReportFormattedExactlyOnce` failing: the existing fixture and
+observer require a `Run:` footer, while `bot.RenderReport` now projects the employee
+message without that diagnostic footer. Resolve that prior employee-proof contract
+mismatch before launching final acceptance; do not waive or delete its receipt.

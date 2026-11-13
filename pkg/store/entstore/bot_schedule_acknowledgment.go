@@ -17,7 +17,19 @@ import (
 // bodies are evidence, never authority. This runs under the source lease before
 // application; its immutable marker is independent of publication order.
 func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run store.BotRun, work *store.BotWorkState, q store.BotRunCommit) (*store.BotReportAcknowledgment, error) {
-	if q.Status != store.RunSucceeded || q.Report.Failure != nil || len(q.Report.Changed) != 0 || len(q.Report.Unverified) != 0 || len(q.Report.Artifacts) != 0 || len(q.Report.NeedsApproval) != 0 || q.Report.NextRunAt != nil || work == nil || work.Phase != store.BotWorkAccepted || work.Candidate == nil || run.MandateRef == nil {
+	if q.Status != store.RunSucceeded || q.Report.Failure != nil || len(q.Report.Changed) != 0 || len(q.Report.Unverified) != 0 || len(q.Report.Artifacts) != 0 || len(q.Report.NeedsApproval) != 0 || q.Report.NextRunAt != nil || work == nil || work.Candidate == nil || run.MandateRef == nil {
+		return nil, nil
+	}
+	switch work.Protocol {
+	case store.BotWorkProtocolAgentLedV1:
+		if store.ValidateBotWorkCompletion(work, q) != nil {
+			return nil, nil
+		}
+	case store.BotWorkProtocolLegacyAssessment:
+		if work.Phase != store.BotWorkAccepted {
+			return nil, nil
+		}
+	default:
 		return nil, nil
 	}
 	c := work.Candidate
@@ -98,7 +110,14 @@ func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRe
 		texts = append(texts, text)
 		marker.OperationIDs = append(marker.OperationIDs, op.ID)
 	}
-	if strings.Join(texts, "\n\n") != q.Report.Summary {
+	canonical := strings.Join(texts, "\n\n")
+	if canonical != c.Text {
+		return nil, nil
+	}
+	// A server-owned acknowledgment may replace the producer's final text.
+	// Suppression is safe only when that original draft contains no independent
+	// content; candidate equality alone cannot establish this.
+	if draft := strings.TrimSpace(c.Bodies["producer-final-draft"]); draft != "" && draft != canonical {
 		return nil, nil
 	}
 	// Compare complete response envelopes, including routine scope/digest/decision.

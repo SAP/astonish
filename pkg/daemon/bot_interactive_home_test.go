@@ -47,6 +47,8 @@ type autoHomeRuntime struct {
 	calls int
 }
 
+func (*autoHomeRuntime) Cancel(context.Context, store.BotLease) error { return nil }
+
 func (r *autoHomeRuntime) Start(ctx context.Context, q bot.RunRequest, _ bot.EventSink) (bot.RunResult, error) {
 	r.calls++
 	if q.Bot.Home.ID == uuid.Nil {

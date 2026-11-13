@@ -30,7 +30,13 @@ REQUIRED_EVIDENCE = ('minimal-conversation', 'responsibility-confirmed', 'tool-a
                      'memory-next-answer', 'details-no-reconnect', 'paused-restart-bytes')
 
 
+from agent_live_contract import validate_agent_evidence
+from skills_live_contract import SKILLS_CONTRACT, SKILLS_REQUIRED, validate_skills_evidence as _validate_skills_evidence
 from quality_live_contract import QUALITY_CONTRACT, QUALITY_REQUIRED, strict_json, validate_quality_evidence as _validate_quality_evidence
+
+
+def validate_skills_evidence(state, actual):
+    _validate_skills_evidence(state, actual, validate_quality_evidence)
 
 
 def validate_quality_evidence(state, actual):
@@ -96,6 +102,59 @@ CONFIG_KEYS = {
 }
 
 
+CANDIDATE_CONFIG_VERSION = 1
+CANDIDATE_PROVIDER_ENV = 'LOCAL_BOT_PROVIDER_SETTINGS_JSON'
+AGENT_TARGET = {'provider': 'New AI Core Provider', 'provider_type': 'sap_ai_core',
+                'model': 'anthropic--claude-4.6-sonnet'}
+PATH_CONFIG_KEYS = {k: v for k, v in CONFIG_KEYS.items()
+                    if k not in ('provider_url', 'provider_api_key', 'model')}
+
+
+def candidate_provider(config):
+    """Validate explicit instance settings only; never resolve credentials or call a model."""
+    required = set(PATH_CONFIG_KEYS) | {'schema_version', 'provider_instance', 'provider_config', 'model', 'intended'}
+    if (not isinstance(config, dict) or set(config) != required
+            or type(config.get('schema_version')) is not int
+            or config['schema_version'] != CANDIDATE_CONFIG_VERSION):
+        raise ValueError('versioned config requires exactly the documented version 1 fields')
+    if any(not isinstance(config[k], str) or not config[k].strip()
+           for k in set(PATH_CONFIG_KEYS) | {'provider_instance', 'model'}):
+        raise ValueError('candidate paths and identity must be nonempty strings')
+    provider = config['provider_config']
+    if (not isinstance(provider, dict) or not provider
+            or any(not isinstance(k, str) or not isinstance(v, str) or not v.strip()
+                   for k, v in provider.items())):
+        raise ValueError('provider_config requires nonempty string fields')
+    fields = {'litellm': {'type', 'base_url', 'api_key'},
+              'sap_ai_core': {'type', 'base_url', 'auth_url', 'client_id', 'client_secret', 'resource_group'}}
+    if provider.get('type') not in fields or set(provider) != fields[provider['type']]:
+        raise ValueError('unsupported or incomplete isolated provider configuration')
+    from urllib.parse import urlparse
+    for key in ('base_url', 'auth_url'):
+        if key not in provider: continue
+        try:
+            url = urlparse(provider[key])
+            valid = (url.scheme in ('http', 'https') and url.hostname and not url.username
+                     and not url.password and not url.query and not url.fragment)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError('invalid provider endpoint; credentials must be separate')
+    identity = {'provider': config['provider_instance'], 'provider_type': provider['type'], 'model': config['model']}
+    if config['intended'] != identity:
+        raise ValueError('intended provider/model parity declaration missing or mismatched')
+    return {'providers': {config['provider_instance']: dict(provider)},
+            'default_provider': config['provider_instance'], 'default_model': config['model']}
+
+
+def require_agent_config(config):
+    candidate = dict(config) if isinstance(config, dict) else {}
+    candidate.pop('bot_routine_policy', None)
+    candidate_provider(candidate)
+    if candidate['intended'] != AGENT_TARGET:
+        raise ValueError('agent acceptance requires the intended AI Core provider and model; aliases are not parity')
+
+
 def routine_policy_yaml(policy):
     if not isinstance(policy, dict) or set(policy) != {'require_approval'} or policy['require_approval'] not in ([], ['memory_forget']):
         raise ValueError('bot_routine_policy permits only require_approval: [memory_forget]')
@@ -103,17 +162,29 @@ def routine_policy_yaml(policy):
 
 
 def config_environment(config):
+    if not isinstance(config, dict):
+        raise ValueError('config requires documented object fields')
     config = dict(config)
     routine = config.pop('bot_routine_policy', {'require_approval': []})
     routine_policy_yaml(routine)
-    if set(config) != set(CONFIG_KEYS) or any(not isinstance(v, str) or not v.strip() for v in config.values()):
-        raise ValueError('config requires exactly the documented nonempty string fields')
-    from urllib.parse import urlparse
-    url = urlparse(config['provider_url'])
-    if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password:
-        raise ValueError('invalid provider URL; credentials must be separate')
     env = dict(os.environ)
-    env.update({CONFIG_KEYS[k]: v for k, v in config.items()})
+    # An explicit file, not ambient provider state, is authoritative.
+    env[CANDIDATE_PROVIDER_ENV] = ''
+    if 'schema_version' in config:
+        provider = candidate_provider(config)
+        env.update({PATH_CONFIG_KEYS[k]: config[k] for k in PATH_CONFIG_KEYS})
+        env[CANDIDATE_PROVIDER_ENV] = json.dumps(provider)
+        env['LOCAL_BOT_MODEL'] = config['model']
+        env['LOCAL_BOT_PROVIDER_URL'] = ''
+        env['LOCAL_BOT_PROVIDER_API_KEY'] = ''
+    else:
+        if set(config) != set(CONFIG_KEYS) or any(not isinstance(v, str) or not v.strip() for v in config.values()):
+            raise ValueError('config requires exactly the documented nonempty string fields')
+        from urllib.parse import urlparse
+        url = urlparse(config['provider_url'])
+        if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password:
+            raise ValueError('invalid provider URL; credentials must be separate')
+        env.update({CONFIG_KEYS[k]: v for k, v in config.items()})
     env['LOCAL_BOT_ROUTINE_POLICY_JSON'] = json.dumps(routine)
     errors = prerequisites(env)
     if errors: raise ValueError('; '.join(errors))
@@ -244,6 +315,20 @@ def stage_embedding_cache(root, source):
 
 def provider_settings(env):
     """One explicit source for startup YAML and authenticated settings provision."""
+    if env.get(CANDIDATE_PROVIDER_ENV):
+        try:
+            settings = strict_json(env[CANDIDATE_PROVIDER_ENV])
+            instance = settings['default_provider']
+            provider = settings['providers'][instance]
+            config = {k: '/explicit' for k in PATH_CONFIG_KEYS}
+            config.update(schema_version=CANDIDATE_CONFIG_VERSION, provider_instance=instance,
+                          provider_config=provider, model=settings['default_model'],
+                          intended={'provider': instance, 'provider_type': provider['type'], 'model': settings['default_model']})
+            validated = candidate_provider(config)
+            if settings != validated: raise ValueError('unexpected settings')
+            return validated
+        except Exception:
+            raise ValueError('invalid explicit candidate provider settings') from None
     keys = ('LOCAL_BOT_PROVIDER_URL', 'LOCAL_BOT_MODEL', 'LOCAL_BOT_PROVIDER_API_KEY')
     if any(key in env for key in keys):
         if any(not isinstance(env.get(key), str) or not env[key].strip() for key in keys):
@@ -296,12 +381,15 @@ channels:
         config.write('\ngeneral: ' + json.dumps({k: provider[k] for k in ('default_provider', 'default_model')})
                      + '\nproviders: ' + json.dumps(provider['providers']) + '\n')
     private_json(root / 'provider-startup-receipt.json', {
-        'staged_before_startup': True, 'explicit': bool(env.get('LOCAL_BOT_PROVIDER_URL')),
+        'staged_before_startup': True, 'explicit': bool(env.get(CANDIDATE_PROVIDER_ENV) or env.get('LOCAL_BOT_PROVIDER_URL')),
         'config_mode': oct(config_path.stat().st_mode & 0o777),
         'default_provider': provider['default_provider'],
+        'provider_type': provider['providers'][provider['default_provider']]['type'],
+        'default_model': provider['default_model'],
         'model_configured': bool(provider['default_model']),
-        'provider_url_configured': bool(provider['providers']['local-litellm']['base_url']),
-        'provider_api_key_configured': bool(provider['providers']['local-litellm']['api_key']),
+        'provider_url_configured': bool(provider['providers'][provider['default_provider']].get('base_url')),
+        'provider_api_key_configured': bool(provider['providers'][provider['default_provider']].get('api_key')),
+        'runtime_parity_verified': False,
     })
     import native_candidate_staging as native
     shutil.copy2(env['LOCAL_BOT_BINARY'], root / 'astonish')
@@ -561,7 +649,7 @@ EMPLOYEE_EVIDENCE_COLUMNS = {
 EMPLOYEE_JSON_COLUMNS = frozenset(('data', 'event_data', 'payload', 'home_binding'))
 # Public JSON fields of store.BotRun (pkg/store/bots.go). Repository metadata
 # such as Instructions and OccurrenceAt is not a second public run document.
-EMPLOYEE_RUN_FIELDS = frozenset('continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
+EMPLOYEE_RUN_FIELDS = frozenset('work skill_id invocation continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
 
 
 def employee_blob(value):
@@ -636,7 +724,9 @@ def employee_run_session(row, errors):
         fields = {key.lower(): value for key, value in document.items()}
         if 'run' in fields:
             # Private repository metadata is allowed, but not a second public identity.
-            if EMPLOYEE_RUN_FIELDS.intersection(fields):
+            # botStoredRun.work is private BotWorkState; only Run.work is the
+            # public projection. Do not use the outer work to discover sessions.
+            if (EMPLOYEE_RUN_FIELDS - {'work'}).intersection(fields):
                 raise ValueError('mixed run')
             document = employee_object(fields['run'])
             fields = {key.lower(): value for key, value in document.items()}
@@ -801,8 +891,15 @@ def employee_readonly_local(state, reader=None):
 def employee_command(state, action):
     inspect_owned(state)
     root = Path(state['root'])
-    cp = json.loads((root / 'employee-checkpoint.json').read_text())
-    if (cp.get('contract') != EMPLOYEE_CONTRACT or cp.get('bot_id') != state.get('bot_id')
+    agent = state.get('workflow') == 'bot-agent-live-v1'
+    checkpoint_name = 'agent-learning-checkpoint.json' if agent else 'employee-checkpoint.json'
+    cp = json.loads((root / checkpoint_name).read_text())
+    contract = 'bot-agent-live-v1' if agent else EMPLOYEE_CONTRACT
+    if agent and (not state.get('agent_nonce') or cp.get('nonce') != state['agent_nonce']
+                  or state.get('agent_learning_bot_id') != state.get('bot_id')
+                  or action not in ('read', 'restart-tick')):
+        raise RuntimeError('agent learning lifecycle identity/action mismatch')
+    if (cp.get('contract') != contract or cp.get('bot_id') != state.get('bot_id')
             or cp.get('candidate') != state['binary_sha256']
             or cp.get('browser_candidate') != state['browser_sha256']):
         raise RuntimeError('employee checkpoint identity mismatch')
@@ -849,8 +946,32 @@ def main(argv=None):
     parser.add_argument('--verify-chat-model', action='store_true', help='title-first real-provider acceptance (not legacy policy acceptance)')
     parser.add_argument('--verify-bot-employee', action='store_true', help='fresh employee workflow; strict versioned evidence, no legacy review scheduling')
     parser.add_argument('--verify-bot-quality', action='store_true', help='fresh isolated real-model quality contract; no diagnostic resume')
+    parser.add_argument('--verify-bot-skills', action='store_true', help='fresh isolated real-model skills plus employee and quality proof')
+    parser.add_argument('--verify-bot-agent', action='store_true', help='fresh isolated agent candidate journey; incomplete proof remains blocked')
     parser.add_argument('--employee-command', choices=('read', 'restart-tick', 'restart-paused', 'restart-denied'), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.verify_bot_agent:
+        if (not args.config or args.state or args.verify_bot_skills or args.verify_bot_quality
+                or args.verify_bot_employee or args.verify_chat_model or args.verify_chat_first
+                or args.restart_owned or args.refresh_browser or args.employee_command):
+            parser.error('--verify-bot-agent requires only --config and fresh execution')
+        try:
+            if (not args.config.is_absolute() or args.config.is_symlink() or not args.config.is_file()
+                    or args.config.stat().st_mode & 0o077):
+                raise ValueError('agent config must be an absolute private non-symlink file (0600)')
+            config = strict_json(args.config.read_text())
+            require_agent_config(config)
+            config_environment(config)
+        except Exception:
+            # Parser/OS errors may contain supplied values or credential-bearing paths.
+            parser.error('agent configuration preflight failed; private version 1 config and exact AI Core identity required')
+    if args.verify_bot_skills:
+        if (not args.config or args.state or args.verify_bot_quality or args.verify_bot_employee
+                or args.verify_chat_model or args.verify_chat_first or args.restart_owned
+                or args.refresh_browser or args.employee_command):
+            parser.error('--verify-bot-skills requires only --config and fresh execution')
+        # Internal composition only; CLI modes remain strictly mutually exclusive.
+        args.verify_bot_quality = True
     if args.verify_bot_quality and (not args.config or args.state or args.verify_bot_employee or args.verify_chat_model or args.verify_chat_first or args.restart_owned or args.refresh_browser or args.employee_command):
         parser.error('--verify-bot-quality requires --config and fresh execution; forbids --state and other modes')
     if args.employee_command:
@@ -866,10 +987,14 @@ def main(argv=None):
             parser.error('--verify-chat-model requires --config and forbids legacy modes')
     if args.config:
         try:
-            os.environ.update(config_environment(json.loads(args.config.read_text())))
-        except Exception as error:
-            parser.error('configuration preflight failed: ' + str(error))
-    verify_browser = args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee or args.verify_bot_quality
+            config = strict_json(args.config.read_text())
+            if 'schema_version' in config and (not args.config.is_absolute() or args.config.is_symlink()
+                                               or args.config.stat().st_mode & 0o077):
+                raise ValueError('versioned configuration requires a private absolute file')
+            os.environ.update(config_environment(config))
+        except Exception:
+            parser.error('configuration preflight failed: invalid configuration or unavailable prerequisites (values withheld)')
+    verify_browser = args.verify_bot_agent or args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee or args.verify_bot_quality
     if args.refresh_browser:
         if not args.state or args.restart_owned: parser.error('--refresh-browser requires --state and forbids --restart-owned')
         refresh_browser(json.loads(args.state.read_text()))
@@ -893,6 +1018,14 @@ def main(argv=None):
         setup(state)
         if verify_browser:
             env = dict(os.environ, CHAT_FIRST_STATE=str(root / 'state.json'))
+            # Ambient mode flags must never select a different acceptance journey.
+            for key in ('BOT_AGENT_ACCEPTANCE', 'BOT_EMPLOYEE_ACCEPTANCE', 'BOT_QUALITY_ACCEPTANCE', 'BOT_SKILLS_ACCEPTANCE', 'CHAT_MODEL_ACCEPTANCE'):
+                env.pop(key, None)
+            if args.verify_bot_agent:
+                state['workflow'] = 'bot-agent-live-v1'
+                state['agent_nonce'] = secrets.token_hex(32)
+                state['agent_intended'] = dict(AGENT_TARGET)
+                env['BOT_AGENT_ACCEPTANCE'] = '1'
             if args.verify_chat_model:
                 if state.get('bot_id') and state.get('workflow') != 'chat-model-v1':
                     raise RuntimeError('cannot reuse legacy Bot for title-first acceptance')
@@ -904,6 +1037,10 @@ def main(argv=None):
             if args.verify_bot_quality:
                 state['workflow'] = QUALITY_CONTRACT
                 env['BOT_QUALITY_ACCEPTANCE'] = '1'
+            if args.verify_bot_skills:
+                state['workflow'] = SKILLS_CONTRACT
+                state['skills_nonce'] = secrets.token_hex(32)
+                env['BOT_SKILLS_ACCEPTANCE'] = '1'
             browser = root / 'bin/chat-first-browser'
             if not state.get('browser_sha256'):
                 subprocess.run(['go', 'build', '-o', str(browser), './tests/e2eboot/chat_first_browser'], cwd=REPO, check=True, timeout=180)
@@ -912,13 +1049,13 @@ def main(argv=None):
                 raise RuntimeError('resume browser candidate changed')
             private_json(root / 'state.json', state)
             try:
-                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=3600 if args.verify_bot_quality else 1800)
+                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=7200 if args.verify_bot_agent else 3600 if args.verify_bot_quality else 1800)
             finally:
                 # The browser owns the durable Bot checkpoint even on failure.
                 state = json.loads((root / 'state.json').read_text())
             # Partial browser work never counts as whole-workflow acceptance.
             actual = strict_json((root / 'browser-evidence.json').read_text())
-            (validate_quality_evidence if args.verify_bot_quality else validate_employee_evidence if args.verify_bot_employee else validate_chat_model_evidence if args.verify_chat_model else validate_evidence)(state, actual)
+            (validate_agent_evidence if args.verify_bot_agent else validate_skills_evidence if args.verify_bot_skills else validate_quality_evidence if args.verify_bot_quality else validate_employee_evidence if args.verify_bot_employee else validate_chat_model_evidence if args.verify_chat_model else validate_evidence)(state, actual)
             inspect_owned(state)
             state['status'] = 'diagnostic-verified' if state.get('diagnostic_resume') else 'verified'
         private_json(root / 'state.json', state)

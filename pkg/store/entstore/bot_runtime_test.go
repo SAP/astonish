@@ -2,7 +2,9 @@ package entstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	entsql "entgo.io/ent/dialect/sql"
 	"errors"
@@ -78,13 +80,265 @@ func (runtimeTestBudget) SettleModel(context.Context, uuid.UUID, execution.Budge
 func (runtimeTestBudget) ReserveTool(context.Context, string) error { return nil }
 func (runtimeTestBudget) Check(context.Context) error               { return nil }
 
+func TestBotAgentClaimInitializesUnstartedWork(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, _, worker, run, lease, _ := botRunFixture(t, scope)
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil || work == nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Phase != store.BotWorkWorking || work.AgentWork == nil {
+				t.Fatalf("new claim must be agent-led: %+v %v", work, err)
+			}
+			if work.Contract.BotID != run.BotID || work.Contract.RunID != run.ID || work.Review != nil || len(work.Criteria) != 0 {
+				t.Fatal("claim lost identity or invented assessment")
+			}
+		})
+	}
+}
+
+// pinLegacyWorkFixture represents an already-persisted pre-agent attempt. It is
+// test setup only: production SaveWork must never switch an in-flight protocol.
+func pinLegacyWorkFixture(t *testing.T, repo *botRepository, ctx context.Context, lease store.BotLease) {
+	t.Helper()
+	err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+		run, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
+		if err != nil {
+			return err
+		}
+		if run.Work == nil {
+			return store.ErrBotInvalid
+		}
+		run.Work = store.NewBotWorkState(run.Work.Contract)
+		return tx.(botWorkDB).updateWorkRun(ctx, *run, lease, repo.clock())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func finishedAgentWorkReport(t *testing.T, repo *botRepository, ctx context.Context, lease store.BotLease, text string, disposition store.AgentWorkDisposition) store.BotReport {
+	t.Helper()
+	work, err := repo.LoadWork(ctx, lease)
+	if err != nil || work == nil || work.Protocol != store.BotWorkProtocolAgentLedV1 {
+		t.Fatalf("agent work unavailable: %+v %v", work, err)
+	}
+	next := work.Clone()
+	next.Phase = store.BotWorkFinished
+	next.AgentWork.Disposition = disposition
+	if disposition == store.AgentWorkBlocked {
+		next.Phase = store.BotWorkBlocked
+		next.Unresolved = []string{"Source unavailable; provide an accessible source to continue."}
+	}
+	next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: text}
+	next.Candidate.Digest = next.Candidate.ContentDigest()
+	work, err = repo.SaveWork(ctx, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store.BotReport{Summary: text, Work: store.BuildBotWorkProjection(work)}
+}
+
+// priorAttemptClaimDB supplies persisted historical input at the claim read seam.
+// ClaimLease still runs against the real scoped database and persists the result.
+type priorAttemptClaimDB struct {
+	botDraftDB
+	runID store.RunID
+	kind  string
+}
+
+func (d priorAttemptClaimDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
+	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+		return fn(priorAttemptClaimDB{botDraftDB: tx, runID: d.runID, kind: d.kind})
+	})
+}
+func (d priorAttemptClaimDB) ReadRun(ctx context.Context, botID store.BotID, runID store.RunID) (*botStoredRun, error) {
+	run, err := d.botDraftDB.ReadRun(ctx, botID, runID)
+	if err != nil || runID != d.runID || run.Run.Status != store.RunQueued {
+		return run, err
+	}
+	switch d.kind {
+	case "started":
+		now := time.Now().Add(-time.Hour)
+		run.Run.StartedAt = &now
+	case "checkpoint":
+		run.Run.Checkpoint = []byte(`{"prior":true}`)
+	case "legacy":
+		run.Work = store.NewBotWorkState(store.BotWorkContract{BotID: botID, RunID: runID, Version: run.Run.Version, Instructions: run.Instructions})
+	}
+	return run, nil
+}
+func TestBotAgentClaimPreservesPriorAttempts(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, kind := range []string{"started", "checkpoint", "legacy"} {
+			t.Run(string(scope)+"/"+kind, func(t *testing.T) {
+				repo, owner, worker, initial, lease, now := botRunFixture(t, scope)
+				report := finishedAgentWorkReport(t, repo, worker, lease, "Initial answer", store.AgentWorkAnswered)
+				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report}); err != nil {
+					t.Fatal(err)
+				}
+				run, err := repo.RequestRun(owner, store.BotRunRequest{BotID: initial.BotID, Version: initial.Version, Trigger: store.TriggerManual, IdempotencyKey: kind, Instructions: "Prior assignment"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				identity, _ := execution.BotRunIdentityFromContext(worker)
+				identity.RunID = run.ID
+				worker = execution.WithBotRunIdentity(owner, identity)
+				originalDB := repo.db
+				repo.db = priorAttemptClaimDB{botDraftDB: originalDB, runID: run.ID, kind: kind}
+				lease, err = repo.ClaimRun(worker, store.BotClaimRequest{BotID: run.BotID, RunID: run.ID, WorkerID: "prior", ExpiresAt: now.Add(time.Minute)})
+				repo.db = originalDB
+				if err != nil {
+					t.Fatal(err)
+				}
+				work, err := repo.LoadWork(worker, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind == "legacy" {
+					if work == nil || work.Protocol != store.BotWorkProtocolLegacyAssessment || work.Phase != store.BotWorkPreparing || work.Revision != 1 {
+						t.Fatalf("legacy relabeled: %+v", work)
+					}
+				} else if work != nil {
+					t.Fatalf("historical nil work relabeled: %+v", work)
+				}
+			})
+		}
+	}
+}
+
+func TestBotAgentArtifactIdentity(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, name := range []string{"owned", "foreign-home", "unsafe-path", "tampered-bytes"} {
+			t.Run(string(scope)+"/"+name, func(t *testing.T) {
+				repo, _, owner, run, home := runtimeFixture(t, scope)
+				principal, _ := execution.PrincipalFromContext(owner)
+				worker := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: run.BotID, RunID: run.ID, Version: run.Version, ActorID: principal.Subject, OrgSlug: "org", TeamSlug: "team"})
+				lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: run.BotID, RunID: run.ID, WorkerID: "artifact", ExpiresAt: time.Now().Add(time.Minute)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				work, err := repo.LoadWork(worker, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := "# Result\nOwned result bytes."
+				sum := sha256.Sum256([]byte(body))
+				artifact := store.BotArtifact{ID: uuid.New(), HomeID: home.home.ID, RelativePath: "reports/result.md", SHA256: hex.EncodeToString(sum[:])}
+				if name == "foreign-home" {
+					artifact.HomeID = uuid.New()
+				}
+				if name == "unsafe-path" {
+					artifact.RelativePath = "../result.md"
+				}
+				next := work.Clone()
+				next.Phase = store.BotWorkFinished
+				next.AgentWork.Disposition = store.AgentWorkAnswered
+				next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: "Here is the result.", Artifacts: []store.BotArtifact{artifact}, Bodies: map[string]string{artifact.ID.String(): body}}
+				if name == "tampered-bytes" {
+					next.Candidate.Bodies[artifact.ID.String()] += "forged"
+				}
+				next.Candidate.Digest = next.Candidate.ContentDigest()
+				work, err = repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next})
+				if name == "tampered-bytes" {
+					if !errors.Is(err, store.ErrBotInvalid) {
+						t.Fatalf("bad artifact bytes saved: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				report := store.BotReport{Summary: work.Candidate.Text, Artifacts: work.Candidate.Artifacts, Work: store.BuildBotWorkProjection(work)}
+				report.FinalizeEmployeeMessage(store.RunSucceeded, work)
+				err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report})
+				if name != "owned" {
+					if !errors.Is(err, store.ErrBotInvalid) {
+						t.Fatalf("wrong artifact identity accepted: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				saved, err := repo.GetRun(owner, run.BotID, run.ID)
+				if err != nil || !reflect.DeepEqual(saved.Report.Artifacts, report.Artifacts) {
+					t.Fatalf("artifact identity changed: %+v %v", saved, err)
+				}
+			})
+		}
+	}
+}
+
+func TestBotAgentCommitStructuralBinding(t *testing.T) {
+	work := store.NewBotAgentWorkState(store.BotWorkContract{BotID: uuid.New(), RunID: uuid.New(), Version: 1, Instructions: "Answer normally"})
+	work.Phase = store.BotWorkFinished
+	work.AgentWork.Disposition = store.AgentWorkAnswered
+	work.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: "The answer is here."}
+	work.Candidate.Digest = work.Candidate.ContentDigest()
+	q := store.BotRunCommit{Lease: store.BotLease{BotID: work.Contract.BotID, RunID: work.Contract.RunID}, Status: store.RunSucceeded, Report: store.BotReport{Summary: work.Candidate.Text, Work: store.BuildBotWorkProjection(work)}}
+	if err := validateBotWorkCommit(work, q); err != nil {
+		t.Fatalf("ordinary answer requires no review: %v", err)
+	}
+	for _, name := range []string{"text", "projection", "quality", "identity", "approval", "uncertain", "candidate", "unfinished"} {
+		t.Run(name, func(t *testing.T) {
+			w := work.Clone()
+			bad := q
+			bad.Report.Work = store.BuildBotWorkProjection(w)
+			switch name {
+			case "text":
+				bad.Report.Summary += "forged"
+			case "projection":
+				bad.Report.Work.WorkRevision++
+			case "quality":
+				bad.Report.Quality = &store.BotQualityReport{}
+			case "identity":
+				bad.Lease.RunID = uuid.New()
+			case "approval":
+				bad.Report.NeedsApproval = []uuid.UUID{uuid.New()}
+			case "uncertain":
+				bad.Report.Unverified = []string{"send outcome unknown"}
+			case "candidate":
+				w.Candidate.Text += "tampered"
+			case "unfinished":
+				w.Phase = store.BotWorkWorking
+				w.AgentWork.Disposition = ""
+				bad.Report.Work = store.BuildBotWorkProjection(w)
+			}
+			if err := validateBotWorkCommit(w, bad); !errors.Is(err, store.ErrBotInvalid) {
+				t.Fatalf("accepted %s: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestBotSkillOrientationCannotRepinProducedWork(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			r, _, worker, run, lease, _ := botRunFixture(t, scope)
+			pinLegacyWorkFixture(t, r, worker, lease)
+			_ = acceptedWorkReport(t, r, worker, lease, "Verified output")
+			w, err := r.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := store.BotSkillOrientation{Kind: store.BotSkillNoSkillNeeded, Mutation: store.BotSkillMutation{BotID: run.BotID, Lease: lease, ExpectedRevision: w.Revision, IdempotencyKey: "late-orientation"}}
+			if _, err := r.OrientSkill(worker, q); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("late orientation: %v", err)
+			}
+			after, err := r.LoadWork(worker, lease)
+			if err != nil || !reflect.DeepEqual(w, after) {
+				t.Fatalf("orientation altered accepted work: %v", err)
+			}
+		})
+	}
+}
+
 func runtimeFixture(t *testing.T, scope store.BotScope) (*botRepository, store.BotStore, context.Context, *store.BotRun, *runtimeTestHome) {
 	t.Helper()
 	// Reuse the scoped SQLite fixture, finish its initial run, then register a
 	// separate draft's home through the internal attestation seam before activation.
 	repo, ctx, worker, initial, lease, _ := botRunFixture(t, scope)
 	repo.now = nil
-	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, worker, lease, "Fixture setup")}); err != nil {
+	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: finishedAgentWorkReport(t, repo, worker, lease, "Fixture setup", store.AgentWorkAnswered)}); err != nil {
 		t.Fatal(err)
 	}
 	owner, _ := execution.PrincipalFromContext(ctx)
@@ -132,6 +386,64 @@ func runtimeConfig(scoped store.BotStore, h *runtimeTestHome, r *runtimeTestAdap
 	}}
 }
 
+func TestBotAgentSupervisorFailureProjection(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, stage := range []string{"permission", "home", "runtime", "forged-envelope", "forged-projection"} {
+			t.Run(string(scope)+"/"+stage, func(t *testing.T) {
+				repo, scoped, ctx, run, home := runtimeFixture(t, scope)
+				failure := &botdomain.RunError{Class: botdomain.ErrorPermission, Message: "controlled denial", Cause: store.ErrBotForbidden}
+				adapter := &runtimeTestAdapter{start: func(_ context.Context, q botdomain.RunRequest, _ botdomain.EventSink) (botdomain.RunResult, error) {
+					result := botdomain.RunResult{Status: store.RunFailed, Report: store.BotReport{Summary: "Work stopped"}}
+					if stage == "forged-envelope" {
+						result.Report.EmployeeMessage = &store.BotEmployeeMessage{Origin: store.BotEmployeeMessageFallback, Text: "forged", SourceDigest: "forged"}
+					}
+					if stage == "forged-projection" {
+						result.Report.Work = store.BuildBotWorkProjection(q.Work)
+						result.Report.Work.RunID = uuid.New()
+					}
+					return result, failure
+				}}
+				cfg := runtimeConfig(scoped, home, adapter)
+				if stage == "permission" {
+					cfg.Ready = func(context.Context, store.BotRunInput) (botdomain.RunPreparation, error) {
+						return botdomain.RunPreparation{}, failure
+					}
+				}
+				if stage == "home" {
+					home.bind = func(context.Context, botdomain.HomeRunBinding) error { return failure }
+				}
+				supervisor, err := botdomain.NewSupervisor(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = supervisor.Execute(ctx, run.BotID, run.ID)
+				if !errors.Is(err, store.ErrBotForbidden) {
+					t.Fatalf("lost execution error: %v", err)
+				}
+				saved, err := repo.GetRun(ctx, run.BotID, run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(stage, "forged-") {
+					if saved.Status != store.RunRunning {
+						t.Fatal("forged result was healed and committed")
+					}
+					return
+				}
+				if saved.Status != store.RunFailed || saved.Report.Work == nil || saved.Report.Work.RunID != run.ID || saved.Report.Quality != nil {
+					t.Fatalf("failure not durably bound: %+v", saved)
+				}
+				if saved.Report.ValidateEmployeeMessageIntegrity(saved.Status) != nil {
+					t.Fatal("invalid failure envelope")
+				}
+				if stage != "runtime" && adapter.calls.Load() != 0 {
+					t.Fatal("executed work after preflight failure")
+				}
+			})
+		}
+	}
+}
+
 func TestBotWorkSnapshotScopeAndRevision(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
@@ -140,7 +452,7 @@ func TestBotWorkSnapshotScopeAndRevision(t *testing.T) {
 			if err != nil || work == nil {
 				t.Fatalf("claim did not persist requirements: %v", err)
 			}
-			if work.Phase != store.BotWorkPreparing || work.Contract.RunID != run.ID || work.Contract.BotID != run.BotID || work.Contract.Instructions == "" {
+			if work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Phase != store.BotWorkWorking || work.Contract.RunID != run.ID || work.Contract.BotID != run.BotID || work.Contract.Instructions == "" {
 				t.Fatalf("invalid pinned contract: %+v", work)
 			}
 			original := work.Clone()
@@ -153,8 +465,7 @@ func TestBotWorkSnapshotScopeAndRevision(t *testing.T) {
 				t.Fatalf("failed update changed snapshot: %v", err)
 			}
 			next := original.Clone()
-			next.Phase = store.BotWorkProducing
-			next.Criteria = []store.BotWorkCriterion{{ID: "assignment", SourceIDs: []string{"assignment", "charter"}, Text: original.Contract.Instructions}}
+			next.AgentWork.Notes = "Inspecting the source"
 			got, err = repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: original.Revision, State: *next})
 			if err != nil || got.Revision != original.Revision+1 {
 				t.Fatalf("save: %+v %v", got, err)
@@ -301,8 +612,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 			}
 			// Two concurrent CAS writers cannot both consume the same phase.
 			next := work.Clone()
-			next.Phase = store.BotWorkProducing
-			next.Criteria = []store.BotWorkCriterion{{ID: "all", SourceIDs: []string{"assignment", "charter", "goal:" + goal.ID.String()}, Text: "Produce sourced report"}}
+			next.AgentWork.Notes = "Collecting dated sources for the report"
 			var wg sync.WaitGroup
 			var wins atomic.Int32
 			for range 2 {
@@ -336,6 +646,36 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 			after, err := repo.LoadWork(worker, lease)
 			if err != nil || !reflect.DeepEqual(saved, after) {
 				t.Fatal("failed write did not roll back", err)
+			}
+			// Persist rich agent work, close the actual SQLite connection, recover
+			// it, and reopen again: neither journal nor projection is ephemeral.
+			before := continuityAgentWork(t, repo, ctx, worker, lease)
+			if err := closeDB(); err != nil {
+				t.Fatal(err)
+			}
+			open()
+			restored, err := repo.LoadWork(worker, lease)
+			if err != nil || !reflect.DeepEqual(before, restored) {
+				t.Fatalf("agent journal reopen: %v", err)
+			}
+			repo.now = func() time.Time { return lease.ExpiresAt.Add(time.Second) }
+			if err := repo.RecoverRun(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			if err := closeDB(); err != nil {
+				t.Fatal(err)
+			}
+			open()
+			recovered, err := repo.db.ReadRun(ctx, b.ID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertContinuityWork(t, before, recovered.Work, store.BotWorkInterrupted)
+			if !reflect.DeepEqual(recovered.Run.Work, store.BuildBotWorkProjection(recovered.Work)) {
+				t.Fatal("reopen projection stale")
+			}
+			if _, err := repo.LoadWork(worker, lease); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("old lease usable after reopen: %v", err)
 			}
 		})
 	}
@@ -524,7 +864,7 @@ func TestBotRuntimeSupervisorLifecycle(t *testing.T) {
 				if !bound || q.Instructions != "Persisted instructions only" || q.Run.Status != store.RunRunning || q.Principal.Subject != q.Bot.OwnerID.String() || execution.RunPolicyFromContext(c) != q.Policy {
 					t.Fatal("incorrect execution input")
 				}
-				return botdomain.RunResult{Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, c, q.Run.Lease, "Observed"), Usage: store.BotUsage{InputTokens: 11, ToolCalls: 1}}, nil
+				return botdomain.RunResult{ModelSelection: &store.SessionPin{Provider: "resolved-provider", Model: "resolved-model"}, Status: store.RunSucceeded, Report: finishedAgentWorkReport(t, repo, c, q.Run.Lease, "Observed", store.AgentWorkAnswered), Usage: store.BotUsage{InputTokens: 11, ToolCalls: 1}}, nil
 			}}
 			supervisor, err := botdomain.NewSupervisor(runtimeConfig(scoped, home, adapter))
 			if err != nil {
@@ -534,7 +874,7 @@ func TestBotRuntimeSupervisorLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved, err := repo.GetRun(ctx, run.BotID, run.ID)
-			if err != nil || saved.Status != store.RunSucceeded || saved.Usage.InputTokens != 11 || saved.FinishedAt == nil {
+			if err != nil || saved.Status != store.RunSucceeded || saved.Usage.InputTokens != 11 || saved.FinishedAt == nil || saved.Provider != "resolved-provider" || saved.Model != "resolved-model" || saved.Usage.CostMicros != nil {
 				t.Fatalf("not committed: %+v %v", saved, err)
 			}
 			if _, err := supervisor.Execute(ctx, run.BotID, run.ID); !errors.Is(err, store.ErrBotConflict) {

@@ -70,7 +70,20 @@ const (
 	BotWorkMaxCandidateBytes = 1 << 20
 )
 
+type BotWorkProtocol string
+
+const (
+	BotWorkProtocolLegacyAssessment BotWorkProtocol = ""
+	BotWorkProtocolAgentLedV1       BotWorkProtocol = "agent_led_v1"
+)
+
 type BotWorkPhase string
+
+// Agent-led execution phases are not legacy review verdicts.
+const (
+	BotWorkWorking  BotWorkPhase = "working"
+	BotWorkFinished BotWorkPhase = "finished"
+)
 
 const (
 	BotWorkPreparing      BotWorkPhase = "preparing"
@@ -102,6 +115,7 @@ const (
 // BotWorkContract is source material, never an authorization grant. It is pinned
 // by the repository at first claim and is immutable for every continuation.
 type BotWorkContract struct {
+	Skill            *BotSkillInvocation `json:"skill,omitempty"`
 	BotID            BotID               `json:"bot_id"`
 	RunID            RunID               `json:"run_id"`
 	Version          int64               `json:"version"`
@@ -251,6 +265,9 @@ type BotWorkReview struct {
 }
 
 type BotWorkState struct {
+	Protocol           BotWorkProtocol        `json:"protocol,omitempty"`
+	AgentWork          *BotAgentWork          `json:"agent_work,omitempty"`
+	SkillState         *BotSkillRunState      `json:"skill_state,omitempty"`
 	ResponseOutcome    BotWorkResponseOutcome `json:"response_outcome,omitempty"`
 	SchemaVersion      int                    `json:"schema_version"`
 	Revision           int64                  `json:"revision"`
@@ -262,6 +279,307 @@ type BotWorkState struct {
 	Review             *BotWorkReview         `json:"review,omitempty"`
 	Repairs            int                    `json:"repairs"`
 	Unresolved         []string               `json:"unresolved,omitempty"`
+}
+
+// Agent work describes judgment and progress, not a permission grant or a proof
+// that the whole assignment is factually correct. Observations remain separate.
+const (
+	BotAgentWorkSchemaVersion    = 1
+	BotAgentWorkMaxItems         = 25
+	BotAgentWorkMaxObligations   = 25
+	BotAgentWorkMaxNotesBytes    = 8 << 10
+	BotAgentWorkMaxChecks        = 100
+	BotAgentWorkMaxMetadataBytes = 64 << 10
+)
+
+type AgentWorkDisposition string
+
+const (
+	AgentWorkAnswered AgentWorkDisposition = "answered"
+	AgentWorkComplete AgentWorkDisposition = "complete"
+	AgentWorkPartial  AgentWorkDisposition = "partial"
+	AgentWorkBlocked  AgentWorkDisposition = "blocked"
+)
+
+type BotWorkItemStatus string
+
+const (
+	BotWorkItemPending    BotWorkItemStatus = "pending"
+	BotWorkItemInProgress BotWorkItemStatus = "in_progress"
+	BotWorkItemCompleted  BotWorkItemStatus = "completed"
+	BotWorkItemBlocked    BotWorkItemStatus = "blocked"
+	BotWorkItemCancelled  BotWorkItemStatus = "cancelled"
+)
+
+type BotWorkContinuationKind string
+
+const (
+	BotWorkContinueOwnerRequest     BotWorkContinuationKind = "owner_request"
+	BotWorkContinueExistingSchedule BotWorkContinuationKind = "existing_schedule"
+	BotWorkContinueExistingApproval BotWorkContinuationKind = "existing_approval"
+)
+
+type BotWorkCheckStatus string
+type BotWorkCheckKind string
+type BotWorkCheckJudgment string
+
+const (
+	BotWorkCheckReturned              BotWorkCheckStatus   = "returned"
+	BotWorkCheckFailed                BotWorkCheckStatus   = "failed"
+	BotWorkCheckInterrupted           BotWorkCheckStatus   = "interrupted"
+	BotWorkCheckModelFeedback         BotWorkCheckKind     = "model_feedback"
+	BotWorkCheckMechanicalObservation BotWorkCheckKind     = "mechanical_observation"
+	BotWorkCheckSupported             BotWorkCheckJudgment = "supported"
+	BotWorkCheckNeedsWork             BotWorkCheckJudgment = "needs_work"
+	BotWorkCheckUnverified            BotWorkCheckJudgment = "unverified"
+)
+
+type BotWorkItem struct {
+	ID           RunID             `json:"id"`
+	Summary      string            `json:"summary"`
+	Status       BotWorkItemStatus `json:"status"`
+	Reason       string            `json:"reason,omitempty"`
+	EvidenceRefs []string          `json:"evidence_refs,omitempty"`
+}
+
+type BotWorkObligation struct {
+	ID           RunID                   `json:"id"`
+	SourceRunID  RunID                   `json:"source_run_id"`
+	WorkItemID   *RunID                  `json:"work_item_id,omitempty"`
+	Summary      string                  `json:"summary"`
+	Reason       string                  `json:"reason"`
+	Continuation BotWorkContinuationKind `json:"continuation"`
+	// References identify existing records only. They do not authorize execution.
+	ContinuationID *RunID `json:"continuation_id,omitempty"`
+}
+
+type BotWorkCheckReceipt struct {
+	ID           RunID                `json:"id"`
+	CallID       string               `json:"call_id"`
+	Kind         BotWorkCheckKind     `json:"kind"`
+	Status       BotWorkCheckStatus   `json:"status"`
+	Judgment     BotWorkCheckJudgment `json:"judgment"`
+	Summary      string               `json:"summary"`
+	DraftDigest  string               `json:"draft_digest"`
+	EvidenceRefs []string             `json:"evidence_refs,omitempty"`
+	ObservedAt   time.Time            `json:"observed_at"`
+}
+
+// BotWorkEvidenceReference addresses captured run-local evidence. The scoped
+// service must resolve the event/call and digest; shape validation is not trust.
+type BotWorkEvidenceReference struct {
+	Ref     string `json:"ref"`
+	RunID   RunID  `json:"run_id"`
+	EventID string `json:"event_id"`
+	CallID  string `json:"call_id"`
+	Digest  string `json:"digest"`
+}
+
+type BotSourceAccessStatus string
+
+const (
+	BotSourceAccessReturned BotSourceAccessStatus = "returned"
+	BotSourceAccessFailed   BotSourceAccessStatus = "failed"
+)
+
+// HTTP status and returned bytes do not establish relevance or source truth.
+type BotSourceAccessFact struct {
+	EvidenceRef string                `json:"evidence_ref"`
+	CallID      string                `json:"call_id"`
+	OriginalURL string                `json:"original_url"`
+	FinalURL    string                `json:"final_url,omitempty"`
+	Status      BotSourceAccessStatus `json:"status"`
+	HTTPStatus  int                   `json:"http_status,omitempty"`
+	ObservedAt  time.Time             `json:"observed_at"`
+	Truncated   bool                  `json:"truncated,omitempty"`
+	BodyDigest  string                `json:"body_digest"`
+}
+
+// BotWorkCallReceipt binds optional bookkeeping retries to the original request.
+// A reserved check means execution may have started; it must never be replayed.
+type BotWorkCallReceipt struct {
+	CallID        string `json:"call_id"`
+	RequestDigest string `json:"request_digest"`
+	Revision      int64  `json:"revision"`
+	Check         bool   `json:"check,omitempty"`
+}
+
+type BotAgentWork struct {
+	Calls         []BotWorkCallReceipt       `json:"calls,omitempty"`
+	SchemaVersion int                        `json:"schema_version"`
+	Notes         string                     `json:"notes,omitempty"`
+	Items         []BotWorkItem              `json:"items,omitempty"`
+	Remaining     []BotWorkObligation        `json:"remaining,omitempty"`
+	Checks        []BotWorkCheckReceipt      `json:"checks,omitempty"`
+	Evidence      []BotWorkEvidenceReference `json:"evidence,omitempty"`
+	SourceAccess  []BotSourceAccessFact      `json:"source_access,omitempty"`
+	Disposition   AgentWorkDisposition       `json:"disposition,omitempty"`
+}
+
+// BotWorkProjection excludes raw evidence and private notes. Transport callers
+// must additionally redact model-authored summaries using the scoped redactor.
+type BotWorkProjection struct {
+	SchemaVersion   int                   `json:"schema_version"`
+	Protocol        BotWorkProtocol       `json:"protocol"`
+	BotID           BotID                 `json:"bot_id"`
+	RunID           RunID                 `json:"run_id"`
+	WorkRevision    int64                 `json:"work_revision"`
+	Phase           BotWorkPhase          `json:"phase"`
+	Disposition     AgentWorkDisposition  `json:"disposition,omitempty"`
+	CandidateDigest string                `json:"candidate_digest,omitempty"`
+	Items           []BotWorkItem         `json:"items,omitempty"`
+	Remaining       []BotWorkObligation   `json:"remaining,omitempty"`
+	Checks          []BotWorkCheckReceipt `json:"checks,omitempty"`
+}
+
+func NewBotAgentWorkState(contract BotWorkContract) *BotWorkState {
+	w := NewBotWorkState(contract)
+	w.Protocol = BotWorkProtocolAgentLedV1
+	w.AgentWork = &BotAgentWork{SchemaVersion: BotAgentWorkSchemaVersion}
+	if w.Phase == BotWorkPreparing {
+		w.Phase = BotWorkWorking
+	}
+	return w
+}
+
+func BuildBotWorkProjection(w *BotWorkState) *BotWorkProjection {
+	if w == nil || w.Protocol != BotWorkProtocolAgentLedV1 || w.Validate() != nil {
+		return nil
+	}
+	copy := w.Clone()
+	p := &BotWorkProjection{SchemaVersion: BotAgentWorkSchemaVersion, Protocol: copy.Protocol,
+		BotID: copy.Contract.BotID, RunID: copy.Contract.RunID, WorkRevision: copy.Revision,
+		Phase: copy.Phase, Disposition: copy.AgentWork.Disposition, Items: copy.AgentWork.Items,
+		Remaining: copy.AgentWork.Remaining, Checks: copy.AgentWork.Checks}
+	if copy.Candidate != nil {
+		p.CandidateDigest = copy.Candidate.Digest
+	}
+	return p
+}
+
+func (p *BotWorkProjection) Validate() error {
+	if p == nil || p.SchemaVersion != BotAgentWorkSchemaVersion || p.Protocol != BotWorkProtocolAgentLedV1 || p.BotID == (BotID{}) || p.RunID == (RunID{}) || p.WorkRevision < 1 {
+		return ErrBotInvalid
+	}
+	if p.CandidateDigest != "" && !skillDigestValid(p.CandidateDigest) {
+		return ErrBotInvalid
+	}
+	if !validAgentWorkPhase(p.Phase) || p.Phase == BotWorkFinished && (p.CandidateDigest == "" || p.Disposition == "" || p.Disposition == AgentWorkBlocked) {
+		return ErrBotInvalid
+	}
+	a := BotAgentWork{SchemaVersion: p.SchemaVersion, Items: p.Items, Remaining: p.Remaining, Checks: p.Checks, Disposition: p.Disposition}
+	return a.validate(p.RunID, nil, false)
+}
+
+func (p *BotWorkProjection) allowsResult(status RunStatus) bool {
+	if p == nil {
+		return false
+	}
+	if status == RunSucceeded {
+		return p.Phase == BotWorkFinished && (p.Disposition == AgentWorkAnswered || p.Disposition == AgentWorkComplete)
+	}
+	return status == RunPartial && ((p.Phase == BotWorkFinished && p.Disposition == AgentWorkPartial) || (p.Phase == BotWorkBlocked && p.Disposition == AgentWorkBlocked))
+}
+
+func validAgentWorkPhase(phase BotWorkPhase) bool {
+	return phase == BotWorkWorking || phase == BotWorkFinished || phase == BotWorkBlocked || phase == BotWorkInterrupted
+}
+
+func (a *BotAgentWork) validate(runID RunID, refs map[string]bool, bindRefs bool) error {
+	if a == nil || a.SchemaVersion != BotAgentWorkSchemaVersion || len(a.Notes) > BotAgentWorkMaxNotesBytes || len(a.Items) > BotAgentWorkMaxItems || len(a.Remaining) > BotAgentWorkMaxObligations || len(a.Checks) > BotAgentWorkMaxChecks {
+		return ErrBotInvalid
+	}
+	raw, err := json.Marshal(a)
+	if err != nil || len(raw) > BotAgentWorkMaxMetadataBytes {
+		return ErrBotInvalid
+	}
+	switch a.Disposition {
+	case "", AgentWorkAnswered, AgentWorkComplete, AgentWorkPartial, AgentWorkBlocked:
+	default:
+		return ErrBotInvalid
+	}
+	validRefs := func(values []string) bool {
+		seen := map[string]bool{}
+		for _, ref := range values {
+			if strings.TrimSpace(ref) == "" || seen[ref] || bindRefs && !refs[ref] {
+				return false
+			}
+			seen[ref] = true
+		}
+		return true
+	}
+	items := map[RunID]bool{}
+	for _, item := range a.Items {
+		if item.ID == (RunID{}) || items[item.ID] || strings.TrimSpace(item.Summary) == "" || !validRefs(item.EvidenceRefs) {
+			return ErrBotInvalid
+		}
+		items[item.ID] = true
+		switch item.Status {
+		case BotWorkItemPending, BotWorkItemInProgress, BotWorkItemCompleted, BotWorkItemCancelled:
+		case BotWorkItemBlocked:
+			if strings.TrimSpace(item.Reason) == "" {
+				return ErrBotInvalid
+			}
+		default:
+			return ErrBotInvalid
+		}
+		if a.Disposition == AgentWorkComplete && item.Status != BotWorkItemCompleted && item.Status != BotWorkItemCancelled {
+			return ErrBotInvalid
+		}
+	}
+	obligations := map[RunID]bool{}
+	for _, remaining := range a.Remaining {
+		if remaining.ID == (RunID{}) || obligations[remaining.ID] || remaining.SourceRunID != runID || strings.TrimSpace(remaining.Summary) == "" || strings.TrimSpace(remaining.Reason) == "" {
+			return ErrBotInvalid
+		}
+		obligations[remaining.ID] = true
+		if remaining.WorkItemID != nil && !items[*remaining.WorkItemID] {
+			return ErrBotInvalid
+		}
+		switch remaining.Continuation {
+		case BotWorkContinueOwnerRequest:
+			if remaining.ContinuationID != nil {
+				return ErrBotInvalid
+			}
+		case BotWorkContinueExistingSchedule, BotWorkContinueExistingApproval:
+			if remaining.ContinuationID == nil || *remaining.ContinuationID == (RunID{}) {
+				return ErrBotInvalid
+			}
+		default:
+			return ErrBotInvalid
+		}
+	}
+	if a.Disposition == AgentWorkComplete && len(a.Remaining) != 0 {
+		return ErrBotInvalid
+	}
+	checks := map[RunID]bool{}
+	for _, check := range a.Checks {
+		if check.ID == (RunID{}) || checks[check.ID] || strings.TrimSpace(check.CallID) == "" || strings.TrimSpace(check.Summary) == "" || check.ObservedAt.IsZero() || !skillDigestValid(check.DraftDigest) || !validRefs(check.EvidenceRefs) {
+			return ErrBotInvalid
+		}
+		checks[check.ID] = true
+		if check.Kind != BotWorkCheckModelFeedback && check.Kind != BotWorkCheckMechanicalObservation {
+			return ErrBotInvalid
+		}
+		switch check.Judgment {
+		case BotWorkCheckSupported, BotWorkCheckNeedsWork, BotWorkCheckUnverified:
+		default:
+			return ErrBotInvalid
+		}
+		switch check.Status {
+		case BotWorkCheckReturned:
+		case BotWorkCheckFailed, BotWorkCheckInterrupted:
+			if check.Judgment != BotWorkCheckUnverified {
+				return ErrBotInvalid
+			}
+		default:
+			return ErrBotInvalid
+		}
+		if check.Kind == BotWorkCheckMechanicalObservation && check.Status == BotWorkCheckReturned && len(check.EvidenceRefs) == 0 {
+			return ErrBotInvalid
+		}
+	}
+	return nil
 }
 
 // BotQualityReport is a safe final projection, not a replacement for trusted
@@ -310,7 +628,10 @@ func (w *BotWorkState) Clone() *BotWorkState {
 
 func NewBotWorkState(contract BotWorkContract) *BotWorkState {
 	w := (&BotWorkState{SchemaVersion: BotWorkSchemaVersion, Revision: 1, Phase: BotWorkPreparing, Contract: contract, RequirementsDigest: botWorkDigest(contract)}).Clone()
-	raw, _ := json.Marshal(contract)
+	// Skill snapshots have their own size limit; original assignment limits stay unchanged.
+	baseContract := contract
+	baseContract.Skill = nil
+	raw, _ := json.Marshal(baseContract)
 	if len(raw) > BotWorkMaxContractBytes {
 		w.Phase = BotWorkBlocked
 		w.Unresolved = []string{"The complete requirement sources exceed the assessment limit; no requirements were discarded."}
@@ -325,6 +646,20 @@ func NewBotWorkState(contract BotWorkContract) *BotWorkState {
 }
 
 func (w *BotWorkState) Validate() error {
+	if w != nil {
+		switch w.Protocol {
+		case BotWorkProtocolLegacyAssessment:
+			if w.AgentWork != nil {
+				return ErrBotInvalid
+			}
+		case BotWorkProtocolAgentLedV1:
+			if w.AgentWork == nil || !validAgentWorkPhase(w.Phase) || len(w.Criteria) != 0 || w.Review != nil || w.Repairs != 0 || w.ResponseOutcome != "" {
+				return ErrBotInvalid
+			}
+		default:
+			return ErrBotUnsupported
+		}
+	}
 	if w == nil || w.SchemaVersion != BotWorkSchemaVersion || w.Revision < 1 || w.Contract.BotID == (BotID{}) || w.Contract.RunID == (RunID{}) || w.Contract.Version < 1 || strings.TrimSpace(w.Contract.Instructions) == "" || w.RequirementsDigest != botWorkDigest(w.Contract) || w.Repairs < 0 || w.Repairs > BotWorkMaxRepairs || len(w.Criteria) > BotWorkMaxCriteria {
 		return ErrBotInvalid
 	}
@@ -360,6 +695,10 @@ func (w *BotWorkState) Validate() error {
 		return ErrBotInvalid
 	}
 	switch w.Phase {
+	case BotWorkWorking, BotWorkFinished:
+		if w.Protocol != BotWorkProtocolAgentLedV1 {
+			return ErrBotInvalid
+		}
 	case BotWorkPreparing, BotWorkProducing, BotWorkCandidateReady, BotWorkReviewing, BotWorkRepairReady, BotWorkRepairing, BotWorkAccepted, BotWorkBlocked, BotWorkInterrupted:
 	default:
 		return ErrBotInvalid
@@ -369,21 +708,36 @@ func (w *BotWorkState) Validate() error {
 			return ErrBotForbidden
 		}
 	}
-	raw, _ := json.Marshal(w.Contract)
+	if w.Contract.Skill != nil {
+		if err := w.Contract.Skill.Validate(w.Contract.BotID); err != nil {
+			return err
+		}
+		if w.SkillState == nil {
+			return ErrBotInvalid
+		}
+	}
+	if w.SkillState != nil {
+		if err := w.SkillState.Validate(w.Contract); err != nil {
+			return err
+		}
+	}
+	baseContract := w.Contract
+	baseContract.Skill = nil
+	raw, _ := json.Marshal(baseContract)
 	if len(raw) > BotWorkMaxContractBytes && w.Phase != BotWorkBlocked && w.Phase != BotWorkInterrupted {
 		return ErrBotInvalid
 	}
 	if (w.Phase == BotWorkBlocked || w.Phase == BotWorkInterrupted) && len(w.Unresolved) == 0 {
 		return ErrBotInvalid
 	}
-	if w.Phase != BotWorkPreparing && w.Phase != BotWorkBlocked && w.Phase != BotWorkInterrupted {
+	if w.Protocol == BotWorkProtocolLegacyAssessment && w.Phase != BotWorkPreparing && w.Phase != BotWorkBlocked && w.Phase != BotWorkInterrupted {
 		if err := w.validateCriteria(); err != nil {
 			return err
 		}
 	}
 	if w.Candidate != nil {
 		c := w.Candidate
-		if c.Revision < 1 || c.Revision > int64(BotWorkMaxRepairs+1) || c.EventID == "" || strings.TrimSpace(c.Text) == "" || c.Digest != c.ContentDigest() {
+		if c.Revision < 1 || (w.Protocol == BotWorkProtocolLegacyAssessment && c.Revision > int64(BotWorkMaxRepairs+1)) || c.EventID == "" || strings.TrimSpace(c.Text) == "" || c.Digest != c.ContentDigest() {
 			return ErrBotInvalid
 		}
 		body, _ := json.Marshal(c)
@@ -402,6 +756,11 @@ func (w *BotWorkState) Validate() error {
 	case BotWorkCandidateReady, BotWorkReviewing, BotWorkRepairReady, BotWorkRepairing, BotWorkAccepted:
 		if w.Candidate == nil {
 			return ErrBotInvalid
+		}
+	}
+	if w.Protocol == BotWorkProtocolAgentLedV1 {
+		if err := w.validateAgentWork(); err != nil {
+			return err
 		}
 	}
 	if err := w.validateBlockers(); err != nil {
@@ -428,6 +787,60 @@ func (w *BotWorkState) Validate() error {
 		}
 		if w.Phase == BotWorkRepairReady && (allPass || w.Repairs >= BotWorkMaxRepairs) {
 			return ErrBotInvalid
+		}
+	}
+	return nil
+}
+
+func (w *BotWorkState) validateAgentWork() error {
+	a := w.AgentWork
+	if len(a.Calls) > 200 {
+		return ErrBotInvalid
+	}
+	calls := map[string]bool{}
+	for _, call := range a.Calls {
+		if call.CallID == "" || len(call.CallID) > 512 || calls[call.CallID] || !skillDigestValid(call.RequestDigest) || call.Revision < 1 || call.Revision > w.Revision+1 {
+			return ErrBotInvalid
+		}
+		calls[call.CallID] = true
+	}
+	// Agent feedback references only the append-only journal. Legacy positional
+	// candidate/observation refs would change meaning when a draft is replaced.
+	refs := map[string]bool{}
+	for _, e := range a.Evidence {
+		if !strings.HasPrefix(e.Ref, "capture:") || len(e.Ref) <= len("capture:") || refs[e.Ref] || e.RunID != w.Contract.RunID || strings.TrimSpace(e.CallID) == "" || strings.TrimSpace(e.EventID) == "" || !skillDigestValid(e.Digest) {
+			return ErrBotInvalid
+		}
+		refs[e.Ref] = true
+	}
+	for _, access := range a.SourceAccess {
+		if !refs[access.EvidenceRef] || strings.TrimSpace(access.CallID) == "" || strings.TrimSpace(access.OriginalURL) == "" || access.ObservedAt.IsZero() || !skillDigestValid(access.BodyDigest) || access.HTTPStatus < 0 || access.HTTPStatus > 599 || access.HTTPStatus > 0 && access.HTTPStatus < 100 {
+			return ErrBotInvalid
+		}
+		if access.Status != BotSourceAccessReturned && access.Status != BotSourceAccessFailed {
+			return ErrBotInvalid
+		}
+		bound := false
+		for _, e := range a.Evidence {
+			if e.Ref == access.EvidenceRef && e.CallID == access.CallID && e.Digest == access.BodyDigest {
+				bound = true
+			}
+		}
+		if !bound {
+			return ErrBotInvalid
+		}
+	}
+	if err := a.validate(w.Contract.RunID, refs, true); err != nil {
+		return err
+	}
+	if w.Phase == BotWorkFinished {
+		if w.Candidate == nil || a.Disposition == "" || a.Disposition == AgentWorkBlocked {
+			return ErrBotInvalid
+		}
+		for _, item := range a.Items {
+			if item.Status == BotWorkItemInProgress {
+				return ErrBotInvalid
+			}
 		}
 	}
 	return nil
@@ -576,8 +989,48 @@ func ValidateBotWorkUpdate(old, next *BotWorkState) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
+	// Only the dedicated skill repository can orient or stage/commit learning.
+	// Generic work updates cannot mint a learned receipt or repin a method.
+	if !reflect.DeepEqual(old.SkillState, next.SkillState) {
+		return ErrBotInvalid
+	}
 	if !reflect.DeepEqual(old.Contract, next.Contract) || old.RequirementsDigest != next.RequirementsDigest || next.Revision != old.Revision {
 		return ErrBotInvalid
+	}
+	if old.Protocol != next.Protocol {
+		return ErrBotInvalid
+	}
+	if old.Protocol == BotWorkProtocolAgentLedV1 {
+		if old.Phase != BotWorkWorking {
+			return ErrBotConflict
+		}
+		if len(next.AgentWork.Calls) < len(old.AgentWork.Calls) || len(old.AgentWork.Calls) > 0 && !reflect.DeepEqual(old.AgentWork.Calls, next.AgentWork.Calls[:len(old.AgentWork.Calls)]) {
+			return ErrBotInvalid
+		}
+		// Journal facts and check attempts are append-only; an edited claim cannot
+		// rewrite the observation or the previous check that motivated its repair.
+		if len(next.AgentWork.Evidence) < len(old.AgentWork.Evidence) || len(next.AgentWork.SourceAccess) < len(old.AgentWork.SourceAccess) || len(next.AgentWork.Checks) < len(old.AgentWork.Checks) {
+			return ErrBotInvalid
+		}
+		if !reflect.DeepEqual(old.AgentWork.Evidence, next.AgentWork.Evidence[:len(old.AgentWork.Evidence)]) && len(old.AgentWork.Evidence) != 0 {
+			return ErrBotInvalid
+		}
+		if botWorkDigest(old.AgentWork.SourceAccess) != botWorkDigest(next.AgentWork.SourceAccess[:len(old.AgentWork.SourceAccess)]) && len(old.AgentWork.SourceAccess) != 0 {
+			return ErrBotInvalid
+		}
+		if botWorkDigest(old.AgentWork.Checks) != botWorkDigest(next.AgentWork.Checks[:len(old.AgentWork.Checks)]) && len(old.AgentWork.Checks) != 0 {
+			return ErrBotInvalid
+		}
+		if !reflect.DeepEqual(old.Candidate, next.Candidate) {
+			expected := int64(1)
+			if old.Candidate != nil {
+				expected = old.Candidate.Revision + 1
+			}
+			if next.Candidate == nil || next.Candidate.Revision != expected {
+				return ErrBotInvalid
+			}
+		}
+		return nil
 	}
 	if old.ResponseOutcome != next.ResponseOutcome && (old.Phase != BotWorkReviewing || next.Phase != BotWorkBlocked || next.ResponseOutcome != BotWorkResponseVerifiedBlocker) {
 		return ErrBotInvalid

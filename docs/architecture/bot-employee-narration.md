@@ -1,5 +1,34 @@
 # Employee narration from safe outcome facts
 
+> **Protocol scope:** the bounded writer/reviewer flow below is retained for
+> legacy assessment runs. It is not required or invoked for `agent_led_v1` work.
+
+## Agent-owned final communication
+
+`ComposeEmployeeMessage` selects the protocol before legacy preparation/narration.
+A captured final answer whose text, candidate digest, artifacts, status and public
+work projection match validated private agent work is preserved byte-for-byte with
+origin `agent`. Answered/complete and partial/blocked outcomes are distinct; neither
+origin nor succeeded status guarantees factual correctness or completed external
+effects. No extra writer/reviewer model capacity is consumed, including on failure.
+
+Absent/mismatched final answers use deterministic server-selected failure text.
+The message names the execution stage, recognized typed reason, available recorded
+observation count and typed artifact references, and an actionable next condition.
+It never includes raw provider errors, observation prose, artifact paths, private
+URLs or partially streamed text. Unknown causes stay unknown. Waiting states ask
+for the required answer/authorization without claiming the action completed; stopped
+runs do not promise a background retry or instruct the owner to inspect a hidden
+draft. Protocol-specific wording leaves historical fallback text unchanged.
+
+`TestBotAgentEmployeeMessageExactFinal`, `TestBotAgentEmployeeFailureNoNarrator`,
+`TestBotAgentEmployeeRejectsUnboundCandidate` and
+`TestBotAgentEmployeeFinalizationIntegrity` exercise zero narrator calls, exact
+result binding, additive receipts and tamper rejection alongside the legacy tests.
+These are library tests, not live provider/HTTP acceptance.
+
+## Legacy narration protocol (retained)
+
 `pkg/bot/employee_message.go` owns composition, not execution or assessment authority.
 
 ## Exact assessed communication

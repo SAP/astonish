@@ -77,8 +77,8 @@ func BotScheduleTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error
 	if err != nil {
 		return nil, err
 	}
-	add, err := functiontool.New(functiontool.Config{Name: "schedule_job", InputSchema: botScheduleInputSchema(), Description: "Capture an authorized Bot cron schedule as a durable pending operation. For an explicit owner request within the current bounded mandate, call this tool with the given task and cadence; do not ask for redundant frequency confirmation, even every minute. The runtime enforces the minimum interval and budgets; honor actual ambiguity, policy denials and exact-operation authorization requirements. Enabled by default after the source turn ends and the worker commits. Results appear in this Bot's home chat; do not ask for channels or recipients. Never claim applied from a pending receipt."}, func(ctx tool.Context, args tools.ScheduleJobArgs) (map[string]any, error) {
-		return botScheduleResultMap(s.add(ctx, args))
+	add, err := functiontool.New(functiontool.Config{Name: "schedule_job", InputSchema: botScheduleInputSchema(), Description: "Capture an authorized Bot cron schedule as a durable pending operation. For an explicit owner request within the current bounded mandate, call this tool with the given task and cadence; do not ask for redundant frequency confirmation, even every minute. The runtime enforces the minimum interval and budgets; honor actual ambiguity, policy denials and exact-operation authorization requirements. Enabled by default after the source turn ends and the worker commits. Results appear in this Bot's home chat; do not ask for channels or recipients. Never claim applied from a pending receipt."}, func(ctx tool.Context, args botScheduleJobArgs) (map[string]any, error) {
+		return botScheduleResultMap(s.addSkill(ctx, args))
 	})
 	if err != nil {
 		return nil, err
@@ -236,7 +236,14 @@ func validateBotCron(tr store.TriggerSpec) error {
 	return nil
 }
 
-func (s botScheduleTools) add(ctx tool.Context, a tools.ScheduleJobArgs) (botScheduleChangeResult, error) {
+// Bot-only wire extension: generic Chat scheduling is deliberately unchanged.
+type botScheduleJobArgs struct {
+	tools.ScheduleJobArgs
+	SkillID    *uuid.UUID `json:"skill_id,omitempty"`
+	Invocation string     `json:"invocation,omitempty"`
+}
+
+func (s botScheduleTools) addSkill(ctx tool.Context, a botScheduleJobArgs) (botScheduleChangeResult, error) {
 	b, v, err := s.current(ctx)
 	if err != nil {
 		return botScheduleChangeResult{}, err
@@ -249,6 +256,51 @@ func (s botScheduleTools) add(ctx tool.Context, a tools.ScheduleJobArgs) (botSch
 	if a.Mode != "adaptive" || a.Flow != "" || len(a.Params) != 0 || a.TestFirst || a.DeliveryMode != "" || len(a.DeliveryChannels) != 0 || len(a.DeliveryMembers) != 0 || a.Channel != "" || a.Target != "" {
 		return botScheduleChangeResult{}, fmt.Errorf("%w: Bot schedules use adaptive instructions and the Bot's reviewed delivery; test runs require owner configuration", store.ErrBotUnsupported)
 	}
+	if a.SkillID == nil && strings.TrimSpace(a.Invocation) != "" {
+		// A saved method is optional for an explicit task schedule. Use only a
+		// persisted current selection for implicit method binding; never pick a
+		// historical task or invent a skill from the model's invocation label.
+		if work, ok := s.repo.(store.BotWorkStore); ok {
+			state, err := work.LoadWork(ctx, s.request.Run.Lease)
+			if err != nil {
+				return botScheduleChangeResult{}, err
+			}
+			if state != nil && state.Contract.Skill != nil {
+				id := state.Contract.Skill.SkillID
+				a.SkillID = &id
+			}
+		}
+		if a.SkillID != nil {
+			// Drop model-copied procedure bytes; execution resolves the method.
+			a.Instructions = a.Invocation
+		} else if strings.TrimSpace(a.Instructions) != "" {
+			// This is an ordinary instruction-based schedule, not a skill
+			// invocation. The same bounded mandate still authorizes enqueue.
+			a.Invocation = ""
+		} else {
+			return botScheduleClarification(), nil
+		}
+	}
+	if err := store.ValidateSkillSelection(a.SkillID, a.Invocation); err != nil {
+		return botScheduleChangeResult{}, err
+	}
+	if a.SkillID != nil {
+		if a.Instructions != "" && a.Instructions != a.Invocation {
+			return botScheduleChangeResult{}, store.ErrBotInvalid
+		}
+		skills, ok := s.repo.(store.BotSkillStore)
+		if !ok {
+			return botScheduleChangeResult{}, store.ErrBotUnsupported
+		}
+		skill, err := skills.GetSkill(ctx, b.ID, *a.SkillID)
+		if err != nil {
+			return botScheduleChangeResult{}, err
+		}
+		if skill.Status == store.BotSkillArchived {
+			return botScheduleChangeResult{}, store.ErrBotConflict
+		}
+		a.Instructions = a.Invocation
+	}
 	if strings.TrimSpace(a.Name) == "" || strings.TrimSpace(a.Instructions) == "" || len(a.Instructions) > 65536 {
 		return botScheduleChangeResult{}, store.ErrBotInvalid
 	}
@@ -259,7 +311,7 @@ func (s botScheduleTools) add(ctx tool.Context, a tools.ScheduleJobArgs) (botSch
 	if tz == "" {
 		tz = "UTC"
 	}
-	tr := store.TriggerSpec{ID: uuid.New(), Kind: store.TriggerCron, Cron: a.Schedule, Timezone: tz, Instructions: a.Instructions}
+	tr := store.TriggerSpec{SkillID: a.SkillID, Invocation: a.Invocation, ID: uuid.New(), Kind: store.TriggerCron, Cron: a.Schedule, Timezone: tz, Instructions: a.Instructions}
 	if err := validateBotCron(tr); err != nil {
 		return botScheduleChangeResult{}, err
 	}
@@ -432,4 +484,8 @@ func (s botScheduleTools) propose(b *store.Bot, id uuid.UUID, action store.BotTr
 	digest := sha256.Sum256([]byte(method + "\n" + path + "\n" + string(body)))
 	review.Digest = hex.EncodeToString(digest[:])
 	return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: botScheduleReviewRequired, Message: "No schedule changed and no proposal or operation was persisted. This is only a configuration request for the owner to review and submit after the active run ends."}, Review: review}
+}
+
+func botScheduleClarification() botScheduleChangeResult {
+	return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: "clarification_required", Message: "Which task should recur? I could not identify a current saved method. Describe or run the task first so its reusable method can be saved; do not copy a procedure into the schedule."}}
 }

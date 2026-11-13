@@ -39,6 +39,38 @@ Chat/job rows, reject newer versions and avoid stamping a failed migration.
 PostgreSQL upgrade/claim tests and old-backup compatibility remain required
 before the Bot persistence phase is complete. Do not weaken backup hash checks.
 
+## Bot skill persistence (DDL marker 2)
+
+`botMigrationVersion=2` adds `bot_skills` and immutable `bot_skill_revisions`
+in personal/team Ent scopes. This marker is deliberately independent of
+`store.BotSchemaVersion=1`: historical immutable BotVersion JSON remains valid.
+No open, read, or schema reconciliation converts scheduler instructions or memory
+into skills. `ConvertLegacySkill` currently returns `ErrBotUnsupported`; explicit
+legacy conversion belongs to the wakeup integration phase.
+
+Skill worker mutations hold the Bot root lease fence, revalidate live membership,
+and use work/head CAS plus content-bound idempotency. Orientation adds exactly one
+skill snapshot before production and rehashes that contract without changing its
+original assignment, charter, goals, attachments, or other work fields. Learning
+is staged privately; staging does not advance the skill head. Lifecycle archive
+and restore are explicit, while activation requires a validated accepted run.
+Deletion purges skill revisions before their aggregate and before the Bot root.
+
+Canonical provenance uses SHA-256 of full event text (or pinned attachment text),
+exact event/session/run linkage and timestamp, and a quoted substring. Owner event
+sources must match the canonical admitted user event and saved instructions, not
+merely an event authored `user`. Goal sources use the canonical complete goal JSON
+hash and exact current goal revision. Feedback-only learning binds both evidence
+and candidate digests to that verified owner source; candidate learning hashes the
+canonical `AvailableEvidenceRefs()` list for its evidence digest. This phase does
+not make semantic assertions about whether a proposed method will work. Provenance
+validation is not prose/credential redaction: the authenticated service must sanitize
+source text before proposing it; storage preserves the content-bound immutable digest.
+
+Verification: `go test ./pkg/store/entstore -run '^TestBot(Skill|Cleanup)' -count=1` uses
+SQLite only. PostgreSQL migration/concurrency and runtime learning commit remain
+separate acceptance requirements.
+
 ## Title-start/run-state compatibility
 
 This change adds no DDL, generated Ent changes, or Bot schema-version bump.

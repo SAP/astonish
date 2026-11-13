@@ -105,7 +105,9 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		return &model.LLMResponse{Content: genai.NewContentFromText("{}", "model"), TurnComplete: true}, true
 	}
 	var output any
-	if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+	if strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1") {
+		output = map[string]any{"kind": store.BotSkillNoSkillNeeded, "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled receipt fixture"}
+	} else if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
 		var contract store.BotWorkContract
 		_ = json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &contract)
 		sources := []string{"assignment", "charter"}
@@ -128,7 +130,9 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		return nil, false
 	}
 	raw, _ := json.Marshal(output)
-	return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
+	response := &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}
+	fixtureHTTPContentCoverage(req, response)
+	return response, true
 }
 
 type journeyClassifier struct{}

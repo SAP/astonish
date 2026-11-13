@@ -24,7 +24,11 @@ func TestBotApprovalResumeFenced(t *testing.T) {
 			checkpoint, _ := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: a.ID, BotID: run.BotID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 			priorCost := int64(7)
 			priorUsage := store.BotUsage{InputTokens: 3, OutputTokens: 2, ToolCalls: 1, CostMicros: &priorCost, RuntimeNanos: int64(time.Second)}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Usage: priorUsage, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []store.RunID{a.ID}}}); err != nil {
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Usage: priorUsage, Checkpoint: checkpoint, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Waiting", NeedsApproval: []store.RunID{a.ID}}}); err != nil {
 				t.Fatal(err)
 			}
 			if err := repo.RequeueApprovedRun(ctx, run.BotID, run.ID, a.ID); !errors.Is(err, store.ErrBotConflict) {
@@ -85,7 +89,11 @@ func TestBotApprovalResumeFenced(t *testing.T) {
 			if err := repo.RequeueApprovedRun(ctx, run.BotID, run.ID, a.ID); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("uncertain replay %v", err)
 			}
-			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: fresh, Status: store.RunPartial, Usage: totalUsage, Report: store.BotReport{Summary: "Action completed; independent outcome verification unavailable.", Unverified: []string{"external effect"}}}); err != nil {
+			work, err = repo.LoadWork(worker, fresh)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: fresh, Status: store.RunPartial, Usage: totalUsage, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Action completed; independent outcome verification unavailable.", Unverified: []string{"external effect"}}}); err != nil {
 				t.Fatal(err)
 			}
 			saved, err = repo.GetRun(ctx, run.BotID, run.ID)

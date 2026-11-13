@@ -82,6 +82,7 @@ func acceptedRoutineAcknowledgment(t *testing.T, r *botRepository, worker contex
 		body, _ := json.Marshal(map[string]any{"operation_id": op.ID, "operation": op.Payload.Operation, "acknowledgment": capture.Acknowledgment(), "payload": op.Payload})
 		response, _ := json.Marshal(map[string]any{"operation_id": op.ID, "bot_id": q.Lease.BotID, "digest": op.Provenance.PayloadDigest, "status": op.Status, "decision": op.Decision, "message": capture.Acknowledgment()})
 		c.Text = capture.Acknowledgment()
+		c.Bodies["producer-final-draft"] = c.Text
 		c.Bodies["pending-control:0"] = string(body)
 		c.Bodies["tool-response:enqueue"] = string(response)
 		c.Observations[0] = capture.Observation()

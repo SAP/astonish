@@ -37,6 +37,7 @@ func (lifecycleHTTPBackend) VerifySessionDestroyed(context.Context, string) erro
 type authorizedScheduleHTTPModel struct {
 	workerTestModel
 	schedule    bool
+	direct      bool
 	pendingDone bool
 	control     map[string]any
 	cadence     *scheduleCadenceModel
@@ -63,7 +64,9 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 	if m.pendingDone {
 		m.pendingDone = false
 		return func(yield func(*model.LLMResponse, error) bool) {
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("Done — I've set up the schedule.", "model"), TurnComplete: true}, nil)
+			// This agent-led producer owns the wording; no mandatory reviewer
+			// rewrites an invented application claim into a pending receipt.
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("The schedule request is pending; application is not yet verified.", "model"), TurnComplete: true}, nil)
 		}
 	}
 	if !m.schedule {
@@ -72,7 +75,12 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 	m.schedule = false
 	m.pendingDone = true
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "execute_tool", Args: map[string]any{"name": "schedule_job", "arguments": map[string]any{"name": "Daily report", "schedule": "0 9 * * *", "timezone": "UTC", "instructions": "Read the daily report", "mode": "adaptive"}}}}}}}, nil)
+		args := map[string]any{"name": "Daily report", "schedule": "0 9 * * *", "timezone": "UTC", "instructions": "Read the daily report", "invocation": "Deliver the daily report", "mode": "adaptive"}
+		call := &genai.FunctionCall{ID: uuid.NewString(), Name: "schedule_job", Args: args}
+		if !m.direct {
+			call.Name, call.Args = "execute_tool", map[string]any{"name": "schedule_job", "arguments": args}
+		}
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
 	}
 }
 func authorizedHTTPPolicy(_ context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
@@ -189,7 +197,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 				jobs = ods.ForUser(owner.String()).ScheduledJobs()
 				pin = ods.ForUser(owner.String()).SetSessionPin
 			}
-			llm := &authorizedScheduleHTTPModel{schedule: true}
+			llm := &authorizedScheduleHTTPModel{schedule: true, direct: scope == store.BotScopePersonal}
 			registry := execution.NewBotTurnAuthorizationRegistry(10)
 			policy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return newProductionBotMandatePolicy(db, &config.AppConfig{})(ctx, ref)
@@ -309,6 +317,18 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			}
 			if len(jobs.List(auth)) != 1 {
 				t.Fatal("expected exactly one persisted job")
+			}
+			currentBot, err := repo.Get(auth, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentVersion, err := repo.GetVersion(auth, b.ID, currentBot.Version)
+			if err != nil || len(currentVersion.Triggers) != 1 {
+				t.Fatalf("missing persisted task schedule: %+v %v", currentVersion, err)
+			}
+			trigger := currentVersion.Triggers[0]
+			if trigger.SkillID != nil || trigger.Invocation != "" || trigger.Instructions != "Read the daily report" {
+				t.Fatalf("unbound invocation must not require or invent a skill: %+v", trigger)
 			}
 			receipt := ops[0].Receipt.Schedule
 			// Compose owner controls over real HTTP, without forged operations or pins.
@@ -539,8 +559,8 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil || result.Status != store.RunSucceeded {
 				t.Fatalf("future run %+v %v", result, err)
 			}
-			if result.Report.Summary != "durable controlled result" || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
-				t.Fatalf("scheduled result lacks reviewed controlled content: %+v", result.Report)
+			if result.Report.Summary != "durable controlled result" || result.Report.Quality != nil || result.Report.Work == nil || result.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || result.Report.Work.Phase != store.BotWorkFinished || result.Report.Work.Disposition != store.AgentWorkAnswered {
+				t.Fatalf("scheduled result lacks committed agent-led content: %+v", result.Report)
 			}
 			events, err := ss.ReadTranscriptEvents(auth, "astonish", owner.String(), b.HomeSessionID.String())
 			if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/bot"
@@ -17,20 +18,29 @@ import (
 )
 
 type employeeReportBubble struct {
-	HTML    string `json:"html"`
-	Text    string `json:"text"`
-	Visible bool   `json:"visible"`
+	// StudioChat preserves history order in data-message-index. A pointer keeps
+	// missing DOM evidence distinct from the first message (index zero).
+	MessageIndex *int   `json:"messageIndex"`
+	HTML         string `json:"html"`
+	Text         string `json:"text"`
+	Visible      bool   `json:"visible"`
 }
 
 // Read only assistant bubbles in this Bot's Home, not sidebar/tool/debug text.
-// The report footer is a persisted run identity, unlike shared weather prose.
+// Bind DOM observations to canonical history publications, never visible prose.
 func employeeReportBubbles(page *rod.Page) []employeeReportBubble {
 	var bubbles []employeeReportBubble
 	for _, el := range page.MustElements(`[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]`) {
 		visible, err := el.Visible()
 		must(err)
+		var messageIndex *int
+		index := el.MustEval(`() => this.closest('[data-message-index]')?.getAttribute('data-message-index') ?? ''`).String()
+		if n, err := strconv.Atoi(index); err == nil && n >= 0 {
+			messageIndex = &n
+		}
 		bubbles = append(bubbles, employeeReportBubble{
-			HTML: el.MustEval(`() => this.innerHTML`).String(), Text: el.MustText(), Visible: visible,
+			MessageIndex: messageIndex,
+			HTML:         el.MustEval(`() => this.innerHTML`).String(), Text: el.MustText(), Visible: visible,
 		})
 	}
 	return bubbles
@@ -75,41 +85,34 @@ func employeeReportExactlyOnce(history string, home string, run store.BotRun, bu
 	if err := goldmark.New(goldmark.WithExtensions(extension.GFM)).Convert([]byte(expected), &rendered); err != nil {
 		return err
 	}
-	want, wantText, _, err := employeeReportDOM(rendered.String(), run.ID.String())
+	want, wantText, err := employeeReportDOM(rendered.String())
 	if err != nil {
 		return err
 	}
 	count = 0
+	seen := make(map[int]bool)
 	for _, bubble := range bubbles {
-		got, gotText, identities, err := employeeReportDOM(bubble.HTML, run.ID.String())
+		if bubble.MessageIndex == nil || *bubble.MessageIndex < 0 || *bubble.MessageIndex >= len(h.Messages) {
+			return fmt.Errorf("assistant bubble has no canonical history identity")
+		}
+		index := *bubble.MessageIndex
+		m := h.Messages[index]
+		id, err := uuid.Parse(strings.TrimPrefix(m.InvocationID, "bot-report:"))
+		if m.Type != "agent" || err != nil || id == uuid.Nil || m.InvocationID != "bot-report:"+id.String() {
+			return fmt.Errorf("private draft assistant bubble in Home")
+		}
+		if seen[index] {
+			return fmt.Errorf("duplicate rendered publication %s", m.InvocationID)
+		}
+		seen[index] = true
+		if id != run.ID {
+			continue
+		}
+		count++
+		got, gotText, err := employeeReportDOM(bubble.HTML)
 		if err != nil {
 			return err
 		}
-		// Count also a raw/malformed copy with the same visible Run footer;
-		// it must not disappear from duplicate detection just because tags differ.
-		textIdentities := 0
-		for _, line := range strings.Split(bubble.Text, "\n") {
-			if strings.TrimSpace(line) == "Run: "+run.ID.String() {
-				textIdentities++
-			}
-		}
-		identities = max(identities, textIdentities)
-		if identities == 0 {
-			// Other canonical runs may share the Home; an unlabelled assistant
-			// draft is not another report and must not hide beside the final one.
-			otherReport := false
-			for _, line := range strings.Split(bubble.Text, "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "Run: ") {
-					_, err := uuid.Parse(strings.TrimPrefix(strings.TrimSpace(line), "Run: "))
-					otherReport = otherReport || err == nil
-				}
-			}
-			if !otherReport {
-				return fmt.Errorf("private draft assistant bubble in Home")
-			}
-			continue
-		}
-		count += identities
 		if !bubble.Visible || !reflect.DeepEqual(got, want) || gotText != wantText || employeeReportWhitespace(bubble.Text) != wantText {
 			return fmt.Errorf("rendered report %s is hidden, incomplete, changed or not formatted", run.ID)
 		}
@@ -127,25 +130,13 @@ func employeeReportWhitespace(s string) string { return strings.Join(strings.Fie
 // altered content and duplicate bodies fail. Ignore only layout wrappers and
 // insignificant HTML whitespace. This is deliberately fail-closed for custom
 // renderers (e.g. Mermaid), not a generic chat normalization layer.
-func employeeReportDOM(source, runID string) ([]string, string, int, error) {
+func employeeReportDOM(source string) ([]string, string, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {
-		return nil, "", 0, err
+		return nil, "", err
 	}
 	var tokens []string
 	var text strings.Builder
-	identities := 0
-	var content func(*html.Node) string
-	content = func(n *html.Node) string {
-		if n.Type == html.TextNode {
-			return n.Data
-		}
-		var b strings.Builder
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			b.WriteString(content(c))
-		}
-		return b.String()
-	}
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.TextNode {
@@ -160,9 +151,6 @@ func employeeReportDOM(source, runID string) ([]string, string, int, error) {
 		block := strings.Contains("|p|h1|h2|h3|h4|h5|h6|li|ul|ol|pre|blockquote|br|tr|td|th|", "|"+tag+"|")
 		if block {
 			text.WriteByte(' ')
-		}
-		if n.Type == html.ElementNode && tag == "p" && strings.TrimSpace(content(n)) == "Run: "+runID {
-			identities++
 		}
 		if semantic {
 			tokens = append(tokens, "<"+tag+">")
@@ -183,5 +171,5 @@ func employeeReportDOM(source, runID string) ([]string, string, int, error) {
 		}
 	}
 	walk(root)
-	return tokens, employeeReportWhitespace(text.String()), identities, nil
+	return tokens, employeeReportWhitespace(text.String()), nil
 }

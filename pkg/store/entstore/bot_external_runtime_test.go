@@ -76,7 +76,7 @@ func TestBotSupervisorExecutesValidatedExternalAdmissions(t *testing.T) {
 					if q.Instructions != def.Instructions || q.Run.Trigger != kind {
 						t.Fatal("dispatch input replaced saved admission")
 					}
-					return botdomain.RunResult{Status: store.RunSucceeded, Report: acceptedWorkReport(t, repo, c, q.Run.Lease, "Executed validated admission")}, nil
+					return botdomain.RunResult{Status: store.RunSucceeded, Report: finishedAgentWorkReport(t, repo, c, q.Run.Lease, "Executed validated admission", store.AgentWorkComplete)}, nil
 				}}
 				// Neither an external kind alone nor a validated marker without the
 				// persisted trigger identity is enough to execute.

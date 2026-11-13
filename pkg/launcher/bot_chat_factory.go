@@ -1,8 +1,10 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
@@ -25,6 +27,16 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+// Work-history callbacks are optional reads, not unbounded scans. A full final
+// page leaves completeness unknown, so exhaustion must never mean "not found".
+const (
+	botWorkHistoryPageSize = 100
+	botWorkHistoryMaxPages = 20
+	botWorkHistoryTimeout  = 2 * time.Second
+)
+
+var errBotWorkHistoryExhausted = errors.New("Bot work history lookup limit exhausted; result is incomplete")
 
 // BotChatScope is loaded from trusted owner/tenant storage, never a viewing
 // member's HTTP Services. Sessions must wrap the existing run's scoped store;
@@ -158,6 +170,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		// The adapter installs this server-only ledger before factory construction.
 		// Carry it explicitly without restoring any ambient viewer values.
 		owner = bot.WithToolOutcomesFromContext(owner, ctx)
+		owner = bot.WithBotWorkServicesFromContext(owner, ctx)
 		cleanups := []func(){cancelOwner}
 		var once sync.Once
 		cleanup := func() {
@@ -278,10 +291,118 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		}
 		transcript, _ := repo.(store.BotTranscriptStore)
 		work, _ := repo.(store.BotWorkStore)
+		skills, _ := repo.(store.BotSkillStore)
+		var redact func(string) string
+		if redactor := credentials.RedactorFromContext(binding.owner); redactor != nil {
+			redact = redactor.Redact
+		}
 		if req.Work != nil && work == nil {
 			return nil, fmt.Errorf("%w: pinned Bot work store unavailable", store.ErrBotUnsupported)
 		}
-		return &api.BotChatResources{AssessmentContext: binding.assessmentContext, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		sessionStore := services.Sessions
+		if req.Bot.Scope == store.BotScopePersonal {
+			sessionStore = services.PersonalSessions
+		}
+		evidenceReader, _ := sessionStore.(store.BotTranscriptReader)
+		previousWork := func(c context.Context) (*store.BotWorkProjection, error) {
+			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
+			defer cancel()
+			if err := binding.check(bound); err != nil {
+				return nil, err
+			}
+			var latest *store.BotRun
+			cursor := uuid.Nil
+			for page := 0; page < botWorkHistoryMaxPages; page++ {
+				if err := bound.Err(); err != nil {
+					return nil, err
+				}
+				rows, err := repo.ListRuns(bound, req.Bot.ID, store.BotPage{Limit: botWorkHistoryPageSize, After: cursor.String()})
+				if err != nil {
+					return nil, err
+				}
+				if err := bound.Err(); err != nil {
+					return nil, err
+				}
+				if len(rows) > botWorkHistoryPageSize {
+					return nil, fmt.Errorf("%w: oversized run history page", store.ErrBotInvalid)
+				}
+				for i := range rows {
+					run := rows[i]
+					if bytes.Compare(run.ID[:], cursor[:]) <= 0 {
+						return nil, fmt.Errorf("%w: run history cursor did not advance", store.ErrBotInvalid)
+					}
+					cursor = run.ID
+					if run.ID != req.Run.ID && run.FinishedAt != nil && run.FinishedAt.Before(req.Run.CreatedAt) && run.Report.Work != nil && (latest == nil || run.FinishedAt.After(*latest.FinishedAt)) {
+						latest = &run
+					}
+				}
+				if len(rows) < botWorkHistoryPageSize {
+					if latest == nil {
+						return nil, nil
+					}
+					return latest.Report.Work, nil
+				}
+			}
+			return nil, fmt.Errorf("previous work: %w", errBotWorkHistoryExhausted)
+		}
+		continuation := func(c context.Context, kind store.BotWorkContinuationKind, id uuid.UUID) error {
+			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
+			defer cancel()
+			if err := binding.check(bound); err != nil {
+				return err
+			}
+			switch kind {
+			case store.BotWorkContinueExistingSchedule:
+				current, err := repo.Get(bound, req.Bot.ID)
+				if err != nil {
+					return err
+				}
+				version, err := repo.GetVersion(bound, req.Bot.ID, current.Version)
+				if err != nil {
+					return err
+				}
+				if err := bound.Err(); err != nil {
+					return err
+				}
+				for _, trigger := range version.Triggers {
+					if trigger.ID == id && trigger.Enabled {
+						return nil
+					}
+				}
+			case store.BotWorkContinueExistingApproval:
+				cursor := uuid.Nil
+				for page := 0; page < botWorkHistoryMaxPages; page++ {
+					if err := bound.Err(); err != nil {
+						return err
+					}
+					rows, err := repo.ListApprovals(bound, req.Bot.ID, store.BotPage{Limit: botWorkHistoryPageSize, After: cursor.String()})
+					if err != nil {
+						return err
+					}
+					if err := bound.Err(); err != nil {
+						return err
+					}
+					if len(rows) > botWorkHistoryPageSize {
+						return fmt.Errorf("%w: oversized approval history page", store.ErrBotInvalid)
+					}
+					for _, approval := range rows {
+						if bytes.Compare(approval.ID[:], cursor[:]) <= 0 {
+							return fmt.Errorf("%w: approval history cursor did not advance", store.ErrBotInvalid)
+						}
+						cursor = approval.ID
+						if approval.ID == id && approval.RunID == req.Run.ID && (approval.Status == store.ApprovalPending || approval.Status == store.ApprovalApproved) && time.Now().Before(approval.ExpiresAt) {
+							return nil
+						}
+					}
+					if len(rows) < botWorkHistoryPageSize {
+						return store.ErrBotForbidden
+					}
+				}
+				return fmt.Errorf("approval continuation: %w", errBotWorkHistoryExhausted)
+			}
+			return store.ErrBotForbidden
+		}
+		return &api.BotChatResources{ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
 }
 
@@ -561,6 +682,37 @@ func newBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig, in *botWi
 		}
 		native = append(native, wrapped)
 	}
+	workTools, err := newBotWorkTools(in.binding)
+	if err != nil {
+		return nil, err
+	}
+	skillTools, err := newBotSkillTools(in.binding, in.scope)
+	if err != nil {
+		return nil, err
+	}
+	workTools = append(workTools, skillTools...)
+	memoryTools, err := BotMemoryTools(in.binding.req, in.scope)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range memoryTools {
+		found := false
+		for _, existing := range native {
+			if existing.Name() == t.Name() {
+				found = true
+			}
+		}
+		if !found {
+			workTools = append(workTools, t)
+		}
+	}
+	for _, t := range workTools {
+		bound, err := newBotBoundTool(t, in.binding)
+		if err != nil {
+			return nil, err
+		}
+		native = append(native, bound)
+	}
 	var flowCleanups []func()
 	for _, t := range in.safe.Tools {
 		if d, ok := t.(*botDrillTool); ok {
@@ -571,7 +723,7 @@ func newBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig, in *botWi
 			flowCleanups = append(flowCleanups, f.cleanup)
 		}
 	}
-	mgr.ToolGroups = map[string]*agent.ToolGroup{"bot": {Name: "bot", Description: "Explicitly isolated Bot capabilities", Tools: native}}
+	mgr.ToolGroups = map[string]*agent.ToolGroup{"bot": {Name: "bot", Description: "Explicitly isolated Bot capabilities", Tools: botChildWorkTools(native)}}
 	delegate, err := tools.NewDelegateTasksToolForManager(mgr)
 	if err != nil {
 		return nil, err
@@ -617,7 +769,11 @@ func newBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig, in *botWi
 	if err := index.PrimeTools(ctx, all, nil); err != nil {
 		return nil, err
 	}
-	mgr.ToolIndex = index
+	childIndex := agent.NewLexicalToolIndex()
+	if err := childIndex.PrimeTools(ctx, botChildWorkTools(all), nil); err != nil {
+		return nil, err
+	}
+	mgr.ToolIndex = childIndex
 	// Use ordinary Chat's progressive discovery/dispatch bridge over the entire
 	// guarded catalogue. The bridge resolves bound tools, never raw adapters.
 	bridge, err := botProviderTools(index, in.binding)

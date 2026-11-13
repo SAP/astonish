@@ -357,8 +357,6 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     window.addEventListener('astonish:source-intake', open)
     return () => window.removeEventListener('astonish:source-intake', open)
   }, [hideSidebar])
-  const [botConnection, setBotConnection] = useState('loading')
-  const [botCursor, setBotCursor] = useState('')
   const [botSubmitting, setBotSubmitting] = useState(false)
   const [botSendError, setBotSendError] = useState('')
   const [botRunStates, setBotRunStates] = useState<BotRunStates>({})
@@ -1175,7 +1173,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     const streamGen = ++streamGenRef.current
 
     const connectStream: typeof connectChatStream = botThreadRef.current
-      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: (state, cursor) => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); if (state === 'reconnecting') setBotSendError(botLocalFailure().message); if (state === 'live') setBotSendError(''); setBotConnection(state); setBotCursor(cursor) } })
+      ? options => connectBotEvents({ ...options, botId: botThreadRef.current!.botId, scope: botThreadRef.current!.scope, onReplayComplete: () => { if (streamGenRef.current === streamGen) setBotReplayComplete(true) }, onState: state => { if (streamGenRef.current !== streamGen) return; if (state === 'loading' || state === 'reconnecting') setBotReplayComplete(false); if (state === 'reconnecting') setBotSendError(botLocalFailure().message); if (state === 'live') setBotSendError('') } })
       : connectChatStream
     const controller = connectStream({
       sessionId,
@@ -2970,7 +2968,6 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>
       {/* Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {botThread && <p role="status" className="px-3 py-1 text-xs text-muted-foreground">Bot transcript: {botConnection} {botCursor && `· cursor ${botCursor}`} {botThread.readOnly && '· Read-only'}</p>}
         {!botThread && !botRoute && activeSessionId && <Button variant="ghost" size="sm" onClick={() => setPromoteOpen(true)}>Promote Chat to Bot draft</Button>}
         {promoteOpen && <BotDraftDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
         {/* Toolbar bar — always visible */}

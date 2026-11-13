@@ -145,7 +145,7 @@ func (r *botRepository) Snapshot(ctx context.Context, id store.BotID) (*store.Bo
 			for _, run := range page {
 				// This barrier is reserved already; reads never allocate a new sequence
 				// or manufacture durable events for pre-envelope databases.
-				result.RunStates = append(result.RunStates, store.BotRunState{SchemaVersion: store.BotRunStateSchemaVersion, BotID: id, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: rec.Bot.HomeSessionID, Presentation: run.Presentation, Status: run.Status, StateSequence: rec.LastSequence, Reason: run.ContinuationReason, UserEventID: run.UserEventID})
+				result.RunStates = append(result.RunStates, store.BotRunState{Work: run.Work, SchemaVersion: store.BotRunStateSchemaVersion, BotID: id, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: rec.Bot.HomeSessionID, Presentation: run.Presentation, Status: run.Status, StateSequence: rec.LastSequence, Reason: run.ContinuationReason, UserEventID: run.UserEventID})
 				previous := result.LatestOutcome
 				if run.FinishedAt != nil && (previous == nil || run.FinishedAt.After(*previous.FinishedAt) || run.FinishedAt.Equal(*previous.FinishedAt) && run.ID.String() > previous.ID.String()) {
 					copy := run

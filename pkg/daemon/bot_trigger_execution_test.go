@@ -32,7 +32,7 @@ import (
 
 var errTriggerControlledModel = errors.New("controlled external-trigger model failure")
 
-const triggerExecutionAnswer = "The reviewed trigger requested an observation report. No external action was performed."
+const triggerExecutionAnswer = "I have no independently verified external result to report."
 
 type triggerExecutionModel struct {
 	calls   int
@@ -220,7 +220,7 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 		if err != nil || saved.Status != wantStatus || saved.Report.Summary == "" || saved.FinishedAt == nil || llm.calls <= before {
 			t.Fatalf("worker did not execute %+v calls=%d %v", saved, llm.calls, err)
 		}
-		if llm.succeed && (saved.Report.Summary != triggerExecutionAnswer || len(saved.Report.Unverified) != 0 || saved.Usage.ToolCalls != 0 || saved.Usage.InputTokens != 19 || saved.Usage.OutputTokens != 9) {
+		if llm.succeed && (saved.Report.Summary != triggerExecutionAnswer || len(saved.Report.Unverified) != 0 || saved.Usage.ToolCalls != 0 || saved.Usage.InputTokens != 5 || saved.Usage.OutputTokens != 3 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || llm.calls != before+1) {
 			t.Fatalf("successful report/accounting not persisted truthfully: %+v", saved)
 		}
 		events, err := org.ForUser(owner).Sessions().ReadTranscriptEvents(auth, "astonish", owner, saved.SessionID.String())

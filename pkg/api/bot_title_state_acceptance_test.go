@@ -152,7 +152,7 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 			if err = f.worker.Poll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunQueued, store.RunRunning, store.RunSucceeded})
+			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunQueued, store.RunRunning, store.RunRunning, store.RunSucceeded})
 			// The resumable live endpoint sends precisely persisted rows, then no
 			// rows after reconnecting from its final session-qualified cursor.
 			path := f.server.URL + f.path + "/sessions/" + f.b.HomeSessionID.String() + "/events?scope=" + string(f.scope)
@@ -207,7 +207,7 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 				}
 				res.Body.Close()
 				cancel()
-				want := 6
+				want := 7 // includes the committed work projection before terminal status
 				if pass == 1 {
 					want = 0
 				}

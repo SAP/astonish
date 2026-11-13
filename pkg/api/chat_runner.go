@@ -187,7 +187,7 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 			text.WriteString(part.Text)
 		}
 		if part.FunctionResponse != nil {
-			cr.observeBotToolOutcome(content.Role, part.FunctionResponse)
+			recoverableReadFailure := cr.observeBotToolOutcome(content.Role, part.FunctionResponse)
 			result := part.FunctionResponse.Response
 			var state agent.ProgressiveResultState
 			switch value := result["state"].(type) {
@@ -196,13 +196,20 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 			case agent.ProgressiveResultState:
 				state = value
 			}
+			// Native errors include policy, cancellation and shared-budget stops.
+			// Never turn those into source feedback, even with an access receipt.
+			if _, nativeError := result["error"].(error); nativeError || (state != "" && state != agent.ProgressiveStateExecutionError) {
+				recoverableReadFailure = false
+			}
 			switch state {
 			case agent.ProgressiveStateAuthorizationDenied, agent.ProgressiveStateApprovalRequired:
 				cr.completion.Blocked = true
 			case agent.ProgressiveStateExecutionError, agent.ProgressiveStateContextRequired, agent.ProgressiveStateContextStale:
-				cr.completion.Err = errors.Join(cr.completion.Err, fmt.Errorf("tool did not complete: %s", state))
+				if !recoverableReadFailure {
+					cr.completion.Err = errors.Join(cr.completion.Err, fmt.Errorf("tool did not complete: %s", state))
+				}
 			}
-			if failure, ok := result["error"]; ok && failure != nil && failure != "" {
+			if failure, ok := result["error"]; !recoverableReadFailure && ok && failure != nil && failure != "" {
 				// ADK can return native callback errors in FunctionResponse. Keep
 				// their identity so the Bot adapter can classify policy decisions;
 				// matching their text would confuse ordinary errors with policy.

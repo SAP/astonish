@@ -42,6 +42,8 @@ func (m *blockedPublicationModel) GenerateContent(_ context.Context, req *model.
 		prompt := req.Config.SystemInstruction.Parts[0].Text
 		var out any
 		switch {
+		case strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1"):
+			out = map[string]any{"kind": store.BotSkillNoSkillNeeded, "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled blocker explanation fixture"}
 		case strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1"):
 			m.preparations++
 			out = map[string]any{"criteria": []store.BotWorkCriterion{
@@ -90,7 +92,9 @@ func (m *blockedPublicationModel) GenerateContent(_ context.Context, req *model.
 		if err != nil {
 			m.t.Fatal(err)
 		}
-		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
+		response := &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}
+		fixtureHTTPContentCoverage(req, response)
+		yield(response, nil)
 	}
 }
 
@@ -178,6 +182,8 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 				if err := json.Unmarshal(f.request("POST", f.path+"/messages", body, 202), &receipt); err != nil {
 					t.Fatal(err)
 				}
+				// Exercise the historical assessor, not the new agent-led default.
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
 				if err := f.worker.Poll(context.Background()); err != nil {
 					t.Fatal(err)
 				}

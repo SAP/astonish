@@ -3,8 +3,10 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/google/uuid"
+	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // botEmployeeReviewAttestation binds a value snapshot, not mutable caller memory.
@@ -46,6 +48,24 @@ func BotWorkHasPendingControlCandidate(work *BotWorkState) bool {
 	return false
 }
 
+// NewBotEmployeeAgentMessage binds communication to the exact captured final
+// result. It establishes identity, not factual correctness or effect authority.
+// Optional work/check metadata and legacy model review are not prerequisites.
+// Pending controls do not invalidate independent answer content. The API must
+// append their canonical queued acknowledgment before capturing the candidate;
+// only the store's validated receipt may suppress a pure acknowledgment.
+func NewBotEmployeeAgentMessage(status RunStatus, report BotReport, work *BotWorkState) (BotEmployeeMessage, error) {
+	if work == nil || work.Protocol != BotWorkProtocolAgentLedV1 || work.Candidate == nil {
+		return BotEmployeeMessage{}, ErrBotInvalid
+	}
+	m := BotEmployeeMessage{Origin: BotEmployeeMessageAgent, Text: work.Candidate.Text, CandidateDigest: work.Candidate.Digest, SourceDigest: report.EmployeeMessageSourceDigest(status)}
+	report.EmployeeMessage = &m
+	if err := report.ValidateEmployeeMessage(status, work); err != nil {
+		return BotEmployeeMessage{}, err
+	}
+	return m, nil
+}
+
 // ValidateEmployeeMessageIntegrity checks immutable publication data without
 // consulting mutable current work (an older sequence may precede resumption).
 // Operation authority is checked separately against its durable receipt.
@@ -61,6 +81,10 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 		return ErrBotInvalid
 	}
 	switch m.Origin {
+	case BotEmployeeMessageAgent:
+		if len(r.Unverified) != 0 || r.Work.Validate() != nil || r.Quality != nil || m.CandidateDigest != r.Work.CandidateDigest || m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || !r.Work.allowsResult(status) {
+			return ErrBotInvalid
+		}
 	case BotEmployeeMessageAssessed:
 		if m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || (status != RunSucceeded && status != RunPartial) {
 			return ErrBotInvalid
@@ -74,7 +98,13 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 		sum := sha256.Sum256([]byte(m.Text))
 		digest := hex.EncodeToString(sum[:])
 		original := r
-		original.Acknowledgment = nil // the sole server-only post-review mutation
+		original.Acknowledgment = nil // server-owned publication marker
+		// Older and current composers review before CommitRun attaches the
+		// server-owned skill receipt. Accept that exact pre-receipt snapshot,
+		// never omit Skill from the durable SourceDigest checked above.
+		if m.ReviewedSourceDigest != original.EmployeeMessageSourceDigest(status) && original.Skill != nil {
+			original.Skill = nil
+		}
 		facts := NewBotEmployeeFallback(status, r, m.Reason)
 		if (status != RunFailed && status != RunPartial) || m.CandidateDigest != "" || m.TextDigest != digest || m.ReviewedTextDigest != digest || m.ReviewedSourceDigest != original.EmployeeMessageSourceDigest(status) || m.Reason != facts.Reason || m.FailureKind != facts.FailureKind || len(m.Text) > 1600 || strings.Contains(strings.ToLower(m.Text), "://") || strings.Contains(strings.ToLower(m.Text), "www.") || strings.ContainsAny(m.Text, "\x00\x1b") {
 			return ErrBotInvalid
@@ -93,31 +123,37 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 type BotEmployeeFailureReason string
 
 const (
-	BotEmployeeReasonEmailTransport BotEmployeeFailureReason = "required_email_transport_unavailable"
-	BotEmployeeReasonMixedControl   BotEmployeeFailureReason = "independent_work_unverified"
-	BotEmployeeReasonUnknown        BotEmployeeFailureReason = "operational_reason_unavailable"
-	BotEmployeeReasonUnverified     BotEmployeeFailureReason = "result_not_verified"
-	BotEmployeeReasonSetup          BotEmployeeFailureReason = "setup_incomplete"
-	BotEmployeeReasonBudget         BotEmployeeFailureReason = "budget_prevented_work"
-	BotEmployeeReasonCost           BotEmployeeFailureReason = "model_cost_unknown"
-	BotEmployeeReasonInput          BotEmployeeFailureReason = "input_does_not_fit"
-	BotEmployeeReasonOverrun        BotEmployeeFailureReason = "usage_exceeded_budget"
-	BotEmployeeReasonFormat         BotEmployeeFailureReason = "model_response_rejected"
-	BotEmployeeReasonMultipleCalls  BotEmployeeFailureReason = "multiple_tool_calls_rejected"
-	BotEmployeeReasonTooLarge       BotEmployeeFailureReason = "response_size_limit"
-	BotEmployeeReasonInterrupted    BotEmployeeFailureReason = "interrupted"
-	BotEmployeeReasonForbidden      BotEmployeeFailureReason = "authorization_denied"
-	BotEmployeeReasonUnsupported    BotEmployeeFailureReason = "capability_unsupported"
-	BotEmployeeReasonExpired        BotEmployeeFailureReason = "approval_or_retention_expired"
-	BotEmployeeReasonNotFound       BotEmployeeFailureReason = "resource_not_found"
-	BotEmployeeReasonInvalid        BotEmployeeFailureReason = "request_invalid"
-	BotEmployeeReasonConflict       BotEmployeeFailureReason = "revision_or_lease_conflict"
-	BotEmployeeReasonOwnerCancelled BotEmployeeFailureReason = "owner_cancelled"
-	BotEmployeeReasonSuperseded     BotEmployeeFailureReason = "schedule_superseded"
+	BotEmployeeReasonAgentUnverifiedEffects BotEmployeeFailureReason = "agent_effects_unverified"
+	BotEmployeeReasonAgentNoResult          BotEmployeeFailureReason = "agent_result_unavailable"
+	BotEmployeeReasonEmailTransport         BotEmployeeFailureReason = "required_email_transport_unavailable"
+	BotEmployeeReasonMixedControl           BotEmployeeFailureReason = "independent_work_unverified"
+	BotEmployeeReasonUnknown                BotEmployeeFailureReason = "operational_reason_unavailable"
+	BotEmployeeReasonUnverified             BotEmployeeFailureReason = "result_not_verified"
+	BotEmployeeReasonSetup                  BotEmployeeFailureReason = "setup_incomplete"
+	BotEmployeeReasonBudget                 BotEmployeeFailureReason = "budget_prevented_work"
+	BotEmployeeReasonCost                   BotEmployeeFailureReason = "model_cost_unknown"
+	BotEmployeeReasonInput                  BotEmployeeFailureReason = "input_does_not_fit"
+	BotEmployeeReasonOverrun                BotEmployeeFailureReason = "usage_exceeded_budget"
+	BotEmployeeReasonFormat                 BotEmployeeFailureReason = "model_response_rejected"
+	BotEmployeeReasonMultipleCalls          BotEmployeeFailureReason = "multiple_tool_calls_rejected"
+	BotEmployeeReasonTooLarge               BotEmployeeFailureReason = "response_size_limit"
+	BotEmployeeReasonInterrupted            BotEmployeeFailureReason = "interrupted"
+	BotEmployeeReasonForbidden              BotEmployeeFailureReason = "authorization_denied"
+	BotEmployeeReasonUnsupported            BotEmployeeFailureReason = "capability_unsupported"
+	BotEmployeeReasonExpired                BotEmployeeFailureReason = "approval_or_retention_expired"
+	BotEmployeeReasonNotFound               BotEmployeeFailureReason = "resource_not_found"
+	BotEmployeeReasonInvalid                BotEmployeeFailureReason = "request_invalid"
+	BotEmployeeReasonConflict               BotEmployeeFailureReason = "revision_or_lease_conflict"
+	BotEmployeeReasonOwnerCancelled         BotEmployeeFailureReason = "owner_cancelled"
+	BotEmployeeReasonSuperseded             BotEmployeeFailureReason = "schedule_superseded"
 )
 
 func EmployeeReasonDetails(reason BotEmployeeFailureReason) (string, string) {
 	switch reason {
+	case BotEmployeeReasonAgentUnverifiedEffects:
+		return "Some tool outcomes are not confirmed. This reply does not confirm that any requested external action, including delivery, completed.", "Check the destination or recorded outcome before retrying to avoid duplicate actions; no retry has been started."
+	case BotEmployeeReasonAgentNoResult:
+		return "No publishable final answer is available from this run.", "You can revise the request or start a new run; no retry has been started."
 	case BotEmployeeReasonEmailTransport:
 		return "The email delivery required by this request is blocked because the native owner email transport is unavailable.", "An administrator must enable/configure the email channel; Bot tools cannot do this."
 	case BotEmployeeReasonMixedControl:
@@ -197,12 +233,15 @@ func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmploy
 		kind = BotReportFailureExecutionFormat
 	case BotEmployeeReasonInterrupted, BotEmployeeReasonOwnerCancelled, BotEmployeeReasonSuperseded:
 		kind = BotReportFailureInterrupted
-	case BotEmployeeReasonEmailTransport, BotEmployeeReasonMixedControl, BotEmployeeReasonUnknown, BotEmployeeReasonUnverified, BotEmployeeReasonForbidden, BotEmployeeReasonUnsupported, BotEmployeeReasonExpired, BotEmployeeReasonNotFound, BotEmployeeReasonInvalid, BotEmployeeReasonConflict:
+	case BotEmployeeReasonAgentUnverifiedEffects, BotEmployeeReasonAgentNoResult, BotEmployeeReasonEmailTransport, BotEmployeeReasonMixedControl, BotEmployeeReasonUnknown, BotEmployeeReasonUnverified, BotEmployeeReasonForbidden, BotEmployeeReasonUnsupported, BotEmployeeReasonExpired, BotEmployeeReasonNotFound, BotEmployeeReasonInvalid, BotEmployeeReasonConflict:
 	default:
 		reason = BotEmployeeReasonUnknown
 	}
 	explanation, action := EmployeeReasonDetails(reason)
 	text := "I couldn't confirm completion of the requested work. " + explanation + " " + action
+	if reason == BotEmployeeReasonSetup {
+		text = "I couldn't start the requested work because internal preparation failed. No result was produced. Please try again; if this continues, ask an administrator to check the run diagnostics."
+	}
 	if reason == BotEmployeeReasonUnknown && report.Failure == nil {
 		switch status {
 		case RunQueued:
@@ -217,12 +256,107 @@ func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmploy
 			text, kind = "I skipped this run; I don't have a new result to share.", ""
 		}
 	}
+	if report.Work != nil && report.Work.Protocol == BotWorkProtocolAgentLedV1 || reason == BotEmployeeReasonAgentNoResult {
+		if reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified {
+			reason = BotEmployeeReasonAgentNoResult
+		}
+		text, kind = agentEmployeeFallbackText(status, report, reason, kind)
+	}
 	return BotEmployeeMessage{Origin: BotEmployeeMessageFallback, Text: text, SourceDigest: report.EmployeeMessageSourceDigest(status), FailureKind: kind, Reason: reason}
+}
+
+// agentEmployeeFallbackText interpolates only closed stage names, counts, and
+// typed artifact IDs, never diagnostics, observation prose, paths or provider URLs.
+// Recorded observations are not claims that an external effect completed.
+func agentEmployeeFallbackText(status RunStatus, report BotReport, reason BotEmployeeFailureReason, kind BotReportFailureKind) (string, BotReportFailureKind) {
+	switch status {
+	case RunQueued:
+		return "I've queued this request; I haven't completed it yet.", ""
+	case RunRunning:
+		return "I'm working on this request; no final answer is available yet.", ""
+	case RunWaitingApproval:
+		return "I need your answer or authorization before I can continue. The pending action has not been confirmed as completed.", ""
+	case RunSkipped:
+		return "I skipped this run; I don't have a new result to share.", ""
+	}
+	if kind == "" {
+		kind = BotReportFailureOperational
+	}
+	stage := "before a final answer was available"
+	if report.Work != nil {
+		switch report.Work.Phase {
+		case BotWorkWorking:
+			stage = "during execution"
+		case BotWorkBlocked:
+			stage = "at a blocked step"
+		case BotWorkInterrupted:
+			stage = "when execution was interrupted"
+		case BotWorkFinished:
+			stage = "while preparing the final answer for publication"
+		}
+	}
+	explanation, action := EmployeeReasonDetails(reason)
+	if reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified {
+		explanation, action = EmployeeReasonDetails(BotEmployeeReasonAgentNoResult)
+	}
+	if reason == BotEmployeeReasonFormat {
+		action = "Try a smaller request; if this persists, ask an administrator to check the model connection."
+	}
+	text := "I couldn't complete this request " + stage + ". " + explanation
+	observations := 0
+	for _, evidence := range append(append([]BotEvidence(nil), report.Changed...), report.Unchanged...) {
+		if evidence.Kind == BotEvidenceObservation && evidence.ValidateCompletion() == nil {
+			observations++
+		}
+	}
+	if observations > 0 {
+		text += fmt.Sprintf(" The run recorded %d tool observation(s); this does not confirm that all requested actions completed.", observations)
+	}
+	for _, artifact := range report.Artifacts {
+		if artifact.ID != uuid.Nil && artifact.HomeID != uuid.Nil && skillDigestValid(artifact.SHA256) {
+			text += " Recorded output reference: " + artifact.ID.String() + "."
+		}
+	}
+	return text + " " + action, kind
 }
 
 // FinalizeEmployeeMessage is called only after validation of private work and
 // supplied communication. It copies rather than mutating a caller's envelope.
 func (r *BotReport) FinalizeEmployeeMessage(status RunStatus, work *BotWorkState) {
+	if (work != nil && work.Protocol == BotWorkProtocolAgentLedV1 || r.Work != nil && r.Work.Protocol == BotWorkProtocolAgentLedV1) && (r.EmployeeMessage == nil || r.EmployeeMessage.Origin != BotEmployeeMessageOperation) {
+		m := r.EmployeeMessage
+		if m == nil {
+			if agent, err := NewBotEmployeeAgentMessage(status, *r, work); err == nil {
+				r.EmployeeMessage = &agent
+				return
+			}
+		} else if m.Origin == BotEmployeeMessageAgent {
+			copy := *m
+			original := *r
+			// These receipts are attached only by the trusted committer, after
+			// validation. Never silently rebind changed result/work/evidence.
+			original.Skill, original.Acknowledgment = nil, nil
+			if m.SourceDigest == r.EmployeeMessageSourceDigest(status) || m.SourceDigest == original.EmployeeMessageSourceDigest(status) {
+				copy.SourceDigest = r.EmployeeMessageSourceDigest(status)
+				candidate := *r
+				candidate.EmployeeMessage = &copy
+				if candidate.ValidateEmployeeMessage(status, work) == nil {
+					r.EmployeeMessage = &copy
+					return
+				}
+			}
+		}
+		reason := BotEmployeeFailureReason("")
+		if m != nil && m.Origin == BotEmployeeMessageFallback {
+			reason = m.Reason
+		}
+		if len(r.Unverified) != 0 && (reason == "" || reason == BotEmployeeReasonAgentNoResult || reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified) {
+			reason = BotEmployeeReasonAgentUnverifiedEffects
+		}
+		fallback := NewBotEmployeeFallback(status, *r, reason)
+		r.EmployeeMessage = &fallback
+		return
+	}
 	// Suppression authority remains the independently validated marker. When a
 	// pending candidate is mixed or erroneous, keep a visible safe explanation
 	// instead of promoting the raw UUID-bearing runtime acknowledgment.
@@ -239,6 +373,13 @@ func (r *BotReport) FinalizeEmployeeMessage(status RunStatus, work *BotWorkState
 		copy := *r.EmployeeMessage
 		copy.SourceDigest = r.EmployeeMessageSourceDigest(status)
 		r.EmployeeMessage = &copy
+		// A receipt may be additive; changed semantic facts (including quality
+		// revision changes) are not a review of the finalized report. Publish a
+		// safe explanation rather than persisting an unpublishable envelope.
+		if r.ValidateEmployeeMessageIntegrity(status) != nil {
+			fallback := NewBotEmployeeFallback(status, *r, "")
+			r.EmployeeMessage = &fallback
+		}
 		return
 	}
 	m := NewBotEmployeeFallback(status, *r, "")

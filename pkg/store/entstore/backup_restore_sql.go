@@ -75,6 +75,22 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 		if err := quiesceRestoredBotRow(entry.Entity, row); err != nil {
 			return 0, fmt.Errorf("quiesce %s record %s: %w", entry.Entity, record.ID, err)
 		}
+		if err := validateRestoredBotSkillRow(entry.Entity, row); err != nil {
+			return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+		}
+		if entry.Entity == "bot_skill_revisions" {
+			table := quoteIdent(dialect, "bot_skills")
+			if dialect == DialectPostgres {
+				table = quoteIdent(dialect, schema) + "." + table
+			}
+			var count int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id="+placeholder(dialect, 1)+" AND bot_id="+placeholder(dialect, 2), normalizeRestoreValue(row["skill_id"]), normalizeRestoreValue(row["bot_id"])).Scan(&count); err != nil {
+				return 0, err
+			}
+			if count != 1 {
+				return 0, fmt.Errorf("skill revision references a missing or foreign Bot skill")
+			}
+		}
 		if err := insertLogicalRow(ctx, tx, dialect, schema, entry.Entity, row); err != nil {
 			return 0, fmt.Errorf("insert %s record %s: %w", entry.Entity, record.ID, err)
 		}
@@ -84,6 +100,34 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 		return 0, err
 	}
 	return count, nil
+}
+
+func validateRestoredBotSkillRow(table string, row map[string]any) error {
+	if table != "bot_skills" && table != "bot_skill_revisions" {
+		return nil
+	}
+	doc, err := restoredBotDocument(row["data"])
+	if err != nil {
+		return err
+	}
+	if table == "bot_skill_revisions" {
+		var v store.BotSkillRevision
+		if err := botDecode(doc, &v); err != nil {
+			return err
+		}
+		if v.ID.String() != fmt.Sprint(row["id"]) || v.BotID.String() != fmt.Sprint(row["bot_id"]) || v.SkillID.String() != fmt.Sprint(row["skill_id"]) || fmt.Sprint(v.Revision) != fmt.Sprint(row["revision"]) || v.Digest != fmt.Sprint(row["digest"]) {
+			return store.ErrBotInvalid
+		}
+		return v.Validate()
+	}
+	var v botStoredSkill
+	if err := botDecode(doc, &v); err != nil {
+		return err
+	}
+	if v.Skill.ID.String() != fmt.Sprint(row["id"]) || v.Skill.BotID.String() != fmt.Sprint(row["bot_id"]) || v.Skill.Key != fmt.Sprint(row["key"]) || fmt.Sprint(v.Skill.Revision) != fmt.Sprint(row["revision"]) || string(v.Skill.Status) != fmt.Sprint(row["status"]) {
+		return store.ErrBotInvalid
+	}
+	return nil
 }
 
 // Restoring a control-plane archive is not consent to resume execution. These
@@ -144,6 +188,38 @@ func quiesceRestoredBotRow(table string, row map[string]any) error {
 			unverified, _ := report["unverified"].([]any)
 			report["unverified"] = append(unverified, reason)
 			run["report"] = report
+		}
+		if rawWork, present := data["work"]; present && rawWork != nil {
+			raw, err := json.Marshal(rawWork)
+			if err != nil {
+				return err
+			}
+			var work store.BotWorkState
+			if err := json.Unmarshal(raw, &work); err != nil {
+				return err
+			}
+			if err := work.Validate(); err != nil {
+				return fmt.Errorf("restore Bot work: %w", err)
+			}
+			if status == store.RunInterrupted {
+				interruptBotWork(&work, reason)
+			}
+			if err := work.Validate(); err != nil {
+				return fmt.Errorf("restore interrupted Bot work: %w", err)
+			}
+			data["work"] = &work
+			if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+				projection := store.BuildBotWorkProjection(&work)
+				run["work"] = projection
+				report, err := restoredBotDocument(run["report"])
+				if err != nil {
+					return err
+				}
+				if report["work"] != nil {
+					report["work"] = projection
+				}
+				run["report"] = report
+			}
 		}
 		data["Run"] = run
 		row["data"], err = save()

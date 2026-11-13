@@ -16,6 +16,8 @@ import (
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -179,6 +181,174 @@ func BotKnowledgeTools(r bot.RunRequest, scope *BotChatScope, factory tools.LLMF
 		return nil, err
 	}
 	return []tool.Tool{skill, search, distill}, nil
+}
+
+type botSkillToolArgs struct {
+	After                 string                    `json:"after,omitempty"`
+	Limit                 int                       `json:"limit,omitempty"`
+	SkillID               string                    `json:"skill_id,omitempty"`
+	ExpectedRevision      int64                     `json:"expected_revision,omitempty"`
+	Title                 string                    `json:"title,omitempty"`
+	Method                []string                  `json:"method,omitempty"`
+	OutputFormat          string                    `json:"output_format,omitempty"`
+	EvaluationRules       []string                  `json:"evaluation_rules,omitempty"`
+	EvidenceRefs          []string                  `json:"evidence_refs,omitempty"`
+	OwnerQuotes           []string                  `json:"owner_quotes,omitempty"`
+	OwnerFeedbackScope    bot.BotOwnerFeedbackScope `json:"owner_feedback_scope,omitempty"`
+	ReplaceExpectationIDs []string                  `json:"replace_expectation_ids,omitempty"`
+}
+
+// Bot-owned methods never shadow ordinary skill_lookup or expand authority.
+func newBotSkillTools(binding *botFactoryBinding, scope *BotChatScope) ([]tool.Tool, error) {
+	if binding == nil || bot.BotWorkServicesFromContext(binding.owner) == nil {
+		return nil, nil
+	}
+	repo := scope.Services.Bots
+	if binding.req.Bot.Scope == store.BotScopePersonal {
+		repo = scope.Services.PersonalBots
+	}
+	skills, ok := repo.(store.BotSkillStore)
+	if !ok {
+		return nil, nil
+	}
+	var out []tool.Tool
+	for _, name := range []string{"bot_skill_list", "bot_skill_read", "bot_skill_use", "bot_skill_save"} {
+		name := name
+		t, err := functiontool.New(functiontool.Config{Name: name, Description: "Optional Bot-owned reusable methods. list/read inspect; list accepts limit (default 20, maximum 100) and after (the previous result's next cursor) to discover later pages; use pins a method; save proposes advisory learning, not permission or verified truth. expected_revision comes from bot_work_read. Evidence refs come from captured tools. No skill is required to answer. Owner corrections require skill_id before selecting a method, owner_feedback_scope=skill, exact current owner_quotes including the owner's durable intent, and replace_expectation_ids from bot_skill_read. scope=run is one-off and is never saved. Do not combine corrections with method changes."}, func(c tool.Context, a botSkillToolArgs) (map[string]any, error) {
+			if c.SessionID() != binding.req.Run.SessionID.String() && (name == "bot_skill_use" || name == "bot_skill_save") {
+				return nil, store.ErrBotForbidden
+			}
+			ctx := binding.bind(c)
+			if err := binding.check(ctx); err != nil {
+				return nil, err
+			}
+			svc := bot.BotWorkServicesFromContext(ctx)
+			if svc == nil {
+				return botWorkToolResult(c, nil, store.ErrBotUnsupported)
+			}
+			switch name {
+			case "bot_skill_list":
+				limit := a.Limit
+				if limit == 0 {
+					limit = 20
+				}
+				if limit < 1 || limit > store.BotSkillMaxPageSize {
+					return botWorkToolResult(c, nil, store.ErrBotInvalid)
+				}
+				rows, err := skills.ListSkills(ctx, binding.req.Bot.ID, store.BotSkillPage{Limit: limit, After: a.After})
+				return botWorkToolResult(c, rows, err)
+			case "bot_skill_read":
+				id, err := uuid.Parse(a.SkillID)
+				if err != nil {
+					return botWorkToolResult(c, nil, store.ErrBotInvalid)
+				}
+				head, err := skills.GetSkill(ctx, binding.req.Bot.ID, id)
+				if err != nil {
+					return botWorkToolResult(c, nil, err)
+				}
+				rev, err := skills.GetSkillRevision(ctx, binding.req.Bot.ID, id, head.HeadRevision)
+				return botWorkToolResult(c, rev, err)
+			case "bot_skill_use":
+				id, err := uuid.Parse(a.SkillID)
+				if err != nil {
+					return botWorkToolResult(c, nil, store.ErrBotInvalid)
+				}
+				inv, err := svc.SelectSkill(ctx, bot.BotWorkSkillSelection{SkillID: id, ExpectedRevision: a.ExpectedRevision, CallID: c.FunctionCallID()})
+				return botWorkToolResult(c, inv, err)
+			default:
+				var id uuid.UUID
+				if a.SkillID != "" {
+					var err error
+					id, err = uuid.Parse(a.SkillID)
+					if err != nil {
+						return botWorkToolResult(c, nil, store.ErrBotInvalid)
+					}
+				}
+				err := svc.StageLearning(ctx, bot.BotWorkLearningProposal{SkillID: id, OwnerFeedbackScope: a.OwnerFeedbackScope, OwnerQuotes: a.OwnerQuotes, ReplaceExpectationIDs: a.ReplaceExpectationIDs, CallID: c.FunctionCallID(), ExpectedRevision: a.ExpectedRevision, Title: a.Title, Method: a.Method, OutputFormat: a.OutputFormat, EvaluationRules: a.EvaluationRules, EvidenceRefs: a.EvidenceRefs})
+				if len(a.OwnerQuotes) > 0 || a.OwnerFeedbackScope != "" || len(a.ReplaceExpectationIDs) > 0 {
+					return botWorkToolResult(c, map[string]any{"staged": false, "saved": err == nil, "message": "Owner expectation correction only; saved=true means the scoped transaction committed. Method and original authority are unchanged."}, err)
+				}
+				return botWorkToolResult(c, map[string]any{"staged": err == nil, "message": "Proposal only; terminal commit determines the saved outcome."}, err)
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		t, err = newBotOptionalSchemaTool(t, binding, name == "bot_skill_use" || name == "bot_skill_save")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// Validate only before executing the optional handler. Never classify an error
+// returned by execution as a schema error: it could be authorization, cancellation
+// or budget exhaustion. The normal outer policy/budget wrapper is unchanged.
+type botOptionalSchemaTool struct {
+	botRunnableTool
+	binding  *botFactoryBinding
+	mutation bool
+	schema   *jsonschema.Resolved
+}
+
+func newBotOptionalSchemaTool(t tool.Tool, binding *botFactoryBinding, mutation bool) (tool.Tool, error) {
+	runnable, ok := t.(botRunnableTool)
+	if !ok {
+		return nil, store.ErrBotUnsupported
+	}
+	schema, ok := runnable.Declaration().ParametersJsonSchema.(*jsonschema.Schema)
+	if !ok {
+		return nil, store.ErrBotUnsupported
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &botOptionalSchemaTool{botRunnableTool: runnable, binding: binding, mutation: mutation, schema: resolved}, nil
+}
+
+func (t *botOptionalSchemaTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	if ctx == nil || t.mutation && ctx.SessionID() != t.binding.req.Run.SessionID.String() {
+		return nil, store.ErrBotForbidden
+	}
+	if err := t.binding.check(t.binding.bind(ctx)); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(args)
+	var normalized any
+	if err == nil {
+		err = json.Unmarshal(raw, &normalized)
+	}
+	if err == nil {
+		err = t.schema.Validate(normalized)
+	}
+	if err == nil {
+		// Schema-valid strings/numbers can still fail Go decoding (UUIDs or
+		// integer overflow). Predecode only the optional tool's declared input;
+		// never recover errors returned by an executing handler.
+		var input any
+		switch t.Name() {
+		case botWorkReadTool:
+			input = &botWorkReadArgs{}
+		case botWorkUpdateTool:
+			input = &botWorkUpdateArgs{}
+		case botEvidenceReadTool:
+			input = &botEvidenceReadArgs{}
+		case botCheckWorkTool:
+			input = &botCheckWorkArgs{}
+		case "bot_skill_list", "bot_skill_read", "bot_skill_use", "bot_skill_save":
+			input = &botSkillToolArgs{}
+		}
+		if input != nil {
+			err = json.Unmarshal(raw, input)
+		}
+	}
+	if err != nil {
+		return botWorkToolResult(ctx, map[string]any{"staged": false, "message": "Optional request was not executed. Use the declared argument schema and retry only if useful; otherwise continue the assignment."}, store.ErrBotInvalid)
+	}
+	return t.botRunnableTool.Run(ctx, args)
 }
 
 type botKnowledgeContext struct {

@@ -106,7 +106,7 @@ func (t *botMandatedReadTool) Run(c tool.Context, a any) (map[string]any, error)
 	if err == nil {
 		var args map[string]any
 		_ = json.Unmarshal(raw, &args)
-		recordBuiltinToolObservation(c, c.SessionID(), t.Name(), args, mandatedReadObservation(t.Name(), result))
+		recordBuiltinToolObservationWithCapture(c, c.SessionID(), t.Name(), args, mandatedReadObservation(t.Name(), result), result)
 	}
 	return result, err
 }

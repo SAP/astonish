@@ -173,9 +173,24 @@ func (d teamBotDB) pauseAdaptive(ctx context.Context, id uuid.UUID, expected tim
 
 // insertIntakeDraft runs wholly in its caller's scoped transaction. Intake hash
 // includes the reviewed request, so idempotency cannot silently change carryover.
-func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, v store.BotVersion, goals []store.BotGoal, carry store.BotCarryover, operation string, source uuid.UUID) (*store.Bot, error) {
+func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, v store.BotVersion, goals []store.BotGoal, carry store.BotCarryover, operation string, source uuid.UUID, seeds ...*store.BotSkillSeed) (*store.Bot, error) {
 	if err := tx.InsertBot(ctx, rec); err != nil {
 		return nil, err
+	}
+	for i, seed := range seeds {
+		if seed == nil {
+			continue
+		}
+		if i >= len(v.Triggers) {
+			return nil, store.ErrBotInvalid
+		}
+		id, err := insertIntakeSkillSeed(ctx, tx, rec.Bot, seed)
+		if err != nil {
+			return nil, err
+		}
+		v.Triggers[i].SkillID = &id
+		v.Triggers[i].Invocation = seed.Responsibility
+		v.Triggers[i].Instructions = ""
 	}
 	hash, err := botHash(v)
 	if err != nil {
@@ -220,6 +235,84 @@ func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, 
 	}
 	return &rec.Bot, nil
 }
+
+// validateIntakeSkillSeed accepts only bounded reviewed prose. A seed is not a
+// serialized revision: no history, capability or foreign provenance can cross.
+func validateIntakeSkillSeed(seed *store.BotSkillSeed) error {
+	if seed == nil {
+		return nil
+	}
+	if strings.TrimSpace(seed.Title) == "" || len(seed.Title) > 200 || strings.TrimSpace(seed.Responsibility) == "" || len(seed.Responsibility) > 4096 || strings.TrimSpace(seed.OwnerExpectation) == "" || len(seed.OwnerExpectation) > 16000 || len(seed.Method) == 0 || len(seed.Method) > store.BotSkillMaxMethodSteps {
+		return store.ErrBotInvalid
+	}
+	for _, step := range seed.Method {
+		if strings.TrimSpace(step) == "" {
+			return store.ErrBotInvalid
+		}
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		return err
+	}
+	if len(raw) > store.BotSkillMaxRevisionBytes/2 {
+		return store.ErrBotInvalid
+	}
+	return nil
+}
+
+// The explicit adopter supplies OwnerExpectation. Store it as a fresh local goal
+// so normal source validation can resolve it, without fabricating a model run,
+// owner message, successful observation, or authority grant.
+func insertIntakeSkillSeed(ctx context.Context, tx botDraftDB, b store.Bot, seed *store.BotSkillSeed) (uuid.UUID, error) {
+	if err := validateIntakeSkillSeed(seed); err != nil {
+		return uuid.Nil, err
+	}
+	db, ok := tx.(botSkillDB)
+	if !ok {
+		return uuid.Nil, store.ErrBotUnsupported
+	}
+	id, goalID := uuid.New(), uuid.New()
+	goal := store.BotGoal{ID: goalID, BotID: b.ID, Revision: 1, Title: seed.Title, CompletionCriteria: seed.OwnerExpectation, Status: store.BotGoalActive, WorkspacePath: "goals/" + goalID.String()}
+	if err := tx.InsertGoal(ctx, goal); err != nil {
+		return uuid.Nil, err
+	}
+	// Read the canonical stored representation for its source digest.
+	g, err := tx.ReadGoal(ctx, b.ID, goalID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	digest, err := botHash(g)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	owner := store.BotSkillProvenance{Level: store.BotSkillOwnerSpecified, BotID: b.ID, GoalID: &goalID, GoalRevision: 1, SourceDigest: digest, Quote: seed.OwnerExpectation, RecordedAt: b.CreatedAt}
+	method := store.BotSkillProvenance{Level: store.BotSkillProposed, BotID: b.ID, RecordedAt: b.CreatedAt}
+	v := store.BotSkillRevision{SchemaVersion: store.BotSkillSchemaVersion, ID: uuid.New(), BotID: b.ID, SkillID: id, Revision: 1, Responsibility: seed.Responsibility, Expectations: []store.BotSkillExpectation{{ID: "owner-expectation", Text: seed.OwnerExpectation, Provenance: owner}}, Method: append([]string(nil), seed.Method...), Provenance: []store.BotSkillProvenance{owner, method}, ChangeReason: "Explicitly adopted seed; method is unverified, not observed learning"}
+	v.Digest = v.ContentDigest()
+	if err := validateSkillRevisionSources(ctx, tx, v); err != nil {
+		return uuid.Nil, err
+	}
+	count, size, err := db.skillQuota(ctx, b.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := store.ValidateBotSkillQuota(count, size, int64(len(raw))); err != nil {
+		return uuid.Nil, err
+	}
+	s := store.BotSkill{ID: id, BotID: b.ID, Key: "seed-" + id.String(), Title: seed.Title, GoalID: &goalID, Status: store.BotSkillDraft, Revision: 1, HeadRevision: 1, HeadDigest: v.Digest, CreatedAt: b.CreatedAt, UpdatedAt: b.CreatedAt}
+	if err := db.writeSkill(ctx, botStoredSkill{Skill: s}, 0); err != nil {
+		return uuid.Nil, err
+	}
+	if err := db.insertSkillRevision(ctx, v); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
 func (r *botRepository) PromoteChat(ctx context.Context, q store.BotPromotionRequest) (*store.Bot, error) {
 	if !q.Reviewed || r.auth.scope == store.BotScopeTeam && !q.ReviewedForTeam {
 		return nil, store.ErrBotForbidden
@@ -332,7 +425,7 @@ func (r *botRepository) ConvertAdaptiveJob(ctx context.Context, q store.BotConve
 			return err
 		}
 		rec.CreateHash = hash
-		result, err = insertIntakeDraft(ctx, tx, rec, v, goals, store.BotCarryover{}, "adaptive_conversion", q.SourceJobID)
+		result, err = insertIntakeDraft(ctx, tx, rec, v, goals, store.BotCarryover{}, "adaptive_conversion", q.SourceJobID, q.SkillSeed)
 		if err != nil {
 			return err
 		}

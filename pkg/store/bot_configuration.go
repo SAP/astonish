@@ -54,13 +54,14 @@ type BotPromotionRequest struct {
 	Carryover       BotCarryover `json:"carryover"`
 }
 type BotConversionRequest struct {
-	SourceJobID       uuid.UUID `json:"-"`
-	ExpectedUpdatedAt time.Time `json:"expected_updated_at"`
-	Name              string    `json:"name"`
-	IdempotencyKey    string    `json:"idempotency_key"`
-	Charter           string    `json:"charter"`
-	Reviewed          bool      `json:"reviewed"`
-	ReviewedForTeam   bool      `json:"reviewed_for_team"`
+	SkillSeed         *BotSkillSeed `json:"skill_seed,omitempty"`
+	SourceJobID       uuid.UUID     `json:"-"`
+	ExpectedUpdatedAt time.Time     `json:"expected_updated_at"`
+	Name              string        `json:"name"`
+	IdempotencyKey    string        `json:"idempotency_key"`
+	Charter           string        `json:"charter"`
+	Reviewed          bool          `json:"reviewed"`
+	ReviewedForTeam   bool          `json:"reviewed_for_team"`
 }
 type BotAdaptiveReview struct {
 	SourceJobID  uuid.UUID   `json:"source_job_id"`

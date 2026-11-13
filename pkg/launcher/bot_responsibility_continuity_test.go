@@ -75,7 +75,11 @@ func TestBotResponsibilityContinuityProvider(t *testing.T) {
 			}
 			finish := func(ctx context.Context, lease store.BotLease) {
 				t.Helper()
-				if err := repo.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Summary: "Context-only test", Unverified: []string{"Live model behavior not exercised"}}}); err != nil {
+				work, err := repo.(store.BotWorkStore).LoadWork(ctx, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := repo.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Context-only test", Unverified: []string{"Live model behavior not exercised"}}}); err != nil {
 					t.Fatal(err)
 				}
 			}

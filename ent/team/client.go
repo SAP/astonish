@@ -25,6 +25,8 @@ import (
 	"github.com/SAP/astonish/ent/team/botintake"
 	"github.com/SAP/astonish/ent/team/botoutbox"
 	"github.com/SAP/astonish/ent/team/botrun"
+	"github.com/SAP/astonish/ent/team/botskill"
+	"github.com/SAP/astonish/ent/team/botskillrevision"
 	"github.com/SAP/astonish/ent/team/bottemplate"
 	"github.com/SAP/astonish/ent/team/bottrackeditem"
 	"github.com/SAP/astonish/ent/team/botversion"
@@ -80,6 +82,10 @@ type Client struct {
 	BotOutbox *BotOutboxClient
 	// BotRun is the client for interacting with the BotRun builders.
 	BotRun *BotRunClient
+	// BotSkill is the client for interacting with the BotSkill builders.
+	BotSkill *BotSkillClient
+	// BotSkillRevision is the client for interacting with the BotSkillRevision builders.
+	BotSkillRevision *BotSkillRevisionClient
 	// BotTemplate is the client for interacting with the BotTemplate builders.
 	BotTemplate *BotTemplateClient
 	// BotTrackedItem is the client for interacting with the BotTrackedItem builders.
@@ -160,6 +166,8 @@ func (c *Client) init() {
 	c.BotIntake = NewBotIntakeClient(c.config)
 	c.BotOutbox = NewBotOutboxClient(c.config)
 	c.BotRun = NewBotRunClient(c.config)
+	c.BotSkill = NewBotSkillClient(c.config)
+	c.BotSkillRevision = NewBotSkillRevisionClient(c.config)
 	c.BotTemplate = NewBotTemplateClient(c.config)
 	c.BotTrackedItem = NewBotTrackedItemClient(c.config)
 	c.BotVersion = NewBotVersionClient(c.config)
@@ -291,6 +299,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BotIntake:           NewBotIntakeClient(cfg),
 		BotOutbox:           NewBotOutboxClient(cfg),
 		BotRun:              NewBotRunClient(cfg),
+		BotSkill:            NewBotSkillClient(cfg),
+		BotSkillRevision:    NewBotSkillRevisionClient(cfg),
 		BotTemplate:         NewBotTemplateClient(cfg),
 		BotTrackedItem:      NewBotTrackedItemClient(cfg),
 		BotVersion:          NewBotVersionClient(cfg),
@@ -349,6 +359,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BotIntake:           NewBotIntakeClient(cfg),
 		BotOutbox:           NewBotOutboxClient(cfg),
 		BotRun:              NewBotRunClient(cfg),
+		BotSkill:            NewBotSkillClient(cfg),
+		BotSkillRevision:    NewBotSkillRevisionClient(cfg),
 		BotTemplate:         NewBotTemplateClient(cfg),
 		BotTrackedItem:      NewBotTrackedItemClient(cfg),
 		BotVersion:          NewBotVersionClient(cfg),
@@ -409,13 +421,13 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.A2aAgent, c.App, c.AppState, c.Bot, c.BotApproval, c.BotGoal, c.BotIntake,
-		c.BotOutbox, c.BotRun, c.BotTemplate, c.BotTrackedItem, c.BotVersion,
-		c.CacheDiagnostic, c.ChatSessionEvent, c.Credential, c.Deck, c.DeckVersion,
-		c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan,
-		c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask,
-		c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
-		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
-		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
+		c.BotOutbox, c.BotRun, c.BotSkill, c.BotSkillRevision, c.BotTemplate,
+		c.BotTrackedItem, c.BotVersion, c.CacheDiagnostic, c.ChatSessionEvent,
+		c.Credential, c.Deck, c.DeckVersion, c.DrillReport, c.FleetMailboxMessage,
+		c.FleetMonitorState, c.FleetPlan, c.FleetRunState, c.FleetSetupDraft,
+		c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer,
+		c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob, c.Session,
+		c.SessionEvent, c.Setting, c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
 		n.Use(hooks...)
 	}
@@ -426,13 +438,13 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.A2aAgent, c.App, c.AppState, c.Bot, c.BotApproval, c.BotGoal, c.BotIntake,
-		c.BotOutbox, c.BotRun, c.BotTemplate, c.BotTrackedItem, c.BotVersion,
-		c.CacheDiagnostic, c.ChatSessionEvent, c.Credential, c.Deck, c.DeckVersion,
-		c.DrillReport, c.FleetMailboxMessage, c.FleetMonitorState, c.FleetPlan,
-		c.FleetRunState, c.FleetSetupDraft, c.FleetSetupProfile, c.FleetTask,
-		c.FleetTemplate, c.Flow, c.McpServer, c.Memory, c.NetworkPolicy,
-		c.SandboxSession, c.ScheduledJob, c.Session, c.SessionEvent, c.Setting,
-		c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
+		c.BotOutbox, c.BotRun, c.BotSkill, c.BotSkillRevision, c.BotTemplate,
+		c.BotTrackedItem, c.BotVersion, c.CacheDiagnostic, c.ChatSessionEvent,
+		c.Credential, c.Deck, c.DeckVersion, c.DrillReport, c.FleetMailboxMessage,
+		c.FleetMonitorState, c.FleetPlan, c.FleetRunState, c.FleetSetupDraft,
+		c.FleetSetupProfile, c.FleetTask, c.FleetTemplate, c.Flow, c.McpServer,
+		c.Memory, c.NetworkPolicy, c.SandboxSession, c.ScheduledJob, c.Session,
+		c.SessionEvent, c.Setting, c.Skill, c.SkillFile, c.Slide, c.TeamAuditLog,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -459,6 +471,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BotOutbox.mutate(ctx, m)
 	case *BotRunMutation:
 		return c.BotRun.mutate(ctx, m)
+	case *BotSkillMutation:
+		return c.BotSkill.mutate(ctx, m)
+	case *BotSkillRevisionMutation:
+		return c.BotSkillRevision.mutate(ctx, m)
 	case *BotTemplateMutation:
 		return c.BotTemplate.mutate(ctx, m)
 	case *BotTrackedItemMutation:
@@ -1910,6 +1926,320 @@ func (c *BotRunClient) mutate(ctx context.Context, m *BotRunMutation) (Value, er
 		return (&BotRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("team: unknown BotRun mutation op: %q", m.Op())
+	}
+}
+
+// BotSkillClient is a client for the BotSkill schema.
+type BotSkillClient struct {
+	config
+}
+
+// NewBotSkillClient returns a client for the BotSkill from the given config.
+func NewBotSkillClient(c config) *BotSkillClient {
+	return &BotSkillClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `botskill.Hooks(f(g(h())))`.
+func (c *BotSkillClient) Use(hooks ...Hook) {
+	c.hooks.BotSkill = append(c.hooks.BotSkill, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `botskill.Intercept(f(g(h())))`.
+func (c *BotSkillClient) Intercept(interceptors ...Interceptor) {
+	c.inters.BotSkill = append(c.inters.BotSkill, interceptors...)
+}
+
+// Create returns a builder for creating a BotSkill entity.
+func (c *BotSkillClient) Create() *BotSkillCreate {
+	mutation := newBotSkillMutation(c.config, OpCreate)
+	return &BotSkillCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of BotSkill entities.
+func (c *BotSkillClient) CreateBulk(builders ...*BotSkillCreate) *BotSkillCreateBulk {
+	return &BotSkillCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *BotSkillClient) MapCreateBulk(slice any, setFunc func(*BotSkillCreate, int)) *BotSkillCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &BotSkillCreateBulk{err: fmt.Errorf("calling to BotSkillClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*BotSkillCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &BotSkillCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for BotSkill.
+func (c *BotSkillClient) Update() *BotSkillUpdate {
+	mutation := newBotSkillMutation(c.config, OpUpdate)
+	return &BotSkillUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *BotSkillClient) UpdateOne(_m *BotSkill) *BotSkillUpdateOne {
+	mutation := newBotSkillMutation(c.config, OpUpdateOne, withBotSkill(_m))
+	return &BotSkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *BotSkillClient) UpdateOneID(id uuid.UUID) *BotSkillUpdateOne {
+	mutation := newBotSkillMutation(c.config, OpUpdateOne, withBotSkillID(id))
+	return &BotSkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for BotSkill.
+func (c *BotSkillClient) Delete() *BotSkillDelete {
+	mutation := newBotSkillMutation(c.config, OpDelete)
+	return &BotSkillDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *BotSkillClient) DeleteOne(_m *BotSkill) *BotSkillDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *BotSkillClient) DeleteOneID(id uuid.UUID) *BotSkillDeleteOne {
+	builder := c.Delete().Where(botskill.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &BotSkillDeleteOne{builder}
+}
+
+// Query returns a query builder for BotSkill.
+func (c *BotSkillClient) Query() *BotSkillQuery {
+	return &BotSkillQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeBotSkill},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a BotSkill entity by its id.
+func (c *BotSkillClient) Get(ctx context.Context, id uuid.UUID) (*BotSkill, error) {
+	return c.Query().Where(botskill.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *BotSkillClient) GetX(ctx context.Context, id uuid.UUID) *BotSkill {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryBot queries the bot edge of a BotSkill.
+func (c *BotSkillClient) QueryBot(_m *BotSkill) *BotQuery {
+	query := (&BotClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(botskill.Table, botskill.FieldID, id),
+			sqlgraph.To(bot.Table, bot.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, false, botskill.BotTable, botskill.BotColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *BotSkillClient) Hooks() []Hook {
+	return c.hooks.BotSkill
+}
+
+// Interceptors returns the client interceptors.
+func (c *BotSkillClient) Interceptors() []Interceptor {
+	return c.inters.BotSkill
+}
+
+func (c *BotSkillClient) mutate(ctx context.Context, m *BotSkillMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&BotSkillCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&BotSkillUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&BotSkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&BotSkillDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("team: unknown BotSkill mutation op: %q", m.Op())
+	}
+}
+
+// BotSkillRevisionClient is a client for the BotSkillRevision schema.
+type BotSkillRevisionClient struct {
+	config
+}
+
+// NewBotSkillRevisionClient returns a client for the BotSkillRevision from the given config.
+func NewBotSkillRevisionClient(c config) *BotSkillRevisionClient {
+	return &BotSkillRevisionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `botskillrevision.Hooks(f(g(h())))`.
+func (c *BotSkillRevisionClient) Use(hooks ...Hook) {
+	c.hooks.BotSkillRevision = append(c.hooks.BotSkillRevision, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `botskillrevision.Intercept(f(g(h())))`.
+func (c *BotSkillRevisionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.BotSkillRevision = append(c.inters.BotSkillRevision, interceptors...)
+}
+
+// Create returns a builder for creating a BotSkillRevision entity.
+func (c *BotSkillRevisionClient) Create() *BotSkillRevisionCreate {
+	mutation := newBotSkillRevisionMutation(c.config, OpCreate)
+	return &BotSkillRevisionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of BotSkillRevision entities.
+func (c *BotSkillRevisionClient) CreateBulk(builders ...*BotSkillRevisionCreate) *BotSkillRevisionCreateBulk {
+	return &BotSkillRevisionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *BotSkillRevisionClient) MapCreateBulk(slice any, setFunc func(*BotSkillRevisionCreate, int)) *BotSkillRevisionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &BotSkillRevisionCreateBulk{err: fmt.Errorf("calling to BotSkillRevisionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*BotSkillRevisionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &BotSkillRevisionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for BotSkillRevision.
+func (c *BotSkillRevisionClient) Update() *BotSkillRevisionUpdate {
+	mutation := newBotSkillRevisionMutation(c.config, OpUpdate)
+	return &BotSkillRevisionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *BotSkillRevisionClient) UpdateOne(_m *BotSkillRevision) *BotSkillRevisionUpdateOne {
+	mutation := newBotSkillRevisionMutation(c.config, OpUpdateOne, withBotSkillRevision(_m))
+	return &BotSkillRevisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *BotSkillRevisionClient) UpdateOneID(id uuid.UUID) *BotSkillRevisionUpdateOne {
+	mutation := newBotSkillRevisionMutation(c.config, OpUpdateOne, withBotSkillRevisionID(id))
+	return &BotSkillRevisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for BotSkillRevision.
+func (c *BotSkillRevisionClient) Delete() *BotSkillRevisionDelete {
+	mutation := newBotSkillRevisionMutation(c.config, OpDelete)
+	return &BotSkillRevisionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *BotSkillRevisionClient) DeleteOne(_m *BotSkillRevision) *BotSkillRevisionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *BotSkillRevisionClient) DeleteOneID(id uuid.UUID) *BotSkillRevisionDeleteOne {
+	builder := c.Delete().Where(botskillrevision.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &BotSkillRevisionDeleteOne{builder}
+}
+
+// Query returns a query builder for BotSkillRevision.
+func (c *BotSkillRevisionClient) Query() *BotSkillRevisionQuery {
+	return &BotSkillRevisionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeBotSkillRevision},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a BotSkillRevision entity by its id.
+func (c *BotSkillRevisionClient) Get(ctx context.Context, id uuid.UUID) (*BotSkillRevision, error) {
+	return c.Query().Where(botskillrevision.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *BotSkillRevisionClient) GetX(ctx context.Context, id uuid.UUID) *BotSkillRevision {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryBot queries the bot edge of a BotSkillRevision.
+func (c *BotSkillRevisionClient) QueryBot(_m *BotSkillRevision) *BotQuery {
+	query := (&BotClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(botskillrevision.Table, botskillrevision.FieldID, id),
+			sqlgraph.To(bot.Table, bot.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, false, botskillrevision.BotTable, botskillrevision.BotColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QuerySkill queries the skill edge of a BotSkillRevision.
+func (c *BotSkillRevisionClient) QuerySkill(_m *BotSkillRevision) *BotSkillQuery {
+	query := (&BotSkillClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(botskillrevision.Table, botskillrevision.FieldID, id),
+			sqlgraph.To(botskill.Table, botskill.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, false, botskillrevision.SkillTable, botskillrevision.SkillColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *BotSkillRevisionClient) Hooks() []Hook {
+	return c.hooks.BotSkillRevision
+}
+
+// Interceptors returns the client interceptors.
+func (c *BotSkillRevisionClient) Interceptors() []Interceptor {
+	return c.inters.BotSkillRevision
+}
+
+func (c *BotSkillRevisionClient) mutate(ctx context.Context, m *BotSkillRevisionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&BotSkillRevisionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&BotSkillRevisionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&BotSkillRevisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&BotSkillRevisionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("team: unknown BotSkillRevision mutation op: %q", m.Op())
 	}
 }
 
@@ -6099,8 +6429,8 @@ func (c *TeamAuditLogClient) mutate(ctx context.Context, m *TeamAuditLogMutation
 type (
 	hooks struct {
 		A2aAgent, App, AppState, Bot, BotApproval, BotGoal, BotIntake, BotOutbox,
-		BotRun, BotTemplate, BotTrackedItem, BotVersion, CacheDiagnostic,
-		ChatSessionEvent, Credential, Deck, DeckVersion, DrillReport,
+		BotRun, BotSkill, BotSkillRevision, BotTemplate, BotTrackedItem, BotVersion,
+		CacheDiagnostic, ChatSessionEvent, Credential, Deck, DeckVersion, DrillReport,
 		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
 		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
 		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,
@@ -6108,8 +6438,8 @@ type (
 	}
 	inters struct {
 		A2aAgent, App, AppState, Bot, BotApproval, BotGoal, BotIntake, BotOutbox,
-		BotRun, BotTemplate, BotTrackedItem, BotVersion, CacheDiagnostic,
-		ChatSessionEvent, Credential, Deck, DeckVersion, DrillReport,
+		BotRun, BotSkill, BotSkillRevision, BotTemplate, BotTrackedItem, BotVersion,
+		CacheDiagnostic, ChatSessionEvent, Credential, Deck, DeckVersion, DrillReport,
 		FleetMailboxMessage, FleetMonitorState, FleetPlan, FleetRunState,
 		FleetSetupDraft, FleetSetupProfile, FleetTask, FleetTemplate, Flow, McpServer,
 		Memory, NetworkPolicy, SandboxSession, ScheduledJob, Session, SessionEvent,

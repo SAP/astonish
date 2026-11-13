@@ -65,7 +65,7 @@ func (m *workAssessmentModel) GenerateContent(_ context.Context, r *model.LLMReq
 			out = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "content", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Use correct, not defective source content"}}}
 		}
 		raw, _ := json.Marshal(out)
-		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1, CandidatesTokenCount: 1, TotalTokenCount: 2}}, nil)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(fixtureContentCoverage(r, raw)), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1, CandidatesTokenCount: 1, TotalTokenCount: 2}}, nil)
 	}
 }
 

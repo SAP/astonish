@@ -1094,6 +1094,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			Name:  "chat",
 			Model: effectiveLLM,
 			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+				if turnOverrides != nil && turnOverrides.Bot != nil && !promptBuilder.CodeMode {
+					return promptBuilder.BuildBotPrompt(ctx, turnOverrides), nil
+				}
 				return instr, nil
 			},
 			Tools:                mainThreadTools,

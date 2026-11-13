@@ -1,5 +1,37 @@
 # Bot live transcript events
 
+## Skill inspection and scheduling surfaces
+
+Studio Details and remote `/bots skills` render committed skill revisions and `BotReport.skill` receipts from scoped GET routes, not skill claims extracted from transcript text. Refresh uses existing workspace revision invalidation; no new SSE kind or Home transcript rewriting is introduced. Unsupported schemas remain unavailable. Inspection is read-only for owners and authorized viewers.
+
+Schedule & triggers references an active skill ID plus invocation intent; it does not copy the method into instructions. Legacy instruction schedules remain explicitly labeled and editable without automatic import. Missing/loading/failed skill reads block new skill selection but do not remove legacy controls. General Settings projects `bot_managed` and offers only Bot navigation for bound jobs; regular scheduler jobs retain their existing controls. Server authorization remains authoritative.
+
+## Agent-led work progress
+
+For `agent_led_v1`, `SaveWork` updates the private document and `BotRun.Work`
+projection in one lease/CAS-fenced transaction, advances the Bot root sequence,
+and persists the existing `bot_run_state` event. Notifications run only after
+commit. Snapshots and transcript replay carry that same projection; failed CAS
+or event persistence rolls everything back. Legacy work saves retain their old
+non-progress event behavior. Work updates do not change execution status, so a
+running state may recur with a higher sequence and work revision before the final
+run commit. No progress event is a final answer or an independent verification.
+
+Studio keeps structured work summaries and item/check/remaining-work data in the
+Details inspector (`BotRunWorkDetails` / `BotWorkDetails`), not as standalone
+per-run rows at the top of Home or run-trace chat. The main transcript remains
+ordinary messages and tool activity, with the existing active-work indicator.
+Live updates, reconnect and restored snapshots still merge run states for busy
+state and receipts; presentation does not delete or alter persisted work. Routine
+transport connection/cursor diagnostics are not displayed in chat. Actionable
+reconnect/access errors and read-only composer restrictions remain visible.
+
+The current controlled tests cover transactional notification/rollback, snapshot
+and history parity, optional notes, scoped evidence reads, and unavailable-check
+feedback followed by a useful final answer. Vitest covers uncluttered live/reconnect/
+restored chat and Details inspection across close/reopen in light and dark themes;
+the complete phase-3 acceptance matrix is a separate verification obligation.
+
 ## Assessed work publication
 
 Runs with a private pinned work contract persist producer/reviewer/correction content and draft artifact envelopes only in their run transcript. The shared repository routing decision applies to both personal/team stores and both ADK content and runtime envelopes. Canonical owner messages, answers, approval cards and state transitions retain their separate trusted writers; rejected drafts are not hidden only in a client reducer.

@@ -297,7 +297,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Strict Bot release gate; no deployment or credential loading")
     parser.add_argument("--preflight", action="store_true", help="check prerequisites only; not acceptance")
     parser.add_argument("--local-only", action="store_true", help="partial local evidence; always non-release exit 3")
+    stages = parser.add_mutually_exclusive_group()
+    stages.add_argument('--skills-stage', choices=('all', 'recovery', 'postgres'), help='strict skills acceptance (separate from full Bot release)')
+    stages.add_argument('--agent-stage', choices=('execution', 'progress', 'learning', 'continuity', 'postgres', 'all'), help='strict agent acceptance (separate from full Bot release)')
+    parser.add_argument('--config', type=Path, help='explicit isolated skills or agent launcher configuration')
     args = parser.parse_args(argv)
+    if args.agent_stage:
+        if args.preflight or args.local_only:
+            parser.error('--agent-stage forbids --preflight and --local-only')
+        from employee_http_acceptance import main as agent_main
+        return agent_main(['--agent-stage', args.agent_stage] + (['--config', str(args.config)] if args.config else []))
+    if args.skills_stage:
+        if args.preflight or args.local_only:
+            parser.error('--skills-stage forbids --preflight and --local-only')
+        from skills_acceptance_driver import main as skills_main
+        return skills_main(['--skills-stage', args.skills_stage] + (['--config', str(args.config)] if args.config else []))
+    if args.config:
+        parser.error('--config requires --skills-stage all')
     env = clean_env(os.environ)
     statuses = {gate: "NOT RUN" for gate in GATES}
     outcome = "NOT RELEASE READY"

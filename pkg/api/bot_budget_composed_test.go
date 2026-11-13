@@ -54,7 +54,9 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 						ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 10, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) {
 							estimates++
-							if partial && estimates <= 2 {
+							// Agent-led work calls the producer directly: allow its tool
+							// request, then deny the final-answer request after the read.
+							if partial && estimates == 1 {
 								return 20, nil
 							}
 							return 80000, nil
@@ -167,10 +169,10 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 						t.Fatalf("effects=%d model called=%t", f.pool.calls, f.model.called)
 					}
 					if partial {
-						if run.Usage.InputTokens != 10 || run.Usage.OutputTokens != 6 || run.Usage.ToolCalls != 1 || len(run.Report.Unchanged) != 1 {
+						if run.Usage.InputTokens != 5 || run.Usage.OutputTokens != 3 || run.Usage.ToolCalls != 1 || len(run.Report.Unchanged) != 1 {
 							t.Fatalf("partial work/accounting lost: %+v", run)
 						}
-						if !strings.Contains(run.Report.Summary, "Used or reserved: 16 tokens") {
+						if !strings.Contains(run.Report.Summary, "Used or reserved: 8 tokens") {
 							t.Fatal(run.Report.Summary)
 						}
 					} else if run.Usage.InputTokens != 0 || run.Usage.OutputTokens != 0 || run.Usage.ToolCalls != 0 || !strings.Contains(run.Report.Summary, "Used or reserved: 0 tokens") {
@@ -186,7 +188,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					if err = f.worker.Poll(context.Background()); err != nil {
 						t.Fatal(err)
 					}
-					if f.pool.calls != expectedCalls || estimates != 2*expectedCalls+1 {
+					if f.pool.calls != expectedCalls || estimates != expectedCalls+1 {
 						t.Fatalf("work retried: calls=%d estimates=%d", f.pool.calls, estimates)
 					}
 					restored, e := f.repo.GetRun(f.ctx, f.b.ID, run.ID)

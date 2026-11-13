@@ -1,21 +1,61 @@
 package launcher
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"google.golang.org/adk/tool"
+
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
-	"github.com/google/uuid"
-	"google.golang.org/adk/tool"
-	"strings"
-	"time"
 )
 
 // Only pinned built-in transports may record these observations. Unknown writes
 // and non-read HTTP methods never become successful read evidence.
 func recordBuiltinToolObservation(ctx tool.Context, sessionID, name string, args, result map[string]any) {
-	if ctx == nil || result == nil || result["error"] != nil {
+	recordBuiltinToolObservationWithCapture(ctx, sessionID, name, args, result, result)
+}
+
+// observation is the trusted transport's decoded metadata; capture is the full
+// ADK response journaled for this call. They differ for typed result envelopes.
+func recordBuiltinToolObservationWithCapture(ctx tool.Context, sessionID, name string, args, result, capture map[string]any) {
+	if ctx == nil || result == nil {
+		return
+	}
+	identity, ok := execution.BotRunIdentityFromContext(ctx)
+	if !ok {
+		return
+	}
+	actor, err := uuid.Parse(identity.ActorID)
+	if err != nil {
+		return
+	}
+	observedAt := time.Now().UTC()
+	// ChatAgent's AfterToolCallback journals RedactMap(output), not the raw
+	// transport response or Redact(JSON(output)). Bind source facts to that
+	// same representation using this run's scoped redactor. Keep the original
+	// map for file/effect receipt verification below; never infer facts from
+	// provider-supplied metadata or relax the later same-call/digest check.
+	sourceResult, sourceCapture := result, capture
+	if redactor := credentials.RedactorFromContext(ctx); redactor != nil {
+		sourceResult = redactor.RedactMap(result)
+		sourceCapture = redactor.RedactMap(capture)
+	}
+	outcome := bot.ToolOutcome{SourceAccess: builtinSourceAccessFacts(ctx.FunctionCallID(), name, args, sourceResult, sourceCapture, observedAt)}
+	defer func() {
+		if outcome.Verified || len(outcome.SourceAccess) != 0 {
+			bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), outcome)
+		}
+	}()
+	if result["error"] != nil {
 		return
 	}
 	resource, summary, verified := tools.VerifiedBuiltinFileReceipt(name, args, result)
@@ -58,23 +98,72 @@ func recordBuiltinToolObservation(ctx tool.Context, sessionID, name string, args
 	if !verified {
 		return
 	}
-	identity, ok := execution.BotRunIdentityFromContext(ctx)
-	if !ok {
-		return
-	}
-	actor, err := uuid.Parse(identity.ActorID)
-	if err != nil {
-		return
-	}
 	source := "sandbox://" + sessionID + "/" + resource
 	if name == "web_fetch" || name == "http_request" {
 		source = resource
 	}
-	observation := store.BotEvidence{Kind: store.BotEvidenceObservation, Summary: summary, Source: source, ObservedAt: time.Now().UTC(), ActorID: actor}
-	outcome := bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{observation}}
+	observation := store.BotEvidence{Kind: store.BotEvidenceObservation, Summary: summary, Source: source, ObservedAt: observedAt, ActorID: actor}
+	outcome.Verified = true
+	outcome.Unchanged = []store.BotEvidence{observation}
 	if changed {
 		outcome.Unchanged = nil
 		outcome.Changed = []store.BotEvidence{observation}
 	}
-	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), outcome)
+}
+
+// Access facts are independent of effect receipts: a failed read remains a failed
+// read, and a 200 footer says nothing about whether the assignment was answered.
+// Hash the whole response JSON, matching the session capture evidence digest.
+func builtinSourceAccessFacts(callID, name string, args, result, capture map[string]any, observedAt time.Time) []store.BotSourceAccessFact {
+	if callID == "" || (name != "web_fetch" && name != "http_request") {
+		return nil
+	}
+	statusKey := "status"
+	if name == "http_request" {
+		method, _ := args["method"].(string)
+		method = strings.ToUpper(method)
+		if method != "" && method != "GET" && method != "HEAD" {
+			return nil
+		}
+		statusKey = "status_code"
+	}
+	originalURL, _ := args["url"].(string)
+	if strings.TrimSpace(originalURL) == "" {
+		return nil
+	}
+	status, validStatus := result[statusKey].(float64)
+	validStatus = validStatus && status >= 100 && status <= 599 && status == float64(int(status))
+	failed := result["error"] != nil
+	if !failed && !validStatus {
+		return nil
+	}
+	// Persistence decodes typed ADK envelopes into maps. Normalize before
+	// hashing so struct field order cannot differ from the captured JSON map.
+	raw, err := json.Marshal(capture)
+	if err != nil {
+		return nil
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		return nil
+	}
+	raw, err = json.Marshal(persisted)
+	if err != nil {
+		return nil
+	}
+	digest := sha256.Sum256(raw)
+	fact := store.BotSourceAccessFact{
+		EvidenceRef: "capture:" + callID, CallID: callID, OriginalURL: originalURL,
+		Status: store.BotSourceAccessFailed, ObservedAt: observedAt,
+		BodyDigest: hex.EncodeToString(digest[:]),
+	}
+	fact.FinalURL, _ = result["final_url"].(string)
+	fact.Truncated, _ = result["truncated"].(bool)
+	if validStatus {
+		fact.HTTPStatus = int(status)
+		if !failed && status >= 200 && status < 300 {
+			fact.Status = store.BotSourceAccessReturned
+		}
+	}
+	return []store.BotSourceAccessFact{fact}
 }

@@ -12,6 +12,25 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestBotAgentWorkDoesNotAuthorizeResume(t *testing.T) {
+	w := store.NewBotAgentWorkState(store.BotWorkContract{BotID: uuid.New(), RunID: uuid.New(), Version: 1, Instructions: "Research"})
+	if err := w.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []store.RunStatus{store.RunInterrupted, store.RunWaitingApproval, store.RunCancelled} {
+		if ValidateRunTransition(status, store.RunQueued, RunTransitionGuard{}) == nil {
+			t.Fatal("agent work bypassed continuation authority")
+		}
+	}
+	// Optional service contracts must not add methods to the execution Runtime.
+	if reflect.TypeOf((*Runtime)(nil)).Elem().NumMethod() != 3 {
+		t.Fatal("execution interface expanded")
+	}
+	if reflect.TypeOf((*BotWorkServices)(nil)).Elem().NumMethod() != 6 {
+		t.Fatal("work capability contract changed")
+	}
+}
+
 func TestBotLifecycleTransitions(t *testing.T) {
 	now := time.Now().UTC()
 	cases := []struct {

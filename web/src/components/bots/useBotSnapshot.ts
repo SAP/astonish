@@ -3,6 +3,7 @@ import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import { BotAPIError, type BotActivity, type BotScope } from '@/api/bots'
 import { getBotSnapshot, readBotActivityPage, writeBotReadCursor, type BotSnapshot } from '@/api/botSnapshot'
 import { getActiveTeam } from '@/api/teamContext'
+import { mergeBotRunState, type BotRunStates } from '@/api/botRunState'
 import { isBotOperation, OperationStatus, type BotOperationView } from '@/api/botOperationResult'
 
 export interface SnapshotState { data?: BotSnapshot; activity: BotActivity[]; loading: boolean; error?: string }
@@ -37,7 +38,10 @@ class SnapshotEntry {
         // Never let an older replica/cached response regress this viewer's cursor.
         const sequence = Math.max(data.read_cursor.sequence, previous?.read_cursor.sequence || 0)
         const latest = Math.max(data.latest_sequence, previous?.latest_sequence || 0)
-        const snapshot = { ...data, latest_sequence: latest, read_cursor: { ...data.read_cursor, sequence }, unread_count: Math.max(0, latest - sequence) }
+        // Snapshot and transcript use the same scoped, sequence-bearing reducer.
+        // A newer root cursor does not make an older per-run projection newer.
+        const runStates = [...(previous?.run_states || []), ...(data.run_states || [])].reduce<BotRunStates>((states, state) => mergeBotRunState(states, state, this.id, data.bot.home_session_id), {})
+        const snapshot = { ...data, run_states: Object.values(runStates), latest_sequence: latest, read_cursor: { ...data.read_cursor, sequence }, unread_count: Math.max(0, latest - sequence) }
         // A failed activity page must not hide fresh root/decision state.
         this.publish({ data: snapshot, activity: this.state.activity, loading: false })
         let activity = this.state.activity

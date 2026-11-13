@@ -215,7 +215,7 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 				t.Fatal("control-only provisioned external tools")
 				return nil, store.ErrBotForbidden
 			}, WrapModel: func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) {
-				return continuityAssessmentModel{m}, nil
+				return m, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -229,9 +229,10 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("runtime: %v %+v", err, result)
 			}
-			if llm.calls != 2 || result.Status != store.RunSucceeded || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
-				t.Fatalf("proposal receipt bypassed controlled production/review: calls=%d result=%+v", llm.calls, result)
+			if llm.calls != 2 || result.Status != store.RunSucceeded || result.Report.Summary != continuityProposalAnswer {
+				t.Fatalf("proposal receipt changed: calls=%d result=%+v", llm.calls, result)
 			}
+			assertLauncherAgentResult(t, repo, worker, lease, result)
 			if !llm.sawReference || proposal.ID == uuid.Nil {
 				t.Fatalf("model did not receive saved reference: %+v", result)
 			}

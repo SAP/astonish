@@ -16,6 +16,11 @@ func TestBotBudgetReportPublication(t *testing.T) {
 			cause := &store.BotMandateQuotaError{Dimension: store.BotQuotaTotalTokens, Limit: 91, Used: 30, Requested: 70}
 			message, _ := bot.BudgetFailureMessage(cause)
 			report := store.BotReport{Summary: message, Failure: &store.BotReportFailure{Kind: store.BotReportFailureBudget, TechnicalDetails: bot.BudgetFailureDetails(cause)}}
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report.Work = store.BuildBotWorkProjection(work)
 			before, err := repo.Get(ctx, run.BotID)
 			if err != nil {
 				t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/credentials"
@@ -19,6 +20,9 @@ func BotMemoryTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error) 
 	if scope == nil || scope.Services == nil {
 		return nil, store.ErrBotUnsupported
 	}
+	if scope.Services.Memory == nil {
+		return nil, nil
+	} // no owner-wide fallback
 	repo := scope.Services.Bots
 	if r.Bot.Scope == store.BotScopePersonal {
 		repo = scope.Services.PersonalBots
@@ -27,7 +31,7 @@ func BotMemoryTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error) 
 	if err != nil {
 		return nil, err
 	}
-	save, err := functiontool.New(functiontool.Config{Name: "memory_save", Description: "Save durable facts to this Bot's memory. overwrite replaces a matching section in this run only."}, func(ctx tool.Context, a tools.MemorySaveArgs) (tools.MemorySaveResult, error) {
+	save, err := functiontool.New(functiontool.Config{Name: "memory_save", Description: "Save durable facts as inferred knowledge in this Bot's memory, not verified evidence. overwrite only changes unattributed legacy sections in this run; attributed claims require an owner correction."}, func(ctx tool.Context, a tools.MemorySaveArgs) (tools.MemorySaveResult, error) {
 		if strings.TrimSpace(a.Category) == "" || strings.TrimSpace(a.Content) == "" {
 			return tools.MemorySaveResult{}, store.ErrBotInvalid
 		}
@@ -46,6 +50,9 @@ func BotMemoryTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error) 
 			}
 			for _, row := range rows {
 				if row.Category == category {
+					if row.Attribution != nil && row.Snippet != content {
+						return tools.MemorySaveResult{}, fmt.Errorf("%w: attributed memory requires an owner correction; the original claim was not changed", store.ErrBotConflict)
+					}
 					if e = memory.Update(ctx, row.ID, content, category); e != nil {
 						return tools.MemorySaveResult{}, e
 					}
@@ -53,7 +60,7 @@ func BotMemoryTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error) 
 				}
 			}
 		}
-		e := memory.Add(ctx, store.MemoryEntry{Content: content, Category: category, SessionID: r.Run.SessionID.String(), CreatedBy: r.Bot.OwnerID.String()})
+		e := memory.Add(ctx, store.MemoryEntry{Content: content, Category: category, SessionID: r.Run.SessionID.String(), CreatedBy: r.Bot.OwnerID.String(), Attribution: &store.MemoryAttribution{BotID: r.Bot.ID, RunID: r.Run.ID, Source: "agent-tool:" + ctx.FunctionCallID(), ObservedAt: time.Now().UTC(), Status: store.MemoryKnowledgeInferred}})
 		return tools.MemorySaveResult{Saved: e == nil, Message: "Saved to Bot memory"}, e
 	})
 	if err != nil {

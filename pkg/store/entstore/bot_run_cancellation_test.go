@@ -125,7 +125,11 @@ func TestBotExactRunCancellationQueuedAndWaiting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: []byte(`{"step":1}`), Report: store.BotReport{Summary: "waiting", NeedsApproval: []store.BotID{approval.ID}}}); err != nil {
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: []byte(`{"step":1}`), Report: store.BotReport{Summary: "waiting", Work: store.BuildBotWorkProjection(work), NeedsApproval: []store.BotID{approval.ID}}}); err != nil {
 				t.Fatal(err)
 			}
 			b, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: a.BotID, Version: a.Version, Trigger: store.TriggerManual, IdempotencyKey: "queued", Instructions: "queued"})

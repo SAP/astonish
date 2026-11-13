@@ -43,6 +43,8 @@ func registerBotRoutes(router *mux.Router) {
 	registerBotGoalRoutes(router)
 	registerBotMemoryRoutes(router)
 	registerBotDocumentRoutes(router)
+	registerBotSkillRoutes(router)
+	router.HandleFunc("/api/studio/bots/{botID}/skills/import-legacy", BotLegacySkillImportHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/permanent-delete", BotPermanentDeleteHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/pause", BotPauseHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/stop", botLifecycleHandler(botdomain.LifecycleStop)).Methods(http.MethodPost)

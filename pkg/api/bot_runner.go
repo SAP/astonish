@@ -26,15 +26,23 @@ import (
 // must belong to this request. SessionService is the existing scoped store; the
 // adapter never creates/replaces sessions or changes their execution owner.
 type BotChatResources struct {
+	// ModelSelection records the successful scoped resolver result, never ambient defaults.
+	ModelSelection *store.SessionPin
 	// AssessmentContext is a trusted, owner-bound read, never a model tool.
-	AssessmentContext func(context.Context) (json.RawMessage, store.BotEvidence, error)
-	Work              store.BotWorkStore
-	Authorization     execution.BotTurnAuthorizer
-	Transcript        store.BotTranscriptStore
-	Agent             *agent.ChatAgent
-	SessionService    session.Service
-	AppName           string
-	Cleanup           func()
+	// Callbacks are factory-bound to this owner/Bot/run; callers cannot choose scope.
+	PreviousWork             func(context.Context) (*store.BotWorkProjection, error)
+	ValidateWorkContinuation func(context.Context, store.BotWorkContinuationKind, uuid.UUID) error
+	EvidenceReader           store.BotTranscriptReader
+	AssessmentContext        func(context.Context) (json.RawMessage, store.BotEvidence, error)
+	Skills                   store.BotSkillStore
+	Redact                   func(string) string
+	Work                     store.BotWorkStore
+	Authorization            execution.BotTurnAuthorizer
+	Transcript               store.BotTranscriptStore
+	Agent                    *agent.ChatAgent
+	SessionService           session.Service
+	AppName                  string
+	Cleanup                  func()
 	// PolicyRuntime is prepared by the trusted factory and must be the same
 	// runtime installed on its bound tools. Nil preserves explicit context wiring.
 	PolicyRuntime *agent.BotPolicyRuntime
@@ -214,10 +222,12 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	a.active[req.Run.ID] = botChatActiveRun{lease: req.Run.Lease, principal: req.Principal, cancel: cancel}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.active, req.Run.ID); a.mu.Unlock() }()
+	var modelSelection *store.SessionPin
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result, err = botChatFailure(bot.ErrorPermanent, fmt.Errorf("bot chat runtime panic: %v", recovered))
 		}
+		result.ModelSelection = modelSelection
 	}()
 	if err := req.Budget.Check(ctx); err != nil {
 		return botChatFailure(bot.ErrorBudget, err)
@@ -233,7 +243,16 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 			ctx = agent.WithBotPolicyRuntime(ctx, runtime)
 		}
 	}
+	var workService *botAgentWorkService
+	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 && (!resume || interaction != nil) {
+		workService = &botAgentWorkService{req: req}
+		ctx = bot.WithBotWorkServices(ctx, workService)
+	}
 	resources, err := a.factory(ctx, req)
+	if err == nil && resources != nil && resources.ModelSelection != nil {
+		selected := *resources.ModelSelection
+		modelSelection = &selected
+	}
 	if resources != nil && resources.Cleanup != nil {
 		defer resources.Cleanup()
 	}
@@ -281,6 +300,9 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	// The factory contract supplies the shared-budget model. Capture/resume
 	// decorators below are parent-turn behavior and must not wrap auxiliary calls.
 	auxiliary := resources.Agent.LLM
+	if workService != nil {
+		workService.resources, workService.llm = resources, auxiliary
+	}
 	ctx = agent.WithBotAuxiliaryLLM(ctx, auxiliary)
 	if capture != nil {
 		resources.Agent.LLM = &botApprovalCaptureModel{LLM: resources.Agent.LLM, capture: capture}
@@ -311,6 +333,16 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotChatResources, sink bot.EventSink, capture *botApprovalCapture, existing *session.GetResponse, interaction *store.BotApproval, resume bool, sequence *int64, completed *ChatCompletion) (result bot.RunResult, err error) {
 	if capture != nil {
 		ctx = context.WithValue(ctx, botApprovalCaptureKey{}, capture)
+	}
+	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		journal := &botAgentReadJournal{}
+		ctx = context.WithValue(ctx, botAgentReadJournalKey{}, journal)
+		// Wrap the producer only, outside capture/exact-action resume decorators.
+		// The fresh factory agent is request-owned; restore it between attempts so
+		// auxiliary models and subsequent work cannot inherit this journal.
+		llm := resources.Agent.LLM
+		resources.Agent.LLM = &botAgentReadModel{LLM: llm, journal: journal}
+		defer func() { resources.Agent.LLM = llm }()
 	}
 	cr := newChatRunner(req.Run.SessionID.String(), req.Bot.OwnerID.String(), resources.AppName, false)
 	cr.cancel() // discard constructor's background context: Bot lifetime is worker-owned
@@ -358,7 +390,7 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	completion := cr.Completion()
 	// Continuations must assess the actual saved source responses and the owner
 	// answer, not only this invocation's final prose. These are untrusted data.
-	if resume && req.Work != nil {
+	if resume && req.Work != nil && req.Work.Protocol != store.BotWorkProtocolAgentLedV1 {
 		if completion.reportBodies == nil {
 			completion.reportBodies = make(map[string]string)
 		}
@@ -545,8 +577,10 @@ type botConversationSession struct {
 
 func (s botConversationSession) Events() session.Events {
 	prior := append([]*session.Event(nil), s.prior...)
-	for e := range s.Session.Events().All() {
-		prior = append(prior, e)
+	if s.Session != nil {
+		for e := range s.Session.Events().All() {
+			prior = append(prior, e)
+		}
 	}
 	prior = append(prior, s.appended...)
 	return botConversationEvents{prior: prior}
@@ -599,6 +633,14 @@ func (s botConversationSessions) AppendEvent(ctx context.Context, sess session.S
 			}
 			if err := s.transcript.AppendBotRunEvent(ctx, s.lease, s.id, &copy); err != nil {
 				return err
+			}
+			// Orientation may already have pinned this canonical owner event in
+			// the run. The transcript write is idempotent; mirror that property
+			// in the in-memory view so the producer sees the admission once.
+			for existing := range wrapped.Events().All() {
+				if existing.ID == copy.ID {
+					return nil
+				}
 			}
 			wrapped.appended = append(wrapped.appended, &copy)
 			return nil

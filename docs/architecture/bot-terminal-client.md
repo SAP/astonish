@@ -1,5 +1,13 @@
 # Remote Bot CLI and terminal Chat
 
+## Committed skills inspection
+
+`/bots skills` uses the optional remote `BotSkillBackend` to inspect scoped committed skill metadata, revision history and linked run receipts. It does not replace `/skills` or expose remote Bots in local Code mode. Enter opens revisions; `u` opens receipts, `h` returns to revisions, `r` retries, `a` toggles archived records in the list, and `n`/`p` follow the server cursor/first page. Escape returns to the list, then the existing Bot Home without detaching or clearing unfinished work. Generation and request IDs reject late responses.
+
+Loading, empty, unavailable and stale results are separate from successful observations. Unknown revision/receipt schemas are unavailable, not interpreted as prose. Reads do not orient a skill, invoke a model, import a legacy trigger, or admit a run. Skills are operating knowledge, never permission. Studio Details → Skills & history reads the same records while Home stays mounted.
+
+The strict controlled surface gate is `python3 tests/e2eboot/skill_surface_acceptance.py`; build Studio first. It requires every named native-browser and PTY case and rejects skipped tests. It does not prove real-provider scheduling or production deployment.
+
 ## Assessed deliverables
 
 Bot Home final reports carry the same committed quality summary in Studio and terminal. `bot.QualitySummary` is shared by the report formatter and terminal overview, distinguishing checked requirements, unresolved requirements, absent legacy assessment and unknown schema. Model assessments are labelled judgments rather than independent mechanical evidence. The overview shows committed limitations; errors/loading do not present a stale assessment as current. Existing Escape/navigation and owner-only actions remain unchanged, and local Code mode has no Bot quality workflow.

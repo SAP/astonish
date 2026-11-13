@@ -1226,6 +1226,179 @@ func (g employeeBrowserGuard) Authorize(ctx context.Context, a execution.ActionD
 	return d, nil
 }
 
+// TestBotAgentWorkBrowserAcceptance exercises the built SPA with controlled public
+// DTOs. Publication correctness is covered separately by the worker acceptance.
+func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
+	if os.Getenv("ASTONISH_BOT_BROWSER_ACCEPTANCE") != "1" {
+		t.Skip("explicit browser opt-in required")
+	}
+	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
+	if bin == "" {
+		var ok bool
+		bin, ok = browserlauncher.LookPath()
+		if !ok {
+			t.Fatal("native browser unavailable")
+		}
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	raw, err := os.ReadFile("../../web/package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	dist, _ := filepath.Abs(filepath.Join("../../web/dist", pkg.Version))
+	id, home, runID, owner := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	b := store.Bot{ID: id, HomeSessionID: home, OwnerID: owner, Scope: store.BotScopePersonal, Status: store.BotActive, Name: "Agent surface", Version: 1, Revision: 1}
+	var mode atomic.Int32
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+			http.Error(w, "read only fixture", 405)
+			return
+		}
+		var value any
+		switch r.URL.Path {
+		case "/api/auth/setup-status":
+			value = map[string]any{"initialized": true, "auth_mode": "builtin"}
+		case "/api/auth/me":
+			value = map[string]any{"user": map[string]any{"id": owner.String(), "email": "agent@example.test", "display_name": "Owner", "role": "owner", "platform_role": "user"}, "org": map[string]any{"slug": "test"}, "team": "test"}
+		case "/api/orgs":
+			value = map[string]any{"orgs": []any{}, "active_org": "test"}
+		case "/api/teams":
+			value = []any{map[string]any{"slug": "test", "name": "Test"}}
+		case "/api/settings/status":
+			value = map[string]any{"setupRequired": false}
+		case "/api/version":
+			value = map[string]any{"version": "dev"}
+		case "/api/agents", "/api/tools":
+			value = []any{}
+		case "/api/studio/bots":
+			value = map[string]any{"bots": []store.Bot{b}}
+		default:
+			if strings.Contains(r.URL.Path, "/versions/") {
+				value = store.DefaultBotVersion()
+				break
+			}
+			if strings.HasSuffix(r.URL.Path, "/events") {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "event: replay_complete\nid: %s:1\ndata: {}\n\n", home)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+				return
+			}
+			if strings.HasSuffix(r.URL.Path, "/snapshot") {
+				if mode.Load() == 4 {
+					http.Error(w, "unavailable", 503)
+					return
+				}
+				work := &store.BotWorkProjection{SchemaVersion: 1, Protocol: store.BotWorkProtocolAgentLedV1, BotID: id, RunID: runID, WorkRevision: 1, Phase: store.BotWorkFinished, Disposition: store.AgentWorkAnswered}
+				if mode.Load() == 1 {
+					work.Disposition = store.AgentWorkPartial
+					work.Remaining = []store.BotWorkObligation{{ID: uuid.New(), SourceRunID: runID, Summary: "Compare missing source", Reason: "Source unavailable", Continuation: store.BotWorkContinueOwnerRequest}}
+					work.Checks = []store.BotWorkCheckReceipt{{ID: uuid.New(), Kind: store.BotWorkCheckModelFeedback, Status: store.BotWorkCheckReturned, Summary: "Narrow the conclusion"}}
+				}
+				if mode.Load() == 2 {
+					work.SchemaVersion = 99
+					work.Items = []store.BotWorkItem{{Summary: "UNSUPPORTED PRIVATE CONTENT"}}
+				}
+				if mode.Load() == 3 {
+					work = nil
+				}
+				value = store.BotSnapshot{Bot: b, Operations: []store.BotOperationView{}, PendingProposals: []store.BotControlProposal{}, PendingApprovals: []store.BotApproval{}, ReadCursor: store.BotReadCursor{ViewerID: owner}, LatestOutcome: &store.BotRun{ID: runID, BotID: id, Status: store.RunSucceeded, Work: work}, RunStates: []store.BotRunState{{SchemaVersion: 1, BotID: id, RunID: runID, SessionID: uuid.New(), HomeSessionID: home, Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunSucceeded, StateSequence: int64(mode.Load() + 2), Work: work}}}
+			} else if strings.HasPrefix(r.URL.Path, "/api/") {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/runs"), strings.HasSuffix(r.URL.Path, "/goals"), strings.HasSuffix(r.URL.Path, "/approvals"), strings.HasSuffix(r.URL.Path, "/proposals"), strings.HasSuffix(r.URL.Path, "/activity"), strings.HasSuffix(r.URL.Path, "/skills"), strings.HasSuffix(r.URL.Path, "/sessions"):
+					value = map[string]any{"runs": []any{}, "goals": []any{}, "approvals": []any{}, "proposals": []any{}, "activity": []any{}, "skills": []any{}, "sessions": []any{}}
+				default:
+					http.NotFound(w, r)
+					return
+				}
+			}
+		}
+		if value != nil {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(value)
+			return
+		}
+		path := filepath.Join(dist, filepath.Clean("/"+r.URL.Path))
+		if info, e := os.Stat(path); e == nil && !info.IsDir() {
+			http.FileServer(http.Dir(dist)).ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(dist, "index.html"))
+	}))
+	defer server.Close()
+	launch := browserlauncher.New().Bin(bin).UserDataDir(t.TempDir()).Headless(true).Leakless(false)
+	control, err := launch.Launch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer launch.Cleanup()
+	browser := rod.New().ControlURL(control).MustConnect()
+	defer browser.Close()
+	page := browser.MustPage().Timeout(30 * time.Second)
+	page.MustEvalOnNewDocument(`window.__agentErrors=[]; window.addEventListener('error', e=>window.__agentErrors.push(e.error?.stack || e.message)); window.addEventListener('unhandledrejection', e=>window.__agentErrors.push(String(e.reason)))`)
+	page.MustNavigate(server.URL + "/#/chat/bots/personal/" + id.String())
+	page = page.WithPanic(func(v any) {
+		text, _ := page.CancelTimeout().Eval(`()=>JSON.stringify({body:document.body.innerText, errors:window.__agentErrors, url:location.href})`)
+		t.Fatalf("agent browser: %v\n%v", v, text)
+	})
+	assertUnclutteredChat := func() {
+		t.Helper()
+		if !page.MustEval(`() => { const workspace = document.querySelector('[aria-label="Bot workspace"]'); return workspace && !workspace.querySelector('[aria-label^="Work for run"]') && !workspace.innerText.includes('Bot transcript:') && !workspace.querySelector('[data-testid="message-area"]').innerText.match(/Work in progress|Answer provided|Partial answer|Work details unavailable/); }`).Bool() {
+			t.Fatal("standalone work or transport diagnostics appeared in chat")
+		}
+	}
+	page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustInput("Keep this draft")
+	assertUnclutteredChat()
+	page.MustElementR("button", "^Details$").MustClick()
+	page.MustElementR("summary", "^Runs & activity$").MustClick()
+	page.MustElementR("summary", "^Answer provided$").MustVisible()
+	t.Log("AGENT_SURFACE browser/answer PASS")
+	for _, tc := range []struct {
+		mode int32
+		want string
+	}{{1, "Partial answer"}, {2, "Work details unavailable"}, {3, "No work result yet"}} {
+		mode.Store(tc.mode)
+		page.MustElementR("button", "^Refresh Bot$").MustClick()
+		page.MustWait(`want => document.querySelector('[role="dialog"]').innerText.includes(want)`, tc.want)
+		assertUnclutteredChat()
+		if tc.mode == 1 {
+			page.MustElementR(`[role="dialog"] summary`, "^Partial answer$").MustClick()
+			page.MustElementR("p", "Feedback received: Narrow the conclusion").MustVisible()
+			page.MustElementR("p", "no automatic continuation").MustVisible()
+		}
+		if tc.mode == 2 && strings.Contains(page.MustElement("body").MustText(), "UNSUPPORTED PRIVATE CONTENT") {
+			t.Fatal("unknown work schema interpreted")
+		}
+	}
+	t.Log("AGENT_SURFACE browser/work-states PASS")
+	mode.Store(4)
+	page.MustElementR("button", "^Refresh Bot$").MustClick()
+	page.MustElement(`[aria-label="Bot workspace"] [role="alert"]`).MustVisible()
+	mode.Store(0)
+	page.MustElementR("button", "^Refresh Bot$").MustClick()
+	page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
+	if page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustProperty("value").Str() != "Keep this draft" {
+		t.Fatal("composer lost")
+	}
+	page.MustReload()
+	page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustVisible()
+	assertUnclutteredChat()
+	page.MustElementR("button", "^Details$").MustClick()
+	page.MustElementR("summary", "^Runs & activity$").MustClick()
+	page.MustElementR("summary", "^Answer provided$").MustVisible()
+	if writes.Load() != 0 {
+		t.Fatalf("inspection wrote %d requests", writes.Load())
+	}
+	t.Log("AGENT_SURFACE browser/restore-composer PASS")
+}
+
 type employeeReadCloser struct{ *strings.Reader }
 
 func (employeeReadCloser) Close() error         { return nil }

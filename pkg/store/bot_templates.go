@@ -24,10 +24,25 @@ type BotGoalDefinition struct {
 	CompletionCriteria string `json:"completion_criteria"`
 }
 type BotScheduleSuggestion struct {
-	Cron         string `json:"cron"`
-	Timezone     string `json:"timezone"`
-	Instructions string `json:"instructions"`
+	// SkillSeed is optional. Its expectation is explicitly adopted by the
+	// destination owner on instantiation; no source IDs or authority are copied.
+	SkillSeed    *BotSkillSeed `json:"skill_seed,omitempty"`
+	Cron         string        `json:"cron"`
+	Timezone     string        `json:"timezone"`
+	Instructions string        `json:"instructions"`
 }
+
+// BotSkillSeed is a reviewed, prose-only initial method, not a copied skill
+// revision. OwnerExpectation is explicit owner adoption, never inferred from the
+// method or legacy instructions. Instantiation creates a local goal source for it.
+// History, observed evidence, IDs, credentials and authority have no fields here.
+type BotSkillSeed struct {
+	Title            string   `json:"title"`
+	Responsibility   string   `json:"responsibility"`
+	OwnerExpectation string   `json:"owner_expectation"`
+	Method           []string `json:"method"`
+}
+
 type BotTemplate struct {
 	ID          uuid.UUID             `json:"id"`
 	Revision    int64                 `json:"revision"`

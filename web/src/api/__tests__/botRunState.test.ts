@@ -4,6 +4,17 @@ import { dispatchBotTranscript } from '../botEvents'
 import type { BotMessageReceipt } from '../botReviews'
 const state: BotRunState = { schema_version: 1, bot_id: 'bot', run_id: 'r', session_id: 'trace', home_session_id: 'home', presentation: 'home_interactive', status: 'running', state_sequence: 3 }
 const merge = (s: Parameters<typeof mergeBotRunState>[0], patch: Partial<BotRunState> = {}) => mergeBotRunState(s, { ...state, ...patch }, 'bot', 'home')
+it('keeps public work identical across replay and rejects cross-run, session and revision regressions', () => {
+  const work: NonNullable<BotRunState['work']> = { schema_version: 1, protocol: 'agent_led_v1', bot_id: 'bot', run_id: 'r', work_revision: 3, phase: 'working', items: [] }
+  const live = merge({}, { work })
+  expect(merge(live, { work })).toBe(live)
+  for (const patch of [{ work: { ...work, run_id: 'other' } }, { work: { ...work, bot_id: 'other' } }, { work: { ...work, work_revision: 2 } }, { session_id: 'other', work }]) expect(merge(live, { ...patch, state_sequence: 4 })).toBe(live)
+  const final = merge(live, { work: { ...work, work_revision: 4, disposition: 'answered', phase: 'finished' }, status: 'succeeded', state_sequence: 5 })
+  expect(merge({}, final.r)).toEqual(final)
+  expect(merge(final, { state_sequence: 6, status: 'succeeded' }).r.work).toEqual(final.r.work)
+  expect(merge(live, { work: { ...work, schema_version: 99 }, state_sequence: 4 }).r.work?.schema_version).toBe(99)
+})
+
 it('keeps two quick turns independent, clears only on durable waiting/terminal state', () => {
   let s = merge({})
   s = merge(s, { run_id: 'r2', status: 'queued' })

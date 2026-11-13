@@ -31,6 +31,74 @@ func QualitySummary(q *store.BotQualityReport) string {
 	return fmt.Sprintf("Requirements checked · %d correction attempts. Model assessments are judgments, not guarantees.", q.Repairs)
 }
 
+// WorkSummary labels agent judgment without certifying requirements or delivery.
+func WorkSummary(w *store.BotWorkProjection) string {
+	if w == nil {
+		return "No work result yet"
+	}
+	if w.SchemaVersion != store.BotAgentWorkSchemaVersion || w.Protocol != store.BotWorkProtocolAgentLedV1 {
+		return "Work details unavailable"
+	}
+	switch w.Disposition {
+	case store.AgentWorkComplete:
+		return "Completed by agent"
+	case store.AgentWorkAnswered:
+		return "Answer provided"
+	case store.AgentWorkPartial:
+		return "Partial answer"
+	case store.AgentWorkBlocked:
+		return "Blocked"
+	}
+	if w.Phase == store.BotWorkInterrupted {
+		return "Interrupted"
+	}
+	return "Work in progress"
+}
+
+// RenderWorkDetails consumes only the public projection; private notes never enter it.
+func RenderWorkDetails(w *store.BotWorkProjection) string {
+	var b strings.Builder
+	b.WriteString(WorkSummary(w))
+	if w == nil || w.SchemaVersion != store.BotAgentWorkSchemaVersion || w.Protocol != store.BotWorkProtocolAgentLedV1 {
+		return b.String()
+	}
+	b.WriteString("\nAgent-reported progress, not independent verification. Delivery and observed effects are separate.")
+	for _, item := range w.Items {
+		status := strings.ReplaceAll(string(item.Status), "_", " ")
+		if item.Status == store.BotWorkItemCompleted {
+			status = "Completed by agent"
+		}
+		fmt.Fprintf(&b, "\n%s: %s", status, item.Summary)
+		if item.Reason != "" {
+			fmt.Fprintf(&b, " — %s", item.Reason)
+		}
+	}
+	if len(w.Remaining) > 0 {
+		b.WriteString("\nRemaining work")
+	}
+	for _, item := range w.Remaining {
+		continuation := "Requires a new owner request; no automatic continuation."
+		switch item.Continuation {
+		case store.BotWorkContinueExistingSchedule:
+			continuation = "Linked to an existing schedule; timing is not provided here."
+		case store.BotWorkContinueExistingApproval:
+			continuation = "Requires the linked approval."
+		}
+		fmt.Fprintf(&b, "\n%s — %s. %s", item.Summary, item.Reason, continuation)
+	}
+	for _, check := range w.Checks {
+		label := "Check unavailable"
+		if check.Status == store.BotWorkCheckReturned {
+			label = "Feedback received"
+			if check.Kind == store.BotWorkCheckMechanicalObservation {
+				label = "Mechanical observation"
+			}
+		}
+		fmt.Fprintf(&b, "\n%s: %s", label, check.Summary)
+	}
+	return b.String()
+}
+
 // RenderReport renders the committed employee message for Home and terminal.
 // Detailed evidence stays on BotReport for diagnostics, not in the conversation.
 func RenderReport(run store.BotRun) string {

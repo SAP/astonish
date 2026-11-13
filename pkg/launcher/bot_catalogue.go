@@ -140,6 +140,9 @@ func (t *botSandboxTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	}
 	output, err := t.client.Call(t.sessionID, t.Name(), values)
 	if err != nil {
+		// Record the failed access, not a successful effect. Keep the original
+		// transport error so ordinary error handling and cancellation are intact.
+		recordBuiltinToolObservation(ctx, t.sessionID, t.Name(), values, map[string]any{"error": err.Error()})
 		return nil, err
 	}
 	var result map[string]any
@@ -159,7 +162,12 @@ var _ agent.BotActionClassifier = BotCatalogueClassifier{}
 func (BotCatalogueClassifier) DescribeAction(_ context.Context, name string, args json.RawMessage) (execution.ActionDescriptor, error) {
 	action := execution.ActionDescriptor{Tool: name, Arguments: args, Effect: execution.EffectUnknown}
 	switch name {
-	case "memory_save":
+	case botWorkReadTool, botWorkUpdateTool, botEvidenceReadTool, botCheckWorkTool, "bot_skill_list", "bot_skill_read":
+		// These are lease-bound local bookkeeping/evidence and Bot-owned
+		// method reads, not external effects. The ordinary policy still checks allowed tools,
+		// child ceilings, disabled tools and budgets before dispatch.
+		action.Effect, action.ConstraintsVerified = execution.EffectRead, true
+	case "memory_save", "bot_skill_use", "bot_skill_save":
 		// The production memory adapter is Bot/session-prefiltered and its
 		// transactional backend checks the live lease before every mutation.
 		action.Effect, action.ConstraintsVerified = execution.EffectReversibleWrite, true

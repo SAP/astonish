@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import BotWorkspace, { BotQualityDetails } from '../BotWorkspace'
+import BotWorkspace, { BotQualityDetails, BotWorkDetails, BotRunWorkDetails } from '../BotWorkspace'
 import BotDraftDialog from '../BotDraftDialog'
 import BotSidebar from '../BotSidebar'
 import { BotGoals, BotSchedule } from '../BotPanels'
 import { BotDecisionInbox } from '../BotControls'
 import { botPath } from '../botRoute'
 import { parseHash } from '@/hooks/useHashRouter'
+import * as skillsApi from '@/api/botSkills'
+vi.mock('@/api/botSkills', async original => ({ ...await original<typeof skillsApi>(), listBotSkills: vi.fn() }))
 import * as reviewsApi from '@/api/botReviews'
 const continuationStates = vi.hoisted(() => ({ value: [] as import('@/api/botRunState').BotRunState[] }))
 vi.mock('@/api/botReviews', async original => ({ ...await original<typeof reviewsApi>(), listControlProposals: vi.fn(), sendBotMessage: vi.fn(), continueInteractive: vi.fn() }))
@@ -18,6 +20,38 @@ import * as policyApi from '@/api/botConfiguration'
 vi.mock('@/api/botConfiguration', async original => ({ ...await original<typeof policyApi>(), configureBot: vi.fn(), getBotConfigurationVersion: vi.fn() }))
 import { cancelBotRun } from '@/api/botRunControls'
 vi.mock('@/api/botRunControls', async original => ({ ...await original<typeof import('@/api/botRunControls')>(), cancelBotRun: vi.fn() }))
+
+it('shows agent work, partial obligations and feedback without certifying success', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 2, phase: 'finished', disposition: 'partial', items: [], remaining: [{ id: 'o', source_run_id: 'r', summary: 'Compare missing source', reason: 'Source unavailable', continuation: 'owner_request' }], checks: [{ id: 'c', call_id: 'call', kind: 'model_feedback', status: 'returned', judgment: 'needs_work', summary: 'Narrow the conclusion', draft_digest: 'digest', observed_at: 'now' }] }
+  const view = render(<BotWorkDetails work={work} />)
+  expect(screen.getByText('Partial answer')).toBeTruthy()
+  expect(screen.getByText(/Requires a new owner request; no automatic continuation/)).toBeTruthy()
+  expect(screen.getByText('Feedback received: Narrow the conclusion')).toBeTruthy()
+  view.rerender(<BotWorkDetails work={{ ...work, schema_version: 99 }} />)
+  expect(screen.getByText('Work details unavailable')).toBeTruthy()
+  expect(screen.queryByText(/Compare missing source/)).toBeNull()
+  view.rerender(<BotWorkDetails work={{ ...work, disposition: 'answered', remaining: [], checks: [] }} unavailable />)
+  expect(screen.getByText('Last known work · Answer provided')).toBeTruthy()
+  expect(screen.queryByText('Remaining work')).toBeNull()
+  view.rerender(<BotWorkDetails loading />)
+  expect(screen.getByText('Loading work details…')).toBeTruthy()
+  view.rerender(<BotWorkDetails />)
+  expect(screen.getByText('No work result yet')).toBeTruthy()
+})
+
+it('only presents scoped work and committed learning, and keeps legacy assessment separate', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 1, phase: 'blocked' }
+  const run = { id: 'r', bot_id: 'b', work, report: { skill: { schema_version: 1, bot_id: 'b', run_id: 'r', skill_id: 'skill', kind: 'updated', used_revision: 1, committed_revision: 2 } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText('Blocked')).toBeInTheDocument()
+  expect(screen.getByText('Learning: updated · used revision 1 · committed revision 2')).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: { ...work, run_id: 'other' }, report: { ...run.report, skill: { ...run.report.skill!, run_id: 'other' } } }} />)
+  expect(screen.getByText('Work details unavailable')).toBeInTheDocument()
+  expect(screen.queryByText(/Learning:/)).not.toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: undefined, report: { ...run.report, quality: { schema_version: 1, work_revision: 1, requirements_digest: 'digest', repairs: 0, outcome: 'blocked' } } }} />)
+  expect(screen.getByText(/Quality assessment:/)).toBeInTheDocument()
+  expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
+})
 
 // Panel tests retain resource fixtures; the real shared snapshot hook has its own suite.
 vi.mock('../useBotSnapshot', async () => {
@@ -51,6 +85,7 @@ const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'W
 const version: api.BotVersion = { bot_id: 'bot', version: 1, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, autonomy: { level: 'supervised', can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'important', preferences: '', bindings: [] }, triggers: [] }
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(skillsApi.listBotSkills).mockResolvedValue({ skills: [] })
   continuationStates.value = []
   vi.mocked(reviewsApi.listControlProposals).mockResolvedValue({ proposals: [] })
   vi.mocked(reviewsApi.sendBotMessage).mockResolvedValue({ run: { id: 'conversation' } as api.BotRun, home_session_id: 'home', user_event_id: 'u', history_cursor: 1 })
@@ -94,6 +129,25 @@ describe('Bot quality assessment', () => {
 })
 
 describe('Bot workspace', () => {
+  it.each(['dark', 'light'])('keeps saved work accessible only in Details when closed and reopened (%s)', async theme => {
+    const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: bot.id, run_id: 'saved-run', work_revision: 2, phase: 'finished', disposition: 'answered', items: [{ id: 'source', status: api.WorkItemStatus.Complete, summary: 'Compared original sources' }] }
+    vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [{ id: 'saved-run', bot_id: bot.id, status: 'succeeded', trigger: 'manual', work, report: { summary: 'The actual answer' }, usage: { tool_calls: 2 } } as api.BotRun] })
+    render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme={theme} userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    expect(screen.queryByText('Answer provided')).not.toBeVisible()
+    await openDetails('Runs')
+    const dialog = screen.getByRole('dialog')
+    const summary = await within(dialog).findByText('Answer provided')
+    expect(summary).toBeVisible()
+    fireEvent.click(summary)
+    expect(within(dialog).getByText('Completed by agent: Compared original sources')).toBeVisible()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(summary).not.toBeVisible()
+    await openDetails('Runs')
+    expect(within(screen.getByRole('dialog')).getByText('Answer provided')).toBe(summary)
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+  })
   it('prepares a draft with an existing conversation but no physical home and retains the acknowledged revision', async () => {
     const empty = { ...bot, home_session_id: '82c09d23-63e1-42d8-8baa-5f540fabc645', home: null }
     vi.mocked(api.getBot).mockResolvedValue(empty)
@@ -423,6 +477,7 @@ describe('Bot workspace', () => {
   })
   it('creates a disabled cron schedule only with a reason', async () => {
     render(<BotSchedule bot={bot} version={version} readOnly={false} onChange={vi.fn()} />)
+    fireEvent.click(screen.getByLabelText('Use legacy instructions (no skill import)'))
     for (const [label, value] of [['Cron expression', '0 9 * * *'], ['Schedule instructions', 'Observe'], ['Trigger change reason', 'Reviewed']]) fireEvent.change(screen.getByLabelText(label), { target: { value } })
     fireEvent.click(screen.getByRole('button', { name: 'Save disabled schedule' }))
     await waitFor(() => expect(api.saveBotTrigger).toHaveBeenCalledWith(bot, expect.objectContaining({ enabled: false, kind: 'cron', timezone: 'UTC' }), 'Reviewed'))

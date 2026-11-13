@@ -804,6 +804,9 @@ func (d teamBotDB) PurgeBot(ctx context.Context, rec botStoredRecord, cutoff tim
 	if _, err := d.client.BotTrackedItem.Delete().Where(bottrackeditem.HasGoalWith(botgoal.BotIDEQ(id))).Exec(ctx); err != nil {
 		return err
 	}
+	if err := d.purgeSkills(ctx, id); err != nil {
+		return err
+	}
 	if _, err := d.client.BotGoal.Delete().Where(botgoal.BotIDEQ(id)).Exec(ctx); err != nil {
 		return err
 	}

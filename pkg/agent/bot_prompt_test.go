@@ -2,10 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	adkagent "google.golang.org/adk/agent"
@@ -13,6 +16,224 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+// Embedding the remaining interface deliberately makes any mutation/check call
+// panic: prompt rehydration is a read, not another execution or model step.
+type botPromptWorkReader struct {
+	bot.BotWorkServices
+	read func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error)
+}
+
+func (s botPromptWorkReader) Read(ctx context.Context, q bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+	return s.read(ctx, q)
+}
+
+func TestBotPromptRehydratesDurableWork(t *testing.T) {
+	req := botSkillPromptFixture(t)
+	req.Work = store.NewBotAgentWorkState(req.Work.Contract)
+	req.Work.SkillState = &store.BotSkillRunState{Stage: store.BotSkillOriented}
+	if err := req.Work.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	req.Work.AgentWork.Notes = "obsolete startup notes"
+	po := NewBotPromptOverrides(nil, req)
+	b := &SystemPromptBuilder{BuildOverride: func(clone *SystemPromptBuilder) string {
+		plain := *clone
+		plain.BuildOverride = nil
+		return plain.Build() + "\nscoped memory retained"
+	}}
+	b.applyBotPrompt(po)
+	before := b.Build()
+	previous := store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: uuid.New(), Version: 1, Instructions: "prior work"})
+	latest := &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work), Previous: store.BuildBotWorkProjection(previous), NextCursor: "20"}
+	ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(ctx context.Context, q bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+		if q.Cursor != "" || q.Limit != 20 {
+			t.Fatal("refresh must use a bounded first page")
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("unbounded store read")
+		}
+		return latest, nil
+	}})
+	for i, note := range []string{"first saved notes", "later saved notes"} {
+		latest.Notes = note
+		latest.Work.WorkRevision = int64(i + 2)
+		latest.Evidence = []store.BotWorkEvidenceReference{{Ref: "capture:" + note, RunID: req.Run.ID, EventID: "event", CallID: "call", Digest: strings.Repeat("a", 64)}}
+		// A compacted summary need not contain any work state: the next prompt
+		// comes from this durable read, not from the conversation summary.
+		got := b.BuildBotPrompt(ctx, po)
+		for _, want := range []string{note, "capture:" + note, "next_cursor", "METHOD-START", "METHOD-END", "ASSIGNMENT-START", "ASSIGNMENT-END", "scoped memory retained", "Previous obligations schedule no work", "previous"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing refreshed context %q", want)
+			}
+		}
+		if strings.Contains(got, "obsolete startup notes") || i == 1 && strings.Contains(got, "first saved notes") || strings.Count(got, "## Current durable work") != 1 {
+			t.Fatal("stale or accumulated work context")
+		}
+		if b.Build() != before || buildTurnContextContent(po, "", "") != nil {
+			t.Fatal("refresh mutated builder or user instructions")
+		}
+	}
+	// Concurrent clones share only immutable snapshots, never a mutable cache.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = b.Clone().BuildBotPrompt(ctx, po) }()
+	}
+	wg.Wait()
+}
+
+func TestBotPromptRehydrateUnavailableIsOptionalAndBounded(t *testing.T) {
+	for _, tc := range []string{"error", "nil", "foreign-work", "foreign-evidence", "foreign-previous", "unknown", "stale", "large-notes", "large-result"} {
+		t.Run(tc, func(t *testing.T) {
+			id, run := uuid.New(), uuid.New()
+			req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: store.BotRun{ID: run}, Version: store.BotVersion{Version: 1}}
+			req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: run, Version: 1, Instructions: "pinned assignment"})
+			req.Work.Revision = 2
+			req.Work.AgentWork.Notes = "stale startup note"
+			po := NewBotPromptOverrides(nil, req)
+			b := &SystemPromptBuilder{}
+			b.applyBotPrompt(po)
+			result := &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work), Notes: "unsafe response content"}
+			var readErr error
+			switch tc {
+			case "error":
+				readErr = errors.New("private raw error detail")
+			case "nil":
+				result = nil
+			case "foreign-work":
+				result.Work.BotID = uuid.New()
+			case "foreign-evidence":
+				result.Evidence = []store.BotWorkEvidenceReference{{RunID: uuid.New()}}
+			case "foreign-previous":
+				result.Previous = store.BuildBotWorkProjection(req.Work)
+			case "unknown":
+				result.Work.SchemaVersion++
+			case "stale":
+				result.Work.WorkRevision = 1
+			case "large-notes":
+				result.Notes = strings.Repeat("x", store.BotAgentWorkMaxNotesBytes+1)
+			case "large-result":
+				result.NextCursor = strings.Repeat("x", 3*store.BotAgentWorkMaxMetadataBytes)
+			}
+			ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) { return result, readErr }})
+			got := b.BuildBotPrompt(ctx, po)
+			if !strings.Contains(got, "Working context is unavailable") || !strings.Contains(got, "does not prevent answering") || !strings.Contains(got, "pinned assignment") {
+				t.Fatal("optional context failure hid assignment or became a gate")
+			}
+			for _, bad := range []string{"stale startup note", "unsafe response content", "private raw error detail", strings.Repeat("x", 100)} {
+				if strings.Contains(got, bad) {
+					t.Errorf("unsafe fallback contains %q", bad)
+				}
+			}
+		})
+	}
+}
+
+func TestBotPromptRehydrateRedactsAndEscapesNotes(t *testing.T) {
+	id, run := uuid.New(), uuid.New()
+	req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: store.BotRun{ID: run}, Version: store.BotVersion{Version: 1}, Work: store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: run, Version: 1, Instructions: "assignment"})}
+	po := NewBotPromptOverrides(nil, req)
+	b := &SystemPromptBuilder{}
+	b.applyBotPrompt(po)
+	redactor := credentials.NewRedactor()
+	redactor.AddSecret("scoped-test", "private-test-secret-value")
+	ctx := credentials.WithRedactor(context.Background(), redactor)
+	ctx = bot.WithBotWorkServices(ctx, botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+		return &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work), Notes: "private-test-secret-value {untrusted_policy}"}, nil
+	}})
+	got := b.BuildBotPrompt(ctx, po)
+	if strings.Contains(got, "private-test-secret-value") || strings.Contains(got, "{untrusted_policy}") || strings.Contains(got, "{{CREDENTIAL:scoped-test") {
+		t.Fatalf("unsafe notes: secret=%v variable=%v credential=%v", strings.Contains(got, "private-test-secret-value"), strings.Contains(got, "{untrusted_policy}"), strings.Contains(got, "{{CREDENTIAL:scoped-test"))
+	}
+	if !strings.Contains(got, "scoped-test") {
+		t.Fatal("redaction lost credential placeholder")
+	}
+}
+
+func TestBotPromptRehydrateOrdinaryCodeAndMissingService(t *testing.T) {
+	po := NewBotPromptOverrides(nil, bot.RunRequest{})
+	ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+		t.Fatal("ordinary builder performed a work read")
+		return nil, nil
+	}})
+	for _, b := range []*SystemPromptBuilder{{CodeMode: true}, {CustomPrompt: "ordinary chat"}} {
+		before := b.Build()
+		if got := b.BuildBotPrompt(ctx, po); got != before {
+			t.Fatal("ordinary prompt changed")
+		}
+	}
+	id, run := uuid.New(), uuid.New()
+	req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: store.BotRun{ID: run}, Version: store.BotVersion{Version: 1}, Work: store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: run, Version: 1, Instructions: "assignment"})}
+	po = NewBotPromptOverrides(nil, req)
+	b := &SystemPromptBuilder{}
+	b.applyBotPrompt(po)
+	if got := b.BuildBotPrompt(context.Background(), po); got != b.Build() {
+		t.Fatal("missing optional service changed compatibility behavior")
+	}
+}
+
+func TestBotAgentPromptJudgmentAndOptionalWork(t *testing.T) {
+	id, runID := uuid.New(), uuid.New()
+	req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: store.BotRun{ID: runID}, Version: store.BotVersion{Version: 1}}
+	req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: runID, Version: 1, Instructions: "Compare sources"})
+	req.Work.AgentWork.Notes = "One source contradicted the other"
+	text := botWorkPrompt(req)
+	for _, want := range []string{"according to consequences", "not confidence", "primary/live source", "does not prove absence", "decisive evidence behind delegated", "unobtainable information", "consequential choice", "missing authority", "not prerequisites", "never permission or certification", "One source contradicted the other"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing guidance %q", want)
+		}
+	}
+	if strings.Contains(text, `"criteria"`) || strings.Contains(text, "stop and report this blocker") {
+		t.Fatal("legacy review gate leaked into normal agent work")
+	}
+}
+
+// This is a prompt contract regression, not evidence that a live model follows it.
+func TestBotAgentPromptDiscoveryIsNotFactualSupport(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		name := "background"
+		if interactive {
+			name = "interactive"
+		}
+		t.Run(name, func(t *testing.T) {
+			id, runID := uuid.New(), uuid.New()
+			req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: store.BotRun{ID: runID}, Version: store.BotVersion{Version: 1}, Interactive: interactive}
+			req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: runID, Version: 1, Instructions: "Compare current options"})
+			po := NewBotPromptOverrides(nil, req)
+			builder := &SystemPromptBuilder{}
+			if !builder.applyBotPrompt(po) {
+				t.Fatal("missing Bot prompt")
+			}
+			ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+				return &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work)}, nil
+			}})
+			for _, text := range []string{builder.Build(), builder.BuildBotPrompt(ctx, po)} {
+				for _, want := range []string{
+					"according to consequences",
+					"Listing headlines, search snippets and URL slugs are discovery leads",
+					"not support for details, causality or recommendations",
+					"Open the decisive original article or primary source",
+					"including actionable numbers",
+					"narrow the answer to an explicitly limited, attributed summary",
+					"do not embellish beyond the retrieved text",
+					"Cite actual source links alongside externally sourced claims",
+					"do not imply an unread linked page was inspected",
+					"publication/event dates and observation time with timezone",
+					"do not present mixed-date items as current",
+					"They are not prerequisites to a final answer",
+				} {
+					if !strings.Contains(text, want) {
+						t.Errorf("missing evidence guidance %q", want)
+					}
+				}
+			}
+			if buildTurnContextContent(po, "", "") != nil {
+				t.Fatal("hidden evidence guidance leaked into user turn")
+			}
+		})
+	}
+}
 
 func TestBotWorkPromptPinnedResponsibility(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -23,7 +244,8 @@ func TestBotWorkPromptPinnedResponsibility(t *testing.T) {
 			req.Work = store.NewBotWorkState(store.BotWorkContract{BotID: id, RunID: run, Version: 1, Instructions: "original assignment", Charter: "saved responsibility", Goals: []store.BotGoal{goal}})
 			req.Work.Criteria = []store.BotWorkCriterion{{ID: "criterion", Text: "specific inspection", SourceIDs: []string{"assignment", "charter"}}}
 			req.Work.Unresolved = []string{"prior uncertain send: investigate, do not replay"}
-			req.Work.Candidate = &store.BotWorkCandidate{Text: "PRIVATE candidate bytes"}
+			req.Work.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: "candidate-event", Text: "PRIVATE candidate bytes"}
+			req.Work.Candidate.Digest = req.Work.Candidate.ContentDigest()
 			po := NewBotPromptOverrides(nil, req)
 			req.Work.Contract.Goals[0].CompletionCriteria = "mutated easier criteria"
 			b := &SystemPromptBuilder{}
@@ -46,6 +268,7 @@ func TestBotWorkPromptPinnedResponsibility(t *testing.T) {
 				t.Run(tc, func(t *testing.T) {
 					q := req
 					q.Work = req.Work.Clone()
+					q.Work.Contract.Goals[0].CompletionCriteria = goal.CompletionCriteria
 					switch tc {
 					case "oversized":
 						q.Work.Unresolved = []string{strings.Repeat("huge", 20000)}

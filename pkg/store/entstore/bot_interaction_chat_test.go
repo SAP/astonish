@@ -78,7 +78,7 @@ func (m *questionModel) GenerateContent(_ context.Context, req *model.LLMRequest
 			if prior != 1 || originalTask != 1 || answers != 1 || writes != m.calls-1 || askID == "" || answer.ToolCallID != askID || answer.Response.QuestionID != questionID || answer.Response.Answer != "safe" || answer.Type != "bot_owner_answer" || answer.Tool != "ask_user" || answer.InvocationID == "" || answer.ApprovalID == "" {
 				m.t.Fatalf("lost or replayed transcript: prior=%d task=%d answers=%d writes=%d ask=%s question=%s answer=%+v", prior, originalTask, answers, writes, askID, questionID, answer)
 			}
-			part := &genai.Part{Text: "Completed the safe destination work."}
+			part := &genai.Part{Text: questionReceiptText}
 			if m.calls == 1 {
 				part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "write_file", Args: map[string]any{"body": "safe"}}}
 			}
@@ -105,18 +105,30 @@ func (questionClassifier) DescribeAction(_ context.Context, name string, args js
 
 func TestBotQuestionSQLiteReopenChatRunner(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		t.Run(string(scope), func(t *testing.T) { testBotQuestionSQLiteReopenChatRunner(t, scope, false) })
+		for _, protocol := range []store.BotWorkProtocol{store.BotWorkProtocolLegacyAssessment, store.BotWorkProtocolAgentLedV1} {
+			name := "legacy"
+			if protocol == store.BotWorkProtocolAgentLedV1 {
+				name = "agent"
+			}
+			t.Run(string(scope)+"/"+name, func(t *testing.T) { testBotQuestionSQLiteReopenChatRunner(t, scope, false, protocol) })
+		}
 	}
 }
 
 func TestBotApproveContinueQuestionHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		t.Run(string(scope), func(t *testing.T) { testBotQuestionSQLiteReopenChatRunner(t, scope, true) })
+		for _, protocol := range []store.BotWorkProtocol{store.BotWorkProtocolLegacyAssessment, store.BotWorkProtocolAgentLedV1} {
+			name := "legacy"
+			if protocol == store.BotWorkProtocolAgentLedV1 {
+				name = "agent"
+			}
+			t.Run(string(scope)+"/"+name, func(t *testing.T) { testBotQuestionSQLiteReopenChatRunner(t, scope, true, protocol) })
+		}
 	}
 }
 
-func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, combined bool) {
-	ctx, botID, runID, home, reopen := entstore.ApprovalScopeReopenFixture(t, scope)
+func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, combined bool, protocol store.BotWorkProtocol) {
+	ctx, botID, runID, home, reopen := entstore.ApprovalScopeReopenFixture(t, scope, protocol)
 	ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Classifier: questionClassifier{}, Guard: approvalGuard{}})
 	scoped, ss := reopen()
 	ts, err := slides.GetTools()
@@ -184,6 +196,9 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	waiting, err := makeSupervisor(first).Execute(ctx, botID, runID)
 	if err != nil || waiting.Status != store.RunWaitingApproval || cleaned.Load() != 1 || len(cards) != 1 || prior.Load() != 1 || first.calls != 2 {
 		t.Fatalf("waiting=%+v err=%v cleaned=%d cards=%d", waiting, err, cleaned.Load(), len(cards))
+	}
+	if protocol == store.BotWorkProtocolAgentLedV1 && len(waiting.Report.Unverified) != 0 {
+		t.Fatalf("ordinary read was treated as an unattested effect: %+v", waiting.Report)
 	}
 	scoped, ss = reopen()
 	approvals, err := scoped.ListApprovals(ctx, botID, store.BotPage{})
@@ -307,9 +322,10 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	}
 	final := &questionModel{continued: true, t: t}
 	result, err := makeSupervisor(final).Execute(ctx, botID, runID)
-	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || result.Report.Quality == nil || result.Report.Quality.Repairs != 0 || len(result.Report.Quality.Criteria) != 1 || result.Report.Quality.Criteria[0].Verdict != store.BotCriterionUnverified || len(result.Report.Unverified) == 0 || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
+	if err != nil || result.Status != store.RunPartial || result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil || len(result.Report.Unverified) == 0 || len(result.Report.Unverified) < len(waiting.Report.Unverified) || final.calls != 2 || constructed.Load() != 2 || prior.Load() != 1 || post.Load() != 1 || len(cards) != 1 {
 		t.Fatalf("unexpected continuation %+v err=%v model=%d constructed=%d", result, err, final.calls, constructed.Load())
 	}
+	assertContinuationProtocolReport(t, result.Report, protocol, questionReceiptText)
 	scoped, ss = reopen()
 	saved, err = scoped.GetRun(ctx, botID, runID)
 	if err != nil || saved.Status != result.Status || saved.Report.Summary != result.Report.Summary {

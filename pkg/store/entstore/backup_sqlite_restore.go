@@ -296,6 +296,10 @@ func restoreTablePriority(entity string) int {
 		return 5
 	case "bot_tracked_items", "bot_approvals", "bot_outbox":
 		return 6
+	case "bot_skills":
+		return 7
+	case "bot_skill_revisions":
+		return 8
 	case "session_events", "chat_session_events", "sandbox_sessions":
 		return 3
 	default:

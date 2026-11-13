@@ -657,7 +657,7 @@ func TestBotRestoreMappingPreservesContent(t *testing.T) {
 	scope := backup.Scope{Kind: "personal", OrgSlug: "oldorg", UserID: oldUser}
 	target := backup.Scope{Kind: "personal", OrgSlug: "neworg", UserID: newUser}
 	opts := PlatformRestoreOptions{MapOrg: map[string]string{"oldorg": "neworg"}, MapTeam: map[string]string{"oldorg/ops": "neworg/platform"}, MapUser: map[string]string{"oldorg/" + oldUser: "neworg/" + newUser}}
-	for _, table := range []string{"bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates", "sessions"} {
+	for _, table := range []string{"bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates", "bot_skills", "bot_skill_revisions", "sessions"} {
 		t.Run(table, func(t *testing.T) {
 			row := map[string]any{"id": "stable-id", "owner_id": oldUser, "user_id": oldUser, "created_by": oldUser, "name": "ops", "title": "oldorg", "bot_id": "bot-id", "definition": map[string]any{"charter": "oldorg", "created_by": oldUser}, "data": map[string]any{"read_cursors": map[string]any{oldUser: "9007199254740993"}, "evidence": oldUser}}
 			got := remapRestoreRow(scope, target, table, row, opts)
@@ -682,6 +682,90 @@ func TestBotRestoreMappingPreservesContent(t *testing.T) {
 	row := remapRestoreRow(scope, target, "bots", map[string]any{"owner_id": oldUser}, opts)
 	if row["owner_id"] != oldUser {
 		t.Fatal("cross-org owner mapping")
+	}
+}
+
+func TestBotSkillRestoreValidation(t *testing.T) {
+	r, owner, _, run, _, _ := botRunFixture(t, store.BotScopePersonal)
+	v := skillTestRevision(t, r, owner, run.BotID)
+	v.Digest = v.ContentDigest()
+	data, err := botJSONMap(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := map[string]any{"id": v.ID.String(), "bot_id": v.BotID.String(), "skill_id": v.SkillID.String(), "revision": 1, "digest": v.Digest, "data": data}
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err != nil {
+		t.Fatal(err)
+	}
+	row["digest"] = "tampered"
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err == nil {
+		t.Fatal("accepted changed immutable digest")
+	}
+	row["digest"] = v.Digest
+	row["bot_id"] = uuid.NewString()
+	if err := validateRestoredBotSkillRow("bot_skill_revisions", row); err == nil {
+		t.Fatal("accepted foreign Bot")
+	}
+}
+
+func TestBotSkillRestoreMalformedRevisionRollsBackScope(t *testing.T) {
+	r, owner, _, run, _, _ := botRunFixture(t, store.BotScopePersonal)
+	v := skillTestRevision(t, r, owner, run.BotID)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "skills.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, ddl := range []string{`CREATE TABLE bot_skills (id TEXT PRIMARY KEY, bot_id TEXT, key TEXT, revision INTEGER, status TEXT, data TEXT)`, `CREATE TABLE bot_skill_revisions (id TEXT PRIMARY KEY, bot_id TEXT, skill_id TEXT REFERENCES bot_skills(id), revision INTEGER, digest TEXT, data TEXT)`} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := botJSONMap(botStoredSkill{Skill: store.BotSkill{ID: v.SkillID, BotID: v.BotID, Key: "restore", Revision: 1, Status: store.BotSkillDraft, HeadRevision: 1, HeadDigest: v.Digest}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, corrupt := range []string{"digest", "foreign-root"} {
+		t.Run(corrupt, func(t *testing.T) {
+			var roots, revisions strings.Builder
+			row := map[string]any{"id": v.SkillID.String(), "bot_id": v.BotID.String(), "key": "restore", "revision": 1, "status": "draft", "data": root}
+			if err := backup.NewRecordWriter(&roots, "bot_skills").Write(v.SkillID.String(), row); err != nil {
+				t.Fatal(err)
+			}
+			copy := *v.Clone()
+			if corrupt == "foreign-root" {
+				copy.BotID = uuid.New()
+				for i := range copy.Expectations {
+					copy.Expectations[i].Provenance.BotID = copy.BotID
+				}
+				for i := range copy.Provenance {
+					copy.Provenance[i].BotID = copy.BotID
+				}
+				copy.Digest = copy.ContentDigest()
+			}
+			data, err := botJSONMap(copy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row = map[string]any{"id": copy.ID.String(), "bot_id": copy.BotID.String(), "skill_id": copy.SkillID.String(), "revision": 1, "digest": copy.Digest, "data": data}
+			if corrupt == "digest" {
+				row["digest"] = "tampered"
+			}
+			if err := backup.NewRecordWriter(&revisions, "bot_skill_revisions").Write(copy.ID.String(), row); err != nil {
+				t.Fatal(err)
+			}
+			entries := []backup.Entry{{Entity: "bot_skill_revisions", Path: "revisions", Kind: "jsonl"}, {Entity: "bot_skills", Path: "roots", Kind: "jsonl"}}
+			err = restoreLogicalEntries(context.Background(), db, DialectSQLite, "", backup.Scope{Kind: "personal", OrgSlug: "org", UserID: uuid.NewString()}, map[string][]byte{"roots": []byte(roots.String()), "revisions": []byte(revisions.String())}, entries, PlatformRestoreOptions{}, &backup.RestoreResult{})
+			if err == nil {
+				t.Fatal("corrupt skill scope committed")
+			}
+			for _, table := range []string{"bot_skills", "bot_skill_revisions"} {
+				var n int
+				if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil || n != 0 {
+					t.Fatalf("partial import %s=%d: %v", table, n, err)
+				}
+			}
+		})
 	}
 }
 

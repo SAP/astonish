@@ -28,6 +28,10 @@ type Tx struct {
 	BotOutbox *BotOutboxClient
 	// BotRun is the client for interacting with the BotRun builders.
 	BotRun *BotRunClient
+	// BotSkill is the client for interacting with the BotSkill builders.
+	BotSkill *BotSkillClient
+	// BotSkillRevision is the client for interacting with the BotSkillRevision builders.
+	BotSkillRevision *BotSkillRevisionClient
 	// BotTrackedItem is the client for interacting with the BotTrackedItem builders.
 	BotTrackedItem *BotTrackedItemClient
 	// BotVersion is the client for interacting with the BotVersion builders.
@@ -193,6 +197,8 @@ func (tx *Tx) init() {
 	tx.BotIntake = NewBotIntakeClient(tx.config)
 	tx.BotOutbox = NewBotOutboxClient(tx.config)
 	tx.BotRun = NewBotRunClient(tx.config)
+	tx.BotSkill = NewBotSkillClient(tx.config)
+	tx.BotSkillRevision = NewBotSkillRevisionClient(tx.config)
 	tx.BotTrackedItem = NewBotTrackedItemClient(tx.config)
 	tx.BotVersion = NewBotVersionClient(tx.config)
 	tx.CacheDiagnostic = NewCacheDiagnosticClient(tx.config)

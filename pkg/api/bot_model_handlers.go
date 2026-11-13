@@ -3,14 +3,15 @@ package api
 import (
 	"context"
 	"errors"
-	"github.com/SAP/astonish/pkg/provider"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"net/http"
 	"sort"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 )
 
@@ -24,6 +25,21 @@ const (
 type botModelPinStore interface {
 	SessionPin(context.Context, string) (*store.SessionPin, error)
 	SetSessionPin(context.Context, string, string, string) error
+}
+
+// botProviderHasCredential checks scoped configuration without constructing an
+// adapter or consulting process environment. SAP uses an OAuth configuration
+// tuple, not an API key; resource_group is optional in the provider factory.
+func botProviderHasCredential(ctx context.Context, svc *store.Services, name string, pCfg config.ProviderConfig) bool {
+	if config.GetProviderType(name, pCfg) == "sap_ai_core" {
+		for _, key := range []string{"client_id", "client_secret", "auth_url", "base_url"} {
+			if strings.TrimSpace(pCfg[key]) == "" {
+				return false
+			}
+		}
+		return true
+	}
+	return sessionProviderHasCredential(ctx, svc, name, pCfg)
 }
 
 // handleBotHomeModel is deliberately separate from generic Chat ownership and
@@ -143,7 +159,7 @@ func handleBotHomeModel(w http.ResponseWriter, r *http.Request, sessionID string
 	if scope == store.BotScopePersonal {
 		ownerServices.PersonalCredentials = org.ForUser(b.OwnerID.String()).Credentials()
 	}
-	result.CredentialsAvailable = result.EffectiveProvider != "" && sessionProviderHasCredential(r.Context(), ownerServices, result.EffectiveProvider, resolved.Providers[result.EffectiveProvider])
+	result.CredentialsAvailable = result.EffectiveProvider != "" && botProviderHasCredential(r.Context(), ownerServices, result.EffectiveProvider, resolved.Providers[result.EffectiveProvider])
 	for name := range resolved.Providers {
 		result.AvailableProviders = append(result.AvailableProviders, name)
 	}

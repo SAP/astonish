@@ -175,12 +175,21 @@ func (r *botRepository) applyControlTaskTx(ctx context.Context, tx botDraftDB, r
 	if err = cas.updateControlVersion(ctx, *rec, rec.Bot.Version, now); err != nil {
 		return err
 	}
-	request := store.BotRunRequest{BotID: p.BotID, Version: p.Version, Trigger: store.TriggerManual, Intent: intent, IdempotencyKey: controlProposalKey(p.ID), Instructions: p.Payload.TaskOnce.Instructions}
+	request := store.BotRunRequest{SkillID: p.Payload.TaskOnce.SkillID, Invocation: p.Payload.TaskOnce.Invocation, BotID: p.BotID, Version: p.Version, Trigger: store.TriggerManual, Intent: intent, IdempotencyKey: controlProposalKey(p.ID), Instructions: p.Payload.TaskOnce.Instructions}
+	if err := validateRunSkillSelection(ctx, tx, p.BotID, request.SkillID, request.Invocation); err != nil {
+		return err
+	}
+	if request.SkillID != nil {
+		if request.Instructions != "" && request.Instructions != request.Invocation {
+			return store.ErrBotInvalid
+		}
+		request.Instructions = request.Invocation
+	}
 	hash, err := botHash(request)
 	if err != nil {
 		return err
 	}
-	run := store.BotRun{ID: uuid.NewSHA1(p.ID, []byte("run")), SessionID: uuid.NewSHA1(p.ID, []byte("session")), BotID: p.BotID, Version: p.Version, Intent: intent, Trigger: store.TriggerManual, IdempotencyKey: request.IdempotencyKey, Status: store.RunQueued, CreatedAt: now}
+	run := store.BotRun{SkillID: request.SkillID, Invocation: request.Invocation, ID: uuid.NewSHA1(p.ID, []byte("run")), SessionID: uuid.NewSHA1(p.ID, []byte("session")), BotID: p.BotID, Version: p.Version, Intent: intent, Trigger: store.TriggerManual, IdempotencyKey: request.IdempotencyKey, Status: store.RunQueued, CreatedAt: now}
 	if ref, bounded := ctx.Value(routineTaskKey{}).(store.BotMandateRef); bounded {
 		run.MandateRef = &ref
 		binding := routineTaskBinding{Ref: ref, OperationID: p.ID, Instructions: request.Instructions}

@@ -161,7 +161,11 @@ func TestBotCommittedResultSurvivesReopen(t *testing.T) {
 		_ = c.Close()
 		t.Fatal(err)
 	}
-	q := store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Summary: "Source unavailable", Unverified: []string{"Live price"}}, Usage: store.BotUsage{InputTokens: 9007199254740993}}
+	work, err := r.LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Source unavailable", Unverified: []string{"Live price"}}, Usage: store.BotUsage{InputTokens: 9007199254740993}}
 	if err := r.CommitRun(worker, q); err != nil {
 		_ = c.Close()
 		t.Fatal(err)
@@ -222,6 +226,7 @@ func TestBotMigrationReopen(t *testing.T) {
 	}
 	// Reconstruct the pre-Bot schema without changing the existing chat/job rows.
 	for _, statement := range []string{
+		"DROP TABLE bot_skill_revisions", "DROP TABLE bot_skills",
 		"DROP TABLE bot_approvals", "DROP TABLE bot_runs", "DROP TABLE bot_tracked_items", "DROP TABLE bot_goals", "DROP TABLE bot_versions", "DROP TABLE bot_outbox", "DROP TABLE bot_templates", "DROP TABLE bots",
 		"ALTER TABLE sessions DROP COLUMN bot_id", "ALTER TABLE sessions DROP COLUMN bot_run_id", "ALTER TABLE sessions DROP COLUMN purpose", "ALTER TABLE sessions DROP COLUMN retention",
 		"ALTER TABLE sandbox_sessions DROP COLUMN bot_home_binding",
@@ -277,7 +282,7 @@ func TestBotMigrationReopen(t *testing.T) {
 		t.Fatalf("existing adaptive changed: %+v", saved)
 	}
 	var version int
-	if err := db.QueryRowContext(ctx, "SELECT version FROM bot_schema_version WHERE id = 'bots'").Scan(&version); err != nil || version != store.BotSchemaVersion {
+	if err := db.QueryRowContext(ctx, "SELECT version FROM bot_schema_version WHERE id = 'bots'").Scan(&version); err != nil || version != botMigrationVersion {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	createBotSchemaFixture(t, c)

@@ -26,7 +26,7 @@ func (*metadataApprovingModel) GenerateContent(_ context.Context, r *model.LLMRe
 			review.Criteria = append(review.Criteria, store.BotCriterionAssessment{CriterionID: c.ID, Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Everything is correct"})
 		}
 		raw, _ := json.Marshal(review)
-		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(fixtureContentCoverage(r, raw)), "model")}, nil)
 	}
 }
 

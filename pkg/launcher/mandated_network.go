@@ -95,7 +95,12 @@ func NewBotRoutineReadMandatePolicy(s *store.Services, ceiling config.BotMandate
 		if ref.Validate() != nil || limits.Validate() != nil || s == nil {
 			return store.BotMandatePolicy{}, store.ErrBotForbidden
 		}
-		resources := []string{"web_fetch", "http_request", BotPublicReadResource}
+		// These capabilities operate only on the current Bot's fenced work and
+		// advisory knowledge. They grant no external action or scheduler authority;
+		// existing mandates retain their originally captured resource set.
+		resources := []string{"web_fetch", "http_request", BotPublicReadResource,
+			"bot_work_read", "bot_work_update", "bot_evidence_read", "bot_check_work",
+			"bot_skill_list", "bot_skill_read", "bot_skill_use", "bot_skill_save"}
 		for _, repo := range []store.NetworkPolicyStore{s.PlatformNetworkPolicies, s.NetworkPolicies, s.TeamNetworkPolicies} {
 			if repo != nil {
 				rules, e := repo.List(ctx)

@@ -25,16 +25,34 @@ import (
 // Controlled model, real factory/tool/runner and temporary SQLite runtime.
 // Not a replay or a live-provider acceptance receipt.
 type routineGoalModel struct {
-	calls    int
-	badFirst bool
+	calls          int
+	badFirst       bool
+	pendingMessage string
 }
 
 func (*routineGoalModel) Name() string { return "routine-goal-fixture" }
-func (m *routineGoalModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *routineGoalModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		if m.calls > 1 && (!m.badFirst || m.calls > 2) {
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("Done, goal applied.", "model"), TurnComplete: true}, nil)
+			text := "Done, goal applied."
+			if !m.badFirst {
+				// A truthful producer repeats the actual pending receipt. Keep the
+				// malformed-tool/mixed-content scenario separate below.
+				for _, content := range req.Contents {
+					for _, part := range content.Parts {
+						if response := part.FunctionResponse; response != nil && response.Name == botProposalToolName {
+							m.pendingMessage, _ = response.Response["message"].(string)
+						}
+					}
+				}
+				if m.pendingMessage == "" {
+					yield(nil, errors.New("routine fixture missing pending tool response message"))
+					return
+				}
+				text = m.pendingMessage
+			}
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(text, "model"), TurnComplete: true}, nil)
 			return
 		}
 		goal := map[string]any{"title": "Orlando weather clarity", "completion_criteria": "Each weather update is easy to understand."}
@@ -52,7 +70,7 @@ type continuityAssessmentModel struct{ model.LLM }
 
 func (m continuityAssessmentModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	system := providerSystem(req)
-	if !strings.Contains(system, "BOT_WORK_PREPARE_V1") && !strings.Contains(system, "BOT_WORK_REVIEW_V1") && !strings.Contains(system, "BOT_WORK_PENDING_REVIEW_V1") {
+	if !strings.Contains(system, "BOT_SKILL_ORIENT_V1") && !strings.Contains(system, "BOT_WORK_PREPARE_V1") && !strings.Contains(system, "BOT_WORK_REVIEW_V1") && !strings.Contains(system, "BOT_WORK_PENDING_REVIEW_V1") {
 		return m.LLM.GenerateContent(ctx, req, stream)
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -63,7 +81,9 @@ func (m continuityAssessmentModel) GenerateContent(ctx context.Context, req *mod
 			}
 		}
 		var out any
-		if strings.Contains(system, "BOT_WORK_PREPARE_V1") {
+		if strings.Contains(system, "BOT_SKILL_ORIENT_V1") {
+			out = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled continuity fixture"}
+		} else if strings.Contains(system, "BOT_WORK_PREPARE_V1") {
 			var contract store.BotWorkContract
 			if err := json.Unmarshal([]byte(input), &contract); err != nil {
 				yield(nil, err)
@@ -113,6 +133,19 @@ func (m continuityAssessmentModel) GenerateContent(ctx context.Context, req *mod
 				deferred := store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "continuity-context", Verdict: store.BotCriterionUnverified, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Worker application is not observed in the source turn."}}}
 				out = map[string]any{"current_turn": current, "deferred_application": deferred}
 			}
+		}
+		// Cite captured bodies for factual claims and receipts for own actions;
+		// unknown candidate prose remains unverified.
+		var content continuityContentInput
+		if err := json.Unmarshal([]byte(input), &content); err != nil {
+			yield(nil, err)
+			return
+		}
+		if review, ok := out.(store.BotWorkReview); ok && content.Items != nil {
+			out = struct {
+				store.BotWorkReview
+				ContentAssessments []continuityContentAssessment `json:"content_assessments"`
+			}{review, continuityContentAssessments(content)}
 		}
 		raw, err := json.Marshal(out)
 		if err != nil {
@@ -254,8 +287,19 @@ func runRoutineGoalSource(t *testing.T, scope store.BotScope, mixed bool) (*botF
 		work, _ := repo.(store.BotWorkStore).LoadWork(worker, lease)
 		t.Fatalf("real tool envelope did not bind acknowledgment: report=%+v work=%+v", source.Report, work)
 	}
+	if !mixed && (source.Report.Summary != llm.pendingMessage || source.Report.Unchanged[0].Summary != llm.pendingMessage || len(source.Report.Acknowledgment.OperationIDs) != 1 || source.Report.Acknowledgment.OperationIDs[0] != ops[0].ID) {
+		t.Fatalf("source acknowledgment did not preserve exact pending receipt: %+v", source.Report)
+	}
 	if mixed && source.Report.Acknowledgment != nil {
 		t.Fatal("mixed tool failure hidden")
+	}
+	repeated, err := rt.ApplyAuthorizedOperation(owner, *admission.Run.MandateRef, ops[0].ID)
+	if err != nil || repeated.Status != store.BotOperationApplied || repeated.Revision != applied.Revision || repeated.Receipt == nil {
+		t.Fatalf("worker replay changed applied operation: %+v %v", repeated, err)
+	}
+	goals, err := repo.ListGoals(owner, b.ID)
+	if err != nil || len(goals) != 1 || goals[0].Title != "Orlando weather clarity" || goals[0].CompletionCriteria != "Each weather update is easy to understand." {
+		t.Fatalf("worker did not apply goal exactly once: %+v %v", goals, err)
 	}
 	return f, repo, owner
 }
@@ -338,7 +382,7 @@ func TestBotWorkResponsibilityContinuityRunner(t *testing.T) {
 				// The controlled assessor keeps this a continuity acceptance, not
 				// a claim about live-model judgment. Use the real pinned snapshot.
 				f.req.Work = input.Work.Clone()
-				_, err = adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
+				result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -357,8 +401,10 @@ func TestBotWorkResponsibilityContinuityRunner(t *testing.T) {
 						}
 					}
 				}
-				// No claimed success for this context-only occurrence.
-				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Summary: "Continuity context exercised", Unverified: []string{"Context-only harness; deliverable quality not assessed"}}}); err != nil {
+				// Commit the actual candidate-bound result, not a synthetic partial
+				// report. This controlled harness proves context continuity only;
+				// the runner's completion status is not live-model quality evidence.
+				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report}); err != nil {
 					t.Fatal(err)
 				}
 				return input.Work.Clone()

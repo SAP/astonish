@@ -3,16 +3,73 @@ package entstore
 import (
 	"errors"
 	"github.com/SAP/astonish/pkg/store"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
+func TestBotAgentEmployeeCommitAndPublication(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, disposition := range []store.AgentWorkDisposition{store.AgentWorkAnswered, store.AgentWorkComplete, store.AgentWorkPartial, store.AgentWorkBlocked} {
+			t.Run(string(scope)+"/"+string(disposition), func(t *testing.T) {
+				repo, owner, worker, run, lease, _ := botRunFixture(t, scope)
+				report := finishedAgentWorkReport(t, repo, worker, lease, "Here is the requested result, with its limitations.", disposition)
+				work, err := repo.LoadWork(worker, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := store.RunSucceeded
+				if disposition == store.AgentWorkPartial || disposition == store.AgentWorkBlocked {
+					status = store.RunPartial
+				}
+				report.FinalizeEmployeeMessage(status, work)
+				if report.EmployeeMessage == nil || report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent {
+					t.Fatal("answer acquired legacy assessment or fallback")
+				}
+				q := store.BotRunCommit{Lease: lease, Status: status, Report: report}
+				stale := q
+				stale.Lease.Fence++
+				if err := repo.CommitRun(worker, stale); !errors.Is(err, store.ErrBotConflict) {
+					t.Fatalf("stale lease: %v", err)
+				}
+				if err := repo.CommitRun(worker, q); err != nil {
+					t.Fatal(err)
+				}
+				if err := repo.CommitRun(worker, q); err != nil {
+					t.Fatalf("retry: %v", err)
+				}
+				bad := q
+				bad.Report.Summary += " forged"
+				if err := repo.CommitRun(worker, bad); !errors.Is(err, store.ErrBotConflict) {
+					t.Fatalf("tampered retry: %v", err)
+				}
+				saved, err := repo.GetRun(owner, run.BotID, run.ID)
+				if err != nil || !reflect.DeepEqual(saved.Work, report.Work) || saved.Report.Quality != nil || saved.Report.ValidateEmployeeMessageIntegrity(status) != nil {
+					t.Fatalf("persisted agent result: %+v %v", saved, err)
+				}
+				pub, err := repo.PublishReport(owner, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID})
+				if err != nil || pub.Text != report.Summary || pub.Suppressed {
+					t.Fatalf("agent publication: %+v %v", pub, err)
+				}
+				again, err := repo.PublishReport(owner, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID, ReportSequence: pub.ReportSequence})
+				if err != nil || again.EventID != pub.EventID || again.Text != pub.Text {
+					t.Fatalf("publication retry: %+v %v", again, err)
+				}
+			})
+		}
+	}
+}
+
 func TestBotEmployeeCommitAndPublication(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, worker, run, lease, _ := botRunFixture(t, scope)
-			report := store.BotReport{Summary: "private provider secret https://private.invalid"}
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := store.BotReport{Summary: "private provider secret https://private.invalid", Work: store.BuildBotWorkProjection(work)}
 			m := store.NewBotEmployeeFallback(store.RunFailed, report, store.BotEmployeeReasonForbidden)
 			report.EmployeeMessage = &m
 			q := store.BotRunCommit{Lease: lease, Status: store.RunFailed, Report: report}

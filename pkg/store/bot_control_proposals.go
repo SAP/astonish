@@ -65,7 +65,9 @@ type BotControlResumeTargets struct {
 }
 
 type BotControlTaskOnce struct {
-	Instructions string `json:"instructions"`
+	SkillID      *uuid.UUID `json:"skill_id,omitempty"`
+	Invocation   string     `json:"invocation,omitempty"`
+	Instructions string     `json:"instructions"`
 }
 
 // BotControlPayload is a closed union. Prose cannot supply authority or a decision.
@@ -106,6 +108,11 @@ func (p BotControlPayload) Validate() error {
 		valid = p.Memory != nil
 	case BotControlScheduleCreate, BotControlScheduleEdit, BotControlSchedulePause, BotControlScheduleRemove:
 		valid = p.Schedule != nil
+		if p.Schedule != nil {
+			if err := ValidateSkillSelection(p.Schedule.Trigger.SkillID, p.Schedule.Trigger.Invocation); err != nil {
+				return err
+			}
+		}
 		// A schedule is not an external delivery configuration. Reject transport
 		// bindings before durable proposal capture, not only when applying it.
 		if p.Schedule != nil && p.Schedule.Trigger.ChannelBinding != nil {
@@ -113,6 +120,12 @@ func (p BotControlPayload) Validate() error {
 		}
 	case BotControlTaskOnceOperation:
 		valid = p.TaskOnce != nil && strings.TrimSpace(p.TaskOnce.Instructions) != ""
+		if p.TaskOnce != nil {
+			if err := ValidateSkillSelection(p.TaskOnce.SkillID, p.TaskOnce.Invocation); err != nil {
+				return err
+			}
+			valid = valid || p.TaskOnce.SkillID != nil
+		}
 	case BotControlResumeTasks:
 		if p.ResumeTargets == nil || len(p.ResumeTargets.ScheduleIDs) == 0 || len(p.ResumeTargets.ScheduleIDs) > 32 {
 			return ErrBotInvalid

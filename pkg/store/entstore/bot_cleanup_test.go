@@ -62,7 +62,15 @@ func cleanupDeleteFixture(t *testing.T, repo *botRepository, ctx context.Context
 func TestBotCleanupTrustedRetentionAndReplay(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
-			repo, owner, _, run, lease, now := botRunFixture(t, scope)
+			repo, owner, worker, run, lease, now := botRunFixture(t, scope)
+			v := skillTestRevision(t, repo, owner, run.BotID)
+			w, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repo.OrientSkill(worker, store.BotSkillOrientation{Kind: store.BotSkillCreateDraft, Key: "cleanup", Title: "Cleanup fixture", Intent: "Exercise skill retention", Draft: &v, Mutation: store.BotSkillMutation{BotID: run.BotID, Lease: lease, ExpectedRevision: w.Revision, IdempotencyKey: "cleanup-skill"}}); err != nil {
+				t.Fatal(err)
+			}
 			deleted, teardown := cleanupDeleteFixture(t, repo, owner, run, lease)
 			calls := 0
 			runtime := cleanupRuntimeContext(t, func(_ context.Context, q store.BotCleanupRequest) error {
@@ -100,6 +108,9 @@ func TestBotCleanupTrustedRetentionAndReplay(t *testing.T) {
 			if n, err := repo.PurgeDue(owner, *now, 10); err != nil || n != 0 {
 				t.Fatalf("early purge: %d %v", n, err)
 			}
+			if _, err := repo.db.(botSkillDB).readSkillRevision(owner, run.BotID, v.SkillID, 1); err != nil {
+				t.Fatalf("retention removed immutable skill: %v", err)
+			}
 			*now = *deleted.RestoreUntil
 			if n, err := repo.PurgeDue(owner, *now, 10); err != nil || n != 0 {
 				t.Fatalf("run teardown authorized home purge: %d %v", n, err)
@@ -112,6 +123,9 @@ func TestBotCleanupTrustedRetentionAndReplay(t *testing.T) {
 			}
 			if n, err := repo.PurgeDue(owner, *now, 10); err != nil || n != 1 {
 				t.Fatalf("confirmed purge: %d %v", n, err)
+			}
+			if count, size, err := repo.db.(botSkillDB).skillQuota(owner, run.BotID); err != nil || count != 0 || size != 0 {
+				t.Fatalf("purge retained skill data: %d %d %v", count, size, err)
 			}
 			if _, err := repo.Get(owner, deleted.ID); !errors.Is(err, store.ErrBotNotFound) {
 				t.Fatalf("tombstone still exists: %v", err)

@@ -18,9 +18,77 @@ import (
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 )
+
+type optionalKnowledgeContext struct{ knowledgeContext }
+
+func (optionalKnowledgeContext) FunctionCallID() string { return "optional-test" }
+
+func TestBotOptionalSchemaRecoveryPreservesBoundaries(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	binding := &botFactoryBinding{owner: store.WithServices(f.ctx, f.services), req: f.req, verifyIsolation: func(context.Context) error { return nil }}
+	ctx := optionalKnowledgeContext{knowledgeCtx(f)}
+	calls := 0
+	var handlerErr error
+	inner, err := functiontool.New(functiontool.Config{Name: "bot_skill_save"}, func(tool.Context, botSkillToolArgs) (map[string]any, error) { calls++; return nil, handlerErr })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := newBotOptionalSchemaTool(inner, binding, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []any{map[string]any{"verified": true}, map[string]any{"owner_quotes": "wrong-type"}, map[string]any{"expected_revision": 1.5}, map[string]any{"expected_revision": 1e30}} {
+		result, err := wrapped.(botRunnableTool).Run(ctx, args)
+		if err != nil || result["status"] != "invalid_request" || calls != 0 {
+			t.Fatalf("schema recovery executed handler: %v %v calls=%d", result, err, calls)
+		}
+	}
+	update, err := functiontool.New(functiontool.Config{Name: botWorkUpdateTool}, func(tool.Context, botWorkUpdateArgs) (map[string]any, error) { calls++; return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardedUpdate, err := newBotOptionalSchemaTool(update, binding, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := guardedUpdate.(botRunnableTool).Run(ctx, map[string]any{"expected_revision": 1, "kind": "upsert_item", "item": map[string]any{"id": "invalid-uuid", "summary": "test", "status": "pending"}})
+	if err != nil || result["status"] != "invalid_request" || calls != 0 {
+		t.Fatalf("typed decode error escaped: %v %v calls=%d", result, err, calls)
+	}
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded, store.ErrBotForbidden, errors.New("budget exhausted")} {
+		handlerErr = want
+		_, err := wrapped.(botRunnableTool).Run(ctx, map[string]any{})
+		if !errors.Is(err, want) {
+			t.Fatalf("execution error swallowed: %v want %v", err, want)
+		}
+	}
+	before := calls
+	child := ctx
+	child.sid = "foreign-session"
+	if _, err := wrapped.(botRunnableTool).Run(child, map[string]any{"verified": true}); !errors.Is(err, store.ErrBotForbidden) || calls != before {
+		t.Fatalf("child authority bypassed: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(f.ctx)
+	cancel()
+	binding.owner = cancelled
+	if _, err := wrapped.(botRunnableTool).Run(ctx, map[string]any{"verified": true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation swallowed: %v", err)
+	}
+	// Ordinary tools have no recovery wrapper; malformed input is still denied.
+	if _, err := inner.(botRunnableTool).Run(ctx, map[string]any{"verified": true}); err == nil {
+		t.Fatal("ordinary schema denial swallowed")
+	}
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded, errors.New("budget exhausted")} {
+		if _, err := botWorkToolResult(ctx, nil, want); !errors.Is(err, want) {
+			t.Fatalf("optional result swallowed execution error: %v", err)
+		}
+	}
+}
 
 type knowledgeSkillStore struct {
 	store.SkillStore

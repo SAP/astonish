@@ -33,6 +33,12 @@ type BotOutbox func(*sql.Selector)
 // BotRun is the predicate function for botrun builders.
 type BotRun func(*sql.Selector)
 
+// BotSkill is the predicate function for botskill builders.
+type BotSkill func(*sql.Selector)
+
+// BotSkillRevision is the predicate function for botskillrevision builders.
+type BotSkillRevision func(*sql.Selector)
+
 // BotTemplate is the predicate function for bottemplate builders.
 type BotTemplate func(*sql.Selector)
 

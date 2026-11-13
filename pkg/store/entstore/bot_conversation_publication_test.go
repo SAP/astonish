@@ -16,8 +16,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// acceptedWorkReport is controlled assessment evidence for repository tests,
-// not a model-quality assertion. It exercises all persisted transitions.
+// acceptedWorkReport is controlled legacy assessment evidence for repository
+// tests, not a model-quality assertion. It exercises all persisted transitions.
 func acceptedWorkReport(t *testing.T, repo *botRepository, ctx context.Context, lease store.BotLease, text string) store.BotReport {
 	t.Helper()
 	work, err := repo.LoadWork(ctx, lease)
@@ -26,6 +26,16 @@ func acceptedWorkReport(t *testing.T, repo *botRepository, ctx context.Context, 
 	}
 	if work == nil {
 		return store.BotReport{Summary: text}
+	}
+	// This helper explicitly exercises the historical assessment protocol.
+	// Seed its persisted fixture directly; production SaveWork must continue
+	// rejecting protocol changes, and agent fixtures must keep their new mode.
+	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		pinLegacyWorkFixture(t, repo, ctx, lease)
+		work, err = repo.LoadWork(ctx, lease)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	save := func(next *store.BotWorkState) {
 		t.Helper()

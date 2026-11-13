@@ -9,6 +9,9 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+// botMigrationVersion tracks DDL independently of immutable BotVersion JSON.
+const botMigrationVersion = 2
+
 // migrateBotSchema wraps scoped Ent reconciliation with a monotonic Bot schema
 // marker. SQL here manages migration metadata only, never application/audit data.
 // The callback owns Ent's dialect-specific additive migration options. A failed
@@ -35,8 +38,8 @@ func migrateBotSchema(ctx context.Context, db *sql.DB, d Dialect, create func() 
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("read bot migration metadata: %w", err)
 		}
-		if version > store.BotSchemaVersion {
-			return fmt.Errorf("%w: database bot schema %d exceeds supported %d", store.ErrBotUnsupported, version, store.BotSchemaVersion)
+		if version > botMigrationVersion {
+			return fmt.Errorf("%w: database bot schema %d exceeds supported %d", store.ErrBotUnsupported, version, botMigrationVersion)
 		}
 	}
 	if err := create(); err != nil {
@@ -47,7 +50,7 @@ func migrateBotSchema(ctx context.Context, db *sql.DB, d Dialect, create func() 
 	}
 	// Both drivers accept $1, and the conditional update cannot downgrade a
 	// concurrently installed newer marker.
-	result, err := db.ExecContext(ctx, "INSERT INTO bot_schema_version (id,version) VALUES ('bots',$1) ON CONFLICT (id) DO UPDATE SET version = excluded.version WHERE bot_schema_version.version <= excluded.version", store.BotSchemaVersion)
+	result, err := db.ExecContext(ctx, "INSERT INTO bot_schema_version (id,version) VALUES ('bots',$1) ON CONFLICT (id) DO UPDATE SET version = excluded.version WHERE bot_schema_version.version <= excluded.version", botMigrationVersion)
 	if err != nil {
 		return fmt.Errorf("record bot migration version: %w", err)
 	}

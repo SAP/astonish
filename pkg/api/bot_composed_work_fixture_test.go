@@ -17,7 +17,9 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 	}
 	prompt := r.Config.SystemInstruction.Parts[0].Text
 	var output any
-	if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
+	if strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1") {
+		output = map[string]any{"kind": "no_skill_needed", "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled non-skill fixture"}
+	} else if strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1") {
 		var c store.BotWorkContract
 		if json.Unmarshal([]byte(r.Contents[0].Parts[0].Text), &c) != nil {
 			return nil, false
@@ -45,6 +47,8 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 	}
 	raw, _ := json.Marshal(output)
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil)
+		response := &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}
+		fixtureHTTPContentCoverage(r, response)
+		yield(response, nil)
 	}, true
 }

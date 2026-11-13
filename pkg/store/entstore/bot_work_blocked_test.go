@@ -13,6 +13,7 @@ func TestBotBlockedExplanationCommitPersistence(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, owner, worker, initial, lease, now := botRunFixture(t, scope)
+			pinLegacyWorkFixture(t, repo, worker, lease)
 			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunPartial, Report: store.BotReport{Summary: "Fixture ended"}}); err != nil {
 				t.Fatal(err)
 			}
@@ -27,6 +28,8 @@ func TestBotBlockedExplanationCommitPersistence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The blocker assessment below is a historical legacy protocol record.
+			pinLegacyWorkFixture(t, repo, worker, lease)
 			w, err := repo.LoadWork(worker, lease)
 			if err != nil {
 				t.Fatal(err)

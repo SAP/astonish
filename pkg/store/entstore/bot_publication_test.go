@@ -109,6 +109,10 @@ func TestBotPublicationWaitingThenFinal(t *testing.T) {
 
 func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, worker context.Context, run *store.BotRun, lease store.BotLease, now *time.Time) {
 	t.Helper()
+	// This scenario finishes with acceptedWorkReport and exercises historical
+	// assessment publication. Pin that protocol before the approval checkpoint,
+	// rather than changing an agent-led run's protocol halfway through resume.
+	pinLegacyWorkFixture(t, repo, worker, lease)
 	version, err := repo.GetVersion(ctx, run.BotID, run.Version)
 	if err != nil {
 		t.Fatal(err)

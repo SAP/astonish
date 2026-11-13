@@ -17,6 +17,41 @@ spec.loader.exec_module(driver)
 
 
 class AcceptanceDriverTests(unittest.TestCase):
+    def test_agent_stage_routes_exact_arguments_and_propagates_status(self):
+        for stage in ('execution', 'progress', 'learning', 'continuity', 'postgres', 'all'):
+            argv = ['--agent-stage', stage]
+            if stage == 'all':
+                argv += ['--config', '/explicit/private-agent.json']
+            for result in (0, 1, 2):
+                with self.subTest(stage=stage, result=result), patch(
+                        'employee_http_acceptance.main', return_value=result) as agent, patch.object(
+                        driver, 'run') as run, patch.object(driver, 'prerequisites') as prerequisites:
+                    self.assertEqual(result, driver.main(argv))
+                    agent.assert_called_once_with(argv)
+                    run.assert_not_called()
+                    prerequisites.assert_not_called()
+
+    def test_agent_cannot_use_partial_release_flags_or_other_modes(self):
+        for extra in (['--preflight'], ['--local-only'], ['--skills-stage', 'all']):
+            with self.subTest(extra=extra), patch('employee_http_acceptance.main') as agent, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    driver.main(['--agent-stage', 'all', '--config', '/explicit/config.json'] + extra)
+                self.assertEqual(2, error.exception.code)
+                agent.assert_not_called()
+
+    def test_agent_missing_config_fails_without_release_fallback(self):
+        with patch.object(driver, 'run') as run, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                driver.main(['--agent-stage', 'all'])
+            self.assertEqual(2, error.exception.code)
+            run.assert_not_called()
+
+    def test_agent_all_docs_keep_current_invocation_and_partial_boundary(self):
+        text = (driver.ROOT / 'tests/e2eboot/README.bots-acceptance.md').read_text()
+        for required in ('--agent-stage all', '--verify-bot-agent', '--browser --terminal --agent',
+                         'ASTONISH_BOTS_TEST_DB_ISOLATED=1', 'No historical receipts', 'not Kubernetes'):
+            self.assertIn(required, text)
+
     def test_employee_gates_require_real_named_tests_in_correct_package(self):
         command = driver.go_command("./pkg/daemon", driver.DAEMON_HTTP)
         self.assertIn("-json", command)

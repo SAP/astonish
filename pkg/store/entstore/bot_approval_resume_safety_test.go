@@ -24,7 +24,11 @@ func waitingApprovalFixture(t *testing.T, scope store.BotScope) (*botRepository,
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: a.ID, BotID: run.BotID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
-	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: raw, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
+	work, err := repo.LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: raw, Report: store.BotReport{Summary: "Waiting", Work: store.BuildBotWorkProjection(work), NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
 		t.Fatal(err)
 	}
 	return repo, ctx, worker, run, a, now

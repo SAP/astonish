@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, it, vi } from 'vitest'
 import BotSchedulePanel from '../BotSchedulePanel'
 import * as api from '@/api/bots'
+import * as skills from '@/api/botSkills'
+vi.mock('@/api/botSkills', async original => ({ ...await original<typeof skills>(), listBotSkills: vi.fn() }))
 import * as triggers from '@/api/botTriggers'
 vi.mock('@/api/bots', async original => ({ ...await original<typeof api>(), getBotVersion: vi.fn(), listBotGoals: vi.fn() }))
 vi.mock('@/api/botTriggers', async original => ({ ...await original<typeof triggers>(), saveTrigger: vi.fn(), actOnTrigger: vi.fn() }))
@@ -9,7 +11,7 @@ const bot = { id: 'bot', scope: 'personal', revision: 3, version: 2, status: 'ac
 const hook: triggers.TriggerSpec = { id: 'hook', kind: 'webhook', instructions: 'Observe', enabled: false, catch_up_once: false, credential_ref: 'ref', hook_status: 'disabled' }
 const version = { bot_id: 'bot', version: 2, persona: { timezone: 'UTC' }, triggers: [hook] } as api.BotVersion
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
-beforeEach(() => { vi.resetAllMocks(); vi.mocked(api.listBotGoals).mockResolvedValue({ goals: [] }) })
+beforeEach(() => { vi.resetAllMocks(); vi.mocked(skills.listBotSkills).mockResolvedValue({ skills: [] }); vi.mocked(api.listBotGoals).mockResolvedValue({ goals: [] }) })
 it('does not enable a hook before proof; refreshes exact server version after dry-run', async () => {
   vi.mocked(triggers.actOnTrigger).mockResolvedValue({ ...bot, revision: 4, version: 3 })
   vi.mocked(api.getBotVersion).mockResolvedValue({ ...version, version: 3, triggers: [{ ...hook, hook_status: 'dry_run_passed' }] })
@@ -45,7 +47,7 @@ it('reviews removal separately and respects read-only mode', async () => {
   expect(screen.getByRole('button', { name: 'Confirm remove' })).toBeEnabled()
   rerender(<BotSchedulePanel bot={bot} version={version} readOnly onChange={vi.fn()} />)
   expect(screen.getByRole('button', { name: 'Confirm remove' })).toBeDisabled()
-  expect(screen.getByLabelText('Schedule instructions')).toBeDisabled()
+  expect(screen.getByLabelText('Schedule skill')).toBeDisabled()
 })
 it('saves catch-up edits disabled and blocks further changes if the server refresh fails', async () => {
   const cron: triggers.TriggerSpec = { id: 'cron', kind: 'cron', cron: '0 9 * * *', timezone: 'UTC', instructions: 'Observe', enabled: true, catch_up_once: false }
@@ -60,6 +62,26 @@ it('saves catch-up edits disabled and blocks further changes if the server refre
   expect(await screen.findByText(/Saved state could not be refreshed/)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Save reviewed changes disabled' })).toBeDisabled()
   expect(screen.getByLabelText('Cron expression')).toHaveValue('0 9 * * *')
+})
+it('saves a skill reference and invocation without copying instructions', async () => {
+  vi.mocked(skills.listBotSkills).mockResolvedValue({ skills: [{ id: 'skill', title: 'Research', status: 'active', head_revision: 2 } as skills.BotSkill] })
+  vi.mocked(triggers.saveTrigger).mockRejectedValue(new Error('controlled rejection'))
+  render(<BotSchedulePanel bot={bot} version={version} readOnly={false} onChange={vi.fn()} />)
+  await screen.findByRole('option', { name: 'Research · revision 2' })
+  change('Schedule skill', 'skill'); change('Invocation intent', 'Morning digest'); change('Cron expression', '0 8 * * *'); change('Trigger change reason', 'Daily update')
+  fireEvent.click(screen.getByRole('button', { name: 'Save disabled schedule' }))
+  await waitFor(() => expect(triggers.saveTrigger).toHaveBeenCalledWith(bot, expect.objectContaining({ skill_id: 'skill', invocation: 'Morning digest', instructions: '', enabled: false }), 'Daily update'))
+  await screen.findByRole('alert')
+})
+it('keeps legacy editing available when the skill service is unavailable', async () => {
+  vi.mocked(skills.listBotSkills).mockRejectedValue(new Error('offline'))
+  render(<BotSchedulePanel bot={bot} version={version} readOnly={false} onChange={vi.fn()} />)
+  await screen.findByText('Skills unavailable.')
+  expect(screen.getByRole('button', { name: 'Save disabled schedule' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Edit trigger' }))
+  expect(screen.getByLabelText('Schedule instructions')).toHaveValue('Observe')
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel editing' }))
+  expect(screen.getByLabelText('Schedule skill')).toBeInTheDocument()
 })
 it('offers only active goals with persisted deadlines', async () => {
   vi.mocked(api.listBotGoals).mockResolvedValue({ goals: [

@@ -117,6 +117,30 @@ func (f BotRunFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotRunMutation", m)
 }
 
+// The BotSkillFunc type is an adapter to allow the use of ordinary
+// function as BotSkill mutator.
+type BotSkillFunc func(context.Context, *team.BotSkillMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotSkillFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotSkillMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotSkillMutation", m)
+}
+
+// The BotSkillRevisionFunc type is an adapter to allow the use of ordinary
+// function as BotSkillRevision mutator.
+type BotSkillRevisionFunc func(context.Context, *team.BotSkillRevisionMutation) (team.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BotSkillRevisionFunc) Mutate(ctx context.Context, m team.Mutation) (team.Value, error) {
+	if mv, ok := m.(*team.BotSkillRevisionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *team.BotSkillRevisionMutation", m)
+}
+
 // The BotTemplateFunc type is an adapter to allow the use of ordinary
 // function as BotTemplate mutator.
 type BotTemplateFunc func(context.Context, *team.BotTemplateMutation) (team.Value, error)

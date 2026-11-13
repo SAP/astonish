@@ -68,6 +68,14 @@ type externalAcceptanceProviderReceipt struct {
 }
 
 func TestBotExternalUncertaintyLoopbackAcceptance(t *testing.T) {
+	testBotExternalUncertaintyLoopbackAcceptance(t, false)
+}
+
+func TestBotAgentExternalUncertaintyLoopbackAcceptance(t *testing.T) {
+	testBotExternalUncertaintyLoopbackAcceptance(t, true)
+}
+
+func testBotExternalUncertaintyLoopbackAcceptance(t *testing.T, agentLed bool) {
 	// HttpRequest clones this transport. Pin every dial to the one owned listener,
 	// disable proxies, and restore globals. No DNS or non-loopback network is used.
 	// Do not parallelize this test with other process-global HTTP-policy tests.
@@ -143,6 +151,20 @@ func TestBotExternalUncertaintyLoopbackAcceptance(t *testing.T) {
 			defer func() { http.DefaultTransport = original; transport.CloseIdleConnections() }()
 
 			ctx, req, ss := botChatTestRequest(t)
+			var work *workMemoryStore
+			if agentLed {
+				req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Run.Version, Instructions: req.Instructions, Charter: req.Version.Charter})
+				work = &workMemoryStore{state: req.Work.Clone()}
+			}
+			withWork := func(factory BotChatAgentFactory) BotChatAgentFactory {
+				return func(c context.Context, q bot.RunRequest) (*BotChatResources, error) {
+					resources, err := factory(c, q)
+					if err == nil && agentLed {
+						resources.Work = work
+					}
+					return resources, err
+				}
+			}
 			policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{externalAcceptanceTool}})
 			if err != nil {
 				t.Fatal(err)
@@ -186,7 +208,7 @@ func TestBotExternalUncertaintyLoopbackAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := map[string]any{"url": classifier.writeURL, "method": http.MethodPost, "body": body, "headers": map[string]any{"Idempotency-Key": key}, "timeout": 2, "max_bytes": 1024}
-			adapter, err := NewBotChatRuntimeAdapter(botChatTestFactory(t, ss, NewMockLLM(ToolCallTurn(externalAcceptanceTool, args)), []tool.Tool{action}, &cleaned))
+			adapter, err := NewBotChatRuntimeAdapter(withWork(botChatTestFactory(t, ss, NewMockLLM(ToolCallTurn(externalAcceptanceTool, args)), []tool.Tool{action}, &cleaned)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +233,7 @@ func TestBotExternalUncertaintyLoopbackAcceptance(t *testing.T) {
 				changed.writeURL += "/unapproved"
 				ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Classifier: changed, Guard: resumeTestGuard{}})
 			}
-			adapter, err = NewBotChatRuntimeAdapter(botChatTestFactory(t, ss, NewMockLLM(TextTurn("The write outcome is uncertain. Reconcile by provider key; do not replay.")), []tool.Tool{action}, &cleaned))
+			adapter, err = NewBotChatRuntimeAdapter(withWork(botChatTestFactory(t, ss, NewMockLLM(TextTurn("The write outcome is uncertain. Reconcile by provider key; do not replay.")), []tool.Tool{action}, &cleaned)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -242,13 +264,19 @@ func TestBotExternalUncertaintyLoopbackAcceptance(t *testing.T) {
 			for range 2 {
 				readCtx, readReq, readSS := ctx, req, ss
 				readReq.Run.Checkpoint = nil
+				if agentLed {
+					// A separate explicitly requested read gets fresh work, never a replay
+					// or mutation of the uncertain action's completed work document.
+					readReq.Work = store.NewBotAgentWorkState(req.Work.Contract)
+					work = &workMemoryStore{state: readReq.Work.Clone()}
+				}
 				readReq.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: readReq.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{externalAcceptanceTool}})
 				if err != nil {
 					t.Fatal(err)
 				}
 				readCtx = agent.WithBotPolicyRuntime(readCtx, agent.BotPolicyRuntime{Classifier: classifier, Guard: resumeTestGuard{}})
 				readArgs := map[string]any{"url": classifier.receiptURL, "method": http.MethodGet, "timeout": 2, "max_bytes": 1024}
-				reader, err := NewBotChatRuntimeAdapter(botChatTestFactory(t, readSS, NewMockLLM(ToolCallTurn(externalAcceptanceTool, readArgs), TextTurn("Provider receipt confirms one effect.")), []tool.Tool{action}, &cleaned))
+				reader, err := NewBotChatRuntimeAdapter(withWork(botChatTestFactory(t, readSS, NewMockLLM(ToolCallTurn(externalAcceptanceTool, readArgs), TextTurn("Provider receipt confirms one effect.")), []tool.Tool{action}, &cleaned)))
 				if err != nil {
 					t.Fatal(err)
 				}

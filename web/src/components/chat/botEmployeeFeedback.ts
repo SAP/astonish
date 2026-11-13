@@ -5,14 +5,14 @@ export const BotFailureKind = {
   Unavailable: 'unavailable', Access: 'access', Changed: 'changed',
   Decision: 'decision', Attachments: 'attachments',
 } as const
-export type BotFailureKind = typeof BotFailureKind[keyof typeof BotFailureKind]
+export type BotFailureKindValue = typeof BotFailureKind[keyof typeof BotFailureKind]
 export interface BotLocalFailure {
   source: 'local'
-  kind: BotFailureKind
+  kind: BotFailureKindValue
   outcome: 'unknown'
   message: string
 }
-const messages: Record<BotFailureKind, string> = {
+const messages: Record<BotFailureKindValue, string> = {
   unavailable: "I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.",
   access: "I can’t access this Bot with your current authorization. Please check your access and refresh. I can’t confirm the outcome of your work.",
   changed: "I need you to refresh and review the current saved action before trying again. I can’t confirm this request’s outcome.",
@@ -21,7 +21,7 @@ const messages: Record<BotFailureKind, string> = {
 }
 // Never read message/body/stack: local errors are not evidence of execution failure.
 // Global failures without an authenticated Bot need no model call or invented identity.
-export function botLocalFailure(error?: unknown, fallback: BotFailureKind = BotFailureKind.Unavailable): BotLocalFailure {
+export function botLocalFailure(error?: unknown, fallback: BotFailureKindValue = BotFailureKind.Unavailable): BotLocalFailure {
   const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined
   const kind = status === 401 || status === 403 ? BotFailureKind.Access : status === 409 || status === 412 ? BotFailureKind.Changed : fallback
   return { source: 'local', kind, outcome: 'unknown', message: messages[kind] }
@@ -59,6 +59,6 @@ export function botEmployeeFeedback(event: BotFeedbackEvent): string {
   }
 }
 
-export function botFailureMessage(error?: unknown, fallback?: BotFailureKind): AgentMessage {
+export function botFailureMessage(error?: unknown, fallback?: BotFailureKindValue): AgentMessage {
   return { type: 'agent', content: botLocalFailure(error, fallback).message, _streaming: false }
 }

@@ -52,7 +52,11 @@ func TestInteractiveContinuationExpiredQuestion(t *testing.T) {
 					t.Fatal(err)
 				}
 				checkpoint, _ := json.Marshal(botdomain.ApprovalCheckpoint{Format: botdomain.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
-				if err := repo.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
+				work, err := repo.LoadWork(ctx, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := repo.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Work: store.BuildBotWorkProjection(work), Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
 					t.Fatal(err)
 				}
 				// Advance beyond the original authentication lifetime, not the question TTL.

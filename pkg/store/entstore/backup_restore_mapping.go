@@ -130,7 +130,7 @@ func remapRestoreRow(scope backup.Scope, targetScope backup.Scope, table string,
 // hashes, storage keys or attribution inside these documents.
 func isBotRestoreRow(table string, row map[string]any) bool {
 	switch table {
-	case "bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates":
+	case "bots", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_templates", "bot_skills", "bot_skill_revisions":
 		return true
 	case "sessions":
 		id, _ := row["bot_id"].(string)

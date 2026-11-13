@@ -19,6 +19,13 @@ type BotBackend interface {
 	DecideBotApproval(context.Context, store.BotApproval, store.ApprovalStatus) error
 }
 
+// BotSkillBackend inspects committed records without running or cancelling work.
+type BotSkillBackend interface {
+	BotSkills(context.Context, store.BotSkillPage) (*store.BotSkillList, error)
+	BotSkillRevisions(context.Context, uuid.UUID, store.BotSkillPage) (*store.BotSkillRevisionList, error)
+	BotSkillRuns(context.Context, uuid.UUID, store.BotSkillPage) (*store.BotSkillRunList, error)
+}
+
 // BotSessionBackend selects persisted traces without resuming or cancelling runs.
 // uuid.Nil selects the current home session.
 type BotSessionBackend interface {

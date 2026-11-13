@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import { botFailureMessage, botLocalFailure, BotFailureKind } from '../botEmployeeFeedback'
 
-it.each([undefined, new Error('GET /api/private: secret stack'), '<html>HTTP 500</html>', { status: 500, body: 'secret' }])('never repeats diagnostics or infers execution failure', error => {
+it.each([undefined, new Error('GET /api/private: secret stack', { cause: new Error('HTTP 500 secret cause') }), '<html>HTTP 500</html>', { status: 500, body: 'secret' }])('never repeats diagnostics or infers execution failure', error => {
   const failure = botLocalFailure(error)
   expect(failure).toMatchObject({ source: 'local', outcome: 'unknown', kind: BotFailureKind.Unavailable })
   expect(failure.message).toContain('may still be running')

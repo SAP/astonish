@@ -50,6 +50,11 @@ func qualityWork(row employeeDiskRow) (*store.BotWorkState, store.BotRun, error)
 	if err != nil {
 		return nil, store.BotRun{}, err
 	}
+	// Only a repository envelope carries private BotWorkState. A flat run's
+	// work field is its public projection and must not be used as evidence.
+	if _, nested := fields["run"]; !nested {
+		return nil, store.BotRun{}, fmt.Errorf("missing private work envelope")
+	}
 	var w store.BotWorkState
 	if err = json.Unmarshal(fields["work"], &w); err != nil {
 		return nil, store.BotRun{}, fmt.Errorf("missing private work snapshot")

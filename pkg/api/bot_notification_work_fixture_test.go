@@ -24,6 +24,21 @@ func notificationReviewedReport(t *testing.T, ctx context.Context, repo store.Bo
 		}
 	}
 	n := w.Clone()
+	if w.Protocol == store.BotWorkProtocolAgentLedV1 {
+		// Delivery-only fixture: a committed ordinary agent answer, no invented review.
+		n.Phase = store.BotWorkFinished
+		n.AgentWork.Disposition = store.AgentWorkAnswered
+		n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: report.Summary}
+		n.Candidate.Digest = n.Candidate.ContentDigest()
+		save(n)
+		report.Work = store.BuildBotWorkProjection(w)
+		message, err := store.NewBotEmployeeAgentMessage(store.RunSucceeded, report, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report.EmployeeMessage = &message
+		return report
+	}
 	n.Phase = store.BotWorkProducing
 	sources := []string{"assignment", "charter"}
 	for _, g := range w.Contract.Goals {

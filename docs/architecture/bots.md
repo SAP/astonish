@@ -1,5 +1,74 @@
 # Bots inside Chat
 
+## Agent-led work contracts (runtime activation pending)
+
+The additive `agent_led_v1` work protocol distinguishes employee judgment from
+mechanical observations and authorization. An absent protocol retains the legacy
+assessment contract and JSON digests; unknown protocols fail closed. The existing
+constructor remains legacy. `NewBotAgentWorkState` is explicit and is not yet wired
+to first claim in this contract phase.
+
+Agent work progresses from `working` to `finished`, `blocked`, or `interrupted`.
+Working updates may retain notes, concurrent work items, check receipts and remaining
+obligations. An ordinary final answer is `answered`; `complete`, `partial`, and
+`blocked` are separate agent dispositions, never independent truth certification.
+A checklist or check is optional. Completed work items are agent reports; legacy
+`BotTodo` and goal completion evidence rules are unchanged. Generic updates cannot
+restart terminal work, repin a skill, change the original assignment, or rewrite
+captured evidence/check history. Authorized continuation is a separate repository
+operation, not permission inferred from notes.
+
+Run-local evidence references bind event, call, digest and run identity. Source
+access facts retain status/time/truncation separately from judgments about source
+usefulness. A returned HTTP 200 does not prove useful or truthful content. Failed
+or interrupted optional checks remain unverified, never implicit passes. Records
+are bounded to 25 work items, 25 obligations, 8 KiB notes, 100 check receipts and
+64 KiB aggregate metadata; raw sources remain in scoped transcript/artifacts.
+
+`BotWorkProjection` carries detached public items, remaining work and check summaries,
+not private notes or source bodies. Its model-authored summaries still require scoped
+redaction by the transport. `BotEmployeeMessageAgent` binds the exact captured final
+result and projection without claiming a legacy assessment. Commit validation retains
+run identity and artifact digests; it cannot fabricate a successful external action.
+`BotWorkServices` supplies optional scoped capabilities without widening `BotStore`
+or the execution `Runtime` interface. Later phases wire execution, learning and live
+projection; these contracts alone do not establish a working live employee.
+
+## Bot-owned internal skills — contract implementation
+
+Bot skills are private operating knowledge, independent of chat/RAG memory, the
+Astonish skill catalogue and scheduler payloads. `BotSkillStore` is an optional
+scoped capability; it does not widen `BotStore` or confer tool authority. A skill
+head identifies the responsibility and current immutable revision. Revisions
+separate owner-backed expectations from proposed/observed methods, source URLs,
+formatting, evaluation rules and provenance. Provenance validation checks shape;
+the repository must resolve canonical owner events and actual execution evidence
+before accepting writes. Model-supplied evidence cannot attest itself.
+
+Draft knowledge can exist before successful execution. Draft becomes active only
+after evidence-backed use; archive/restore is explicit and never enables a
+schedule. Revision history is append-only, including reversions. Quotas reject
+writes rather than truncate knowledge: 100 skills/Bot, 64 KiB/revision, 64 sources,
+64 expectations, 128 method steps/evidence references, 1000 revisions/skill and
+64 MiB total documents. Reads page at most 100 rows. Runtime selection is bounded
+to four full skills/256 KiB, with each pinned document independently validated.
+
+`BotSkillInvocation` pins an exact revision and digest before task execution.
+`BotWorkContract.Skill` and `BotWorkState.SkillState` retain that pin and private
+learning proposal through continuation. Generic `SaveWork` updates cannot alter
+skill state: dedicated repository operations perform orientation and learning.
+The skill stage progresses unoriented → oriented → learning-staged → committed
+or deferred; suspension preserves it, never authorizes effect replay. Owner
+expectations and immutable authority constraints are distinct: better formatting
+may be learned without renewing a mandate, but no skill text can expand grants.
+
+Optional trigger/task/run skill references preserve absent-field JSON bytes and
+historical hashes. `BotReport.Skill` is a repository-committed receipt, not a
+producer claim; an uncommitted proposal must not be shown as saved. The original
+32 KiB assignment limit is unchanged; skill snapshot bytes have a separate bound.
+This section records contracts only. Persistence, automatic learning, schedule
+binding and live acceptance are subsequent phases, not proven capabilities yet.
+
 ## Durable work requirements (implementation in progress)
 
 First claims now pin the saved assignment, charter and goal identities/revisions into the private run JSON envelope. `BotWorkStore` reads and updates this state only under the current scoped worker identity, live lease and revision CAS. Reads return detached copies; updates cannot replace source requirements or rewrite an already submitted candidate. Public run JSON does not expose the private work record. Existing reports and in-flight legacy continuations are not retroactively assessed.

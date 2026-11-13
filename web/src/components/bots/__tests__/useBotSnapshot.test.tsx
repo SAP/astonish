@@ -84,6 +84,25 @@ it('aborts a stale Bot response and resets activity and cursor on viewer switche
   expect(hook.result.current.data?.bot.id).toBe('b')
   expect(hook.result.current.activity).toEqual([])
 })
+it('keeps run work ordered across newer snapshots and reload', async () => {
+  const initial = snapshot('a', 'owner', 0)
+  initial.bot.home_session_id = 'home'
+  const state: NonNullable<BotSnapshot['run_states']>[number] = { schema_version: 1, bot_id: 'a', run_id: 'run', session_id: 'trace', home_session_id: 'home', presentation: 'home_interactive', status: 'succeeded', state_sequence: 7, work: { schema_version: 1, protocol: 'agent_led_v1', bot_id: 'a', run_id: 'run', work_revision: 3, phase: 'finished', disposition: 'answered' } }
+  initial.run_states = [state]
+  vi.mocked(api.getBotSnapshot).mockResolvedValue(initial)
+  const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner'))
+  await waitFor(() => expect(hook.result.current.data?.run_states).toEqual([state]))
+  vi.mocked(api.getBotSnapshot).mockResolvedValue({ ...initial, latest_sequence: 1, run_states: [{ ...state, state_sequence: 6, status: 'running' }, { ...state, run_id: 'foreign', bot_id: 'other' }] })
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data?.run_states).toEqual([state])
+  vi.mocked(api.getBotSnapshot).mockResolvedValue({ ...initial, latest_sequence: 2, run_states: [{ ...state, state_sequence: 8, work: { ...state.work!, work_revision: 2 } }] })
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data?.run_states).toEqual([state])
+  hook.unmount()
+  vi.mocked(api.getBotSnapshot).mockResolvedValue(initial)
+  const restored = renderHook(() => useBotSnapshot('a', 'team', 'owner'))
+  await waitFor(() => expect(restored.result.current.data?.run_states).toEqual([state]))
+})
 it('refreshes in the background without a transcript event', async () => {
   vi.useFakeTimers()
   const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner'))

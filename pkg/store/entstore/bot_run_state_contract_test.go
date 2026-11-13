@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	adksession "google.golang.org/adk/session"
 )
 
 func assertRunStateSequence(t *testing.T, repo *botRepository, ctx context.Context, run store.BotRun, want ...store.RunStatus) {
@@ -77,13 +79,127 @@ func assertCommittedRunStateNotifications(t *testing.T, repo *botRepository, ctx
 	}), &states
 }
 
+func TestBotAgentProgressProjectionAtomic(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, owner, worker, run, lease, _ := botRunFixture(t, scope)
+			work, err := repo.LoadWork(worker, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var notifications []store.BotRunState
+			worker = store.WithBotRunStateNotifier(worker, func(ctx context.Context, state store.BotRunState) {
+				saved, err := repo.GetRun(ctx, run.BotID, run.ID)
+				if err != nil || !reflect.DeepEqual(saved.Work, state.Work) || state.Work == nil {
+					t.Fatalf("projection notification before commit: %+v %v", state, err)
+				}
+				notifications = append(notifications, state)
+			})
+			next := work.Clone()
+			next.AgentWork.Notes = "Checking the alternative source"
+			saved, err := repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(notifications) != 1 || !reflect.DeepEqual(notifications[0].Work, store.BuildBotWorkProjection(saved)) {
+				t.Fatalf("missing committed progress: %+v", notifications)
+			}
+			if _, err := repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next}); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("stale update: %v", err)
+			}
+			if len(notifications) != 1 {
+				t.Fatal("failed CAS published progress")
+			}
+			rows, err := messageReviewReader(repo).ReadBotTranscript(owner, run.SessionID, 0, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range rows {
+				value, ok := row.Event.Actions.StateDelta[store.BotRunStateKey]
+				if !ok {
+					continue
+				}
+				raw, _ := json.Marshal(value)
+				var state store.BotRunState
+				if err := json.Unmarshal(raw, &state); err != nil {
+					t.Fatal(err)
+				}
+				if state.StateSequence == notifications[0].StateSequence {
+					found = reflect.DeepEqual(state, notifications[0])
+				}
+			}
+			if !found {
+				t.Fatal("live progress differs from restored transcript")
+			}
+			snapshot, err := repo.Snapshot(owner, run.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found = false
+			for _, state := range snapshot.RunStates {
+				if state.RunID == run.ID {
+					found = reflect.DeepEqual(state.Work, notifications[0].Work)
+				}
+			}
+			if !found {
+				t.Fatal("snapshot differs from committed progress")
+			}
+
+			// A failure after the projection write must roll back the projection,
+			// sequence, transcript and after-commit notification together.
+			original := repo.db
+			repo.db = botProgressFailDB{botDraftDB: original}
+			next = saved.Clone()
+			next.AgentWork.Notes = "This update must roll back"
+			_, err = repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: saved.Revision, State: *next})
+			repo.db = original
+			if !errors.Is(err, errBotProgressFixture) {
+				t.Fatalf("missing injected failure: %v", err)
+			}
+			after, err := repo.LoadWork(worker, lease)
+			if err != nil || !reflect.DeepEqual(after, saved) || len(notifications) != 1 {
+				t.Fatalf("partial progress commit: %v", err)
+			}
+			afterSnapshot, err := repo.Snapshot(owner, run.BotID)
+			if err != nil || !reflect.DeepEqual(afterSnapshot, snapshot) {
+				t.Fatalf("rollback changed snapshot: %v", err)
+			}
+		})
+	}
+}
+
+var errBotProgressFixture = errors.New("injected progress event failure")
+
+type botProgressFailDB struct{ botDraftDB }
+
+func (d botProgressFailDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
+	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(botProgressFailDB{tx}) })
+}
+func (d botProgressFailDB) fenceTranscript(ctx context.Context, lease store.BotLease, now time.Time) error {
+	return d.botDraftDB.(botTranscriptDB).fenceTranscript(ctx, lease, now)
+}
+func (d botProgressFailDB) appendRunTranscript(ctx context.Context, b store.Bot, run store.BotRun, event *adksession.Event) error {
+	return d.botDraftDB.(botTranscriptDB).appendRunTranscript(ctx, b, run, event)
+}
+func (d botProgressFailDB) updateWorkRun(ctx context.Context, run botStoredRun, lease store.BotLease, now time.Time) error {
+	return d.botDraftDB.(botWorkDB).updateWorkRun(ctx, run, lease, now)
+}
+func (d botProgressFailDB) InsertActivity(context.Context, store.BotActivity, string) error {
+	return errBotProgressFixture
+}
+
 func TestBotRunStateAllStatusesAndFailedCAS(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, status := range []store.RunStatus{store.RunWaitingApproval, store.RunInterrupted, store.RunSucceeded, store.RunPartial, store.RunFailed, store.RunSkipped, store.RunCancelled} {
 			t.Run(string(scope)+"/"+string(status), func(t *testing.T) {
 				repo, ctx, worker, run, lease, now := botRunFixture(t, scope)
 				assertRunStateSequence(t, repo, ctx, *run, store.RunQueued, store.RunRunning)
-				q := store.BotRunCommit{Lease: lease, Status: status, Report: store.BotReport{Summary: "observed outcome"}}
+				work, err := repo.LoadWork(worker, lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				q := store.BotRunCommit{Lease: lease, Status: status, Report: store.BotReport{Summary: "observed outcome", Work: store.BuildBotWorkProjection(work)}}
 				if status == store.RunSucceeded {
 					q.Report = acceptedWorkReport(t, repo, worker, lease, q.Report.Summary)
 				}

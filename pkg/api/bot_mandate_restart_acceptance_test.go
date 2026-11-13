@@ -51,7 +51,14 @@ func (g restartMandateGuard) Authorize(ctx context.Context, a execution.ActionDe
 	return d, nil
 }
 
-func testMandateWorkerRestartHTTP(t *testing.T) {
+func TestBotAgentContinuityHTTPAcceptance(t *testing.T) {
+	t.Run("sqlite-restart-once", func(t *testing.T) { testBotAgentContinuityRestartHTTP(t, false) })
+	t.Run("cancel-before-restart-no-replay", func(t *testing.T) { testBotAgentContinuityRestartHTTP(t, true) })
+}
+
+func testMandateWorkerRestartHTTP(t *testing.T) { testBotAgentContinuityRestartHTTP(t, false) }
+
+func testBotAgentContinuityRestartHTTP(t *testing.T, cancel bool) {
 	f := newInteractiveHTTPFixture(t, "web_fetch", nil, []string{"chat", "tool:execute"})
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; fmt.Fprint(w, "restart observation") }))
@@ -72,6 +79,7 @@ func testMandateWorkerRestartHTTP(t *testing.T) {
 	}
 	router := mux.NewRouter()
 	router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler)
+	router.HandleFunc("/bots/{botID}/runs/{runID}/cancel", api.BotCancelRunHandler)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		router.ServeHTTP(w, r.WithContext(store.WithServices(ctx, &store.Services{Bots: f.repo, BotMandatePolicy: policy})))
 	}))
@@ -81,7 +89,7 @@ func testMandateWorkerRestartHTTP(t *testing.T) {
 	}
 	raw, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	server.Close()
+	defer server.Close()
 	if response.StatusCode != 202 {
 		t.Fatalf("admission %d %s", response.StatusCode, raw)
 	}
@@ -97,6 +105,18 @@ func testMandateWorkerRestartHTTP(t *testing.T) {
 	if receipt.Run.MandateRef == nil {
 		t.Fatalf("missing mandate: %s", raw)
 	}
+	if cancel {
+		response, err := http.Post(server.URL+"/bots/"+f.b.ID.String()+"/runs/"+receipt.Run.ID.String()+"/cancel?scope=team", "application/json", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("cancel: %d %s", response.StatusCode, raw)
+		}
+	}
+	server.Close()
 	f.registry.Close()
 	f.server.Close()
 	if err = f.db.Close(); err != nil {
@@ -127,12 +147,24 @@ func testMandateWorkerRestartHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = worker.Poll(context.Background()); err != nil {
-		t.Fatal(err)
+	defer worker.Stop()
+	for range 3 {
+		if err = worker.Poll(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	run, err := repo.GetRun(ctx, f.b.ID, receipt.Run.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cancel {
+		if run.Status != store.RunCancelled || calls != 0 || run.Usage.ToolCalls != 0 {
+			t.Fatalf("cancelled run replayed: calls=%d run=%+v", calls, run)
+		}
+		return
+	}
+	if run.Work == nil || run.Work.Protocol != store.BotWorkProtocolAgentLedV1 || run.Report.Quality != nil {
+		t.Fatalf("restart changed agent work protocol: %+v", run)
 	}
 	if run.Status != store.RunSucceeded || calls != 1 || run.Usage.ToolCalls != 1 || run.Usage.InputTokens == 0 || run.Usage.CostMicros != nil {
 		t.Fatalf("restart execution calls=%d run=%+v", calls, run)

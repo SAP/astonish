@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"testing"
 
@@ -24,7 +25,9 @@ func (m *botAssessmentPurposeModel) GenerateContent(ctx context.Context, req *mo
 		if bot.ModelCallPurposeFromContext(ctx) != bot.ModelCallPurposeAssessment {
 			m.t.Error("assessment purpose absent at model boundary")
 		}
-		if !stream || len(req.Config.Tools) != 0 || req.Config.SystemInstruction.Parts[0].Text != m.prompt {
+		schema, err := json.Marshal(req.Config.ResponseJsonSchema)
+		wantPrompt := m.prompt + "\nRESPONSE JSON SCHEMA (server-defined output contract; enum values are exact, not examples):\n" + string(schema)
+		if err != nil || !stream || len(req.Config.Tools) != 0 || req.Config.SystemInstruction.Parts[0].Text != wantPrompt {
 			m.t.Error("assessment request changed")
 		}
 		yield(&model.LLMResponse{Content: genai.NewContentFromText(`{}`, "model")}, nil)

@@ -21,10 +21,20 @@ func (t *Transcript) applyBotRunState(s *store.BotRunState) {
 	if t.BotRunStates == nil {
 		t.BotRunStates = map[string]store.BotRunState{}
 	}
-	if prior := t.BotRunStates[s.RunID.String()]; prior.StateSequence >= s.StateSequence {
+	prior := t.BotRunStates[s.RunID.String()]
+	if prior.StateSequence >= s.StateSequence || prior.SessionID != uuid.Nil && prior.SessionID != s.SessionID {
 		return
 	}
-	t.BotRunStates[s.RunID.String()] = *s
+	if w := s.Work; w != nil {
+		if w.BotID != s.BotID || w.RunID != s.RunID || w.WorkRevision < 1 || prior.Work != nil && w.WorkRevision < prior.Work.WorkRevision {
+			return
+		}
+	}
+	next := *s
+	if next.Work == nil {
+		next.Work = prior.Work
+	}
+	t.BotRunStates[s.RunID.String()] = next
 }
 func botRunStatePriority(s store.BotRunState) int {
 	if s.Reason == store.BotContinuationRequired {

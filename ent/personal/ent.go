@@ -20,6 +20,8 @@ import (
 	"github.com/SAP/astonish/ent/personal/botintake"
 	"github.com/SAP/astonish/ent/personal/botoutbox"
 	"github.com/SAP/astonish/ent/personal/botrun"
+	"github.com/SAP/astonish/ent/personal/botskill"
+	"github.com/SAP/astonish/ent/personal/botskillrevision"
 	"github.com/SAP/astonish/ent/personal/bottrackeditem"
 	"github.com/SAP/astonish/ent/personal/botversion"
 	"github.com/SAP/astonish/ent/personal/cachediagnostic"
@@ -101,6 +103,8 @@ func checkColumn(t, c string) error {
 			botintake.Table:        botintake.ValidColumn,
 			botoutbox.Table:        botoutbox.ValidColumn,
 			botrun.Table:           botrun.ValidColumn,
+			botskill.Table:         botskill.ValidColumn,
+			botskillrevision.Table: botskillrevision.ValidColumn,
 			bottrackeditem.Table:   bottrackeditem.ValidColumn,
 			botversion.Table:       botversion.ValidColumn,
 			cachediagnostic.Table:  cachediagnostic.ValidColumn,

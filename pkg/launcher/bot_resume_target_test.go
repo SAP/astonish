@@ -20,12 +20,14 @@ import (
 )
 
 // The executable-tool assertions below remain direct. Settle their source run
-// through the real quality controller rather than forging a successful commit.
+// through the real runtime's candidate binding rather than forging a commit.
 type resumeReceiptModel struct{ model.LLM }
 
 func (resumeReceiptModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{Content: genai.NewContentFromText("The selected control was captured and remains pending; no schedule has been applied.", "model"), TurnComplete: true}, nil)
+		// The control was enqueued directly by the fixture, not by this model
+		// turn. Do not invent an in-conversation execution receipt for it.
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(resumeReceiptLimitation, "model"), TurnComplete: true}, nil)
 	}
 }
 
@@ -43,7 +45,7 @@ func settleResumeSource(t *testing.T, f *botFactoryFixture, repo store.BotStore,
 		}
 	}
 	f.cfg.WrapModel = func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) {
-		return continuityAssessmentModel{resumeReceiptModel{m}}, nil
+		return resumeReceiptModel{m}, nil
 	}
 	factory, err := NewBotChatAgentFactory(f.cfg)
 	if err != nil {
@@ -54,9 +56,10 @@ func settleResumeSource(t *testing.T, f *botFactoryFixture, repo store.BotStore,
 		t.Fatal(err)
 	}
 	result, err := adapter.Start(worker, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
-	if err != nil || result.Status != store.RunSucceeded || result.Report.Quality == nil || result.Report.Quality.Outcome != store.BotWorkAccepted {
-		t.Fatalf("source receipt did not pass quality: %+v %v", result, err)
+	if err != nil || result.Status != store.RunSucceeded || result.Report.Summary != resumeReceiptLimitation {
+		t.Fatalf("source receipt did not finish: %+v %v", result, err)
 	}
+	assertLauncherAgentResult(t, repo, worker, f.req.Run.Lease, result)
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: f.req.Run.Lease, Status: result.Status, Report: result.Report, Usage: result.Usage}); err != nil {
 		t.Fatal(err)
 	}

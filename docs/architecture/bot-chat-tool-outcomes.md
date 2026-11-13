@@ -53,6 +53,41 @@ fails assessment. Transport errors, malformed responses, unknown tools and
 non-read HTTP methods retain their existing uncertainty handling. This does not
 certify article freshness or relax the final assessment/publication gate.
 
+## Typed source-access facts
+
+`bot.ToolOutcome.SourceAccess` carries server-only `[]store.BotSourceAccessFact`
+from `recordBuiltinToolObservation`, independently of legacy effect receipts.
+Only pinned built-in `web_fetch` (GET) and `http_request` (GET/default or HEAD)
+responses qualify, with a bound Bot run and active function-call ID. Unknown tools
+and write methods cannot mint access facts. This adds no authorization or retry.
+
+Each fact contains `EvidenceRef = "capture:" + CallID`, the context-derived
+`CallID`, argument-derived `OriginalURL`, observed `FinalURL`, `HTTPStatus`,
+`Truncated`, UTC `ObservedAt`, and `BodyDigest`. Despite its historical field
+name, `BodyDigest` is lowercase SHA-256 of `json.Marshal(responseMap)`, **not**
+of extracted article text: it must match the captured response evidence digest.
+Absent final URLs are not guessed. A valid 2xx response without an error records
+`BotSourceAccessReturned`; non-2xx responses and explicit JSON error responses
+record `BotSourceAccessFailed` (HTTP status zero when no valid status is known).
+A 200 footer, empty body or truncated page establishes no usefulness, freshness,
+truth or task completion. Those remain agent judgments.
+
+Facts are snapshotted in the per-call ledger and consumed once. They neither
+replace nor upgrade existing `Verified`, `Changed`, `Unchanged` or artifact
+receipts. API consumers must retain facts even when `Verified` is false, resolve
+the matching same-run capture, and compare its digest before persisting it.
+Callers that return Go errors before invoking this helper provide no response to
+capture. Callers that unwrap response envelopes must preserve or separately bind
+the original response digest; an unwrapped digest is not evidence for an envelope.
+
+`TestBotBuiltinSourceAccessFacts` covers 200 footer, 429, explicit error responses,
+GET/HEAD, URL provenance, truncation, UTC and exact JSON digests while preserving
+legacy receipts. `TestBotBuiltinSourceAccessRejectsUnboundAndNonRead` rejects
+unbound, unknown and write paths. `TestBotSourceAccessLedgerSnapshot` checks copy
+and consume semantics, and `TestBotCatalogueSourceAccessResponseDigest` checks the
+production catalogue wrapper with controlled node responses and one call per
+response. These tests do not claim live-provider or full API persistence coverage.
+
 ## Routine control capture
 
 Mandated routine controls use server-only `bot.RoutineCapture` metadata, separate from schedule captures and applied-operation receipts. `launcher.verifyRoutineCapture` compares an independent authorized-operation read with the enqueue result and request, including pending/execute state, payload digest, source run, owner, mandate, idempotency key and provenance. Missing, mismatched or already-applied routine readback cannot produce a pending attestation. The per-call ledger snapshots and consumes metadata once; returned JSON cannot create it.

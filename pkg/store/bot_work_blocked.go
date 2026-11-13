@@ -218,6 +218,27 @@ func (w *BotWorkState) VerifiedBlockedResponse() *BotWorkBlockedResponse {
 // ValidateBotWorkCompletion adds explanation binding without relaxing any of the
 // repository's accepted-candidate, lease, revision, artifact or authority gates.
 func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
+	if w != nil && w.Protocol == BotWorkProtocolAgentLedV1 {
+		if err := w.Validate(); err != nil {
+			return err
+		}
+		p := BuildBotWorkProjection(w)
+		if q.Lease.BotID != w.Contract.BotID || q.Lease.RunID != w.Contract.RunID || q.Report.Quality != nil || !reflect.DeepEqual(q.Report.Work, p) {
+			return ErrBotInvalid
+		}
+		if q.Status == RunSucceeded || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent || len(q.Report.Artifacts) != 0 {
+			if !p.allowsResult(q.Status) || w.Candidate == nil || q.Report.Summary != w.Candidate.Text || !reflect.DeepEqual(q.Report.Artifacts, w.Candidate.Artifacts) {
+				return ErrBotInvalid
+			}
+		}
+		if q.Status == RunSucceeded && (len(q.Report.Unverified) != 0 || len(q.Report.NeedsApproval) != 0 || q.Report.Failure != nil) {
+			return ErrBotInvalid
+		}
+		return nil
+	}
+	if q.Report.Work != nil {
+		return ErrBotInvalid
+	}
 	var supplied *BotWorkBlockedResponse
 	var outcome BotWorkResponseOutcome
 	if q.Report.Quality != nil {

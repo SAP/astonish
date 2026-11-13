@@ -126,7 +126,10 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 				return zero, errors.Join(err, claimErr)
 			}
 			result := supervisorOutcome(zero, err)
-			commitErr := s.config.Store.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report})
+			if bindErr := s.bindFailureWork(ctx, lease, &result, err); bindErr != nil {
+				return result, errors.Join(err, bindErr)
+			}
+			commitErr := s.config.Store.CommitRun(ctx, store.BotRunCommit{ModelSelection: result.ModelSelection, Lease: lease, Status: result.Status, Report: result.Report})
 			return result, errors.Join(err, commitErr)
 		}
 		return zero, err
@@ -320,8 +323,41 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	if transitionErr := ValidateRunTransition(store.RunRunning, result.Status, RunTransitionGuard{}); transitionErr != nil {
 		return result, errors.Join(err, transitionErr)
 	}
-	commitErr := s.config.Store.CommitRun(ctx, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: result.Usage, Todos: result.Todos, Checkpoint: result.Checkpoint})
+	if bindErr := s.bindFailureWork(ctx, lease, &result, err); bindErr != nil {
+		return result, errors.Join(err, bindErr)
+	}
+	commitErr := s.config.Store.CommitRun(ctx, store.BotRunCommit{ModelSelection: result.ModelSelection, Lease: lease, Status: result.Status, Report: result.Report, Usage: result.Usage, Todos: result.Todos, Checkpoint: result.Checkpoint})
 	return result, errors.Join(err, commitErr)
+}
+
+// bindFailureWork supplies only missing failure metadata from the leased store.
+// It cannot repair a supplied projection, certify a candidate, or heal a forged
+// employee envelope. Successful answers remain entirely the adapter's contract.
+func (s *Supervisor) bindFailureWork(ctx context.Context, lease store.BotLease, result *RunResult, cause error) error {
+	if result.Status == store.RunSucceeded || result.Report.Work != nil {
+		return nil
+	}
+	if result.Report.EmployeeMessage != nil && result.Report.ValidateEmployeeMessageIntegrity(result.Status) != nil {
+		return store.ErrBotInvalid
+	}
+	workStore, ok := s.config.Store.(store.BotWorkStore)
+	if !ok {
+		return nil
+	}
+	work, err := workStore.LoadWork(ctx, lease)
+	if err != nil {
+		return err
+	}
+	if work == nil || work.Protocol != store.BotWorkProtocolAgentLedV1 {
+		return nil
+	}
+	result.Report.Work = store.BuildBotWorkProjection(work)
+	if result.Report.Work == nil {
+		return store.ErrBotInvalid
+	}
+	message := ComposeEmployeeMessage(ctx, result.Status, result.Report, cause, EmployeeMessageOptions{Work: work})
+	result.Report.EmployeeMessage = &message
+	return nil
 }
 
 func supervisorOutcome(result RunResult, err error) (out RunResult) {

@@ -15,6 +15,12 @@ import (
 
 func acceptedScheduleAcknowledgment(t *testing.T, r *botRepository, worker context.Context, q store.BotAuthorizedOperationRequest, op *store.BotOperation, mutate func(*store.BotWorkCandidate)) store.BotReport {
 	t.Helper()
+	pinLegacyWorkFixture(t, r, worker, q.Lease)
+	return completedScheduleAcknowledgment(t, r, worker, q, op, mutate)
+}
+
+func completedScheduleAcknowledgment(t *testing.T, r *botRepository, worker context.Context, q store.BotAuthorizedOperationRequest, op *store.BotOperation, mutate func(*store.BotWorkCandidate)) store.BotReport {
+	t.Helper()
 	payload, _ := json.Marshal(op.Payload)
 	capture := botdomain.ScheduleCapture{OperationID: op.ID, BotID: q.Lease.BotID, SourceRunID: q.Lease.RunID, OwnerID: uuid.MustParse(q.MandateRef.OwnerID), Operation: op.Payload.Operation, ObservedAt: time.Now().UTC()}
 	body, _ := json.Marshal(map[string]any{"operation_id": op.ID, "operation": op.Payload.Operation, "acknowledgment": capture.Acknowledgment(), "payload": json.RawMessage(payload)})
@@ -30,16 +36,21 @@ func acceptedScheduleAcknowledgment(t *testing.T, r *botRepository, worker conte
 		}
 	}
 	next := work.Clone()
-	next.Phase = store.BotWorkProducing
-	sources := []string{"assignment", "charter"}
-	for _, g := range work.Contract.Goals {
-		sources = append(sources, "goal:"+g.ID.String())
+	if work.Protocol == store.BotWorkProtocolLegacyAssessment {
+		next.Phase = store.BotWorkProducing
+		sources := []string{"assignment", "charter"}
+		for _, g := range work.Contract.Goals {
+			sources = append(sources, "goal:"+g.ID.String())
+		}
+		next.Criteria = []store.BotWorkCriterion{{ID: "enqueue", SourceIDs: sources, Text: "Queue the requested schedule"}}
+		save(next)
+		next = work.Clone()
+		next.Phase = store.BotWorkCandidateReady
+	} else {
+		next.Phase = store.BotWorkFinished
+		next.AgentWork.Disposition = store.AgentWorkAnswered
 	}
-	next.Criteria = []store.BotWorkCriterion{{ID: "enqueue", SourceIDs: sources, Text: "Queue the requested schedule"}}
-	save(next)
-	next = work.Clone()
-	next.Phase = store.BotWorkCandidateReady
-	next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: capture.Acknowledgment(), Bodies: map[string]string{"pending-control:0": string(body), "producer-final-draft": "Done (private untrusted draft)"}, Observations: []store.BotEvidence{capture.Observation()}}
+	next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: capture.Acknowledgment(), Bodies: map[string]string{"pending-control:0": string(body), "producer-final-draft": capture.Acknowledgment()}, Observations: []store.BotEvidence{capture.Observation()}}
 	response, _ := json.Marshal(map[string]any{"operation_id": op.ID, "status": store.BotOperationPending, "message": capture.Acknowledgment()})
 	next.Candidate.Bodies["tool-response:enqueue"] = string(response)
 	next.Candidate.Bodies["observed-current-controls"] = `{}`
@@ -50,6 +61,9 @@ func acceptedScheduleAcknowledgment(t *testing.T, r *botRepository, worker conte
 	}
 	next.Candidate.Digest = next.Candidate.ContentDigest()
 	save(next)
+	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		return store.BotReport{Summary: work.Candidate.Text, Unchanged: work.Candidate.Observations[:1], Work: store.BuildBotWorkProjection(work)}
+	}
 	next = work.Clone()
 	next.Phase = store.BotWorkReviewing
 	save(next)
@@ -58,6 +72,76 @@ func acceptedScheduleAcknowledgment(t *testing.T, r *botRepository, worker conte
 	next.Review = &store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "enqueue", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Controlled pending enqueue assessment"}}}
 	save(next)
 	return store.BotReport{Summary: work.Candidate.Text, Unchanged: work.Candidate.Observations[:1], Quality: &store.BotQualityReport{SchemaVersion: work.SchemaVersion, WorkRevision: work.Revision, RequirementsDigest: work.RequirementsDigest, CandidateDigest: work.Candidate.Digest, Outcome: work.Phase, Criteria: work.Review.Criteria, Repairs: work.Repairs}}
+}
+
+func TestBotAgentScheduleAcknowledgmentAuthority(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, name := range []string{"pending", "mixed", "mixed-draft", "independent-draft", "payload", "foreign", "observation", "tool-error", "extra-body"} {
+			t.Run(string(scope)+"/"+name, func(t *testing.T) {
+				r, runtime, owner, worker, q := authorizedScheduleFixture(t, scope)
+				op, err := runtime.EnqueueAuthorizedOperation(worker, q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report := completedScheduleAcknowledgment(t, r, worker, q, op, func(c *store.BotWorkCandidate) {
+					switch name {
+					case "mixed":
+						c.Text += "\nAn independent useful result."
+					case "mixed-draft":
+						c.Bodies["producer-final-draft"] = c.Text + "\nAn independent useful result."
+					case "independent-draft":
+						c.Bodies["producer-final-draft"] = "An independent useful result."
+					case "payload":
+						c.Bodies["pending-control:0"] = strings.Replace(c.Bodies["pending-control:0"], "read the report", "different instructions", 1)
+					case "foreign":
+						c.Bodies["pending-control:0"] = strings.ReplaceAll(c.Bodies["pending-control:0"], op.ID.String(), uuid.NewString())
+					case "observation":
+						c.Observations[0].Source = "forged"
+					case "tool-error":
+						c.Bodies["tool-response:enqueue"] = `{"status":"error"}`
+					case "extra-body":
+						c.Bodies["independent-work"] = "result"
+					}
+				})
+				work, err := r.LoadWork(worker, q.Lease)
+				if err != nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Review != nil {
+					t.Fatalf("not agent-led: %+v %v", work, err)
+				}
+				report.FinalizeEmployeeMessage(store.RunSucceeded, work)
+				if err := validateBotWorkCommit(work, store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}); err != nil {
+					t.Fatalf("work binding: %v", err)
+				}
+				if err := report.ValidateEmployeeMessage(store.RunSucceeded, work); err != nil {
+					t.Fatalf("message binding: %+v %v", report.EmployeeMessage, err)
+				}
+				commit := store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.CommitRun(worker, commit); err != nil {
+					t.Fatalf("exact agent retry: %v", err)
+				}
+				bad := commit
+				projection := *commit.Report.Work
+				projection.WorkRevision++
+				bad.Report.Work = &projection
+				if err := r.CommitRun(worker, bad); !errors.Is(err, store.ErrBotConflict) {
+					t.Fatalf("tampered agent projection retry: %v", err)
+				}
+				saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (saved.Report.Acknowledgment != nil) != (name == "pending") {
+					t.Fatalf("authority classification %s: %+v", name, saved.Report.Acknowledgment)
+				}
+				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
+				if err != nil || pub.Suppressed != (name == "pending") {
+					t.Fatalf("publication: %+v %v", pub, err)
+				}
+			})
+		}
+	}
 }
 
 func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
@@ -181,7 +265,7 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 }
 
 func TestBotScheduleAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
-	for _, name := range []string{"mixed", "payload", "foreign-operation", "observation", "tool-error", "extra-body", "assessment-scope", "failed", "marker"} {
+	for _, name := range []string{"mixed", "mixed-draft", "independent-draft", "payload", "foreign-operation", "observation", "tool-error", "extra-body", "assessment-scope", "failed", "marker"} {
 		t.Run(name, func(t *testing.T) {
 			r, runtime, owner, worker, q := authorizedScheduleFixture(t, store.BotScopePersonal)
 			op, err := runtime.EnqueueAuthorizedOperation(worker, q)
@@ -192,6 +276,10 @@ func TestBotScheduleAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
 				switch name {
 				case "mixed":
 					c.Text += "\nToday's requested report is here."
+				case "mixed-draft":
+					c.Bodies["producer-final-draft"] = c.Text + "\nAn independent useful result."
+				case "independent-draft":
+					c.Bodies["producer-final-draft"] = "An independent useful result."
 				case "payload":
 					c.Bodies["pending-control:0"] = strings.Replace(c.Bodies["pending-control:0"], "read the report", "different instructions", 1)
 				case "foreign-operation":

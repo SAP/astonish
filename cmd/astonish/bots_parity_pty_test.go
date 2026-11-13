@@ -32,7 +32,10 @@ func TestBotParityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, fal
 
 func TestBotWorkQualityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, true) }
 
-func runBotParityPTYAcceptance(t *testing.T, quality bool) {
+func TestBotAgentWorkPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, false, true) }
+
+func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
+	agentWork := len(agentMode) > 0 && agentMode[0]
 	for _, status := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused} {
 		t.Run(string(status), func(t *testing.T) {
 			home := t.TempDir()
@@ -112,6 +115,21 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 							if !quality {
 								snap.LatestOutcome = &run
 							}
+						}
+						if agentWork {
+							latest := run
+							latest.Work = &store.BotWorkProjection{SchemaVersion: 1, Protocol: store.BotWorkProtocolAgentLedV1, BotID: id, RunID: run.ID, WorkRevision: 2, Phase: store.BotWorkFinished, Disposition: store.AgentWorkAnswered}
+							if panelState.Load() == 1 {
+								latest.Work.Disposition = store.AgentWorkPartial
+								latest.Work.Remaining = []store.BotWorkObligation{{Summary: "Missing source", Reason: "Source unavailable", Continuation: store.BotWorkContinueOwnerRequest}}
+							}
+							if panelState.Load() == 3 {
+								latest.Work = nil
+							}
+							if panelState.Load() == 4 {
+								latest.Work.SchemaVersion = 99
+							}
+							snap.LatestOutcome = &latest
 						}
 						if headerState.Load() == 1 {
 							snap.Bot.Status = store.BotPaused
@@ -336,11 +354,43 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 				send("\r")
 			}
 			wait("Durable parity home")
+			if agentWork {
+				for _, tc := range []struct {
+					state int32
+					want  string
+				}{{0, "Answer provided"}, {1, "Partial answer"}, {3, "No work result yet"}, {4, "Work details unavailable"}} {
+					panelState.Store(tc.state)
+					send("/bots status\r")
+					wait(tc.want)
+					if tc.state == 1 {
+						wait("Remaining work")
+						wait("no automatic continuation")
+					}
+					escape()
+				}
+				panelState.Store(0)
+				send("/bots status\r")
+				wait("Answer provided")
+				panelState.Store(2)
+				send("r")
+				wait("Press r to retry")
+				wait("Last known work details")
+				panelState.Store(0)
+				send("r")
+				// Refresh keeps the same answer text; the terminal may emit only
+				// deleted stale/error rows. Assert a complete resized frame.
+				refreshed := frame(139)
+				if !strings.Contains(refreshed, "Answer provided") || strings.Contains(refreshed, "Last known") || strings.Contains(refreshed, "Press r to retry") {
+					t.Fatalf("refresh did not restore current work: %s", refreshed)
+				}
+				escape()
+				t.Log("AGENT_SURFACE pty/work-states PASS")
+			}
 			if quality {
 				for _, tc := range []struct {
 					state int32
 					want  string
-				}{{0, "Requirements checked"}, {1, "Requirements remain unmet or unverified"}, {3, "Not assessed"}, {4, "Assessment unavailable"}} {
+				}{{0, "Requirements checked"}, {1, "Requirements remain unmet or unverified"}, {3, "No work result yet"}, {4, "Assessment unavailable"}} {
 					panelState.Store(tc.state)
 					send("/bots status\r")
 					wait(tc.want)
@@ -399,7 +449,10 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 			panelState.Store(2)
 			for _, command := range []string{"goals", "schedule"} {
 				send("/bots " + command + "\r")
-				wait("server error (403): forbidden")
+				wait("Work details unavailable. Press r to retry.")
+				if strings.Contains(read(), "server error (403)") {
+					t.Fatal("overview exposed raw transport error")
+				}
 				escape()
 			}
 			panelState.Store(0)
@@ -425,11 +478,18 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 			if strings.Count(homeFrame, "parity-message") != 1 || strings.Count(homeFrame, "Durable parity answer") != 1 || strings.Contains(homeFrame, "Runtime parity findings") {
 				t.Fatalf("restored home chronology mismatch: %s", homeFrame)
 			}
+			if agentWork {
+				t.Log("AGENT_SURFACE pty/restore-readonly PASS")
+			}
 			for _, code := range []int32{409, 403} {
 				reject.Store(code)
 				send("retain-this-message\r")
-				wait(fmt.Sprint(code))
+				// Composer transport errors are not typed yet, so even 403 uses safe generic feedback.
+				wait("I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.")
 				retained := frame(uint16(143 + code%10))
+				if strings.Contains(retained, "server error (") || strings.Contains(retained, "review-conflict") {
+					t.Fatalf("composer exposed raw diagnostic: %s", retained)
+				}
 				if !strings.Contains(retained, "retain-this-message") {
 					t.Fatalf("rejected composer input lost: %s", retained)
 				}
@@ -477,7 +537,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool) {
 			wait("No approvals.")
 			escape()
 			if status == store.BotPaused {
-				wait("Continuation blocked while paused")
+				wait("I saved your approval, but I’m still paused.")
 			}
 			if proposalPosts.Load() != 1 || approvalPosts.Load() != 1 {
 				t.Fatalf("decision counts: %d/%d", proposalPosts.Load(), approvalPosts.Load())

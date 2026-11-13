@@ -302,6 +302,12 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 		boundedWait("quality idle", 6*time.Minute, func() bool { return employeeExecutionIdle(readOwned("quality-idle", "read"), id) })
 		return employeeSend(page, home, key, message, snapshot, runs, capture, func() { actions[key] = true; checkpoint() }, saveEvidence)
 	}, readOwned, runs)
+	skills := startSkills(root, home, state, api, func(key, message string) store.BotRun {
+		if actions[key] {
+			panic("duplicate skills action")
+		}
+		return employeeSend(page, home, key, message, snapshot, runs, capture, func() { actions[key] = true; checkpoint() }, saveEvidence)
+	}, readOwned, runs)
 	stage("employee-natural-schedule")
 	before := map[uuid.UUID]bool{}
 	for _, r := range runs() {
@@ -332,6 +338,9 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 			}
 			if !found {
 				panic("actual trigger differs from every-minute request")
+			}
+			if skills != nil {
+				skills.schedule(v, op.VerifiedSchedule.TriggerID)
 			}
 			if page().MustInfo().URL != home {
 				panic("schedule changed Home")
@@ -406,7 +415,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 			}
 			if r.Status == store.RunSucceeded {
 				tick = r
-				return quality.offline(offline, uuid.MustParse(id), expectedTrigger, restartedAt)
+				return quality.offline(offline, uuid.MustParse(id), expectedTrigger, restartedAt) && skills.offline(offline, expectedTrigger, restartedAt)
 			}
 		}
 		return false
@@ -424,6 +433,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	must(os.WriteFile(filepath.Join(root, "employee-reauth-report-bubbles.json"), reportEvidence, 0600))
 	must(employeeReportExactlyOnce(history, snapshot().Bot.HomeSessionID.String(), tick, reportBubbles))
 	quality.restored(page(), history, snapshot().Bot.HomeSessionID.String())
+	skills.restored()
 	receipt("reauth-same-home", "One login after offline evidence; scheduled result appears once in unchanged Home", "employee-reauth-history.json + employee-reauth-report-bubbles.json")
 	idle := func() {
 		boundedWait("employee idle (execution ownership cleared)", 6*time.Minute, func() bool {
@@ -649,6 +659,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	must(employeeForgottenMemory(beforeDeny, capture("approved-memory-after-tick", botPath+"/memory?scope=personal"), approved))
 	capture("approved-final", botPath+"/snapshot?scope=personal")
 	receipt("exception-approved-once", "Distinct exact exception approved once; preference removed and no replay after reload/tick", "employee-exception-approved.json + employee-approved-memory.json")
+	skills.removeAndInspect(page, send, change)
 	stage("employee-delete-preserves-peer")
 	peerCapture := func(label, path string, format employeePeerFormat) employeePeerPayload {
 		p, err := employeeCapturePeer(page(), root, label, path, format)
@@ -816,6 +827,7 @@ func newEmployeeWorkflow(basePage *rod.Page, api func(string, string, any) strin
 	evidence["status"] = "verified"
 	checkpoint()
 	quality.finish(evidence)
+	skills.finish(evidence)
 	save()
 }
 
@@ -940,12 +952,14 @@ func employeeRun(row employeeDiskRow) store.BotRun {
 	raw, fields, err := employeeStoredDocument(row.Data)
 	must(err)
 	if run, nested := fields["run"]; nested {
-		// Private repository metadata may accompany Run, but public run
-		// fields alongside it would provide a second, ambiguous identity/state.
+		// Private repository metadata may accompany Run. In particular envelope
+		// work is BotWorkState, while Run.work is BotWorkProjection; only the
+		// nested Run supplies public identity/state. All other public fields
+		// alongside it would provide a second, ambiguous identity/state.
 		runType := reflect.TypeFor[store.BotRun]()
 		for i := 0; i < runType.NumField(); i++ {
 			key := strings.Split(runType.Field(i).Tag.Get("json"), ",")[0]
-			if key != "-" {
+			if key != "-" && key != "work" {
 				if _, exists := fields[key]; exists {
 					panic("ambiguous flat and nested disk run")
 				}

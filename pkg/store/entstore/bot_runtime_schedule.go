@@ -265,6 +265,10 @@ func (r *botRepository) resolveScheduledRequest(ctx context.Context, tx botDraft
 		}
 		req.Trigger = trigger.Kind
 		req.Instructions = trigger.Instructions
+		req.SkillID, req.Invocation = trigger.SkillID, trigger.Invocation
+		if trigger.SkillID != nil {
+			req.Instructions = trigger.Invocation
+		}
 		return nil
 	}
 	return store.ErrBotForbidden

@@ -307,7 +307,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			saved = getRun(run.ID)
 			// The fixture independently observes the exact resumed effect. The
 			// earlier blocked invocation is not an executed uncertain action.
-			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality == nil || saved.Report.Quality.Outcome != store.BotWorkAccepted || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentDraftTest || effects.Load() != 1 || llm.calls != 2 {
+			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || saved.Report.Work.Disposition != store.AgentWorkAnswered || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentDraftTest || effects.Load() != 1 || llm.calls != 2 {
 				t.Fatalf("resume run=%+v effects=%d calls=%d", saved, effects.Load(), llm.calls)
 			}
 			all = approvals()

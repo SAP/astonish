@@ -51,7 +51,17 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 	if err != nil {
 		return nil, err
 	}
+	memoryText, err := in.binding.currentMemory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	in.binding.owner = withoutGenericBotMemory(in.binding.owner)
 	prompt := &agent.SystemPromptBuilder{WorkspaceDir: in.safe.WorkspaceDir, SandboxEnabled: true, SandboxWorkspaceDir: in.safe.WorkspaceDir}
+	prompt.BuildOverride = func(clone *agent.SystemPromptBuilder) string {
+		plain := *clone
+		plain.BuildOverride = nil
+		return plain.Build() + memoryText
+	}
 	chat := agent.NewChatAgent(in.llm, nil, nil, in.scope.Sessions, prompt, false, false)
 	wrappers := map[string]tool.Tool{}
 	wrap := func(t tool.Tool) (tool.Tool, error) {
@@ -65,6 +75,43 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 		w := &interactiveBotTool{botRunnableTool: run, binding: in.binding}
 		wrappers[t.Name()] = w
 		return w, nil
+	}
+	workTools, err := newBotWorkTools(in.binding)
+	if err != nil {
+		return nil, err
+	}
+	skillTools, err := newBotSkillTools(in.binding, in.scope)
+	if err != nil {
+		return nil, err
+	}
+	workTools = append(workTools, skillTools...)
+	memoryTools, err := BotMemoryTools(in.binding.req, in.scope)
+	if err != nil {
+		return nil, err
+	}
+	// Drop generic memory entries even when scoped memory is unavailable. Keeping
+	// Chat's delete adapter would allow its Services-based owner-wide fallback.
+	withoutMemory := func(entries []tool.Tool) []tool.Tool {
+		filtered := make([]tool.Tool, 0, len(entries))
+		for _, entry := range entries {
+			switch entry.Name() {
+			case "memory_save", "memory_search", "memory_get", "memory_delete":
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		return filtered
+	}
+	catalog.AllTools = append(withoutMemory(catalog.AllTools), memoryTools...)
+	for _, group := range catalog.Groups {
+		group.Tools = withoutMemory(group.Tools)
+	}
+	if len(memoryTools) != 0 {
+		catalog.Groups["bot_memory"] = &agent.ToolGroup{Name: "bot_memory", Description: "Current Bot memory only", Tools: memoryTools}
+	}
+	catalog.AllTools = append(catalog.AllTools, workTools...)
+	if len(workTools) != 0 {
+		catalog.Groups["bot_work"] = &agent.ToolGroup{Name: "bot_work", Description: "Optional scoped work and evidence", Tools: workTools}
 	}
 	var all []tool.Tool
 	for _, t := range catalog.AllTools {
@@ -203,8 +250,12 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 		mgr.SessionService = in.scope.Sessions
 		mgr.AppName = "astonish"
 		mgr.UserID = in.binding.req.Bot.OwnerID.String()
-		mgr.ToolGroups = catalog.Groups
-		mgr.ToolIndex = index
+		mgr.ToolGroups = botChildWorkGroups(catalog.Groups)
+		childIndex := agent.NewLexicalToolIndex()
+		if err := childIndex.PrimeTools(in.binding.owner, botChildWorkTools(all), agent.SortedGroups(mgr.ToolGroups)); err != nil {
+			return nil, err
+		}
+		mgr.ToolIndex = childIndex
 		mgr.Redactor = redactor
 		mgr.CredentialStore = chat.CredentialStore
 		mgr.PendingSecrets = chat.PendingSecrets
@@ -215,7 +266,7 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 		mgr.Compactor = chat.Compactor.Clone()
 		chat.SubAgentManager = mgr
 	}
-	in.binding.owner = agent.WithRequestMCPGroups(in.binding.owner, catalog.Groups)
+	in.binding.owner = agent.WithRequestMCPGroups(in.binding.owner, botChildWorkGroups(catalog.Groups))
 	if err = restoreBotPlan(ctx, chat, in.scope, in.binding.req.Run.SessionID.String(), in.binding.req.Bot.OwnerID.String()); err != nil {
 		return nil, err
 	}
@@ -251,12 +302,16 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	result, err := t.botRunnableTool.Run(bound, args)
 	// Only the shared built-in node transport is eligible; an MCP tool with
 	// the same name or a forged result cannot attest to effects.
-	if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin && err == nil {
+	if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin {
 		raw, marshalErr := json.Marshal(args)
 		var values map[string]any
 		if marshalErr == nil && json.Unmarshal(raw, &values) == nil {
 			if values, normalizeErr := common.NormalizeFileToolArguments(t.Name(), values); normalizeErr == nil {
-				recordBuiltinToolObservation(bound, t.binding.req.Run.SessionID.String(), t.Name(), values, result)
+				observation := result
+				if err != nil {
+					observation = map[string]any{"error": err.Error()}
+				}
+				recordBuiltinToolObservation(bound, t.binding.req.Run.SessionID.String(), t.Name(), values, observation)
 			}
 		}
 	}

@@ -32,7 +32,15 @@ func verifyRoutineTaskRun(ctx context.Context, tx botDraftDB, rec *botStoredReco
 	if err != nil {
 		return err
 	}
-	if o.Status != store.BotOperationApplied || o.Payload.TaskOnce == nil || o.Payload.TaskOnce.Instructions != b.Instructions {
+	if o.Status != store.BotOperationApplied || o.Payload.TaskOnce == nil {
+		return store.ErrBotForbidden
+	}
+	task := o.Payload.TaskOnce
+	instructions := task.Instructions
+	if task.SkillID != nil {
+		instructions = task.Invocation
+	}
+	if instructions != b.Instructions || !sameSkillID(task.SkillID, run.Run.SkillID) || task.Invocation != run.Run.Invocation {
 		return store.ErrBotForbidden
 	}
 	return verifyRoutineGrant(ctx, tx, *o)

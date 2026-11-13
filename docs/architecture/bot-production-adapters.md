@@ -5,6 +5,20 @@ Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 policy and the shared run budget precede adapter execution. There is no host
 fallback when an adapter is unavailable.
 
+## Resolved model provenance
+
+The successful Bot factory carries the owner-scoped resolver's provider instance
+and model pair in `BotChatResources.ModelSelection`. The runtime copies it into
+`RunResult` on both normal and post-factory failure exits; the supervisor passes it
+through the existing lease-fenced `BotRunCommit`. The store persists it in the
+existing `BotRun.Provider`/`Model` fields, independently of token and price usage.
+This records the selected model for the latest committed attempt, not a model
+chosen from ambient defaults or the adapter's display name. A continuation with
+no successful factory selection preserves the prior identity; historical empty
+records remain unknown. Optional commit metadata is omitted from legacy commit
+hashes. No model call or pricing lookup is added. Native adapter observation logs
+remain separate evidence of actual adapter invocation, not wire-level proof.
+
 ## Shared executable Chat catalog
 
 `launcher.BuildChatCatalog(ctx, inputs, cfg)` shares executable registration with
@@ -245,6 +259,132 @@ These are controlled fixtures (including local protocol servers), not deployed
 sandbox isolation, production mail delivery, arbitrary concurrent store mutation,
 or Studio/terminal approval acceptance. No production code was changed for this
 verification pass.
+
+## Isolated candidate provider configuration (preparation only)
+
+`tests/e2eboot/local_bot_smoke_launcher.py --config /absolute/private.json`
+accepts the existing unversioned LiteLLM configuration unchanged, or this explicit
+version 1 object. Keep the file mode 0600; do not copy a live daemon configuration
+or extract secrets from sessions. All values below are placeholders:
+
+```json
+{
+  "schema_version": 1,
+  "binary": "/absolute/fresh-linux-arm64-astonish",
+  "docker": "/absolute/linux-arm64-docker",
+  "layers": "/absolute/isolated-layers",
+  "browser": "/absolute/native-browser",
+  "embedding_cache": "/absolute/hash-pinned-model-cache",
+  "provider_instance": "New AI Core Provider",
+  "provider_config": {
+    "type": "sap_ai_core",
+    "base_url": "https://api.example.test",
+    "auth_url": "https://auth.example.test",
+    "client_id": "operator-supplied",
+    "client_secret": "operator-supplied",
+    "resource_group": "operator-supplied"
+  },
+  "model": "anthropic--claude-4.6-sonnet",
+  "intended": {
+    "provider": "New AI Core Provider",
+    "provider_type": "sap_ai_core",
+    "model": "anthropic--claude-4.6-sonnet"
+  }
+}
+```
+
+The optional `bot_routine_policy` retains its existing restricted semantics.
+Unknown versions/fields, duplicate JSON keys, incomplete credentials, and mismatched
+intended identities fail preflight without echoing supplied values. Version 1
+supports explicit `sap_ai_core` fields above, or `litellm` with exactly `type`,
+`base_url`, and `api_key`. AI Core resource group is explicit rather than inherited.
+URLs cannot embed credentials, query strings or fragments. Startup YAML and the
+existing authenticated platform-settings provisioning use the same named instance,
+not a rewritten `local-litellm` alias. Secrets are staged only inside the fresh
+owned candidate's private configuration; the startup receipt contains identity and
+configuration-presence metadata, not credential values.
+
+`--verify-bot-agent` requires a fresh invocation with only an absolute private
+version 1 `--config`; `--state`, legacy modes and alternate provider/model aliases
+are rejected. **It currently fails closed even with valid configuration** because
+the complete agent browser journey and runtime parity receipts are not implemented.
+It starts no candidate and makes no model call. A staging receipt explicitly says
+`runtime_parity_verified: false`: configuration equality is not observed parity
+between Bot Home model-status, worker resolver input and actual adapter metadata.
+Those production-path observations, three fresh title-only Stock Market News runs,
+document/comparison tasks, browser/PTY, scheduler/feedback/restart, and guarded
+PostgreSQL continuity remain required before full employee acceptance. Local Python
+safety tests are preparation evidence only; no readiness or live-provider claim is
+made by this configuration support.
+
+## Native adapter provenance: payload-free worker observations
+
+The native browser cannot derive concrete adapter identity from Bot Home model
+status, `BotRun.Provider`/`Model`, aggregate usage, or transcript text. The concrete
+boundary is `pkg/daemon/bot_worker.go`, `BotWorker.loadScope`'s `ResolveProvider`
+closure: its callback returns the value constructed by
+`pkg/daemon/bot_production.go`, `newProductionBotWorker`'s `ResolveModel` closure,
+which currently returns `provider.GetProvider(ctx, name, modelName, local)` directly.
+The preceding `store.ResolveBotModelSelection` uses the owner-scoped Home pin and
+settings. `pkg/provider/streaming.Progress` contains only phases, liveness and
+recovery timing, not adapter/model/request identity. Cache diagnostics describe
+canonical ADK requests, not concrete factory-return types or wire identity, and
+are not a native Bot worker provenance producer.
+
+**Production boundary:** the browser/report/contract files alone cannot capture
+that object in another process. A second factory invocation in the browser or a
+separate Go diagnostic is not evidence about the native worker. The existing
+`stockAgentConfig.observeAdapter` test observer is explicitly diagnostic-only.
+
+The production-native implementation is payload-free worker telemetry, with no
+new endpoint, configuration, schema or provider call:
+
+- `BotWorker.loadScope.ResolveProvider` retains the exact successful resolver
+  return and wraps it with `observeBotResolvedModel` before the existing budget
+  wrapper. The mandate guard, scopes, resolver errors, provider instance and
+  limits are unchanged. Nil and typed-nil models emit no successful identity.
+- `pkg/daemon/bot_model_observation.go` emits bounded identity-only JSON prefixed
+  `[bot-model-observation-v1]` through the existing daemon logger. Resolution
+  records include worker/PID, fresh adapter UUID, Bot/run/session/owner/scope,
+  resolver provider/model, the actual object's concrete Go type and `Name()`.
+  No object/config serialization, prompts, responses, raw errors, credentials,
+  authorization tokens or hidden thought parts are emitted. Overlong/control
+  metadata becomes an explicit invalid-metadata marker rather than an empty
+  request-model observation. The observer never rejects a production adapter.
+- The transparent iterator forwards the exact context, request, streaming flag,
+  responses/errors and consumer stop signal. Generation start/end records carry
+  the same identity, fresh call UUID/ordinal, request model (honestly empty when
+  omitted), response count and complete/error/cancelled/consumer-stopped outcome.
+  An interrupted iterator is not complete evidence. Random-ID/logging failures
+  do not gate execution. There are no extra model calls or background goroutines.
+- `agent_live.go` captures the fresh owned candidate's `logs/daemon.log` through
+  `agent_adapter.go`, using a closed typed mirror into a private hashed manifest.
+  Symlink/missing logs, malformed/unknown fields, incomplete reads, missing calls
+  or rotated-away records fail acceptance; raw daemon logs are never published.
+  The source starts at this browser invocation, spans the owned learning restart,
+  and is bound to candidate/browser hashes and nonce. Standard logger routing to
+  `daemon.log` is exercised with `TestBotModelObservationPrivateLoggerRoute`.
+- `agent_live_contract.py` invokes `agent_adapter_contract.py` independently of
+  source grounding. It validates all records against retained title, general and
+  learning runs, exact Bot/run/session identities and run timestamps, consistent
+  PID/worker/adapter/call identities, paired starts/ends and contiguous ordinals.
+  Resolver/Home parity alone is insufficient: actual `*sap.Provider` and actual
+  model name must match the target, and nonempty substituted request models fail.
+  Missing/foreign/duplicate/factory-only evidence cannot clear adapter provenance.
+
+These are **native-worker-adapter** observations with **wire_verified: false**.
+They prove invocation of the observed in-process object, not authenticated upstream
+wire/model identity or successful factual work. An error/cancellation observation
+is still an observation, not a successful task. Ownership/process provenance relies
+on the existing fresh-candidate launcher verification and private owned log path,
+not signatures in these records. Full source grounding remains a separate gate.
+
+Focused zero-inference fixtures cover actual-instance identity, nil/typed nil,
+stream/nonstream transparency, early stop/error/cancellation, concurrent run/call
+isolation, logger failure, private log routing, owned-log extraction and rejecting
+wrong concrete adapters, changed models, calls, runs, candidate hashes/nonces and
+payload-bearing fields. No live candidate has yet been rebuilt or exercised with
+this hook; earlier candidates cannot retroactively supply this telemetry.
 
 ## Verification and limits
 

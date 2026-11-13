@@ -306,6 +306,234 @@ func TestEmployeeMessagePreservesVerifiedBlockedExplanation(t *testing.T) {
 	}
 }
 
+func agentEmployeeFixture(t *testing.T, disposition store.AgentWorkDisposition) (*store.BotWorkState, store.BotReport, store.RunStatus) {
+	t.Helper()
+	w := store.NewBotAgentWorkState(store.BotWorkContract{BotID: uuid.New(), RunID: uuid.New(), Version: 1, Instructions: "Compare the sources", Charter: "Be truthful"})
+	w.Phase = store.BotWorkFinished
+	w.AgentWork.Disposition = disposition
+	status := store.RunSucceeded
+	if disposition == store.AgentWorkPartial {
+		status = store.RunPartial
+	}
+	if disposition == store.AgentWorkBlocked {
+		status, w.Phase = store.RunPartial, store.BotWorkBlocked
+		w.Unresolved = []string{"Source unavailable"}
+	}
+	w.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: "final-answer", Text: "Available findings, with limitations.\n"}
+	w.Candidate.Digest = w.Candidate.ContentDigest()
+	if err := w.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return w, store.BotReport{Summary: w.Candidate.Text, Work: store.BuildBotWorkProjection(w)}, status
+}
+
+func TestBotAgentEmployeeMessageExactFinal(t *testing.T) {
+	for _, disposition := range []store.AgentWorkDisposition{store.AgentWorkAnswered, store.AgentWorkComplete, store.AgentWorkPartial, store.AgentWorkBlocked} {
+		t.Run(string(disposition), func(t *testing.T) {
+			w, report, status := agentEmployeeFixture(t, disposition)
+			m := &employeeNarrator{t: t, mode: "error"}
+			message := ComposeEmployeeMessage(context.Background(), status, report, nil, EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { t.Fatal("agent composition reserved model capacity"); return nil }})
+			if message.Origin != store.BotEmployeeMessageAgent || message.Text != w.Candidate.Text || message.CandidateDigest != w.Candidate.Digest || m.calls != 0 {
+				t.Fatalf("not exact agent result: %+v calls=%d", message, m.calls)
+			}
+			report.EmployeeMessage = &message
+			if err := report.ValidateEmployeeMessage(status, w); err != nil {
+				t.Fatal(err)
+			}
+			// The commit-time skill receipt is additive and requires no legacy review.
+			report.Skill = &store.BotSkillReceipt{}
+			report.FinalizeEmployeeMessage(status, w)
+			if report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || report.EmployeeMessage == &message || report.ValidateEmployeeMessage(status, w) != nil {
+				t.Fatalf("receipt invalidated exact result: %+v", report.EmployeeMessage)
+			}
+			report.Summary += "changed"
+			if report.ValidateEmployeeMessage(status, w) == nil {
+				t.Fatal("changed final answer accepted")
+			}
+			report.FinalizeEmployeeMessage(status, w)
+			if report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback {
+				t.Fatal("finalizer repaired tampered answer into agent authority")
+			}
+		})
+	}
+}
+
+func TestBotAgentEmployeeFailureNoNarrator(t *testing.T) {
+	for _, status := range []store.RunStatus{store.RunFailed, store.RunPartial, store.RunWaitingApproval, store.RunInterrupted} {
+		t.Run(string(status), func(t *testing.T) {
+			w, report, _ := agentEmployeeFixture(t, store.AgentWorkAnswered)
+			w.Phase, w.Candidate, w.AgentWork.Disposition = store.BotWorkWorking, nil, ""
+			report.Work = store.BuildBotWorkProjection(w)
+			report.Summary = "SECRET partially streamed provider answer"
+			report.Unverified = []string{"SECRET uncertain send"}
+			m := &employeeNarrator{t: t}
+			got := ComposeEmployeeMessage(context.Background(), status, report, errors.New("SECRET https://provider.invalid/token"), EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { return nil }})
+			if m.calls != 0 || got.Origin != store.BotEmployeeMessageFallback || strings.Contains(got.Text, "SECRET") || strings.Contains(got.Text, "Review the incomplete result") || strings.Contains(got.Text, "assessed") || strings.Contains(got.Text, "review the run diagnostics") {
+				t.Fatalf("unsafe or model-gated failure: %+v calls=%d", got, m.calls)
+			}
+			if status == store.RunWaitingApproval && !strings.Contains(got.Text, "answer or authorization") {
+				t.Fatal(got.Text)
+			}
+			report.EmployeeMessage = &got
+			if err := report.ValidateEmployeeMessage(status, w); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestBotAgentEmployeeRejectsUnboundCandidate(t *testing.T) {
+	for _, mutation := range []string{"text", "digest", "projection", "status", "failure", "artifact", "missing-work"} {
+		t.Run(mutation, func(t *testing.T) {
+			w, report, status := agentEmployeeFixture(t, store.AgentWorkAnswered)
+			switch mutation {
+			case "text":
+				report.Summary += "not captured"
+			case "digest":
+				w.Candidate.Digest = strings.Repeat("0", 64)
+			case "projection":
+				report.Work.WorkRevision++
+			case "status":
+				status = store.RunWaitingApproval
+			case "failure":
+				report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureOperational}
+			case "artifact":
+				report.Artifacts = []store.BotArtifact{{ID: uuid.New(), HomeID: uuid.New(), SHA256: strings.Repeat("a", 64)}}
+			case "missing-work":
+				w = nil
+			}
+			m := &employeeNarrator{t: t}
+			got := ComposeEmployeeMessage(context.Background(), status, report, nil, EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { return nil }})
+			if got.Origin != store.BotEmployeeMessageFallback || m.calls != 0 {
+				t.Fatalf("unbound candidate promoted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestBotAgentEmployeePendingControlNoNarrator(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		name := "pure"
+		if mixed {
+			name = "mixed"
+		}
+		t.Run(name, func(t *testing.T) {
+			w, report, status := agentEmployeeFixture(t, store.AgentWorkAnswered)
+			text := "I've queued the requested change; it has not been applied yet."
+			if mixed {
+				text = "The comparison result is available.\n\n" + text
+			}
+			w.Candidate.Text = text
+			w.Candidate.Bodies = map[string]string{"pending-control:private": "SECRET receipt"}
+			w.Candidate.Digest = w.Candidate.ContentDigest()
+			report.Summary, report.Work = text, store.BuildBotWorkProjection(w)
+			m := &employeeNarrator{t: t, mode: "error"}
+			message := ComposeEmployeeMessage(context.Background(), status, report, nil, EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { t.Fatal("reserved narrator capacity"); return nil }})
+			if message.Origin != store.BotEmployeeMessageAgent || message.Text != text || m.calls != 0 {
+				t.Fatalf("pending answer lost: %+v", message)
+			}
+			report.EmployeeMessage = &message
+			report.Skill = &store.BotSkillReceipt{}
+			report.FinalizeEmployeeMessage(status, w)
+			if report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || report.EmployeeMessage.Text != text || report.ValidateEmployeeMessage(status, w) != nil {
+				t.Fatalf("pending answer invalidated: %+v", report.EmployeeMessage)
+			}
+		})
+	}
+}
+
+func TestBotAgentEmployeeUnverifiedOutcomeNoNarrator(t *testing.T) {
+	w, report, status := agentEmployeeFixture(t, store.AgentWorkPartial)
+	w.Candidate.Text = "Email sent successfully."
+	w.Candidate.Digest = w.Candidate.ContentDigest()
+	report.Summary, report.Work = w.Candidate.Text, store.BuildBotWorkProjection(w)
+	report.Unverified = []string{"SECRET send returned without verified outcome metadata"}
+	originalText, originalDigest := w.Candidate.Text, w.Candidate.Digest
+	m := &employeeNarrator{t: t, mode: "error"}
+	message := ComposeEmployeeMessage(context.Background(), status, report, nil, EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { t.Fatal("reserved narrator capacity"); return nil }})
+	if message.Origin != store.BotEmployeeMessageFallback || strings.Contains(message.Text, "Email sent") || strings.Contains(message.Text, "SECRET") || !strings.Contains(message.Text, "not confirmed") || !strings.Contains(message.Text, "before retrying") || m.calls != 0 {
+		t.Fatalf("unsafe uncertainty: %+v calls=%d", message, m.calls)
+	}
+	if w.Candidate.Text != originalText || w.Candidate.Digest != originalDigest {
+		t.Fatal("candidate binding changed")
+	}
+	if _, err := store.NewBotEmployeeAgentMessage(status, report, w); err == nil {
+		t.Fatal("constructor promoted uncertain claim")
+	}
+	report.EmployeeMessage = &message
+	if err := report.ValidateEmployeeMessage(status, w); err != nil {
+		t.Fatal(err)
+	}
+	// Direct finalization must not restore the raw candidate either.
+	report.EmployeeMessage = nil
+	report.FinalizeEmployeeMessage(status, w)
+	if report.EmployeeMessage.Origin != store.BotEmployeeMessageFallback || !strings.Contains(report.EmployeeMessage.Text, "not confirmed") {
+		t.Fatalf("finalization restored claim: %+v", report.EmployeeMessage)
+	}
+	if err := report.ValidateEmployeeMessage(status, w); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBotAgentEmployeeFinalizationIntegrity(t *testing.T) {
+	for _, mutation := range []string{"none", "evidence", "projection", "candidate-digest", "text", "model-fields", "source-digest"} {
+		t.Run(mutation, func(t *testing.T) {
+			w, report, status := agentEmployeeFixture(t, store.AgentWorkAnswered)
+			message, err := store.NewBotEmployeeAgentMessage(status, report, w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report.EmployeeMessage = &message
+			switch mutation {
+			case "none":
+				report.EmployeeMessage = nil // trusted finalizer can bind missing envelope
+			case "evidence":
+				report.Changed = []store.BotEvidence{{Kind: store.BotEvidenceInference, Summary: "new claim"}}
+			case "projection":
+				report.Work.WorkRevision++
+			case "candidate-digest":
+				message.CandidateDigest = strings.Repeat("0", 64)
+			case "text":
+				message.Text += "changed"
+			case "model-fields":
+				message.ReviewedTextDigest = "invented"
+			case "source-digest":
+				message.SourceDigest = "invented"
+			}
+			report.FinalizeEmployeeMessage(status, w)
+			if (report.EmployeeMessage.Origin == store.BotEmployeeMessageAgent) != (mutation == "none") {
+				t.Fatalf("unexpected origin: %+v", report.EmployeeMessage)
+			}
+			if err := report.ValidateEmployeeMessageIntegrity(status); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestBotAgentEmployeeFallbackSafeFacts(t *testing.T) {
+	_, report, _ := agentEmployeeFixture(t, store.AgentWorkPartial)
+	report.Work.Phase = store.BotWorkWorking
+	report.Summary = "SECRET draft"
+	report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureExecutionFormat, TechnicalDetails: "SECRET provider credentials"}
+	report.Changed = []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "SECRET", Source: "SECRET", ObservedAt: time.Now(), ActorID: uuid.New()}, {Kind: store.BotEvidenceInference, Summary: "claimed effect"}}
+	id := uuid.New()
+	report.Artifacts = []store.BotArtifact{{ID: id, HomeID: uuid.New(), SHA256: strings.Repeat("a", 64), RelativePath: "SECRET", Title: "SECRET"}}
+	message := EmployeeMessageFallback(store.RunFailed, report, nil)
+	for _, want := range []string{"during execution", "model response could not be processed", "1 tool observation(s)", id.String(), "Try a smaller request"} {
+		if !strings.Contains(message.Text, want) {
+			t.Fatalf("missing %q: %s", want, message.Text)
+		}
+	}
+	if strings.Contains(message.Text, "SECRET") || strings.Contains(message.Text, "claimed effect") {
+		t.Fatal(message.Text)
+	}
+	report.EmployeeMessage = &message
+	if err := report.ValidateEmployeeMessageIntegrity(store.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEmployeeMessageFallbackTypedFailures(t *testing.T) {
 	for _, cause := range []error{ErrBudgetExceeded, ErrBudgetUnknownCost, &BudgetLimitError{Dimension: BudgetTokens, Scope: BudgetRun, Reason: BudgetInputDoesNotFit}, &CheckpointResponseError{Reason: CheckpointResponseMultipleCalls}, context.Canceled} {
 		message := EmployeeMessageFallback(store.RunFailed, store.BotReport{}, cause)

@@ -141,6 +141,12 @@ func (r *botRepository) proposeSourceIntake(ctx context.Context, q store.BotSour
 	if q.SourceID == uuid.Nil || strings.TrimSpace(q.Name) == "" || strings.TrimSpace(q.IdempotencyKey) == "" {
 		return nil, store.ErrBotInvalid
 	}
+	if q.SkillSeed != nil && q.Mode != store.BotIntakeAdaptive {
+		return nil, store.ErrBotInvalid
+	}
+	if e := validateIntakeSkillSeed(q.SkillSeed); e != nil {
+		return nil, e
+	}
 	// Reuse the strict bounded prose/selection validator, without granting ordinary
 	// unfinished saves the right to replace the source proposal envelope.
 	if _, e = store.NewBotUnfinishedIntake(uuid.New(), actor, r.auth.scope, store.BotUnfinishedPut{IdempotencyKey: q.IdempotencyKey, Content: store.BotUnfinishedContent{Mode: q.Mode, Name: q.Name, Charter: q.Charter, Carryover: q.Carryover}}, r.clock()); e != nil {
@@ -238,7 +244,7 @@ func (r *botRepository) applySourceIntake(ctx context.Context, tx botDraftDB, p 
 		return nil, e
 	}
 	rec.CreateHash = p.Digest
-	b, e := insertIntakeDraft(ctx, tx, rec, v, goals, q.Carryover, string(q.Mode), q.SourceID)
+	b, e := insertIntakeDraft(ctx, tx, rec, v, goals, q.Carryover, string(q.Mode), q.SourceID, q.SkillSeed)
 	if e != nil {
 		return nil, e
 	}
@@ -283,7 +289,7 @@ func createSourceTemplate(ctx context.Context, d *personalBotStore, p *store.Bot
 	for _, g := range t.Definition.SuggestedGoals {
 		goals = append(goals, store.BotGoal{Title: g.Title, Description: g.Description, CompletionCriteria: g.CompletionCriteria})
 	}
-	return d.CreateDraft(ctx, store.BotCreateRequest{Name: p.Request.Name, OwnerID: p.OwnerID, IdempotencyKey: sourceDraftKey(p), Version: v, Goals: goals})
+	return createSeededTemplateDraft(ctx, d, store.BotCreateRequest{Name: p.Request.Name, OwnerID: p.OwnerID, IdempotencyKey: sourceDraftKey(p), Version: v, Goals: goals}, t)
 }
 func (r *botRepository) decideSourceIntake(ctx context.Context, id uuid.UUID, q store.BotSourceIntakeDecision, templates store.BotTemplateStore, destination store.BotStore) (*store.BotSourceIntakeProposal, error) {
 	if _, worker := execution.BotRunIdentityFromContext(ctx); worker {

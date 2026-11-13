@@ -93,6 +93,31 @@ func (b *botPlatformBackend) watchSelection() (*store.Bot, uuid.UUID) {
 	}
 	return &v, sid
 }
+
+var _ backend.BotSkillBackend = (*botPlatformBackend)(nil)
+
+func (b *botPlatformBackend) BotSkills(ctx context.Context, page store.BotSkillPage) (*store.BotSkillList, error) {
+	bot := b.SelectedBot()
+	if bot == nil {
+		return nil, fmt.Errorf("select a Bot first")
+	}
+	return b.bots.Skills(ctx, bot.ID.String(), page)
+}
+func (b *botPlatformBackend) BotSkillRevisions(ctx context.Context, skill uuid.UUID, page store.BotSkillPage) (*store.BotSkillRevisionList, error) {
+	bot := b.SelectedBot()
+	if bot == nil {
+		return nil, fmt.Errorf("select a Bot first")
+	}
+	return b.bots.SkillRevisions(ctx, bot.ID.String(), skill.String(), page)
+}
+func (b *botPlatformBackend) BotSkillRuns(ctx context.Context, skill uuid.UUID, page store.BotSkillPage) (*store.BotSkillRunList, error) {
+	bot := b.SelectedBot()
+	if bot == nil {
+		return nil, fmt.Errorf("select a Bot first")
+	}
+	return b.bots.SkillRuns(ctx, bot.ID.String(), skill.String(), page)
+}
+
 func (b *botPlatformBackend) BotRuns(ctx context.Context) ([]store.BotRun, error) {
 	bot := b.SelectedBot()
 	if bot == nil {

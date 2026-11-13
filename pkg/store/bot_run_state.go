@@ -7,6 +7,7 @@ const BotRunStateKey = "bot_run_state"
 
 // BotRunState is durable presentation metadata, not model content or authority.
 type BotRunState struct {
+	Work          *BotWorkProjection    `json:"work,omitempty"`
 	SchemaVersion int                   `json:"schema_version"`
 	BotID         uuid.UUID             `json:"bot_id"`
 	RunID         uuid.UUID             `json:"run_id"`

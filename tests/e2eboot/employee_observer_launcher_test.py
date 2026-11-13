@@ -211,6 +211,37 @@ class EmployeeObserverTests(unittest.TestCase):
         public = set(re.findall(r'json:"([^",]+)', run_source)) - {'-'}
         self.assertEqual(launcher.EMPLOYEE_RUN_FIELDS, public)
 
+    def test_work_projection_and_private_envelope_remain_distinct(self):
+        run = dict(id='mine', bot_id=self.bot, session_id='execution',
+                   work={'protocol': 'agent_led_v1', 'status': 'working'})
+        # The repository's work is private BotWorkState, not Run.work's public
+        # BotWorkProjection. It must never supply the observed session identity.
+        private_work = dict(session_id='private-session', working_notes='PRIVATE-NOTES')
+        for wrapper in ('run', 'Run'):
+            document = {wrapper: run, 'work': private_work,
+                        'CallerCeiling': {'session_id': 'private-session'},
+                        'MandateRef': {'id': 'private-mandate'}}
+            errors = []
+            row = dict(id='mine', bot_id=self.bot, data=json.dumps(document))
+            self.assertEqual(launcher.employee_run_session(row, errors), 'execution')
+            self.assertEqual(errors, [])
+            without_session = {key: value for key, value in run.items() if key != 'session_id'}
+            row['data'] = json.dumps(dict(document, **{wrapper: without_session}))
+            errors = []
+            self.assertIsNone(launcher.employee_run_session(row, errors))
+            self.assertEqual(errors, [])
+            # Other public fields beside Run remain an ambiguous second run.
+            for field in ('skill_id', 'invocation', 'session_id'):
+                with self.subTest(wrapper=wrapper, field=field):
+                    row['data'] = json.dumps(dict(document, **{field: 'conflict'}))
+                    errors = []
+                    self.assertIsNone(launcher.employee_run_session(row, errors))
+                    self.assertTrue(errors)
+                    self.assertNotIn('PRIVATE-NOTES', json.dumps(errors))
+        self.assertTrue({'caller_ceiling', 'callerceiling', 'mandate_ref',
+                         'mandateref', 'credentials', 'working_notes'}.isdisjoint(
+                             launcher.EMPLOYEE_RUN_FIELDS))
+
     def test_run_session_canonical_shapes_exact_identity(self):
         run = dict(id=str(uuid.uuid4()), bot_id=self.bot, session_id=str(uuid.uuid4()), version=9007199254740993)
         for nested in (run, {'run': run}, {'Run': run, 'ExternalAdmissionValidated': False}):

@@ -1,5 +1,44 @@
 # Bot runtime report evidence
 
+## Agent-led working evidence
+
+New `agent_led_v1` runs have optional read/update/evidence/check capabilities, not
+legacy accepted-review prerequisites. A useful final answer is captured even when
+optional items are unfinished: in-progress items become pending (never completed),
+and the result is partial. No finish tool is required and no retry is scheduled.
+Legacy assessment evidence below remains specific to the legacy protocol.
+
+Source bodies stay in the scoped, append-only run transcript rather than being
+copied into every candidate. Before the next producer model call, the adapter
+flushes source references and typed access facts against that persisted transcript;
+call ID, event, body digest and run identity must match. HTTP 200 establishes only
+transport return; 429/failures are retained negative observations, not permanent
+content vetoes. Source-retrieval errors must be distinguished from denied authority
+and uncertain effects by completion handling. Metadata exhaustion returns an
+explicit error instead of dropping evidence; evidence reads provide byte offsets,
+length and truncation. A failed final provider call does not erase earlier facts.
+
+Optional checks reserve a durable call receipt before spending tokens, release the
+service mutex during the model call, then reload the current revision before saving
+feedback. Interrupted reservations cannot replay. Cancellation/fencing prevents
+late feedback mutation. Checks share the factory's already-metered model; cumulative
+usage snapshots are recorded once for reporting, never charged again. Empty,
+oversized, interrupted or tool-calling responses return check-unavailable feedback,
+not a universal review failure. Existing negative feedback is append-only.
+
+Factory-bound `BotChatResources.PreviousWork(context.Context)` supplies the previous
+committed projection for this Bot. `ValidateWorkContinuation(context.Context,
+store.BotWorkContinuationKind, uuid.UUID)` validates live same-Bot schedule/approval
+references; absent wiring rejects these continuations. Neither callback grants
+execution authority, accepts model-selected scope, nor creates a schedule.
+
+Unit evidence includes `TestBotAgentAccessFlushedBeforeModelAndRetainedOnFailure`,
+`TestBotAgentCheckConcurrentUpdateUsageAndCancellation`,
+`TestBotAgentCheckMalformedAndOversizedFeedbackRecover`,
+`TestBotAgentPreviousAndContinuationAreScoped`, and
+`TestBotAgentUnfinishedItemsDoNotGateAnswer`. These use controlled models/stores;
+they are not live-provider or restart/database acceptance.
+
 ## Budget-stop evidence
 
 `bot.BudgetLimitError` snapshots token limit, accounted usage (including holds), remaining allowance and optional request estimates at enforcement under the meter lock. `BudgetFailureMessage` recognizes native typed errors, existing mandate token quota dimensions, and legacy budget sentinels—not error text. First-call rejection is not consumption. Unknown/overflow/runtime/tool cases receive a nonnumeric fallback; no current configuration defaults are consulted.
@@ -36,6 +75,51 @@ for review, not applied.
 using actual built-in dispatch, JSON node transport, catalogue/owner binding, ADK
 and ChatRunner, with one node call and one tool usage per operation. Its transport
 and model are controlled; it is not live container/provider acceptance.
+
+## Skill assessment format recovery
+
+`botWorkJSON` permits at most one JSON-only format correction for skill orientation
+and skill learning, as for work assessment. Both calls use the same selected skill
+schema, original input, tool-free configuration and shared run budget. Prior model
+text remains explicitly untrusted. Invalid JSON and strict schema decoding errors
+(including unknown fields and wrong types) may use the same second call; no fields
+are silently dropped. Correction instructions use static safe text, never raw
+parser errors, and each attempt decodes into fresh storage. Syntax, schema and
+citation correction share one two-call ceiling, not independent retry budgets.
+Wrong digests, semantic authority/provenance rejection, tool calls,
+partial/interrupted streams and provider errors do not enable format retries.
+Cancellation and authority/budget boundaries are checked before correction; usage
+from both calls is retained. There is no fenced-JSON extraction or task replay.
+
+`TestBotSkillJSONFormatRecovery` reproduces the previous one-attempt regression
+for both prompts and covers the bounded failures. `TestBotSkillJSONFormatRecoverySharedBudget`
+uses the real BudgetLLM decorator to verify both-call charges and correction
+admission against the original allowance.
+
+`TestBotSkillRuntimeHTTPAcceptance/{personal,team}/format-recovery` starts with
+malformed orientation, corrects with the identical schema, saves the skill before
+production, fetches an actual temporary HTTP source exactly once, then also
+recovers malformed learning. It checks the active skill's observed source revision,
+a succeeded run, and exactly one delivered answer in Home SSE on repeated readback
+and after another worker poll. Repeated malformed orientation remains bounded to
+two calls with zero tools and no skill. The strict controlled gate is
+`python3 tests/e2eboot/employee_http_acceptance.py --skills-stage runtime`.
+This is controlled worker/HTTP/SQLite evidence, not live provider or daemon proof;
+no existing user Bot is mutated.
+
+## Content citation recovery evidence
+
+`TestBotContentQualityHTTPAcceptance/{personal,team}/citation-repair` exercises
+owner HTTP admission, isolated SQLite, worker and ChatRunner with one actual HTTP
+feed fetch: bad source quote → same-input/schema reviewer correction → unsupported
+claims/off-topic findings → existing producer repair → valid review → exactly one
+Home publication. `citation-only` needs no producer retry; `citation-exhausted`
+stops after two reviewer calls with no rejected content/artifacts and no tool replay.
+`TestBotContentCitationRecovery` covers unknown refs, missing coverage, retained
+negative findings, wrong-digest non-recovery, cancellation/budget before correction,
+shared actual usage accounting and the shared format/citation correction ceiling.
+Errors contain only typed reasons, indices and hashed identifiers. No live provider
+judgment, deployed daemon or existing Bot was exercised or changed.
 
 ## Acceptance coverage and limits
 

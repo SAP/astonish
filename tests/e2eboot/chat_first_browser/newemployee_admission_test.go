@@ -137,6 +137,38 @@ func TestEmployeeAdmissionCorrelatesPersistedUserEvent(t *testing.T) {
 	}
 }
 
+func TestEmployeeAdmissionStudioTrimmedPayload(t *testing.T) {
+	s, user := employeeScheduleFixture()
+	user.HistoryCursor = 142
+	draft := "Save this document:\n\n# Operations brief\n\nBudget: unchanged.\n"
+	persisted := "Save this document:\n\n# Operations brief\n\nBudget: unchanged."
+	for _, test := range []struct {
+		name, draft, persisted string
+		want                   bool
+	}{
+		{name: "document-final-newline", draft: draft, persisted: persisted, want: true},
+		{name: "outer-spaces", draft: " \t" + draft + "\r\n", persisted: persisted, want: true},
+		{name: "javascript-bom-nbsp", draft: "\ufeff\u00a0" + draft + "\u2029", persisted: persisted, want: true},
+		{name: "nel-not-trimmed", draft: "\u0085" + persisted, persisted: "\u0085" + persisted, want: true},
+		{name: "nel-must-not-disappear", draft: "\u0085" + persisted, persisted: persisted},
+		{name: "interior-newline-changed", draft: draft, persisted: "Save this document:\n# Operations brief\n\nBudget: unchanged."},
+		{name: "interior-indent-changed", draft: draft, persisted: "Save this document:\n\n # Operations brief\n\nBudget: unchanged."},
+		{name: "persisted-not-normalized", draft: draft, persisted: " " + persisted},
+		{name: "empty-draft", draft: " \n\ufeff", persisted: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := employeeAdmittedRun(admissionHistory(user.UserEventID, "user", test.persisted), test.draft, s.Bot, nil, []store.BotRun{user})
+			if err != nil || (got.ID == user.ID) != test.want {
+				t.Fatalf("Studio payload correlation: got=%v want=%v err=%v", got.ID, test.want, err)
+			}
+		})
+	}
+	got, err := employeeAdmittedRun("event: done\ndata: {\"persisted\":true}\n\n", "\n", s.Bot, nil, []store.BotRun{user})
+	if err != nil || got.ID != uuid.Nil {
+		t.Fatalf("missing event must not match an empty draft: got=%v err=%v", got.ID, err)
+	}
+}
+
 func TestEmployeeComposerRequiresExactEnabledOwnedUI(t *testing.T) {
 	good := employeeComposerState{URL: "owned-home", Input: "Pause", Present: true}
 	if err := validateEmployeeComposer(good, "owned-home", "Pause"); err != nil {

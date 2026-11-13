@@ -101,6 +101,10 @@ func (r *botRepository) cancelRunTx(ctx context.Context, tx botDraftDB, rec *bot
 		saved.Run.Status = store.RunInterrupted
 		saved.Run.FinishedAt = nil
 	}
+	if saved.Work != nil && saved.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		interruptBotWork(saved.Work, "Run cancelled; prior effects remain unverified and continuation requires a new authorized request.")
+		syncBotWorkProjection(saved)
+	}
 	db, ok := tx.(botRunCancellationDB)
 	if !ok {
 		return store.ErrBotUnsupported

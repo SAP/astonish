@@ -13,11 +13,11 @@ func TestBotWorkQualityOverview(t *testing.T) {
 	m := model{theme: DefaultTheme(), width: 110, height: 40, ready: true}
 	m.bots.overview = botOverviewGoals
 	m.bots.snapshot = &store.BotSnapshot{Bot: store.Bot{Name: "Analyst"}}
-	if !strings.Contains(stripANSI(m.renderBotOverview()), "No assessed result yet.") {
+	if !strings.Contains(stripANSI(m.renderBotOverview()), "No work result yet") {
 		t.Fatal("missing empty state")
 	}
 	m.bots.snapshot.LatestOutcome = &store.BotRun{Status: store.RunSucceeded}
-	if !strings.Contains(stripANSI(m.renderBotOverview()), "Not assessed") {
+	if !strings.Contains(stripANSI(m.renderBotOverview()), "No work result yet") {
 		t.Fatal("legacy inferred pass")
 	}
 	m.bots.snapshot.LatestOutcome.Report.Quality = &store.BotQualityReport{SchemaVersion: 1, Outcome: store.BotWorkBlocked, Limitations: []string{"Current source unavailable"}}
@@ -28,8 +28,14 @@ func TestBotWorkQualityOverview(t *testing.T) {
 		}
 	}
 	m.bots.err = "offline"
+	out = stripANSI(m.renderBotOverview())
+	if !strings.Contains(out, "Last known work details") || !strings.Contains(out, "Press r to retry") || !strings.Contains(out, "Current source unavailable") {
+		t.Fatal("retained assessment must be explicitly stale and retryable", out)
+	}
+	m.bots.err = ""
+	m.bots.snapshot.LatestOutcome.Report.Quality.SchemaVersion = 99
 	if strings.Contains(stripANSI(m.renderBotOverview()), "Current source unavailable") {
-		t.Fatal("stale assessment shown as current after error")
+		t.Fatal("unknown legacy schema exposed details")
 	}
 }
 

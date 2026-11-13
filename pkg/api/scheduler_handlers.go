@@ -719,6 +719,7 @@ func buildSchedulerExecContext(ctx context.Context, svc *store.Services, scope s
 // apiJob is the JSON representation returned to the frontend.
 // It uses the flat format expected by SchedulerSettings.tsx.
 type apiJob struct {
+	BotManaged          bool              `json:"bot_managed,omitempty"`
 	ID                  string            `json:"id"`
 	Name                string            `json:"name"`
 	Mode                string            `json:"mode"`
@@ -739,6 +740,7 @@ type apiJob struct {
 
 func storeJobToAPIJob(sj *store.ScheduledJob) apiJob {
 	return apiJob{
+		BotManaged:          sj.Payload.BotID != "",
 		ID:                  sj.ID,
 		Name:                sj.Name,
 		Mode:                sj.Mode,

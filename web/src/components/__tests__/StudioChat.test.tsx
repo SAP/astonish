@@ -80,6 +80,43 @@ describe('StudioChat', () => {
     })
   })
 
+  it('keeps standalone work rows out of Bot chat through live updates, reconnect and restore without remounting the composer', async () => {
+    const state: import('../../api/botRunState').BotRunState = { schema_version: 1, bot_id: 'bot', home_session_id: 'bot-home', session_id: 'trace', run_id: 'run', presentation: 'home_interactive', status: 'running', state_sequence: 2, work: { schema_version: 1, protocol: 'agent_led_v1', bot_id: 'bot', run_id: 'run', work_revision: 2, phase: 'working', items: [{ id: 'item', status: 'in_progress', summary: 'Comparing original sources' }] } }
+    const thread = { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), runStates: [state] }
+    const view = render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={thread} />)
+    const input = await screen.findByTestId('chat-input')
+    fireEvent.change(input, { target: { value: 'Keep this draft' } })
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    const done = { ...state, state_sequence: 4, status: 'succeeded' as const, work: { ...state.work!, work_revision: 3, disposition: 'answered' as const, phase: 'finished' as const } }
+    const other = { ...state, run_id: 'other', session_id: 'other-trace', work: { ...state.work!, run_id: 'other' } }
+    await act(async () => {
+      stream.onEvent('bot_run_state', other as unknown as Record<string, unknown>)
+      stream.onEvent('bot_run_state', done as unknown as Record<string, unknown>)
+      stream.onEvent('bot_run_state', state as unknown as Record<string, unknown>)
+      stream.onState?.('live', 'cursor')
+    })
+    const assertNoWorkRows = () => {
+      expect(screen.queryAllByRole('region', { name: /Work for run/ })).toHaveLength(0)
+      expect(screen.queryByText(/^(Last known work · )?(Work in progress|Answer provided)$/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Bot transcript:/)).not.toBeInTheDocument()
+    }
+    assertNoWorkRows()
+    expect(screen.getByText('Working…')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-input')).toBe(input)
+    expect(input).toHaveValue('Keep this draft')
+    await act(async () => stream.onState?.('reconnecting', 'cursor'))
+    assertNoWorkRows()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    view.rerender(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ ...thread, runStates: [state] }} />)
+    assertNoWorkRows()
+    expect(input).toHaveValue('Keep this draft')
+    view.unmount()
+    render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ ...thread, runStates: [done, other] }} />)
+    await screen.findByTestId('chat-input')
+    assertNoWorkRows()
+    expect(screen.queryByText(/All requirements verified/)).not.toBeInTheDocument()
+  })
+
   it('sends after applied cadence using the authoritative snapshot and never replays a concurrent conflict', async () => {
     const initial: BotSnapshot = { bot: { id: 'bot', scope: 'personal', owner_id: 'owner', name: 'Weather', status: 'active', revision: 5, version: 2, home_session_id: 'bot-home', home: null, created_at: '', updated_at: '' }, read_cursor: { bot_id: 'bot', viewer_id: 'owner', sequence: 0 }, latest_sequence: 0, unread_count: 0, pending_approvals: [] }
     vi.mocked(snapshots.getBotSnapshot).mockResolvedValue(initial)
@@ -354,7 +391,7 @@ describe('StudioChat', () => {
       assertReport()
       await send(frame + replayComplete)
       assertReport()
-      expect(screen.getByText(/Bot transcript: live · cursor bot-home:1/)).toBeInTheDocument()
+      expect(screen.queryByText(/Bot transcript:/)).not.toBeInTheDocument()
     } finally {
       view.unmount()
       fetch.mockRestore()
@@ -402,7 +439,7 @@ describe('StudioChat', () => {
         assertReports(i - 3)
       }
       await act(async () => { source.enqueue(encoder.encode(replayComplete(7))) })
-      expect(screen.getByText(/Bot transcript: live · cursor bot-home:7/)).toBeInTheDocument()
+      expect(screen.queryByText(/Bot transcript:/)).not.toBeInTheDocument()
       expect(screen.getAllByTestId('agent-message-bubble')).toHaveLength(4)
     } finally {
       view.unmount()

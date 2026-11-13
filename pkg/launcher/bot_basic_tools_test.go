@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"iter"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -250,7 +252,7 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 				t.Fatalf("save: %v", saved)
 			}
 			found := basicCall(t, r, c, "memory_search", map[string]any{"query": "quasar", "max_results": 3})
-			data, _ := json.Marshal(found)
+			data, _ := json.Marshal(found["result"])
 			var results tools.PlatformMemorySearchResult
 			if err := json.Unmarshal(data, &results); err != nil {
 				t.Fatal(err)
@@ -262,10 +264,39 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 			if got["content"] != "quasar source evidence" {
 				t.Fatalf("get: %v", got)
 			}
-			basicCall(t, r, c, "memory_save", map[string]any{"category": "facts", "content": "quasar replacement", "overwrite": true})
-			got = basicCall(t, r, c, "memory_get", map[string]any{"path": results.Results[0].Path})
-			if got["content"] != "quasar replacement" {
-				t.Fatalf("overwrite: %v", got)
+			attribution := results.Results[0].Attribution
+			if attribution == nil || attribution.BotID != b.ID || attribution.RunID != run.ID || attribution.Status != store.MemoryKnowledgeInferred || attribution.Evidence != nil || attribution.Source != "agent-tool:controlled-call" || attribution.ObservedAt.IsZero() {
+				t.Fatalf("agent save lost server-bound inferred attribution: %+v", attribution)
+			}
+			// Attributed text cannot inherit the old claim's provenance through overwrite.
+			for _, entry := range r.Agent.Tools {
+				if entry.Name() == "memory_save" {
+					out, e := entry.(botRunnableTool).Run(c, map[string]any{"category": "facts", "content": "quasar replacement", "overwrite": true})
+					if !errors.Is(e, store.ErrBotConflict) || !strings.Contains(e.Error(), "owner correction") || out["saved"] == true {
+						t.Fatalf("attributed overwrite needs actionable correction, not false success: %v %v", out, e)
+					}
+				}
+			}
+			unchanged, err := f.services.Memory.Get(f.ctx, results.Results[0].ID)
+			if err != nil || unchanged.Snippet != "quasar source evidence" || !reflect.DeepEqual(unchanged.Attribution, attribution) {
+				t.Fatalf("rejected overwrite altered historical provenance: %+v %v", unchanged, err)
+			}
+			// Explicit legacy fixture: unattributed, current-run rows retain the old
+			// overwrite contract. Newly saved agent facts must never take this path.
+			if err := f.services.Memory.Add(f.ctx, store.MemoryEntry{Content: "legacy original", Category: "legacy", SessionID: run.SessionID.String(), CreatedBy: p.Subject}); err != nil {
+				t.Fatal(err)
+			}
+			basicCall(t, r, c, "memory_save", map[string]any{"category": "legacy", "content": "quasar replacement", "overwrite": true})
+			legacy, err := f.services.Memory.ListBySession(f.ctx, run.SessionID.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacyUpdated := false
+			for _, row := range legacy {
+				legacyUpdated = legacyUpdated || row.Category == "legacy" && row.Snippet == "quasar replacement" && row.Attribution == nil
+			}
+			if !legacyUpdated {
+				t.Fatal("legacy overwrite lost compatibility")
 			}
 			testBotForgottenMemoryProvider(t, f, r, c, run.SessionID.String())
 		})

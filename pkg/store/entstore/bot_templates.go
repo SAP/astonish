@@ -58,9 +58,12 @@ func validateBotTemplate(def store.BotTemplateDefinition) error {
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	for _, schedule := range def.SuggestedSchedules {
+		if err := validateIntakeSkillSeed(schedule.SkillSeed); err != nil {
+			return err
+		}
 		// Do not accept CRON_TZ prefixes or descriptors that override the reviewed
 		// timezone/cadence through the parser. The saved format is five fields only.
-		if len(strings.Fields(schedule.Cron)) != 5 || strings.TrimSpace(schedule.Instructions) == "" || len(schedule.Instructions) > 16000 || schedule.Timezone == "" || schedule.Timezone == "Local" {
+		if len(strings.Fields(schedule.Cron)) != 5 || schedule.SkillSeed == nil && strings.TrimSpace(schedule.Instructions) == "" || len(schedule.Instructions) > 16000 || schedule.Timezone == "" || schedule.Timezone == "Local" {
 			return store.ErrBotInvalid
 		}
 		if _, err := parser.Parse(schedule.Cron); err != nil {
@@ -247,5 +250,52 @@ func (s *teamBotTemplateStore) ForkToPersonal(ctx context.Context, dest *persona
 		goals = append(goals, store.BotGoal{Title: g.Title, Description: g.Description, CompletionCriteria: g.CompletionCriteria})
 	}
 	v.ChangeReason = fmt.Sprintf("Forked team template %s revision %d", source.ID, source.Revision)
-	return dest.CreateDraft(ctx, store.BotCreateRequest{Name: req.Name, OwnerID: actor, Version: v, Goals: goals, IdempotencyKey: key})
+	return createSeededTemplateDraft(ctx, dest, store.BotCreateRequest{Name: req.Name, OwnerID: actor, Version: v, Goals: goals, IdempotencyKey: key}, source)
+}
+
+// A fork's Bot, local owner expectation, skill and initial revision commit in
+// one destination transaction. The source contains no private skill identities.
+func createSeededTemplateDraft(ctx context.Context, dest *personalBotStore, req store.BotCreateRequest, source *store.BotTemplate) (*store.Bot, error) {
+	seeds := make([]*store.BotSkillSeed, len(source.Definition.SuggestedSchedules))
+	hasSeed := false
+	for i, schedule := range source.Definition.SuggestedSchedules {
+		seeds[i] = schedule.SkillSeed
+		hasSeed = hasSeed || schedule.SkillSeed != nil
+	}
+	if !hasSeed {
+		return dest.CreateDraft(ctx, req)
+	}
+	r := dest.repository()
+	actor, err := r.auth.authorize(ctx, req.OwnerID, true)
+	if err != nil {
+		return nil, err
+	}
+	rec, v, goals, err := prepareBotDraft(req, actor, r.auth.scope, r.clock())
+	if err != nil {
+		return nil, err
+	}
+	rec.CreateHash, err = botHash([]any{req, source})
+	if err != nil {
+		return nil, err
+	}
+	var result *store.Bot
+	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+		old, e := tx.FindCreate(ctx, rec.CreateKey)
+		if e == nil {
+			if old.CreateHash != rec.CreateHash {
+				return store.ErrBotConflict
+			}
+			result = &old.Bot
+			return nil
+		}
+		if e != store.ErrBotNotFound {
+			return e
+		}
+		result, e = insertIntakeDraft(ctx, tx, rec, v, goals, store.BotCarryover{}, "template_fork", source.ID, seeds...)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }

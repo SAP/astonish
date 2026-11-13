@@ -25,9 +25,23 @@ func TestCreateSkillCreatesFreshTemplate(t *testing.T) {
 	if string(data) != result.Content || !strings.Contains(string(data), "name: deploy-k8s") {
 		t.Fatalf("unexpected template: %q", data)
 	}
+	// Creation permissions honor the caller's umask. Compare with a file
+	// created using the same requested mode rather than requiring a permissive
+	// umask (private acceptance runs deliberately use 077).
+	control := filepath.Join(root, "permission-control")
+	if err := os.WriteFile(control, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	controlInfo, err := os.Stat(control)
+	if err != nil {
+		t.Fatal(err)
+	}
 	info, err := os.Stat(wantFile)
-	if err != nil || info.Mode().Perm() != 0644 {
-		t.Fatalf("mode=%v err=%v", info.Mode(), err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != controlInfo.Mode().Perm() {
+		t.Fatalf("mode=%v, want %v after applying umask", info.Mode(), controlInfo.Mode())
 	}
 }
 

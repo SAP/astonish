@@ -58,6 +58,37 @@ func TestRenderReportEmployeeMessage(t *testing.T) {
 	}
 }
 
+func TestRenderWorkDetailsAgentJudgment(t *testing.T) {
+	if got := RenderWorkDetails(nil); got != "No work result yet" {
+		t.Fatal(got)
+	}
+	work := &store.BotWorkProjection{SchemaVersion: store.BotAgentWorkSchemaVersion, Protocol: store.BotWorkProtocolAgentLedV1, Phase: store.BotWorkFinished, Disposition: store.AgentWorkAnswered}
+	for disposition, label := range map[store.AgentWorkDisposition]string{store.AgentWorkAnswered: "Answer provided", store.AgentWorkComplete: "Completed by agent", store.AgentWorkPartial: "Partial answer", store.AgentWorkBlocked: "Blocked"} {
+		work.Disposition = disposition
+		if got := WorkSummary(work); got != label {
+			t.Fatalf("%s: %s", disposition, got)
+		}
+	}
+	work.Disposition = ""
+	work.Phase = store.BotWorkInterrupted
+	if WorkSummary(work) != "Interrupted" {
+		t.Fatal("interruption lost")
+	}
+	work.Items = []store.BotWorkItem{{Summary: "Read sources", Status: store.BotWorkItemCompleted}}
+	work.Remaining = []store.BotWorkObligation{{Summary: "Missing source", Reason: "Unavailable", Continuation: store.BotWorkContinueOwnerRequest}}
+	work.Checks = []store.BotWorkCheckReceipt{{Kind: store.BotWorkCheckModelFeedback, Status: store.BotWorkCheckReturned, Summary: "Narrow claim"}, {Kind: store.BotWorkCheckMechanicalObservation, Status: store.BotWorkCheckReturned, Summary: "HTTP 200"}, {Summary: "Invalid check response"}}
+	got := RenderWorkDetails(work)
+	for _, want := range []string{"Completed by agent: Read sources", "Remaining work", "no automatic continuation", "Feedback received: Narrow claim", "Mechanical observation: HTTP 200", "Check unavailable: Invalid check response"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+	work.SchemaVersion = 99
+	if got := RenderWorkDetails(work); got != "Work details unavailable" {
+		t.Fatalf("unknown schema content leaked: %s", got)
+	}
+}
+
 func TestRenderReport(t *testing.T) {
 	next := time.Now().UTC()
 	approval := uuid.New()

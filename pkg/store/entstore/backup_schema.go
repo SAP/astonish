@@ -110,7 +110,7 @@ func sqlitePreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope)
 
 func preBotAddedTable(table, scope string) bool {
 	switch table {
-	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox":
+	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_skills", "bot_skill_revisions":
 		return scope == "team" || scope == "personal"
 	case "bot_templates":
 		return scope == "team"
@@ -125,6 +125,9 @@ func sqlitePreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest back
 	if archive.Version != "sqlite:"+backup.ArchiveFormat || archive.Hash == "" {
 		return false, nil
 	}
+	if ok, err := preSkillBackupCompatible(ctx, db, DialectSQLite, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
 	for _, entry := range manifest.Entries {
 		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
 			return false, nil
@@ -135,7 +138,7 @@ func sqlitePreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest back
 }
 
 // postgresPreBotSchemaHash uses the existing PostgreSQL archive representation
-// (table names and ordered column names), removing only the known Bot v1 delta.
+// (table names and ordered column names), removing the known Bot additions.
 // It is deliberately not a subset-schema compatibility check.
 func postgresPreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope) (string, error) {
 	schema := postgresSchemaForScope(scope)
@@ -176,6 +179,9 @@ func postgresPreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest ba
 	if archive.Version != "postgres:"+backup.ArchiveFormat || archive.Hash == "" {
 		return false, nil
 	}
+	if ok, err := preSkillBackupCompatible(ctx, db, DialectPostgres, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
 	for _, entry := range manifest.Entries {
 		if entry.Scope == scope && preBotAddedTable(entry.Entity, scope.Kind) {
 			return false, nil
@@ -183,6 +189,43 @@ func postgresPreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest ba
 	}
 	hash, err := postgresPreBotSchemaHash(ctx, db, scope)
 	return err == nil && hash == archive.Hash, err
+}
+
+// preSkillBackupCompatible recognizes exactly the Bot v1 schema: only the two
+// v2 skill tables are absent. No arbitrary missing columns/tables are accepted.
+func preSkillBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	for _, entry := range manifest.Entries {
+		if entry.Scope == scope && (entry.Entity == "bot_skills" || entry.Entity == "bot_skill_revisions") {
+			return false, nil
+		}
+	}
+	schema := ""
+	if dialect == DialectPostgres {
+		schema = postgresSchemaForScope(scope)
+	}
+	tables, err := userTables(ctx, db, dialect, schema)
+	if err != nil {
+		return false, err
+	}
+	var parts []string
+	for _, table := range tables {
+		if table == "bot_skills" || table == "bot_skill_revisions" {
+			continue
+		}
+		var columns []string
+		if dialect == DialectSQLite {
+			columns, err = sqliteTableSchema(ctx, db, table)
+		} else {
+			columns, err = tableColumns(ctx, db, dialect, schema, table)
+		}
+		if err != nil {
+			return false, err
+		}
+		parts = append(parts, table+"("+strings.Join(columns, ",")+")")
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:]) == archive.Hash, nil
 }
 
 func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string, error) {

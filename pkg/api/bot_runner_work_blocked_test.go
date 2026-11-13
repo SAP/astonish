@@ -106,6 +106,6 @@ func (m *blockedEmailAssessment) GenerateContent(_ context.Context, r *model.LLM
 			}
 		}
 		raw, _ := json.Marshal(output)
-		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(fixtureContentCoverage(r, raw)), "model")}, nil)
 	}
 }

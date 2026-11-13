@@ -31,6 +31,33 @@ func TestSupervisorOutcomeNeverClaimsSuccessAfterError(t *testing.T) {
 	}
 }
 
+func TestBotSkillVersionSelection(t *testing.T) {
+	v := store.DefaultBotVersion()
+	v.BotID = store.BotID{1}
+	v.Charter = "News"
+	id := store.BotID{2}
+	v.Triggers = []store.TriggerSpec{{SkillID: &id, Invocation: "Send update"}}
+	if err := ValidateVersion(v); err != nil {
+		t.Fatal(err)
+	}
+	v.Triggers[0].Invocation = ""
+	if err := ValidateVersion(v); !errors.Is(err, store.ErrBotInvalid) {
+		t.Fatalf("missing intent accepted: %v", err)
+	}
+	v.Triggers[0] = store.TriggerSpec{Instructions: "legacy"}
+	if err := ValidateVersion(v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBotSkillSupervisorFailureRetainsUncommittedLearning(t *testing.T) {
+	learning := &store.BotSkillLearning{SourceRunID: store.RunID{1}}
+	result := supervisorOutcome(RunResult{Status: store.RunSucceeded, SkillLearning: learning}, errors.New("failed"))
+	if result.Status != store.RunFailed || result.SkillLearning != learning || result.Report.Skill != nil {
+		t.Fatal("uncommitted learning was erased or presented as committed")
+	}
+}
+
 func TestSupervisorMissingDependencies(t *testing.T) {
 	if _, err := NewSupervisor(SupervisorConfig{}); !errors.Is(err, store.ErrBotUnsupported) {
 		t.Fatalf("missing configuration accepted: %v", err)

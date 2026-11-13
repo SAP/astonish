@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"github.com/SAP/astonish/pkg/store"
+	"sort"
 )
 
 // botWorkResponseSchema is an explicit JSON Schema, rather than a MIME hint.
@@ -44,7 +45,7 @@ func botWorkResponseSchema(prompt string, inputs ...[]byte) map[string]any {
 			"method":  enum([]string{string(store.BotAssessmentModel)}), "explanation": text(),
 		}, "dependency_purpose", "dependency_verdict", "blocker_id", "criterion_ids", "source_id", "source_quote", "verdict", "method", "explanation")
 		schema["properties"].(map[string]any)["blocked_response"] = map[string]any{"anyOf": []any{assessment, map[string]any{"type": "null"}}}
-		schema["required"] = []string{"candidate_digest", "criteria", "blocked_response"}
+		schema["required"] = append(schema["required"].([]string), "blocked_response")
 		return schema
 	case botWorkPendingReviewPrompt:
 		review := botWorkResponseSchema(botWorkReviewPrompt, inputs...)
@@ -63,7 +64,52 @@ func botWorkResponseSchema(prompt string, inputs ...[]byte) map[string]any {
 			props["criterion_id"] = enum(ids)
 			props["evidence_refs"] = map[string]any{"type": "array", "items": enum(state.Candidate.AvailableEvidenceRefs()), "description": botWorkCitationGuidance}
 		}
-		return object(map[string]any{"candidate_digest": digest, "criteria": map[string]any{"type": "array", "items": criterion, "maxItems": 64}}, "candidate_digest", "criteria")
+		result := object(map[string]any{"candidate_digest": digest, "criteria": map[string]any{"type": "array", "items": criterion, "maxItems": 64}}, "candidate_digest", "criteria")
+		var content struct {
+			Items             []botWorkContentItem `json:"content_items"`
+			Sources           map[string]string    `json:"content_sources"`
+			ExecutionEvidence map[string]string    `json:"execution_evidence"`
+		}
+		if len(inputs) > 0 {
+			_ = json.Unmarshal(inputs[0], &content)
+		}
+		if content.Items != nil {
+			itemIDs, sourceIDs := []string{}, []string{}
+			for _, item := range content.Items {
+				itemIDs = append(itemIDs, item.ID)
+			}
+			for ref := range content.Sources {
+				sourceIDs = append(sourceIDs, ref)
+			}
+			sort.Strings(sourceIDs)
+			verdict := func() map[string]any {
+				return enum([]string{string(store.BotCriterionSatisfied), string(store.BotCriterionFailed), string(store.BotCriterionUnverified)})
+			}
+			citations := func(refs []string) map[string]any {
+				ref := text()
+				if len(refs) > 0 {
+					ref = enum(refs)
+				}
+				array := map[string]any{"type": "array", "items": object(map[string]any{"ref": ref, "quote": text()}, "ref", "quote")}
+				if len(refs) == 0 {
+					array["maxItems"] = 0
+				}
+				return array
+			}
+			executionIDs := []string{}
+			for ref := range content.ExecutionEvidence {
+				executionIDs = append(executionIDs, ref)
+			}
+			sort.Strings(executionIDs)
+			itemRef := text()
+			if len(itemIDs) > 0 {
+				itemRef = enum(itemIDs)
+			}
+			assessment := object(map[string]any{"item_id": itemRef, "claim_type": enum([]string{string(botContentFactual), string(botContentNonfactual), string(botContentExecution)}), "relevance": verdict(), "support": verdict(), "explanation": text(), "sources": citations(sourceIDs), "execution_sources": citations(executionIDs)}, "item_id", "claim_type", "relevance", "support", "explanation", "sources", "execution_sources")
+			result["properties"].(map[string]any)["content_assessments"] = map[string]any{"type": "array", "items": assessment, "maxItems": len(itemIDs)}
+			result["required"] = []string{"candidate_digest", "criteria", "content_assessments"}
+		}
+		return result
 	default:
 		return nil
 	}

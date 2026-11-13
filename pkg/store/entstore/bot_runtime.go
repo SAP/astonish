@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	personalrun "github.com/SAP/astonish/ent/personal/botrun"
@@ -62,12 +63,8 @@ type botWorkDB interface {
 }
 
 func (d personalBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l store.BotLease, now time.Time) error {
-	raw, err := json.Marshal(run)
+	data, err := botJSONMap(run)
 	if err != nil {
-		return err
-	}
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
 		return err
 	}
 	n, err := d.client.BotRun.Update().Where(personalrun.IDEQ(l.RunID), personalrun.BotIDEQ(l.BotID), personalrun.StatusEQ(personalrun.StatusRunning), personalrun.FenceEQ(l.Fence), personalrun.WorkerIDEQ(l.WorkerID), personalrun.LeaseExpiresAtGT(now)).SetData(data).Save(ctx)
@@ -80,12 +77,8 @@ func (d personalBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l st
 	return nil
 }
 func (d teamBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l store.BotLease, now time.Time) error {
-	raw, err := json.Marshal(run)
+	data, err := botJSONMap(run)
 	if err != nil {
-		return err
-	}
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
 		return err
 	}
 	n, err := d.client.BotRun.Update().Where(teamrun.IDEQ(l.RunID), teamrun.BotIDEQ(l.BotID), teamrun.StatusEQ(teamrun.StatusRunning), teamrun.FenceEQ(l.Fence), teamrun.WorkerIDEQ(l.WorkerID), teamrun.LeaseExpiresAtGT(now)).SetData(data).Save(ctx)
@@ -141,8 +134,26 @@ func (r *botRepository) SaveWork(ctx context.Context, q store.BotWorkUpdate) (*s
 		}
 		next.Revision++
 		run.Work = next
+		run.Run.Work = store.BuildBotWorkProjection(next)
 		if err := writer.updateWorkRun(ctx, *run, q.Lease, now); err != nil {
 			return err
+		}
+		if next.Protocol == store.BotWorkProtocolAgentLedV1 {
+			rec, err := tx.GetBot(ctx, q.Lease.BotID)
+			if err != nil {
+				return err
+			}
+			if err := tx.AdvanceLeaseSequence(ctx, q.Lease, rec.LastSequence, now); err != nil {
+				return err
+			}
+			payload, err := json.Marshal(map[string]any{"run_id": q.Lease.RunID, "work_revision": next.Revision})
+			if err != nil {
+				return err
+			}
+			activity := store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: now}
+			if err := insertBotRunStateActivity(ctx, tx, activity, fmt.Sprintf("work:%s:%d", q.Lease.RunID, next.Revision)); err != nil {
+				return err
+			}
 		}
 		result = next.Clone()
 		return nil

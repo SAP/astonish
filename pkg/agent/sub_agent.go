@@ -56,6 +56,9 @@ func asEventArchiver(svc adksession.Service) eventArchiver {
 
 // SubAgentConfig holds configuration for the sub-agent system.
 type SubAgentConfig struct {
+	// CodeMode enables code-intelligence defaults for public preferred delegates only.
+	// It is supplied by the launcher, not inferred from project context or prompts.
+	CodeMode          bool          `yaml:"-" json:"-"`
 	MaxDepth          int           `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`                   // Max delegation nesting (default: 2)
 	MaxConcurrent     int           `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`         // Max parallel sub-agents (default: 5)
 	TaskTimeout       time.Duration `yaml:"task_timeout,omitempty" json:"task_timeout,omitempty"`             // Per-task absolute timeout (default: 10m)
@@ -2104,6 +2107,10 @@ func (m *SubAgentManager) buildChildPromptWithScope(ctx context.Context, task Su
 		}
 	}
 
+	if m.codeDelegateDefaults(task) {
+		sb.WriteString(codeDelegateGuidance(scope))
+	}
+
 	// Inject working directory so sub-agents know the correct project path.
 	// Without this, sub-agents hallucinate paths like /home/user/repo/... which
 	// don't exist on the host, triggering folder-access prompts and slow fallback
@@ -2613,6 +2620,12 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 				}
 			}
 		}
+		// Code-mode baseline promotion resolves codegraph below through the
+		// scope, so an unavailable graph server can fall back without failing
+		// the task, even when explicitly preferred or auto-selected.
+		if m.codeDelegateDefaults(task) && name == codeDelegateGraphGroup {
+			needsToolsets = false
+		}
 		if !needsToolsets {
 			if preferred && len(g.Toolsets) > 0 {
 				deferred[name] = &ToolGroup{Name: name, Toolsets: append([]tool.Toolset(nil), g.Toolsets...)}
@@ -2711,6 +2724,21 @@ func (m *SubAgentManager) childToolScope(ctx context.Context, task SubAgentTask)
 		}
 	}
 	var warnings []string
+	if m.codeDelegateDefaults(task) {
+		// The resolver may know about newly configured codegraph tools before
+		// the index has refreshed. Probe only this exact server, never all MCP.
+		if groups[codeDelegateGraphGroup] == nil && scope.resolver != nil && !IsMCPGroupInaccessible(ctx, codeDelegateGraphGroup) {
+			scope.deferred[codeDelegateGraphGroup] = &ToolGroup{Name: codeDelegateGraphGroup}
+		}
+		warnings = append(warnings, scope.addCodeDelegateTools(ctx)...)
+		for _, entry := range scope.initial {
+			for _, token := range task.ToolFilter {
+				if token == entry.tool.Name() || token == entry.group || token == entry.group+"/"+entry.tool.Name() {
+					matched[token] = true
+				}
+			}
+		}
+	}
 	for _, token := range task.ToolFilter {
 		if !matched[token] {
 			warnings = append(warnings, fmt.Sprintf("tool or group %q is unavailable in the child scope", token))

@@ -1355,6 +1355,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// Wire SubAgentManager — deferred until all tools and LLM are known.
 	// Sub-agents get tool groups for group-based tool resolution.
 	if subAgentMgr != nil {
+		subAgentMgr.Config.CodeMode = cfg.CodeMode
 		subAgentMgr.LLM = llm
 		subAgentMgr.ToolGroups = toolGroups
 		subAgentMgr.FleetTools = fleetOnlyTools

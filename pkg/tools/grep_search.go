@@ -123,7 +123,12 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 
 	// Bound the total search time so a runaway walk (e.g. over ~/go/pkg/mod)
 	// cannot hang the turn.
-	runCtx, cancel := context.WithTimeout(context.Background(), grepSearchTimeout)
+	// Preserve caller cancellation; nil remains supported for direct calls.
+	parent := context.Context(ctx)
+	if parent == nil {
+		parent = context.Background()
+	}
+	runCtx, cancel := context.WithTimeoutCause(parent, grepSearchTimeout, errGrepTimeout)
 	defer cancel()
 
 	// Ripgrep is the only backend: it is gitignore-aware, fast, and supports
@@ -138,10 +143,7 @@ func GrepSearch(ctx tool.Context, args GrepSearchArgs) (GrepSearchResult, error)
 		return GrepSearchResult{}, err
 	}
 
-	capped := len(matches) >= maxResults
-	if capped && truncatedReason == "" {
-		truncatedReason = fmt.Sprintf("result limit reached (%d)", maxResults)
-	}
+	capped := truncatedReason != ""
 
 	elapsed := time.Since(start).Milliseconds()
 
@@ -166,6 +168,9 @@ func grepTimeoutError(searchPath string) error {
 
 // tryRipgrep attempts to use ripgrep for searching
 func tryRipgrep(ctx context.Context, args GrepSearchArgs, searchPath string, maxResults, headLimit int) ([]GrepMatch, string, error) {
+	if err := grepContextError(ctx); err != nil {
+		return nil, "", err
+	}
 	// Resolve rg: an installed rg on PATH, else the managed (auto-provisioned)
 	// copy. This makes ripgrep effectively always available for code search.
 	rgPath, err := ripgrep.ResolvePath()
@@ -231,86 +236,108 @@ func tryRipgrep(ctx context.Context, args GrepSearchArgs, searchPath string, max
 	cmd.Stderr = nil // we'll check exit code instead
 
 	if err := cmd.Start(); err != nil {
+		if ctxErr := grepContextError(ctx); ctxErr != nil {
+			return nil, "", ctxErr
+		}
 		return nil, "", fmt.Errorf("ripgrep start failed: %w", err)
 	}
 
-	// Read up to headLimit bytes from stdout
-	truncatedReason := ""
-	limitedReader := &io.LimitedReader{R: stdout, N: int64(headLimit) + 1}
-	output, _ := io.ReadAll(limitedReader)
-	if len(output) > headLimit {
-		output = output[:headLimit]
-		truncatedReason = fmt.Sprintf("output truncated at %d bytes", headLimit)
+	matches, truncatedReason, readErr := parseRipgrepOutput(stdout, maxResults, headLimit)
+	if truncatedReason != "" || readErr != nil {
+		// Never Wait with an unread pipe and a live producer: rg may be
+		// blocked writing. Kill instead of draining an arbitrarily large search.
+		_ = cmd.Process.Kill()
+		_ = stdout.Close()
 	}
-
-	// We must wait for the command to finish, but we can ignore errors
-	// caused by the broken pipe from our early close
+	// Every successfully started child is reaped exactly once, including caps,
+	// malformed output, read failures, and CommandContext cancellation.
 	waitErr := cmd.Wait()
-	// If the context fired (deadline or cancel), CommandContext killed rg.
-	// Surface a clear timeout so the agent narrows its search.
-	if ctx.Err() != nil {
-		return nil, "", errGrepTimeout
+	if err := grepContextError(ctx); err != nil {
+		return nil, "", err
 	}
-	if waitErr != nil && truncatedReason == "" {
+	if readErr != nil {
+		return nil, "", readErr
+	}
+	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			switch exitErr.ExitCode() {
 			case 1:
-				// Exit code 1 = no matches found (not an error)
-				return []GrepMatch{}, "", nil
+				if truncatedReason == "" {
+					return []GrepMatch{}, "", nil
+				}
 			case 2:
-				// Exit code 2 = error (invalid type, bad pattern, etc.)
 				return nil, "", fmt.Errorf("ripgrep error (exit 2): check type/pattern validity")
 			}
 		}
-		// If we truncated, the broken pipe is expected — don't error
-		return nil, "", fmt.Errorf("ripgrep execution failed: %w", waitErr)
+		if truncatedReason == "" {
+			return nil, "", fmt.Errorf("ripgrep execution failed: %w", waitErr)
+		}
 	}
-
-	matches, err := parseRipgrepOutput(output, maxResults)
-	return matches, truncatedReason, err
+	return matches, truncatedReason, nil
 }
 
-// parseRipgrepOutput parses ripgrep's JSON output, returning both match and context lines
-func parseRipgrepOutput(output []byte, maxResults int) ([]GrepMatch, error) {
+// grepContextError distinguishes the tool's own safety timeout from caller
+// deadlines/cancellation. Killing a capped child does not cancel this context.
+func grepContextError(ctx context.Context) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	if errors.Is(context.Cause(ctx), errGrepTimeout) {
+		return errGrepTimeout
+	}
+	return ctx.Err()
+}
+
+// parseRipgrepOutput streams complete JSON records within a total byte budget.
+// A record may exceed Scanner's default 64KiB, but cannot allocate beyond the
+// output budget. A cap discards only the unfinished record, with an explicit
+// reason; malformed JSON or unexpected read failures are never silently lost.
+func parseRipgrepOutput(output io.Reader, maxResults, headLimit int) ([]GrepMatch, string, error) {
 	var matches []GrepMatch
 	matchCount := 0
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
+	limited := &io.LimitedReader{R: output, N: int64(headLimit)}
+	reader := bufio.NewReader(limited)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, "", fmt.Errorf("read ripgrep output: %w", err)
 		}
-
-		var rg ripgrepMatch
-		if err := json.Unmarshal([]byte(line), &rg); err != nil {
-			continue
+		if errors.Is(err, io.EOF) && limited.N == 0 {
+			// At most one extra byte distinguishes exact EOF from a byte cap.
+			var probe [1]byte
+			n, probeErr := output.Read(probe[:])
+			if n > 0 {
+				return matches, fmt.Sprintf("output truncated at %d bytes (only complete JSON records retained)", headLimit), nil
+			}
+			if probeErr != nil && !errors.Is(probeErr, io.EOF) {
+				return nil, "", fmt.Errorf("read ripgrep output: %w", probeErr)
+			}
 		}
-
-		var kind string
-		switch rg.Type {
-		case "match":
-			kind = "match"
-			matchCount++
-		case "context":
-			kind = "context"
-		default:
-			continue
+		if len(line) > 0 && string(line) != "\n" {
+			var rg ripgrepMatch
+			if jsonErr := json.Unmarshal(line, &rg); jsonErr != nil {
+				return nil, "", fmt.Errorf("invalid ripgrep JSON record: %w", jsonErr)
+			}
+			switch rg.Type {
+			case "match", "context":
+				matches = append(matches, GrepMatch{
+					File:       rg.Data.Path.Text,
+					LineNumber: rg.Data.LineNumber,
+					Content:    strings.TrimRight(rg.Data.Lines.Text, "\n\r"),
+					Kind:       rg.Type,
+				})
+				if rg.Type == "match" {
+					matchCount++
+				}
+				// Keep the existing prefix semantics: context is free, and
+				// output ends at the maxResults-th match (not its after-context).
+				if matchCount >= maxResults {
+					return matches, fmt.Sprintf("result limit reached (%d)", maxResults), nil
+				}
+			}
 		}
-
-		match := GrepMatch{
-			File:       rg.Data.Path.Text,
-			LineNumber: rg.Data.LineNumber,
-			Content:    strings.TrimRight(rg.Data.Lines.Text, "\n\r"),
-			Kind:       kind,
-		}
-		matches = append(matches, match)
-
-		// Cap based on match count (context lines are free)
-		if matchCount >= maxResults {
-			break
+		if errors.Is(err, io.EOF) {
+			return matches, "", nil
 		}
 	}
-
-	return matches, nil
 }

@@ -14,6 +14,30 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 
 Studio chat emits the same Live Evidence block from `SystemPromptBuilder` (no codegraph / stop-exploring language). Detailed browser/process how-tos stay in vector `memory/guidance/*.md`.
 
+## Code delegate investigation defaults
+
+Code delegates receive a focused coding baseline, not the parent's full system prompt or conversation. The launcher explicitly sets `SubAgentConfig.CodeMode` (`pkg/agent/sub_agent.go`); project context, a working directory or coding words in a prompt do not enable it. `codeDelegateDefaults` (`pkg/agent/code_delegate_tools.go`) applies only to public preferred-selection tasks (`ChildToolSelectionPreferred`), with no `CustomPrompt`, `OverrideTools` or `OverrideToolsets`.
+
+For eligible tasks, `ChildToolScope.addCodeDelegateTools` promotes the permitted core structural tools (`code_definition`, `code_references`, `repo_map`) and permitted `mcp:codegraph` tools into the **initial declarations**, even when `preferred_tools` contains only `core` or other groups. The baseline comes from the frozen invocation scope, preserving its wrapped executable instances; it does not consult ambient tools or eagerly load unrelated MCP groups. Initial declarations are sorted and deduplicated before the immutable handoff records their names. Preferences do not grant permission: denied/excluded tools, disabled tools and inaccessible groups remain unavailable. Non-Code delegates, strict tool-selection tasks, custom prompts and explicit tool/toolset overrides retain their existing behavior and boundaries.
+
+`codeDelegateGuidance` adds a small child-specific **Code Investigation** block based on those resolved declarations:
+
+- Use codegraph first for implementation, definitions, callers and tests; do not begin with repository-wide grep or directory traversal.
+- Use permitted structural tools next for gaps, then narrow file reads. Reserve `grep_search` for literal/string/configuration gaps, not symbol discovery.
+- Treat source returned by codegraph as already read; do not read the same regions again. Stop exploring when implementation scope, affected callers and verification are clear.
+
+Missing, denied or unresolved codegraph is not fatal: resolution failure produces a warning and the guidance explicitly says graph tools are unavailable, directing the child to permitted structural tools and narrow reads without claiming graph coverage. If structural tools are also absent, use only permitted discovery and narrowly scoped file tools. This targeted guidance is separate from handoff context: prior findings and task-specific constraints still require explicit instructions; it is not full parent-prompt inheritance.
+
+## Bounded literal search
+
+`grep_search` (`pkg/tools/grep_search.go`) uses ripgrep's JSON stream, not a full-output buffer or a pipe prefix followed by waiting on a still-writing process. `parseRipgrepOutput` retains complete JSON records within `head_limit` (default **5 MiB**), including records larger than the usual scanner 64 KiB limit. An unfinished record at the byte cap is discarded, while earlier complete records survive. At most one extra byte is read to distinguish exact EOF from truncation. Malformed JSON and unexpected read failures return errors instead of disappearing silently.
+
+`max_results` (default **50**) counts match records, not context records. Output ends at the limit-th match, without its trailing after-context; `total` counts all returned match and context entries. A byte or result cap sets `capped` and an explicit `truncated_reason`. On a cap or parser/read failure, `tryRipgrep` kills the producer and closes the pipe rather than draining an arbitrarily large search. Every successfully started process is reaped with `Wait`, including cancellation and error paths. No-match exit 1 is an empty success; exit 2 remains a ripgrep error, not an empty search result.
+
+The fixed safety timeout remains **25 seconds**. The search context now derives from the caller (nil direct-call contexts still work), so caller cancellation or an earlier deadline stops the running search and remains distinguishable from the tool's own actionable timeout error. Timeout guidance asks for a narrower path, glob or type filter; it is not permission to scan broad trees repeatedly.
+
+**Cold-start caveat:** ripgrep resolution still prefers `rg` on PATH, then the managed copy, then pinned auto-provisioning (`pkg/tools/ripgrep/ripgrep.go`); there is no pure-Go backend for `grep_search`. `ResolvePath` does not accept the caller context, and a fresh download uses its own **90-second** background-context timeout. The 25-second search deadline therefore is not a strict wall-clock bound for a cold provisioning call, and caller cancellation cannot interrupt that provisioning step. Once resolution returns successfully, the expired/cancelled search context prevents the search from proceeding normally.
+
 ## Normal-mode plan revision
 
 `announce_plan` remains Plan-mode only. A valid new announcement replaces any older plan—pending, approved, running, failed or completed—without requiring cancellation. Replacement creates a new plan identity with pending steps, no inherited evidence/Results, and its own execution approval. The previous plan remains historical; its graph acceptance and delegate registry do not constrain the new plan. Failed validation or persistence leaves the old plan unchanged, and late verification against the old identity is discarded. Normal/Ask announcements remain blocked; `update_plan` revisions remain distinct from new announcements. `update_plan` has two mutually exclusive operations:
@@ -67,3 +91,5 @@ Execution mode may inspect a **running surface** (shell, docker, `browser_naviga
 - Live Evidence section tests in `pkg/agent/live_evidence_test.go` and prompt goldens.
 - Skill index tests in `pkg/skills` for `inspect-live-surface`, `verify-live-with-drill`, `watch-long-running`.
 - `update_plan` miss payload in `pkg/tools/plan_tool_test.go`.
+- Code delegate baseline, guidance and permission/selection boundaries in `pkg/agent/code_delegate_tools_test.go`.
+- Streaming grep caps, large JSON records, context accounting, cancellation and exit distinctions in `pkg/tools/grep_search_stream_test.go`; actionable timeout guidance in `pkg/tools/search_tools_test.go`.

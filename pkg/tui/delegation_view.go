@@ -316,10 +316,7 @@ func (m model) renderDelegationActivity(task events.DelegationTaskState, width i
 			continue
 		}
 		s := *row.step
-		label := render.ToolStatusLabel(s.Status) + "  " + render.ToolDisplayName(s.Name)
-		if s.Status == "running" {
-			label += " · pending"
-		}
+		label := collapsedToolLine(render.ToolDetailLine(s), width)
 		if s.Status == "error" {
 			b.WriteString(m.theme.Error.Render(label) + "\n")
 		} else if s.Status == "running" {
@@ -327,8 +324,10 @@ func (m model) renderDelegationActivity(task events.DelegationTaskState, width i
 		} else {
 			b.WriteString(m.theme.Muted.Render(label) + "\n")
 		}
-		if detail := render.ToolDetailBody(s, width); detail != "" {
-			b.WriteString(m.theme.Muted.Render(detail) + "\n")
+		if m.delegationDetail.raw {
+			if detail := render.ToolDetailBody(s, width); detail != "" {
+				b.WriteString(m.theme.Muted.Render(detail) + "\n")
+			}
 		}
 		if s.Status == "complete" && (s.Name == "edit_file" || s.Name == "write_file") {
 			root := m.workDir
@@ -360,7 +359,6 @@ func (m model) renderDelegationActivity(task events.DelegationTaskState, width i
 				b.WriteString(m.theme.Error.Render(preview) + "\n")
 			}
 		}
-		b.WriteByte('\n')
 	}
 	return wrapDelegationStyled(b.String(), width)
 }

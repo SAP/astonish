@@ -54,7 +54,7 @@ func TestDelegationWrappedWritePendingAndNarrow(t *testing.T) {
 	call := events.DelegationActivity{Type: "tool_call", CallID: "w", ToolName: "execute_tool", Args: map[string]any{"name": "functions.write_file", "arguments": map[string]any{"path": "long/path/file.go", "content": content}}}
 	task := events.DelegationTaskState{Activity: []events.DelegationActivity{call}}
 	pending := stripANSI(m.renderDelegationActivity(task, 28))
-	if !strings.Contains(pending, "pending") || strings.Contains(pending, "lastLine") {
+	if !strings.Contains(pending, "⏳") || strings.Contains(pending, "lastLine") {
 		t.Fatal(pending)
 	}
 	task.Activity = append(task.Activity, events.DelegationActivity{Type: "tool_result", CallID: "w", ToolName: "execute_tool", Result: map[string]any{"success": true}})

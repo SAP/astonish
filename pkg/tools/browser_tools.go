@@ -19,6 +19,14 @@ func GetBrowserTools(mgr *browser.Manager) ([]tool.Tool, error) {
 	return getBrowserToolsWithGuard(mgr, guard)
 }
 
+// GetBrowserToolsForCode permits local development servers in host Code mode.
+// Other private/link-local addresses and DNS names resolving to them remain blocked.
+func GetBrowserToolsForCode(mgr *browser.Manager) ([]tool.Tool, error) {
+	guard := browser.DefaultNavigationGuard()
+	guard.AllowLoopback = true
+	return getBrowserToolsWithGuard(mgr, guard)
+}
+
 // GetBrowserToolsForSandbox creates browser tools with private network
 // blocking disabled. When sandbox is enabled, Chromium runs inside the
 // session container (same network namespace as services), so localhost and

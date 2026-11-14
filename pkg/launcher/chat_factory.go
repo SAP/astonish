@@ -569,13 +569,7 @@ func newWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig) (*ChatFactor
 	// --- 2f. Initialize browser automation tools → deferred category ---
 	browserCfg := browserConfigFromApp(cfg.AppConfig)
 	browserMgr := browser.NewManager(browserCfg)
-	var browserToolsSlice []tool.Tool
-	var browserErr error
-	if cfg.AppConfig != nil && sandbox.IsSandboxEnabled(&cfg.AppConfig.Sandbox) {
-		browserToolsSlice, browserErr = tools.GetBrowserToolsForSandbox(browserMgr)
-	} else {
-		browserToolsSlice, browserErr = tools.GetBrowserTools(browserMgr)
-	}
+	browserToolsSlice, browserErr := browserToolsForFactory(cfg, browserMgr)
 	if browserErr != nil {
 		if cfg.DebugMode {
 			slog.Warn("failed to create browser tools", "error", browserErr)
@@ -1805,6 +1799,17 @@ func makeLLMFunc(llm model.LLM) func(ctx context.Context, prompt string) (string
 // Exported for use by the channel manager and other callers.
 func MakeLLMFunc(llm model.LLM) func(ctx context.Context, prompt string) (string, error) {
 	return makeLLMFunc(llm)
+}
+
+// browserToolsForFactory keeps the loopback exception exclusive to host Code mode.
+func browserToolsForFactory(cfg *ChatFactoryConfig, mgr *browser.Manager) ([]tool.Tool, error) {
+	if cfg.AppConfig != nil && sandbox.IsSandboxEnabled(&cfg.AppConfig.Sandbox) {
+		return tools.GetBrowserToolsForSandbox(mgr)
+	}
+	if cfg.CodeMode {
+		return tools.GetBrowserToolsForCode(mgr)
+	}
+	return tools.GetBrowserTools(mgr)
 }
 
 // browserConfigFromApp builds a browser.BrowserConfig by merging user settings

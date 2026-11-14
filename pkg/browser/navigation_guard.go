@@ -10,6 +10,7 @@ import (
 // NavigationGuard checks URLs before browser navigation to prevent SSRF.
 type NavigationGuard struct {
 	BlockPrivateNetworks bool
+	AllowLoopback        bool     // permits only literal loopback IPs and exact localhost
 	AllowedHostnames     []string // overrides private network block
 }
 
@@ -47,6 +48,17 @@ func (g *NavigationGuard) Check(rawURL string) error {
 	}
 
 	host := parsed.Hostname()
+
+	// Code mode may reach local dev servers, but never grant this exception
+	// to arbitrary DNS names that resolve to loopback/private addresses.
+	if g.AllowLoopback {
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
 
 	// Check hostname allowlist
 	for _, allowed := range g.AllowedHostnames {

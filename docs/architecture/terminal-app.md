@@ -117,6 +117,16 @@ If `client.IsRemoteMode()` is false (no `~/.config/astonish/remote.yaml` / login
 6. `NewWiredChatAgent(ctx, …, PlatformMode: false, AllowMissingProvider: true, SessionService: fileStore)` — the same wiring choke point Studio uses, minus sandbox wrapping.
 7. Build `localAgentBackend` (with the store and a directory-scoped `userID`) and hand it to `tui.Run`.
 
+### Local browser testing
+
+With the sandbox off, Code mode selects `tools.GetBrowserToolsForCode` in
+`chat_factory.go`. Both `browser_navigate` and new tabs share a navigation guard
+that permits HTTP(S) to exact `localhost` and literal loopback IPs (`127.0.0.0/8`,
+`::1`); navigation normalizes localhost/`::1` to IPv4 for IPv4-only dev servers.
+LAN, link-local/metadata addresses, and arbitrary DNS names resolving to private
+or loopback IPs remain blocked. This is a Code-only exception: normal host tools
+retain the default SSRF guard, and sandbox tools retain their existing policy.
+
 ### Starting without a model
 
 Code mode opens even when no provider/model is configured. When provider resolution yields nothing, `NewWiredChatAgent` (with `AllowMissingProvider: true`) installs a **placeholder LLM** (`provider.NewPlaceholderLLM`) so the full agent — tools, MCP, session, sandbox-off wiring — is still built, and reports `ProviderConfigured: false`.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -182,6 +183,7 @@ type DeliveryPolicy struct {
 	Bindings    []BotChannelBinding `json:"bindings"`
 }
 type TriggerSpec struct {
+	TaskID         *uuid.UUID         `json:"task_id,omitempty"`
 	SkillID        *uuid.UUID         `json:"skill_id,omitempty"`
 	Invocation     string             `json:"invocation,omitempty"`
 	ID             uuid.UUID          `json:"id"`
@@ -311,7 +313,12 @@ type BotEmployeeMessage struct {
 }
 
 type BotReport struct {
-	Work *BotWorkProjection `json:"work,omitempty"`
+	// EffectState is assigned only from runtime-owned classified calls and effect
+	// receipts. Unverified prose alone cannot establish whether an action ran.
+	EffectState BotReportEffectState `json:"effect_state,omitempty"`
+	// ReviewLimitation is a trusted review response, never the rejected draft.
+	ReviewLimitation *BotEmployeeReviewLimitation `json:"review_limitation,omitempty"`
+	Work             *BotWorkProjection           `json:"work,omitempty"`
 	// Skill is assigned from committed repository state, never model claims.
 	Skill           *BotSkillReceipt         `json:"skill,omitempty"`
 	EmployeeMessage *BotEmployeeMessage      `json:"employee_message,omitempty"`
@@ -346,6 +353,20 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 	m := r.EmployeeMessage
 	if m == nil {
 		return nil
+	}
+	if m.Reason == BotEmployeeReasonResearchInadequate {
+		if work == nil || work.Validate() != nil || r.employeeReviewLimitationText(status) == "" || !reflect.DeepEqual(r.Work, BuildBotWorkProjection(work)) || work.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 || work.Candidate == nil || r.ReviewLimitation.Text == work.Candidate.Text {
+			return ErrBotInvalid
+		}
+		found := false
+		for _, gap := range work.Unresolved {
+			if gap == r.ReviewLimitation.Text {
+				found = true
+			}
+		}
+		if !found {
+			return ErrBotInvalid
+		}
 	}
 	if m.Reason == BotEmployeeReasonEmailTransport && (status != RunPartial || work.ConfirmedRequiredBlocker() == nil) {
 		return ErrBotInvalid
@@ -386,6 +407,7 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 }
 
 type BotRun struct {
+	Task       *BotTaskRef        `json:"task,omitempty"`
 	Work       *BotWorkProjection `json:"work,omitempty"`
 	SkillID    *uuid.UUID         `json:"skill_id,omitempty"`
 	Invocation string             `json:"invocation,omitempty"`
@@ -500,6 +522,7 @@ type BotLifecycleRequest struct {
 	Now              time.Time
 }
 type BotRunRequest struct {
+	TaskID         *uuid.UUID         `json:",omitempty"`
 	SkillID        *uuid.UUID         `json:",omitempty"`
 	Invocation     string             `json:",omitempty"`
 	Intent         BotExecutionIntent `json:",omitempty"`

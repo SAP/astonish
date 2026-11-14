@@ -46,7 +46,7 @@ func (m *scheduleCadenceModel) GenerateContent(_ context.Context, r *model.LLMRe
 				return
 			}
 			m.pending(id)
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("Done, cadence changed.", "model"), TurnComplete: true}, nil)
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(response["message"].(string), "model"), TurnComplete: true}, nil)
 			m.step++
 			return
 		default:

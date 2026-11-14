@@ -23,6 +23,11 @@ class BotSkillSurfaceEntrypointTest(unittest.TestCase):
                 self.assertEqual(entrypoint.main(flags), 0)
                 gate.assert_called_once_with()
 
+    def test_details_absence_is_required_by_underlying_gate(self):
+        from skill_surface_acceptance import CASES
+        self.assertIn('browser/no-skill-fetch', CASES['TestBotDetailsWithoutSkillsBrowserAcceptance'])
+        self.assertIn('TestBotSkillsPTYAcceptance', CASES)
+
     def test_failure_propagates(self):
         with patch.object(entrypoint, 'run_surface_gate', return_value=1):
             self.assertEqual(entrypoint.main(['--browser', '--terminal']), 1)

@@ -9,7 +9,6 @@ import { botLocalFailure } from '../chat/botEmployeeFeedback'
 import StudioChat from '../StudioChat'
 import { BotLifecycleControls, BotPolicySummary } from './BotControls'
 import { BotGoals, BotMemoryCharterPanel, BotSchedule, BotTemplatePublication } from './BotPanels'
-import BotSkillsPanel from './BotSkillsPanel'
 import BotConfigurationPanel from './BotConfigurationPanel'
 import BotStopRun from './BotStopRun'
 import BotHomeSetup from './BotHomeSetup'
@@ -115,7 +114,6 @@ function BotDetails({ bot, readOnly, revision, refresh, snapshot, reviews, route
     <details><summary>Operation evidence</summary><p>{snapshot.data?.mandate?.available ? 'A stored mandate is available. Each action still checks current authorization.' : 'No stored mandate is available.'}</p>{snapshot.error ? <p role="alert">Operation evidence is unavailable. Refresh before relying on these results.</p> : (snapshot.data?.operations || []).length ? (snapshot.data?.operations || []).map(operation => <p key={operation.operation_id}>{operation.summary} · {operation.status}</p>) : <p>No operation results yet.</p>}</details>
     <details><summary>Review inbox</summary>{reviews}</details>
     <details><summary>Goals</summary>{goals.error && <p role="alert">{goals.error}<Button onClick={goals.retry}>Retry goals</Button></p>}{goals.data && <BotGoals bot={bot} goals={goals.data.goals} readOnly={unavailable} onChange={refresh} />}</details>
-    <details><summary>Skills &amp; history</summary><BotSkillsPanel bot={bot} revision={revision} /></details>
     <details><summary>Schedule & triggers</summary>{version.data && <BotSchedule bot={bot} version={version.data} readOnly={unavailable} onChange={refresh} />}</details>
     <details><summary>Memory & charter</summary><BotMemoryCharterPanel bot={bot} readOnly={unavailable} onChange={refresh} /></details>
     <details><summary>Configuration</summary><BotConfigurationPanel bot={bot} readOnly={unavailable} onChange={refresh} />{!readOnly && <BotTemplatePublication />}</details>

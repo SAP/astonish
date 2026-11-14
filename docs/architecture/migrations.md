@@ -71,6 +71,35 @@ Verification: `go test ./pkg/store/entstore -run '^TestBot(Skill|Cleanup)' -coun
 SQLite only. PostgreSQL migration/concurrency and runtime learning commit remain
 separate acceptance requirements.
 
+## Bot Task persistence (DDL marker 3)
+
+`botMigrationVersion=3` adds scoped personal/team `bot_tasks` and
+`bot_task_revisions` through the current additive Ent reconciliation workflow.
+The registry stores identity/lifecycle and head revision/digest, not another editable
+copy of live TASK.md instructions. Immutable revision JSON holds archival/recovery
+bundle bytes using the existing precision-protecting envelope; publication state,
+original authority ref and backend receipt ref are separate envelope columns.
+Task heads are independent from BotVersion and Skill heads. Historical document
+schema versions, JSON bytes/hashes and legacy schedule payloads remain unchanged.
+No reconciliation backfills Tasks or converts existing instructions into Tasks.
+
+The schemas and generated migration metadata are produced by running
+`go run generate.go` in `ent/personal` and `ent/team`. Their generate.go files are
+ignore-tagged programs, not go:generate directives; a silent `go generate` exit is
+not evidence that output changed. Repeat actual generation and compare output for
+drift. Keep historical Atlas checksums unchanged; they are not this runtime's DDL.
+
+`TestBotTaskMigrateV3` exercises marker 2 → 3 and idempotent empty Task reconciliation
+in SQLite personal/team scopes, including exact historical v2 backup hashes with
+Skills present and Tasks absent. The compatibility reconstruction removes only
+known Task additions (and, separately, known Skill additions for v1), rejects
+archives containing excluded tables, and rejects unrelated schema differences.
+Existing legacy Chat/job preservation and future-marker/failed-reconciliation
+tests remain required. PostgreSQL and Task
+backup/restore/file recovery are not certified by these SQLite tests. See
+[Bot Task workspace contracts](bot-task-workspace.md) for states, quotas and the
+strict compatibility-only acceptance driver.
+
 ## Title-start/run-state compatibility
 
 This change adds no DDL, generated Ent changes, or Bot schema-version bump.
@@ -82,6 +111,32 @@ No startup or GET backfills historical state or initializes legacy drafts.
 create keys. Imports and default CreateDraft stay inert. Snapshot fields
 `run_states` and `history_cursor` are additive read-only projections. PostgreSQL
 requires a separate disposable-database run; SQLite proof is not PostgreSQL proof.
+
+## Bot per-turn extraction persistence (DDL marker 4)
+
+`botMigrationVersion=4` adds personal/team `bot_knowledge_extractions` and
+`bot_knowledge_file_heads` using additive Ent reconciliation. Generate with
+`go run generate.go` in each scope, without historical document version or Atlas
+checksum changes. Full source tuples are unique; exact input remains in the
+precision-protecting `bot_document` envelope. New input requires a trusted
+complete-source verifier plus a canonical terminal run and result activity.
+
+Extraction claims are independent from terminal run leases. Each mutation locks
+the Bot root, rechecks live editable membership/original actor and current root
+fence. Begin persists one attempt ID before model use. Expired Extracting becomes
+Held, never Pending. Prepared decisions may take fresh extraction fences for
+recovery; uncertain Held without a decision may only abort. FilesReady/Committed
+require trusted exact fenced byte verification. Scoped path heads CAS all original
+expected digests atomically with the extraction receipt. Retained Markdown is inert.
+Restore invalidates claims and holds unfinished records; root restore barriers block
+claims until explicit reconciliation. Purge removes extraction journals and heads.
+Marker-3 backup compatibility excludes only these two tables; historical v1/v2
+reconstruction also excludes them without relaxing unrelated schema hashes.
+
+SQLite checks: `go test ./pkg/store/entstore -run 'TestBotKnowledgeExtraction|TestBotMigration|TestBotTaskMigrate' -count=1`.
+PostgreSQL concurrency, production source-verifier/worker wiring, actual physical
+publication and paid-model execution are separate acceptance requirements; these
+store tests do not prove completed learning.
 
 ## Historical Atlas workflow (not the active Ent implementation)
 

@@ -23,7 +23,7 @@ func TestAuthorizedScheduleDirectSourceAndTitleBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The marker is private to title admission, never supplied in JSON.
-			titleCtx := context.WithValue(owner, titleMandateAdmissionKey{}, true)
+			titleCtx := context.WithValue(owner, titleMandateAdmissionKey{}, titleMandateAdmission{Kind: store.BotInitiationKindTitle, Subject: "Every day at nine read the report"})
 			admitted, err := r.AdmitMessage(titleCtx, store.BotMessageRequest{BotID: q.MandateRef.BotID, Version: 1, Instructions: "Every day at nine read the report", IdempotencyKey: "title-boundary"})
 			if err != nil {
 				t.Fatal(err)

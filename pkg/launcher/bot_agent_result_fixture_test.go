@@ -16,7 +16,7 @@ func assertLauncherAgentResult(t *testing.T, repo store.BotStore, ctx context.Co
 	if err != nil {
 		t.Fatal(err)
 	}
-	if work == nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Candidate == nil || work.Review != nil || result.Report.Quality != nil {
+	if work == nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Candidate == nil || (work.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 && !work.HasAcceptedEmployeeReview()) || (work.EmployeeReviewPolicy == "" && work.Review != nil) || result.Report.Quality != nil {
 		t.Fatalf("expected agent-led candidate without legacy review: work=%+v report=%+v", work, result.Report)
 	}
 	if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent {

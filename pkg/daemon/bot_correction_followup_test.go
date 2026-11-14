@@ -33,10 +33,31 @@ import (
 type correctionFollowupModel struct {
 	prompts []string
 	answers []string
+	reviews []string
 }
 
 func (*correctionFollowupModel) Name() string { return "controlled" }
 func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool {
+		if w.Candidate.Text == "No delivery fact in active context." {
+			return true
+		}
+		// The review must see current captured evidence, not the producer's
+		// answer, its previous prompt, or an obsolete delivery notice.
+		var input workerContentInput
+		if json.Unmarshal([]byte(r.Contents[0].Parts[0].Text), &input) != nil {
+			return false
+		}
+		for _, body := range input.Sources {
+			if strings.Contains(body, w.Candidate.Text) {
+				return true
+			}
+		}
+		return false
+	}); ok {
+		m.reviews = append(m.reviews, r.Contents[0].Parts[0].Text)
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var prompt string
 		if r.Config != nil && r.Config.SystemInstruction != nil {
@@ -45,6 +66,36 @@ func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LL
 			}
 		}
 		m.prompts = append(m.prompts, prompt)
+		foundMemory := false
+		for _, content := range r.Contents {
+			for _, part := range content.Parts {
+				foundMemory = foundMemory || part.FunctionResponse != nil && part.FunctionResponse.Name == "memory_get"
+			}
+		}
+		if !foundMemory {
+			for _, content := range r.Contents {
+				for _, part := range content.Parts {
+					if part.FunctionResponse == nil || part.FunctionResponse.Name != "memory_search" {
+						continue
+					}
+					raw, _ := json.Marshal(part.FunctionResponse.Response["result"])
+					var result struct {
+						Results []struct {
+							Path string `json:"path"`
+						} `json:"results"`
+					}
+					_ = json.Unmarshal(raw, &result)
+					if len(result.Results) > 0 {
+						m.answers = append(m.answers, "")
+						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "memory_get", Args: map[string]any{"path": result.Results[0].Path}}}}}, TurnComplete: true}, nil)
+						return
+					}
+				}
+			}
+			m.answers = append(m.answers, "")
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "memory_search", Args: map[string]any{"query": "Delivery", "max_results": 6}}}}}, TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
+			return
+		}
 		answer := "No delivery fact in active context."
 		if strings.Contains(prompt, "Delivery is Thursday") {
 			answer = "Delivery is Thursday"
@@ -77,7 +128,11 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				if e != nil {
 					return nil, e
 				}
-				return &launcher.BotChatSafeResources{Tools: memoryTools, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				repo := s.Services.Bots
+				if q.Bot.Scope == store.BotScopePersonal {
+					repo = s.Services.PersonalBots
+				}
+				return &launcher.BotChatSafeResources{Tools: memoryTools, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -104,6 +159,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			}
 			version := store.DefaultBotVersion()
 			version.Charter = "Report delivery facts and track receipt."
+			version.Autonomy.AllowedTools = []string{"memory_search", "memory_get"}
 			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Delivery", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "correction"})
 			if err != nil {
 				t.Fatal(err)
@@ -205,10 +261,10 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				}
 				saved, e := repo.GetRun(auth, b.ID, admitted.ID)
 				if e != nil || saved.Status != store.RunSucceeded {
-					t.Fatalf("worker run: %+v %v", saved, e)
+					t.Fatalf("worker run: %+v %v reviews=%s", saved, e, llm.reviews)
 				}
-				if len(llm.prompts) != before+1 {
-					t.Fatalf("correction followup should need exactly one agent call, not preparation/review: before=%d after=%d", before, len(llm.prompts))
+				if len(llm.prompts) != before+3 {
+					t.Fatalf("correction followup should need one scoped memory search, one exact memory read and one final producer call: before=%d after=%d", before, len(llm.prompts))
 				}
 				if saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 {
 					t.Fatalf("new followup lost agent work protocol: %+v", saved.Report.Work)
@@ -223,8 +279,8 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				if key == "after-correction" && strings.Contains(prompt, "Delivery is Thursday") {
 					t.Error("superseded delivery remains in active context")
 				}
-				if llm.answers[before] != want {
-					t.Errorf("%s: model derived %q, want %q", key, llm.answers[before], want)
+				if llm.answers[before+2] != want {
+					t.Errorf("%s: model derived %q, want %q", key, llm.answers[before+2], want)
 				}
 				events, e := sessions.ReadTranscriptEvents(auth, "astonish", owner, admitted.SessionID.String())
 				if e != nil {
@@ -236,7 +292,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 						continue
 					}
 					for _, part := range event.Content.Parts {
-						persisted = persisted || part.Text == llm.answers[before]
+						persisted = persisted || part.Text == llm.answers[before+2]
 					}
 				}
 				if !persisted {

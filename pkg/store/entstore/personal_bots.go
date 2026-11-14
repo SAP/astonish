@@ -12,6 +12,8 @@ import (
 	"github.com/SAP/astonish/ent/personal/botgoal"
 	"github.com/SAP/astonish/ent/personal/botoutbox"
 	"github.com/SAP/astonish/ent/personal/botrun"
+	"github.com/SAP/astonish/ent/personal/bottask"
+	"github.com/SAP/astonish/ent/personal/bottaskrevision"
 	"github.com/SAP/astonish/ent/personal/bottrackeditem"
 	"github.com/SAP/astonish/ent/personal/botversion"
 	"github.com/SAP/astonish/ent/personal/cachediagnostic"
@@ -23,9 +25,10 @@ import (
 )
 
 type personalBotStore struct {
-	credentials store.CredentialStore
-	client      *personalent.Client
-	auth        botRepositoryAuth
+	taskVerifier func(context.Context, store.BotTaskPublication, string) error
+	credentials  store.CredentialStore
+	client       *personalent.Client
+	auth         botRepositoryAuth
 }
 
 func (s *personalBotStore) repository() *botRepository {
@@ -782,6 +785,15 @@ func (d personalBotDB) PurgeBot(ctx context.Context, rec botStoredRecord, cutoff
 		return err
 	}
 	if _, err := d.client.BotTrackedItem.Delete().Where(bottrackeditem.HasGoalWith(botgoal.BotIDEQ(id))).Exec(ctx); err != nil {
+		return err
+	}
+	if _, err := d.client.BotTaskRevision.Delete().Where(bottaskrevision.BotIDEQ(id)).Exec(ctx); err != nil {
+		return err
+	}
+	if _, err := d.client.BotTask.Delete().Where(bottask.BotIDEQ(id)).Exec(ctx); err != nil {
+		return err
+	}
+	if err := d.purgeKnowledge(ctx, id); err != nil {
 		return err
 	}
 	if err := d.purgeSkills(ctx, id); err != nil {

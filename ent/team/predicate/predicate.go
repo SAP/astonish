@@ -27,6 +27,12 @@ type BotGoal func(*sql.Selector)
 // BotIntake is the predicate function for botintake builders.
 type BotIntake func(*sql.Selector)
 
+// BotKnowledgeExtraction is the predicate function for botknowledgeextraction builders.
+type BotKnowledgeExtraction func(*sql.Selector)
+
+// BotKnowledgeFileHead is the predicate function for botknowledgefilehead builders.
+type BotKnowledgeFileHead func(*sql.Selector)
+
 // BotOutbox is the predicate function for botoutbox builders.
 type BotOutbox func(*sql.Selector)
 
@@ -38,6 +44,12 @@ type BotSkill func(*sql.Selector)
 
 // BotSkillRevision is the predicate function for botskillrevision builders.
 type BotSkillRevision func(*sql.Selector)
+
+// BotTask is the predicate function for bottask builders.
+type BotTask func(*sql.Selector)
+
+// BotTaskRevision is the predicate function for bottaskrevision builders.
+type BotTaskRevision func(*sql.Selector)
 
 // BotTemplate is the predicate function for bottemplate builders.
 type BotTemplate func(*sql.Selector)

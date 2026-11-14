@@ -136,6 +136,7 @@ func BotMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var q struct {
+		TaskID *uuid.UUID `json:"task_id,omitempty"`
 		Version        int64            `json:"version"`
 		IdempotencyKey string           `json:"idempotency_key"`
 		Instructions   string           `json:"instructions"`
@@ -163,7 +164,7 @@ func BotMessageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// Physical setup belongs to the shared post-admission worker preflight.
 	}
-	receipt, err := messages.AdmitMessage(ctx, store.BotMessageRequest{BotID: id, Version: q.Version, IdempotencyKey: q.IdempotencyKey, Instructions: q.Instructions, Attachments: files})
+	receipt, err := messages.AdmitMessage(ctx, store.BotMessageRequest{TaskID: q.TaskID, BotID: id, Version: q.Version, IdempotencyKey: q.IdempotencyKey, Instructions: q.Instructions, Attachments: files})
 	if err != nil {
 		botHTTPError(w, err)
 		return
@@ -190,6 +191,7 @@ func botRequestRun(w http.ResponseWriter, r *http.Request, intent store.BotExecu
 		return
 	}
 	var q struct {
+		TaskID *uuid.UUID `json:"task_id,omitempty"`
 		Version        int64            `json:"version"`
 		IdempotencyKey string           `json:"idempotency_key"`
 		Instructions   string           `json:"instructions"`
@@ -224,7 +226,7 @@ func botRequestRun(w http.ResponseWriter, r *http.Request, intent store.BotExecu
 			}
 		}
 	}
-	run, err := repo.RequestRun(r.Context(), store.BotRunRequest{Intent: intent, BotID: id, Version: q.Version, Trigger: store.TriggerManual, IdempotencyKey: q.IdempotencyKey, Instructions: q.Instructions, Attachments: files})
+	run, err := repo.RequestRun(r.Context(), store.BotRunRequest{TaskID: q.TaskID, Intent: intent, BotID: id, Version: q.Version, Trigger: store.TriggerManual, IdempotencyKey: q.IdempotencyKey, Instructions: q.Instructions, Attachments: files})
 	if err != nil {
 		botHTTPError(w, err)
 		return

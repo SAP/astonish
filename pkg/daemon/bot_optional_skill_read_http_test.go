@@ -35,9 +35,16 @@ type optionalSkillReadHTTPModel struct {
 	stage   int
 	missing uuid.UUID
 	reads   int
+	reviews int
 }
 
 func (m *optionalSkillReadHTTPModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
+		return w.Candidate.Text == "I can continue without a saved method."
+	}); ok {
+		m.reviews++
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if m.stage > 0 {
 			want := "ok"
@@ -70,7 +77,7 @@ func (m *optionalSkillReadHTTPModel) GenerateContent(_ context.Context, req *mod
 			m.reads++
 		}
 		if m.stage == 2 {
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("No saved methods are available; I can continue without one.", "model"), TurnComplete: true}, nil)
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("I can continue without a saved method.", "model"), TurnComplete: true}, nil)
 			m.stage++
 			return
 		}
@@ -175,7 +182,7 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved, err := repo.GetRun(ctx, b.ID, receipt.Run.ID)
-			if err != nil || saved.Status != store.RunSucceeded || mdl.reads != 2 || !strings.Contains(saved.Report.Summary, "continue without one") {
+			if err != nil || saved.Status != store.RunSucceeded || mdl.reads != 2 || mdl.stage != 3 || mdl.reviews != 1 || !strings.Contains(saved.Report.Summary, "continue without a saved method") {
 				t.Fatalf("optional reads failed: run=%+v reads=%d err=%v", saved, mdl.reads, err)
 			}
 			approvals, err := repo.ListApprovals(ctx, b.ID, store.BotPage{})

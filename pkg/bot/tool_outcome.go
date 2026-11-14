@@ -28,6 +28,18 @@ type ToolOutcome struct {
 	// ScheduleCapture attests only durable enqueue, never a scheduler mutation.
 	ScheduleCapture *ScheduleCapture
 	RoutineCapture  *RoutineCapture
+	// Nonexecution is recorded only at a concrete pre-execution rejection.
+	// It never certifies a successful task, content, or external effect.
+	Nonexecution *ToolNonexecutionReceipt
+	// ReceiptConflict prevents duplicate ledger records from erasing uncertainty.
+	ReceiptConflict bool
+}
+
+// ToolNonexecutionReceipt binds a trusted rejection to its exact invocation.
+// This type is server-only; provider JSON and tool arguments cannot mint it.
+type ToolNonexecutionReceipt struct {
+	CallID   string
+	ToolName string
 }
 
 // ToolReportArtifact binds captured report bytes to a server-observed home file.
@@ -83,8 +95,18 @@ func RecordToolOutcome(ctx context.Context, callID string, outcome ToolOutcome) 
 		capture := *outcome.RoutineCapture
 		outcome.RoutineCapture = &capture
 	}
+	if outcome.Nonexecution != nil {
+		receipt := *outcome.Nonexecution
+		outcome.Nonexecution = &receipt
+	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
+	if prior, exists := ledger.records[callID]; exists {
+		// A second record cannot overwrite a failed effect with nonexecution.
+		prior.ReceiptConflict = true
+		ledger.records[callID] = prior
+		return
+	}
 	ledger.records[callID] = outcome
 }
 

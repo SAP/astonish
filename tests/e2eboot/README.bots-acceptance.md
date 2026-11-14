@@ -1,5 +1,34 @@
 # Bot release acceptance
 
+## Bot-owned Task all-stage gate (not live-certified)
+
+```sh
+python3 -B tests/e2eboot/bot_task_acceptance.py --stage all \
+  --config "${LOCAL_BOT_TASK_CONFIG:?Explicit isolated AI Core and search config required}"
+```
+
+The distinct workflow runs compatibility, workspace, search, execution and owned
+PostgreSQL/daemon continuity in dependency order, then invokes
+`local_bot_smoke_launcher.py --verify-bot-tasks --config CONFIG`. State reuse is
+forbidden; historical employee/skills/quality/agent modes remain separate.
+
+Use an absolute, private regular non-symlink version 1 launcher JSON config plus
+`search_config`. Exact Bot identity: `sap_ai_core_sci` / `sap_ai_core` /
+`anthropic--claude-4.6-sonnet`. Tavily supplies `engine: tavily` and `api_key`;
+Perplexity supplies `engine: perplexity`, `provider_instance`, `provider_config`
+and `model`. Missing explicit config blocks before startup; no ambient secret
+fallback, normal-daemon mutation or spending-limit change is allowed.
+
+The read-only owned observer compares scoped registry revisions with actual
+workspace-volume bytes, never substituting archival bundles. Three unchanged
+Stock Market News starts retain search-before-detail ordering, Task assets, run
+pins, transcripts, answers/sources and adapter identities. The validator emits
+all eighteen exact obligations and keeps missing/failed cases outstanding.
+Accountable grounding and fresh-candidate correction/helper/state/scheduler/
+restart/backup/terminal journeys remain implementation and live-evidence gaps;
+providing config alone cannot close them. No paid Task candidate has been run in
+this checkpoint. Kubernetes/OpenShell certification is outside this gate.
+
 ## Strict agent all-stage gate (not yet live-certified)
 
 ```sh

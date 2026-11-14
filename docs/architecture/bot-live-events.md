@@ -2,7 +2,9 @@
 
 ## Skill inspection and scheduling surfaces
 
-Studio Details and remote `/bots skills` render committed skill revisions and `BotReport.skill` receipts from scoped GET routes, not skill claims extracted from transcript text. Refresh uses existing workspace revision invalidation; no new SSE kind or Home transcript rewriting is introduced. Unsupported schemas remain unavailable. Inspection is read-only for owners and authorized viewers.
+Studio Details no longer mounts `BotSkillsPanel` or the Skills & history accordion, in personal/team and all lifecycle/read-only/resource states. There is no replacement Tasks panel, file browser or badge. Goals, Memory & charter, Schedule & triggers, Runs & activity, policy/approval controls and the mounted Home conversation remain unchanged; Close/Escape and refresh do not start or cancel work. The removed inspector issues no skill-list/history fetches. Schedule & triggers independently retains its existing active-skill selection GET (`limit=100`); removing the inspector does not disable scheduling.
+
+Remote `/bots skills` independently renders committed skill revisions and `BotReport.skill` receipts from scoped GET routes, not transcript claims. Backend skill APIs, tools, data and the standalone component remain intact. Unsupported schemas remain unavailable. Studio/terminal parity compares shared ordered transcript, run/result/progress and final invocation fields, not a Studio Skills dataset. Terminal skill-reference/schema/read-only checks remain independent. No new SSE kind or Home transcript rewriting is introduced.
 
 Schedule & triggers references an active skill ID plus invocation intent; it does not copy the method into instructions. Legacy instruction schedules remain explicitly labeled and editable without automatic import. Missing/loading/failed skill reads block new skill selection but do not remove legacy controls. General Settings projects `bot_managed` and offers only Bot navigation for bound jobs; regular scheduler jobs retain their existing controls. Server authorization remains authoritative.
 

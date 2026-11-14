@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 
+	personalent "github.com/SAP/astonish/ent/personal"
 	teament "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/ent/team/scheduledjob"
 	teamsession "github.com/SAP/astonish/ent/team/session"
@@ -226,6 +227,8 @@ func TestBotMigrationReopen(t *testing.T) {
 	}
 	// Reconstruct the pre-Bot schema without changing the existing chat/job rows.
 	for _, statement := range []string{
+		"DROP TABLE bot_knowledge_file_heads", "DROP TABLE bot_knowledge_extractions",
+		"DROP TABLE bot_task_revisions", "DROP TABLE bot_tasks",
 		"DROP TABLE bot_skill_revisions", "DROP TABLE bot_skills",
 		"DROP TABLE bot_approvals", "DROP TABLE bot_runs", "DROP TABLE bot_tracked_items", "DROP TABLE bot_goals", "DROP TABLE bot_versions", "DROP TABLE bot_outbox", "DROP TABLE bot_templates", "DROP TABLE bots",
 		"ALTER TABLE sessions DROP COLUMN bot_id", "ALTER TABLE sessions DROP COLUMN bot_run_id", "ALTER TABLE sessions DROP COLUMN purpose", "ALTER TABLE sessions DROP COLUMN retention",
@@ -260,6 +263,10 @@ func TestBotMigrationReopen(t *testing.T) {
 	if err := checkSQLiteScopeSchemaCompatible(ctx, legacyManifest, db, legacyScope); err == nil {
 		t.Fatal("Bot archive accepted as legacy")
 	}
+	legacyManifest.Entries = []backup.Entry{{Scope: legacyScope, Entity: "bot_task_revisions"}}
+	if err := checkSQLiteScopeSchemaCompatible(ctx, legacyManifest, db, legacyScope); err == nil {
+		t.Fatal("Task archive accepted as pre-Bot legacy")
+	}
 	legacyManifest.Entries = nil
 	if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN unrelated TEXT`); err != nil {
 		t.Fatal(err)
@@ -286,6 +293,77 @@ func TestBotMigrationReopen(t *testing.T) {
 		t.Fatalf("version %d: %v", version, err)
 	}
 	createBotSchemaFixture(t, c)
+}
+
+func TestBotTaskMigrateV3(t *testing.T) {
+	for _, scope := range []string{"personal", "team"} {
+		t.Run(scope, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "task.db")+"?_pragma=foreign_keys(1)&_fk=1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+			if _, err = db.ExecContext(ctx, "CREATE TABLE bot_schema_version (id TEXT PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO bot_schema_version VALUES ('bots',2)"); err != nil {
+				t.Fatal(err)
+			}
+			driver := entsql.OpenDB(dialect.SQLite, db)
+			var create func() error
+			if scope == "personal" {
+				c := personalent.NewClient(personalent.Driver(driver))
+				create = func() error { return c.Schema.Create(ctx) }
+			} else {
+				c := teament.NewClient(teament.Driver(driver))
+				create = func() error { return c.Schema.Create(ctx) }
+			}
+			// Reproduce the exact v2 shape: Skills exist, Tasks do not.
+			if err = create(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.ExecContext(ctx, "DROP TABLE bot_knowledge_file_heads; DROP TABLE bot_knowledge_extractions; DROP TABLE bot_task_revisions; DROP TABLE bot_tasks"); err != nil {
+				t.Fatal(err)
+			}
+			archiveScope := backup.Scope{Kind: scope, OrgSlug: "org", TeamSlug: "team", UserID: uuid.NewString()}
+			archiveVersion, err := schemaVersionForScope(ctx, "sqlite", db, archiveScope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := backup.Manifest{SchemaVersions: map[string]backup.SchemaVersion{backupScopeKey(archiveScope): archiveVersion}, Entries: []backup.Entry{{Scope: archiveScope, Entity: "bot_skills"}}}
+			for i := 0; i < 2; i++ {
+				if err = migrateBotSchema(ctx, db, DialectSQLite, create); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err = checkSQLiteScopeSchemaCompatible(ctx, manifest, db, archiveScope); err != nil {
+				t.Fatalf("exact v2 backup upgrade rejected: %v", err)
+			}
+			manifest.Entries = append(manifest.Entries, backup.Entry{Scope: archiveScope, Entity: "bot_tasks"})
+			if err = checkSQLiteScopeSchemaCompatible(ctx, manifest, db, archiveScope); err == nil {
+				t.Fatal("Task archive accepted as v2")
+			}
+			manifest.Entries = manifest.Entries[:1]
+			if _, err = db.ExecContext(ctx, "ALTER TABLE bot_skills ADD COLUMN unrelated TEXT"); err != nil {
+				t.Fatal(err)
+			}
+			if err = checkSQLiteScopeSchemaCompatible(ctx, manifest, db, archiveScope); err == nil {
+				t.Fatal("unrelated v2 schema mismatch accepted")
+			}
+			var marker int
+			if err = db.QueryRowContext(ctx, "SELECT version FROM bot_schema_version WHERE id='bots'").Scan(&marker); err != nil || marker != botMigrationVersion {
+				t.Fatalf("marker %d: %v", marker, err)
+			}
+			for _, table := range []string{"bot_tasks", "bot_task_revisions", "bot_skills", "bot_skill_revisions"} {
+				var n int
+				if err = db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil || n != 0 {
+					t.Fatalf("table %s: %d %v", table, n, err)
+				}
+			}
+			if store.BotSchemaVersion != 1 || store.BotSkillSchemaVersion != 1 {
+				t.Fatal("historical document schema changed")
+			}
+		})
+	}
 }
 
 func TestBotMigrationRejectsNewerVersionBeforeChanges(t *testing.T) {

@@ -16,6 +16,7 @@ const (
 
 // BotMessageRequest is a home conversation turn, not consent to activate a Bot.
 type BotMessageRequest struct {
+	TaskID          *uuid.UUID               `json:"task_id,omitempty"`
 	ScheduleCommand *BotOwnerScheduleCommand `json:"schedule_command,omitempty"`
 	BotID           BotID                    `json:"-"`
 	Version         int64                    `json:"version"`

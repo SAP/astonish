@@ -130,6 +130,11 @@ func main() {
 	must(authenticate())
 	page.MustNavigate(base + "/#/chat").MustReload()
 	page.MustElementR("button", "^New Bot$").MustVisible()
+	if taskModeEnabled(os.Getenv) {
+		setStage("task-fresh", 90*time.Minute)
+		newTaskWorkflow(basePage, api, state, statePath, root, base, evidence, save)
+		return
+	}
 	if os.Getenv("BOT_AGENT_ACCEPTANCE") == "1" {
 		setStage("agent-fresh", 120*time.Minute)
 		newAgentWorkflow(basePage, api, state, statePath, root, base, evidence, save)

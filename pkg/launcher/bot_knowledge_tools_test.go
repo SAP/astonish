@@ -32,6 +32,8 @@ func TestBotOptionalSchemaRecoveryPreservesBoundaries(t *testing.T) {
 	f := newBotFactoryFixture(t)
 	binding := &botFactoryBinding{owner: store.WithServices(f.ctx, f.services), req: f.req, verifyIsolation: func(context.Context) error { return nil }}
 	ctx := optionalKnowledgeContext{knowledgeCtx(f)}
+	ledgerCtx, _ := bot.WithToolOutcomes(ctx.base)
+	ctx.base = ledgerCtx
 	calls := 0
 	var handlerErr error
 	inner, err := functiontool.New(functiontool.Config{Name: "bot_skill_save"}, func(tool.Context, botSkillToolArgs) (map[string]any, error) { calls++; return nil, handlerErr })
@@ -46,6 +48,10 @@ func TestBotOptionalSchemaRecoveryPreservesBoundaries(t *testing.T) {
 		result, err := wrapped.(botRunnableTool).Run(ctx, args)
 		if err != nil || result["status"] != "invalid_request" || calls != 0 {
 			t.Fatalf("schema recovery executed handler: %v %v calls=%d", result, err, calls)
+		}
+		o, ok := bot.TakeToolOutcome(ctx, ctx.FunctionCallID())
+		if !ok || !o.Verified || o.Nonexecution == nil || o.Nonexecution.CallID != ctx.FunctionCallID() || o.Nonexecution.ToolName != wrapped.Name() || o.ReceiptConflict {
+			t.Fatalf("rejection lacks concrete receipt: %+v", o)
 		}
 	}
 	update, err := functiontool.New(functiontool.Config{Name: botWorkUpdateTool}, func(tool.Context, botWorkUpdateArgs) (map[string]any, error) { calls++; return nil, nil })

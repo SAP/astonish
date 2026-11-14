@@ -24,6 +24,10 @@ type Tx struct {
 	BotGoal *BotGoalClient
 	// BotIntake is the client for interacting with the BotIntake builders.
 	BotIntake *BotIntakeClient
+	// BotKnowledgeExtraction is the client for interacting with the BotKnowledgeExtraction builders.
+	BotKnowledgeExtraction *BotKnowledgeExtractionClient
+	// BotKnowledgeFileHead is the client for interacting with the BotKnowledgeFileHead builders.
+	BotKnowledgeFileHead *BotKnowledgeFileHeadClient
 	// BotOutbox is the client for interacting with the BotOutbox builders.
 	BotOutbox *BotOutboxClient
 	// BotRun is the client for interacting with the BotRun builders.
@@ -32,6 +36,10 @@ type Tx struct {
 	BotSkill *BotSkillClient
 	// BotSkillRevision is the client for interacting with the BotSkillRevision builders.
 	BotSkillRevision *BotSkillRevisionClient
+	// BotTask is the client for interacting with the BotTask builders.
+	BotTask *BotTaskClient
+	// BotTaskRevision is the client for interacting with the BotTaskRevision builders.
+	BotTaskRevision *BotTaskRevisionClient
 	// BotTrackedItem is the client for interacting with the BotTrackedItem builders.
 	BotTrackedItem *BotTrackedItemClient
 	// BotVersion is the client for interacting with the BotVersion builders.
@@ -195,10 +203,14 @@ func (tx *Tx) init() {
 	tx.BotApproval = NewBotApprovalClient(tx.config)
 	tx.BotGoal = NewBotGoalClient(tx.config)
 	tx.BotIntake = NewBotIntakeClient(tx.config)
+	tx.BotKnowledgeExtraction = NewBotKnowledgeExtractionClient(tx.config)
+	tx.BotKnowledgeFileHead = NewBotKnowledgeFileHeadClient(tx.config)
 	tx.BotOutbox = NewBotOutboxClient(tx.config)
 	tx.BotRun = NewBotRunClient(tx.config)
 	tx.BotSkill = NewBotSkillClient(tx.config)
 	tx.BotSkillRevision = NewBotSkillRevisionClient(tx.config)
+	tx.BotTask = NewBotTaskClient(tx.config)
+	tx.BotTaskRevision = NewBotTaskRevisionClient(tx.config)
 	tx.BotTrackedItem = NewBotTrackedItemClient(tx.config)
 	tx.BotVersion = NewBotVersionClient(tx.config)
 	tx.CacheDiagnostic = NewCacheDiagnosticClient(tx.config)

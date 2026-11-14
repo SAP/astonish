@@ -32,6 +32,24 @@ timeout without calling a model or granting a receipt. Configuration and truthfu
 assessment publication are documented under
 [retained-source inspection](../../tests/e2eboot/README.bots-acceptance.md#retained-source-inspection-in-the-fresh-agent-invocation).
 
+Configured search-first research supplies discovery/background evidence only.
+A successful `BotResearchEpisode` permits detail retrieval; it is not factual
+certification. Decisive dates, amounts and consequential assertions still require
+inspection of the actual source detail. Empty, rate-limited or missing-source
+searches must remain limitations, not fabricated URLs or verified claims. The
+isolated search gate proves dispatch ordering and scope without paid calls; it
+does not replace the three fresh live Stock Market News quality journeys.
+
+Pre-execution rejection of malformed optional bookkeeping records a server-only
+`ToolNonexecutionReceipt` at the concrete schema wrapper, after scope/lease checks
+and before the underlying handler runs. The report journal accepts it only for the
+exact captured invocation ID and tool name, with no conflicting effect metadata.
+This permits the unchanged useful interactive answer; it certifies neither work
+completion nor factual quality. Bare `Verified=true`, remote JSON, tool-name
+recognition and autonomous policy bindings do not grant this exemption. Missing
+responses, duplicate invocation/ledger IDs, mismatched names and any conflicting
+send/write/artifact/schedule receipt remain uncertain and cannot enable replay.
+
 ## Legacy content assessment (retained)
 
 `pkg/api/bot_runner_work_content.go` extends the existing bounded, tool-free work
@@ -103,6 +121,24 @@ The reproduced `.tmp/real-stock-title-live-3207647661` reviews both fail at
 assessment 30/source 1: the exact disclaimer exists only in `source_2`, not the
 selected `source_1`. Replay now supplies that candidate and still rejects a second
 response that repeats the wrong ref.
+
+Correction also supplies private `invalid_citations` for malformed content and
+execution bindings in assessment/source order (at most 64 entries and 32 KiB of
+encoded entry data), with `invalid_citations_truncated` when bounded. Valid exact
+citations, including same-field alternate views, are omitted. Each issue searches
+only its own namespace for full exact nonblank quote matches. The single correction
+can thus address multiple bad quotes, not just the first. It never rewrites a
+citation, changes evidence views, loosens quote equality or adds model calls.
+Unsupported claims receive failed/unverified support and empty citations when no
+exact supporting passage exists; negative verdicts never permit invented quotes.
+Guidance distinguishes JSON transport escapes from literal source backslashes and
+newlines. Employee feedback chooses tool-free text repair only when removing or
+qualifying embellishments can still satisfy the complete assignment; material
+evidence/coverage gaps still require authorized research.
+`TestBotContentCitationDiagnosticAllFailures` failed first with zero supplied issues,
+then verifies all bindings, namespace isolation, two-call recovery and retained
+negatives. Escaping and diagnostic count/byte bounds have separate tests. These
+offline checks do not establish that the latest live provider failure is resolved.
 
 The unchanged title-only live HTTP diagnostic was run once after this correction
 change, with private artifacts in `.tmp/real-stock-title-live-3597493403`.

@@ -25,6 +25,7 @@ func TestBotHomeOfflineDeletionGuards(t *testing.T) {
 			t.Setenv("DOCKER_TEST_LOG", log)
 			body := `printf '%s\n' "$*" >> "$DOCKER_TEST_LOG"
 if [ "$1 $2" = 'volume inspect' ]; then
+case "$3" in astonish-bot-workspace-*) echo 'No such volume' >&2; exit 1;; esac
 `
 			if tc.inspect == "" {
 				body += `echo 'No such volume' >&2; exit 1`

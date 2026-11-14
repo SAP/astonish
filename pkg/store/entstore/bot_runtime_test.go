@@ -130,6 +130,7 @@ func finishedAgentWorkReport(t *testing.T, repo *botRepository, ctx context.Cont
 	}
 	next.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: text}
 	next.Candidate.Digest = next.Candidate.ContentDigest()
+	acceptEmployeeReviewFixture(next)
 	work, err = repo.SaveWork(ctx, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next})
 	if err != nil {
 		t.Fatal(err)

@@ -43,6 +43,7 @@ type BotScheduledRunStore interface {
 // BotRunInput is durable input for one already admitted run. Instructions must
 // come from the saved request, never from the worker's dispatch payload.
 type BotRunInput struct {
+	Task    *BotTaskRevision
 	Work    *BotWorkState
 	Bot     Bot
 	Version BotVersion
@@ -264,21 +265,29 @@ type BotWorkReview struct {
 	Criteria        []BotCriterionAssessment      `json:"criteria"`
 }
 
+type BotEmployeeReviewPolicy string
+
+const BotEmployeeReviewEvidenceBoundV1 BotEmployeeReviewPolicy = "evidence_bound_v1"
+
 type BotWorkState struct {
-	Protocol           BotWorkProtocol        `json:"protocol,omitempty"`
-	AgentWork          *BotAgentWork          `json:"agent_work,omitempty"`
-	SkillState         *BotSkillRunState      `json:"skill_state,omitempty"`
-	ResponseOutcome    BotWorkResponseOutcome `json:"response_outcome,omitempty"`
-	SchemaVersion      int                    `json:"schema_version"`
-	Revision           int64                  `json:"revision"`
-	Phase              BotWorkPhase           `json:"phase"`
-	Contract           BotWorkContract        `json:"contract"`
-	RequirementsDigest string                 `json:"requirements_digest"`
-	Criteria           []BotWorkCriterion     `json:"criteria,omitempty"`
-	Candidate          *BotWorkCandidate      `json:"candidate,omitempty"`
-	Review             *BotWorkReview         `json:"review,omitempty"`
-	Repairs            int                    `json:"repairs"`
-	Unresolved         []string               `json:"unresolved,omitempty"`
+	EmployeeReviewPolicy   BotEmployeeReviewPolicy `json:"employee_review_policy,omitempty"`
+	EmployeeReviewAttempts int                     `json:"employee_review_attempts,omitempty"`
+	EmployeeReviewPending  bool                    `json:"employee_review_pending,omitempty"`
+	EmployeeRepairPending  bool                    `json:"employee_repair_pending,omitempty"`
+	Protocol               BotWorkProtocol         `json:"protocol,omitempty"`
+	AgentWork              *BotAgentWork           `json:"agent_work,omitempty"`
+	SkillState             *BotSkillRunState       `json:"skill_state,omitempty"`
+	ResponseOutcome        BotWorkResponseOutcome  `json:"response_outcome,omitempty"`
+	SchemaVersion          int                     `json:"schema_version"`
+	Revision               int64                   `json:"revision"`
+	Phase                  BotWorkPhase            `json:"phase"`
+	Contract               BotWorkContract         `json:"contract"`
+	RequirementsDigest     string                  `json:"requirements_digest"`
+	Criteria               []BotWorkCriterion      `json:"criteria,omitempty"`
+	Candidate              *BotWorkCandidate       `json:"candidate,omitempty"`
+	Review                 *BotWorkReview          `json:"review,omitempty"`
+	Repairs                int                     `json:"repairs"`
+	Unresolved             []string                `json:"unresolved,omitempty"`
 }
 
 // Agent work describes judgment and progress, not a permission grant or a proof
@@ -647,13 +656,22 @@ func NewBotWorkState(contract BotWorkContract) *BotWorkState {
 
 func (w *BotWorkState) Validate() error {
 	if w != nil {
+		if w.EmployeeReviewAttempts < 0 || w.EmployeeReviewAttempts > BotWorkMaxRepairs+1 || (w.EmployeeReviewPolicy == "" && (w.EmployeeReviewAttempts != 0 || w.EmployeeReviewPending || w.EmployeeRepairPending)) || (w.EmployeeReviewPending && (w.Candidate == nil || w.Review != nil || w.EmployeeRepairPending)) || (w.EmployeeRepairPending && (w.Candidate == nil || w.Review != nil || w.Repairs == 0)) {
+			return ErrBotInvalid
+		}
 		switch w.Protocol {
 		case BotWorkProtocolLegacyAssessment:
 			if w.AgentWork != nil {
 				return ErrBotInvalid
 			}
 		case BotWorkProtocolAgentLedV1:
-			if w.AgentWork == nil || !validAgentWorkPhase(w.Phase) || len(w.Criteria) != 0 || w.Review != nil || w.Repairs != 0 || w.ResponseOutcome != "" {
+			if w.AgentWork == nil || !validAgentWorkPhase(w.Phase) || w.ResponseOutcome != "" || (w.EmployeeReviewPolicy == "" && (len(w.Criteria) != 0 || w.Review != nil || w.Repairs != 0)) {
+				return ErrBotInvalid
+			}
+			if w.EmployeeReviewPolicy != "" && w.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 {
+				return ErrBotUnsupported
+			}
+			if w.EmployeeReviewPolicy != "" && w.Phase == BotWorkFinished && !w.HasAcceptedEmployeeReview() {
 				return ErrBotInvalid
 			}
 		default:
@@ -997,10 +1015,24 @@ func ValidateBotWorkUpdate(old, next *BotWorkState) error {
 	if !reflect.DeepEqual(old.Contract, next.Contract) || old.RequirementsDigest != next.RequirementsDigest || next.Revision != old.Revision {
 		return ErrBotInvalid
 	}
-	if old.Protocol != next.Protocol {
+	if old.Protocol != next.Protocol || old.EmployeeReviewPolicy != next.EmployeeReviewPolicy {
 		return ErrBotInvalid
 	}
 	if old.Protocol == BotWorkProtocolAgentLedV1 {
+		if old.EmployeeReviewPolicy != "" {
+			if next.EmployeeReviewAttempts < old.EmployeeReviewAttempts || next.EmployeeReviewAttempts > old.EmployeeReviewAttempts+1 || next.EmployeeReviewAttempts != old.EmployeeReviewAttempts && (old.EmployeeReviewPending || old.EmployeeRepairPending || !next.EmployeeReviewPending || !reflect.DeepEqual(old.Candidate, next.Candidate)) {
+				return ErrBotInvalid
+			}
+			if next.Repairs < old.Repairs || next.Repairs > old.Repairs+1 || next.Repairs != old.Repairs && (old.Review == nil || old.HasAcceptedEmployeeReview() || next.Review != nil) {
+				return ErrBotInvalid
+			}
+			if len(old.Criteria) > 0 && !reflect.DeepEqual(old.Criteria, next.Criteria) {
+				return ErrBotInvalid
+			}
+			if len(next.Criteria) > 0 && next.validateCriteria() != nil {
+				return ErrBotInvalid
+			}
+		}
 		if old.Phase != BotWorkWorking {
 			return ErrBotConflict
 		}

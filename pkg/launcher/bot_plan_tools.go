@@ -193,6 +193,10 @@ func newBotWorkTools(binding *botFactoryBinding) ([]tool.Tool, error) {
 func botChildWorkTools(all []tool.Tool) []tool.Tool {
 	out := make([]tool.Tool, 0, len(all))
 	for _, t := range all {
+		switch t.Name() {
+		case botWorkUpdateTool, "bot_task_select", "bot_task_capture", "bot_task_update", "bot_task_asset", "bot_task_state", "bot_task_execute":
+			continue
+		}
 		if t.Name() != botWorkUpdateTool {
 			out = append(out, t)
 		}

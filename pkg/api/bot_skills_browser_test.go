@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -53,10 +55,15 @@ func TestBotSkillsBrowserAcceptance(t *testing.T) {
 	router := mux.NewRouter()
 	registerBotRoutes(router)
 	var unavailable, unsupported atomic.Bool
-	var writes atomic.Int64
+	var writes, skillsPanelReads atomic.Int64
 	env.Router.PathPrefix("/api/studio/bots").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writes.Add(1)
+		}
+		// Schedule retains its separate limit=100 lookup. Only the removed
+		// Skills panel's list/history reads must disappear from Details.
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/skills") && !(strings.HasSuffix(r.URL.Path, "/skills") && r.URL.Query().Get("limit") == "100") {
+			skillsPanelReads.Add(1)
 		}
 		if unavailable.Load() && strings.HasSuffix(r.URL.Path, "/skills") {
 			http.Error(w, "Controlled unavailable", 503)
@@ -88,11 +95,44 @@ func TestBotSkillsBrowserAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixtureDist := buildBotSkillsComponentFixture(t, b.ID.String())
+	env.Router.HandleFunc("/skills-component-fixture", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, `<div id="root"></div><script type="module" src="/skills-component-assets/fixture.js"></script>`)
+	})
+	env.Router.PathPrefix("/skills-component-assets/").Handler(http.StripPrefix("/skills-component-assets/", http.FileServer(http.Dir(fixtureDist))))
 	page := newStreamBrowserPage(t, env, bin, dist)
 	page.MustNavigate(env.URL + "/#/chat/bots/personal/" + b.ID.String())
 	page.MustElement(`[data-testid="chat-input"]`).MustInput("Preserve unfinished Home work")
 	page.MustElementR("button", "^Details$").MustClick()
-	page.MustElementR("summary", "^Skills & history$").MustClick()
+	assertNoSkills := func() {
+		t.Helper()
+		if !page.MustEval(`() => !document.querySelector('[aria-label="Bot skills"]') && !Array.from(document.querySelectorAll('[role="dialog"] summary')).some(n => /Skills & history|File browser|Tasks/.test(n.textContent))`).Bool() {
+			t.Fatal("Details mounted removed Skills or replacement navigation")
+		}
+		if skillsPanelReads.Load() != 0 {
+			t.Fatalf("Details issued removed Skills panel reads: %d", skillsPanelReads.Load())
+		}
+	}
+	page.MustElementR("summary", "^Schedule & triggers$").MustClick()
+	page.MustElementR("p", "Legacy instructions: Read official releases").MustVisible()
+	page.MustElement(`[aria-label="Schedule skill"]`).MustVisible()
+	page.MustElementR("p", "No active skills").MustVisible()
+	assertNoSkills()
+	if writes.Load() != 0 {
+		t.Fatal("Details inspection wrote data")
+	}
+	t.Log("SKILL_SURFACE browser/details-absent PASS")
+	t.Log("SKILL_SURFACE browser/legacy-schedule PASS")
+	page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
+	if page.MustElement(`[data-testid="chat-input"]`).MustProperty("value").Str() != "Preserve unfinished Home work" {
+		t.Fatal("Details lost Home draft")
+	}
+
+	// This isolated test-only bundle mounts the preserved component directly,
+	// not through Studio routing or Details. Its requests use the same real
+	// scoped handlers and SQLite as the workspace above.
+	page.MustNavigate(env.URL + "/skills-component-fixture")
 	page.MustElementR("p", "No committed skills yet").MustVisible()
 	t.Log("SKILL_SURFACE browser/empty PASS")
 	page.MustElementR("button", "^Review legacy import$").MustClick()
@@ -136,15 +176,22 @@ func TestBotSkillsBrowserAcceptance(t *testing.T) {
 	page.MustElementR("button", "^Refresh skills$").MustClick()
 	page.MustWait(`() => !document.querySelector('[aria-label="Bot skills"] [role="alert"]')`)
 	t.Log("SKILL_SURFACE browser/stale-retry PASS")
+	// Return to the actual built workspace with populated skill data, then
+	// reload. Inspection still must not mount the standalone component.
+	skillsPanelReads.Store(0)
+	page.MustNavigate(env.URL + "/#/chat/bots/personal/" + b.ID.String())
+	page.MustElementR("button", "^Details$").MustClick()
 	page.MustElementR("summary", "^Schedule & triggers$").MustClick()
 	page.MustElementR("p", "Legacy instructions: Read official releases").MustVisible()
-	page.MustElement(`[aria-label="Schedule skill"]`).MustVisible()
-	page.MustElementR("p", "No active skills").MustVisible()
-	t.Log("SKILL_SURFACE browser/legacy-schedule PASS")
+	assertNoSkills()
 	page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
-	if page.MustElement(`[data-testid="chat-input"]`).MustProperty("value").Str() != "Preserve unfinished Home work" {
-		t.Fatal("Details lost Home draft")
-	}
+	page.MustReload()
+	page.MustElementR("button", "^Details$").MustClick()
+	page.MustElementR("summary", "^Schedule & triggers$").MustClick()
+	page.MustElementR("p", "Legacy instructions: Read official releases").MustVisible()
+	assertNoSkills()
+	page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
+	page.MustElement(`[data-testid="chat-input"]`).MustVisible()
 	after, err := repo.Get(ctx, b.ID)
 	if err != nil || after.Revision != b.Revision {
 		t.Fatalf("inspection mutated root: %v", err)
@@ -153,4 +200,35 @@ func TestBotSkillsBrowserAcceptance(t *testing.T) {
 		t.Fatalf("inspection made extra writes: %d", writes.Load())
 	}
 	t.Log("SKILL_SURFACE browser/home-readonly PASS")
+}
+
+// Build only a test entry in a temporary directory. No production route,
+// source, or built SPA asset is changed to expose the orphaned component.
+func buildBotSkillsComponentFixture(t *testing.T, botID string) string {
+	t.Helper()
+	web, err := filepath.Abs("../../web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "fixture.tsx")
+	source := fmt.Sprintf(`import React from %q;
+import { createRoot } from %q;
+import BotSkillsPanel from %q;
+import { getBot } from %q;
+getBot(%q, 'personal').then(bot => createRoot(document.getElementById('root')!).render(React.createElement(BotSkillsPanel, {bot})));
+`, filepath.Join(web, "node_modules/react/index.js"), filepath.Join(web, "node_modules/react-dom/client.js"), filepath.Join(web, "src/components/bots/BotSkillsPanel.tsx"), filepath.Join(web, "src/api/bots.ts"), botID)
+	if err := os.WriteFile(entry, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "dist")
+	// Loading the existing config retains React transform and @ aliases while
+	// replacing only the build entry/output and never touching web/dist.
+	script := `import {build} from 'vite'; await build({configFile: './vite.config.js', define: {'process.env.NODE_ENV': JSON.stringify('production')}, build: {outDir: process.argv[2], emptyOutDir: true, lib: {entry: process.argv[1], formats: ['es'], fileName: () => 'fixture.js'}}});`
+	cmd := exec.Command("node", "--input-type=module", "-e", script, entry, out)
+	cmd.Dir = web
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build standalone skill component fixture: %v\n%s", err, output)
+	}
+	return out
 }

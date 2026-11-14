@@ -32,9 +32,12 @@ type botAgentReadCall struct {
 	read bool
 }
 type botAgentReadJournal struct {
-	mu    sync.Mutex
-	calls map[string]botAgentReadCall
-	seen  map[string]bool
+	mu                      sync.Mutex
+	calls                   map[string]botAgentReadCall
+	seen                    map[string]bool
+	completed               map[string]bool
+	uncertain               bool
+	constrainedTextComplete bool
 }
 
 func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionCall) {
@@ -63,15 +66,35 @@ func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionC
 	if j.calls == nil {
 		j.calls = make(map[string]botAgentReadCall)
 		j.seen = make(map[string]bool)
+		j.completed = make(map[string]bool)
 	}
 	if j.seen[call.ID] {
 		entry.read = false
+		j.uncertain = true
 	}
 	j.seen[call.ID] = true
 	j.calls[call.ID] = entry
 }
 
-func (j *botAgentReadJournal) take(response *genai.FunctionResponse) bool {
+func (s *botAgentWorkService) captureReadReference(callID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accessPending == nil {
+		s.accessPending = map[string][]store.BotSourceAccessFact{}
+	}
+	if _, exists := s.accessPending[callID]; exists {
+		return
+	}
+	if callID == "" || len(s.accessPending) >= 200 {
+		s.accessErr = store.ErrBotInvalid
+		return
+	}
+	// A nil fact slice is intentional: flushAccess still verifies and binds the
+	// exact durable transcript reference without inventing HTTP or truth facts.
+	s.accessPending[callID] = nil
+}
+
+func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ...bot.ToolOutcome) bool {
 	if j == nil {
 		return false
 	}
@@ -79,7 +102,65 @@ func (j *botAgentReadJournal) take(response *genai.FunctionResponse) bool {
 	defer j.mu.Unlock()
 	entry, ok := j.calls[response.ID]
 	delete(j.calls, response.ID)
-	return ok && entry.read && entry.name == response.Name
+	read := ok && entry.read && entry.name == response.Name
+	noEffect := false
+	if len(receipts) == 1 {
+		o := receipts[0]
+		r := o.Nonexecution
+		noEffect = ok && entry.name == response.Name && response.ID != "" && r != nil && r.CallID == response.ID && r.ToolName == response.Name && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+	}
+	if (!read && !noEffect) || (len(receipts) == 1 && receipts[0].Nonexecution != nil && !noEffect) || j.completed[response.ID] {
+		j.uncertain = true
+	}
+	if j.completed == nil {
+		j.completed = make(map[string]bool)
+	}
+	j.completed[response.ID] = true
+	return read
+}
+
+// effectState requires complete invocation-bound receipts, not absence of changed
+// or unverified prose. Ordinary empty attempts have no classified execution
+// evidence; only trusted constrained final text can establish nonexecution.
+func (j *botAgentReadJournal) effectState() store.BotReportEffectState {
+	if j == nil {
+		return store.BotReportEffectsUnknown
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.uncertain || len(j.calls) != 0 || len(j.completed) != len(j.seen) {
+		return store.BotReportEffectsUncertain
+	}
+	if len(j.seen) == 0 && !j.constrainedTextComplete {
+		return store.BotReportEffectsUnknown
+	}
+	return store.BotReportEffectsReadOnly
+}
+
+// completeConstrainedText is only for the validated read-only research path,
+// never an inference from missing receipts on an ordinary attempt.
+func (j *botAgentReadJournal) completeConstrainedText(c ChatCompletion) {
+	if j == nil || c.Err != nil || c.Blocked || !c.Final || c.FinalEventID == "" || strings.TrimSpace(c.FinalText) == "" || c.Usage.ToolCalls != 0 || c.toolResponses != 0 || len(c.pendingControls) != 0 || len(c.reportBodies) != 0 || len(c.Report.Changed) != 0 || len(c.Report.Unverified) != 0 || len(c.Report.Artifacts) != 0 || len(c.Report.NeedsApproval) != 0 || c.Report.NextRunAt != nil || c.Report.EffectState != store.BotReportEffectsUnknown {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.uncertain && len(j.calls) == 0 && len(j.seen) == 0 && len(j.completed) == 0 {
+		j.constrainedTextComplete = true
+	}
+}
+
+func (j *botAgentReadJournal) observeEffect(outcome bot.ToolOutcome, captured bool) {
+	if j == nil || !captured {
+		return
+	}
+	// A conflicting runtime receipt always beats a read classification. Read
+	// access failures carry Unverified diagnostics but do not imply a send.
+	if outcome.ReceiptConflict || len(outcome.Changed) != 0 || len(outcome.Artifacts) != 0 || outcome.RoutineCapture != nil || outcome.ScheduleCapture != nil || outcome.NextRunAt != nil {
+		j.mu.Lock()
+		j.uncertain = true
+		j.mu.Unlock()
+	}
 }
 
 type botAgentReadModel struct {
@@ -141,9 +222,11 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		service.captureAccess(response.ID, outcome.SourceAccess)
 	}
 	journal, _ := cr.ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal)
-	read := journal.take(response)
+	read := journal.take(response, outcome)
+	journal.observeEffect(outcome, ok)
+	cr.completion.Report.EffectState = journal.effectState()
 	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && read && (!ok || len(outcome.SourceAccess) == 0) {
-		service.captureAccess(response.ID, nil) // bind the journal reference even without HTTP facts
+		service.captureReadReference(response.ID) // bind even when a local read has no HTTP facts
 	}
 	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {
 		// Consume only identity-bound, guard-captured nonexecution. An existing
@@ -297,6 +380,7 @@ func botCompletionReport(completion ChatCompletion, req bot.RunRequest) store.Bo
 		report.Summary = scheduler.ResolveAdaptiveReportBody(completion.FinalText, bodies)
 	}
 	if completion.Usage.ToolCalls > completion.toolResponses {
+		report.EffectState = store.BotReportEffectsUncertain
 		report.Unverified = append(report.Unverified, "Some tool calls have no observed response.")
 	}
 	return report

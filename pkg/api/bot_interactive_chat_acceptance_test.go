@@ -52,6 +52,11 @@ func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.L
 		if p.Subject != m.principal.Subject || p.Authentication != m.principal.Authentication || p.Surface != m.principal.Surface {
 			m.t.Errorf("provider lost original principal: %+v", p)
 		}
+		if response, ok := scriptedEmployeeReview(req); ok {
+			m.reviews++
+			yield(response, nil)
+			return
+		}
 		if m.assessment != nil {
 			if response, ok := m.assessment(req); ok {
 				fixtureHTTPContentCoverage(req, response)
@@ -270,7 +275,13 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 					}
 				}
 			}
-			output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "scoped-result", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected scoped result against observed tool response."}}}
+			assessments := []store.BotCriterionAssessment{}
+			for _, criterion := range work.Criteria {
+				if !criterion.Excluded {
+					assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected scoped result against observed tool response."})
+				}
+			}
+			output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: assessments}
 		} else {
 			return nil, false
 		}
@@ -403,7 +414,7 @@ func TestBotAgentProgressHTTPAcceptance(t *testing.T) {
 						t.Fatal("unexpected mandatory model call")
 					}
 					step++
-					part := &genai.Part{Text: "I checked the alternate source and retained the result."}
+					part := &genai.Part{Text: "Checking the alternate source remains a progress note, not a verified result."}
 					switch step {
 					case 1:
 						part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "progress-note", Name: "bot_work_update", Args: map[string]any{"expected_revision": 1, "kind": "replace_notes", "notes": "Checking the alternate source"}}}
@@ -422,10 +433,10 @@ func TestBotAgentProgressHTTPAcceptance(t *testing.T) {
 					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 				}
 				run := f.capabilityTurn(mode, []string{"bot_work_update", "bot_work_read"})
-				if run.Usage.InputTokens != 15 || run.Usage.OutputTokens != 9 || run.Usage.ToolCalls != 2 {
+				if run.Usage.InputTokens != 20 || run.Usage.OutputTokens != 12 || run.Usage.ToolCalls != 2 {
 					t.Fatalf("progress usage not charged: %+v", run.Usage)
 				}
-				if run.Status != store.RunSucceeded || run.Report.Work == nil || run.Report.Work.WorkRevision < 3 || step != 3 {
+				if run.Status != store.RunSucceeded || run.Report.Work == nil || run.Report.Work.WorkRevision < 3 || step != 3 || f.model.reviews != 1 {
 					t.Fatalf("progress lost at final capture: %+v steps=%d", run, step)
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
@@ -492,7 +503,7 @@ func TestBotAgentCheckHTTPAcceptance(t *testing.T) {
 						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 					}
 					run := f.capabilityTurn(mode, []string{"read_file", "bot_evidence_read", "bot_check_work"})
-					if run.Usage.InputTokens != 31 || run.Usage.OutputTokens != 19 || run.Usage.ToolCalls != 3 {
+					if run.Usage.InputTokens != 36 || run.Usage.OutputTokens != 22 || run.Usage.ToolCalls != 3 {
 						t.Fatalf("optional check did not share producer budget: %+v", run.Usage)
 					}
 					if run.Status != store.RunSucceeded || step != 4 || checks != 1 || f.pool.calls != 1 || run.Report.Work == nil || len(run.Report.Work.Checks) != 1 {
@@ -679,7 +690,7 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 								}
 							}
 						}
-						return nil, false
+						return &model.LLMResponse{Content: genai.NewContentFromText("No stock market sources were retrieved; current market news remains unverified.", "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 					}
 					var receipt store.BotMessageReceipt
 					body := fmt.Sprintf(`{"version":%d,"instructions":"Stock Market News","idempotency_key":"agent-work"}`, f.b.Version)
@@ -703,7 +714,7 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if run.Status != store.RunSucceeded || calls != 1 || f.pool.calls != 0 || run.Report.Quality != nil || run.Report.Work == nil || run.Report.Work.Disposition != store.AgentWorkAnswered || run.Report.EmployeeMessage == nil || run.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || run.Report.Summary != "Observed scoped result." {
+					if run.Status != store.RunSucceeded || calls != 1 || f.pool.calls != 0 || run.Report.Quality != nil || run.Report.Work == nil || run.Report.Work.Disposition != store.AgentWorkAnswered || run.Report.EmployeeMessage == nil || run.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || run.Report.Summary != "No stock market sources were retrieved; current market news remains unverified." {
 						t.Fatalf("agent execution: calls=%d tools=%d run=%+v", calls, f.pool.calls, run)
 					}
 					path := f.path + "/sessions/" + f.b.HomeSessionID.String() + "/stream"

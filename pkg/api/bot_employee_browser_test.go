@@ -1226,9 +1226,13 @@ func (g employeeBrowserGuard) Authorize(ctx context.Context, a execution.ActionD
 	return d, nil
 }
 
-// TestBotAgentWorkBrowserAcceptance exercises the built SPA with controlled public
-// DTOs. Publication correctness is covered separately by the worker acceptance.
-func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
+// Controlled built-SPA work and Details inspection. Publication correctness is
+// covered separately by worker acceptance; fixtures never call a provider.
+func TestBotDetailsWithoutSkillsBrowserAcceptance(t *testing.T) { runBotAgentWorkBrowser(t) }
+
+func TestBotAgentWorkBrowserAcceptance(t *testing.T) { runBotAgentWorkBrowser(t) }
+
+func runBotAgentWorkBrowser(t *testing.T) {
 	if os.Getenv("ASTONISH_BOT_BROWSER_ACCEPTANCE") != "1" {
 		t.Skip("explicit browser opt-in required")
 	}
@@ -1255,11 +1259,25 @@ func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
 	b := store.Bot{ID: id, HomeSessionID: home, OwnerID: owner, Scope: store.BotScopePersonal, Status: store.BotActive, Name: "Agent surface", Version: 1, Revision: 1}
 	var mode atomic.Int32
 	var writes atomic.Int32
+	var skillFetches atomic.Int32
+	var lifecycle atomic.Int32
+	var teamScope, readOnly atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writes.Add(1)
 			http.Error(w, "read only fixture", 405)
 			return
+		}
+		if strings.Contains(r.URL.Path, "/skills") && r.URL.Query().Get("limit") != "100" {
+			skillFetches.Add(1)
+		}
+		visibleBot := b
+		visibleBot.Status = []store.BotStatus{store.BotActive, store.BotDraft, store.BotPaused, store.BotStopped, store.BotDeleted}[lifecycle.Load()]
+		if teamScope.Load() {
+			visibleBot.Scope = store.BotScopeTeam
+		}
+		if readOnly.Load() {
+			visibleBot.OwnerID = runID
 		}
 		var value any
 		switch r.URL.Path {
@@ -1278,7 +1296,7 @@ func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
 		case "/api/agents", "/api/tools":
 			value = []any{}
 		case "/api/studio/bots":
-			value = map[string]any{"bots": []store.Bot{b}}
+			value = map[string]any{"bots": []store.Bot{visibleBot}}
 		default:
 			if strings.Contains(r.URL.Path, "/versions/") {
 				value = store.DefaultBotVersion()
@@ -1309,7 +1327,7 @@ func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
 				if mode.Load() == 3 {
 					work = nil
 				}
-				value = store.BotSnapshot{Bot: b, Operations: []store.BotOperationView{}, PendingProposals: []store.BotControlProposal{}, PendingApprovals: []store.BotApproval{}, ReadCursor: store.BotReadCursor{ViewerID: owner}, LatestOutcome: &store.BotRun{ID: runID, BotID: id, Status: store.RunSucceeded, Work: work}, RunStates: []store.BotRunState{{SchemaVersion: 1, BotID: id, RunID: runID, SessionID: uuid.New(), HomeSessionID: home, Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunSucceeded, StateSequence: int64(mode.Load() + 2), Work: work}}}
+				value = store.BotSnapshot{Bot: visibleBot, Operations: []store.BotOperationView{}, PendingProposals: []store.BotControlProposal{}, PendingApprovals: []store.BotApproval{}, ReadCursor: store.BotReadCursor{ViewerID: owner}, LatestOutcome: &store.BotRun{ID: runID, BotID: id, Status: store.RunSucceeded, Work: work}, RunStates: []store.BotRunState{{SchemaVersion: 1, BotID: id, RunID: runID, SessionID: uuid.New(), HomeSessionID: home, Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunSucceeded, StateSequence: int64(mode.Load() + 2), Work: work}}}
 			} else if strings.HasPrefix(r.URL.Path, "/api/") {
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/runs"), strings.HasSuffix(r.URL.Path, "/goals"), strings.HasSuffix(r.URL.Path, "/approvals"), strings.HasSuffix(r.URL.Path, "/proposals"), strings.HasSuffix(r.URL.Path, "/activity"), strings.HasSuffix(r.URL.Path, "/skills"), strings.HasSuffix(r.URL.Path, "/sessions"):
@@ -1350,6 +1368,9 @@ func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
 	})
 	assertUnclutteredChat := func() {
 		t.Helper()
+		if !page.MustEval(`() => !document.querySelector('[aria-label="Bot skills"]') && !Array.from(document.querySelectorAll('[role="dialog"] summary')).some(n => /Skills & history|File browser|Tasks/.test(n.textContent))`).Bool() {
+			t.Fatal("removed Details navigation mounted")
+		}
 		if !page.MustEval(`() => { const workspace = document.querySelector('[aria-label="Bot workspace"]'); return workspace && !workspace.querySelector('[aria-label^="Work for run"]') && !workspace.innerText.includes('Bot transcript:') && !workspace.querySelector('[data-testid="message-area"]').innerText.match(/Work in progress|Answer provided|Partial answer|Work details unavailable/); }`).Bool() {
 			t.Fatal("standalone work or transport diagnostics appeared in chat")
 		}
@@ -1396,6 +1417,35 @@ func TestBotAgentWorkBrowserAcceptance(t *testing.T) {
 	if writes.Load() != 0 {
 		t.Fatalf("inspection wrote %d requests", writes.Load())
 	}
+	assertUnclutteredChat()
+	if skillFetches.Load() != 0 {
+		t.Fatalf("removed Skills fetched %d times", skillFetches.Load())
+	}
+	for _, scope := range []string{"personal", "team"} {
+		teamScope.Store(scope == "team")
+		for status := int32(0); status < 5; status++ {
+			lifecycle.Store(status)
+			for _, viewerReadOnly := range []bool{false, true} {
+				readOnly.Store(viewerReadOnly)
+				page.MustNavigate(server.URL + "/#/chat/bots/" + scope + "/" + id.String())
+				page.MustReload()
+				page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+				page.MustElementR("button", "^Details$").MustClick()
+				assertUnclutteredChat()
+				for _, name := range []string{"Goals", "Memory & charter", "Schedule & triggers", "Runs & activity", "Review inbox"} {
+					page.MustElementR(`[role="dialog"] summary`, "^"+name+"$").MustVisible()
+				}
+				page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
+				assertUnclutteredChat()
+			}
+		}
+	}
+	if skillFetches.Load() != 0 || writes.Load() != 0 {
+		t.Fatal("Details inspection fetched removed inspector or mutated state")
+	}
+	t.Log("SKILL_SURFACE browser/no-skills PASS")
+	t.Log("SKILL_SURFACE browser/no-skill-fetch PASS")
+	t.Log("SKILL_SURFACE browser/home-readonly PASS")
 	t.Log("AGENT_SURFACE browser/restore-composer PASS")
 }
 

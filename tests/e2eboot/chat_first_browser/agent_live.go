@@ -261,27 +261,17 @@ func newAgentWorkflow(basePage *rod.Page, api func(string, string, any) string, 
 			var exchanges []agentTerminalExchange
 			must(json.Unmarshal([]byte(page().MustEval(agentStudioExchangeJS, state["bot_id"]).Str()), &exchanges))
 			page().MustElementR("button", "^Details$").MustClick()
-			page().MustElementR("summary", "^Skills & history$").MustClick()
-			page().MustElement(`[aria-label="Bot skills"]`).MustVisible()
+			page().MustElementR("summary", "^Runs & activity$").MustClick()
+			if !page().MustEval(`() => !document.querySelector('[aria-label="Bot skills"]') && !Array.from(document.querySelectorAll('[role="dialog"] summary')).some(n => /Skills & history|File browser|Tasks/.test(n.textContent))`).Bool() {
+				panic("removed Details navigation is mounted")
+			}
 			var rendered agentStudioRendered
-			boundedWait("Studio rendered skill dataset", 20*time.Second, func() bool {
-				result := page().MustEval(agentStudioSkillsJS).Str()
-				if result == "" {
-					return false
-				}
-				must(json.Unmarshal([]byte(result), &rendered.Skills))
-				return true
-			})
-			rendered.SkillsText = page().MustElement(`[aria-label="Bot skills"]`).MustText()
-			page().MustElementR("button", "^Close$").MustClick()
 			boundedWait("Studio canonical final bubble and work", 25*time.Second, func() bool {
 				result := page().MustEval(agentStudioRenderedJS).Str()
 				if result == "" {
 					return false
 				}
-				skills := rendered.Skills
 				must(json.Unmarshal([]byte(result), &rendered))
-				rendered.Skills = skills
 				return rendered.Visible && rendered.Text != ""
 			})
 			return agentStudioPass{Exchanges: exchanges, Rendered: rendered}
@@ -327,9 +317,7 @@ type agentStudioRendered struct {
 	Text       string            `json:"text"`
 	Visible    bool              `json:"visible"`
 	RunStates  json.RawMessage   `json:"run_states"`
-	Skills     json.RawMessage   `json:"skills"`
 	WorkText   map[string]string `json:"work_text"`
-	SkillsText string            `json:"skills_text"`
 }
 type agentStudioPass struct {
 	Exchanges []agentTerminalExchange `json:"exchanges"`
@@ -364,7 +352,6 @@ const agentStudioExchangeJS = `async (bot) => {
  const get=async path=>{const r=await fetch(path,{credentials:'include',signal:controller.signal}); const body=await r.text(); rows.push({path,status:r.status,body}); if(!r.ok) throw Error('Studio read HTTP '+r.status); return JSON.parse(body)};
  try {
   const snapshot=await get(base+'/snapshot?scope=personal');
-  await get(base+'/skills?scope=personal');
   const path=base+'/sessions/'+snapshot.bot.home_session_id+'/events?scope=personal';
   const r=await fetch(path,{credentials:'include',signal:controller.signal});
   if(!r.ok) throw Error('Studio replay HTTP '+r.status);
@@ -378,13 +365,6 @@ const agentStudioExchangeJS = `async (bot) => {
 // Read only the mounted React component dataset: unlike an API copy, these are
 // the values actually passed to/rendered by Studio. Fail closed if React internals
 // change. The final text itself always comes from the visible DOM bubble.
-const agentStudioSkillsJS = `() => {
- const node=document.querySelector('[aria-label="Bot skills"]'); if(!node || !node.checkVisibility()) return '';
- const key=Object.keys(node).find(k=>k.startsWith('__reactFiber$')); if(!key) return '';
- let f=node[key];
- while(f){for(let h=f.memoizedState;h;h=h.next){const v=h.memoizedState;if(v && v.data && Array.isArray(v.data.skills) && v.loading===false && !v.error){return JSON.stringify(v.data.skills)}} f=f.return}
- return '';
-}`
 const agentStudioRenderedJS = `() => {
  const root=document.querySelector('[aria-label="Bot workspace"]');if(!root) return '';
  const area=root.querySelector('[data-testid="message-area"]');if(!area) return '';
@@ -405,8 +385,10 @@ const agentStudioRenderedJS = `() => {
  const workText={};
  for(const state of states){
   if(!state.work) continue;
-  const section=root.querySelector('[aria-label="Work for run '+state.run_id+'"]');
-  const detail=section && section.querySelector('details[aria-label="Agent work"]');
+   const detail=Array.from(document.querySelectorAll('[role="dialog"] details[aria-label="Agent work"]')).find(node => {
+    const key=Object.keys(node).find(k=>k.startsWith('__reactFiber$')); let f=key && node[key];
+    while(f){if(f.memoizedProps?.work?.run_id===state.run_id) return true; f=f.return} return false;
+   });
   if(!detail) return '';detail.open=true;
   if(!detail.checkVisibility() || !detail.innerText.trim()) return '';
   workText[state.run_id]=detail.innerText;

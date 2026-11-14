@@ -18,6 +18,12 @@ import (
 // without a model, following the persisted protocol (including historical review).
 func reviewedRecoveryReply(t *testing.T, repo store.BotStore, ctx context.Context, lease store.BotLease, text string) store.BotReport {
 	t.Helper()
+	switch text {
+	case "Home ready", "review ready", "No tools needed":
+		// Closed lifecycle acknowledgments; no outside fact or applied control.
+	default:
+		t.Fatalf("unsupported lifecycle fixture reply %q", text)
+	}
 	ws := repo.(store.BotWorkStore)
 	w, err := ws.LoadWork(ctx, lease)
 	if err != nil {
@@ -36,8 +42,22 @@ func reviewedRecoveryReply(t *testing.T, repo store.BotStore, ctx context.Contex
 		n.AgentWork.Disposition = store.AgentWorkAnswered
 		n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: text}
 		n.Candidate.Digest = n.Candidate.ContentDigest()
+		if n.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 {
+			sources := []string{"assignment", "charter"}
+			for _, goal := range n.Contract.Goals {
+				sources = append(sources, "goal:"+goal.ID.String())
+			}
+			n.Criteria = []store.BotWorkCriterion{{ID: "reply", SourceIDs: sources, Text: "Return the controlled lifecycle acknowledgment without claiming external action"}}
+			n.Review = &store.BotWorkReview{CandidateDigest: n.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "reply", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + n.Candidate.Digest}, Explanation: "Literal lifecycle fixture acknowledgment; no external fact, tool effect, or proposal application claimed."}}}
+		}
 		save(n)
-		return store.BotReport{Summary: text, Work: store.BuildBotWorkProjection(w)}
+		report := store.BotReport{Summary: text, Work: store.BuildBotWorkProjection(w)}
+		message, e := store.NewBotEmployeeAgentMessage(store.RunSucceeded, report, w)
+		if e != nil {
+			t.Fatal(e)
+		}
+		report.EmployeeMessage = &message
+		return report
 	}
 	// Only preexisting legacy work follows the historical assessment transitions.
 	n.Phase = store.BotWorkProducing
@@ -93,6 +113,7 @@ func TestBotWorkerPauseRecoveryAfterDatabaseReopen(t *testing.T) {
 type interruptedRecoveryPollStore struct {
 	store.BotStore
 	store.BotPublicationStore
+	store.BotKnowledgeExtractionStore
 }
 
 func (s interruptedRecoveryPollStore) ListRuns(ctx context.Context, id store.BotID, page store.BotPage) ([]store.BotRun, error) {
@@ -225,7 +246,7 @@ func testBotWorkerRecoveryAfterReopen(t *testing.T, paused bool) {
 				w.config.Sandbox = physical
 				conversationCtx := execution.WithBotRunIdentity(auth, execution.BotRunIdentity{BotID: b.ID, RunID: conversation.ID, Version: b.Version, ActorID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug})
 				claim := store.BotClaimRequest{BotID: b.ID, RunID: conversation.ID, WorkerID: "replacement", ExpiresAt: time.Now().Add(time.Minute)}
-				pollRepo := interruptedRecoveryPollStore{BotStore: repo, BotPublicationStore: repo.(store.BotPublicationStore)}
+				pollRepo := interruptedRecoveryPollStore{BotStore: repo, BotPublicationStore: repo.(store.BotPublicationStore), BotKnowledgeExtractionStore: repo.(store.BotKnowledgeExtractionStore)}
 				if err = w.pollStore(auth, pollRepo, nil); err == nil {
 					t.Fatal("missing physical evidence not reported")
 				}

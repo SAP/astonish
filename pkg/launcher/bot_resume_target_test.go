@@ -45,7 +45,7 @@ func settleResumeSource(t *testing.T, f *botFactoryFixture, repo store.BotStore,
 		}
 	}
 	f.cfg.WrapModel = func(_ context.Context, m model.LLM, _ execution.RunBudget) (model.LLM, error) {
-		return resumeReceiptModel{m}, nil
+		return continuityAssessmentModel{resumeReceiptModel{m}}, nil
 	}
 	factory, err := NewBotChatAgentFactory(f.cfg)
 	if err != nil {

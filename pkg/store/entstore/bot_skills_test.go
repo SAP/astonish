@@ -194,7 +194,7 @@ func TestBotSkillMigrationV2(t *testing.T) {
 				}
 			}
 			var marker, count int
-			if err = db.QueryRowContext(ctx, "SELECT version FROM bot_schema_version WHERE id='bots'").Scan(&marker); err != nil || marker != 2 {
+			if err = db.QueryRowContext(ctx, "SELECT version FROM bot_schema_version WHERE id='bots'").Scan(&marker); err != nil || marker != botMigrationVersion {
 				t.Fatalf("marker: %d %v", marker, err)
 			}
 			if store.BotSchemaVersion != 1 {
@@ -206,7 +206,7 @@ func TestBotSkillMigrationV2(t *testing.T) {
 			if err = db.QueryRowContext(ctx, "SELECT count(*) FROM bot_skill_revisions").Scan(&count); err != nil || count != 0 {
 				t.Fatalf("revision table: %v", err)
 			}
-			if _, err = db.ExecContext(ctx, "UPDATE bot_schema_version SET version=3"); err != nil {
+			if _, err = db.ExecContext(ctx, "UPDATE bot_schema_version SET version=$1", botMigrationVersion+1); err != nil {
 				t.Fatal(err)
 			}
 			called := false

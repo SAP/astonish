@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -14,11 +15,14 @@ import (
 
 // This creates a real pre-Bot archive, rather than merely changing its declared
 // hash. The source has no Bot tables/columns; the target is a current deployment.
-func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) { testBotLegacyArchive(t, true) }
+func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) { testBotLegacyArchive(t, 0) }
 
-func TestBotSkillRestoreSQLitePreSkillArchive(t *testing.T) { testBotLegacyArchive(t, false) }
+func TestBotSkillRestoreSQLitePreSkillArchive(t *testing.T) { testBotLegacyArchive(t, 1) }
 
-func testBotLegacyArchive(t *testing.T, preBot bool) {
+func TestBotTaskRestoreSQLiteMarker2Archive(t *testing.T) { testBotLegacyArchive(t, 2) }
+
+func testBotLegacyArchive(t *testing.T, marker int) {
+	preBot := marker == 0
 	ctx := context.Background()
 	open := func(dir string) *Store {
 		t.Helper()
@@ -89,9 +93,13 @@ func testBotLegacyArchive(t *testing.T, preBot bool) {
 		if !preBot {
 			statements = nil
 		}
-		statements = append([]string{"DROP TABLE bot_skill_revisions", "DROP TABLE bot_skills"}, statements...)
+		dropped := []string{"DROP TABLE bot_knowledge_file_heads", "DROP TABLE bot_knowledge_extractions", "DROP TABLE bot_task_revisions", "DROP TABLE bot_tasks"}
+		if marker < 2 {
+			dropped = append(dropped, "DROP TABLE bot_skill_revisions", "DROP TABLE bot_skills")
+		}
+		statements = append(dropped, statements...)
 		if !preBot {
-			statements = append(statements, "UPDATE bot_schema_version SET version=1")
+			statements = append(statements, fmt.Sprintf("UPDATE bot_schema_version SET version=%d", marker))
 		}
 		for _, stmt := range statements {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -154,7 +162,11 @@ func testBotLegacyArchive(t *testing.T, preBot bool) {
 			if err := checkSQLiteScopeSchemaCompatible(ctx, summary.Manifest, db, scope); err != nil {
 				t.Fatal(err)
 			}
-			for _, table := range []string{"bot_skills", "bot_skill_revisions"} {
+			excluded := []string{"bot_tasks", "bot_task_revisions"}
+			if marker < 2 {
+				excluded = append(excluded, "bot_skills", "bot_skill_revisions")
+			}
+			for _, table := range excluded {
 				bad := summary.Manifest
 				bad.Entries = append(append([]backup.Entry(nil), bad.Entries...), backup.Entry{Scope: scope, Entity: table})
 				if err := checkSQLiteScopeSchemaCompatible(ctx, bad, db, scope); err == nil {

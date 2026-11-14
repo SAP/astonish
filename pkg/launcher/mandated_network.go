@@ -100,7 +100,8 @@ func NewBotRoutineReadMandatePolicy(s *store.Services, ceiling config.BotMandate
 		// existing mandates retain their originally captured resource set.
 		resources := []string{"web_fetch", "http_request", BotPublicReadResource,
 			"bot_work_read", "bot_work_update", "bot_evidence_read", "bot_check_work",
-			"bot_skill_list", "bot_skill_read", "bot_skill_use", "bot_skill_save"}
+			"bot_skill_list", "bot_skill_read", "bot_skill_use", "bot_skill_save",
+			"bot_task_list", "bot_task_read", "bot_task_select", "bot_task_capture", "bot_task_update", "bot_task_asset", "bot_task_state", "bot_task_execute"}
 		for _, repo := range []store.NetworkPolicyStore{s.PlatformNetworkPolicies, s.NetworkPolicies, s.TeamNetworkPolicies} {
 			if repo != nil {
 				rules, e := repo.List(ctx)

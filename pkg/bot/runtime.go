@@ -14,6 +14,7 @@ import (
 	"google.golang.org/adk/model"
 
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -258,6 +259,7 @@ type BotWorkLearningProposal struct {
 }
 
 type RunRequest struct {
+	Task *store.BotTaskRevision
 	// Skill is a detached, repository-pinned method; never an authority grant.
 	Skill         *store.BotSkillInvocation
 	Work          *store.BotWorkState
@@ -331,6 +333,20 @@ type RunError struct {
 
 func (e *RunError) Error() string { return e.Message }
 func (e *RunError) Unwrap() error { return e.Cause }
+
+// TaskWorkspace is optional; it is neither a second runtime nor authority.
+type TaskWorkspace interface {
+	Read(context.Context, store.BotID, string, int64) ([]byte, error)
+	Write(context.Context, store.BotTaskMutation, sandbox.BotHomeWorkspaceFile) error
+	Publish(context.Context, store.BotTaskPrepareRequest) (*store.BotTask, error)
+	Load(context.Context, store.BotID, store.BotTaskRef) (*store.BotTaskRevision, error)
+}
+
+// WorkspaceScriptBackend is optional; existing TaskWorkspace implementations
+// remain valid and unsupported backends fail closed without a host fallback.
+type WorkspaceScriptBackend interface {
+	Execute(context.Context, store.BotTaskMutation, store.BotTaskRef, string, execution.RunBudget) (*sandbox.BotHomeWorkspaceScriptResult, error)
+}
 
 type HomeRequest struct {
 	BotID    store.BotID

@@ -17,6 +17,7 @@ type mandateModelCharge struct {
 }
 
 type mandateRunUsage struct {
+	PublicResearchCalls  int64
 	Models               map[string]mandateModelCharge
 	Tools, Tokens, Spend int64
 	Ref                  store.BotMandateRef
@@ -34,7 +35,16 @@ const (
 	mandateRelease
 	mandateModelReserve
 	mandateModelSettle
+	mandateResearchReserve
 )
+
+func (s *botMandateRuntime) ReserveBotPublicResearch(ctx context.Context, ref store.BotMandateRef, session string) error {
+	id, ok := execution.BotRunIdentityFromContext(ctx)
+	if !ok || id.BotID != ref.BotID || id.RunID == uuid.Nil || session == "" {
+		return store.ErrBotForbidden
+	}
+	return s.quota(ctx, ref, id.RunID, mandateResearchReserve, 0, 0, 0)
+}
 
 func (s *botMandateRuntime) ReserveBotMandateRun(ctx context.Context, ref store.BotMandateRef, run uuid.UUID) error {
 	return s.quota(ctx, ref, run, mandateReserve, 0, 0, 0)
@@ -163,6 +173,12 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			}
 			usage.DailyRuns++
 			usage.Active[id] = mandateRunUsage{Ref: ref}
+		case mandateResearchReserve:
+			if !active || current.Ref != ref || m.Mandate.PublicResearch == nil || current.PublicResearchCalls >= m.Mandate.PublicResearch.MaxCalls {
+				return store.ErrBotForbidden
+			}
+			current.PublicResearchCalls++
+			usage.Active[id] = current
 		case mandateConsume, mandateModelReserve:
 			if action == mandateModelReserve {
 				if current.Models == nil {

@@ -110,7 +110,7 @@ func sqlitePreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope)
 
 func preBotAddedTable(table, scope string) bool {
 	switch table {
-	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_skills", "bot_skill_revisions":
+	case "bots", "bot_schema_version", "bot_versions", "bot_goals", "bot_tracked_items", "bot_runs", "bot_approvals", "bot_outbox", "bot_skills", "bot_skill_revisions", "bot_tasks", "bot_task_revisions", "bot_knowledge_extractions", "bot_knowledge_file_heads":
 		return scope == "team" || scope == "personal"
 	case "bot_templates":
 		return scope == "team"
@@ -191,11 +191,27 @@ func postgresPreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest ba
 	return err == nil && hash == archive.Hash, err
 }
 
-// preSkillBackupCompatible recognizes exactly the Bot v1 schema: only the two
-// v2 skill tables are absent. No arbitrary missing columns/tables are accepted.
+// preSkillBackupCompatible recognizes exactly Bot v1, excluding only known
+// v2 Skill and v3 Task additions. It also accepts exact v2 through the Task-only
+// delta. No arbitrary missing columns/tables are accepted.
 func preSkillBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion) (bool, error) {
+	if ok, err := preKnowledgeBackupCompatible(ctx, db, dialect, manifest, scope, archive); ok || err != nil {
+		return ok, err
+	}
+	if ok, err := preTaskBackupCompatible(ctx, db, dialect, manifest, scope, archive, false); ok || err != nil {
+		return ok, err
+	}
+	return preTaskBackupCompatible(ctx, db, dialect, manifest, scope, archive, true)
+}
+
+// includeSkills reconstructs v1 rather than v2; each path compares an exact hash
+// and rejects archive entries for every table it excludes.
+func preTaskBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion, includeSkills bool) (bool, error) {
+	excluded := func(table string) bool {
+		return table == "bot_knowledge_extractions" || table == "bot_knowledge_file_heads" || table == "bot_tasks" || table == "bot_task_revisions" || includeSkills && (table == "bot_skills" || table == "bot_skill_revisions")
+	}
 	for _, entry := range manifest.Entries {
-		if entry.Scope == scope && (entry.Entity == "bot_skills" || entry.Entity == "bot_skill_revisions") {
+		if entry.Scope == scope && excluded(entry.Entity) {
 			return false, nil
 		}
 	}
@@ -209,7 +225,7 @@ func preSkillBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, 
 	}
 	var parts []string
 	for _, table := range tables {
-		if table == "bot_skills" || table == "bot_skill_revisions" {
+		if excluded(table) {
 			continue
 		}
 		var columns []string

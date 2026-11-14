@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/SAP/astonish/pkg/execution"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/cache"
@@ -99,10 +101,49 @@ func BotMCPTools(ctx context.Context, pool sandbox.ToolNodePool, sessionID strin
 			servers[row.Name] = row
 		}
 	}
+	var standardCredentials store.CredentialStore
+	var standardStores []store.MCPServerStore
+	standardName := ""
+	if svc := store.FromContext(ctx); svc != nil && svc.Settings != nil {
+		cfg, err := botKnowledgeSearchConfig(ctx, svc)
+		if err != nil {
+			return nil, cleanup, err
+		}
+		parts := strings.Split(cfg.General.WebSearchTool, ":")
+		if len(parts) == 2 && servers[parts[0]].Name == "" {
+			if standard := config.GetStandardServer(parts[0]); standard != nil && standard.Kind != "model" && standard.WebSearchTool == cfg.General.WebSearchTool {
+				row, cs, err := botSelectedStandardSearch(ctx, svc, cfg)
+				if err != nil {
+					return nil, cleanup, err
+				}
+				engine, err := execution.BotSearchEngineForTool(parts[1])
+				if err != nil {
+					return nil, cleanup, err
+				}
+				limitKey := "limit"
+				switch engine {
+				case execution.BotSearchTavily:
+					limitKey = "max_results"
+				case execution.BotSearchBrave:
+					limitKey = "count"
+				}
+				row.CachedTools, _ = json.Marshal([]any{map[string]any{"name": parts[1], "description": "Selected configured public search executable", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}, limitKey: map[string]any{"type": "integer"}}, "required": []string{"query", limitKey}, "additionalProperties": false}}})
+				servers[row.Name] = *row
+				standardName, standardCredentials = row.Name, cs
+				standardStores = append([]store.MCPServerStore{botStandardSearchStore{services: svc}}, stores...)
+			}
+		}
+	}
 	var result []tool.Tool
 	for _, s := range servers {
 		if !s.IsEnabled() {
 			continue
+		}
+		var scopedCredentials store.CredentialStore
+		selectedStores := stores
+		if s.Name == standardName {
+			scopedCredentials = standardCredentials
+			selectedStores = standardStores
 		}
 		cfg := botMCPConfig(s)
 		var entries []cache.ToolEntry
@@ -117,7 +158,7 @@ func BotMCPTools(ctx context.Context, pool sandbox.ToolNodePool, sessionID strin
 			if err != nil {
 				return nil, cleanup, err
 			}
-			result = append(result, &botMCPTool{botRunnableTool: schema.(botRunnableTool), sessionID: sessionID, identity: identity, backend: pool.GetBackend(), client: client, config: cfg, serverName: s.Name, stores: stores, action: astonishmcp.NodeDiscover})
+			result = append(result, &botMCPTool{botRunnableTool: schema.(botRunnableTool), sessionID: sessionID, identity: identity, backend: pool.GetBackend(), client: client, config: cfg, serverName: s.Name, stores: selectedStores, action: astonishmcp.NodeDiscover})
 			continue
 		}
 		// Use Chat's declaration proxy only; never connect its host transport.
@@ -131,7 +172,7 @@ func BotMCPTools(ctx context.Context, pool sandbox.ToolNodePool, sessionID strin
 			if !ok {
 				return nil, cleanup, store.ErrBotUnsupported
 			}
-			result = append(result, &botMCPTool{botRunnableTool: runnable, sessionID: sessionID, identity: agent.BotToolIdentity("mcp:"+s.Name, p.Name()), backend: pool.GetBackend(), client: client, config: cfg, toolName: p.Name(), serverName: s.Name, stores: stores, action: astonishmcp.NodeCall})
+			result = append(result, &botMCPTool{botRunnableTool: runnable, sessionID: sessionID, identity: agent.BotToolIdentity("mcp:"+s.Name, p.Name()), backend: pool.GetBackend(), client: client, config: cfg, toolName: p.Name(), serverName: s.Name, stores: selectedStores, action: astonishmcp.NodeCall, standardCredentials: scopedCredentials})
 		}
 	}
 	return result, cleanup, nil
@@ -139,15 +180,16 @@ func BotMCPTools(ctx context.Context, pool sandbox.ToolNodePool, sessionID strin
 
 type botMCPTool struct {
 	botRunnableTool
-	sessionID  string
-	identity   string
-	backend    sandbox.Backend
-	client     sandbox.ToolNodeClient
-	config     config.MCPServerConfig
-	toolName   string
-	serverName string
-	stores     []store.MCPServerStore
-	action     astonishmcp.NodeAction
+	sessionID           string
+	identity            string
+	backend             sandbox.Backend
+	client              sandbox.ToolNodeClient
+	config              config.MCPServerConfig
+	toolName            string
+	serverName          string
+	stores              []store.MCPServerStore
+	action              astonishmcp.NodeAction
+	standardCredentials store.CredentialStore
 }
 
 func (t *botMCPTool) Name() string { return t.identity }
@@ -226,6 +268,14 @@ func botMCPNodeRequest(ctx context.Context, backend sandbox.Backend, client sand
 	}
 	redactor := credentials.NewRedactor()
 	redactor.HydrateFromStore(cs)
+	auth, ok := ctx.Value(botMCPAuthorizedKey{}).(botMCPAuthorization)
+	if !ok || auth.target == nil || auth.check == nil {
+		return nil, store.ErrBotForbidden
+	}
+	if auth.target.standardCredentials != nil {
+		ctx = store.WithCredentialStore(ctx, auth.target.standardCredentials)
+		redactor.HydrateFromStore(auth.target.standardCredentials)
+	}
 	if err := sandbox.SyncSessionCredentialVault(ctx, backend, nil, id); err != nil {
 		return nil, fmt.Errorf("MCP vault: %s", redactor.Redact(err.Error()))
 	}
@@ -240,10 +290,7 @@ func botMCPNodeRequest(ctx context.Context, backend sandbox.Backend, client sand
 	// PushFile may block past cancellation, lease revocation, or a target edit.
 	// Revalidate the captured authorization immediately before node dispatch;
 	// this refreshes the authoritative binding, not the already-consumed grant.
-	auth, ok := ctx.Value(botMCPAuthorizedKey{}).(botMCPAuthorization)
-	if !ok || auth.target == nil || auth.check == nil {
-		return nil, store.ErrBotForbidden
-	}
+	// Authorization was checked before provisioning; recheck the same bound target.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

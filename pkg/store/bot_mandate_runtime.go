@@ -11,7 +11,8 @@ import (
 // BotMandatePolicy is resolved from current trusted operator policy and exact
 // tool/resource catalog, never copied from request or model output.
 type BotMandatePolicy struct {
-	Scopes []string
+	PublicResearch *execution.BotPublicResearchScope
+	Scopes         []string
 	// ExceptionConstraints is the trusted owner's ceiling for exact, expiring
 	// operation decisions; it is never included in worker mandates.
 	ExceptionConstraints []execution.BotActionResourceConstraint

@@ -164,11 +164,10 @@ func employeePreparationNeverStarted(report store.BotReport, opts EmployeeMessag
 func ComposeEmployeeMessage(ctx context.Context, status store.RunStatus, report store.BotReport, cause error, opts EmployeeMessageOptions) store.BotEmployeeMessage {
 	fallback := EmployeeMessageFallback(status, report, cause)
 	if opts.Work != nil && opts.Work.Protocol == store.BotWorkProtocolAgentLedV1 || report.Work != nil && report.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
-		// Server-recorded uncertainty is not a content judgment. Preserve the
-		// captured candidate privately, but never publish its possible effect
-		// claims as a confirmed answer or ask a narrator to reinterpret them.
-		if len(report.Unverified) != 0 && cause == nil {
-			return store.NewBotEmployeeFallback(status, report, store.BotEmployeeReasonAgentUnverifiedEffects)
+		// Content findings do not attest external effects. Use runtime-owned facts
+		// and a scoped, withheld review response, without another narration call.
+		if cause == nil && (len(report.Unverified) != 0 || report.ReviewLimitation != nil || report.EffectState == store.BotReportEffectsUncertain) {
+			return store.NewBotEmployeeFallback(status, report, store.BotEmployeeOutcomeReason(status, report))
 		}
 		if cause == nil {
 			if message, err := store.NewBotEmployeeAgentMessage(status, report, opts.Work); err == nil {

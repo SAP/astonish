@@ -75,8 +75,37 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 		if err := quiesceRestoredBotRow(entry.Entity, row); err != nil {
 			return 0, fmt.Errorf("quiesce %s record %s: %w", entry.Entity, record.ID, err)
 		}
+		if err := validateRestoredBotTaskRow(entry.Entity, row); err != nil {
+			return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+		}
 		if err := validateRestoredBotSkillRow(entry.Entity, row); err != nil {
 			return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+		}
+		if entry.Entity == "bot_tasks" {
+			table := quoteIdent(dialect, "bots")
+			if dialect == DialectPostgres {
+				table = quoteIdent(dialect, schema) + "." + table
+			}
+			var matches int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id="+placeholder(dialect, 1), normalizeRestoreValue(row["bot_id"])).Scan(&matches); err != nil {
+				return 0, err
+			}
+			if matches != 1 {
+				return 0, fmt.Errorf("task references a missing Bot")
+			}
+		}
+		if entry.Entity == "bot_task_revisions" {
+			table := quoteIdent(dialect, "bot_tasks")
+			if dialect == DialectPostgres {
+				table = quoteIdent(dialect, schema) + "." + table
+			}
+			var matches int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id="+placeholder(dialect, 1)+" AND bot_id="+placeholder(dialect, 2), normalizeRestoreValue(row["task_id"]), normalizeRestoreValue(row["bot_id"])).Scan(&matches); err != nil {
+				return 0, err
+			}
+			if matches != 1 {
+				return 0, fmt.Errorf("task revision references a missing or foreign Bot task")
+			}
 		}
 		if entry.Entity == "bot_skill_revisions" {
 			table := quoteIdent(dialect, "bot_skills")
@@ -136,6 +165,16 @@ func validateRestoredBotSkillRow(table string, row map[string]any) error {
 func quiesceRestoredBotRow(table string, row map[string]any) error {
 	const reason = "backup restore: held for reconciliation; external effects and physical cleanup are unverified"
 	switch table {
+	case "bot_knowledge_extractions":
+		return quiesceRestoredKnowledgeRow(row)
+	case "bot_task_revisions":
+		if err := validateRestoredBotTaskRow(table, row); err != nil {
+			return err
+		}
+		state := store.BotTaskPublicationState(fmt.Sprint(row["publication_state"]))
+		if state == store.BotTaskPublicationPrepared || state == store.BotTaskPublicationFilesReady {
+			row["publication_state"] = string(store.BotTaskPublicationHeld)
+		}
 	case "bots":
 		if err := advanceRestoredBotCounter(row, "fence"); err != nil {
 			return err

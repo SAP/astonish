@@ -155,6 +155,73 @@ def require_agent_config(config):
         raise ValueError('agent acceptance requires the intended AI Core provider and model; aliases are not parity')
 
 
+TASK_TARGET = {'provider': 'sap_ai_core_sci', 'provider_type': 'sap_ai_core',
+               'model': 'anthropic--claude-4.6-sonnet'}
+TASK_SEARCH_ENV = 'LOCAL_BOT_TASK_SEARCH_SETTINGS_JSON'
+
+
+def task_configuration(config):
+    """Exact explicit Task config; return candidate settings and a secret-free route."""
+    if not isinstance(config, dict) or 'search_config' not in config:
+        raise ValueError('Task search_config required')
+    candidate = dict(config)
+    search = candidate.pop('search_config')
+    routine = candidate.pop('bot_routine_policy', {'require_approval': []})
+    routine_policy_yaml(routine)
+    settings = candidate_provider(candidate)
+    if candidate['intended'] != TASK_TARGET:
+        raise ValueError('Task requires exact sap_ai_core_sci AI Core identity')
+    if not isinstance(search, dict):
+        raise ValueError('Task requires explicit supported search settings')
+    engine = search.get('engine')
+    if engine == 'perplexity' and set(search) == {'engine', 'provider_instance', 'provider_config', 'model'}:
+        if not isinstance(search['provider_config'], dict):
+            raise ValueError('explicit search provider configuration required')
+        search_candidate = dict(candidate, provider_instance=search['provider_instance'],
+                                provider_config=search['provider_config'], model=search['model'])
+        search_candidate['intended'] = dict(provider=search['provider_instance'],
+                                            provider_type=search['provider_config'].get('type'), model=search['model'])
+        search_settings = candidate_provider(search_candidate)
+        if search['provider_instance'] in settings['providers']:
+            raise ValueError('search provider must be a distinct explicit instance')
+        settings['providers'].update(search_settings['providers'])
+        staged = {'general': {'web_search_tool': 'perplexity:perplexity_web_search'},
+                  'perplexity_web_search': {'provider': search['provider_instance'], 'model': search['model']}}
+        provider, model, tool = search['provider_instance'], search['model'], 'perplexity:perplexity_web_search'
+    elif engine == 'tavily' and set(search) == {'engine', 'api_key'}:
+        if not isinstance(search['api_key'], str) or not search['api_key'].strip():
+            raise ValueError('explicit Tavily key required')
+        staged = {'general': {'web_search_tool': 'tavily:tavily_search'},
+                  'web_servers': {'tavily': {'api_key': search['api_key'], 'installed': True}}}
+        provider, model, tool = 'tavily', '', 'tavily:tavily_search'
+    else:
+        raise ValueError('unsupported or incomplete Task search configuration')
+    fingerprint = hashlib.sha256(json.dumps(search, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    route = dict(engine=engine, provider=provider, model=model, tool=tool, fingerprint=fingerprint)
+    return settings, staged, route
+
+
+def task_config_environment(config):
+    settings, search, _ = task_configuration(config)
+    candidate = dict(config)
+    candidate.pop('search_config')
+    env = config_environment(candidate)
+    env[CANDIDATE_PROVIDER_ENV] = json.dumps(settings)
+    env[TASK_SEARCH_ENV] = json.dumps(search)
+    return env
+
+
+def validate_task_evidence(state, actual):
+    from task_live_contract import CONTRACT, REQUIRED, evaluate
+    results = evaluate(state, actual)
+    if (actual.get('contract') != CONTRACT or actual.get('status') != 'verified'
+            or actual.get('unverified') or actual.get('unimplemented') or actual.get('skipped')
+            or set(actual.get('passed', [])) != set(REQUIRED)
+            or len(actual.get('passed', [])) != len(REQUIRED)
+            or any(value['status'] != 'passed' for value in results.values())):
+        raise RuntimeError('UNVERIFIED Task proof obligations remain outstanding')
+
+
 def routine_policy_yaml(policy):
     if not isinstance(policy, dict) or set(policy) != {'require_approval'} or policy['require_approval'] not in ([], ['memory_forget']):
         raise ValueError('bot_routine_policy permits only require_approval: [memory_forget]')
@@ -170,6 +237,7 @@ def config_environment(config):
     env = dict(os.environ)
     # An explicit file, not ambient provider state, is authoritative.
     env[CANDIDATE_PROVIDER_ENV] = ''
+    env.pop(TASK_SEARCH_ENV, None)
     if 'schema_version' in config:
         provider = candidate_provider(config)
         env.update({PATH_CONFIG_KEYS[k]: config[k] for k in PATH_CONFIG_KEYS})
@@ -325,6 +393,12 @@ def provider_settings(env):
                           provider_config=provider, model=settings['default_model'],
                           intended={'provider': instance, 'provider_type': provider['type'], 'model': settings['default_model']})
             validated = candidate_provider(config)
+            if env.get(TASK_SEARCH_ENV):
+                for name, extra in settings['providers'].items():
+                    if name == instance: continue
+                    extra_config = dict(config, provider_instance=name, provider_config=extra)
+                    extra_config['intended'] = dict(provider=name, provider_type=extra['type'], model=config['model'])
+                    validated['providers'].update(candidate_provider(extra_config)['providers'])
             if settings != validated: raise ValueError('unexpected settings')
             return validated
         except Exception:
@@ -378,8 +452,14 @@ channels:
     # Stage the same explicit settings for every fresh mode before docker starts.
     config_path.chmod(0o600)
     with config_path.open('a') as config:
-        config.write('\ngeneral: ' + json.dumps({k: provider[k] for k in ('default_provider', 'default_model')})
+        general = {k: provider[k] for k in ('default_provider', 'default_model')}
+        search = strict_json(env[TASK_SEARCH_ENV]) if env.get(TASK_SEARCH_ENV) else {}
+        general.update(search.get('general', {}))
+        config.write('\ngeneral: ' + json.dumps(general)
                      + '\nproviders: ' + json.dumps(provider['providers']) + '\n')
+        for section in ('perplexity_web_search', 'web_servers'):
+            if section in search:
+                config.write(section + ': ' + json.dumps(search[section]) + '\n')
     private_json(root / 'provider-startup-receipt.json', {
         'staged_before_startup': True, 'explicit': bool(env.get(CANDIDATE_PROVIDER_ENV) or env.get('LOCAL_BOT_PROVIDER_URL')),
         'config_mode': oct(config_path.stat().st_mode & 0o777),
@@ -649,7 +729,7 @@ EMPLOYEE_EVIDENCE_COLUMNS = {
 EMPLOYEE_JSON_COLUMNS = frozenset(('data', 'event_data', 'payload', 'home_binding'))
 # Public JSON fields of store.BotRun (pkg/store/bots.go). Repository metadata
 # such as Instructions and OccurrenceAt is not a second public run document.
-EMPLOYEE_RUN_FIELDS = frozenset('work skill_id invocation continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
+EMPLOYEE_RUN_FIELDS = frozenset('task work skill_id invocation continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
 
 
 def employee_blob(value):
@@ -888,6 +968,147 @@ def employee_readonly_local(state, reader=None):
     return matches[0]
 
 
+TASK_WORKSPACE_IMAGE = 'python@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90'
+TASK_PHYSICAL_READER = r'''
+import os,sys,json,stat,base64,fcntl
+q=json.load(sys.stdin)
+root=os.open('/mnt/astonish-bot-home',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+def read(p,limit=1048576):
+ a=p.split('/')
+ if not p or len(a)>64 or any(x in ('','.','..') for x in a) or any(c in p for c in ('\\','\x00','\r','\n')): raise ValueError('path')
+ d=os.dup(root)
+ try:
+  for x in a[:-1]:
+   n=os.open(x,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=d);os.close(d);d=n
+  f=os.open(a[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=d)
+  try:
+   s=os.fstat(f)
+   if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_size>limit: raise ValueError('file')
+   b=bytearray()
+   while len(b)<=limit:
+    chunk=os.read(f,min(65536,limit+1-len(b)))
+    if not chunk: break
+    b+=chunk
+   if len(b)!=s.st_size or len(b)>limit: raise ValueError('size')
+   return bytes(b)
+  finally: os.close(f)
+ finally: os.close(d)
+lock=os.open('.workspace-lock',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=root)
+s=os.fstat(lock)
+if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1: raise ValueError('lock')
+fcntl.flock(lock,fcntl.LOCK_SH)
+out=[];total=0
+for task in q['tasks']:
+ p='tasks/'+task['id'];h=json.loads(read(p+'/.head'))
+ if h['task_path']!=p or h['binding_key']!=q['binding'] or h['publication_id']!=task['publication_id']: raise ValueError('head')
+ if sorted(e['path'] for e in h['entries'])!=sorted(task['assets']): raise ValueError('assets')
+ for path in task['assets']:
+  b=read(p+'/.revisions/'+h['publication_id']+'/'+path);total+=len(b)
+  if total>16777216: raise ValueError('quota')
+  out.append(dict(task_id=task['id'],path=path,bytes=base64.b64encode(b).decode()))
+print(json.dumps(out))
+'''
+
+
+def task_physical_files(state, binding, tasks):
+    """Read actual private workspace volume; never create/adopt a missing volume."""
+    scope = binding['scope']
+    ordered = {k: scope[k] for k in ('org_id', 'team_id', 'user_id', 'bot_id') if scope.get(k)}
+    key = hashlib.sha256(json.dumps(ordered, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    if (binding.get('backend') != 'docker' or binding.get('ref') != 'astonish-bot-home-' + key
+            or scope.get('bot_id') != state['bot_id'] or not scope.get('user_id')
+            or bool(scope.get('org_id')) != bool(scope.get('team_id'))):
+        raise RuntimeError('Task physical Home binding mismatch')
+    volume = 'astonish-bot-workspace-' + key
+    def volume_owned():
+        info = strict_json(subprocess.check_output(['docker', 'volume', 'inspect', volume], text=True, timeout=20))
+        if (len(info) != 1 or info[0]['Name'] != volume or info[0]['Driver'] != 'local'
+                or info[0].get('Options') or info[0]['Labels'].get('astonish.bot-home.scope') != key
+                or info[0]['Labels'].get('astonish.bot-home.version') != 'workspace-1'):
+            raise RuntimeError('Task private volume ownership mismatch')
+    volume_owned()
+    name = 'astonish-task-observer-' + secrets.token_hex(16)
+    created = False
+    try:
+        subprocess.run(['docker', 'container', 'create', '--interactive', '--name=' + name,
+                        '--label=astonish.task-observer=' + name, '--pull=never', '--network=none',
+                        '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+                        '--pids-limit=16', '--memory=256m', '--cpus=0.5', '--log-driver=none',
+                        '--mount=type=volume,source=' + volume + ',target=/mnt/astonish-bot-home,readonly,volume-nocopy',
+                        '--entrypoint=python3', TASK_WORKSPACE_IMAGE, '-I', '-c', TASK_PHYSICAL_READER],
+                       check=True, capture_output=True, timeout=30)
+        created = True
+        info = strict_json(subprocess.check_output(['docker', 'inspect', name], text=True, timeout=20))[0]
+        mounts = info['Mounts']
+        if (info['Config']['Labels'].get('astonish.task-observer') != name or len(mounts) != 1
+                or mounts[0]['Type'] != 'volume' or mounts[0]['Name'] != volume or mounts[0]['RW']
+                or mounts[0]['Destination'] != '/mnt/astonish-bot-home'):
+            raise RuntimeError('Task observer read-only mount mismatch')
+        result = subprocess.run(['docker', 'start', '--attach', '--interactive', name],
+                                input=json.dumps(dict(binding=key, tasks=tasks)), text=True,
+                                capture_output=True, check=True, timeout=30)
+        volume_owned()
+        files = strict_json(result.stdout)
+        if not isinstance(files, list): raise RuntimeError('invalid physical Task file evidence')
+        return files
+    finally:
+        if created:
+            info = strict_json(subprocess.check_output(['docker', 'inspect', name], text=True, timeout=20))[0]
+            if info['Config']['Labels'].get('astonish.task-observer') != name:
+                raise RuntimeError('Task observer cleanup ownership mismatch; retained')
+            subprocess.run(['docker', 'rm', '--force', name], check=True, capture_output=True, timeout=20)
+
+
+def task_readonly(state):
+    """Independent owned writer registry plus physical Home observation, no host fallback."""
+    from employee_namespace_reader import Reader
+    from task_live_contract import CONTRACT
+    if state.get('workflow') != CONTRACT or state.get('task_config_verified') is not True:
+        raise RuntimeError('Task observer requires verified owned workflow')
+    info = inspect_owned(state)
+    observed = employee_readonly(state)
+    if not observed['observation_complete'] or len(observed['bots']) != 1:
+        raise RuntimeError('Task registry ownership incomplete')
+    errors = []
+    binding = employee_document(observed['bots'][0]['home_binding'], 'Task Home binding', errors)
+    if errors: raise RuntimeError('invalid Task Home binding')
+    root = Path(state['root']).resolve()
+    reader = Reader(REPO, root, info)
+    try:
+        with reader.connect(Path(observed['database']).as_uri() + '?mode=ro', uri=True) as db:
+            db.execute('PRAGMA query_only=ON'); db.execute('BEGIN')
+            rows = db.execute('SELECT id, bot_id, key, title, status, revision, home_path, head_revision, head_digest, created_at, updated_at FROM bot_tasks WHERE bot_id=? ORDER BY id', (state['bot_id'],))
+            if not rows or len(rows)>100: raise RuntimeError('Task registry absent or exceeds quota')
+            tasks, revisions, requests = [], [], []
+            for row in rows:
+                task = dict(row)
+                head = dict(task_id=task['id'], revision=task.pop('head_revision'), digest=task.pop('head_digest'))
+                if task['status'] != 'ready' or task['home_path'] != 'tasks/' + task['id']:
+                    raise RuntimeError('Task registry head not ready')
+                task['head'] = head
+                stored = db.execute('SELECT id, data FROM bot_task_revisions WHERE bot_id=? AND task_id=? AND revision=? AND digest=? AND publication_state=?',
+                                    (state['bot_id'], task['id'], head['revision'], head['digest'], 'committed'))
+                if len(stored)!=1: raise RuntimeError('Task committed revision ambiguous')
+                document = employee_document(stored[0]['data'], 'Task revision', errors)
+                revision = document.get('Publication', {}).get('candidate')
+                if (errors or not isinstance(revision, dict) or revision.get('id') != stored[0]['id']
+                        or revision.get('bot_id') != state['bot_id'] or revision.get('ref') != head):
+                    raise RuntimeError('Task revision binding mismatch')
+                assets = [a['path'] for a in revision['manifest']['assets']]
+                if not assets or len(assets)>64 or len(set(assets))!=len(assets):
+                    raise RuntimeError('Task asset inventory invalid')
+                tasks.append(task); revisions.append(revision)
+                requests.append(dict(id=task['id'], publication_id=revision['id'], assets=assets))
+            files = task_physical_files(state, binding, requests)
+    finally:
+        reader.close()
+    after = inspect_owned(state)
+    if after['State']['StartedAt'] != info['State']['StartedAt']:
+        raise RuntimeError('Task writer restarted during observation')
+    return dict(observation_source='owned-writer-container-and-home-volume', bot_id=state['bot_id'],
+                tasks=tasks, revisions=revisions, physical_files=files)
+
+
 def employee_command(state, action):
     inspect_owned(state)
     root = Path(state['root'])
@@ -947,9 +1168,24 @@ def main(argv=None):
     parser.add_argument('--verify-bot-employee', action='store_true', help='fresh employee workflow; strict versioned evidence, no legacy review scheduling')
     parser.add_argument('--verify-bot-quality', action='store_true', help='fresh isolated real-model quality contract; no diagnostic resume')
     parser.add_argument('--verify-bot-skills', action='store_true', help='fresh isolated real-model skills plus employee and quality proof')
+    parser.add_argument('--verify-bot-tasks', action='store_true', help='fresh Task candidate with explicit AI Core and configured search; no state reuse')
     parser.add_argument('--verify-bot-agent', action='store_true', help='fresh isolated agent candidate journey; incomplete proof remains blocked')
     parser.add_argument('--employee-command', choices=('read', 'restart-tick', 'restart-paused', 'restart-denied'), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.verify_bot_tasks:
+        if (not args.config or args.state or args.verify_bot_agent or args.verify_bot_skills
+                or args.verify_bot_quality or args.verify_bot_employee or args.verify_chat_model
+                or args.verify_chat_first or args.restart_owned or args.refresh_browser or args.employee_command):
+            parser.error('--verify-bot-tasks requires only --config and fresh execution')
+        try:
+            if (not args.config.is_absolute() or args.config.is_symlink() or not args.config.is_file()
+                    or args.config.stat().st_mode & 0o077):
+                raise ValueError('private absolute Task config required')
+            config = strict_json(args.config.read_text())
+            task_configuration(config)
+            task_config_environment(config)
+        except Exception:
+            parser.error('Task configuration preflight failed; private version 1 config, exact AI Core identity and explicit supported search required (values withheld)')
     if args.verify_bot_agent:
         if (not args.config or args.state or args.verify_bot_skills or args.verify_bot_quality
                 or args.verify_bot_employee or args.verify_chat_model or args.verify_chat_first
@@ -991,10 +1227,12 @@ def main(argv=None):
             if 'schema_version' in config and (not args.config.is_absolute() or args.config.is_symlink()
                                                or args.config.stat().st_mode & 0o077):
                 raise ValueError('versioned configuration requires a private absolute file')
-            os.environ.update(config_environment(config))
+            os.environ.update(task_config_environment(config) if args.verify_bot_tasks else config_environment(config))
+            if not args.verify_bot_tasks:
+                os.environ.pop(TASK_SEARCH_ENV, None)
         except Exception:
             parser.error('configuration preflight failed: invalid configuration or unavailable prerequisites (values withheld)')
-    verify_browser = args.verify_bot_agent or args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee or args.verify_bot_quality
+    verify_browser = args.verify_bot_tasks or args.verify_bot_agent or args.verify_chat_first or args.verify_chat_model or args.verify_bot_employee or args.verify_bot_quality
     if args.refresh_browser:
         if not args.state or args.restart_owned: parser.error('--refresh-browser requires --state and forbids --restart-owned')
         refresh_browser(json.loads(args.state.read_text()))
@@ -1019,8 +1257,17 @@ def main(argv=None):
         if verify_browser:
             env = dict(os.environ, CHAT_FIRST_STATE=str(root / 'state.json'))
             # Ambient mode flags must never select a different acceptance journey.
-            for key in ('BOT_AGENT_ACCEPTANCE', 'BOT_EMPLOYEE_ACCEPTANCE', 'BOT_QUALITY_ACCEPTANCE', 'BOT_SKILLS_ACCEPTANCE', 'CHAT_MODEL_ACCEPTANCE'):
+            for key in ('BOT_TASK_ACCEPTANCE', 'BOT_AGENT_ACCEPTANCE', 'BOT_EMPLOYEE_ACCEPTANCE', 'BOT_QUALITY_ACCEPTANCE', 'BOT_SKILLS_ACCEPTANCE', 'CHAT_MODEL_ACCEPTANCE'):
                 env.pop(key, None)
+            if args.verify_bot_tasks:
+                from task_live_contract import CONTRACT
+                if any(state.get(key) for key in ('workflow', 'bot_id', 'task_attempted', 'task_nonce', 'diagnostic_resume')):
+                    raise RuntimeError('Task requires a fresh unused candidate')
+                state.update(workflow=CONTRACT, task_nonce=secrets.token_hex(32),
+                             task_intended=dict(TASK_TARGET), task_config_verified=True,
+                             task_search=task_configuration(config)[2])
+                env['BOT_TASK_ACCEPTANCE'] = '1'
+                env['LOCAL_BOT_TASK_CONFIG'] = str(args.config)
             if args.verify_bot_agent:
                 state['workflow'] = 'bot-agent-live-v1'
                 state['agent_nonce'] = secrets.token_hex(32)
@@ -1049,7 +1296,7 @@ def main(argv=None):
                 raise RuntimeError('resume browser candidate changed')
             private_json(root / 'state.json', state)
             try:
-                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=7200 if args.verify_bot_agent else 3600 if args.verify_bot_quality else 1800)
+                subprocess.run([str(browser)], cwd=REPO, env=env, check=True, timeout=7200 if args.verify_bot_tasks or args.verify_bot_agent else 3600 if args.verify_bot_quality else 1800)
             finally:
                 # The browser owns the durable Bot checkpoint even on failure.
                 state = json.loads((root / 'state.json').read_text())

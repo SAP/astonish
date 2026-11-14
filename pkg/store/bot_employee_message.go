@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
@@ -82,7 +83,7 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 	}
 	switch m.Origin {
 	case BotEmployeeMessageAgent:
-		if len(r.Unverified) != 0 || r.Work.Validate() != nil || r.Quality != nil || m.CandidateDigest != r.Work.CandidateDigest || m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || !r.Work.allowsResult(status) {
+		if r.EffectState == BotReportEffectsUncertain || r.ReviewLimitation != nil || len(r.Unverified) != 0 || r.Work.Validate() != nil || r.Quality != nil || m.CandidateDigest != r.Work.CandidateDigest || m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || !r.Work.allowsResult(status) {
 			return ErrBotInvalid
 		}
 	case BotEmployeeMessageAssessed:
@@ -119,10 +120,71 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 	return nil
 }
 
+// BotReportEffectState is runtime-owned, not inferred from review findings or
+// remote tool JSON. Empty/unknown retains conservative no-replay handling.
+type BotReportEffectState string
+
+const (
+	BotReportEffectsUnknown   BotReportEffectState = ""
+	BotReportEffectsReadOnly  BotReportEffectState = "read_only"
+	BotReportEffectsConfirmed BotReportEffectState = "confirmed"
+	BotReportEffectsUncertain BotReportEffectState = "uncertain"
+)
+
+// BotEmployeeReviewLimitation binds a trusted, owner-facing limitation to the
+// withheld work snapshot. It grants neither candidate acceptance nor replay.
+type BotEmployeeReviewLimitation struct {
+	BotID           BotID  `json:"bot_id"`
+	RunID           RunID  `json:"run_id"`
+	WorkRevision    int64  `json:"work_revision"`
+	CandidateDigest string `json:"candidate_digest"`
+	Text            string `json:"text"`
+}
+
+// SetBotEmployeeReviewLimitation is called only by trusted review code after
+// storing a blocked state. Never pass provider diagnostics or a rejected draft.
+func SetBotEmployeeReviewLimitation(r *BotReport, w *BotWorkState, text string) error {
+	if r == nil || w == nil || w.Validate() != nil || w.Protocol != BotWorkProtocolAgentLedV1 || w.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 || w.Phase != BotWorkBlocked || w.Candidate == nil || text == w.Candidate.Text || !reflect.DeepEqual(r.Work, BuildBotWorkProjection(w)) {
+		return ErrBotInvalid
+	}
+	found := false
+	for _, gap := range w.Unresolved {
+		if gap == text {
+			found = true
+		}
+	}
+	if !found || strings.TrimSpace(text) == "" || len(text) > 1600 || strings.Contains(strings.ToLower(text), "://") || strings.Contains(strings.ToLower(text), "www.") || strings.ContainsAny(text, "\x00\x1b") {
+		return ErrBotInvalid
+	}
+	r.ReviewLimitation = &BotEmployeeReviewLimitation{BotID: w.Contract.BotID, RunID: w.Contract.RunID, WorkRevision: w.Revision, CandidateDigest: w.Candidate.Digest, Text: text}
+	return nil
+}
+
+func (r BotReport) employeeReviewLimitationText(status RunStatus) string {
+	l, p := r.ReviewLimitation, r.Work
+	if status != RunPartial || l == nil || p.Validate() != nil || p.Phase != BotWorkBlocked || l.BotID != p.BotID || l.RunID != p.RunID || l.WorkRevision != p.WorkRevision || l.CandidateDigest == "" || l.CandidateDigest != p.CandidateDigest || strings.TrimSpace(l.Text) == "" || len(l.Text) > 1600 || strings.Contains(strings.ToLower(l.Text), "://") || strings.Contains(strings.ToLower(l.Text), "www.") || strings.ContainsAny(l.Text, "\x00\x1b") {
+		return ""
+	}
+	return l.Text
+}
+
+// BotEmployeeOutcomeReason distinguishes content inadequacy from uncertainty in
+// captured external effects. A missing receipt is conservative, not proof of a send.
+func BotEmployeeOutcomeReason(status RunStatus, r BotReport) BotEmployeeFailureReason {
+	if r.EffectState == BotReportEffectsUncertain || (len(r.Unverified) != 0 || r.ReviewLimitation != nil) && r.EffectState != BotReportEffectsReadOnly && r.EffectState != BotReportEffectsConfirmed {
+		return BotEmployeeReasonAgentUnverifiedEffects
+	}
+	if r.employeeReviewLimitationText(status) != "" {
+		return BotEmployeeReasonResearchInadequate
+	}
+	return BotEmployeeReasonAgentNoResult
+}
+
 // BotEmployeeFailureReason is a server-selected reason, never provider prose.
 type BotEmployeeFailureReason string
 
 const (
+	BotEmployeeReasonResearchInadequate     BotEmployeeFailureReason = "research_inadequate"
 	BotEmployeeReasonAgentUnverifiedEffects BotEmployeeFailureReason = "agent_effects_unverified"
 	BotEmployeeReasonAgentNoResult          BotEmployeeFailureReason = "agent_result_unavailable"
 	BotEmployeeReasonEmailTransport         BotEmployeeFailureReason = "required_email_transport_unavailable"
@@ -150,6 +212,8 @@ const (
 
 func EmployeeReasonDetails(reason BotEmployeeFailureReason) (string, string) {
 	switch reason {
+	case BotEmployeeReasonResearchInadequate:
+		return "I don't have enough verified source coverage to provide the requested answer.", "The assignment remains incomplete."
 	case BotEmployeeReasonAgentUnverifiedEffects:
 		return "Some tool outcomes are not confirmed. This reply does not confirm that any requested external action, including delivery, completed.", "Check the destination or recorded outcome before retrying to avoid duplicate actions; no retry has been started."
 	case BotEmployeeReasonAgentNoResult:
@@ -199,8 +263,9 @@ func EmployeeReasonDetails(reason BotEmployeeFailureReason) (string, string) {
 	}
 }
 
-// NewBotEmployeeFallback regenerates the exact public text from closed typed
-// facts. An empty reason derives the safe reason from report/status alone.
+// NewBotEmployeeFallback regenerates exact public text from closed typed facts
+// or a scoped trusted review limitation (never diagnostics or the rejected draft).
+// An empty reason derives the safe reason from report/status alone.
 func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmployeeFailureReason) BotEmployeeMessage {
 	kind := BotReportFailureOperational
 	if reason == "" {
@@ -233,7 +298,7 @@ func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmploy
 		kind = BotReportFailureExecutionFormat
 	case BotEmployeeReasonInterrupted, BotEmployeeReasonOwnerCancelled, BotEmployeeReasonSuperseded:
 		kind = BotReportFailureInterrupted
-	case BotEmployeeReasonAgentUnverifiedEffects, BotEmployeeReasonAgentNoResult, BotEmployeeReasonEmailTransport, BotEmployeeReasonMixedControl, BotEmployeeReasonUnknown, BotEmployeeReasonUnverified, BotEmployeeReasonForbidden, BotEmployeeReasonUnsupported, BotEmployeeReasonExpired, BotEmployeeReasonNotFound, BotEmployeeReasonInvalid, BotEmployeeReasonConflict:
+	case BotEmployeeReasonResearchInadequate, BotEmployeeReasonAgentUnverifiedEffects, BotEmployeeReasonAgentNoResult, BotEmployeeReasonEmailTransport, BotEmployeeReasonMixedControl, BotEmployeeReasonUnknown, BotEmployeeReasonUnverified, BotEmployeeReasonForbidden, BotEmployeeReasonUnsupported, BotEmployeeReasonExpired, BotEmployeeReasonNotFound, BotEmployeeReasonInvalid, BotEmployeeReasonConflict:
 	default:
 		reason = BotEmployeeReasonUnknown
 	}
@@ -261,6 +326,14 @@ func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmploy
 			reason = BotEmployeeReasonAgentNoResult
 		}
 		text, kind = agentEmployeeFallbackText(status, report, reason, kind)
+	}
+	if reason == BotEmployeeReasonResearchInadequate {
+		if BotEmployeeOutcomeReason(status, report) == reason {
+			text = report.employeeReviewLimitationText(status)
+		} else {
+			reason = BotEmployeeOutcomeReason(status, report)
+			text, kind = agentEmployeeFallbackText(status, report, reason, kind)
+		}
 	}
 	return BotEmployeeMessage{Origin: BotEmployeeMessageFallback, Text: text, SourceDigest: report.EmployeeMessageSourceDigest(status), FailureKind: kind, Reason: reason}
 }
@@ -350,8 +423,10 @@ func (r *BotReport) FinalizeEmployeeMessage(status RunStatus, work *BotWorkState
 		if m != nil && m.Origin == BotEmployeeMessageFallback {
 			reason = m.Reason
 		}
-		if len(r.Unverified) != 0 && (reason == "" || reason == BotEmployeeReasonAgentNoResult || reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified) {
-			reason = BotEmployeeReasonAgentUnverifiedEffects
+		if reason == "" || reason == BotEmployeeReasonAgentNoResult || reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified || reason == BotEmployeeReasonResearchInadequate {
+			if len(r.Unverified) != 0 || r.ReviewLimitation != nil || r.EffectState == BotReportEffectsUncertain {
+				reason = BotEmployeeOutcomeReason(status, *r)
+			}
 		}
 		fallback := NewBotEmployeeFallback(status, *r, reason)
 		r.EmployeeMessage = &fallback

@@ -203,6 +203,8 @@ func WithBotMandatedReadClassifier(base agent.BotActionClassifier, catalog []too
 		switch read := t.(type) {
 		case *botMandatedReadTool:
 			c.adapters[t.Name()] = read
+		case *botConfiguredResearchTool:
+			c.adapters[t.Name()] = read
 		case *botMandatedSearchTool:
 			c.adapters[t.Name()] = read
 		}

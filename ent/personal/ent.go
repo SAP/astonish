@@ -18,10 +18,14 @@ import (
 	"github.com/SAP/astonish/ent/personal/botapproval"
 	"github.com/SAP/astonish/ent/personal/botgoal"
 	"github.com/SAP/astonish/ent/personal/botintake"
+	"github.com/SAP/astonish/ent/personal/botknowledgeextraction"
+	"github.com/SAP/astonish/ent/personal/botknowledgefilehead"
 	"github.com/SAP/astonish/ent/personal/botoutbox"
 	"github.com/SAP/astonish/ent/personal/botrun"
 	"github.com/SAP/astonish/ent/personal/botskill"
 	"github.com/SAP/astonish/ent/personal/botskillrevision"
+	"github.com/SAP/astonish/ent/personal/bottask"
+	"github.com/SAP/astonish/ent/personal/bottaskrevision"
 	"github.com/SAP/astonish/ent/personal/bottrackeditem"
 	"github.com/SAP/astonish/ent/personal/botversion"
 	"github.com/SAP/astonish/ent/personal/cachediagnostic"
@@ -95,29 +99,33 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			app.Table:              app.ValidColumn,
-			appstate.Table:         appstate.ValidColumn,
-			bot.Table:              bot.ValidColumn,
-			botapproval.Table:      botapproval.ValidColumn,
-			botgoal.Table:          botgoal.ValidColumn,
-			botintake.Table:        botintake.ValidColumn,
-			botoutbox.Table:        botoutbox.ValidColumn,
-			botrun.Table:           botrun.ValidColumn,
-			botskill.Table:         botskill.ValidColumn,
-			botskillrevision.Table: botskillrevision.ValidColumn,
-			bottrackeditem.Table:   bottrackeditem.ValidColumn,
-			botversion.Table:       botversion.ValidColumn,
-			cachediagnostic.Table:  cachediagnostic.ValidColumn,
-			credential.Table:       credential.ValidColumn,
-			deck.Table:             deck.ValidColumn,
-			deckversion.Table:      deckversion.ValidColumn,
-			flow.Table:             flow.ValidColumn,
-			memory.Table:           memory.ValidColumn,
-			personalsettings.Table: personalsettings.ValidColumn,
-			scheduledjob.Table:     scheduledjob.ValidColumn,
-			session.Table:          session.ValidColumn,
-			sessionevent.Table:     sessionevent.ValidColumn,
-			slide.Table:            slide.ValidColumn,
+			app.Table:                    app.ValidColumn,
+			appstate.Table:               appstate.ValidColumn,
+			bot.Table:                    bot.ValidColumn,
+			botapproval.Table:            botapproval.ValidColumn,
+			botgoal.Table:                botgoal.ValidColumn,
+			botintake.Table:              botintake.ValidColumn,
+			botknowledgeextraction.Table: botknowledgeextraction.ValidColumn,
+			botknowledgefilehead.Table:   botknowledgefilehead.ValidColumn,
+			botoutbox.Table:              botoutbox.ValidColumn,
+			botrun.Table:                 botrun.ValidColumn,
+			botskill.Table:               botskill.ValidColumn,
+			botskillrevision.Table:       botskillrevision.ValidColumn,
+			bottask.Table:                bottask.ValidColumn,
+			bottaskrevision.Table:        bottaskrevision.ValidColumn,
+			bottrackeditem.Table:         bottrackeditem.ValidColumn,
+			botversion.Table:             botversion.ValidColumn,
+			cachediagnostic.Table:        cachediagnostic.ValidColumn,
+			credential.Table:             credential.ValidColumn,
+			deck.Table:                   deck.ValidColumn,
+			deckversion.Table:            deckversion.ValidColumn,
+			flow.Table:                   flow.ValidColumn,
+			memory.Table:                 memory.ValidColumn,
+			personalsettings.Table:       personalsettings.ValidColumn,
+			scheduledjob.Table:           scheduledjob.ValidColumn,
+			session.Table:                session.ValidColumn,
+			sessionevent.Table:           sessionevent.ValidColumn,
+			slide.Table:                  slide.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

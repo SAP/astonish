@@ -214,7 +214,11 @@ func (r *botRepository) LoadRunInput(ctx context.Context, id store.BotID, runID 
 		if err != nil {
 			return err
 		}
-		input = store.BotRunInput{Work: saved.Work.Clone(), Bot: rec.Bot, Version: *version, Run: saved.Run, Goals: goals, Instructions: saved.Instructions, Attachments: saved.Attachments, ExternalAdmissionValidated: saved.ExternalAdmissionValidated}
+		input = store.BotRunInput{Task: saved.Task.Clone(), Work: saved.Work.Clone(), Bot: rec.Bot, Version: *version, Run: saved.Run, Goals: goals, Instructions: saved.Instructions, Attachments: saved.Attachments, ExternalAdmissionValidated: saved.ExternalAdmissionValidated}
+		if input.Task != nil {
+			if input.Run.Task == nil || input.Task.Ref != *input.Run.Task || input.Task.Validate(store.BotTaskDraft) != nil { return store.ErrBotConflict }
+			input.Instructions = string(input.Task.Bundle["TASK.md"])
+		}
 		return nil
 	})
 	if err != nil {

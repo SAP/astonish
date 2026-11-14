@@ -25,6 +25,20 @@ type logicalDB struct {
 }
 
 func exportLogicalDBRows(ctx context.Context, writer *backup.Writer, manifest *backup.Manifest, dbInfo logicalDB, opts PlatformBackupExportOptions) error {
+	if opts.WorkspaceBackend != nil && (dbInfo.Scope.Kind == "personal" || dbInfo.Scope.Kind == "team") {
+		if opts.WorkspaceFence == nil {
+			return fmt.Errorf("workspace backup requires scoped writer fence")
+		}
+		plain := opts
+		plain.WorkspaceBackend = nil
+		plain.WorkspaceFence = nil
+		return opts.WorkspaceFence(ctx, dbInfo.Scope, func() error {
+			if err := exportLogicalDBRows(ctx, writer, manifest, dbInfo, plain); err != nil {
+				return err
+			}
+			return exportBotWorkspaceSnapshots(ctx, writer, manifest, dbInfo, opts)
+		})
+	}
 	if dbInfo.Dialect == DialectSQLite {
 		if _, err := dbInfo.DB.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
 			return fmt.Errorf("set %s query_only: %w", dbInfo.Description, err)

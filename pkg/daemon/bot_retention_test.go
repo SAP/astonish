@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -15,14 +16,15 @@ import (
 type retentionStoreFixture struct {
 	store.BotStore
 	store.BotPublicationStore
-	bot       store.Bot
-	claim     *store.BotHomeCleanupClaim
-	confirmed bool
-	purged    bool
+	bot        store.Bot
+	claim      *store.BotHomeCleanupClaim
+	confirmed  bool
+	purged     bool
+	activities []store.BotActivity
 }
 
 func (s *retentionStoreFixture) ListActivity(context.Context, store.BotID, int64, int) ([]store.BotActivity, error) {
-	return nil, nil
+	return s.activities, nil
 }
 func (s *retentionStoreFixture) ListRuns(context.Context, store.BotID, store.BotPage) ([]store.BotRun, error) {
 	return nil, nil
@@ -128,6 +130,34 @@ func TestBotRetentionPollingRetry(t *testing.T) {
 		t.Fatal("retry did not confirm exact success and purge")
 	}
 	t.Log("production poll fixture: reserved before Delete; backend failure retained; retry confirmed immutable receipt before purge (no live Docker)")
+}
+
+func TestBotRetentionKnowledgeCapabilityRequiredOnlyForSource(t *testing.T) {
+	for _, sourced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "extraction-source"}[sourced], func(t *testing.T) {
+			w, repo, backend, ctx := retentionFixture(t)
+			runID := uuid.New()
+			payload := map[string]any{"intent": store.BotOutboxPublish}
+			if sourced {
+				payload["knowledge_source"] = store.BotKnowledgeExtractionSource{BotID: repo.bot.ID, RunID: runID, Sequence: 1}
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo.activities = []store.BotActivity{{BotID: repo.bot.ID, RunID: &runID, Sequence: 1, Kind: store.BotActivityReport, Payload: encoded}}
+			// Isolate retirement from publication: permanent deletion never
+			// publishes old results, but must not hide missing extraction storage.
+			repo.bot.PermanentDelete = true
+			err = w.pollStore(ctx, repo, nil)
+			if sourced && !errors.Is(err, store.ErrBotUnsupported) || !sourced && err != nil {
+				t.Fatalf("sourced=%v: %v", sourced, err)
+			}
+			if backend.calls != 1 || !repo.confirmed || !repo.purged {
+				t.Fatal("unrelated extraction capability blocked retirement")
+			}
+		})
+	}
 }
 
 func TestBotRetentionOwnerCannotInvokeAuthorizer(t *testing.T) {

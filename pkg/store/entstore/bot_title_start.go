@@ -28,6 +28,12 @@ func (t botAdmissionTx) Transaction(ctx context.Context, fn func(botDraftDB) err
 
 type titleMandateAdmissionKey struct{}
 
+// Adapter-owned initiation state: never inferred from a Bot name or private turn.
+type titleMandateAdmission struct {
+	Kind    store.BotInitiationKind
+	Subject string
+}
+
 type titleAdmission struct {
 	store.BotMessageAdmission
 	registered []execution.BotRunIdentity
@@ -47,7 +53,7 @@ func (r *botRepository) CreateDraftAndStart(ctx context.Context, q store.BotCrea
 		return nil, store.ErrBotForbidden
 	}
 	tracked := &titleAdmission{BotMessageAdmission: admission}
-	ctx = context.WithValue(store.WithBotMessageAdmission(ctx, tracked), titleMandateAdmissionKey{}, true)
+	ctx = context.WithValue(store.WithBotMessageAdmission(ctx, tracked), titleMandateAdmissionKey{}, titleMandateAdmission{Kind: store.BotInitiationKindTitle, Subject: q.Name})
 	var result *store.BotTitleStartReceipt
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
 		scoped := *r

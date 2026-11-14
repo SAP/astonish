@@ -35,6 +35,8 @@ type BotChatResources struct {
 	EvidenceReader           store.BotTranscriptReader
 	AssessmentContext        func(context.Context) (json.RawMessage, store.BotEvidence, error)
 	Skills                   store.BotSkillStore
+	Tasks                    store.BotTaskStore
+	TaskWorkspace            bot.TaskWorkspace
 	Redact                   func(string) string
 	Work                     store.BotWorkStore
 	Authorization            execution.BotTurnAuthorizer
@@ -46,6 +48,9 @@ type BotChatResources struct {
 	// PolicyRuntime is prepared by the trusted factory and must be the same
 	// runtime installed on its bound tools. Nil preserves explicit context wiring.
 	PolicyRuntime *agent.BotPolicyRuntime
+	// ResearchFactory constructs a fresh producer with only the configured public
+	// read tools. The adapter installs its continuation runner automatically.
+	ResearchFactory func(context.Context, BotEmployeeResearchRequest) (*BotChatResources, error)
 }
 
 // BotChatAgentFactory reverses the launcher -> api dependency. The authenticated
@@ -315,6 +320,41 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		resources.Agent.LLM = &botResumeModel{LLM: resources.Agent.LLM, action: action}
 	}
 	var sequence int64
+	if resources.ResearchFactory != nil {
+		ctx = WithBotEmployeeResearchRunner(ctx, func(researchCtx context.Context, directed BotEmployeeResearchRequest) (BotEmployeeResearchResult, error) {
+			// Preserve the original assignment; the handoff adds review guidance.
+			directed.Request.Instructions = req.Instructions + "\n\n" + directed.Request.Instructions
+			fresh, err := resources.ResearchFactory(researchCtx, directed)
+			if fresh != nil && fresh.Cleanup != nil {
+				defer fresh.Cleanup()
+			}
+			if err != nil {
+				return BotEmployeeResearchResult{}, err
+			}
+			if fresh == nil || fresh.Agent == nil || fresh.Agent.LLM == nil || fresh.Cleanup == nil || fresh.PolicyRuntime == nil || fresh.SessionService == nil {
+				return BotEmployeeResearchResult{}, store.ErrBotUnsupported
+			}
+			// Keep the adapter's existing conversation wrapper, session and event
+			// sequence; never register a new run or capture an approval continuation.
+			fresh.SessionService = resources.SessionService
+			fresh.Agent.SessionService = fresh.SessionService
+			if conversation, ok := fresh.SessionService.(botConversationSessions); ok {
+				conversation.internalInput = true
+				fresh.SessionService = conversation
+				fresh.Agent.SessionService = conversation
+			}
+			researchCtx = agent.WithBotPolicyRuntime(researchCtx, directed.PolicyRuntime)
+			privateSink := func(c context.Context, event bot.RuntimeEvent) error {
+				if event.Type == "text" || event.Type == "done" {
+					return nil
+				}
+				return sink(c, event)
+			}
+			var completion ChatCompletion
+			result, err := runBotChatAttempt(researchCtx, directed.Request, fresh, privateSink, nil, existing, nil, false, &sequence, &completion)
+			return BotEmployeeResearchResult{Result: result, Completion: completion}, err
+		})
+	}
 	produce := func(attemptReq bot.RunRequest, attemptInteraction *store.BotApproval, completion *ChatCompletion) (bot.RunResult, error) {
 		return runBotChatAttempt(ctx, attemptReq, resources, sink, capture, existing, attemptInteraction, resume, &sequence, completion)
 	}
@@ -349,7 +389,36 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	cr.ctx, cr.cancel = context.WithCancel(context.WithValue(ctx, appNameContextKey, resources.AppName))
 	defer cr.cancel()
 	turnID := uuid.New()
+	// Hold producer text until a tool boundary proves it is interim narration.
+	// The last response is published only by the reviewed, committed report.
+	var pendingText []ChatEvent
+	guardFinal := req.Work != nil && req.Work.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1
+	publish := func(eventCtx context.Context, event ChatEvent) error {
+		payload, err := json.Marshal(event.Data)
+		if err != nil {
+			return err
+		}
+		*sequence++
+		return sink(eventCtx, bot.RuntimeEvent{SessionID: req.Run.SessionID, RunID: req.Run.ID, TurnID: turnID, Sequence: *sequence, Type: event.Type, Payload: payload})
+	}
 	cr.SetEventSink(func(eventCtx context.Context, event ChatEvent) error {
+		if guardFinal {
+			if event.Type == "text" {
+				pendingText = append(pendingText, event)
+				return nil
+			}
+			if event.Type == "done" {
+				return nil
+			}
+			if event.Type == "tool_call" || event.Type == "subtask_progress" || event.Type == string(store.BotInteractionQuestion) {
+				for _, interim := range pendingText {
+					if err := publish(eventCtx, interim); err != nil {
+						return err
+					}
+				}
+				pendingText = nil
+			}
+		}
 		payload, err := json.Marshal(event.Data)
 		if err != nil {
 			return err
@@ -469,6 +538,20 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	}
 	if !completion.Final {
 		return botChatFailure(bot.ErrorPermanent, errors.New("chat ended without a final model answer"))
+	}
+	// Only a validated narrowed research policy plus live read classifier can
+	// attest successful no-tool text. Ordinary empty journals remain unknown.
+	policy, _ := ctx.Value(botEmployeeResearchPolicyKey{}).(*execution.RunPolicy)
+	runtime := agent.BotPolicyRuntimeFromContext(ctx)
+	_, readOnly := runtime.Classifier.(botEmployeeReadClassifier)
+	if policy != nil && policy == req.Policy && policy == execution.RunPolicyFromContext(ctx) && runtime.Guard != nil && runtime.Approvals == nil && readOnly && req.Mandate != nil && !resume && capture == nil && interaction == nil {
+		journal, _ := ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal)
+		journal.completeConstrainedText(completion)
+		if journal.effectState() == store.BotReportEffectsReadOnly {
+			completion.Report.EffectState = store.BotReportEffectsReadOnly
+			observed.EffectState = store.BotReportEffectsReadOnly
+			*completed = completion
+		}
 	}
 	result = bot.RunResult{Status: store.RunSucceeded, Report: observed}
 	if len(result.Report.Unverified) > 0 {

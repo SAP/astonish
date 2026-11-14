@@ -5,6 +5,24 @@ Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 policy and the shared run budget precede adapter execution. There is no host
 fallback when an adapter is unavailable.
 
+## Configured public research
+
+The mandate branch installs `BotConfiguredResearchTool` before its retrieval-only
+return. Both Bot factories retain the same run-bound `BotResearchEpisode` and
+check detail retrieval on the logical executable, including progressive dispatch.
+New owner-backed scopes pin the effective configured Perplexity provider/model or
+Tavily MCP executable. Perplexity reuses `RunPerplexityWebSearch` with confined
+provider secrets and shared accounting; Tavily dispatches through the pinned node
+and symbolic scoped vault, not a host MCP fallback or sibling-tool exemption.
+Missing configuration, empty results and failed searches leave detail retrieval
+locked. Search URLs/snippets are discovery evidence, not certified values.
+
+The isolated `bot_task_acceptance.py --stage search` gate builds a fresh temporary
+candidate, requires personal/team owner HTTP search-before-detail ordering and
+physical node MCP transport, and rejects skipped or foreign test evidence. It
+makes no paid calls; live provider quality and full process recovery remain
+separate acceptance requirements.
+
 ## Resolved model provenance
 
 The successful Bot factory carries the owner-scoped resolver's provider instance

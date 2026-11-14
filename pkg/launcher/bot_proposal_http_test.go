@@ -34,7 +34,10 @@ type proposalModel struct {
 }
 
 func (*proposalModel) Name() string { return "controlled-proposal" }
-func (m *proposalModel) GenerateContent(ctx context.Context, q *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *proposalModel) GenerateContent(ctx context.Context, q *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if strings.HasPrefix(providerSystem(q), "BOT_WORK_REVIEW_V1") {
+		return (continuityAssessmentModel{LLM: m}).GenerateContent(ctx, q, stream)
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		if m.calls == 1 {

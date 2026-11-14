@@ -113,7 +113,14 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 		if !ok {
 			return store.ErrBotUnsupported
 		}
+		pinnedTask, err := pinTaskHead(ctx, tx, q.BotID, q.TaskID)
+		if err != nil {
+			return err
+		}
 		run := store.BotRun{ID: uuid.New(), BotID: q.BotID, Version: q.Version, SessionID: uuid.New(), Trigger: store.TriggerManual, Intent: intent, Presentation: store.BotRunPresentationHomeInteractive, IdempotencyKey: q.IdempotencyKey, Status: store.RunQueued, CreatedAt: now}
+		if pinnedTask != nil {
+			run.Task = pinnedTask.Ref.Clone()
+		}
 		if interactive {
 			p, ok := execution.PrincipalFromContext(ctx)
 			if !ok || p.Validate() != nil || p.Kind != execution.PrincipalKindUser || p.Subject != actor.String() || p.OrgSlug != r.auth.orgSlug || (r.auth.teamSlug != "" && p.TeamSlug != r.auth.teamSlug) {
@@ -145,7 +152,7 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 		if err := r.issueMessageMandate(ctx, tx, rec, &run, q); err != nil {
 			return err
 		}
-		if err := tx.InsertRun(ctx, botStoredRun{Run: run, RequestHash: hash, Instructions: q.Instructions, Attachments: q.Attachments}, rec.Bot.OwnerID); err != nil {
+		if err := tx.InsertRun(ctx, botStoredRun{Task: pinnedTask.Clone(), Run: run, RequestHash: hash, Instructions: q.Instructions, Attachments: q.Attachments}, rec.Bot.OwnerID); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status, "intent": store.BotOutboxDispatch, "actor_id": actor})

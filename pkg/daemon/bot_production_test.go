@@ -46,6 +46,9 @@ type workerDraftRepo struct {
 	bots []store.Bot
 }
 
+func (workerDraftRepo) ListActivity(context.Context, store.BotID, int64, int) ([]store.BotActivity, error) {
+	return nil, nil
+}
 func (r workerDraftRepo) List(context.Context, store.BotPage) ([]store.Bot, error) {
 	return r.bots, nil
 }

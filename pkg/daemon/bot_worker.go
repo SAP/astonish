@@ -14,6 +14,7 @@ import (
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
@@ -29,18 +30,20 @@ import (
 // no ordinary Chat factory or host-tool fallback is used. ChannelManager is
 // consulted only for delivery of already-authorized publication targets.
 type BotWorkerConfig struct {
-	MandatePolicy store.BotMandatePolicyResolver
-	TurnRegistry  *execution.BotTurnAuthorizationRegistry
-	Backend       store.PlatformBackend
-	Sandbox       sandbox.Backend
-	Pool          sandbox.ToolNodePool
-	Prepare       func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error)
-	ResolveModel  func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error)
-	ModelOptions  provider.BudgetLLMOptions
-	ContextWindow int
-	WorkerID      string
-	PollInterval  time.Duration
-	Publish       bot.EventSink
+	KnowledgeSafety   bot.KnowledgeExtractionSafety
+	KnowledgeRedactor func(context.Context, execution.Principal, store.BotScope) (*credentials.Redactor, error)
+	MandatePolicy     store.BotMandatePolicyResolver
+	TurnRegistry      *execution.BotTurnAuthorizationRegistry
+	Backend           store.PlatformBackend
+	Sandbox           sandbox.Backend
+	Pool              sandbox.ToolNodePool
+	Prepare           func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error)
+	ResolveModel      func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error)
+	ModelOptions      provider.BudgetLLMOptions
+	ContextWindow     int
+	WorkerID          string
+	PollInterval      time.Duration
+	Publish           bot.EventSink
 	// ChannelManager resolves the live transport after channel reloads. Nil uses
 	// the daemon's synchronized getter; no manager leaves notifications pending.
 	ChannelManager func() *channels.ChannelManager
@@ -48,6 +51,10 @@ type BotWorkerConfig struct {
 type BotWorker struct {
 	schedulerReady    atomic.Bool
 	activationStopped atomic.Bool
+	lifecycleMu       sync.Mutex
+	pollCancels       map[uint64]context.CancelFunc
+	pollSerial        uint64
+	started           bool
 	config            BotWorkerConfig
 	runtime           bot.Runtime
 	cancel            context.CancelFunc
@@ -71,6 +78,12 @@ func NewBotWorker(c BotWorkerConfig) (*BotWorker, error) {
 	}
 	if c.PollInterval < 0 {
 		return nil, store.ErrBotInvalid
+	}
+	if c.KnowledgeSafety == nil {
+		c.KnowledgeSafety = botKnowledgeSafety
+	}
+	if c.KnowledgeRedactor == nil {
+		c.KnowledgeRedactor = productionKnowledgeRedactor(c.Backend, nil)
 	}
 	if c.ChannelManager == nil {
 		c.ChannelManager = api.GetChannelManager
@@ -210,6 +223,8 @@ func (w *BotWorker) loadScope(ctx context.Context, r bot.RunRequest) (*launcher.
 	if err != nil {
 		return nil, err
 	}
+	svc.PlatformSettings, svc.OrgSettings = w.config.Backend.PlatformSettings(), w.config.Backend.OrgSettings(r.Principal.OrgSlug)
+	svc.MCPServers = org.OrgMCPServers()
 	if networks, ok := w.config.Backend.(interface {
 		PlatformNetworkPolicies() store.NetworkPolicyStore
 	}); ok {
@@ -269,8 +284,15 @@ func (w *BotWorker) loadScope(ctx context.Context, r bot.RunRequest) (*launcher.
 }
 
 func (w *BotWorker) Start(ctx context.Context) {
+	w.lifecycleMu.Lock()
+	if w.started || w.activationStopped.Load() {
+		w.lifecycleMu.Unlock()
+		return
+	}
+	w.started = true
 	ctx, w.cancel = context.WithCancel(ctx)
 	w.wg.Add(1)
+	w.lifecycleMu.Unlock()
 	go func() {
 		defer w.wg.Done()
 		ticker := time.NewTicker(w.config.PollInterval)
@@ -288,16 +310,42 @@ func (w *BotWorker) Start(ctx context.Context) {
 	}()
 }
 func (w *BotWorker) Stop() {
+	w.lifecycleMu.Lock()
 	w.activationStopped.Store(true)
 	if w.cancel != nil {
 		w.cancel()
 	}
+	for _, cancel := range w.pollCancels {
+		cancel()
+	}
+	w.lifecycleMu.Unlock()
 	w.wg.Wait()
 }
 
 // Poll enumerates trusted organization membership independently of messaging
 // channels. Repository authorization is repeated for every read/claim/action.
 func (w *BotWorker) Poll(ctx context.Context) error {
+	w.lifecycleMu.Lock()
+	if w.activationStopped.Load() {
+		w.lifecycleMu.Unlock()
+		return context.Canceled
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	w.pollSerial++
+	serial := w.pollSerial
+	if w.pollCancels == nil {
+		w.pollCancels = make(map[uint64]context.CancelFunc)
+	}
+	w.pollCancels[serial] = cancel
+	w.wg.Add(1)
+	w.lifecycleMu.Unlock()
+	defer func() {
+		cancel()
+		w.lifecycleMu.Lock()
+		delete(w.pollCancels, serial)
+		w.lifecycleMu.Unlock()
+		w.wg.Done()
+	}()
 	cleanupErr := w.retryMandateCleanup(ctx)
 	orgs, err := w.config.Backend.Organizations().List(ctx)
 	if err != nil {
@@ -471,6 +519,9 @@ func (w *BotWorker) pollStore(ctx context.Context, repo store.BotStore, ss store
 					runPage.After = runs[len(runs)-1].ID.String()
 				}
 			}
+			if err := w.reconcileKnowledge(ctx, repo, ss, b); err != nil {
+				failures = append(failures, err)
+			}
 			if err := w.reconcileRetention(ctx, repo, b); err != nil {
 				failures = append(failures, err)
 			}
@@ -500,6 +551,7 @@ func botRunBudget(in store.BotRunInput, now time.Time) (*bot.SharedRunBudget, er
 }
 
 func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.SessionStore, id store.BotID, runID store.RunID) error {
+	ctx = w.knowledgeCommitContext(ctx, repo, ss)
 	if err := w.prepareInteractiveHome(ctx, repo, id, runID); err != nil {
 		return err
 	}

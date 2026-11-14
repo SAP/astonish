@@ -8,19 +8,24 @@ import (
 	"os"
 
 	"github.com/SAP/astonish/pkg/backup"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 )
 
 const backupModeLogical = "logical"
 
 type PlatformBackupExportOptions struct {
-	Backend       string
-	Compression   backup.Compression
-	RedactSecrets bool
-	Passphrase    string
-	OrgSlug       string
-	TeamSlug      string
-	UserID        string
+	Backend          string
+	Compression      backup.Compression
+	RedactSecrets    bool
+	Passphrase       string
+	OrgSlug          string
+	TeamSlug         string
+	UserID           string
+	WorkspaceBackend sandbox.BotHomeWorkspaceBackend
+	WorkspaceBinding func(backup.Scope, store.BotID, store.BotHomeBinding) (*sandbox.BotHomeBinding, error)
+	// Trusted server callback holds all scope writers during SQL and file export.
+	WorkspaceFence func(context.Context, backup.Scope, func() error) error
 }
 
 func (s *Store) ExportPlatformBackup(ctx context.Context, archivePath string, opts PlatformBackupExportOptions) error {

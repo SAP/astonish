@@ -105,7 +105,7 @@ func TestAgentStudioManifestUsesIndependentPasses(t *testing.T) {
 			t.Fatal("not independent ordered observations")
 		}
 		calls++
-		return agentStudioPass{Exchanges: []agentTerminalExchange{{Path: "raw-path", Status: 200, Body: fmt.Sprintf("raw-%d", pass)}}, Rendered: agentStudioRendered{Text: fmt.Sprintf("DOM-%d", pass), Invocation: "bot-report:fixture", Visible: true, RunStates: json.RawMessage(`[]`), Skills: json.RawMessage(`[]`)}}
+		return agentStudioPass{Exchanges: []agentTerminalExchange{{Path: "raw-path", Status: 200, Body: fmt.Sprintf("raw-%d", pass)}}, Rendered: agentStudioRendered{Text: fmt.Sprintf("DOM-%d", pass), Invocation: "bot-report:fixture", Visible: true, RunStates: json.RawMessage(`[]`)}}
 	})
 	if err != nil || calls != 2 {
 		t.Fatalf("capture failed: %v", err)
@@ -128,14 +128,14 @@ func TestAgentStudioManifestUsesIndependentPasses(t *testing.T) {
 
 func TestAgentStudioRawExchangeScript(t *testing.T) {
 	script := `const assert=require('node:assert/strict');
- const bodies=[{bot:{home_session_id:'home'}},{skills:[]}], paths=[];
+ const bodies=[{bot:{home_session_id:'home'}}], paths=[];
  const transcript='id: home:1\nevent: transcript\ndata: {"content":{"parts":[{"text":"raw answer"}]}}\n\n';
  const replay='event: replay_complete\ndata: {}\n\n';
  const chunks=[transcript.slice(0,19),transcript.slice(19)+replay];let cancelled=false;
  global.fetch=async (path,opts)=>{paths.push(path);assert.equal(opts.credentials,'include');assert.equal(opts.method,undefined);const n=paths.length;
- if(n<3)return {ok:true,status:200,text:async()=>JSON.stringify(bodies[n-1])};
+ if(n<2)return {ok:true,status:200,text:async()=>JSON.stringify(bodies[n-1])};
  return {ok:true,status:200,body:{getReader:()=>({read:async()=>chunks.length?{done:false,value:new TextEncoder().encode(chunks.shift())}:{done:true},cancel:async()=>{cancelled=true}})}}};
- (async()=>{const rows=JSON.parse(await (` + agentStudioExchangeJS + `)('owned'));assert.equal(rows.length,4);assert.equal(rows[2].body,transcript.trimEnd());assert.equal(rows[3].body,replay.trimEnd());assert.equal(rows[2].path,'/api/studio/bots/owned/sessions/home/events?scope=personal');assert.equal(cancelled,true);})().catch(e=>{console.error(e);process.exit(1)});
+ (async()=>{const rows=JSON.parse(await (` + agentStudioExchangeJS + `)('owned'));assert.equal(rows.length,3);assert.equal(rows[1].body,transcript.trimEnd());assert.equal(rows[2].body,replay.trimEnd());assert.equal(rows[1].path,'/api/studio/bots/owned/sessions/home/events?scope=personal');assert.equal(cancelled,true);assert.equal(paths.some(p=>p.includes('/skills')),false);})().catch(e=>{console.error(e);process.exit(1)});
  `
 	if out, err := exec.Command("node", "-e", script).CombinedOutput(); err != nil {
 		t.Fatalf("raw browser exchange script: %v %s", err, out)
@@ -146,17 +146,14 @@ func TestAgentStudioScriptsReadDOMNotAPIFabrication(t *testing.T) {
 	// Execute the actual observation functions against minimal mounted-component
 	// fixtures; no daemon, provider, credentials or normal browser profile.
 	script := `const assert=require('node:assert/strict');
- const skills=[{id:'skill',title:'DOM skill'}];
- const skillNode={checkVisibility:()=>true,__reactFiber$fixture:{memoizedState:{memoizedState:{data:{skills},loading:false},next:null},return:null}};
  const bubble={innerText:'visible DOM answer',checkVisibility:()=>true,scrollIntoView:()=>{}};
  const detail={open:false,checkVisibility:()=>true,innerText:'Completed by agent: DOM work'};
  const messages=[{type:'agent',invocationId:'bot-report:fixture',content:'NOT THE DOM TEXT'}];
  const states={fixture:{schema_version:1,run_id:'fixture',state_sequence:1,work:{summary:'NOT THE DOM WORK'}}};
  const area={__reactFiber$fixture:{memoizedState:{memoizedState:messages,next:{memoizedState:states,next:null}},return:null}};
- const root={querySelector:s=>s.includes('message-area')?area:s.includes('data-message-index')?{querySelector:()=>bubble}:s.includes('Work for run')?{querySelector:()=>detail}:null};
- global.document={querySelector:s=>s.includes('Bot skills')?skillNode:root};
- const observedSkills=(` + agentStudioSkillsJS + `)();
- assert.deepEqual(JSON.parse(observedSkills),skills);
+ const root={querySelector:s=>s.includes('message-area')?area:s.includes('data-message-index')?{querySelector:()=>bubble}:null};
+ detail.__reactFiber$fixture={memoizedProps:{work:{run_id:"fixture"}},return:null};
+ global.document={querySelector:()=>root,querySelectorAll:()=>[detail]};
  const observed=JSON.parse((` + agentStudioRenderedJS + `)());
  assert.equal(observed.text,'visible DOM answer');assert.equal(observed.invocation_id,'bot-report:fixture');assert.equal(observed.visible,true);assert.deepEqual(observed.run_states,Object.values(states));assert.equal(detail.open,true);
  assert.equal(observed.work_text.fixture,'Completed by agent: DOM work');

@@ -52,9 +52,9 @@ class TerminalContractTests(unittest.TestCase):
         # replay; reconnect receives the same durable records during replay.
         self.terminal['passes'][0]['exchanges'].insert(2, dict(path=self.rows[2]['path'], status=200,
                  body=f'id: {self.home}:0\nevent: replay_complete\ndata: {{}}'))
-        self.studio = dict(binding, contract='bot-agent-studio-v1', passes=[dict(exchanges=copy.deepcopy(self.rows),
+        self.studio = dict(binding, contract='bot-agent-studio-v1', passes=[dict(exchanges=copy.deepcopy([r for r in self.rows if '/skills?' not in r['path']]),
                            rendered=dict(visible=True, invocation_id='bot-report:'+self.rid, text=self.text,
-                                         run_states=[projection], skills=[skill])) for _ in range(2)])
+                                         run_states=[projection])) for _ in range(2)])
         self.actual = dict(contract='bot-agent-live-v1', nonce='c'*64, candidate='a'*64, browser_candidate='b'*64)
         self.save()
 
@@ -168,6 +168,18 @@ class TerminalContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'raw encoded'):
             terminal_parity(self.state, self.actual)
 
+    def test_studio_skills_are_absent_and_terminal_inspection_is_independent(self):
+        terminal_parity(self.state, self.actual)
+        self.studio['passes'][0]['rendered']['skills'] = []
+        self.save()
+        with self.assertRaisesRegex(RuntimeError, 'removed Skills'):
+            terminal_parity(self.state, self.actual)
+        del self.studio['passes'][0]['rendered']['skills']
+        self.studio['passes'][0]['exchanges'].insert(1, copy.deepcopy(self.rows[1]))
+        self.save()
+        with self.assertRaisesRegex(RuntimeError, 'removed Skills'):
+            terminal_parity(self.state, self.actual)
+
     def test_complete_synthetic_proof_passes(self):
         terminal_parity(self.state, self.actual)
 
@@ -202,11 +214,10 @@ class TerminalContractTests(unittest.TestCase):
     def test_rehashed_skill_and_reconnect_drift_fail(self):
         self.terminal['passes'][1]['exchanges'][1]['body'] = self.rows[1]['body'].replace('f'*64, '0'*64)
         self.save()
-        with self.assertRaisesRegex(RuntimeError, 'records differ'):
+        with self.assertRaisesRegex(RuntimeError, 'persisted records|skill reference'):
             terminal_parity(self.state, self.actual)
-        for doc in (self.terminal, self.studio):
-            for capture in doc['passes']:
-                capture['exchanges'][1]['body'] = self.rows[1]['body'].replace('f'*64, '0'*64)
+        for capture in self.terminal['passes']:
+            capture['exchanges'][1]['body'] = self.rows[1]['body'].replace('f'*64, '0'*64)
         self.save()
         with self.assertRaisesRegex(RuntimeError, 'skill reference'):
             terminal_parity(self.state, self.actual)

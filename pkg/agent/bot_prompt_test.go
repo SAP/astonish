@@ -9,6 +9,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	adkagent "google.golang.org/adk/agent"
@@ -26,6 +27,45 @@ type botPromptWorkReader struct {
 
 func (s botPromptWorkReader) Read(ctx context.Context, q bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
 	return s.read(ctx, q)
+}
+
+func TestBotPromptProactiveInteractionContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		run         store.BotRun
+		interactive bool
+	}{
+		{"chat", store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}, true},
+		{"home", store.BotRun{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive}, true},
+		{"control", store.BotRun{Intent: store.BotIntentDraftConversation}, true},
+		{"scheduled", store.BotRun{Trigger: store.TriggerCron}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := bot.RunRequest{Run: tc.run, Instructions: "AI News", Bot: store.Bot{Name: "AI News"}}
+			po := NewBotPromptOverrides(nil, req)
+			b := &SystemPromptBuilder{}
+			b.applyBotPrompt(po)
+			prompt := b.Build()
+			for _, want := range []string{"Every question you choose to ask the owner", "call the actual ask_user tool", "kind=select with allow_custom_answer=true", "including optional recurrence offers, recurrence times/timezones, and refinements", "meaningful, request-specific options", "Do not append a plain-text question"} {
+				if strings.Contains(prompt, want) != tc.interactive {
+					t.Errorf("interactive=%v: contract %q", tc.interactive, want)
+				}
+			}
+			for _, want := range []string{"For an initial title or broad assignment, begin with a brief AI-authored acknowledgement", "not a canned ready message", "continue immediately into actual useful work", "Put the acknowledgement before the first real work tool call"} {
+				if strings.Contains(prompt, want) != (tc.interactive && tc.name != "control") {
+					t.Errorf("mode %s: contract %q", tc.name, want)
+				}
+			}
+			for _, want := range []string{"A switch to an unrelated subject requires fresh scoped authority", "never mutate or stretch an old mandate", "Historical grants are not upgraded", "For provenance questions, inspect actual retained tool calls and responses", "Distinguish direct calls from delegated calls", "Never infer RSS, search, fetch or extraction provenance from the shape of an answer", "new per-turn extraction applies only to future work"} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("missing contract %q", want)
+				}
+			}
+			if buildTurnContextContent(po, "", "") != nil || req.Instructions != "AI News" {
+				t.Fatal("hidden guidance changed the visible assignment")
+			}
+		})
+	}
 }
 
 func TestBotPromptRehydratesDurableWork(t *testing.T) {

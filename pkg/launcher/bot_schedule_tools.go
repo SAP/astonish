@@ -237,7 +237,11 @@ func validateBotCron(tr store.TriggerSpec) error {
 }
 
 // Bot-only wire extension: generic Chat scheduling is deliberately unchanged.
+const botTaskScheduleProtocol = "task_v1"
+
 type botScheduleJobArgs struct {
+	TaskID *uuid.UUID `json:"task_id,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
 	tools.ScheduleJobArgs
 	SkillID    *uuid.UUID `json:"skill_id,omitempty"`
 	Invocation string     `json:"invocation,omitempty"`
@@ -255,6 +259,14 @@ func (s botScheduleTools) addSkill(ctx tool.Context, a botScheduleJobArgs) (botS
 	// routine into an adaptive run or overwrite the reviewed delivery policy.
 	if a.Mode != "adaptive" || a.Flow != "" || len(a.Params) != 0 || a.TestFirst || a.DeliveryMode != "" || len(a.DeliveryChannels) != 0 || len(a.DeliveryMembers) != 0 || a.Channel != "" || a.Target != "" {
 		return botScheduleChangeResult{}, fmt.Errorf("%w: Bot schedules use adaptive instructions and the Bot's reviewed delivery; test runs require owner configuration", store.ErrBotUnsupported)
+	}
+	if a.Protocol != "" && a.Protocol != botTaskScheduleProtocol { return botScheduleChangeResult{}, store.ErrBotUnsupported }
+	if a.Protocol == botTaskScheduleProtocol || a.TaskID != nil {
+		if a.TaskID == nil { return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: "task_required", Message: "Capture or select a committed Task with bot_task_capture/bot_task_update, then retry with task_id; no review or skill is required."}}, nil }
+		tasks, ok := s.repo.(store.BotTaskStore); if !ok { return botScheduleChangeResult{}, store.ErrBotUnsupported }
+		task, e := tasks.GetTask(ctx,b.ID,*a.TaskID); if e != nil { return botScheduleChangeResult{},e }
+		if task.Head == nil || task.Status == store.BotTaskArchived { return botScheduleChangeResult{},store.ErrBotConflict }
+		a.SkillID=nil; a.Invocation=""; a.Instructions="Invoke retained Task"
 	}
 	if a.SkillID == nil && strings.TrimSpace(a.Invocation) != "" {
 		// A saved method is optional for an explicit task schedule. Use only a
@@ -311,7 +323,7 @@ func (s botScheduleTools) addSkill(ctx tool.Context, a botScheduleJobArgs) (botS
 	if tz == "" {
 		tz = "UTC"
 	}
-	tr := store.TriggerSpec{SkillID: a.SkillID, Invocation: a.Invocation, ID: uuid.New(), Kind: store.TriggerCron, Cron: a.Schedule, Timezone: tz, Instructions: a.Instructions}
+	tr := store.TriggerSpec{TaskID: a.TaskID, SkillID: a.SkillID, Invocation: a.Invocation, ID: uuid.New(), Kind: store.TriggerCron, Cron: a.Schedule, Timezone: tz, Instructions: a.Instructions}
 	if err := validateBotCron(tr); err != nil {
 		return botScheduleChangeResult{}, err
 	}

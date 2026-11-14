@@ -1,5 +1,16 @@
 # Bot-home cleanup and permanent deletion in the daemon
 
+## Retained Task workspace
+
+Docker's optional `BotHomeWorkspaceBackend` uses the exact registered durable
+Home volume, not daemon HOME or an ephemeral session workspace. Immutable Task
+bundles survive helper-container teardown; state and outputs remain separate.
+Workspace publication never advances Bot definition version. Canonical executable
+reads select the committed Task registry revision and verify retained bytes.
+Schedule removal does not delete Task files. Existing retention cleanup remains
+the only permanent Home deletion path. See [Task workspace](bot-task-workspace.md)
+for physical Docker acceptance and unsupported-backend boundaries.
+
 The Bot worker polls deleted Bots as part of its ordinary owner-scoped store
 traversal. After retention expires it uses `BotHomeDeleteBackend` only when the
 backend and the optional `BotHomeCleanupStore` / `BotCleanupStore` contracts are

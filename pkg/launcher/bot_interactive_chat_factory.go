@@ -56,11 +56,19 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 		return nil, err
 	}
 	in.binding.owner = withoutGenericBotMemory(in.binding.owner)
+	workspaceText, err := in.binding.tasks.guidance(ctx)
+	if err != nil {
+		return nil, err
+	}
+	provenanceText, err := in.binding.priorRetrievalContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	prompt := &agent.SystemPromptBuilder{WorkspaceDir: in.safe.WorkspaceDir, SandboxEnabled: true, SandboxWorkspaceDir: in.safe.WorkspaceDir}
 	prompt.BuildOverride = func(clone *agent.SystemPromptBuilder) string {
 		plain := *clone
 		plain.BuildOverride = nil
-		return plain.Build() + memoryText
+		return plain.Build() + memoryText + workspaceText + provenanceText
 	}
 	chat := agent.NewChatAgent(in.llm, nil, nil, in.scope.Sessions, prompt, false, false)
 	wrappers := map[string]tool.Tool{}
@@ -85,6 +93,11 @@ func newInteractiveBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig
 		return nil, err
 	}
 	workTools = append(workTools, skillTools...)
+	taskTools, err := newBotTaskTools(in.binding)
+	if err != nil {
+		return nil, err
+	}
+	workTools = append(workTools, taskTools...)
 	memoryTools, err := BotMemoryTools(in.binding.req, in.scope)
 	if err != nil {
 		return nil, err
@@ -288,6 +301,9 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	if err := t.binding.check(bound); err != nil {
 		return nil, err
 	}
+	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
+		return nil, err
+	}
 	if err := t.binding.req.Authorization.AuthorizeTool(bound, t.Name()); err != nil {
 		return nil, err
 	}
@@ -300,6 +316,11 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 		return nil, err
 	}
 	result, err := t.botRunnableTool.Run(bound, args)
+	if substantiveTaskTool(t.botRunnableTool) && t.binding.tasks != nil {
+		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
+			return result, captureErr
+		}
+	}
 	// Only the shared built-in node transport is eligible; an MCP tool with
 	// the same name or a forged result cannot attest to effects.
 	if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin {

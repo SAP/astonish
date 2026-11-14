@@ -106,7 +106,13 @@ func (m continuityAssessmentModel) GenerateContent(ctx context.Context, req *mod
 				yield(nil, errors.New("missing candidate"))
 				return
 			}
-			out = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "continuity-context", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Controlled context-only assessment; no external effects claimed"}}}
+			assessments := []store.BotCriterionAssessment{}
+			for _, criterion := range w.Criteria {
+				if !criterion.Excluded {
+					assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Controlled context-only assessment; content support is independently checked below"})
+				}
+			}
+			out = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: assessments}
 			if strings.Contains(system, "BOT_WORK_PENDING_REVIEW_V1") {
 				var pending struct {
 					Scope    string `json:"scope"`

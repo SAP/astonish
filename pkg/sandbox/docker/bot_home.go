@@ -60,6 +60,23 @@ func (db *DockerBackend) DeleteBotHome(ctx context.Context, b *sandbox.BotHomeBi
 	if len(bytes.TrimSpace(attached)) != 0 {
 		return errors.New("sandbox/docker: bot home is attached; storage retained")
 	}
+	// A private workspace is never forced away while a storage helper is attached.
+	private := workspaceVolume(b)
+	raw, e := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "inspect", private)
+	if e == nil {
+		var v []struct {
+			Name, Driver    string
+			Labels, Options map[string]string
+		}
+		if json.Unmarshal(raw, &v) != nil || len(v) != 1 || v[0].Name != private || v[0].Driver != "local" || len(v[0].Options) != 0 || v[0].Labels[botHomeScopeLabel] != b.Scope.Key() || v[0].Labels[botHomeVersionLabel] != "workspace-1" {
+			return errors.New("private workspace ownership mismatch; retained")
+		}
+		if _, e = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", private); e != nil {
+			return e
+		}
+	} else if !isDockerNotFoundError(e) && !strings.Contains(strings.ToLower(e.Error()), "no such volume") {
+		return e
+	}
 	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", b.Ref)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such volume") && ctx.Err() == nil {
 		return nil

@@ -79,6 +79,7 @@ func TestBotAgentContinuityInterruption(t *testing.T) {
 				if strings.HasPrefix(operation, "finished-") {
 					next := before.Clone()
 					next.Phase = store.BotWorkFinished
+					acceptEmployeeReviewFixture(next)
 					next.AgentWork.Disposition = store.AgentWorkPartial
 					next.AgentWork.Items[0].Status = store.BotWorkItemBlocked
 					next.AgentWork.Items[0].Reason = "Second source unavailable"
@@ -228,6 +229,7 @@ func TestBotAgentContinuitySQLiteRestoreReopen(t *testing.T) {
 			}
 			if finished {
 				saved.Work.Phase = store.BotWorkFinished
+				acceptEmployeeReviewFixture(saved.Work)
 				saved.Work.AgentWork.Disposition = store.AgentWorkPartial
 				saved.Work.AgentWork.Items[0].Status = store.BotWorkItemBlocked
 				saved.Work.AgentWork.Items[0].Reason = "Awaiting second source"

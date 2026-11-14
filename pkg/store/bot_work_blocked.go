@@ -217,10 +217,27 @@ func (w *BotWorkState) VerifiedBlockedResponse() *BotWorkBlockedResponse {
 
 // ValidateBotWorkCompletion adds explanation binding without relaxing any of the
 // repository's accepted-candidate, lease, revision, artifact or authority gates.
+// HasAcceptedEmployeeReview binds a review to all current publishable bytes.
+// This is a bounded model judgment, not a guarantee of factual truth.
+func (w *BotWorkState) HasAcceptedEmployeeReview() bool {
+	if w == nil || w.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 || w.Candidate == nil || w.EmployeeReviewPending || w.EmployeeRepairPending || w.Candidate.Digest != w.Candidate.ContentDigest() || w.Review == nil || w.validateCriteria() != nil || w.validateReview() != nil {
+		return false
+	}
+	for _, assessment := range w.Review.Criteria {
+		if assessment.Verdict != BotCriterionSatisfied {
+			return false
+		}
+	}
+	return true
+}
+
 func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
 	if w != nil && w.Protocol == BotWorkProtocolAgentLedV1 {
 		if err := w.Validate(); err != nil {
 			return err
+		}
+		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() {
+			return ErrBotInvalid
 		}
 		p := BuildBotWorkProjection(w)
 		if q.Lease.BotID != w.Contract.BotID || q.Lease.RunID != w.Contract.RunID || q.Report.Quality != nil || !reflect.DeepEqual(q.Report.Work, p) {

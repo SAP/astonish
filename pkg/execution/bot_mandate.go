@@ -96,15 +96,20 @@ func (l BotMandateLimits) ValidateWithin(c BotMandateLimits) error {
 }
 
 type BotMandate struct {
-	Ref         BotMandateRef                 `json:"ref"`
-	Purpose     BotMandatePurpose             `json:"purpose"`
-	ExpiresAt   time.Time                     `json:"expires_at"`
-	Scopes      []string                      `json:"scopes"`
-	Constraints []BotActionResourceConstraint `json:"constraints"`
-	Limits      BotMandateLimits              `json:"limits"`
+	Ref            BotMandateRef                 `json:"ref"`
+	Purpose        BotMandatePurpose             `json:"purpose"`
+	ExpiresAt      time.Time                     `json:"expires_at"`
+	Scopes         []string                      `json:"scopes"`
+	Constraints    []BotActionResourceConstraint `json:"constraints"`
+	PublicResearch *BotPublicResearchScope       `json:"public_research,omitempty"`
+	Limits         BotMandateLimits              `json:"limits"`
 }
 
 func (m BotMandate) Clone() BotMandate {
+	if m.PublicResearch != nil {
+		v := m.PublicResearch.Clone()
+		m.PublicResearch = &v
+	}
 	m.Scopes = slices.Clone(m.Scopes)
 	m.Constraints = slices.Clone(m.Constraints)
 	for i := range m.Constraints {
@@ -118,6 +123,11 @@ func (m BotMandate) Validate(now time.Time) error {
 	}
 	if !m.Purpose.Valid() || !m.ExpiresAt.After(now) || len(m.Scopes) == 0 || len(m.Constraints) == 0 {
 		return errors.New("invalid mandate purpose, expiry or constraints")
+	}
+	if m.PublicResearch != nil {
+		if err := m.PublicResearch.Validate(); err != nil {
+			return err
+		}
 	}
 	if err := m.Limits.Validate(); err != nil {
 		return err

@@ -19,7 +19,11 @@ type teamSettingsStore struct {
 var _ store.SettingsStore = (*teamSettingsStore)(nil)
 
 func (s *teamSettingsStore) Get(ctx context.Context) (*store.TeamSettings, error) {
-	setting, err := s.client.Setting.Get(ctx, settingsKey)
+	client := s.client
+	if tx, ok := ctx.Value(botPolicyTransactionKey{}).(botPolicyTransaction); ok && tx.outer == client {
+		client = tx.current
+	}
+	setting, err := client.Setting.Get(ctx, settingsKey)
 	if err != nil {
 		if teament.IsNotFound(err) {
 			return &store.TeamSettings{}, nil

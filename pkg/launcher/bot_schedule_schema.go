@@ -8,7 +8,9 @@ func botScheduleInputSchema() *jsonschema.Schema {
 	text := func(description string) *jsonschema.Schema {
 		return &jsonschema.Schema{Type: "string", Description: description}
 	}
-	return &jsonschema.Schema{Type: "object", AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}}, Required: []string{"name", "mode", "schedule"}, AnyOf: []*jsonschema.Schema{{Required: []string{"instructions"}}, {Required: []string{"invocation"}}}, Properties: map[string]*jsonschema.Schema{
+	return &jsonschema.Schema{Type: "object", AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}}, Required: []string{"name", "mode", "schedule"}, Description: "Provide task_id, instructions or invocation; the handler validates the work binding.", Properties: map[string]*jsonschema.Schema{
+		"task_id":      {Type: "string", Format: "uuid", Description: "Committed current Bot Task; execution resolves Home files"},
+		"protocol":     {Type: "string", Enum: []any{"task_v1"}, Description: "New Task-native recurrence requires task_id; omitted is explicit legacy"},
 		"skill_id":     {Type: "string", Format: "uuid", Description: "Optional internal skill of this Bot. Omit to use the persisted current task; never ask the owner for an internal ID or copy its procedure"},
 		"invocation":   text("Short task intent for the selected skill. Method is resolved at execution, never stored in the schedule."),
 		"name":         text("Short name for the reviewed schedule"),
@@ -32,10 +34,6 @@ func botScheduleUpdateInputSchema() *jsonschema.Schema {
 			"schedule": {Type: "string", MinLength: new(1), Description: "New five-field cron expression; omit to preserve cadence"},
 			"timezone": {Type: "string", MinLength: new(1), Description: "New IANA timezone; omit to preserve timezone"},
 		},
-		AnyOf: []*jsonschema.Schema{
-			{Required: []string{"enabled"}},
-			{Required: []string{"schedule"}},
-			{Required: []string{"timezone"}},
-		},
+		Description: "Provide at least one of enabled, schedule or timezone; the handler rejects an empty patch.",
 	}
 }

@@ -97,8 +97,17 @@ func (m *skillScheduleModel) GenerateContent(ctx context.Context, req *model.LLM
 	if req.Config != nil && req.Config.SystemInstruction != nil && len(req.Config.SystemInstruction.Parts) > 0 {
 		prompt = req.Config.SystemInstruction.Parts[0].Text
 	}
+	// Automatic review is a separate provider call, not an agent script turn.
+	// The fixture assesses captured candidate/receipt evidence; production owns
+	// criterion validation, persistence and the application gate.
+	if strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") || strings.HasPrefix(prompt, "BOT_WORK_PENDING_REVIEW_V1") {
+		if answer, ok := workerWorkAssessment(req, nil); ok {
+			return answer
+		}
+		m.t.Fatal("automatic review input not recognized")
+	}
 	if m.work != nil && strings.HasPrefix(prompt, "BOT_") {
-		m.t.Fatal("agent work invoked mandatory assessment")
+		m.t.Fatal("agent work invoked unexpected preparation assessment")
 	}
 	if m.work != nil && !m.control && m.tool == "" {
 		return m.agentContent()
@@ -147,6 +156,51 @@ func (m *skillScheduleModel) GenerateContent(ctx context.Context, req *model.LLM
 		}
 	}
 	return m.workerTestModel.GenerateContent(ctx, req, stream)
+}
+
+// Automatic employee review must not consume a producer turn or invent a
+// fixture criterion ID. Unknown claims stay unverified even in schedule tests.
+func TestSkillScheduleAutomaticReviewPreservesScriptAndCriteria(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		want       store.BotCriterionVerdict
+	}{
+		{"controlled-placeholder", "durable controlled result", store.BotCriterionSatisfied},
+		{"unsupported-claim", "The schedule was applied successfully.", store.BotCriterionUnverified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &skillScheduleModel{t: t, stage: 2, work: func() *store.BotWorkState {
+				t.Fatal("review consumed the agent script")
+				return nil
+			}}
+			w := store.BotWorkState{Criteria: []store.BotWorkCriterion{
+				{ID: "actual-owner-criterion", Text: "Report the result truthfully", SourceIDs: []string{"assignment"}},
+				{ID: "excluded-owner-criterion", Excluded: true},
+			}, Candidate: &store.BotWorkCandidate{Digest: "actual-candidate-digest", Text: tc.text}}
+			raw, err := json.Marshal(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := &model.LLMRequest{Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText("BOT_WORK_REVIEW_V1", "system")}, Contents: []*genai.Content{genai.NewContentFromText(string(raw), "user")}}
+			count := 0
+			for response, err := range m.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				count++
+				var review store.BotWorkReview
+				if err := json.Unmarshal([]byte(response.Content.Parts[0].Text), &review); err != nil {
+					t.Fatal(err)
+				}
+				if review.CandidateDigest != w.Candidate.Digest || len(review.Criteria) != 1 || review.Criteria[0].CriterionID != w.Criteria[0].ID || review.Criteria[0].Verdict != tc.want {
+					t.Fatalf("review lost actual candidate/criteria or blessed unsupported output: %+v", review)
+				}
+			}
+			if count != 1 || m.stage != 2 || m.calls != 0 {
+				t.Fatalf("review consumed script: responses=%d stage=%d calls=%d", count, m.stage, m.calls)
+			}
+		})
+	}
 }
 
 // Actual HTTP owner turns create the skill and authorized controls. The real

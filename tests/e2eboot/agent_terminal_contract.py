@@ -4,10 +4,10 @@ Required additions to the producer (absence is UNVERIFIED, never inferred):
 * terminal frames: {encoding: 'base64', data: raw PTY bytes, rows: int, cols: int}
 * studio_manifest -> agent-studio.json: invocation binding, bot_id, url, two
   passes with the same exchanges plus rendered {invocation_id, text, visible,
-  run_states, skills}, captured from the Studio DOM/rendered component dataset.
+  run_states}, captured from the Studio DOM/rendered component dataset.
 * state.agent_cli_sha256: independently retained native candidate build digest.
 
-Studio exchanges are actual snapshot/skills/SSE responses, not reserialized
+Studio exchanges are actual snapshot/SSE responses, not reserialized
 terminal records. rendered.text is the visible canonical final bubble's DOM text.
 Only a conservative terminal escape subset is interpreted; unknown controls fail
 closed rather than treating hidden output as a visible answer.
@@ -206,7 +206,9 @@ def _terminal_parity(state, actual):
     for pass_index, (terminal_pass, studio_pass) in enumerate(zip(terminal['passes'], studio['passes'])):
         observed = records(terminal_pass['exchanges'], bot)
         browser = records(studio_pass['exchanges'], bot)
-        check(observed == browser, 'Studio/terminal records differ')
+        check(not any(path.endswith('/skills') for path in browser[0]), 'Studio fetched removed Skills dataset')
+        shared = {path: value for path, value in observed[0].items() if not path.endswith('/skills')}
+        check((shared, observed[1], observed[2]) == browser, 'Studio/terminal records differ')
         check(canonical is None or canonical == observed, 'reconnect changed persisted records')
         canonical = observed
         endpoints, events, snapshot = observed
@@ -217,9 +219,8 @@ def _terminal_parity(state, actual):
         rendered = studio_pass['rendered']
         check(rendered['visible'] is True and rendered['invocation_id'] == invocation
               and isinstance(rendered['text'], str) and rendered['text'].strip(), 'missing/foreign Studio final bubble')
-        check(rendered['run_states'] == snapshot['run_states']
-              and rendered['skills'] == endpoints['/api/studio/bots/' + bot + '/skills']['skills'],
-              'Studio rendered work/skill dataset differs')
+        check(rendered['run_states'] == snapshot['run_states'], 'Studio rendered work dataset differs')
+        check('skills' not in rendered and 'skills_text' not in rendered, 'Studio includes removed Skills dataset')
         # Deliberately conservative: no guessed Markdown stripping or fuzzy matching.
         check(normalize(rendered['text']) == normalize(text), 'Studio final text differs from publication')
         frames = terminal_pass['frames']

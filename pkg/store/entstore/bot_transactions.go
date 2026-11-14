@@ -76,6 +76,7 @@ type botStoredRecord struct {
 }
 
 type botStoredRun struct {
+	Task *store.BotTaskRevision `json:"task,omitempty"`
 	// SkillAdmissionOwner is set only by authenticated, original manual RequestRun.
 	// It is not copied from tool input or inferred from a user-shaped transcript.
 	SkillAdmissionOwner        *uuid.UUID                `json:"skill_admission_owner,omitempty"`
@@ -177,6 +178,7 @@ type botRepository struct {
 	now  func() time.Time
 	// Installed by the runtime composition, never accepted from a request.
 	activationCheck func(context.Context, store.Bot, store.BotVersion) error
+	taskVerifier    func(context.Context, store.BotTaskPublication, string) error
 }
 
 func (r *botRepository) clock() time.Time {
@@ -365,7 +367,14 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 		if err := validateRunSkillSelection(ctx, tx, req.BotID, req.SkillID, req.Invocation); err != nil {
 			return err
 		}
+		pinnedTask, err := pinTaskHead(ctx, tx, req.BotID, req.TaskID)
+		if err != nil {
+			return err
+		}
 		run := store.BotRun{SkillID: req.SkillID, Invocation: req.Invocation, Intent: req.Intent, ID: uuid.New(), BotID: req.BotID, Version: req.Version, SessionID: uuid.New(), Trigger: req.Trigger, TriggerID: req.TriggerID, IdempotencyKey: req.IdempotencyKey, Status: store.RunQueued, CreatedAt: now}
+		if pinnedTask != nil {
+			run.Task = pinnedTask.Ref.Clone()
+		}
 		if occurrence != nil && occurrence.external == nil {
 			if err := r.attachScheduledTask(ctx, tx, rec, &run, req); err != nil {
 				return err
@@ -377,7 +386,7 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 			owner := actor
 			admissionOwner = &owner
 		}
-		if err := tx.InsertRun(ctx, botStoredRun{SkillAdmissionOwner: admissionOwner, Run: run, ExternalAdmissionValidated: occurrence != nil && occurrence.external != nil, RequestHash: hash, Instructions: req.Instructions, Attachments: req.Attachments, OccurrenceAt: req.OccurrenceAt}, rec.Bot.OwnerID); err != nil {
+		if err := tx.InsertRun(ctx, botStoredRun{Task: pinnedTask.Clone(), SkillAdmissionOwner: admissionOwner, Run: run, ExternalAdmissionValidated: occurrence != nil && occurrence.external != nil, RequestHash: hash, Instructions: req.Instructions, Attachments: req.Attachments, OccurrenceAt: req.OccurrenceAt}, rec.Bot.OwnerID); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status, "intent": store.BotOutboxDispatch, "actor_id": actor})
@@ -493,6 +502,7 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 				return err
 			}
 			run.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.BotID, RunID: req.RunID, Version: run.Run.Version, AdmissionEventID: run.Run.UserEventID, Instructions: run.Instructions, Charter: version.Charter, Goals: goals, Attachments: store.PinBotWorkAttachments(run.Attachments)})
+			run.Work.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
 			if err := run.Work.Validate(); err != nil {
 				return err
 			}
@@ -798,6 +808,16 @@ func (r *botRepository) ConsumeApproval(ctx context.Context, q store.BotApproval
 // CommitRun publishes one immutable outcome per execution lease. Transport done
 // events cannot call this without an explicit status and report. Side-effect
 // delivery is deferred: this transaction records publication intent only.
+// WithBotKnowledgeCommitSource binds an issuer snapshot builder to terminal
+// commits. The builder executes before the transaction, avoiding outer-store
+// reads while SQLite's single writer is locked. Source identities are filled
+// only after inserting the canonical result activity.
+func WithBotKnowledgeCommitSource(ctx context.Context, build func(context.Context, store.BotLease) (store.BotKnowledgeExtractionInput, error)) context.Context {
+	return context.WithValue(ctx, botKnowledgeCommitSourceKey{}, build)
+}
+
+type botKnowledgeCommitSourceKey struct{}
+
 func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) error {
 	if q.ModelSelection != nil && (strings.TrimSpace(q.ModelSelection.Provider) == "" || strings.TrimSpace(q.ModelSelection.Model) == "") {
 		return store.ErrBotInvalid
@@ -847,6 +867,14 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 	hash, err := botHash(q)
 	if err != nil {
 		return err
+	}
+	var extraction *store.BotKnowledgeExtractionInput
+	if build, ok := ctx.Value(botKnowledgeCommitSourceKey{}).(func(context.Context, store.BotLease) (store.BotKnowledgeExtractionInput, error)); ok && q.Status.Terminal() {
+		input, e := build(ctx, q.Lease)
+		if e != nil {
+			return e
+		}
+		extraction = &input
 	}
 	return r.db.Transaction(ctx, func(tx botDraftDB) error {
 		now := r.clock()
@@ -931,11 +959,30 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 				return err
 			}
 		}
-		payload, err := json.Marshal(map[string]any{"run_id": q.Lease.RunID, "status": q.Status, "report": q.Report, "usage": q.Usage, "intent": store.BotOutboxPublish})
+		resultPayload := map[string]any{"run_id": q.Lease.RunID, "status": q.Status, "report": q.Report, "usage": q.Usage, "intent": store.BotOutboxPublish}
+		if extraction != nil {
+			extraction.OwnerMessage = saved.Instructions
+			extraction.Outcome.Status = string(q.Status)
+			extraction.Outcome.Answer = q.Report.Summary
+			extraction.Source = store.BotKnowledgeExtractionSource{BotID: q.Lease.BotID, RunID: q.Lease.RunID, Version: saved.Run.Version, Sequence: rec.LastSequence + 1, OutcomeDigest: store.BotKnowledgeDigest(extraction.Outcome)}
+			resultPayload["knowledge_source"] = extraction.Source
+		}
+		payload, err := json.Marshal(resultPayload)
 		if err != nil {
 			return err
 		}
-		return insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityReport, Payload: payload, CreatedAt: now}, fmt.Sprintf("result:%s:%d", q.Lease.RunID, q.Lease.Fence))
+		if err := insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityReport, Payload: payload, CreatedAt: now}, fmt.Sprintf("result:%s:%d", q.Lease.RunID, q.Lease.Fence)); err != nil {
+			return err
+		}
+		if extraction != nil {
+			extraction.OwnerMessage = saved.Instructions
+			extraction.Outcome.Status = string(q.Status)
+			extraction.Outcome.Answer = q.Report.Summary
+			extraction.Source = store.BotKnowledgeExtractionSource{BotID: q.Lease.BotID, RunID: q.Lease.RunID, Version: saved.Run.Version, Sequence: rec.LastSequence + 1, OutcomeDigest: store.BotKnowledgeDigest(extraction.Outcome)}
+			_, err := r.enqueueBotKnowledgeExtractionTx(ctx, tx, *extraction)
+			return err
+		}
+		return nil
 	})
 }
 

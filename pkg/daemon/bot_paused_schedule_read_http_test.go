@@ -106,7 +106,7 @@ func (m *pausedScheduleReadModel) GenerateContent(_ context.Context, r *model.LL
 			}
 			m.inspected()
 			m.step++
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("Selected report resume is pending.", "model"), TurnComplete: true}, nil)
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(response["message"].(string), "model"), TurnComplete: true}, nil)
 			return
 		default:
 			yield(nil, fmt.Errorf("unexpected paused schedule retry"))

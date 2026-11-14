@@ -231,7 +231,7 @@ class EmployeeObserverTests(unittest.TestCase):
             self.assertIsNone(launcher.employee_run_session(row, errors))
             self.assertEqual(errors, [])
             # Other public fields beside Run remain an ambiguous second run.
-            for field in ('skill_id', 'invocation', 'session_id'):
+            for field in ('task', 'skill_id', 'invocation', 'session_id'):
                 with self.subTest(wrapper=wrapper, field=field):
                     row['data'] = json.dumps(dict(document, **{field: 'conflict'}))
                     errors = []
@@ -243,7 +243,9 @@ class EmployeeObserverTests(unittest.TestCase):
                              launcher.EMPLOYEE_RUN_FIELDS))
 
     def test_run_session_canonical_shapes_exact_identity(self):
-        run = dict(id=str(uuid.uuid4()), bot_id=self.bot, session_id=str(uuid.uuid4()), version=9007199254740993)
+        run = dict(id=str(uuid.uuid4()), bot_id=self.bot, session_id=str(uuid.uuid4()),
+                   version=9007199254740993,
+                   task=dict(task_id=str(uuid.uuid4()), revision=7, digest='committed-task-digest'))
         for nested in (run, {'run': run}, {'Run': run, 'ExternalAdmissionValidated': False}):
             for document in (nested, {'bot_document': json.dumps(nested)}):
                 for indexed in (False, True):

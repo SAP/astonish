@@ -22,7 +22,53 @@ def agent_config():
     return config
 
 
+def task_config(engine='tavily'):
+    config = agent_config()
+    config.update(provider_instance=launcher.TASK_TARGET['provider'], intended=dict(launcher.TASK_TARGET))
+    config['search_config'] = (dict(engine='tavily', api_key='SEARCH_SECRET_SENTINEL') if engine == 'tavily'
+        else dict(engine='perplexity', provider_instance='search-provider', model='sonar-pro',
+                  provider_config=dict(type='litellm', base_url='https://search.example.test', api_key='SEARCH_SECRET_SENTINEL')))
+    return config
+
+
 class ProviderStartupTests(unittest.TestCase):
+    def test_task_explicit_search_settings_staged_privately_before_startup(self):
+        for engine in ('tavily', 'perplexity'):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory); binary = repo / 'candidate'; binary.write_bytes(b'candidate')
+                settings, search, route = launcher.task_configuration(task_config(engine))
+                env = dict(LOCAL_BOT_BINARY=str(binary), LOCAL_BOT_DOCKER=str(binary), LOCAL_BOT_LAYERS=str(repo/'layers'))
+                env[launcher.CANDIDATE_PROVIDER_ENV] = json.dumps(settings)
+                env[launcher.TASK_SEARCH_ENV] = json.dumps(search)
+                def start(args, **kwargs):
+                    path = next((repo/'.tmp').glob('*/config/astonish/config.yaml'))
+                    staged = yaml.safe_load(path.read_text())
+                    self.assertEqual(staged['general']['web_search_tool'], route['tool'])
+                    self.assertEqual(staged['general']['default_provider'], launcher.TASK_TARGET['provider'])
+                    self.assertEqual(staged['providers'], settings['providers'])
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    if engine == 'tavily': self.assertEqual(staged['web_servers'], search['web_servers'])
+                    else: self.assertEqual(staged['perplexity_web_search'], search['perplexity_web_search'])
+                    return 'owned-container\n'
+                with patch('native_candidate_staging.stage', return_value={'candidate_image_id':'sha256:native'}), patch.object(launcher, 'REPO', repo), patch.object(launcher.subprocess, 'check_output', side_effect=start):
+                    state = launcher.create(env)
+                for name in ('state.json', 'daemon.env', 'provider-startup-receipt.json'):
+                    self.assertNotIn('SECRET_SENTINEL', (Path(state['root'])/name).read_text())
+                self.assertNotIn('SECRET_SENTINEL', json.dumps(route))
+
+    def test_task_search_config_is_exact_no_ambient_fallback(self):
+        from copy import deepcopy
+        valid = task_config(); launcher.task_configuration(valid)
+        cases = []
+        c = deepcopy(valid); del c['search_config']; cases.append(c)
+        c = deepcopy(valid); c['search_config']['api_key']=''; cases.append(c)
+        c = deepcopy(valid); c['search_config']['unknown']='SECRET_SENTINEL'; cases.append(c)
+        c = deepcopy(valid); c['intended']['provider']='alias'; cases.append(c)
+        c = deepcopy(valid); c['search_config']['engine']='brave'; cases.append(c)
+        for config in cases:
+            with self.assertRaises(ValueError) as error: launcher.task_configuration(config)
+            self.assertNotIn('SECRET_SENTINEL', str(error.exception))
+
     def test_versioned_provider_and_legacy_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

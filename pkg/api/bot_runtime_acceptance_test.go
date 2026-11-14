@@ -125,7 +125,13 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		if work.Candidate != nil && work.Candidate.Text == "Exact approved action receipt observed." && len(work.Candidate.Observations) > 0 && len(work.Candidate.Artifacts) == 1 && work.Candidate.Bodies[work.Candidate.Artifacts[0].ID.String()] == work.Candidate.Text {
 			verdict = store.BotCriterionSatisfied
 		}
-		output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "receipt", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected captured receipt and actual observed effect."}}}
+		assessments := []store.BotCriterionAssessment{}
+		for _, criterion := range work.Criteria {
+			if !criterion.Excluded {
+				assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected captured receipt and actual observed effect."})
+			}
+		}
+		output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: assessments}
 	} else {
 		return nil, false
 	}

@@ -41,7 +41,13 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 		if accept != nil && accept(&w) {
 			verdict = store.BotCriterionSatisfied
 		}
-		output = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "controlled-result", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Inspected captured controlled result"}}}
+		assessments := []store.BotCriterionAssessment{}
+		for _, criterion := range w.Criteria {
+			if !criterion.Excluded {
+				assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Inspected captured controlled result"})
+			}
+		}
+		output = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: assessments}
 	} else {
 		return nil, false
 	}

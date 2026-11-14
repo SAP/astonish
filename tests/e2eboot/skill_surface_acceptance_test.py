@@ -11,6 +11,13 @@ class SkillSurfaceGateTest(unittest.TestCase):
     def check(self, events):
         return validate('\n'.join(json.dumps(event) for event in events))
 
+    def test_removed_browser_contract_and_retained_terminal_cases(self):
+        self.assertNotIn('TestBotSkillsBrowserAcceptance', CASES)
+        self.assertEqual(CASES['TestBotDetailsWithoutSkillsBrowserAcceptance'],
+                         ('browser/no-skills', 'browser/no-skill-fetch', 'browser/home-readonly'))
+        self.assertIn('pty/schema', CASES['TestBotSkillsPTYAcceptance'])
+        self.assertIn('pty/escape-readonly', CASES['TestBotSkillsPTYAcceptance'])
+
     def test_complete(self):
         self.assertEqual(len(self.check(self.events())), sum(map(len, CASES.values())))
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict isolated built Studio/native-browser and remote-command PTY gate."""
+"""Strict isolated Details-without-Skills and retained remote-command PTY gate."""
 import argparse
 import json
 import os

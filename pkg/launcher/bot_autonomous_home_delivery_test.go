@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -34,7 +35,10 @@ type homeDeliveryModel struct {
 }
 
 func (*homeDeliveryModel) Name() string { return "home-delivery-controlled" }
-func (m *homeDeliveryModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if strings.HasPrefix(providerSystem(req), "BOT_WORK_REVIEW_V1") {
+		return (continuityAssessmentModel{LLM: m}).GenerateContent(ctx, req, stream)
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
 		system := ""
@@ -113,12 +117,17 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	}
 	v.Budget = spec
 	f.req.Bot, f.req.Version, f.req.Run, f.req.Policy, f.req.Budget, f.req.Instructions = *b, *v, *run, policy, meter, homeWeatherTask
+	f.req.Work, err = repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.services.PersonalBots = repo
 	f.services.Memory = nil
 	_, err = f.sessions.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: b.OwnerID.String(), SessionID: run.SessionID.String(), State: map[string]any{"execution_owner": "bot"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.sessions = f.services.PersonalSessions
 	llm := &homeDeliveryModel{t: t}
 	f.cfg.ContextWindow = 200000
 	f.cfg.WrapModel = func(_ context.Context, _ model.LLM, budget execution.RunBudget) (model.LLM, error) {
@@ -130,8 +139,10 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 		if args["url"] != homeWeatherURL || args["method"] != "GET" {
 			return nil, fmt.Errorf("unexpected fetch: %v", args)
 		}
-		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{Source: homeWeatherURL, Summary: homeWeatherAnswer, Kind: store.BotEvidenceObservation, ObservedAt: time.Now().UTC(), ActorID: b.OwnerID}}})
-		return map[string]any{"status_code": 200, "body": `{"current_condition":[{"temp_C":"24","weatherDesc":[{"value":"Clear"}]}],"fixture_padding":"` + strings.Repeat("x", 39417) + `"}`}, nil
+		response := map[string]any{"status_code": 200, "body": `{"current_condition":[{"temp_C":"24","weatherDesc":[{"value":"Clear"}]}],"fixture_padding":"` + strings.Repeat("x", 39417) + `"}`}
+		raw, _ := json.Marshal(response)
+		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{Source: homeWeatherURL, Summary: homeWeatherAnswer, Kind: store.BotEvidenceObservation, ObservedAt: time.Now().UTC(), ActorID: b.OwnerID}}, SourceAccess: []store.BotSourceAccessFact{{EvidenceRef: "capture:" + c.FunctionCallID(), CallID: c.FunctionCallID(), OriginalURL: homeWeatherURL, Status: store.BotSourceAccessReturned, HTTPStatus: 200, ObservedAt: time.Now().UTC(), BodyDigest: fmt.Sprintf("%x", sha256.Sum256(raw))}}})
+		return response, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,13 +162,17 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != store.RunSucceeded || result.Report.Summary != homeWeatherAnswer || len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 1 {
-		t.Fatalf("result=%+v", result)
+	if result.Status != store.RunSucceeded || result.Report.Summary != homeWeatherAnswer || len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 0 {
+		t.Fatalf("result=%+v work=%+v", result, result.Report.Work)
 	}
 	assertLauncherAgentResult(t, repo, worker, lease, result)
+	work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil || work == nil || !work.HasAcceptedEmployeeReview() || len(work.AgentWork.Evidence) != 1 || len(work.AgentWork.SourceAccess) != 1 || work.AgentWork.SourceAccess[0].OriginalURL != homeWeatherURL {
+		t.Fatalf("weather evidence/review missing: %+v %v", work, err)
+	}
 	usage := meter.Usage()
-	// Only producer calls are charged: no orientation, preparation or review.
-	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241 || usage.OutputTokens != 81+97 {
+	// Producer and independent review are charged to the same finite budget.
+	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241+7 || usage.OutputTokens != 81+97+3 {
 		t.Fatalf("calls=%d fetches=%d usage=%+v", llm.calls, fetches, usage)
 	}
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: usage}); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -37,7 +38,7 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 	}
 	pool := sandbox.NewBackendPool(b, sandbox.ResourceLimits{})
 	release := func() { pool.Cleanup(); cleanup() }
-	w, err := NewBotWorker(BotWorkerConfig{MandatePolicy: newProductionBotMandatePolicy(backend, cfg), TurnRegistry: registry, Backend: backend, Sandbox: b, Pool: pool, WorkerID: "bot-" + uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, p execution.Principal, scope store.BotScope, name, modelName string) (model.LLM, error) {
+	w, err := NewBotWorker(BotWorkerConfig{KnowledgeSafety: botKnowledgeSafety, KnowledgeRedactor: productionKnowledgeRedactor(backend, cfg), MandatePolicy: newProductionBotMandatePolicy(backend, cfg), TurnRegistry: registry, Backend: backend, Sandbox: b, Pool: pool, WorkerID: "bot-" + uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, p execution.Principal, scope store.BotScope, name, modelName string) (model.LLM, error) {
 		org, err := backend.ForOrg(p.OrgSlug)
 		if err != nil {
 			return nil, err
@@ -100,6 +101,15 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 			defer cancel()
 			_ = b.DestroySession(c, id)
 		}}
+		if workspaceBackend, ok := b.(sandbox.BotHomeWorkspaceBackend); ok {
+			if tasks, ok := repo.(store.BotTaskStore); ok {
+				workspace := &launcher.BotTaskWorkspace{Backend: workspaceBackend, Bots: repo, Tasks: tasks}
+				if err := workspace.Install(); err != nil {
+					return resources, err
+				}
+				resources.TaskWorkspace = workspace
+			}
+		}
 		if r.Mandate != nil {
 			resources.PolicyRuntime.Mandate = r.Mandate
 		}
@@ -131,10 +141,23 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 			return resources, resources.VerifyIsolation(ctx)
 		}
 		if r.Mandate != nil {
-			reads, err := launcher.BotMandatedReadTools(r.Mandate, launcher.BotRoutineReadPolicy(scope.Services))
+			var mcp []tool.Tool
+			if grant := r.Mandate.Authorization.Snapshot().PublicResearch; grant != nil && grant.Route.Engine.IsMCP() {
+				var cleanupMCP func()
+				mcp, cleanupMCP, err = launcher.BotMCPTools(ctx, pool, id, scope.Services.MCPServers, scope.Services.TeamMCPServers)
+				if cleanupMCP != nil {
+					previous := resources.Cleanup
+					resources.Cleanup = func() { cleanupMCP(); previous() }
+				}
+				if err != nil {
+					return resources, err
+				}
+			}
+			reads, episode, err := productionBotMandatedTools(ctx, r, scope, mcp, provider.GetProvider)
 			if err != nil {
 				return resources, err
 			}
+			resources.Research = episode
 			resources.Tools = reads
 			resources.PolicyRuntime.Classifier = launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)
 			resources.VerifyIsolation = func(c context.Context) error {
@@ -284,6 +307,50 @@ func productionBotKnowledgeTools(ctx context.Context, backend store.PlatformBack
 	svc.PlatformSettings, svc.OrgSettings = backend.PlatformSettings(), backend.OrgSettings(r.Principal.OrgSlug)
 	local.Services = &svc
 	return launcher.BotKnowledgeTools(r, &local, provider.GetProvider)
+}
+
+// productionBotMandatedTools is shared by the production Prepare branch and the
+// HTTP acceptance harness. Installing a question adapter does not grant its use.
+func productionBotMandatedTools(ctx context.Context, r bot.RunRequest, scope *launcher.BotChatScope, mcp []tool.Tool, factory tools.LLMFactory) ([]tool.Tool, *launcher.BotResearchEpisode, error) {
+	reads, err := launcher.BotMandatedReadTools(r.Mandate, launcher.BotRoutineReadPolicy(scope.Services))
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, "ask_user") == nil {
+		workflow, err := launcher.BotWorkflowTools(r, scope)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, candidate := range workflow {
+			if candidate.Name() == "ask_user" {
+				reads = append(reads, candidate)
+			}
+		}
+	}
+	grant := r.Mandate.Authorization.Snapshot().PublicResearch
+	initialTitle := false
+	if grant == nil {
+		record, err := r.Mandate.Runtime.ReadBotMandate(ctx, r.Mandate.Authorization.Ref())
+		if err != nil {
+			return nil, nil, err
+		}
+		initialTitle = record.Provenance.InitiationKind == store.BotInitiationKindTitle
+	}
+	var episode *launcher.BotResearchEpisode
+	if grant != nil || initialTitle {
+		episode, err = launcher.NewBotResearchEpisode(r.Run.ID, r.Run.SessionID.String(), launcher.BotResearchOpenWeb, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if grant != nil {
+		search, err := launcher.BotConfiguredResearchTool(ctx, r, scope, factory, mcp, episode)
+		if err != nil {
+			return nil, episode, err
+		}
+		reads = append(reads, search)
+	}
+	return reads, episode, nil
 }
 
 // productionBotWorkflowTools installs only trusted tenant storage. It deliberately

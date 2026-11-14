@@ -85,7 +85,7 @@ func (s *botMandateRuntime) verifyScheduledTask(ctx context.Context, tx botDraft
 	if parent.Provenance != m.Provenance || m.Mandate.ExpiresAt.After(parent.Mandate.ExpiresAt) {
 		return store.ErrBotForbidden
 	}
-	if err := checkMandatePolicy(m.Mandate, store.BotMandatePolicy{Scopes: parent.Mandate.Scopes, Constraints: parent.Mandate.Constraints, Limits: parent.Mandate.Limits}); err != nil {
+	if err := checkMandatePolicy(m.Mandate, store.BotMandatePolicy{Scopes: parent.Mandate.Scopes, Constraints: parent.Mandate.Constraints, Limits: parent.Mandate.Limits, PublicResearch: parent.Mandate.PublicResearch}); err != nil {
 		return err
 	}
 	op, err := readMandateOperation(ctx, tx, rec, b.Parent, b.OperationID)

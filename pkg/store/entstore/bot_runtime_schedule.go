@@ -241,7 +241,7 @@ func (r *botRepository) resolveScheduledRequest(ctx context.Context, tx botDraft
 		if trigger.ID != q.TriggerID {
 			continue
 		}
-		if !trigger.Enabled || trigger.ScheduleID == nil || trigger.ScheduleID.String() != q.JobID || strings.TrimSpace(trigger.Instructions) == "" {
+		if !trigger.Enabled || trigger.ScheduleID == nil || trigger.ScheduleID.String() != q.JobID || (trigger.TaskID == nil && strings.TrimSpace(trigger.Instructions) == "") {
 			return store.ErrBotForbidden
 		}
 		switch trigger.Kind {
@@ -263,6 +263,7 @@ func (r *botRepository) resolveScheduledRequest(ctx context.Context, tx botDraft
 		default:
 			return store.ErrBotUnsupported
 		}
+		req.TaskID = trigger.TaskID
 		req.Trigger = trigger.Kind
 		req.Instructions = trigger.Instructions
 		req.SkillID, req.Invocation = trigger.SkillID, trigger.Invocation

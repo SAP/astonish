@@ -26,6 +26,33 @@ func TestToolOutcomeOwnerContext(t *testing.T) {
 	}
 }
 
+func TestToolNonexecutionLedger(t *testing.T) {
+	ctx, _ := WithToolOutcomes(context.Background())
+	receipt := &ToolNonexecutionReceipt{CallID: "rejected", ToolName: "bot_work_update"}
+	RecordToolOutcome(ctx, receipt.CallID, ToolOutcome{Verified: true, Nonexecution: receipt})
+	receipt.ToolName = "spoofed"
+	outcome, ok := TakeToolOutcome(ctx, "rejected")
+	if !ok || outcome.Nonexecution == nil || outcome.Nonexecution.ToolName != "bot_work_update" {
+		t.Fatalf("receipt was not snapshotted: %+v", outcome)
+	}
+	if _, ok := TakeToolOutcome(ctx, "rejected"); ok {
+		t.Fatal("receipt replayed")
+	}
+	for _, reverse := range []bool{false, true} {
+		failed := ToolOutcome{Unverified: []string{"send receipt missing"}}
+		rejected := ToolOutcome{Verified: true, Nonexecution: &ToolNonexecutionReceipt{CallID: "conflict", ToolName: "send"}}
+		if reverse {
+			failed, rejected = rejected, failed
+		}
+		RecordToolOutcome(ctx, "conflict", failed)
+		RecordToolOutcome(ctx, "conflict", rejected)
+		got, ok := TakeToolOutcome(ctx, "conflict")
+		if !ok || !got.ReceiptConflict {
+			t.Fatalf("duplicate record erased conflict: %+v", got)
+		}
+	}
+}
+
 func TestToolOutcomeLedger(t *testing.T) {
 	ctx, _ := WithToolOutcomes(context.Background())
 	e := store.BotEvidence{Kind: store.BotEvidenceObservation, Summary: "observed", Source: "fixture", ObservedAt: time.Now(), ActorID: uuid.New()}

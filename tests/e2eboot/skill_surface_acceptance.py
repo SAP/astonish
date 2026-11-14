@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 CASES = {
-    'TestBotSkillsBrowserAcceptance': ('browser/empty', 'browser/import-cancel', 'browser/import-success', 'browser/history', 'browser/schema', 'browser/stale-retry', 'browser/legacy-schedule', 'browser/home-readonly'),
+    'TestBotDetailsWithoutSkillsBrowserAcceptance': ('browser/no-skills', 'browser/no-skill-fetch', 'browser/home-readonly'),
     'TestBotSkillsPTYAcceptance': ('pty/empty', 'pty/history', 'pty/schema', 'pty/receipts', 'pty/stale-retry', 'pty/escape-readonly'),
 }
 
@@ -39,7 +39,7 @@ def validate(text):
 def main():
     root = Path(__file__).resolve().parents[2]
     env = dict(os.environ, ASTONISH_BOT_BROWSER_ACCEPTANCE='1')
-    command = ['go', 'test', './pkg/api', './cmd/astonish', '-run', '^TestBotSkills(Browser|PTY)Acceptance$', '-count=1', '-json', '-timeout=5m']
+    command = ['go', 'test', './pkg/api', './cmd/astonish', '-run', '^TestBot(SkillsPTY|DetailsWithoutSkillsBrowser)Acceptance$', '-count=1', '-json', '-timeout=5m']
     result = subprocess.run(command, cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)

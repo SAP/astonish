@@ -129,6 +129,46 @@ describe('Bot quality assessment', () => {
 })
 
 describe('Bot workspace', () => {
+  it.each((['personal', 'team'] as const).flatMap(scope =>
+    (['draft', 'active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
+      ['owner', 'other'].map(userId => ({ scope, status, userId })))))('omits Skills and file navigation in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
+    render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId={userId} />)
+    await openDetails('Runs')
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.querySelector('[aria-label="Bot skills"]')).toBeNull()
+    expect(within(dialog).queryByText(/Skills & history|File browser|Tasks/, { selector: 'summary' })).not.toBeInTheDocument()
+    for (const name of ['Goals', 'Memory & charter', 'Schedule & triggers', 'Runs & activity', 'Review inbox']) {
+      expect(within(dialog).getByText(name, { selector: 'summary' })).toBeInTheDocument()
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Refresh Bot' }))
+    await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(2))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(screen.getByLabelText('Shared composer')).toBeInTheDocument()
+    await openDetails('Runs')
+    // Schedule & triggers retains its independent limit=100 selection read.
+    expect(vi.mocked(skillsApi.listBotSkills).mock.calls.every(([, , options]) => options?.limit === 100)).toBe(true)
+    expect(api.requestBotRun).not.toHaveBeenCalled()
+    expect(cancelBotRun).not.toHaveBeenCalled()
+    expect(api.botLifecycle).not.toHaveBeenCalled()
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+  })
+  it('never fetches the removed Skills inspector in loading, failed or empty workspace states', async () => {
+    vi.mocked(api.getBot).mockImplementationOnce(() => new Promise(() => {}))
+    const view = render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="dark" userId="owner" />)
+    expect(screen.getByText('Loading Bot…')).toBeInTheDocument()
+    vi.mocked(api.getBot).mockRejectedValueOnce(new Error('Workspace unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry workspace' }))
+    await screen.findByRole('alert')
+    vi.mocked(api.getBot).mockResolvedValue(bot)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry workspace' }))
+    await openDetails('Runs')
+    expect(await screen.findByText('No runs yet.')).toBeInTheDocument()
+    expect(screen.queryByText('Skills & history')).not.toBeInTheDocument()
+    // Schedule & triggers retains its independent limit=100 selection read.
+    expect(vi.mocked(skillsApi.listBotSkills).mock.calls.every(([, , options]) => options?.limit === 100)).toBe(true)
+    view.unmount()
+  })
   it.each(['dark', 'light'])('keeps saved work accessible only in Details when closed and reopened (%s)', async theme => {
     const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: bot.id, run_id: 'saved-run', work_revision: 2, phase: 'finished', disposition: 'answered', items: [{ id: 'source', status: api.WorkItemStatus.Complete, summary: 'Compared original sources' }] }
     vi.mocked(api.listBotRuns).mockResolvedValue({ runs: [{ id: 'saved-run', bot_id: bot.id, status: 'succeeded', trigger: 'manual', work, report: { summary: 'The actual answer' }, usage: { tool_calls: 2 } } as api.BotRun] })

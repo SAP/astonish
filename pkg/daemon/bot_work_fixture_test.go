@@ -76,7 +76,13 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 		if pass {
 			verdict = store.BotCriterionSatisfied
 		}
-		output = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "fixture-result", Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Checked captured controlled result and pending receipt status."}}}
+		assessments := []store.BotCriterionAssessment{}
+		for _, criterion := range w.Criteria {
+			if !criterion.Excluded {
+				assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Checked captured controlled result and pending receipt status."})
+			}
+		}
+		output = store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: assessments}
 		if strings.HasPrefix(prompt, "BOT_WORK_PENDING_REVIEW_V1") {
 			deferred := store.BotWorkReview{CandidateDigest: w.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "fixture-result", Verdict: store.BotCriterionUnverified, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + w.Candidate.Digest}, Explanation: "Pending receipt does not establish application; the real worker applies after source completion."}}}
 			output = map[string]any{"current_turn": output, "deferred_application": deferred}
@@ -140,9 +146,26 @@ func workerAssessContent(in workerContentInput, item workerContentItem) workerCo
 	case "durable controlled result":
 		a.ClaimType, a.Support = workerClaimNonfactual, store.BotCriterionSatisfied
 		a.Explanation = "Literal placeholder identifying the controlled text response; no external fact or action is asserted."
-	case triggerExecutionAnswer, "No delivery fact in active context.":
+	case triggerExecutionAnswer, "No delivery fact in active context.", "I can continue without a saved method.":
 		a.ClaimType, a.Support = workerClaimNonfactual, store.BotCriterionSatisfied
 		a.Explanation = "Honest limitation, not an assertion of an external outcome."
+	case "The schedule request is pending; application is not yet verified.":
+		for ref, raw := range in.ExecutionEvidence {
+			var receipt store.BotEvidence
+			if json.Unmarshal([]byte(raw), &receipt) == nil && strings.Contains(receipt.Summary, "(schedule_create)") && strings.Contains(receipt.Summary, "pending") {
+				a.ClaimType, a.Support = workerClaimExecution, store.BotCriterionSatisfied
+				a.ExecutionSources = append(a.ExecutionSources, workerContentSource{Ref: ref, Quote: raw})
+				a.Explanation = "Captured schedule_create receipt establishes only pending enqueue, not application."
+			}
+		}
+	case "Delivery is Thursday", "Delivery is Friday":
+		for ref, body := range in.Sources {
+			if strings.HasPrefix(ref, "source_") && strings.Contains(body, item.Text) {
+				a.Sources = append(a.Sources, workerContentSource{Ref: ref, Quote: item.Text})
+				a.Support = store.BotCriterionSatisfied
+				a.Explanation = "Exact current Bot memory search result, not a prior prompt or superseded memory."
+			}
+		}
 	case "Verified AI news source":
 		for ref, body := range in.Sources {
 			if strings.HasPrefix(ref, "source_") && strings.Contains(body, item.Text) {
@@ -317,7 +340,7 @@ func TestWorkerPendingAssessmentProtocol(t *testing.T) {
 		{"other-work-failed", store.BotControlPayload{Operation: store.BotControlPriorityPause, Reason: "Owner requested pause"}, false, store.BotCriterionUnverified},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := store.BotWorkState{Contract: store.BotWorkContract{Instructions: "Pause immediately and retain the original report requirements."}, Candidate: &store.BotWorkCandidate{Digest: "controlled-digest", Text: "pending, not applied", Observations: []store.BotEvidence{{Summary: "pending record"}}}}
+			w := store.BotWorkState{Criteria: []store.BotWorkCriterion{{ID: "fixture-result", SourceIDs: []string{"assignment", "charter"}, Text: "Retain requirements and acknowledge only pending controls"}}, Contract: store.BotWorkContract{Instructions: "Pause immediately and retain the original report requirements."}, Candidate: &store.BotWorkCandidate{Digest: "controlled-digest", Text: "pending, not applied", Observations: []store.BotEvidence{{Summary: "pending record"}}}}
 			input := struct {
 				store.BotWorkState
 				Scope    string           `json:"scope"`

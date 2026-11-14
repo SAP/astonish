@@ -17,6 +17,111 @@ import (
 	"google.golang.org/genai"
 )
 
+// scriptedEmployeeReview is a separate tool-free fixture lane. It never calls the
+// producer script or labels arbitrary candidate prose as nonfactual. Unknown
+// claims fail closed; captured receipt assertions use the actual source IDs/bytes.
+func scriptedEmployeeReview(req *model.LLMRequest) (*model.LLMResponse, bool) {
+	if req == nil || req.Config == nil || req.Config.SystemInstruction == nil || len(req.Config.SystemInstruction.Parts) == 0 || !strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_WORK_REVIEW_V1") {
+		return nil, false
+	}
+	var in struct {
+		store.BotWorkState
+		Items []struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"content_items"`
+		Sources map[string]string `json:"content_sources"`
+	}
+	if len(req.Contents) == 0 || len(req.Contents[0].Parts) == 0 || json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &in) != nil || in.Candidate == nil {
+		return &model.LLMResponse{Content: genai.NewContentFromText(`{}`, "model")}, true
+	}
+	if in.EmployeeReviewPolicy != store.BotEmployeeReviewEvidenceBoundV1 {
+		return nil, false // Legacy/content-specific fixtures own their review responses.
+	}
+	assessments := []any{}
+	accepted := true
+	for _, item := range in.Items {
+		claim, support, explanation := "factual", "unverified", "No captured passage supports this scripted claim"
+		sources := []any{}
+		switch item.Text {
+		case "No stock market sources were retrieved; current market news remains unverified.", "A malformed optional request did not prevent this useful answer.",
+			"The useful response remains available even when optional learning cannot be saved.",
+			"No additional method was needed for this answer.",
+			"Checking the alternate source remains a progress note, not a verified result.":
+			claim, support, explanation = "nonfactual", "satisfied", "Honest limitation or description of this response, not an external fact"
+		case "The source says isolated receipt.":
+			for ref, text := range in.Sources {
+				if strings.Contains(text, "isolated receipt") {
+					sources = append(sources, map[string]any{"ref": ref, "quote": "isolated receipt"})
+					support, explanation = "satisfied", "Captured receipt contains exactly isolated receipt"
+					break
+				}
+			}
+		}
+		if support != "satisfied" {
+			accepted = false
+		}
+		assessments = append(assessments, map[string]any{"item_id": item.ID, "claim_type": claim, "execution_sources": []any{}, "relevance": "satisfied", "support": support, "explanation": explanation, "sources": sources})
+	}
+	criteria := []store.BotCriterionAssessment{}
+	for _, criterion := range in.Criteria {
+		verdict := store.BotCriterionUnverified
+		if accepted {
+			verdict = store.BotCriterionSatisfied
+		}
+		criteria = append(criteria, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + in.Candidate.Digest}, Explanation: "Checked all scripted statements against captured receipt bytes or explicit limitations"})
+	}
+	raw, _ := json.Marshal(map[string]any{"candidate_digest": in.Candidate.Digest, "criteria": criteria, "content_assessments": assessments})
+	return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
+}
+
+func TestScriptedEmployeeReviewEvidence(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(fmt.Sprint(supported), func(t *testing.T) {
+			input := map[string]any{
+				"employee_review_policy": store.BotEmployeeReviewEvidenceBoundV1,
+				"candidate":              map[string]any{"digest": "candidate-bound"},
+				"criteria":               []any{map[string]any{"id": "actual-criterion", "source_ids": []string{"assignment"}}},
+				"content_items":          []any{map[string]any{"id": "actual-item", "text": "The source says isolated receipt."}},
+				"content_sources":        map[string]string{},
+			}
+			if supported {
+				input["content_sources"] = map[string]string{"source_7": "isolated receipt"}
+			}
+			raw, _ := json.Marshal(input)
+			req := &model.LLMRequest{Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText("BOT_WORK_REVIEW_V1", "system")}, Contents: []*genai.Content{genai.NewContentFromText(string(raw), "user")}}
+			response, ok := scriptedEmployeeReview(req)
+			if !ok {
+				t.Fatal("review not dispatched independently")
+			}
+			var out struct {
+				store.BotWorkReview
+				Items []struct {
+					ItemID  string `json:"item_id"`
+					Support string `json:"support"`
+					Sources []struct {
+						Ref   string `json:"ref"`
+						Quote string `json:"quote"`
+					} `json:"sources"`
+				} `json:"content_assessments"`
+			}
+			if err := json.Unmarshal([]byte(response.Content.Parts[0].Text), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.CandidateDigest != "candidate-bound" || len(out.Criteria) != 1 || out.Criteria[0].CriterionID != "actual-criterion" || len(out.Items) != 1 || out.Items[0].ItemID != "actual-item" {
+				t.Fatalf("lost input identity: %+v", out)
+			}
+			if supported {
+				if out.Items[0].Support != "satisfied" || len(out.Items[0].Sources) != 1 || out.Items[0].Sources[0].Ref != "source_7" || out.Items[0].Sources[0].Quote != "isolated receipt" {
+					t.Fatalf("missing captured support: %+v", out)
+				}
+			} else if out.Items[0].Support != "unverified" || out.Criteria[0].Verdict != store.BotCriterionUnverified {
+				t.Fatalf("fabricated acceptance: %+v", out)
+			}
+		})
+	}
+}
+
 // Controlled real HTTP/worker/factory test; no learning or orientation model.
 func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -344,7 +449,7 @@ func TestBotAgentOptionalWorkSchemaHTTPAcceptance(t *testing.T) {
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
 				if !strings.Contains(history, final) || strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-					t.Fatal("useful final missing or duplicated")
+										t.Fatal("useful final missing or duplicated")
 				}
 			})
 		}

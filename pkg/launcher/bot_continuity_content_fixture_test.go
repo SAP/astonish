@@ -67,6 +67,22 @@ func continuityContentAssessments(input continuityContentInput) []continuityCont
 		switch item.Text {
 		case homeWeatherAnswer:
 			a.Sources = cite(input.Sources, continuityWeatherPassage, true)
+			for ref, body := range input.Sources {
+				if !strings.HasPrefix(ref, "source_") {
+					continue
+				}
+				var weather struct {
+					Conditions []struct {
+						Temperature string `json:"temp_C"`
+						Description []struct {
+							Value string `json:"value"`
+						} `json:"weatherDesc"`
+					} `json:"current_condition"`
+				}
+				if json.Unmarshal([]byte(body), &weather) == nil && len(weather.Conditions) == 1 && weather.Conditions[0].Temperature == "24" && len(weather.Conditions[0].Description) == 1 && weather.Conditions[0].Description[0].Value == "Clear" {
+					a.Sources = []continuityCitation{{Ref: ref, Quote: `"temp_C":"24"`}}
+				}
+			}
 			a.Explanation = "The controlled weather response body gives 24 C and Clear for the requested Orlando fetch; neither HTTP status nor a tool receipt supports weather facts."
 		case continuityProposalAnswer:
 			a.ClaimType = continuityExecution
@@ -76,6 +92,14 @@ func continuityContentAssessments(input continuityContentInput) []continuityCont
 			a.ClaimType = continuityNonfactual
 			a.Support = store.BotCriterionSatisfied
 			a.Explanation = "An honest limitation about absent in-conversation confirmation, not a claim that an out-of-band control was captured or applied."
+		}
+		for ref, raw := range input.ExecutionEvidence {
+			var receipt store.BotEvidence
+			if json.Unmarshal([]byte(raw), &receipt) == nil && receipt.Summary == item.Text && strings.Contains(receipt.Summary, "pending") {
+				a.ClaimType, a.Support = continuityExecution, store.BotCriterionSatisfied
+				a.ExecutionSources = []continuityCitation{{Ref: ref, Quote: raw}}
+				a.Explanation = "Repeats the captured pending receipt exactly; does not assert application."
+			}
 		}
 		if len(a.Sources) != 0 || len(a.ExecutionSources) != 0 {
 			a.Support = store.BotCriterionSatisfied
@@ -92,6 +116,10 @@ func TestContinuityContentAssessments(t *testing.T) {
 		kind              continuityClaimType
 		verdict           store.BotCriterionVerdict
 	}{
+		{"weather decoded JSON", homeWeatherAnswer, map[string]string{"source_1": `{"current_condition":[{"weatherDesc":[{"value":"Clear"}],"temp_C":"24"}]}`}, nil, continuityFactual, store.BotCriterionSatisfied},
+		{"weather decoded wrong temperature", homeWeatherAnswer, map[string]string{"source_1": `{"current_condition":[{"weatherDesc":[{"value":"Clear"}],"temp_C":"30"}]}`}, nil, continuityFactual, store.BotCriterionUnverified},
+		{"exact pending receipt", "Operation pending, not applied.", nil, map[string]string{"observation:0": `{"summary":"Operation pending, not applied."}`}, continuityExecution, store.BotCriterionSatisfied},
+		{"changed pending receipt", "Operation applied.", nil, map[string]string{"observation:0": `{"summary":"Operation pending, not applied."}`}, continuityFactual, store.BotCriterionUnverified},
 		{"weather body", homeWeatherAnswer, map[string]string{"source_7": "{" + continuityWeatherPassage + "}"}, nil, continuityFactual, store.BotCriterionSatisfied},
 		{"weather no body", homeWeatherAnswer, nil, nil, continuityFactual, store.BotCriterionUnverified},
 		{"weather receipt cannot corroborate", homeWeatherAnswer, nil, map[string]string{"observation:0": continuityWeatherPassage}, continuityFactual, store.BotCriterionUnverified},

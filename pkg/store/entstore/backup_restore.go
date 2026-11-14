@@ -23,6 +23,9 @@ func (s *Store) PlanPlatformRestore(ctx context.Context, archivePath string, opt
 	if err != nil {
 		return nil, err
 	}
+	if err := validateBotWorkspaceArchiveEntries(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase}, summary); err != nil {
+		return nil, err
+	}
 	plan := backup.RestorePlan{
 		Archive:       summary,
 		TargetBackend: string(s.dialect),
@@ -122,6 +125,9 @@ func (s *Store) RestorePlatformBackup(ctx context.Context, archivePath string, o
 }
 
 func restoreActionForEntry(entry backup.Entry, opts PlatformRestoreOptions) (string, string) {
+	if entry.Entity == botWorkspaceArchiveEntity {
+		return "skip", "workspace files require explicit authorized fresh-Home recovery"
+	}
 	switch entry.Entity {
 	case "bots", "bot_runs", "bot_approvals", "bot_outbox":
 		return "restore_quiesced", "Bot execution authority is invalidated; undelivered work requires reconciliation"

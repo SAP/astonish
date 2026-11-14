@@ -1,5 +1,72 @@
 # Bot specification traceability and release checklist
 
+## Employee regression correction checkpoint — 2026-11-14
+
+The six user requirements supersede optional employee review and producer-triggered
+retention. Live AI News evidence confirmed greeting-only title output, direct RSS
+fetch, poor article support, guessed provenance and an empty physical Home.
+These failures remain unresolved as live release acceptance; no normal rollout.
+
+Source changes now include four configured-search engines and scoped standard-server
+resolution, ordinary title research admission, automatic digest-bound employee
+review with bounded tool-free repair, draft-text withholding, durable review-attempt
+reservations, dedicated every-turn extraction journals (schema marker 4), fresh
+maintenance claims, locked physical Docker knowledge publication, scoped safety and
+usage, model-authored acknowledgement/ask_user guidance, and exact prior-tool
+provenance context. Physical owned Docker tests have demonstrated retained files,
+short correction application and Prepared reuse without model replay; those tests
+use controlled models, not real-provider semantics or OS-process restart evidence.
+
+Remaining requirements include safe fresh scope changes through typed ask_user
+answers, real acknowledgement/question/live-restore parity, full regression
+compatibility and actual configured-provider grounded results. Full relevant tests
+currently fail (`/tmp/bot-employee-full-final.json`) in older work/check/learning,
+approval/question, artifact and external-trigger cases. Several deterministic
+fixtures do not distinguish automatic review calls from producer calls; failures
+must be classified and repaired without weakening the review gate. A poor or
+unsupported candidate must remain withheld. No whole-suite pass is claimed for
+this checkpoint. No normal daemon restart, user-data mutation, paid run, commit,
+push or deployment occurred.
+
+## Bot-owned Task workspace checkpoint — 2026-11-14
+
+Six approved implementation phases now have recorded verification: Task contracts,
+confined physical workspace storage, configured search-first research, shared
+manual/scheduled Task execution, Details Skills removal, and restart/backup
+continuity. Final `task-acceptance` is **not complete** and no deployment is approved.
+
+The continuity retry exposed an unrelated fresh-HOME embedding-model download
+stall. Its isolated harness now supplies a test-owned loopback embedding endpoint
+through supported configuration; Task files, helper bytes and SQLite state are
+still inspected independently in real Docker Homes after process replacement.
+The recorded phase verification passed. A separate earlier concurrent driver
+failed its scheduler occurrence case and remains failed evidence in
+`/tmp/bot-task-continuity-fixture.log`; it must not be presented as that pass.
+
+Final acceptance plumbing now has a distinct fresh-only `--verify-bot-tasks`
+launcher and `--stage all --config` orchestration. The Go collector retains three
+unchanged Stock Market News attempts, run/transcript/search observations, and
+independent registry/physical-file observations. Offline validation refuses to
+turn model booleans, missing evidence or unrelated controlled fixtures into
+accountable source grounding or real lifecycle certification. Supplying config
+alone does not implement the remaining lifecycle and semantic acceptance gates.
+`LOCAL_BOT_TASK_CONFIG` was absent in this execution environment; no new paid
+stock samples were run. Prior failed stock grounding remains unresolved.
+
+Whole-repository ordinary Go tests passed this turn (`/tmp/bot-task-full-go.log`).
+Frontend tests (163 files, 1343 tests), typecheck, production build and lint passed.
+The first full Python run failed an additive public `task` pin projection check;
+the corrected full rerun passed 312 tests with one existing skip
+(`/tmp/bot-task-python-final.log`). Scoped races passed in entstore, launcher and
+daemon (`/tmp/bot-task-race-final.log`); Ent regeneration completed with an exact
+pre/post file-digest comparison and no drift (`/tmp/bot-task-ent-final.log`).
+Full Go lint initially caught a self-comparison in a workspace digest test. The
+test now checks the independently calculated SHA-256 fixture, its scoped test
+passes, and corrected `make lint` reports zero issues
+(`/tmp/bot-task-lint-corrected.log`).
+No normal `:9393` restart, user Bot/schedule edit, spending-limit change,
+credential scrape, commit, push or rollout was performed.
+
 ## SCI provider acceptance follow-up — 2026-11-13
 
 The operator selected `sap_ai_core_sci`. Its explicitly selected configuration now supplies the isolated candidate, retaining the historical display name `New AI Core Provider` and model `anthropic--claude-4.6-sonnet`. The credential prerequisite is resolved; no secrets are included here.

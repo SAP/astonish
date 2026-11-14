@@ -40,6 +40,17 @@ func newProductionBotMandatePolicy(backend store.PlatformBackend, cfg *config.Ap
 		if err != nil {
 			return store.BotMandatePolicy{}, err
 		}
+		team := org.ForTeam(ref.TeamSlug)
+		svc.PlatformSettings, svc.OrgSettings, svc.Settings = backend.PlatformSettings(), backend.OrgSettings(ref.OrgSlug), team.Settings()
+		svc.MCPServers, svc.TeamMCPServers = org.OrgMCPServers(), team.MCPServers()
+		if route, searchErr := launcher.BotEffectiveConfiguredSearchRoute(ctx, svc); searchErr == nil {
+			policy.PublicResearch = &execution.BotPublicResearchScope{Version: 1, Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview, execution.BotResearchRecent, execution.BotResearchPrimary, execution.BotResearchContradictions}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 4}
+			for i := range policy.Constraints {
+				if policy.Constraints[i].Action == execution.CapabilityToolExecute {
+					policy.Constraints[i].Resources = append(policy.Constraints[i].Resources, launcher.BotConfiguredSearchToolName)
+				}
+			}
+		}
 		policy = addBotOwnControlBaseline(policy)
 		var routine config.BotRoutinePolicyConfig
 		if cfg != nil {

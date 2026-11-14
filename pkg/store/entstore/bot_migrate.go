@@ -10,7 +10,7 @@ import (
 )
 
 // botMigrationVersion tracks DDL independently of immutable BotVersion JSON.
-const botMigrationVersion = 2
+const botMigrationVersion = 4
 
 // migrateBotSchema wraps scoped Ent reconciliation with a monotonic Bot schema
 // marker. SQL here manages migration metadata only, never application/audit data.

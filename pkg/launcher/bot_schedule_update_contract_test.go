@@ -62,8 +62,8 @@ func TestBotScheduleUpdateProviderContract(t *testing.T) {
 		if len(fn.Parameters.Properties) != 4 {
 			t.Errorf("Bot exposes unsupported patch fields: %v", fn.Parameters.Properties)
 		}
-		if len(fn.Parameters.AnyOf) != 3 {
-			t.Errorf("schema accepts job_id-only update: %+v", fn.Parameters)
+		if len(fn.Parameters.AnyOf) != 0 {
+			t.Errorf("provider rejects top-level anyOf: %+v", fn.Parameters)
 		}
 		for _, want := range []string{"at least one", "top-level", "does not change task instructions", "memory"} {
 			if !strings.Contains(fn.Description, want) {

@@ -63,6 +63,82 @@ func TestBotAgentSourceFailureIsInformationNotReportVeto(t *testing.T) {
 	}
 }
 
+func TestBotAgentNonexecutionOutcomeBinding(t *testing.T) {
+	for _, mode := range []string{"matching", "missing-response", "wrong-id", "wrong-name", "receipt-id", "receipt-name", "duplicate-call", "duplicate-response", "duplicate-ledger", "unverified", "bare-verified", "spoofed-json", "send", "write", "unchanged", "diagnostic", "source", "artifact", "schedule", "routine", "next-run"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, req, _ := botChatTestRequest(t)
+			ctx = execution.WithBotRunIdentity(ctx, req.Policy.Identity())
+			ctx, _ = bot.WithToolOutcomes(ctx)
+			journal := &botAgentReadJournal{}
+			// No autonomous classifier is bound into this interactive context.
+			call := &genai.FunctionCall{ID: "optional", Name: "bot_work_update", Args: map[string]any{"kind": "bad"}}
+			journal.capture(ctx, call)
+			outcome := bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: call.ID, ToolName: call.Name}}
+			response := &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: map[string]any{"status": "invalid_request"}}
+			switch mode {
+			case "wrong-id":
+				response.ID = "other"
+			case "wrong-name":
+				response.Name = "other"
+			case "receipt-id":
+				outcome.Nonexecution.CallID = "other"
+			case "receipt-name":
+				outcome.Nonexecution.ToolName = "other"
+			case "duplicate-call":
+				journal.capture(ctx, call)
+			case "unverified":
+				outcome.Verified = false
+			case "bare-verified":
+				outcome.Nonexecution = nil
+			case "spoofed-json":
+				response.Response[bot.ToolOutcomeKey] = map[string]any{"verified": true, "nonexecution": map[string]any{"CallID": call.ID, "ToolName": call.Name}}
+			case "send", "write":
+				outcome.Changed = []store.BotEvidence{{Summary: "uncertain " + mode}}
+			case "unchanged":
+				outcome.Unchanged = []store.BotEvidence{{Summary: "mixed receipt"}}
+			case "diagnostic":
+				outcome.Unverified = []string{"external effect receipt missing"}
+			case "source":
+				outcome.SourceAccess = []store.BotSourceAccessFact{{CallID: call.ID}}
+			case "artifact":
+				outcome.Artifacts = []bot.ToolReportArtifact{{}}
+			case "schedule":
+				outcome.ScheduleCapture = &bot.ScheduleCapture{}
+			case "routine":
+				outcome.RoutineCapture = &bot.RoutineCapture{}
+			case "next-run":
+				now := time.Now()
+				outcome.NextRunAt = &now
+			}
+			if mode != "spoofed-json" {
+				bot.RecordToolOutcome(ctx, call.ID, outcome)
+			}
+			if mode == "duplicate-ledger" {
+				bot.RecordToolOutcome(ctx, call.ID, outcome)
+			}
+			cr := newChatRunner(req.Run.SessionID.String(), req.Bot.OwnerID.String(), studioChatAppName, false)
+			defer cr.cancel()
+			cr.ctx = context.WithValue(ctx, botAgentReadJournalKey{}, journal)
+			if mode != "missing-response" {
+				cr.observeBotToolOutcome("tool", response)
+			}
+			if mode == "duplicate-response" {
+				cr.observeBotToolOutcome("tool", response)
+			}
+			want := store.BotReportEffectsUncertain
+			if mode == "matching" {
+				want = store.BotReportEffectsReadOnly
+				if len(cr.completion.Report.Unverified) != 0 || len(cr.completion.Report.Changed) != 0 {
+					t.Fatalf("rejection minted a content veto/effect: %+v", cr.completion.Report)
+				}
+			}
+			if got := journal.effectState(); got != want {
+				t.Fatalf("state=%q want=%q report=%+v", got, want, cr.completion.Report)
+			}
+		})
+	}
+}
+
 func TestBotAgentReadOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name                string

@@ -217,6 +217,84 @@ var (
 			},
 		},
 	}
+	// BotKnowledgeExtractionsColumns holds the columns for the "bot_knowledge_extractions" table.
+	BotKnowledgeExtractionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "run_id", Type: field.TypeUUID},
+		{Name: "outcome_digest", Type: field.TypeString},
+		{Name: "source_sequence", Type: field.TypeInt64},
+		{Name: "source_version", Type: field.TypeInt64},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "fence", Type: field.TypeInt64, Default: 0},
+		{Name: "worker_id", Type: field.TypeString, Default: ""},
+		{Name: "lease_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"pending", "extracting", "prepared", "files_ready", "committed", "no_change", "held", "aborted"}, Default: "pending"},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotKnowledgeExtractionsTable holds the schema information for the "bot_knowledge_extractions" table.
+	BotKnowledgeExtractionsTable = &schema.Table{
+		Name:       "bot_knowledge_extractions",
+		Columns:    BotKnowledgeExtractionsColumns,
+		PrimaryKey: []*schema.Column{BotKnowledgeExtractionsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_knowledge_extractions_bots_bot",
+				Columns:    []*schema.Column{BotKnowledgeExtractionsColumns[13]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botknowledgeextraction_bot_id_run_id_outcome_digest_source_sequence_source_version",
+				Unique:  true,
+				Columns: []*schema.Column{BotKnowledgeExtractionsColumns[13], BotKnowledgeExtractionsColumns[1], BotKnowledgeExtractionsColumns[2], BotKnowledgeExtractionsColumns[3], BotKnowledgeExtractionsColumns[4]},
+			},
+			{
+				Name:    "botknowledgeextraction_bot_id_state",
+				Unique:  false,
+				Columns: []*schema.Column{BotKnowledgeExtractionsColumns[13], BotKnowledgeExtractionsColumns[9]},
+			},
+			{
+				Name:    "botknowledgeextraction_lease_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{BotKnowledgeExtractionsColumns[8]},
+			},
+		},
+	}
+	// BotKnowledgeFileHeadsColumns holds the columns for the "bot_knowledge_file_heads" table.
+	BotKnowledgeFileHeadsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "path", Type: field.TypeString},
+		{Name: "digest", Type: field.TypeString},
+		{Name: "extraction_id", Type: field.TypeUUID},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotKnowledgeFileHeadsTable holds the schema information for the "bot_knowledge_file_heads" table.
+	BotKnowledgeFileHeadsTable = &schema.Table{
+		Name:       "bot_knowledge_file_heads",
+		Columns:    BotKnowledgeFileHeadsColumns,
+		PrimaryKey: []*schema.Column{BotKnowledgeFileHeadsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_knowledge_file_heads_bots_bot",
+				Columns:    []*schema.Column{BotKnowledgeFileHeadsColumns[5]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "botknowledgefilehead_bot_id_path",
+				Unique:  true,
+				Columns: []*schema.Column{BotKnowledgeFileHeadsColumns[5], BotKnowledgeFileHeadsColumns[1]},
+			},
+		},
+	}
 	// BotOutboxColumns holds the columns for the "bot_outbox" table.
 	BotOutboxColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -384,6 +462,99 @@ var (
 				Name:    "botskillrevision_bot_id_skill_id_revision",
 				Unique:  true,
 				Columns: []*schema.Column{BotSkillRevisionsColumns[6], BotSkillRevisionsColumns[7], BotSkillRevisionsColumns[1]},
+			},
+		},
+	}
+	// BotTasksColumns holds the columns for the "bot_tasks" table.
+	BotTasksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "key", Type: field.TypeString},
+		{Name: "home_path", Type: field.TypeString},
+		{Name: "title", Type: field.TypeString},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"draft", "ready", "archived"}, Default: "draft"},
+		{Name: "head_revision", Type: field.TypeInt64, Default: 0},
+		{Name: "head_digest", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+	}
+	// BotTasksTable holds the schema information for the "bot_tasks" table.
+	BotTasksTable = &schema.Table{
+		Name:       "bot_tasks",
+		Columns:    BotTasksColumns,
+		PrimaryKey: []*schema.Column{BotTasksColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_tasks_bots_bot",
+				Columns:    []*schema.Column{BotTasksColumns[10]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "bottask_bot_id_key",
+				Unique:  true,
+				Columns: []*schema.Column{BotTasksColumns[10], BotTasksColumns[1]},
+			},
+			{
+				Name:    "bottask_bot_id_home_path",
+				Unique:  true,
+				Columns: []*schema.Column{BotTasksColumns[10], BotTasksColumns[2]},
+			},
+			{
+				Name:    "bottask_bot_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{BotTasksColumns[10], BotTasksColumns[5]},
+			},
+		},
+	}
+	// BotTaskRevisionsColumns holds the columns for the "bot_task_revisions" table.
+	BotTaskRevisionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "revision", Type: field.TypeInt64},
+		{Name: "digest", Type: field.TypeString},
+		{Name: "size_bytes", Type: field.TypeInt64},
+		{Name: "parent_revision", Type: field.TypeInt64, Default: 0},
+		{Name: "parent_digest", Type: field.TypeString, Default: ""},
+		{Name: "publication_state", Type: field.TypeEnum, Enums: []string{"prepared", "files_ready", "committed", "held", "aborted"}, Default: "prepared"},
+		{Name: "authority_constraint_ref", Type: field.TypeString},
+		{Name: "workspace_receipt_ref", Type: field.TypeString, Default: ""},
+		{Name: "data", Type: field.TypeJSON},
+		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
+		{Name: "bot_id", Type: field.TypeUUID},
+		{Name: "task_id", Type: field.TypeUUID},
+	}
+	// BotTaskRevisionsTable holds the schema information for the "bot_task_revisions" table.
+	BotTaskRevisionsTable = &schema.Table{
+		Name:       "bot_task_revisions",
+		Columns:    BotTaskRevisionsColumns,
+		PrimaryKey: []*schema.Column{BotTaskRevisionsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "bot_task_revisions_bots_bot",
+				Columns:    []*schema.Column{BotTaskRevisionsColumns[11]},
+				RefColumns: []*schema.Column{BotsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "bot_task_revisions_bot_tasks_task",
+				Columns:    []*schema.Column{BotTaskRevisionsColumns[12]},
+				RefColumns: []*schema.Column{BotTasksColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "bottaskrevision_bot_id_task_id_revision",
+				Unique:  true,
+				Columns: []*schema.Column{BotTaskRevisionsColumns[11], BotTaskRevisionsColumns[12], BotTaskRevisionsColumns[1]},
+			},
+			{
+				Name:    "bottaskrevision_bot_id_publication_state",
+				Unique:  false,
+				Columns: []*schema.Column{BotTaskRevisionsColumns[11], BotTaskRevisionsColumns[6]},
 			},
 		},
 	}
@@ -791,10 +962,14 @@ var (
 		BotApprovalsTable,
 		BotGoalsTable,
 		BotIntakesTable,
+		BotKnowledgeExtractionsTable,
+		BotKnowledgeFileHeadsTable,
 		BotOutboxTable,
 		BotRunsTable,
 		BotSkillsTable,
 		BotSkillRevisionsTable,
+		BotTasksTable,
+		BotTaskRevisionsTable,
 		BotTrackedItemsTable,
 		BotVersionsTable,
 		CacheDiagnosticsTable,
@@ -831,6 +1006,14 @@ func init() {
 	BotGoalsTable.Annotation = &entsql.Annotation{
 		Table: "bot_goals",
 	}
+	BotKnowledgeExtractionsTable.ForeignKeys[0].RefTable = BotsTable
+	BotKnowledgeExtractionsTable.Annotation = &entsql.Annotation{
+		Table: "bot_knowledge_extractions",
+	}
+	BotKnowledgeFileHeadsTable.ForeignKeys[0].RefTable = BotsTable
+	BotKnowledgeFileHeadsTable.Annotation = &entsql.Annotation{
+		Table: "bot_knowledge_file_heads",
+	}
 	BotOutboxTable.ForeignKeys[0].RefTable = BotsTable
 	BotOutboxTable.Annotation = &entsql.Annotation{
 		Table: "bot_outbox",
@@ -847,6 +1030,15 @@ func init() {
 	BotSkillRevisionsTable.ForeignKeys[1].RefTable = BotSkillsTable
 	BotSkillRevisionsTable.Annotation = &entsql.Annotation{
 		Table: "bot_skill_revisions",
+	}
+	BotTasksTable.ForeignKeys[0].RefTable = BotsTable
+	BotTasksTable.Annotation = &entsql.Annotation{
+		Table: "bot_tasks",
+	}
+	BotTaskRevisionsTable.ForeignKeys[0].RefTable = BotsTable
+	BotTaskRevisionsTable.ForeignKeys[1].RefTable = BotTasksTable
+	BotTaskRevisionsTable.Annotation = &entsql.Annotation{
+		Table: "bot_task_revisions",
 	}
 	BotTrackedItemsTable.ForeignKeys[0].RefTable = BotGoalsTable
 	BotTrackedItemsTable.Annotation = &entsql.Annotation{

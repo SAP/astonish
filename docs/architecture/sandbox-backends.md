@@ -1,5 +1,15 @@
 # Sandbox Backends (Docker OverlayFS, Kubernetes, OpenShell)
 
+## Optional Bot Task workspace capability
+
+Docker implements confined retained Task bundles and network-disabled Python/SQLite
+helpers through `BotHomeWorkspaceBackend` and `BotHomeWorkspaceScriptBackend`.
+The helper image is separately provisioned and digest-pinned; no runtime pull,
+installation or host fallback occurs. Physical Docker acceptance lives in
+`bot_task_acceptance.py --stage workspace`. Kubernetes and OpenShell do not yet
+expose this new optional capability; existing Home reads/deletion remain unchanged.
+See [Task workspace](bot-task-workspace.md) for limits and publication recovery.
+
 > **Status (Incus removed).** Local sessions on macOS and Linux use Docker
 > OverlayFS (`pkg/sandbox/docker/`). `sandbox.backend: incus` is a legacy
 > alias for `docker`. There is no `astonish-incus` image. Kubernetes and

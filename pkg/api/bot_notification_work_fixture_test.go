@@ -25,11 +25,20 @@ func notificationReviewedReport(t *testing.T, ctx context.Context, repo store.Bo
 	}
 	n := w.Clone()
 	if w.Protocol == store.BotWorkProtocolAgentLedV1 {
-		// Delivery-only fixture: a committed ordinary agent answer, no invented review.
+		// Transport fixture supplies its controlled observations and an assessment
+		// bound to these exact bytes; publication still enforces the review gate.
 		n.Phase = store.BotWorkFinished
 		n.AgentWork.Disposition = store.AgentWorkAnswered
-		n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: report.Summary}
+		n.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: uuid.NewString(), Text: report.Summary, Observations: append(append([]store.BotEvidence{}, report.Changed...), report.Unchanged...)}
 		n.Candidate.Digest = n.Candidate.ContentDigest()
+		if n.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 {
+			sources := []string{"assignment", "charter"}
+			for _, goal := range n.Contract.Goals {
+				sources = append(sources, "goal:"+goal.ID.String())
+			}
+			n.Criteria = []store.BotWorkCriterion{{ID: "notification", SourceIDs: sources, Text: "Report the controlled observation for notification delivery"}}
+			n.Review = &store.BotWorkReview{CandidateDigest: n.Candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "notification", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + n.Candidate.Digest}, Explanation: "Observed outcome labels the controlled notification observation; it does not claim external notification delivery."}}}
+		}
 		save(n)
 		report.Work = store.BuildBotWorkProjection(w)
 		message, err := store.NewBotEmployeeAgentMessage(store.RunSucceeded, report, w)

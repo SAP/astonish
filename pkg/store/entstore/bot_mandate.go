@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -91,6 +92,19 @@ func (r *botRepository) mandateScope(ctx context.Context, db botDraftDB, ref sto
 	return rec, nil
 }
 func checkMandatePolicy(m store.BotMandate, p store.BotMandatePolicy) error {
+	if m.PublicResearch != nil {
+		if p.PublicResearch == nil {
+			return store.ErrBotForbidden
+		}
+		ceiling := p.PublicResearch.Clone()
+		if ceiling.Subject == "" && ceiling.SourceEventID == "" {
+			ceiling.Subject = m.PublicResearch.Subject
+			ceiling.SourceEventID = m.PublicResearch.SourceEventID
+		}
+		if err := m.PublicResearch.ValidateWithin(&ceiling); err != nil {
+			return err
+		}
+	}
 	if err := m.Limits.ValidateWithin(p.Limits); err != nil {
 		return err
 	}
@@ -274,6 +288,40 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 	}
 	now := r.clock()
 	m := store.BotMandate{Ref: ref, Purpose: execution.BotMandatePurposeTask, ExpiresAt: now.Add(policy.TTL), Scopes: policy.Scopes, Constraints: policy.Constraints, Limits: policy.Limits}.Clone()
+	initiation, title := ctx.Value(titleMandateAdmissionKey{}).(titleMandateAdmission)
+	if rec.Bot.Status != store.BotPaused && policy.PublicResearch != nil {
+		// The authenticated start-from-title action admits only its initial subject,
+		// never the charter, attachments, history or a later model-proposed query.
+		// Direct turns retain the explicit disclosure form for compatibility.
+		subject := ""
+		if title {
+			if initiation.Kind == store.BotInitiationKindTitle && initiation.Subject == q.Instructions && len(q.Attachments) == 0 {
+				subject = strings.TrimSpace(initiation.Subject)
+			}
+		} else {
+			for _, line := range strings.Split(q.Instructions, "\n") {
+				if strings.HasPrefix(line, "Public research subject: ") {
+					if subject != "" {
+						return store.ErrBotInvalid
+					}
+					subject = strings.TrimPrefix(line, "Public research subject: ")
+				}
+			}
+		}
+		if subject != "" {
+			scope := policy.PublicResearch.Clone()
+			scope.Subject, scope.SourceEventID = subject, run.UserEventID
+			// Structurally ambiguous title text remains an ordinary owner turn;
+			// clarification must not disclose it through a guessed public query.
+			if err := scope.Validate(); err != nil {
+				if !title {
+					return err
+				}
+			} else {
+				m.PublicResearch = &scope
+			}
+		}
+	}
 	if rec.Bot.Status == store.BotPaused {
 		m.Purpose = execution.BotMandatePurposeOperation
 		m.Constraints = pausedControlConstraints(m.Constraints)
@@ -287,7 +335,7 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 		return err
 	}
 	kind := store.BotInitiationKindDirectOwnerMessage
-	if title, _ := ctx.Value(titleMandateAdmissionKey{}).(bool); title {
+	if title && initiation.Kind == store.BotInitiationKindTitle {
 		kind = store.BotInitiationKindTitle
 	}
 	// Legacy schedule_command data is never an authority source.

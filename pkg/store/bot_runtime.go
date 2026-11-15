@@ -671,7 +671,11 @@ func (w *BotWorkState) Validate() error {
 			if w.EmployeeReviewPolicy != "" && w.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 {
 				return ErrBotUnsupported
 			}
-			if w.EmployeeReviewPolicy != "" && w.Phase == BotWorkFinished && !w.HasAcceptedEmployeeReview() {
+			// BotWorkFinished requires an accepted review UNLESS the disposition
+			// is AgentWorkPartial — partial delivery is a legitimate fallback when
+			// the review could not be completed (infra failure, content-validation
+			// exhaustion, etc.) and the candidate is safe text-only work.
+			if w.EmployeeReviewPolicy != "" && w.Phase == BotWorkFinished && !w.HasAcceptedEmployeeReview() && w.AgentWork.Disposition != AgentWorkPartial {
 				return ErrBotInvalid
 			}
 		default:

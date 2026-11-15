@@ -60,6 +60,9 @@ func completedScheduleAcknowledgment(t *testing.T, r *botRepository, worker cont
 		mutate(next.Candidate)
 	}
 	next.Candidate.Digest = next.Candidate.ContentDigest()
+	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
+		acceptEmployeeReviewFixture(next)
+	}
 	save(next)
 	if work.Protocol == store.BotWorkProtocolAgentLedV1 {
 		return store.BotReport{Summary: work.Candidate.Text, Unchanged: work.Candidate.Observations[:1], Work: store.BuildBotWorkProjection(work)}
@@ -104,7 +107,7 @@ func TestBotAgentScheduleAcknowledgmentAuthority(t *testing.T) {
 					}
 				})
 				work, err := r.LoadWork(worker, q.Lease)
-				if err != nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || work.Review != nil {
+				if err != nil || work.Protocol != store.BotWorkProtocolAgentLedV1 || report.Quality != nil {
 					t.Fatalf("not agent-led: %+v %v", work, err)
 				}
 				report.FinalizeEmployeeMessage(store.RunSucceeded, work)

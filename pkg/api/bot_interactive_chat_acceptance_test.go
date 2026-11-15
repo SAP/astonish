@@ -645,7 +645,7 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 					if run.Status != store.RunSucceeded || step != 6 || checks != 1 || f.pool.calls != 2 || requests["/primary"] != 1 || requests["/alternative"] != 1 {
 						t.Fatalf("fallback blocked/replayed: run=%+v step=%d checks=%d requests=%v", run, step, checks, requests)
 					}
-					if run.Usage.InputTokens != 41 || run.Usage.OutputTokens != 25 || run.Usage.ToolCalls != 5 {
+					if run.Usage.InputTokens != 46 || run.Usage.OutputTokens != 28 || run.Usage.ToolCalls != 5 {
 						t.Fatalf("fallback/check budget not shared: %+v", run.Usage)
 					}
 					if run.Report.Work == nil || len(run.Report.Work.Checks) != 1 || run.Report.Work.Checks[0].Status != store.BotWorkCheckFailed || run.Report.Work.Checks[0].Judgment != store.BotWorkCheckUnverified {

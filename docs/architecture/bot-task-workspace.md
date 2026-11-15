@@ -56,6 +56,29 @@ bundle bytes, excluding its own digest and server archival timestamp. The snapsh
 is validated against every declared asset; undeclared files and truncated bytes
 cannot certify a bundle. These checks certify byte/shape integrity, not truth.
 
+### Directed source-access recovery
+
+Employee research continuations carry a bounded `source_recovery` navigation
+context from same-run captured bytes and exact evidence references/digests:
+untried discovered URLs with captured context/JSON path, actual failed access
+(including HTTP status), and returned excerpts whose usefulness is unassessed.
+Configured search's known `answer`, `citations`, and `search_results` fields supply
+hints; arbitrary remote metadata, private notes, and model-created receipts do not.
+Relevant untried article leads take priority over repeating failed URLs, homepages,
+or thin indexes. Relevant alternate reporting is allowed within existing authority;
+primary-source preference is not primary-only policy. An already successful search
+in the same live episode need not repeat just to inspect its leads. Existing live
+URL/search guards, mandate, budget, lease, read-only ceiling, and evidence review
+remain authoritative: discovered links are neither grants nor proof of claims.
+
+A review finding is candidate-bound, not a lasting diagnosis of the run. After
+research refreshes evidence or text repair replaces the candidate, a later review
+transport/model failure must not publish the predecessor's finding (for example,
+“only blocked sources” after substantive source bodies were recovered). Canonical
+recovered bytes remain in the private candidate; publication still fails closed
+until the new candidate actually passes review. Regression:
+`TestBotEmployeeRecoveredEvidenceReviewFailureDoesNotPublishStaleFinding`.
+
 ## Lifecycle and publication
 
 Task lifecycle transitions are Draft → Ready upon a usable committed executable

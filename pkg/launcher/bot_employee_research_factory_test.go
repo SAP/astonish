@@ -141,12 +141,14 @@ func (m *guidedHTTPModel) GenerateContent(ctx context.Context, q *model.LLMReque
 
 func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 	for _, scenario := range []struct {
+		recovery          bool
 		formatOnly        bool
 		continuationError bool
 		sourceFailure     bool
-	}{{}, {formatOnly: true}, {continuationError: true}, {sourceFailure: true}} {
+		transportFailure  bool
+	}{{}, {recovery: true}, {formatOnly: true}, {continuationError: true}, {sourceFailure: true}, {sourceFailure: true, transportFailure: true}} {
 		formatOnly, continuationError := scenario.formatOnly, scenario.continuationError
-		t.Run(fmt.Sprintf("format=%v/continuation-error=%v/source-failure=%v", formatOnly, continuationError, scenario.sourceFailure), func(t *testing.T) {
+		t.Run(fmt.Sprintf("format=%v/continuation-error=%v/source-failure=%v/transport-failure=%v", formatOnly, continuationError, scenario.sourceFailure, scenario.transportFailure), func(t *testing.T) {
 			f, repo := scheduleFixture(t, store.BotScopePersonal)
 			knowledgeSearchSettings(f)
 			route, err := BotEffectiveConfiguredSearchRoute(f.ctx, f.services)
@@ -160,9 +162,23 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 				order = append(order, r.URL.Path)
 				w.Header().Set("Content-Type", "text/plain")
 				if r.URL.Path == "/blocked" {
-					w.WriteHeader(http.StatusForbidden)
+					if scenario.recovery {
+						w.WriteHeader(http.StatusTooManyRequests)
+					} else {
+						w.WriteHeader(http.StatusForbidden)
+					}
 					fmt.Fprint(w, "Source unavailable")
 				} else if r.URL.Path == "/thin" {
+					if scenario.transportFailure {
+						// A real transport failure, not a provider map claiming read safety.
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						_ = conn.Close()
+						return
+					}
 					fmt.Fprint(w, "Privacy policy | Copyright")
 				} else if r.URL.Path == "/index" {
 					fmt.Fprint(w, index)
@@ -259,6 +275,9 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					expectedEvidence := 4
 					if scenario.sourceFailure {
 						expectedEvidence = 6
+					}
+					if scenario.recovery {
+						expectedEvidence = 5
 					}
 					if reviews == 2 && (!strings.Contains(fmt.Sprint(state.Candidate.Bodies), breadth) || len(state.AgentWork.Evidence) != expectedEvidence) {
 						t.Error("additional durable journal references not rehydrated")
@@ -365,11 +384,59 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 							name, args = "web_fetch", map[string]any{"url": source.URL + "/breadth"}
 						}
 					}
+					if scenario.recovery {
+						switch round {
+						case 3:
+							name, args = "web_fetch", map[string]any{"url": source.URL + "/blocked"}
+						case 4:
+							name, args = "web_fetch", map[string]any{"url": source.URL + "/thin"}
+						case 5:
+							name, args = "", nil
+						case 6:
+							// Select the actual discovered URL from the factory handoff,
+							// not a scripted second search or hardcoded article host.
+							prompt := text + system
+							start := strings.Index(prompt, `"source_recovery":`)
+							var recovery struct {
+								Leads []struct {
+									URL        string `json:"url"`
+									CaptureRef string `json:"capture_ref"`
+								} `json:"untried_discovered_urls"`
+								Failed []struct {
+									Access store.BotSourceAccessFact `json:"access"`
+								} `json:"failed_sources"`
+								Returned []struct {
+									Excerpt string `json:"captured_excerpt"`
+								} `json:"returned_sources_usefulness_unassessed"`
+							}
+							if start < 0 {
+								t.Error("captured source recovery missing")
+								name = ""
+								break
+							}
+							if err := json.NewDecoder(strings.NewReader(prompt[start+len(`"source_recovery":`):])).Decode(&recovery); err != nil {
+								t.Error(err)
+							}
+							if len(recovery.Leads) != 1 || len(recovery.Failed) != 1 || recovery.Failed[0].Access.HTTPStatus != 429 || recovery.Leads[0].CaptureRef != "tool-response:guided-1" {
+								t.Errorf("incorrect recovery context: %+v", recovery)
+								name = ""
+								break
+							}
+							if !strings.Contains(fmt.Sprint(recovery.Returned), "Privacy policy") || !strings.Contains(prompt, "before rereading failed URLs") {
+								t.Error("thin sources/recovery guidance missing")
+							}
+							name, args = "web_fetch", map[string]any{"url": recovery.Leads[0].URL}
+						default:
+							if round > 6 {
+								name = ""
+							}
+						}
+					}
 					if name != "" {
 						out.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("guided-%d", round), Name: name, Args: args}}}}
 					} else {
 						answer := final
-						if !formatOnly && round == 3 {
+						if !formatOnly && (round == 3 || scenario.recovery && round == 5) {
 							answer = index
 						}
 						out.Content = genai.NewContentFromText(answer, "model")
@@ -394,7 +461,11 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					if searchCalls == 2 {
 						url = source.URL + "/breadth"
 					}
-					return &knowledgeModel{text: "Sources: " + url}, nil
+					searchText := "Sources: " + url
+					if scenario.recovery {
+						searchText += " alternate article: " + source.URL + "/breadth blocked: " + source.URL + "/blocked thin: " + source.URL + "/thin"
+					}
+					return &knowledgeModel{text: searchText}, nil
 				}, nil, episode)
 				if err != nil {
 					return nil, err
@@ -459,18 +530,30 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 						t.Fatal("source failure is not invocation-bound")
 					}
 				}
-				if facts["guided-5"].Status != store.BotSourceAccessFailed || facts["guided-5"].HTTPStatus != 403 || facts["guided-6"].Status != store.BotSourceAccessReturned || facts["guided-6"].HTTPStatus != 200 {
+				thinStatus, thinHTTP := store.BotSourceAccessReturned, 200
+				thinBody := "Privacy policy | Copyright"
+				if scenario.transportFailure {
+					thinStatus, thinHTTP, thinBody = store.BotSourceAccessFailed, 0, "fetch failed:"
+				}
+				if facts["guided-5"].Status != store.BotSourceAccessFailed || facts["guided-5"].HTTPStatus != 403 || facts["guided-6"].Status != thinStatus || facts["guided-6"].HTTPStatus != thinHTTP {
 					t.Fatalf("negative/thin sources lost: %+v", facts)
 				}
-				if !strings.Contains(fmt.Sprint(state.Candidate.Bodies), "Source unavailable") || !strings.Contains(fmt.Sprint(state.Candidate.Bodies), "Privacy policy | Copyright") {
+				if !strings.Contains(fmt.Sprint(state.Candidate.Bodies), "Source unavailable") || !strings.Contains(fmt.Sprint(state.Candidate.Bodies), thinBody) {
 					t.Fatal("negative/thin source bodies not retained for second review")
 				}
 			}
-			if fmt.Sprint(order) != wantOrder || searchCalls != 2 || result.Usage.ToolCalls != wantTools {
+			wantSearch := 2
+			if scenario.recovery {
+				wantOrder, wantTools, wantSearch = "[search /index /blocked /thin /breadth]", 5, 1
+			}
+			if fmt.Sprint(order) != wantOrder || searchCalls != wantSearch || result.Usage.ToolCalls != wantTools {
 				t.Errorf("research order/usage: %v %+v", order, result.Usage)
 			}
 			wantReviews := 2
 			wantProducer := 6
+			if scenario.recovery {
+				wantProducer = 7
+			}
 			if scenario.sourceFailure {
 				wantProducer = 8
 			}
@@ -487,10 +570,10 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			quotaErr := rt.(interface {
 				ReserveBotPublicResearch(context.Context, execution.BotMandateRef, string) error
 			}).ReserveBotPublicResearch(worker, *admission.Run.MandateRef, f.req.Run.SessionID.String())
-			if quotaErr == nil {
+			if (quotaErr == nil) != scenario.recovery {
 				t.Error("continuation escaped same durable two-call research quota")
 			}
-			if got := f.req.Budget.(*bot.SharedRunBudget).Usage(); got.InputTokens != 6 || got.OutputTokens != 10 || got.ToolCalls != wantTools {
+			if got := f.req.Budget.(*bot.SharedRunBudget).Usage(); got.InputTokens != int64(3*wantSearch) || got.OutputTokens != int64(5*wantSearch) || got.ToolCalls != wantTools {
 				t.Errorf("shared research accounting mismatch: %+v", got)
 			}
 			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: result.Usage}); err != nil {

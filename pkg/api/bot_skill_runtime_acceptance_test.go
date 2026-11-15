@@ -47,8 +47,23 @@ func scriptedEmployeeReview(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		case "No stock market sources were retrieved; current market news remains unverified.", "A malformed optional request did not prevent this useful answer.",
 			"The useful response remains available even when optional learning cannot be saved.",
 			"No additional method was needed for this answer.",
-			"Checking the alternate source remains a progress note, not a verified result.":
+			"Checking the alternate source remains a progress note, not a verified result.",
+			"The receipt was read; the proposed method is a draft.",
+			"Here is the receipt result; remaining limitations are explicit.",
+			"The scoped receipt was read. A reusable method is proposed, not independently certified.",
+			"The current receipt was read again using the saved method.",
+			"The preference request was handled without changing permissions.",
+			"The saved paragraph preference is available for this summary.",
+			"Observed scoped result.":
 			claim, support, explanation = "nonfactual", "satisfied", "Honest limitation or description of this response, not an external fact"
+		case "The alternative source reports 42 units. The primary source had no usable article; the optional check was unavailable.":
+			for ref, text := range in.Sources {
+				if strings.Contains(text, "42 units") {
+					sources = append(sources, map[string]any{"ref": ref, "quote": "42 units"})
+					support, explanation = "satisfied", "Captured alternative source reports 42 units"
+					break
+				}
+			}
 		case "The source says isolated receipt.":
 			for ref, text := range in.Sources {
 				if strings.Contains(text, "isolated receipt") {

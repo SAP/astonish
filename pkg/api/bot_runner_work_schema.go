@@ -48,7 +48,9 @@ func botWorkResponseSchema(prompt string, inputs ...[]byte) map[string]any {
 			assessments["items"].(map[string]any)["properties"].(map[string]any)["item_id"] = text()
 		}
 		props["formatted_review"] = map[string]any{"anyOf": []any{formatted, map[string]any{"type": "null"}}}
-		result["required"] = append(result["required"].([]string), "repair_kind", "missing_dimensions", "source_needs", "public_queries", "formatted_text", "formatted_review")
+		props["revised_text"] = text()
+		props["revised_review"] = map[string]any{"anyOf": []any{formatted, map[string]any{"type": "null"}}}
+		result["required"] = append(result["required"].([]string), "repair_kind", "missing_dimensions", "source_needs", "public_queries", "formatted_text", "formatted_review", "revised_text", "revised_review")
 		return result
 	case botWorkPreparePrompt:
 		criterion = object(map[string]any{"id": text(), "source_ids": map[string]any{"type": "array", "items": enum(sources), "minItems": 1}, "text": text(), "verification_kind": map[string]any{"type": "string", "enum": []string{string(store.BotWorkVerificationModel), string(store.BotWorkVerificationSourceURL), string(store.BotWorkVerificationRetrievalTime)}}, "fulfillment_scope": map[string]any{"type": "string", "enum": []string{string(store.BotWorkCriterionCurrentTurn), string(store.BotWorkCriterionFutureTaskDefinition)}}, "excluded": map[string]any{"type": "boolean"}, "exclusion_reason": text()}, "id", "source_ids", "text", "verification_kind", "fulfillment_scope", "excluded", "exclusion_reason")

@@ -16,13 +16,17 @@ import (
 // not a topic-specific server acceptance override. Deterministic model judgments
 // verify the supplied policy; live model adherence is a separate acceptance gate.
 func TestBotEmployeeScopeContentReview(t *testing.T) {
-	for _, mode := range []string{"useful-selective", "unsupported", "empty-limitation", "invented-quote"} {
+	for _, mode := range []string{"useful-selective", "source-index-inventory", "unsupported", "empty-limitation", "invented-quote"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, req, _ := botChatTestRequest(t)
 			w := store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: req.Run.ID, Version: 1, Instructions: "AI News"})
 			w.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
 			w.Criteria = botEmployeeReviewCriteria(w)
-			w.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: "final", Text: "IBM released an AI model.\nThe UK published an AI consultation.\nSelected coverage; other providers and market developments were not verified.", Bodies: map[string]string{"tool-response:ibm": `{"content":"IBM released an AI model."}`, "tool-response:uk": `{"content":"The UK published an AI consultation."}`}}
+			w.Candidate = &store.BotWorkCandidate{Revision: 1, EventID: "final", Text: "IBM released an AI model with downloadable weights for developers to adapt.\nThe UK opened a consultation on AI procurement rules for public services.\nSelected coverage.", Bodies: map[string]string{"tool-response:ibm": `{"content":"IBM released an AI model with downloadable weights for developers to adapt."}`, "tool-response:uk": `{"content":"The UK opened a consultation on AI procurement rules for public services."}`}}
+			if mode == "source-index-inventory" {
+				w.Candidate.Text = "Introducing Gemini4 Hydrogen — categorized as Models.\nVerified: index updates.\nEvidence boundary: only the blog index was fetched; linked articles were not read."
+				w.Candidate.Bodies = map[string]string{"tool-response:index": `{"content":"Introducing Gemini4 Hydrogen — categorized as Models.\nVerified: index updates."}`}
+			}
 			if mode == "empty-limitation" {
 				w.Candidate.Text = "No briefing; sources unavailable."
 			}
@@ -48,17 +52,28 @@ func TestBotEmployeeScopeContentReview(t *testing.T) {
 					if in.Contract.Instructions != "AI News" {
 						t.Fatal("assignment replaced with inferred coverage")
 					}
+					for _, want := range []string{"bare headline/category inventory is not a briefing", "what happened", "multiple substantive developments when available", "Internal evidence notes are optional", "material uncertainty briefly and naturally", "read the actual stories", "within existing search authority", "needs_work"} {
+						if !strings.Contains(system, want) || !strings.Contains(in.Criteria[0].Text, want) {
+							t.Errorf("review/criterion missing reader usefulness instruction %q", want)
+						}
+					}
 					response := botEmployeeAssessment{BotEmployeeRepairFeedback: BotEmployeeRepairFeedback{Kind: botEmployeeRepairNone}}
 					response.CandidateDigest = in.Candidate.Digest
 					verdict := store.BotCriterionSatisfied
-					if mode == "empty-limitation" {
+					if mode == "empty-limitation" || mode == "source-index-inventory" && strings.Contains(system, "bare headline/category inventory is not a briefing") {
 						verdict = store.BotCriterionFailed
+						if mode == "source-index-inventory" {
+							response.Kind = botEmployeeRepairResearch
+							response.MissingDimensions = []string{"Substantive news developments"}
+							response.SourceNeeds = []string{"Read substantive stories rather than catalog labels."}
+							response.PublicQueries = []string{"AI news specialist reporting"}
+						}
 					}
 					response.Criteria = []store.BotCriterionAssessment{{CriterionID: in.Criteria[0].ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + in.Candidate.Digest}, Explanation: "Original broad title requires useful news, not every sector; empty limitations are inadequate."}}
 					for _, item := range in.Items {
 						a := botWorkContentAssessment{ItemID: item.ID, ClaimType: botContentFactual, Relevance: store.BotCriterionSatisfied, Support: store.BotCriterionSatisfied, Explanation: "Supported selected coverage."}
 						quote := item.Text
-						if strings.Contains(quote, "Selected coverage") || mode == "empty-limitation" {
+						if strings.Contains(quote, "Selected coverage") || strings.HasPrefix(quote, "Evidence boundary:") || mode == "empty-limitation" {
 							a.ClaimType = botContentNonfactual
 						} else if mode == "unsupported" {
 							a.Support = store.BotCriterionUnverified
@@ -81,7 +96,10 @@ func TestBotEmployeeScopeContentReview(t *testing.T) {
 					yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
 				}
 			}}
-			review, _, err := reviewBotEmployeeCandidate(ctx, req, llm, w, &store.BotUsage{})
+			review, feedback, err := reviewBotEmployeeCandidate(ctx, req, llm, w, &store.BotUsage{})
+			if mode == "source-index-inventory" && (err != nil || review == nil || review.Criteria[0].Verdict != store.BotCriterionFailed || feedback.Kind != botEmployeeRepairResearch || calls != 1) {
+				t.Fatalf("source-backed inventory must need substantive work, not citation repair: err=%v review=%+v feedback=%+v calls=%d", err, review, feedback, calls)
+			}
 			if err == nil {
 				w.Review = review
 			}

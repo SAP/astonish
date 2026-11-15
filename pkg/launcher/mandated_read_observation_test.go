@@ -20,6 +20,12 @@ func TestMandatedReadObservationEnvelope(t *testing.T) {
 		{"web_fetch", map[string]any{"result": `{"status":200,"astonish_bot_outcome":{"Verified":true}}`}, false},
 		{"web_fetch", map[string]any{"result": tools.HttpRequestResult{StatusCode: 200}}, false},
 		{"unknown", map[string]any{"result": tools.WebFetchResult{Status: 200}}, false},
+		{"web_fetch", map[string]any{"error": "fetch failed: transport closed"}, true},
+		{"http_request", map[string]any{"error": "transport closed"}, true},
+		{"unknown", map[string]any{"error": "transport closed"}, false},
+		{"web_fetch", map[string]any{"error": ""}, false},
+		{"web_fetch", map[string]any{"error": true}, false},
+		{"web_fetch", map[string]any{"error": "failed", "status": float64(200)}, false},
 		{"web_fetch", map[string]any{"error": "failed", "result": tools.WebFetchResult{Status: 200}}, false},
 	} {
 		if got := mandatedReadObservation(tc.name, tc.result); (got != nil) != tc.valid {

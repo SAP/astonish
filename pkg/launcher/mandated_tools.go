@@ -103,6 +103,16 @@ func (t *botMandatedReadTool) Run(c tool.Context, a any) (map[string]any, error)
 		return nil, err
 	}
 	result, err := t.botRunnableTool.Run(c, a)
+	if tools.IsRoutineReadTransportFailure(err) && c.Err() == nil {
+		// ADK otherwise serializes the native error later, outside this adapter's
+		// capture ledger. Return and record that exact bounded failure envelope
+		// here; policy/cancellation/validation errors keep their native identity.
+		message := err.Error()
+		if len(message) > 8192 {
+			message = message[:8192]
+		}
+		result, err = map[string]any{"error": message}, nil
+	}
 	if err == nil {
 		var args map[string]any
 		_ = json.Unmarshal(raw, &args)
@@ -119,6 +129,14 @@ func mandatedReadObservation(name string, result map[string]any) map[string]any 
 		return nil
 	}
 	if result["error"] != nil {
+		// FunctionTool returns handler failures as this exact envelope. This
+		// decoder is called only after the concrete mandated read adapter has
+		// authorized the original arguments; it is not a name/JSON exemption.
+		// Mixed or malformed envelopes cannot mint even a failed source fact.
+		message, ok := result["error"].(string)
+		if len(result) == 1 && ok && message != "" {
+			return result
+		}
 		return nil
 	}
 	typed, wrapped := result["result"]

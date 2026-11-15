@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -51,6 +52,31 @@ func ValidateRoutineRead(a HttpRequestArgs) error {
 	_, err := RoutineReadOrigin(a.URL)
 	return err
 }
+
+// RoutineReadTransportFailure marks only failures inside the constrained HTTP
+// transport, not validation, authority, IP policy or cancellation failures.
+// The original error is preserved for callers; no serialized metadata grants it.
+type RoutineReadTransportFailure struct{ cause error }
+
+func (e *RoutineReadTransportFailure) Error() string { return e.cause.Error() }
+func (e *RoutineReadTransportFailure) Unwrap() error { return e.cause }
+func IsRoutineReadTransportFailure(err error) bool {
+	var failure *RoutineReadTransportFailure
+	return errors.As(err, &failure)
+}
+
+type routineReadPolicyFailure struct{ error }
+
+func (e routineReadPolicyFailure) Unwrap() error { return e.error }
+
+func routineReadTransportError(ctx context.Context, err error) error {
+	var denied routineReadPolicyFailure
+	if ctx.Err() != nil || errors.As(err, &denied) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &RoutineReadTransportFailure{cause: err}
+}
+
 func routineReadRequest(ctx context.Context, a HttpRequestArgs, p RoutineReadPolicy) (HttpRequestResult, error) {
 	if err := ValidateRoutineRead(a); err != nil {
 		return HttpRequestResult{}, err
@@ -85,10 +111,10 @@ func routineReadRequest(ctx context.Context, a HttpRequestArgs, p RoutineReadPol
 		for _, ip := range ips {
 			if p.AllowIP != nil {
 				if err := p.AllowIP(c, address, ip.IP); err != nil {
-					return nil, err
+					return nil, routineReadPolicyFailure{err}
 				}
 			} else if !ip.IP.IsGlobalUnicast() || ip.IP.IsPrivate() || ip.IP.IsLoopback() || ip.IP.IsLinkLocalUnicast() {
-				return nil, fmt.Errorf("routine read private address denied")
+				return nil, routineReadPolicyFailure{fmt.Errorf("routine read private address denied")}
 			}
 		}
 		return (&net.Dialer{}).DialContext(c, network, net.JoinHostPort(ips[0].IP.String(), port))
@@ -96,9 +122,12 @@ func routineReadRequest(ctx context.Context, a HttpRequestArgs, p RoutineReadPol
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: httpReqDefaultTimeout, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) > httpReqMaxRedirects {
-			return fmt.Errorf("too many redirects")
+			return routineReadPolicyFailure{fmt.Errorf("too many redirects")}
 		}
-		return authorize(r.URL.String())
+		if err := authorize(r.URL.String()); err != nil {
+			return routineReadPolicyFailure{err}
+		}
+		return nil
 	}}
 	method := strings.ToUpper(a.Method)
 	if method == "" {
@@ -110,7 +139,7 @@ func routineReadRequest(ctx context.Context, a HttpRequestArgs, p RoutineReadPol
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return HttpRequestResult{}, err
+		return HttpRequestResult{}, routineReadTransportError(ctx, err)
 	}
 	defer res.Body.Close()
 	limit := int64(httpReqDefaultMaxBytes)
@@ -119,7 +148,7 @@ func routineReadRequest(ctx context.Context, a HttpRequestArgs, p RoutineReadPol
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
 	if err != nil {
-		return HttpRequestResult{}, err
+		return HttpRequestResult{}, routineReadTransportError(ctx, err)
 	}
 	truncated := int64(len(body)) > limit
 	if truncated {

@@ -108,7 +108,7 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Allow producer context for the 39KB fixture; production budgets stay unchanged.
-	limit := int64(150000)
+	limit := int64(160000)
 	toolsLimit := int64(100)
 	spec := store.BudgetSpec{MaxRuntimeSeconds: 300, MaxTokens: &limit, MaxToolCalls: &toolsLimit}
 	meter, err := bot.NewRunBudget(spec, time.Now())

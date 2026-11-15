@@ -83,7 +83,8 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 	}
 	switch m.Origin {
 	case BotEmployeeMessageAgent:
-		if r.EffectState == BotReportEffectsUncertain || r.ReviewLimitation != nil || len(r.Unverified) != 0 || r.Work.Validate() != nil || r.Quality != nil || m.CandidateDigest != r.Work.CandidateDigest || m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || !r.Work.allowsResult(status) {
+		partialGraceful := status == RunPartial && r.Work != nil && r.Work.Phase == BotWorkFinished && r.Work.Disposition == AgentWorkPartial
+		if r.EffectState == BotReportEffectsUncertain || r.ReviewLimitation != nil || (len(r.Unverified) != 0 && !partialGraceful) || r.Work.Validate() != nil || r.Quality != nil || m.CandidateDigest != r.Work.CandidateDigest || m.CandidateDigest == "" || m.Text != r.Summary || m.FailureKind != "" || m.Reason != "" || !r.Work.allowsResult(status) {
 			return ErrBotInvalid
 		}
 	case BotEmployeeMessageAssessed:

@@ -25,14 +25,20 @@ import (
 )
 
 type agentExecutionWorkStore struct {
-	state *store.BotWorkState
-	err   error
+	state            *store.BotWorkState
+	err              error
+	requirePrincipal bool
 }
 
 func (s *agentExecutionWorkStore) LoadWork(context.Context, store.BotLease) (*store.BotWorkState, error) {
 	return s.state.Clone(), nil
 }
-func (s *agentExecutionWorkStore) SaveWork(_ context.Context, q store.BotWorkUpdate) (*store.BotWorkState, error) {
+func (s *agentExecutionWorkStore) SaveWork(ctx context.Context, q store.BotWorkUpdate) (*store.BotWorkState, error) {
+	if s.requirePrincipal {
+		if p, ok := execution.PrincipalFromContext(ctx); !ok || p.Validate() != nil {
+			return nil, store.ErrBotForbidden
+		}
+	}
 	if s.err != nil {
 		return nil, s.err
 	}

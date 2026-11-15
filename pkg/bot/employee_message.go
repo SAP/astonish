@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -166,7 +167,18 @@ func ComposeEmployeeMessage(ctx context.Context, status store.RunStatus, report 
 	if opts.Work != nil && opts.Work.Protocol == store.BotWorkProtocolAgentLedV1 || report.Work != nil && report.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
 		// Content findings do not attest external effects. Use runtime-owned facts
 		// and a scoped, withheld review response, without another narration call.
-		if cause == nil && (len(report.Unverified) != 0 || report.ReviewLimitation != nil || report.EffectState == store.BotReportEffectsUncertain) {
+		// When a safe read-only/text-only candidate is delivered gracefully as
+		// AgentWorkPartial in BotWorkFinished, preserve the agent's candidate answer
+		// rather than replacing it with a generic "couldn't confirm completion" fallback.
+		gracefulPartial := status == store.RunPartial &&
+			opts.Work != nil &&
+			opts.Work.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 &&
+			opts.Work.Phase == store.BotWorkFinished &&
+			opts.Work.AgentWork != nil &&
+			opts.Work.AgentWork.Disposition == store.AgentWorkPartial &&
+			len(opts.Work.Unresolved) > 0 &&
+			reflect.DeepEqual(report.Unverified, opts.Work.Unresolved)
+		if cause == nil && ((!gracefulPartial && len(report.Unverified) != 0) || report.ReviewLimitation != nil || report.EffectState == store.BotReportEffectsUncertain) {
 			return store.NewBotEmployeeFallback(status, report, store.BotEmployeeOutcomeReason(status, report))
 		}
 		if cause == nil {

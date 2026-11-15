@@ -1202,7 +1202,7 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return mcpAuth.target.Run(invocation, args)
 	}
 	result, err := t.botRunnableTool.Run(bound, args)
-	if substantiveTaskTool(t.botRunnableTool) && t.binding.tasks != nil {
+	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, errors.Join(err, captureErr)
 		}

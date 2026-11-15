@@ -48,7 +48,7 @@ func workerWorkAssessment(r *model.LLMRequest, accept func(*store.BotWorkState) 
 		if json.Unmarshal([]byte(r.Contents[0].Parts[0].Text), &w) != nil || w.Candidate == nil {
 			return nil, false
 		}
-		pass := w.Candidate.Text == "durable controlled result"
+		pass := w.Candidate.Text == "durable controlled result" || w.Candidate.Text == "Fresh decisive sources inspected; captured observations are not correctness guarantees."
 		if strings.Contains(strings.ToLower(w.Candidate.Text), "pending") && len(w.Candidate.Observations) > 0 {
 			pass = true
 		}
@@ -146,7 +146,7 @@ func workerAssessContent(in workerContentInput, item workerContentItem) workerCo
 	case "durable controlled result":
 		a.ClaimType, a.Support = workerClaimNonfactual, store.BotCriterionSatisfied
 		a.Explanation = "Literal placeholder identifying the controlled text response; no external fact or action is asserted."
-	case triggerExecutionAnswer, "No delivery fact in active context.", "I can continue without a saved method.":
+	case triggerExecutionAnswer, "No delivery fact in active context.", "I can continue without a saved method.", "Fresh decisive sources inspected; captured observations are not correctness guarantees.":
 		a.ClaimType, a.Support = workerClaimNonfactual, store.BotCriterionSatisfied
 		a.Explanation = "Honest limitation, not an assertion of an external outcome."
 	case "The schedule request is pending; application is not yet verified.":

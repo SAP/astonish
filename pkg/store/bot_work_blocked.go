@@ -236,7 +236,7 @@ func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
 		if err := w.Validate(); err != nil {
 			return err
 		}
-		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() {
+		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() && !(w.AgentWork != nil && w.AgentWork.Disposition == AgentWorkPartial && q.Status == RunPartial) {
 			return ErrBotInvalid
 		}
 		p := BuildBotWorkProjection(w)

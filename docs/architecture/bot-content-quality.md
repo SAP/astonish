@@ -50,6 +50,125 @@ recognition and autonomous policy bindings do not grant this exemption. Missing
 responses, duplicate invocation/ledger IDs, mismatched names and any conflicting
 send/write/artifact/schedule receipt remain uncertain and cannot enable replay.
 
+## Trusted read transport failures
+
+`routineReadRequest` marks failures from the constrained HTTP exchange/body read
+with a first-party typed error. Validation, origin/redirect/IP policy denials and
+cancellation keep native error identity and never receive that marker. The concrete
+`botMandatedReadTool` converts only that marker, after its original read-scope
+checks, into the exact returned `{error: string}` envelope (bounded to 8192 bytes).
+The existing scoped-redacted capture hash records `BotSourceAccessFailed` with
+same-call identity, zero HTTP status when no response is available, and no verified
+effect/success receipt. Mixed error/result envelopes and malformed aliases remain
+rejected; providers and arbitrary named tools cannot mint these facts.
+
+Previously the native error bypassed adapter capture, and the error-envelope
+decoder also discarded it. The generic completion error path then marked otherwise
+read-only recovered research uncertain and withheld the useful draft. With the
+bound failed fact, the existing report recovery path retains the negative evidence
+without claiming an unconfirmed send or bypassing the supported-answer review.
+`TestBotEmployeeGuidedResearchProductionJourney` failed first on actual HTTP 403 →
+connection-close transport failure → usable 200; it now independently checks exact
+source quotes, persists all source facts and commits the supported employee message.
+This is isolated production-factory evidence, not a fresh paid-provider/live-daemon
+acceptance claim.
+
+## Outcome-driven approach selection
+
+Bot producer instructions apply the same approach-selection rule to research,
+code, data, documents and authorized external actions. Before the first work tool,
+the employee chooses a useful outcome, dependencies, proportionate evidence/tests
+and a stopping condition within the ordinary producer call. There is no extra
+planner model, required plan tool, saved universal procedure or new permission.
+Working assumptions never become owner requirements. Independent reads may run
+in parallel only when the current runtime permits them.
+
+The employee distinguishes material gaps from presentation-only corrections,
+optional enrichment and genuine missing-input/authority blockers. It should repair
+unsupported embellishments before drafting and stop once useful explicit
+requirements are adequately supported, not pursue exhaustive or perfect output.
+News discovery is one application: configured search finds complementary specialist
+coverage, repeated stories are grouped, and shared-origin or syndicated reports
+are not counted as independent corroboration. Portal counts and site lists are
+not fixed. Consequential details still require decisive captured evidence.
+Retained approach decisions, resources and failures are adaptable Bot-owned
+knowledge; they do not prescribe web research for unrelated assignments.
+
+Prompt regression coverage includes research, bug fixing, spreadsheet analysis
+and document revision. This establishes delivered instructions, not live model
+adherence or a demonstrated latency improvement; those require separate journeys.
+
+## Reader-facing news, not source inventories
+
+Producer guidance in `pkg/agent/bot_prompt.go` and employee assessment guidance in
+`pkg/api/bot_employee_review.go` distinguish usefulness from attribution safety.
+A news briefing explains what happened with meaningful supported context and
+multiple substantive developments when available. Selected coverage remains valid;
+there is no compulsory story count, vendor roster, exhaustive survey or template.
+Bare headline/category inventories and index-update statements do not fulfill a
+briefing merely because each statement has an exact source quote. Assessment must
+fail assignment adequacy (`needs_work` for optional check judgment) while preserving
+honest per-claim support; no production keyword blacklist or truth boolean is added.
+
+When captured evidence already includes substantive stories, text repair can write
+the useful answer. With discovery listings only, the employee should read actual
+stories or seek other relevant specialist coverage through existing configured
+search authority, not invent details or polish the inventory into a false completion.
+Internal evidence notes are optional working context, not mandatory public prose.
+Material uncertainty (including unknown freshness) remains explicit, briefly and
+naturally where it affects interpretation. Clearly attributed sources at the bottom
+are valid; links do not imply unread article inspection.
+
+`TestBotPromptReaderFacingNews` covers initial/refreshed interactive and background
+prompts without changing the owner turn. `TestBotEmployeeScopeContentReview`
+exercises the production reviewer with deterministic model judgments: a source-backed
+category inventory fails adequacy without citation failure, useful limited multi-story
+coverage passes, and unsupported stories/invented quotes remain rejected. These tests
+prove instruction delivery and strict validation, not live model adherence. The
+previous succeeded-but-inadequate index-only result is not news-quality acceptance;
+new live provider/browser verification remains a separate obligation.
+
+## Evidence-grounded correction inside employee review
+
+For evidence-bound employee runs, `repair_kind:text` may return `revised_text`
+and a complete `revised_review` inside the existing tool-free assessment. This
+corrects removable unsupported embellishments without abandoning useful research
+at the two producer-repair limit. It does not add a reviewer call, autoaccept a
+negative assessment, weaken the assignment, or increase `BotWorkMaxRepairs`.
+The original review must still validate against the original candidate. The nested
+review uses the **input** candidate digest and evidence references; the server
+constructs a private text-only candidate retaining the pinned full assignment and
+captured evidence, rebinds only candidate identity, then reruns ordinary identity,
+criterion coverage, mechanical checks, every actual revised line, source refs,
+exact quotes, relevance and support validation. Publication requires a complete
+accepted revised assessment. Claim support and assignment adequacy remain model
+judgments, not an exact-quote mechanical truth guarantee.
+
+Unlike formatting correction, evidence-grounded text correction may remove or
+qualify an unsupported assertion; it need not preserve its bytes. Formatting keeps
+its existing exact claim-preservation check. Mixed revision protocols, incomplete
+nested reviews, foreign identities/refs, invented quotes, unsupported revised
+claims and inadequate original-requirement coverage remain rejected. Actual
+missing research remains blocked at the existing repair limit. Text correction
+requires the actual captured read-only report, no changed/unverified effects,
+artifacts, approvals, runtime blockers or pending controls, and no revised execution
+claims. It cannot replay tools or change artifacts/control state. Separate text
+repair receives explicit private `review_findings` (complete criterion and content
+assessments) and `review_feedback`; these are untrusted guidance, not grants.
+
+`TestBotEmployeeTextOneAssessmentAtRepairLimit` records the failing-first case:
+previous strict decoding rejected same-review text fields, and legacy text feedback
+without them remained negative at `Repairs >= 2`. The test now proves a useful
+briefing with a removable unsupported sentence publishes in one assessment after
+two repairs, while altered unsupported facts, foreign refs, missing coverage and
+real research gaps remain withheld. Schema and exact-repair-findings tests cover
+the other protocol boundaries. `TestBotEmployeeTextRevisionGuidance` also failed
+first when the decoder accepted revised fields but the prompt never instructed the
+reviewer to return them; it now requires explicit same-assessment correction,
+complete revised review, pinned identity, actual line IDs and read-only boundaries.
+This is deterministic production-validator evidence;
+no paid provider, live-daemon restart or deployment acceptance is implied.
+
 ## Legacy content assessment (retained)
 
 `pkg/api/bot_runner_work_content.go` extends the existing bounded, tool-free work
@@ -58,6 +177,38 @@ and review retain the original assignment, charter, goals and captured attachmen
 text. Topic relevance follows that owner scope, never a feed's broad category.
 Adjacent technology is not automatically relevant; explicit scope expansion and
 genuine topic coverage in another industry are permitted.
+
+## Bounded transient assessment transport recovery
+
+`botWorkJSON` permits one retry only for typed retryable HTTP 429/502/503/504,
+network timeouts, or connection resets. It does not parse provider messages or
+trust an arbitrary `Retryable` flag for other status codes. This consumes the
+**same two-call ceiling** as strict JSON/schema and citation correction. It
+reuses the exact request, input, schema, owner model and metered budget, discards
+failed-call text, and rechecks the original authorization, mandate/lease and
+cancellation boundaries before a second call. Usage maxima from each call are
+summed even on errors; no producer, tool, source fetch or uncertain effect is
+replayed. Two transient failures withhold the candidate. Malformed second-call
+output receives no third attempt and is never automatically accepted.
+
+Cancellation/deadline, budget failures, forbidden/conflicting authority,
+provider schema/auth 4xx, untyped errors, incomplete output, explicit interrupted
+responses and `InterruptedStreamError` remain non-replayable. A typed transient
+iterator failure after private partial assessment text may retry; an explicit
+interrupted-stream marker never does. Strict output limits, function-call
+rejection, complete-response checks, identity, evidence and citation validators
+are unchanged. `TestBotWorkAssessmentTransient*` covers recovery and withholding
+through employee publication, immutable tool-free requests, summed usage,
+shared correction slots and cancellation/authority/budget checks.
+
+Private review diagnostics now retain server-owned provider/transport reason
+codes and numeric HTTP status, not provider name, message, response body,
+credentials or source URLs. The recorded live review call
+`79e59976-7a80-4015-aea9-ac2165a40cd9` at `2026-11-14T20:29:16Z` had a sanitized
+`model_response` error; this alone does **not** establish timeout, truncation,
+schema rejection or any other exact provider cause. Offline retry tests are not
+proof that that live failure is resolved. No paid rerun or daemon deployment was
+performed for this change.
 
 ## Protocol and rejection
 

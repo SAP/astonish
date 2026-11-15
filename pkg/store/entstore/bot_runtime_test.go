@@ -238,6 +238,9 @@ func TestBotAgentArtifactIdentity(t *testing.T) {
 					next.Candidate.Bodies[artifact.ID.String()] += "forged"
 				}
 				next.Candidate.Digest = next.Candidate.ContentDigest()
+				if name != "tampered-bytes" {
+					acceptEmployeeReviewFixture(next)
+				}
 				work, err = repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: work.Revision, State: *next})
 				if name == "tampered-bytes" {
 					if !errors.Is(err, store.ErrBotInvalid) {

@@ -316,7 +316,7 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 		return nil, err
 	}
 	result, err := t.botRunnableTool.Run(bound, args)
-	if substantiveTaskTool(t.botRunnableTool) && t.binding.tasks != nil {
+	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, captureErr
 		}

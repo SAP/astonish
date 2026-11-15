@@ -42,7 +42,7 @@ func (r *botRepository) commitBotSkill(ctx context.Context, tx botDraftDB, saved
 			}
 			if event.Timestamp.After(*state.SelectedAt) && !event.Partial && event.Content != nil {
 				for _, part := range event.Content.Parts {
-					if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID == evidence.CallID {
+					if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID == evidence.CallID && !strings.HasPrefix(part.FunctionResponse.Name, "bot_skill_") && !strings.HasPrefix(part.FunctionResponse.Name, "bot_work_") {
 						used = true
 					}
 				}

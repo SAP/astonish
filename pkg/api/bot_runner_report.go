@@ -36,6 +36,7 @@ type botAgentReadJournal struct {
 	calls                   map[string]botAgentReadCall
 	seen                    map[string]bool
 	completed               map[string]bool
+	confirmed               bool
 	uncertain               bool
 	constrainedTextComplete bool
 }
@@ -79,6 +80,9 @@ func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionC
 func (s *botAgentWorkService) captureReadReference(callID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.resources == nil || s.resources.EvidenceReader == nil {
+		return
+	}
 	if s.accessPending == nil {
 		s.accessPending = map[string][]store.BotSourceAccessFact{}
 	}
@@ -104,12 +108,22 @@ func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ..
 	delete(j.calls, response.ID)
 	read := ok && entry.read && entry.name == response.Name
 	noEffect := false
+	verifiedRead := false
+	confirmedEffect := false
 	if len(receipts) == 1 {
 		o := receipts[0]
 		r := o.Nonexecution
 		noEffect = ok && entry.name == response.Name && response.ID != "" && r != nil && r.CallID == response.ID && r.ToolName == response.Name && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		verifiedRead = ok && entry.name == response.Name && response.ID != "" && r == nil && o.Verified && !o.ReceiptConflict && len(o.Unverified) == 0 && len(o.Changed) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		confirmedEffect = ok && !entry.read && entry.name == response.Name && response.ID != "" && r == nil && o.Verified && !o.ReceiptConflict && len(o.Unverified) == 0 && (len(o.Changed) > 0 || len(o.Artifacts) > 0 || o.RoutineCapture != nil || o.ScheduleCapture != nil || o.NextRunAt != nil)
 	}
-	if (!read && !noEffect) || (len(receipts) == 1 && receipts[0].Nonexecution != nil && !noEffect) || j.completed[response.ID] {
+	if verifiedRead {
+		read = true
+	}
+	if confirmedEffect {
+		j.confirmed = true
+	}
+	if (!read && !noEffect && !confirmedEffect) || (len(receipts) == 1 && receipts[0].Nonexecution != nil && !noEffect) || j.completed[response.ID] {
 		j.uncertain = true
 	}
 	if j.completed == nil {
@@ -134,6 +148,9 @@ func (j *botAgentReadJournal) effectState() store.BotReportEffectState {
 	if len(j.seen) == 0 && !j.constrainedTextComplete {
 		return store.BotReportEffectsUnknown
 	}
+	if j.confirmed {
+		return store.BotReportEffectsConfirmed
+	}
 	return store.BotReportEffectsReadOnly
 }
 
@@ -156,7 +173,7 @@ func (j *botAgentReadJournal) observeEffect(outcome bot.ToolOutcome, captured bo
 	}
 	// A conflicting runtime receipt always beats a read classification. Read
 	// access failures carry Unverified diagnostics but do not imply a send.
-	if outcome.ReceiptConflict || len(outcome.Changed) != 0 || len(outcome.Artifacts) != 0 || outcome.RoutineCapture != nil || outcome.ScheduleCapture != nil || outcome.NextRunAt != nil {
+	if outcome.ReceiptConflict || (!outcome.Verified && (len(outcome.Changed) != 0 || len(outcome.Artifacts) != 0 || outcome.RoutineCapture != nil || outcome.ScheduleCapture != nil || outcome.NextRunAt != nil)) {
 		j.mu.Lock()
 		j.uncertain = true
 		j.mu.Unlock()
@@ -225,7 +242,7 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 	read := journal.take(response, outcome)
 	journal.observeEffect(outcome, ok)
 	cr.completion.Report.EffectState = journal.effectState()
-	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && read && (!ok || len(outcome.SourceAccess) == 0) {
+	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && read && (!ok || (len(outcome.SourceAccess) == 0 && outcome.Nonexecution == nil)) && !strings.HasPrefix(response.Name, "bot_skill_") && !strings.HasPrefix(response.Name, "bot_work_") {
 		service.captureReadReference(response.ID) // bind even when a local read has no HTTP facts
 	}
 	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {

@@ -106,7 +106,30 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 	}
 	switch protocol {
 	case store.BotWorkProtocolAgentLedV1:
-		// Newly admitted attempts select the current protocol at first claim.
+		if len(protocols) == 1 {
+			var saved *botStoredRun
+			if scope == store.BotScopeTeam {
+				saved, err = (teamBotDB{client: teamClient}).ReadRun(ctx, b.ID, run.ID)
+			} else {
+				saved, err = (personalBotDB{client: client}).ReadRun(ctx, b.ID, run.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: b.ID, RunID: run.ID, Version: run.Version, AdmissionEventID: saved.Run.UserEventID, Instructions: saved.Instructions, Charter: version.Charter})
+			data, err := botJSONMap(*saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scope == store.BotScopeTeam {
+				err = teamClient.BotRun.UpdateOneID(run.ID).SetData(data).Exec(ctx)
+			} else {
+				err = client.BotRun.UpdateOneID(run.ID).SetData(data).Exec(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 	case store.BotWorkProtocolLegacyAssessment:
 		// Simulate a persisted pre-agent attempt before the runtime claims it.
 		// Production APIs must never downgrade an in-flight work protocol.

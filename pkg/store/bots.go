@@ -379,6 +379,9 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 		if work == nil || work.Protocol != BotWorkProtocolAgentLedV1 || work.Candidate == nil || m.CandidateDigest != work.Candidate.Digest {
 			return ErrBotInvalid
 		}
+		if len(r.Unverified) != 0 && (work.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 || work.Phase != BotWorkFinished || work.AgentWork == nil || work.AgentWork.Disposition != AgentWorkPartial || len(work.Unresolved) == 0 || !reflect.DeepEqual(r.Unverified, work.Unresolved)) {
+			return ErrBotInvalid
+		}
 		return ValidateBotWorkCompletion(work, BotRunCommit{Lease: BotLease{BotID: work.Contract.BotID, RunID: work.Contract.RunID}, Status: status, Report: r})
 	case BotEmployeeMessageAssessed:
 		if work == nil || work.Validate() != nil || work.Candidate == nil || m.CandidateDigest != work.Candidate.Digest || m.Text != work.Candidate.Text || r.Summary != work.Candidate.Text || m.FailureKind != "" {

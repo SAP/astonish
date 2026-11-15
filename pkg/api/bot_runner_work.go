@@ -101,6 +101,7 @@ func botWorkJSON(ctx context.Context, req bot.RunRequest, llm model.LLM, prompt 
 		var text strings.Builder
 		var callInput, callOutput int64
 		complete := false
+		var transportErr error
 		for response, callErr := range llm.GenerateContent(bot.WithModelCallPurpose(ctx, bot.ModelCallPurposeAssessment), request, true) {
 			if response != nil && response.UsageMetadata != nil {
 				// ADK usage is cumulative within a call, including repeated final
@@ -113,7 +114,25 @@ func botWorkJSON(ctx context.Context, req bot.RunRequest, llm model.LLM, prompt 
 				callInput, callOutput = nextInput, nextOutput
 			}
 			if callErr != nil {
-				return callErr
+				if !botReviewTransientModelError(callErr) || (response != nil && (response.Interrupted || response.ErrorCode != "" || response.ErrorMessage != "")) {
+					return callErr
+				}
+				if response != nil && response.Content != nil {
+					responseBytes := text.Len()
+					for _, part := range response.Content.Parts {
+						if part != nil && part.FunctionCall != nil {
+							return errors.New("assessment attempted a tool call")
+						}
+						if part != nil && !part.Thought {
+							responseBytes += len(part.Text)
+						}
+					}
+					if responseBytes > store.BotWorkMaxContractBytes {
+						return errors.New("assessment response exceeds limit")
+					}
+				}
+				transportErr = callErr
+				break
 			}
 			if response == nil {
 				continue
@@ -152,6 +171,17 @@ func botWorkJSON(ctx context.Context, req bot.RunRequest, llm model.LLM, prompt 
 		stage = botReviewBoundary
 		if err := botWorkBoundary(ctx, req); err != nil {
 			return err
+		}
+		if transportErr != nil {
+			stage = botReviewModel
+			if attempt+1 == attemptLimit {
+				return transportErr
+			}
+			// This slot is shared with JSON/schema/citation correction, never a
+			// new allowance. Discard failed-call text; repeat only the exact
+			// tool-free request after original live boundary checks above.
+			botReviewValidationDiagnostic(req, stage, diagnosticAttempt, true, transportErr)
+			continue
 		}
 		stage = botReviewCompletion
 		// Iterator termination alone does not make partial JSON a completed
@@ -1196,11 +1226,13 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 		}
 		updated, saveErr = resources.Work.SaveWork(ctx, store.BotWorkUpdate{Lease: req.Run.Lease, ExpectedRevision: w.Revision, State: *next})
 	}
+	if updated != nil {
+		saved = updated
+	}
 	if saveErr != nil {
 		result, err = stop(fmt.Errorf("agent result capture failed: %w", saveErr))
 		return
 	}
-	saved = updated
 	if learned, learningErr := stageBotAgentSkillObservations(ctx, req, resources, updated); learningErr == nil {
 		saved = learned
 	} else if resources.Skills != nil && updated.Contract.Skill != nil {

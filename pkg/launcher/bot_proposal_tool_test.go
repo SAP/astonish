@@ -72,6 +72,7 @@ func TestBotProposalCapabilityStrictBoundAndCapped(t *testing.T) {
 				if _, err = tool.Run(ctx, bad); err == nil || repo.calls != 0 {
 					t.Fatal("unknown payload accepted")
 				}
+				_, _ = bot.TakeToolOutcome(ledgerCtx, ctx.FunctionCallID())
 				for i := 0; i < 3; i++ {
 					out, e := tool.Run(ctx, valid)
 					outcome, ok := bot.TakeToolOutcome(ledgerCtx, ctx.FunctionCallID())

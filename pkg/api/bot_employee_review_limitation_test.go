@@ -108,24 +108,43 @@ func TestBotEmployeeResearchLimitationHTTP(t *testing.T) {
 			if reviews != 3 || productions != 1 || result.Status != store.RunPartial {
 				t.Fatalf("unbounded or missing review: reviews=%d productions=%d result=%+v", reviews, productions, result)
 			}
-			limitation := result.Report.ReviewLimitation
-			if limitation == nil || !strings.Contains(limitation.Text, gap) || limitation.Text != saved.state.Unresolved[0] || limitation.WorkRevision != saved.state.Revision {
-				t.Fatalf("saved finding not bound: %+v", result.Report)
-			}
-			if strings.Contains(result.Report.Summary, candidate) {
-				t.Fatal("rejected candidate leaked")
-			}
-			reason := store.BotEmployeeOutcomeReason(result.Status, result.Report)
-			message := store.NewBotEmployeeFallback(result.Status, result.Report, reason)
-			if result.Report.EmployeeMessage == nil || *result.Report.EmployeeMessage != message {
-				t.Fatalf("active final did not use bound facts: %+v expected=%+v", result.Report.EmployeeMessage, message)
-			}
 			if method == http.MethodGet {
-				if effects != 0 || result.Report.EffectState != store.BotReportEffectsReadOnly || reason != store.BotEmployeeReasonResearchInadequate || !strings.Contains(message.Text, gap) || strings.Contains(message.Text, "destination") {
-					t.Fatalf("research confused with effects: %+v message=%+v", result.Report, message)
+				// With safe read-only effects and text-only candidate, the
+				// max-repairs path now delivers as partial rather than
+				// withholding. The candidate text is the report summary AND the
+				// published employee message (not the generic fallback).
+				if !strings.Contains(result.Report.Summary, candidate) {
+					t.Fatal("partial delivery should include candidate text")
 				}
-			} else if effects != 1 || result.Report.EffectState != store.BotReportEffectsUncertain || reason != store.BotEmployeeReasonAgentUnverifiedEffects || !strings.Contains(message.Text, "destination") {
-				t.Fatalf("uncertain effect warning lost: %+v message=%+v", result.Report, message)
+				if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || result.Report.EmployeeMessage.Text != candidate {
+					t.Fatalf("partial delivery employee message did not preserve candidate text: %+v", result.Report.EmployeeMessage)
+				}
+				if err := result.Report.ValidateEmployeeMessage(result.Status, saved.state); err != nil {
+					t.Fatalf("partial delivery employee message failed validation: %v", err)
+				}
+				if result.Report.EffectState != store.BotReportEffectsReadOnly {
+					t.Fatalf("read-only effect state lost: %+v", result.Report)
+				}
+				if len(result.Report.Unverified) == 0 || !strings.Contains(result.Report.Unverified[0], "content review") {
+					t.Fatalf("missing partial-delivery caveat: %+v", result.Report.Unverified)
+				}
+			} else {
+				// POST: uncertain effects prevent graceful delivery; still withheld.
+				limitation := result.Report.ReviewLimitation
+				if limitation == nil || !strings.Contains(limitation.Text, gap) || limitation.Text != saved.state.Unresolved[0] || limitation.WorkRevision != saved.state.Revision {
+					t.Fatalf("saved finding not bound: %+v", result.Report)
+				}
+				if strings.Contains(result.Report.Summary, candidate) {
+					t.Fatal("rejected candidate leaked")
+				}
+				reason := store.BotEmployeeOutcomeReason(result.Status, result.Report)
+				message := store.NewBotEmployeeFallback(result.Status, result.Report, reason)
+				if result.Report.EmployeeMessage == nil || *result.Report.EmployeeMessage != message {
+					t.Fatalf("active final did not use bound facts: %+v expected=%+v", result.Report.EmployeeMessage, message)
+				}
+				if effects != 1 || result.Report.EffectState != store.BotReportEffectsUncertain || reason != store.BotEmployeeReasonAgentUnverifiedEffects || !strings.Contains(message.Text, "destination") {
+					t.Fatalf("uncertain effect warning lost: %+v message=%+v", result.Report, message)
+				}
 			}
 		})
 	}

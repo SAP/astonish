@@ -252,8 +252,21 @@ func TestBotEmployeeReviewAdequateRepairSucceeds(t *testing.T) {
 
 func TestBotEmployeeReviewRejectsUnsupportedDelegatedReport(t *testing.T) {
 	result, _, _, reviews := employeeReviewHTTP(t, "exhausted")
-	if reviews != 3 || strings.Contains(result.Report.Summary, "rose 8%") || len(result.Report.Artifacts) != 0 {
-		t.Fatalf("unsupported candidate published: %+v reviews=%d", result, reviews)
+	// With the graceful delivery policy, exhausted repairs deliver the candidate
+	// as partial with caveats rather than withholding entirely. The candidate text
+	// "The market rose 8%..." is unsupported by the source, but partial delivery
+	// with caveats is better than "I couldn't complete this request."
+	if reviews != 3 || result.Status != store.RunPartial || len(result.Report.Artifacts) != 0 {
+		t.Fatalf("unexpected exhausted outcome: %+v reviews=%d", result, reviews)
+	}
+	if !strings.Contains(result.Report.Summary, "rose 8%") {
+		t.Fatalf("partial delivery should include the candidate text: %+v", result.Report)
+	}
+	if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || !strings.Contains(result.Report.EmployeeMessage.Text, "rose 8%") {
+		t.Fatalf("partial delivery employee message should contain candidate text: %+v", result.Report.EmployeeMessage)
+	}
+	if len(result.Report.Unverified) == 0 || !strings.Contains(result.Report.Unverified[0], "content review") {
+		t.Fatalf("partial delivery missing caveat: %+v", result.Report.Unverified)
 	}
 }
 func TestBotEmployeeReviewRepairsBeforePublication(t *testing.T) {

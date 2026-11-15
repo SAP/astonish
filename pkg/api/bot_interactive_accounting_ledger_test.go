@@ -19,10 +19,11 @@ func TestInteractiveAccountingDurableLedgerAndReplay(t *testing.T) {
 				// Historical work additionally orients, prepares and reviews; those
 				// calls must still use the same meter, never become free checks.
 				wantCalls, wantChecks := 2, 0
+				wantInput, wantOutput := int64(15), int64(9)
 				if legacy {
 					wantCalls, wantChecks = 5, 3
+					wantInput, wantOutput = int64(wantCalls*5), int64(wantCalls*3)
 				}
-				wantInput, wantOutput := int64(wantCalls*5), int64(wantCalls*3)
 				calls, checks := 0, 0
 				assessment := f.model.assessment
 				f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

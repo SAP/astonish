@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -30,12 +32,19 @@ func TestBotReviewValidationDiagnosticPayloadFree(t *testing.T) {
 		{botReviewDecode, errors.New("secret-provider-response https://private.invalid"), "rejected"},
 		{botReviewBoundary, context.Canceled, "canceled"},
 		{botReviewIdentity, store.ErrBotConflict, "conflict"},
+		{botReviewModel, llmerror.NewLLMError("secret-provider", 503, "secret-message", "https://private.invalid"), "provider_transient"},
+		{botReviewModel, llmerror.NewLLMError("secret-provider", 400, "secret-message", "https://private.invalid"), "provider_rejected"},
+		{botReviewModel, llmerror.NewInterruptedStream(llmerror.NewLLMError("secret-provider", 503, "secret-message", "https://private.invalid")), "provider_interrupted"},
+		{botReviewModel, bot.ErrBudgetExceeded, "budget"},
 	} {
 		buf.Reset()
 		botReviewValidationDiagnostic(req, tc.stage, 1, true, tc.err)
 		log := buf.String()
 		if strings.Contains(log, "secret") || strings.Contains(log, "private.invalid") || strings.Contains(log, "sha256") || !strings.Contains(log, `"reason":"`+tc.reason+`"`) || !strings.Contains(log, `"stage":"`+string(tc.stage)+`"`) || !strings.Contains(log, `"correction":true`) {
 			t.Fatalf("unsafe/inexact diagnostic: %s", log)
+		}
+		if tc.reason == "provider_transient" && !strings.Contains(log, `"provider_status":503`) {
+			t.Fatalf("typed HTTP status missing: %s", log)
 		}
 	}
 }

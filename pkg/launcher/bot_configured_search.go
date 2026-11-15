@@ -206,7 +206,8 @@ func (s botStandardSearchStore) List(ctx context.Context) ([]store.MCPServer, er
 }
 
 type botPublicResearchArgs struct {
-	Facet execution.BotResearchFacet `json:"facet" jsonschema:"Admitted public research facet: overview, recent, primary, contradictions. No arbitrary query or private context."`
+	Facet execution.BotResearchFacet `json:"facet,omitempty" jsonschema:"Admitted public research facet: overview, recent, primary, contradictions."`
+	Query string                     `json:"query,omitempty" jsonschema:"Optional specific public search query (for example, a specific company, ticker, or topic within the assignment)."`
 }
 type botPublicResearchQuota interface {
 	ReserveBotPublicResearch(context.Context, execution.BotMandateRef, string) error
@@ -247,7 +248,7 @@ func BotConfiguredResearchTool(ctx context.Context, r bot.RunRequest, scope *Bot
 			return nil, fmt.Errorf("configured MCP search metadata unavailable; discover the exact executable with approval first")
 		}
 	}
-	native, err := functiontool.New(functiontool.Config{Name: BotConfiguredSearchToolName, Description: fmt.Sprintf("Search the owner-admitted public subject through the exact configured Perplexity, Tavily, Brave or Firecrawl executable. Choose a typed facet, never send private instructions. Search snippets are discovery only; inspect decisive sources before asserting actionable facts. This run admits at most %d search calls across all facets, not one call per facet. Use returned remaining episode ceiling; stop broad facet retries when exhausted and inspect discovered sources.", grant.MaxCalls)}, func(c tool.Context, a botPublicResearchArgs) (tools.PerplexityWebSearchResult, error) {
+	native, err := functiontool.New(functiontool.Config{Name: BotConfiguredSearchToolName, Description: fmt.Sprintf("Search the owner-admitted public subject through the exact configured Perplexity, Tavily, Brave or Firecrawl executable. Pass a typed facet (overview, recent, primary, contradictions) or an optional specific public query (such as an individual company or topic). Never send private instructions. Search snippets are discovery only; inspect decisive sources before asserting actionable facts. This run admits at most %d search calls. Use returned remaining episode ceiling; stop broad facet retries when exhausted and inspect discovered sources.", grant.MaxCalls)}, func(c tool.Context, a botPublicResearchArgs) (tools.PerplexityWebSearchResult, error) {
 		return t.search(c, a)
 	})
 	if err != nil {
@@ -286,6 +287,22 @@ func (t *botConfiguredResearchTool) prepare(ctx context.Context, raw json.RawMes
 	ceiling.Route = route
 	if err := grant.ValidateWithin(&ceiling); err != nil {
 		return nil, "", err
+	}
+	customQuery := strings.TrimSpace(a.Query)
+	if customQuery != "" {
+		if t.request.Run.IdempotencyKey == "" || strings.Contains(strings.ToLower(customQuery), "private") || strings.Contains(customQuery, "{{") || strings.ContainsAny(customQuery, "\r\n\x00") || len(customQuery) > grant.MaxQueryBytes {
+			return nil, "", store.ErrBotForbidden
+		}
+		if a.Facet == "" && len(grant.Facets) > 0 {
+			a.Facet = grant.Facets[0]
+		}
+		if _, err := grant.Query(a.Facet); err != nil {
+			return nil, "", err
+		}
+		return grant, customQuery, nil
+	}
+	if a.Facet == "" && t.request.Run.IdempotencyKey != "" && len(grant.Facets) > 0 {
+		a.Facet = grant.Facets[0]
 	}
 	q, err := grant.Query(a.Facet)
 	return grant, q, err

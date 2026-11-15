@@ -138,7 +138,8 @@ func botReviewRecoverableError(err error) bool {
 	var interrupted *llmerror.InterruptedStreamError
 	var decode *botReviewDecodeError
 	var protocol *botContentProtocolError
-	if botReviewTransientModelError(err) || errors.As(err, &interrupted) || errors.As(err, &decode) || errors.As(err, &protocol) {
+	if botReviewTransientModelError(err) || errors.As(err, &interrupted) || errors.As(err, &decode) || errors.As(err, &protocol) ||
+		errors.Is(err, bot.ErrBudgetExceeded) || errors.Is(err, bot.ErrBudgetReservation) || errors.Is(err, store.ErrBotForbidden) {
 		return true
 	}
 	msg := err.Error()

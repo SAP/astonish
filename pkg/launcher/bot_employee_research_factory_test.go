@@ -490,11 +490,11 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			}
 			if continuationError {
 				state, loadErr := repo.(store.BotWorkStore).LoadWork(worker, lease)
-				if loadErr != nil || result.Status != store.RunPartial || state.Phase != store.BotWorkBlocked || state.HasAcceptedEmployeeReview() || len(state.AgentWork.Evidence) != 4 || reviews != 1 || producerCalls != 6 {
-					t.Fatalf("failed continuation lost fenced limitation/evidence: status=%s state=%+v load=%v reviews=%d producer=%d", result.Status, state, loadErr, reviews, producerCalls)
+				if loadErr != nil || result.Status != store.RunPartial || state.Phase != store.BotWorkFinished || state.AgentWork == nil || state.AgentWork.Disposition != store.AgentWorkPartial || state.HasAcceptedEmployeeReview() || len(state.AgentWork.Evidence) != 4 || reviews != 1 || producerCalls != 6 {
+					t.Fatalf("failed continuation did not gracefully deliver candidate: status=%s state=%+v load=%v reviews=%d producer=%d", result.Status, state, loadErr, reviews, producerCalls)
 				}
-				if result.Report.Work.WorkRevision != state.Revision || result.Report.ReviewLimitation == nil {
-					t.Fatal("limitation is not bound to latest continuation revision")
+				if result.Report.Work.WorkRevision != state.Revision || result.Report.Summary != state.Candidate.Text {
+					t.Fatalf("partial delivery is not bound to latest continuation revision/candidate: report=%+v state=%+v", result.Report, state)
 				}
 				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: result.Usage}); err != nil {
 					t.Fatal(err)
@@ -504,8 +504,8 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					t.Fatal(commitErr)
 				}
 				message := committed.Report.EmployeeMessage
-				if committed.Status != store.RunPartial || message == nil || message.Reason != store.BotEmployeeOutcomeReason(result.Status, result.Report) || strings.TrimSpace(message.Text) == "" || message.Text == final || message.Text == state.Candidate.Text {
-					t.Fatalf("failed continuation did not publish its safe committed outcome: %+v", committed)
+				if committed.Status != store.RunPartial || message == nil || message.Origin != store.BotEmployeeMessageAgent || message.Text != state.Candidate.Text {
+					t.Fatalf("failed continuation did not publish candidate answer: %+v", committed)
 				}
 				return
 			}

@@ -685,6 +685,9 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 			yield(nil, err)
 			return
 		}
+		if l.researchOnly {
+			stream = false
+		}
 		for response, err := range l.LLM.GenerateContent(bound, request, stream) {
 			if !yield(response, err) {
 				return

@@ -39,6 +39,14 @@ func TestBotTitlePublicResearchAdmission(t *testing.T) {
 			if err != nil || replay.Run.ID != first.Run.ID || *replay.Run.MandateRef != *first.Run.MandateRef {
 				t.Fatalf("replay changed authority: %+v %v", replay, err)
 			}
+			followup, err := repo.AdmitMessage(ctx, store.BotMessageRequest{BotID: first.ID, Version: 1, Instructions: "Search each major AI lab individually and compile a single report.", IdempotencyKey: "public-followup"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			followupMandate, err := readMandate(ctx, repo.db, *followup.Run.MandateRef)
+			if err != nil || followupMandate.Mandate.PublicResearch == nil || followupMandate.Mandate.PublicResearch.Subject != "AI News" {
+				t.Fatalf("ordinary follow-up lost public research availability: %+v %v", followupMandate, err)
+			}
 			direct, err := repo.AdmitMessage(ctx, store.BotMessageRequest{BotID: first.ID, Version: 1, Instructions: "AI News using my private assignment", IdempotencyKey: "private-turn"})
 			if err != nil {
 				t.Fatal(err)

@@ -139,3 +139,27 @@ func TestBotConfiguredSearch(t *testing.T) {
 		})
 	}
 }
+
+func TestBotConfiguredSearchAdmittedCustomQueries(t *testing.T) {
+	f, runtime, episode := researchFixture(t)
+	f.req.Run.IdempotencyKey = "admitted-followup-turn"
+	runtime.m.PublicResearch.MaxCalls = 5
+	f.ctx, _ = bot.WithToolOutcomes(f.ctx)
+	searchModel := &researchCoverageProbeModel{knowledgeModel: knowledgeModel{text: "Sources: https://example.com/decisive"}}
+	factory := func(context.Context, string, string, *config.AppConfig) (model.LLM, error) { return searchModel, nil }
+	tool, err := BotConfiguredResearchTool(f.ctx, f.req, knowledgeScope(f), factory, nil, episode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := tool.(botRunnableTool)
+	ctx := optionalKnowledgeContext{knowledgeCtx(f)}
+	if _, err := native.Run(ctx, map[string]any{"query": "Meta Platforms latest news"}); err != nil {
+		t.Fatalf("custom company query rejected on admitted run: %v", err)
+	}
+	if _, err := native.Run(ctx, map[string]any{"facet": "recent", "query": "Apple Inc latest news"}); err != nil {
+		t.Fatalf("facet + custom company query rejected on admitted run: %v", err)
+	}
+	if len(searchModel.requests) != 2 || !strings.Contains(searchModel.requests[0], "Meta Platforms latest news") || !strings.Contains(searchModel.requests[1], "Apple Inc latest news") {
+		t.Fatalf("custom queries not dispatched: %v", searchModel.requests)
+	}
+}

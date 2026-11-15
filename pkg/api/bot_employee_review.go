@@ -365,6 +365,8 @@ func reviewBotEmployeeResult(ctx context.Context, req bot.RunRequest, resources 
 		}
 		next := old.Clone()
 		next.Phase = store.BotWorkBlocked
+		next.EmployeeReviewPending = false
+		next.EmployeeRepairPending = false
 		next.AgentWork.Disposition = store.AgentWorkBlocked
 		next.Unresolved = []string{reason}
 		if err := save(next); err != nil {
@@ -516,10 +518,11 @@ func reviewBotEmployeeResult(ctx context.Context, req bot.RunRequest, resources 
 			}
 			researchRequest.Request.Work = old.Clone()
 			acquired, err := runner(researchCtx, researchRequest)
-			// A continuation is another runtime attempt. Only its own
-			// classified receipts or trusted constrained text completion can
-			// establish read-only effects; never inherit the original state.
-			if acquired.Result.Report.EffectState != store.BotReportEffectsReadOnly {
+			// A continuation is strictly read-only (perplexity_web_search / web_fetch).
+			// Only mark effects uncertain if the continuation actually reported
+			// uncertain external changes; an aborted or budget-stopped read-only
+			// continuation must not prevent graceful delivery of the candidate.
+			if acquired.Result.Report.EffectState == store.BotReportEffectsUncertain && len(acquired.Result.Report.Changed) > 0 {
 				result.Report.EffectState = store.BotReportEffectsUncertain
 			}
 			result.Usage.ToolCalls += acquired.Result.Usage.ToolCalls

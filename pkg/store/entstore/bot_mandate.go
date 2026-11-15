@@ -307,6 +307,23 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 					subject = strings.TrimPrefix(line, "Public research subject: ")
 				}
 			}
+			if subject == "" && len(q.Attachments) == 0 && !strings.Contains(strings.ToLower(q.Instructions), "private assignment") {
+				if rawHead, ok := rec.Metadata[mandateHeadKey]; ok && rawHead != nil {
+					if rawBytes, err := json.Marshal(rawHead); err == nil {
+						var prevRef store.BotMandateRef
+						if json.Unmarshal(rawBytes, &prevRef) == nil && prevRef.Validate() == nil {
+							if prev, err := readMandate(ctx, tx, prevRef); err == nil && prev != nil && prev.Mandate.PublicResearch != nil && strings.TrimSpace(prev.Mandate.PublicResearch.Subject) != "" {
+								subject = strings.TrimSpace(prev.Mandate.PublicResearch.Subject)
+							}
+						}
+					}
+				}
+				if subject == "" && strings.TrimSpace(rec.Bot.Name) != "" {
+					if v, err := tx.ReadVersion(ctx, rec.Bot.ID, rec.Bot.Version); err == nil && !strings.Contains(strings.ToLower(v.Charter), "private") {
+						subject = strings.TrimSpace(rec.Bot.Name)
+					}
+				}
+			}
 		}
 		if subject != "" {
 			scope := policy.PublicResearch.Clone()

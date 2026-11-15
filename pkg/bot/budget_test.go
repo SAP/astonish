@@ -24,6 +24,23 @@ func testRunBudget(t *testing.T, tokens, tools, cost *int64) *SharedRunBudget {
 	return b
 }
 
+func TestSharedRunBudgetTokenLimitIsCloned(t *testing.T) {
+	limit := int64(100)
+	b := testRunBudget(t, &limit, nil, nil)
+	limit = 200
+	snapshot := b.TokenLimit()
+	if snapshot == nil || *snapshot != 100 {
+		t.Fatalf("limit=%v", snapshot)
+	}
+	*snapshot = 300
+	if got := b.TokenLimit(); got == nil || *got != 100 {
+		t.Fatalf("mutated limit=%v", got)
+	}
+	if testRunBudget(t, nil, nil, nil).TokenLimit() != nil {
+		t.Fatal("unlimited budget acquired a token limit")
+	}
+}
+
 func TestSharedRunBudgetReserveClampAndSettleOnce(t *testing.T) {
 	ctx := context.Background()
 	limit := int64(100)

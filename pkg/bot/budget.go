@@ -76,6 +76,13 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 // Deadline lets model decorators cancel in-flight generation at the run limit.
 func (b *SharedRunBudget) Deadline() time.Time { return b.deadline }
 
+// TokenLimit returns a snapshot of the effective run allowance, including mandate limits.
+func (b *SharedRunBudget) TokenLimit() *int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return copyBudgetInt(b.tokens)
+}
+
 func copyBudgetInt(v *int64) *int64 {
 	if v == nil {
 		return nil

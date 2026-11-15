@@ -231,12 +231,28 @@ func (w *BotWorkState) HasAcceptedEmployeeReview() bool {
 	return true
 }
 
+// BotReportIsReadOnlyResult requires positive runtime classification; missing
+// effect receipts or model-authored assurances are not evidence of nonexecution.
+func BotReportIsReadOnlyResult(r BotReport) bool {
+	return r.EffectState == BotReportEffectsReadOnly && len(r.Changed) == 0 && len(r.Unverified) == 0 && len(r.Artifacts) == 0 && len(r.NeedsApproval) == 0 && r.NextRunAt == nil && r.Failure == nil && r.Acknowledgment == nil
+}
+
+// HasReadOnlyEmployeeResult is not a review verdict or factual certification.
+// It recognizes only a fresh worker-attested candidate, never a persisted review
+// attempt or pending control. The report classification is rechecked at commit.
+func (w *BotWorkState) HasReadOnlyEmployeeResult() bool {
+	return w != nil && w.Protocol == BotWorkProtocolAgentLedV1 && w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && w.Candidate != nil && w.Candidate.ReadOnlyResult && w.Candidate.Digest == w.Candidate.ContentDigest() && len(w.Candidate.Artifacts) == 0 && len(w.Candidate.RuntimeBlockers) == 0 && !BotWorkHasPendingControlCandidate(w) && w.Review == nil && len(w.Criteria) == 0 && w.Repairs == 0 && w.EmployeeReviewAttempts == 0 && !w.EmployeeReviewPending && !w.EmployeeRepairPending
+}
+
 func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
 	if w != nil && w.Protocol == BotWorkProtocolAgentLedV1 {
 		if err := w.Validate(); err != nil {
 			return err
 		}
-		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() && !(w.AgentWork != nil && w.AgentWork.Disposition == AgentWorkPartial && q.Status == RunPartial) {
+		if w.Candidate != nil && w.Candidate.ReadOnlyResult && (!w.HasReadOnlyEmployeeResult() || !BotReportIsReadOnlyResult(q.Report)) {
+			return ErrBotInvalid
+		}
+		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() && !w.HasReadOnlyEmployeeResult() && !(w.AgentWork != nil && w.AgentWork.Disposition == AgentWorkPartial && q.Status == RunPartial) {
 			return ErrBotInvalid
 		}
 		p := BuildBotWorkProjection(w)

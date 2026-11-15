@@ -37,6 +37,7 @@ type homeDeliveryModel struct {
 func (*homeDeliveryModel) Name() string { return "home-delivery-controlled" }
 func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if strings.HasPrefix(providerSystem(req), "BOT_WORK_REVIEW_V1") {
+		m.t.Error("fresh read-only Home result must not invoke a reviewer")
 		return (continuityAssessmentModel{LLM: m}).GenerateContent(ctx, req, stream)
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -167,12 +168,12 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	}
 	assertLauncherAgentResult(t, repo, worker, lease, result)
 	work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
-	if err != nil || work == nil || !work.HasAcceptedEmployeeReview() || len(work.AgentWork.Evidence) != 1 || len(work.AgentWork.SourceAccess) != 1 || work.AgentWork.SourceAccess[0].OriginalURL != homeWeatherURL {
-		t.Fatalf("weather evidence/review missing: %+v %v", work, err)
+	if err != nil || work == nil || !work.HasReadOnlyEmployeeResult() || work.Review != nil || work.EmployeeReviewAttempts != 0 || work.AgentWork == nil || len(work.AgentWork.Evidence) != 1 || len(work.AgentWork.SourceAccess) != 1 || work.AgentWork.SourceAccess[0].OriginalURL != homeWeatherURL {
+		t.Fatalf("expected fresh read-only weather evidence without review: %+v %v", work, err)
 	}
 	usage := meter.Usage()
-	// Producer and independent review are charged to the same finite budget.
-	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241+7 || usage.OutputTokens != 81+97+3 {
+	// Only the two producer turns and fetch are charged; no reviewer is invoked.
+	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241 || usage.OutputTokens != 81+97 {
 		t.Fatalf("calls=%d fetches=%d usage=%+v", llm.calls, fetches, usage)
 	}
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: usage}); err != nil {

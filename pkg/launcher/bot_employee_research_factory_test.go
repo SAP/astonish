@@ -236,6 +236,16 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// This journey explicitly exercises the retained assessment/repair
+			// contract, rather than the fresh read-only default. Persist legitimate
+			// typed criteria under the claimed worker lease; owner prose is not a
+			// review-policy switch.
+			reviewWork := f.req.Work.Clone()
+			reviewWork.Criteria = []store.BotWorkCriterion{{ID: "employee-assignment", SourceIDs: []string{"assignment", "charter"}, Text: "Report the broad index move and market breadth with decisive source support.", VerificationKind: store.BotWorkVerificationModel, FulfillmentScope: store.BotWorkCriterionCurrentTurn}}
+			f.req.Work, err = repo.(store.BotWorkStore).SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: f.req.Work.Revision, State: *reviewWork})
+			if err != nil {
+				t.Fatal(err)
+			}
 			f.services.PersonalBots = repo
 			_, err = f.sessions.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: b.OwnerID.String(), SessionID: f.req.Run.SessionID.String(), State: map[string]any{"execution_owner": "bot"}})
 			if err != nil {
@@ -268,6 +278,9 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					var input continuityContentInput
 					_ = json.Unmarshal([]byte(text), &state)
 					_ = json.Unmarshal([]byte(text), &input)
+					if len(state.Criteria) != 1 || state.Criteria[0].Text != reviewWork.Criteria[0].Text || state.Criteria[0].ID != reviewWork.Criteria[0].ID {
+						t.Error("explicit assessment criteria changed")
+					}
 					adequate := state.Candidate != nil && state.Candidate.Text == final
 					if !strings.Contains(state.Contract.Instructions, "index move and market breadth") {
 						t.Error("original assignment lost")

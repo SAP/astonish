@@ -51,10 +51,21 @@ class SnapshotEntry {
           // Catch up to a bounded high-water mark. New arrivals are picked up by
           // the next poll; a perpetually busy Bot cannot keep this request alive.
           while (after < data.latest_sequence) {
-            const page = await readBotActivityPage(this.id, this.scope, this.team, after, controller.signal)
+            let page: Awaited<ReturnType<typeof readBotActivityPage>>
+            try {
+              page = await readBotActivityPage(this.id, this.scope, this.team, after, controller.signal)
+            } catch (error) {
+              // Activity is auxiliary: a transport failure cannot invalidate a
+              // freshly read outcome or operation head. Keep partial catch-up
+              // and retry on the next poll, but never retain inaccessible data.
+              if (error instanceof BotAPIError && [401, 403, 404].includes(error.status)) throw error
+              break
+            }
             if (!active()) return
             const next = page.activity.filter(event => event.sequence > after && event.sequence <= data.latest_sequence)
-            if (!next.length) throw new Error('Activity catch-up stalled. Retry to reload activity.')
+            // The root sequence also advances for records outside activity.
+            // Exhaustion (including only newer rows) is not an outcome failure.
+            if (!next.length) break
             next.forEach(event => merged.set(event.sequence, event))
             after = Math.max(...next.map(event => event.sequence))
           }

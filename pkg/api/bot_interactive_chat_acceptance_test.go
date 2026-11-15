@@ -113,20 +113,21 @@ func (p *interactiveHTTPPool) Call(_ string, name string, args map[string]interf
 }
 
 type interactiveHTTPFixture struct {
-	db       *entstore.Store
-	dataDir  string // owned temporary SQLite fixture, never a live data directory
-	server   *httptest.Server
-	scope    store.BotScope
-	t        *testing.T
-	ctx      context.Context
-	request  func(string, string, string, int) []byte
-	worker   *daemon.BotWorker
-	repo     store.BotStore
-	b        store.Bot
-	path     string
-	pool     *interactiveHTTPPool
-	registry *execution.BotTurnAuthorizationRegistry
-	model    *interactiveHTTPModel
+	db            *entstore.Store
+	dataDir       string // owned temporary SQLite fixture, never a live data directory
+	server        *httptest.Server
+	scope         store.BotScope
+	t             *testing.T
+	ctx           context.Context
+	request       func(string, string, string, int) []byte
+	worker        *daemon.BotWorker
+	repo          store.BotStore
+	b             store.Bot
+	path          string
+	pool          *interactiveHTTPPool
+	registry      *execution.BotTurnAuthorizationRegistry
+	requireReview bool
+	model         *interactiveHTTPModel
 }
 
 func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]any, scopes []string, requestedScope ...store.BotScope) *interactiveHTTPFixture {
@@ -331,6 +332,9 @@ func (f *interactiveHTTPFixture) turn() *store.BotRun {
 	if !receipt.Run.IsInteractiveChat() {
 		f.t.Fatal("not interactive admission")
 	}
+	if f.requireReview {
+		pinReviewedHTTPAttempt(f.t, f, receipt.Run)
+	}
 	if err := f.worker.Poll(context.Background()); err != nil {
 		f.t.Fatal(err)
 	}
@@ -384,6 +388,9 @@ func (f *interactiveHTTPFixture) capabilityTurn(mode capabilityHTTPMode, tools [
 	if admitted.IsInteractiveChat() {
 		f.t.Fatal("autonomous admission unexpectedly interactive")
 	}
+	if f.requireReview {
+		pinReviewedHTTPAttempt(f.t, f, admitted)
+	}
 	if err = f.worker.Poll(context.Background()); err != nil {
 		f.t.Fatal(err)
 	}
@@ -432,6 +439,7 @@ func TestBotAgentProgressHTTPAcceptance(t *testing.T) {
 					}
 					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 				}
+				f.requireReview = true
 				run := f.capabilityTurn(mode, []string{"bot_work_update", "bot_work_read"})
 				if run.Usage.InputTokens != 20 || run.Usage.OutputTokens != 12 || run.Usage.ToolCalls != 2 {
 					t.Fatalf("progress usage not charged: %+v", run.Usage)
@@ -503,7 +511,9 @@ func TestBotAgentCheckHTTPAcceptance(t *testing.T) {
 						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 					}
 					run := f.capabilityTurn(mode, []string{"read_file", "bot_evidence_read", "bot_check_work"})
-					if run.Usage.InputTokens != 36 || run.Usage.OutputTokens != 22 || run.Usage.ToolCalls != 3 {
+					// Four producer turns plus the explicitly requested optional check;
+					// no mandatory end-of-run content review is charged.
+					if run.Usage.InputTokens != 31 || run.Usage.OutputTokens != 19 || run.Usage.ToolCalls != 3 {
 						t.Fatalf("optional check did not share producer budget: %+v", run.Usage)
 					}
 					if run.Status != store.RunSucceeded || step != 4 || checks != 1 || f.pool.calls != 1 || run.Report.Work == nil || len(run.Report.Work.Checks) != 1 {
@@ -641,6 +651,7 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 						}
 						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 					}
+					f.requireReview = true
 					run := f.capabilityTurn(mode, []string{"web_fetch", "bot_work_update", "bot_evidence_read", "bot_check_work"})
 					if run.Status != store.RunSucceeded || step != 6 || checks != 1 || f.pool.calls != 2 || requests["/primary"] != 1 || requests["/alternative"] != 1 {
 						t.Fatalf("fallback blocked/replayed: run=%+v step=%d checks=%d requests=%v", run, step, checks, requests)

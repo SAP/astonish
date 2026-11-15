@@ -15,11 +15,11 @@ func TestInteractiveAccountingDurableLedgerAndReplay(t *testing.T) {
 		for _, legacy := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/legacy=%t", scope, legacy), func(t *testing.T) {
 				f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
-				// Agent-led work only requests the tool and produces the answer.
+				// Fresh read-only work only requests the tool and produces the answer.
 				// Historical work additionally orients, prepares and reviews; those
 				// calls must still use the same meter, never become free checks.
 				wantCalls, wantChecks := 2, 0
-				wantInput, wantOutput := int64(15), int64(9)
+				wantInput, wantOutput := int64(10), int64(6)
 				if legacy {
 					wantCalls, wantChecks = 5, 3
 					wantInput, wantOutput = int64(wantCalls*5), int64(wantCalls*3)

@@ -244,6 +244,10 @@ type BotCriterionAssessment struct {
 
 // Bodies are private captured bytes; filenames alone are not review evidence.
 type BotWorkCandidate struct {
+	// ReadOnlyResult is set only by the worker after positive runtime effect
+	// classification. It bypasses mandatory content review, not permissions or
+	// explicit checks, and is bound into the immutable candidate digest.
+	ReadOnlyResult  bool              `json:"read_only_result,omitempty"`
 	RuntimeBlockers []BotWorkBlocker  `json:"runtime_blockers,omitempty"`
 	Revision        int64             `json:"revision"`
 	EventID         string            `json:"event_id"`
@@ -671,11 +675,13 @@ func (w *BotWorkState) Validate() error {
 			if w.EmployeeReviewPolicy != "" && w.EmployeeReviewPolicy != BotEmployeeReviewEvidenceBoundV1 {
 				return ErrBotUnsupported
 			}
-			// BotWorkFinished requires an accepted review UNLESS the disposition
-			// is AgentWorkPartial — partial delivery is a legitimate fallback when
-			// the review could not be completed (infra failure, content-validation
-			// exhaustion, etc.) and the candidate is safe text-only work.
-			if w.EmployeeReviewPolicy != "" && w.Phase == BotWorkFinished && !w.HasAcceptedEmployeeReview() && w.AgentWork.Disposition != AgentWorkPartial {
+			if w.Candidate != nil && w.Candidate.ReadOnlyResult && (w.Phase != BotWorkFinished || !w.HasReadOnlyEmployeeResult()) {
+				return ErrBotInvalid
+			}
+			// Fresh positively classified read-only work needs no mandatory content
+			// review. Persisted review/repair attempts retain the existing contract.
+			// Partial delivery remains the existing review-failure fallback.
+			if w.EmployeeReviewPolicy != "" && w.Phase == BotWorkFinished && !w.HasAcceptedEmployeeReview() && !w.HasReadOnlyEmployeeResult() && w.AgentWork.Disposition != AgentWorkPartial {
 				return ErrBotInvalid
 			}
 		default:
@@ -1056,6 +1062,9 @@ func ValidateBotWorkUpdate(old, next *BotWorkState) error {
 		}
 		if botWorkDigest(old.AgentWork.Checks) != botWorkDigest(next.AgentWork.Checks[:len(old.AgentWork.Checks)]) && len(old.AgentWork.Checks) != 0 {
 			return ErrBotInvalid
+		}
+		if next.Candidate != nil && next.Candidate.ReadOnlyResult && old.Candidate != nil {
+			return ErrBotInvalid // never relabel a persisted candidate/review
 		}
 		if !reflect.DeepEqual(old.Candidate, next.Candidate) {
 			expected := int64(1)

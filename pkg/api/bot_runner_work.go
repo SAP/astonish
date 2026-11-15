@@ -1088,8 +1088,9 @@ func (s *botAgentWorkService) Check(ctx context.Context, q bot.BotWorkCheckReque
 	return &receipt, nil
 }
 
-// runBotAgentWork captures ordinary output and automatically reviews new-policy
-// candidates. Historical runs keep their contract; production is never replayed.
+// runBotAgentWork captures ordinary output. Fresh positively classified read-only
+// results need no mandatory content review; existing reviews and effectful work
+// keep their contract. Production is never replayed.
 func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChatResources, w *store.BotWorkState, produce botWorkProducer, reviewModels ...model.LLM) (result bot.RunResult, saved *store.BotWorkState, err error) {
 	saved = w
 	defer func() {
@@ -1209,11 +1210,15 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	if len(completion.pendingControls) > 0 {
 		candidate.Bodies[botWorkPendingProducerDraft] = completion.FinalText
 	}
+	// Runtime effect classification is positive evidence, not a guess from tool
+	// names or empty Changed/Unverified lists. Do not relabel historical review
+	// candidates or suppress explicit checks performed during ordinary work.
+	candidate.ReadOnlyResult = w.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 && w.Candidate == nil && w.Review == nil && len(w.Criteria) == 0 && w.EmployeeReviewAttempts == 0 && w.Repairs == 0 && !w.EmployeeReviewPending && !w.EmployeeRepairPending && next.Phase == store.BotWorkFinished && len(completion.pendingControls) == 0 && store.BotReportIsReadOnlyResult(result.Report)
 	candidate.Digest = candidate.ContentDigest()
 	next.Candidate = candidate
 	var updated *store.BotWorkState
 	var saveErr error
-	if w.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 {
+	if w.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 && !candidate.ReadOnlyResult {
 		var auxiliary model.LLM
 		if len(reviewModels) > 0 {
 			auxiliary = reviewModels[0]

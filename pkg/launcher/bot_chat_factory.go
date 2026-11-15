@@ -276,7 +276,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			}
 			owner = agent.WithBotPolicyRuntime(owner, safe.PolicyRuntime)
 		}
-		binding := &botFactoryBinding{research: safe.Research, owner: owner, req: req, ownerEmail: scoped.OwnerEmail, verifyIsolation: safe.VerifyIsolation}
+		binding := &botFactoryBinding{synthesisReserve: newBotSynthesisReserve(req.Budget, req.Version.Budget), research: safe.Research, owner: owner, req: req, ownerEmail: scoped.OwnerEmail, verifyIsolation: safe.VerifyIsolation}
 		taskRepo := services.Bots
 		if req.Bot.Scope == store.BotScopePersonal {
 			taskRepo = services.PersonalBots
@@ -444,7 +444,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			owner, cancel := context.WithCancel(binding.bind(c))
 			owner = execution.WithRunPolicy(owner, r.Policy)
 			owner = agent.WithBotPolicyRuntime(owner, directed.PolicyRuntime)
-			freshBinding := &botFactoryBinding{owner: owner, req: r, research: binding.research, researchOnly: true, verifyIsolation: binding.verifyIsolation}
+			freshBinding := &botFactoryBinding{synthesisReserve: binding.synthesisReserve, owner: owner, req: r, research: binding.research, researchOnly: true, verifyIsolation: binding.verifyIsolation}
 			freshModel := &botFactoryLLM{LLM: wrapped, binding: freshBinding, researchOnly: true}
 			var reads []tool.Tool
 			for _, t := range safe.Tools {
@@ -572,14 +572,15 @@ type botWiredInjection struct {
 	credentials   store.CredentialStore
 }
 type botFactoryBinding struct {
-	researchOnly    bool
-	tasks           *botTaskServices
-	redactTask      func(string) string
-	research        *BotResearchEpisode
-	ownerEmail      func(context.Context) (store.BotOwnerEmailDelivery, error)
-	owner           context.Context
-	req             bot.RunRequest
-	verifyIsolation func(context.Context) error
+	synthesisReserve *botSynthesisReserve
+	researchOnly     bool
+	tasks            *botTaskServices
+	redactTask       func(string) string
+	research         *BotResearchEpisode
+	ownerEmail       func(context.Context) (store.BotOwnerEmailDelivery, error)
+	owner            context.Context
+	req              bot.RunRequest
+	verifyIsolation  func(context.Context) error
 }
 
 func (b *botFactoryBinding) check(ctx context.Context) error {
@@ -688,10 +689,44 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 		if l.researchOnly {
 			stream = false
 		}
-		for response, err := range l.LLM.GenerateContent(bound, request, stream) {
-			if !yield(response, err) {
+		var synthesis bool
+		if purpose != bot.ModelCallPurposeAssessment {
+			var err error
+			request, synthesis, err = l.binding.synthesisReserve.prepare(bound, request)
+			if err != nil {
+				yield(nil, err)
 				return
 			}
+		}
+		if synthesis {
+			stream = false // Do not publish a partial answer before bounded correction.
+		}
+		// At most one correction, through the same metered model and live checks.
+		for attempt := 0; attempt < 2; attempt++ {
+			correction := false
+			for response, err := range l.LLM.GenerateContent(bound, request, stream) {
+				if err == nil && synthesis && botResponseHasToolCall(response) {
+					if attempt == 1 {
+						yield(nil, errBotSynthesisToolCall)
+						return
+					}
+					correction = true
+					break
+				}
+				if !yield(response, err) || err != nil {
+					return
+				}
+			}
+			if !correction {
+				return
+			}
+			if err := l.binding.check(bound); err != nil {
+				yield(nil, err)
+				return
+			}
+			cloned := *request
+			cloned.Contents = append(append([]*genai.Content(nil), request.Contents...), genai.NewContentFromText("Your tool request was not executed. Return the final answer as text only from retained evidence; state missing evidence honestly.", "user"))
+			request = &cloned
 		}
 	}
 }
@@ -1160,6 +1195,9 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 			return nil, err
 		}
 	}
+	if t.binding.synthesisReserve.synthesis() {
+		return botSynthesisStoppedResult(), nil
+	}
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
 	}
@@ -1204,7 +1242,7 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		invocation := botBoundToolContext{Context: bound, owner: context.WithValue(bound, botMCPAuthorizedKey{}, mcpAuth)}
 		return mcpAuth.target.Run(invocation, args)
 	}
-	result, err := t.botRunnableTool.Run(bound, args)
+	result, err := t.binding.runSynthesisTool(bound, t.botRunnableTool, args)
 	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, errors.Join(err, captureErr)

@@ -301,6 +301,9 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	if err := t.binding.check(bound); err != nil {
 		return nil, err
 	}
+	if t.binding.synthesisReserve.synthesis() {
+		return botSynthesisStoppedResult(), nil
+	}
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
 	}
@@ -315,7 +318,7 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	if err := t.binding.req.Budget.ReserveTool(bound, t.Name()); err != nil {
 		return nil, err
 	}
-	result, err := t.botRunnableTool.Run(bound, args)
+	result, err := t.binding.runSynthesisTool(bound, t.botRunnableTool, args)
 	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, captureErr

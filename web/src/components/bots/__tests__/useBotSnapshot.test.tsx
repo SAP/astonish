@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useBotSnapshot } from '../useBotSnapshot'
 import * as api from '@/api/botSnapshot'
+import { BotAPIError } from '@/api/bots'
 import type { BotSnapshot } from '@/api/botSnapshot'
 vi.mock('@/api/botSnapshot', () => ({ getBotSnapshot: vi.fn(), readBotActivityPage: vi.fn(), writeBotReadCursor: vi.fn() }))
 vi.mock('@/api/teamContext', () => ({ getActiveTeam: () => 'team-a' }))
@@ -102,6 +103,65 @@ it('keeps run work ordered across newer snapshots and reload', async () => {
   vi.mocked(api.getBotSnapshot).mockResolvedValue(initial)
   const restored = renderHook(() => useBotSnapshot('a', 'team', 'owner'))
   await waitFor(() => expect(restored.result.current.data?.run_states).toEqual([state]))
+})
+it('does not flash an outcome error when activity ends before the snapshot high-water mark', async () => {
+  vi.mocked(api.readBotActivityPage).mockResolvedValue({ activity: [] })
+  const errors: Array<string | undefined> = []
+  const hook = renderHook(() => {
+    const state = useBotSnapshot('a', 'team', 'owner', true)
+    errors.push(state.error)
+    return state
+  })
+  await act(async () => { await Promise.resolve() })
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data?.latest_sequence).toBe(121)
+  expect(errors.filter(Boolean)).toEqual([])
+})
+it.each(['running', 'succeeded'] as const)('keeps fresh %s state and partial activity when an auxiliary page fails, then catches up', async status => {
+  const initial = snapshot()
+  initial.run_states = [{ schema_version: 1, bot_id: 'a', run_id: 'run', session_id: 'trace', home_session_id: '', presentation: 'home_interactive', status, state_sequence: 121 }]
+  vi.mocked(api.getBotSnapshot).mockResolvedValue(initial)
+  vi.mocked(api.readBotActivityPage).mockResolvedValueOnce({ activity: [{ sequence: 1, kind: 'report', payload: {}, created_at: '' }] }).mockRejectedValue(new Error('Network unavailable'))
+  const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner', true))
+  await act(async () => { await Promise.resolve() })
+  expect(hook.result.current.error).toBeUndefined()
+  expect(hook.result.current.data?.run_states).toEqual(initial.run_states)
+  expect(hook.result.current.activity.map(event => event.sequence)).toEqual([1])
+  vi.mocked(api.readBotActivityPage).mockResolvedValue({ activity: [{ sequence: 121, kind: 'report', payload: {}, created_at: '' }] })
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.activity.map(event => event.sequence)).toEqual([1, 121])
+  expect(hook.result.current.error).toBeUndefined()
+})
+it.each([401, 403, 404])('clears protected snapshot data on activity access loss (%s)', async status => {
+  const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner', true))
+  await waitFor(() => expect(hook.result.current.activity).toHaveLength(121))
+  vi.mocked(api.getBotSnapshot).mockResolvedValue(snapshot('a', 'owner', 122))
+  vi.mocked(api.readBotActivityPage).mockRejectedValue(new BotAPIError(status, 'Access lost'))
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data).toBeUndefined()
+  expect(hook.result.current.activity).toEqual([])
+  expect(hook.result.current.error).toBeTruthy()
+})
+it('does not let a late activity rejection clear the new viewer workspace', async () => {
+  let reject!: (error: Error) => void
+  vi.mocked(api.readBotActivityPage).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+  const hook = renderHook(({ id, viewer }) => useBotSnapshot(id, 'team', viewer, true), { initialProps: { id: 'a', viewer: 'owner' } })
+  await waitFor(() => expect(api.readBotActivityPage).toHaveBeenCalled())
+  vi.mocked(api.getBotSnapshot).mockResolvedValue(snapshot('b', 'other', 0))
+  hook.rerender({ id: 'b', viewer: 'other' })
+  await waitFor(() => expect(hook.result.current.data?.bot.id).toBe('b'))
+  await act(async () => reject(new BotAPIError(403, 'Old access lost')))
+  expect(hook.result.current.data?.bot.id).toBe('b')
+  expect(hook.result.current.error).toBeUndefined()
+})
+it('preserves authoritative snapshot read errors and the last known state', async () => {
+  const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner'))
+  await waitFor(() => expect(hook.result.current.data).toBeDefined())
+  const previous = hook.result.current.data
+  vi.mocked(api.getBotSnapshot).mockRejectedValue(new Error('Snapshot unavailable'))
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data).toBe(previous)
+  expect(hook.result.current.error).toBeTruthy()
 })
 it('refreshes in the background without a transcript event', async () => {
   vi.useFakeTimers()

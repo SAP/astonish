@@ -16,7 +16,7 @@ func TestBotBroadAssignmentPlansDeliverableBeforeResearch(t *testing.T) {
 			b := &SystemPromptBuilder{}
 			b.applyBotPrompt(NewBotPromptOverrides(nil, req))
 			prompt := b.Build()
-			for _, want := range []string{"Before the first work tool call", "shortest reliable approach", "working assumptions, not owner requirements", "Do not let the first search results define", "material gaps", "not a fixed topic checklist", "shared origin", "presentation-only", "optional enrichment", "no extra planning-model call"} {
+			for _, want := range []string{"Before the first work tool call", "shortest reliable approach", "working assumptions, not owner requirements", "Do not let the first search results define", "material gaps", "not a fixed topic checklist", "shared origin", "presentation-only", "optional enrichment", "no extra planning-model call", "refine scope rather than expand it", "saved Tasks and owner feedback", "Self-check during composition", "reserve for synthesis"} {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("missing deliverable planning contract %q", want)
 				}

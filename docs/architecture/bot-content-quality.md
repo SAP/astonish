@@ -50,6 +50,54 @@ recognition and autonomous policy bindings do not grant this exemption. Missing
 responses, duplicate invocation/ledger IDs, mismatched names and any conflicting
 send/write/artifact/schedule receipt remain uncertain and cannot enable replay.
 
+## Fresh read-only employee results
+
+For fresh `agent_led_v1` work under `evidence_bound_v1`, the worker can publish
+an ordinary answer without a mandatory reviewer or finish ritual when the actual
+runtime report positively classifies it as read-only. The employee owns usefulness,
+source inspection, material uncertainty and stopping decisions. This is not an
+accepted review, a factual certification, or evidence that every requested detail
+was supplied. Optional `bot_check_work` remains available and budgeted.
+
+The worker's `ReadOnlyResult` flag is included in the immutable candidate digest.
+The commit gate checks the report again: missing/unknown/uncertain effects, writes,
+unverified effects, artifacts, approvals, schedules, failures and pending controls
+do not qualify. Permission, lease, scope, cancellation, immutable publication and
+no-replay guards still apply independently. Existing candidates, criteria,
+review/repair history and pending review controls retain their review contract;
+they cannot be relabeled into this fresh-result path. Typed criteria persisted
+through the scoped worker `SaveWork` boundary keep an explicit assessment journey
+on that existing contract; owner instruction keywords do not select review policy.
+
+`TestBotEmployeeReadOnlyPublishesWithoutReview` exercises real adapter/tool capture
+and restored commit validation. `TestBotReadOnlyEmployeeCompletionBinding` rejects
+identity, digest, projection and effect drift. The guided-research production
+journey explicitly persists review criteria and still tests source-grounded repair,
+formatting, failed continuation and source/transport failure recovery. These are
+isolated tests, not fresh paid-provider acceptance or factual-quality guarantees.
+
+## Synthesis reserve
+
+The production Bot factory uses the existing run budget's deadline and token
+limit to stop gathering before the hard limit. It reserves one fifth of the
+remaining runtime at factory creation, capped at 60 seconds, for synthesis.
+After tool work begins, conservative next-prompt size and remaining tokens may
+also trigger synthesis. This is a stopping policy, not an additional allowance;
+provider reservations, authorization and cancellation remain authoritative.
+
+During synthesis the producer receives retained conversation evidence with an
+empty tool catalogue and instructions to qualify unsupported claims and disclose
+unfinished work. Unexpected tool requests receive at most one metered correction.
+Mechanically classified reads can be interrupted at the earlier research deadline;
+the resulting source-unavailable response does not certify source content or
+external effects. Unknown/effectful calls are not treated as safe interrupted reads.
+Auxiliary assessment calls do not receive producer synthesis instructions.
+
+`TestBotSynthesisProductionAdapterFinalAnswer` exercises the factory and runtime
+adapter through a successful read, a soft-deadline read interruption and exact
+employee-message publication without an end reviewer. This deterministic test
+uses controlled sources/model responses, not a live provider latency guarantee.
+
 ## Trusted read transport failures
 
 `routineReadRequest` marks failures from the constrained HTTP exchange/body read

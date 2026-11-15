@@ -19,6 +19,16 @@ import (
 // stores and factories. No candidate or verdict is seeded, and production cannot
 // downgrade a run through SaveWork.
 func pinLegacyHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun) {
+	pinHTTPWorkAttempt(t, f, run, false)
+}
+
+// pinReviewedHTTPAttempt requests an explicit evidence review before execution;
+// it does not forge a candidate, verdict, or runtime effect classification.
+func pinReviewedHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun) {
+	pinHTTPWorkAttempt(t, f, run, true)
+}
+
+func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRun, reviewed bool) {
 	t.Helper()
 	path := filepath.Join(f.dataDir, "orgs", "interactive", "teams", "team.db")
 	if f.scope == store.BotScopePersonal {
@@ -49,6 +59,11 @@ func pinLegacyHTTPAttempt(t *testing.T, f *interactiveHTTPFixture, run store.Bot
 		t.Fatal(err)
 	}
 	work := store.NewBotWorkState(store.BotWorkContract{BotID: run.BotID, RunID: run.ID, Version: run.Version, Instructions: input.Instructions, Charter: input.Version.Charter})
+	if reviewed {
+		work = store.NewBotAgentWorkState(work.Contract)
+		work.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
+		work.Criteria = []store.BotWorkCriterion{{ID: "scoped-result", SourceIDs: []string{"assignment", "charter"}, Text: "Use the requested scoped tool and truthfully report its result."}}
+	}
 	if err := work.Validate(); err != nil {
 		t.Fatal(err)
 	}

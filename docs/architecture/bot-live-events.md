@@ -8,6 +8,23 @@ Remote `/bots skills` independently renders committed skill revisions and `BotRe
 
 Schedule & triggers references an active skill ID plus invocation intent; it does not copy the method into instructions. Legacy instruction schedules remain explicitly labeled and editable without automatic import. Missing/loading/failed skill reads block new skill selection but do not remove legacy controls. General Settings projects `bot_managed` and offers only Bot navigation for bound jobs; regular scheduler jobs retain their existing controls. Server authorization remains authoritative.
 
+## Snapshot polling and auxiliary activity
+
+The shared Studio snapshot cache treats the root snapshot (including ordered run
+states and committed operation heads) as authoritative, independently of activity
+pagination. The root high-water sequence is not a promise that an activity row
+exists at that sequence. An exhausted activity page ends this bounded catch-up;
+it does not report an uncertain work outcome. Transient activity read failures
+retain fresh snapshot state and already fetched activity, then resume from the
+last activity sequence on a later poll. They never flash the workspace outcome
+warning, regress running/succeeded state, or replay a send.
+
+Snapshot read/identity errors still surface and operation synchronization still
+requires committed heads in an authoritative root. A 401/403/404 from either read
+clears protected cached data and surfaces the access failure. Aborted reads cannot
+publish into a switched viewer/Bot workspace. Message send failures remain owned
+by the message path, not suppressed by this auxiliary-read policy.
+
 ## Agent-led work progress
 
 For `agent_led_v1`, `SaveWork` updates the private document and `BotRun.Work`

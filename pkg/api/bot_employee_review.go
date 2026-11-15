@@ -349,7 +349,10 @@ func botEmployeeReviewCriteria(w *store.BotWorkState) []store.BotWorkCriterion {
 func reviewBotEmployeeResult(ctx context.Context, req bot.RunRequest, resources *BotChatResources, llm model.LLM, old, draft *store.BotWorkState, result *bot.RunResult) (*store.BotWorkState, error) {
 	finishPhase := draft.Phase
 	draft.Phase = store.BotWorkWorking
-	draft.Criteria = botEmployeeReviewCriteria(draft)
+	// Explicitly persisted criteria retain their immutable assessment contract.
+	if len(draft.Criteria) == 0 {
+		draft.Criteria = botEmployeeReviewCriteria(draft)
+	}
 	draft.Review = nil
 	save := func(next *store.BotWorkState) error {
 		saved, err := resources.Work.SaveWork(ctx, store.BotWorkUpdate{Lease: req.Run.Lease, ExpectedRevision: old.Revision, State: *next})

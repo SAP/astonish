@@ -105,16 +105,14 @@ func TestBotEmployeeResearchLimitationHTTP(t *testing.T) {
 			if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 				t.Fatal(err)
 			}
-			if reviews != 3 || productions != 1 || result.Status != store.RunPartial {
-				t.Fatalf("unbounded or missing review: reviews=%d productions=%d result=%+v", reviews, productions, result)
-			}
 			if method == http.MethodGet {
-				// With safe read-only effects and text-only candidate, the
-				// max-repairs path now delivers as partial rather than
-				// withholding. The candidate text is the report summary AND the
-				// published employee message (not the generic fallback).
+				// Positive read-only classification bypasses mandatory content
+				// assessment. Publication is not a guarantee that claims are true.
+				if reviews != 0 || productions != 1 || result.Status != store.RunSucceeded || !saved.state.HasReadOnlyEmployeeResult() {
+					t.Fatalf("read-only result required review: reviews=%d productions=%d result=%+v", reviews, productions, result)
+				}
 				if !strings.Contains(result.Report.Summary, candidate) {
-					t.Fatal("partial delivery should include candidate text")
+					t.Fatal("read-only delivery should include candidate text")
 				}
 				if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || result.Report.EmployeeMessage.Text != candidate {
 					t.Fatalf("partial delivery employee message did not preserve candidate text: %+v", result.Report.EmployeeMessage)
@@ -125,10 +123,13 @@ func TestBotEmployeeResearchLimitationHTTP(t *testing.T) {
 				if result.Report.EffectState != store.BotReportEffectsReadOnly {
 					t.Fatalf("read-only effect state lost: %+v", result.Report)
 				}
-				if len(result.Report.Unverified) == 0 || !strings.Contains(result.Report.Unverified[0], "content review") {
-					t.Fatalf("missing partial-delivery caveat: %+v", result.Report.Unverified)
+				if len(result.Report.Unverified) != 0 || result.Report.ReviewLimitation != nil {
+					t.Fatalf("invented review limitation: %+v", result.Report)
 				}
 			} else {
+				if reviews != 3 || productions != 1 || result.Status != store.RunPartial {
+					t.Fatalf("unbounded or missing review: reviews=%d productions=%d result=%+v", reviews, productions, result)
+				}
 				// POST: uncertain effects prevent graceful delivery; still withheld.
 				limitation := result.Report.ReviewLimitation
 				if limitation == nil || !strings.Contains(limitation.Text, gap) || limitation.Text != saved.state.Unresolved[0] || limitation.WorkRevision != saved.state.Revision {

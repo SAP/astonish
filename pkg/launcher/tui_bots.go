@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
@@ -425,7 +426,8 @@ func botTranscriptEvents(frame client.SSEEvent) ([]events.Event, error) {
 		out = append(out, events.Event{Kind: events.KindArtifact, Artifact: &events.Artifact{Path: path, FileName: filepath.Base(path)}})
 	}
 	if e.UsageMetadata != nil {
-		out = append(out, events.Event{Kind: events.KindUsage, Usage: &events.Usage{Input: int64(e.UsageMetadata.PromptTokenCount), Output: int64(e.UsageMetadata.CandidatesTokenCount), Total: int64(e.UsageMetadata.TotalTokenCount)}})
+		input, output := bot.ModelUsageTokens(e.UsageMetadata)
+		out = append(out, events.Event{Kind: events.KindUsage, Usage: &events.Usage{Input: input, Output: output, Total: input + output}})
 	}
 	// Metadata-only ADK rows are not text boundaries. Runtime envelopes above
 	// carry their own explicit done event.

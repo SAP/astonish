@@ -34,7 +34,7 @@ type botCoalescedOccurrence struct {
 
 // Bounded pages, no lifetime-sized root index. Root sequence CAS makes the
 // search plus occurrence receipt atomic with competing admissions and claims.
-func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uuid.UUID) (*store.BotRun, error) {
+func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uuid.UUID, occurrence time.Time) (*store.BotRun, error) {
 	after := uuid.Nil
 	for {
 		runs, err := tx.ReadRuns(ctx, bot, 100, after)
@@ -45,7 +45,7 @@ func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uui
 			if run.TriggerID != trigger || run.Trigger != store.TriggerCron {
 				continue
 			}
-			if !run.Status.Terminal() {
+			if !run.Status.Terminal() && run.Status != store.RunInterrupted {
 				return &run, nil
 			}
 			if run.Status == store.RunInterrupted {
@@ -53,7 +53,14 @@ func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uui
 				if err != nil {
 					return nil, err
 				}
-				if saved.ProgressUncertain || saved.ProgressPending != 0 || saved.Progress != nil && (saved.Progress.Phase == store.BotProgressReconciling || saved.Run.ContinuationReason == store.BotContinuationRequired) {
+				// Interrupted is deliberately nonterminal for continuation. Only a
+				// complete effect ledger plus exact teardown may release recurrence;
+				// missing progress is not proof that no tool executed.
+				safe, err := scheduledInterruptionAllowsNewOccurrence(ctx, tx, saved, occurrence)
+				if err != nil {
+					return nil, err
+				}
+				if !safe {
 					return &run, nil
 				}
 			}

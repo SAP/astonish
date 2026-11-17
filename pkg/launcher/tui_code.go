@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
@@ -2330,17 +2331,17 @@ func (b *localAgentBackend) emitRoutingInfo(emit func(string, map[string]any), c
 // emitUsage emits a usage event from real provider metadata. It returns true
 // when metadata was present (so callers can skip the local estimate fallback).
 func (b *localAgentBackend) emitUsage(event *session.Event, emit func(string, map[string]any)) bool {
-	if event.LLMResponse.UsageMetadata == nil || event.LLMResponse.Partial {
+	if event == nil || event.UsageMetadata == nil || event.Partial || agent.IsTurnContextEvent(event) {
 		return false
 	}
-	um := event.LLMResponse.UsageMetadata
-	if um.TotalTokenCount == 0 && um.PromptTokenCount == 0 && um.CandidatesTokenCount == 0 {
+	input, output := bot.ModelUsageTokens(event.UsageMetadata)
+	if input+output == 0 {
 		return false
 	}
 	emit("usage", map[string]any{
-		"input_tokens":  um.PromptTokenCount,
-		"output_tokens": um.CandidatesTokenCount,
-		"total_tokens":  um.TotalTokenCount,
+		"input_tokens":  input,
+		"output_tokens": output,
+		"total_tokens":  input + output,
 	})
 	return true
 }

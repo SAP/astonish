@@ -79,7 +79,7 @@ func (c *ProgressController) Check(ctx context.Context) (*ProgressDecision, erro
 	if c == nil {
 		return nil, nil
 	}
-	if c.LLM == nil || c.Interval <= 0 || c.Timeout <= 0 || c.Now == nil || c.Boundary == nil || c.Observe == nil || c.Commit == nil || c.AskUser == nil {
+	if c.LLM == nil || c.Interval <= 0 || c.Timeout < 0 || c.Now == nil || c.Boundary == nil || c.Observe == nil || c.Commit == nil || c.AskUser == nil {
 		return nil, store.ErrBotUnsupported
 	}
 	if err := c.Boundary(ctx); err != nil {
@@ -181,7 +181,11 @@ func (c *ProgressController) evaluate(ctx context.Context, raw []byte, observed 
 			prompt += "\nOne format correction: return only the declared JSON fields and valid supplied references."
 		}
 		req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(string(raw), "user")}, Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(prompt, "system"), ResponseMIMEType: "application/json", MaxOutputTokens: 2048}}
-		callCtx, cancel := context.WithTimeout(WithModelCallPurpose(ctx, ModelCallPurposeProgress), c.Timeout)
+		callCtx := WithModelCallPurpose(ctx, ModelCallPurposeProgress)
+		cancel := func() {}
+		if c.Timeout > 0 {
+			callCtx, cancel = context.WithTimeout(callCtx, c.Timeout)
+		}
 		var text strings.Builder
 		complete, invalid := false, false
 		var callErr error

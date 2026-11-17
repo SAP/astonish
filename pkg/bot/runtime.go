@@ -188,7 +188,38 @@ type BotWorkSkillHead struct {
 	HeadRevision int64                `json:"head_revision"`
 }
 
+// BotPriorRunContext is bounded outcome metadata, never a prior assignment,
+// mandate, report body or authority to replay an effect.
+type BotPriorRunContext struct {
+	BotID       store.BotID                `json:"bot_id"`
+	RunID       store.RunID                `json:"run_id"`
+	TriggerID   uuid.UUID                  `json:"trigger_id"`
+	CreatedAt   time.Time                  `json:"created_at"`
+	OutcomeAt   time.Time                  `json:"outcome_at"`
+	Status      store.RunStatus            `json:"status"`
+	FailureKind store.BotReportFailureKind `json:"failure_kind,omitempty"`
+}
+
+// ValidFor rechecks the exact scheduled occurrence binding at each consumer.
+func (p *BotPriorRunContext) ValidFor(current store.BotRun) bool {
+	if p == nil || current.Trigger != store.TriggerCron || current.TriggerID == uuid.Nil ||
+		p.BotID == uuid.Nil || p.BotID != current.BotID || p.RunID == uuid.Nil || p.RunID == current.ID ||
+		p.TriggerID != current.TriggerID || p.CreatedAt.IsZero() || p.OutcomeAt.IsZero() ||
+		!p.CreatedAt.Before(current.CreatedAt) || !p.OutcomeAt.Before(current.CreatedAt) || p.OutcomeAt.Before(p.CreatedAt) ||
+		(!p.Status.Terminal() && p.Status != store.RunInterrupted) {
+		return false
+	}
+	switch p.FailureKind {
+	case "", store.BotReportFailureBudget, store.BotReportFailureExecutionFormat,
+		store.BotReportFailureOperational, store.BotReportFailureInterrupted, store.BotReportFailureSetup:
+		return true
+	default:
+		return false
+	}
+}
+
 type BotWorkReadResult struct {
+	PriorRun              *BotPriorRunContext              `json:"prior_run,omitempty"`
 	PriorSkillID          *uuid.UUID                       `json:"prior_skill_id,omitempty"`
 	SkillIndex            []BotWorkSkillHead               `json:"skill_index,omitempty"`
 	SkillNext             string                           `json:"skill_next,omitempty"`

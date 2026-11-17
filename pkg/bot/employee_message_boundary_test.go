@@ -520,7 +520,7 @@ func TestBotAgentEmployeeFallbackSafeFacts(t *testing.T) {
 	id := uuid.New()
 	report.Artifacts = []store.BotArtifact{{ID: id, HomeID: uuid.New(), SHA256: strings.Repeat("a", 64), RelativePath: "SECRET", Title: "SECRET"}}
 	message := EmployeeMessageFallback(store.RunFailed, report, nil)
-	for _, want := range []string{"during execution", "model response could not be processed", "1 tool observation(s)", id.String(), "Try a smaller request"} {
+	for _, want := range []string{"during execution", "model response could not be processed", "does not confirm that all requested actions completed", id.String(), "Try a smaller request"} {
 		if !strings.Contains(message.Text, want) {
 			t.Fatalf("missing %q: %s", want, message.Text)
 		}

@@ -114,16 +114,40 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 	if rec.Bot.Revision != q.ExpectedRevision || rec.Fence != q.Fence || rec.Bot.Home != q.Home {
 		return false, store.ErrBotConflict
 	}
+	// Recovery releases the logical lease before physical teardown is known.
+	// Only the exact recovery transaction (not any terminal run with an empty
+	// root) can supply the missing barrier. Keep its successor fence exact so a
+	// newer claim or lifecycle transition cannot be adopted by an old verifier.
+	recovered := false
+	if q.Kind == store.BotCleanupRunTeardown && rec.ActiveRunID == nil && rec.LeaseExpiresAt == nil && q.Fence == q.RunFence+1 {
+		run, err := db.ReadRun(ctx, q.BotID, q.RunID)
+		if err != nil {
+			return false, err
+		}
+		if run.Run.Status == store.RunInterrupted && run.CommitHash == "recovered" && run.Run.Lease.Fence == q.RunFence && run.Run.SessionID != uuid.Nil {
+			a, err := db.FindActivity(ctx, q.BotID, fmt.Sprintf("recovery:%s:%d", q.RunID, q.RunFence))
+			if err != nil {
+				return false, err
+			}
+			var payload struct {
+				RunID  uuid.UUID       `json:"run_id"`
+				Status store.RunStatus `json:"status"`
+			}
+			recovered = a.RunID != nil && *a.RunID == q.RunID && a.Kind == store.BotActivityReport && json.Unmarshal(a.Payload, &payload) == nil && payload.RunID == q.RunID && payload.Status == store.RunInterrupted
+		}
+	}
 	switch rec.Bot.Status {
 	case store.BotPaused, store.BotStopped, store.BotDeleted:
 	case store.BotActive, store.BotDraft:
-		// An active Bot may release only an exact cancellation barrier, never
-		// retire its home or clear an unrelated interrupted attempt.
+		// An active Bot may attest its exact recovered attempt or release an
+		// exact cancellation barrier; it can never retire its home.
 		if q.Kind != store.BotCleanupRunTeardown || q.Fence != q.RunFence+1 {
 			return false, store.ErrBotConflict
 		}
-		if _, err := db.FindActivity(ctx, q.BotID, fmt.Sprintf("cancel:%s", q.RunID)); err != nil {
-			return false, store.ErrBotConflict
+		if !recovered {
+			if _, err := db.FindActivity(ctx, q.BotID, fmt.Sprintf("cancel:%s", q.RunID)); err != nil {
+				return false, store.ErrBotConflict
+			}
 		}
 	default:
 		return false, store.ErrBotConflict
@@ -149,7 +173,7 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 			return true, nil
 		}
 	}
-	if q.Kind == store.BotCleanupRunTeardown {
+	if q.Kind == store.BotCleanupRunTeardown && !recovered {
 		if rec.ActiveRunID == nil || *rec.ActiveRunID != q.RunID {
 			return false, store.ErrBotConflict
 		}
@@ -188,7 +212,12 @@ func (d teamBotDB) CleanupHasBusyRuns(ctx context.Context, id uuid.UUID) (bool, 
 func (d personalBotDB) SaveCleanup(ctx context.Context, rec botStoredRecord, q store.BotCleanupRequest, data map[string]any, now time.Time) error {
 	u := d.client.Bot.Update().Where(personalbot.IDEQ(q.BotID), personalbot.RevisionEQ(q.ExpectedRevision), personalbot.FenceEQ(q.Fence), personalbot.LastSeqEQ(rec.LastSequence), personalbot.StatusEQ(personalbot.Status(rec.Bot.Status))).SetData(data).AddLastSeq(1).SetUpdatedAt(now)
 	if q.Kind == store.BotCleanupRunTeardown {
-		u.Where(personalbot.ActiveRunIDEQ(q.RunID)).ClearActiveRunID().ClearLeaseExpiresAt().SetCleanupComplete(false)
+		if rec.ActiveRunID == nil {
+			u.Where(personalbot.ActiveRunIDIsNil(), personalbot.LeaseExpiresAtIsNil())
+		} else {
+			u.Where(personalbot.ActiveRunIDEQ(q.RunID))
+		}
+		u.ClearActiveRunID().ClearLeaseExpiresAt().SetCleanupComplete(false)
 	} else {
 		u.Where(personalbot.StatusEQ(personalbot.StatusDeleted), personalbot.PurgeAfterLTE(now), personalbot.ActiveRunIDIsNil(), personalbot.LeaseExpiresAtIsNil()).SetCleanupComplete(true)
 	}
@@ -205,7 +234,12 @@ func (d personalBotDB) SaveCleanup(ctx context.Context, rec botStoredRecord, q s
 func (d teamBotDB) SaveCleanup(ctx context.Context, rec botStoredRecord, q store.BotCleanupRequest, data map[string]any, now time.Time) error {
 	u := d.client.Bot.Update().Where(teambot.IDEQ(q.BotID), teambot.RevisionEQ(q.ExpectedRevision), teambot.FenceEQ(q.Fence), teambot.LastSeqEQ(rec.LastSequence), teambot.StatusEQ(teambot.Status(rec.Bot.Status))).SetData(data).AddLastSeq(1).SetUpdatedAt(now)
 	if q.Kind == store.BotCleanupRunTeardown {
-		u.Where(teambot.ActiveRunIDEQ(q.RunID)).ClearActiveRunID().ClearLeaseExpiresAt().SetCleanupComplete(false)
+		if rec.ActiveRunID == nil {
+			u.Where(teambot.ActiveRunIDIsNil(), teambot.LeaseExpiresAtIsNil())
+		} else {
+			u.Where(teambot.ActiveRunIDEQ(q.RunID))
+		}
+		u.ClearActiveRunID().ClearLeaseExpiresAt().SetCleanupComplete(false)
 	} else {
 		u.Where(teambot.StatusEQ(teambot.StatusDeleted), teambot.PurgeAfterLTE(now), teambot.ActiveRunIDIsNil(), teambot.LeaseExpiresAtIsNil()).SetCleanupComplete(true)
 	}

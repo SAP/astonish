@@ -107,8 +107,9 @@ func botWorkJSON(ctx context.Context, req bot.RunRequest, llm model.LLM, prompt 
 				// ADK usage is cumulative within a call, including repeated final
 				// snapshots. Account only increases, before any failure return;
 				// the next format attempt starts its own maxima.
-				nextInput := max(callInput, int64(response.UsageMetadata.PromptTokenCount))
-				nextOutput := max(callOutput, int64(response.UsageMetadata.CandidatesTokenCount))
+				input, output := bot.ModelUsageTokens(response.UsageMetadata)
+				nextInput := max(callInput, input)
+				nextOutput := max(callOutput, output)
 				usage.InputTokens += nextInput - callInput
 				usage.OutputTokens += nextOutput - callOutput
 				callInput, callOutput = nextInput, nextOutput
@@ -500,6 +501,19 @@ func (s *botAgentWorkService) Read(ctx context.Context, q bot.BotWorkReadRequest
 	}
 	out := &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(w), Notes: w.AgentWork.Notes}
 	s.readSkillIndex(ctx, out)
+	if s.resources.PriorRun != nil {
+		prior, err := s.resources.PriorRun(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			if !prior.ValidFor(s.req.Run) {
+				return nil, store.ErrBotForbidden
+			}
+			copyPrior := *prior
+			out.PriorRun = &copyPrior
+		}
+	}
 	if s.resources.PreviousWork != nil {
 		previous, err := s.resources.PreviousWork(ctx)
 		if err != nil {
@@ -1038,8 +1052,9 @@ func (s *botAgentWorkService) Check(ctx context.Context, q bot.BotWorkCheckReque
 		text, complete, invalid := "", false, false
 		for response, callErr := range s.llm.GenerateContent(bot.WithModelCallPurpose(ctx, bot.ModelCallPurposeAssessment), request, false) {
 			if response != nil && response.UsageMetadata != nil {
-				callInput = max(callInput, int64(response.UsageMetadata.PromptTokenCount))
-				callOutput = max(callOutput, int64(response.UsageMetadata.CandidatesTokenCount))
+				input, output := bot.ModelUsageTokens(response.UsageMetadata)
+				callInput = max(callInput, input)
+				callOutput = max(callOutput, output)
 			}
 			if callErr != nil {
 				invalid = true

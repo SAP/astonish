@@ -85,7 +85,12 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 				default:
 					t.Errorf("unnecessary recovery/review model call %d", step)
 				}
-				return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}, true
+				response := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}
+				if step == 3 {
+					response.FinishReason = genai.FinishReasonStop
+					response.TurnComplete = true
+				}
+				return response, true
 			}
 			var admission store.BotMessageReceipt
 			if err := json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Read /isolated/receipt.txt and report its contents. Task tracking is optional.","idempotency_key":"synthesis-receipt"}`, f.b.Version), 202), &admission); err != nil {

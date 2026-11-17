@@ -177,8 +177,8 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			if len(tools) > 0 {
 				responseReq.ParallelToolCalls = parallelToolCalls
 			}
-			if streaming {
-				p.generateResponsesStream(ctx, responseReq, yield)
+			if streaming || streamprogress.HealthEnabled(ctx) {
+				p.generateResponsesStream(ctx, responseReq, streaming, yield)
 				return
 			}
 			resp, err := p.client.CreateResponse(ctx, responseReq)
@@ -207,12 +207,12 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 			var textAccum, reasoningAccum strings.Builder
 			var finishReason openai.FinishReason
 			var streamUsage *genai.GenerateContentResponseUsageMetadata
-			var thinkingReported, toolsReported, outputSeen bool
+			var thinkingReported, toolsReported, outputSeen, refused, legacyTool bool
 			fail := func(err error) {
 				if outputSeen {
 					err = llmerror.NewInterruptedStream(err)
 				}
-				yield(nil, err)
+				yield(&model.LLMResponse{UsageMetadata: streamUsage, FinishReason: completionFinishReason(finishReason, refused)}, err)
 			}
 			for {
 				resp, err := stream.Recv()
@@ -224,6 +224,10 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 					if textAccum.Len() > 0 {
 						parts = append(parts, &genai.Part{Text: textAccum.String()})
 					}
+					if finishReason == "" && refused {
+						fail(completionError(finishReason, textAccum.String(), len(toolCalls) > 0 || legacyTool, true))
+						return
+					}
 					if finishReason == "" {
 						// Persist partial prose, but never incomplete tool calls.
 						if len(parts) > 0 && !yield(&model.LLMResponse{
@@ -234,8 +238,12 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 						fail(&llmerror.TruncatedStreamError{Provider: "OpenAI"})
 						return
 					}
-					if finishReason == openai.FinishReasonToolCalls && len(toolCalls) == 0 {
-						fail(fmt.Errorf("OpenAI stream finished tool calls without a tool"))
+					if err := completionError(finishReason, textAccum.String(), len(toolCalls) > 0 || legacyTool, refused); err != nil {
+						fail(err)
+						return
+					}
+					if legacyTool {
+						fail(&llmerror.EmptyCompletionError{Provider: "OpenAI", FinishReason: genai.FinishReasonOther, HasToolCalls: true})
 						return
 					}
 					indices := make([]int, 0, len(toolCalls))
@@ -254,7 +262,7 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 						parts = append(parts, &genai.Part{FunctionCall: call})
 					}
 					if len(parts) > 0 || streamUsage != nil {
-						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: streamUsage}, nil)
+						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: streamUsage, FinishReason: completionFinishReason(finishReason, refused), TurnComplete: true}, nil)
 					}
 					return
 				}
@@ -263,20 +271,20 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 					return
 				}
 				if resp.Usage != nil {
-					streamUsage = usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails)
+					streamUsage = usageMetadata(*resp.Usage)
 				}
 				if len(resp.Choices) == 0 {
 					continue
 				}
 				choice := resp.Choices[0]
-				if choice.FinishReason != "" && choice.FinishReason != openai.FinishReasonStop && choice.FinishReason != openai.FinishReasonToolCalls {
-					fail(fmt.Errorf("OpenAI stream did not complete successfully: %s", choice.FinishReason))
-					return
-				}
-				if finishReason != "" && (choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" || len(choice.Delta.ToolCalls) > 0 || choice.FinishReason != "") {
+				// Defer terminal classification until EOF so the usage-only trailer
+				// is retained even for length/refusal/filtered completions.
+				if finishReason != "" && (choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" || choice.Delta.Refusal != "" || choice.Delta.FunctionCall != nil || len(choice.Delta.ToolCalls) > 0 || choice.FinishReason != "") {
 					fail(fmt.Errorf("OpenAI stream received output after finish_reason"))
 					return
 				}
+				refused = refused || choice.Delta.Refusal != ""
+				legacyTool = legacyTool || choice.Delta.FunctionCall != nil
 				if choice.FinishReason != "" {
 					finishReason = choice.FinishReason
 				}
@@ -331,7 +339,11 @@ func (p *Provider) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 				return
 			}
 			llmResp := p.toLLMResponse(resp)
-			yield(llmResp, nil)
+			completionErr := chatCompletionError(resp)
+			if completionErr != nil {
+				discardCompletionTools(llmResp)
+			}
+			yield(llmResp, completionErr)
 		}
 	}
 }
@@ -840,7 +852,7 @@ func truncateForLog(s string, maxLen int) string {
 
 func (p *Provider) toLLMResponse(resp openai.ChatCompletionResponse) *model.LLMResponse {
 	if len(resp.Choices) == 0 {
-		return &model.LLMResponse{}
+		return &model.LLMResponse{UsageMetadata: usageMetadata(resp.Usage), FinishReason: genai.FinishReasonUnspecified}
 	}
 	choice := resp.Choices[0]
 
@@ -876,18 +888,26 @@ func (p *Provider) toLLMResponse(resp openai.ChatCompletionResponse) *model.LLMR
 			Role:  "model",
 			Parts: parts,
 		},
-		UsageMetadata: usageMetadata(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, resp.Usage.PromptTokensDetails),
+		UsageMetadata: usageMetadata(resp.Usage),
+		FinishReason:  completionFinishReason(choice.FinishReason, choice.Message.Refusal != ""),
 	}
 }
 
-func usageMetadata(prompt, completion, total int, details *openai.PromptTokensDetails) *genai.GenerateContentResponseUsageMetadata {
+func usageMetadata(raw openai.Usage) *genai.GenerateContentResponseUsageMetadata {
 	usage := &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:     int32(prompt),
-		CandidatesTokenCount: int32(completion),
-		TotalTokenCount:      int32(total),
+		PromptTokenCount:     int32(raw.PromptTokens),
+		CandidatesTokenCount: int32(raw.CompletionTokens),
+		TotalTokenCount:      int32(raw.TotalTokens),
 	}
-	if details != nil {
-		usage.CachedContentTokenCount = int32(details.CachedTokens)
+	if raw.PromptTokensDetails != nil {
+		usage.CachedContentTokenCount = int32(raw.PromptTokensDetails.CachedTokens)
+	}
+	if raw.CompletionTokensDetails != nil {
+		// OpenAI completion_tokens includes reasoning; ADK counts thoughts
+		// separately. Split the subset, never add it a second time to totals.
+		reasoning := min(max(raw.CompletionTokensDetails.ReasoningTokens, 0), max(raw.CompletionTokens, 0))
+		usage.ThoughtsTokenCount = int32(reasoning)
+		usage.CandidatesTokenCount = int32(raw.CompletionTokens - reasoning)
 	}
 	return usage
 }

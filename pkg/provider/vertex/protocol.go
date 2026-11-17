@@ -376,6 +376,8 @@ func ParseResponse(body []byte) (*model.LLMResponse, error) {
 			Parts: parts,
 		},
 		UsageMetadata: vertexResp.UsageMetadata,
+		FinishReason:  genai.FinishReason(candidate.FinishReason),
+		TurnComplete:  genai.FinishReason(candidate.FinishReason) == genai.FinishReasonStop,
 	}, nil
 }
 
@@ -504,7 +506,7 @@ func ParseStreamWithProgress(reader io.Reader, onProgress func(streaming.Progres
 		}
 		flushText()
 		if len(parts) > 0 || usage != nil {
-			yield(&model.LLMResponse{Content: &genai.Content{Role: role, Parts: parts}, UsageMetadata: usage}, nil)
+			yield(&model.LLMResponse{Content: &genai.Content{Role: role, Parts: parts}, UsageMetadata: usage, FinishReason: finish, TurnComplete: finish == genai.FinishReasonStop}, nil)
 		}
 	}
 }

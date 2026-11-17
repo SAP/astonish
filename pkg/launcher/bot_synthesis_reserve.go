@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -61,7 +63,7 @@ func (r *botSynthesisReserve) synthesis() bool {
 	return r.final
 }
 
-func (r *botSynthesisReserve) prepare(ctx context.Context, req *model.LLMRequest) (*model.LLMRequest, bool, error) {
+func (r *botSynthesisReserve) prepare(ctx context.Context, req *model.LLMRequest, llm model.LLM) (*model.LLMRequest, bool, error) {
 	if r == nil || req == nil {
 		return req, false, nil
 	}
@@ -76,26 +78,49 @@ func (r *botSynthesisReserve) prepare(ctx context.Context, req *model.LLMRequest
 	cloned.Config = &config
 	usage := r.meter.Usage()
 	remaining := "unlimited"
-	// Include the *whole* next prompt, not just output, in the stopping decision.
-	// JSON bytes are deliberately conservative, not a learned bytes/token ratio.
-	// Actual reservations (including unknown costs) remain the provider's job.
+	// Consult admission's request/model-scoped measurement, never a learned ratio.
+	// New or changed input still uses its conservative byte bound. The reserve is
+	// only a stopping policy; all reservations and live checks remain mandatory.
 	if r.spec.MaxTokens != nil {
-		left := max(int64(0), *r.spec.MaxTokens-usage.InputTokens-usage.OutputTokens)
+		left := max(int64(0), *r.spec.MaxTokens)
+		left -= min(left, max(int64(0), usage.InputTokens))
+		left -= min(left, max(int64(0), usage.OutputTokens))
 		remaining = fmt.Sprint(left)
-		raw, err := json.Marshal(struct {
-			Contents []*genai.Content
-			Config   *genai.GenerateContentConfig
-		}{req.Contents, req.Config})
+		input, err := provider.EstimateModelInput(ctx, llm, &cloned)
 		if err != nil {
 			return nil, false, err
 		}
-		input := int64(len(raw)) + 1024
+		// Bound the request-local reserve guidance and its framing, including the
+		// final-only variant. Admission independently estimates the actual message.
+		const guidanceBound = int64(2048)
+		if input < 0 || input > math.MaxInt64-guidanceBound-4096 {
+			return nil, false, errors.New("invalid synthesis input token estimate")
+		}
+		input += guidanceBound
 		output := int64(4096)
 		if config.MaxOutputTokens > 0 {
 			output = min(output, int64(config.MaxOutputTokens))
 		}
+		// Removing tools changes the model request identity. Reserve enough for
+		// that actual final-only request too, rather than assuming it can reuse
+		// the tool-enabled prompt measurement.
+		finalRequest := cloned
+		finalConfig := config
+		finalConfig.Tools = nil
+		finalConfig.ToolConfig = nil
+		finalRequest.Config = &finalConfig
+		finalRequest.Tools = nil
+		finalInput, err := provider.EstimateModelInput(ctx, llm, &finalRequest)
+		if err != nil {
+			return nil, false, err
+		}
+		if finalInput < 0 || finalInput > math.MaxInt64-guidanceBound-output {
+			return nil, false, errors.New("invalid final synthesis input token estimate")
+		}
+		finalCost := finalInput + guidanceBound + output
+		nextCost := input + output
 		r.mu.Lock()
-		if usage.ToolCalls > 0 && left <= 2*(input+output) {
+		if usage.ToolCalls > 0 && (finalCost >= left || nextCost >= left-finalCost) {
 			r.final = true
 		}
 		r.mu.Unlock()

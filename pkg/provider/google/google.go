@@ -79,6 +79,9 @@ func NewProvider(ctx context.Context, modelName string, apiKey string) (model.LL
 	// This handles the model.LLM interface implementation
 	m, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{
 		APIKey: apiKey,
+		// The SDK otherwise uses an unobserved default HTTP client. Observe real
+		// reads without changing its auth, endpoint or ordinary transport policy.
+		HTTPClient: &http.Client{Transport: nativeHealthTransport{base: http.DefaultTransport}},
 	})
 	if err != nil {
 		return nil, err

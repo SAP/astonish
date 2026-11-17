@@ -15,6 +15,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -180,6 +181,10 @@ type botProgressLLM struct {
 	binding *botFactoryBinding
 }
 
+func (l *botProgressLLM) EstimateInputTokens(ctx context.Context, request *model.LLMRequest) (int64, error) {
+	return provider.EstimateModelInput(ctx, l.LLM, request)
+}
+
 func (l *botProgressLLM) GenerateContent(ctx context.Context, request *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if l.binding.req.Version.Budget.RuntimePolicy.EffectiveMode() != execution.BotRuntimeModeProgressV1 {
@@ -195,16 +200,24 @@ func (l *botProgressLLM) GenerateContent(ctx context.Context, request *model.LLM
 			yield(nil, err)
 			return
 		}
-		call, cancel := context.WithTimeout(ctx, time.Duration(l.binding.req.Version.Budget.RuntimePolicy.ModelCallTimeoutSeconds)*time.Second)
-		defer cancel()
+		call := provider.WithGenerationHealthCheck(ctx, l.binding.checkDuringGeneration)
+		if policy := l.binding.req.Version.Budget.RuntimePolicy; policy.GenerationHealth == nil {
+			var cancel context.CancelFunc
+			call, cancel = context.WithTimeout(call, time.Duration(policy.ModelCallTimeoutSeconds)*time.Second)
+			defer cancel()
+		}
 		var usage store.BotUsage
 		defer func() { finish(store.BotProgressDispatchSettled, usage, "") }()
 		for r, e := range l.LLM.GenerateContent(call, request, stream) {
 			if r != nil && r.UsageMetadata != nil {
-				usage.InputTokens = int64(r.UsageMetadata.PromptTokenCount)
-				usage.OutputTokens = int64(r.UsageMetadata.CandidatesTokenCount)
+				input, output := bot.ModelUsageTokens(r.UsageMetadata)
+				// Usage snapshots are cumulative, including repeated trailers.
+				usage.InputTokens = max(usage.InputTokens, input)
+				usage.OutputTokens = max(usage.OutputTokens, output)
 			}
-			if !yield(r, e) || e != nil {
+			// A consumer may drain a failed generation to observe BudgetLLM's
+			// trailing settlement error before authorizing a bounded correction.
+			if !yield(r, e) {
 				return
 			}
 		}

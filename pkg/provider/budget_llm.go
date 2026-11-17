@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider/streaming"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -143,6 +144,29 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 			config.MaxOutputTokens = int32(r.OutputTokens)
 		}
 		cloned.Config = &config
+		var stopHealth func() error
+		if health, ok := b.budget.(interface {
+			GenerationHealth() *execution.BotGenerationHealthPolicy
+		}); ok {
+			if policy := health.GenerationHealth(); policy != nil {
+				check, _ := ctx.Value(generationHealthCheckKey{}).(func(context.Context) error)
+				ctx, stopHealth = streaming.StartHealthMonitor(ctx, streaming.HealthOptions{
+					IdleTimeout:   time.Duration(policy.IdleTimeoutSeconds) * time.Second,
+					CheckInterval: time.Duration(policy.CheckIntervalSeconds) * time.Second,
+					Check: func(c context.Context) error {
+						if err := CheckGenerationBudget(c, b.budget); err != nil {
+							return err
+						}
+						if check != nil {
+							return check(c)
+						}
+						return nil
+					},
+				})
+				// Runs after the provider iterator unwinds, including early consumer exit.
+				defer func() { _ = stopHealth() }()
+			}
+		}
 		observed := execution.BudgetUsage{}
 		seen, finalUsage, failed := false, false, false
 		finalPrompt := false
@@ -166,14 +190,20 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 			if callErr != nil || response != nil && (response.ErrorCode != "" || response.Interrupted) {
 				failed = true
 			}
+			// A continuing consumer may need trailing failure evidence before
+			// deciding whether recovery is safe. Drain after errors as requested,
+			// retaining conservative settlement and any later usage metadata.
 			if !yield(response, callErr) {
 				return
 			}
-			if callErr != nil {
-				break
-			}
 		}
-		if seen && finalUsage && !failed && ctx.Err() == nil {
+		callContextErr := ctx.Err()
+		if stopHealth != nil {
+			// Normal stop cancels the monitor context; only its result classifies
+			// generation failure. In particular final usage must still reconcile.
+			callContextErr = stopHealth()
+		}
+		if seen && finalUsage && !failed && callContextErr == nil {
 			usage = observed
 			if usage.InputTokens == 0 {
 				// Output-only usage does not prove the prompt was free.
@@ -187,7 +217,7 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 			usage.InputTokens = max(usage.InputTokens, observed.InputTokens)
 			usage.OutputTokens = max(usage.OutputTokens, observed.OutputTokens)
 		}
-		if err = errors.Join(err, ctx.Err(), settle()); err != nil {
+		if err = errors.Join(err, callContextErr, settle()); err != nil {
 			yield(nil, err)
 		} else if finalPrompt && !failed {
 			b.inputHistory.observe(snapshot, observed.InputTokens)

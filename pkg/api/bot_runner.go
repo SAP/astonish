@@ -33,6 +33,7 @@ type BotChatResources struct {
 	ModelSelection *store.SessionPin
 	// AssessmentContext is a trusted, owner-bound read, never a model tool.
 	// Callbacks are factory-bound to this owner/Bot/run; callers cannot choose scope.
+	PriorRun                 func(context.Context) (*bot.BotPriorRunContext, error)
 	PreviousWork             func(context.Context) (*store.BotWorkProjection, error)
 	ValidateWorkContinuation func(context.Context, store.BotWorkContinuationKind, uuid.UUID) error
 	EvidenceReader           store.BotTranscriptReader
@@ -288,11 +289,12 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	}
 	// Setup is bounded independently; stop its watchdog once resources are ready.
 	// Resources keep the run context, never a soon-cancelled setup child context.
-	var setupTimer *time.Timer
+	setupTimeout := 120 * time.Second
 	if timeout, ok := req.Budget.(interface{ ModelCallTimeout() time.Duration }); ok && timeout.ModelCallTimeout() > 0 {
-		setupTimer = time.AfterFunc(timeout.ModelCallTimeout(), cancel)
-		defer setupTimer.Stop()
+		setupTimeout = timeout.ModelCallTimeout()
 	}
+	setupTimer := time.AfterFunc(setupTimeout, cancel)
+	defer setupTimer.Stop()
 	resources, err := a.factory(ctx, req)
 	if setupTimer != nil {
 		setupTimer.Stop()

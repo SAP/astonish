@@ -357,10 +357,7 @@ func newBotTaskTools(b *botFactoryBinding) ([]tool.Tool, error) {
 	var out []tool.Tool
 	for _, name := range []string{"bot_task_list", "bot_task_read", "bot_task_select", "bot_task_capture", "bot_task_update", "bot_task_asset", "bot_task_state", "bot_task_execute"} {
 		name := name
-		description := "Bounded current Bot Home Task capability. Files and IDs grant no authority. Draft capture and updates require no finish ritual. Scripts are untested assets until independently validated."
-		if name == "bot_task_execute" {
-			description = "Execute one declared executable Python helper from the selected Task's pinned bundle. Requires path under scripts/ ending in .py (for example scripts/helper.py); task_id optionally selects another owned Task. This does not invoke, enqueue or schedule a Task. For a prose TASK.md procedure, perform the work directly using authorized tools. Existing sandbox, lease, budget and authority checks apply."
-		}
+		description := botTaskToolDescription(name)
 		t, err := functiontool.New(functiontool.Config{Name: name, Description: description}, func(ctx tool.Context, a botTaskArgs) (result map[string]any, cause error) {
 			nonexecuted := false
 			defer func() {
@@ -447,11 +444,7 @@ func newBotTaskTools(b *botFactoryBinding) ([]tool.Tool, error) {
 				return nil, err
 			}
 			if name == "bot_task_read" {
-				p := a.Path
-				if p == "" {
-					p = "TASK.md"
-				}
-				return map[string]any{"task": ref, "content": string(r.Bundle[p])}, nil
+				return botTaskBundleRead(ref, r.Bundle, a.Path)
 			}
 			p := a.Path
 			if name == "bot_task_update" {

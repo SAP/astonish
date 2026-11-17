@@ -39,7 +39,7 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 	}
 	pool := sandbox.NewBackendPool(b, sandbox.ResourceLimits{})
 	release := func() { pool.Cleanup(); cleanup() }
-	w, err := NewBotWorker(BotWorkerConfig{KnowledgeSafety: botKnowledgeSafety, KnowledgeRedactor: productionKnowledgeRedactor(backend, cfg), MandatePolicy: newProductionBotMandatePolicy(backend, cfg), TurnRegistry: registry, Backend: backend, Sandbox: b, Pool: pool, WorkerID: "bot-" + uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, p execution.Principal, scope store.BotScope, name, modelName string) (model.LLM, error) {
+	w, err := NewBotWorker(BotWorkerConfig{KnowledgeSafety: botKnowledgeSafety, KnowledgeRedactor: productionKnowledgeRedactor(backend, cfg), MandatePolicy: newProductionBotMandatePolicy(backend, cfg), TurnRegistry: registry, Backend: backend, Sandbox: b, Pool: pool, WorkerID: "bot-" + uuid.NewString(), ModelOptions: provider.BudgetLLMOptions{SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, p execution.Principal, scope store.BotScope, name, modelName string) (model.LLM, error) {
 		org, err := backend.ForOrg(p.OrgSlug)
 		if err != nil {
 			return nil, err
@@ -59,6 +59,9 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 			return nil, err
 		}
 		local := &config.AppConfig{Providers: map[string]config.ProviderConfig{}}
+		if cfg != nil {
+			local.General.ContextLength = cfg.General.ContextLength
+		}
 		merge := func(values map[string]store.ProviderConfig) {
 			for n, v := range values {
 				copy := config.ProviderConfig{}
@@ -80,7 +83,12 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 		if _, ok := local.Providers[name]; !ok {
 			return nil, store.ErrBotUnsupported
 		}
-		return provider.GetProvider(ctx, name, modelName, local)
+		ctx = provider.WithConfinedProviderSecrets(ctx)
+		llm, err := provider.GetProvider(ctx, name, modelName, local)
+		if err != nil {
+			return nil, err
+		}
+		return newBotGenerationModel(ctx, llm, name, modelName, local), nil
 	}, Prepare: func(ctx context.Context, r bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		if err := productionBotPriceReadiness(r.Version); err != nil {
 			return nil, err

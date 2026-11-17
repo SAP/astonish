@@ -39,11 +39,13 @@ type BotWorkerConfig struct {
 	Pool              sandbox.ToolNodePool
 	Prepare           func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error)
 	ResolveModel      func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error)
-	ModelOptions      provider.BudgetLLMOptions
-	ContextWindow     int
-	WorkerID          string
-	PollInterval      time.Duration
-	Publish           bot.EventSink
+	// Zero selects capabilities from the scoped model (or finite fallbacks).
+	// Positive values remain explicit caller/operator overrides.
+	ModelOptions  provider.BudgetLLMOptions
+	ContextWindow int
+	WorkerID      string
+	PollInterval  time.Duration
+	Publish       bot.EventSink
 	// ChannelManager resolves the live transport after channel reloads. Nil uses
 	// the daemon's synchronized getter; no manager leaves notifications pending.
 	ChannelManager func() *channels.ChannelManager
@@ -65,7 +67,7 @@ type BotWorker struct {
 }
 
 func NewBotWorker(c BotWorkerConfig) (*BotWorker, error) {
-	if c.Backend == nil || c.Sandbox == nil || c.Pool == nil || c.Prepare == nil || c.ResolveModel == nil || c.WorkerID == "" || c.ContextWindow <= 0 || c.ModelOptions.MaxOutputTokens <= 0 {
+	if c.Backend == nil || c.Sandbox == nil || c.Pool == nil || c.Prepare == nil || c.ResolveModel == nil || c.WorkerID == "" || c.ContextWindow < 0 || c.ModelOptions.MaxOutputTokens < 0 {
 		return nil, store.ErrBotUnsupported
 	}
 	if _, ok := c.Sandbox.(sandbox.BotHomeBackend); !ok {
@@ -91,8 +93,10 @@ func NewBotWorker(c BotWorkerConfig) (*BotWorker, error) {
 	}
 	c.Publish = installBotEventPublisher(c.Publish)
 	w := &BotWorker{config: c}
-	factory, err := launcher.NewBotChatAgentFactory(launcher.BotChatFactoryConfig{LoadScope: w.loadScope, Prepare: w.prepareAuthorizedSchedules, ContextWindow: c.ContextWindow, WrapModel: func(ctx context.Context, llm model.LLM, b execution.RunBudget) (model.LLM, error) {
-		return provider.NewBudgetLLM(llm, b, c.ModelOptions)
+	factory, err := launcher.NewBotChatAgentFactory(launcher.BotChatFactoryConfig{LoadScope: w.loadScope, Prepare: w.prepareAuthorizedSchedules, ContextWindow: c.ContextWindow, ResolveContextWindow: func(ctx context.Context, llm model.LLM) int {
+		return botModelContextWindow(ctx, llm)
+	}, WrapModel: func(ctx context.Context, llm model.LLM, b execution.RunBudget) (model.LLM, error) {
+		return provider.NewBudgetLLM(llm, b, botModelBudgetOptions(llm, c.ModelOptions))
 	}})
 	if err != nil {
 		return nil, err
@@ -278,6 +282,11 @@ func (w *BotWorker) loadScope(ctx context.Context, r bot.RunRequest) (*launcher.
 		llm, err := w.config.ResolveModel(c, r.Principal, r.Bot.Scope, p, m)
 		if err != nil {
 			return llm, err
+		}
+		if configured, ok := llm.(*botGenerationModel); ok {
+			copy := *configured
+			copy.LLM = observeBotResolvedModel(r, w.config.WorkerID, p, m, configured.LLM)
+			return &copy, nil
 		}
 		return observeBotResolvedModel(r, w.config.WorkerID, p, m, llm), nil
 	}}

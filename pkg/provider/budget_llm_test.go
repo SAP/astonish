@@ -237,6 +237,62 @@ func TestBudgetLLMConcurrentIteratorReuse(t *testing.T) {
 	}
 }
 
+func TestBudgetLLMTrailingErrorDrainAndConsumerStop(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, mode := range []string{"drain", "larger_usage", "consumer_stop"} {
+			t.Run(map[bool]string{false: "single", true: "stream"}[stream]+"/"+mode, func(t *testing.T) {
+				b := meter(t, 1000)
+				first := &provider.EmptyCompletionError{Provider: "controlled", FinishReason: genai.FinishReasonMaxTokens}
+				trailing := context.Canceled
+				continued, unwound := false, false
+				m := &budgetTestLLM{generate: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						defer func() { unwound = true }()
+						if !yield(nil, first) {
+							return
+						}
+						continued = true
+						response := usageResponse(2, 3)
+						if mode == "larger_usage" {
+							response = usageResponse(20, 150)
+						}
+						yield(response, trailing)
+					}
+				}}
+				llm := wrap(t, m, b, budgetOptions())
+				var failure error
+				responses := 0
+				for response, err := range llm.GenerateContent(context.Background(), &model.LLMRequest{}, stream) {
+					failure = errors.Join(failure, err)
+					if response != nil {
+						responses++
+					}
+					if mode == "consumer_stop" {
+						break
+					}
+				}
+				if !unwound || !errors.Is(failure, first) {
+					t.Fatalf("unwound=%t failure=%v", unwound, failure)
+				}
+				if mode == "consumer_stop" {
+					if continued || responses != 0 || errors.Is(failure, trailing) {
+						t.Fatal("provider continued after consumer stopped")
+					}
+				} else if !continued || responses != 1 || !errors.Is(failure, trailing) {
+					t.Errorf("trailing evidence lost: continued=%t responses=%d failure=%v", continued, responses, failure)
+				}
+				wantIn, wantOut := int64(10), int64(100)
+				if mode == "larger_usage" {
+					wantIn, wantOut = 20, 150
+				}
+				if u := b.Usage(); u.InputTokens != wantIn || u.OutputTokens != wantOut {
+					t.Errorf("failed attempt settlement=%+v want input=%d output=%d", u, wantIn, wantOut)
+				}
+			})
+		}
+	}
+}
+
 func TestBudgetLLMDefaultEstimatorAndValidation(t *testing.T) {
 	if _, err := provider.NewBudgetLLM(nil, nil, provider.BudgetLLMOptions{}); err == nil {
 		t.Fatal("nil dependencies accepted")

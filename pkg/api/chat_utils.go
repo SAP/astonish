@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	adrill "github.com/SAP/astonish/pkg/drill"
@@ -587,22 +588,23 @@ func applyPlanStepUpdate(messages []StudioMessage, args map[string]any) {
 // transcript. Each non-partial event with a non-nil UsageMetadata represents
 // one API call's token counts. Returns nil if no usage data is present.
 func collectUsage(events session.Events) *UsageSummary {
-	var input, output, total int32
+	var input, output int64
 	for i := range events.Len() {
 		event := events.At(i)
-		if um := event.LLMResponse.UsageMetadata; um != nil {
-			input += um.PromptTokenCount
-			output += um.CandidatesTokenCount
-			total += um.TotalTokenCount
+		if event == nil || event.Partial || event.UsageMetadata == nil || agent.IsTurnContextEvent(event) {
+			continue
 		}
+		callInput, callOutput := bot.ModelUsageTokens(event.UsageMetadata)
+		input += callInput
+		output += callOutput
 	}
-	if total == 0 {
+	if input+output == 0 {
 		return nil
 	}
 	return &UsageSummary{
-		InputTokens:  input,
-		OutputTokens: output,
-		TotalTokens:  total,
+		InputTokens:  int32(input),
+		OutputTokens: int32(output),
+		TotalTokens:  int32(input + output),
 	}
 }
 

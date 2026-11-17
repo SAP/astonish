@@ -286,7 +286,8 @@ func employeeModelJSON(ctx context.Context, opts EmployeeMessageOptions, instruc
 	var input, output int64
 	for response, err := range opts.LLM.GenerateContent(WithModelCallPurpose(ctx, ModelCallPurposeAssessment), request, true) {
 		if response != nil && response.UsageMetadata != nil && opts.Usage != nil {
-			nextInput, nextOutput := max(input, int64(response.UsageMetadata.PromptTokenCount)), max(output, int64(response.UsageMetadata.CandidatesTokenCount))
+			observedInput, observedOutput := ModelUsageTokens(response.UsageMetadata)
+			nextInput, nextOutput := max(input, observedInput), max(output, observedOutput)
 			opts.Usage.InputTokens += nextInput - input
 			opts.Usage.OutputTokens += nextOutput - output
 			input, output = nextInput, nextOutput

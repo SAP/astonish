@@ -20,22 +20,68 @@ const (
 	BotRuntimePolicyMaxBytes                     = 1024
 )
 
+// BotGenerationHealthPolicy monitors stalled generation, not elapsed model age.
+// Both intervals must be explicit, positive and duration-safe. Nil preserves
+// the saved model deadline policy.
+type BotGenerationHealthPolicy struct {
+	IdleTimeoutSeconds   int64 `json:"idle_timeout_seconds" yaml:"idle_timeout_seconds"`
+	CheckIntervalSeconds int64 `json:"check_interval_seconds" yaml:"check_interval_seconds"`
+}
+
+// UnmarshalJSON rejects unknown health switches rather than silently disabling
+// an intended safety boundary. It never supplies missing defaults.
+func (p *BotGenerationHealthPolicy) UnmarshalJSON(data []byte) error {
+	type wire BotGenerationHealthPolicy
+	var value wire
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	*p = BotGenerationHealthPolicy(value)
+	return nil
+}
+
+func (p *BotGenerationHealthPolicy) Clone() *BotGenerationHealthPolicy {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	return &out
+}
+
+func (p *BotGenerationHealthPolicy) Validate() error {
+	if p == nil {
+		return nil
+	}
+	for _, value := range []int64{p.IdleTimeoutSeconds, p.CheckIntervalSeconds} {
+		if value <= 0 || value > int64((1<<63-1)/time.Second) {
+			return errors.New("generation health seconds must be positive and duration-safe")
+		}
+	}
+	if p.CheckIntervalSeconds > p.IdleTimeoutSeconds {
+		return errors.New("generation health check interval exceeds idle timeout")
+	}
+	return nil
+}
+
 // BotRuntimePolicy is optional. Nil preserves legacy semantics. A present policy
 // must be complete: decoding or validation never supplies defaults. Cadence is a
 // soft evaluation boundary, not a kill deadline. Nil MaxActiveSeconds explicitly
 // means no whole-assignment active-duration cap, never unlimited spending.
 type BotRuntimePolicy struct {
-	SchemaVersion             int            `json:"schema_version" yaml:"schema_version"`
-	Mode                      BotRuntimeMode `json:"mode" yaml:"mode"`
-	EvaluationIntervalSeconds int64          `json:"evaluation_interval_seconds,omitempty" yaml:"evaluation_interval_seconds,omitempty"`
-	MaxActiveSeconds          *int64         `json:"max_active_seconds,omitempty" yaml:"max_active_seconds,omitempty"`
-	ModelCallTimeoutSeconds   int64          `json:"model_call_timeout_seconds,omitempty" yaml:"model_call_timeout_seconds,omitempty"`
-	ToolCallTimeoutSeconds    int64          `json:"tool_call_timeout_seconds,omitempty" yaml:"tool_call_timeout_seconds,omitempty"`
+	SchemaVersion             int                        `json:"schema_version" yaml:"schema_version"`
+	Mode                      BotRuntimeMode             `json:"mode" yaml:"mode"`
+	EvaluationIntervalSeconds int64                      `json:"evaluation_interval_seconds,omitempty" yaml:"evaluation_interval_seconds,omitempty"`
+	MaxActiveSeconds          *int64                     `json:"max_active_seconds,omitempty" yaml:"max_active_seconds,omitempty"`
+	ModelCallTimeoutSeconds   int64                      `json:"model_call_timeout_seconds,omitempty" yaml:"model_call_timeout_seconds,omitempty"`
+	GenerationHealth          *BotGenerationHealthPolicy `json:"generation_health,omitempty" yaml:"generation_health,omitempty"`
+	ToolCallTimeoutSeconds    int64                      `json:"tool_call_timeout_seconds,omitempty" yaml:"tool_call_timeout_seconds,omitempty"`
 }
 
 // NewBotProgressRuntimePolicy is only for explicitly authorized NEW configuration.
 func NewBotProgressRuntimePolicy() *BotRuntimePolicy {
-	return &BotRuntimePolicy{SchemaVersion: BotRuntimePolicySchemaVersion, Mode: BotRuntimeModeProgressV1, EvaluationIntervalSeconds: 300, ModelCallTimeoutSeconds: 120, ToolCallTimeoutSeconds: 120}
+	return &BotRuntimePolicy{SchemaVersion: BotRuntimePolicySchemaVersion, Mode: BotRuntimeModeProgressV1, EvaluationIntervalSeconds: 300, GenerationHealth: &BotGenerationHealthPolicy{IdleTimeoutSeconds: 120, CheckIntervalSeconds: 10}, ToolCallTimeoutSeconds: 120}
 }
 func (p *BotRuntimePolicy) EffectiveMode() BotRuntimeMode {
 	if p == nil {
@@ -48,6 +94,7 @@ func (p *BotRuntimePolicy) Clone() *BotRuntimePolicy {
 		return nil
 	}
 	out := *p
+	out.GenerationHealth = p.GenerationHealth.Clone()
 	if p.MaxActiveSeconds != nil {
 		v := *p.MaxActiveSeconds
 		out.MaxActiveSeconds = &v
@@ -63,11 +110,21 @@ func (p *BotRuntimePolicy) Validate() error {
 	}
 	switch p.Mode {
 	case BotRuntimeModeLegacy:
-		if p.EvaluationIntervalSeconds != 0 || p.MaxActiveSeconds != nil || p.ModelCallTimeoutSeconds != 0 || p.ToolCallTimeoutSeconds != 0 {
+		if p.EvaluationIntervalSeconds != 0 || p.MaxActiveSeconds != nil || p.ModelCallTimeoutSeconds != 0 || p.ToolCallTimeoutSeconds != 0 || p.GenerationHealth != nil {
 			return errors.New("legacy runtime policy contains progress limits")
 		}
 	case BotRuntimeModeProgressV1:
-		values := []int64{p.EvaluationIntervalSeconds, p.ModelCallTimeoutSeconds, p.ToolCallTimeoutSeconds}
+		values := []int64{p.EvaluationIntervalSeconds, p.ToolCallTimeoutSeconds}
+		if p.GenerationHealth == nil {
+			values = append(values, p.ModelCallTimeoutSeconds)
+		} else {
+			if p.ModelCallTimeoutSeconds != 0 {
+				return errors.New("generation health conflicts with elapsed model timeout")
+			}
+			if err := p.GenerationHealth.Validate(); err != nil {
+				return err
+			}
+		}
 		if p.MaxActiveSeconds != nil {
 			values = append(values, *p.MaxActiveSeconds)
 		}
@@ -101,8 +158,26 @@ func (p *BotRuntimePolicy) ValidateWithin(ceiling *BotRuntimePolicy) error {
 	if ceiling.EffectiveMode() != BotRuntimeModeProgressV1 {
 		return errors.New("progress runtime not allowed by trusted policy")
 	}
-	if p.EvaluationIntervalSeconds > ceiling.EvaluationIntervalSeconds || p.ModelCallTimeoutSeconds > ceiling.ModelCallTimeoutSeconds || p.ToolCallTimeoutSeconds > ceiling.ToolCallTimeoutSeconds {
+	if p.EvaluationIntervalSeconds > ceiling.EvaluationIntervalSeconds || p.ToolCallTimeoutSeconds > ceiling.ToolCallTimeoutSeconds {
 		return errors.New("runtime policy exceeds operator ceiling")
+	}
+	if p.GenerationHealth != nil {
+		if ceiling.GenerationHealth == nil {
+			return errors.New("generation health not allowed by trusted policy")
+		}
+		if p.GenerationHealth.IdleTimeoutSeconds > ceiling.GenerationHealth.IdleTimeoutSeconds || p.GenerationHealth.CheckIntervalSeconds > ceiling.GenerationHealth.CheckIntervalSeconds {
+			return errors.New("generation health exceeds operator ceiling")
+		}
+	} else {
+		// A finite elapsed deadline can narrow a health ceiling, but never the
+		// reverse: removing a saved deadline requires explicit trusted opt-in.
+		modelCeiling := ceiling.ModelCallTimeoutSeconds
+		if ceiling.GenerationHealth != nil {
+			modelCeiling = ceiling.GenerationHealth.IdleTimeoutSeconds
+		}
+		if p.ModelCallTimeoutSeconds > modelCeiling {
+			return errors.New("runtime policy exceeds model timeout ceiling")
+		}
 	}
 	if ceiling.MaxActiveSeconds != nil && (p.MaxActiveSeconds == nil || *p.MaxActiveSeconds > *ceiling.MaxActiveSeconds) {
 		return errors.New("runtime policy exceeds active duration ceiling")

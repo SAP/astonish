@@ -14,7 +14,7 @@ func TestBotRuntimePolicyValidationAndLegacy(t *testing.T) {
 		t.Fatal("absent policy changed legacy semantics")
 	}
 	p := NewBotProgressRuntimePolicy()
-	if p.Validate() != nil || p.EvaluationIntervalSeconds != 300 || p.ModelCallTimeoutSeconds != 120 || p.ToolCallTimeoutSeconds != 120 || p.MaxActiveSeconds != nil {
+	if p.Validate() != nil || p.EvaluationIntervalSeconds != 300 || p.ModelCallTimeoutSeconds != 0 || p.GenerationHealth == nil || p.GenerationHealth.IdleTimeoutSeconds != 120 || p.GenerationHealth.CheckIntervalSeconds != 10 || p.ToolCallTimeoutSeconds != 120 || p.MaxActiveSeconds != nil {
 		t.Fatal("new policy defaults")
 	}
 	for name, mutate := range map[string]func(*BotRuntimePolicy){

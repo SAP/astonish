@@ -6,6 +6,78 @@ are configured. Explicit legacy policy and saved finite ceilings retain their
 semantics; existing versions and grants are never upgraded on read. A compatible
 explicit progress policy may opt new authorization into a finite active-time cap.
 
+### Generation health contract
+
+New `execution.NewBotProgressRuntimePolicy()` policies explicitly select
+`generation_health: {idle_timeout_seconds: 120, check_interval_seconds: 10}`
+with no elapsed model-call deadline (`model_call_timeout_seconds` is zero/omitted).
+This is a stall detector policy, not a maximum generation age. A healthy Bot may
+continue for hours; spending, token/tool budgets, cancellation, authority expiry
+and any explicit `max_active_seconds` remain authoritative. Tool-call limits are
+unchanged. Setup and other non-generation work need separate bounded deadlines.
+
+The Bot `BudgetLLM` snapshots this policy and owns one monitor per generation,
+including non-streaming evaluator/auxiliary requests. The dispatch wrapper supplies
+the owner-bound live authority/lease/isolation check; the worker supervisor remains
+independent. Idle expiry and parent cancellation do not wait for an authority read
+to finish: they cancel its context, then monitor shutdown joins that read and the
+provider iterator before a dispatch becomes settled. A successful normal stop does
+not turn its own context cancellation into a failed generation or discard final
+usage. Interrupted or early-consumer-exit calls retain conservative reservations.
+
+Progress evaluation accepts a zero elapsed timeout only because its normal model
+path is the same health-metered Bot model. Factory setup keeps an independent
+120-second bound (or the saved finite model timeout). Configured search remains a
+tool operation subject to its existing tool-call deadline; health mode does not
+remove that outer tool bound or authorize retries of external effects.
+
+Saved policies without `generation_health` retain their positive elapsed model
+call timeout; decoding, cloning and reads never upgrade them. Health and a
+nonzero elapsed model timeout conflict and are rejected. Health intervals must
+be positive and duration-safe, with check interval no greater than idle timeout.
+Unknown JSON health fields are rejected. A request cannot replace an operator's
+elapsed timeout with health monitoring unless the trusted ceiling explicitly
+selects health. Requested idle/check intervals cannot exceed that ceiling;
+a finite historical model timeout can narrow a health ceiling up to its idle
+limit. Existing active-time and resource ceiling checks are unchanged.
+
+`bot.SharedRunBudget.GenerationHealth() *execution.BotGenerationHealthPolicy`
+returns a detached optional snapshot for generation-monitor consumers.
+`ModelCallTimeout()` returns zero for a validated health policy, and the budget
+continues exposing the independent hard assignment deadline through `Deadline()`.
+The policy/storage tests establish this contract, not live watchdog operation.
+
+#### Reviewed Studio configuration
+
+`web/src/api/botConfiguration.ts` shares the additive health policy with
+`bots.ts` through `BotVersion.budget`; it validates the same positive bounded
+intervals and rejects health plus a nonzero elapsed model deadline. Zero or an
+omitted model timeout is valid only with health monitoring in progress mode.
+`BotConfigurationPanel` loads saved policies verbatim: a saved 120-second model
+timeout without health remains an elapsed deadline, including on unrelated edits.
+Only explicit selection of progress mode for a new policy uses the new 120/10
+health defaults. Existing progress policies have a separate **Use generation
+health monitoring (explicit opt-in)** checkbox; switching it on replaces only the
+model timeout with zero and adds health intervals, preserving total active-time,
+tool and spending caps. Switching it off restores the baseline elapsed timeout
+if present, otherwise requires entering a positive elapsed timeout.
+
+The optional editor remains available only for authorized draft/paused/stopped
+Bots. Loading/error/active/deleted/read-only states cannot save. Exact before/after
+policy parameters, reason, pinned revision/version and separate rights consent
+are required before the existing configuration PUT; edits reset consent and
+conflicts retain the draft for explicit re-review. No live version, grant or
+assignment is rewritten on load, and no new questionnaire or event is introduced.
+The UI distinguishes inactivity from task age and explains that no fixed
+generation duration does not remove spending, authorization or cancellation
+boundaries. Terminal clients continue to decode the shared Go store budget types;
+this is a configuration-only change, not a transcript/SSE rendering change.
+
+Focused coverage: `botGenerationHealth.test.ts`, `botProgress.test.ts` and
+`BotConfigurationPanel.test.tsx` under `web/src` cover validation, unchanged saved
+deadlines, explicit reviewed opt-in, conflicting health limits and read-only
+controls. These component tests do not establish live watchdog behavior.
+
 The production Chat adapter installs dispatch accounting, context restoration and
 the employee progress controller. Its activation guard remains fail-closed when
 required stores or work state are missing; it is not a blanket feature refusal.

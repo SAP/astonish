@@ -164,8 +164,9 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 		cr.completion.Err = errors.Join(cr.completion.Err, fmt.Errorf("model response: %s %s", event.ErrorCode, event.ErrorMessage))
 	}
 	if usage := event.UsageMetadata; usage != nil {
-		cr.completion.Usage.InputTokens += int64(usage.PromptTokenCount)
-		cr.completion.Usage.OutputTokens += int64(usage.CandidatesTokenCount)
+		input, output := bot.ModelUsageTokens(usage)
+		cr.completion.Usage.InputTokens += input
+		cr.completion.Usage.OutputTokens += output
 	}
 	content := event.Content
 	if content == nil {
@@ -1370,14 +1371,7 @@ runLoop:
 
 		// Emit usage event when the provider reports token counts.
 		// Only for non-partial responses to avoid duplicate emissions.
-		if event.LLMResponse.UsageMetadata != nil && !event.LLMResponse.Partial {
-			um := event.LLMResponse.UsageMetadata
-			cr.emitEvent("usage", map[string]any{
-				"input_tokens":  um.PromptTokenCount,
-				"output_tokens": um.CandidatesTokenCount,
-				"total_tokens":  um.TotalTokenCount,
-			})
-		}
+		cr.emitUsage(event)
 	}
 
 	// Safety net: if the run loop exited due to a stream truncation error
@@ -1517,14 +1511,7 @@ runLoop:
 			finishResponse(event)
 
 			// Emit usage event for retry loop too.
-			if event.LLMResponse.UsageMetadata != nil && !event.LLMResponse.Partial {
-				um := event.LLMResponse.UsageMetadata
-				cr.emitEvent("usage", map[string]any{
-					"input_tokens":  um.PromptTokenCount,
-					"output_tokens": um.CandidatesTokenCount,
-					"total_tokens":  um.TotalTokenCount,
-				})
-			}
+			cr.emitUsage(event)
 		}
 	} else if lastRunErr == nil && !hasContent && cr.ctx.Err() == nil {
 		// The run loop exited cleanly but produced no content at all.
@@ -1545,6 +1532,21 @@ runLoop:
 	// flips an artifact's "is this a report?" gate so the frontend embeds it
 	// inline as EmbeddedFileViewer instead of showing a small artifact card.
 	cr.detectAndEmitReportMarkers(sessionService)
+}
+
+// emitUsage publishes one completed model call, never cumulative partial snapshots.
+// Match completion accounting so reasoning and tool prompts are included and the
+// total remains the sum of the two reported components, even without a raw total.
+func (cr *ChatRunner) emitUsage(event *session.Event) {
+	if event == nil || event.Partial || event.UsageMetadata == nil || agent.IsTurnContextEvent(event) {
+		return
+	}
+	input, output := bot.ModelUsageTokens(event.UsageMetadata)
+	cr.emitEvent("usage", map[string]any{
+		"input_tokens":  input,
+		"output_tokens": output,
+		"total_tokens":  input + output,
+	})
 }
 
 // processStateDelta extracts approval, retry, error, and thinking events from state deltas.

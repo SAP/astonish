@@ -33,6 +33,7 @@ type modelCharge struct {
 type SharedRunBudget struct {
 	mu                                         sync.Mutex
 	modelTimeout, toolTimeout                  time.Duration
+	generationHealth                           *execution.BotGenerationHealthPolicy
 	deadline                                   time.Time
 	startedAt                                  time.Time
 	runtimeUsed                                int64
@@ -75,6 +76,7 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 			b.deadline = startedAt.Add(time.Duration(*p.MaxActiveSeconds)*time.Second - time.Duration(usage.RuntimeNanos))
 		}
 		b.modelTimeout = time.Duration(p.ModelCallTimeoutSeconds) * time.Second
+		b.generationHealth = p.GenerationHealth.Clone()
 		b.toolTimeout = time.Duration(p.ToolCallTimeoutSeconds) * time.Second
 	}
 	if usage.CostMicros == nil {
@@ -89,6 +91,12 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 func (b *SharedRunBudget) Deadline() time.Time             { return b.deadline }
 func (b *SharedRunBudget) ModelCallTimeout() time.Duration { return b.modelTimeout }
 func (b *SharedRunBudget) ToolCallTimeout() time.Duration  { return b.toolTimeout }
+
+// GenerationHealth returns the optional explicit stalled-generation policy.
+// Callers receive a detached snapshot; nil retains legacy model deadlines.
+func (b *SharedRunBudget) GenerationHealth() *execution.BotGenerationHealthPolicy {
+	return b.generationHealth.Clone()
+}
 
 // TokenLimit returns a snapshot of the effective run allowance, including mandate limits.
 func (b *SharedRunBudget) TokenLimit() *int64 {
@@ -114,6 +122,33 @@ func (b *SharedRunBudget) live(ctx context.Context) error {
 	}
 	if b.overflow {
 		return ErrBudgetExceeded
+	}
+	return nil
+}
+
+// CheckInFlight validates an already admitted operation, not capacity for a new
+// one. Outstanding reservations may exactly fill a ceiling; actual overruns,
+// unknown costs, cancellation and hard runtime limits still fail closed.
+// Callers must never use this method to authorize a new model or tool dispatch.
+func (b *SharedRunBudget) CheckInFlight(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.live(ctx); err != nil {
+		return err
+	}
+	if b.tokens != nil && (b.inputUsed > *b.tokens || b.outputUsed > *b.tokens-b.inputUsed) {
+		return b.tokenFailure(BudgetSettlementOverrun, nil, nil)
+	}
+	if b.tools != nil && b.toolsUsed > *b.tools {
+		return fmt.Errorf("%w: tools", ErrBudgetExceeded)
+	}
+	if b.cost != nil {
+		if b.unknownCosts > 0 {
+			return ErrBudgetUnknownCost
+		}
+		if b.costHeld > *b.cost {
+			return fmt.Errorf("%w: model cost", ErrBudgetExceeded)
+		}
 	}
 	return nil
 }

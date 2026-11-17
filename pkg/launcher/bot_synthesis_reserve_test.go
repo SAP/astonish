@@ -22,7 +22,7 @@ func TestBotSynthesisReserveResearchThenFinal(t *testing.T) {
 	now := time.Now()
 	r.now = func() time.Time { return now }
 	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Research the assignment", "user")}, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "web_fetch"}}}}}}
-	research, final, err := r.prepare(context.Background(), request)
+	research, final, err := r.prepare(context.Background(), request, nil)
 	if err != nil || final || len(research.Config.Tools) != 1 {
 		t.Fatalf("research=%v final=%v err=%v", research, final, err)
 	}
@@ -30,7 +30,7 @@ func TestBotSynthesisReserveResearchThenFinal(t *testing.T) {
 		t.Fatal("model cannot see remaining budget")
 	}
 	now = meter.Deadline().Add(-r.reserveTime / 2)
-	answer, final, err := r.prepare(context.Background(), request)
+	answer, final, err := r.prepare(context.Background(), request, nil)
 	if err != nil || !final || len(answer.Config.Tools) != 0 || len(answer.Tools) != 0 {
 		t.Fatalf("final=%v err=%v request=%+v", final, err, answer)
 	}
@@ -38,7 +38,7 @@ func TestBotSynthesisReserveResearchThenFinal(t *testing.T) {
 		t.Fatal("mutated caller request")
 	}
 	now = now.Add(-time.Minute)
-	if _, final, _ = r.prepare(context.Background(), request); !final {
+	if _, final, _ = r.prepare(context.Background(), request, nil); !final {
 		t.Fatal("synthesis transition reversed")
 	}
 }
@@ -52,7 +52,7 @@ func TestBotSynthesisReserveTokenPressureAndCancellation(t *testing.T) {
 	}
 	r := newBotSynthesisReserve(meter, spec)
 	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Answer with retained evidence", "user")}}
-	_, final, err := r.prepare(context.Background(), req)
+	_, final, err := r.prepare(context.Background(), req, nil)
 	if err != nil || !final {
 		t.Fatalf("token reserve not protected final=%v err=%v", final, err)
 	}
@@ -61,7 +61,7 @@ func TestBotSynthesisReserveTokenPressureAndCancellation(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := r.prepare(canceled, req); err != context.Canceled {
+	if _, _, err := r.prepare(canceled, req, nil); err != context.Canceled {
 		t.Fatalf("cancellation bypassed: %v", err)
 	}
 }

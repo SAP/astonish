@@ -1,6 +1,9 @@
 package launcher
 
 import (
+	"time"
+
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -34,15 +37,31 @@ func botProposalInputSchema() *jsonschema.Schema {
 	autonomy := object(map[string]*jsonschema.Schema{
 		"level": text(), "allowed_tools": array(text()), "denied_tools": array(text()), "allowed_paths": array(text()), "allowed_hosts": array(text()), "can_contact_people": scalar("boolean"), "can_publish": scalar("boolean"), "spend_currency": text(), "max_spend_per_run_minor": scalar("integer"), "max_spend_per_month_minor": scalar("integer"),
 	}, "level")
+	positiveSeconds := func() *jsonschema.Schema {
+		minimum, maximum := float64(1), float64((1<<63-1)/time.Second)
+		return &jsonschema.Schema{Type: "integer", Minimum: &minimum, Maximum: &maximum}
+	}
+	generationHealth := object(map[string]*jsonschema.Schema{
+		"idle_timeout_seconds": positiveSeconds(), "check_interval_seconds": positiveSeconds(),
+	}, "idle_timeout_seconds", "check_interval_seconds")
+	generationHealth.Description = "Explicit generation inactivity policy, not an elapsed model deadline. Both seconds must be positive and duration-safe; check_interval_seconds must not exceed idle_timeout_seconds. Requires progress_v1 and an omitted or zero model_call_timeout_seconds. Omit or null preserves the saved elapsed model timeout policy."
 	runtimePolicy := object(map[string]*jsonschema.Schema{
 		"schema_version":              scalar("integer"),
 		"mode":                        text(),
 		"evaluation_interval_seconds": scalar("integer"),
 		"max_active_seconds":          nullable(scalar("integer")),
 		"model_call_timeout_seconds":  scalar("integer"),
+		"generation_health":           nullable(generationHealth),
 		"tool_call_timeout_seconds":   scalar("integer"),
 	}, "schema_version", "mode")
-	runtimePolicy.Description = "Optional reviewed runtime policy, subject to trusted operator authorization. Omit to preserve legacy duration semantics. progress_v1 requires positive evaluation and individual model/tool timeout seconds; max_active_seconds is an optional cumulative hard duration, not an evaluation cadence. This never changes existing grants or spending limits."
+	// An explicit health object must not remove a saved model deadline silently.
+	// Cross-field interval ordering remains enforced by BotRuntimePolicy.Validate.
+	runtimePolicy.If = &jsonschema.Schema{Required: []string{"generation_health"}, Properties: map[string]*jsonschema.Schema{"generation_health": {Type: "object"}}}
+	runtimePolicy.Then = &jsonschema.Schema{Properties: map[string]*jsonschema.Schema{
+		"mode":                       {Enum: []any{execution.BotRuntimeModeProgressV1}},
+		"model_call_timeout_seconds": {Enum: []any{0}},
+	}}
+	runtimePolicy.Description = "Optional reviewed runtime policy, subject to trusted operator authorization. Omit to preserve legacy duration semantics. progress_v1 requires positive evaluation and tool timeout seconds, and either generation_health with omitted/zero model_call_timeout_seconds or a positive saved model_call_timeout_seconds without generation_health. max_active_seconds is an optional cumulative hard duration, not an evaluation cadence. This never changes existing grants or spending limits."
 	budget := object(map[string]*jsonschema.Schema{"runtime_policy": nullable(runtimePolicy), "max_runtime_seconds": scalar("integer"), "max_tool_calls": nullable(scalar("integer")), "max_tokens": nullable(scalar("integer")), "max_runs_per_day": nullable(scalar("integer")), "max_model_cost_micros": nullable(scalar("integer"))}, "max_runtime_seconds")
 	delivery := object(map[string]*jsonschema.Schema{"notify": text(), "preferences": text(), "bindings": array(binding())})
 	configuration := object(map[string]*jsonschema.Schema{"pause": scalar("boolean"), "autonomy": autonomy, "budget": budget, "delivery": delivery}, "autonomy", "budget", "delivery")

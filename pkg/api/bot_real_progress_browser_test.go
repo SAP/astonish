@@ -77,11 +77,16 @@ type liveProgressModel struct {
 	inner                            model.LLM
 	recorder                         *realStockHTTPRecorder
 	evaluations, evidenceEvaluations atomic.Int64
+	evidence                         func(*model.LLMRequest) bool
+	checkRequest                     func(*model.LLMRequest)
 }
 
 func (m *liveProgressModel) Name() string { return m.inner.Name() }
 func (m *liveProgressModel) GenerateContent(ctx context.Context, req *model.LLMRequest, streaming bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		if m.checkRequest != nil {
+			m.checkRequest(req)
+		}
 		prompt := ""
 		if req.Config != nil && req.Config.SystemInstruction != nil {
 			for _, p := range req.Config.SystemInstruction.Parts {
@@ -96,7 +101,11 @@ func (m *liveProgressModel) GenerateContent(ctx context.Context, req *model.LLMR
 				yield(nil, err)
 				return
 			}
-			if liveProgressHasEvidence(req) {
+			evidence := m.evidence
+			if evidence == nil {
+				evidence = liveProgressHasEvidence
+			}
+			if evidence(req) {
 				m.evidenceEvaluations.Add(1)
 			}
 		}
@@ -165,17 +174,44 @@ func liveProgressFinalPage(page *rod.Page, ctx context.Context) *rod.Page {
 	return page.Context(ctx).Timeout(40 * time.Second)
 }
 
-// Compare the complete rendered report, not merely links or the chosen topic.
-// Markdown presentation whitespace is ignored; every non-whitespace character
-// and every ordered external link must match the persisted report exactly.
+// Exact prose, section order, ordered links and diagram placement are compared
+// separately from Mermaid's presentation. Each expected diagram is independently
+// rendered from the persisted source; SVG labels and structural/edge semantics
+// must match. Generated IDs, CSS and viewport geometry are not report content.
 const liveProgressExactReport = `(html) => {
  const expected = new DOMParser().parseFromString(html, 'text/html').body;
  const norm = s => s.replace(/\s+/gu, '');
  const links = e => Array.from(e.querySelectorAll('a[href^="http"]'), a => a.getAttribute('href'));
+ const semanticSVG = svg => {
+  if (!svg) return null;
+  const walk = e => {
+   if (['style','defs','title','desc'].includes(e.localName)) return null;
+   const attrs = ['class','role','aria-roledescription','data-node','data-edge','marker-start','marker-end'].map(k => {
+    let v=e.getAttribute(k); if (k.startsWith('marker-') && v) v='present';
+    return v ? [k,v] : null;
+   }).filter(Boolean);
+   const children = [...e.childNodes].map(n=>n.nodeType===3 ? norm(n.textContent) : n.nodeType===1 ? walk(n) : null).filter(v=>v!==null && v!=='');
+   return [e.localName,attrs,children];
+  };
+  return walk(svg);
+ };
+ const sources = [...expected.querySelectorAll('pre > code.language-mermaid')];
+ const prepared = window.__proofExpectedDiagrams || [];
+ if (sources.length !== prepared.length || sources.some((c,i)=>c.textContent.trim()!==prepared[i].source)) return {count:0, error:'unprepared diagram source'};
+ const wantDiagrams = prepared.map(d=>semanticSVG(new DOMParser().parseFromString(d.svg,'text/html').querySelector('svg')));
+ sources.forEach((code,i)=>code.parentElement.replaceWith(document.createTextNode('DIAGRAM_BOUNDARY_'+i)));
  const want = norm(expected.textContent);
- const matches = Array.from(document.querySelectorAll('[aria-label="Bot workspace"] .markdown-body'))
-   .filter(e => !e.querySelector('.markdown-body') && e.getClientRects().length && want.length > 0 && norm(e.textContent) === want && JSON.stringify(links(e)) === JSON.stringify(links(expected)));
- return {count: matches.length, text: matches[0]?.innerText || '', links: matches[0] ? links(matches[0]) : []};
+ const candidates = Array.from(document.querySelectorAll('[aria-label="Bot workspace"] .markdown-body'))
+   .filter(e => !e.querySelector('.markdown-body') && e.getClientRects().length);
+ const matches = candidates.filter(e => {
+  const diagrams=[...e.querySelectorAll('.mermaid-diagram')];
+  if (e.querySelector('.mermaid-error') || diagrams.length!==wantDiagrams.length) return false;
+  if (diagrams.some((d,i)=>d.querySelectorAll('svg').length!==1 || JSON.stringify(semanticSVG(d.querySelector('svg')))!==JSON.stringify(wantDiagrams[i]))) return false;
+  const copy=e.cloneNode(true);
+  [...copy.querySelectorAll('.mermaid-diagram')].forEach((d,i)=>d.replaceWith(document.createTextNode('DIAGRAM_BOUNDARY_'+i)));
+  return want.length>0 && norm(copy.textContent)===want && JSON.stringify(links(copy))===JSON.stringify(links(expected));
+ });
+ return {count:matches.length, text:matches[0]?.innerText || '', links:matches[0]?links(matches[0]):[], diagrams:matches[0]?prepared.map((d,i)=>({source:d.source,semantics:wantDiagrams[i]})):[]};
 }`
 
 func liveProgressReportHTML(t *testing.T, summary string) string {
@@ -326,16 +362,30 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 	if os.Getenv("ASTONISH_REAL_PROGRESS_BROWSER") != "1" {
 		t.Skip("explicit paid browser acceptance opt-in required")
 	}
+	runLiveProgressBrowser(t, liveProgressScenario{title: "AI News", answer: "New AI Model Releases", prefix: "real-progress-browser", evaluationInterval: 10, evidence: liveProgressHasEvidence})
+}
+
+// Scenario callbacks assess real outputs; they never inject model responses.
+type liveProgressScenario struct {
+	title, answer, prefix string
+	evaluationInterval    int
+	evidence              func(*model.LLMRequest) bool
+	checkRequest          func(*model.LLMRequest)
+	assess                func(*testing.T, *store.BotRun, string)
+}
+
+func runLiveProgressBrowser(t *testing.T, scenario liveProgressScenario) {
+	t.Helper()
 	cfg := realProgressBrowserConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	dir, err := os.MkdirTemp("../../.tmp", "real-progress-browser-")
+	dir, err := os.MkdirTemp("../../.tmp", scenario.prefix+"-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir, _ = filepath.Abs(dir)
 	_ = os.Chmod(dir, 0700)
-	if err = os.WriteFile("../../.tmp/real-progress-browser-latest", []byte(dir), 0600); err != nil {
+	if err = os.WriteFile("../../.tmp/"+scenario.prefix+"-latest", []byte(dir), 0600); err != nil {
 		t.Fatal(err)
 	}
 	rec := &realStockHTTPRecorder{dir: dir, redact: []string{"nonempty-redaction-enabled"}}
@@ -366,7 +416,7 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := execution.NewBotProgressRuntimePolicy()
-	policy.EvaluationIntervalSeconds = 10
+	policy.EvaluationIntervalSeconds = int64(scenario.evaluationInterval)
 	org, _ := f.db.ForOrg("interactive")
 	personal := org.ForUser(f.b.OwnerID.String())
 	team := org.ForTeam("team")
@@ -409,6 +459,10 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 	_ = json.Unmarshal(raw, &pkg)
 	dist, _ := filepath.Abs(filepath.Join("../../web/dist", pkg.Version))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__proof_mermaid/") {
+			liveProgressMermaidFiles().ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == root && r.Method == http.MethodPost {
 			createSvc := *svc
 			createSvc.PersonalBots = liveProgressTitleStore{BotStore: personal.Bots(), policy: policy}
@@ -467,13 +521,21 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 	defer browser.Close()
 	page := browser.MustPage(server.URL + "/#/chat").Timeout(45 * time.Second)
 	page = page.WithPanic(func(v any) {
-		text, _ := page.Context(context.Background()).Timeout(5 * time.Second).Eval(`()=>document.body.innerText`)
+		rescue := page.Context(context.Background()).Timeout(8 * time.Second)
+		text, _ := rescue.Eval(`()=>document.body.innerText`)
+		if png, e := rescue.Screenshot(false, nil); e == nil {
+			_ = os.WriteFile(filepath.Join(dir, "browser-failure.png"), png, 0600)
+		}
 		save("browser-failure.json", map[string]any{"failure": fmt.Sprint(v), "dom": text})
+		t.Logf("original browser retained for bounded inspection: %s; CDP %s; artifacts=%s", server.URL, control, dir)
+		if os.Getenv("ASTONISH_BROWSER_FAILURE_HOLD") == "1" {
+			time.Sleep(2 * time.Minute)
+		}
 		t.Fatalf("browser failure; artifacts=%s", dir)
 	})
 	started := time.Now()
 	page.MustElementR("button", "^New Bot$").MustClick()
-	page.MustElement(`[aria-label="Bot name"]`).MustInput("AI News")
+	page.MustElement(`[aria-label="Bot name"]`).MustInput(scenario.title)
 	page.MustElementR("button", "^Start conversation$").MustClick()
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
 	id := strings.Split(page.MustEval(`()=>location.hash`).Str(), "/")[4]
@@ -495,24 +557,33 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 		return
 	}
 	var sonarCalls atomic.Int64
-	observed := &liveProgressModel{inner: rec, recorder: rec}
+	observed := &liveProgressModel{inner: rec, recorder: rec, evidence: scenario.evidence, checkRequest: scenario.checkRequest}
 	f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
 		return nil, fmt.Errorf("unmandated native tool transport forbidden: %s", name)
 	}
 	expected, _ := execution.PrincipalFromContext(f.ctx)
-	f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, MandatePolicy: mandatePolicy, WorkerID: uuid.NewString(), ContextWindow: 200000, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 8192, SupportsOutputLimit: true}, ResolveModel: func(c context.Context, owner execution.Principal, scope store.BotScope, instance, name string) (model.LLM, error) {
+	f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, MandatePolicy: mandatePolicy, WorkerID: uuid.NewString(), ResolveModel: func(c context.Context, owner execution.Principal, scope store.BotScope, instance, name string) (model.LLM, error) {
 		if owner.Subject != expected.Subject || scope != f.scope || instance != stockAgentProvider || name != "gpt-5.6-terra" {
 			return nil, fmt.Errorf("model identity mismatch")
 		}
+		window := provider.ResolveContextWindow(c, instance, name, cfg)
+		capacity := provider.ResolveModelOutputCapacity(c, instance, name, cfg)
 		if rec.inner == nil {
 			llm, e := provider.GetProvider(c, instance, name, cfg)
 			if e != nil {
 				return nil, fmt.Errorf("provider initialization failed (details withheld)")
 			}
 			rec.inner = llm
+			output := provider.BudgetOutputTokens(capacity, 0)
+			if e := rec.save("generation-settings.json", map[string]any{"context_window": window, "output_capacity": capacity, "max_output_tokens": output, "numeric_wrapper": true, "explicit_worker_override": false}); e != nil {
+				return nil, e
+			}
+			if window != 1050000 || output != 32768 {
+				return nil, fmt.Errorf("unexpected live model-aware generation limits: %d/%d", window, output)
+			}
 			_ = rec.save("identity.json", map[string]any{"provider": instance, "model": name, "adapter": fmt.Sprintf("%T", llm), "adapter_model": llm.Name()})
 		}
-		return observed, nil
+		return daemon.NewBotGenerationModel(observed, window, capacity), nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		s.Services.PlatformSettings, s.Services.OrgSettings, s.Services.Settings = svc.PlatformSettings, svc.OrgSettings, svc.Settings
 		s.Services.NetworkPolicies, s.Services.TeamNetworkPolicies = svc.NetworkPolicies, svc.TeamNetworkPolicies
@@ -563,7 +634,7 @@ func TestBotRealProgressBrowserAcceptance(t *testing.T) {
 	}
 	page.MustElement(`textarea[aria-label="Custom answer"]`).MustVisible()
 	save("question-dom.json", page.MustEval(`()=>document.body.innerText`).Str())
-	page.MustElement(`textarea[aria-label="Custom answer"]`).MustInput("New AI Model Releases")
+	page.MustElement(`textarea[aria-label="Custom answer"]`).MustInput(scenario.answer)
 	page.MustElementR("button", "^Submit answer$").MustClick()
 	page.MustElement(`article[aria-label="Answered question"]`).MustVisible()
 	confirmed, err := f.repo.(store.BotRuntimeStore).LoadRunInput(f.ctx, f.b.ID, runID)
@@ -607,16 +678,20 @@ wait:
 		t.Fatalf("no completed answer: status=%s; artifacts=%s", run.Status, dir)
 	}
 	if sonarCalls.Load() == 0 || observed.evidenceEvaluations.Load() == 0 || tokens > 500000 || strings.Count(string(home), "bot-report:"+runID.String()) != 1 {
-		t.Fatalf("missing strict search/progress/budget/publication evidence; artifacts=%s", dir)
+		t.Errorf("missing strict search/progress/budget/publication evidence; artifacts=%s", dir)
 	}
 	approvals, err := f.repo.ListApprovals(f.ctx, f.b.ID, store.BotPage{})
 	if err != nil || len(approvals) != 1 {
 		t.Fatalf("redundant scope question: %d approvals, %v", len(approvals), err)
 	}
+	if scenario.assess != nil {
+		scenario.assess(t, run, dir)
+	}
 	originalTab := page.TargetID
 	page = liveProgressFinalPage(page, ctx)
 	// Wait on the original page for the complete persisted report exactly once.
 	expectedHTML := liveProgressReportHTML(t, run.Report.Summary)
+	save("expected-diagrams.json", page.MustEval(liveProgressPrepareDiagrams, expectedHTML))
 	visible := `(html) => { const w = document.querySelector('[aria-label="Bot workspace"]'); return w && w.querySelectorAll('a[href^="http"]').length >= 2 && !w.innerText.includes('Working…') && !w.querySelector('textarea[aria-label="Custom answer"]') && (` + liveProgressExactReport + `)(html).count === 1; }`
 	page.MustWait(visible, expectedHTML)
 	if page.TargetID != originalTab {
@@ -629,6 +704,7 @@ wait:
 	page.MustScreenshot(filepath.Join(dir, "final-live.png"))
 	page.MustReload() // exactly one reload, only after live final delivery
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+	page.MustEval(liveProgressPrepareDiagrams, expectedHTML)
 	page.MustWait(visible, expectedHTML)
 	reloadReport := page.MustEval(liveProgressExactReport, expectedHTML)
 	save("final-reload-report.json", reloadReport)
@@ -638,7 +714,7 @@ wait:
 	reloadDOM := page.MustEval(`()=>document.querySelector('[aria-label="Bot workspace"]').innerText`).Str()
 	save("final-reload-dom.json", reloadDOM)
 	page.MustScreenshot(filepath.Join(dir, "final-reload.png"))
-	if !strings.Contains(liveDOM, "New AI Model Releases") || !strings.Contains(reloadDOM, "New AI Model Releases") {
+	if !strings.Contains(liveDOM, scenario.title) || !strings.Contains(reloadDOM, scenario.title) {
 		t.Fatal("chosen scope missing from live/reload")
 	}
 	save("browser-accepted.json", map[string]any{"live_visible": true, "reload_visible": true, "exact_report_match": true, "report_occurrences_live": liveReport.Get("count").Int(), "report_occurrences_reload": reloadReport.Get("count").Int(), "approval_count": len(approvals), "original_tab": originalTab, "evaluations": observed.evaluations.Load(), "reload_count": 1, "sonar_calls": sonarCalls.Load(), "evidence_evaluations": observed.evidenceEvaluations.Load(), "bot_id": f.b.ID, "run_id": runID, "summary": run.Report.Summary, "dom": reloadDOM})

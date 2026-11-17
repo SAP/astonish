@@ -142,7 +142,8 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				// This fixture exercises search then detail, not token exhaustion.
 				// Leave room for the full guarded prompt and synthesis reserve;
 				// retain finite per-run and aggregate ceilings on this NEW grant.
-				p.Limits.MaxTokens = 80000
+				p.Limits.MaxTokens = 200000
+				p.Limits.MaxTotalTokens = 400000
 				p.Constraints = append(p.Constraints, execution.BotActionResourceConstraint{Action: execution.CapabilityToolExecute, Resources: []string{launcher.BotConfiguredSearchToolName, "web_fetch", detail.URL}})
 				p.PublicResearch = &execution.BotPublicResearchScope{Version: 1, Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 2}
 				return p, e

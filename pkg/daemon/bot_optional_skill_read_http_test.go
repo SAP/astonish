@@ -182,8 +182,10 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved, err := repo.GetRun(ctx, b.ID, receipt.Run.ID)
-			if err != nil || saved.Status != store.RunSucceeded || mdl.reads != 2 || mdl.stage != 3 || mdl.reviews != 1 || !strings.Contains(saved.Report.Summary, "continue without a saved method") {
-				t.Fatalf("optional reads failed: run=%+v reads=%d err=%v", saved, mdl.reads, err)
+			// Agent-led work has no mandatory prepare/review ritual. Keep that
+			// protocol explicit while still checking both real read receipts.
+			if err != nil || saved.Status != store.RunSucceeded || saved.Work == nil || saved.Work.Protocol != store.BotWorkProtocolAgentLedV1 || mdl.reads != 2 || mdl.stage != 3 || mdl.reviews != 0 || !strings.Contains(saved.Report.Summary, "continue without a saved method") {
+				t.Fatalf("optional reads failed: run=%+v reads=%d stage=%d assessments=%d err=%v", saved, mdl.reads, mdl.stage, mdl.reviews, err)
 			}
 			approvals, err := repo.ListApprovals(ctx, b.ID, store.BotPage{})
 			if err != nil || len(approvals) != 0 {

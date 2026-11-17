@@ -32,10 +32,20 @@ import (
 // No skill, pin or operation is preseeded.
 type titleSkillScheduleModel struct {
 	skillScheduleModel
-	source string
+	source        string
+	questionAsked bool
 }
 
 func (m *titleSkillScheduleModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if !m.questionAsked {
+		m.questionAsked = true
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "title-skill-question", Name: "ask_user", Args: map[string]any{
+				"prompt": "Which AI news assignment should I carry out?", "kind": "select", "allow_custom_answer": true,
+				"options": []any{map[string]any{"id": "brief", "label": "Research current AI news"}, map[string]any{"id": "compare", "label": "Compare AI research announcements"}, map[string]any{"id": "sources", "label": "Find original AI news sources"}},
+			}}}}}}, nil)
+		}
+	}
 	if m.work != nil {
 		return m.skillScheduleModel.GenerateContent(ctx, req, stream)
 	}
@@ -237,6 +247,7 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 			router := mux.NewRouter()
 			root := "/bots/{botID}"
 			router.HandleFunc(root+"/messages", api.BotMessageHandler).Methods("POST")
+			router.HandleFunc(root+"/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 			router.HandleFunc(root+"/runs/{runID}", api.BotRunHandler).Methods("GET")
 			router.HandleFunc(root+"/skills", api.BotSkillsHandler).Methods("GET")
 			router.HandleFunc(root+"/skills/import-legacy", api.BotLegacySkillImportHandler).Methods("POST")
@@ -385,6 +396,25 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 					t.Fatal(e)
 				}
 				run := readRun(created.InitialTurn.Run.ID)
+				waiting, e := repo.GetRun(auth, b.ID, run.ID)
+				if e != nil || run.Status != store.RunWaitingApproval || waiting.TitleConfirmation == nil || waiting.TitleConfirmation.State != store.BotTitleConfirmationWaiting || pool.calls != 0 {
+					t.Fatalf("title did not wait for clarification before fetching: %+v calls=%d err=%v", waiting, pool.calls, e)
+				}
+				approvals, e := repo.ListApprovals(auth, b.ID, store.BotPage{})
+				if e != nil || len(approvals) != 1 || approvals[0].Interaction == nil {
+					t.Fatalf("missing title question: %+v %v", approvals, e)
+				}
+				// Keep the owner's exact scope, rather than inventing requirements
+				// from the title or treating the later scheduling "yes" as this answer.
+				approval := approvals[0]
+				request("POST", path+"/approvals/"+approval.ID.String()+"/approve-and-continue", map[string]any{
+					"action_digest": approval.ActionDigest,
+					"response":      store.BotInteractionResponse{QuestionID: approval.Interaction.QuestionID, Answer: "AI News"},
+				}, http.StatusAccepted)
+				if e := worker.Poll(ctx); e != nil {
+					t.Fatal(e)
+				}
+				run = readRun(created.InitialTurn.Run.ID)
 				if run.Status != store.RunSucceeded || pool.calls != 1 {
 					t.Fatalf("initial fetch failed: %+v calls=%d", run, pool.calls)
 				}

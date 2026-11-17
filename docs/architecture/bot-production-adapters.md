@@ -5,6 +5,72 @@ Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 policy and the shared run budget precede adapter execution. There is no host
 fallback when an adapter is unavailable.
 
+## Model-aware generation limits
+
+Production resolves the context window from the selected owner-scoped provider
+configuration using ordinary Chat's `ResolveContextWindow`: explicit
+`general.context_length`, metadata, curated model capacity, then the 200,000-token
+unknown fallback. The immutable per-invocation adapter carries numeric limits
+only; it does not retain the provider configuration or change model provenance.
+The Bot factory injects this capacity into its compactor. Explicit worker/factory
+context overrides (including 32,768) still take precedence.
+
+The shared `BudgetLLM` remains the only reservation/enforcement boundary. A known
+output capacity selects at most 32,768 tokens per call (and never above that
+capacity); unknown output capacity uses a finite 16,384-token fallback. This gives
+reasoning models headroom without reserving their entire 128K output capability
+on every call. Explicit worker output options bypass this default policy, but not
+known model capacity; smaller request limits and remaining shared tokens still
+clamp the actual provider request. SAP metadata includes learned limits with
+exact static fallback; compatible/LiteLLM and OpenRouter metadata supply their
+reported limits. Missing configuration does not trigger a host provider lookup.
+No saved token/spend grant, retry count, synthesis prompt, or approval changes.
+Controlled tests prove metadata/override propagation and budget clamping, not
+that a particular live reasoning task succeeds with the new ceiling.
+
+## Bounded final synthesis recovery
+
+`bot_synthesis_generation.go` handles only the factory's final-only synthesis
+path. It buffers nonstreaming output and drains the original progress/BudgetLLM
+iterator before considering a correction. Explicit output-limit termination
+(`MaxTokens` response or a sole typed output-limit `EmptyCompletionError`) permits
+one concise, complete rewrite, including visible truncated or reasoning-only
+results. A typed empty stop completion retains its existing correction path.
+At most 8 KiB of visible UTF-8 draft text is retained in the correction as a
+JSON-quoted, untrusted excerpt, never reasoning, tool payloads or attachments.
+The replacement must stand alone; a draft is neither published nor treated as
+proof of external effects. Request contents/configuration are not mutated.
+
+The same single correction slot covers forbidden-tool format correction: no
+third attempt, increased ceiling, reopened research or replay. Missing terminal
+metadata, partial-only output without known output-limit evidence, filtering,
+interruption, buffer overflow and independent trailing errors fail closed.
+A later stop cannot override an earlier output-limit or unsafe ending. Only a
+nonpartial visible answer with stop/turn-complete evidence and no veto is
+published. Typed errors retain `errors.Is`/`errors.As` cause matching.
+
+Each rejected attempt emits payload-free diagnostics: typed reason, attempt and
+response counts, partial/turn-complete flags, stop/output-limit/missing/other
+finish counts, interrupted/error-code counts, visible bytes, thought-part count,
+tool presence, completion/buffer flags and error count. No raw finish/error
+strings, model prose, reasoning, tool arguments or credentials enter this
+summary; successful recovery still leaves first-attempt diagnostic evidence.
+
+Before retry, current authorization, parent cancellation, lease and shared budget
+are rechecked, and the progress boundary drains settlement and rejects unsafe
+active/uncertain dispatches. Both attempts use the same model, run, request output
+ceiling and meter; the current budget may reduce or refuse the second allowance.
+Failed-response usage reaches BudgetLLM before output is withheld. No tools,
+external effects, runs or research are replayed. Assessment/progress calls and
+ordinary Chat retain their existing paths. Controlled
+`TestBotSynthesisEmptyCompletionHTTP` and
+`TestBotSynthesisOutputLimitCompletionHTTP` exercise empty/visible length → final
+design over local OpenAI-compatible HTTP through the composed factory and API
+adapter (legacy work review policy), checking retained draft privacy, shared
+metering and publication. These tests do not establish semantic review or
+paid-model quality, nor whether truncation or missing metadata caused a reported
+live failure.
+
 ## Initial title confirmation
 
 New title runs enter `needs_question`, not executable work. After owner/session/model
@@ -58,6 +124,34 @@ candidate, requires personal/team owner HTTP search-before-detail ordering and
 physical node MCP transport, and rejects skipped or foreign test evidence. It
 makes no paid calls; live provider quality and full process recovery remain
 separate acceptance requirements.
+
+## Prior scheduled occurrence awareness
+
+The owner-bound factory provides `BotChatResources.PriorRun` alongside the
+unchanged `PreviousWork` projection. `bot_work_read` and the automatic
+provider-bound durable-work prompt refresh expose an optional `prior_run`:
+Bot/run/trigger identities, occurrence creation time, persisted outcome time,
+terminal/interrupted status and an allowlisted failure category only. No report
+summary, technical error, transcript, old assignment or mandate is copied.
+
+Selection is restricted to this Bot's exact cron trigger, before the current
+admission, and chooses the latest **occurrence creation time**, not the latest
+failure or completion time. A later success therefore supersedes an old failure;
+a coalesced older occurrence cannot supersede a newer actual attempt merely
+because its state was committed later. Interrupted recovery is eligible without
+`FinishedAt` or `Report.Work`: its persisted `StateCommittedAt` supplies the
+outcome timestamp. Rows with no known outcome timestamp, current/future rows,
+active runs and other triggers are not predecessor context. The UUID-paginated
+scan has the existing history timeout/page bounds; incomplete reads never claim
+that no predecessor exists.
+
+The service and prompt independently validate the binding and copy only bounded
+metadata. Guidance explicitly distinguishes a newly admitted occurrence from a
+retry/replay: learn from the predecessor's outcome under the current assignment
+and authority, never resume old tasks, inherit permissions, replay uncertain
+effects or change schedules. Missing optional context is not proof of success
+and does not block otherwise supported work. No UI/API run-history shape,
+admission rule or production record is rewritten by this read path.
 
 ## Resolved model provenance
 

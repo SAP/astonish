@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
 	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
@@ -86,8 +87,10 @@ type BotChatFactoryConfig struct {
 	LoadScope func(context.Context, bot.RunRequest) (*BotChatScope, error)
 	Prepare   func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error)
 	WrapModel func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error)
-	// ContextWindow is explicitly configured: no network model-metadata fallback.
-	ContextWindow int
+	// ContextWindow is an explicit override. ResolveContextWindow, when supplied,
+	// resolves capacity from the already owner-scoped model (never ambient config).
+	ContextWindow        int
+	ResolveContextWindow func(context.Context, model.LLM) int
 }
 
 // BotChatModelResolver resolves pins using the already owner-scoped reader.
@@ -163,7 +166,7 @@ func BotChatServicesForOwner(org store.OrgDataStore, principal execution.Princip
 // Compose its result with api.NewBotChatRuntimeAdapter after installing the live
 // guard/budget infrastructure. Construction never creates or reparents sessions.
 func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, error) {
-	if cfg.LoadScope == nil || cfg.Prepare == nil || cfg.WrapModel == nil || cfg.ContextWindow <= 0 {
+	if cfg.LoadScope == nil || cfg.Prepare == nil || cfg.WrapModel == nil || (cfg.ContextWindow <= 0 && cfg.ResolveContextWindow == nil) {
 		return nil, fmt.Errorf("%w: explicit Bot scope, isolation, budget wrapper and context window required", store.ErrBotUnsupported)
 	}
 	return func(ctx context.Context, req bot.RunRequest) (resources *api.BotChatResources, err error) {
@@ -234,6 +237,13 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			return nil, err
 		}
 		if resolved.LLM == nil || strings.TrimSpace(resolved.Provider) == "" || strings.TrimSpace(resolved.Model) == "" {
+			return nil, store.ErrBotUnsupported
+		}
+		contextWindow := cfg.ContextWindow
+		if contextWindow <= 0 && cfg.ResolveContextWindow != nil {
+			contextWindow = cfg.ResolveContextWindow(owner, resolved.LLM)
+		}
+		if contextWindow <= 0 {
 			return nil, store.ErrBotUnsupported
 		}
 		wrapped, err := cfg.WrapModel(owner, resolved.LLM, req.Budget)
@@ -339,7 +349,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		// the same metered auxiliary capability there before publishing resources.
 		owner = agent.WithBotAuxiliaryLLM(owner, llm)
 		binding.owner = owner
-		injection := &botWiredInjection{scope: scoped, safe: safe, binding: binding, llm: llm, contextWindow: cfg.ContextWindow, credentials: creds}
+		injection := &botWiredInjection{scope: scoped, safe: safe, binding: binding, llm: llm, contextWindow: contextWindow, credentials: creds}
 		wired, err := NewWiredChatAgent(context.WithValue(owner, botWiredKey{}, injection), &ChatFactoryConfig{AppConfig: &config.AppConfig{}, ProviderName: resolved.Provider, ModelName: resolved.Model, PlatformMode: true, SessionService: scoped.Sessions})
 		if wired != nil && wired.Cleanup != nil {
 			cleanups = append(cleanups, wired.Cleanup)
@@ -406,6 +416,14 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 				}
 			}
 			return nil, fmt.Errorf("previous work: %w", errBotWorkHistoryExhausted)
+		}
+		priorRun := func(c context.Context) (*bot.BotPriorRunContext, error) {
+			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
+			defer cancel()
+			if err := binding.check(bound); err != nil {
+				return nil, err
+			}
+			return readBotPriorRun(bound, repo, req.Run)
 		}
 		continuation := func(c context.Context, kind store.BotWorkContinuationKind, id uuid.UUID) error {
 			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
@@ -501,8 +519,68 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			chat.Redactor = wired.ChatAgent.Redactor
 			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cancel, PolicyRuntime: &directed.PolicyRuntime}, nil
 		}
-		return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PriorRun: priorRun, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
+}
+
+// readBotPriorRun scans the scoped UUID-paginated history without assuming that
+// UUID order or completion order is occurrence order. Interrupted recovery may
+// have no FinishedAt; StateCommittedAt is its persisted outcome observation.
+func readBotPriorRun(ctx context.Context, repo interface {
+	ListRuns(context.Context, store.BotID, store.BotPage) ([]store.BotRun, error)
+}, current store.BotRun) (*bot.BotPriorRunContext, error) {
+	if current.Trigger != store.TriggerCron || current.TriggerID == uuid.Nil || current.CreatedAt.IsZero() {
+		return nil, nil
+	}
+	var latest *bot.BotPriorRunContext
+	cursor := uuid.Nil
+	for page := 0; page < botWorkHistoryMaxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rows, err := repo.ListRuns(ctx, current.BotID, store.BotPage{Limit: botWorkHistoryPageSize, After: cursor.String()})
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(rows) > botWorkHistoryPageSize {
+			return nil, store.ErrBotInvalid
+		}
+		for _, run := range rows {
+			if bytes.Compare(run.ID[:], cursor[:]) <= 0 {
+				return nil, store.ErrBotInvalid
+			}
+			cursor = run.ID
+			if run.Trigger != store.TriggerCron {
+				continue
+			}
+			outcomeAt := run.StateCommittedAt
+			if run.FinishedAt != nil && !run.FinishedAt.IsZero() {
+				outcomeAt = *run.FinishedAt
+			}
+			// Legacy rows without a persisted finish/transition timestamp cannot
+			// prove when the outcome became known; do not invent one.
+			prior := &bot.BotPriorRunContext{BotID: run.BotID, RunID: run.ID, TriggerID: run.TriggerID, CreatedAt: run.CreatedAt, OutcomeAt: outcomeAt, Status: run.Status}
+			if run.Report.Failure != nil {
+				switch kind := run.Report.Failure.Kind; kind {
+				case store.BotReportFailureBudget, store.BotReportFailureExecutionFormat, store.BotReportFailureOperational, store.BotReportFailureInterrupted, store.BotReportFailureSetup:
+					prior.FailureKind = kind
+				}
+			}
+			if !prior.ValidFor(current) {
+				continue
+			}
+			if latest == nil || prior.CreatedAt.After(latest.CreatedAt) || (prior.CreatedAt.Equal(latest.CreatedAt) && bytes.Compare(prior.RunID[:], latest.RunID[:]) > 0) {
+				latest = prior
+			}
+		}
+		if len(rows) < botWorkHistoryPageSize {
+			return latest, nil
+		}
+	}
+	return nil, fmt.Errorf("prior run: %w", errBotWorkHistoryExhausted)
 }
 
 // botFactoryInteractive selects ephemeral turn authority only when no durable
@@ -628,6 +706,18 @@ type botFactoryBinding struct {
 }
 
 func (b *botFactoryBinding) check(ctx context.Context) error {
+	return b.checkWithBudget(ctx, b.req.Budget.Check)
+}
+
+// checkDuringGeneration is only installed as the post-reservation health
+// callback. New dispatches continue to use check, including their capacity gate.
+func (b *botFactoryBinding) checkDuringGeneration(ctx context.Context) error {
+	return b.checkWithBudget(ctx, func(c context.Context) error {
+		return provider.CheckGenerationBudget(c, b.req.Budget)
+	})
+}
+
+func (b *botFactoryBinding) checkWithBudget(ctx context.Context, checkBudget func(context.Context) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -667,7 +757,7 @@ func (b *botFactoryBinding) check(ctx context.Context) error {
 	if !reflect.DeepEqual(run.TitleConfirmation, b.req.Run.TitleConfirmation) || run.TitleConfirmation.ValidateBinding(*run, current.OwnerID) != nil {
 		return store.ErrBotConflict
 	}
-	if err := b.req.Budget.Check(ctx); err != nil {
+	if err := checkBudget(ctx); err != nil {
 		return err
 	}
 	if b.req.Mandate != nil {
@@ -745,41 +835,25 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 		var synthesis bool
 		if purpose != bot.ModelCallPurposeAssessment && purpose != bot.ModelCallPurposeProgress {
 			var err error
-			request, synthesis, err = l.binding.synthesisReserve.prepare(bound, request)
+			request, synthesis, err = l.binding.synthesisReserve.prepare(bound, request, l.LLM)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
+			if l.binding.synthesisReserve != nil && request != nil {
+				bound = provider.WithBudgetInputGuidance(bound, request)
+			}
 		}
 		if synthesis {
-			stream = false // Do not publish a partial answer before bounded correction.
+			// The final-only path drains every attempt before deciding whether one
+			// same-budget correction is safe. It never exposes incomplete output.
+			l.generateSynthesis(bound, request, yield)
+			return
 		}
-		// At most one correction, through the same metered model and live checks.
-		for attempt := 0; attempt < 2; attempt++ {
-			correction := false
-			for response, err := range l.LLM.GenerateContent(bound, request, stream) {
-				if err == nil && synthesis && botResponseHasToolCall(response) {
-					if attempt == 1 {
-						yield(nil, errBotSynthesisToolCall)
-						return
-					}
-					correction = true
-					break
-				}
-				if !yield(response, err) || err != nil {
-					return
-				}
-			}
-			if !correction {
+		for response, err := range l.LLM.GenerateContent(bound, request, stream) {
+			if !yield(response, err) || err != nil {
 				return
 			}
-			if err := l.binding.check(bound); err != nil {
-				yield(nil, err)
-				return
-			}
-			cloned := *request
-			cloned.Contents = append(append([]*genai.Content(nil), request.Contents...), genai.NewContentFromText("Your tool request was not executed. Return the final answer as text only from retained evidence; state missing evidence honestly.", "user"))
-			request = &cloned
 		}
 	}
 }

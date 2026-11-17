@@ -8,7 +8,7 @@ import (
 func TestBotRuntimePolicyDefaultsAndExplicitOperatorCaps(t *testing.T) {
 	for _, cfg := range []*AppConfig{nil, {}} {
 		p, err := cfg.EffectiveBotRuntimePolicy()
-		if err != nil || p.EffectiveMode() != execution.BotRuntimeModeProgressV1 || p.MaxActiveSeconds != nil {
+		if err != nil || p.EffectiveMode() != execution.BotRuntimeModeProgressV1 || p.MaxActiveSeconds != nil || p.ModelCallTimeoutSeconds != 0 || p.GenerationHealth == nil || p.GenerationHealth.IdleTimeoutSeconds != 120 || p.GenerationHealth.CheckIntervalSeconds != 10 {
 			t.Fatalf("defaults: %+v %v", p, err)
 		}
 	}
@@ -34,6 +34,10 @@ func TestBotRuntimePolicyDefaultsAndExplicitOperatorCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	*p.MaxActiveSeconds = 1
+	p.GenerationHealth.IdleTimeoutSeconds = 1
+	if cfg.BotRuntimePolicy.GenerationHealth.IdleTimeoutSeconds != 120 {
+		t.Fatal("health policy aliases config")
+	}
 	if *cfg.BotRuntimePolicy.MaxActiveSeconds != 200 {
 		t.Fatal("policy aliases config")
 	}

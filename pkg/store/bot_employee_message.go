@@ -93,7 +93,10 @@ func (r BotReport) ValidateEmployeeMessageIntegrity(status RunStatus) error {
 		}
 	case BotEmployeeMessageFallback:
 		expected := NewBotEmployeeFallback(status, r, m.Reason)
-		if *m != expected {
+		if *m != expected && *m != newBotEmployeeFallback(status, r, m.Reason, botEmployeeFallbackLegacyObservationCount) {
+			// Historical publications retain their exact canonical wording. This
+			// is a full-envelope comparison, not permission to accept arbitrary
+			// text or to omit any source facts from the digest above.
 			return ErrBotInvalid
 		}
 	case BotEmployeeMessageModel:
@@ -268,6 +271,18 @@ func EmployeeReasonDetails(reason BotEmployeeFailureReason) (string, string) {
 // or a scoped trusted review limitation (never diagnostics or the rejected draft).
 // An empty reason derives the safe reason from report/status alone.
 func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmployeeFailureReason) BotEmployeeMessage {
+	return newBotEmployeeFallback(status, report, reason, botEmployeeFallbackCurrent)
+}
+
+type botEmployeeFallbackWording uint8
+
+const (
+	botEmployeeFallbackCurrent botEmployeeFallbackWording = iota
+	// Used only to validate exact historical publications, never to mint new ones.
+	botEmployeeFallbackLegacyObservationCount
+)
+
+func newBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmployeeFailureReason, wording botEmployeeFallbackWording) BotEmployeeMessage {
 	kind := BotReportFailureOperational
 	if reason == "" {
 		reason = BotEmployeeReasonUnknown
@@ -326,23 +341,23 @@ func NewBotEmployeeFallback(status RunStatus, report BotReport, reason BotEmploy
 		if reason == BotEmployeeReasonUnknown || reason == BotEmployeeReasonUnverified {
 			reason = BotEmployeeReasonAgentNoResult
 		}
-		text, kind = agentEmployeeFallbackText(status, report, reason, kind)
+		text, kind = agentEmployeeFallbackText(status, report, reason, kind, wording)
 	}
 	if reason == BotEmployeeReasonResearchInadequate {
 		if BotEmployeeOutcomeReason(status, report) == reason {
 			text = report.employeeReviewLimitationText(status)
 		} else {
 			reason = BotEmployeeOutcomeReason(status, report)
-			text, kind = agentEmployeeFallbackText(status, report, reason, kind)
+			text, kind = agentEmployeeFallbackText(status, report, reason, kind, wording)
 		}
 	}
 	return BotEmployeeMessage{Origin: BotEmployeeMessageFallback, Text: text, SourceDigest: report.EmployeeMessageSourceDigest(status), FailureKind: kind, Reason: reason}
 }
 
-// agentEmployeeFallbackText interpolates only closed stage names, counts, and
-// typed artifact IDs, never diagnostics, observation prose, paths or provider URLs.
-// Recorded observations are not claims that an external effect completed.
-func agentEmployeeFallbackText(status RunStatus, report BotReport, reason BotEmployeeFailureReason, kind BotReportFailureKind) (string, BotReportFailureKind) {
+// agentEmployeeFallbackText interpolates only closed stage names and typed
+// artifact IDs, never diagnostics, observation prose, paths or provider URLs.
+// Selected report evidence is not a tool-call ledger or proof of completed effects.
+func agentEmployeeFallbackText(status RunStatus, report BotReport, reason BotEmployeeFailureReason, kind BotReportFailureKind, wording botEmployeeFallbackWording) (string, BotReportFailureKind) {
 	switch status {
 	case RunQueued:
 		return "I've queued this request; I haven't completed it yet.", ""
@@ -384,7 +399,11 @@ func agentEmployeeFallbackText(status RunStatus, report BotReport, reason BotEmp
 		}
 	}
 	if observations > 0 {
-		text += fmt.Sprintf(" The run recorded %d tool observation(s); this does not confirm that all requested actions completed.", observations)
+		if wording == botEmployeeFallbackLegacyObservationCount {
+			text += fmt.Sprintf(" The run recorded %d tool observation(s); this does not confirm that all requested actions completed.", observations)
+		} else {
+			text += " The run recorded some observations; this does not confirm that all requested actions completed."
+		}
 	}
 	for _, artifact := range report.Artifacts {
 		if artifact.ID != uuid.Nil && artifact.HomeID != uuid.Nil && skillDigestValid(artifact.SHA256) {

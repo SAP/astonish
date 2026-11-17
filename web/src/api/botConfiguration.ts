@@ -13,24 +13,40 @@ export interface BotAutonomy {
   max_spend_per_run_minor: number; max_spend_per_month_minor: number
 }
 export const RuntimeMode = { Legacy: 'legacy', Progress: 'progress_v1' } as const
+export interface BotGenerationHealthPolicy {
+  idle_timeout_seconds: number; check_interval_seconds: number
+}
 export interface BotRuntimePolicy {
   schema_version: number; mode: typeof RuntimeMode[keyof typeof RuntimeMode]
   evaluation_interval_seconds?: number; max_active_seconds?: number
   model_call_timeout_seconds?: number; tool_call_timeout_seconds?: number
+  generation_health?: BotGenerationHealthPolicy
+}
+/** Only for an explicit new policy selection, never for loading saved versions. */
+export function newBotProgressRuntimePolicy(): BotRuntimePolicy {
+  return { schema_version: 1, mode: RuntimeMode.Progress, evaluation_interval_seconds: 300, model_call_timeout_seconds: 0, tool_call_timeout_seconds: 120, generation_health: { idle_timeout_seconds: 120, check_interval_seconds: 10 } }
 }
 export const runtimeSecondsMax = 9223372036
 export function validRuntimePolicy(policy?: BotRuntimePolicy): boolean {
   if (!policy) return true
   if (policy.schema_version !== 1) return false
-  if (policy.mode === RuntimeMode.Legacy) return !policy.evaluation_interval_seconds && policy.max_active_seconds == null && !policy.model_call_timeout_seconds && !policy.tool_call_timeout_seconds
+  if (policy.mode === RuntimeMode.Legacy) return !policy.evaluation_interval_seconds && policy.max_active_seconds == null && !policy.model_call_timeout_seconds && !policy.tool_call_timeout_seconds && policy.generation_health == null
   if (policy.mode !== RuntimeMode.Progress) return false
-  return [policy.evaluation_interval_seconds, policy.model_call_timeout_seconds, policy.tool_call_timeout_seconds, ...(policy.max_active_seconds == null ? [] : [policy.max_active_seconds])].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= runtimeSecondsMax)
+  const positiveSeconds = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= runtimeSecondsMax
+  const health = policy.generation_health
+  if (health != null) {
+    if (typeof health !== 'object' || Object.keys(health).some(key => !['idle_timeout_seconds', 'check_interval_seconds'].includes(key))) return false
+    if (!positiveSeconds(health.idle_timeout_seconds) || !positiveSeconds(health.check_interval_seconds) || health.check_interval_seconds > health.idle_timeout_seconds) return false
+    if (policy.model_call_timeout_seconds != null && policy.model_call_timeout_seconds !== 0) return false
+  } else if (!positiveSeconds(policy.model_call_timeout_seconds)) return false
+  return [policy.evaluation_interval_seconds, policy.tool_call_timeout_seconds, ...(policy.max_active_seconds == null ? [] : [policy.max_active_seconds])].every(positiveSeconds)
 }
 export function runtimePolicySummary(budget: BotBudget): string {
   const policy = budget.runtime_policy
   if (!validRuntimePolicy(policy)) return 'Runtime policy unavailable'
   if (policy?.mode !== RuntimeMode.Progress) return `${budget.max_runtime_seconds}s/run (saved legacy limit)`
-  return `${policy.max_active_seconds ? `Maximum ${policy.max_active_seconds}s active time` : 'No task duration limit; token, tool and spending limits still apply.'} · progress checks every ${policy.evaluation_interval_seconds}s · operator policy remains authoritative`
+  const generation = policy.generation_health ? `No fixed generation duration; inactivity threshold ${policy.generation_health.idle_timeout_seconds}s, health checks every ${policy.generation_health.check_interval_seconds}s` : `Model elapsed timeout ${policy.model_call_timeout_seconds}s (saved deadline)`
+  return `${policy.max_active_seconds ? `Maximum ${policy.max_active_seconds}s active time` : 'No task duration limit; token, tool and spending limits still apply.'} · ${generation} · progress checks every ${policy.evaluation_interval_seconds}s · operator policy remains authoritative`
 }
 export interface BotBudget {
   runtime_policy?: BotRuntimePolicy

@@ -61,6 +61,15 @@ type MandateBudget struct {
 	OnReleaseFailure func(*MandateExecution)
 }
 
+// CheckInFlight preserves durable authority checks instead of inheriting the
+// embedded meter's implementation and bypassing mandate revocation.
+func (b *MandateBudget) CheckInFlight(ctx context.Context) error {
+	if err := b.Mandate.Check(ctx); err != nil {
+		return err
+	}
+	return b.SharedRunBudget.CheckInFlight(ctx)
+}
+
 func (b *MandateBudget) Check(ctx context.Context) error {
 	if err := b.Mandate.Check(ctx); err != nil {
 		return err

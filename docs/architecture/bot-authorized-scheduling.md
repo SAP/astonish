@@ -80,6 +80,37 @@ For a version explicitly using `progress_v1`, scheduled admission finds an open 
 
 Current lifecycle and scheduled authority checks precede new coalescing; a paused or unauthorized tick is not reported as successful. Exact occurrence replay returns its saved receipt even after pause. Coalesced ticks do not form a catch-up backlog. `TestBotProgressScheduledAdmissionHTTP` exercises production scheduler callbacks and actual loopback HTTP reads in both SQLite scopes: thirty ticks span queued, running and suspended states with one logical run and a daily cap of one, followed by pause denial and receipt replay. This controlled test does not establish deployed worker continuation or live-provider execution.
 
+## New occurrences after interrupted work
+
+An interrupted progress-mode occurrence does not permanently occupy its schedule
+when the durable evidence proves a new occurrence is safe. Admission requires a
+complete, bounded dispatch ledger and an exact old-run/fence/Home physical teardown
+receipt. Pending model calls are allowed; pending tools, uncertain tool outcomes,
+missing receipts and malformed/incomplete ledgers remain held. This is admission
+of a new future occurrence, not replay or continuation of the old run. Earlier
+coalesced ticks stay acknowledged and never become a catch-up backlog. Old run
+status, report, usage and conservative quota reservations are not rewritten.
+
+Recovered interruption can confirm teardown without an active-run pointer only
+when the persisted recovery marker, activity, immediate successor fence and empty
+lease agree. Verification is rechecked before commit to protect newer work. A new
+scheduled employee receives bounded typed metadata about its latest earlier
+terminal occurrence on the exact same trigger, including interruption even when
+no final work projection or finished timestamp exists. This context cannot grant
+old authority, overwrite the new assignment or authorize replaying uncertain actions.
+
+`TestBotRecoveredScheduleCleanupHTTP` covers worker recovery/cleanup and admission
+in personal/team SQLite. `TestBotScheduledNewRunProcessDockerAcceptance` additionally
+kills an owned worker during a model call before its first checkpoint, reopens the
+store in another process, honors lease expiry, and verifies that a live Docker
+container blocks admission. After explicit harness removal and production teardown
+verification, a real future tick creates a distinct run/session; the controlled
+model sees the interrupted predecessor and publishes one result. Old accounting
+is retained. This passed on November 17, 2026; evidence is in
+`.tmp/new-run-process-acceptance-evidence.md`. It is real subprocess/Docker proof
+with deterministic model adapters, not a production daemon restart, paid-provider
+judgment test or automatic container-removal test.
+
 ## Receipts and publication
 
 The typed schedule receipt records source linkage, observed trigger/job identity, version, removal and effective enabled/next-run state. It is written only after those postconditions are observed transactionally. Existing report publication drains the committed intent after commit and deduplicates its Home event. Reserved-key and applied-operation checks distinguish receipts from ordinary source reports; receipts are not suppressed by a prior conversational reply and never authorize external notifications.

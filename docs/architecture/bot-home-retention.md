@@ -49,6 +49,33 @@ cleanup-confirmed tombstone. Backend failures and failed confirmation leave the
 claim and tombstone in place, so a later poll retries idempotent deletion rather
 than falsely declaring completion.
 
+## Recovered interrupted-run teardown
+
+`RecoverRun` revokes an expired lease and clears the logical active-run pointer;
+this is not physical teardown evidence. The ordinary worker's next poll observes
+`RunInterrupted` and verifies destruction of that run's exact persisted session
+before `ConfirmCleanup` can append a `cleanup-confirmed` receipt. No new public
+interface or owner-controlled cleanup endpoint is introduced.
+
+The store accepts the pointer-free recovery path only with the private recovered
+commit marker, matching recovery report activity, exact run/fence, nonempty
+session identity, empty active-run and lease fields, and the immediate successor
+Bot fence. The existing exact Home, revision, service scope and tenant checks run
+both before and after the external verifier. A newer worker claim, pause, delete
+or restore invalidates an in-flight receipt. Root CAS includes empty-pointer and
+lease predicates; cleanup cannot erase newer execution. Audit failure rolls back
+the receipt, and a durable exact replay does not call the verifier again.
+
+This receipt never resumes the interrupted run, settles its dispatch ledger,
+changes its report/billing, or authorizes Home retirement. Later scheduled
+occurrences still need independently safe dispatch evidence; pending unknown tool
+writes remain held even after confirmed teardown. `TestBotRecoveredCleanup*`
+covers both SQLite scopes and races; `TestBotRecoveredScheduleCleanupHTTP` drives
+production worker recovery and repeat polling, scheduler admission and HTTP run
+reads for pending models, settled tools, unknown writes and absent/foreign
+receipts. Physical destruction is fixture-attested in these tests, not live
+Docker or an OS-process restart evidence.
+
 ## Exact-owned execution reconciliation
 
 Before raw storage deletion, `BotHomeManager.Delete` invokes the optional

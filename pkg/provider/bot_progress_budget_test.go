@@ -14,6 +14,7 @@ import (
 
 func TestBotProgressBudgetModelOperationTimeout(t *testing.T) {
 	p := execution.NewBotProgressRuntimePolicy()
+	p.GenerationHealth = nil // Explicit historical elapsed-time policy.
 	p.ModelCallTimeoutSeconds = 1
 	cap := int64(110)
 	b, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300, RuntimePolicy: p, MaxTokens: &cap}, time.Now().Add(-6*time.Hour))

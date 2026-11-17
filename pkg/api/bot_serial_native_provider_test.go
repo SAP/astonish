@@ -34,19 +34,21 @@ import (
 // This test and its children must remain serial while the dial hook is installed.
 func botNativeAnthropicLoopback(t *testing.T, server *httptest.Server) {
 	t.Helper()
-	transport := httpool.Transport().(*http.Transport)
-	old := transport.DialTLSContext
-	transport.CloseIdleConnections()
-	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if addr != "api.anthropic.com:443" {
-			return nil, fmt.Errorf("unexpected native fixture TLS destination: %s", addr)
-		}
-		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
-	}
-	t.Cleanup(func() {
+	ordinary, generation := httpool.BaseTransports()
+	for _, transport := range []*http.Transport{ordinary, generation} {
+		old := transport.DialTLSContext
 		transport.CloseIdleConnections()
-		transport.DialTLSContext = old
-	})
+		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if addr != "api.anthropic.com:443" {
+				return nil, fmt.Errorf("unexpected native fixture TLS destination: %s", addr)
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		}
+		t.Cleanup(func() {
+			transport.CloseIdleConnections()
+			transport.DialTLSContext = old
+		})
+	}
 }
 
 // Composes production Bot runtime -> checkpoint capture -> budget -> swappable

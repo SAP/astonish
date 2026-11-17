@@ -55,15 +55,17 @@ func (m botKnowledgeModel) GenerateKnowledgeExtraction(c context.Context, q bot.
 	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(q.InputJSON, "user")}, Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(q.SystemInstruction, "system"), ResponseMIMEType: "application/json", MaxOutputTokens: int32(q.MaxOutputTokens)}}
 	complete := false
 	for r, e := range m.llm.GenerateContent(c, request, false) {
+		// Preserve billed usage even when the provider returns an error with it.
+		if r != nil && r.UsageMetadata != nil {
+			input, output := bot.ModelUsageTokens(r.UsageMetadata)
+			out.Usage.InputTokens = max(out.Usage.InputTokens, input)
+			out.Usage.OutputTokens = max(out.Usage.OutputTokens, output)
+		}
 		if e != nil {
 			return out, e
 		}
 		if r == nil {
 			continue
-		}
-		if r.UsageMetadata != nil {
-			out.Usage.InputTokens = max(out.Usage.InputTokens, int64(r.UsageMetadata.PromptTokenCount))
-			out.Usage.OutputTokens = max(out.Usage.OutputTokens, int64(r.UsageMetadata.CandidatesTokenCount))
 		}
 		if r.Interrupted || r.ErrorCode != "" || r.ErrorMessage != "" {
 			return out, store.ErrBotConflict

@@ -25,6 +25,7 @@ func (m progressExtractionBound) GenerateKnowledgeExtraction(ctx context.Context
 func TestBotProgressBudgetKnowledgeExtractionZeroDeadline(t *testing.T) {
 	e, _, m := extractionRunner(t, `{"schema_version":1,"kind":"no_change","reason":"already retained","proposals":[]}`)
 	policy := execution.NewBotProgressRuntimePolicy()
+	policy.GenerationHealth = nil // Explicit historical elapsed-time policy.
 	policy.ModelCallTimeoutSeconds = 1
 	budget, err := NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300, RuntimePolicy: policy}, time.Now())
 	if err != nil {

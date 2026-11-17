@@ -378,6 +378,7 @@ func ParseResponse(body []byte) (*model.LLMResponse, error) {
 	}
 
 	resp.UsageMetadata = usageMetadata(bedrockResp.Usage)
+	resp.FinishReason, resp.TurnComplete = terminationMetadata(streamStopReason(bedrockResp.StopReason))
 
 	return resp, nil
 }
@@ -390,7 +391,22 @@ const (
 	streamStopToolUse      streamStopReason = "tool_use"
 	streamStopMaxTokens    streamStopReason = "max_tokens"
 	streamStopContextLimit streamStopReason = "model_context_window_exceeded"
+	streamStopRefusal      streamStopReason = "refusal"
 )
+
+// Only explicit successful termination certifies final-answer completion.
+func terminationMetadata(reason streamStopReason) (genai.FinishReason, bool) {
+	switch reason {
+	case streamStopEndTurn, streamStopSequence:
+		return genai.FinishReasonStop, true
+	case streamStopMaxTokens, streamStopContextLimit:
+		return genai.FinishReasonMaxTokens, false
+	case streamStopRefusal:
+		return genai.FinishReasonSafety, false
+	default:
+		return genai.FinishReasonOther, false
+	}
+}
 
 // ParseStream parses a Bedrock SSE stream without progress notifications.
 func ParseStream(reader io.Reader) iter.Seq2[*model.LLMResponse, error] {
@@ -597,7 +613,8 @@ func ParseStreamWithProgress(reader io.Reader, onProgress func(streaming.Progres
 					flushText()
 					metadata := usageMetadata(usage)
 					if len(parts) > 0 || metadata != nil {
-						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: metadata}, nil)
+						finish, complete := terminationMetadata(stopReason)
+						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}, UsageMetadata: metadata, FinishReason: finish, TurnComplete: complete}, nil)
 					}
 					return
 				}

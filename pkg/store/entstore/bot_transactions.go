@@ -377,7 +377,7 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 		}
 		now := r.clock()
 		if occurrence != nil && occurrence.external == nil && req.Trigger == store.TriggerCron && v.Budget.RuntimePolicy.EffectiveMode() == execution.BotRuntimeModeProgressV1 {
-			open, e := findProgressAssignment(ctx, tx, req.BotID, req.TriggerID)
+			open, e := findProgressAssignment(ctx, tx, req.BotID, req.TriggerID, req.OccurrenceAt)
 			if e != nil {
 				return e
 			}

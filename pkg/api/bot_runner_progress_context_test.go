@@ -62,6 +62,8 @@ func progressContextFixture(t *testing.T) (context.Context, *botProgressRuntime,
 	req.Instructions = "Continue from the saved answer."
 	req.Version.Persona.Soul = "Concise research colleague"
 	req.Version.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
+	req.Version.Budget.RuntimePolicy.GenerationHealth = nil // Exercise saved elapsed-time policy.
+	req.Version.Budget.RuntimePolicy.ModelCallTimeoutSeconds = 120
 	req.ProgressStore = &progressContextStoreStub{}
 	req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Version.Version, Instructions: "Compare the three regional rail proposals for a general audience.", Charter: req.Version.Charter})
 	req.Work.AgentWork.Notes = "The northern route costs less; compare access and capacity next."

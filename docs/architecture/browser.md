@@ -89,6 +89,14 @@ Browser persists across tool calls within a session
 Explicit close or session end: browser cleanup
 ```
 
+### Local browser reuse
+
+In non-sandbox mode, after the explicit remote-CDP route, the manager checks the configured persistent profile's `DevToolsActivePort`. A valid loopback WebSocket connection and `Browser.getVersion` handshake allow reuse of that profile's running Chromium, preserving existing tabs and session state. Discovery never scans arbitrary debugging ports or attaches to unrelated browser profiles. Missing, malformed, or stale endpoint files fall through to normal launch; a post-launch-error check also handles another manager starting the profile concurrently.
+
+A borrowed browser is not process-owned: reconnect/reset and cleanup close its CDP socket rather than sending `Browser.close` or killing the owner's process. Incognito contexts created by the borrowing manager are disposed on detach. Sandbox and explicit remote-CDP routing remain separate. Headed-to-headless fallback constructs a fresh, identically configured Rod launcher because launcher objects are single-use even after a failed launch; failures preserve the original cause rather than masking it with `already launched`.
+
+Live regression command: `ASTONISH_LOCAL_BROWSER_ACCEPTANCE=1 go test ./pkg/browser -run '^TestLocal' -count=1 -v`. This starts isolated real Chromium, reuses it from a second manager, checks tab-state preservation and navigation, and verifies detach leaves the owner's browser alive.
+
 ### CAPTCHA Detection
 
 JavaScript-based detection checks for:

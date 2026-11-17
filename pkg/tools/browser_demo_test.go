@@ -1,13 +1,18 @@
 package tools
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/browser"
 )
 
 func TestBrowserHighlight_RequiresTarget(t *testing.T) {
-	mgr := browser.NewManager(browser.DefaultConfig())
+	mgr := browser.NewManager(browser.BrowserConfig{
+		Headless: true, UserDataDir: t.TempDir(),
+		ChromePath: filepath.Join(t.TempDir(), "missing-chrome"),
+	})
+	t.Cleanup(mgr.Cleanup)
 	refs := browser.NewRefMap()
 	fn := BrowserHighlight(mgr, refs)
 	_, err := fn(nil, BrowserHighlightArgs{})
@@ -17,7 +22,11 @@ func TestBrowserHighlight_RequiresTarget(t *testing.T) {
 }
 
 func TestBrowserMoveCursor_RequiresTarget(t *testing.T) {
-	mgr := browser.NewManager(browser.DefaultConfig())
+	mgr := browser.NewManager(browser.BrowserConfig{
+		Headless: true, UserDataDir: t.TempDir(),
+		ChromePath: filepath.Join(t.TempDir(), "missing-chrome"),
+	})
+	t.Cleanup(mgr.Cleanup)
 	refs := browser.NewRefMap()
 	fn := BrowserMoveCursor(mgr, refs)
 	_, err := fn(nil, BrowserMoveCursorArgs{})
@@ -27,7 +36,11 @@ func TestBrowserMoveCursor_RequiresTarget(t *testing.T) {
 }
 
 func TestBrowserMoveCursor_WithDurationMs(t *testing.T) {
-	mgr := browser.NewManager(browser.DefaultConfig())
+	mgr := browser.NewManager(browser.BrowserConfig{
+		Headless: true, UserDataDir: t.TempDir(),
+		ChromePath: filepath.Join(t.TempDir(), "missing-chrome"),
+	})
+	t.Cleanup(mgr.Cleanup)
 	refs := browser.NewRefMap()
 	fn := BrowserMoveCursor(mgr, refs)
 	// With no browser launched, CurrentPage() fails before target resolution,
@@ -40,7 +53,11 @@ func TestBrowserMoveCursor_WithDurationMs(t *testing.T) {
 }
 
 func TestBrowserFullscreen_NoPage(t *testing.T) {
-	mgr := browser.NewManager(browser.DefaultConfig())
+	mgr := browser.NewManager(browser.BrowserConfig{
+		Headless: true, UserDataDir: t.TempDir(),
+		ChromePath: filepath.Join(t.TempDir(), "missing-chrome"),
+	})
+	t.Cleanup(mgr.Cleanup)
 	fn := BrowserFullscreen(mgr)
 	_, err := fn(nil, BrowserFullscreenArgs{Enabled: true})
 	if err == nil {
@@ -49,7 +66,11 @@ func TestBrowserFullscreen_NoPage(t *testing.T) {
 }
 
 func TestBrowserClearHighlights_NoPage(t *testing.T) {
-	mgr := browser.NewManager(browser.DefaultConfig())
+	mgr := browser.NewManager(browser.BrowserConfig{
+		Headless: true, UserDataDir: t.TempDir(),
+		ChromePath: filepath.Join(t.TempDir(), "missing-chrome"),
+	})
+	t.Cleanup(mgr.Cleanup)
 	fn := BrowserClearHighlights(mgr)
 	_, err := fn(nil, BrowserClearHighlightsArgs{})
 	if err == nil {

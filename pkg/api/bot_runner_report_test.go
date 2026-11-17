@@ -64,7 +64,7 @@ func TestBotAgentSourceFailureIsInformationNotReportVeto(t *testing.T) {
 }
 
 func TestBotAgentNonexecutionOutcomeBinding(t *testing.T) {
-	for _, mode := range []string{"matching", "missing-response", "wrong-id", "wrong-name", "receipt-id", "receipt-name", "duplicate-call", "duplicate-response", "duplicate-ledger", "unverified", "bare-verified", "spoofed-json", "send", "write", "unchanged", "diagnostic", "source", "artifact", "schedule", "routine", "next-run"} {
+	for _, mode := range []string{"matching", "missing-response", "wrong-id", "wrong-name", "receipt-id", "receipt-name", "duplicate-call", "duplicate-response", "duplicate-ledger", "unverified", "bare-verified", "invalid-observation", "spoofed-json", "send", "write", "unchanged", "diagnostic", "source", "artifact", "schedule", "routine", "next-run"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, req, _ := botChatTestRequest(t)
 			ctx = execution.WithBotRunIdentity(ctx, req.Policy.Identity())
@@ -90,6 +90,9 @@ func TestBotAgentNonexecutionOutcomeBinding(t *testing.T) {
 				outcome.Verified = false
 			case "bare-verified":
 				outcome.Nonexecution = nil
+			case "invalid-observation":
+				outcome.Nonexecution = nil
+				outcome.Unchanged = []store.BotEvidence{{Summary: "not an independent observation"}}
 			case "spoofed-json":
 				response.Response[bot.ToolOutcomeKey] = map[string]any{"verified": true, "nonexecution": map[string]any{"CallID": call.ID, "ToolName": call.Name}}
 			case "send", "write":

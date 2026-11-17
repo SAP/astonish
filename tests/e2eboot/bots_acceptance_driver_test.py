@@ -17,6 +17,164 @@ spec.loader.exec_module(driver)
 
 
 class AcceptanceDriverTests(unittest.TestCase):
+    def test_durable_progress_names_are_real_and_include_required_boundaries(self):
+        for package, names in driver.DURABLE_PROGRESS_CASES.items():
+            source = '\n'.join(p.read_text() for p in (driver.ROOT / package).glob('*test.go'))
+            self.assertEqual(len(names), len(set(names)))
+            for name in names:
+                self.assertRegex(source, rf'func {re.escape(name)}\(t \*testing.T\)')
+        for name in ('TestBotProgressSixHourClockAcceptance', 'TestBotProgressProcessRestartAcceptance',
+                     'TestBotProgressBrowserAcceptance', 'TestBotTitleConfirmationDockerBrowserAcceptance'):
+            self.assertIn(name, driver.DURABLE_PROGRESS_CASES['./pkg/api'])
+        self.assertIn('TestBotProgressPTYAcceptance', driver.DURABLE_PROGRESS_CASES['./cmd/astonish'])
+        self.assertIn('TestBotProgressScheduledContinuation', driver.DURABLE_PROGRESS_CASES['./pkg/store/entstore'])
+
+    def test_durable_progress_exact_evidence_no_skips_or_empty_pass(self):
+        env = {'PATH': os.environ['PATH'], 'ASTONISH_MEMORY_BROWSER_ACCEPTANCE': '1',
+               'ASTONISH_TEST_DOCKER': '1', 'ASTONISH_BOT_BROWSER_PATH': sys.executable,
+               'ASTONISH_SANDBOX_IMAGE': 'owned-image', 'OPENAI_API_KEY': 'forbidden',
+               'ASTONISH_DSN': 'production', 'GOFLAGS': '-run=Nothing',
+               'ASTONISH_PROGRESS_PROCESS_STAGE': 'restart-settled'}
+        for mode in ('pass', 'zero', 'skip-child', 'foreign', 'pass-without-run', 'package-unfinished', 'missing-child'):
+            def execute(command, child_env, evidence=None, **kwargs):
+                for key in ('OPENAI_API_KEY', 'ASTONISH_DSN', 'GOFLAGS', 'ASTONISH_PROGRESS_PROCESS_STAGE'):
+                    self.assertNotIn(key, child_env)
+                if evidence:
+                    package = command[-3].replace('./', 'github.com/SAP/astonish/')
+                    if mode == 'foreign':
+                        package = 'foreign/package'
+                    for name in evidence.required:
+                        if mode == 'zero' or (mode == 'missing-child' and '/' in name):
+                            continue
+                        if mode != 'pass-without-run':
+                            evidence.feed(json.dumps({'Package': package, 'Test': name, 'Action': 'run'}))
+                        evidence.feed(json.dumps({'Package': package, 'Test': name, 'Action': 'pass'}))
+                    if mode == 'skip-child':
+                        evidence.feed(json.dumps({'Package': package, 'Test': 'TestRequired/child', 'Action': 'skip'}))
+                    if mode != 'package-unfinished':
+                        evidence.feed(json.dumps({'Package': package, 'Action': 'pass'}))
+                return True
+            with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, env, clear=True), \
+                    patch.object(driver.shutil, 'which', return_value='/tool'), \
+                    patch.object(driver, 'run', side_effect=execute), contextlib.redirect_stdout(io.StringIO()):
+                report = Path(directory) / 'evidence.json'
+                code = driver.main(['--stage', 'durable-progress', '--report', str(report)])
+                self.assertEqual(0 if mode == 'pass' else 1, code, mode)
+                result = json.loads(report.read_text())
+                self.assertEqual('PASS' if mode == 'pass' else 'FAIL', result['status'])
+                self.assertIn('two-hour wall-clock soak', result['unverified'])
+                self.assertEqual(len(driver.DURABLE_PROGRESS_CASES), len(result['gates']))
+
+    def test_durable_progress_optional_and_missing_prerequisites_block_without_launch(self):
+        for extra in ([], ['--soak'], ['--real-provider', '--config', '/tmp/not-read'], ['--postgres']):
+            with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+                    patch.object(driver, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+                report = Path(directory) / 'blocked.json'
+                self.assertEqual(2, driver.main(['--stage', 'durable-progress', '--report', str(report)] + extra))
+                self.assertEqual('BLOCKED', json.loads(report.read_text())['status'])
+                run.assert_not_called()
+
+    def test_durable_progress_shell_missing_prerequisites_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(['bash', str(Path(__file__).with_name('bots_acceptance.sh')),
+                                     '--stage', 'durable-progress', '--report', directory + '/report.json'],
+                                    env={'PATH': os.environ['PATH']}, capture_output=True, text=True, timeout=20)
+            self.assertEqual(2, result.returncode)
+            self.assertEqual('BLOCKED', json.loads(Path(directory, 'report.json').read_text())['status'])
+
+    def test_title_confirmation_requires_team_search_followup_and_restart_evidence(self):
+        self.assertIn('TestBotTitleConfirmationProcessRestart', driver.TITLE_CONFIRMATION_CASES['./pkg/store/entstore'])
+        self.assertIn('TestBotTitleTeamOptionBrowserAcceptance', driver.TITLE_CONFIRMATION_BROWSER)
+        self.assertIn('TestBotTitleTeamCustomBrowserAcceptance', driver.TITLE_CONFIRMATION_BROWSER)
+        self.assertIn('TestBotTitleConfiguredSearchHTTP', driver.TITLE_CONFIRMATION_CASES['./pkg/daemon'])
+        self.assertIn('TestBotTitleConfirmationStateHTTPAcceptance', driver.TITLE_CONFIRMATION_CASES['./pkg/api'])
+        self.assertIn('TestBotTitleConfirmedLaterQuestionContinuation', driver.TITLE_CONFIRMATION_CASES['./pkg/api'])
+
+    def test_title_confirmation_requires_explicit_browser_and_docker(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(driver, 'run') as run:
+            self.assertEqual(2, driver.title_confirmation())
+            run.assert_not_called()
+
+    def test_title_confirmation_rejects_partial_modes(self):
+        for extra in (['--preflight'], ['--local-only'], ['--config', '/tmp/not-used']):
+            with contextlib.redirect_stderr(io.StringIO()), patch.object(driver, 'title_confirmation') as stage:
+                with self.assertRaises(SystemExit):
+                    driver.main(['--stage', 'title-confirmation'] + extra)
+                stage.assert_not_called()
+
+    def test_title_confirmation_exact_evidence_and_environment(self):
+        env = {'PATH': os.environ['PATH'], 'ASTONISH_MEMORY_BROWSER_ACCEPTANCE': '1',
+               'ASTONISH_BOT_BROWSER_PATH': sys.executable, 'ASTONISH_SANDBOX_IMAGE': 'owned-image',
+               'OPENAI_API_KEY': 'not-for-controlled-tests', 'ASTONISH_DSN': 'production'}
+        for mode in ('pass', 'missing', 'skip', 'foreign'):
+            def execute(command, child_env, evidence=None, **kwargs):
+                self.assertNotIn('OPENAI_API_KEY', child_env)
+                self.assertNotIn('ASTONISH_DSN', child_env)
+                if evidence:
+                    package = command[-3].replace('./', 'github.com/SAP/astonish/')
+                    if mode == 'foreign':
+                        package = 'foreign/package'
+                    for name in evidence.required:
+                        if mode == 'missing':
+                            continue
+                        for action in ('run', 'skip' if mode == 'skip' else 'pass'):
+                            evidence.feed(json.dumps({'Package': package, 'Test': name, 'Action': action}))
+                    return not evidence.errors()
+                return True
+            with patch.dict(os.environ, env, clear=True), patch.object(driver.shutil, 'which', return_value='/tool'), patch.object(driver, 'run', side_effect=execute) as run:
+                self.assertEqual(0 if mode == 'pass' else 1, driver.title_confirmation(), mode)
+                if mode == 'pass':
+                    commands = [c.args[0] for c in run.call_args_list]
+                    self.assertTrue(any('TestBotTitleConfirmationDockerBrowserAcceptance' in ' '.join(c) for c in commands))
+                    self.assertTrue(any('TestBotTitleChatPTYAcceptance' in ' '.join(c) for c in commands))
+                    self.assertIn(['npm', '--prefix', 'web', 'run', 'build'], commands)
+
+    def test_title_confirmation_shell_missing_prerequisites_fails(self):
+        result = subprocess.run(['bash', str(Path(__file__).with_name('bots_acceptance.sh')),
+                                 '--stage', 'title-confirmation'],
+                                env={'PATH': os.environ['PATH'], 'HOME': os.environ.get('HOME', '/tmp')},
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(2, result.returncode)
+        self.assertIn('ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 required', result.stdout)
+        self.assertIn('ASTONISH_BOT_BROWSER_PATH', result.stdout)
+        self.assertIn('ASTONISH_SANDBOX_IMAGE', result.stdout)
+
+    def test_title_confirmation_docs_keep_evidence_boundaries(self):
+        for path in ('tests/e2eboot/README.bots-acceptance.md', 'docs/architecture/bot-release-checklist.md'):
+            text = (driver.ROOT / path).read_text()
+            for required in ('--stage title-confirmation', 'ASTONISH_BOT_BROWSER_PATH',
+                             'ASTONISH_SANDBOX_IMAGE', 'pending' if 'checklist' in path else 'unverified'):
+                self.assertIn(required, text)
+
+    def test_title_confirmation_routes_without_release_fallback(self):
+        with patch.object(driver, 'title_confirmation', return_value=2) as stage, patch.object(driver, 'prerequisites') as release:
+            self.assertEqual(2, driver.main(['--stage', 'title-confirmation']))
+            stage.assert_called_once_with()
+            release.assert_not_called()
+
+    def test_title_confirmation_contract_rejects_missing_or_skipped_evidence(self):
+        for output in ('', json.dumps({'Action': 'skip', 'Test': 'TestBotTitleConfirmationHTTPAcceptance'})):
+            with patch.object(driver.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output)):
+                self.assertEqual(1, driver.title_confirmation_contract())
+
+    def test_title_confirmation_contract_requires_factory_journey_and_restart(self):
+        def result(command, **kwargs):
+            names = command[-1][2:-2].split('|')
+            if './pkg/launcher' in command:
+                self.assertIn('TestBotTitleConfirmationFactoryJourney', names)
+            if './pkg/store/entstore' in command:
+                self.assertIn('TestBotTitleConfirmationProcessRestart', names)
+            return subprocess.CompletedProcess(command, 0, '\n'.join(json.dumps({'Action': 'pass', 'Test': name}) for name in names))
+        with patch.object(driver.subprocess, 'run', side_effect=result) as run:
+            self.assertEqual(0, driver.title_confirmation_contract())
+            self.assertTrue(any('./pkg/launcher' in call.args[0] for call in run.call_args_list))
+            self.assertTrue(any('./pkg/store/entstore' in call.args[0] for call in run.call_args_list))
+
+    def test_title_confirmation_stage_routes_without_release_fallback(self):
+        with patch.object(driver, 'title_confirmation_contract', return_value=1) as contract:
+            self.assertEqual(1, driver.main(['--stage', 'title-confirmation-contract']))
+            contract.assert_called_once_with()
+
     def test_agent_stage_routes_exact_arguments_and_propagates_status(self):
         for stage in ('execution', 'progress', 'learning', 'continuity', 'postgres', 'all'):
             argv = ['--agent-stage', stage]

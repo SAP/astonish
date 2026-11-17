@@ -3,6 +3,7 @@ package launcher
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
@@ -30,6 +31,7 @@ func botHiddenTurnContext(e *adksession.Event) bool {
 // mixing them with the wire projection would bypass Chat's UI normalization.
 // One mapper lives for the whole Watch, including transport reconnects.
 type botTranscriptMapper struct {
+	progressSession   bool
 	runtimeTurns      map[string]bool
 	activeRuntimeTurn string // bounded session → done window for ADK invocation binding
 	sequences         map[string]int64
@@ -63,7 +65,22 @@ func (m *botTranscriptMapper) mapFrame(frame client.SSEEvent) ([]events.Event, e
 		if err = json.Unmarshal(data, &state); err != nil {
 			return nil, err
 		}
+		if state.Progress != nil && state.ValidateProgress() == nil {
+			m.progressSession = true
+		} else if state.Progress == nil && state.Presentation == store.BotRunPresentationHomeInteractive {
+			// A later ordinary Home conversation retains its normal projection.
+			// Do not make one progress assignment suppress future owner dialogue.
+			m.progressSession = false
+		}
 		return []events.Event{{Kind: events.KindBotRunState, BotRunState: &state}}, nil
+	}
+	if m.progressSession {
+		// Progress-driven work publishes employee results at canonical report
+		// boundaries. Raw tools, intermediate drafts and runtime diagnostics are
+		// private in both Home and run traces; owner input remains visible.
+		if row.Author != "user" && !strings.HasPrefix(row.InvocationID, "bot-report:") {
+			return nil, nil
+		}
 	}
 	if raw, ok := row.Actions.StateDelta[botRuntimeStateKey]; ok {
 		wire, err := decodeBotRuntimeEnvelope(raw)

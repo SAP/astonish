@@ -12,6 +12,7 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"io"
@@ -51,7 +52,7 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 		if !allowed {
 			return store.BotMandatePolicy{}, store.ErrBotForbidden
 		}
-		return store.BotMandatePolicy{Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{"task"}}, {Action: execution.CapabilityToolExecute, Resources: []string{"web_fetch", "http_request", origin}}}, Limits: execution.BotMandateLimits(config.DefaultBotMandateConfig()), TTL: time.Hour}, nil
+		return store.BotMandatePolicy{Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{"task"}}, {Action: execution.CapabilityToolExecute, Resources: []string{"ask_user", "web_fetch", "http_request", origin}}}, Limits: execution.BotMandateLimits(config.DefaultBotMandateConfig()), TTL: time.Hour}, nil
 	}
 	principal, _ := execution.PrincipalFromContext(f.ctx)
 	principal.Authentication = execution.AuthMethodPlatformJWT
@@ -85,6 +86,43 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	if err != nil || run.MandateRef == nil {
 		t.Fatalf("missing durable pin %+v %v", run, err)
 	}
+	// A title initially grants question-only authority. Complete the real persisted
+	// question/owner-answer transition before reconstructing task authorization.
+	auth = store.WithBotMandateAdmission(auth, policy)
+	auth = store.WithBotMessageAdmission(auth, f.registry)
+	identity := execution.BotRunIdentity{BotID: receipt.ID, RunID: run.ID, Version: run.Version, ActorID: principal.Subject, OrgSlug: principal.OrgSlug, TeamSlug: principal.TeamSlug}
+	worker := execution.WithBotRunIdentity(auth, identity)
+	lease, err := f.repo.ClaimRun(worker, store.BotClaimRequest{BotID: receipt.ID, RunID: run.ID, WorkerID: "mandate-confirmation", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{"questionId":"weather-task","kind":"select","prompt":"Which weather task?","allow_custom_answer":true,"options":[{"id":"current","label":"Read the current weather"},{"id":"forecast","label":"Read the weather forecast"},{"id":"compare","label":"Compare weather reports"}]}`)
+	action := execution.ActionDescriptor{Tool: "ask_user", Effect: execution.EffectRead, Arguments: payload, ConstraintsVerified: true}
+	digest, err := action.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := f.repo.RequestApproval(worker, lease, store.BotApproval{BotID: receipt.ID, RunID: run.ID, Version: run.Version, Action: action, ActionDigest: digest, Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "weather-task", Payload: payload}, ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.InteractionCheckpointFormat, ApprovalID: approval.ID, BotID: receipt.ID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting for weather assignment", NeedsApproval: []uuid.UUID{approval.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("weather retrieved before confirmation")
+	}
+	if _, err = f.repo.(store.BotApproveContinueStore).DecideAndRequeueApprovedRun(auth, store.BotApproveContinueRequest{BotID: receipt.ID, ApprovalID: approval.ID, ActorID: uuid.MustParse(principal.Subject), ActionDigest: digest, Response: &store.BotInteractionResponse{QuestionID: "weather-task", Answer: "Read the current weather"}}); err != nil {
+		t.Fatal(err)
+	}
+	run, err = f.repo.GetRun(auth, receipt.ID, run.ID)
+	if err != nil || run.TitleConfirmation == nil || run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed {
+		t.Fatalf("assignment not confirmed: %+v %v", run, err)
+	}
 	f.registry.Close()
 	runtime, err := entstore.NewBotMandateRuntime(f.repo, policy)
 	if err != nil {
@@ -97,7 +135,6 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	if _, err = execution.VerifyBotMandateAuthorization(context.Background(), runtime, *run.MandateRef, execution.BotMandatePurposeSchedule); err == nil {
 		t.Fatal("title granted recurrence")
 	}
-	identity := execution.BotRunIdentity{BotID: receipt.ID, RunID: run.ID, Version: run.Version, ActorID: principal.Subject, OrgSlug: principal.OrgSlug, TeamSlug: principal.TeamSlug}
 	m := &bot.MandateExecution{Authorization: authorization, Runtime: runtime, Identity: identity}
 	catalog, err := launcher.BotMandatedReadTools(m, tools.RoutineReadPolicy{Authorize: func(_ context.Context, o string) error {
 		if o != origin {
@@ -112,6 +149,9 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(catalog) != 2 {
+		t.Fatalf("confirmed mandate read catalog: got %d tools, want web_fetch and http_request", len(catalog))
 	}
 	tc := mandateHTTPToolContext{base: execution.WithBotRunIdentity(context.Background(), identity), session: run.SessionID.String()}
 	executable := catalog[0].(interface {

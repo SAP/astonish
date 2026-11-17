@@ -9,6 +9,7 @@ import (
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 )
 
 // botRetentionManager installs only a service-authorized, durable reservation.
@@ -41,7 +42,10 @@ func (w *BotWorker) botRetentionManager(repo store.BotStore, b store.Bot, claim 
 		if reserved == nil || reserved.Request.Home != home || reserved.Request.BotID != b.ID || reserved.Request.ExpectedRevision != b.Revision || reserved.OwnerID != b.OwnerID.String() || reserved.OrgSlug != p.OrgSlug || reserved.TeamSlug != p.TeamSlug {
 			return nil, store.ErrBotConflict
 		}
-		*claim = *reserved // Value copy: post-delete receipt never rereads mutable Bot state.
+		if claim.Request.BotID != uuid.Nil && *claim != *reserved {
+			return nil, store.ErrBotConflict
+		}
+		*claim = *reserved // Rechecks must preserve the original reservation fence.
 		return &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: reserved.OrgSlug, TeamID: reserved.TeamSlug, UserID: reserved.OwnerID, BotID: b.ID.String()}, Backend: sandbox.BackendKind(home.Backend), Ref: home.StorageKey}, nil
 	}}
 }

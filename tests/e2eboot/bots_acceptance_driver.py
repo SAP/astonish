@@ -40,6 +40,209 @@ LIVE_BOTS = ["TestBotsLiveLifecycle", "TestBotsLiveKubernetesRetainedHome"]
 RELEASE_SCENARIOS = {f"BOTS-{number:03d}" for number in range(1, 11)}
 
 
+TITLE_CONFIRMATION_BROWSER = ["TestBotTitleChatBrowserAcceptance", "TestBotAmbiguousTitleQuestionBrowserAcceptance",
+                              "TestBotThinkingRestoreBrowserAcceptance", "TestBotTitleConfirmationDockerBrowserAcceptance",
+                              "TestBotTitleTeamOptionBrowserAcceptance", "TestBotTitleTeamCustomBrowserAcceptance"]
+TITLE_CONFIRMATION_CASES = {
+    './pkg/launcher': ['TestBotTitleConfirmationFactoryJourney'],
+    './pkg/api': ['TestBotTitleConfirmationHTTPAcceptance', 'TestBotTitleConfirmationStateHTTPAcceptance', 'TestBotTitleConfirmedLaterQuestionContinuation', 'TestBotTitleStartHTTPAcceptance', 'TestBotRunStateHTTPAcceptance'],
+    './pkg/daemon': ['TestBotTitleConfiguredSearchHTTP', 'TestBotInteractiveAutoHomeHTTP', 'TestBotWorkerRecordedZeroExcludesOwnerWait', 'TestBotWorkerMeteredResumeReturnsCumulativeCommitUsage'],
+    './pkg/store/entstore': ['TestBotTitleConfirmationProcessRestart', 'TestBotTitlePublicResearchAdmission', 'TestInteractiveContinuationExpiredQuestion'],
+}
+
+
+DURABLE_PROGRESS_CASES = {
+    './pkg/api': ['TestBotProgressSixHourClockAcceptance', 'TestBotProgressEmployeeHTTP',
+                  'TestBotProgressRecoveryHTTP', 'TestBotProgressLifecycleHTTP',
+                  'TestBotProgressRestartHTTP', 'TestBotProgressDeleteHTTP', 'TestBotProgressStateSSE',
+                  'TestBotProgressSynthesisReceiptHTTP', 'TestBotProgressProcessRestartAcceptance',
+                  'TestBotProgressBrowserAcceptance', 'TestBotTitleConfirmationDockerBrowserAcceptance',
+                  'TestBotTitleConfirmedLaterQuestionContinuation', 'TestBotProgressReadJournalRoundTrip'],
+    './pkg/daemon': ['TestBotProgressScheduledAdmissionHTTP', 'TestBotPermanentDeleteHTTP'],
+    './pkg/store/entstore': ['TestBotProgressQuotaSuspension', 'TestBotProgressRollbackConcurrentAndCommit',
+                            'TestBotProgressActiveTimeAcrossRecovery', 'TestBotProgressFencesAndAccounting',
+                            'TestBotProgressSettlementAfterWorkAdvance', 'TestBotProgressQueuedAuthorityLoss',
+                            'TestBotProgressScheduledContinuation', 'TestBotProgressControllerDurableContextRestart',
+                            'TestBotProgressDurableDispatch', 'TestBotProgressSettledSuspendContinue'],
+    './pkg/bot': ['TestBotProgressControllerDecisions', 'TestBotProgressControllerCorrectionAndUnsafeBoundary',
+                  'TestBotProgressControllerPersistenceFailure', 'TestBotProgressBudgetCumulativeDurationAndAuthority'],
+    './pkg/provider': ['TestBotProgressBudgetModelOperationTimeout'],
+    './pkg/launcher': ['TestBotProgressDispatchToolWaitsForPersistedBoundary', 'TestBotProgressDispatchInteractiveNative',
+                      'TestBotProgressDispatchTrustedClassification', 'TestBotProgressDispatchCancellationDrainsChild',
+                      'TestBotProgressDispatchProviderFailClosed'],
+    './cmd/astonish': ['TestBotProgressPTYAcceptance'],
+}
+
+
+DURABLE_PROGRESS_SUBTESTS = {
+    './pkg/api': ['TestBotProgressProcessRestartAcceptance/settled',
+                  'TestBotProgressProcessRestartAcceptance/settled-write',
+                  'TestBotProgressProcessRestartAcceptance/in-flight',
+                  'TestBotProgressSixHourClockAcceptance/personal',
+                  'TestBotProgressSixHourClockAcceptance/team'],
+}
+
+
+def durable_progress(args):
+    """Strict fresh evidence. Never load live settings or accept historical receipts."""
+    allowed = {'PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
+               'GOROOT', 'GOPATH', 'GOCACHE', 'GOMODCACHE', 'GOPROXY', 'GONOSUMDB', 'GOPRIVATE',
+               'CGO_ENABLED', 'CC', 'CXX', 'PKG_CONFIG_PATH', 'DOCKER_HOST', 'DOCKER_CONTEXT',
+               'DOCKER_CONFIG', 'ASTONISH_BOT_BROWSER_PATH', 'ASTONISH_SANDBOX_IMAGE'}
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    report = {'schema_version': 1, 'stage': 'durable-progress', 'status': 'BLOCKED', 'gates': [],
+              'clock_boundary': 'employee controller only; real lease/auth/operation clocks',
+              'unverified': ['two-hour wall-clock soak', 'real-provider quality', 'PostgreSQL concurrency',
+                             'Kubernetes', 'full tool-node overlay']}
+    path = args.report
+    if path is None:
+        fd, name = tempfile.mkstemp(prefix='astonish-durable-progress-', suffix='.json')
+        os.close(fd)
+        path = Path(name)
+    errors = []
+    for key in ('ASTONISH_MEMORY_BROWSER_ACCEPTANCE', 'ASTONISH_TEST_DOCKER'):
+        if os.environ.get(key) != '1':
+            errors.append(key + '=1 required')
+    browser = env.get('ASTONISH_BOT_BROWSER_PATH', '')
+    if not browser or not Path(browser).is_absolute() or not os.access(browser, os.X_OK):
+        errors.append('ASTONISH_BOT_BROWSER_PATH must name an absolute executable browser')
+    if not env.get('ASTONISH_SANDBOX_IMAGE'):
+        errors.append('ASTONISH_SANDBOX_IMAGE must name an existing local image (no pull)')
+    for tool in ('go', 'npm', 'docker'):
+        if not shutil.which(tool, path=env.get('PATH')):
+            errors.append(tool + ' required on PATH')
+    if args.postgres:
+        if not os.environ.get('ASTONISH_TEST_DSN') or os.environ.get('ASTONISH_BOTS_TEST_DB_ISOLATED') != '1':
+            errors.append('PostgreSQL requires explicit ASTONISH_TEST_DSN and ASTONISH_BOTS_TEST_DB_ISOLATED=1')
+        errors.append('durable-progress PostgreSQL concurrency tier not yet implemented')
+    if args.soak or args.real_provider:
+        if args.config is None:
+            errors.append('optional soak/provider tier requires --config with isolated settings and finite spend limits')
+        errors.append('durable-progress wall-clock/provider tier not yet implemented; no provider launched')
+    started = time.monotonic()
+    try:
+        if errors:
+            report['errors'] = errors
+            for error in errors:
+                print('BLOCKED: ' + error)
+            return 2
+        env.update(ASTONISH_MEMORY_BROWSER_ACCEPTANCE='1', ASTONISH_TEST_DOCKER='1')
+        for command in (['docker', 'info', '--format', '{{.ServerVersion}}'],
+                        ['docker', 'image', 'inspect', '--format', '{{.Id}}', env['ASTONISH_SANDBOX_IMAGE']]):
+            if not run(command, env, timeout=30):
+                report['errors'] = ['physical Docker prerequisite failed']
+                return 2
+        if not run(['npm', '--prefix', 'web', 'run', 'build'], env):
+            report['status'] = 'FAIL'
+            report['errors'] = ['Studio build failed']
+            return 1
+        all_passed = True
+        for package, names in DURABLE_PROGRESS_CASES.items():
+            required = names + DURABLE_PROGRESS_SUBTESTS.get(package, [])
+            evidence = GoEvidence(required)
+            passed = run(go_command(package, names), env, evidence)
+            package_id = 'github.com/SAP/astonish/' + package.removeprefix('./')
+            qualified = {(package_id, name) for name in required}
+            missing = qualified - evidence.qualified_passes
+            issues = evidence.errors() + ['missing exact package/test: ' + '/'.join(n) for n in sorted(missing)]
+            if package_id not in evidence.packages_passed:
+                issues.append('package did not finish with pass: ' + package_id)
+            passed = passed and not issues
+            all_passed = all_passed and passed
+            report['gates'].append({'package': package, 'status': 'PASS' if passed else 'FAIL',
+                                    'required': required, 'passed': [n for p, n in sorted(evidence.qualified_passes) if (p, n) in qualified],
+                                    'errors': issues})
+        report['status'] = 'PASS' if all_passed else 'FAIL'
+        return 0 if all_passed else 1
+    except (OSError, TimeoutError, KeyboardInterrupt) as error:
+        report['status'] = 'FAIL'
+        report['errors'] = [redact(str(error), env)]
+        return 1
+    finally:
+        report['elapsed_seconds'] = round(time.monotonic() - started, 3)
+        path.write_text(json.dumps(report, indent=2) + '\n')
+        print('DURABLE_PROGRESS_REPORT ' + str(path), flush=True)
+        print('durable-progress: ' + report['status'] + '; optional tiers remain unverified', flush=True)
+
+
+def title_confirmation():
+    """Fresh built clients and owned Docker Home, never production configuration."""
+    # Unlike release clean_env, controlled gates must not receive provider keys.
+    env = {k: v for k, v in clean_env(os.environ).items()
+           if k in {'PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
+                    'GOROOT', 'GOPATH', 'GOCACHE', 'GOMODCACHE', 'GOPROXY', 'GONOSUMDB', 'GOPRIVATE',
+                    'CGO_ENABLED', 'CC', 'CXX', 'PKG_CONFIG_PATH', 'DOCKER_HOST', 'DOCKER_CONTEXT',
+                    'DOCKER_CONFIG', 'ASTONISH_BOT_BROWSER_PATH', 'ASTONISH_SANDBOX_IMAGE'}}
+    errors = []
+    if os.environ.get('ASTONISH_MEMORY_BROWSER_ACCEPTANCE') != '1':
+        errors.append('ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 required')
+    browser = env.get('ASTONISH_BOT_BROWSER_PATH', '')
+    if not browser or not Path(browser).is_absolute() or not os.access(browser, os.X_OK):
+        errors.append('ASTONISH_BOT_BROWSER_PATH must name an absolute executable browser')
+    if not env.get('ASTONISH_SANDBOX_IMAGE'):
+        errors.append('ASTONISH_SANDBOX_IMAGE must name an existing local image (no pull)')
+    for tool in ('go', 'npm', 'docker'):
+        if not shutil.which(tool, path=env.get('PATH')):
+            errors.append(tool + ' required on PATH')
+    if errors:
+        for error in errors:
+            print('BLOCKED: ' + error)
+        return 2
+    env.update(ASTONISH_MEMORY_BROWSER_ACCEPTANCE='1', ASTONISH_TEST_DOCKER='1')
+    try:
+        for probe in (['docker', 'info', '--format', '{{.ServerVersion}}'],
+                      ['docker', 'image', 'inspect', '--format', '{{.Id}}', env['ASTONISH_SANDBOX_IMAGE']]):
+            if not run(probe, env, timeout=30):
+                return 2
+        if not run(['npm', '--prefix', 'web', 'run', 'build'], env):
+            return 1
+        cases = list(TITLE_CONFIRMATION_CASES.items()) + [('./pkg/api', TITLE_CONFIRMATION_BROWSER),
+                                                         ('./cmd/astonish', ['TestBotTitleChatPTYAcceptance'])]
+        for package, names in cases:
+            evidence = GoEvidence(names)
+            if not run(go_command(package, names), env, evidence):
+                return 1
+            qualified = {('github.com/SAP/astonish/' + package.removeprefix('./'), name) for name in names}
+            if not qualified.issubset(evidence.qualified_passes):
+                print('EVIDENCE FAILURE: missing exact package/test run-pass evidence')
+                return 1
+    except (OSError, TimeoutError) as error:
+        print('BLOCKED: ' + redact(str(error), env))
+        return 2
+    print('title-confirmation: personal/team built-browser answers, PTY, configured-search HTTP and controlled lifecycle passed; real Docker Home absence/provisioning/mount receipt passed. Team title admission uses production HTTP because NewBotDialog is personal-only. Two-process SQLite/authorization restart passed. Full tool-node overlay, Task files and real-provider suggestion quality/latency remain separate acceptance obligations.')
+    return 0
+
+
+def title_confirmation_contract():
+    """No-skip, isolated loopback HTTP and compatibility evidence, not release proof."""
+    cases = {
+        './pkg/launcher': ['TestBotTitleConfirmationFactoryJourney'],
+        './pkg/api': ['TestBotTitleConfirmationHTTPAcceptance'],
+        './pkg/daemon': ['TestBotTitleConfiguredSearchHTTP', 'TestBotInteractiveAutoHomeHTTP', 'TestBotWorkerRecordedZeroExcludesOwnerWait', 'TestBotWorkerMeteredResumeReturnsCumulativeCommitUsage'],
+        './pkg/store/entstore': ['TestBotTitleConfirmationProcessRestart', 'TestBotTitlePublicResearchAdmission', 'TestInteractiveContinuationExpiredQuestion'],
+    }
+    for package, names in cases.items():
+        result = subprocess.run(['go', 'test', '-json', '-count=1', package, '-run', '^(' + '|'.join(names) + ')$'], cwd=ROOT, env=clean_env(os.environ), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        passed = set()
+        skipped = False
+        for line in result.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                print(line)
+                continue
+            if event.get('Action') == 'skip':
+                skipped = True
+            if event.get('Action') == 'pass':
+                passed.add(event.get('Test'))
+            if event.get('Output'):
+                print(event['Output'], end='')
+        if result.returncode or skipped or not set(names).issubset(passed):
+            return 1
+    print('title-confirmation-contract: controlled production factory, HTTP and ordinary-question compatibility passed; real provider quality and physical sandbox not exercised')
+    return 0
+
+
 def redact(text, env):
     secrets = []
     for key, value in env.items():
@@ -298,10 +501,27 @@ def main(argv=None):
     parser.add_argument("--preflight", action="store_true", help="check prerequisites only; not acceptance")
     parser.add_argument("--local-only", action="store_true", help="partial local evidence; always non-release exit 3")
     stages = parser.add_mutually_exclusive_group()
+    stages.add_argument('--stage', choices=('title-confirmation-contract', 'title-confirmation', 'durable-progress'), help='strict title confirmation contract or built-client/owned Docker acceptance')
     stages.add_argument('--skills-stage', choices=('all', 'recovery', 'postgres'), help='strict skills acceptance (separate from full Bot release)')
     stages.add_argument('--agent-stage', choices=('execution', 'progress', 'learning', 'continuity', 'postgres', 'all'), help='strict agent acceptance (separate from full Bot release)')
     parser.add_argument('--config', type=Path, help='explicit isolated skills or agent launcher configuration')
+    parser.add_argument('--report', type=Path, help='durable-progress machine-readable evidence output')
+    parser.add_argument('--soak', action='store_true', help='request optional two-hour wall-clock tier (blocks until implemented)')
+    parser.add_argument('--real-provider', action='store_true', help='request optional paid-provider tier (blocks until implemented)')
+    parser.add_argument('--postgres', action='store_true', help='request dedicated durable-progress PostgreSQL tier')
     args = parser.parse_args(argv)
+    if args.stage == 'durable-progress':
+        if args.preflight or args.local_only or (args.config and not (args.soak or args.real_provider)):
+            parser.error('durable-progress forbids partial modes; --config requires optional soak/provider tier')
+        return durable_progress(args)
+    if args.report or args.soak or args.real_provider or args.postgres:
+        parser.error('--report/--soak/--real-provider/--postgres require --stage durable-progress')
+    if args.stage:
+        if args.preflight or args.local_only or args.config:
+            parser.error('--stage forbids --preflight, --local-only and --config')
+        if args.stage == 'title-confirmation':
+            return title_confirmation()
+        return title_confirmation_contract()
     if args.agent_stage:
         if args.preflight or args.local_only:
             parser.error('--agent-stage forbids --preflight and --local-only')

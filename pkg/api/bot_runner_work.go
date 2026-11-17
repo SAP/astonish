@@ -429,7 +429,9 @@ func (s *botAgentWorkService) flushAccess(ctx context.Context, w *store.BotWorkS
 		if err != nil {
 			return nil, err
 		}
-		if err := s.bindEvidence(ctx, next, []string{captured.Reference.Ref}); err != nil {
+		// evidence already loaded and hashed the durable same-run response. Bind
+		// that exact reference without scanning and encoding the transcript twice.
+		if err := bindBotCapturedEvidence(next, captured.Reference); err != nil {
 			return nil, err
 		}
 		for _, fact := range facts {
@@ -655,18 +657,27 @@ func (s *botAgentWorkService) bindEvidence(ctx context.Context, w *store.BotWork
 		if err != nil {
 			return err
 		}
-		found := false
-		for _, existing := range w.AgentWork.Evidence {
-			if existing.Ref == ref {
-				if existing != result.Reference {
-					return store.ErrBotConflict
-				}
-				found = true
+		if err := bindBotCapturedEvidence(w, result.Reference); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bindBotCapturedEvidence accepts only a reference returned by evidence(), not
+// caller-provided metadata. Keep identity/digest conflict checks on both paths.
+func bindBotCapturedEvidence(w *store.BotWorkState, reference store.BotWorkEvidenceReference) error {
+	found := false
+	for _, existing := range w.AgentWork.Evidence {
+		if existing.Ref == reference.Ref {
+			if existing != reference {
+				return store.ErrBotConflict
 			}
+			found = true
 		}
-		if !found {
-			w.AgentWork.Evidence = append(w.AgentWork.Evidence, result.Reference)
-		}
+	}
+	if !found {
+		w.AgentWork.Evidence = append(w.AgentWork.Evidence, reference)
 	}
 	return nil
 }
@@ -1127,6 +1138,9 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	req.Skill = w.Contract.Skill
 	var completion ChatCompletion
 	result, err = produce(req, &completion)
+	if result.ProgressCheckpoint != nil {
+		return
+	}
 	// Optional tools may have advanced work while the producer was running.
 	// Final capture must extend that exact state, never overwrite it with preflight.
 	if service, ok := bot.BotWorkServicesFromContext(ctx).(*botAgentWorkService); ok {
@@ -1256,6 +1270,9 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 	// The auxiliary model is the same already-metered owner model, never a new
 	// client or authority. Setup failures use botChatFailure's fallback instead.
 	defer func() {
+		if result.ProgressCheckpoint != nil {
+			return
+		}
 		cause := err
 		if cause == nil && result.Failure != nil {
 			cause = result.Failure

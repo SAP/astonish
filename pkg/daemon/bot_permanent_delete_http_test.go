@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -178,6 +179,36 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 				repo = ods.ForUser(owner).Bots()
 			}
 			ownerCtx := principal(ctx, owner)
+			dbPath := filepath.Join(dir, "orgs", org.Slug, "personal", owner+".db")
+			if scope == "team" {
+				dbPath = filepath.Join(dir, "orgs", org.Slug, "teams", team.Slug+".db")
+			}
+			rows, e := sql.Open("sqlite", dbPath)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer rows.Close()
+			execSQL := func(query string, args ...any) {
+				t.Helper()
+				if _, e := rows.ExecContext(ctx, query, args...); e != nil {
+					t.Fatal(e)
+				}
+			}
+			count := func(query string, want int, args ...any) {
+				t.Helper()
+				var n int
+				if e := rows.QueryRowContext(ctx, query, args...).Scan(&n); e != nil || n != want {
+					t.Fatalf("SQL count %s = %d, want %d: %v", query, n, want, e)
+				}
+			}
+			jobs := map[store.BotID]string{}
+			for _, seeded := range []store.Bot{b, other} {
+				jobs[seeded.ID] = uuid.NewString()
+				execSQL(`INSERT INTO scheduled_jobs(id,name,schedule,mode,payload,status) VALUES (?,'delete-proof','* * * * *','bot_trigger',?,'active')`, jobs[seeded.ID], fmt.Sprintf(`{"bot_id":%q}`, seeded.ID))
+				task := uuid.NewString()
+				execSQL(`INSERT INTO bot_tasks(id,bot_id,key,home_path,title) VALUES (?,?,'proof','tasks/proof','Proof')`, task, seeded.ID.String())
+				execSQL(`INSERT INTO bot_task_revisions(id,bot_id,task_id,revision,digest,size_bytes,authority_constraint_ref,data) VALUES (?,?,?,1,'proof',5,'fixture','{}')`, uuid.NewString(), seeded.ID.String(), task)
+			}
 			path := "/api/studio/bots/" + b.ID.String()
 			request("POST", path+"/permanent-delete"+suffix, owner, `{"expected_revision":1,"confirm":false}`, 400)
 			request("POST", path+"/permanent-delete"+suffix, owner, `{"expected_revision":1,"confirm":true,"reason":"not allowed"}`, 400)
@@ -195,13 +226,24 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			child := uuid.NewString()
+			execSQL(`INSERT INTO sessions(id,parent_id) VALUES (?,?)`, child, b.HomeSessionID.String())
+			for _, sid := range []string{b.HomeSessionID.String(), child, other.HomeSessionID.String()} {
+				execSQL(`INSERT INTO session_events(session_id,event_data) VALUES (?,?)`, sid, `{"content":"deletion history"}`)
+				execSQL(`INSERT INTO memories(id,chunk_text,session_id) VALUES (?,?,?)`, uuid.NewString(), "deletion history", sid)
+			}
 			body := fmt.Sprintf(`{"expected_revision":%d,"confirm":true}`, b.Revision)
 			request("POST", path+"/permanent-delete"+suffix, owner, `{"expected_revision":999,"confirm":true}`, 409)
 			request("POST", path+"/permanent-delete"+suffix, owner, body, 202)
-			deleted := request("GET", path+suffix, owner, "", 200)
-			request("POST", path+"/restore"+suffix, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"restore"}`, deleted.Revision), 409)
+			request("GET", path+suffix, owner, "", http.StatusGone)
+			request("GET", path+"/permanent-delete"+suffix, owner, "", http.StatusAccepted)
+			deleted, e := repo.Get(ownerCtx, b.ID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			request("POST", path+"/restore"+suffix, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"restore"}`, deleted.Revision), http.StatusGone)
 			backend.fail = true
-			if e := worker.reconcileRetention(ownerCtx, repo, deleted); e == nil {
+			if e := worker.reconcileRetention(ownerCtx, repo, *deleted); e == nil {
 				t.Fatal("expected physical failure")
 			}
 			request("POST", path+"/permanent-delete"+suffix, owner, body, 202)
@@ -210,7 +252,7 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			}
 			backend.fail = false
 			outage := &permanentPurgeOutage{BotStore: repo, BotHomeCleanupStore: repo.(store.BotHomeCleanupStore), BotCleanupStore: repo.(store.BotCleanupStore), BotPermanentDeleteStore: repo.(store.BotPermanentDeleteStore)}
-			if e := worker.reconcileRetention(ownerCtx, outage, deleted); e == nil || !outage.verified {
+			if e := worker.reconcileRetention(ownerCtx, outage, *deleted); e == nil || !outage.verified {
 				t.Fatal("expected verified purge outage", e)
 			}
 			if _, e := repo.Get(ownerCtx, b.ID); e != nil {
@@ -231,6 +273,19 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			if _, e := repo.GetRun(ownerCtx, b.ID, source.ID); !errors.Is(e, store.ErrBotNotFound) {
 				t.Fatal("run retained", e)
 			}
+			for _, table := range []string{"bot_tasks", "bot_task_revisions"} {
+				count("SELECT count(*) FROM "+table+" WHERE bot_id=?", 0, b.ID.String())
+				count("SELECT count(*) FROM "+table+" WHERE bot_id=?", 1, other.ID.String())
+			}
+			count("SELECT count(*) FROM scheduled_jobs WHERE id=?", 0, jobs[b.ID])
+			count("SELECT count(*) FROM scheduled_jobs WHERE id=? AND status='active'", 1, jobs[other.ID])
+			for _, sid := range []string{b.HomeSessionID.String(), child} {
+				count("SELECT count(*) FROM sessions WHERE id=?", 0, sid)
+				count("SELECT count(*) FROM session_events WHERE session_id=?", 0, sid)
+				count("SELECT count(*) FROM memories WHERE session_id=?", 0, sid)
+			}
+			count("SELECT count(*) FROM session_events WHERE session_id=?", 1, other.HomeSessionID.String())
+			count("SELECT count(*) FROM memories WHERE session_id=?", 1, other.HomeSessionID.String())
 			if contents, e := os.ReadFile(otherArtifact); e != nil || string(contents) != "keep unrelated artifact" {
 				t.Fatal("unrelated artifact changed", e)
 			}

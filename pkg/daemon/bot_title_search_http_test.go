@@ -22,21 +22,31 @@ import (
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 type titleResearchHTTPModel struct {
-	reviews int
-	step    int
-	url     string
-	missing bool
+	questionAsked bool
+	reviews       int
+	step          int
+	url           string
+	missing       bool
 }
 
 func (titleResearchHTTPModel) Name() string { return "title-research-fixture" }
 func (m *titleResearchHTTPModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if !m.questionAsked {
+		m.questionAsked = true
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "title-search-question", Name: "ask_user", Args: map[string]any{
+				"prompt": "Which AI news assignment should I carry out?", "kind": "select", "allow_custom_answer": true,
+				"options": []any{map[string]any{"id": "brief", "label": "Research current AI news"}, map[string]any{"id": "compare", "label": "Compare AI research announcements"}, map[string]any{"id": "sources", "label": "Find original AI news sources"}},
+			}}}}}}, nil)
+		}
+	}
 	if response, ok := m.review(request); ok {
 		return response
 	}
@@ -245,14 +255,17 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 					if !hasAsk {
 						t.Fatal("authorized mandated branch lacks actual ask_user adapter")
 					}
+					if q.Run.TitleConfirmation == nil || q.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed {
+						t.Fatal("research preparation before title confirmation")
+					}
 					if episode == nil {
-						t.Fatal("title missing research-first episode")
+						t.Fatal("confirmed title missing search-before-detail guard")
 					}
 					if missing {
 						if _, err := launcher.BotEffectiveConfiguredSearchRoute(c, s.Services); err == nil {
 							t.Fatal("missing selection fell back")
 						}
-						if err := episode.AllowDetail(c, q.Run.ID, q.Run.SessionID.String(), detail.URL); err == nil {
+						if err := episode.AllowDetail(c, q.Run.ID, q.Run.SessionID.String(), detail.URL); err == nil || err.Error() != "configured search must return sources before detail retrieval; retry an admitted facet or report search unavailable" {
 							t.Fatal("missing engine allowed detail")
 						}
 					}
@@ -263,8 +276,11 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 				}
 				defer worker.Stop()
 				services := &store.Services{Bots: repo, PersonalBots: repo, Sessions: sessions, PersonalSessions: sessions, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
+				router := mux.NewRouter()
+				router.HandleFunc("/", api.BotCreateHandler).Methods(http.MethodPost)
+				router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods(http.MethodPost)
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					api.BotCreateHandler(w, r.WithContext(store.WithServices(auth, services)))
+					router.ServeHTTP(w, r.WithContext(store.WithServices(auth, services)))
 				}))
 				defer server.Close()
 				response, err := http.Post(server.URL+"?scope="+string(scope), "application/json", strings.NewReader(`{"name":"AI News","start_from_title":true,"idempotency_key":"unchanged-title"}`))
@@ -283,28 +299,51 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 				if err := json.Unmarshal(raw, &created); err != nil || created.InitialTurn == nil {
 					t.Fatalf("receipt %s %v", raw, err)
 				}
-				internal, err := execution.WithPrincipal(t.Context(), execution.Principal{Kind: execution.PrincipalKindService, ClientID: "home-registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "title-search", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: created.ID, ExpectedRevision: created.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: created.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-					t.Fatal(err)
+				version, err := repo.GetVersion(auth, created.ID, created.Version)
+				if err != nil || version.Budget.RuntimePolicy.EffectiveMode() != execution.BotRuntimeModeProgressV1 || version.Budget.RuntimePolicy.MaxActiveSeconds != nil {
+					t.Fatalf("new title did not select default progress policy: %+v %v", version, err)
 				}
 				if err := pin(auth, created.HomeSessionID.String(), "controlled", "model"); err != nil {
 					t.Fatal(err)
 				}
 				if err := worker.execute(auth, repo, sessions, created.ID, created.InitialTurn.Run.ID); err != nil {
-					t.Fatalf("execute title research: %v", err)
+					t.Fatalf("generate title question: %v", err)
+				}
+				waiting, err := repo.GetRun(auth, created.ID, created.InitialTurn.Run.ID)
+				if err != nil || waiting.Status != store.RunWaitingApproval || waiting.TitleConfirmation == nil || waiting.TitleConfirmation.State != store.BotTitleConfirmationWaiting || searchCalls != 0 || detailCalls != 0 || mdl.step != 0 {
+					t.Fatalf("research occurred before confirmation: run=%+v search=%d detail=%d step=%d err=%v", waiting, searchCalls, detailCalls, mdl.step, err)
+				}
+				approvals, err := repo.ListApprovals(auth, created.ID, store.BotPage{})
+				if err != nil || len(approvals) != 1 || approvals[0].Interaction == nil {
+					t.Fatalf("missing title question: %+v %v", approvals, err)
+				}
+				approval := approvals[0]
+				answerBody, err := json.Marshal(map[string]any{"action_digest": approval.ActionDigest, "response": store.BotInteractionResponse{QuestionID: approval.Interaction.QuestionID, Answer: "brief"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				answerURL := fmt.Sprintf("%s/bots/%s/approvals/%s/approve-and-continue?scope=%s", server.URL, created.ID, approval.ID, scope)
+				answerResponse, err := server.Client().Post(answerURL, "application/json", strings.NewReader(string(answerBody)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				answerRaw, err := io.ReadAll(answerResponse.Body)
+				answerResponse.Body.Close()
+				if err != nil || answerResponse.StatusCode != http.StatusAccepted {
+					t.Fatalf("answer title: status=%d body=%s err=%v", answerResponse.StatusCode, answerRaw, err)
+				}
+				if err := worker.execute(auth, repo, sessions, created.ID, created.InitialTurn.Run.ID); err != nil {
+					t.Fatalf("execute confirmed title research: %v", err)
 				}
 				saved, err := repo.GetRun(auth, created.ID, created.InitialTurn.Run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if mdl.reviews != 1 || saved.Report.Work == nil || saved.Report.Work.CandidateDigest == "" {
-					t.Fatalf("missing persisted evidence review: calls=%d report=%+v", mdl.reviews, saved.Report)
+				if !missing && (mdl.reviews != 0 || !store.BotReportIsReadOnlyResult(saved.Report) || saved.Report.Work == nil || saved.Report.Work.CandidateDigest == "" || saved.Report.Work.RunID != saved.ID) {
+					t.Fatalf("missing fresh read-only result or unexpected reviewer: calls=%d report=%+v", mdl.reviews, saved.Report)
 				}
 				if missing {
-					if searchCalls != 0 || detailCalls != 0 || !strings.Contains(saved.Report.Summary, "Configured search unavailable") {
+					if searchCalls != 0 || detailCalls != 0 || saved.Report.Summary != "Configured search unavailable; no detail source fetched. Configure scoped search before researching AI News." {
 						t.Fatalf("untruthful blocker: %+v search=%d fetch=%d", saved, searchCalls, detailCalls)
 					}
 				} else if saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 {

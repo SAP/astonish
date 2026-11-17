@@ -1,5 +1,112 @@
 # Bot specification traceability and release checklist
 
+## Durable-progress controlled gate — 2026-11-16
+
+Run `python3 -B tests/e2eboot/bots_acceptance_driver.py --stage durable-progress`
+with `--report /tmp/astonish-durable-progress-report.json` and the explicit browser
+and Docker prerequisites in `tests/e2eboot/README.bots-acceptance.md`.
+Do not substitute historical receipts or a package build for this gate.
+
+- Required: personal/team six-hour controller-clock tests; settled-read,
+  settled-write and unresolved-write **OS process** restarts; same assignment,
+  restored evidence, monotonic accounting and no replay.
+- Required: controlled production HTTP/store lifecycle, schedule coalescing,
+  authority loss and authenticated continuation, quota controls, cancellation,
+  deletion and trusted synthesis nonexecution.
+- Required: built Studio browser, real terminal PTY and owned physical Docker
+  Home readiness/mount/cleanup. Exact package/test run-pass records and all named
+  restart/clock subtests are mandatory; any skip or missing test fails.
+- Fresh scoped evidence: all three `TestBotProgressProcessRestartAcceptance` cases
+  passed, including real lease expiry for the unresolved write and exactly one
+  final publication for both settled cases. Acceptance-driver Python tests passed
+  (132 tests), and the plan's scoped Go lint reported `0 issues.`
+- Final parent gate remains pending: the current strict run failed
+  `TestBotTitleConfirmationDockerBrowserAcceptance` with "Bot Home exposed a tool
+  activity card" after restoring the waiting question and submitting its answer.
+  It therefore does not establish physical Home provisioning/cleanup acceptance.
+  A corrected built-client rerun and final diff checks are required; failed
+  attempts are not acceptance and must not enable the new default.
+- Unverified: real-provider judgment/quality, two-hour wall-clock soak,
+  PostgreSQL concurrency, Kubernetes and full tool-node overlay. Optional tier
+  flags currently block with exit 2; they do not silently skip or use live settings.
+
+No current user Bot, normal daemon, production database, schedule or credential
+configuration is changed by this controlled gate.
+
+## Permanent deletion acceptance checkpoint — 2026-11-16
+
+The focused deletion gate includes these exact tests:
+
+- `TestBotPermanentDeleteAttachedDockerAcceptance`: production HTTP + real scoped
+  SQLite + production Docker backend in one disposable fixture. Running owned
+  attachment, pending content 410/status 202, forged-attachment refusal, fresh
+  controller/registry polling, physical resource absence, SQL Task/history/job
+  purge, final 404 and unchanged unrelated scheduler sentinel.
+- `TestBotPermanentDeleteHTTP/personal` and `/team`: physical-directory cleanup
+  failure and post-verification SQL outage, fresh-worker completion without a
+  backend/client retry, owned rows absent and peer Bot/files/Tasks/jobs preserved.
+- `TestBotPermanentDeleteBrowserAcceptance`: actual built Studio sidebar and
+  cancellation/confirmation, 202/410/status202/404, observer-independent worker
+  cleanup, disposable Docker volume absence and SQLite/FTS purge with preserved
+  peer file and shared credential. This browser fixture uses a controlled volume
+  adapter; the production attached backend is verified by the first test.
+
+Current scoped tests passed **3 top-level tests, 5 named PASS records including
+personal/team subtests, zero skips**, and scoped Go lint reports `0 issues.`
+The Studio production build/typecheck passed. Earlier gate attempts exposed a
+browser opt-in mismatch (skip) and unused registry assignment (lint failure);
+those do not count as acceptance and were corrected before the no-skip rerun.
+
+Restart means replacement of worker/backend/registry objects with durable registry
+reopen, not an OS daemon-process restart. PostgreSQL/Kubernetes deletion and live
+Apple News cleanup are not claimed. No normal daemon restart, shared prune, live
+user-resource mutation, provider spending or deployment occurred. SQLite keeps
+freed pages reusable; deletion performs no automatic global VACUUM. The older
+title-confirmation obligations below remain unclosed.
+
+## Title-confirmation acceptance checkpoint — 2026-11-15
+
+New title starts require a persisted `ask_user` interpretation before ordinary
+execution. The selected option/custom answer supplies intent, never blanket tool,
+external-effect or recurrence permission. Three/four suggestions and custom text
+use existing Studio/terminal question controls; waiting time is excluded from
+active runtime. Historical runs, direct messages and schedules are not migrated.
+
+The focused invocation is `bots_acceptance.sh --stage title-confirmation` with
+explicit `ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1`, absolute executable
+`ASTONISH_BOT_BROWSER_PATH` and existing local `ASTONISH_SANDBOX_IMAGE`.
+It builds Studio and requires exact non-skipped lifecycle, actual browser, owned
+Docker Home and title PTY evidence. Missing prerequisites block rather than skip.
+Provider secrets/production database settings are excluded from controlled gates.
+
+**Earlier failed evidence (retained; final acceptance pending a fresh gate):**
+built Studio compilation and the then-current 37 driver unit tests passed; actual
+Rod journeys failed before their question persisted. Logs
+`.tmp/title-confirmation-browser.log` and
+`.tmp/title-confirmation-browser-authorized.log` expose the old `ControlOnly()`
+rejection in `botBoundTool.Run` on real admitted draft-conversation titles.
+Factory-only success does not override this failure. No production guard was
+weakened in the acceptance fixture; a narrow production correction and fresh
+browser/PTY rerun are required.
+
+The owned Docker harness checks physical absence before confirmation and, after
+it, the worker-created Home binding, volume ownership, helper mount and receipt
+bytes. In the earlier failed attempts, post-answer assertions did **not run** past
+the blocker. This harness is not
+full tool-node overlay or research/Task-file evidence. Separately,
+`TestBotTitleConfirmationProcessRestart` now passes a controlled two-process
+SQLite/authorization restart proof and is required by both strict and contract
+manifests: the second test process reopens persisted confirmation state with a
+fresh authorization registry before accepting the owner answer. This is a
+question-repository subprocess check, not browser worker replacement or an actual
+daemon restart/browser recovery drill. Full overlay and Task-file publication
+remain unverified by the title-confirmation gate.
+Personal/team built-browser parity, configured search after confirmation, real
+provider question relevance/title-to-card latency and final live result quality
+remain obligations unless separately recorded by a current invocation. Historical
+failed live grounding below is retained; no normal daemon restart/deploy, existing
+user-resource edits, provider spending, shared Docker cleanup or commit occurred.
+
 ## Employee regression correction checkpoint — 2026-11-14
 
 The six user requirements supersede optional employee review and producer-triggered

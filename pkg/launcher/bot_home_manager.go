@@ -153,5 +153,29 @@ func (m *BotHomeManager) Delete(ctx context.Context, home store.BotHomeBinding) 
 	if home.ID == uuid.Nil || home.BotID == uuid.Nil || home.Revision < 1 || binding == nil || binding.Validate() != nil || binding.Scope.BotID != home.BotID.String() || string(binding.Backend) != home.Backend || binding.Ref != home.StorageKey {
 		return store.ErrBotConflict
 	}
-	return deleter.DeleteBotHome(ctx, binding)
+	// Capture a value, not the authorizer's mutable pointer. Every recheck must
+	// return the same server-derived owner/tenant as the original reservation.
+	exact := *binding
+	recheck := func(c context.Context) error {
+		if err := c.Err(); err != nil {
+			return err
+		}
+		current, err := m.AuthorizeDelete(c, home)
+		if err != nil {
+			return err
+		}
+		if current == nil || *current != exact {
+			return store.ErrBotConflict
+		}
+		return nil
+	}
+	if reconciler, ok := m.Backend.(sandbox.BotHomeSessionCleanupBackend); ok {
+		if err := reconciler.ReconcileBotHomeSessions(ctx, &exact, recheck); err != nil {
+			return err
+		}
+	}
+	if err := recheck(ctx); err != nil {
+		return err
+	}
+	return deleter.DeleteBotHome(ctx, &exact)
 }

@@ -95,7 +95,7 @@ func botSessionReadAllowed(r *http.Request, svc *store.Services, meta *store.Ses
 		return false
 	}
 	b, err := repo.Get(r.Context(), id)
-	if err != nil || b == nil || b.ID != id || b.Scope != scope || b.OwnerID.String() != meta.UserID {
+	if err != nil || b == nil || b.PermanentDelete || b.ID != id || b.Scope != scope || b.OwnerID.String() != meta.UserID {
 		return false
 	}
 	switch meta.Purpose {

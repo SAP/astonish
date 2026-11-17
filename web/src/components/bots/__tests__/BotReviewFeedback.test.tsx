@@ -10,17 +10,19 @@ const bot = { id: 'bot', scope: 'personal', status: 'paused', version: 1 } as Bo
 const approval: BotApproval = { id: 'a', run_id: 'r', version: 1, action_digest: 'exact-digest', action: { summary: 'Send only this email' }, status: 'pending', expires_at: '2099-01-01' }
 beforeEach(() => vi.clearAllMocks())
 
-it.each([Continuation.Blocked, Continuation.Queued])('uses shared answer receipt for %s without rewriting the question', async continuation => {
+it.each([Continuation.Blocked, Continuation.Queued])('shows the saved answer for %s without lifecycle receipts or rewriting the question', async continuation => {
   const prompt = 'Where should I send this exact report?'
   const question: BotApproval = { ...approval, interaction: { kind: 'chat_question', question_id: 'exact-q', payload: { kind: 'text', prompt } } }
-  vi.mocked(approveAndContinue).mockResolvedValue({ approval: { ...question, status: 'consumed' }, run_id: 'r', continuation })
+  vi.mocked(approveAndContinue).mockResolvedValue({ approval: { ...question, status: continuation === Continuation.Blocked ? 'approved' : 'consumed', response: { question_id: 'exact-q', answer: 'Only me' } }, run_id: 'r', continuation })
   render(<BotReviewCard bot={bot} approval={question} readOnly={false} onChange={vi.fn()} />)
   expect(screen.getAllByText(prompt)).toHaveLength(1)
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Only me' } })
   fireEvent.click(screen.getByRole('button', { name: /submit/i }))
-  const receipt = (await screen.findByText(botEmployeeFeedback({ kind: 'decision_saved', decision: 'answer', continuation }))).closest('[role="status"]')
-  expect(receipt).toHaveClass('markdown-body')
-  expect(receipt).toHaveTextContent(botEmployeeFeedback({ kind: 'decision_saved', decision: 'answer', continuation }))
+  const card = await screen.findByRole('article', { name: 'Answered question' })
+  expect(card).toHaveTextContent('Your answer: Only me')
+  expect(card).not.toHaveTextContent(/consumed|approved|queued|completed/i)
+  expect(screen.queryByText(botEmployeeFeedback({ kind: 'decision_saved', decision: 'answer', continuation }))).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /continue/i })).not.toBeInTheDocument()
   expect(screen.getAllByText(prompt)).toHaveLength(1)
   expect(approveAndContinue).toHaveBeenCalledExactlyOnceWith(bot, question, 'Only me')
 })

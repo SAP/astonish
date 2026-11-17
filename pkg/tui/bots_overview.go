@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -74,10 +75,10 @@ func (m model) overviewRunStates(snap *store.BotSnapshot) []store.BotRunState {
 	tr := events.NewTranscript()
 	tr.BotID, tr.SessionID = snap.Bot.ID.String(), snap.Bot.HomeSessionID.String()
 	tr.BotRunStates = make(map[string]store.BotRunState)
-	if m.tr != nil {
-		tr.BotID, tr.SessionID = m.tr.BotID, m.tr.SessionID
-		for id, state := range m.tr.BotRunStates {
-			tr.BotRunStates[id] = state
+	if m.tr != nil && m.tr.BotID == snap.Bot.ID.String() {
+		tr.SessionID = m.tr.SessionID
+		for _, state := range m.tr.BotRunStates {
+			tr.Apply(events.Event{Kind: events.KindBotRunState, BotRunState: &state})
 		}
 	}
 	for _, state := range snap.RunStates {
@@ -152,6 +153,16 @@ func (m model) renderBotOverview() string {
 			s.WriteString("\nNo work result yet")
 		}
 		for _, state := range states {
+			if label, _ := events.BotProgressStatus(state); label != "" {
+				fmt.Fprintf(&s, "\nRun %s · %s · checkpoint %d\n", state.RunID, label, state.Progress.Revision)
+				if !state.CommittedAt.IsZero() {
+					fmt.Fprintf(&s, "Saved: %s\n", state.CommittedAt.Format("2006-01-02 15:04:05Z07:00"))
+				}
+				fmt.Fprintf(&s, "Active duration: %s\n", time.Duration(state.Progress.ActiveDurationNanos))
+				if state.Progress.CoalescedOccurrences > 0 {
+					fmt.Fprintf(&s, "Coalesced schedule ticks: %d\n", state.Progress.CoalescedOccurrences)
+				}
+			}
 			if state.Work != nil && (snap.LatestOutcome == nil || state.RunID != snap.LatestOutcome.ID) {
 				fmt.Fprintf(&s, "\nRun %s [%s]\n%s", state.RunID, state.Status, bot.RenderWorkDetails(state.Work))
 			}

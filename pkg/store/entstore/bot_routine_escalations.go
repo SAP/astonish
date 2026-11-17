@@ -102,13 +102,15 @@ func routineSuppressionKey(payload store.BotControlPayload, mandate store.BotMan
 	// direct-owner provenance, not model-supplied context or tool-call IDs.
 	allowed := routineAllowed(store.BotMandate{Constraints: policy.Constraints}, payload.Operation)
 	digest, _ := botHash(struct {
-		Payload       store.BotControlPayload
-		Revision      int64
-		MandateAllows bool
-		PolicyAllows  bool
-		Limits        store.BotMandateLimits
-		PolicyLimits  store.BotMandateLimits
-	}{payload, mandate.Ref.Revision, routineAllowed(mandate, payload.Operation), allowed, mandate.Limits, policy.Limits})
+		Payload             store.BotControlPayload
+		Revision            int64
+		MandateAllows       bool
+		PolicyAllows        bool
+		Limits              store.BotMandateLimits
+		PolicyLimits        store.BotMandateLimits
+		RuntimePolicy       *execution.BotRuntimePolicy
+		PolicyRuntimePolicy *execution.BotRuntimePolicy
+	}{payload, mandate.Ref.Revision, routineAllowed(mandate, payload.Operation), allowed, mandate.Limits, policy.Limits, mandate.RuntimePolicy, policy.RuntimePolicy})
 	return "routine-denied:" + digest
 }
 

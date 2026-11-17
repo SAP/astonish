@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,11 +50,13 @@ func (db *DockerBackend) DeleteBotHome(ctx context.Context, b *sandbox.BotHomeBi
 	if err := validateBotHomeReference(b); err != nil {
 		return err
 	}
+	homeMissing := false
 	if err := db.validateBotHome(ctx, b); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no such volume") && ctx.Err() == nil {
-			return nil
+			homeMissing = true
+		} else {
+			return err
 		}
-		return err
 	}
 	attached, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "ps", "-aq", "--filter=volume="+b.Ref)
 	if err != nil {
@@ -77,11 +82,248 @@ func (db *DockerBackend) DeleteBotHome(ctx context.Context, b *sandbox.BotHomeBi
 	} else if !isDockerNotFoundError(e) && !strings.Contains(strings.ToLower(e.Error()), "no such volume") {
 		return e
 	}
+	if homeMissing {
+		return ctx.Err()
+	}
 	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", b.Ref)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such volume") && ctx.Err() == nil {
 		return nil
 	}
 	return err
+}
+
+var _ sandbox.BotHomeSessionCleanupBackend = (*DockerBackend)(nil)
+
+type botCleanupContainer struct {
+	ID, Name string
+	Config   struct{ Labels map[string]string }
+	Mounts   []struct {
+		Type, Name, Source, Destination string
+		RW                              bool
+	}
+}
+
+func (db *DockerBackend) inspectBotCleanupContainer(ctx context.Context, ref string) (*botCleanupContainer, error) {
+	raw, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{json .}}", ref)
+	if err != nil {
+		return nil, err
+	}
+	var c botCleanupContainer
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, err
+	}
+	if c.ID == "" {
+		return nil, errors.New("sandbox/docker: missing immutable container identity")
+	}
+	return &c, nil
+}
+
+// ReconcileBotHomeSessions is only for service-authorized retirement, never raw
+// volume deletion. Labels alone are not ownership: require the recovery binding,
+// scoped registry owner, canonical mounts and exact immutable container identity.
+func (db *DockerBackend) ReconcileBotHomeSessions(ctx context.Context, b *sandbox.BotHomeBinding, authorize func(context.Context) error) error {
+	if err := validateBotHomeReference(b); err != nil {
+		return err
+	}
+	if authorize == nil {
+		return errors.New("sandbox/docker: cleanup authorization required")
+	}
+	if err := authorize(ctx); err != nil {
+		return err
+	}
+	if db.cfg.Sessions == nil {
+		return errors.New("sandbox/docker: cleanup registry required")
+	}
+	if err := db.validateBotHome(ctx, b); err != nil && !(ctx.Err() == nil && strings.Contains(strings.ToLower(err.Error()), "no such volume")) {
+		return err
+	}
+	ids := map[string]bool{}
+	attachments := map[string]string{}
+	attached, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "ps", "-aq", "--no-trunc", "--filter=volume="+b.Ref)
+	if err != nil {
+		return err
+	}
+	for _, ref := range strings.Fields(string(attached)) {
+		c, err := db.inspectBotCleanupContainer(ctx, ref)
+		if err != nil {
+			return err
+		}
+		id := c.Config.Labels["astonish.session_id"]
+		if id == "" {
+			return errors.New("sandbox/docker: unknown home attachment; retained")
+		}
+		if c.Name != "/"+containerName(id) || (attachments[id] != "" && attachments[id] != c.ID) {
+			return errors.New("sandbox/docker: ambiguous home attachment; retained")
+		}
+		attachments[id] = c.ID
+		ids[id] = true
+	}
+	// A previous attempt may already have removed the container but failed on its
+	// overlay or private recovery files. Discover only exact-binding sidecars; no
+	// global Docker prune, registry enumeration or adoption of unregistered runs.
+	entries, err := os.ReadDir(db.cfg.UppersDir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, e := os.ReadFile(filepath.Join(db.cfg.UppersDir, entry.Name(), dockerSessionMetadataFile))
+		if os.IsNotExist(e) {
+			continue
+		}
+		if e != nil {
+			return e
+		}
+		var m dockerSessionMetadata
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return fmt.Errorf("sandbox/docker: cannot attribute recovery storage: %w", err)
+		}
+		if m.BotHome.Equal(b) {
+			ids[entry.Name()] = true
+		}
+	}
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	// Lock all candidates in deterministic order, then validate all before deleting
+	// any. These are the same locks Create/Start/Destroy use across backend instances.
+	var unlocks []func()
+	defer func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}()
+	for _, id := range ordered {
+		// Bot execution sessions are UUIDs. Reject path traversal and truncation aliases.
+		if parsed, e := uuid.Parse(id); e != nil || parsed.String() != id {
+			return errors.New("sandbox/docker: invalid Bot session identity; retained")
+		}
+		unlock, e := db.lockSession(ctx, id)
+		if e != nil {
+			return e
+		}
+		unlocks = append(unlocks, unlock)
+	}
+	refs := map[string]string{}
+	for _, id := range ordered {
+		ref, e := db.validateBotCleanupSession(ctx, b, id)
+		if e != nil {
+			return e
+		}
+		if initial := attachments[id]; initial != "" && initial != ref {
+			return errors.New("sandbox/docker: discovered attachment changed; retained")
+		}
+		refs[id] = ref
+	}
+	for _, id := range ordered {
+		if err := authorize(ctx); err != nil {
+			return err
+		}
+		ref, e := db.validateBotCleanupSession(ctx, b, id)
+		if e != nil {
+			return e
+		}
+		if ref != refs[id] {
+			return errors.New("sandbox/docker: attachment changed during cleanup; retained")
+		}
+		// A durable receipt may outlive its registry deletion. Validation above
+		// permits that case only when container AND overlay are already absent;
+		// never use the receipt alone to delete a Docker resource.
+		rec, err := db.cfg.Sessions.GetSession(id)
+		if err != nil {
+			return err
+		}
+		if rec == nil {
+			if _, err := db.validateBotCleanupSession(ctx, b, id); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(db.upperPath(id)); err != nil {
+				return err
+			}
+			sessionLaunchEnvs.Delete(sessionEnvKey{db, id})
+			continue
+		}
+		if err := db.destroySessionLocked(ctx, id, ref); err != nil {
+			return err
+		}
+	}
+	// Includes unknown attachments created since discovery. Raw deletion performs
+	// another reference check and Docker itself refuses in-use volume removal.
+	attached, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "ps", "-aq", "--filter=volume="+b.Ref)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(attached)) != 0 {
+		return errors.New("sandbox/docker: home attachment remains; retained")
+	}
+	return ctx.Err()
+}
+
+func (db *DockerBackend) validateBotCleanupSession(ctx context.Context, b *sandbox.BotHomeBinding, id string) (string, error) {
+	m, err := db.readSessionMetadata(id)
+	if err != nil {
+		return "", err
+	}
+	if m == nil || !m.BotHome.Equal(b) || m.UserID != b.Scope.UserID || m.OrgSlug != b.Scope.OrgID || m.TeamSlug != b.Scope.TeamID {
+		return "", errors.New("sandbox/docker: cleanup recovery ownership mismatch; retained")
+	}
+	db.cfg.Sessions.SetSessionScope(id, b.Scope.OrgID, b.Scope.TeamID)
+	rec, err := db.cfg.Sessions.GetSession(id)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil && m.CleanupPending {
+		// This receipt authorizes only final local cleanup, not container or
+		// volume destruction without a registry owner. Replacements fail closed.
+		if _, err := db.inspectBotCleanupContainer(ctx, containerName(id)); err == nil {
+			return "", errors.New("sandbox/docker: container exists after cleanup receipt; retained")
+		} else if !isDockerNotFoundError(err) {
+			return "", err
+		}
+		if _, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "inspect", overlayVolumeName(id)); err == nil {
+			return "", errors.New("sandbox/docker: overlay exists after cleanup receipt; retained")
+		} else if !isDockerNotFoundError(err) && !strings.Contains(strings.ToLower(err.Error()), "no such volume") {
+			return "", err
+		}
+		return "", ctx.Err()
+	}
+	if rec == nil || rec.SessionID != id || rec.CreatedBy != b.Scope.UserID || rec.Backend != string(sandbox.BackendKindDocker) || rec.ContainerName != containerName(id) {
+		return "", errors.New("sandbox/docker: cleanup registry ownership mismatch; retained")
+	}
+	c, err := db.inspectBotCleanupContainer(ctx, containerName(id))
+	if err != nil {
+		if isDockerNotFoundError(err) {
+			return "", nil // never remove by name after observing absence
+		}
+		return "", err
+	}
+	labels := c.Config.Labels
+	if c.Name != "/"+containerName(id) || labels["astonish.session_id"] != id || labels[botHomeScopeLabel] != b.Scope.Key() || labels["astonish.org"] != b.Scope.OrgID || labels["astonish.team"] != b.Scope.TeamID {
+		return "", errors.New("sandbox/docker: cleanup container identity mismatch; retained")
+	}
+	home, overlay, upper, layers := false, false, false, false
+	for _, mount := range c.Mounts {
+		switch mount.Destination {
+		case botHomeMount:
+			home = mount.Type == "volume" && mount.Name == b.Ref && mount.RW
+		case mountOverlay:
+			overlay = mount.Type == "volume" && mount.Name == overlayVolumeName(id) && mount.RW
+		case mountUppers:
+			upper = mount.Type == "bind" && filepath.Clean(mount.Source) == filepath.Clean(db.upperPath(id)) && mount.RW
+		case mountLayers:
+			layers = mount.Type == "bind" && filepath.Clean(mount.Source) == filepath.Clean(db.cfg.LayersDir) && !mount.RW
+		default:
+			return "", errors.New("sandbox/docker: unexpected cleanup mount; retained")
+		}
+	}
+	if !home || !overlay || !upper || !layers || len(c.Mounts) != 4 {
+		return "", errors.New("sandbox/docker: cleanup mount mismatch; retained")
+	}
+	return c.ID, nil
 }
 
 // The descriptor, not merely a pre-open pathname, is checked for containment.

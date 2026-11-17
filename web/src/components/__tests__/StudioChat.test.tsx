@@ -80,6 +80,28 @@ describe('StudioChat', () => {
     })
   })
 
+  it.each(['dark', 'light'])('renders durable scheduled progress live and restored without timer failure (%s)', async theme => {
+    const progress: import('../../api/botProgress').BotProgressProjection = { schema_version: 1, bot_id: 'bot', run_id: 'run', session_id: 'trace', revision: 5, phase: 'evaluating', active_duration_nanos: 21600000000000 }
+    const state: import('../../api/botRunState').BotRunState = { schema_version: 1, bot_id: 'bot', home_session_id: 'bot-home', session_id: 'trace', run_id: 'run', presentation: '', status: 'running', state_sequence: 10, progress }
+    const thread = { botId: 'bot', scope: 'team' as const, readOnly: true, onSend: vi.fn(), runStates: [state] }
+    const view = render(<StudioChat theme={theme} initialSessionId="bot-home" hideSidebar botThread={thread} />)
+    expect(await screen.findByText('Checking progress')).toBeInTheDocument()
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    const phases = await import('../../api/botProgress')
+    let sequence = 11
+    for (const phase of Object.values(phases.ProgressPhase)) {
+      await act(async () => stream.onEvent('bot_run_state', { ...state, state_sequence: sequence++, progress: { ...progress, revision: sequence, phase } }))
+      expect(screen.getByTestId('thinking-indicator')).toHaveTextContent(phases.progressLabels[phase])
+      expect(screen.queryByText(/timed out|failed/i)).not.toBeInTheDocument()
+    }
+    await act(async () => stream.onState?.('reconnecting', 'cursor'))
+    expect(screen.getByTestId('thinking-indicator')).toHaveTextContent('Checking an unconfirmed action')
+    view.unmount()
+    render(<StudioChat theme={theme} initialSessionId="bot-home" hideSidebar botThread={thread} />)
+    expect(await screen.findByText('Checking progress')).toBeInTheDocument()
+    expect(thread.onSend).not.toHaveBeenCalled()
+  })
+
   it('keeps standalone work rows out of Bot chat through live updates, reconnect and restore without remounting the composer', async () => {
     const state: import('../../api/botRunState').BotRunState = { schema_version: 1, bot_id: 'bot', home_session_id: 'bot-home', session_id: 'trace', run_id: 'run', presentation: 'home_interactive', status: 'running', state_sequence: 2, work: { schema_version: 1, protocol: 'agent_led_v1', bot_id: 'bot', run_id: 'run', work_revision: 2, phase: 'working', items: [{ id: 'item', status: 'in_progress', summary: 'Comparing original sources' }] } }
     const thread = { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), runStates: [state] }
@@ -302,6 +324,46 @@ describe('StudioChat', () => {
     expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
   })
 
+  it.each(['personal', 'team'] as const)('keeps %s Bot acknowledgement visible without tool activity live and on replay', async scope => {
+    const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope, readOnly: false, onSend: vi.fn(), renderReview: () => <span>Your answer: Local release notes</span> } }
+    for (const replay of [false, true]) {
+      const view = render(<StudioChat {...props} />)
+      const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+      await act(async () => {
+        stream.onEvent('bot_review', { kind: 'approval', reviewId: 'a', eventId: 'question' })
+        stream.onEvent('user_message', { text: 'Local release notes' })
+        stream.onEvent('text', { text: "I'll read the isolated release notes.", invocationId: 'producer' })
+        stream.onEvent('tool_call', { name: 'read_file', args: { path: '/isolated/receipt.txt' } })
+        if (replay) {
+          stream.onEvent('tool_result', { name: 'read_file', result: 'PRIVATE_RELEASE_SOURCE_BODY_MUST_NOT_APPEAR' })
+          stream.onEvent('text', { text: 'Title task understood.', invocationId: 'final' })
+        }
+      })
+      const acknowledgement = screen.getByText("I'll read the isolated release notes.")
+      expect(acknowledgement).toBeVisible()
+      expect(screen.queryByTestId('tool-activity-block')).not.toBeInTheDocument()
+      expect(view.container).not.toHaveTextContent('/isolated/receipt.txt')
+      expect(view.container).not.toHaveTextContent('PRIVATE_RELEASE_SOURCE_BODY_MUST_NOT_APPEAR')
+      expect(screen.getByText('Your answer: Local release notes').compareDocumentPosition(acknowledgement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      if (replay) expect(acknowledgement.compareDocumentPosition(screen.getByText('Title task understood.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      else expect(screen.queryByText('Title task understood.')).not.toBeInTheDocument()
+      view.unmount()
+    }
+  })
+
+  it('passes an upgraded question payload through the canonical review without duplicating the row', async () => {
+    const renderReview = vi.fn((_kind, _id, question) => <span>{question?.prompt || 'Waiting for question'}</span>)
+    render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn(), renderReview }} />)
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    await act(async () => {
+      stream.onEvent('bot_review', { kind: 'approval', reviewId: 'a', eventId: 'first' })
+      stream.onEvent('bot_review', { kind: 'approval', reviewId: 'a', eventId: 'second', question: { questionId: 'q', kind: 'text', prompt: 'Which AI news?' } })
+    })
+    expect(screen.getAllByText('Which AI news?')).toHaveLength(1)
+    expect(screen.queryByText('Waiting for question')).not.toBeInTheDocument()
+    expect(renderReview).toHaveBeenLastCalledWith('approval', 'a', expect.objectContaining({ questionId: 'q' }))
+  })
+
   it.each(['review_id', 'reviewId'])('renders persisted %s reviews once and ignores unknown review kinds', async field => {
     render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn(), renderReview: (kind, id) => <span>{kind}: {id}</span> }} />)
     const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
@@ -421,9 +483,8 @@ describe('StudioChat', () => {
         expect(report).toBeVisible()
         expect(report.closest('[data-testid="tool-activity-block"]')).toBeNull()
       }
-      const activity = screen.getByTestId('tool-activity-block')
-      expect(activity.querySelector('button')).toHaveAttribute('aria-expanded', 'false')
-      expect(activity).toHaveTextContent('schedule_job')
+      expect(screen.queryByTestId('tool-activity-block')).not.toBeInTheDocument()
+      expect(screen.queryByText('schedule_job')).not.toBeInTheDocument()
       if (count === 3) expect(screen.getByText('Schedule requested')).toBeVisible()
     }
     const view = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
@@ -466,7 +527,8 @@ describe('StudioChat', () => {
     })
     expect(screen.getByText('Owner instruction')).toBeInTheDocument()
     expect(screen.getByText('Bot observation')).toBeInTheDocument()
-    expect(screen.getByText(/Review this checkpoint in the Decision inbox/)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Thinking…')
+    expect(screen.queryByText(/Review this checkpoint in the Decision inbox/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Yes' })).not.toBeInTheDocument()
     fireEvent.change(screen.getByTestId('chat-input'), { target: { value: '__literal__' } })
     fireEvent.click(screen.getByTestId('send-button'))

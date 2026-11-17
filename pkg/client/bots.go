@@ -34,7 +34,7 @@ func (b Bots) request(ctx context.Context, method, path string, body, dst any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return parseErrorResponse(resp)
+		return &BotResponseError{StatusCode: resp.StatusCode, Cause: parseErrorResponse(resp)}
 	}
 	if dst != nil {
 		return json.NewDecoder(resp.Body).Decode(dst)
@@ -62,7 +62,7 @@ func (c *Client) doBotRequest(ctx context.Context, method, path string, body any
 		}
 		resp.Body.Close()
 		if err = c.refresh(); err != nil {
-			return nil, fmt.Errorf("session expired: %w (run 'astonish login')", err)
+			return nil, &BotResponseError{StatusCode: http.StatusUnauthorized, Cause: fmt.Errorf("session expired: %w (run 'astonish login')", err)}
 		}
 	}
 	return nil, fmt.Errorf("authentication failed")

@@ -48,3 +48,18 @@ it('does not refresh a replacement Home after a late continuation receipt', asyn
   await Promise.resolve()
   expect(changed).not.toHaveBeenCalled()
 })
+it('binds explicit progress continuation to checkpoint and clears pending state on scope change', async () => {
+  let resolve!: (value: never) => void
+  vi.mocked(continueInteractive).mockReturnValue(new Promise(r => { resolve = r }))
+  const changed = vi.fn()
+  const view = render(<BotContinueInteractive bot={bot} runId="run" checkpointRevision={7} disabled={false} onChange={changed} />)
+  expect(continueInteractive).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Continue saved progress' }))
+  expect(continueInteractive).toHaveBeenCalledWith(bot, 'run', expect.any(String), { kind: 'progress_v1', checkpoint_revision: 7 })
+  expect(screen.getByRole('button', { name: 'Continuing…' })).toBeDisabled()
+  view.rerender(<BotContinueInteractive bot={{ ...bot, scope: 'team' }} runId="run" checkpointRevision={7} disabled={false} onChange={changed} />)
+  expect(screen.getByRole('button', { name: 'Continue saved progress' })).toBeEnabled()
+  resolve({} as never)
+  await Promise.resolve()
+  expect(changed).not.toHaveBeenCalled()
+})

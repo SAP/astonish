@@ -6,12 +6,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+func TestBotTitleConfirmationRejectsPermissionRequest(t *testing.T) {
+	for _, confirmation := range []*store.BotTitleConfirmation{nil, {State: store.BotTitleConfirmationNeedsQuestion}, {State: store.BotTitleConfirmationWaiting}} {
+		capture := &botApprovalCapture{req: bot.RunRequest{Run: store.BotRun{TitleConfirmation: confirmation}}}
+		id, err := capture.RequestApproval(context.Background(), execution.BotRunIdentity{}, execution.ActionDescriptor{}, "")
+		if err != store.ErrBotForbidden || id != uuid.Nil || capture.approval != nil {
+			t.Fatalf("nil-policy permission request was not safely rejected: id=%v err=%v", id, err)
+		}
+	}
+}
 
 func TestBotInteractionAnswerCorrelation(t *testing.T) {
 	for _, tc := range []struct {

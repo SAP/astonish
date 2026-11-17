@@ -93,7 +93,7 @@ func (*deleteBrowserPool) SetBotHome(string, *sandbox.BotHomeBinding) error { re
 // Opt in after building web. Never connects to the owner's daemon/database and
 // never pulls/removes images; alpine:latest must already be locally available.
 func TestBotPermanentDeleteBrowserAcceptance(t *testing.T) {
-	if os.Getenv("ASTONISH_BOT_DELETE_BROWSER_ACCEPTANCE") != "1" {
+	if os.Getenv("ASTONISH_BOT_DELETE_BROWSER_ACCEPTANCE") != "1" && os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
 		t.Skip("set ASTONISH_BOT_DELETE_BROWSER_ACCEPTANCE=1 after web build")
 	}
 	ctx := context.Background()
@@ -187,7 +187,7 @@ func TestBotPermanentDeleteBrowserAcceptance(t *testing.T) {
 	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := store.WithTenantContext(principal(r.Context()), &store.TenantContext{OrgSlug: org.Slug, TeamSlug: team.Slug, UserID: owner})
-		if strings.HasSuffix(r.URL.Path, "/permanent-delete") {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/permanent-delete") {
 			posts.Add(1)
 			body, _ := io.ReadAll(r.Body)
 			if strings.Contains(string(body), "reason") {
@@ -275,7 +275,10 @@ func TestBotPermanentDeleteBrowserAcceptance(t *testing.T) {
 	}
 	cred := uuid.NewString()
 	execSQL("INSERT INTO credentials(id,name,cred_type,encrypted) VALUES (?,?,?,?)", cred, "Shared keep", "api_key", []byte("unchanged-secret"))
-	bin := os.Getenv("ASTONISH_MEMORY_BROWSER_PATH")
+	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
+	if bin == "" {
+		bin = os.Getenv("ASTONISH_MEMORY_BROWSER_PATH")
+	}
 	if bin == "" {
 		var ok bool
 		bin, ok = launcher.LookPath()
@@ -318,6 +321,8 @@ func TestBotPermanentDeleteBrowserAcceptance(t *testing.T) {
 	if accepted.Load() != 1 {
 		t.Fatal("missing real HTTP 202")
 	}
+	request("GET", "/api/studio/bots/"+target.ID.String()+"?scope=personal", "", http.StatusGone)
+	request("GET", "/api/studio/bots/"+target.ID.String()+"/permanent-delete?scope=personal", "", http.StatusAccepted)
 	// Close observation: the real daemon worker, not a browser retry, must finish.
 	page.MustElementR(`[role="dialog"] button`, "^Close$").MustClick()
 	must(worker.Poll(ctx))

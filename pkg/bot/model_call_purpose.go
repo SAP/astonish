@@ -9,6 +9,7 @@ type ModelCallPurpose uint8
 const (
 	ModelCallPurposeProducer ModelCallPurpose = iota
 	ModelCallPurposeAssessment
+	ModelCallPurposeProgress
 )
 
 type modelCallPurposeKey struct{}

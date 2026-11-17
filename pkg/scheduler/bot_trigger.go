@@ -31,6 +31,7 @@ type BotAdmissionStatus string
 
 const (
 	BotAdmissionAdmitted  BotAdmissionStatus = "admitted"
+	BotAdmissionCoalesced BotAdmissionStatus = "coalesced"
 	BotAdmissionDuplicate BotAdmissionStatus = "duplicate"
 	BotAdmissionSkipped   BotAdmissionStatus = "skipped"
 )
@@ -123,7 +124,7 @@ func (e *Executor) executeBotTrigger(ctx context.Context, job *Job) (string, err
 		return "", fmt.Errorf("Bot-trigger admission: %w", err)
 	}
 	switch receipt.Status {
-	case BotAdmissionAdmitted, BotAdmissionDuplicate:
+	case BotAdmissionAdmitted, BotAdmissionDuplicate, BotAdmissionCoalesced:
 		if receipt.RunID == uuid.Nil {
 			return "", fmt.Errorf("Bot-trigger admission missing durable run ID")
 		}

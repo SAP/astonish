@@ -237,7 +237,10 @@ func (s *teamBotTemplateStore) ForkToPersonal(ctx context.Context, dest *persona
 	if err != nil {
 		return nil, err
 	}
-	v := store.DefaultBotVersion()
+	v, err := store.NewBotVersionForCreation(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
 	v.Charter = source.Definition.Charter
 	v.Persona.Language = source.Definition.Language
 	for i, suggestion := range source.Definition.SuggestedSchedules {

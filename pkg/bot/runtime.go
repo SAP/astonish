@@ -124,7 +124,10 @@ func ValidateVersion(v store.BotVersion) error {
 	default:
 		return fmt.Errorf("%w: autonomy", store.ErrBotInvalid)
 	}
-	if v.Budget.MaxRuntimeSeconds <= 0 || v.Autonomy.MaxSpendPerRunMinor < 0 || v.Autonomy.MaxSpendPerMonthMinor < 0 {
+	if err := v.Budget.RuntimePolicy.Validate(); err != nil {
+		return fmt.Errorf("%w: runtime policy: %v", store.ErrBotInvalid, err)
+	}
+	if v.Budget.MaxRuntimeSeconds <= 0 || v.Budget.MaxRuntimeSeconds > int64((1<<63-1)/time.Second) || v.Autonomy.MaxSpendPerRunMinor < 0 || v.Autonomy.MaxSpendPerMonthMinor < 0 {
 		return fmt.Errorf("%w: budget", store.ErrBotInvalid)
 	}
 	for _, limit := range []*int64{v.Budget.MaxTokens, v.Budget.MaxToolCalls, v.Budget.MaxRunsPerDay, v.Budget.MaxModelCostMicros} {
@@ -258,8 +261,34 @@ type BotWorkLearningProposal struct {
 	EvidenceRefs, OwnerQuotes, ReplaceExpectationIDs []string
 }
 
+// ProgressDispatch is the request-local durable dispatch capability shared by the
+// factory's model and every executable tool view. Begin precedes execution;
+// Settle requires trusted receipt evidence for writes, never response prose.
+type ProgressDispatch interface {
+	Begin(context.Context, store.BotProgressDispatchKind, string, store.BotUsage) (*store.BotProgressDispatchReceipt, error)
+	Settle(context.Context, uuid.UUID, store.BotProgressDispatchOutcome, store.BotUsage, string) error
+	Boundary(context.Context) error
+}
+
+type progressDispatchKey struct{}
+
+func WithProgressDispatch(ctx context.Context, dispatch ProgressDispatch) context.Context {
+	return context.WithValue(ctx, progressDispatchKey{}, dispatch)
+}
+func ProgressDispatchFromContext(ctx context.Context) ProgressDispatch {
+	dispatch, _ := ctx.Value(progressDispatchKey{}).(ProgressDispatch)
+	return dispatch
+}
+
 type RunRequest struct {
-	Task *store.BotTaskRevision
+	// ProgressYieldRequested is a trusted worker drain signal, never model input.
+	ProgressYieldRequested func() bool
+	// CurrentLease follows supervisor renewals without extending authority.
+	CurrentLease func() store.BotLease
+	// Progress is a private repository-bound snapshot, not an approval checkpoint.
+	Progress      *store.BotProgressState
+	ProgressStore store.BotProgressStore
+	Task          *store.BotTaskRevision
 	// Skill is a detached, repository-pinned method; never an authority grant.
 	Skill         *store.BotSkillInvocation
 	Work          *store.BotWorkState
@@ -291,6 +320,8 @@ type RuntimeEvent struct {
 type EventSink func(context.Context, RuntimeEvent) error
 
 type RunResult struct {
+	// ProgressCheckpoint is disjoint from the legacy approval Checkpoint below.
+	ProgressCheckpoint *store.BotProgressState
 	// ModelSelection is the successful owner-scoped factory selection, not usage or pricing.
 	ModelSelection *store.SessionPin
 	// SkillLearning is uncommitted until the scoped repository accepts it.
@@ -301,6 +332,17 @@ type RunResult struct {
 	Checkpoint    json.RawMessage
 	Todos         []store.BotTodo
 	Failure       *RunError
+}
+
+// ValidateCheckpoints rejects mixed formats; neither format establishes authority.
+func (r RunResult) ValidateCheckpoints() error {
+	if r.ProgressCheckpoint == nil {
+		return nil
+	}
+	if len(r.Checkpoint) != 0 {
+		return store.ErrBotInvalid
+	}
+	return r.ProgressCheckpoint.Validate()
 }
 
 // Runtime methods return on checkpoint or completion, not viewer disconnection.

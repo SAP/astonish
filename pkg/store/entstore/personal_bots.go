@@ -172,6 +172,7 @@ func decodePersonalBotRun(row *personalent.BotRun) (*botStoredRun, error) {
 	if row.LeaseExpiresAt != nil {
 		saved.Run.Lease.ExpiresAt = *row.LeaseExpiresAt
 	}
+	saved.Run.Progress = progressProjection(&saved)
 	return &saved, nil
 }
 func (d personalBotDB) FindRun(ctx context.Context, id uuid.UUID, key string) (*botStoredRun, error) {

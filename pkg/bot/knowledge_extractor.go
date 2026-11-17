@@ -117,7 +117,13 @@ func (e *KnowledgeExtractor) Extract(ctx context.Context, input store.BotKnowled
 	// Always use the persisted complete snapshot, not the re-enqueue caller's data.
 	input = record.Input.Clone()
 	deadline := e.budget.Deadline()
-	if lease.ExpiresAt.Before(deadline) {
+	if timeout := e.budget.ModelCallTimeout(); timeout > 0 {
+		operationDeadline := time.Now().Add(timeout)
+		if deadline.IsZero() || operationDeadline.Before(deadline) {
+			deadline = operationDeadline
+		}
+	}
+	if deadline.IsZero() || lease.ExpiresAt.Before(deadline) {
 		deadline = lease.ExpiresAt
 	}
 	modelCtx, modelCancel := context.WithDeadline(ctx, deadline)

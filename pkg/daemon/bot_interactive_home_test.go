@@ -126,7 +126,7 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 				return raw
 			}
 			body := `{"name":"Research title","idempotency_key":"once","start_from_title":true}`
-			if mode == "message" {
+			if mode != "title" {
 				body = `{"name":"Research title","idempotency_key":"once"}`
 			}
 			var created struct {
@@ -136,7 +136,7 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			if err = json.Unmarshal(request("/api/studio/bots?scope=personal", body), &created); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "message" {
+			if mode != "title" {
 				var receipt store.BotMessageReceipt
 				if err = json.Unmarshal(request("/api/studio/bots/"+created.ID.String()+"/messages?scope=personal", `{"version":1,"instructions":"Research title","idempotency_key":"message"}`), &receipt); err != nil {
 					t.Fatal(err)
@@ -152,6 +152,29 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			ownerCtx, _, err := worker.authenticateOwner(ctx, BotSchedulerScope{org.Slug, team.Slug, owner})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if mode == "title" {
+				// Clarification needs live authorization, but must not prepare a
+				// physical Home. The factory journey exercises its actual question.
+				if err := worker.prepareInteractiveHome(ownerCtx, repo, created.ID, runID); err != nil {
+					t.Fatal(err)
+				}
+				run, err := repo.GetRun(caller, created.ID, runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				current, err := repo.Get(caller, created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.Home.ID != uuid.Nil || backend.calls != 0 || runtime.calls != 0 || run.Status != store.RunQueued || run.Lease.Fence != 0 || run.TitleConfirmation == nil || run.TitleConfirmation.State != store.BotTitleConfirmationNeedsQuestion {
+					t.Fatalf("pending title provisioned Home: bot=%+v run=%+v calls=%d", current, run, backend.calls)
+				}
+				registry.Cancel(execution.BotRunIdentity{BotID: created.ID, RunID: runID, Version: 1, ActorID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+				if err := worker.prepareInteractiveHome(ownerCtx, repo, created.ID, runID); err == nil {
+					t.Fatal("pending title bypassed revoked authority")
+				}
+				return
 			}
 			identity := execution.BotRunIdentity{BotID: created.ID, RunID: runID, Version: 1, ActorID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug}
 			switch mode {

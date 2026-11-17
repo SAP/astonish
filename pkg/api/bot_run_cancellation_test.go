@@ -20,6 +20,13 @@ type exactCancelHTTPStore struct {
 	calls int
 }
 
+func (s *exactCancelHTTPStore) Get(_ context.Context, id store.BotID) (*store.Bot, error) {
+	if id != s.run.BotID {
+		return nil, store.ErrBotNotFound
+	}
+	return &store.Bot{ID: id, Scope: store.BotScopeTeam}, nil
+}
+
 func (s *exactCancelHTTPStore) CancelRun(ctx context.Context, id store.BotID, rid store.RunID) (*store.BotRun, error) {
 	p, ok := execution.PrincipalFromContext(ctx)
 	if !ok || p.OrgSlug != "org" || p.TeamSlug != "team" {

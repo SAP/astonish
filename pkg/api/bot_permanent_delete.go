@@ -6,6 +6,31 @@ import (
 	"net/http"
 )
 
+const botDeletionPending = "deletion_pending"
+
+// BotDeletionStatusHandler exposes only deletion state, never the retained Bot content.
+func BotDeletionStatusHandler(w http.ResponseWriter, r *http.Request) {
+	repo, _, ok := botRequestStore(w, r)
+	if !ok {
+		return
+	}
+	id, ok := botPathID(w, r)
+	if !ok {
+		return
+	}
+	b, err := repo.Get(r.Context(), id)
+	if err != nil {
+		botHTTPError(w, err)
+		return
+	}
+	if !b.PermanentDelete {
+		botHTTPError(w, store.ErrBotConflict)
+		return
+	}
+	w.Header().Set("Retry-After", "2")
+	botWriteJSON(w, http.StatusAccepted, map[string]string{"status": "pending", "code": botDeletionPending})
+}
+
 // BotPermanentDeleteHandler acknowledges completion only after the exact target
 // purge commits. A missing target is 404, never fabricated physical proof.
 func BotPermanentDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -49,5 +74,5 @@ func BotPermanentDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	botWriteJSON(w, http.StatusAccepted, struct {
 		Bot    *store.Bot `json:"bot"`
 		Status string     `json:"status"`
-	}{b, "pending"})
+	}{&store.Bot{ID: b.ID, Scope: b.Scope, Revision: b.Revision, Status: store.BotDeleted, PermanentDelete: true}, "pending"})
 }

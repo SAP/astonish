@@ -68,6 +68,30 @@ No public endpoint, request boolean, or automatic session cleanup enables purge.
 
 ## Live acceptance
 
+`TestBotPermanentDeleteAttachedDockerAcceptance` in `pkg/daemon` creates an
+exact-owned running session with Home and overlay bytes plus a retained private
+workspace. Raw deletion fails closed. A foreign container with a forged Home
+label blocks authorized cleanup without stopping either attachment. After fixture
+removal of that foreign container, a fresh backend, disk registry and worker
+complete reconciliation and verify absence of the owned container, overlay,
+recovery directory, workspace, Home and registry record, then retry idempotently.
+The retention store is a fixture: this test proves physical Docker lifecycle,
+not SQL row purge. No shared network, layer or production registry is modified.
+
+Run this physical gate separately from optional persistence suites:
+
+```sh
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_SANDBOX_IMAGE=ghcr.io/sap/astonish-sandbox-base:dev \
+go test ./pkg/daemon -run '^TestBotPermanentDeleteAttachedDockerAcceptance$' -count=1 -timeout=5m
+```
+
+The image must already exist locally. `ASTONISH_BOT_HOME_TEST_LAYERS` may select
+an existing read-only layers directory; otherwise this gate uses the local
+Astonish config directory's `sandbox/layers`. Writable directories, volumes and
+an internal network are disposable. Missing prerequisites fail when enabled.
+
+
 `TestBotHomeDockerPersistenceLive` (also used by the designated persistence
 acceptance) creates unique Bot homes and run containers using the production
 backend factory and registry. It destroys both original runs, reads the old

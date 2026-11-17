@@ -136,7 +136,7 @@ func BotMessageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var q struct {
-		TaskID *uuid.UUID `json:"task_id,omitempty"`
+		TaskID         *uuid.UUID       `json:"task_id,omitempty"`
 		Version        int64            `json:"version"`
 		IdempotencyKey string           `json:"idempotency_key"`
 		Instructions   string           `json:"instructions"`
@@ -191,7 +191,7 @@ func botRequestRun(w http.ResponseWriter, r *http.Request, intent store.BotExecu
 		return
 	}
 	var q struct {
-		TaskID *uuid.UUID `json:"task_id,omitempty"`
+		TaskID         *uuid.UUID       `json:"task_id,omitempty"`
 		Version        int64            `json:"version"`
 		IdempotencyKey string           `json:"idempotency_key"`
 		Instructions   string           `json:"instructions"`
@@ -339,7 +339,16 @@ func BotApproveContinueHandler(w http.ResponseWriter, r *http.Request) {
 		botHTTPError(w, store.ErrBotUnsupported)
 		return
 	}
-	result, err := capability.DecideAndRequeueApprovedRun(r.Context(), store.BotApproveContinueRequest{BotID: id, ApprovalID: approvalID, ActorID: actor, ActionDigest: q.ActionDigest, Response: q.Response})
+	ctx := r.Context()
+	if svc := store.FromContext(ctx); svc != nil && (svc.BotTurnRegistry != nil || svc.BotMandatePolicy != nil) {
+		var err error
+		ctx, err = botInteractiveAdmissionContext(r)
+		if err != nil {
+			botHTTPError(w, err)
+			return
+		}
+	}
+	result, err := capability.DecideAndRequeueApprovedRun(ctx, store.BotApproveContinueRequest{BotID: id, ApprovalID: approvalID, ActorID: actor, ActionDigest: q.ActionDigest, Response: q.Response})
 	if err != nil {
 		botHTTPError(w, err)
 		return

@@ -29,6 +29,26 @@ import {
   supersededAgentIndices,
 } from '../toolActivity'
 
+describe('Bot narration visibility', () => {
+  it('preserves acknowledgements before blocked tools and after final replay', () => {
+    const records: ChatMsg[] = [
+      { type: 'user', content: 'Summarize local release notes' },
+      { type: 'agent', content: "I'll read the isolated release notes." },
+      { type: 'tool_call', toolName: 'read_file', toolArgs: { path: '/isolated/receipt.txt' } },
+      { type: 'agent', content: 'Title task understood.' },
+    ]
+    for (const transcript of [records.slice(0, 3), records, JSON.parse(JSON.stringify(records))]) {
+      const index = buildChronologicalActivityRenderIndex(transcript, 'preserve-agent')
+      expect(index.activityByStart.has(1)).toBe(false)
+      expect(index.skipIndices.has(1)).toBe(false)
+      expect(index.activityByStart.get(2)?.entries.map(entry => entry.kind)).toEqual(['tool'])
+      expect(index.skipIndices.has(3)).toBe(false)
+    }
+    expect(buildChronologicalActivityRenderIndex(records).activityByStart.get(1)?.entries.map(entry => entry.kind)).toEqual(['message', 'tool'])
+    expect(buildChronologicalActivityRenderIndex([], 'preserve-agent').activityByStart.size).toBe(0)
+  })
+})
+
 describe('delegation identity', () => {
   it('keeps persisted call positions when parallel workers start in reverse order', () => {
     const records = [

@@ -1,3 +1,4 @@
+import { runtimePolicySummary } from '@/api/botConfiguration'
 import { useState } from 'react'
 import BotDeleteDialog from './BotDeleteDialog'
 import { useBotClock } from './useBotClock'
@@ -32,7 +33,7 @@ export function BotLifecycleControls({ bot, onChange, readOnly }: { bot: Bot; on
   </div>
 }
 export function BotPolicySummary({ version }: { version: BotVersion }) {
-  return <p className="text-xs text-muted-foreground">{version.autonomy.level} · {version.persona.timezone || 'UTC'} · contact {version.autonomy.can_contact_people ? 'allowed by policy' : 'disabled'} · spend cap {version.autonomy.max_spend_per_run_minor} minor units/run · {version.budget.max_runtime_seconds}s/run · notifications {version.delivery.notify}</p>
+  return <p className="text-xs text-muted-foreground">{version.autonomy.level} · {version.persona.timezone || 'UTC'} · contact {version.autonomy.can_contact_people ? 'allowed by policy' : 'disabled'} · spend cap {version.autonomy.max_spend_per_run_minor} minor units/run · {runtimePolicySummary(version.budget)} · notifications {version.delivery.notify}</p>
 }
 export function BotDecisionInbox({ bot, approvals, onChange, readOnly }: { bot: Bot; approvals: BotApproval[]; onChange: () => void; readOnly: boolean }) {
   const [busy, setBusy] = useState(''), [error, setError] = useState('')

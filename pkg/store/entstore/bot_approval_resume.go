@@ -8,6 +8,7 @@ import (
 	prun "github.com/SAP/astonish/ent/personal/botrun"
 	trun "github.com/SAP/astonish/ent/team/botrun"
 	botdomain "github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
@@ -45,6 +46,8 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		return nil, err
 	}
 	var result *store.BotApproveContinueResult
+	var registered *execution.BotRunIdentity
+	var continuation store.BotContinuationAdmission
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
@@ -61,16 +64,20 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		if err != nil {
 			return err
 		}
+		saved, err := tx.ReadRun(ctx, q.BotID, a.RunID)
+		if err != nil {
+			return err
+		}
+		if titleAnswerReplay(saved, a, q.Response) && a.ActionDigest == q.ActionDigest {
+			result = &store.BotApproveContinueResult{Approval: *a, RunID: a.RunID, Continuation: store.BotContinuationQueued}
+			return nil
+		}
 		now := r.clock()
 		if !now.Before(a.ExpiresAt) {
 			return store.ErrBotExpired
 		}
 		if a.ActionDigest != q.ActionDigest || a.Version != rec.Bot.Version || rec.Bot.Status == store.BotStopped || rec.Bot.Status == store.BotDeleted {
 			return store.ErrBotConflict
-		}
-		saved, err := tx.ReadRun(ctx, q.BotID, a.RunID)
-		if err != nil {
-			return err
 		}
 		if (saved.Run.ControlOnly() && !saved.Run.IsInteractiveChat()) || saved.Run.Version != rec.Bot.Version || rec.ActiveRunID != nil {
 			return store.ErrBotConflict
@@ -86,7 +93,7 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		if err != nil || !c.Matches(*a) || c.Fence != saved.Run.Lease.Fence {
 			return store.ErrBotConflict
 		}
-		if saved.Run.IsInteractiveChat() && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
+		if saved.Run.IsInteractiveChat() && (saved.Run.TitleConfirmation == nil || saved.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed) && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
 			return store.ErrBotForbidden
 		}
 		if a.Interaction != nil {
@@ -95,6 +102,32 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 			}
 		} else if q.Response != nil {
 			return store.ErrBotInvalid
+		}
+		// Mandate-backed title confirmation is authorized transactionally below by
+		// confirmTitleAssignment: verified owner, non-revoked mandate and current
+		// policy are required before the answer and refreshed mandate can queue.
+		// Source admission deliberately retains no process-local turn authority.
+		// Only registry-backed runs need an interactive continuation here.
+		if saved.Run.MandateRef == nil && saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed && saved.Run.IsInteractiveChat() && r.interactiveAnswerAuthority(ctx, saved.Run) != nil {
+			hook, ok := store.BotMessageAdmissionFromContext(ctx)
+			if !ok {
+				return store.ErrBotForbidden
+			}
+			continuation, ok = hook.(store.BotContinuationAdmission)
+			if !ok || saved.Run.CallerCeiling == nil {
+				return store.ErrBotForbidden
+			}
+			id := execution.BotRunIdentity{BotID: saved.Run.BotID, RunID: saved.Run.ID, Version: saved.Run.Version, ActorID: actor.String(), OrgSlug: r.auth.orgSlug, TeamSlug: saved.Run.CallerCeiling.Principal.TeamSlug}
+			authority, err := continuation.RegisterContinuation(ctx, id, *saved.Run.CallerCeiling)
+			if err != nil {
+				return store.ErrBotForbidden
+			}
+			registered = &id
+			if authority.Identity != id {
+				return store.ErrBotForbidden
+			}
+			ceiling := authority.CallerCeiling()
+			saved.Run.CallerCeiling = &ceiling
 		}
 		switch a.Status {
 		case store.ApprovalPending:
@@ -129,6 +162,9 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 			}
 			state = store.BotContinuationBlockedByPause
 		} else if saved.Run.Status == store.RunWaitingApproval {
+			if err := r.confirmTitleAssignment(ctx, tx, rec, saved, *a); err != nil {
+				return err
+			}
 			if err := r.queueApprovedCheckpoint(ctx, tx, rec, saved, c.Fence, a.ID); err != nil {
 				return err
 			}
@@ -137,6 +173,9 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		return nil
 	})
 	if err != nil {
+		if registered != nil {
+			continuation.Cancel(*registered)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -176,6 +215,9 @@ func (r *botRepository) RequeueApprovedRun(ctx context.Context, id, runID, appro
 		if err != nil {
 			return err
 		}
+		if saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed {
+			return store.ErrBotForbidden
+		}
 		if !interactiveStatus(saved.Run, rec.Bot.Status) || (saved.Run.ControlOnly() && !saved.Run.IsInteractiveChat()) || rec.Bot.Version != saved.Run.Version || rec.ActiveRunID != nil {
 			return store.ErrBotConflict
 		}
@@ -183,7 +225,7 @@ func (r *botRepository) RequeueApprovedRun(ctx context.Context, id, runID, appro
 		if err != nil {
 			return err
 		}
-		if saved.Run.IsInteractiveChat() && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
+		if saved.Run.IsInteractiveChat() && (saved.Run.TitleConfirmation == nil || saved.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed) && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
 			return store.ErrBotForbidden
 		}
 		if a.ID != approvalID {

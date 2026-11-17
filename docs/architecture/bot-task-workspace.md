@@ -22,6 +22,20 @@ bound from actual reservations in this episode, not an invented durable quota
 read: restored/other reservations can make the durable remaining allowance
 smaller. Unknown durable denials do not receive the discovery exception.
 
+Configured Perplexity search retries provider **initialization only**, at most
+once, for typed transient transport errors (including an HTTP client timeout
+while the caller is still live). The 100ms cancellation-aware backoff and both
+attempts retain the existing run deadline and shared budget. Each attempt checks
+current mandate, route and budget; no extra search quota is reserved. Authentication,
+configuration, permanent DNS/TLS and HTTP status errors do not trigger this retry.
+Generation and MCP/other operations are never replayed by this recovery. Exhaustion
+returns the concrete initialization diagnostic with configured provider values
+redacted. Only a completed sourced search unlocks detail access; successful
+recovery retains once-only generation usage accounting. `TestBotConfiguredSearchSAPProductionParity` exercises a real
+SAP client deployment-request timeout followed by successful discovery/generation
+against a local HTTP fixture, not a live provider. This reproduces the observed
+Chat recovery pattern; it does not establish the historical Bot's exact failure.
+
 ## Status and scope
 
 This document defines the shared Task contracts and DDL foundation, not completed
@@ -35,6 +49,38 @@ operating knowledge; a Goal is a standing outcome; a mandate/permission envelope
 is authority. None substitutes for another. A Task's optional Goal and Skill
 references must identify the same Bot and carry pinned revisions. Shape validation
 rejects foreign references; repositories must additionally resolve them in scope.
+
+## Executing an admitted retained Task
+
+For a Task-backed occurrence, `LoadRunInput` supplies the pinned `TASK.md`, not
+an instruction to enqueue another run. The production factory reads that exact
+revision through the workspace and adds its immutable manifest title and original
+assignment as context. Background guidance explicitly says the worker is already
+executing this occurrence: perform the procedure with authorized tools and return
+the result. Interactive owner conversations retain their newest-message priority;
+a selected Task is context, not an instruction to repeat it or override controls.
+Oversized definitions are not silently treated as complete: guidance directs the
+worker to `bot_task_read` for the full file.
+
+`bot_task_execute` is **only a Python helper-script capability**, not Task
+admission, scheduling or recursion. Its declaration requires a declared executable
+`scripts/*.py` path. Missing/invalid paths fail before selection or dispatch with
+an actionable diagnostic. The backend still enforces declaration, confinement,
+lease, authority and budget. A repeated current `task_id` does not upgrade the
+occurrence to the live head; explicit selection of another owned Task remains
+available, and returning to the original Task restores the occurrence's pin.
+
+`TestBotRetainedTaskProductionFactoryExecution` runs a cron Task through the
+production factory and runtime adapter with a controlled model, scoped repository
+and workspace fixture: the model receives title, original assignment and full
+procedure, a real guarded fixture read returns its observation, and one final
+answer follows without helper execution or Task publication. Companion tests cover
+helper validation, valid helper dispatch, another-Task selection, archival checks,
+immutable pins and oversized definitions. This proves wiring and tool behavior,
+not real-provider compliance, physical sandbox execution, or historical assignment
+quality. If an older Task captured only a preference such as “Products and
+companies” rather than the full intended assignment, this change does not invent
+missing context or migrate that Task.
 
 ## File authority and archival recovery
 
@@ -78,6 +124,70 @@ transport/model failure must not publish the predecessor's finding (for example,
 recovered bytes remain in the private candidate; publication still fails closed
 until the new candidate actually passes review. Regression:
 `TestBotEmployeeRecoveredEvidenceReviewFailureDoesNotPublishStaleFinding`.
+
+## Adaptive quality continuity
+
+Automatically captured `TASK.md` drafts retain subject-neutral quality guidance:
+owner audience and topic dimensions, context, practical implications and evidence
+quality. Observed fetch URLs are starting points, not an exhaustive source list or
+proof of availability. Refinement should distinguish unavailable/uninvestigated
+areas from checked areas with no relevant changes. Sparse findings may change the
+length and organization; only explicit owner requirements impose exact output
+contracts. There is no fixed report layout, category set or word-count target.
+
+`botTaskServices.initialBaselineContext` supplies a prior-result quality reference
+even when the definition has an Output section, without overriding that section's
+explicit owner contract. Candidates are bounded to the existing 20-run page and
+must be same-Bot successful/partial manual results. Relevance requires the same
+immutable Task pin (or an older revision with the same assignment), a validated
+confirmed-title assignment, or the exact admitted Home user event matching the
+manifest assignment. A Task merely selected as context in a Home conversation
+still requires assignment provenance. Missing/foreign/ambiguous provenance omits
+the reference; report/title similarity is never sufficient. Historical
+`LoadRunInput` is not used because it accepts queued runs only.
+
+Historical prose is redacted before extraction and JSON-quoted as untrusted data,
+not owner approval, instructions, current fact proof or evidence that a source
+worked. `botTaskQualityExcerpt` preserves short results and distributes at most
+3,000 UTF-8 bytes across up to 24 structural blocks sampled over the whole result,
+including its ending, rather than keeping only its opening. This deterministic,
+lossy reference is explicitly not a complete checklist or semantic summary. No
+extra model phase or persistence schema is introduced. These changes do not
+rewrite existing recipes or recover absent original owner requirements.
+
+`TestBotTaskQuality*` covers late sections, bounded deterministic multilingual
+excerpts, sparse results, owner-contract precedence, untrusted prose, redaction,
+Task revision/owner-message/title-confirmation binding and automatic recipes.
+These tests prove prompt/data wiring with controlled fixtures, not real-provider
+report quality or a live scheduled run.
+
+## Task invocation receipts and retained research
+
+A successful scoped Task update already emits an independently captured Home
+operation receipt; it does not change the authorization classifier from
+`EffectReversibleWrite` to `EffectRead`. The completion journal can accept that
+receipt without treating an arbitrary write or unknown tool as harmless. A bare
+`Verified` flag or an incomplete observation is insufficient. Optional local
+work/check/learning results likewise record an invocation-bound observation of
+the completed bookkeeping attempt, not certification that a check passed or
+learning was accepted. Native service, cancellation and binding failures retain
+their existing error behavior.
+
+`bot_task_execute` rejects a missing, noncanonical or non-`scripts/*.py` helper
+path after the live binding check and before Task selection or backend dispatch.
+That branch records one exact-call `ToolNonexecutionReceipt` and returns explicit
+error feedback, not a success observation. It must suppress the ordinary deferred
+Task-success receipt to avoid conflicting attestations. Native authorization,
+cancellation and backend errors remain terminal; matching `ErrBotInvalid` after
+dispatch is not proof that nothing happened.
+
+This permits an actual final research answer, including source limitations, to
+survive an invalid helper request followed by reads and a committed Task update.
+The existing runtime requires complete receipts and the actual final event;
+uncertain external effects and permission failures still prevent recovery.
+`TestBotRetainedTaskResearchFinal` covers the concrete Task tools and real runtime
+adapter through restored commit validation with controlled workspace/source
+fixtures, not physical Docker or a paid provider.
 
 ## Lifecycle and publication
 

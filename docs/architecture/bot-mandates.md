@@ -1,5 +1,33 @@
 # Bot mandates and responsibility continuity
 
+## Explicit progress runtime policy
+
+`BudgetSpec.runtime_policy` and the pinned mandate carry a versioned
+`execution.BotRuntimePolicy`. Absence remains legacy: saved 300/900-second
+limits are not migrated on read. New creation resolves trusted
+`AppConfig.EffectiveBotRuntimePolicy`: absent historical operator configuration
+permits `progress_v1`; explicit legacy `bot_mandates` retains its duration ceiling.
+Conflicting explicit progress/mandate ceilings fail validation.
+
+Progress policy separates evaluation cadence from optional cumulative
+`max_active_seconds` and bounded individual model/tool calls. Token, tool,
+spending, admission and authority-expiry limits remain in force. Scheduled grants
+inherit the saved policy and expiry; no renewal or quota reset is implied.
+`SharedRunBudget.Deadline()` returns zero only for no whole-task hard duration.
+Consumers must check `IsZero()` before installing a deadline. `bot.RunContext`
+combines the persisted usage, actual meter and authority expiry without granting
+fresh time. Provider, tool and knowledge-extraction calls retain independent
+operation bounds; knowledge extraction also retains its 60-second lease bound.
+
+Verification: `TestBotRuntimePolicyHTTPAcceptance` exercises personal/team
+creation and reviewed immutable configuration over isolated production HTTP
+routes. `TestBotProgressBudgetCumulativeDurationAndAuthority`,
+`TestBotProgressBudgetModelOperationTimeout` and
+`TestBotProgressBudgetKnowledgeExtractionZeroDeadline` exercise cumulative
+six-hour usage, finite resource enforcement, cancellation and absent hard timers.
+These are deterministic tests, not evidence of a wall-clock soak or durable
+restart integration. Rollout remains dormant pending the full execution gate.
+
 ## Requirements are not authority
 
 A mandate and `execution.RunPolicy` define what a Bot may do. The pinned

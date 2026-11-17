@@ -35,13 +35,13 @@ func TestBotDocumentsHTTPBoundary(t *testing.T) {
 		{"PUT", "/unknown", `{"content":"x","confirmed":true,"expected_revision":1,"reason":"review"}`, 400},
 	} {
 		t.Run(tc.method+tc.path+tc.body, func(t *testing.T) {
-			repo := &botMemoryBoundaryStore{}
+			repo := &botMemoryBoundaryStore{bot: &store.Bot{}}
 			router := mux.NewRouter()
 			registerBotRoutes(router)
 			req := httptest.NewRequest(tc.method, "/api/studio/bots/"+uuid.NewString()+"/documents"+tc.path, strings.NewReader(tc.body)).WithContext(store.WithServices(c, &store.Services{PersonalBots: repo}))
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
-			if w.Code != tc.status || repo.calls != 0 {
+			if w.Code != tc.status || repo.calls != 1 {
 				t.Fatalf("status %d calls %d: %s", w.Code, repo.calls, w.Body.String())
 			}
 		})

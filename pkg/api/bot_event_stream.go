@@ -76,7 +76,7 @@ func marshalBotTranscriptEvent(event *session.Event, botID, sessionID uuid.UUID)
 			if err := json.Unmarshal(raw, &state); err != nil {
 				return nil, err
 			}
-			if state.BotID != botID || state.RunID == uuid.Nil || state.SessionID == uuid.Nil || state.HomeSessionID == uuid.Nil || state.StateSequence < 1 || event.Content != nil || (sessionID != state.SessionID && (sessionID != state.HomeSessionID || state.Presentation != store.BotRunPresentationHomeInteractive)) {
+			if state.BotID != botID || state.RunID == uuid.Nil || state.SessionID == uuid.Nil || state.HomeSessionID == uuid.Nil || state.StateSequence < 1 || event.Content != nil || event.Author != "bot_runtime" || state.ValidateProgress() != nil || (sessionID != state.SessionID && (sessionID != state.HomeSessionID || (state.Presentation != store.BotRunPresentationHomeInteractive && state.Progress == nil))) {
 				return nil, store.ErrBotInvalid
 			}
 			switch state.Status {
@@ -84,6 +84,9 @@ func marshalBotTranscriptEvent(event *session.Event, botID, sessionID uuid.UUID)
 			default:
 				return nil, store.ErrBotInvalid
 			}
+			clean := *event
+			clean.Actions = session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: state}}
+			return json.Marshal(&clean)
 		}
 	}
 	return json.Marshal(event)
@@ -224,7 +227,7 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 			if row.Cursor <= cursor || row.Event == nil {
 				return
 			}
-			payload, err := marshalBotTranscriptEvent(projectBotQuestionTranscript(row.Event, approvals), id, sid)
+			payload, err := marshalBotTranscriptEvent(projectBotHomeNarrative(projectBotReviewQuestion(projectBotQuestionTranscript(row.Event, approvals), approvals, id, sid), b.HomeSessionID, sid), id, sid)
 			if err != nil || !write(botTranscriptEvent, payload, row.Cursor) {
 				return
 			}

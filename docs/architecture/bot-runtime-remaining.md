@@ -2,6 +2,81 @@
 
 > Historical continuation record. For the current additive message/proposal/source-intake and compact UI contracts, see [Chat-first contracts](bot-chat-first.md). Older phase status and per-intent composer assumptions below are not current release evidence. Real live smoke and larger deployed specification scenarios remain pending; tool-free default drafting does not authorize external execution.
 
+## Durable progress contracts — 2026-11-16 (not runtime activation)
+
+`execution.BotRuntimePolicy` schema 1 separates `progress_v1` evaluation cadence
+from individual model/tool timeouts and optional cumulative active duration.
+Absent policy remains legacy; a present zero/unknown policy is rejected, not
+upgraded on read. Only `NewBotProgressRuntimePolicy()` constructs 300-second
+cadence and 120-second operation defaults. `MaxActiveSeconds == nil` explicitly
+has no active-duration cap under authorized progress mode; spending, token and
+tool caps are independent and unchanged. No constructor is wired into creation
+or existing versions in this contract phase.
+
+`BudgetSpec.RuntimePolicy`, `BotMandate.RuntimePolicy`, and the trusted
+`BotMandatePolicy.RuntimePolicy` ceiling are optional and deep-cloned. The legacy
+finite `BotMandateLimits.Validate` / `ValidateWithin` behavior stays intact.
+`ValidateWithinRuntimePolicy(ceiling, requested, allowed)` replaces only the
+legacy runtime comparison when requested and allowed policies both explicitly
+permit progress. All finite legacy fields still validate. A bounded allowed
+`MaxActiveSeconds` cannot be widened or removed; cadence and operation timeouts
+cannot exceed their trusted ceilings. This comparison is structural, not a grant.
+
+Private contracts are extracted to `pkg/store/bot_progress.go` rather than making
+`bot_runtime.go` larger. `BotProgressCheckpoint` uses the discriminator
+`kind: bot_progress_v1` and schema 1. It pins exact Bot/run/session/version/task,
+work revision, checkpoint revision, stable logical TurnID, event/transcript and
+dispatch cursors, bounded private context reference plus SHA-256 digest, evaluation,
+next eligibility and cumulative usage. Checkpoint successors advance exactly one
+revision and cannot regress usage/cursors/work/evaluation or replace identity or
+TurnID. State/summary/context-reference limits are 64 KiB / 4 KiB / 1 KiB.
+
+`BotProgressMutation{Lease, Binding, ExpectedRevision}` is trusted-worker input.
+`Validate` only checks structural binding and lease shape/expiry: implementations
+must atomically recheck the actual scoped lease/fence, revision, live membership,
+current authority and nonterminal status. Possessing a checkpoint is not authority.
+The optional `BotProgressStore` contract is:
+
+- `CheckpointProgress(ctx, BotProgressCheckpointRequest{Mutation, State}) (*BotProgressState, error)`
+- `BeginProgressDispatch(ctx, BotProgressBeginDispatchRequest{Mutation, DispatchID, Kind, OperationDigest, ReservedUsage}) (*BotProgressDispatchReceipt, error)`
+- `SettleProgressDispatch(ctx, BotProgressSettleDispatchRequest{Mutation, DispatchID, Outcome, Usage, EvidenceRef}) (*BotProgressDispatchReceipt, error)`
+- `ContinueProgress(ctx, BotProgressContinueRequest{Mutation, CheckpointRevision, Reason}) (*BotProgressState, error)`
+
+Dispatch `Kind` is `model` or `tool`; outcome is `settled`, `not_executed`, or
+`uncertain`. Nonexecution requires a trusted evidence reference, not a tool error
+string. `ReservedUsage`/settlement `Usage` describe one dispatch; checkpoint Usage
+is cumulative. Transactions must reconcile outstanding reservations and never
+replay uncertain effects. Receipt fields are `DispatchID`, `LedgerCursor`,
+`Revision`. Begin/settle revisions and persisted occupancy behavior will be
+implemented in the store phase; these are not yet functioning persistence methods.
+
+`BotMandateProgressQuotaStore` optionally adds `SuspendBotMandateRun` and
+`ReacquireBotMandateRun`, both accepting `BotMandateProgressQuotaRequest{MandateRef,
+Mutation}`. Suspend releases concurrency occupancy only; reacquire preserves the
+same logical assignment/daily charge and cumulative ledger. Existing quota and
+`BotMandateRuntime` interfaces are unchanged.
+
+`BotRunInput.Progress` and `bot.RunRequest.Progress` are private state snapshots;
+`RunRequest.ProgressStore` is the optional capability. `RunResult.ProgressCheckpoint`
+is a `*store.BotProgressState`, separate from legacy approval `Checkpoint` bytes;
+`ValidateCheckpoints()` rejects mixing formats. No approval checkpoint or forged
+owner answer is a progress continuation. `ModelCallPurposeProgress` selects prompt
+purpose only, never a different provider, budget or authority. Runtime Start,
+Resume, Cancel and generic execution signatures remain unchanged.
+
+The additive public `BotRunState.Progress` is `*BotProgressProjection` with schema,
+Bot/run/session binding, revision, phase/reason, employee summary and optional
+evaluation timestamp only. `ValidateProgress()` checks this addition without
+altering legacy projection shape. Private context, ledger, tool traces and notes
+are absent. Typed progress phases do not add RunStatus values or imply completion.
+No SSE or client is emitting/consuming new progress data yet; publication, frontend
+and terminal wiring and the phase transition machine belong to later phases.
+
+Contract tests cover malformed versions/modes, old JSON, nil optionals, policy and
+checkpoint cloning, binding tampering, finite ceilings, monotonic successors,
+format separation, quota bindings and projection validation. These tests do not
+prove long-running execution, restart recovery, coalescing, live UI or providers.
+
 ## Status — 2026-11-05
 
 **Phase 3 remains running.** The runtime is implemented and exercised substantially beyond a persistence-only foundation, but there are still missing runtime behaviors, not merely a final test command. Do not mark the phase complete from passing package tests, catalogue presence, a blocked unsafe adapter, or the bounded exact-action continuation alone.

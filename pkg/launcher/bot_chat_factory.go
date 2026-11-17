@@ -243,6 +243,36 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		if wrapped == nil {
 			return nil, store.ErrBotUnsupported
 		}
+		if req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+			redactor := credentials.NewRedactor()
+			owner = credentials.WithRedactor(owner, redactor)
+			binding := &botFactoryBinding{owner: owner, req: req}
+			questionRuntime := agent.BotPolicyRuntime{Guard: botTitleQuestionPolicy{binding}, Classifier: botTitleQuestionPolicy{binding}}
+			owner = agent.WithBotPolicyRuntime(owner, questionRuntime)
+			binding.owner = owner
+			question, err := botWorkflowQuestionTool(req, scoped)
+			if err != nil {
+				return nil, err
+			}
+			bound, err := newBotBoundTool(question, binding)
+			if err != nil {
+				return nil, err
+			}
+			binding.installProgressBridge()
+			llm := &botTitleQuestionLLM{LLM: &botProgressLLM{LLM: wrapped, binding: binding}, binding: binding}
+			chat := agent.NewChatAgent(llm, nil, nil, scoped.Sessions, &agent.SystemPromptBuilder{Tools: []tool.Tool{bound}}, false, false)
+			chat.Tools = []tool.Tool{bound}
+			chat.Redactor = redactor
+			repo := store.BotStoreFromContext(owner, req.Bot.Scope)
+			transcript, ok := repo.(store.BotTranscriptStore)
+			if !ok {
+				return nil, store.ErrBotUnsupported
+			}
+			if err := binding.check(owner); err != nil {
+				return nil, err
+			}
+			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, Transcript: transcript, PolicyRuntime: &questionRuntime, Authorization: req.Authorization, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}}, nil
+		}
 		var safe *BotChatSafeResources
 		if req.Run.ControlOnly() && !botFactoryInteractive(req) && req.Mandate == nil {
 			// No preparation callback may provision a sandbox or external tools for
@@ -303,7 +333,8 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		} else if req.Run.Task != nil {
 			return nil, store.ErrBotUnsupported
 		}
-		llm := &botFactoryLLM{LLM: wrapped, binding: binding}
+		binding.installProgressBridge()
+		llm := &botFactoryLLM{LLM: &botProgressLLM{LLM: wrapped, binding: binding}, binding: binding}
 		// Bound tool contexts resolve values from owner, not the caller; install
 		// the same metered auxiliary capability there before publishing resources.
 		owner = agent.WithBotAuxiliaryLLM(owner, llm)
@@ -445,7 +476,8 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			owner = execution.WithRunPolicy(owner, r.Policy)
 			owner = agent.WithBotPolicyRuntime(owner, directed.PolicyRuntime)
 			freshBinding := &botFactoryBinding{synthesisReserve: binding.synthesisReserve, owner: owner, req: r, research: binding.research, researchOnly: true, verifyIsolation: binding.verifyIsolation}
-			freshModel := &botFactoryLLM{LLM: wrapped, binding: freshBinding, researchOnly: true}
+			freshBinding.progress = binding.progress
+			freshModel := &botFactoryLLM{LLM: &botProgressLLM{LLM: wrapped, binding: freshBinding}, binding: freshBinding, researchOnly: true}
 			var reads []tool.Tool
 			for _, t := range safe.Tools {
 				if t.Name() == "perplexity_web_search" {
@@ -467,9 +499,9 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			chat := agent.NewChatAgent(freshModel, nil, nil, scoped.Sessions, prompt, false, false)
 			chat.Tools = reads
 			chat.Redactor = wired.ChatAgent.Redactor
-			return &api.BotChatResources{Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cancel, PolicyRuntime: &directed.PolicyRuntime}, nil
+			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cancel, PolicyRuntime: &directed.PolicyRuntime}, nil
 		}
-		return &api.BotChatResources{ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
 }
 
@@ -488,6 +520,11 @@ func validateBotFactoryRequest(ctx context.Context, req bot.RunRequest) error {
 	want := execution.BotRunIdentity{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Version.Version, ActorID: req.Bot.OwnerID.String(), OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug}
 	if !ok || p.Validate() != nil || p.Kind != execution.PrincipalKindUser || !reflect.DeepEqual(p, req.Principal) || p.Subject != req.Bot.OwnerID.String() || !identified || id != want || want.Validate() != nil || !req.Run.ExecutionMode.Valid() || (req.Run.RequiresAutonomousPolicy() && req.Policy == nil) || (req.Policy != nil && req.Policy.Identity() != want) || execution.RunPolicyFromContext(ctx) != req.Policy {
 		return store.ErrBotForbidden
+	}
+	if c := req.Run.TitleConfirmation; c != nil {
+		if c.ValidateBinding(req.Run, req.Bot.OwnerID) != nil || (c.State != store.BotTitleConfirmationNeedsQuestion && c.State != store.BotTitleConfirmationConfirmed) {
+			return store.ErrBotInvalid
+		}
 	}
 	if req.Bot.Scope != store.BotScopePersonal && req.Bot.Scope != store.BotScopeTeam {
 		return store.ErrBotInvalid
@@ -553,6 +590,12 @@ func botFactoryOwnerContext(ctx context.Context, req bot.RunRequest) context.Con
 	}
 	owner = execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Version.Version, ActorID: req.Principal.Subject, OrgSlug: req.Principal.OrgSlug, TeamSlug: req.Principal.TeamSlug})
 	owner = execution.WithRunPolicy(owner, req.Policy)
+	if d := bot.ProgressDispatchFromContext(ctx); d != nil {
+		owner = bot.WithProgressDispatch(owner, d)
+	}
+	if c := bot.ProgressControllerFromContext(ctx); c != nil {
+		owner = bot.WithProgressController(owner, c)
+	}
 	if botFactoryInteractive(req) {
 		owner = execution.WithBotTurnAuthorizer(owner, req.Authorization)
 	}
@@ -572,6 +615,7 @@ type botWiredInjection struct {
 	credentials   store.CredentialStore
 }
 type botFactoryBinding struct {
+	progress         *botProgressBridge
 	synthesisReserve *botSynthesisReserve
 	researchOnly     bool
 	tasks            *botTaskServices
@@ -620,6 +664,9 @@ func (b *botFactoryBinding) check(ctx context.Context) error {
 	if run == nil || run.ID != b.req.Run.ID || run.BotID != b.req.Bot.ID || run.Status != store.RunRunning || run.Intent != b.req.Run.Intent || run.Version != b.req.Version.Version || run.SessionID != b.req.Run.SessionID || run.Lease.BotID != lease.BotID || run.Lease.RunID != lease.RunID || run.Lease.WorkerID != lease.WorkerID || run.Lease.Fence != lease.Fence || !time.Now().Before(run.Lease.ExpiresAt) {
 		return store.ErrBotConflict
 	}
+	if !reflect.DeepEqual(run.TitleConfirmation, b.req.Run.TitleConfirmation) || run.TitleConfirmation.ValidateBinding(*run, current.OwnerID) != nil {
+		return store.ErrBotConflict
+	}
 	if err := b.req.Budget.Check(ctx); err != nil {
 		return err
 	}
@@ -636,6 +683,12 @@ func (b *botFactoryBinding) check(ctx context.Context) error {
 			return err
 		}
 	}
+	if b.req.Run.TitleConfirmation != nil && b.req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+		if !bot.HasInteractionOwner(bound) {
+			return store.ErrBotForbidden
+		}
+		return nil // no physical workspace exists during title clarification
+	}
 	return b.verifyIsolation(ctx)
 }
 
@@ -643,7 +696,7 @@ func (b *botFactoryBinding) check(ctx context.Context) error {
 // every other value from the captured owner context, never from a later viewer.
 func (b *botFactoryBinding) bind(ctx context.Context) context.Context {
 	policy := execution.RunPolicyFromContext(ctx)
-	if b.researchOnly || policy == nil || policy.Identity() != b.req.Policy.Identity() {
+	if b.researchOnly || b.req.Policy == nil || policy == nil || policy.Identity() != b.req.Policy.Identity() {
 		policy = b.req.Policy
 	}
 	return execution.WithRunPolicy(botBoundContext{Context: ctx, owner: b.owner}, policy)
@@ -673,7 +726,7 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 			return
 		}
 		request := req
-		if !l.researchOnly && purpose != bot.ModelCallPurposeAssessment {
+		if !l.researchOnly && purpose != bot.ModelCallPurposeAssessment && purpose != bot.ModelCallPurposeProgress {
 			var err error
 			request, err = l.binding.withCurrentControlContext(bound, req)
 			if err != nil {
@@ -690,7 +743,7 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 			stream = false
 		}
 		var synthesis bool
-		if purpose != bot.ModelCallPurposeAssessment {
+		if purpose != bot.ModelCallPurposeAssessment && purpose != bot.ModelCallPurposeProgress {
 			var err error
 			request, synthesis, err = l.binding.synthesisReserve.prepare(bound, request)
 			if err != nil {
@@ -728,6 +781,115 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 			cloned.Contents = append(append([]*genai.Content(nil), request.Contents...), genai.NewContentFromText("Your tool request was not executed. Return the final answer as text only from retained evidence; state missing evidence honestly.", "user"))
 			request = &cloned
 		}
+	}
+}
+
+type botTitleQuestionPolicy struct{ binding *botFactoryBinding }
+
+func (p botTitleQuestionPolicy) DescribeAction(ctx context.Context, name string, raw json.RawMessage) (execution.ActionDescriptor, error) {
+	if err := p.binding.check(ctx); err != nil {
+		return execution.ActionDescriptor{}, err
+	}
+	if name != "ask_user" || validateBotTitleQuestionArgs(raw) != nil {
+		return execution.ActionDescriptor{}, store.ErrBotForbidden
+	}
+	return execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectRead, ConstraintsVerified: true}, nil
+}
+func (p botTitleQuestionPolicy) Authorize(ctx context.Context, action execution.ActionDescriptor) (execution.PolicyDecision, error) {
+	if _, err := p.DescribeAction(ctx, action.Tool, action.Arguments); err != nil {
+		return execution.PolicyDecision{}, err
+	}
+	if p.binding.req.Mandate != nil {
+		if err := p.binding.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, "ask_user"); err != nil {
+			return execution.PolicyDecision{}, err
+		}
+	}
+	return execution.EvaluateRunPolicy(ctx, action, time.Now()), nil
+}
+
+// validateBotTitleQuestionArgs refuses convenience pickers and all non-question
+// fields before the genuine handler can consult any resource.
+func validateBotTitleQuestionArgs(args any) error {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	var values map[string]any
+	if json.Unmarshal(raw, &values) != nil || values == nil {
+		return store.ErrBotInvalid
+	}
+	for key := range values {
+		switch key {
+		case "kind", "prompt", "options", "allow_custom_answer":
+		default:
+			return store.ErrBotInvalid
+		}
+	}
+	values["questionId"] = "title-validation"
+	raw, _ = json.Marshal(values)
+	return store.ValidateBotTitleQuestion(&store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "title-validation", Payload: raw})
+}
+
+// Buffer a full response before exposing any call. One correction consumes the
+// same active budget; invalid prose/calls never reach the Chat tool loop.
+type botTitleQuestionLLM struct {
+	model.LLM
+	binding *botFactoryBinding
+}
+
+func (m *botTitleQuestionLLM) GenerateContent(ctx context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		bound := m.binding.bind(ctx)
+		for attempt := 0; attempt < 2; attempt++ {
+			if err := m.binding.check(bound); err != nil {
+				yield(nil, err)
+				return
+			}
+			var responses []*model.LLMResponse
+			var call *genai.FunctionCall
+			calls, size := 0, 0
+			for response, err := range m.LLM.GenerateContent(bound, request, false) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				raw, err := json.Marshal(response)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				size += len(raw)
+				if size > 1<<20 {
+					yield(nil, errors.New("title clarification generation failed: oversized response"))
+					return
+				}
+				if response != nil && response.Content != nil {
+					for _, p := range response.Content.Parts {
+						if p != nil && p.FunctionCall != nil {
+							calls++
+							call = p.FunctionCall
+						}
+					}
+				}
+				responses = append(responses, response)
+			}
+			if calls == 1 && call.Name == "ask_user" && validateBotTitleQuestionArgs(call.Args) == nil {
+				if err := m.binding.check(bound); err != nil {
+					yield(nil, err)
+					return
+				}
+				for _, response := range responses {
+					if !yield(response, nil) {
+						return
+					}
+				}
+				return
+			}
+			copy := *request
+			copy.Contents = append(append([]*genai.Content(nil), request.Contents...), genai.NewContentFromText("No tool was executed. Correct your response: call only ask_user once, kind=select, three or four distinct title-specific options, allow_custom_answer=true. No other fields or tools and no plain-text question.", "user"))
+			request = &copy
+		}
+		yield(nil, errors.New("title clarification generation failed: expected one valid ask_user call after one correction"))
 	}
 }
 
@@ -1179,8 +1341,24 @@ type botBoundToolContext struct {
 }
 
 func (c botBoundToolContext) Value(key any) any { return c.owner.Value(key) }
+
+// preserveBotToolBinding carries an existing factory authorization marker across
+// our lifetime-only wrappers. It must never mint a binding for an unbound or
+// arbitrary embedded context, or replace the captured owner values.
+func preserveBotToolBinding(original, wrapped tool.Context) tool.Context {
+	if bound, ok := original.(botBoundToolContext); ok {
+		bound.Context = wrapped
+		return bound
+	}
+	return wrapped
+}
+
 func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	if t.binding.req.Run.ControlOnly() && t.binding.req.Mandate == nil {
+	// A newly admitted draft conversation may only ask its pending title
+	// question. The authoritative binding, session, arguments, authorization,
+	// and budget checks below still gate the genuine question handler.
+	pendingTitleQuestion := t.Name() == "ask_user" && t.binding.req.Run.TitleConfirmation != nil && t.binding.req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion
+	if t.binding.req.Run.ControlOnly() && t.binding.req.Mandate == nil && !pendingTitleQuestion {
 		return nil, store.ErrBotForbidden
 	}
 	if ctx == nil || ctx.SessionID() == "" {
@@ -1195,8 +1373,30 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 			return nil, err
 		}
 	}
+	if t.binding.req.Run.TitleConfirmation != nil && t.binding.req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+		if t.Name() != "ask_user" || ctx.SessionID() != t.binding.req.Run.SessionID.String() {
+			return nil, store.ErrBotForbidden
+		}
+		if err := validateBotTitleQuestionArgs(args); err != nil {
+			return nil, err
+		}
+		if t.binding.req.Authorization != nil {
+			if err := t.binding.req.Authorization.Authorize(bound, execution.CapabilityToolExecute); err != nil {
+				return nil, err
+			}
+		}
+		if t.binding.req.Mandate != nil {
+			if err := t.binding.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, "ask_user"); err != nil {
+				return nil, err
+			}
+		}
+		if err := t.binding.req.Budget.ReserveTool(bound, "ask_user"); err != nil {
+			return nil, err
+		}
+		return t.binding.progressTool(bound, t.botRunnableTool, args, t.botRunnableTool.Run)
+	}
 	if t.binding.synthesisReserve.synthesis() {
-		return botSynthesisStoppedResult(), nil
+		return botSynthesisStoppedResult(bound, t.Name()), nil
 	}
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
@@ -1236,13 +1436,15 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	}
 	if emailAuth.target != nil {
 		invocation := botBoundToolContext{Context: bound, owner: context.WithValue(bound, botEmailAuthorizedKey{}, emailAuth)}
-		return emailAuth.target.Run(invocation, args)
+		return t.binding.progressTool(invocation, emailAuth.target, args, emailAuth.target.Run)
 	}
 	if mcpAuth.target != nil {
 		invocation := botBoundToolContext{Context: bound, owner: context.WithValue(bound, botMCPAuthorizedKey{}, mcpAuth)}
-		return mcpAuth.target.Run(invocation, args)
+		return t.binding.progressTool(invocation, mcpAuth.target, args, mcpAuth.target.Run)
 	}
-	result, err := t.binding.runSynthesisTool(bound, t.botRunnableTool, args)
+	result, err := t.binding.progressTool(bound, t.botRunnableTool, args, func(c tool.Context, a any) (map[string]any, error) {
+		return t.binding.runSynthesisTool(c, t.botRunnableTool, a)
+	})
 	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, errors.Join(err, captureErr)

@@ -39,7 +39,7 @@ import { projectBotOperation } from './chat/botOperationProjection'
 import { botFailureMessage, botLocalFailure, BotFailureKind } from './chat/botEmployeeFeedback'
 import BotEmployeeMessage from './bots/BotEmployeeMessage'
 import BotOperationResult from './bots/BotOperationResult'
-import { mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
+import { botRunOpen, botRunStatusLabel, mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
   deriveLatestHarness,
   harnessFocusEquals,
@@ -301,7 +301,7 @@ interface StudioChatProps {
   hideSidebar?: boolean
   botRoute?: import('./bots/botRoute').BotRoute
   userId?: string
-  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; renderReview?: (kind: 'proposal' | 'approval', id: string) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
+  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; renderReview?: (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
   initialSessionId?: string | null
   pendingChatMessage?: { message: string; systemContext?: string } | null
   onPendingChatMessageConsumed?: () => void
@@ -1205,7 +1205,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           if (data.kind !== 'proposal' && data.kind !== 'approval') return
           const kind = data.kind
           const reviewId = String(data.review_id || data.reviewId || '')
-          if (reviewId) setMessages(prev => prev.some(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId) ? prev : [...finalizeStreamingAgentText(prev), { type: 'bot_review', kind, reviewId, eventId: String(data.eventId || reviewId) }])
+          const question = data.question as import('@/api/questions').Question | undefined
+          if (reviewId) setMessages(prev => prev.some(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId) ? prev.map(m => m.type === 'bot_review' && m.kind === kind && m.reviewId === reviewId && question ? { ...m, question } : m) : [...finalizeStreamingAgentText(prev), { type: 'bot_review', kind, reviewId, question, eventId: String(data.eventId || reviewId) }])
           return
         }
         // Bot ADK envelopes feed this same reducer, never a second transcript store.
@@ -1515,6 +1516,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         setMessages(finalizeStreamingAgentText)
         console.error('Chat reconnect stream error:', err)
         if (botThreadRef.current) {
+          if ('status' in err && [401, 403, 404, 410].includes(Number(err.status))) { setMessages([]); setBotRunStates({}); setBotOperations({}); setBotReplayComplete(false) }
           setBotSendError(botLocalFailure(err).message)
           setIsStreaming(false)
           return
@@ -2750,17 +2752,22 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
   // One lossless display projection for live and restored transcript records.
   const { activityByStart, skipIndices: toolActivitySkipIndices, lastActivityStart } = useMemo(
-    () => buildChronologicalActivityRenderIndex(messages),
-    [messages],
+    () => buildChronologicalActivityRenderIndex(messages, botThread ? 'preserve-agent' : 'fold-intermediate'),
+    [messages, !!botThread],
   )
 
   const liveStreamStatus = useMemo(() => {
-    if (!(botThread ? botBusy : isStreaming)) return null
-    if (botThread) return 'Working…'
+    if (botThread) {
+      if (botThread.status === 'stopped' || botThread.status === 'deleted') return null
+      const open = Object.values(botRunStates).filter(state => botRunOpen(state) && (state.progress || state.status === 'running' || state.status === 'queued'))
+      if (open.length) return [...new Set(open.map(state => !state.progress && (state.status === 'running' || state.status === 'queued') ? 'Working…' : botRunStatusLabel(state)))].join(' · ')
+      return botBusy ? 'Working…' : null
+    }
+    if (!isStreaming) return null
     const activity = activityByStart.get(lastActivityStart)
     const running = activity?.steps.find(step => step.status === 'running')
     return running ? liveActivityHint(running) : generationProgress || 'Thinking…'
-  }, [isStreaming, botThread, botBusy, activityByStart, lastActivityStart, generationProgress])
+  }, [isStreaming, botThread, botBusy, botRunStates, activityByStart, lastActivityStart, generationProgress])
 
   const renderAgentMessage = (msg: AgentMessage & { invocationId?: string }, index: number, placement: 'transcript' | 'activity') => {
                 // Collect web source URLs for citation pill
@@ -3181,10 +3188,13 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           ) : (
             messages.map((msg, index) => {
               if (msg.type === 'bot_operation') { const operation = botOperations[msg.operationId]; return operation && botThread ? <BotOperationResult key={msg.eventId} operation={operation} scope={botThread.scope} readOnly={botThread.readOnly || !!botThread.decisionsReadOnly} onChange={next => setBotOperations(prev => mergeBotOperation(prev, next, botThread.botId, initialSessionId || ''))} /> : null }
-              if (msg.type === 'bot_review') return <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId)}</div>
+              if (msg.type === 'bot_review') return <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId, msg.question)}</div>
               // Turn-level activity fold: render block at segment start; skip covered indices.
               const activityAt = activityByStart.get(index)
               if (activityAt) {
+                // Employee conversations preserve assistant acknowledgements above,
+                // but autonomous tool activity is private (including restored rows).
+                if (botThread) return null
                 // Live while this is the latest activity and tools are still running
                 // (or stream open before any trailing agent bubble after the fold).
                 const hasTrailingAgent = messages
@@ -3556,7 +3566,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
               if (msg.type === 'chat_question') {
                 const questionMsg = msg as ChatQuestionMessage
-                if (botThread) return <p key={index} className="rounded border border-border p-3">{questionMsg.prompt} — Review this checkpoint in the Decision inbox above.</p>
+                if (botThread) return messages.slice(index + 1).some(m => m.type === 'bot_review' && m.kind === 'approval') ? null : <p key={index} role="status" className="my-3 text-sm text-muted-foreground">Thinking…</p>
                 if (isChatQuestionAnswered(messages, index)) {
                   return (
                     <div key={index} className="space-y-1" data-testid="ask-user-answered">

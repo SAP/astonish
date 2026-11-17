@@ -85,6 +85,14 @@ func testBotPermanentVerifiedPurge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Reads cannot invalidate the revision pinned by a durable cleanup claim.
+			if err := repo.MarkRead(owner, store.BotReadCursor{BotID: deleted.ID, ViewerID: deleted.OwnerID, Sequence: rec.LastSequence}); err != nil && !errors.Is(err, store.ErrBotForbidden) {
+				t.Fatal(err)
+			}
+			retried, err := repo.ReserveHomeCleanup(runtime, deleted.Home, deleted.Revision)
+			if err != nil || *retried != *claim {
+				t.Fatalf("read invalidated cleanup claim: %+v %v", retried, err)
+			}
 			if err = repo.ConfirmCleanup(runtime, claim.Request); err != nil {
 				t.Fatal(err)
 			}

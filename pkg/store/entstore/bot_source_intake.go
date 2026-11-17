@@ -224,7 +224,10 @@ func sourceDraftKey(p *store.BotSourceIntakeProposal) string {
 }
 func (r *botRepository) applySourceIntake(ctx context.Context, tx botDraftDB, p *store.BotSourceIntakeProposal) (*store.Bot, error) {
 	q := p.Request
-	v := store.DefaultBotVersion()
+	v, policyErr := store.NewBotVersionForCreation(ctx, p.OwnerID)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	v.Charter = q.Charter
 	goals := []store.BotGoal{}
 	for _, g := range q.Carryover.Goals {
@@ -279,7 +282,10 @@ func (r *botRepository) templateDestination(ctx context.Context, p *store.BotSou
 }
 func createSourceTemplate(ctx context.Context, d *personalBotStore, p *store.BotSourceIntakeProposal) (*store.Bot, error) {
 	t := p.Template
-	v := store.DefaultBotVersion()
+	v, policyErr := store.NewBotVersionForCreation(ctx, p.OwnerID)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	v.Charter = t.Definition.Charter
 	v.Persona.Language = t.Definition.Language
 	for i, s := range t.Definition.SuggestedSchedules {

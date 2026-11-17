@@ -74,6 +74,12 @@ Started or previously leased records are not repurposed. Claim/admission and rec
 
 `TestBotAuthorizedScheduleQueuedReconciliation` exercises due occurrence admission followed by edit/pause/remove/create, cancellation versus unchanged rebinding, disabled unrelated jobs, stale worker rejection, current policy and revocation, duplicate replay, active-lease fencing, and injected receipt failure with run/root/version/scheduler rollback in both SQLite scopes. `TestIntegrationPostgresBotQueuedScheduleReconciliation` covers edit/create/pause/remove, historically disabled unrelated schedules and forced claim interleaving against the guarded disposable PostgreSQL fixture.
 
+## Progress-driven occurrence coalescing
+
+For a version explicitly using `progress_v1`, scheduled admission finds an open assignment for the exact Bot and trigger while holding the root transaction barrier. Queued/running/waiting work and suspended/reconciling progress keep that assignment open. A new tick returns typed `BotAdmissionCoalesced`, links its immutable occurrence receipt to the existing run, and acknowledges/advances the scheduler row atomically without another run, dispatch or daily admission charge. Different triggers retain distinct assignments but share the Bot execution slot. Legacy versions retain their saved admission semantics.
+
+Current lifecycle and scheduled authority checks precede new coalescing; a paused or unauthorized tick is not reported as successful. Exact occurrence replay returns its saved receipt even after pause. Coalesced ticks do not form a catch-up backlog. `TestBotProgressScheduledAdmissionHTTP` exercises production scheduler callbacks and actual loopback HTTP reads in both SQLite scopes: thirty ticks span queued, running and suspended states with one logical run and a daily cap of one, followed by pause denial and receipt replay. This controlled test does not establish deployed worker continuation or live-provider execution.
+
 ## Receipts and publication
 
 The typed schedule receipt records source linkage, observed trigger/job identity, version, removal and effective enabled/next-run state. It is written only after those postconditions are observed transactionally. Existing report publication drains the committed intent after commit and deduplicates its Home event. Reserved-key and applied-operation checks distinguish receipts from ordinary source reports; receipts are not suppressed by a prior conversational reply and never authorize external notifications.

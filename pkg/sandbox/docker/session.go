@@ -230,20 +230,56 @@ func (db *DockerBackend) DestroySession(ctx context.Context, sessionID string) e
 		return err
 	}
 	defer unlock()
+	return db.destroySessionLocked(ctx, sessionID, containerName(sessionID))
+}
+
+// Shared lifecycle primitive. Retention passes the inspected immutable Docker ID
+// so a concurrent name replacement can never redirect a destructive command.
+func (db *DockerBackend) destroySessionLocked(ctx context.Context, sessionID, containerRef string) error {
 	if err := db.requireRegisteredSession(sessionID); err != nil {
 		return err
 	}
-	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", containerName(sessionID))
-	if err != nil && !isDockerNotFoundError(err) {
-		return err
+	if containerRef != "" {
+		_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "rm", "-f", "-v", containerRef)
+		if err != nil && !isDockerNotFoundError(err) {
+			return err
+		}
 	}
 	if err := db.removeOverlayVolume(ctx, sessionID); err != nil {
 		return err
 	}
+	// Keep a discoverable receipt across registry deletion. Removing the entire
+	// recovery directory first loses attribution if the process stops or SQL fails.
+	m, err := db.readSessionMetadata(sessionID)
+	if err != nil {
+		return err
+	}
+	if m != nil && m.BotHome != nil && db.cfg.Sessions != nil {
+		m.CleanupPending = true // container and overlay have already been removed
+		if err := db.writeSessionMetadata(m); err != nil {
+			return err
+		}
+		// Delete payload first while keeping the sidecar discoverable. A partial
+		// RemoveAll must not erase attribution before private bytes are gone.
+		entries, err := os.ReadDir(db.upperPath(sessionID))
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Name() != dockerSessionMetadataFile {
+				if err := os.RemoveAll(filepath.Join(db.upperPath(sessionID), entry.Name())); err != nil {
+					return err
+				}
+			}
+		}
+		if err := db.cfg.Sessions.Remove(sessionID); err != nil {
+			return err
+		}
+	}
 	if err := os.RemoveAll(db.upperPath(sessionID)); err != nil {
 		return err
 	}
-	if db.cfg.Sessions != nil {
+	if db.cfg.Sessions != nil && (m == nil || m.BotHome == nil) {
 		if err := db.cfg.Sessions.Remove(sessionID); err != nil {
 			return err
 		}
@@ -582,8 +618,8 @@ func (db *DockerBackend) persistUpper(ctx context.Context, sessionID string) err
 }
 
 func (db *DockerBackend) removeOverlayVolume(ctx context.Context, sessionID string) error {
-	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", "-f", overlayVolumeName(sessionID))
-	if err != nil && !isDockerNotFoundError(err) {
+	_, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "rm", overlayVolumeName(sessionID))
+	if err != nil && !isDockerNotFoundError(err) && !(ctx.Err() == nil && strings.Contains(strings.ToLower(err.Error()), "no such volume")) {
 		return fmt.Errorf("sandbox/docker: remove overlay volume: %w", err)
 	}
 	return nil
@@ -733,19 +769,20 @@ const dockerSessionMetadataVersion = 1
 // credentials are deliberately excluded. EnvKeys requires fresh authorized env
 // after a controller restart instead of silently launching a degraded session.
 type dockerSessionMetadata struct {
-	BotHome    *sandbox.BotHomeBinding `json:"bot_home,omitempty"`
-	Version    int                     `json:"version"`
-	SessionID  string                  `json:"session_id"`
-	Type       sandbox.SessionType     `json:"type"`
-	UserID     string                  `json:"user_id,omitempty"`
-	OrgSlug    string                  `json:"org_slug,omitempty"`
-	TeamSlug   string                  `json:"team_slug,omitempty"`
-	TemplateID string                  `json:"template_id"`
-	LayerChain []string                `json:"layer_chain"`
-	Image      string                  `json:"image"`
-	Labels     map[string]string       `json:"labels,omitempty"`
-	Limits     sandbox.ResourceLimits  `json:"limits"`
-	EnvKeys    []string                `json:"required_env_keys,omitempty"`
+	CleanupPending bool                    `json:"cleanup_pending,omitempty"`
+	BotHome        *sandbox.BotHomeBinding `json:"bot_home,omitempty"`
+	Version        int                     `json:"version"`
+	SessionID      string                  `json:"session_id"`
+	Type           sandbox.SessionType     `json:"type"`
+	UserID         string                  `json:"user_id,omitempty"`
+	OrgSlug        string                  `json:"org_slug,omitempty"`
+	TeamSlug       string                  `json:"team_slug,omitempty"`
+	TemplateID     string                  `json:"template_id"`
+	LayerChain     []string                `json:"layer_chain"`
+	Image          string                  `json:"image"`
+	Labels         map[string]string       `json:"labels,omitempty"`
+	Limits         sandbox.ResourceLimits  `json:"limits"`
+	EnvKeys        []string                `json:"required_env_keys,omitempty"`
 }
 
 func cloneEnv(env map[string]string) map[string]string {
@@ -812,6 +849,9 @@ func (db *DockerBackend) writeSessionMetadata(m *dockerSessionMetadata) error {
 	return os.Rename(file.Name(), filepath.Join(dir, dockerSessionMetadataFile))
 }
 func (db *DockerBackend) recoverySpec(m *dockerSessionMetadata, current sandbox.SessionSpec, recreating bool) (sandbox.SessionSpec, error) {
+	if m.CleanupPending {
+		return current, fmt.Errorf("sandbox/docker: session cleanup pending; cannot restart")
+	}
 	if (current.BotHome != nil || current.Type != "") && !current.BotHome.Equal(m.BotHome) {
 		return current, fmt.Errorf("sandbox/docker: recovery bot home mismatch; storage retained")
 	}

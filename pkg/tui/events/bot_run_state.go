@@ -10,7 +10,7 @@ func (t *Transcript) applyBotRunState(s *store.BotRunState) {
 	if s == nil || s.SchemaVersion != store.BotRunStateSchemaVersion || s.BotID.String() != t.BotID || s.RunID == uuid.Nil || s.SessionID == uuid.Nil || s.StateSequence < 1 {
 		return
 	}
-	if t.SessionID != s.SessionID.String() && (t.SessionID != s.HomeSessionID.String() || s.Presentation != store.BotRunPresentationHomeInteractive) {
+	if t.SessionID != s.SessionID.String() && (t.SessionID != s.HomeSessionID.String() || (s.Presentation != store.BotRunPresentationHomeInteractive && s.Progress == nil)) {
 		return
 	}
 	switch s.Status {
@@ -31,6 +31,19 @@ func (t *Transcript) applyBotRunState(s *store.BotRunState) {
 		}
 	}
 	next := *s
+	if p := s.Progress; p != nil {
+		// Unknown optional versions fall back to execution status; malformed or
+		// cross-bound known projections cannot advance this run.
+		if p.SchemaVersion != store.BotProgressSchemaVersion || !p.Phase.Valid() {
+			next.Progress = nil
+		} else if s.ValidateProgress() != nil || p.ActiveDurationNanos < 0 || prior.Progress != nil && p.Revision < prior.Progress.Revision {
+			return
+		} else {
+			next.Progress = p.Clone()
+		}
+	} else {
+		next.Progress = prior.Progress.Clone()
+	}
 	if next.Work == nil {
 		next.Work = prior.Work
 	}
@@ -63,7 +76,7 @@ func (t *Transcript) restoreBotRunState() {
 	// work, with a stable ID tie-break, regardless of snapshot/replay ordering.
 	for _, s := range t.BotRunStates {
 		if latest.RunID == uuid.Nil || botRunStatePriority(s) > botRunStatePriority(latest) ||
-			(botRunStatePriority(s) == botRunStatePriority(latest) && s.RunID.String() > latest.RunID.String()) {
+			(botRunStatePriority(s) == botRunStatePriority(latest) && (s.CommittedAt.After(latest.CommittedAt) || s.CommittedAt.Equal(latest.CommittedAt) && s.RunID.String() > latest.RunID.String())) {
 			latest = s
 		}
 	}
@@ -94,4 +107,43 @@ func (t *Transcript) restoreBotRunState() {
 		t.Status = "Continuation required"
 		t.Streaming = false
 	}
+	if label, busy := BotProgressStatus(latest); label != "" {
+		t.Status, t.Streaming = label, busy
+	}
+}
+
+// BotProgressStatus is shared by compact status and read-only details. Progress
+// never supersedes a committed terminal execution status.
+func BotProgressStatus(s store.BotRunState) (string, bool) {
+	if s.Progress == nil || s.ValidateProgress() != nil {
+		return "", false
+	}
+	switch s.Status {
+	case store.RunQueued, store.RunRunning, store.RunInterrupted, store.RunWaitingApproval:
+	default:
+		return "", false
+	}
+	switch s.Progress.Phase {
+	case store.BotProgressWorking:
+		return "Working", true
+	case store.BotProgressEvaluating:
+		return "Checking progress", true
+	case store.BotProgressReplanning:
+		return "Adjusting approach", true
+	case store.BotProgressCheckpointing:
+		return "Saving progress", true
+	case store.BotProgressSynthesizing:
+		return "Preparing result", true
+	case store.BotProgressSuspended:
+		return "Paused", false
+	case store.BotProgressWaitingUser:
+		return "Waiting for your input", false
+	case store.BotProgressWaitingBudget:
+		return "Waiting for budget", false
+	case store.BotProgressWaitingAuthorization:
+		return "Authorization required", false
+	case store.BotProgressReconciling:
+		return "Checking an unconfirmed action", false
+	}
+	return "", false
 }

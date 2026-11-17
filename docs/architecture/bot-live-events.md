@@ -1,5 +1,61 @@
 # Bot live transcript events
 
+## Progress-driven controls and wire contract
+
+`BotRunState.progress` is optional `BotProgressProjection` (schema version 1).
+It contains `bot_id`, `run_id`, `session_id`, checkpoint `revision`, `phase`,
+optional `reason`, optional employee `summary`, optional RFC3339 `evaluated_at`,
+`active_duration_nanos`, optional RFC3339 `active_since` and `next_eligible_at`,
+and optional nonnegative `coalesced_occurrences` (omitted at zero).
+The enclosing state adds RFC3339 `committed_at`; its existing `state_sequence`
+orders updates **within the same run only**. Live SSE carries this exact state at
+`actions.stateDelta.bot_run_state`; snapshot `run_states` uses the same constructor.
+No context reference, dispatch ledger, caller ceiling or private grant is exposed.
+Coalesced counts are stored with the logical assignment and advance once per new
+accepted occurrence, never on duplicate delivery. Live state, restored snapshot,
+and admission receipts use the same committed count and sequence. Before the
+first valid checkpoint, the count stays private with the run; it appears with the
+first valid progress projection.
+
+Phases are `working`, `evaluating`, `replanning`, `synthesizing`, `checkpointing`,
+`waiting_user`, `waiting_budget`, `waiting_authorization`, `suspended`, and
+`reconciling`. Reasons are `cadence`, `recovery`, `tool_failure`,
+`context_pressure`, `ready_to_synthesize`, `owner_input`, `budget`,
+`authorization`, `paused`, and `uncertain_effect`. None denotes completion:
+`BotRunState.status` and committed final publication remain authoritative.
+
+For an owner-paused, safely settled interactive or mandated progress assignment, send:
+
+```http
+POST /api/studio/bots/{botID}/runs/{runID}/continue-interactive?scope=personal|team
+Content-Type: application/json
+
+{"kind":"progress_v1","checkpoint_revision":7,"expected_revision":4,"idempotency_key":"unique-owner-action"}
+```
+
+`checkpoint_revision` is the displayed progress `revision`; `expected_revision`
+is the current Bot revision. Do not include `response` or fabricate an owner
+answer. Success is HTTP 202 with the existing public BotRun response; identical
+idempotent retries do not queue duplicate work. Stale checkpoint/revision, unsafe
+or cancelled/deleted work conflict (409); invalid authority is forbidden (403).
+The operation retains the same run/session, context, ledger and cumulative usage
+and does not activate the paused Bot or its recurrence. Scheduled mandate runs
+require current owner authentication and verification of the original child and
+parent grants, applied scheduling receipt, scope and current operator policy.
+Continuation restores the same per-run quota occupancy without changing daily or
+lifetime totals, limits, grant IDs or expiration. Expired/revoked authority remains
+`waiting_authorization`; exhausted quota remains `waiting_budget`. This endpoint
+does not renew scheduled grants. Only the exact continued run may use its valid
+grant while the Bot is paused; a later lifecycle revision invalidates that permit.
+
+A still-live caller grant is reused byte-for-byte, without extending expiry.
+Missing/expired registry authority requires current authenticated admission and
+intersection with the saved caller ceiling; persisted principal/tenant context
+alone is not authentication evidence and cannot renew it. Controlled personal/team
+HTTP tests cover both branches, forged-context rejection, preserved usage/context,
+non-replayed completed reads, pause/cancel/delete and ordered snapshot/SSE parity.
+These are isolated SQLite/worker tests, not production deployment or browser proof.
+
 ## Skill inspection and scheduling surfaces
 
 Studio Details no longer mounts `BotSkillsPanel` or the Skills & history accordion, in personal/team and all lifecycle/read-only/resource states. There is no replacement Tasks panel, file browser or badge. Goals, Memory & charter, Schedule & triggers, Runs & activity, policy/approval controls and the mounted Home conversation remain unchanged; Close/Escape and refresh do not start or cancel work. The removed inspector issues no skill-list/history fetches. Schedule & triggers independently retains its existing active-skill selection GET (`limit=100`); removing the inspector does not disable scheduling.

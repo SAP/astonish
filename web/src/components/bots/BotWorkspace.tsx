@@ -18,8 +18,9 @@ import { botPath, type BotRoute } from './botRoute'
 import { useBotSnapshot } from './useBotSnapshot'
 import { getActiveTeam } from '@/api/teamContext'
 import { useWorkspaceResource as useResource } from './workspaceResource'
+import BotProgressDetails from './BotProgressDetails'
 import BotContinueInteractive from './BotContinueInteractive'
-import { RunStatus } from '@/api/botRunState'
+import { RunStatus, canContinueBotProgress } from '@/api/botRunState'
 import { BotReviewCard } from './BotReviewCard'
 import type { BotOperationView } from '@/api/botOperationResult'
 
@@ -33,6 +34,7 @@ export default function BotWorkspace({ route, theme, userId }: { route: BotRoute
   const [revision, setRevision] = useState(0)
   const refresh = useCallback(() => { snapshot.retry(); setRevision(v => v + 1); window.dispatchEvent(new Event('astonish:bots-updated')) }, [snapshot.retry])
   const key = `${userId || ''}/${getActiveTeam() || ''}/${route.scope}/${route.botId}`
+  if (snapshot.deletionPending || snapshot.data?.bot.permanent_delete) return <section className="p-4"><p role="status">Deleting… Bot content is unavailable while backend cleanup is pending. Deletion will continue if you leave.</p><Button onClick={refresh}>Check deletion progress</Button></section>
   if (!snapshot.data) return <section className="p-4"><p role={snapshot.error ? 'alert' : 'status'}>{snapshot.error || 'Loading Bot…'}</p><Button onClick={refresh}>Retry workspace</Button></section>
   return <LoadedBotWorkspace key={key} bot={snapshot.data.bot} route={route} theme={theme} userId={userId} refresh={refresh} revision={revision + snapshot.data.latest_sequence} snapshot={snapshot} />
 }
@@ -44,7 +46,7 @@ function LoadedBotWorkspace({ bot, route, theme, userId, refresh, revision, snap
   const readOnly = !userId || bot.owner_id !== userId
   const toolFree = false
   const conversationUnavailable = conversationReadOnly(bot, userId)
-  const allApprovals = [...(approvals.data?.approvals || snapshot.data?.pending_approvals || [])].sort((a, b) => Date.parse(a.expires_at) - Date.parse(b.expires_at))
+  const allApprovals = [...new Map([...(snapshot.data?.pending_approvals || []), ...(approvals.data?.approvals || [])].map(a => [a.id, a])).values()].sort((a, b) => Date.parse(a.expires_at) - Date.parse(b.expires_at))
   const onOperationsChange = useCallback((operations: BotOperationView[]) => {
     // Background reconciliation changes the root, never replays user input.
     void snapshot.syncOperations(operations).catch(() => { /* Send reports an unresolved projection; transport errors already surface in the snapshot. */ })
@@ -61,13 +63,13 @@ function LoadedBotWorkspace({ bot, route, theme, userId, refresh, revision, snap
     refresh()
     return receipt
   }
-  const renderReview = (kind: 'proposal' | 'approval', id: string) => <BotReviewCard key={`${kind}/${id}`} bot={bot} proposal={kind === 'proposal' ? proposals.data?.proposals.find(p => p.id === id) : undefined} approval={kind === 'approval' ? allApprovals.find(a => a.id === id) : undefined} requiresContinueInteractive={snapshot.data?.run_states?.some(s => s.run_id === allApprovals.find(a => a.id === id)?.run_id && s.reason === 'continuation_required')} readOnly={readOnly || !!snapshot.error || !!proposals.error || !!approvals.error || bot.status === api.BotStatus.Deleted} onChange={refresh} />
+  const renderReview = (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => <BotReviewCard key={`${kind}/${id}`} question={question} awaitingApproval={kind === 'approval'} bot={bot} proposal={kind === 'proposal' ? proposals.data?.proposals.find(p => p.id === id) : undefined} approval={kind === 'approval' ? allApprovals.find(a => a.id === id) : undefined} requiresContinueInteractive={snapshot.data?.run_states?.some(s => s.run_id === allApprovals.find(a => a.id === id)?.run_id && s.reason === 'continuation_required')} readOnly={readOnly || !!snapshot.error || !!proposals.error || !!approvals.error || bot.status === api.BotStatus.Deleted} onChange={refresh} />
   return <section aria-label="Bot workspace" className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden bg-background text-foreground">
     <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2"><div className="min-w-0"><h1 className="font-semibold truncate">{bot.name}</h1><p className="text-xs text-muted-foreground">{bot.status} · {bot.scope === 'personal' ? 'Private' : 'Team'}</p></div>
       <Dialog modal={false} open={details} onOpenChange={setDetails}><DialogTrigger asChild><Button variant="ghost">Details</Button></DialogTrigger><DialogPrimitive.Portal forceMount><DialogPrimitive.Overlay className={details ? 'fixed inset-0 z-50 bg-black/60' : 'hidden'} /><DialogPrimitive.Content forceMount aria-hidden={!details} style={!details ? { display: 'none' } : undefined} className="fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%] z-50 rounded-xl border bg-card p-6 shadow-xl w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90dvh] overflow-y-auto"><DialogTitle>{bot.name} details</DialogTitle><DialogDescription>Settings, history and exceptional decisions. Routine work reports its answer in Chat. Closing Details preserves unfinished edits until you leave this Bot.</DialogDescription><DialogPrimitive.Close asChild><Button variant="ghost">Close</Button></DialogPrimitive.Close><BotDetails bot={bot} readOnly={readOnly} revision={revision} refresh={refresh} snapshot={snapshot} route={route} reviews={<>{proposals.error && <p role="alert">{proposals.error}<Button onClick={proposals.retry}>Retry reviews</Button></p>}{proposals.data?.proposals.map(p => renderReview('proposal', p.id))}{allApprovals.filter(a => a.status === 'pending' || a.status === 'approved').map(a => renderReview('approval', a.id))}</>} /></DialogPrimitive.Content></DialogPrimitive.Portal></Dialog>
     </header>
-    {snapshot.error && <p role="alert" className="px-4 text-sm">{snapshot.error} <Button variant="link" onClick={refresh}>Retry</Button></p>}
-    {snapshot.data?.run_states?.filter(s => s.reason === 'continuation_required' && (s.status === RunStatus.Interrupted || s.status === RunStatus.Queued) && !allApprovals.some(a => a.run_id === s.run_id && a.status === 'pending')).map(s => <BotContinueInteractive key={`${bot.id}/${s.run_id}/${s.state_sequence}`} bot={bot} runId={s.run_id} disabled={conversationUnavailable || readOnly || !!snapshot.error || !!approvals.error} onChange={refresh} />)}
+    {snapshot.error && <p role="alert" className="px-4 text-sm">Updates unavailable. {snapshot.error} <Button variant="link" onClick={refresh}>Retry</Button></p>}
+    {snapshot.data?.run_states?.filter(s => (canContinueBotProgress(s) || s.reason === 'continuation_required' && (s.status === RunStatus.Interrupted || s.status === RunStatus.Queued)) && !allApprovals.some(a => a.run_id === s.run_id && a.status === 'pending')).map(s => <BotContinueInteractive key={`${bot.id}/${s.run_id}/${canContinueBotProgress(s) ? s.progress?.revision : s.state_sequence}`} bot={bot} runId={s.run_id} checkpointRevision={canContinueBotProgress(s) ? s.progress?.revision : undefined} disabled={conversationUnavailable || readOnly || !!snapshot.error || !!approvals.error} onChange={refresh} />)}
     <StudioChat key={bot.id} theme={theme} initialSessionId={bot.home_session_id} hideSidebar botThread={{ botId: bot.id, scope: bot.scope, status: bot.status, readOnly: conversationUnavailable, toolFree, operations: snapshot.data?.operations || [], decisionsReadOnly: readOnly || !!snapshot.error, runStates: snapshot.data?.run_states, onSend: send, onOperationsChange, renderReview }} />
   </section>
 }
@@ -107,6 +109,7 @@ function BotDetails({ bot, readOnly, revision, refresh, snapshot, reviews, route
   const [error, setError] = useState('')
   return <div className="space-y-4"><p className="text-xs">Version {effectiveBot.version} · revision {effectiveBot.revision}</p><Button variant="outline" onClick={refresh}>Refresh Bot</Button>
     {version.error && <p role="alert">{version.error}<Button onClick={version.retry}>Retry policy</Button></p>}{version.data && <BotPolicySummary version={version.data} />}
+    {snapshot.data?.run_states?.map(state => <BotProgressDetails key={state.run_id} state={state} />)}
     <BotLifecycleControls bot={bot} readOnly={readOnly || !version.data || !!snapshot.error} onChange={refresh} />
     <details><summary>Execution setup</summary><BotHomeSetup bot={effectiveBot} disabled={unavailable} onPrepared={next => { setPrepared(next); refresh() }} onRefresh={refresh} />{!readOnly && bot.home_session_id && <BotHomeModel sessionId={bot.home_session_id} />}<BotTestOnce bot={effectiveBot} disabled={unavailable || !version.data || !effectiveBot.home} onRun={run => { refresh(); window.location.hash = botPath(bot.id, bot.scope, run.id) }} /></details>
     <details open={!!route.runId}><summary>Runs & activity</summary><p>{snapshot.data?.unread_count || 0} unread updates · {snapshot.data?.pending_approvals.length || 0} decisions waiting</p>{snapshot.data?.latest_outcome ? <><p>{snapshot.data.latest_outcome.report.summary || snapshot.data.latest_outcome.status}</p><BotRunWorkDetails run={snapshot.data.latest_outcome} unavailable={!!snapshot.error} /></> : <p>No work result yet</p>}{runs.error && <p role="alert">{runs.error}<Button onClick={runs.retry}>Retry runs</Button></p>}{runs.data?.runs.length === 0 && <p>No runs yet.</p>}{runs.data?.runs.filter(run => run.id !== route.runId).map(run => <article key={run.id} className="border rounded p-3"><a href={`#${botPath(bot.id, bot.scope, run.id)}`}>{run.status} · {run.trigger}</a><p>{run.report.summary || 'No report yet.'}</p><BotRunWorkDetails run={run} unavailable={!!runs.error} /><BotStopRun bot={bot} run={run} disabled={unavailable} onChange={refresh} /><p>{run.provider}/{run.model} · {run.usage.tool_calls} tool calls</p>{run.report.changed?.map((e, i) => <p key={i}>Changed: {e.summary} — {e.source}</p>)}{run.report.unchanged?.map((e, i) => <p key={i}>Unchanged: {e.summary}</p>)}{run.report.unverified?.map((e, i) => <p key={i}>Unverified: {e}</p>)}</article>)}{snapshot.activity.map(a => <p key={a.sequence}>#{a.sequence} {a.kind} · {a.created_at}</p>)}<Button onClick={() => snapshot.markRead(Math.max(0, ...snapshot.activity.map(a => a.sequence))).catch(e => setError(botLocalFailure(e).message))}>Mark displayed activity read</Button>{error && <BotEmployeeMessage role="alert">{error}</BotEmployeeMessage>}</details>

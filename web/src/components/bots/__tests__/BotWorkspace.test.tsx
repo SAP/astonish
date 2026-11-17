@@ -129,6 +129,15 @@ describe('Bot quality assessment', () => {
 })
 
 describe('Bot workspace', () => {
+  it.each(['light', 'dark'])('unmounts content on permanent deletion without claiming cleanup completed (%s)', async theme => {
+    render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme={theme} userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Deleted, permanent_delete: true })
+    act(() => window.dispatchEvent(new Event('astonish:bots-updated')))
+    expect(await screen.findByRole('status')).toHaveTextContent('backend cleanup is pending')
+    expect(screen.queryByLabelText('Shared composer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument()
+  })
   it.each((['personal', 'team'] as const).flatMap(scope =>
     (['draft', 'active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
       ['owner', 'other'].map(userId => ({ scope, status, userId })))))('omits Skills and file navigation in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
@@ -535,6 +544,23 @@ describe('Bot workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Deny' }))
     await waitFor(() => expect(api.decideBotApproval).toHaveBeenCalledWith(bot, approval, 'denied', undefined))
   })
+})
+
+it('retains checkpoint continuation acceptance across higher enclosing sequences', async () => {
+  const paused: import('@/api/botRunState').BotRunState = { schema_version: 1, bot_id: 'bot', run_id: 'saved', session_id: 'trace', home_session_id: 'home', presentation: '', status: 'interrupted', state_sequence: 9, progress: { schema_version: 1, bot_id: 'bot', run_id: 'saved', session_id: 'trace', revision: 4, phase: 'suspended', reason: 'paused', active_duration_nanos: 21600000000000 } }
+  continuationStates.value = [paused]
+  vi.mocked(reviewsApi.continueInteractive).mockResolvedValue({} as api.BotRun)
+  render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="owner" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Continue saved progress' }))
+  expect(await screen.findByRole('button', { name: 'Continuation requested' })).toBeDisabled()
+  continuationStates.value = [{ ...paused, state_sequence: 10 }]
+  fireEvent.click(screen.getByRole('button', { name: 'Details' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh Bot' }))
+  await waitFor(() => expect(reviewsApi.continueInteractive).toHaveBeenCalledOnce())
+  fireEvent.click(screen.getByRole('button', { name: /^Close$/ }))
+  expect(screen.getByRole('button', { name: 'Continuation requested' })).toBeDisabled()
+  expect(reviewsApi.continueInteractive).toHaveBeenCalledWith(bot, 'saved', expect.any(String), { kind: 'progress_v1', checkpoint_revision: 4 })
+  expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
 })
 
 it('offers standalone continuation from interrupted snapshot without fabricating an answer or resending', async () => {

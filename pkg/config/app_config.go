@@ -18,9 +18,10 @@ import (
 type ProviderTokenRefreshFunc func(instanceName, accessToken, refreshToken string, expiresAt time.Time) error
 
 type AppConfig struct {
-	BotRoutinePolicy     BotRoutinePolicyConfig   `yaml:"bot_routine_policy,omitempty" json:"bot_routine_policy,omitempty"`
-	BotMandates          *BotMandateConfig        `yaml:"bot_mandates,omitempty" json:"bot_mandates,omitempty"`
-	ProviderTokenRefresh ProviderTokenRefreshFunc `yaml:"-" json:"-"`
+	BotRuntimePolicy     *execution.BotRuntimePolicy `yaml:"bot_runtime_policy,omitempty" json:"bot_runtime_policy,omitempty"`
+	BotRoutinePolicy     BotRoutinePolicyConfig      `yaml:"bot_routine_policy,omitempty" json:"bot_routine_policy,omitempty"`
+	BotMandates          *BotMandateConfig           `yaml:"bot_mandates,omitempty" json:"bot_mandates,omitempty"`
+	ProviderTokenRefresh ProviderTokenRefreshFunc    `yaml:"-" json:"-"`
 
 	General             GeneralConfig              `yaml:"general"`
 	WebServers          map[string]WebServerConfig `yaml:"web_servers,omitempty" json:"web_servers,omitempty"`
@@ -60,6 +61,31 @@ func (c *AppConfig) EffectiveBotMandateConfig() (BotMandateConfig, error) {
 		v = *c.BotMandates
 	}
 	return v, v.Validate()
+}
+
+// EffectiveBotRuntimePolicy is a ceiling for newly authorized work, never a
+// migration of saved versions or grants. An explicit historical mandate config
+// retains its finite duration unless an explicit compatible policy is provided.
+func (c *AppConfig) EffectiveBotRuntimePolicy() (*execution.BotRuntimePolicy, error) {
+	if _, err := c.EffectiveBotMandateConfig(); err != nil {
+		return nil, err
+	}
+	if c != nil && c.BotRuntimePolicy != nil {
+		p := c.BotRuntimePolicy.Clone()
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		if c.BotMandates != nil && p.EffectiveMode() == execution.BotRuntimeModeProgressV1 && (p.MaxActiveSeconds == nil || *p.MaxActiveSeconds > c.BotMandates.MaxRuntimeSeconds) {
+			return nil, fmt.Errorf("bot runtime policy conflicts with explicit mandate runtime ceiling")
+		}
+		return p, nil
+	}
+	if c != nil && c.BotMandates != nil {
+		// Saved operator ceilings retain legacy duration semantics unless the
+		// operator explicitly selects a compatible runtime policy above.
+		return nil, nil
+	}
+	return execution.NewBotProgressRuntimePolicy(), nil
 }
 
 const AutoModelSentinel = "auto"

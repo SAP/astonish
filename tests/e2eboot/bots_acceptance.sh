@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Strict Bot release acceptance. Never loads .env or provisions infrastructure.
+# Strict Bot acceptance, including --stage title-confirmation built clients and
+# owned disposable Docker Home. Never loads .env or alters shared infrastructure.
 set -euo pipefail
 set +x
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)

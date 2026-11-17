@@ -25,6 +25,14 @@ The existing scoped Bot outbox stores immutable reserved-key records; root Bot J
 
 A consumer must handle transaction conflicts by retrying the operation, never performing a side effect after a failed reservation. Exactly-once external side effects and production quota dispatch wiring are outside this storage layer.
 
+## Progress checkpoints and logical-run occupancy
+
+The optional `store.BotProgressStore` implemented by both scoped Ent adapters persists `CheckpointProgress`, `BeginProgressDispatch`, `SettleProgressDispatch`, and `ContinueProgress` under the live worker fence, pinned task/work binding and expected progress revision. The private run envelope contains bounded cursors and checkpoint state; immutable dispatch records use reserved scoped outbox keys. Generic activity and commit cannot synthesize a clean running-to-queued checkpoint.
+
+Dispatch reservations and settlements preserve cumulative usage. Pending dispatches or tool outcomes lacking call-bound evidence prevent safe checkpoint recovery; unknown price remains unknown. Commit cannot erase a prior ledger charge. Checkpoint, heartbeat, continuation and recovery account owned active intervals, excluding queued/suspended time; recovery conservatively charges unaccounted owned intervals. Explicit recorded zero remains distinct from legacy missing accounting.
+
+Clean suspension moves the run's quota reservation from concurrency occupancy into its private envelope without refunding daily, aggregate or per-run usage. `BotMandateProgressQuotaStore.ReacquireBotMandateRun` checks current authority and the matching settled checkpoint before restoring occupancy; generic reserve cannot reset a suspended ledger. These storage capabilities do not themselves wire the provider/worker evaluation loop, classify external effects or restore model context. Those consumers must invoke the optional interfaces and supply trusted receipts before execution. PostgreSQL concurrency and live-provider restart acceptance remain separately required.
+
 ## Operation handoff
 
 The returned runtime also implements `store.BotOperationStore` (type assertion). Creation binds an idempotency key to exact immutable content and starts at pending revision 1. Transitions check expected revision and the typed transition matrix, persist an immutable new record, and advance the private head atomically. Applied receipts require observed postconditions. This layer persists records only; it does not apply schedules, execute payloads, or independently attest a supplied executor receipt.

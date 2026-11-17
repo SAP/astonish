@@ -20,6 +20,7 @@ import (
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/litellm"
+	"github.com/SAP/astonish/pkg/question"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
@@ -32,6 +33,9 @@ func TestBotRealStockTitleLiveHTTPDiagnostic(t *testing.T) {
 		t.Skip("explicit paid live diagnostic opt-in required")
 	}
 	// Once opted in, absent/invalid config is a failure, never a strict-driver skip.
+	if !filepath.IsAbs(os.Getenv("LOCAL_BOT_AGENT_CONFIG")) {
+		t.Fatal("live diagnostic requires an explicit absolute isolated provider config")
+	}
 	c, err := readStockAgentConfig(os.Getenv("LOCAL_BOT_AGENT_CONFIG"))
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +67,11 @@ func runStockTitleLiveHTTPDiagnostic(t *testing.T, sameProvider *stockAgentConfi
 	if sameProvider != nil {
 		instance, cfg.Model = sameProvider.Instance, sameProvider.Model
 	} else {
-		raw, e := os.ReadFile(filepath.Join(root, ".tmp", "employee-native-config.json"))
+		legacyConfig := os.Getenv("ASTONISH_STOCK_TITLE_LEGACY_PROVIDER_CONFIG")
+		if !filepath.IsAbs(legacyConfig) {
+			t.Fatal("legacy diagnostic requires an explicit absolute isolated provider config")
+		}
+		raw, e := os.ReadFile(legacyConfig)
 		if e != nil || json.Unmarshal(raw, &cfg) != nil || cfg.URL == "" || cfg.Key == "" || cfg.Model == "" {
 			t.Fatal("legacy private provider configuration unavailable")
 		}
@@ -142,7 +150,8 @@ func runStockTitleLiveHTTPDiagnostic(t *testing.T, sameProvider *stockAgentConfi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	sourceCalls := 0
+	sourceCalls, prepareCalls := 0, 0
+	confirmedAssignment := ""
 	f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
 		sourceCalls++
 		n := sourceCalls
@@ -206,8 +215,9 @@ func runStockTitleLiveHTTPDiagnostic(t *testing.T, sameProvider *stockAgentConfi
 		}
 		return rec, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-		if q.Instructions != "Stock Market News" {
-			return nil, fmt.Errorf("assignment changed")
+		prepareCalls++
+		if confirmedAssignment == "" || q.Instructions != confirmedAssignment {
+			return nil, fmt.Errorf("execution started without the confirmed assignment")
 		}
 		return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 	}})
@@ -228,7 +238,37 @@ func runStockTitleLiveHTTPDiagnostic(t *testing.T, sameProvider *stockAgentConfi
 	if sameProvider == nil {
 		pinLegacyHTTPAttempt(t, f, receipt.InitialTurn.Run)
 	}
-	pollErr := f.worker.Poll(ctx) // exactly once: engine recovery only, never resubmit
+	pollErr := f.worker.Poll(ctx)
+	waiting, waitErr := f.repo.GetRun(f.ctx, f.b.ID, receipt.InitialTurn.Run.ID)
+	save("confirmation-first-poll.json", map[string]any{"run": waiting, "elapsed_seconds": time.Since(started).Seconds(), "source_calls": sourceCalls, "prepare_calls": prepareCalls, "poll_error": fmt.Sprint(pollErr), "load_error": fmt.Sprint(waitErr)})
+	if pollErr != nil || waitErr != nil || waiting == nil || waiting.Status != store.RunWaitingApproval || waiting.TitleConfirmation == nil || waiting.TitleConfirmation.State != store.BotTitleConfirmationWaiting || sourceCalls != 0 || prepareCalls != 0 {
+		t.Fatalf("title did not reach question-only wait; diagnostics=%s", dir)
+	}
+	approvals, err := f.repo.ListApprovals(f.ctx, f.b.ID, store.BotPage{})
+	if err != nil || len(approvals) != 1 || store.ValidateBotTitleQuestion(approvals[0].Interaction) != nil {
+		t.Fatalf("missing real title confirmation; diagnostics=%s", dir)
+	}
+	a := approvals[0]
+	var card question.Question
+	if err := json.Unmarshal(a.Interaction.Payload, &card); err != nil {
+		t.Fatal(err)
+	}
+	save("title-question.json", map[string]any{"approval": a, "title_to_card_seconds": time.Since(started).Seconds(), "relevance": "recorded for human inspection; not inferred from structural validity"})
+	// Answer the actual provider-generated option, never a fixed interpretation.
+	answer := card.Options[0].ID
+	if custom := os.Getenv("ASTONISH_STOCK_TITLE_CONFIRMATION_ANSWER"); custom != "" {
+		answer = custom
+	}
+	answerBody, _ := json.Marshal(map[string]any{"action_digest": a.ActionDigest, "response": map[string]any{"question_id": a.Interaction.QuestionID, "answer": answer}})
+	save("confirmation-answer.json", json.RawMessage(answerBody))
+	f.request("POST", f.path+"/approvals/"+a.ID.String()+"/approve-and-continue", string(answerBody), 202)
+	confirmedInput, err := f.repo.(store.BotRuntimeStore).LoadRunInput(f.ctx, f.b.ID, waiting.ID)
+	if err != nil || confirmedInput.Instructions == "" {
+		t.Fatal("confirmed assignment unavailable")
+	}
+	confirmedAssignment = confirmedInput.Instructions
+	save("confirmed-input.json", confirmedInput)
+	pollErr = f.worker.Poll(ctx) // one execution claim after the bound owner answer
 	runRaw := f.request("GET", f.path+"/runs/"+receipt.InitialTurn.Run.ID.String(), "", 200)
 	save("run.json", json.RawMessage(runRaw))
 	var run store.BotRun
@@ -252,9 +292,9 @@ func runStockTitleLiveHTTPDiagnostic(t *testing.T, sameProvider *stockAgentConfi
 		t.Error("no real model call")
 	}
 	// A diagnostic transport pass is not acceptance: fail after preserving all
-	// evidence unless the exact title-only task produced an accepted Home report.
+	// evidence unless the confirmed title task produced an accepted Home report.
 	if run.Status != store.RunSucceeded || run.Report.Summary == "" {
-		t.Fatalf("title-only live task did not complete: status=%s; diagnostics=%s", run.Status, dir)
+		t.Fatalf("confirmed title live task did not complete: status=%s; diagnostics=%s", run.Status, dir)
 	}
 	if sameProvider == nil && (run.Report.Quality == nil || run.Report.Quality.Outcome != store.BotWorkAccepted) {
 		t.Fatal("legacy diagnostic lacks accepted review")

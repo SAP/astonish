@@ -11,6 +11,7 @@ import (
 // BotMandatePolicy is resolved from current trusted operator policy and exact
 // tool/resource catalog, never copied from request or model output.
 type BotMandatePolicy struct {
+	RuntimePolicy  *execution.BotRuntimePolicy
 	PublicResearch *execution.BotPublicResearchScope
 	Scopes         []string
 	// ExceptionConstraints is the trusted owner's ceiling for exact, expiring
@@ -20,6 +21,41 @@ type BotMandatePolicy struct {
 	Limits               BotMandateLimits
 	TTL                  time.Duration
 }
+
+// Clone detaches policy snapshots; resolvers remain trusted composition inputs.
+func (p BotMandatePolicy) Clone() BotMandatePolicy {
+	m := execution.BotMandate{RuntimePolicy: p.RuntimePolicy, PublicResearch: p.PublicResearch, Scopes: p.Scopes, Constraints: p.Constraints}.Clone()
+	p.RuntimePolicy, p.PublicResearch, p.Scopes, p.Constraints = m.RuntimePolicy, m.PublicResearch, m.Scopes, m.Constraints
+	p.ExceptionConstraints = execution.BotMandate{Constraints: p.ExceptionConstraints}.Clone().Constraints
+	return p
+}
+
+// Progress occupancy is independent of cumulative quota. Suspend releases ONLY
+// concurrency occupancy; reacquire rechecks current authority and capacity for
+// the same logical run without charging a new daily run or resetting any ledger.
+type BotMandateProgressQuotaRequest struct {
+	MandateRef BotMandateRef
+	Mutation   BotProgressMutation
+}
+
+func (r BotMandateProgressQuotaRequest) Validate(now time.Time) error {
+	if err := r.MandateRef.Validate(); err != nil {
+		return err
+	}
+	if err := r.Mutation.Validate(now); err != nil {
+		return err
+	}
+	if r.MandateRef.BotID != r.Mutation.Binding.BotID {
+		return ErrBotConflict
+	}
+	return nil
+}
+
+type BotMandateProgressQuotaStore interface {
+	SuspendBotMandateRun(context.Context, BotMandateProgressQuotaRequest) error
+	ReacquireBotMandateRun(context.Context, BotMandateProgressQuotaRequest) error
+}
+
 type BotMandatePolicyResolver func(context.Context, BotMandateRef) (BotMandatePolicy, error)
 type botMandateAdmissionKey struct{}
 

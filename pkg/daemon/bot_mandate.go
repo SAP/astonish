@@ -51,6 +51,10 @@ func newProductionBotMandatePolicy(backend store.PlatformBackend, cfg *config.Ap
 				}
 			}
 		}
+		policy.RuntimePolicy, err = cfg.EffectiveBotRuntimePolicy()
+		if err != nil {
+			return store.BotMandatePolicy{}, err
+		}
 		policy = addBotOwnControlBaseline(policy)
 		var routine config.BotRoutinePolicyConfig
 		if cfg != nil {
@@ -93,7 +97,10 @@ func (w *BotWorker) prepareMandate(ctx context.Context, repo store.BotStore, in 
 	if err != nil {
 		return bot.RunPreparation{}, err
 	}
-	limits := auth.Snapshot().Limits
+	snapshot := auth.Snapshot()
+	limits := snapshot.Limits
+	// The saved mandate, not a newer version or operator default, is authority.
+	in.Version.Budget.RuntimePolicy = snapshot.RuntimePolicy.Clone()
 	if in.Version.Budget.MaxRuntimeSeconds <= 0 || in.Version.Budget.MaxRuntimeSeconds > limits.MaxRuntimeSeconds {
 		in.Version.Budget.MaxRuntimeSeconds = limits.MaxRuntimeSeconds
 	}

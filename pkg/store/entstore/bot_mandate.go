@@ -105,7 +105,7 @@ func checkMandatePolicy(m store.BotMandate, p store.BotMandatePolicy) error {
 			return err
 		}
 	}
-	if err := m.Limits.ValidateWithin(p.Limits); err != nil {
+	if err := m.Limits.ValidateWithinRuntimePolicy(p.Limits, m.RuntimePolicy, p.RuntimePolicy); err != nil {
 		return err
 	}
 	for _, s := range m.Scopes {
@@ -172,6 +172,13 @@ func (s *botMandateRuntime) verify(ctx context.Context, db botDraftDB, ref store
 		Instructions string
 		Attachments  []store.ChatFile
 	}{source.Run.UserEventID, source.Instructions, source.Attachments})
+	if c := source.Run.TitleConfirmation; c != nil && c.State == store.BotTitleConfirmationConfirmed {
+		p := m.Provenance.TitleConfirmation
+		if c.ValidateBinding(source.Run, rec.Bot.OwnerID) != nil || p == nil || p.AssignmentDigest != c.AssignmentDigest || p.ApprovalID != c.ApprovalID.String() || p.QuestionID != c.QuestionID || p.BotID != c.BotID.String() || p.RunID != c.RunID.String() || p.OwnerID != c.OwnerID.String() || p.UserEventID != c.UserEventID {
+			return nil, nil, store.ErrBotForbidden
+		}
+		digest = c.AssignmentDigest
+	}
 	if err != nil || digest != m.Provenance.SourceDigest {
 		return nil, nil, store.ErrBotForbidden
 	}
@@ -189,7 +196,7 @@ func (s *botMandateRuntime) verify(ctx context.Context, db botDraftDB, ref store
 }
 func (s *botMandateRuntime) VerifyBotMandate(ctx context.Context, ref store.BotMandateRef, purpose store.BotMandatePurpose) (store.BotMandate, error) {
 	m, rec, err := s.verify(ctx, s.repo.db, ref, purpose)
-	if err == nil && rec.Bot.Status == store.BotPaused && purpose != execution.BotMandatePurposeOperation {
+	if err == nil && rec.Bot.Status == store.BotPaused && purpose != execution.BotMandatePurposeOperation && !mandateProgressWhilePaused(ctx, s.repo.db, rec, ref) {
 		return store.BotMandate{}, store.ErrBotForbidden
 	}
 	if err != nil {
@@ -286,10 +293,17 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 	if policy.TTL <= 0 {
 		return store.ErrBotInvalid
 	}
+	version, err := tx.ReadVersion(ctx, rec.Bot.ID, run.Version)
+	if err != nil {
+		return err
+	}
+	if err := version.Budget.RuntimePolicy.ValidateWithin(policy.RuntimePolicy); err != nil {
+		return err
+	}
 	now := r.clock()
-	m := store.BotMandate{Ref: ref, Purpose: execution.BotMandatePurposeTask, ExpiresAt: now.Add(policy.TTL), Scopes: policy.Scopes, Constraints: policy.Constraints, Limits: policy.Limits}.Clone()
+	m := store.BotMandate{RuntimePolicy: version.Budget.RuntimePolicy.Clone(), Ref: ref, Purpose: execution.BotMandatePurposeTask, ExpiresAt: now.Add(policy.TTL), Scopes: policy.Scopes, Constraints: policy.Constraints, Limits: policy.Limits}.Clone()
 	initiation, title := ctx.Value(titleMandateAdmissionKey{}).(titleMandateAdmission)
-	if rec.Bot.Status != store.BotPaused && policy.PublicResearch != nil {
+	if rec.Bot.Status != store.BotPaused && policy.PublicResearch != nil && run.TitleConfirmation == nil {
 		// The authenticated start-from-title action admits only its initial subject,
 		// never the charter, attachments, history or a later model-proposed query.
 		// Direct turns retain the explicit disclosure form for compatibility.
@@ -336,6 +350,20 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 				}
 			} else {
 				m.PublicResearch = &scope
+			}
+		}
+	}
+	if run.TitleConfirmation != nil {
+		m.Scopes = nil
+		m.Constraints = nil
+		for _, c := range policy.Constraints {
+			if c.Action == execution.CapabilityChat {
+				m.Constraints = append(m.Constraints, c)
+				m.Scopes = append(m.Scopes, string(c.Action))
+			}
+			if c.Action == execution.CapabilityToolExecute && slices.Contains(c.Resources, "ask_user") {
+				m.Constraints = append(m.Constraints, execution.BotActionResourceConstraint{Action: c.Action, Resources: []string{"ask_user"}})
+				m.Scopes = append(m.Scopes, string(c.Action))
 			}
 		}
 	}

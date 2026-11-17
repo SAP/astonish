@@ -5,6 +5,34 @@ Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 policy and the shared run budget precede adapter execution. There is no host
 fallback when an adapter is unavailable.
 
+## Initial title confirmation
+
+New title runs enter `needs_question`, not executable work. After owner/session/model
+resolution and budget wrapping, `NewBotChatAgentFactory` returns a dedicated Chat
+agent exposing only the genuine `ask_user` handler. It does not call `Prepare`,
+`NewWiredChatAgent`, research, Task, learning, or operation setup. The authoritative
+Bot/run/owner/lease and pending state are rechecked at model and tool boundaries;
+a dedicated policy permits only a valid three/four-option question with custom
+text. Convenience resource pickers and permission requests are rejected.
+
+The model boundary buffers responses and allows one same-budget correction for
+plain text, malformed questions or premature work calls. Only a durable question
+checkpoint counts as success. The API bypasses work production, journals and review
+for this stage. Home preflight retains authorization but skips physical provisioning;
+Supervisor similarly skips Ensure/BindRun via `RequiresPhysicalHome`.
+
+After an authenticated correlated answer, the bound confirmed assignment enters
+normal execution and physical Home preparation resumes. The original title and
+call/result remain intact; the owner answer is a correlated user event, not a second
+tool response or permission grant. Nil confirmation preserves historical behavior.
+`bots_acceptance_driver.py --stage title-confirmation-contract` exercises controlled
+factory and HTTP journeys, including interactive/autonomous/mandated factory
+paths, option/custom answers, revoked authorization and stale leases. The Home
+HTTP test separately checks that pending-title preflight makes zero backend calls
+while ordinary message preflight retains provisioning, retry and cancellation.
+Real-provider quality and actual sandbox provisioning require separate isolated
+acceptance evidence.
+
 ## Configured public research
 
 The mandate branch installs `BotConfiguredResearchTool` before its retrieval-only
@@ -16,6 +44,14 @@ provider secrets and shared accounting; Tavily dispatches through the pinned nod
 and symbolic scoped vault, not a host MCP fallback or sibling-tool exemption.
 Missing configuration, empty results and failed searches leave detail retrieval
 locked. Search URLs/snippets are discovery evidence, not certified values.
+Provider initialization errors retain Chat's diagnostic through the existing
+provider-value redaction boundary; authentication or deployment failures must not
+be mislabeled as `bot capability unsupported`. The local
+`TestBotConfiguredSearchSAPProductionParity` fixture exercises actual SAP token
+exchange, deployment discovery and generation for initial mandated and follow-up
+research, plus authentication/deployment failures with detail retrieval locked.
+It proves adapter parity using controlled HTTP responses, not live SAP health or
+the cause of a historical failure whose diagnostic was discarded.
 
 The isolated `bot_task_acceptance.py --stage search` gate builds a fresh temporary
 candidate, requires personal/team owner HTTP search-before-detail ordering and

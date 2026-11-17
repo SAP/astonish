@@ -206,7 +206,7 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 				cr.completion.Blocked = true
 			case agent.ProgressiveStateExecutionError, agent.ProgressiveStateContextRequired, agent.ProgressiveStateContextStale:
 				if !recoverableReadFailure {
-					cr.completion.Err = errors.Join(cr.completion.Err, fmt.Errorf("tool did not complete: %s", state))
+					cr.completion.Err = errors.Join(cr.completion.Err, &botToolFeedbackError{cause: fmt.Errorf("tool did not complete: %s", state), recoverable: state == agent.ProgressiveStateExecutionError})
 				}
 			}
 			if failure, ok := result["error"]; !recoverableReadFailure && ok && failure != nil && failure != "" {
@@ -219,7 +219,8 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 				} else {
 					toolErr = fmt.Errorf("tool execution failed: %v", failure)
 				}
-				cr.completion.Err = errors.Join(cr.completion.Err, toolErr)
+				_, nativeError := failure.(error)
+				cr.completion.Err = errors.Join(cr.completion.Err, &botToolFeedbackError{cause: toolErr, recoverable: !nativeError})
 			}
 		}
 	}

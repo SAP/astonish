@@ -19,6 +19,24 @@ func (lifecycleMeterRuntime) Resume(ctx context.Context, q bot.RunRequest, _ bot
 	return bot.RunResult{Status: store.RunSucceeded, Usage: store.BotUsage{ToolCalls: 1}}, nil
 }
 
+func TestBotWorkerRecordedZeroExcludesOwnerWait(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-24 * time.Hour)
+	in := store.BotRunInput{Version: store.DefaultBotVersion(), Run: store.BotRun{StartedAt: &started, RuntimeAccountingRecorded: true, Lease: store.BotLease{Fence: 1}, Usage: store.BotUsage{InputTokens: 17}}}
+	budget, err := botRunBudget(in, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !budget.Deadline().Equal(now.Add(time.Duration(in.Version.Budget.MaxRuntimeSeconds)*time.Second)) || budget.Usage().InputTokens != 17 {
+		t.Fatal("owner wait consumed budget or usage reset")
+	}
+	in.Run.RuntimeAccountingRecorded = false
+	legacy, err := botRunBudget(in, now)
+	if err == nil && legacy.Check(context.Background()) == nil {
+		t.Fatal("legacy wall-clock fallback lost")
+	}
+}
+
 func TestBotWorkerMeteredResumeReturnsCumulativeCommitUsage(t *testing.T) {
 	cost := int64(12)
 	usage := store.BotUsage{ToolCalls: 3, InputTokens: 8, OutputTokens: 2, CostMicros: &cost, RuntimeNanos: int64(time.Second)}

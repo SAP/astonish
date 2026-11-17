@@ -11,6 +11,10 @@ describe('scoped Bot transport', () => {
     await expect(permanentDeleteBot({ id: 'a/b', scope, revision: 4 } as Bot)).resolves.toBeUndefined()
     expect(fetchMock).toHaveBeenCalledWith(`/api/studio/bots/a%2Fb/permanent-delete?scope=${scope}`, expect.objectContaining({ method: 'POST', body: '{"expected_revision":4,"confirm":true}' }))
   })
+  it('preserves the deletion-pending code separately from its human message', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('{"code":"deletion_pending","error":"Cleanup pending"}', { status: 410 }))
+    await expect(permanentDeleteBot({ id: 'a', scope: 'personal', revision: 4 } as Bot)).rejects.toMatchObject({ status: 410, code: 'deletion_pending', message: 'Cleanup pending' })
+  })
   it('preserves pending and HTTP failures rather than inventing completion', async () => {
     const bot = { id: 'a', scope: 'personal', revision: 4 } as Bot
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'pending', bot }), { status: 202 }))

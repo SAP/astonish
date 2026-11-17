@@ -113,6 +113,7 @@ func (p *interactiveHTTPPool) Call(_ string, name string, args map[string]interf
 }
 
 type interactiveHTTPFixture struct {
+	policy        *store.BotMandatePolicyResolver
 	db            *entstore.Store
 	dataDir       string // owned temporary SQLite fixture, never a live data directory
 	server        *httptest.Server
@@ -121,6 +122,7 @@ type interactiveHTTPFixture struct {
 	ctx           context.Context
 	request       func(string, string, string, int) []byte
 	worker        *daemon.BotWorker
+	workerConfig  daemon.BotWorkerConfig
 	repo          store.BotStore
 	b             store.Bot
 	path          string
@@ -201,9 +203,16 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 	router.HandleFunc(root+"/{botID}/configuration", api.BotConfigurationHandler).Methods("PUT")
 	router.HandleFunc(root+"/{botID}/activate", api.BotActivateHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/pause", api.BotPauseHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/runs/{runID}/continue-interactive", api.BotContinueInteractiveHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/runs/{runID}/cancel", api.BotCancelRunHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/permanent", api.BotPermanentDeleteHandler).Methods("DELETE")
 	router.HandleFunc(root+"/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 	router.HandleFunc("/api/studio/sessions/{id}/model", api.PatchSessionModelHandler).Methods("PATCH")
+	var policy store.BotMandatePolicyResolver
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if policy != nil {
+			r = r.WithContext(store.WithBotMandateAdmission(r.Context(), policy))
+		}
 		svc := &store.Services{TenantRouter: db, Bots: repo, Sessions: ods.ForTeam(team.Slug).Sessions(), PersonalBots: personal.Bots(), PersonalSessions: personal.Sessions(), BotInteractiveReady: true, BotTurnRegistry: registry}
 		router.ServeHTTP(w, r.WithContext(store.WithServices(auth(r.Context()), svc)))
 	}))
@@ -289,7 +298,7 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 		raw, _ := json.Marshal(output)
 		return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 	}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+	workerConfig := daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		// Capabilities come only from the owner-reviewed HTTP configuration.
@@ -317,11 +326,12 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 			resources.PolicyRuntime = agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: journeyGuard{repo: repo, req: q}}
 		}
 		return resources, nil
-	}})
+	}}
+	worker, err := daemon.NewBotWorker(workerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &interactiveHTTPFixture{db: db, dataDir: dir, server: server, scope: scope, t: t, ctx: ctx, request: request, worker: worker, repo: repo, b: b, path: root + "/" + b.ID.String(), pool: pool, registry: registry, model: mdl}
+	return &interactiveHTTPFixture{workerConfig: workerConfig, policy: &policy, db: db, dataDir: dir, server: server, scope: scope, t: t, ctx: ctx, request: request, worker: worker, repo: repo, b: b, path: root + "/" + b.ID.String(), pool: pool, registry: registry, model: mdl}
 }
 func (f *interactiveHTTPFixture) turn() *store.BotRun {
 	f.t.Helper()

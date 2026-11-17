@@ -83,11 +83,11 @@ func (r *botRepository) QuiesceSingleAutonomousRun(ctx context.Context, tx botDr
 func (r *botRepository) cancelRunTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun) error {
 	id, rid := rec.Bot.ID, saved.Run.ID
 	previous := saved.Run.Status
-	if previous.Terminal() || previous == store.RunInterrupted {
+	if (previous.Terminal() || previous == store.RunInterrupted) && !(previous == store.RunInterrupted && saved.Progress != nil && saved.Run.ContinuationReason == store.BotContinuationRequired) {
 		return nil
 	}
 	switch previous {
-	case store.RunQueued, store.RunWaitingApproval, store.RunRunning:
+	case store.RunQueued, store.RunWaitingApproval, store.RunRunning, store.RunInterrupted:
 	default:
 		return store.ErrBotConflict
 	}
@@ -95,6 +95,10 @@ func (r *botRepository) cancelRunTx(ctx context.Context, tx botDraftDB, rec *bot
 		return store.ErrBotConflict
 	}
 	now := r.clock()
+	saved.Run.ContinuationReason = ""
+	if previous == store.RunRunning && (saved.Progress != nil || saved.ProgressCursor != 0) {
+		progressAccount(saved, now)
+	}
 	saved.Run.Status = store.RunCancelled
 	saved.Run.FinishedAt = &now
 	if previous == store.RunRunning {

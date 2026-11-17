@@ -94,6 +94,62 @@ func TestBotHomeCleanupReservation(t *testing.T) {
 	}
 }
 
+func TestBotHomeCleanupLegacyReadRevision(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, owner, _, run, lease, _ := botRunFixture(t, scope)
+			soft, teardown := cleanupDeleteFixture(t, repo, owner, run, lease)
+			deleted, err := repo.BeginPermanentDelete(owner, store.BotPermanentDeleteRequest{BotID: soft.ID, ActorID: soft.OwnerID, ExpectedRevision: soft.Revision, Confirm: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec, err := repo.db.GetBot(owner, deleted.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			teardown.ExpectedRevision, teardown.Fence = deleted.Revision, rec.Fence
+			runtime := cleanupRuntimeContext(t, func(context.Context, store.BotCleanupRequest) error { return nil })
+			if err := repo.ConfirmCleanup(runtime, teardown); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := repo.ReserveHomeCleanup(runtime, deleted.Home, deleted.Revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Reproduce the old viewer write below the new repository guard.
+			if err := repo.db.Transaction(owner, func(tx botDraftDB) error {
+				current, err := tx.GetBot(owner, deleted.ID)
+				if err != nil {
+					return err
+				}
+				return tx.SaveReadCursor(owner, *current, store.BotReadCursor{BotID: deleted.ID, ViewerID: deleted.OwnerID, Sequence: current.LastSequence})
+			}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := repo.Get(owner, deleted.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.ConfirmCleanup(runtime, claim.Request); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("stale worker: %v", err)
+			}
+			renewed, err := repo.ReserveHomeCleanup(runtime, current.Home, current.Revision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if renewed.Request.ExpectedRevision != current.Revision || renewed.Request.Fence != claim.Request.Fence {
+				t.Fatal("invalid renewal")
+			}
+			if err := repo.ConfirmCleanup(runtime, renewed.Request); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.PurgeDeleted(owner, current.ID, current.Revision); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestBotHomeCleanupRestoreWins(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {

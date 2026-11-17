@@ -40,7 +40,7 @@ func TestBotHeaderSnapshotFailureIsUnavailable(t *testing.T) {
 	m := newModel(context.Background(), Config{Backend: b, Width: 160})
 	next, _ := m.Update(botSnapshotMsg{generation: m.botGeneration, err: errors.New("not found")})
 	header := stripANSI(next.(model).renderHeader())
-	if !strings.Contains(header, "status unavailable") || !strings.Contains(header, "Decisions unavailable") {
+	if !strings.Contains(header, "active · Updates unavailable") || !strings.Contains(header, "Decisions unavailable") {
 		t.Fatal(header)
 	}
 }

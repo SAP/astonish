@@ -161,17 +161,22 @@ export type ChronologicalActivitySegment =
   | { kind: 'passthrough'; index: number }
   | { kind: 'activity'; start: number; end: number; entries: ActivityEntry[]; steps: ToolActivityStep[]; coveredIndices: number[] }
 
+export type ActivityTextMode = 'fold-intermediate' | 'preserve-agent'
+
 /** Lossless display projection; raw records retain their original identity and order. */
-export function groupChronologicalActivity(messages: ChatMsg[]): ChronologicalActivitySegment[] {
+export function groupChronologicalActivity(messages: ChatMsg[], textMode: ActivityTextMode = 'fold-intermediate'): ChronologicalActivitySegment[] {
+  // Bot progress is already explicitly published by the runtime. Keep that
+  // owner-facing narration visible, rather than hiding it in a collapsed tool.
+  const boundary = (message: ChatMsg) => isHardBreak(message) || (textMode === 'preserve-agent' && message.type === 'agent')
   const segments: ChronologicalActivitySegment[] = []
   let i = 0
   while (i < messages.length) {
-    if (isHardBreak(messages[i])) {
+    if (boundary(messages[i])) {
       segments.push({ kind: 'passthrough', index: i++ })
       continue
     }
     const start = i
-    while (i < messages.length && !isHardBreak(messages[i])) i++
+    while (i < messages.length && !boundary(messages[i])) i++
     const end = i - 1
     const steps = pairSteps(messages, start, end)
     if (!steps.length) {
@@ -214,12 +219,12 @@ export function groupChronologicalActivity(messages: ChatMsg[]): ChronologicalAc
   return segments
 }
 
-export function buildChronologicalActivityRenderIndex(messages: ChatMsg[]) {
+export function buildChronologicalActivityRenderIndex(messages: ChatMsg[], textMode: ActivityTextMode = 'fold-intermediate') {
   const activityByStart = new Map<number, Extract<ChronologicalActivitySegment, { kind: 'activity' }>>()
   const skipIndices = new Set<number>()
   let lastActivityStart = -1
   messages.forEach((message, index) => { if (message.type === 'thinking') skipIndices.add(index) })
-  for (const segment of groupChronologicalActivity(messages)) {
+  for (const segment of groupChronologicalActivity(messages, textMode)) {
     if (segment.kind !== 'activity') continue
     activityByStart.set(segment.start, segment)
     lastActivityStart = segment.start

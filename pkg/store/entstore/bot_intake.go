@@ -324,7 +324,10 @@ func (r *botRepository) PromoteChat(ctx context.Context, q store.BotPromotionReq
 	if err != nil {
 		return nil, err
 	}
-	v := store.DefaultBotVersion()
+	v, err := store.NewBotVersionForCreation(ctx, actor)
+	if err != nil {
+		return nil, err
+	}
 	v.Charter = q.Charter
 	goals := make([]store.BotGoal, 0, len(q.Carryover.Goals))
 	for _, g := range q.Carryover.Goals {
@@ -412,7 +415,10 @@ func (r *botRepository) ConvertAdaptiveJob(ctx context.Context, q store.BotConve
 		if err != nil {
 			return err
 		}
-		v := store.DefaultBotVersion()
+		v, err := store.NewBotVersionForCreation(ctx, actor)
+		if err != nil {
+			return err
+		}
 		v.Charter = q.Charter
 		// Only the reviewed job schedule and instructions cross over; no delivery,
 		// credentials, Params, execution history or owner/team bindings are copied.

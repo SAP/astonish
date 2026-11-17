@@ -72,3 +72,55 @@ func TestBotHomeManagerExactBindingAndFence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type reconcilingHomeBackend struct {
+	homeManagerBackend
+	reconciled, deleted bool
+	reconcileErr        error
+}
+
+func (b *reconcilingHomeBackend) ReconcileBotHomeSessions(ctx context.Context, h *sandbox.BotHomeBinding, authorize func(context.Context) error) error {
+	if err := authorize(ctx); err != nil {
+		return err
+	}
+	b.reconciled = true
+	return b.reconcileErr
+}
+func (b *reconcilingHomeBackend) DeleteBotHome(context.Context, *sandbox.BotHomeBinding) error {
+	b.deleted = true
+	if !b.reconciled {
+		return errors.New("deleted before reconciliation")
+	}
+	return nil
+}
+func TestBotHomeManagerAuthorizedReconciliation(t *testing.T) {
+	for _, mode := range []string{"success", "denied", "reconcile-error", "revoked"} {
+		t.Run(mode, func(t *testing.T) {
+			id := uuid.New()
+			home := store.BotHomeBinding{ID: uuid.New(), BotID: id, Revision: 1, Backend: "docker", StorageKey: "owned"}
+			binding := sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{UserID: "owner", BotID: id.String()}, Backend: sandbox.BackendKindDocker, Ref: "owned"}
+			backend := &reconcilingHomeBackend{}
+			if mode == "reconcile-error" {
+				backend.reconcileErr = errors.New("foreign attachment")
+			}
+			calls := 0
+			manager := &BotHomeManager{Backend: backend, AuthorizeDelete: func(context.Context, store.BotHomeBinding) (*sandbox.BotHomeBinding, error) {
+				calls++
+				if mode == "denied" || mode == "revoked" && calls > 2 {
+					return nil, store.ErrBotConflict
+				}
+				return &binding, nil
+			}}
+			err := manager.Delete(t.Context(), home)
+			if (err == nil) != (mode == "success") {
+				t.Fatalf("delete: %v", err)
+			}
+			if backend.deleted != (mode == "success") {
+				t.Fatal("deletion bypassed authorization/reconciliation")
+			}
+			if mode == "denied" && backend.reconciled {
+				t.Fatal("unauthorized reconciliation")
+			}
+		})
+	}
+}

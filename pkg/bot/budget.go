@@ -32,6 +32,7 @@ type modelCharge struct {
 // Construct it with NewRunBudget; its zero value fails closed.
 type SharedRunBudget struct {
 	mu                                         sync.Mutex
+	modelTimeout, toolTimeout                  time.Duration
 	deadline                                   time.Time
 	startedAt                                  time.Time
 	runtimeUsed                                int64
@@ -56,6 +57,9 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 	if usage.RuntimeNanos < 0 || usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ToolCalls < 0 || usage.CostMicros != nil && *usage.CostMicros < 0 {
 		return nil, ErrBudgetReservation
 	}
+	if err := spec.RuntimePolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBudgetReservation, err)
+	}
 	if startedAt.IsZero() || spec.MaxRuntimeSeconds <= 0 || spec.MaxRuntimeSeconds > math.MaxInt64/int64(time.Second) {
 		return nil, fmt.Errorf("%w: runtime", ErrBudgetReservation)
 	}
@@ -65,6 +69,14 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 		}
 	}
 	b := &SharedRunBudget{startedAt: startedAt, runtimeUsed: usage.RuntimeNanos, deadline: startedAt.Add(time.Duration(spec.MaxRuntimeSeconds)*time.Second - time.Duration(usage.RuntimeNanos)), tokens: copyBudgetInt(spec.MaxTokens), tools: copyBudgetInt(spec.MaxToolCalls), cost: copyBudgetInt(spec.MaxModelCostMicros), charges: make(map[uuid.UUID]modelCharge), inputUsed: usage.InputTokens, outputUsed: usage.OutputTokens, toolsUsed: usage.ToolCalls}
+	if p := spec.RuntimePolicy; p.EffectiveMode() == execution.BotRuntimeModeProgressV1 {
+		b.deadline = time.Time{}
+		if p.MaxActiveSeconds != nil {
+			b.deadline = startedAt.Add(time.Duration(*p.MaxActiveSeconds)*time.Second - time.Duration(usage.RuntimeNanos))
+		}
+		b.modelTimeout = time.Duration(p.ModelCallTimeoutSeconds) * time.Second
+		b.toolTimeout = time.Duration(p.ToolCallTimeoutSeconds) * time.Second
+	}
 	if usage.CostMicros == nil {
 		b.unknownCosts = 1
 	} else {
@@ -74,7 +86,9 @@ func RestoreRunBudget(spec store.BudgetSpec, startedAt time.Time, usage store.Bo
 }
 
 // Deadline lets model decorators cancel in-flight generation at the run limit.
-func (b *SharedRunBudget) Deadline() time.Time { return b.deadline }
+func (b *SharedRunBudget) Deadline() time.Time             { return b.deadline }
+func (b *SharedRunBudget) ModelCallTimeout() time.Duration { return b.modelTimeout }
+func (b *SharedRunBudget) ToolCallTimeout() time.Duration  { return b.toolTimeout }
 
 // TokenLimit returns a snapshot of the effective run allowance, including mandate limits.
 func (b *SharedRunBudget) TokenLimit() *int64 {
@@ -95,7 +109,7 @@ func (b *SharedRunBudget) live(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if b.charges == nil || !time.Now().Before(b.deadline) {
+	if b.charges == nil || (!b.deadline.IsZero() && !time.Now().Before(b.deadline)) {
 		return fmt.Errorf("%w: runtime", ErrBudgetExceeded)
 	}
 	if b.overflow {

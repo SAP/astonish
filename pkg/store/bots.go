@@ -161,11 +161,24 @@ type BotAutonomy struct {
 
 // BudgetSpec uses nil for unlimited/unknown, not zero. Spend caps are separate.
 type BudgetSpec struct {
-	MaxRuntimeSeconds  int64  `json:"max_runtime_seconds"`
-	MaxToolCalls       *int64 `json:"max_tool_calls,omitempty"`
-	MaxTokens          *int64 `json:"max_tokens,omitempty"`
-	MaxRunsPerDay      *int64 `json:"max_runs_per_day,omitempty"`
-	MaxModelCostMicros *int64 `json:"max_model_cost_micros,omitempty"`
+	RuntimePolicy      *execution.BotRuntimePolicy `json:"runtime_policy,omitempty"`
+	MaxRuntimeSeconds  int64                       `json:"max_runtime_seconds"`
+	MaxToolCalls       *int64                      `json:"max_tool_calls,omitempty"`
+	MaxTokens          *int64                      `json:"max_tokens,omitempty"`
+	MaxRunsPerDay      *int64                      `json:"max_runs_per_day,omitempty"`
+	MaxModelCostMicros *int64                      `json:"max_model_cost_micros,omitempty"`
+}
+
+// Clone detaches all optional limits before consumer narrowing.
+func (b BudgetSpec) Clone() BudgetSpec {
+	b.RuntimePolicy = b.RuntimePolicy.Clone()
+	for _, ptr := range []**int64{&b.MaxToolCalls, &b.MaxTokens, &b.MaxRunsPerDay, &b.MaxModelCostMicros} {
+		if *ptr != nil {
+			v := **ptr
+			*ptr = &v
+		}
+	}
+	return b
 }
 
 // Binding ID resolves a server-verified linked identity, not a caller-created
@@ -410,10 +423,16 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 }
 
 type BotRun struct {
-	Task       *BotTaskRef        `json:"task,omitempty"`
-	Work       *BotWorkProjection `json:"work,omitempty"`
-	SkillID    *uuid.UUID         `json:"skill_id,omitempty"`
-	Invocation string             `json:"invocation,omitempty"`
+	Progress         *BotProgressProjection `json:"progress,omitempty"`
+	StateSequence    int64                  `json:"state_sequence,omitempty"`
+	StateCommittedAt time.Time              `json:"state_committed_at,omitempty"`
+	// Private repository metadata; never accepted from model-writable run JSON.
+	TitleConfirmation         *BotTitleConfirmation `json:"-"`
+	RuntimeAccountingRecorded bool                  `json:"-"`
+	Task                      *BotTaskRef           `json:"task,omitempty"`
+	Work                      *BotWorkProjection    `json:"work,omitempty"`
+	SkillID                   *uuid.UUID            `json:"skill_id,omitempty"`
+	Invocation                string                `json:"invocation,omitempty"`
 	// MandateRef is persisted only in the private repository envelope.
 	MandateRef         *BotMandateRef             `json:"-"`
 	ContinuationReason BotContinuationReason      `json:"continuation_reason,omitempty"`

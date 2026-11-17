@@ -16,11 +16,42 @@ func authorizedSchedulePolicy(ctx context.Context, ref store.BotMandateRef) (sto
 	return p, e
 }
 
-func authorizedScheduleFixture(t *testing.T, scope store.BotScope) (*botRepository, *botAuthorizedOperationRuntime, context.Context, context.Context, store.BotAuthorizedOperationRequest) {
+func authorizedScheduleFixture(t *testing.T, scope store.BotScope, progress ...bool) (*botRepository, *botAuthorizedOperationRuntime, context.Context, context.Context, store.BotAuthorizedOperationRequest) {
 	t.Helper()
 	r, bots, base, initial, _ := runtimeFixture(t, scope)
-	owner := store.WithBotMandateAdmission(mandateOwnerContext(t, base), authorizedSchedulePolicy)
-	receipt, err := r.AdmitMessage(owner, store.BotMessageRequest{BotID: initial.BotID, Version: 1, Instructions: "Every day at nine, read the report. Keep other schedules unchanged.", IdempotencyKey: uuid.NewString()})
+	policy := store.BotMandatePolicyResolver(authorizedSchedulePolicy)
+	version := int64(1)
+	if len(progress) > 0 && progress[0] {
+		policy = func(c context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
+			p, e := authorizedSchedulePolicy(c, ref)
+			p.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
+			return p, e
+		}
+		b, e := r.Get(base, initial.BotID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		b, e = r.Pause(base, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "review progress"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		v, e := r.GetVersion(base, b.ID, b.Version)
+		if e != nil {
+			t.Fatal(e)
+		}
+		v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
+		b, e = r.ConfigureReviewed(store.WithBotMandateAdmission(base, policy), store.BotConfigurationRequest{BotID: b.ID, ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "review progress", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
+		if e != nil {
+			t.Fatal(e)
+		}
+		b, e = r.Resume(base, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		version = b.Version
+	}
+	owner := store.WithBotMandateAdmission(mandateOwnerContext(t, base), policy)
+	receipt, err := r.AdmitMessage(owner, store.BotMessageRequest{BotID: initial.BotID, Version: version, Instructions: "Every day at nine, read the report. Keep other schedules unchanged.", IdempotencyKey: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +65,7 @@ func authorizedScheduleFixture(t *testing.T, scope store.BotScope) (*botReposito
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := NewBotAuthorizedOperationRuntime(bots, authorizedSchedulePolicy, func(_ context.Context, a store.BotScheduleAuthorization) error {
+	rt, err := NewBotAuthorizedOperationRuntime(bots, policy, func(_ context.Context, a store.BotScheduleAuthorization) error {
 		if a.Instructions != "Every day at nine, read the report. Keep other schedules unchanged." || a.Provenance.UserEventID == "" {
 			return store.ErrBotForbidden
 		}

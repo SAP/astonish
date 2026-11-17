@@ -134,7 +134,7 @@ func TestBotHomeRecoveryConflictAndRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(log)
-	if strings.Contains(string(data), b.Ref) || !strings.Contains(string(data), "volume rm -f "+overlayVolumeName("run")) {
+	if strings.Contains(string(data), b.Ref) || !strings.Contains(string(data), "volume rm "+overlayVolumeName("run")) {
 		t.Fatalf("destroy touched home or missed run: %s", data)
 	}
 }

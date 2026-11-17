@@ -54,6 +54,16 @@ func (a *BotChatRuntimeAdapter) resumeInteraction(ctx context.Context, req bot.R
 	ctx = context.WithValue(ctx, botResumeInteractionKey{}, approval)
 	// Never submit the original task as another user turn.
 	req.Instructions = "Continue the saved conversation from the owner's answer. Do not repeat completed work. The answer does not authorize additional tool permissions."
+	if c := req.Run.TitleConfirmation; c != nil {
+		if c.ValidateBinding(req.Run, req.Bot.OwnerID) != nil || c.State != store.BotTitleConfirmationConfirmed {
+			return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+		}
+		// Only the initial confirmation replaces the assignment. Later questions
+		// resume their own correlated answer without re-executing the title.
+		if c.ApprovalID == approval.ID {
+			req.Instructions = c.ConfirmedAssignment
+		}
+	}
 	return a.runChat(ctx, req, sink, true)
 }
 

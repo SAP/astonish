@@ -24,6 +24,14 @@ import (
 
 // Exercises the real command process and terminal; no model/provider credentials.
 func TestBotTitleChatPTYAcceptance(t *testing.T) {
+	for _, mode := range []string{"option", "custom"} {
+		t.Run(mode, func(t *testing.T) { testBotTitleChatPTYAnswer(t, mode) })
+	}
+}
+
+// The HTTP fixture supplies a persisted ask_user interaction, not a fabricated
+// completed assignment. Production worker execution is covered by HTTP acceptance.
+func testBotTitleChatPTYAnswer(t *testing.T, mode string) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
@@ -33,9 +41,16 @@ func TestBotTitleChatPTYAcceptance(t *testing.T) {
 	}
 	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Title draft", Scope: store.BotScopePersonal, Status: store.BotDraft, Version: 1, Revision: 1}
 	base := "/api/studio/bots/" + bot.ID.String()
-	state := store.BotRunState{SchemaVersion: 1, BotID: bot.ID, RunID: uuid.New(), HomeSessionID: bot.HomeSessionID, SessionID: uuid.New(), Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunRunning, StateSequence: 1}
-	answers := make(chan struct{}, 1)
-	approval := store.BotApproval{ID: uuid.New(), BotID: bot.ID, RunID: state.RunID, ActionDigest: "title-action", Status: store.ApprovalPending, ExpiresAt: time.Now().Add(time.Hour), Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "title-q", Payload: json.RawMessage(`{"questionId":"title-q","kind":"text","prompt":"Which details should the title include?"}`)}}
+	state := store.BotRunState{SchemaVersion: 1, BotID: bot.ID, RunID: uuid.New(), HomeSessionID: bot.HomeSessionID, SessionID: uuid.New(), Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunWaitingApproval, StateSequence: 3}
+	answers := make(chan struct{}, 2)
+	wantAnswer := "forecast"
+	if mode == "custom" {
+		wantAnswer = "Weekend rain"
+	}
+	approval := store.BotApproval{ID: uuid.New(), BotID: bot.ID, RunID: state.RunID, ActionDigest: "title-action", Status: store.ApprovalPending, ExpiresAt: time.Now().Add(time.Hour), Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "title-q", Payload: json.RawMessage(`{"questionId":"title-q","kind":"select","prompt":"What should I do about Boston weather?","options":[{"id":"forecast","label":"Compare Boston forecasts"},{"id":"climate","label":"Explain Boston seasonal weather"},{"id":"outing","label":"Plan a Boston outing"}],"allow_custom_answer":true}`)}}
+	if err := approval.Interaction.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer title-token" {
 			http.Error(w, "unauthorized", 401)
@@ -59,7 +74,7 @@ func TestBotTitleChatPTYAcceptance(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Error(err)
 			}
-			if r.Method != "POST" || request.ActionDigest != approval.ActionDigest || request.Response == nil || request.Response.QuestionID != "title-q" || request.Response.Answer != "jk" {
+			if r.Method != "POST" || request.ActionDigest != approval.ActionDigest || request.Response == nil || request.Response.QuestionID != "title-q" || request.Response.Answer != wantAnswer {
 				t.Errorf("unbound answer: %+v", request)
 			}
 			write(store.BotApproveContinueResult{RunID: state.RunID, Continuation: store.BotContinuationQueued})
@@ -67,7 +82,9 @@ func TestBotTitleChatPTYAcceptance(t *testing.T) {
 		case base + "/sessions/" + bot.HomeSessionID.String() + "/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			rows := []session.Event{{Actions: session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: state}}}, {Author: "model"}}
-			rows[1].Content = &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Useful title draft"}}}
+			var args map[string]any
+			_ = json.Unmarshal(approval.Interaction.Payload, &args)
+			rows[1].Content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "title-call", Name: "ask_user", Args: args}}}}
 			for i, row := range rows {
 				raw, _ := json.Marshal(row)
 				fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", bot.HomeSessionID, i+1, raw)
@@ -135,20 +152,27 @@ func TestBotTitleChatPTYAcceptance(t *testing.T) {
 		defer mu.Unlock()
 		t.Fatalf("missing %q: %s", text, ansi.Strip(output.String()))
 	}
-	wait("Useful title draft")
-	wait("Thinking")
+	// Open and reload the actual durable decision, rather than inventing a final
+	// report while the title is still waiting for an owner answer.
+	wait("Waiting for answer or review")
+	_, _ = io.WriteString(pt, "/bots approvals\r")
+	wait("What should I do about Boston weather?")
+	wait("Compare Boston forecasts")
+	wait("Custom answer:")
+	_, _ = io.WriteString(pt, "\x1b")
+	time.Sleep(300 * time.Millisecond)
 	mu.Lock()
 	output.Reset()
 	mu.Unlock()
-	_, _ = io.WriteString(pt, "/bots home\r")
-	time.Sleep(300 * time.Millisecond)
-	_ = pty.Setsize(pt, &pty.Winsize{Rows: 40, Cols: 141})
-	wait("Useful title draft")
-	wait("Thinking")
 	_, _ = io.WriteString(pt, "/bots approvals\r")
-	wait("Which details should the title include?")
-	_, _ = io.WriteString(pt, "yjk\r")
-	wait(`Confirm answer "jk"`)
+	wait("What should I do about Boston weather?")
+	wait("Explain Boston seasonal weather")
+	_, _ = io.WriteString(pt, "y")
+	if mode == "custom" {
+		_, _ = io.WriteString(pt, "\x1b[B\x1b[B\x1b[B"+wantAnswer)
+	}
+	_, _ = io.WriteString(pt, "\r")
+	wait(fmt.Sprintf("Confirm answer %q", wantAnswer))
 	select {
 	case <-answers:
 		t.Fatal("answer posted before confirmation")

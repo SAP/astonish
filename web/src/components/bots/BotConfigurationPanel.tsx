@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { BotAPIError, BotStatus, getBot, type Bot } from '@/api/bots'
 import { getActiveTeam } from '@/api/teamContext'
-import { AutonomyLevel, NotifyPolicy, configureBot, getBotConfigurationVersion, type AutonomyLevelValue, type NotifyPolicyValue, type BotConfiguration, type BotConfigurationRequest } from '@/api/botConfiguration'
+import { RuntimeMode, validRuntimePolicy, runtimePolicySummary, runtimeSecondsMax, AutonomyLevel, NotifyPolicy, configureBot, getBotConfigurationVersion, type AutonomyLevelValue, type NotifyPolicyValue, type BotConfiguration, type BotConfigurationRequest } from '@/api/botConfiguration'
 
 type Props = { bot: Bot; readOnly?: boolean; onChange: () => void }
 type Baseline = { bot: Bot; policy: BotConfiguration }
@@ -26,6 +26,8 @@ function describe(policy: BotConfiguration): Record<string, string> {
   result['Spend currency'] = policy.autonomy.spend_currency || '(none)'
   for (const [key, label] of Object.entries(spend)) result[label] = String(policy.autonomy[key as keyof typeof spend])
   for (const [key, label] of Object.entries(budgets)) result[label] = String(policy.budget[key as keyof typeof budgets] ?? 'Unlimited / unknown')
+  result['Runtime policy'] = runtimePolicySummary(policy.budget)
+  result['Runtime policy parameters'] = JSON.stringify(policy.budget.runtime_policy || null)
   result.Notifications = policy.delivery.notify
   result['Delivery preferences'] = policy.delivery.preferences || '(none)'
   result['Delivery destinations'] = (policy.delivery.bindings || []).map(b => `${b.channel}: ${b.chat_id}${b.thread_id ? ` / ${b.thread_id}` : ''} (linked identity ${b.id})`).join('; ') || '(none)'
@@ -99,8 +101,9 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
     {draft && baseline && <form onSubmit={event => {
       event.preventDefault()
       if (unavailable || busy || conflict || !reason.trim()) return
-      const numbers = [...Object.values(draft.budget), draft.autonomy.max_spend_per_run_minor, draft.autonomy.max_spend_per_month_minor].filter(value => value !== undefined)
-      if (!numbers.every(value => Number.isSafeInteger(value) && value >= 0) || !(draft.budget.max_runtime_seconds > 0)) { setError('Use non-negative safe whole numbers for limits, and a positive runtime.'); return }
+      const numbers = [...(Object.keys(budgets) as (keyof typeof budgets)[]).map(key => draft.budget[key]), draft.autonomy.max_spend_per_run_minor, draft.autonomy.max_spend_per_month_minor].filter(value => value !== undefined)
+      if (!numbers.every(value => Number.isSafeInteger(value) && value >= 0) || (draft.budget.runtime_policy?.mode !== RuntimeMode.Progress && !(draft.budget.max_runtime_seconds > 0))) { setError('Use non-negative safe whole numbers for limits, and a positive runtime.'); return }
+      if (!validRuntimePolicy(draft.budget.runtime_policy)) { setError('Use a supported runtime policy with positive, duration-safe whole seconds.'); return }
       if (!Object.values(AutonomyLevel).includes(draft.autonomy.level) || !Object.values(NotifyPolicy).includes(draft.delivery.notify)) { setError('Unsupported autonomy or notification policy. Choose a supported value.'); return }
       setError(''); setReviewed(false); setRights(false)
       setReview({ ...clean(draft), expected_revision: baseline.bot.revision, expected_version: baseline.bot.version, reviewed: true, reason: reason.trim() })
@@ -119,8 +122,17 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
         <div className="grid gap-3 sm:grid-cols-2">{(Object.keys(spend) as (keyof typeof spend)[]).map(key => <label className={field} key={key}>{spend[key]}<Input type="number" min={0} max={Number.MAX_SAFE_INTEGER} step={1} required value={draft.autonomy[key]} onChange={e => change({ ...draft, autonomy: { ...draft.autonomy, [key]: e.target.value === '' ? NaN : Number(e.target.value) } })} /></label>)}</div>
         <p className="text-sm text-muted-foreground">Purchase caps use currency minor units; zero does not grant spending. They are separate from model cost. Unsupported capabilities fail closed on the server.</p>
         <h3 className="font-medium">Budgets</h3>
+        <label className={field}>Runtime mode<select className={select} value={draft.budget.runtime_policy?.mode || RuntimeMode.Legacy} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: e.target.value === RuntimeMode.Progress ? { schema_version: 1, mode: RuntimeMode.Progress } : undefined } })}>
+          <option value={RuntimeMode.Legacy}>Saved legacy duration limit</option><option value={RuntimeMode.Progress}>Progress-driven (requires operator permission)</option>
+        </select></label>
+        <p className="text-sm text-muted-foreground">Progress mode is an explicit opt-in, disabled by default on the server. New authorization is required; changing configuration does not upgrade existing assignments or grants.</p>
+        {draft.budget.runtime_policy?.mode === RuntimeMode.Progress && <>
+          <p>{runtimePolicySummary(draft.budget)}</p>
+          <p className="text-sm text-muted-foreground">Blank total active duration means no task duration limit; token, tool and spending limits still apply. Operator ceilings are checked by the server.</p>
+          <div className="grid gap-3 sm:grid-cols-2">{(['evaluation_interval_seconds', 'max_active_seconds', 'model_call_timeout_seconds', 'tool_call_timeout_seconds'] as const).map(key => <label key={key} className={field}>{({ evaluation_interval_seconds: 'Progress evaluation interval (seconds)', max_active_seconds: 'Total active duration limit (seconds, optional)', model_call_timeout_seconds: 'Model operation timeout (seconds)', tool_call_timeout_seconds: 'Tool operation timeout (seconds)' })[key]}<Input type="number" min={1} max={runtimeSecondsMax} step={1} required={key !== 'max_active_seconds'} value={draft.budget.runtime_policy?.[key] ?? ''} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: { ...draft.budget.runtime_policy!, [key]: e.target.value === '' ? undefined : Number(e.target.value) } } })} /></label>)}</div>
+        </>}
         <p className="text-sm text-muted-foreground">Blank optional budgets mean unlimited / unknown; zero is an explicit limit. Model-cost caps cannot guarantee a money ceiling when model pricing or enforcement is unsupported.</p>
-        <div className="grid gap-3 sm:grid-cols-2">{(Object.keys(budgets) as (keyof typeof budgets)[]).map(key => <label className={field} key={key}>{budgets[key]}<Input type="number" min={key === 'max_runtime_seconds' ? 1 : 0} max={Number.MAX_SAFE_INTEGER} step={1} required={key === 'max_runtime_seconds'} value={draft.budget[key] ?? ''} onChange={e => change({ ...draft, budget: { ...draft.budget, [key]: e.target.value === '' ? undefined : Number(e.target.value) } })} /></label>)}</div>
+        <div className="grid gap-3 sm:grid-cols-2">{(Object.keys(budgets) as (keyof typeof budgets)[]).filter(key => key !== 'max_runtime_seconds' || draft.budget.runtime_policy?.mode !== RuntimeMode.Progress).map(key => <label className={field} key={key}>{budgets[key]}<Input type="number" min={key === 'max_runtime_seconds' ? 1 : 0} max={Number.MAX_SAFE_INTEGER} step={1} required={key === 'max_runtime_seconds'} value={draft.budget[key] ?? ''} onChange={e => change({ ...draft, budget: { ...draft.budget, [key]: e.target.value === '' ? undefined : Number(e.target.value) } })} /></label>)}</div>
         <h3 className="font-medium">Delivery</h3>
         <label className={field}>Notifications<select className={select} value={draft.delivery.notify} onChange={e => change({ ...draft, delivery: { ...draft.delivery, notify: e.target.value as NotifyPolicyValue } })}>
           {!Object.values(NotifyPolicy).includes(draft.delivery.notify) && <option value={draft.delivery.notify}>Unsupported: {draft.delivery.notify}</option>}

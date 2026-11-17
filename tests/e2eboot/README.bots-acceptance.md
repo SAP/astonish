@@ -1,5 +1,112 @@
 # Bot release acceptance
 
+## Durable progress (strict controlled acceptance)
+
+```sh
+ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 \
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_BOT_BROWSER_PATH="${BOT_BROWSER:?Absolute executable browser}" \
+ASTONISH_SANDBOX_IMAGE="${BOT_TEST_IMAGE:?Existing local Docker image}" \
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage durable-progress \
+  --report /tmp/astonish-durable-progress-report.json
+```
+
+The stage builds Studio and requires fresh exact package/test **run and pass**
+events, including all three OS-process restart modes and personal/team clock
+subtests. Zero matching tests, any skipped descendant, missing package completion,
+a foreign package's similarly named test, or a failing subprocess fails the gate.
+Its bounded JSON report lists every required test, gate result, elapsed time and
+unverified tier. No historical receipts substitute for a current invocation.
+
+`TestBotProgressProcessRestartAcceptance` owns child test executables, isolated
+SQLite and a loopback effect sink. The parent SIGKILLs at a drained read checkpoint,
+a drained write with an out-of-band exact sink receipt, and an in-flight write.
+A fresh process reopens the store, worker and empty authorization registry. Settled
+work requests fresh authentication, keeps the same run/session and cumulative
+ledger, then finishes without replaying a read or write. The settled-write case also
+requires employee assessment and confirmed effect evidence after restoring the
+receipt; both settled cases repoll and require exactly one final publication.
+An unresolved write waits
+for **real lease expiry** and stays interrupted without automatic replay or false
+success. This is host-process proof, distinct from injected crashes and from a
+Docker-host restart. No normal daemon or current user Bot is involved.
+
+`TestBotProgressSixHourClockAcceptance` advances only the employee controller clock
+past six hours; lease, authentication and individual-operation clocks stay real.
+Its three evaluations use the same employee adapter and include continue/replan,
+original assignment/evidence checks and exactly one published final. It is protocol
+wiring evidence, not model judgment quality or a six-hour wall-clock run. Separate
+required tests cover compacted context, transient failures, bounded calls, quota
+and legacy limits, schedule coalescing, pause/continuation, revocation, deletion,
+trusted synthesis nonexecution, employee-only built browser and the real PTY.
+
+Docker daemon readiness and the explicitly named **local** image are mandatory;
+there is no image pull. The required title-confirmation Docker browser fixture
+owns its UUID Home/helper, verifies mounting/persistence and cleans up only those
+resources. Cleanup failure fails that test. No shared prune or live resource change
+is permitted. Physical Home proof is not full tool-node overlay proof.
+
+Optional `--soak`, `--real-provider` and `--postgres` requests currently **BLOCK**
+(exit 2), never silently skip or launch a paid provider. Soak/provider additionally
+require `--config` identifying isolated settings and finite spending limits;
+PostgreSQL requires explicit `ASTONISH_TEST_DSN` and
+`ASTONISH_BOTS_TEST_DB_ISOLATED=1`. Their durable-progress harnesses remain
+unimplemented/unverified. A passing controlled report cannot claim a two-hour
+wall-clock soak, real-provider quality, PostgreSQL concurrency or Kubernetes.
+
+## Initial title confirmation (controlled built-client gate)
+
+New title-created Bots must ask one focused question with three or four distinct
+interpretations and a custom-answer input before preparing a Home, researching,
+or creating a Task. Owner waiting is not active runtime. Confirmation selects the
+assignment; it is not permission for external effects or recurring work. Legacy
+runs, ordinary direct messages and schedules retain their existing semantics.
+
+```sh
+ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 \
+ASTONISH_BOT_BROWSER_PATH="${BOT_BROWSER:?Absolute executable browser}" \
+ASTONISH_SANDBOX_IMAGE="${BOT_TEST_IMAGE:?Existing local Docker image}" \
+bash tests/e2eboot/bots_acceptance.sh --stage title-confirmation
+```
+
+This distinct stage builds Studio, runs exact controlled lifecycle/HTTP cases,
+launches disposable Rod profiles against production handlers/worker factories,
+and requires the real title PTY case. Missing prerequisites, skipped tests,
+missing exact package/test run-pass evidence, or partial-mode flags fail closed.
+No `.env`, provider credentials, production database settings or normal daemon
+are used. `--stage title-confirmation-contract` remains the narrower contract gate.
+
+`TestBotTitleConfirmationDockerBrowserAcceptance` independently checks no owned
+Home volume/container before the answer, then production worker Home registration,
+Docker volume ownership, an owned helper's mount and persisted receipt. Helpers
+use the existing image (`--pull=never`), no network and UUID-owned cleanup. This
+proves physical Home ordering, **not** full tool-node overlay, configured research
+or Task-file publication. The browser worker replacement retains the same live
+HTTP authorization registry; it is not an OS-process/registry restart claim.
+
+The strict manifest also requires built team-workspace option and custom-answer
+journeys, configured-search HTTP (personal/team with configured and missing
+service), ordered title-confirmation state, and later-question continuation.
+Team title admission uses the production HTTP endpoint before opening the built
+team workspace: `NewBotDialog` currently offers personal creation only. These
+team browser cases do not claim a team creation dialog. Both strict and contract
+manifests require `TestBotTitleConfirmationProcessRestart`: two separate test
+processes reopen the same SQLite database with a fresh authorization registry and
+recover the waiting confirmation before accepting its owner answer. This passing
+controlled question-repository subprocess proof closes the SQLite/authorization
+restart gap; it is distinct from browser worker replacement and does not claim
+an actual daemon restart or end-to-end browser recovery across daemon processes.
+
+Earlier browser attempts remain failed evidence: `.tmp/title-confirmation-browser.log`
+and `.tmp/title-confirmation-browser-authorized.log` reached the built UI and real
+worker but were blocked by the legacy `botBoundTool.Run` ControlOnly guard before
+question persistence. Do not turn these into passing receipts. A narrow production
+fix must be judged by a fresh rerun, not these historical receipts. Real-provider
+title-to-card latency, suggestion
+relevance and post-confirmation research quality require an explicit isolated
+provider configuration and remain unverified; controlled models cannot certify
+those qualities or supersede historical live failures.
+
 ## Bot-owned Task all-stage gate (not live-certified)
 
 ```sh

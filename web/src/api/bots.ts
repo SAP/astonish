@@ -22,7 +22,7 @@ export interface BotTrigger {
 export interface BotVersion {
   bot_id: string; version: number; charter: string; persona: BotPersona
   autonomy: { level: string; can_contact_people: boolean; can_publish: boolean; max_spend_per_run_minor: number; max_spend_per_month_minor: number }
-  budget: { max_runtime_seconds: number; max_tool_calls?: number; max_tokens?: number; max_runs_per_day?: number }
+  budget: import('./botConfiguration').BotBudget
   delivery: { notify: string; preferences: string; bindings: { id: string; channel: string; chat_id: string }[] | null }
   triggers: BotTrigger[] | null
 }
@@ -79,6 +79,7 @@ export function botQualitySummary(q?: BotQualityReport): string {
   return `Requirements checked · ${q.repairs} correction attempts. Model assessments are judgments, not guarantees.`
 }
 export interface BotRun {
+  progress?: import('./botProgress').BotProgressProjection
   id: string; bot_id: string; session_id: string; version: number; trigger: string
   status: 'queued' | 'running' | 'waiting_approval' | 'interrupted' | 'succeeded' | 'partial' | 'failed' | 'skipped' | 'cancelled'
   created_at: string; started_at?: string; finished_at?: string; provider: string; model: string
@@ -89,6 +90,7 @@ export interface BotRun {
 export interface BotApproval {
   id: string; run_id: string; version: number; action_digest: string
   action: Record<string, unknown>; status: 'pending' | 'approved' | 'denied' | 'expired' | 'revoked' | 'consumed'; expires_at: string
+  response?: { question_id: string; answer: string }
   interaction?: { kind: 'chat_question'; question_id: string; payload: import('./questions').Question }
 }
 export interface BotGoal { id: string; revision: number; title: string; description: string; completion_criteria: string; status: 'active' | 'completed'; due_at?: string; evidence: BotEvidence[] | null }
@@ -98,7 +100,18 @@ export interface BotTemplate { id: string; revision: number; definition: { schem
 export interface BotDraft { name: string; start_from_title?: boolean; idempotency_key: string; definition?: { charter: string; persona?: BotPersona } }
 export interface BotCarryover { summary: string; memories: { content: string; category: string }[]; goals: { title: string; completion_criteria: string }[]; artifacts: { title: string; content: string }[] }
 export interface BotPromotion { name: string; charter: string; idempotency_key: string; reviewed: boolean; reviewed_for_team: boolean; carryover: BotCarryover }
-export class BotAPIError extends Error { constructor(public status: number, message: string) { super(message) } }
+export const BotErrorCode = { DeletionPending: 'deletion_pending' } as const
+export class BotAPIError extends Error {
+  code?: string
+  constructor(public status: number, message: string) {
+    super(message)
+    try {
+      const body = JSON.parse(message) as { code?: string; error?: string }
+      if (typeof body.code === 'string') this.code = body.code
+      if (typeof body.error === 'string') this.message = body.error
+    } catch { /* Preserve plain-text errors. */ }
+  }
+}
 const segment = encodeURIComponent
 export function botURL(path = '', scope: BotScope = 'personal', query: Record<string, string> = {}) {
   return `/api/studio/bots${path}?${new URLSearchParams({ ...query, scope })}`

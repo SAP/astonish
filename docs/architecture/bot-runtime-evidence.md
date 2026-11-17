@@ -1,5 +1,36 @@
 # Bot runtime report evidence
 
+## Durable-progress recovery evidence
+
+`bots_acceptance_driver.py --stage durable-progress` is the fresh, no-skip controlled
+gate. Its JSON report names exact package/test pairs and required child cases;
+zero tests, missing run/pass events, skipped descendants and unfinished packages
+fail closed. See `tests/e2eboot/README.bots-acceptance.md` for explicit browser and
+local Docker prerequisites and invocation.
+
+`TestBotProgressProcessRestartAcceptance` kills an owned OS worker process, then
+opens the same isolated SQLite store in a new process with an empty authorization
+registry. Drained reads and writes require fresh authentication before continuing
+the same run/session with monotonic usage and no replay. A write is settled only
+with an exact out-of-band observed sink receipt; a bare `Verified` flag is not
+positive completion evidence. In-flight writes wait for real lease expiry and
+remain interrupted without a continuation offer or duplicate external action.
+The pre-claim transition accepts only a bound, fully settled progress ledger,
+never pending/uncertain dispatches, completed commits, or a mismatched binding.
+Auxiliary employee-assessment model iterators reserve dispatches too: after the
+work loop returns, their drained receipts must settle before final commit. The
+settled-write restart case exercises that path, requires confirmed effect evidence
+and employee assessment, then polls again and asserts exactly one final transcript
+publication. A producer-only settlement boundary is insufficient.
+
+Six-hour acceptance advances the employee controller clock, not lease, operation,
+authorization or wall clocks. Controlled model scripts prove protocol wiring,
+not model judgment. Host-process restart and disposable Docker Home validation
+are distinct; neither proves a Docker-host restart or full tool-node overlay.
+The optional real-provider, two-hour wall-clock soak, PostgreSQL concurrency and
+Kubernetes tiers remain unverified; requested unimplemented optional tiers block
+rather than skip or spend money. No production Bot or normal daemon is used.
+
 ## Agent-led working evidence
 
 New `agent_led_v1` runs have optional read/update/evidence/check capabilities, not

@@ -1,5 +1,30 @@
 # Bot interactive question checkpoints
 
+## Progress integration status (fail closed)
+
+`progress_v1` persistence and budget contracts do not yet imply a runnable durable
+employee. `BotChatRuntimeAdapter` rejects progress activation before resource
+construction, and discriminates `bot_progress_v1` before approval decoding. Never
+remove this guard merely because the policy has no whole-task deadline.
+
+The Bot-only `ProgressController` and ChatAgent pre-model callback provide an
+opt-in cooperative boundary: typed continue/replan/synthesize/ask-user decisions,
+tool-free employee calls using `ModelCallPurposeProgress`, individual call limits,
+one format correction, supplied-reference validation, cancellation-aware backoff,
+and commit-before-adopting-plan behavior. This is scaffolding, not restart proof.
+Its Observe callback must attest all tools and children settled; Commit must
+persist bounded context and the shared ledger; AskUser must create the genuine
+interaction checkpoint. No production factory installs these callbacks yet.
+
+Remaining safety wiring before enabling: durable working-context bytes plus
+verified digest/transcript fallback; Read/Write/Internal trusted dispatch classes
+across direct/MCP/email/bridge/child execution; cumulative reservation/settlement
+and uncertainty reconciliation; typed yield handling in producer/work/report and
+worker paths; restore of exact turn/event cursors without owner-input replay;
+ordinary progress continuation separate from approval. HTTP activation-gate tests
+prove refusal only, **not** `TestBotProgressEmployeeHTTP` or restart acceptance.
+
+
 ## Work assessment continuity
 
 A question suspends the existing producing/repairing phase; its pinned original

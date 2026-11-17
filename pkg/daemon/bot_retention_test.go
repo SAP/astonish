@@ -187,6 +187,28 @@ func TestBotRetentionBeforeExpiry(t *testing.T) {
 	}
 }
 
+func TestBotRetentionReservationFenceCannotChange(t *testing.T) {
+	w, repo, _, ownerCtx := retentionFixture(t)
+	p, _ := execution.PrincipalFromContext(ownerCtx)
+	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindService, Authentication: execution.AuthMethodLocalOS, Surface: execution.SurfaceCode, ClientID: w.config.WorkerID, OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug, Scopes: []string{store.BotCleanupScope}, Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claim store.BotHomeCleanupClaim
+	manager := w.botRetentionManager(repo, repo.bot, &claim)
+	if _, err := manager.AuthorizeDelete(ctx, repo.bot.Home); err != nil {
+		t.Fatal(err)
+	}
+	original := claim
+	repo.claim.Request.Fence++
+	if _, err := manager.AuthorizeDelete(ctx, repo.bot.Home); !errors.Is(err, store.ErrBotConflict) {
+		t.Fatalf("changed fence accepted: %v", err)
+	}
+	if claim != original {
+		t.Fatal("recheck replaced original receipt")
+	}
+}
+
 func TestBotRetentionUnsupportedBackend(t *testing.T) {
 	w, repo, _, ctx := retentionFixture(t)
 	w.config.Sandbox = nil

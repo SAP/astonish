@@ -2,6 +2,8 @@ package entstore
 
 import (
 	"context"
+	prun "github.com/SAP/astonish/ent/personal/botrun"
+	trun "github.com/SAP/astonish/ent/team/botrun"
 	"github.com/SAP/astonish/pkg/store"
 	"time"
 )
@@ -13,6 +15,19 @@ func appendBotRunStateTx(ctx context.Context, tx botDraftDB, b store.Bot, run st
 }
 
 func (d personalBotDB) AppendRunState(ctx context.Context, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
+	saved, err := d.ReadRun(ctx, b.ID, run.ID)
+	if err != nil {
+		return err
+	}
+	saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+	run = saved.Run
+	data, err := botJSONMap(*saved)
+	if err != nil {
+		return err
+	}
+	if _, err = d.client.BotRun.Update().Where(prun.IDEQ(run.ID), prun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
+		return err
+	}
 	event, err := store.NewBotRunStateEvent(b, run, sequence, at)
 	if err != nil {
 		return err
@@ -24,6 +39,19 @@ func (d personalBotDB) AppendRunState(ctx context.Context, b store.Bot, run stor
 	return nil
 }
 func (d teamBotDB) AppendRunState(ctx context.Context, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
+	saved, err := d.ReadRun(ctx, b.ID, run.ID)
+	if err != nil {
+		return err
+	}
+	saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+	run = saved.Run
+	data, err := botJSONMap(*saved)
+	if err != nil {
+		return err
+	}
+	if _, err = d.client.BotRun.Update().Where(trun.IDEQ(run.ID), trun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
+		return err
+	}
 	event, err := store.NewBotRunStateEvent(b, run, sequence, at)
 	if err != nil {
 		return err

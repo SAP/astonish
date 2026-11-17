@@ -58,19 +58,17 @@ func (r *botRepository) interactiveAnswerAuthority(ctx context.Context, run stor
 	return nil
 }
 func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotContinueInteractiveRequest) (*store.BotRun, error) {
-	if strings.TrimSpace(q.IdempotencyKey) == "" || len(q.IdempotencyKey) > 200 {
+	if strings.TrimSpace(q.IdempotencyKey) == "" || len(q.IdempotencyKey) > 200 || (q.Kind != "" && q.Kind != store.BotContinuationProgress) || (q.Kind == "" && q.CheckpointRevision != 0) {
 		return nil, store.ErrBotInvalid
 	}
 	hook, ok := store.BotMessageAdmissionFromContext(ctx)
 	if !ok {
 		return nil, store.ErrBotForbidden
 	}
-	admission, ok := hook.(store.BotContinuationAdmission)
-	if !ok {
-		return nil, store.ErrBotUnsupported
-	}
+	admission, _ := hook.(store.BotContinuationAdmission)
 	var registered *execution.BotRunIdentity
 	var result *store.BotRun
+	var holdErr error
 	hash, _ := botHash(q)
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
@@ -89,7 +87,9 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			return err
 		}
 		run := &saved.Run
-		if !run.IsInteractiveChat() || run.CallerCeiling == nil {
+		progressContinuation := q.Kind == store.BotContinuationProgress
+		mandatedProgress := progressContinuation && run.MandateRef != nil
+		if !mandatedProgress && (!run.IsInteractiveChat() || run.CallerCeiling == nil || admission == nil) {
 			return store.ErrBotForbidden
 		}
 		if previous, ok := saved.ContinuationRequests[q.IdempotencyKey]; ok {
@@ -99,17 +99,31 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			result = run
 			return nil
 		}
-		if rec.Bot.Revision != q.ExpectedRevision || rec.Bot.Version != run.Version || rec.ActiveRunID != nil || !interactiveStatus(*run, rec.Bot.Status) {
+		statusAllowed := interactiveStatus(*run, rec.Bot.Status) || mandatedProgress && rec.Bot.Status == store.BotPaused
+		if rec.Bot.Revision != q.ExpectedRevision || rec.Bot.Version != run.Version || rec.ActiveRunID != nil || !statusAllowed {
 			return store.ErrBotConflict
 		}
 		previousStatus := run.Status
+		previousFence := run.Lease.Fence
+		if progressContinuation {
+			if !progressSafe(saved) || q.CheckpointRevision != progressRevision(saved) || q.Response != nil || saved.Progress.Phase != store.BotProgressSuspended && saved.Progress.Phase != store.BotProgressWaitingAuthorization && saved.Progress.Phase != store.BotProgressWaitingBudget || run.ContinuationReason != store.BotContinuationRequired || run.Status != store.RunInterrupted {
+				return store.ErrBotConflict
+			}
+			v, e := tx.ReadVersion(ctx, run.BotID, run.Version)
+			if e != nil {
+				return e
+			}
+			if v.Budget.RuntimePolicy.EffectiveMode() != execution.BotRuntimeModeProgressV1 {
+				return store.ErrBotForbidden
+			}
+		}
 		var approval *store.BotApproval
 		switch run.Status {
 		case store.RunQueued, store.RunInterrupted:
 			if run.Status == store.RunInterrupted && run.ContinuationReason != store.BotContinuationRequired {
 				return store.ErrBotConflict
 			}
-			if !safeInteractiveQueue(*saved) || q.Response != nil {
+			if (!progressContinuation && !safeInteractiveQueue(*saved)) || q.Response != nil {
 				return store.ErrBotConflict
 			}
 		case store.RunWaitingApproval:
@@ -127,17 +141,32 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 		default:
 			return store.ErrBotConflict
 		}
-		id := execution.BotRunIdentity{BotID: run.BotID, RunID: run.ID, Version: run.Version, ActorID: actor.String(), OrgSlug: r.auth.orgSlug, TeamSlug: run.CallerCeiling.Principal.TeamSlug}
-		auth, err := admission.RegisterContinuation(ctx, id, *run.CallerCeiling)
-		if err != nil {
-			return store.ErrBotForbidden
+		if mandatedProgress {
+			if !verifiedMandateOwner(ctx, rec.Bot.OwnerID.String(), r.clock()) {
+				return store.ErrBotForbidden
+			}
+			if err := r.authorizeMandateProgressContinuation(ctx, tx, rec, saved); err != nil {
+				holdErr = err
+				return r.holdProgressContinuation(ctx, tx, rec, saved, err)
+			}
+		} else {
+			id := execution.BotRunIdentity{BotID: run.BotID, RunID: run.ID, Version: run.Version, ActorID: actor.String(), OrgSlug: r.auth.orgSlug, TeamSlug: run.CallerCeiling.Principal.TeamSlug}
+			// A paused progress assignment may still have live, bounded caller
+			// authority. Reuse it without extending expiry; only expired/lost authority
+			// goes through fresh authenticated registration and ceiling intersection.
+			if !progressContinuation || r.interactiveAnswerAuthority(ctx, *run) != nil {
+				auth, err := admission.RegisterContinuation(ctx, id, *run.CallerCeiling)
+				if err != nil {
+					return store.ErrBotForbidden
+				}
+				registered = &id
+				if auth.Identity != id {
+					return store.ErrBotForbidden
+				}
+				ceiling := auth.CallerCeiling()
+				run.CallerCeiling = &ceiling
+			}
 		}
-		registered = &id
-		if auth.Identity != id {
-			return store.ErrBotForbidden
-		}
-		ceiling := auth.CallerCeiling()
-		run.CallerCeiling = &ceiling
 		run.ContinuationReason = ""
 		if saved.ContinuationRequests == nil {
 			saved.ContinuationRequests = map[string]string{}
@@ -159,11 +188,28 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			if err := botApprovalActivity(ctx, tx, *approval, rec.LastSequence, now); err != nil {
 				return err
 			}
+			if err := r.confirmTitleAssignment(ctx, tx, rec, saved, *approval); err != nil {
+				return err
+			}
 			if err := r.queueApprovedCheckpoint(ctx, tx, rec, saved, run.Lease.Fence, approval.ID); err != nil {
 				return err
 			}
 		} else {
 			run.Status = store.RunQueued
+			if progressContinuation {
+				switch rec.Bot.Status {
+				case store.BotPaused:
+					run.Intent = store.BotIntentConversation
+				case store.BotDraft:
+					run.Intent = store.BotIntentDraftConversation
+				case store.BotActive:
+					run.Intent = store.BotIntentRegular
+				}
+				saved.Progress.Phase = store.BotProgressWorking
+				saved.Progress.Reason = store.BotProgressReasonRecovery
+				saved.Progress.Checkpoint.NextEligibleAt = r.clock()
+				saved.ProgressAccountedAt = r.clock()
+			}
 			if err := tx.AdvanceSequence(ctx, q.BotID, rec.LastSequence); err != nil {
 				return err
 			}
@@ -174,9 +220,9 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			var n int
 			switch db := tx.(type) {
 			case personalBotDB:
-				n, err = db.client.BotRun.Update().Where(prun.IDEQ(run.ID), prun.BotIDEQ(run.BotID), prun.StatusEQ(prun.Status(previousStatus)), prun.FenceEQ(0)).SetStatus(prun.StatusQueued).SetData(data).Save(ctx)
+				n, err = db.client.BotRun.Update().Where(prun.IDEQ(run.ID), prun.BotIDEQ(run.BotID), prun.StatusEQ(prun.Status(previousStatus)), prun.FenceEQ(previousFence)).SetStatus(prun.StatusQueued).SetData(data).Save(ctx)
 			case teamBotDB:
-				n, err = db.client.BotRun.Update().Where(trun.IDEQ(run.ID), trun.BotIDEQ(run.BotID), trun.StatusEQ(trun.Status(previousStatus)), trun.FenceEQ(0)).SetStatus(trun.StatusQueued).SetData(data).Save(ctx)
+				n, err = db.client.BotRun.Update().Where(trun.IDEQ(run.ID), trun.BotIDEQ(run.BotID), trun.StatusEQ(trun.Status(previousStatus)), trun.FenceEQ(previousFence)).SetStatus(trun.StatusQueued).SetData(data).Save(ctx)
 			default:
 				return store.ErrBotUnsupported
 			}
@@ -199,5 +245,5 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 		}
 		return nil, err
 	}
-	return result, nil
+	return result, holdErr
 }

@@ -55,10 +55,35 @@ func BotWorkflowTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error
 			if !ok {
 				return nil, store.ErrBotUnsupported
 			}
-			result = append(result, &botWorkflowTool{botRunnableTool: raw, kind: family.kind, req: r, services: svc})
+			result = append(result, newBotWorkflowTool(raw, family.kind, r, svc))
 		}
 	}
 	return result, nil
+}
+
+func newBotWorkflowTool(raw botRunnableTool, kind botWorkflowKind, r bot.RunRequest, svc store.Services) *botWorkflowTool {
+	return &botWorkflowTool{botRunnableTool: raw, kind: kind, req: r, services: svc}
+}
+
+// Select the genuine Chat question handler without preparing any work families.
+func botWorkflowQuestionTool(r bot.RunRequest, scope *BotChatScope) (tool.Tool, error) {
+	if scope == nil || scope.Services == nil {
+		return nil, store.ErrBotUnsupported
+	}
+	ts, err := slides.GetTools()
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range ts {
+		if t.Name() == "ask_user" {
+			raw, ok := t.(botRunnableTool)
+			if !ok {
+				return nil, store.ErrBotUnsupported
+			}
+			return newBotWorkflowTool(raw, botWorkflowSlides, r, *scope.Services), nil
+		}
+	}
+	return nil, store.ErrBotUnsupported
 }
 
 type botWorkflowKind uint8

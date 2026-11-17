@@ -46,7 +46,7 @@ func (w *BotWorker) prepareInteractiveHome(ctx context.Context, repo store.BotSt
 		if err != nil {
 			return err
 		}
-		if b.Home.ID != uuid.Nil {
+		if !run.RequiresPhysicalHome() || b.Home.ID != uuid.Nil {
 			return nil
 		}
 		if _, err = w.provisionHome(ctx, repo, id, b.Revision); err != nil {
@@ -85,7 +85,7 @@ func (w *BotWorker) prepareInteractiveHome(ctx context.Context, repo store.BotSt
 	if err = auth.Authorize(caller, execution.CapabilityChat); err != nil {
 		return err
 	}
-	if b.Home.ID != uuid.Nil {
+	if !run.RequiresPhysicalHome() || b.Home.ID != uuid.Nil {
 		return nil
 	}
 	if _, err = w.provisionHome(caller, repo, id, b.Revision); err != nil {

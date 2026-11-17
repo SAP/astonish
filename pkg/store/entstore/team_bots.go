@@ -174,6 +174,7 @@ func decodeTeamBotRun(row *teament.BotRun) (*botStoredRun, error) {
 	if row.LeaseExpiresAt != nil {
 		saved.Run.Lease.ExpiresAt = *row.LeaseExpiresAt
 	}
+	saved.Run.Progress = progressProjection(&saved)
 	return &saved, nil
 }
 func (d teamBotDB) FindRun(ctx context.Context, id uuid.UUID, key string) (*botStoredRun, error) {

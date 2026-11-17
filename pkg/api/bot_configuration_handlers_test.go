@@ -18,6 +18,7 @@ import (
 )
 
 type reviewedHTTPFixture struct {
+	policy   *store.BotMandatePolicyResolver
 	owner    string
 	binding  store.BotChannelBinding
 	request  func(string, string, any, int) []byte
@@ -67,6 +68,7 @@ func newReviewedHTTPFixture(t *testing.T, roles ...string) reviewedHTTPFixture {
 	if err := db.UserChannels().Link(ctx, &store.UserChannel{ID: binding.ID.String(), UserID: owner, ChannelType: binding.Channel, ExternalID: binding.ChatID, Enabled: true, Verified: true}); err != nil {
 		t.Fatal(err)
 	}
+	var policy store.BotMandatePolicyResolver
 	router := mux.NewRouter()
 	RegisterRoutes(router, base, db, entstore.TenantMiddleware(db))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +79,9 @@ func newReviewedHTTPFixture(t *testing.T, roles ...string) reviewedHTTPFixture {
 		}
 		c = context.WithValue(c, platformUserKey{}, &PlatformUser{ID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Role: role})
 		c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+		if policy != nil {
+			c = store.WithBotMandateAdmission(c, policy)
+		}
 		router.ServeHTTP(w, r.WithContext(c))
 	}))
 	t.Cleanup(server.Close)
@@ -110,7 +115,7 @@ func newReviewedHTTPFixture(t *testing.T, roles ...string) reviewedHTTPFixture {
 		}
 		return result
 	}
-	return reviewedHTTPFixture{owner: owner, binding: binding, request: request, sessions: func(scope string) store.SessionStore {
+	return reviewedHTTPFixture{policy: &policy, owner: owner, binding: binding, request: request, sessions: func(scope string) store.SessionStore {
 		if scope == "team" {
 			return ods.ForTeam(team.Slug).Sessions()
 		}

@@ -91,6 +91,48 @@ These views apply to local-daemon and platform Studio with the existing theme to
 
 ## SSE Transport Layer
 
+### Durable Bot progress
+
+Studio consumes the optional schema-1 `BotRunState.progress` contract documented
+in [Bot live events](bot-live-events.md). The shared `botProgress` validator and
+`botRunState` reducer scope updates to Bot/Home/run/session and order each run by
+its own `state_sequence`; checkpoint revisions and cumulative active duration do
+not regress. Scheduled states enter Home only with validated public progress.
+Missing or unsupported optional fields fall back to the known execution status;
+only committed terminal status denotes a result, never a phase or elapsed timer.
+
+Home uses a single compact employee status for working, evaluation, replanning,
+synthesis, checkpoint saving and necessary waits. `BotProgressDetails` shows
+bounded data-only summary, checkpoint time and cumulative active duration in
+Details, not per-evaluation transcript cards. It shows the optional nonnegative
+`coalesced_occurrences` count when supplied, never a count inferred from state
+sequences. It does not subscribe to traces. Snapshot/read APIs remain authoritative:
+transient refresh failures retain the last state with “Updates unavailable”; access
+loss (401/403/404/410) and identity changes clear protected state. No read retries
+submit work. These semantics are shared in light/dark and personal/team views;
+read-only viewers cannot continue assignments.
+
+Owner continuation is an explicit checkpoint-bound `progress_v1` request using the
+existing continuation transport, without a fabricated question response. Its stable
+idempotency key survives retries; Bot/run/checkpoint/team/scope changes clear local
+pending state and ignore late receipts. Backend admission remains authoritative,
+including scheduled-run support. Configuration changes require reviewed explicit
+opt-in and positive duration-safe nested policy fields; existing legacy limits and
+unrelated saves are preserved. Progress mode is server-gated by default, not a new
+client creation default. Ordinary Chat/code-mode execution indicators are unchanged.
+
+### Bot narration visibility
+
+Bot Home uses `buildChronologicalActivityRenderIndex(messages, 'preserve-agent')`:
+published model acknowledgement/progress stays in the main transcript, both live
+and on reload. Tool activity blocks are not mounted in Bot conversations; preserving
+narration does not grant visibility to autonomous tool names, arguments or results.
+Ordinary Chat retains `fold-intermediate` and its expandable tool details. This is presentation only: no synthetic acknowledgement,
+new wire event, source-result disclosure, or report-gate change. The runtime releases
+interim text only at a tool boundary; final text still uses committed publication.
+The terminal Bot wire mapper consumes the same ordered text/tool envelopes without
+this Studio activity-fold policy.
+
 SSE parsing is implemented **manually** using the `ReadableStream` API in `web/src/api/studioChat.ts` -- not the browser's native `EventSource`. This is because the initial request is a `POST` (EventSource only supports GET).
 
 Two functions share identical parsing logic:

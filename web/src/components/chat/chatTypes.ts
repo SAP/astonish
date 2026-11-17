@@ -478,7 +478,7 @@ export interface NetworkDenialMessage {
 }
 
 export interface BotOperationMessage { type: 'bot_operation'; operationId: string; eventId: string }
-export interface BotReviewMessage { type: 'bot_review'; kind: 'proposal' | 'approval'; reviewId: string; eventId: string }
+export interface BotReviewMessage { type: 'bot_review'; kind: 'proposal' | 'approval'; reviewId: string; eventId: string; question?: import('@/api/questions').Question }
 
 export type ChatMsg = InvocationScopedMessage & (
   | BotOperationMessage

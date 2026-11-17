@@ -54,7 +54,15 @@ func (r *botRepository) RequireInteractiveContinuation(ctx context.Context, id s
 		previous := run.Status
 		switch previous {
 		case store.RunQueued:
-			if !safeInteractiveQueue(*saved) {
+			if saved.Progress != nil {
+				// Drained work has already started. Only a fully settled,
+				// bound ledger may request fresh authorization after restart.
+				if !progressSafe(saved) || saved.CommitHash != "" || run.FinishedAt != nil {
+					return store.ErrBotConflict
+				}
+				saved.Progress.Phase = store.BotProgressWaitingAuthorization
+				saved.Progress.Reason = store.BotProgressReasonAuthorization
+			} else if !safeInteractiveQueue(*saved) {
 				return store.ErrBotConflict
 			}
 			run.Status = store.RunInterrupted

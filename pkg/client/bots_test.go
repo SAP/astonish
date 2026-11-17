@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,6 +99,36 @@ func TestBotsWatchReconnectCursorAndDetach(t *testing.T) {
 		t.Fatal("cross-session cursor accepted")
 	}
 }
+func TestBotsDeletionPendingNoContent(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			calls := 0
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusGone)
+				fmt.Fprint(w, `{"code":"deletion_pending","error":"Bot content unavailable: cleanup pending"}`)
+			}))
+			defer s.Close()
+			b := Bots{Client: NewWithConfig(s.URL), Scope: scope}
+			ctx := context.Background()
+			id, sid := uuid.NewString(), uuid.NewString()
+			// Existing client methods return allocated zero values alongside errors.
+			// Verify no retained content rather than imposing a new nil-result contract.
+			if bot, err := b.Get(ctx, id); !reflect.DeepEqual(bot, &store.Bot{}) || err == nil || !strings.Contains(err.Error(), "cleanup pending") {
+				t.Fatalf("detail: %+v %v", bot, err)
+			}
+			if snap, err := b.Snapshot(ctx, id); !reflect.DeepEqual(snap, &store.BotSnapshot{}) || err == nil || !strings.Contains(err.Error(), "cleanup pending") {
+				t.Fatalf("snapshot: %+v %v", snap, err)
+			}
+			err := b.Watch(ctx, id, sid, "", true, func(SSEEvent) error { t.Error("deleted content delivered"); return nil })
+			if err == nil || !strings.Contains(err.Error(), "cleanup pending") || calls != 3 {
+				t.Fatalf("watch retried or invented completion: %v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
 func TestBotsWatchForbiddenNoRetry(t *testing.T) {
 	var calls int
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; http.Error(w, "forbidden", 403) }))

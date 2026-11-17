@@ -21,6 +21,9 @@ type botsState struct {
 	skills                   *botSkillsState
 	exceptions               bool
 	continueRun              bool
+	progressReview           *store.BotRunState
+	progressRevision         int64
+	progressKey              string
 	answerText               string
 	proposals                bool
 	proposalItems            []store.BotControlProposal
@@ -148,7 +151,13 @@ func (m model) botCommand(text string) (tea.Model, tea.Cmd) {
 					return botsLoadedMsg{requestID: m.bots.requestID, err: fmt.Errorf("run selection unavailable"), generation: gen}
 				}
 				r, err := c.BotRuns(m.ctx)
-				return botsLoadedMsg{requestID: m.bots.requestID, runs: r, err: err, generation: gen}
+				var snap *store.BotSnapshot
+				if err == nil && m.bots.continueRun {
+					if overview, ok := m.backend.(backend.BotOverviewBackend); ok {
+						snap, err = overview.BotSnapshot(m.ctx)
+					}
+				}
+				return botsLoadedMsg{requestID: m.bots.requestID, runs: r, snapshot: snap, err: err, generation: gen}
 			}
 			if approvals {
 				if overview, ok := m.backend.(backend.BotOverviewBackend); ok {
@@ -336,6 +345,9 @@ func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.bots.runs {
 			if m.bots.continueRun {
 				run := m.bots.runItems[m.bots.cursor]
+				if state, ok := m.botProgressForReview(run); ok {
+					return m.reviewBotProgress(state)
+				}
 				c, ok := m.backend.(backend.BotInteractiveContinuationBackend)
 				if !ok || !run.IsInteractiveChat() || m.bots.err != "" {
 					m.bots.err = "Select an interactive run eligible for explicit continuation."
@@ -433,7 +445,9 @@ func (m model) renderBotsOverlay() string {
 			fmt.Fprintf(&s, "%s%s [%s]\n  Session: %s\n", mark, r.ID, r.Status, r.SessionID)
 		}
 		if m.bots.continueRun {
-			if m.bots.confirm == "" {
+			if m.bots.progressReview != nil && m.bots.confirm != "" {
+				fmt.Fprintf(&s, "\nContinue saved progress checkpoint %d at Bot revision %d? Enter confirms · Esc cancels. No activation or schedule changes.", m.bots.progressReview.Progress.Revision, m.bots.progressRevision)
+			} else if m.bots.confirm == "" {
 				s.WriteString("\nExplicit continuation: Enter reviews selected run · Esc cancels")
 			} else {
 				s.WriteString("\nContinue this exact interactive run? Enter confirms · Esc cancels. No activation or schedule changes.")

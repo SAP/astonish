@@ -22,6 +22,11 @@ func NewBotRunStateEvent(b Bot, run BotRun, sequence int64, at time.Time) (*sess
 	if run.Work != nil && (run.Work.Validate() != nil || run.Work.BotID != b.ID || run.Work.RunID != run.ID) {
 		return nil, ErrBotInvalid
 	}
-	state := BotRunState{Work: run.Work, SchemaVersion: BotRunStateSchemaVersion, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: b.HomeSessionID, Presentation: run.Presentation, Status: run.Status, StateSequence: sequence, Reason: run.ContinuationReason, UserEventID: run.UserEventID}
+	run.StateSequence = sequence
+	run.StateCommittedAt = at
+	state := BuildBotRunState(b, run)
+	if state.ValidateProgress() != nil {
+		return nil, ErrBotInvalid
+	}
 	return &session.Event{ID: fmt.Sprintf("bot-run-state:%s:%d", run.ID, sequence), Author: "bot_runtime", Timestamp: at, Actions: session.EventActions{StateDelta: map[string]any{BotRunStateKey: state}}}, nil
 }

@@ -88,6 +88,36 @@ and consume semantics, and `TestBotCatalogueSourceAccessResponseDigest` checks t
 production catalogue wrapper with controlled node responses and one call per
 response. These tests do not claim live-provider or full API persistence coverage.
 
+## Synthesis rejection receipts
+
+`launcher.botSynthesisStoppedResult(ctx tool.Context, toolName string)` records
+`bot.ToolOutcome{Verified: true, Nonexecution: ...}` in the bound attempt ledger,
+with the active `FunctionCallID` and exact target tool name. The autonomous and
+interactive wrappers and the final `runSynthesisTool` dispatch boundary invoke it
+only when the synthesis reserve rejects an invocation **before target dispatch**.
+The returned `not_executed` JSON is explanatory text, not trusted evidence.
+`Verified` attests only to nonexecution; it does not certify the answer, any changed
+resource, or a completed Task update. The rejected invocation consumes no tool
+execution quota.
+
+A started operation, including a timed-out read or write, never receives this
+receipt. Existing ledger conflict handling remains authoritative: a duplicate
+call ID cannot replace prior uncertainty with nonexecution, and receipts are
+consumed once. This preserves the ordinary read-only final-publication path when
+completed research is followed by a rejected optional Task update, without
+exempting unknown effects or bypassing assessment requirements.
+
+`TestBotSynthesisStoppedReceiptExactInvocation` covers all three rejection sites,
+exact identity and single consumption. `TestBotSynthesisStoppedReceiptDuplicateCannotEraseUncertainty`
+and `TestBotSynthesisStartedTimeoutHasNoNonexecutionReceipt` protect the negative
+cases. `TestBotProgressSynthesisReceiptHTTP` exercises personal and team HTTP
+admission, production worker/factory/runner, an actual file read through a
+controlled isolated node transport, a synthesis-rejected `bot_task_update`, and
+exactly one final answer in HTTP history after repeated polling. It requires one
+metered read, no Task workspace invocation, no unverified effects, and no extra
+recovery/review model call. These are isolated SQLite/controlled-model regression
+receipts, not live daemon, browser, or real-provider validation.
+
 ## Routine control capture
 
 Mandated routine controls use server-only `bot.RoutineCapture` metadata, separate from schedule captures and applied-operation receipts. `launcher.verifyRoutineCapture` compares an independent authorized-operation read with the enqueue result and request, including pending/execute state, payload digest, source run, owner, mandate, idempotency key and provenance. Missing, mismatched or already-applied routine readback cannot produce a pending attestation. The per-call ledger snapshots and consumes metadata once; returned JSON cannot create it.

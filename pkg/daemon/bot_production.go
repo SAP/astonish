@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"path"
 	"strings"
 	"time"
@@ -99,7 +100,9 @@ func newProductionBotWorker(backend store.PlatformBackend, cfg *config.AppConfig
 			pool.Remove(id)
 			c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 			defer cancel()
-			_ = b.DestroySession(c, id)
+			if err := b.DestroySession(c, id); err != nil {
+				log.Printf("[bots] destroy session %s: %v; retained for authorized cleanup retry", id, err)
+			}
 		}}
 		if workspaceBackend, ok := b.(sandbox.BotHomeWorkspaceBackend); ok {
 			if tasks, ok := repo.(store.BotTaskStore); ok {
@@ -336,8 +339,11 @@ func productionBotMandatedTools(ctx context.Context, r bot.RunRequest, scope *la
 		}
 		initialTitle = record.Provenance.InitiationKind == store.BotInitiationKindTitle
 	}
+	// Confirmation changes mandate provenance to the answered interaction, but
+	// must not remove the title's search-before-detail guard when no route exists.
+	confirmedTitle := r.Run.TitleConfirmation != nil && r.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed
 	var episode *launcher.BotResearchEpisode
-	if grant != nil || initialTitle {
+	if grant != nil || initialTitle || confirmedTitle {
 		episode, err = launcher.NewBotResearchEpisode(r.Run.ID, r.Run.SessionID.String(), launcher.BotResearchOpenWeb, nil)
 		if err != nil {
 			return nil, nil, err

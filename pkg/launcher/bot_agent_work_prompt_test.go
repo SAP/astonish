@@ -44,12 +44,37 @@ func (m *agentWorkPromptModel) GenerateContent(_ context.Context, req *model.LLM
 				}
 			}
 		}
-		for _, want := range []string{"## Agent-owned work", "Listing headlines, search snippets and URL slugs are discovery leads", "Open the decisive original article or primary source", "## Current durable work", "They are not prerequisites to a final answer", "Stock Market News"} {
+		for _, want := range []string{
+			"## Agent-owned work",
+			"Bare listing headlines and URL slugs are not support for details, causality or recommendations beyond their actual content",
+			"Substantive search output is different: judge what its text supports and attribute secondary reporting honestly",
+			"Substantive, attributed search summaries and credible secondary reporting can support an ordinary overview",
+			"For explicit verification or a high-stakes decision or action, inspect the primary/live source",
+			"including actionable numbers on which the decision or action depends",
+			"For an ordinary roundup, substantive sourced search output is usable by default",
+			"Primary-source fetches fill a material gap, not a routine verification step",
+			"An older page, a different version or a failed fetch is not contradictory evidence by itself",
+			"Preserve distinct relevant developments already supported by returned coverage",
+			"shorten individual stories before dropping supported coverage",
+			"not a verification diary",
+			"do not embellish beyond the retrieved text",
+			"do not imply an unread linked page was inspected",
+			"Preserve relevant, reasonably supported breadth",
+			"Explicitly requested depth and verification still apply",
+			"## Current durable work",
+			"They are not prerequisites to a final answer",
+			"Stock Market News",
+		} {
 			if !strings.Contains(system.String(), want) {
 				m.t.Errorf("dispatch %d missing %q", len(m.prompts), want)
 			}
 		}
-		for _, forbidden := range []string{"## Pinned work requirements", "Assessment context unavailable", "\"criteria\"", "\"checklist\""} {
+		for _, forbidden := range []string{
+			"## Pinned work requirements", "Assessment context unavailable", "\"criteria\"", "\"checklist\"",
+			"For actionable facts inspect the primary/live source",
+			"Open the decisive original article or primary source before relying on consequential claims, including actionable numbers",
+			"Inspect decisive articles or primary documents selectively for consequential details such as availability, licensing, prices and performance",
+		} {
 			if strings.Contains(system.String(), forbidden) {
 				m.t.Errorf("dispatch %d contains legacy context %q", len(m.prompts), forbidden)
 			}
@@ -101,6 +126,7 @@ func TestBotAgentWorkProductionFactoryPrompt(t *testing.T) {
 						return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 					}
 				} else {
+					f.req.Run.Trigger = store.TriggerCron
 					prepare := f.cfg.Prepare
 					f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
 						safe, err := prepare(ctx, req, scope)

@@ -31,6 +31,7 @@ type botVersionDTO struct {
 }
 
 func registerBotRoutes(router *mux.Router) {
+	router.Use(botContentAccess)
 	router.HandleFunc("/api/studio/bots/{botID}/home", BotHomeSetupHandler).Methods(http.MethodPost)
 	registerBotSnapshotRoutes(router)
 	registerBotUnfinishedIntakeRoutes(router)
@@ -45,6 +46,7 @@ func registerBotRoutes(router *mux.Router) {
 	registerBotDocumentRoutes(router)
 	registerBotSkillRoutes(router)
 	router.HandleFunc("/api/studio/bots/{botID}/skills/import-legacy", BotLegacySkillImportHandler).Methods(http.MethodPost)
+	router.HandleFunc("/api/studio/bots/{botID}/permanent-delete", BotDeletionStatusHandler).Methods(http.MethodGet)
 	router.HandleFunc("/api/studio/bots/{botID}/permanent-delete", BotPermanentDeleteHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/pause", BotPauseHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/stop", botLifecycleHandler(botdomain.LifecycleStop)).Methods(http.MethodPost)
@@ -140,7 +142,11 @@ func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 	if !botDecodeRequest(w, r, &q) {
 		return
 	}
-	v := store.DefaultBotVersion()
+	v, err := store.NewBotVersionForCreation(r.Context(), actor)
+	if err != nil {
+		botHTTPError(w, err)
+		return
+	}
 	v.Charter = q.Definition.Charter
 	if strings.TrimSpace(v.Charter) == "" {
 		v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
@@ -192,13 +198,28 @@ func BotListHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	bots, err := repo.List(r.Context(), page)
-	if err != nil {
-		botHTTPError(w, err)
-		return
-	}
-	if bots == nil {
-		bots = []store.Bot{}
+	bots := []store.Bot{}
+	for len(bots) < page.Limit {
+		remaining := page.Limit - len(bots)
+		batch, err := repo.List(r.Context(), store.BotPage{Limit: remaining, After: page.After})
+		if err != nil {
+			botHTTPError(w, err)
+			return
+		}
+		for _, b := range batch {
+			if !b.PermanentDelete {
+				bots = append(bots, b)
+			}
+		}
+		if len(batch) < remaining {
+			break
+		}
+		next := batch[len(batch)-1].ID.String()
+		if next == page.After {
+			botHTTPError(w, store.ErrBotConflict)
+			return
+		}
+		page.After = next
 	}
 	botWriteJSON(w, http.StatusOK, struct {
 		Bots []store.Bot `json:"bots"`

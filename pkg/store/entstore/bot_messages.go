@@ -140,6 +140,12 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 			run.CallerCeiling = &ceiling
 		}
 		run.UserEventID = "bot-message:" + run.ID.String()
+		if initiation, title := ctx.Value(titleMandateAdmissionKey{}).(titleMandateAdmission); title {
+			if initiation.Kind != store.BotInitiationKindTitle || initiation.Subject != q.Instructions || pinnedTask != nil || len(q.Attachments) != 0 {
+				return store.ErrBotInvalid
+			}
+			run.TitleConfirmation = &store.BotTitleConfirmation{Version: store.BotTitleConfirmationVersion, State: store.BotTitleConfirmationNeedsQuestion, BotID: run.BotID, RunID: run.ID, OwnerID: actor, OriginalTitle: q.Instructions, UserEventID: run.UserEventID}
+		}
 		parts := []*genai.Part{genai.NewPartFromText(q.Instructions)}
 		for _, file := range q.Attachments {
 			parts = append(parts, genai.NewPartFromBytes(file.Data, file.MimeType))

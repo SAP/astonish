@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { BotAPIError, permanentDeleteBot, type Bot } from '@/api/bots'
+import { BotAPIError, BotErrorCode, permanentDeleteBot, type Bot } from '@/api/bots'
 import { getActiveTeam } from '@/api/teamContext'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -40,11 +40,18 @@ export default function BotDeleteDialog({ bot, onClose, onDeleted }: { bot: Bot;
       if (current !== generation.current || getActiveTeam() !== team.current) return
       if (!result) { finish(); return }
       accepted.current = true; setPending(true)
+      window.dispatchEvent(new Event('astonish:bots-updated'))
       timer.current = setTimeout(() => { void apply() }, 2000)
     } catch (e) {
       if (current !== generation.current || getActiveTeam() !== team.current) return
       // Absence is meaningful only after this exact target's irreversible intent was accepted.
       if (accepted.current && e instanceof BotAPIError && e.status === 404) { finish(); return }
+      if (e instanceof BotAPIError && e.status === 410 && e.code === BotErrorCode.DeletionPending) {
+        accepted.current = true; setPending(true)
+        window.dispatchEvent(new Event('astonish:bots-updated'))
+        timer.current = setTimeout(() => { void apply() }, 2000)
+        return
+      }
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       if (current === generation.current) { inFlight.current = false; setBusy(false) }

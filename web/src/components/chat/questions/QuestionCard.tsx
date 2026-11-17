@@ -32,7 +32,7 @@ export default function QuestionCard({ question, disabled = false, answered = fa
     {question.kind === 'yesno' && <YesNoCard prompt={question.prompt} disabled={inactive} onAnswer={yes => { void submit(yes ? 'yes' : 'no', yes ? 'Yes' : 'No') }} />}
     {question.kind === 'select' && <>
       <SingleSelectCard prompt={question.prompt} disabled={inactive} options={(question.options ?? []).map(option => ({ ...option, thumbnail: option.thumbnail ? <QuestionOptionThumb thumbnail={option.thumbnail} label={option.label} /> : undefined }))} onSelect={(id, label) => { void submit(id, label) }} />
-      {question.allow_custom_answer && <TextAnswerInput prompt="Custom answer" disabled={inactive} onAnswer={answer => { void submit(answer) }} />}
+      {question.allow_custom_answer && <TextAnswerInput prompt="Custom answer" placeholder="Something else…" disabled={inactive} onAnswer={answer => { void submit(answer) }} />}
     </>}
     {question.kind === 'text' && <div className="rounded-lg border border-border bg-card p-4 text-card-foreground"><p className="mb-3 text-sm font-medium">{question.prompt}</p><TextAnswerInput prompt={question.prompt} disabled={inactive} onAnswer={answer => { void submit(answer) }} /></div>}
     {error && <p role="alert">{error}</p>}

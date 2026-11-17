@@ -51,6 +51,11 @@ type BotProposalBackend interface {
 	DecideBotProposal(context.Context, store.BotControlProposal, bool) error
 }
 
+// BotProgressContinuationBackend preserves both revisions captured during review.
+type BotProgressContinuationBackend interface {
+	ContinueBotProgress(context.Context, store.BotRunState, int64, string) (*store.BotRun, error)
+}
+
 type BotInteractiveContinuationBackend interface {
 	ContinueBotInteractive(context.Context, store.BotRun, *store.BotInteractionResponse) (*store.BotRun, error)
 }

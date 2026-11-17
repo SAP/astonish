@@ -1,11 +1,61 @@
 package api
 
 import (
+	"encoding/json"
+
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 )
+
+// projectBotReviewQuestion enriches only the durable, approval-bound reference.
+// Scoped approval reads remain authority; model text and runtime questions do not.
+func projectBotReviewQuestion(e *session.Event, approvals []store.BotApproval, botID, sessionID uuid.UUID) *session.Event {
+	if e == nil || e.Author != "bot_runtime" || e.Content != nil {
+		return e
+	}
+	raw, err := json.Marshal(e.Actions.StateDelta["bot_runtime_event"])
+	if err != nil {
+		return e
+	}
+	var envelope bot.RuntimeEvent
+	if json.Unmarshal(raw, &envelope) != nil || envelope.Type != "bot_review" || envelope.SessionID != sessionID || envelope.RunID == uuid.Nil {
+		return e
+	}
+	var ref struct {
+		Kind     string    `json:"kind"`
+		ReviewID uuid.UUID `json:"review_id"`
+	}
+	if json.Unmarshal(envelope.Payload, &ref) != nil || ref.Kind != "approval" || ref.ReviewID == uuid.Nil {
+		return e
+	}
+	identity := uuid.NewSHA1(ref.ReviewID, []byte("bot-review:approval"))
+	if e.ID != identity.String() || e.InvocationID != identity.String() || envelope.TurnID != identity || envelope.Sequence != 1 {
+		return e
+	}
+	for _, a := range approvals {
+		if a.ID != ref.ReviewID || a.BotID != botID || a.RunID != envelope.RunID || a.Interaction == nil || a.Interaction.Validate() != nil {
+			continue
+		}
+		envelope.Payload, err = json.Marshal(struct {
+			Kind     string          `json:"kind"`
+			ReviewID uuid.UUID       `json:"review_id"`
+			Question json.RawMessage `json:"question"`
+		}{ref.Kind, ref.ReviewID, a.Interaction.Payload})
+		if err != nil {
+			return e
+		}
+		projected := *e
+		projected.Actions.StateDelta = make(map[string]any, len(e.Actions.StateDelta))
+		for k, v := range e.Actions.StateDelta {
+			projected.Actions.StateDelta[k] = v
+		}
+		projected.Actions.StateDelta["bot_runtime_event"] = envelope
+		return &projected
+	}
+	return e
+}
 
 // Presentation only. Approval creation atomically appends the canonical review.
 // Preserve all durable rows, diagnostic run history, and transport cursor positions.

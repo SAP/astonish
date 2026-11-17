@@ -12,7 +12,28 @@ export interface BotAutonomy {
   can_contact_people: boolean; can_publish: boolean; spend_currency?: string
   max_spend_per_run_minor: number; max_spend_per_month_minor: number
 }
+export const RuntimeMode = { Legacy: 'legacy', Progress: 'progress_v1' } as const
+export interface BotRuntimePolicy {
+  schema_version: number; mode: typeof RuntimeMode[keyof typeof RuntimeMode]
+  evaluation_interval_seconds?: number; max_active_seconds?: number
+  model_call_timeout_seconds?: number; tool_call_timeout_seconds?: number
+}
+export const runtimeSecondsMax = 9223372036
+export function validRuntimePolicy(policy?: BotRuntimePolicy): boolean {
+  if (!policy) return true
+  if (policy.schema_version !== 1) return false
+  if (policy.mode === RuntimeMode.Legacy) return !policy.evaluation_interval_seconds && policy.max_active_seconds == null && !policy.model_call_timeout_seconds && !policy.tool_call_timeout_seconds
+  if (policy.mode !== RuntimeMode.Progress) return false
+  return [policy.evaluation_interval_seconds, policy.model_call_timeout_seconds, policy.tool_call_timeout_seconds, ...(policy.max_active_seconds == null ? [] : [policy.max_active_seconds])].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= runtimeSecondsMax)
+}
+export function runtimePolicySummary(budget: BotBudget): string {
+  const policy = budget.runtime_policy
+  if (!validRuntimePolicy(policy)) return 'Runtime policy unavailable'
+  if (policy?.mode !== RuntimeMode.Progress) return `${budget.max_runtime_seconds}s/run (saved legacy limit)`
+  return `${policy.max_active_seconds ? `Maximum ${policy.max_active_seconds}s active time` : 'No task duration limit; token, tool and spending limits still apply.'} · progress checks every ${policy.evaluation_interval_seconds}s · operator policy remains authoritative`
+}
 export interface BotBudget {
+  runtime_policy?: BotRuntimePolicy
   max_runtime_seconds: number; max_tool_calls?: number; max_tokens?: number
   max_runs_per_day?: number; max_model_cost_micros?: number
 }

@@ -29,6 +29,22 @@ func (s botPromptWorkReader) Read(ctx context.Context, q bot.BotWorkReadRequest)
 	return s.read(ctx, q)
 }
 
+func TestBotTitleConfirmationPrompt(t *testing.T) {
+	req := bot.RunRequest{Run: store.BotRun{TitleConfirmation: &store.BotTitleConfirmation{State: store.BotTitleConfirmationNeedsQuestion}}, Instructions: "AI news"}
+	b := &SystemPromptBuilder{}
+	b.applyBotPrompt(NewBotPromptOverrides(nil, req))
+	for _, want := range []string{"Trusted initial title-confirmation stage", "three or four", "allow_custom_answer=true", "Do not research", "from the title only", "Preserve the title's likely intent", "highest-value missing dimension", "scope, interests, audience, or constraints", "same dimension", "concrete, meaningful preferences", "Do not force alternatives into different task formats", "without hard-coded organizations or topic templates", "no waiting boilerplate"} {
+		if !strings.Contains(b.SchedulerHints, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for _, bad := range []string{"continue immediately into actual useful work", "No user is waiting", "Pinned work", "Each option must name a concrete executable task", "distinct intents"} {
+		if strings.Contains(b.SchedulerHints+b.SessionContext, bad) {
+			t.Errorf("conflicting guidance %q", bad)
+		}
+	}
+}
+
 func TestBotPromptProactiveInteractionContracts(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -46,12 +62,12 @@ func TestBotPromptProactiveInteractionContracts(t *testing.T) {
 			b := &SystemPromptBuilder{}
 			b.applyBotPrompt(po)
 			prompt := b.Build()
-			for _, want := range []string{"Every question you choose to ask the owner", "call the actual ask_user tool", "kind=select with allow_custom_answer=true", "including optional recurrence offers, recurrence times/timezones, and refinements", "meaningful, request-specific options", "Do not append a plain-text question"} {
+			for _, want := range []string{"The newest owner message defines this turn's requested outcome", "Historical title confirmations and their answers are context, not a new instruction to repeat completed work", "Reuse completed results when the current request changes only delivery or configuration", "Every question you choose to ask the owner", "call the actual ask_user tool", "kind=select with allow_custom_answer=true", "including optional recurrence offers, recurrence times/timezones, and refinements", "meaningful, request-specific options", "Do not append a plain-text question"} {
 				if strings.Contains(prompt, want) != tc.interactive {
 					t.Errorf("interactive=%v: contract %q", tc.interactive, want)
 				}
 			}
-			for _, want := range []string{"For an initial title or broad assignment, begin with a brief AI-authored acknowledgement", "not a canned ready message", "continue immediately into actual useful work", "Put the acknowledgement before the first real work tool call"} {
+			for _, want := range []string{"Interpret a selected preference together with the original title", "not as a replacement task", "Once the assignment is sufficiently specified", "not a canned ready message", "continue immediately into actual useful work", "Put the acknowledgement before the first real work tool call", "ask a further focused ask_user question before external work"} {
 				if strings.Contains(prompt, want) != (tc.interactive && tc.name != "control") {
 					t.Errorf("mode %s: contract %q", tc.name, want)
 				}
@@ -251,11 +267,12 @@ func TestBotAgentPromptDiscoveryIsNotFactualSupport(t *testing.T) {
 			for _, text := range []string{builder.Build(), builder.BuildBotPrompt(ctx, po)} {
 				for _, want := range []string{
 					"according to consequences",
-					"Listing headlines, search snippets and URL slugs are discovery leads",
-					"not support for details, causality or recommendations",
-					"Open the decisive original article or primary source",
-					"including actionable numbers",
-					"narrow the answer to an explicitly limited, attributed summary",
+					"Bare listing headlines and URL slugs",
+					"not support for details, causality or recommendations beyond their actual content",
+					"Substantive search output is different",
+					"For explicit verification or a high-stakes decision or action, inspect the primary/live source",
+					"including actionable numbers on which the decision or action depends",
+					"qualify the affected claim rather than discarding unrelated supported coverage",
 					"do not embellish beyond the retrieved text",
 					"Cite actual source links alongside externally sourced claims",
 					"do not imply an unread linked page was inspected",
@@ -360,6 +377,80 @@ func TestBotPromptPrivateSnapshot(t *testing.T) {
 		t.Fatalf("Bot context leaked into replayed user event: %+v", content)
 	}
 }
+
+// This verifies delivered prompt contracts, not model adherence or factual quality.
+func assertBotAdaptiveQualityGuidance(t *testing.T, prompt string) {
+	t.Helper()
+	for _, want := range []string{
+		"A schedule-only conversion or cadence/delivery change preserves the subject, audience, all requested dimensions and analytical depth",
+		"not a frozen presentation template",
+		"newest explicit owner instructions govern requested changes",
+		"Earlier reports are quality references, not current facts or permission",
+		"Numbered sections, bullets and tables are optional",
+		"no mandatory item count or word count",
+		"A narrower update is legitimate when current evidence is sparse",
+		"do not silently omit requested dimensions",
+		"not investigated is not no developments",
+		"do not promote one assistant-chosen bullet format into an owner requirement",
+		"Concision removes repetition, not requested substance",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("missing adaptive quality contract %q", want)
+		}
+	}
+	for _, bad := range []string{"Return a concise outcome with evidence", "Once you have the requested data, summarize it and finish"} {
+		if strings.Contains(prompt, bad) {
+			t.Errorf("background shortcut competes with quality continuity: %q", bad)
+		}
+	}
+}
+
+func TestBotPromptAdaptiveQualityContinuity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  store.BotRun
+	}{
+		{"chat", store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}},
+		{"home", store.BotRun{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive}},
+		{"control", store.BotRun{Intent: store.BotIntentDraftConversation}},
+		{"scheduled", store.BotRun{Trigger: store.TriggerCron}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, runID := uuid.New(), uuid.New()
+			tc.run.ID = runID
+			req := bot.RunRequest{Bot: store.Bot{ID: id}, Run: tc.run, Version: store.BotVersion{Version: 1}, Instructions: "Compare current options for the operations team, including cost and tradeoffs"}
+			req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: runID, Version: 1, Instructions: req.Instructions})
+			po := NewBotPromptOverrides(nil, req)
+			builder := &SystemPromptBuilder{}
+			if !builder.applyBotPrompt(po) {
+				t.Fatal("missing Bot prompt")
+			}
+			ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+				return &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work)}, nil
+			}})
+			assertBotAdaptiveQualityGuidance(t, builder.Build())
+			assertBotAdaptiveQualityGuidance(t, builder.BuildBotPrompt(ctx, po))
+			if buildTurnContextContent(po, "", "") != nil || req.Instructions != req.Work.Contract.Instructions {
+				t.Fatal("quality guidance changed the owner turn")
+			}
+		})
+	}
+}
+
+func TestBotPromptAdaptiveQualityRespectsTitleAndCodeBoundaries(t *testing.T) {
+	po := NewBotPromptOverrides(nil, bot.RunRequest{Run: store.BotRun{TitleConfirmation: &store.BotTitleConfirmation{State: store.BotTitleConfirmationNeedsQuestion}}})
+	builder := &SystemPromptBuilder{}
+	builder.applyBotPrompt(po)
+	if strings.Contains(builder.Build(), "A schedule-only conversion") || !strings.Contains(builder.SchedulerHints, "Do not research") {
+		t.Fatal("quality guidance leaked into question-only title stage")
+	}
+	code := &SystemPromptBuilder{CodeMode: true}
+	before := code.Build()
+	if code.applyBotPrompt(NewBotPromptOverrides(nil, bot.RunRequest{})) || code.Build() != before {
+		t.Fatal("Bot quality guidance changed Code mode")
+	}
+}
+
 func TestBotPromptFreshPerInvocation(t *testing.T) {
 	service := session.InMemoryService()
 	llm := &ADKMockModel{Responses: []*genai.Content{
@@ -389,6 +480,8 @@ func TestBotPromptFreshPerInvocation(t *testing.T) {
 		}
 		req := llm.Requests[i]
 		core := req.Config.SystemInstruction.Parts[0].Text
+		assertBotAdaptiveQualityGuidance(t, core)
+		assertBotProportionalRigor(t, core)
 		if !strings.Contains(core, charter) || strings.Contains(core, "unrelated-portal") || i == 1 && strings.Contains(core, "charter-one") {
 			t.Fatalf("stale or unrelated system context: %s", core)
 		}

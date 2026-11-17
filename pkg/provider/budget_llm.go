@@ -74,7 +74,12 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 			yield(nil, errors.New("nil budget model request"))
 			return
 		}
-		if deadline, ok := b.budget.(interface{ Deadline() time.Time }); ok {
+		if timeout, ok := b.budget.(interface{ ModelCallTimeout() time.Duration }); ok && timeout.ModelCallTimeout() > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout.ModelCallTimeout())
+			defer cancel()
+		}
+		if deadline, ok := b.budget.(interface{ Deadline() time.Time }); ok && !deadline.Deadline().IsZero() {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithDeadline(ctx, deadline.Deadline())
 			defer cancel()

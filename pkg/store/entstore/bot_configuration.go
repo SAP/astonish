@@ -81,6 +81,16 @@ func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDraftDB, 
 		v := *current
 		v.Autonomy = q.Autonomy
 		v.Budget = q.Budget
+		if v.Budget.RuntimePolicy != nil {
+			ceiling, err := store.BotRuntimePolicyForConfiguration(ctx, q.BotID, rec.Bot.OwnerID)
+			if err != nil {
+				return err
+			}
+			if err := v.Budget.RuntimePolicy.ValidateWithin(ceiling); err != nil {
+				return store.ErrBotForbidden
+			}
+			v.Budget.RuntimePolicy = v.Budget.RuntimePolicy.Clone()
+		}
 		v.Delivery = q.Delivery
 		v.ChangeReason = q.Reason
 		v.Version++

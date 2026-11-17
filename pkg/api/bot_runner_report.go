@@ -41,6 +41,38 @@ type botAgentReadJournal struct {
 	constrainedTextComplete bool
 }
 
+type botProgressReadJournal struct {
+	Seen      map[string]bool `json:"seen"`
+	Completed map[string]bool `json:"completed"`
+	Confirmed bool            `json:"confirmed"`
+	Uncertain bool            `json:"uncertain"`
+}
+
+func (j *botAgentReadJournal) progressSnapshot() *botProgressReadJournal {
+	if j == nil {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	s := &botProgressReadJournal{Seen: map[string]bool{}, Completed: map[string]bool{}, Confirmed: j.confirmed, Uncertain: j.uncertain || len(j.calls) != 0}
+	for k, v := range j.seen {
+		s.Seen[k] = v
+	}
+	for k, v := range j.completed {
+		s.Completed[k] = v
+	}
+	return s
+}
+
+func (j *botAgentReadJournal) restoreProgress(s *botProgressReadJournal) {
+	if s == nil {
+		return
+	}
+	j.calls = map[string]botAgentReadCall{}
+	j.seen, j.completed = s.Seen, s.Completed
+	j.confirmed, j.uncertain = s.Confirmed, s.Uncertain
+}
+
 func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionCall) {
 	if call.ID == "" {
 		call.ID = uuid.NewString()
@@ -114,7 +146,14 @@ func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ..
 		o := receipts[0]
 		r := o.Nonexecution
 		noEffect = ok && entry.name == response.Name && response.ID != "" && r != nil && r.CallID == response.ID && r.ToolName == response.Name && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
-		verifiedRead = ok && entry.name == response.Name && response.ID != "" && r == nil && o.Verified && !o.ReceiptConflict && len(o.Unverified) == 0 && len(o.Changed) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		// A bare Verified flag is not positive effect evidence. Internal Task
+		// bookkeeping supplies actual independently observed Home facts; require
+		// every observation to validate before it can complete a non-read call.
+		observedUnchanged := len(o.Unchanged) > 0
+		for _, observation := range o.Unchanged {
+			observedUnchanged = observedUnchanged && bot.ValidObservation(observation)
+		}
+		verifiedRead = observedUnchanged && ok && entry.name == response.Name && response.ID != "" && r == nil && o.Verified && !o.ReceiptConflict && len(o.Unverified) == 0 && len(o.Changed) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
 		confirmedEffect = ok && !entry.read && entry.name == response.Name && response.ID != "" && r == nil && o.Verified && !o.ReceiptConflict && len(o.Unverified) == 0 && (len(o.Changed) > 0 || len(o.Artifacts) > 0 || o.RoutineCapture != nil || o.ScheduleCapture != nil || o.NextRunAt != nil)
 	}
 	if verifiedRead {
@@ -363,6 +402,47 @@ func botBoundSourceAccessFailure(response *genai.FunctionResponse, facts []store
 		}
 	}
 	return true
+}
+
+// botToolFeedbackError preserves the original diagnostic and native error identity.
+// Only non-native execution feedback can be recovered; policy, cancellation and
+// budget callback errors, model errors and runner/sink errors remain terminal.
+// It never grants effect authority or makes a tool result successful.
+type botToolFeedbackError struct {
+	cause       error
+	recoverable bool
+}
+
+func (e *botToolFeedbackError) Error() string { return e.cause.Error() }
+func (e *botToolFeedbackError) Unwrap() error { return e.cause }
+
+func botOnlyRecoverableToolFeedback(err error) bool {
+	if feedback, ok := err.(*botToolFeedbackError); ok {
+		return feedback.recoverable
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !botOnlyRecoverableToolFeedback(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// botCanRetainReadOnlyFinal allows the employee's completed communication, not
+// a retry or a claim of full success. The existing candidate/commit boundaries
+// still own final publication. Unknown effects and absent final output fail shut.
+func botCanRetainReadOnlyFinal(c ChatCompletion, req bot.RunRequest, report store.BotReport) bool {
+	return req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 &&
+		!c.Blocked && c.Final && c.FinalEventID != "" && strings.TrimSpace(c.FinalText) != "" &&
+		c.Usage.ToolCalls > 0 && c.Usage.ToolCalls == c.toolResponses && len(c.pendingControls) == 0 &&
+		botOnlyRecoverableToolFeedback(c.Err) && store.BotReportIsReadOnlyResult(report)
 }
 
 func botCompletionReport(completion ChatCompletion, req bot.RunRequest) store.BotReport {

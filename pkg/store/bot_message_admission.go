@@ -28,6 +28,9 @@ func BotMessageAdmissionFromContext(ctx context.Context) (BotMessageAdmission, b
 // RequiresPhysicalHome distinguishes actual execution from legacy control-only
 // conversations. Unknown execution modes do not gain physical execution.
 func (r BotRun) RequiresPhysicalHome() bool {
+	if r.TitleConfirmation != nil && (r.TitleConfirmation.ValidateBinding(r, r.TitleConfirmation.OwnerID) != nil || r.TitleConfirmation.State != BotTitleConfirmationConfirmed) {
+		return false
+	}
 	return r.ExecutionMode.Valid() && (r.ExecutionMode == execution.BotExecutionModeChatInteractive || !r.ControlOnly())
 }
 

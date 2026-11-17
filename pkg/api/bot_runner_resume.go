@@ -49,7 +49,7 @@ func (c *botApprovalCapture) takeNonexecution(id, name string) bool {
 func (c *botApprovalCapture) RequestApproval(ctx context.Context, id execution.BotRunIdentity, a execution.ActionDescriptor, digest string) (uuid.UUID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if id != c.req.Policy.Identity() {
+	if (c.req.Run.TitleConfirmation != nil && c.req.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed) || c.req.Policy == nil || id != c.req.Policy.Identity() {
 		return uuid.Nil, store.ErrBotForbidden
 	}
 	if c.approval != nil {
@@ -257,6 +257,28 @@ func (g *botResumeGuard) Authorize(ctx context.Context, a execution.ActionDescri
 }
 
 func (a *BotChatRuntimeAdapter) resume(ctx context.Context, req bot.RunRequest, sink bot.EventSink) (bot.RunResult, error) {
+	if botHasProgressCheckpoint(req) {
+		if err := botProgressActivationGuard(req); err != nil {
+			return botChatFailure(bot.ErrorBlocked, err)
+		}
+		// Only the repository snapshot is eligible; raw checkpoint bytes are not
+		// an authority or a substitute for the freshly claimed private state.
+		if req.Progress == nil {
+			return botChatFailure(bot.ErrorBlocked, store.ErrBotInvalid)
+		}
+		p := &botProgressRuntime{req: req, state: req.Progress}
+		m, err := p.mutation(ctx)
+		if err != nil {
+			return botChatFailure(bot.ErrorBlocked, err)
+		}
+		id := execution.BotRunIdentity{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Run.Version, ActorID: req.Principal.Subject, OrgSlug: req.Principal.OrgSlug, TeamSlug: req.Principal.TeamSlug}
+		ctx = execution.WithBotRunIdentity(ctx, id)
+		req.Progress, err = req.ProgressStore.ContinueProgress(ctx, store.BotProgressContinueRequest{Mutation: m, CheckpointRevision: m.ExpectedRevision, Reason: store.BotProgressReasonRecovery})
+		if err != nil {
+			return botChatFailure(bot.ErrorBlocked, err)
+		}
+		return a.runChat(ctx, req, sink, true)
+	}
 	s := bot.ApprovalStoreFromContext(ctx)
 	rs, ok := s.(store.BotApprovalResumeStore)
 	if !ok {

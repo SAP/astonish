@@ -7,6 +7,21 @@ vi.mock('@/api/bots', async original => ({ ...await original<typeof import('@/ap
 const bot = { id: 'delete-me', name: 'Watcher', scope: 'personal', owner_id: 'owner', revision: 4, status: 'active' } as Bot
 beforeEach(() => { vi.resetAllMocks(); window.history.replaceState(null, '', '#/chat/bots/personal/delete-me') })
 afterEach(() => vi.useRealTimers())
+it('treats typed 410 as pending, never completed, and refreshes protected content', async () => {
+  vi.useFakeTimers()
+  const refresh = vi.fn()
+  window.addEventListener('astonish:bots-updated', refresh)
+  vi.mocked(permanentDeleteBot).mockRejectedValue(new BotAPIError(410, JSON.stringify({ code: 'deletion_pending', error: 'Cleanup pending' })))
+  const close = vi.fn(), deleted = vi.fn()
+  const view = render(<BotDeleteDialog bot={bot} onClose={close} onDeleted={deleted} />)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Delete' })))
+  expect(screen.getByRole('status')).toHaveTextContent('cleanup is in progress')
+  expect(refresh).toHaveBeenCalledOnce()
+  expect(deleted).not.toHaveBeenCalled()
+  expect(close).not.toHaveBeenCalled()
+  view.unmount()
+  window.removeEventListener('astonish:bots-updated', refresh)
+})
 it('confirms without a reason and prevents duplicate submission', async () => {
   let resolve!: (value: undefined) => void
   vi.mocked(permanentDeleteBot).mockReturnValue(new Promise(r => { resolve = r }))

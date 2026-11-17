@@ -213,6 +213,20 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			return err
 		}
 		p := &store.BotPublication{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: saved.Run.Report.EmployeeMessage.Text, PublishedAt: now}
+		questionOnly, err := questionOnlyWaitingPublication(ctx, tx, saved.Run)
+		if err != nil {
+			return err
+		}
+		if questionOnly {
+			// The durable question review is the entire user-facing wait. Keep
+			// the report/receipt for replay, but do not append a second message.
+			p.Suppressed, p.Text = true, ""
+			if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
+				return err
+			}
+			result = p
+			return nil
+		}
 		if ack := saved.Run.Report.Acknowledgment; ack != nil && (ack.Kind == store.BotReportAcknowledgmentSchedulePending || ack.Kind == store.BotReportAcknowledgmentControlPending) && len(ack.OperationIDs) > 0 {
 			p.Suppressed = true
 			p.Text = ""
@@ -291,6 +305,28 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		return nil
 	})
 	return result, err
+}
+
+// questionOnlyWaitingPublication uses committed approval identities, never prose
+// or the mutable run's current status, so replay after an answer stays silent.
+func questionOnlyWaitingPublication(ctx context.Context, db botDraftDB, run store.BotRun) (bool, error) {
+	r := run.Report
+	if run.Status != store.RunWaitingApproval || len(r.NeedsApproval) == 0 || r.Failure != nil || len(r.Changed) != 0 || len(r.Artifacts) != 0 || len(r.Unverified) != 0 || r.EmployeeMessage == nil || r.EmployeeMessage.Origin != store.BotEmployeeMessageFallback {
+		return false, nil
+	}
+	for _, id := range r.NeedsApproval {
+		a, err := db.ReadApproval(ctx, run.BotID, id)
+		if errors.Is(err, store.ErrBotNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if a.RunID != run.ID || a.Action.Tool != "ask_user" || a.Interaction == nil || a.Interaction.Validate() != nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // persistedConversationReply requires the same actual model event in this run

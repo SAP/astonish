@@ -14,8 +14,8 @@ type ReviewKey = `${ReviewKind}:${string}`
 // A session announces the Chat wire projection before its ADK rows arrive.
 // Control/reference metadata is not evidence that a turn has a wire projection.
 const conversationWireTypes = new Set(['session', 'text', 'tool_call', 'tool_result'])
-export interface BotTranscriptMapper { turns: Map<string, number>; runtimeTurns: Set<string>; reviews: Set<ReviewKey> }
-export const createBotTranscriptMapper = (): BotTranscriptMapper => ({ turns: new Map(), runtimeTurns: new Set(), reviews: new Set() })
+export interface BotTranscriptMapper { turns: Map<string, number>; runtimeTurns: Set<string>; reviews: Set<ReviewKey>; questionReviews: Set<string>; waitingForQuestion: boolean }
+export const createBotTranscriptMapper = (): BotTranscriptMapper => ({ turns: new Map(), runtimeTurns: new Set(), reviews: new Set(), questionReviews: new Set(), waitingForQuestion: false })
 export function dispatchBotTranscript(event: BotTranscript, emit: SSEEventCallback, mapper = createBotTranscriptMapper(), eventId = event.ID || '') {
   const raw = event as BotTranscript & { id?: string; invocationId?: string; author?: string; actions?: { stateDelta?: { bot_operation?: import('./botOperationResult').BotOperationView; bot_runtime_event?: RuntimeEnvelope; bot_run_state?: import('./botRunState').BotRunState; _astonish_turn_context?: boolean } }; content?: BotTranscript['Content'] }
   event = { ...event, ID: event.ID || raw.id, InvocationID: event.InvocationID || raw.invocationId, Author: event.Author || raw.author, Content: event.Content || raw.content, Actions: event.Actions || { StateDelta: raw.actions?.stateDelta } }
@@ -29,17 +29,36 @@ export function dispatchBotTranscript(event: BotTranscript, emit: SSEEventCallba
   eventId = eventId || event.ID || ''
   const runtime = event.Actions?.StateDelta?.bot_runtime_event
   const turn = runtime?.turn_id || event.InvocationID || ''
-  const review = (kind: ReviewKind, reviewId: unknown) => {
+  const review = (kind: ReviewKind, reviewId: unknown, question?: unknown) => {
     if (typeof reviewId !== 'string' || !reviewId.trim()) return
     const key: ReviewKey = `${kind}:${reviewId}`
     if (mapper.reviews.has(key)) return
     mapper.reviews.add(key)
     // First observed reference owns provenance, regardless of replay spelling.
-    emit('bot_review', { kind, reviewId, eventId, invocationId: turn })
+    emit('bot_review', { kind, reviewId, eventId, invocationId: turn, ...(question ? { question } : {}) })
   }
   const send: SSEEventCallback = (type, payload) => {
+    if (type === 'chat_question' && typeof payload.questionId === 'string' && typeof payload.prompt === 'string' && ['select', 'yesno', 'text'].includes(String(payload.kind)) && !payload.approval_id) {
+      mapper.waitingForQuestion = true
+      emit(type, { ...payload, eventId, invocationId: turn })
+      return
+    }
+    if (type === 'chat_question' && typeof payload.approval_id === 'string' && typeof payload.questionId === 'string' && typeof payload.prompt === 'string' && ['select', 'yesno', 'text'].includes(String(payload.kind))) {
+      const id = payload.approval_id
+      if (!mapper.questionReviews.has(id)) {
+        mapper.questionReviews.add(id)
+        mapper.reviews.add(`approval:${id}`)
+        mapper.waitingForQuestion = true
+        emit('bot_review', { kind: 'approval', reviewId: id, question: payload, eventId, invocationId: turn })
+      }
+      return
+    }
+    // Historical runtime fallback is redundant only inside a typed question wait.
+    // Exact equality deliberately preserves quotations and unrelated assistant text.
+    if (type === 'text' && mapper.waitingForQuestion && payload.text === 'I need your answer or authorization before I can continue.') return
+    if (type === 'user_message' || type === 'tool_call') mapper.waitingForQuestion = false
     if (type === 'bot_review') {
-      if (payload.kind === 'proposal' || payload.kind === 'approval') review(payload.kind, payload.review_id ?? payload.reviewId)
+      if (payload.kind === 'proposal' || payload.kind === 'approval') review(payload.kind, payload.review_id ?? payload.reviewId, payload.question)
       return
     }
     const result = payload.result as Record<string, unknown> | undefined
@@ -131,7 +150,7 @@ export function connectBotEvents(options: BotStreamOptions): AbortController {
     } catch (error) {
       if (controller.signal.aborted) return
       const err = error instanceof Error ? error : new Error(String(error))
-      if (err instanceof BotAPIError && [400, 401, 403, 404].includes(err.status) || retry >= 3) {
+      if (err instanceof BotAPIError && [400, 401, 403, 404, 410].includes(err.status) || retry >= 3) {
         options.onState?.('error', cursor); options.onError?.(err); return
       }
       options.onState?.('reconnecting', cursor)

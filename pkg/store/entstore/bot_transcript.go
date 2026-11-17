@@ -42,7 +42,7 @@ func botHomeArtifactEvent(r store.BotRun, e *adksession.Event) bool {
 }
 
 func botHomeRunStateEvent(r store.BotRun, e *adksession.Event) bool {
-	if r.Presentation != store.BotRunPresentationHomeInteractive || e.Author != "bot_runtime" {
+	if (r.Presentation != store.BotRunPresentationHomeInteractive && r.Progress == nil) || e.Author != "bot_runtime" || e.Content != nil {
 		return false
 	}
 	raw, err := json.Marshal(e.Actions.StateDelta[store.BotRunStateKey])
@@ -50,7 +50,7 @@ func botHomeRunStateEvent(r store.BotRun, e *adksession.Event) bool {
 		return false
 	}
 	var state store.BotRunState
-	return json.Unmarshal(raw, &state) == nil && state.SchemaVersion == store.BotRunStateSchemaVersion && state.RunID == r.ID && state.BotID == r.BotID && state.SessionID == r.SessionID && state.Presentation == r.Presentation
+	return json.Unmarshal(raw, &state) == nil && state.SchemaVersion == store.BotRunStateSchemaVersion && state.RunID == r.ID && state.BotID == r.BotID && state.SessionID == r.SessionID && state.Presentation == r.Presentation && state.ValidateProgress() == nil && (r.Presentation == store.BotRunPresentationHomeInteractive || state.Progress != nil)
 }
 
 var _ store.BotTranscriptReader = (*teamSessionStore)(nil)
@@ -114,12 +114,17 @@ func workTranscriptContext(ctx context.Context, work *store.BotWorkState) contex
 }
 
 func mirrorBotRunEvent(ctx context.Context, r store.BotRun, e *adksession.Event) bool {
+	if botHomeRunStateEvent(r, e) {
+		return true
+	}
 	work, _ := ctx.Value(botWorkTranscriptKey{}).(bool)
 	if work {
-		// Owner admissions/answers and approval cards have their own canonical
-		// repository writers. No producer text, tool result or artifact is final.
+		// Only validated owner input and tool-boundary-released interim narration
+		// bypass the private work transcript. Final text, source results and
+		// artifacts still require their canonical committed publication writers.
 		ownerInput, _ := ctx.Value(botWorkOwnerInputKey{}).(bool)
-		return ownerInput || (e.Content == nil && botHomeRunStateEvent(r, e))
+		progress, _ := ctx.Value(botWorkProgressKey{}).(bool)
+		return ownerInput || progress || (e.Content == nil && botHomeRunStateEvent(r, e))
 	}
 	return (r.Intent != store.BotIntentRegular || r.Presentation == store.BotRunPresentationHomeInteractive) && (e.Content != nil || botHomeArtifactEvent(r, e) || botHomeRunStateEvent(r, e))
 }
@@ -158,6 +163,14 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 			return store.ErrBotForbidden
 		}
 		projectCtx := workTranscriptContext(ctx, run.Work)
+		if run.Work != nil && run.Run.Presentation == store.BotRunPresentationHomeInteractive {
+			owner, err := botWorkAnswerEvent(ctx, tx, run.Run, event)
+			if err != nil {
+				return err
+			}
+			projectCtx = context.WithValue(projectCtx, botWorkOwnerInputKey{}, owner)
+			projectCtx = context.WithValue(projectCtx, botWorkProgressKey{}, botWorkProgressEvent(run.Run, run.Work, event))
+		}
 		// Legacy explicit /conversation and /test-run have no canonical admission
 		// row. Preserve only the exact persisted owner assignment, never role alone
 		// or model-generated correction instructions, under one deterministic ID.

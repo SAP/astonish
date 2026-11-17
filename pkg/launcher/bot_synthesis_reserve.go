@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
@@ -54,7 +55,7 @@ func (r *botSynthesisReserve) synthesis() bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.now().Before(r.meter.Deadline().Add(-r.reserveTime)) {
+	if !r.meter.Deadline().IsZero() && !r.now().Before(r.meter.Deadline().Add(-r.reserveTime)) {
 		r.final = true
 	}
 	return r.final
@@ -101,6 +102,9 @@ func (r *botSynthesisReserve) prepare(ctx context.Context, req *model.LLMRequest
 	}
 	final := r.synthesis()
 	guidance := fmt.Sprintf("Run budget remaining: %s tokens (input and output together), %.0f seconds until the original hard deadline. Keep %.0f seconds for synthesis. These are remaining limits, not new allowances. Refine the requested scope rather than adding optional research; deliver promptly from adequate evidence.", remaining, max(0, r.meter.Deadline().Sub(r.now()).Seconds()), r.reserveTime.Seconds())
+	if r.meter.Deadline().IsZero() {
+		guidance = fmt.Sprintf("Run budget remaining: %s tokens (input and output together). No whole-task duration cap. These are remaining limits, not new allowances. Preserve enough tokens for a useful answer and disclose material gaps honestly.", remaining)
+	}
 	if final {
 		config.Tools = nil
 		config.ToolConfig = nil
@@ -127,7 +131,11 @@ func botResponseHasToolCall(r *model.LLMResponse) bool {
 	return false
 }
 
-func botSynthesisStoppedResult() map[string]any {
+// Only call at a concrete rejection before target.Run: a started operation,
+// including a timed-out read, cannot attest to nonexecution. Keep this in the
+// trusted ledger rather than returning model-forgeable outcome JSON.
+func botSynthesisStoppedResult(ctx tool.Context, toolName string) map[string]any {
+	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: ctx.FunctionCallID(), ToolName: toolName}})
 	return map[string]any{"status": "not_executed", "reason": "synthesis reserve reached; compose the final answer from retained evidence without further tools"}
 }
 
@@ -136,7 +144,7 @@ func botSynthesisStoppedResult() map[string]any {
 // effect into success, or replay it. The original parent context remains live.
 func (b *botFactoryBinding) synthesisReadContext(ctx tool.Context, name string, args any) (tool.Context, context.CancelFunc, bool) {
 	noop := func() {}
-	if b.synthesisReserve == nil {
+	if b.synthesisReserve == nil || b.synthesisReserve.meter.Deadline().IsZero() {
 		return ctx, noop, false
 	}
 	classifier := agent.BotPolicyRuntimeFromContext(b.owner).Classifier
@@ -154,11 +162,7 @@ func (b *botFactoryBinding) synthesisReadContext(ctx tool.Context, name string, 
 	deadline := b.synthesisReserve.meter.Deadline().Add(-b.synthesisReserve.reserveTime)
 	narrowed, cancel := context.WithDeadline(ctx, deadline)
 	lifetime := botSynthesisToolContext{Context: ctx, lifetime: narrowed}
-	if bound, ok := ctx.(botBoundToolContext); ok {
-		bound.Context = lifetime
-		return bound, cancel, true
-	}
-	return lifetime, cancel, true
+	return preserveBotToolBinding(ctx, lifetime), cancel, true
 }
 
 type botSynthesisToolContext struct {
@@ -172,7 +176,12 @@ func (c botSynthesisToolContext) Err() error                  { return c.lifetim
 
 func (b *botFactoryBinding) runSynthesisTool(ctx tool.Context, target botRunnableTool, args any) (map[string]any, error) {
 	if b.synthesisReserve.synthesis() {
-		return botSynthesisStoppedResult(), nil
+		return botSynthesisStoppedResult(ctx, target.Name()), nil
+	}
+	if timeout, ok := b.req.Budget.(interface{ ToolCallTimeout() time.Duration }); ok && timeout.ToolCallTimeout() > 0 {
+		lifetime, cancel := context.WithTimeout(ctx, timeout.ToolCallTimeout())
+		defer cancel()
+		ctx = preserveBotToolBinding(ctx, botSynthesisToolContext{Context: ctx, lifetime: lifetime})
 	}
 	readCtx, cancel, read := b.synthesisReadContext(ctx, target.Name(), args)
 	defer cancel()

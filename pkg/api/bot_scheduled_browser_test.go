@@ -147,7 +147,11 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		t.Fatal(err)
 	}
 	auth := func(c context.Context) context.Context {
-		p, e := execution.WithPrincipal(c, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+		var scopes []string
+		if strings.HasPrefix(journey, "title") {
+			scopes = []string{"chat", "tool:execute"}
+		}
+		p, e := execution.WithPrincipal(c, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: scopes})
 		if e != nil {
 			panic(e)
 		}
@@ -160,8 +164,12 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	ownerCtx := auth(ctx)
 	personal := ods.ForUser(owner)
 	repo := personal.Bots()
+	teamJourney := strings.HasPrefix(journey, "title-team")
+	if teamJourney {
+		repo = ods.ForTeam(team.Slug).Bots()
+	}
 	registry := execution.NewBotTurnAuthorizationRegistry(100)
-	svc := &store.Services{PersonalBots: repo, PersonalSessions: personal.Sessions(), BotInteractiveReady: strings.HasPrefix(journey, "title"), BotTurnRegistry: registry}
+	svc := &store.Services{TenantRouter: db, Bots: ods.ForTeam(team.Slug).Bots(), Sessions: ods.ForTeam(team.Slug).Sessions(), PersonalBots: personal.Bots(), PersonalSessions: personal.Sessions(), BotInteractiveReady: strings.HasPrefix(journey, "title"), BotTurnRegistry: registry}
 	router := mux.NewRouter()
 	root := "/api/studio/bots"
 	// Mount exported production handlers, not browser fetch or response mocks.
@@ -274,7 +282,23 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		t.Fatalf("browser failure: %v\n%v", v, text)
 	})
 	var b store.Bot
-	if strings.HasPrefix(journey, "title") {
+	if teamJourney {
+		page.MustElementR("button", "^New Bot$").MustVisible()
+		page.MustEval(`() => localStorage.setItem('astonish_active_team', 'journey')`)
+		// Team creation has no NewBotDialog control; use production admission,
+		// then exercise the built team workspace without response mocks.
+		var receipt titleHTTPReceipt
+		if err = json.Unmarshal(request("POST", root+"?scope=team", `{"name":"Summarize release notes","idempotency_key":"team-title","start_from_title":true}`, 201), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		b = receipt.Bot
+		if b.Scope != store.BotScopeTeam {
+			t.Fatal("team admission used personal store")
+		}
+		page.MustNavigate(server.URL + "/#/chat/bots/team/" + b.ID.String())
+		page.MustReload()
+		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+	} else if strings.HasPrefix(journey, "title") {
 		page.MustElementR("button", "^New Bot$").MustClick()
 		title := "Scheduled browser watcher"
 		if journey == "title-question" {
@@ -305,8 +329,14 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		t.Fatal(err)
 	}
 	if strings.HasPrefix(journey, "title") {
-		if err := personal.SetSessionPin(ownerCtx, b.HomeSessionID.String(), "controlled", "journey-model"); err != nil {
-			t.Fatal(err)
+		var pinErr error
+		if teamJourney {
+			pinErr = ods.ForTeam(team.Slug).SetSessionPin(ownerCtx, b.HomeSessionID.String(), "controlled", "journey-model")
+		} else {
+			pinErr = personal.SetSessionPin(ownerCtx, b.HomeSessionID.String(), "controlled", "journey-model")
+		}
+		if pinErr != nil {
+			t.Fatal(pinErr)
 		}
 		runTitleBrowserAssertions(t, ctx, page, repo, ownerCtx, db, registry, b, journey)
 		return

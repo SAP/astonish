@@ -66,6 +66,9 @@ func (c BotSchedulerCallbacks) Admission() scheduler.BotTriggerFunc {
 			return scheduler.BotAdmission{}, fmt.Errorf("Bot scheduler admission receipt unavailable")
 		}
 		status := scheduler.BotAdmissionAdmitted
+		if receipt.Coalesced {
+			status = scheduler.BotAdmissionCoalesced
+		}
 		if receipt.Duplicate {
 			status = scheduler.BotAdmissionDuplicate
 		}

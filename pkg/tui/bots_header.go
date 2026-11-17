@@ -3,7 +3,9 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 	"context"
+	"errors"
 	"fmt"
+	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -65,7 +67,22 @@ func (m model) applyBotSnapshot(v botSnapshotMsg) (tea.Model, tea.Cmd) {
 	if v.snapshot != nil && v.snapshot.Bot.ID != m.botCap().SelectedBot().ID {
 		return m, waitBotSnapshot(m.botSnapshots)
 	}
-	m.botSnapshot, m.botSnapshotErr = v.snapshot, v.err
+	m.botSnapshotErr = v.err
+	if v.err != nil {
+		var response *client.BotResponseError
+		if errors.As(v.err, &response) && (response.StatusCode == 401 || response.StatusCode == 403 || response.StatusCode == 404 || response.StatusCode == 410) {
+			m.detachBotWatch()
+			m.botCap().DetachBot()
+			m.bots = botsState{}
+			m.tr.Reset()
+			m.tr.Apply(events.NewError("Bot access unavailable. Select again after access is restored."))
+			m.refreshViewport()
+			return m, nil
+		}
+		m.tr.Title = m.botHeaderTitle()
+	} else if v.snapshot != nil {
+		m.botSnapshot = v.snapshot
+	}
 	if v.err == nil && v.snapshot != nil {
 		m.info = m.backend.Info()
 		m.tr.Title = m.botHeaderTitle()
@@ -100,7 +117,7 @@ func (m model) botHeaderTitle() string {
 	}
 	status := string(bot.Status)
 	if m.botSnapshotErr != nil {
-		status = "status unavailable"
+		status += " · Updates unavailable"
 	}
 	title := fmt.Sprintf("Bot: %s [%s]", bot.Name, status)
 	if m.info.SessionID != "" && m.info.SessionID != bot.HomeSessionID.String() {

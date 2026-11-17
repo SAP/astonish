@@ -8,6 +8,88 @@ import (
 	"time"
 )
 
+func TestBotRuntimePolicyValidationAndLegacy(t *testing.T) {
+	var absent *BotRuntimePolicy
+	if absent.Validate() != nil || absent.EffectiveMode() != BotRuntimeModeLegacy || absent.Clone() != nil {
+		t.Fatal("absent policy changed legacy semantics")
+	}
+	p := NewBotProgressRuntimePolicy()
+	if p.Validate() != nil || p.EvaluationIntervalSeconds != 300 || p.ModelCallTimeoutSeconds != 120 || p.ToolCallTimeoutSeconds != 120 || p.MaxActiveSeconds != nil {
+		t.Fatal("new policy defaults")
+	}
+	for name, mutate := range map[string]func(*BotRuntimePolicy){
+		"unknown mode":     func(p *BotRuntimePolicy) { p.Mode = "unknown" },
+		"unknown version":  func(p *BotRuntimePolicy) { p.SchemaVersion++ },
+		"zero cadence":     func(p *BotRuntimePolicy) { p.EvaluationIntervalSeconds = 0 },
+		"negative timeout": func(p *BotRuntimePolicy) { p.ModelCallTimeoutSeconds = -1 },
+		"overflow":         func(p *BotRuntimePolicy) { p.ToolCallTimeoutSeconds = 1<<63 - 1 },
+		"zero hard cap":    func(p *BotRuntimePolicy) { p.MaxActiveSeconds = new(int64) },
+		"legacy mixture":   func(p *BotRuntimePolicy) { p.Mode = BotRuntimeModeLegacy },
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := p.Clone()
+			mutate(q)
+			if q.Validate() == nil {
+				t.Fatal("malformed policy accepted")
+			}
+		})
+	}
+	var old BotMandate
+	if err := json.Unmarshal([]byte(`{"limits":{"max_runtime_seconds":300}}`), &old); err != nil || old.RuntimePolicy != nil {
+		t.Fatal("old JSON upgraded")
+	}
+	var zero BotRuntimePolicy
+	if zero.Validate() == nil {
+		t.Fatal("present zero policy silently defaulted")
+	}
+}
+
+func TestBotRuntimePolicyCeilingAndClone(t *testing.T) {
+	m := testMandate()
+	ceiling := m.Limits
+	m.Limits.MaxRuntimeSeconds = 900
+	if m.Limits.ValidateWithin(ceiling) == nil {
+		t.Fatal("legacy runtime ceiling bypassed")
+	}
+	p := NewBotProgressRuntimePolicy()
+	if m.Limits.ValidateWithinRuntimePolicy(ceiling, p, nil) == nil {
+		t.Fatal("progress allowed without trusted opt-in")
+	}
+	if err := m.Limits.ValidateWithinRuntimePolicy(ceiling, p, p); err != nil {
+		t.Fatal(err)
+	}
+	m.Limits.MaxTokens++
+	if m.Limits.ValidateWithinRuntimePolicy(ceiling, p, p) == nil {
+		t.Fatal("progress expanded tokens")
+	}
+	m.Limits = ceiling
+	cap := int64(600)
+	bounded := p.Clone()
+	bounded.MaxActiveSeconds = &cap
+	if p.ValidateWithin(bounded) == nil {
+		t.Fatal("unbounded request exceeded hard cap")
+	}
+	if bounded.ValidateWithin(p) != nil {
+		t.Fatal("bounded request denied")
+	}
+	m.RuntimePolicy = bounded
+	copy := m.Clone()
+	*copy.RuntimePolicy.MaxActiveSeconds = 1
+	if *m.RuntimePolicy.MaxActiveSeconds != 600 {
+		t.Fatal("policy pointer aliases clone")
+	}
+	a, err := VerifyBotMandateAuthorization(context.Background(), mandateVerifier{m}, m.Ref, m.Purpose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*m.RuntimePolicy.MaxActiveSeconds = 2
+	snapshot := a.Snapshot()
+	*snapshot.RuntimePolicy.MaxActiveSeconds = 3
+	if *a.Snapshot().RuntimePolicy.MaxActiveSeconds != 600 {
+		t.Fatal("sealed authority policy aliased")
+	}
+}
+
 func TestBotMandateRawPrincipalRejected(t *testing.T) {
 	p := Principal{Kind: PrincipalKindUser, Authentication: AuthMethodBotMandate, Surface: SurfaceStudio, Subject: "u", OrgSlug: "o", TeamSlug: "t", Authenticated: true, Scopes: []string{"chat"}}
 	if p.Validate() == nil {

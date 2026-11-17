@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
+
+	"github.com/SAP/astonish/pkg/execution"
+	"github.com/google/uuid"
 
 	"github.com/SAP/astonish/pkg/bot"
 	"google.golang.org/adk/tool/functiontool"
@@ -91,8 +95,17 @@ func botWorkToolResult(ctx tool.Context, value any, err error) (map[string]any, 
 		return nil, err
 	}
 	// Only the completed local bookkeeping attempt is recorded, not a successful
-	// check or task. Failed attempts still return explicit feedback below.
-	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true})
+	// check or task. Failed attempts still return explicit feedback below. These
+	// services cannot dispatch external actions. Bind an observation to the live
+	// run instead of asking the journal to trust a bare Verified flag.
+	if identity, ok := execution.BotRunIdentityFromContext(ctx); ok {
+		if actor, parseErr := uuid.Parse(identity.ActorID); parseErr == nil {
+			bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{
+				Kind: store.BotEvidenceObservation, Summary: "Scoped local work bookkeeping attempt returned; no content correctness, task success or external effect inferred",
+				Source: "bot-work://" + identity.BotID.String() + "/" + identity.RunID.String() + "/" + ctx.FunctionCallID(), ActorID: actor, ObservedAt: time.Now().UTC(),
+			}}})
+		}
+	}
 	if err != nil {
 		code, message := "unavailable", "Work bookkeeping or evidence is unavailable. Continue with available information; do not infer success or absence from this failure."
 		if errors.Is(err, store.ErrBotConflict) {

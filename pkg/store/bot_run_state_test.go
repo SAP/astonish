@@ -6,6 +6,45 @@ import (
 	"time"
 )
 
+func TestBotRunStateProgressProjection(t *testing.T) {
+	if (BotRunState{}).ValidateProgress() != nil {
+		t.Fatal("legacy projection rejected")
+	}
+	s, _, now := progressContractFixture()
+	b := s.Checkpoint.Binding
+	p := &BotProgressProjection{SchemaVersion: BotProgressSchemaVersion, BotID: b.BotID, RunID: b.RunID, SessionID: b.SessionID, Revision: 1, Phase: BotProgressEvaluating, EvaluatedAt: &now}
+	state := BotRunState{BotID: b.BotID, RunID: b.RunID, SessionID: b.SessionID, Progress: p}
+	if err := state.ValidateProgress(); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []BotProgressPhase{BotProgressWorking, BotProgressEvaluating, BotProgressReplanning, BotProgressSynthesizing, BotProgressCheckpointing, BotProgressWaitingUser, BotProgressWaitingBudget, BotProgressWaitingAuthorization, BotProgressSuspended, BotProgressReconciling} {
+		p.Phase = phase
+		if p.Validate() != nil {
+			t.Fatalf("phase %s rejected", phase)
+		}
+	}
+	for name, change := range map[string]func(*BotProgressProjection){
+		"unknown phase":   func(p *BotProgressProjection) { p.Phase = "complete" },
+		"unknown version": func(p *BotProgressProjection) { p.SchemaVersion++ },
+		"unknown reason":  func(p *BotProgressProjection) { p.Reason = "unknown" },
+		"binding":         func(p *BotProgressProjection) { p.RunID = uuid.New() },
+		"revision":        func(p *BotProgressProjection) { p.Revision = 0 },
+		"time":            func(p *BotProgressProjection) { *p.EvaluatedAt = time.Time{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := state
+			copy.Progress = p.Clone()
+			change(copy.Progress)
+			if copy.ValidateProgress() == nil {
+				t.Fatal("malformed projection")
+			}
+		})
+	}
+	if p.EvaluatedAt.IsZero() {
+		t.Fatal("clone date aliases")
+	}
+}
+
 func TestBotAgentWorkProjectionContract(t *testing.T) {
 	w := NewBotAgentWorkState(attachmentWorkContract())
 	w.AgentWork.Notes = "private working notes"

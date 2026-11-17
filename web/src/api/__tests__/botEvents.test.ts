@@ -71,6 +71,26 @@ const wire = (type: string, payload: Record<string, unknown>, turn?: string, id 
   actions: { stateDelta: { bot_runtime_event: { type, payload, turn_id: turn, sequence: 1 } } },
 }))
 
+it('hides historical fallback only while a typed question is pending and preserves later or quoted prose', () => {
+  const mapper = createBotTranscriptMapper(), emit = vi.fn()
+  const text = 'I need your answer or authorization before I can continue.'
+  const row = (value: string): BotTranscript => ({ Author: 'assistant', Content: { parts: [{ text: value }] } })
+  dispatchBotTranscript(row(text), emit, mapper)
+  dispatchBotTranscript(wire('chat_question', { questionId: 'q', kind: 'text', prompt: 'Which topic?' }), emit, mapper)
+  dispatchBotTranscript(row(text), emit, mapper)
+  dispatchBotTranscript(row(`Quoted: ${text}`), emit, mapper)
+  dispatchBotTranscript(userRow(false, 'Research'), emit, mapper)
+  dispatchBotTranscript(row(text), emit, mapper)
+  expect(emit.mock.calls.filter(([type]) => type === 'text').map(([, p]) => p.text)).toEqual([text, `Quoted: ${text}`, text])
+  expect(emit).toHaveBeenCalledWith('chat_question', expect.objectContaining({ questionId: 'q' }))
+})
+
+it('projects the real question payload with its runtime approval reference', () => {
+  const emit = vi.fn()
+  dispatchBotTranscript(wire('chat_question', { approval_id: 'a', questionId: 'q', kind: 'select', prompt: 'Which AI news?', options: [{ id: 'research', label: 'Research papers' }], allow_custom_answer: true }), emit)
+  expect(emit).toHaveBeenCalledWith('bot_review', expect.objectContaining({ reviewId: 'a', question: expect.objectContaining({ questionId: 'q', prompt: 'Which AI news?' }) }))
+})
+
 it.each(['proposal', 'approval'])('normalizes canonical persisted %s references to the StudioChat contract', kind => {
   const emit = vi.fn()
   dispatchBotTranscript(wire('bot_review', { kind, review_id: 'review-1' }, 'review-turn'), emit)

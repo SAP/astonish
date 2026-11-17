@@ -66,11 +66,18 @@ func (r *botRepository) ReserveHomeCleanup(ctx context.Context, home store.BotHo
 			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
 				return store.ErrBotInvalid
 			}
-			if previous != claim {
+			if previous == claim {
+				result = &previous
+				return nil
+			}
+			// Older versions allowed MarkRead to advance the root after reservation.
+			// Renew only that revision: owner, scope, binding and fence must remain
+			// identical, and checkCleanup above revalidated all current barriers.
+			oldRevision := previous.Request.ExpectedRevision
+			previous.Request.ExpectedRevision = revision
+			if !rec.Bot.PermanentDelete || oldRevision >= revision || previous != claim {
 				return store.ErrBotConflict
 			}
-			result = &previous
-			return nil
 		}
 		raw, err := json.Marshal(claim)
 		if err != nil {

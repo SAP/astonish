@@ -3,6 +3,63 @@
 > **Protocol scope:** the bounded writer/reviewer flow below is retained for
 > legacy assessment runs. It is not required or invoked for `agent_led_v1` work.
 
+## Initial title questions
+
+A newly title-created employee first asks one focused, title-specific `ask_user`
+question with three or four materially different interpretations and custom text.
+This trusted pending stage replaces work-first guidance only until confirmation;
+it is not an onboarding questionnaire or a mandatory completion review. No research,
+Task publication, work journal or narrator/reviewer runs before the answer. Invalid
+plain-text or tool responses receive at most one metered correction and otherwise
+fail clarification without speculative work. The persisted question is restored,
+not regenerated while waiting. Once answered, normal employee ownership and
+useful-work-first behavior resume under unchanged permission boundaries.
+
+### Confirmed-title acknowledgement in Home
+
+For Home-interactive agent-led work, the owner answer and actual producer interim
+narration survive both live delivery and replay. `botConversationSessions` assigns
+answers the deterministic `bot-owner-answer:<approval>` ID; the fenced transcript
+writer checks the consumed approval, version, run and exact typed response before
+mirroring that event. A user role or serialized answer marker alone is insufficient.
+
+`runBotChatAttempt` already holds producer text until a subsequent tool-call boundary
+proves it is interim narration. `bot_work_narration.go` permits only those runtime
+`text` envelopes for work with that buffering policy. Tool calls are diagnostics,
+not communication: they are never mirrored merely to make an acknowledgement
+visible. The ordinary raw ADK producer content, thoughts, tool/source response
+bodies, artifacts and final
+`done` remain private. The existing committed report publisher still owns the final
+answer. This does not generate an acknowledgement or require additional model calls.
+The persisted ordered rows remain the single source for Studio and terminal Home;
+no new SSE kind or client-only rendering path is added.
+
+The missing acknowledgement was a persistence projection gap: `084cd66d` introduced
+`mirrorBotRunEvent`'s blanket private-work gate, and mandate-backed resumed titles
+initialize that work state. Registry-only/run-transcript tests did not exercise the
+Home gate. `TestBotTitleMandateAcknowledgementHomeHTTP` reproduces the production
+mandate path with the registry closed, real title/question/answer HTTP handlers,
+worker/factory, scoped SQLite and a blocking controlled HTTP source, in both personal
+and team scope. It checks live answer → producer acknowledgement order while the
+first source remains blocked, and acknowledgement → tool-call chronology in the
+private run diagnostics. Repeat HTTP replay, one final publication, idempotent
+answer resubmission, and no raw source or tool telemetry leakage remain required.
+
+`projectBotHomeNarrative` is shared by live and history HTTP transports, hence by
+Studio and the terminal. Already-written Home tool telemetry is projected to an
+identity-only row, retaining its cursor and stored history. Raw run diagnostics
+are unchanged. Released runtime speech is projected as complete ADK text, so the
+existing clients finalize it immediately without a visible tool boundary; it is
+not a fabricated acknowledgement or a new event kind. Genuine `ask_user` controls,
+approval/review events, user input and committed final publications remain visible.
+
+The six `bot_title_chat_browser_test.go` journeys exercise built Studio, compact Q/A,
+actual acknowledgement before blocked work, no tool cards, final/reload chronology,
+personal/team modes and owned disposable Docker Home. Terminal mapper/reducer
+coverage is `TestBotHomeNarrativeTerminalBeforeFinal`; the title PTY harness checks
+option/custom-answer transport separately. Controlled evidence is not a claim of
+real-provider quality/latency or deployed-daemon verification.
+
 ## Agent-owned final communication
 
 `ComposeEmployeeMessage` selects the protocol before legacy preparation/narration.

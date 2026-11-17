@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -11,6 +12,53 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+func TestBotRuntimePolicyVersionValidation(t *testing.T) {
+	v := store.DefaultBotVersion()
+	v.BotID = uuid.New()
+	v.Charter = "Research the assignment."
+	if err := ValidateVersion(v); err != nil {
+		t.Fatal(err)
+	}
+	v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
+	if err := ValidateVersion(v); err != nil {
+		t.Fatal(err)
+	}
+	v.Budget.RuntimePolicy.SchemaVersion++
+	if ValidateVersion(v) == nil {
+		t.Fatal("unknown runtime policy accepted by version validation")
+	}
+}
+
+func TestBotProgressContractRuntimeOptional(t *testing.T) {
+	if reflect.TypeOf((*Runtime)(nil)).Elem().NumMethod() != 3 {
+		t.Fatal("Runtime signatures expanded")
+	}
+	var request RunRequest
+	if request.Progress != nil || request.ProgressStore != nil {
+		t.Fatal("progress enabled by default")
+	}
+	if (RunResult{}).ValidateCheckpoints() != nil {
+		t.Fatal("legacy result rejected")
+	}
+	if (RunResult{Checkpoint: json.RawMessage(`{"approval":true}`)}).ValidateCheckpoints() != nil {
+		t.Fatal("legacy approval changed")
+	}
+	mixed := RunResult{Checkpoint: json.RawMessage(`{}`), ProgressCheckpoint: &store.BotProgressState{}}
+	if mixed.ValidateCheckpoints() == nil {
+		t.Fatal("mixed approval/progress accepted")
+	}
+	if ModelCallPurposeFromContext(context.Background()) != ModelCallPurposeProducer {
+		t.Fatal("default purpose changed")
+	}
+	ctx := WithModelCallPurpose(context.Background(), ModelCallPurposeProgress)
+	if ModelCallPurposeFromContext(ctx) != ModelCallPurposeProgress || ModelCallPurposeProgress == ModelCallPurposeAssessment {
+		t.Fatal("progress purpose not distinct")
+	}
+	if ValidateRunTransition(store.RunInterrupted, store.RunQueued, RunTransitionGuard{}) == nil {
+		t.Fatal("progress type bypassed legacy authority")
+	}
+}
 
 func TestBotAgentWorkDoesNotAuthorizeResume(t *testing.T) {
 	w := store.NewBotAgentWorkState(store.BotWorkContract{BotID: uuid.New(), RunID: uuid.New(), Version: 1, Instructions: "Research"})

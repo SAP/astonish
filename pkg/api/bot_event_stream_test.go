@@ -187,7 +187,12 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent := func(id string) {
 				t.Helper()
-				if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), &adksession.Event{ID: id, Author: "execution-owner", Timestamp: time.Now()}); err != nil {
+				e := &adksession.Event{ID: id, Author: "execution-owner", Timestamp: time.Now()}
+				if id == "first" {
+					e.Author = "bot_runtime"
+					e.Actions.StateDelta = map[string]any{"bot_runtime_event": map[string]any{"type": "tool_call", "payload": map[string]any{"name": "web_fetch", "args": map[string]any{"url": "HISTORICAL_PRIVATE_URL"}}}}
+				}
+				if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), e); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -200,7 +205,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent("first")
 			first := readBotSSE(t, rd)
-			if first.event != botTranscriptEvent || !strings.Contains(first.data, "first") {
+			if first.event != botTranscriptEvent || !strings.Contains(first.data, "first") || strings.Contains(first.data, "HISTORICAL_PRIVATE_URL") || strings.Contains(first.data, "web_fetch") {
 				t.Fatalf("live: %+v", first)
 			}
 			live.Body.Close()
@@ -252,7 +257,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			// A full snapshot uses the same ordered source and IDs as live delivery.
 			full := request("GET", path, owner, "", "", 200)
 			fr := bufio.NewReader(full.Body)
-			if f := readBotSSE(t, fr); f.id != first.id || !strings.Contains(f.data, "first") {
+			if f := readBotSSE(t, fr); f.id != first.id || !strings.Contains(f.data, "first") || strings.Contains(f.data, "HISTORICAL_PRIVATE_URL") || strings.Contains(f.data, "web_fetch") {
 				t.Fatal("snapshot differs", f)
 			}
 			full.Body.Close()

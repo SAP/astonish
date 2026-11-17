@@ -24,6 +24,10 @@ type skillHTTPStore struct {
 	revision int64
 }
 
+func (s *skillHTTPStore) Get(_ context.Context, id store.BotID) (*store.Bot, error) {
+	return &store.Bot{ID: id, Scope: store.BotScopePersonal}, nil
+}
+
 func (s *skillHTTPStore) ListSkills(_ context.Context, b uuid.UUID, p store.BotSkillPage) (*store.BotSkillList, error) {
 	s.calls++
 	s.botID = b
@@ -128,7 +132,7 @@ func TestBotSkillHTTPBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		ctx    context.Context
 		status int
-	}{{context.Background(), 401}, {skillHTTPContext(t, &botBoundaryStore{}), 503}, {skillHTTPContext(t, nil), 503}} {
+	}{{context.Background(), 401}, {skillHTTPContext(t, &botMemoryBoundaryStore{bot: &store.Bot{ID: botID}}), 503}, {skillHTTPContext(t, nil), 503}} {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest("GET", root, nil).WithContext(tc.ctx))
 		if w.Code != tc.status {

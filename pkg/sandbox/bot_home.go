@@ -91,6 +91,15 @@ type BotHomeDeleteBackend interface {
 	DeleteBotHome(context.Context, *BotHomeBinding) error
 }
 
+// BotHomeSessionCleanupBackend is optional and privileged. The caller must first
+// reserve deletion after worker shutdown. Implementations reconcile only exact
+// binding-owned sessions, fail closed on unknown attachments, and invoke the
+// authorization callback again under lifecycle locks before each destruction.
+// This does not change the non-forcing DeleteBotHome contract.
+type BotHomeSessionCleanupBackend interface {
+	ReconcileBotHomeSessions(context.Context, *BotHomeBinding, func(context.Context) error) error
+}
+
 const MaxBotHomeArtifactBytes int64 = 16 << 20
 
 // ValidateBotHomeArtifactPath rejects aliases as well as traversal, so metadata

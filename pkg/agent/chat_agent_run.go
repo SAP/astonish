@@ -12,11 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider/llmerror"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -1006,6 +1008,31 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 		// Build BeforeModelCallbacks
 		var beforeModelCallbacks []llmagent.BeforeModelCallback
+		if progress := bot.ProgressControllerFromContext(ctx); progress != nil && turnOverrides != nil && turnOverrides.Bot != nil {
+			beforeModelCallbacks = append(beforeModelCallbacks, func(call agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				decision, err := progress.Check(call)
+				if err != nil {
+					return nil, err
+				}
+				if decision != nil && req != nil {
+					if decision.Decision == store.BotProgressAskUser {
+						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "ask_user", Args: map[string]any{"kind": "text", "prompt": decision.Question}}}}}}, nil
+					}
+					if decision.Decision == store.BotProgressSynthesize {
+						req.Tools = nil
+						if req.Config != nil {
+							clone := *req.Config
+							clone.Tools = nil
+							clone.ToolConfig = nil
+							req.Config = &clone
+						}
+					}
+					text := "Employee progress decision: " + string(decision.Decision) + "\n" + decision.Summary + "\n" + strings.Join(decision.NextSteps, "\n")
+					req.Contents = append(req.Contents, genai.NewContentFromText(text, "user"))
+				}
+				return nil, nil
+			})
+		}
 		if !promptBuilder.CodeMode {
 			beforeModelCallbacks = append(beforeModelCallbacks, func(_ agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 				if req != nil {

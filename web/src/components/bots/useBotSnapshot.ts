@@ -1,12 +1,12 @@
 import { botLocalFailure } from '../chat/botEmployeeFeedback'
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
-import { BotAPIError, type BotActivity, type BotScope } from '@/api/bots'
+import { BotAPIError, BotErrorCode, type BotActivity, type BotScope } from '@/api/bots'
 import { getBotSnapshot, readBotActivityPage, writeBotReadCursor, type BotSnapshot } from '@/api/botSnapshot'
 import { getActiveTeam } from '@/api/teamContext'
 import { mergeBotRunState, type BotRunStates } from '@/api/botRunState'
 import { isBotOperation, OperationStatus, type BotOperationView } from '@/api/botOperationResult'
 
-export interface SnapshotState { data?: BotSnapshot; activity: BotActivity[]; loading: boolean; error?: string }
+export interface SnapshotState { data?: BotSnapshot; activity: BotActivity[]; loading: boolean; error?: string; deletionPending?: boolean }
 const empty: SnapshotState = { activity: [], loading: true }
 const entries = new Map<string, SnapshotEntry>()
 
@@ -30,7 +30,7 @@ class SnapshotEntry {
       try {
         const data = await getBotSnapshot(this.id, this.scope, this.team, controller.signal)
         if (!active()) return
-        if (data.bot.id !== this.id || data.bot.scope !== this.scope || data.read_cursor.viewer_id !== this.viewer) throw new Error('Bot snapshot identity changed. Reload your workspace.')
+        if (data.bot.id !== this.id || data.bot.scope !== this.scope || data.read_cursor.viewer_id !== this.viewer) throw new BotAPIError(403, 'Bot snapshot identity changed. Reload your workspace.')
         const previous = this.state.data
         // Keep the root and its operation evidence together; never graft a new
         // cursor onto a stale root and then use it as message admission authority.
@@ -58,7 +58,7 @@ class SnapshotEntry {
               // Activity is auxiliary: a transport failure cannot invalidate a
               // freshly read outcome or operation head. Keep partial catch-up
               // and retry on the next poll, but never retain inaccessible data.
-              if (error instanceof BotAPIError && [401, 403, 404].includes(error.status)) throw error
+              if (error instanceof BotAPIError && [401, 403, 404, 410].includes(error.status)) throw error
               break
             }
             if (!active()) return
@@ -73,7 +73,7 @@ class SnapshotEntry {
         }
         if (active()) this.publish({ data: snapshot, activity, loading: false })
       } catch (error) {
-        if (active()) this.publish({ ...(error instanceof BotAPIError && [401, 403, 404].includes(error.status) ? empty : this.state), loading: false, error: botLocalFailure(error).message })
+        if (active()) this.publish({ ...(error instanceof BotAPIError && [401, 403, 404, 410].includes(error.status) ? empty : this.state), loading: false, error: botLocalFailure(error).message, deletionPending: error instanceof BotAPIError && error.status === 410 && error.code === BotErrorCode.DeletionPending })
       } finally { if (active()) this.inflight = undefined }
     })()
     return this.inflight

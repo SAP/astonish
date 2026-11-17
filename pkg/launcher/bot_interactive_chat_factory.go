@@ -302,7 +302,7 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 		return nil, err
 	}
 	if t.binding.synthesisReserve.synthesis() {
-		return botSynthesisStoppedResult(), nil
+		return botSynthesisStoppedResult(bound, t.Name()), nil
 	}
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
@@ -318,28 +318,30 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	if err := t.binding.req.Budget.ReserveTool(bound, t.Name()); err != nil {
 		return nil, err
 	}
-	result, err := t.binding.runSynthesisTool(bound, t.botRunnableTool, args)
-	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
-		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
-			return result, captureErr
-		}
-	}
-	// Only the shared built-in node transport is eligible; an MCP tool with
-	// the same name or a forged result cannot attest to effects.
-	if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin {
-		raw, marshalErr := json.Marshal(args)
-		var values map[string]any
-		if marshalErr == nil && json.Unmarshal(raw, &values) == nil {
-			if values, normalizeErr := common.NormalizeFileToolArguments(t.Name(), values); normalizeErr == nil {
-				observation := result
-				if err != nil {
-					observation = map[string]any{"error": err.Error()}
-				}
-				recordBuiltinToolObservation(bound, t.binding.req.Run.SessionID.String(), t.Name(), values, observation)
+	return t.binding.progressTool(bound, t.botRunnableTool, args, func(c tool.Context, a any) (map[string]any, error) {
+		result, err := t.binding.runSynthesisTool(c, t.botRunnableTool, a)
+		if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
+			if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
+				return result, captureErr
 			}
 		}
-	}
-	return result, err
+		// Only the shared built-in node transport is eligible; an MCP tool with
+		// the same name or a forged result cannot attest to effects.
+		if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin {
+			raw, marshalErr := json.Marshal(args)
+			var values map[string]any
+			if marshalErr == nil && json.Unmarshal(raw, &values) == nil {
+				if values, normalizeErr := common.NormalizeFileToolArguments(t.Name(), values); normalizeErr == nil {
+					observation := result
+					if err != nil {
+						observation = map[string]any{"error": err.Error()}
+					}
+					recordBuiltinToolObservation(bound, t.binding.req.Run.SessionID.String(), t.Name(), values, observation)
+				}
+			}
+		}
+		return result, err
+	})
 }
 func (t *interactiveBotTool) ProcessRequest(ctx tool.Context, r *model.LLMRequest) error {
 	if ctx == nil {

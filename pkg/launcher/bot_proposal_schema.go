@@ -34,7 +34,16 @@ func botProposalInputSchema() *jsonschema.Schema {
 	autonomy := object(map[string]*jsonschema.Schema{
 		"level": text(), "allowed_tools": array(text()), "denied_tools": array(text()), "allowed_paths": array(text()), "allowed_hosts": array(text()), "can_contact_people": scalar("boolean"), "can_publish": scalar("boolean"), "spend_currency": text(), "max_spend_per_run_minor": scalar("integer"), "max_spend_per_month_minor": scalar("integer"),
 	}, "level")
-	budget := object(map[string]*jsonschema.Schema{"max_runtime_seconds": scalar("integer"), "max_tool_calls": nullable(scalar("integer")), "max_tokens": nullable(scalar("integer")), "max_runs_per_day": nullable(scalar("integer")), "max_model_cost_micros": nullable(scalar("integer"))}, "max_runtime_seconds")
+	runtimePolicy := object(map[string]*jsonschema.Schema{
+		"schema_version":              scalar("integer"),
+		"mode":                        text(),
+		"evaluation_interval_seconds": scalar("integer"),
+		"max_active_seconds":          nullable(scalar("integer")),
+		"model_call_timeout_seconds":  scalar("integer"),
+		"tool_call_timeout_seconds":   scalar("integer"),
+	}, "schema_version", "mode")
+	runtimePolicy.Description = "Optional reviewed runtime policy, subject to trusted operator authorization. Omit to preserve legacy duration semantics. progress_v1 requires positive evaluation and individual model/tool timeout seconds; max_active_seconds is an optional cumulative hard duration, not an evaluation cadence. This never changes existing grants or spending limits."
+	budget := object(map[string]*jsonschema.Schema{"runtime_policy": nullable(runtimePolicy), "max_runtime_seconds": scalar("integer"), "max_tool_calls": nullable(scalar("integer")), "max_tokens": nullable(scalar("integer")), "max_runs_per_day": nullable(scalar("integer")), "max_model_cost_micros": nullable(scalar("integer"))}, "max_runtime_seconds")
 	delivery := object(map[string]*jsonschema.Schema{"notify": text(), "preferences": text(), "bindings": array(binding())})
 	configuration := object(map[string]*jsonschema.Schema{"pause": scalar("boolean"), "autonomy": autonomy, "budget": budget, "delivery": delivery}, "autonomy", "budget", "delivery")
 	evidence := object(map[string]*jsonschema.Schema{"kind": text(), "summary": text(), "source": text(), "observed_at": {Type: "string", Format: "date-time"}, "actor_id": id()}, "kind", "summary", "source", "observed_at", "actor_id")

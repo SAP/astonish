@@ -6,6 +6,7 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"reflect"
 	"strings"
 )
 
@@ -82,10 +83,10 @@ func (s *botMandateRuntime) verifyScheduledTask(ctx context.Context, tx botDraft
 	if err != nil {
 		return err
 	}
-	if parent.Provenance != m.Provenance || m.Mandate.ExpiresAt.After(parent.Mandate.ExpiresAt) {
+	if parent.Provenance != m.Provenance || !m.Mandate.ExpiresAt.Equal(parent.Mandate.ExpiresAt) || !reflect.DeepEqual(m.Mandate.RuntimePolicy, parent.Mandate.RuntimePolicy) {
 		return store.ErrBotForbidden
 	}
-	if err := checkMandatePolicy(m.Mandate, store.BotMandatePolicy{Scopes: parent.Mandate.Scopes, Constraints: parent.Mandate.Constraints, Limits: parent.Mandate.Limits, PublicResearch: parent.Mandate.PublicResearch}); err != nil {
+	if err := checkMandatePolicy(m.Mandate, store.BotMandatePolicy{RuntimePolicy: parent.Mandate.RuntimePolicy, Scopes: parent.Mandate.Scopes, Constraints: parent.Mandate.Constraints, Limits: parent.Mandate.Limits, PublicResearch: parent.Mandate.PublicResearch}); err != nil {
 		return err
 	}
 	op, err := readMandateOperation(ctx, tx, rec, b.Parent, b.OperationID)

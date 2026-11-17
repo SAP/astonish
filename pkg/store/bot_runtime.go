@@ -31,6 +31,7 @@ type BotScheduledAdmission struct {
 	Acknowledged bool
 	Run          BotRun
 	Duplicate    bool
+	Coalesced    bool
 }
 
 // BotScheduledRunStore is an optional internal scheduler admission capability.
@@ -43,12 +44,13 @@ type BotScheduledRunStore interface {
 // BotRunInput is durable input for one already admitted run. Instructions must
 // come from the saved request, never from the worker's dispatch payload.
 type BotRunInput struct {
-	Task    *BotTaskRevision
-	Work    *BotWorkState
-	Bot     Bot
-	Version BotVersion
-	Run     BotRun
-	Goals   []BotGoal
+	Progress *BotProgressState // private detached checkpoint, never approval input
+	Task     *BotTaskRevision
+	Work     *BotWorkState
+	Bot      Bot
+	Version  BotVersion
+	Run      BotRun
+	Goals    []BotGoal
 	// ExternalAdmissionValidated comes only from the persisted admission receipt.
 	ExternalAdmissionValidated bool
 	Instructions               string

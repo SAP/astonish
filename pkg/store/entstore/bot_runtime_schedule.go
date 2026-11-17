@@ -27,10 +27,49 @@ func (s *teamBotStore) AdmitScheduledRun(ctx context.Context, q store.BotSchedul
 	return s.repository().AdmitScheduledRun(ctx, q)
 }
 
+type botCoalescedOccurrence struct {
+	Occurrence store.BotScheduledOccurrence
+	RunID      uuid.UUID
+}
+
+// Bounded pages, no lifetime-sized root index. Root sequence CAS makes the
+// search plus occurrence receipt atomic with competing admissions and claims.
+func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uuid.UUID) (*store.BotRun, error) {
+	after := uuid.Nil
+	for {
+		runs, err := tx.ReadRuns(ctx, bot, 100, after)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			if run.TriggerID != trigger || run.Trigger != store.TriggerCron {
+				continue
+			}
+			if !run.Status.Terminal() {
+				return &run, nil
+			}
+			if run.Status == store.RunInterrupted {
+				saved, err := tx.ReadRun(ctx, bot, run.ID)
+				if err != nil {
+					return nil, err
+				}
+				if saved.ProgressUncertain || saved.ProgressPending != 0 || saved.Progress != nil && (saved.Progress.Phase == store.BotProgressReconciling || saved.Run.ContinuationReason == store.BotContinuationRequired) {
+					return &run, nil
+				}
+			}
+		}
+		if len(runs) < 100 {
+			return nil, nil
+		}
+		after = runs[len(runs)-1].ID
+	}
+}
+
 type botScheduledRequest struct {
 	external   *store.BotExternalEvent
 	occurrence store.BotScheduledOccurrence
 	duplicate  bool
+	coalesced  bool
 }
 
 // AdmitScheduledRun resolves all executable input from the saved immutable
@@ -53,7 +92,7 @@ func (r *botRepository) AdmitScheduledRun(ctx context.Context, q store.BotSchedu
 	if err != nil {
 		return nil, r.rejectScheduledRun(ctx, q, err)
 	}
-	return &store.BotScheduledAdmission{Run: *run, Duplicate: trusted.duplicate, Acknowledged: true}, nil
+	return &store.BotScheduledAdmission{Run: *run, Duplicate: trusted.duplicate, Coalesced: trusted.coalesced, Acknowledged: true}, nil
 }
 
 // The optional DB capability reads the existing scheduler row inside admission's

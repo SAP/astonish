@@ -54,8 +54,20 @@ func TestBotContentCitationDiagnosticAllFailures(t *testing.T) {
 	if !strings.Contains(botWorkContentGuidance, "For failed/unverified support, use an empty sources array") {
 		t.Fatal("missing unsupported-claim citation guidance")
 	}
-	if !strings.Contains(botEmployeeAssessmentGuidance, "Use text when existing evidence already permits an adequate answer") || !strings.Contains(botEmployeeAssessmentGuidance, "additional evidence or representative coverage is needed") {
-		t.Fatal("text repair must remove embellishments without accepting inadequate coverage")
+	// Text repair may use existing stories, but cannot turn an inadequate
+	// inventory into accepted coverage or discard original requirements.
+	for _, want := range []string{
+		"Use research only when more evidence is needed",
+		"if evidence has stories use text repair, otherwise request research to read the actual stories within existing search authority",
+		"a bare headline/category inventory is not a briefing and needs_work",
+		"Identify gaps from original owner wording and preserve every explicit requirement, freshness constraint and citation/evidence gate",
+		"a complete review of the revised answer against the FULL original assignment and captured evidence, with every criterion and content_assessments",
+		"removing or qualifying unsupported claims",
+		"Use empty revised_text and null revised_review if not possible",
+	} {
+		if !strings.Contains(botEmployeeAssessmentGuidance, want) {
+			t.Errorf("text repair must remove embellishments without accepting inadequate coverage: missing %q", want)
+		}
 	}
 	ctx, req, _ := botChatTestRequest(t)
 	w := store.NewBotWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: req.Run.ID, Version: req.Run.Version, Instructions: "Grounded answer", Charter: req.Version.Charter})

@@ -32,13 +32,78 @@ timeout without calling a model or granting a receipt. Configuration and truthfu
 assessment publication are documented under
 [retained-source inspection](../../tests/e2eboot/README.bots-acceptance.md#retained-source-inspection-in-the-fresh-agent-invocation).
 
-Configured search-first research supplies discovery/background evidence only.
-A successful `BotResearchEpisode` permits detail retrieval; it is not factual
-certification. Decisive dates, amounts and consequential assertions still require
-inspection of the actual source detail. Empty, rate-limited or missing-source
-searches must remain limitations, not fabricated URLs or verified claims. The
+Configured search-first research establishes scoped discovery, not factual
+certification. Substantive attributed search summaries and credible secondary
+reporting are usable by default for an ordinary overview to the extent their text
+supports the claims; fetching every linked article is not a prerequisite. Bare
+indexes and labels do not support invented details. Material gaps, genuine
+contradictions, explicit verification requests and high-stakes decisions or actions
+call for targeted inspection of actual source detail. Simply reporting a price,
+availability, licensing or performance announcement does not turn news into a
+verification or decision task. Empty, rate-limited or missing-source searches
+remain limitations, not proof of absence or fabricated verified claims. The
 isolated search gate proves dispatch ordering and scope without paid calls; it
-does not replace the three fresh live Stock Market News quality journeys.
+does not establish real-provider judgment or factual quality.
+
+### Proportionate rigor and selective clarification
+
+Bot producer guidance distinguishes responsibility from an automatic specialist
+standard of proof. Effort follows the requested outcome, explicit requirements,
+stakes and material uncertainty. Preserve reasonably supported breadth, attribute
+secondary reporting honestly and retain relevant caveats; a blocked primary page
+alone does not justify deleting a supported development. An older page, a different
+version or a failed fetch is not contradictory evidence by itself: compare the
+same event/version, date and conditions before declaring a conflict. Weak or
+contradictory claims must not become certain merely to increase coverage.
+Additional research needs a material gap, meaningful contradiction, explicit
+verification requirement or high-stakes decision/action claim to resolve; optional
+specialist detail must not delay an adequately supported deliverable.
+
+For an ordinary roundup, preserve distinct relevant developments supported by the
+returned coverage: group duplicates and shorten stories before dropping supported
+coverage. Primary fetches fill material gaps, not a routine verification checklist.
+The answer is reader-facing news, not a verification diary. Brief natural caveats
+and clear story-to-source attribution preserve honesty without repetitive evidence
+reports or claims that unread pages were inspected. No fixed story/vendor count or
+blind factual guarantee is introduced. These rules reconcile the agent-work and
+generic research instructions in `pkg/agent/bot_prompt.go`, rather than leaving
+unqualified primary-source mandates competing with composition guidance.
+
+The employee uses known context and reasonable low-risk assumptions instead of a
+rigor questionnaire. A focused question is appropriate when its answer would
+materially change the work and cannot be obtained from existing context, or for a
+consequential owner choice or missing authority. The existing title-confirmation
+stage remains unchanged. Saved Tasks and methods distinguish assistant-chosen
+research choices from actual owner requirements. Explicit depth or verification
+requirements are not relaxed. External-action authority, committed effect receipts,
+publication binding and legacy review contracts remain unchanged.
+
+The same principles reach the ordinary producer on initial and refreshed turns and
+the existing tool-free progress evaluation. Neither path introduces a model call,
+questionnaire, public setting, automatic research gate or new tool limit.
+`TestBotPromptProportionalRigor`, `TestBotPromptFreshPerInvocation` and
+`TestBotProgressEvaluationProportionalRigor` inspect delivered instructions,
+including correction/refresh and mode boundaries. Producer composition regressions
+in `TestBotPromptProportionalRigor` cover initial/refreshed scheduled, Home and
+interactive prompts; `TestBotAgentWorkProductionFactoryPrompt` observes exact
+model requests through the production factory before/after durable-work updates.
+They reject the competing unqualified primary-fetch rules and retain explicit
+verification, high-stakes checks, source honesty and title/Code exclusions. These
+controlled tests establish instruction delivery, not real-provider adherence,
+improved coverage or latency.
+
+Two isolated real-provider browser journeys on November 16 tested the composition
+change with the normal title/answer request. The first revealed competing evaluator
+instructions; `progressPrompt` was then aligned with search-supported composition,
+including same-event contradiction comparison and preservation of reported breadth.
+The second (`.tmp/real-progress-browser-4217674207/`) passed live and reload delivery
+in 46.98 seconds with three searches, one fetch and two evaluations. Its evaluator
+accepted substantive reporting despite a 403 primary fetch rather than requiring
+vendor-by-vendor verification. Composition acceptance remains partial: selection
+was uneven and one evaluator made an unsupported future-date objection. Older-page
+comparison was not exercised in that final run. These observations do not certify
+all source claims or establish consistent quality across tasks. The execution,
+authorization, timeout, publication and UI mechanisms were not changed.
 
 Pre-execution rejection of malformed optional bookkeeping records a server-only
 `ToolNonexecutionReceipt` at the concrete schema wrapper, after scope/lease checks
@@ -75,6 +140,33 @@ identity, digest, projection and effect drift. The guided-research production
 journey explicitly persists review criteria and still tests source-grounded repair,
 formatting, failed continuation and source/transport failure recovery. These are
 isolated tests, not fresh paid-provider acceptance or factual-quality guarantees.
+
+## Completed answers after read-tool feedback
+
+For agent-led work, non-native tool execution feedback is retained in
+`ChatCompletion.Err` with its original diagnostic, but is distinct from terminal
+runner/model errors. `runBotChatAttempt` can retain an actual final model answer
+only when every tool response is observed, the runtime positively classifies the
+report as read-only, no pending controls or unverified effects exist, and the
+context/budget checks still pass. The normal immutable candidate and employee
+message boundaries then publish that exact answer as **partial**, never inferred
+full success. A specific source blocker and a useful answer recovered from another
+source both remain employee-owned communication; no mandatory reviewer or retry is
+introduced. Historical review contracts remain unchanged.
+
+Native callback errors (including policy, cancellation and budget), approval or
+context-required states, model/runner/persistence errors, missing final output,
+and unknown/uncertain or effectful execution do not qualify. Tool names and model
+claims cannot grant recovery. Generic fallback text is unchanged; this fixes lost
+final capture rather than rewriting the fallback or certifying the answer.
+
+`TestBotEmployeeToolErrorFinalCommunication` failed first for a read-tool error
+followed by the actual specific blocker, and for a failed read followed by a useful
+alternate-source answer. It exercises the real adapter, zero added review calls,
+exact agent-origin message, partial status, tool accounting, candidate identity and
+serialized work/report commit validation. `TestBotEmployeeToolErrorRecoveryBoundary`
+covers terminal error identity and unsafe/missing evidence. These are isolated
+controlled-model tests, not live-daemon or paid-provider acceptance.
 
 ## Synthesis reserve
 
@@ -138,13 +230,47 @@ requirements are adequately supported, not pursue exhaustive or perfect output.
 News discovery is one application: configured search finds complementary specialist
 coverage, repeated stories are grouped, and shared-origin or syndicated reports
 are not counted as independent corroboration. Portal counts and site lists are
-not fixed. Consequential details still require decisive captured evidence.
+not fixed. Explicit verification and high-stakes decisions/actions still require
+stronger captured evidence for the relevant claims; ordinary attributed news does
+not require primary verification merely because it mentions a price or release.
 Retained approach decisions, resources and failures are adaptable Bot-owned
 knowledge; they do not prescribe web research for unrelated assignments.
 
 Prompt regression coverage includes research, bug fixing, spreadsheet analysis
 and document revision. This establishes delivered instructions, not live model
 adherence or a demonstrated latency improvement; those require separate journeys.
+
+## Adaptive recurring-work quality continuity
+
+`applyBotPrompt` in `pkg/agent/bot_prompt.go` supplies subject-neutral continuity
+instructions in interactive, Home, control and background Bot prompts, including
+`BuildBotPrompt` refreshes. A schedule-only conversion or cadence/delivery change
+preserves the assignment's subject, audience, requested dimensions and analytical
+depth. It does not freeze the prior answer's layout or turn a successful example
+into a new owner requirement. Newest explicit owner instructions govern requested
+changes within the existing pinned-assignment and authorization boundaries.
+
+Earlier reports are references for useful depth and coverage, not current factual
+evidence or permission. Numbered sections, bullets, tables and length are adaptive
+to the reader and available evidence unless the owner explicitly requires a form
+or count. Sparse current evidence can justify a narrower update, but not silently
+omitting requested dimensions or equating an uninvestigated dimension with no
+material developments. Material limits should be natural and brief, without
+padding unsupported detail or imposing a public coverage checklist. Concision
+removes repetition, not requested substance; unattended execution is not a reason
+to replace the requested deliverable with a shallow summary. Saved Tasks and
+methods should retain explicit preferences and adaptable depth/coverage guidance,
+not promote a single assistant-chosen bullet format into an owner requirement.
+
+This is producer guidance only: no new classifier, mandatory end review, model
+call, automatic recurrence, permission, storage schema or UI contract. The initial
+title-confirmation stage remains question-only, and Code mode is unchanged.
+`TestBotPromptAdaptiveQualityContinuity` checks initial/refreshed mode coverage;
+`TestBotPromptAdaptiveQualityRespectsTitleAndCodeBoundaries` protects those
+exclusions. `TestBotPromptFreshPerInvocation` also checks actual model-request
+system instructions through `NewChatAgent` on background and resumed interactive
+turns, retaining the clean owner turn and unchanged shared builder. These are
+controlled prompt-contract tests, not live-provider quality acceptance.
 
 ## Reader-facing news, not source inventories
 

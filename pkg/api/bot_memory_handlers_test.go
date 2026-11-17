@@ -44,12 +44,12 @@ func TestBotMemoryHTTPBoundary(t *testing.T) {
 		{name: "missing tenant", ctx: principal, status: 403},
 		{name: "invalid scope", ctx: authenticated, query: "?scope=org", status: 400},
 		{name: "duplicate scope", ctx: authenticated, query: "?scope=personal&scope=team", status: 400},
-		{name: "wrong identity", ctx: authenticated, bot: &store.Bot{ID: uuid.New(), Scope: store.BotScopePersonal}, status: 403, calls: 1},
-		{name: "wrong scope", ctx: authenticated, bot: &store.Bot{ID: id, Scope: store.BotScopeTeam}, status: 403, calls: 1},
+		{name: "wrong identity", ctx: authenticated, bot: &store.Bot{ID: uuid.New(), Scope: store.BotScopePersonal}, status: 403, calls: 2},
+		{name: "wrong scope", ctx: authenticated, bot: &store.Bot{ID: id, Scope: store.BotScopeTeam}, status: 403, calls: 2},
 		{name: "not found", ctx: authenticated, status: 404, calls: 1},
 		{name: "sanitized backend", ctx: authenticated, err: errors.New("database secret connection"), status: 500, calls: 1},
-		{name: "no personal router fallback", ctx: authenticated, bot: &store.Bot{ID: id, Scope: store.BotScopePersonal}, status: 503, calls: 1},
-		{name: "no team router fallback", ctx: authenticated, query: "?scope=team", bot: &store.Bot{ID: id, Scope: store.BotScopeTeam}, status: 503, calls: 1},
+		{name: "no personal router fallback", ctx: authenticated, bot: &store.Bot{ID: id, Scope: store.BotScopePersonal}, status: 503, calls: 2},
+		{name: "no team router fallback", ctx: authenticated, query: "?scope=team", bot: &store.Bot{ID: id, Scope: store.BotScopeTeam}, status: 503, calls: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, route := range []struct{ method, suffix string }{{"GET", ""}, {"POST", ""}, {"GET", "/search?q=x"}, {"GET", "/" + uuid.NewString()}, {"PUT", "/" + uuid.NewString()}, {"DELETE", "/" + uuid.NewString()}} {

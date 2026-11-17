@@ -49,6 +49,36 @@ cleanup-confirmed tombstone. Backend failures and failed confirmation leave the
 claim and tombstone in place, so a later poll retries idempotent deletion rather
 than falsely declaring completion.
 
+## Exact-owned execution reconciliation
+
+Before raw storage deletion, `BotHomeManager.Delete` invokes the optional
+`BotHomeSessionCleanupBackend`. Docker preflights all Home attachments against
+canonical session names, immutable container IDs, the exact recovery Home binding,
+owner and tenant, the scoped session registry, and the four expected mounts.
+Labels alone never authorize deletion. Unknown, forged or foreign attachments
+retain storage and prevent a completion receipt. Session locks serialize this
+path with create/start/destroy; immutable IDs prevent name-replacement deletion.
+
+The manager rechecks the value-copied authorization binding, and retention checks
+that repeated reservations preserve the original claim/fence. The backend calls
+this recheck immediately before each lifecycle teardown. It removes the session
+container and non-forced overlay volume, then marks its exact-binding recovery
+sidecar `cleanup_pending` and removes private payloads before the registry row.
+The sidecar is removed last: registry errors and interruptions before/after the
+registry commit remain discoverable on restart. A receipt without a registry row
+permits only final local cleanup after proving both container and overlay absent;
+it cannot authorize Docker destruction or session recreation. Failed overlay
+deletion retains recovery and registry evidence for restart.
+`TestBotHomeCleanupExactOwnershipAndRetry` covers both registry interruption
+windows, fresh-store retry, and preservation of replacement containers/overlays.
+Exact-binding recovery sidecars permit retry after the container already vanished.
+Production teardown failures are logged rather than discarded. No pool cache is
+required to recover an abandoned session.
+
+Raw `DeleteBotHome` remains non-forcing. A missing Home still triggers validated
+private-workspace removal, never Home recreation. Docker reference checks and a
+final authorization check protect the subsequent storage deletion.
+
 ## Evidence and boundaries
 
 `TestBotHomeCleanupReservation` and `TestBotHomeCleanupRestoreWins` exercise both
@@ -62,6 +92,37 @@ composition fixtures, not proof that Docker removed a volume. Live Docker
 artifact/read/delete proof belongs to `TestBotHomeDockerPersistenceLive` and the
 separate Docker offline-home acceptance described in
 [docker-bot-home-offline.md](docker-bot-home-offline.md).
+
+## Current deletion acceptance
+
+`TestBotPermanentDeleteAttachedDockerAcceptance` now uses real scoped SQLite
+stores and production HTTP routes rather than a retention-store fake. It creates
+an attached running Docker session, Home, overlay and private workspace, accepts
+permanent deletion (202), observes ordinary content 410 and explicit status 202,
+and rejects a forged foreign attachment without touching either container. After
+fixture removal of only that forged attachment, fresh backend/registry/worker
+objects resume ordinary polling. The test independently checks container, overlay,
+workspace, Home, registry and private recovery directory absence; exact SQL Bot,
+session/history, Task/revision and scheduler-job absence; final HTTP 404; and an
+unchanged unrelated active scheduler sentinel. This is controller/registry
+replacement in one test process, not an OS daemon-process restart.
+
+`TestBotPermanentDeleteHTTP/personal` and `/team` additionally inject physical
+cleanup and post-verification SQL-purge failures, then resume with a fresh worker
+without a backend or further client retry. Both assert owned Task/revision,
+session/history/memory and scheduled-job removal and preserve another Bot's
+Task/revision, history/memory, active job and file.
+
+`TestBotPermanentDeleteBrowserAcceptance` serves the built Studio client against
+production HTTP and SQLite, with a controlled adapter that deletes real disposable
+Docker volumes. It checks cancel/no reason, accepted 202, content 410, explicit
+pending status 202, observer closure, worker cleanup, final 404, SQL/history/FTS
+absence and preservation of another Bot/file/shared credential. Its adapter does
+not stand in for the attached production-Docker-backend proof above.
+
+SQLite row deletion makes pages reusable; file size need not shrink. This path
+performs no automatic global `VACUUM`, secure media erasure or backup deletion.
+Existing production Bots and the normal daemon are outside these fixtures.
 
 ## Explicit permanent deletion
 

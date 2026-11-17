@@ -76,7 +76,15 @@ type botStoredRecord struct {
 }
 
 type botStoredRun struct {
-	Task *store.BotTaskRevision `json:"task,omitempty"`
+	ProgressOwnerContinuation *botProgressOwnerContinuation `json:"progress_owner_continuation,omitempty"`
+	CoalescedOccurrences      int64                         `json:"coalesced_occurrences,omitempty"`
+	Progress                  *store.BotProgressState       `json:"progress,omitempty"`
+	ProgressCursor            int64                         `json:"progress_cursor,omitempty"`
+	ProgressPending           int64                         `json:"progress_pending,omitempty"`
+	ProgressUncertain         bool                          `json:"progress_uncertain,omitempty"`
+	ProgressAccountedAt       time.Time                     `json:"progress_accounted_at,omitempty"`
+	ProgressQuota             *mandateRunUsage              `json:"progress_quota,omitempty"`
+	Task                      *store.BotTaskRevision        `json:"task,omitempty"`
 	// SkillAdmissionOwner is set only by authenticated, original manual RequestRun.
 	// It is not copied from tool input or inferred from a user-shaped transcript.
 	SkillAdmissionOwner        *uuid.UUID                `json:"skill_admission_owner,omitempty"`
@@ -97,21 +105,32 @@ func (s botStoredRun) MarshalJSON() ([]byte, error) {
 	type stored botStoredRun
 	return json.Marshal(struct {
 		stored
-		MandateRef    *store.BotMandateRef        `json:"mandate_ref,omitempty"`
-		CallerCeiling *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
-	}{stored: stored(s), MandateRef: s.Run.MandateRef, CallerCeiling: s.Run.CallerCeiling})
+		MandateRef                *store.BotMandateRef        `json:"mandate_ref,omitempty"`
+		CallerCeiling             *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
+		TitleConfirmation         *store.BotTitleConfirmation `json:"title_confirmation,omitempty"`
+		RuntimeAccountingRecorded bool                        `json:"runtime_accounting_recorded,omitempty"`
+	}{stored: stored(s), MandateRef: s.Run.MandateRef, CallerCeiling: s.Run.CallerCeiling, TitleConfirmation: s.Run.TitleConfirmation, RuntimeAccountingRecorded: s.Run.RuntimeAccountingRecorded})
 }
 func (s *botStoredRun) UnmarshalJSON(data []byte) error {
 	type stored botStoredRun
 	var value struct {
 		stored
-		MandateRef    *store.BotMandateRef        `json:"mandate_ref,omitempty"`
-		CallerCeiling *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
+		MandateRef                *store.BotMandateRef        `json:"mandate_ref,omitempty"`
+		CallerCeiling             *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
+		TitleConfirmation         *store.BotTitleConfirmation `json:"title_confirmation,omitempty"`
+		RuntimeAccountingRecorded bool                        `json:"runtime_accounting_recorded,omitempty"`
 	}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
+	if c := value.TitleConfirmation; c != nil {
+		if c.ValidateBinding(value.stored.Run, c.OwnerID) != nil || c.OriginalTitle != value.stored.Instructions {
+			return store.ErrBotInvalid
+		}
+	}
 	*s = botStoredRun(value.stored)
+	s.Run.TitleConfirmation = value.TitleConfirmation.Clone()
+	s.Run.RuntimeAccountingRecorded = value.RuntimeAccountingRecorded
 	s.Run.MandateRef = value.MandateRef
 	if value.CallerCeiling != nil {
 		ceiling := value.CallerCeiling.Clone()
@@ -288,6 +307,21 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 			// A committed occurrence remains replayable after pause/version rebind.
 			// Authentication and ownership above still apply; no live state is mutated.
 			if occurrence.external == nil {
+				var receipt botCoalescedOccurrence
+				if e := progressRead(ctx, tx, req.BotID, "progress-occurrence:"+req.IdempotencyKey, &receipt); e == nil {
+					if receipt.Occurrence.Version != req.Version || receipt.Occurrence.TriggerID != req.TriggerID || !receipt.Occurrence.OccurrenceAt.Equal(req.OccurrenceAt) {
+						return store.ErrBotConflict
+					}
+					old, e := tx.ReadRun(ctx, req.BotID, receipt.RunID)
+					if e != nil {
+						return e
+					}
+					occurrence.duplicate, occurrence.coalesced = true, true
+					result = &old.Run
+					return nil
+				} else if e != store.ErrBotNotFound {
+					return e
+				}
 				old, e := tx.FindRun(ctx, req.BotID, req.IdempotencyKey)
 				if e == nil {
 					if old.Run.Version != req.Version || old.Run.TriggerID != req.TriggerID || !old.OccurrenceAt.Equal(req.OccurrenceAt) {
@@ -342,6 +376,47 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 			return err
 		}
 		now := r.clock()
+		if occurrence != nil && occurrence.external == nil && req.Trigger == store.TriggerCron && v.Budget.RuntimePolicy.EffectiveMode() == execution.BotRuntimeModeProgressV1 {
+			open, e := findProgressAssignment(ctx, tx, req.BotID, req.TriggerID)
+			if e != nil {
+				return e
+			}
+			if open != nil {
+				if err := tx.(botScheduledDB).advanceScheduledAdmission(ctx, *rec); err != nil {
+					return err
+				}
+				payload, e := json.Marshal(botCoalescedOccurrence{Occurrence: occurrence.occurrence, RunID: open.ID})
+				if e != nil {
+					return e
+				}
+				if e = tx.InsertActivity(ctx, store.BotActivity{BotID: req.BotID, RunID: &open.ID, Sequence: rec.LastSequence + 1, Kind: progressRecordKind, Payload: payload, CreatedAt: now}, "progress-occurrence:"+req.IdempotencyKey); e != nil {
+					return e
+				}
+				if e = r.acknowledgeScheduledRequest(ctx, tx, req, occurrence, now); e != nil {
+					return e
+				}
+				counted, e := tx.ReadRun(ctx, req.BotID, open.ID)
+				if e != nil {
+					return e
+				}
+				counted.CoalescedOccurrences = progressAdd(counted.CoalescedOccurrences, 1)
+				if e = saveProgressEnvelope(ctx, tx, counted); e != nil {
+					return e
+				}
+				if e = appendBotRunStateTx(ctx, tx, rec.Bot, counted.Run, rec.LastSequence+1, now); e != nil {
+					return e
+				}
+				// Return the same committed projection as the live event and snapshot,
+				// including the sequence advanced by this coalesced occurrence.
+				committed, e := tx.ReadRun(ctx, req.BotID, open.ID)
+				if e != nil {
+					return e
+				}
+				occurrence.coalesced = true
+				result = &committed.Run
+				return nil
+			}
+		}
 		if v.Budget.MaxRunsPerDay != nil {
 			loc, err := time.LoadLocation(v.Persona.Timezone)
 			if err != nil {
@@ -490,9 +565,16 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 				after = runs[len(runs)-1].ID
 			}
 		}
+		if run.Progress != nil {
+			if !progressSafe(run) || now.Before(run.Progress.Checkpoint.NextEligibleAt) {
+				return store.ErrBotConflict
+			}
+			run.ProgressAccountedAt = now
+		}
 		// Only first claims initialize work. Legacy in-flight/checkpoint attempts
 		// remain legacy; an existing contract is never regenerated on continuation.
-		if run.Work == nil && run.Run.StartedAt == nil && len(run.Run.Checkpoint) == 0 {
+		confirmedTitle := run.Run.TitleConfirmation != nil && run.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed
+		if run.Work == nil && (confirmedTitle || (run.Run.TitleConfirmation == nil && run.Run.StartedAt == nil && len(run.Run.Checkpoint) == 0)) {
 			version, err := tx.ReadVersion(ctx, req.BotID, run.Run.Version)
 			if err != nil {
 				return err
@@ -501,7 +583,11 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 			if err != nil {
 				return err
 			}
-			run.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.BotID, RunID: req.RunID, Version: run.Run.Version, AdmissionEventID: run.Run.UserEventID, Instructions: run.Instructions, Charter: version.Charter, Goals: goals, Attachments: store.PinBotWorkAttachments(run.Attachments)})
+			instructions := run.Instructions
+			if confirmedTitle {
+				instructions = run.Run.TitleConfirmation.ConfirmedAssignment
+			}
+			run.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.BotID, RunID: req.RunID, Version: run.Run.Version, AdmissionEventID: run.Run.UserEventID, Instructions: instructions, Charter: version.Charter, Goals: goals, Attachments: store.PinBotWorkAttachments(run.Attachments)})
 			run.Work.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
 			if err := run.Work.Validate(); err != nil {
 				return err
@@ -554,8 +640,23 @@ func (r *botRepository) RenewLease(ctx context.Context, lease store.BotLease, ex
 		return store.BotLease{}, store.ErrBotInvalid
 	}
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+		if locker, ok := tx.(botTranscriptDB); ok {
+			if err := locker.fenceTranscript(ctx, lease, now); err != nil {
+				return err
+			}
+		}
 		if _, err := r.checkLease(ctx, tx, lease, now); err != nil {
 			return err
+		}
+		saved, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
+		if err != nil {
+			return err
+		}
+		if saved.Progress != nil || saved.ProgressCursor != 0 {
+			progressAccount(saved, now)
+			if err := tx.(botWorkDB).updateWorkRun(ctx, *saved, lease, now); err != nil {
+				return err
+			}
 		}
 		return tx.RenewRunLease(ctx, lease, now, expires.UTC())
 	})
@@ -645,6 +746,25 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 		if !a.ExpiresAt.After(now) {
 			return store.ErrBotExpired
 		}
+		if c := saved.Run.TitleConfirmation; c != nil && c.State != store.BotTitleConfirmationConfirmed {
+			if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil || a.Action.Tool != "ask_user" || a.Action.Effect != execution.EffectRead || store.ValidateBotTitleQuestion(a.Interaction) != nil {
+				return store.ErrBotInvalid
+			}
+			if c.State == store.BotTitleConfirmationWaiting {
+				old, err := tx.ReadApproval(ctx, l.BotID, c.ApprovalID)
+				if err != nil {
+					return err
+				}
+				if old.ActionDigest != digest || !reflect.DeepEqual(old.Interaction, a.Interaction) {
+					return store.ErrBotConflict
+				}
+				result = old
+				return nil
+			}
+			if c.State != store.BotTitleConfirmationNeedsQuestion {
+				return store.ErrBotConflict
+			}
+		}
 		old, err := tx.FindApproval(ctx, l.BotID, l.RunID, digest)
 		if err == nil {
 			result = old
@@ -661,6 +781,16 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 		a.Status = store.ApprovalPending
 		a.DecidedAt = nil
 		a.DecidedBy = nil
+		if saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+			next, err := saved.Run.TitleConfirmation.WithQuestion(a)
+			if err != nil {
+				return err
+			}
+			saved.Run.TitleConfirmation = next
+			if err := persistTitleQuestion(ctx, tx, saved); err != nil {
+				return err
+			}
+		}
 		if err := tx.InsertApproval(ctx, a); err != nil {
 			return err
 		}
@@ -727,6 +857,9 @@ func (r *botRepository) DecideApproval(ctx context.Context, q store.BotApprovalD
 			saved, err := tx.ReadRun(ctx, q.BotID, a.RunID)
 			if err != nil {
 				return err
+			}
+			if saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed {
+				return store.ErrBotForbidden
 			}
 			if err := r.interactiveAnswerAuthority(ctx, saved.Run); err != nil {
 				return err
@@ -902,6 +1035,36 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		if _, err := r.checkLease(ctx, tx, q.Lease, now); err != nil {
 			return err
 		}
+		if c := saved.Run.TitleConfirmation; c != nil && c.State != store.BotTitleConfirmationConfirmed {
+			if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil || q.Status == store.RunSucceeded || q.Status == store.RunPartial || len(q.Report.Artifacts) != 0 || len(q.Todos) != 0 {
+				return store.ErrBotForbidden
+			}
+			if q.Status == store.RunWaitingApproval {
+				checkpoint, err := botdomain.DecodeApprovalCheckpoint(q.Checkpoint, saved.Run)
+				if err != nil || c.State != store.BotTitleConfirmationWaiting || checkpoint.ApprovalID != c.ApprovalID || checkpoint.Fence != q.Lease.Fence || len(q.Report.NeedsApproval) != 1 || q.Report.NeedsApproval[0] != c.ApprovalID {
+					return store.ErrBotConflict
+				}
+				a, err := tx.ReadApproval(ctx, saved.Run.BotID, c.ApprovalID)
+				if err != nil || !checkpoint.Matches(*a) {
+					return store.ErrBotConflict
+				}
+			}
+		}
+		// Progress usage is a logical-run total, not this attempt's meter. Keep
+		// commit replay keyed to the original request but never erase durable holds.
+		if saved.Progress != nil || saved.ProgressCursor != 0 {
+			if !progressUsageAtLeast(q.Usage, saved.Run.Usage) {
+				return store.ErrBotConflict
+			}
+			if (q.Status == store.RunSucceeded || q.Status == store.RunPartial || q.Status == store.RunWaitingApproval) && (saved.ProgressPending != 0 || saved.ProgressUncertain) {
+				return store.ErrBotConflict
+			}
+			progressAccount(saved, now)
+			q.Usage.RuntimeNanos = max(q.Usage.RuntimeNanos, saved.Run.Usage.RuntimeNanos)
+			if saved.ProgressCursor > 0 && saved.Run.Usage.CostMicros == nil {
+				q.Usage.CostMicros = nil
+			}
+		}
 		// Validate publication against work before learning finalization changes it.
 		if err := validateBotWorkCommit(saved.Work, q); err != nil {
 			return err
@@ -940,6 +1103,7 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		saved.Run.Work = store.BuildBotWorkProjection(saved.Work)
 		saved.Run.Report = q.Report
 		saved.Run.Usage = q.Usage
+		saved.Run.RuntimeAccountingRecorded = true
 		// An unresolved continuation must not erase the last known selection.
 		if q.ModelSelection != nil {
 			saved.Run.Provider = q.ModelSelection.Provider
@@ -1119,6 +1283,29 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 		}
 		if rec.LeaseExpiresAt == nil || now.Before(*rec.LeaseExpiresAt) || now.Before(saved.Run.Lease.ExpiresAt) {
 			return store.ErrBotConflict
+		}
+		if saved.Progress != nil || saved.ProgressCursor != 0 {
+			progressAccount(saved, now)
+			if progressSafe(saved) {
+				if err := suspendProgressQuota(ctx, tx, rec, saved); err != nil {
+					return err
+				}
+				saved.Run.Status = store.RunQueued
+				saved.Progress.Phase = store.BotProgressSuspended
+				saved.Progress.Reason = store.BotProgressReasonRecovery
+				saved.Progress.Checkpoint.Usage = saved.Run.Usage
+				if err := tx.FinishRun(ctx, *rec, *saved, lease, now, true); err != nil {
+					return err
+				}
+				payload, _ := json.Marshal(map[string]any{"run_id": lease.RunID, "status": store.RunQueued, "intent": store.BotOutboxDispatch})
+				return insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: lease.BotID, RunID: &lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: now}, fmt.Sprintf("progress-recovery:%s:%d", lease.RunID, lease.Fence))
+			}
+			// A later dispatch invalidates an older valid checkpoint. Never requeue it.
+			saved.ProgressUncertain = true
+			if saved.Progress != nil {
+				saved.Progress.Phase = store.BotProgressReconciling
+				saved.Progress.Reason = store.BotProgressReasonUncertainEffect
+			}
 		}
 		interruptBotWork(saved.Work, "Run interrupted; verify prior effects before any authorized continuation.")
 		syncBotWorkProjection(saved)
@@ -1362,11 +1549,18 @@ func (r *botRepository) changeLifecycleIntent(ctx context.Context, q store.BotLi
 					return err
 				}
 				seq++
-				body, err := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status, "report": run.Report, "intent": store.BotOutboxPublish})
+				kind := store.BotActivityReport
+				payload := map[string]any{"run_id": run.ID, "status": run.Status, "report": run.Report, "intent": store.BotOutboxPublish}
+				if !stop && run.Progress != nil {
+					kind = store.BotActivityRun
+					delete(payload, "intent")
+					delete(payload, "report")
+				}
+				body, err := json.Marshal(payload)
 				if err != nil {
 					return err
 				}
-				if err := insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: q.BotID, RunID: &run.ID, Sequence: seq, Kind: store.BotActivityReport, Payload: body, CreatedAt: now}, fmt.Sprintf("lifecycle-result:%d:%s", next.Revision, run.ID)); err != nil {
+				if err := insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: q.BotID, RunID: &run.ID, Sequence: seq, Kind: kind, Payload: body, CreatedAt: now}, fmt.Sprintf("lifecycle-result:%d:%s", next.Revision, run.ID)); err != nil {
 					return err
 				}
 			}
@@ -1403,6 +1597,24 @@ func (r *botRepository) changeLifecycleIntent(ctx context.Context, q store.BotLi
 }
 
 func quiescedBotRun(saved botStoredRun, stop bool, now time.Time) botStoredRun {
+	if !stop && saved.Progress != nil {
+		if saved.Run.Status == store.RunRunning {
+			progressAccount(&saved, now)
+		}
+		saved.Run.Status = store.RunInterrupted
+		saved.Run.FinishedAt = nil
+		saved.Progress.Phase = store.BotProgressSuspended
+		saved.Progress.Reason = store.BotProgressReasonPaused
+		if !progressSafe(&saved) {
+			saved.Progress.Phase = store.BotProgressReconciling
+			saved.Progress.Reason = store.BotProgressReasonUncertainEffect
+			saved.ProgressUncertain = true
+		}
+		saved.Run.ContinuationReason = store.BotContinuationRequired
+		saved.Run.Report.EmployeeMessage = nil
+		saved.Run.Progress = store.BuildBotProgressProjection(saved.Progress, saved.Run)
+		return saved
+	}
 	wasRunning := saved.Run.Status == store.RunRunning
 	if wasRunning {
 		saved.Run.Status = store.RunInterrupted
@@ -1503,6 +1715,11 @@ func (r *botRepository) MarkRead(ctx context.Context, cursor store.BotReadCursor
 		}
 		if _, err := r.auth.authorize(ctx, rec.Bot.OwnerID, false); err != nil {
 			return err
+		}
+		// Permanent deletion and a reserved Home cleanup pin the root revision.
+		// A read cursor is no reason to invalidate physical cleanup authority.
+		if rec.Bot.PermanentDelete || rec.Metadata[botHomeCleanupClaimKey] != nil {
+			return store.ErrBotForbidden
 		}
 		if cursor.Sequence > rec.LastSequence {
 			return store.ErrBotInvalid

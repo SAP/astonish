@@ -132,7 +132,16 @@ it.each(['running', 'succeeded'] as const)('keeps fresh %s state and partial act
   expect(hook.result.current.activity.map(event => event.sequence)).toEqual([1, 121])
   expect(hook.result.current.error).toBeUndefined()
 })
-it.each([401, 403, 404])('clears protected snapshot data on activity access loss (%s)', async status => {
+it('clears cached content and exposes typed pending state on a deletion response', async () => {
+  const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner', true))
+  await waitFor(() => expect(hook.result.current.activity).toHaveLength(121))
+  vi.mocked(api.getBotSnapshot).mockRejectedValue(new BotAPIError(410, '{"code":"deletion_pending","error":"Cleanup pending"}'))
+  await act(async () => hook.result.current.retry())
+  expect(hook.result.current.data).toBeUndefined()
+  expect(hook.result.current.activity).toEqual([])
+  expect(hook.result.current.deletionPending).toBe(true)
+})
+it.each([401, 403, 404, 410])('clears protected snapshot data on activity access loss (%s)', async status => {
   const hook = renderHook(() => useBotSnapshot('a', 'team', 'owner', true))
   await waitFor(() => expect(hook.result.current.activity).toHaveLength(121))
   vi.mocked(api.getBotSnapshot).mockResolvedValue(snapshot('a', 'owner', 122))

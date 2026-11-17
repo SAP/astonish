@@ -26,6 +26,9 @@ import (
 // must belong to this request. SessionService is the existing scoped store; the
 // adapter never creates/replaces sessions or changes their execution owner.
 type BotChatResources struct {
+	// ProgressDispatch attests that the factory wired this exact capability to
+	// all models and executable tool views; nil keeps progress fail-closed.
+	ProgressDispatch bot.ProgressDispatch
 	// ModelSelection records the successful scoped resolver result, never ambient defaults.
 	ModelSelection *store.SessionPin
 	// AssessmentContext is a trusted, owner-bound read, never a model tool.
@@ -159,6 +162,14 @@ func validateBotChatRequest(ctx context.Context, req bot.RunRequest, sink bot.Ev
 	if prior := execution.RunPolicyFromContext(ctx); prior != nil && prior != req.Policy {
 		return store.ErrBotForbidden
 	}
+	if c := req.Run.TitleConfirmation; c != nil {
+		if c.ValidateBinding(req.Run, req.Bot.OwnerID) != nil || (c.State != store.BotTitleConfirmationNeedsQuestion && c.State != store.BotTitleConfirmationConfirmed) {
+			return store.ErrBotInvalid
+		}
+	}
+	if err := botProgressActivationGuard(req); err != nil {
+		return err
+	}
 	if req.Budget == nil || sink == nil {
 		return store.ErrBotUnsupported
 	}
@@ -199,6 +210,9 @@ func (a *BotChatRuntimeAdapter) Start(ctx context.Context, req bot.RunRequest, s
 }
 
 func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest, sink bot.EventSink, resume bool) (result bot.RunResult, err error) {
+	if req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+		req.Work = nil // clarification has no producer, journal or Task publication
+	}
 	validation := req
 	if resume {
 		validation.Run.Checkpoint = nil
@@ -217,7 +231,16 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	ctx = store.WithUserID(ctx, req.Bot.OwnerID.String())
 	ctx = store.WithOrgSlug(ctx, req.Principal.OrgSlug)
 	ctx = store.WithTeamSlug(ctx, req.Principal.TeamSlug)
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.Version.Budget.MaxRuntimeSeconds)*time.Second)
+	var expiry time.Time
+	if req.Mandate != nil {
+		expiry = req.Mandate.Authorization.Snapshot().ExpiresAt
+	} else if req.Run.CallerCeiling != nil {
+		expiry = req.Run.CallerCeiling.ExpiresAt
+	}
+	ctx, cancel, err := bot.RunContext(ctx, req.Version.Budget, req.Budget, req.Run.Usage, expiry)
+	if err != nil {
+		return botChatFailure(bot.ErrorBudget, err)
+	}
 	defer cancel()
 	a.mu.Lock()
 	if _, exists := a.active[req.Run.ID]; exists {
@@ -237,9 +260,19 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	if err := req.Budget.Check(ctx); err != nil {
 		return botChatFailure(bot.ErrorBudget, err)
 	}
+	var progress *botProgressRuntime
+	ordinaryResume := resume && req.Progress != nil
+	if bot.ProgressExecutionEnabled(req) {
+		progress = &botProgressRuntime{req: req, state: req.Progress.Clone(), pending: make(map[uuid.UUID]bool)}
+		if progress.state != nil {
+			progress.cursor = progress.state.Checkpoint.DispatchLedgerCursor
+		}
+		ctx = bot.WithProgressDispatch(ctx, progress)
+		ctx = bot.WithProgressController(ctx, &bot.ProgressController{Boundary: progress.Boundary})
+	}
 	interaction, _ := ctx.Value(botResumeInteractionKey{}).(*store.BotApproval)
 	var capture *botApprovalCapture
-	if !resume || interaction != nil {
+	if !resume || interaction != nil || ordinaryResume {
 		if s := bot.ApprovalStoreFromContext(ctx); s != nil {
 			capture = &botApprovalCapture{store: s, req: req}
 			ctx = bot.WithInteractionOwner(ctx)
@@ -249,11 +282,21 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		}
 	}
 	var workService *botAgentWorkService
-	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 && (!resume || interaction != nil) {
+	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 && (!resume || interaction != nil || ordinaryResume) {
 		workService = &botAgentWorkService{req: req}
 		ctx = bot.WithBotWorkServices(ctx, workService)
 	}
+	// Setup is bounded independently; stop its watchdog once resources are ready.
+	// Resources keep the run context, never a soon-cancelled setup child context.
+	var setupTimer *time.Timer
+	if timeout, ok := req.Budget.(interface{ ModelCallTimeout() time.Duration }); ok && timeout.ModelCallTimeout() > 0 {
+		setupTimer = time.AfterFunc(timeout.ModelCallTimeout(), cancel)
+		defer setupTimer.Stop()
+	}
 	resources, err := a.factory(ctx, req)
+	if setupTimer != nil {
+		setupTimer.Stop()
+	}
 	if err == nil && resources != nil && resources.ModelSelection != nil {
 		selected := *resources.ModelSelection
 		modelSelection = &selected
@@ -285,7 +328,7 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		if transcript == nil {
 			return botChatFailure(bot.ErrorPermission, store.ErrBotUnsupported)
 		}
-		conversation := botConversationSessions{Service: resources.SessionService, transcript: transcript, lease: req.Run.Lease, id: req.Run.SessionID, userEventID: req.Run.UserEventID}
+		conversation := botConversationSessions{Service: resources.SessionService, transcript: transcript, lease: req.Run.Lease, id: req.Run.SessionID, userEventID: req.Run.UserEventID, internalInput: ordinaryResume}
 		if interaction != nil {
 			conversation.answerEventID = "bot-owner-answer:" + interaction.ID.String()
 		}
@@ -302,6 +345,12 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	if existing == nil || existing.Session == nil || existing.Session.ID() != req.Run.SessionID.String() || existing.Session.UserID() != req.Bot.OwnerID.String() || existing.Session.AppName() != resources.AppName {
 		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
 	}
+	if progress != nil {
+		ctx, err = progress.compose(ctx, resources)
+		if err != nil {
+			return botChatFailure(bot.ErrorBlocked, err)
+		}
+	}
 	// The factory contract supplies the shared-budget model. Capture/resume
 	// decorators below are parent-turn behavior and must not wrap auxiliary calls.
 	auxiliary := resources.Agent.LLM
@@ -312,7 +361,7 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	if capture != nil {
 		resources.Agent.LLM = &botApprovalCaptureModel{LLM: resources.Agent.LLM, capture: capture}
 	}
-	if resume && interaction == nil {
+	if resume && interaction == nil && !ordinaryResume {
 		action, ok := ctx.Value(botResumeActionKey{}).(execution.ActionDescriptor)
 		if !ok {
 			return botChatFailure(bot.ErrorBlocked, store.ErrBotUnsupported)
@@ -358,7 +407,21 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	produce := func(attemptReq bot.RunRequest, attemptInteraction *store.BotApproval, completion *ChatCompletion) (bot.RunResult, error) {
 		return runBotChatAttempt(ctx, attemptReq, resources, sink, capture, existing, attemptInteraction, resume, &sequence, completion)
 	}
-	return runBotWork(ctx, req, resources, auxiliary, resume && interaction == nil, func(attemptReq bot.RunRequest, completion *ChatCompletion) (bot.RunResult, error) {
+	if req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
+		if capture == nil {
+			return botChatFailure(bot.ErrorBlocked, store.ErrBotUnsupported)
+		}
+		var completion ChatCompletion
+		result, err := produce(req, nil, &completion)
+		if err != nil {
+			return result, err
+		}
+		if result.Status != store.RunWaitingApproval || len(result.Checkpoint) == 0 {
+			return botChatFailure(bot.ErrorPermanent, errors.New("title clarification generation failed: no persisted question checkpoint"))
+		}
+		return result, nil
+	}
+	result, runErr := runBotWork(ctx, req, resources, auxiliary, resume && interaction == nil && !ordinaryResume, func(attemptReq bot.RunRequest, completion *ChatCompletion) (bot.RunResult, error) {
 		result, err := produce(attemptReq, interaction, completion)
 		interaction = nil // an owner answer is consumed only once
 		if conversation, ok := resources.SessionService.(botConversationSessions); ok {
@@ -368,6 +431,15 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		}
 		return result, err
 	})
+	// Auxiliary employee assessment calls also reserve durable dispatches. Their
+	// returned iterators have drained now; settle them before the supervisor's
+	// final commit, not only at the last producer/tool boundary.
+	if result.ProgressCheckpoint == nil {
+		if controller := bot.ProgressControllerFromContext(ctx); controller != nil && controller.Boundary != nil {
+			runErr = errors.Join(runErr, controller.Boundary(ctx))
+		}
+	}
+	return result, runErr
 }
 
 func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotChatResources, sink bot.EventSink, capture *botApprovalCapture, existing *session.GetResponse, interaction *store.BotApproval, resume bool, sequence *int64, completed *ChatCompletion) (result bot.RunResult, err error) {
@@ -376,6 +448,10 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	}
 	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
 		journal := &botAgentReadJournal{}
+		if progress, ok := bot.ProgressDispatchFromContext(ctx).(*botProgressRuntime); ok {
+			journal.restoreProgress(progress.restoredJournal)
+			progress.restoredJournal = nil // only the first resumed producer inherits it
+		}
 		ctx = context.WithValue(ctx, botAgentReadJournalKey{}, journal)
 		// Wrap the producer only, outside capture/exact-action resume decorators.
 		// The fresh factory agent is request-owned; restore it between attempts so
@@ -457,6 +533,12 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	// No title model call and no interactive auto-approval in Bot mode.
 	cr.Run(resources.Agent, resources.SessionService, resources.Agent.LLM, nil, message, req.Instructions, false, "", nil, false)
 	completion := cr.Completion()
+	if journal, ok := ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal); ok {
+		completion.Report.EffectState = journal.effectState()
+	}
+	if controller := bot.ProgressControllerFromContext(ctx); controller != nil && controller.Boundary != nil {
+		completion.Err = errors.Join(completion.Err, controller.Boundary(ctx))
+	}
 	// Continuations must assess the actual saved source responses and the owner
 	// answer, not only this invocation's final prose. These are untrusted data.
 	if resume && req.Work != nil && req.Work.Protocol != store.BotWorkProtocolAgentLedV1 {
@@ -487,6 +569,16 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 			} else {
 				completion.reportBodies["tool-response:owner-answer:"+interaction.ID.String()] = string(raw)
 			}
+		}
+	}
+	// A suspended checkpoint has already atomically released the durable lease.
+	// Never turn this nonterminal handoff into a failed/final report.
+	if progress, ok := bot.ProgressDispatchFromContext(ctx).(*botProgressRuntime); ok {
+		progress.mu.Lock()
+		state := progress.state.Clone()
+		progress.mu.Unlock()
+		if state != nil && state.Phase == store.BotProgressSuspended {
+			return bot.RunResult{Status: store.RunQueued, ProgressCheckpoint: state, Usage: state.Checkpoint.Usage}, nil
 		}
 	}
 	*completed = completion
@@ -520,7 +612,8 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	if completion.Blocked {
 		return botChatFailure(bot.ErrorBlocked, errors.New("bot run blocked; approval or intervention required"))
 	}
-	if completion.Err != nil {
+	retainReadOnlyFinal := botCanRetainReadOnlyFinal(completion, req, observed)
+	if completion.Err != nil && !retainReadOnlyFinal {
 		class := bot.ErrorPermanent
 		var policyErr *agent.BotPolicyError
 		if errors.As(completion.Err, &policyErr) {
@@ -554,7 +647,10 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 		}
 	}
 	result = bot.RunResult{Status: store.RunSucceeded, Report: observed}
-	if len(result.Report.Unverified) > 0 {
+	if retainReadOnlyFinal || len(result.Report.Unverified) > 0 {
+		// Read feedback does not erase completed employee communication, but is
+		// not proof the full assignment succeeded. Preserve the exact final as
+		// partial through the normal candidate and publication boundaries.
 		result.Status = store.RunPartial
 	}
 	return result, nil

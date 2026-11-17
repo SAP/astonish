@@ -9,8 +9,10 @@ import (
 	"time"
 )
 
+// Include the ordinary chat/question capabilities so title admissions can issue
+// their question-only mandate without weakening the finite quota policy.
 func mandateTestPolicy(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
-	return store.BotMandatePolicy{TTL: time.Hour, Scopes: []string{string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{"read_file"}}}, Limits: store.BotMandateLimits{MinScheduleIntervalSeconds: 60, MaxSchedules: 1, MaxDailyRuns: 2, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 60, MaxToolCalls: 2, MaxTokens: 10, MaxTotalToolCalls: 3, MaxTotalTokens: 15}}, nil
+	return store.BotMandatePolicy{TTL: time.Hour, Scopes: []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{"read_file", "ask_user"}}, {Action: execution.CapabilityChat, Resources: []string{"chat"}}}, Limits: store.BotMandateLimits{MinScheduleIntervalSeconds: 60, MaxSchedules: 1, MaxDailyRuns: 2, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 60, MaxToolCalls: 2, MaxTokens: 10, MaxTotalToolCalls: 3, MaxTotalTokens: 15}}, nil
 }
 func TestBotMandateAdmissionDurable(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {

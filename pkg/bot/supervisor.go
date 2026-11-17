@@ -33,10 +33,11 @@ type SupervisorConfig struct {
 	Ready   RunReadiness
 	// Events must persist before publication. A viewer connection is not an
 	// appropriate sink: its disconnection must not control the worker lifetime.
-	Events        EventSink
-	WorkerID      string
-	LeaseDuration time.Duration
-	RenewInterval time.Duration
+	Events                 EventSink
+	WorkerID               string
+	LeaseDuration          time.Duration
+	RenewInterval          time.Duration
+	ProgressYieldRequested func() bool
 }
 
 // Supervisor executes one already admitted manual/scheduled run or explicitly requeued exact
@@ -201,21 +202,16 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	if err != nil {
 		return zero, err
 	}
-	deadline := time.Now().Add(time.Duration(input.Version.Budget.MaxRuntimeSeconds) * time.Second)
-	if prepared.Mandate == nil && input.Run.IsInteractiveChat() && input.Run.CallerCeiling.ExpiresAt.Before(deadline) {
-		deadline = input.Run.CallerCeiling.ExpiresAt
-	}
+	var expiry time.Time
 	if prepared.Mandate != nil {
-		// Preparation may narrow runtime below the saved version budget. Enforce
-		// that actual deadline for home binding, tools and in-flight models alike.
-		if bounded, ok := prepared.Budget.(interface{ Deadline() time.Time }); ok && bounded.Deadline().Before(deadline) {
-			deadline = bounded.Deadline()
-		}
-		if expiry := prepared.Mandate.Authorization.Snapshot().ExpiresAt; expiry.Before(deadline) {
-			deadline = expiry
-		}
+		expiry = prepared.Mandate.Authorization.Snapshot().ExpiresAt
+	} else if input.Run.IsInteractiveChat() && input.Run.CallerCeiling != nil {
+		expiry = input.Run.CallerCeiling.ExpiresAt
 	}
-	runCtx, cancel := context.WithDeadline(ctx, deadline)
+	runCtx, cancel, err := RunContext(ctx, input.Version.Budget, prepared.Budget, input.Run.Usage, expiry)
+	if err != nil {
+		return zero, err
+	}
 	defer cancel()
 	// Renewal covers home binding as well as Start. A lost lease cancels the
 	// context immediately and invokes Runtime.Cancel with a bounded cleanup ctx.
@@ -286,6 +282,10 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	input.Run.Status = store.RunRunning
 	input.Run.StartedAt = &now
 	request := RunRequest{Task: input.Task.Clone(), Work: input.Work.Clone(), Mandate: prepared.Mandate, Bot: input.Bot, Version: input.Version, Run: input.Run, Principal: p, Authorization: prepared.Authorization, Interactive: prepared.Mandate == nil && input.Run.IsInteractiveChat(), Policy: prepared.Policy, Budget: prepared.Budget, Goals: input.Goals, Instructions: input.Instructions, Attachments: input.Attachments, Now: now}
+	request.Progress = input.Progress.Clone()
+	request.ProgressYieldRequested = s.config.ProgressYieldRequested
+	request.ProgressStore, _ = s.config.Store.(store.BotProgressStore)
+	request.CurrentLease = func() store.BotLease { mu.Lock(); defer mu.Unlock(); return latest }
 	result := zero
 	if workStore, ok := s.config.Store.(store.BotWorkStore); ok {
 		request.Work, err = workStore.LoadWork(runCtx, lease)
@@ -297,7 +297,7 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 		err = runCtx.Err()
 	}
 	if err == nil {
-		if len(request.Run.Checkpoint) > 0 {
+		if len(request.Run.Checkpoint) > 0 || request.Progress != nil {
 			result, err = s.config.Runtime.Resume(runCtx, request, s.config.Events)
 		} else {
 			result, err = s.config.Runtime.Start(runCtx, request, s.config.Events)
@@ -318,6 +318,13 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	mu.Unlock()
 	if lost != nil || runCtx.Err() != nil {
 		return result, errors.Join(err, lost, runCtx.Err())
+	}
+	if result.ProgressCheckpoint != nil {
+		if err != nil || result.ValidateCheckpoints() != nil || result.Status != store.RunQueued || result.ProgressCheckpoint.Phase != store.BotProgressSuspended {
+			return result, errors.Join(err, store.ErrBotInvalid)
+		}
+		// CheckpointProgress committed the queued handoff and released the lease.
+		return result, nil
 	}
 	result = supervisorOutcome(result, err)
 	if transitionErr := ValidateRunTransition(store.RunRunning, result.Status, RunTransitionGuard{}); transitionErr != nil {

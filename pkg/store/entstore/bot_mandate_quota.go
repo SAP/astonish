@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"math"
+	"reflect"
+	"time"
 )
 
 type mandateModelCharge struct {
@@ -22,7 +25,16 @@ type mandateRunUsage struct {
 	Tools, Tokens, Spend int64
 	Ref                  store.BotMandateRef
 }
+type mandateTitleContinuation struct {
+	Usage      mandateRunUsage
+	ApprovalID uuid.UUID
+	Checkpoint string
+}
+
 type mandateUsage struct {
+	// Only a released, checkpointed initial title question may transfer its
+	// cumulative usage to the owner's fresh confirmed-assignment mandate.
+	TitleContinuations              map[string]mandateTitleContinuation
 	Day                             string
 	DailyRuns, Tools, Tokens, Spend int64
 	Active                          map[string]mandateRunUsage
@@ -98,7 +110,7 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			return err
 		}
 		if action != mandateRelease {
-			if rec.Bot.Status == store.BotPaused && m.Mandate.Purpose != execution.BotMandatePurposeOperation {
+			if rec.Bot.Status == store.BotPaused && m.Mandate.Purpose != execution.BotMandatePurposeOperation && !mandateProgressWhilePaused(ctx, tx, rec, ref) {
 				return store.ErrBotForbidden
 			}
 			m, rec, err = s.verify(ctx, tx, ref, m.Mandate.Purpose)
@@ -151,6 +163,9 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 		reservationKey := "mandate-reservation:" + id
 		switch action {
 		case mandateReserve:
+			if saved.ProgressQuota != nil {
+				return store.ErrBotConflict
+			}
 			// Preparation precedes ClaimRun. Do not consume this run's one-shot
 			// reservation while another writer (including an interrupted writer
 			// awaiting verified teardown) still owns the admission barrier.
@@ -164,7 +179,38 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 				return nil
 			}
 			if _, err := tx.FindActivity(ctx, ref.BotID, reservationKey); err == nil {
-				return store.ErrBotConflict
+				pending, ok := usage.TitleContinuations[id]
+				if !ok || saved.Run.Status != store.RunQueued || pending.Usage.Ref == ref || m.Provenance.InitiationKind != store.BotInitiationKindTitleConfirmation || pending.Checkpoint != string(saved.Run.Checkpoint) {
+					return store.ErrBotConflict
+				}
+				c := saved.Run.TitleConfirmation
+				if c == nil || c.State != store.BotTitleConfirmationConfirmed || c.ApprovalID != pending.ApprovalID {
+					return store.ErrBotForbidden
+				}
+				a, err := resumeApproval(ctx, tx, saved.Run)
+				if err != nil {
+					return err
+				}
+				waiting := c.Clone()
+				waiting.State = store.BotTitleConfirmationWaiting
+				waiting.ConfirmedAssignment, waiting.AssignmentDigest = "", ""
+				waiting.DecidedBy = uuid.Nil
+				waiting.DecidedAt = time.Time{}
+				confirmed, err := waiting.WithAnswer(*a)
+				if err != nil || !reflect.DeepEqual(confirmed, c) {
+					return store.ErrBotForbidden
+				}
+				if int64(len(usage.Active)) >= l.MaxConcurrentRuns {
+					return store.ErrBotForbidden
+				}
+				current = pending.Usage
+				current.Ref = ref
+				usage.Active[id] = current
+				delete(usage.TitleContinuations, id)
+				reservationKey += ":title-confirmed:" + ref.ID.String()
+				// The initial question already charged this run. Do not charge a
+				// second daily run or reset any per-run/model/research usage.
+				break
 			} else if !errors.Is(err, store.ErrBotNotFound) {
 				return err
 			}
@@ -242,6 +288,21 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			}
 			if current.Ref != ref {
 				return store.ErrBotForbidden
+			}
+			// Persist a one-shot handoff only at the real initial-question
+			// checkpoint. Released ordinary/uncertain-effect runs stay spent.
+			c := saved.Run.TitleConfirmation
+			if c != nil && c.State == store.BotTitleConfirmationWaiting && c.ValidateBinding(saved.Run, rec.Bot.OwnerID) == nil && saved.Run.Status == store.RunWaitingApproval && m.Provenance.InitiationKind == store.BotInitiationKindTitle {
+				checkpoint, e := botdomain.DecodeApprovalCheckpoint(saved.Run.Checkpoint, saved.Run)
+				if e == nil && checkpoint.ApprovalID == c.ApprovalID {
+					a, e := tx.ReadApproval(ctx, ref.BotID, c.ApprovalID)
+					if e == nil && checkpoint.Matches(*a) && a.Status == store.ApprovalPending && reflect.DeepEqual(a.Interaction, c.Question) {
+						if usage.TitleContinuations == nil {
+							usage.TitleContinuations = map[string]mandateTitleContinuation{}
+						}
+						usage.TitleContinuations[id] = mandateTitleContinuation{Usage: current, ApprovalID: c.ApprovalID, Checkpoint: string(saved.Run.Checkpoint)}
+					}
+				}
 			}
 			delete(usage.Active, id)
 		}

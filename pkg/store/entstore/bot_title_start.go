@@ -2,6 +2,10 @@ package entstore
 
 import (
 	"context"
+	"reflect"
+
+	prun "github.com/SAP/astonish/ent/personal/botrun"
+	trun "github.com/SAP/astonish/ent/team/botrun"
 
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -45,6 +49,101 @@ func (a *titleAdmission) Register(ctx context.Context, id execution.BotRunIdenti
 		a.registered = append(a.registered, id)
 	}
 	return value, err
+}
+
+func persistTitleQuestion(ctx context.Context, tx botDraftDB, saved *botStoredRun) error {
+	data, err := botJSONMap(*saved)
+	if err != nil {
+		return err
+	}
+	var n int
+	switch db := tx.(type) {
+	case personalBotDB:
+		n, err = db.client.BotRun.Update().Where(prun.IDEQ(saved.Run.ID), prun.StatusEQ(prun.StatusRunning), prun.FenceEQ(saved.Run.Lease.Fence)).SetData(data).Save(ctx)
+	case teamBotDB:
+		n, err = db.client.BotRun.Update().Where(trun.IDEQ(saved.Run.ID), trun.StatusEQ(trun.StatusRunning), trun.FenceEQ(saved.Run.Lease.Fence)).SetData(data).Save(ctx)
+	default:
+		return store.ErrBotUnsupported
+	}
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return store.ErrBotConflict
+	}
+	return nil
+}
+
+// confirmTitleAssignment is transaction-local: authority and assignment queue together.
+func (r *botRepository) confirmTitleAssignment(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun, a store.BotApproval) error {
+	c := saved.Run.TitleConfirmation
+	if c == nil || c.State == store.BotTitleConfirmationConfirmed {
+		return nil
+	}
+	if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil {
+		return store.ErrBotForbidden
+	}
+	next, err := c.WithAnswer(a)
+	if err != nil {
+		return err
+	}
+	resolve, enabled := store.BotMandateAdmissionFromContext(ctx)
+	if saved.Run.MandateRef != nil {
+		if !enabled || !verifiedMandateOwner(ctx, rec.Bot.OwnerID.String(), r.clock()) {
+			return store.ErrBotForbidden
+		}
+		old, err := readMandate(ctx, tx, *saved.Run.MandateRef)
+		if err != nil {
+			return err
+		}
+		if old.RevokedAt != nil || !old.Mandate.ExpiresAt.After(r.clock()) {
+			return store.ErrBotForbidden
+		}
+		ref := *saved.Run.MandateRef
+		ref.ID = uuid.New()
+		ref.Revision = 1
+		policy, err := resolve(botPolicyContext(ctx, tx), ref)
+		if err != nil {
+			return err
+		}
+		now := r.clock()
+		if err := old.Mandate.RuntimePolicy.ValidateWithin(policy.RuntimePolicy); err != nil {
+			return err
+		}
+		m := store.BotMandate{RuntimePolicy: old.Mandate.RuntimePolicy.Clone(), Ref: ref, Purpose: execution.BotMandatePurposeTask, ExpiresAt: old.Mandate.ExpiresAt, Scopes: policy.Scopes, Constraints: policy.Constraints, Limits: old.Mandate.Limits}.Clone()
+		if err := m.Limits.ValidateWithinRuntimePolicy(policy.Limits, m.RuntimePolicy, policy.RuntimePolicy); err != nil {
+			return err
+		}
+		// Only the originally admitted title is eligible for public queries;
+		// the selected/custom assignment is never a public-search subject.
+		if policy.PublicResearch != nil {
+			scope := policy.PublicResearch.Clone()
+			scope.Subject, scope.SourceEventID = c.OriginalTitle, c.UserEventID
+			if scope.Validate() == nil {
+				m.PublicResearch = &scope
+			}
+		}
+		provenance := store.BotMandateProvenance{InitiationKind: store.BotInitiationKindTitleConfirmation, Source: store.BotMandateSourceAuthenticatedUser, ActorID: rec.Bot.OwnerID.String(), RequestID: a.ID.String(), RecordedAt: now, UserEventID: c.UserEventID, SourceDigest: next.AssignmentDigest, RunID: saved.Run.ID.String(), TitleConfirmation: &store.BotTitleConfirmationProvenance{BotID: c.BotID.String(), RunID: c.RunID.String(), OwnerID: c.OwnerID.String(), UserEventID: c.UserEventID, ApprovalID: a.ID.String(), QuestionID: c.QuestionID, AssignmentDigest: next.AssignmentDigest}}
+		record := store.BotMandateRecord{Mandate: m, Provenance: provenance}
+		if err := record.Validate(now); err != nil {
+			return err
+		}
+		if err := appendMandateRecord(ctx, tx, rec, mandateKey(ref), record, now); err != nil {
+			return err
+		}
+		rec.Metadata[mandateHeadKey] = ref
+		if err := saveMandateMetadata(ctx, tx, rec); err != nil {
+			return err
+		}
+		saved.Run.MandateRef = &ref
+	}
+	saved.Run.TitleConfirmation = next
+	return nil
+}
+
+func titleAnswerReplay(saved *botStoredRun, a *store.BotApproval, response *store.BotInteractionResponse) bool {
+	c := saved.Run.TitleConfirmation
+	return c != nil && c.State == store.BotTitleConfirmationConfirmed && c.ApprovalID == a.ID && reflect.DeepEqual(a.Response, response)
 }
 
 func (r *botRepository) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {

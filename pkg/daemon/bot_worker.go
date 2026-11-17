@@ -51,6 +51,7 @@ type BotWorkerConfig struct {
 type BotWorker struct {
 	schedulerReady    atomic.Bool
 	activationStopped atomic.Bool
+	progressDrain     atomic.Bool
 	lifecycleMu       sync.Mutex
 	pollCancels       map[uint64]context.CancelFunc
 	pollSerial        uint64
@@ -309,6 +310,27 @@ func (w *BotWorker) Start(ctx context.Context) {
 		}
 	}()
 }
+
+// Drain requests a durable handoff at the next settled progress boundary.
+// Legacy work is allowed to finish; caller deadline then falls back to Stop's
+// cancellation semantics, never claiming an unsafe checkpoint was committed.
+func (w *BotWorker) Drain(ctx context.Context) error {
+	w.lifecycleMu.Lock()
+	w.activationStopped.Store(true)
+	w.progressDrain.Store(true)
+	w.lifecycleMu.Unlock()
+	done := make(chan struct{})
+	go func() { w.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		w.Stop()
+		return nil
+	case <-ctx.Done():
+		w.Stop()
+		return ctx.Err()
+	}
+}
+
 func (w *BotWorker) Stop() {
 	w.lifecycleMu.Lock()
 	w.activationStopped.Store(true)
@@ -541,7 +563,7 @@ func botRunBudget(in store.BotRunInput, now time.Time) (*bot.SharedRunBudget, er
 	if in.Run.Lease.Fence == 0 && in.Run.StartedAt == nil && len(in.Run.Checkpoint) == 0 && u == (store.BotUsage{}) {
 		return bot.NewRunBudget(in.Version.Budget, now)
 	}
-	if u.RuntimeNanos == 0 {
+	if u.RuntimeNanos == 0 && !in.Run.RuntimeAccountingRecorded {
 		if in.Run.StartedAt == nil || in.Run.StartedAt.After(now) {
 			return nil, bot.ErrBudgetReservation
 		}
@@ -556,7 +578,7 @@ func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.S
 		return err
 	}
 	homes := &launcher.BotHomeManager{Backend: w.config.Sandbox.(sandbox.BotHomeBackend), Pool: w.config.Pool, Bots: repo}
-	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{Store: repo, Runtime: w.runtime, Homes: homes, WorkerID: w.config.WorkerID, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
+	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{ProgressYieldRequested: w.progressDrain.Load, Store: repo, Runtime: w.runtime, Homes: homes, WorkerID: w.config.WorkerID, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
 		identity, _ := execution.BotRunIdentityFromContext(c)
 		if !in.Run.ExecutionMode.Valid() {
 			return bot.RunPreparation{}, store.ErrBotForbidden

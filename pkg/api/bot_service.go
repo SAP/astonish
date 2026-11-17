@@ -51,6 +51,49 @@ func botRequestStore(w http.ResponseWriter, r *http.Request) (store.BotStore, uu
 	return repo, actor, true
 }
 
+// botContentAccess gates registered Bot content routes while leaving worker reads
+// and the exact deletion status/retry endpoint available. Session aliases use the
+// same tombstone rule in botSessionReadAllowed.
+func botContentAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idText := mux.Vars(r)["botID"]
+		// Unfinished intake is inert input stored separately before a Bot exists;
+		// its handler owns authorization and no-store headers, not Bot content.
+		if idText == "" || r.URL.Path == "/api/studio/bots/intake/"+idText || r.URL.Path == "/api/studio/bots/"+idText+"/permanent-delete" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		repo, _, ok := botRequestStore(w, r)
+		if !ok {
+			return
+		}
+		id, ok := botPathID(w, r)
+		if !ok {
+			return
+		}
+		b, err := repo.Get(r.Context(), id)
+		if err != nil {
+			// Session URLs deliberately conceal inaccessible Bot identity.
+			if mux.Vars(r)["sessionID"] != "" {
+				botHTTPError(w, store.ErrBotNotFound)
+			} else {
+				botHTTPError(w, err)
+			}
+			return
+		}
+		if b == nil {
+			botHTTPError(w, store.ErrBotNotFound)
+			return
+		}
+		if b.PermanentDelete {
+			w.Header().Set("Retry-After", "2")
+			botWriteJSON(w, http.StatusGone, map[string]string{"code": botDeletionPending, "error": "Bot content is unavailable: permanent deletion cleanup is pending"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // botInteractiveAdmissionContext never falls back to legacy/autonomy authority.
 // It is used only after explicit startup readiness enables interactive admission.
 func botInteractiveAdmissionContext(r *http.Request) (context.Context, error) {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
@@ -383,12 +386,49 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 			if p != grant.Route.Provider || m != grant.Route.Model {
 				return nil, store.ErrBotForbidden
 			}
-			if _, _, e := t.prepare(ctx, raw); e != nil {
-				return nil, e
+			// Initialization is read-only discovery/authentication, before any model
+			// generation. Retry it once, never RunPerplexityWebSearch or its LLM.
+			// Keep the existing run deadline and shared meter, including the wait.
+			if timeout, ok := t.request.Budget.(interface{ ModelCallTimeout() time.Duration }); ok && timeout.ModelCallTimeout() > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout.ModelCallTimeout())
+				defer cancel()
 			}
-			inner, e := t.factory(provider.WithConfinedProviderSecrets(ctx), p, m, app)
-			if e != nil {
-				return nil, store.ErrBotUnsupported
+			if deadline, ok := t.request.Budget.(interface{ Deadline() time.Time }); ok && !deadline.Deadline().IsZero() {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline.Deadline())
+				defer cancel()
+			}
+			var inner model.LLM
+			for attempt := 0; ; attempt++ {
+				if e := ctx.Err(); e != nil {
+					return nil, e
+				}
+				if t.request.Budget == nil {
+					return nil, store.ErrBotUnsupported
+				}
+				if e := t.request.Budget.Check(ctx); e != nil {
+					return nil, e
+				}
+				if _, _, e := t.prepare(ctx, raw); e != nil {
+					return nil, e
+				}
+				var e error
+				inner, e = t.factory(provider.WithConfinedProviderSecrets(ctx), p, m, app)
+				if e == nil {
+					break
+				}
+				if attempt != 0 || !botSearchInitializationTransient(ctx, e) {
+					// Preserve the concrete diagnostic; redact at the outer boundary.
+					return nil, e
+				}
+				timer := time.NewTimer(100 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
 			}
 			return provider.NewBudgetLLM(inner, t.request.Budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
 		})
@@ -414,6 +454,23 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	recordBuiltinToolObservationWithCapture(c, c.SessionID(), t.Name(), map[string]any{"facet": a.Facet}, observation, observation)
 	return result, nil
 }
+
+// botSearchInitializationTransient deliberately uses typed transport errors, not
+// error-message matching. HTTP auth/status failures, bad configuration, TLS and
+// permanent DNS errors are not retryable. A client timeout may wrap a deadline
+// error even though the caller's own deadline has not expired.
+func botSearchInitializationTransient(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) && (network.Timeout() || network.Temporary()) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE)
+}
+
 func botSymbolicSearchCredential(v string) bool {
 	if len(v) > 256 || !strings.HasPrefix(v, "{{CREDENTIAL:") || !strings.HasSuffix(v, "}}") {
 		return false

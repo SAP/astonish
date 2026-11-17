@@ -84,7 +84,7 @@ func BotHistoryStreamHandler(w http.ResponseWriter, r *http.Request) {
 		if event == nil {
 			continue
 		}
-		payload, err := marshalBotTranscriptEvent(projectBotQuestionTranscript(event, approvals), id, sid)
+		payload, err := marshalBotTranscriptEvent(projectBotHomeNarrative(projectBotReviewQuestion(projectBotQuestionTranscript(event, approvals), approvals, id, sid), b.HomeSessionID, sid), id, sid)
 		if err != nil {
 			http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
 			return

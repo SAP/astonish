@@ -2,12 +2,132 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
 	"slices"
 	"strings"
 	"time"
 )
+
+// BotRuntimeMode distinguishes saved legacy limits from explicit progress policy.
+type BotRuntimeMode string
+
+const (
+	BotRuntimeModeLegacy          BotRuntimeMode = "legacy"
+	BotRuntimeModeProgressV1      BotRuntimeMode = "progress_v1"
+	BotRuntimePolicySchemaVersion                = 1
+	BotRuntimePolicyMaxBytes                     = 1024
+)
+
+// BotRuntimePolicy is optional. Nil preserves legacy semantics. A present policy
+// must be complete: decoding or validation never supplies defaults. Cadence is a
+// soft evaluation boundary, not a kill deadline. Nil MaxActiveSeconds explicitly
+// means no whole-assignment active-duration cap, never unlimited spending.
+type BotRuntimePolicy struct {
+	SchemaVersion             int            `json:"schema_version" yaml:"schema_version"`
+	Mode                      BotRuntimeMode `json:"mode" yaml:"mode"`
+	EvaluationIntervalSeconds int64          `json:"evaluation_interval_seconds,omitempty" yaml:"evaluation_interval_seconds,omitempty"`
+	MaxActiveSeconds          *int64         `json:"max_active_seconds,omitempty" yaml:"max_active_seconds,omitempty"`
+	ModelCallTimeoutSeconds   int64          `json:"model_call_timeout_seconds,omitempty" yaml:"model_call_timeout_seconds,omitempty"`
+	ToolCallTimeoutSeconds    int64          `json:"tool_call_timeout_seconds,omitempty" yaml:"tool_call_timeout_seconds,omitempty"`
+}
+
+// NewBotProgressRuntimePolicy is only for explicitly authorized NEW configuration.
+func NewBotProgressRuntimePolicy() *BotRuntimePolicy {
+	return &BotRuntimePolicy{SchemaVersion: BotRuntimePolicySchemaVersion, Mode: BotRuntimeModeProgressV1, EvaluationIntervalSeconds: 300, ModelCallTimeoutSeconds: 120, ToolCallTimeoutSeconds: 120}
+}
+func (p *BotRuntimePolicy) EffectiveMode() BotRuntimeMode {
+	if p == nil {
+		return BotRuntimeModeLegacy
+	}
+	return p.Mode
+}
+func (p *BotRuntimePolicy) Clone() *BotRuntimePolicy {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	if p.MaxActiveSeconds != nil {
+		v := *p.MaxActiveSeconds
+		out.MaxActiveSeconds = &v
+	}
+	return &out
+}
+func (p *BotRuntimePolicy) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.SchemaVersion != BotRuntimePolicySchemaVersion {
+		return errors.New("unknown bot runtime policy version")
+	}
+	switch p.Mode {
+	case BotRuntimeModeLegacy:
+		if p.EvaluationIntervalSeconds != 0 || p.MaxActiveSeconds != nil || p.ModelCallTimeoutSeconds != 0 || p.ToolCallTimeoutSeconds != 0 {
+			return errors.New("legacy runtime policy contains progress limits")
+		}
+	case BotRuntimeModeProgressV1:
+		values := []int64{p.EvaluationIntervalSeconds, p.ModelCallTimeoutSeconds, p.ToolCallTimeoutSeconds}
+		if p.MaxActiveSeconds != nil {
+			values = append(values, *p.MaxActiveSeconds)
+		}
+		for _, value := range values {
+			if value <= 0 || value > int64((1<<63-1)/time.Second) {
+				return errors.New("runtime policy seconds must be positive and duration-safe")
+			}
+		}
+	default:
+		return errors.New("unknown bot runtime mode")
+	}
+	data, err := json.Marshal(p)
+	if err != nil || len(data) > BotRuntimePolicyMaxBytes {
+		return errors.New("runtime policy exceeds serialized limit")
+	}
+	return nil
+}
+
+// ValidateWithin checks runtime authority only. Nil/legacy ceilings never opt a
+// request into progress. An interval ceiling is a maximum time between reviews.
+func (p *BotRuntimePolicy) ValidateWithin(ceiling *BotRuntimePolicy) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if err := ceiling.Validate(); err != nil {
+		return err
+	}
+	if p.EffectiveMode() == BotRuntimeModeLegacy {
+		return nil
+	}
+	if ceiling.EffectiveMode() != BotRuntimeModeProgressV1 {
+		return errors.New("progress runtime not allowed by trusted policy")
+	}
+	if p.EvaluationIntervalSeconds > ceiling.EvaluationIntervalSeconds || p.ModelCallTimeoutSeconds > ceiling.ModelCallTimeoutSeconds || p.ToolCallTimeoutSeconds > ceiling.ToolCallTimeoutSeconds {
+		return errors.New("runtime policy exceeds operator ceiling")
+	}
+	if ceiling.MaxActiveSeconds != nil && (p.MaxActiveSeconds == nil || *p.MaxActiveSeconds > *ceiling.MaxActiveSeconds) {
+		return errors.New("runtime policy exceeds active duration ceiling")
+	}
+	return nil
+}
+
+// ValidateWithinRuntimePolicy replaces ONLY the legacy duration comparison when
+// both sides explicitly opt into progress. All finite fields still validate;
+// cumulative and per-run resource limits retain their original comparisons.
+func (l BotMandateLimits) ValidateWithinRuntimePolicy(c BotMandateLimits, requested, allowed *BotRuntimePolicy) error {
+	if err := requested.ValidateWithin(allowed); err != nil {
+		return err
+	}
+	if err := l.Validate(); err != nil {
+		return err
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if requested.EffectiveMode() == BotRuntimeModeProgressV1 {
+		l.MaxRuntimeSeconds = c.MaxRuntimeSeconds
+	}
+	return l.ValidateWithin(c)
+}
 
 // BotMandateRef pins the complete tenant, owner, bot and immutable revision.
 // Possessing a reference is not authority.
@@ -96,6 +216,7 @@ func (l BotMandateLimits) ValidateWithin(c BotMandateLimits) error {
 }
 
 type BotMandate struct {
+	RuntimePolicy  *BotRuntimePolicy             `json:"runtime_policy,omitempty"`
 	Ref            BotMandateRef                 `json:"ref"`
 	Purpose        BotMandatePurpose             `json:"purpose"`
 	ExpiresAt      time.Time                     `json:"expires_at"`
@@ -106,6 +227,7 @@ type BotMandate struct {
 }
 
 func (m BotMandate) Clone() BotMandate {
+	m.RuntimePolicy = m.RuntimePolicy.Clone()
 	if m.PublicResearch != nil {
 		v := m.PublicResearch.Clone()
 		m.PublicResearch = &v
@@ -118,6 +240,9 @@ func (m BotMandate) Clone() BotMandate {
 	return m
 }
 func (m BotMandate) Validate(now time.Time) error {
+	if err := m.RuntimePolicy.Validate(); err != nil {
+		return err
+	}
 	if err := m.Ref.Validate(); err != nil {
 		return err
 	}

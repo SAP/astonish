@@ -19,6 +19,16 @@ revokes pending/approved old action grants, disables runtime schedules and recor
 an audit activity. It does not activate, clear a shutdown barrier or change the
 lifecycle status. Trigger configuration remains the separate reviewed trigger API.
 
+`budget.runtime_policy` is optional and is preserved exactly in immutable
+versions. An absent policy keeps legacy `max_runtime_seconds` behavior; an
+explicit `progress_v1` policy must satisfy the current trusted operator ceiling.
+Review does not upgrade old mandates, renew expiry or resume schedules. New
+minimal/intake/source/template creation selects policy through
+`NewBotVersionForCreation`; `DefaultBotVersion` remains a legacy constructor.
+See [mandate runtime policy](bot-mandates.md#explicit-progress-runtime-policy)
+for operation bounds and compatibility. The proposal tool's closed JSON schema
+includes this optional nested policy; model proposals do not supply authority.
+
 Ordinary `POST .../versions` edits remain prose-only, including after a draft has
 reviewed runtime policy. Activation remains a separate readiness-gated API.
 Delivery binding targets are requests, not authority. Configuration resolves each

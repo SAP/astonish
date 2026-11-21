@@ -231,9 +231,6 @@ func (m model) renderPlanProgressBody(width int, full bool) string {
 		if p.ParallelGroup != "" {
 			fmt.Fprintf(&b, "%s\n", wrapPlain("Group: "+p.ParallelGroup, width))
 		}
-		if p.Current {
-			fmt.Fprintln(&b, "Progress: unavailable")
-		}
 		if full {
 			if p.Summary != "" {
 				fmt.Fprintf(&b, "%s\n", wrapPlain(p.Summary, width))

@@ -173,11 +173,6 @@ func (m model) layoutPlanPhaseCards(width int) (string, []planPhaseCardSpan) {
 		if p.ParallelGroup != "" {
 			rows = append(rows, "  "+s.card.Render(truncateToWidth("Group: "+p.ParallelGroup, textWidth)))
 		}
-		if p.Current {
-			for _, line := range strings.Split(wrapPlain("Progress: unavailable", max(1, width-1)), "\n") {
-				rows = append(rows, s.card.Render(line))
-			}
-		}
 		// Explicit painted padding keeps resets within the card surface.
 		for i, row := range rows {
 			rows[i] = s.card.Render(" ") + row + s.card.Render(strings.Repeat(" ", max(0, width-1-lipgloss.Width(row))))

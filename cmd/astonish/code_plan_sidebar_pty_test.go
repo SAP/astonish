@@ -725,7 +725,13 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	}
 	term := f.start()
 	defer term.close()
-	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10", "running · recorded, not live", "Progress: unavailable")
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10", "running · recorded, not live")
+	term.assertAbsent("Progress: unavailable")
+	term.send("\x07")
+	term.wait("Plan progress · esc back", "Current: phase-10")
+	term.assertAbsent("Progress: unavailable")
+	term.send("\x1b")
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10")
 	term.send("Continue the restored plan.\r")
 	receive := func() chan sidebarPTYModelTurn {
 		t.Helper()
@@ -792,7 +798,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 		tick.Stop()
 		tool(fmt.Sprintf("phase-%02d", phase), "complete")
 		tool(fmt.Sprintf("phase-%02d", phase+1), "running")
-		waitPlanPTYRegion(t, term, 92, 120, fmt.Sprintf("● Follow phase %02d", phase+1), "running", "Progress: unavailable")
+		waitPlanPTYRegion(t, term, 92, 120, fmt.Sprintf("● Follow phase %02d", phase+1), "running")
 		assertHistory()
 	}
 	// Resizing with the same target must not undo manual browsing. A target
@@ -811,7 +817,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	tool("phase-13", "running")
 	term.wait("Current: phase-13", "80%")
 	term.resize(120, 30)
-	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 13", "running", "Progress: unavailable")
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 13", "running")
 	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
 	term.resize(120, 65)
 	frame := waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "PHASES", "80%", "● Follow phase 13")
@@ -842,7 +848,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	f.sessionID = replacement.Session.ID()
 	restored := f.start()
 	defer restored.close()
-	waitPlanPTYRegion(t, restored, 92, 120, "● Follow phase 14", "running · recorded, not live", "Progress: unavailable")
+	waitPlanPTYRegion(t, restored, 92, 120, "● Follow phase 14", "running · recorded, not live")
 }
 
 func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
@@ -961,7 +967,7 @@ func waitSidebarPTYRunningCard(t *testing.T, term *handoffPTY, name, title strin
 				end++
 			}
 			card := strings.Join(lines[i:end], "\n")
-			if strings.Contains(card, name) && strings.Contains(card, "running") && strings.Contains(card, "Progress: unavailable") {
+			if strings.Contains(card, name) && strings.Contains(card, "running") && !strings.Contains(card, "Progress: unavailable") {
 				return
 			}
 		}

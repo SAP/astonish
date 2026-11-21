@@ -212,7 +212,7 @@ func TestPlanSidebarResponsiveGeometry(t *testing.T) {
 						found := false
 						for i := 0; i < 30; i++ {
 							panel := stripANSI(m.renderPlanSidebar(m.vp.Height() + m.stickyHeaderLines))
-							if strings.Contains(panel, phase) && strings.Contains(panel, "running") && strings.Contains(panel, "Progress: unavailable") {
+							if strings.Contains(panel, phase) && strings.Contains(panel, "running") && !strings.Contains(panel, "Progress: unavailable") {
 								found = true
 								break
 							}

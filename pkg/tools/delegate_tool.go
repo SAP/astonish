@@ -61,10 +61,11 @@ type SubTaskResultItem struct {
 
 // DelegateTasksResult is the output schema for the delegate_tasks tool.
 type DelegateTasksResult struct {
-	BatchID string              `json:"batch_id,omitempty"`
-	Status  string              `json:"status"`
-	Results []SubTaskResultItem `json:"results"`
-	Summary string              `json:"summary"`
+	PlanRecovery *agent.CodePlanRecovery `json:"plan_recovery,omitempty"`
+	BatchID      string                  `json:"batch_id,omitempty"`
+	Status       string                  `json:"status"`
+	Results      []SubTaskResultItem     `json:"results"`
+	Summary      string                  `json:"summary"`
 }
 
 func delegateTasks(ctx tool.Context, args DelegateTasksArgs) (DelegateTasksResult, error) {
@@ -116,6 +117,11 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 	}
 
 	// Capture only the invocation-scoped runtime, once for the whole batch.
+	codeRuntime, _ := agent.PlanRuntimeFromContext(ctx)
+	codeExecution := codeRuntime.CodeExecutionEnabled()
+	if codeExecution {
+		defer func() { out.PlanRecovery = codeRuntime.CodeRecovery(out.Status, out.Summary) }()
+	}
 	planCapture := agent.CaptureDelegationPlan(ctx)
 	// Convert tool inputs to SubAgentTasks
 	tasks := make([]agent.SubAgentTask, len(args.Tasks))
@@ -148,6 +154,13 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 			ParentDepth:       0,       // delegate_tasks creates top-level sub-agents
 			OnEvent:           onEvent, // transparent streaming to UI (session-scoped)
 		}
+	}
+
+	if codeExecution {
+		if admissionErr := codeRuntime.AdmitCodeDelegates(tasks); admissionErr != nil {
+			return DelegateTasksResult{Status: "blocked", Summary: admissionErr.Error()}, nil
+		}
+		defer codeRuntime.FinishCodeDelegates(tasks)
 	}
 
 	// Emit delegation_start progress event with the full task plan

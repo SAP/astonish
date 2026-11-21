@@ -1116,6 +1116,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 			return called, botExecutableIdentity(called), args, nil
 		})
+		codeLoop := newCodePlanLoop(ctx)
+		beforeToolCallbacks = append([]llmagent.BeforeToolCallback{codeLoop.beforeTool}, beforeToolCallbacks...)
+		beforeModelCallbacks = append(beforeModelCallbacks, codeLoop.beforeModel)
 		mainThreadTools := append([]tool.Tool(nil), c.Tools...)
 		llmAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat",
@@ -1155,7 +1158,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		// error responses if ADK still hard-aborts on an unknown tool name.
 		var lastFunctionCalls []*genai.FunctionCall
 
-		for attempt := range maxRetries {
+		for attempt := 0; attempt < maxRetries; attempt++ {
 
 			retried := false
 			for event, err := range llmAgent.Run(ctx) {
@@ -1281,7 +1284,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 
 				// Yield event to the caller (console/web)
+				codeLoop.observe(event)
 				if !yield(event, nil) {
+					return
+				}
+				if checkpoint := codeLoop.checkpoint(); checkpoint != "" {
+					yield(&session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: checkpoint}}}}}, nil)
 					return
 				}
 			} // end inner for-range over llmAgent.Run(ctx)
@@ -1289,8 +1297,18 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return
 			}
 
-			// If we didn't retry, the run completed successfully — break out
+			// A successful final narration is not Code plan completion. Resume the
+			// existing ADK invocation with hidden runtime guidance, not a user turn.
 			if !retried {
+				resume, err := codeLoop.resume(ctx)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if resume {
+					attempt--
+					continue
+				}
 				break
 			}
 			// Otherwise, the retry loop continues with the next attempt

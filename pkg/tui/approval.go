@@ -82,6 +82,9 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 func (m model) approvalOptions() []string {
 	if m.tr.ApprovalIdx >= 0 && m.tr.ApprovalIdx < len(m.tr.Items) {
 		it := m.tr.Items[m.tr.ApprovalIdx]
+		if it.ApprovalKind == "plan" {
+			return m.planApprovalOptions(it)
+		}
 		if len(it.Options) > 0 {
 			return it.Options
 		}
@@ -529,12 +532,97 @@ func compactLine(s string, maxRunes int) string {
 }
 
 const (
+	planOptRun              = "Approve and run autonomously until done"
+	planOptReview           = "Approve and pause for review after each phase"
 	planOptApprove          = events.PlanOptionApprove
 	planOptRequest          = events.PlanOptionRequestChanges
 	planOptDecline          = events.PlanOptionDecline
 	planChangesHint         = "Describe the changes to the plan…"
 	planApprovalUserMessage = "I approve this plan. Please start implementing it now, phase by phase."
 )
+
+// codePlanApprovalMessage describes the chosen cadence; authority remains in TurnOptions.
+func codePlanApprovalMessage(mode agent.CodePlanExecutionMode) string {
+	switch mode {
+	case agent.CodePlanRunToCompletion:
+		return "I approve this plan. Please run it to completion, continuing through verified phases."
+	case agent.CodePlanReviewEachPhase:
+		return "I approve this plan. Please start implementing it now, pausing for review after each verified phase."
+	default:
+		return planApprovalUserMessage
+	}
+}
+
+// planApprovalOptions is the ordered source for rendering, keys and mouse choices.
+// Project only local Code initial approval; shared event labels stay wire-compatible.
+func (m model) planApprovalOptions(it events.Item) []string {
+	if m.info.Mode == "code" {
+		return []string{planOptRun, planOptReview, planOptRequest, planOptDecline}
+	}
+	if len(it.Options) > 0 {
+		return it.Options
+	}
+	return events.PlanApprovalOptions()
+}
+
+// codePlanApprovalAtPoint hit-tests only the active pending card's rendered
+// option labels. The result indexes the same ordered list used by keyboard input.
+func (m model) codePlanApprovalAtPoint(p selectionPoint) (int, bool) {
+	if m.info.Mode != "code" || !m.tr.Awaiting || m.planApprovalPending {
+		return 0, false
+	}
+	it := m.approvalItem()
+	if it == nil || it.Kind != events.ItemPlan || it.PlanStatus != events.PlanPending {
+		return 0, false
+	}
+	item, ok := m.itemAtLine(p.line)
+	if !ok || item != m.tr.ApprovalIdx || p.line < 0 || p.line >= len(m.transcriptPlainLines) {
+		return 0, false
+	}
+	line := m.transcriptPlainLines[p.line]
+	for i, option := range m.planApprovalOptions(*it) {
+		label := m.planApprovalLabel(option, i)
+		start := strings.Index(line, label)
+		if start < 0 {
+			// Narrow plan frames truncate labels rather than wrapping options.
+			// Their shortcut column still identifies the same clickable row.
+			start = strings.Index(line, fmt.Sprintf("%-3s  ", planApprovalKeyHint(option, i)))
+		}
+		if start < 0 {
+			continue
+		}
+		left := lipgloss.Width(line[:start])
+		if p.col >= left && p.col < left+lipgloss.Width(label) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (m model) planApprovalLabel(option string, index int) string {
+	key := planApprovalKeyHint(option, index)
+	if m.info.Mode == "code" {
+		return fmt.Sprintf("%-3s  %s", key, option)
+	}
+	return fmt.Sprintf("%s  %s", key, option)
+}
+
+func planApprovalKeyHint(option string, index int) string {
+	switch option {
+	case planOptRun:
+		return "1/y"
+	case planOptReview:
+		return "2"
+	case planOptApprove:
+		return "Enter"
+	case planOptRequest:
+		return "r"
+	case planOptDecline:
+		return "n"
+	default:
+		return fmt.Sprintf("%d", index+1)
+	}
+}
 
 // handlePlanApprovalKey maps plan-approval accelerators without going through
 // pickYes/pickNo (those would send n/esc to "Request changes"). Navigation
@@ -565,15 +653,25 @@ func (m model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) 
 			return next, cmd, true
 		}
 		return m, nil, true
-	case "y", "Y", "1":
-		next, cmd := m.submitApproval(planOptApprove)
+	case "y", "Y":
+		choice := planOptApprove
+		if m.info.Mode == "code" {
+			choice = planOptRun
+		}
+		next, cmd := m.submitApproval(choice)
 		return next, cmd, true
-	case "r", "R", "2":
+	case "r", "R":
 		next, cmd := m.submitApproval(planOptRequest)
 		return next, cmd, true
-	case "n", "N", "esc", "3":
+	case "n", "N", "esc":
 		next, cmd := m.submitApproval(planOptDecline)
 		return next, cmd, true
+	case "1", "2", "3", "4":
+		idx := int(key[0] - '1')
+		if idx < len(opts) {
+			next, cmd := m.submitApproval(opts[idx])
+			return next, cmd, true
+		}
 	}
 	return m, nil, false
 }
@@ -598,20 +696,13 @@ func (m model) renderPlanApprovalFooter() string {
 		cursor = 0
 	}
 
-	accel := map[string]string{
-		planOptApprove: "Enter",
-		planOptRequest: "r",
-		planOptDecline: "n",
-	}
 	buttons := make([]string, 0, len(opts))
 	for i, o := range opts {
-		key := accel[o]
-		if key == "" {
-			key = fmt.Sprintf("%d", i+1)
-		}
-		label := fmt.Sprintf(" %s  %s ", key, o)
+		label := " " + m.planApprovalLabel(o, i) + " "
 		if i == cursor {
 			buttons = append(buttons, th.PlanHeader.Bold(true).Render("▸"+label))
+		} else if m.info.Mode == "code" {
+			buttons = append(buttons, th.PlanMuted.Render(" "+label))
 		} else {
 			buttons = append(buttons, th.PlanMuted.Render("["+label+"]"))
 		}
@@ -619,7 +710,7 @@ func (m model) renderPlanApprovalFooter() string {
 
 	header := th.PlanHeader.Render("✦ Plan Ready · choose how to proceed")
 	row := strings.Join(buttons, "  ")
-	stacked := lipgloss.Width(stripANSI(row)) > contentW
+	stacked := m.info.Mode == "code" || lipgloss.Width(stripANSI(row)) > contentW
 	var rows []string
 	rows = append(rows, header)
 	if stacked {
@@ -705,7 +796,16 @@ type planApprovalStartedMsg struct {
 // execution. "Request changes" lets the user type feedback. "Decline" aborts
 // the plan and returns to Normal mode.
 func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
-	if choice == planOptApprove {
+	var executionMode agent.CodePlanExecutionMode
+	if m.info.Mode == "code" {
+		switch choice {
+		case planOptRun, planOptApprove:
+			executionMode = agent.CodePlanRunToCompletion
+		case planOptReview:
+			executionMode = agent.CodePlanReviewEachPhase
+		}
+	}
+	if choice == planOptApprove || executionMode != "" {
 		if m.planApprovalPending || m.eventCh != nil {
 			return m, nil
 		}
@@ -728,9 +828,10 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 				}
 			}
 			turnCtx, cancel := context.WithCancel(ctx)
-			ch, err := b.RunTurn(turnCtx, planApprovalUserMessage, backend.TurnOptions{
+			ch, err := b.RunTurn(turnCtx, codePlanApprovalMessage(executionMode), backend.TurnOptions{
 				SystemContext:         agent.BuildPlanExecutionSystemContext(planPath),
 				ApprovedPlanExecution: true,
+				CodePlanExecutionMode: executionMode,
 			})
 			if err != nil {
 				cancel()

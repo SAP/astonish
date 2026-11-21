@@ -115,6 +115,7 @@ func PlanRuntimeErrorCode(err error) string {
 type CommitPlanSnapshot func(PlanSnapshot) error
 
 type PlanRuntimeOptions struct {
+	CodeExecution  bool // local Code only; absent preserves remote/legacy behavior
 	Workspace      string
 	Acceptance     string
 	Verify         func(string) (int, string, error)
@@ -545,6 +546,9 @@ func (r *PlanRuntime) checkBusyLocked(affected map[string]bool) error {
 // AdvanceOnToolStart starts the next eligible phase only after initial approval.
 // Research calls against an unapproved plan are intentionally a no-op.
 func (r *PlanRuntime) AdvanceOnToolStart() (string, error) {
+	if r.CodeExecutionEnabled() {
+		return "", nil
+	} // Code parent explicitly starts phases.
 	if r == nil {
 		return "", nil
 	}
@@ -583,6 +587,9 @@ func (r *PlanRuntime) AdvanceOnToolStart() (string, error) {
 // RegisterDelegate registers one delegate and durably publishes its phase start.
 // It returns a step name only for a new running transition (legacy event semantics).
 func (r *PlanRuntime) RegisterDelegate(stepName, taskName string) (string, error) {
+	if r.CodeExecutionEnabled() {
+		return "", nil
+	}
 	if r == nil {
 		return "", planRuntimeError(PlanRuntimeNoPlan, "no active plan")
 	}
@@ -631,6 +638,9 @@ func (r *PlanRuntime) RegisterDelegate(stepName, taskName string) (string, error
 // means all registered tasks are done; the caller must still run UpdateStep verify.
 // Failed persistence never publishes a task finish or changes delegate counters.
 func (r *PlanRuntime) FinishDelegate(stepName, taskName string) (string, error) {
+	if r.CodeExecutionEnabled() {
+		return "", nil
+	} // A narrow child finish must never verify the whole Code phase.
 	if r == nil {
 		return "", planRuntimeError(PlanRuntimeNoPlan, "no active plan")
 	}
@@ -708,6 +718,21 @@ func (r *PlanRuntime) UpdateStep(step, status string) PlanStepApplyResult {
 		return fail(PlanRuntimeBusy, "phase verification is already running")
 	}
 	want := normalizePlanStatus(status)
+	if r.options.CodeExecution && (codeReviewPending(s) || want == "running" || want == "complete") {
+		if err := codePhaseBlock(s, step); err != nil {
+			unlock()
+			return fail(PlanRuntimeErrorCode(err), err.Error())
+		}
+	}
+	if r.options.CodeExecution && s.Document.CodeExecutionMode.Valid() && want == "complete" {
+		key := strings.ToLower(step)
+		for task := range p.taskRegistry[key] {
+			if !p.completedTasks[key][task] {
+				unlock()
+				return fail(PlanRuntimeBusy, "phase delegates are still running")
+			}
+		}
+	}
 	if want == "running" || want == "complete" {
 		if s.Document.Lifecycle != PlanLifecycleApproved {
 			unlock()
@@ -784,6 +809,14 @@ func (r *PlanRuntime) UpdateStep(step, status string) PlanStepApplyResult {
 	}
 	current.Steps[idx].Evidence = evidence
 	current.Steps[idx].Status = applied
+	if r.options.CodeExecution && current.Document.CodeExecutionMode == CodePlanReviewEachPhase && applied == "complete" {
+		for _, phase := range current.Steps {
+			if phase.Status != "complete" {
+				current.Document.CodeReviewPending = step
+				break
+			}
+		}
+	}
 	if err := r.commitLocked(current); err != nil {
 		return fail(PlanRuntimeErrorCode(err), err.Error())
 	}
@@ -814,6 +847,9 @@ func (r *PlanRuntime) Complete(outcomeObserved, unverified string) PlanCompletio
 	}
 	if strings.TrimSpace(s.Document.Results) != "" {
 		return fail(PlanRuntimeCompleted, "completion was already recorded")
+	}
+	if r.options.CodeExecution && codeReviewPending(s) {
+		return fail(CodePlanReviewRequired, "verified phase awaits user review before completion")
 	}
 	if len(s.Steps) == 0 || len(r.inFlight) > 0 {
 		return fail(PlanCompletionIncomplete, "not every phase has finished verification")

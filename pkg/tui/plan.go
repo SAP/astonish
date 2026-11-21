@@ -337,19 +337,18 @@ func (m model) planApprovalLines(it events.Item, inner int) []string {
 	switch it.PlanStatus {
 	case events.PlanPending:
 		lines = append(lines, m.theme.PlanHeader.Render("✦ Plan Ready · choose how to proceed"))
-		opts := it.Options
-		if len(opts) == 0 {
-			opts = []string{planOptApprove, planOptRequest, planOptDecline}
-		}
+		opts := m.planApprovalOptions(it)
 		cursor := m.tr.ApprovalCursor
 		for i, option := range opts {
-			key := []string{"Enter", "r", "n"}[min(i, 2)]
-			label := fmt.Sprintf("%s  %s", key, option)
+			label := m.planApprovalLabel(option, i)
 			if i == cursor {
 				lines = append(lines, m.theme.PlanHeader.Bold(true).Render("▸ "+label))
 			} else {
 				lines = append(lines, m.theme.PlanMuted.Render("  "+label))
 			}
+		}
+		if m.info.Mode == "code" {
+			lines = append(lines, m.theme.PlanMuted.Render("↑/↓ move · Enter select · Esc decline"))
 		}
 	case events.PlanApproved:
 		lines = append(lines, m.theme.Success.Render("✓ Approved"))

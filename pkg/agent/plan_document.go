@@ -201,12 +201,14 @@ func downgradeHeadings(s string) string {
 // planDocumentMetadata deliberately excludes narrative and runtime steps. Its
 // proposal contains definition-only values, so metadata cannot recurse.
 type planDocumentMetadata struct {
-	PlanID          string                `json:"plan_id,omitempty"`
-	Revision        int64                 `json:"revision,omitempty"`
-	Sequence        int64                 `json:"sequence,omitempty"`
-	PendingRevision *PlanRevisionProposal `json:"pending_revision,omitempty"`
-	RevisionNote    string                `json:"revision_note,omitempty"`
-	GraphAcceptance string                `json:"graph_acceptance,omitempty"`
+	CodeExecutionMode CodePlanExecutionMode `json:"code_execution_mode,omitempty"`
+	CodeReviewPending string                `json:"code_review_pending,omitempty"`
+	PlanID            string                `json:"plan_id,omitempty"`
+	Revision          int64                 `json:"revision,omitempty"`
+	Sequence          int64                 `json:"sequence,omitempty"`
+	PendingRevision   *PlanRevisionProposal `json:"pending_revision,omitempty"`
+	RevisionNote      string                `json:"revision_note,omitempty"`
+	GraphAcceptance   string                `json:"graph_acceptance,omitempty"`
 }
 
 // renderPlanMarkdownWithDoc serializes a plan to Markdown, optionally including
@@ -220,8 +222,8 @@ func renderPlanMarkdownWithDoc(goal string, doc PlanDocumentInfo, steps []planSt
 	}
 	sb.WriteString(fmt.Sprintf("_Last updated: %s_\n\n", planClock().UTC().Format(time.RFC3339)))
 
-	if doc.PlanID != "" || doc.Revision != 0 || doc.Sequence != 0 || doc.PendingRevision != nil || doc.RevisionNote != "" || doc.GraphAcceptance != "" {
-		metadata := planDocumentMetadata{doc.PlanID, doc.Revision, doc.Sequence, doc.PendingRevision, doc.RevisionNote, doc.GraphAcceptance}
+	if doc.CodeExecutionMode != "" || doc.PlanID != "" || doc.Revision != 0 || doc.Sequence != 0 || doc.PendingRevision != nil || doc.RevisionNote != "" || doc.GraphAcceptance != "" {
+		metadata := planDocumentMetadata{CodeExecutionMode: doc.CodeExecutionMode, CodeReviewPending: doc.CodeReviewPending, PlanID: doc.PlanID, Revision: doc.Revision, Sequence: doc.Sequence, PendingRevision: doc.PendingRevision, RevisionNote: doc.RevisionNote, GraphAcceptance: doc.GraphAcceptance}
 		encoded, _ := json.MarshalIndent(metadata, "", "  ") // only JSON value types
 		sb.WriteString("## Plan Metadata\n\n```json\n" + string(encoded) + "\n```\n\n")
 		if doc.RevisionNote != "" || doc.PendingRevision != nil {
@@ -419,6 +421,7 @@ func parsePlanMarkdownFull(md string) (doc PlanDocumentInfo, goal string, steps 
 			if decodeErr := json.Unmarshal([]byte(content), &metadata); decodeErr != nil {
 				err = fmt.Errorf("invalid plan metadata: %w", decodeErr)
 			} else {
+				doc.CodeExecutionMode, doc.CodeReviewPending = metadata.CodeExecutionMode, metadata.CodeReviewPending
 				doc.PlanID, doc.Revision, doc.Sequence = metadata.PlanID, metadata.Revision, metadata.Sequence
 				doc.PendingRevision, doc.RevisionNote, doc.GraphAcceptance = metadata.PendingRevision, metadata.RevisionNote, metadata.GraphAcceptance
 			}

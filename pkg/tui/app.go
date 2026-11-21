@@ -3066,6 +3066,11 @@ func (m model) handleMouseRelease(msg tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if idx, ok := m.codePlanApprovalAtPoint(m.selectionStart); ok {
+		m.tr.ApprovalCursor = idx
+		return m.submitApproval(m.approvalOptions()[idx])
+	}
+
 	if artifact, ok := m.artifactAtLine(m.selectionStart.line); ok {
 		return m.openArtifactViewer(artifact)
 	}
@@ -3585,7 +3590,12 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			appendBlock(i, it.Kind, m.renderDelegationItem(it, cw))
 
 		case events.ItemPlan:
-			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, "", "")
+			approvalState := ""
+			if it.PlanStatus == events.PlanPending {
+				// Pending cards contain controls: content alone cannot cache their cursor.
+				approvalState = fmt.Sprintf("%d:%q", m.tr.ApprovalCursor, m.planApprovalOptions(it))
+			}
+			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, approvalState, "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
 				useCached(i, it.Kind, cacheKey, cached)
 			} else {
@@ -5688,6 +5698,9 @@ func (m model) renderHints() string {
 	th := m.theme
 	if m.tr.Awaiting {
 		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+			if m.info.Mode == "code" {
+				return th.Hint.Render("Enter select  ·  1 run  ·  2 review  ·  r changes  ·  Esc decline")
+			}
 			return th.Hint.Render("enter implement  ·  r request changes  ·  n/esc decline  ·  ↑↓ choose")
 		}
 		return th.Hint.Render("y approve  ·  n deny  ·  1/2 select  ·  esc deny")

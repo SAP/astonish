@@ -48,11 +48,17 @@ var commandArgKeys = []string{"command"}
 
 // RequiresToolAuthorization reports whether a tool needs explicit user
 // authorization to run in Normal (non-plan) code mode. Read-only / safe tools
-// (agent.SafeTools) never do; everything else does. In plan mode the caller
-// uses the plan-mode gate instead, so planMode short-circuits to false here
-// (plan mode never routes through the Normal-mode authorization path).
+// (agent.SafeTools) and completion bookkeeping never do; everything else does.
+// In plan mode the caller uses the plan-mode gate instead, so planMode
+// short-circuits to false here (plan mode never routes through this path).
 func RequiresToolAuthorization(name string, planMode bool) bool {
 	if planMode {
+		return false
+	}
+	// Like announce_plan/update_plan, completion records session plan state.
+	// It uses existing phase evidence and executes no commands. Keep this
+	// Code consent exemption separate from the Plan/Ask mode allow-lists.
+	if name == "announce_completion" {
 		return false
 	}
 	return !IsToolSafe(name)

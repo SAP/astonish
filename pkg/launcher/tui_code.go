@@ -1425,6 +1425,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		close(out)
 		return nil, fmt.Errorf("restore session plan: %w", err)
 	}
+	if err := prepareCodePlanExecution(planRuntime, message, opts); err != nil {
+		close(out)
+		return nil, err
+	}
 	planSnapshot := planRuntime.Snapshot()
 	if !planMode && !graphPlan && !askMode {
 		if !approvedPlanExecution && len(planSnapshot.Steps) > 0 &&
@@ -2017,7 +2021,7 @@ func (b *localAgentBackend) localPlanRuntime(ctx context.Context, sessionID stri
 			emit("error", map[string]any{"error": "plan mirror failed (session snapshot saved; retry next turn): " + err.Error()})
 		}
 	}
-	options := agent.PlanRuntimeOptions{Workspace: b.workingDir, CommitSnapshot: func(s agent.PlanSnapshot) error {
+	options := agent.PlanRuntimeOptions{CodeExecution: true, Workspace: b.workingDir, CommitSnapshot: func(s agent.PlanSnapshot) error {
 		// Re-fetch by the actual app/user scope rather than a shared agent default.
 		current, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
 		if err != nil {

@@ -138,6 +138,9 @@ type TurnOptions struct {
 	// approved plan. The runtime allows normal tools and update_plan, but rejects
 	// announce_plan so execution cannot replace the approved plan.
 	ApprovedPlanExecution bool
+	// CodePlanExecutionMode is trusted initial-approval intent, never inferred
+	// from user text. Empty on remote chat and ordinary continuation turns.
+	CodePlanExecutionMode agent.CodePlanExecutionMode
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

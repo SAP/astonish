@@ -15,6 +15,48 @@ import (
 
 const legacyKnowledgePreamble = "CRITICAL — You MUST apply the following knowledge when executing this task. It contains proven commands, specific flags, and workarounds that are KNOWN TO WORK from previous sessions. Use the exact commands and approaches described here.\n\n"
 
+type completedContext struct {
+	context.Context
+	sess session.Session
+}
+
+func (c completedContext) Session() session.Session { return c.sess }
+
+func TestCompletedPlanTurnContextProjection(t *testing.T) {
+	svc := session.InMemoryService()
+	created, err := svc.Create(context.Background(), &session.CreateRequest{AppName: "test", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := codeExecutionFixture(CodePlanRunToCompletion)
+	generated := strings.ReplaceAll(PlanExecutionSystemContext, "__PLAN_BODY__", "OLD EXECUTION BODY")
+	hidden := buildTurnContextContent(&PromptOverrides{SessionContext: generated, ApprovedPlanExecution: true, ChannelHints: "KEEP"}, "TOOLS", "")
+	original := hidden.Parts[0].Text
+	if err := svc.AppendEvent(context.Background(), created.Session, newTurnContextEvent(hidden)); err != nil {
+		t.Fatal(err)
+	}
+	ctx := completedContext{context.Background(), created.Session}
+	req := &model.LLMRequest{Contents: []*genai.Content{hidden}}
+	projectCompletedCodePlanRequest(ctx, req, s)
+	got := req.Contents[0].Parts[0].Text
+	if strings.Contains(got, "OLD EXECUTION BODY") || strings.Contains(got, "An approved plan is being executed") || !strings.Contains(got, "KEEP") || !strings.Contains(got, "TOOLS") || !strings.Contains(got, s.PlanID) {
+		t.Fatal(got)
+	}
+	if hidden.Parts[0].Text != original {
+		t.Fatal("stored history changed")
+	}
+	// Exact user-authored copies are ambiguous; never rewrite them.
+	user := genai.NewContentFromText(original, "user")
+	if err := svc.AppendEvent(context.Background(), created.Session, &session.Event{ID: "genuine-user", Author: "user", LLMResponse: model.LLMResponse{Content: user}}); err != nil {
+		t.Fatal(err)
+	}
+	req.Contents = []*genai.Content{user}
+	projectCompletedCodePlanRequest(ctx, req, s)
+	if req.Contents[0] != user {
+		t.Fatal("user-authored lookalike changed")
+	}
+}
+
 func TestTurnKnowledgeSnapshot(t *testing.T) {
 	r := credentials.NewRedactor()
 	r.AddSecret("fixture", "super-secret-value")

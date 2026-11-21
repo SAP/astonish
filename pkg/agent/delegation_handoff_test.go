@@ -20,6 +20,29 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestDelegationHandoffCompletedCodeIsUnscoped(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		s := codeExecutionFixture(CodePlanRunToCompletion)
+		for i := range s.Steps {
+			s.Steps[i].Status = "complete"
+		}
+		s.Document.Results = "accepted"
+		r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: local})
+		ctx := WithDelegationPlanSource(WithPlanRuntime(context.Background(), r), "/historical/PLAN.md")
+		capture := CaptureDelegationPlan(ctx)
+		if local {
+			if !reflect.DeepEqual(capture, DelegationPlanCapture{}) {
+				t.Fatal("historical Code plan leaked into handoff", capture)
+			}
+			if _, err := capture.ForTask("unrelated", "", "not-an-old-step"); err != nil {
+				t.Fatal(err)
+			}
+		} else if capture.snapshot.PlanID != s.PlanID || capture.sourceMirror == "" {
+			t.Fatal("remote capture changed")
+		}
+	}
+}
+
 type handoffTestLLM struct {
 	generate func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
 }

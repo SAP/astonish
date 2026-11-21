@@ -530,6 +530,8 @@ func redirectLogsForTUI(debug bool) func() {
 // mapSSEToEvents translator, so the TUI renders identically to platform mode
 // with no new mapping code.
 type localAgentBackend struct {
+	folderPermissionMu       sync.Mutex
+	folderPermissionPolicies map[string]*agent.SessionAuthPolicy
 	// Sessions whose FileStore state cache predates a local rollback. Guarded by mu.
 	planHistoryTruncated map[string]bool
 	result               *ChatFactoryResult
@@ -608,6 +610,7 @@ type localAgentBackend struct {
 	// the approval overlay and response channel at a time.
 	subAgentAuthMu      sync.Mutex
 	subAgentAuthPending bool
+	subAgentAuthRequest *agent.PendingAuthorization
 
 	// routingApprovalContinuation is set when the previous turn ended with a
 	// pending tool approval (the done event was preceded by an approval event).
@@ -713,9 +716,226 @@ func (b *localAgentBackend) Info() backend.Info {
 	return info
 }
 
-func (b *localAgentBackend) Open(ctx context.Context) error {
-	_ = ctx
+const codeFolderPermissionKey = "astonish_code_folder_permissions_v1"
+const codeFolderPermissionAuthor = "code-permissions"
+
+type codeFolderPermissionRecord struct {
+	Version   int    `json:"version"`
+	AppName   string `json:"app_name"`
+	UserID    string `json:"user_id"`
+	SessionID string `json:"session_id"`
+	agent.CodeSessionFolderSettings
+}
+
+func (b *localAgentBackend) persistCodeFolders(ctx context.Context, userID, id string, settings agent.CodeSessionFolderSettings) error {
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: userID, SessionID: id})
+	if err != nil {
+		return err
+	}
+	if resp == nil || resp.Session == nil {
+		return fmt.Errorf("saved Code session not found")
+	}
+	record := codeFolderPermissionRecord{Version: 1, AppName: codeAppName, UserID: userID, SessionID: id, CodeSessionFolderSettings: settings}
+	ev := &session.Event{
+		ID: fmt.Sprintf("code-permissions-%d", time.Now().UnixNano()), Author: codeFolderPermissionAuthor, Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{codeFolderPermissionKey: record}},
+	}
+	if err := b.sessionSvc.AppendEvent(ctx, resp.Session, ev); err != nil {
+		// FileStore publishes the event pointer to its cache before disk append.
+		// Neutralize that failed record so later compaction cannot persist consent
+		// that the user was told failed. Hydration also reads the durable transcript.
+		delete(ev.Actions.StateDelta, codeFolderPermissionKey)
+		return err
+	}
 	return nil
+}
+
+// hydrateCodeFolders reads only trusted state-only events, never tool arguments,
+// model content or inherited archive state. Policy identity detects model rebuilds.
+func (b *localAgentBackend) hydrateCodeFolders(ctx context.Context, id string) error {
+	if id == "" || b.result == nil || b.result.ChatAgent == nil {
+		return nil
+	}
+	b.folderPermissionMu.Lock()
+	defer b.folderPermissionMu.Unlock()
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(id)
+	userID := b.effectiveUserID()
+	ownerKey := userID + "\x00" + id
+	if b.folderPermissionPolicies[ownerKey] == p {
+		return nil
+	}
+	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: userID, SessionID: id})
+	if err != nil {
+		return fmt.Errorf("restore Code folder permissions: %w", err)
+	}
+	if resp == nil || resp.Session == nil {
+		return fmt.Errorf("saved Code session not found")
+	}
+	var permissionEvents []*session.Event
+	if b.fileStore != nil {
+		permissionEvents, err = b.fileStore.ReadTranscriptEvents(codeAppName, userID, id)
+		if err != nil {
+			return fmt.Errorf("read saved folder permissions: %w", err)
+		}
+	} else {
+		for ev := range resp.Session.Events().All() {
+			permissionEvents = append(permissionEvents, ev)
+		}
+	}
+	var current agent.CodeSessionFolderSettings
+	malformed := false
+	for _, ev := range permissionEvents {
+		if ev == nil {
+			continue
+		}
+		raw, ok := ev.Actions.StateDelta[codeFolderPermissionKey]
+		if !ok {
+			continue
+		}
+		var record codeFolderPermissionRecord
+		data, marshalErr := json.Marshal(raw)
+		if marshalErr != nil || json.Unmarshal(data, &record) != nil || ev.Author != codeFolderPermissionAuthor || ev.LLMResponse.Content != nil || record.Version != 1 || record.AppName != codeAppName || record.UserID != userID || record.SessionID != id || record.Generation < current.Generation || (record.AllFolders && record.Generation == 0) || (record.Generation == current.Generation && record.AllFolders != current.AllFolders) {
+			malformed = true
+			current.AllFolders = false
+			continue
+		}
+		current = record.CodeSessionFolderSettings
+		malformed = false // a later trusted explicit setting supersedes corrupt history
+	}
+	if malformed {
+		current.AllFolders = false
+		b.mu.Lock()
+		b.notices = append(b.notices, "Saved folder permission was invalid; external folders require approval.")
+		b.mu.Unlock()
+	}
+	p.ConfigureCodeSessionFolders(current, func(next agent.CodeSessionFolderSettings) error {
+		return b.persistCodeFolders(context.Background(), userID, id, next)
+	})
+	if b.folderPermissionPolicies == nil {
+		b.folderPermissionPolicies = make(map[string]*agent.SessionAuthPolicy)
+	}
+	b.folderPermissionPolicies[ownerKey] = p
+	return nil
+}
+
+func (b *localAgentBackend) CodePermissions(ctx context.Context) (backend.CodePermissionsSnapshot, error) {
+	b.mu.Lock()
+	id, override := b.sessionID, b.autoApprove
+	b.mu.Unlock()
+	out := backend.CodePermissionsSnapshot{SessionID: id, CLIOverride: override, Source: backend.CodePermissionSourceCurrent}
+	if override {
+		out.Source = backend.CodePermissionSourceCLI
+	}
+	if id == "" || b.result == nil || b.result.ChatAgent == nil {
+		return out, nil
+	}
+	if err := b.hydrateCodeFolders(ctx, id); err != nil {
+		return out, err
+	}
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(id)
+	folders := p.CodeSessionFolders()
+	out.SessionAllFolders, out.Generation = folders.AllFolders, folders.Generation
+	out.AllToolsSession = p.AllToolsAllowedForSession()
+	r, err := b.localPlanRuntime(ctx, id, nil)
+	if err != nil {
+		return out, err
+	}
+	snapshot := r.Snapshot()
+	out.PlanFullAccess = p.CodePlanFullAccessGranted(id, snapshot)
+	if out.PlanFullAccess {
+		out.PlanID = snapshot.PlanID
+	}
+	if !override {
+		if out.SessionAllFolders {
+			out.Source = backend.CodePermissionSourceSession
+		}
+		if out.PlanFullAccess {
+			out.Source = backend.CodePermissionSourcePlan
+		}
+	}
+	return out, nil
+}
+
+func (b *localAgentBackend) RevokeCodePermission(ctx context.Context, scope backend.CodePermissionScope) error {
+	if scope != backend.CodePermissionPlanFullAccess && scope != backend.CodePermissionSessionAllFolders {
+		return fmt.Errorf("unknown Code permission scope %q", scope)
+	}
+	b.mu.Lock()
+	id := b.sessionID
+	b.mu.Unlock()
+	if id == "" || b.result == nil || b.result.ChatAgent == nil {
+		return nil
+	}
+	if err := b.hydrateCodeFolders(ctx, id); err != nil {
+		return err
+	}
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(id)
+	if scope == backend.CodePermissionPlanFullAccess {
+		p.RevokeCodePlanFullAccess()
+		return nil
+	}
+	return p.SetAllFoldersForSession(false)
+}
+
+func (b *localAgentBackend) ReenableCodePlanFullAccess(ctx context.Context, sessionID, planID string, revision int64) error {
+	b.mu.Lock()
+	id := b.sessionID
+	b.mu.Unlock()
+	if id == "" || id != sessionID || b.result == nil || b.result.ChatAgent == nil {
+		return fmt.Errorf("Code session changed")
+	}
+	r, err := b.localPlanRuntime(ctx, id, nil)
+	if err != nil {
+		return err
+	}
+	return b.result.ChatAgent.GetOrCreateAuthPolicy(id).ReenableCodePlanFullAccess(id, r, planID, revision)
+}
+
+// Keep lazy Code structurally compatible without exposing this API to remote chat.
+func (b *lazyCodeBackend) ReenableCodePlanFullAccess(ctx context.Context, sessionID, planID string, revision int64) error {
+	if inner, ok := b.inner.(interface {
+		ReenableCodePlanFullAccess(context.Context, string, string, int64) error
+	}); ok {
+		return inner.ReenableCodePlanFullAccess(ctx, sessionID, planID, revision)
+	}
+	return fmt.Errorf("Code backend not opened")
+}
+
+// PrepareCodeFolderApproval durably commits broad folder consent while the exact
+// prompt still owns the response route. Failure leaves both UI and runtime pending.
+func (b *localAgentBackend) PrepareCodeFolderApproval(ctx context.Context, sessionID, toolName string, paths []string, choice string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if sessionID == "" || b.sessionID != sessionID || b.result == nil || b.result.ChatAgent == nil {
+		return fmt.Errorf("Code session changed")
+	}
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(sessionID)
+	req := p.Pending()
+	if b.subAgentAuthPending {
+		req = b.subAgentAuthRequest
+	}
+	if req == nil || req.Kind != "folder" || req.Tool != toolName || strings.Join(req.Paths, "\x00") != strings.Join(paths, "\x00") || agent.DecodeAuthorizationChoice(req, choice) != agent.AuthorizationAllFolders {
+		return fmt.Errorf("folder request changed; retry the current prompt")
+	}
+	return p.SetAllFoldersForSession(true)
+}
+
+func (b *lazyCodeBackend) PrepareCodeFolderApproval(ctx context.Context, sessionID, toolName string, paths []string, choice string) error {
+	if inner, ok := b.inner.(interface {
+		PrepareCodeFolderApproval(context.Context, string, string, []string, string) error
+	}); ok {
+		return inner.PrepareCodeFolderApproval(ctx, sessionID, toolName, paths, choice)
+	}
+	return fmt.Errorf("Code backend not opened")
+}
+
+var _ backend.CodePermissionsBackend = (*localAgentBackend)(nil)
+
+func (b *localAgentBackend) Open(ctx context.Context) error {
+	b.mu.Lock()
+	id := b.sessionID
+	b.mu.Unlock()
+	return b.hydrateCodeFolders(ctx, id)
 }
 
 func (b *localAgentBackend) Close() error {
@@ -1082,23 +1302,40 @@ func (b *localAgentBackend) ActivePlanFilePath() string {
 // shouldContinueApprovedPlan reports whether a Normal turn should keep executing
 // an already-approved PLAN.md (research ceilings, inlined plan, no replacement).
 func (b *localAgentBackend) shouldContinueApprovedPlan(ctx context.Context, sessionID, planPath string, chatAgent *agent.ChatAgent) bool {
+	// This predicate must not bootstrap or mirror a plan: callers also use it
+	// while deciding whether a legacy document has just become approved.
+	if b.sessionSvc != nil {
+		if resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID}); err == nil && resp != nil && resp.Session != nil {
+			if value, err := resp.Session.State().Get(agent.PlanSnapshotStateKey); err == nil && value != nil {
+				if raw, err := json.Marshal(value); err == nil {
+					var snapshot agent.PlanSnapshot
+					if json.Unmarshal(raw, &snapshot) == nil && snapshot.IsFullyAccepted() {
+						return false
+					}
+				}
+			}
+		}
+	}
 	if planPath == "" {
 		return false
 	}
 	if _, err := os.Stat(planPath); err != nil {
 		return false
 	}
-	if chatAgent != nil && chatAgent.IsActivePlanApproved() {
-		return true
-	}
-	// A restarted process has no in-memory seal. PLAN.md carries the lifecycle,
-	// so prefer the document before falling back to the session-state key.
+	// A restarted process has no in-memory seal. Check completed legacy
+	// documents before either the in-memory or session-state lifecycle fallback.
 	if data, err := os.ReadFile(planPath); err == nil {
-		if doc, _, _, perr := agent.ParsePlanDocument(string(data)); perr == nil {
+		if doc, goal, steps, perr := agent.ParsePlanDocument(string(data)); perr == nil {
+			if (agent.PlanSnapshot{Goal: goal, Document: doc, Steps: steps}).IsFullyAccepted() {
+				return false
+			}
 			if agent.NormalizePlanLifecycle(doc.Lifecycle) != "" {
 				return true
 			}
 		}
+	}
+	if chatAgent != nil && chatAgent.IsActivePlanApproved() {
+		return true
 	}
 	return b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved
 }
@@ -1150,7 +1387,7 @@ func localPlanSystemContext(s agent.PlanSnapshot, planPath string, completed boo
 	}
 	template := agent.PlanExecutionSystemContext
 	if completed {
-		template = agent.PlanCompletedSystemContext
+		return agent.CompletedCodePlanReference(s, planPath)
 	}
 	return strings.NewReplacer("__PLAN_PATH__", planPath, "__PLAN_BODY__",
 		agent.RenderPlanFromInfoWithDoc(s.Goal, s.Document, s.Steps)).Replace(template)
@@ -1264,6 +1501,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 	}
 
 	chatAgent := b.result.ChatAgent
+	if err := b.hydrateCodeFolders(ctx, sessionID); err != nil {
+		close(out)
+		return nil, err
+	}
 	chatAgent.AutoApprove = autoApprove
 	// Wire the RoutingLLM to SubAgentManager so sub-agents use the same routing.
 	b.mu.Lock()
@@ -1344,12 +1585,15 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			defer b.subAgentAuthMu.Unlock()
 
 			policy := chatAgent.GetOrCreateAuthPolicy(req.ParentSessionID)
+			if policy.CodePlanFullAccessAllowed(req.Context, req.ParentSessionID) {
+				return agent.SubAgentAuthResponse{Granted: true, PlanBypass: true}
+			}
 			if policy != nil {
 				if req.Kind == "folder" && len(policy.OutOfScopePaths(req.Args)) == 0 {
-					return agent.SubAgentAuthResponse{Granted: true, Choice: "Always Allow"}
+					return agent.SubAgentAuthResponse{Granted: true, Choice: agent.OptAllowPathOnce}
 				}
 				if req.Kind == "tool" && policy.AllToolsAllowedForSession() {
-					return agent.SubAgentAuthResponse{Granted: true, Choice: "Always Allow"}
+					return agent.SubAgentAuthResponse{Granted: true, Choice: agent.OptAllowPathOnce}
 				}
 			}
 
@@ -1372,6 +1616,7 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			// in the same turn is not misrouted.
 			b.mu.Lock()
 			b.subAgentAuthPending = true
+			b.subAgentAuthRequest = &agent.PendingAuthorization{Kind: req.Kind, Tool: req.ToolName, Paths: append([]string(nil), req.OutOfScopePaths...), Options: agent.FolderApprovalOptions()}
 			b.mu.Unlock()
 			// Emit approval event so the TUI shows the overlay.
 			payload := map[string]any{
@@ -1395,6 +1640,12 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			var resp agent.SubAgentAuthResponse
 			select {
 			case resp = <-b.subAgentAuthRespCh:
+				choices := agent.ToolApprovalOptions()
+				if req.Kind == "folder" {
+					choices = agent.FolderApprovalOptions()
+				}
+				pending := &agent.PendingAuthorization{Kind: req.Kind, Options: choices}
+				resp.Granted = agent.DecodeAuthorizationChoice(pending, resp.Choice) != agent.AuthorizationDeny
 			case <-ctx.Done():
 				resp = agent.SubAgentAuthResponse{Granted: false, Choice: "Deny"}
 				b.mu.Lock()
@@ -1425,12 +1676,30 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		close(out)
 		return nil, fmt.Errorf("restore session plan: %w", err)
 	}
-	if err := prepareCodePlanExecution(planRuntime, message, opts); err != nil {
+	planSnapshot := planRuntime.Snapshot()
+	if planSnapshot.IsFullyAccepted() {
+		// Durable completion wins over stale UI approval options and lifecycle.
+		approvedPlanExecution, approvedPlanExecutionExplicit = false, false
+		approvedPlanCompleted = true
+		if !planMode && !graphPlan && !askMode && (strings.TrimSpace(systemContext) == "" || isLocalPlanSystemContext(systemContext)) {
+			systemContext = localPlanSystemContext(planSnapshot, planPath, true)
+		}
+	} else if err := prepareCodePlanExecution(planRuntime, message, opts); err != nil {
 		close(out)
 		return nil, err
 	}
-	planSnapshot := planRuntime.Snapshot()
-	if !planMode && !graphPlan && !askMode {
+	policy := chatAgent.GetOrCreateAuthPolicy(sessionID)
+	policy.ObserveCodePlanSnapshot(planRuntime.Snapshot())
+	if !approvedPlanCompleted && opts.CodePlanPermissionMode != "" {
+		policy.RevokeCodePlanFullAccess()
+		if opts.CodePlanPermissionMode == agent.CodePlanFullAccess {
+			if err := policy.GrantCodePlanFullAccess(sessionID, planRuntime); err != nil {
+				close(out)
+				return nil, err
+			}
+		}
+	}
+	if !planMode && !graphPlan && !askMode && !approvedPlanCompleted {
 		if !approvedPlanExecution && len(planSnapshot.Steps) > 0 &&
 			(agent.NormalizePlanLifecycle(planSnapshot.Document.Lifecycle) != "" || b.sessionPlanLifecycle(ctx, sessionID) == events.PlanApproved) {
 			approvedPlanExecution = true
@@ -1440,25 +1709,8 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 				close(out)
 				return nil, fmt.Errorf("restore approved plan: no session plan")
 			}
-			// Check whether every phase in the restored plan has reached a
-			// terminal state. If so, the plan is historical context — not an
-			// active execution. Switch to the softer completed-plan context
-			// so the model returns to normal conversation mode instead of
-			// treating every user message as an action to execute.
-			planAllComplete := false
-			if plan := planRuntime.PlanState(); plan != nil && plan.IsFullyAccepted() {
-				planAllComplete = true
-			}
-			// The TUI may have prebuilt context from the old mirror. Replace that
-			// generated context too, rather than treating it as authoritative.
 			if strings.TrimSpace(systemContext) == "" || isLocalPlanSystemContext(systemContext) {
-				systemContext = localPlanSystemContext(planSnapshot, planPath, planAllComplete)
-			}
-			if planAllComplete {
-				// Demote from active execution to completed-plan reference.
-				// Keep approvedPlanExecution true so the plan cannot be replaced,
-				// but signal downstream context that execution is over.
-				approvedPlanCompleted = true
+				systemContext = localPlanSystemContext(planRuntime.Snapshot(), planPath, false)
 			}
 		}
 	}
@@ -1832,6 +2084,18 @@ func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string
 			return out
 		}
 	}
+	if b.result != nil && b.result.ChatAgent != nil {
+		if err := b.hydrateCodeFolders(ctx, sessionID); err != nil {
+			return out
+		}
+		settings := b.result.ChatAgent.GetOrCreateAuthPolicy(sessionID).CodeSessionFolders()
+		if err := b.persistCodeFolders(ctx, b.effectiveUserID(), childID, settings); err != nil {
+			return out
+		}
+		if err := b.hydrateCodeFolders(ctx, childID); err != nil {
+			return out
+		}
+	}
 	b.mu.Lock()
 	b.sessionID = childID
 	b.contextTokens = int64(after)
@@ -2004,6 +2268,9 @@ func cleanCodeSessionTitle(raw string) string {
 // localPlanRuntime restores the authoritative session snapshot before consulting
 // the legacy sidecar. A sidecar failure is reported and repaired on the next turn.
 func (b *localAgentBackend) localPlanRuntime(ctx context.Context, sessionID string, emit func(string, map[string]any)) (*agent.PlanRuntime, error) {
+	if emit == nil {
+		emit = func(string, map[string]any) {}
+	}
 	resp, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
 	if err != nil {
 		return nil, err
@@ -2037,6 +2304,9 @@ func (b *localAgentBackend) localPlanRuntime(ctx context.Context, sessionID stri
 		}
 		if err = b.sessionSvc.AppendEvent(ctx, current.Session, &session.Event{ID: fmt.Sprintf("plan-%s-%d", s.PlanID, s.Sequence), Author: "system", Timestamp: time.Now(), Actions: session.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: value}}}); err != nil {
 			return err
+		}
+		if b.result != nil && b.result.ChatAgent != nil {
+			b.result.ChatAgent.GetOrCreateAuthPolicy(sessionID).ObserveCodePlanSnapshot(s)
 		}
 		mirror(s)
 		if s.Document.Lifecycle != "" {
@@ -2102,6 +2372,16 @@ func (b *localAgentBackend) driveTurn(
 	}})
 	defer chatAgent.BindSessionPlanRuntime(sessionID, runtime)()
 	if po := agent.PromptOverridesFromContext(ctx); po != nil {
+		if runtime.Snapshot().IsFullyAccepted() {
+			updated := *po
+			updated.ApprovedPlanExecution, updated.ApprovedPlanExecutionExplicit = false, false
+			updated.ApprovedPlanCompleted = true
+			if !po.PlanMode && !po.GraphPlanMode && !po.AskMode && (strings.TrimSpace(po.SessionContext) == "" || isLocalPlanSystemContext(po.SessionContext)) {
+				updated.SessionContext = agent.EscapeCurlyPlaceholders(localPlanSystemContext(runtime.Snapshot(), b.planFilePath(sessionID), true))
+			}
+			po = &updated
+			ctx = agent.WithPromptOverrides(ctx, po)
+		}
 		if po.PlanMode || po.GraphPlanMode {
 			// Plan mode may replace any previous plan with a fresh announcement.
 			// Execution approval belongs to the new plan, not its predecessor.
@@ -2132,6 +2412,7 @@ func (b *localAgentBackend) driveTurn(
 			}
 		}
 	}
+	ctx = chatAgent.GetOrCreateAuthPolicy(sessionID).BindCodePlanExecution(ctx, sessionID, runtime)
 	seenPartialText := false
 	sawRealUsage := false
 	// Allow the first mid-turn estimate to fire immediately (the throttle only
@@ -2976,6 +3257,9 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	activeID := sessionID
 	if b.fileStore != nil {
 		activeID = b.fileStore.LatestDescendant(sessionID)
+	}
+	if err := b.hydrateCodeFolders(ctx, activeID); err != nil {
+		return nil, err
 	}
 	hist, err := b.loadHistory(ctx, activeID)
 	if err != nil {
@@ -4020,6 +4304,17 @@ func (b *localAgentBackend) RollbackTo(ctx context.Context, pointID string) ([]b
 		}
 	}
 
+	// Permissions are explicit settings, not conversation history. Preserve the
+	// latest choice (including revocation), never replay an earlier grant.
+	var folderSettings agent.CodeSessionFolderSettings
+	if b.result != nil && b.result.ChatAgent != nil {
+		if err := b.hydrateCodeFolders(ctx, activeID); err != nil {
+			return nil, err
+		}
+		p := b.result.ChatAgent.GetOrCreateAuthPolicy(activeID)
+		folderSettings = p.CodeSessionFolders()
+		p.RevokeCodePlanFullAccess()
+	}
 	// 2) Truncate the owning session to the events before the target message.
 	if b.fileStore != nil {
 		if _, err := b.fileStore.TruncateEvents(codeAppName, b.effectiveUserID(), ownerID, targetIdx); err != nil {
@@ -4046,6 +4341,19 @@ func (b *localAgentBackend) RollbackTo(ctx context.Context, pointID string) ([]b
 		}
 	}
 
+	if b.result != nil && b.result.ChatAgent != nil {
+		folderSettings.Generation++
+		if err := b.persistCodeFolders(ctx, b.effectiveUserID(), ownerID, folderSettings); err != nil {
+			return nil, fmt.Errorf("restore current folder permissions after rollback: %w", err)
+		}
+		b.folderPermissionMu.Lock()
+		delete(b.folderPermissionPolicies, b.effectiveUserID()+"\x00"+ownerID)
+		b.folderPermissionMu.Unlock()
+		b.result.ChatAgent.GetOrCreateAuthPolicy(ownerID).RevokeCodePlanFullAccess()
+		if err := b.hydrateCodeFolders(ctx, ownerID); err != nil {
+			return nil, err
+		}
+	}
 	// 4) Re-activate the owning session and reset usage.
 	ctxTokens := b.estimateContextTokens(ctx, ownerID)
 	b.mu.Lock()

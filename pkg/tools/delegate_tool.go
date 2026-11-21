@@ -118,7 +118,7 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 
 	// Capture only the invocation-scoped runtime, once for the whole batch.
 	codeRuntime, _ := agent.PlanRuntimeFromContext(ctx)
-	codeExecution := codeRuntime.CodeExecutionEnabled()
+	codeExecution := codeRuntime.CodeExecutionActive()
 	if codeExecution {
 		defer func() { out.PlanRecovery = codeRuntime.CodeRecovery(out.Status, out.Summary) }()
 	}

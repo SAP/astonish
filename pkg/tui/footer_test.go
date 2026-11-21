@@ -8,9 +8,38 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestCodePermissionsFooterExpiresPlanButKeepsSessionGrant(t *testing.T) {
+	m := newTestComposerModel(110)
+	defer m.cancel()
+	m.info.Mode = "code"
+	s := agent.PlanSnapshot{PlanID: "active", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	s.Document.Lifecycle = agent.PlanLifecycleApproved
+	s.Document.CodeExecutionMode = agent.CodePlanRunToCompletion
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.syncCodePermissions()
+	m.permissions.known = true
+	m.permissions.snapshot = backend.CodePermissionsSnapshot{PlanID: "active", PlanFullAccess: true, SessionAllFolders: true}
+	if !strings.Contains(m.codePermissionFooter(), "Full access · this plan") {
+		t.Fatal("active lease missing")
+	}
+	s.Sequence++
+	s.Steps[0].Status = "complete"
+	s.Document.Results = "Verified"
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.syncCodePermissions()
+	if got := m.codePermissionFooter(); got != "Folders · session" {
+		t.Fatalf("completed permission footer = %q", got)
+	}
+	m.planPermission = agent.CodePlanFullAccess
+	if strings.Contains(m.codePermissionFooter(), "Full access") {
+		t.Fatal("selection claimed effective authority")
+	}
+}
 
 func TestModelFooterTextShowsProviderAndConcreteModel(t *testing.T) {
 	got := modelFooterText("sap-ai-core", "anthropic--claude-3.7-sonnet")

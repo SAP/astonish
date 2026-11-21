@@ -1372,10 +1372,13 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		taskName := task.Name
 
 		// Folder-access gate (checked first, same as main thread).
-		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+		beforeToolCallbacks = append(beforeToolCallbacks, func(authCtx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 			policy := getPolicy(parentSessionID)
 			if policy == nil {
 				return nil, nil // no policy = no enforcement
+			}
+			if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+				return nil, nil
 			}
 			outside := policy.OutOfScopePaths(args)
 			if len(outside) == 0 {
@@ -1385,6 +1388,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			}
 			// Paths are out of scope — request authorization from the user.
 			resp := authGate(SubAgentAuthRequest{
+				Context:         authCtx,
 				TaskName:        taskName,
 				Kind:            "folder",
 				ToolName:        t.Name(),
@@ -1392,24 +1396,21 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 				OutOfScopePaths: outside,
 				ParentSessionID: parentSessionID,
 			})
+			if resp.PlanBypass {
+				if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+					return nil, nil
+				}
+				return map[string]any{"status": "authorization_denied", "error": "Plan permission was revoked; retry for approval."}, nil
+			}
 			if resp.Granted {
-				// Apply the grant to the policy based on the user's choice.
-				choice := NormalizeAuthChoice(resp.Choice)
-				switch choice {
-				case "broad2": // "Always Allow" → grant paths for session
-					for _, path := range outside {
-						policy.GrantPathForSession(path)
-					}
-				default: // "Allow" → grant paths once
-					for _, path := range outside {
-						policy.GrantPathOnce(path)
-					}
+				d, err := policy.ApplyAuthorizationRequest(&PendingAuthorization{Kind: "folder", Tool: t.Name(), Paths: outside, Options: FolderApprovalOptions()}, resp.Choice)
+				if err != nil {
+					return nil, err
 				}
-				// Subsume the tool gate for this call (same as main thread).
-				if RequiresToolAuthorization(t.Name(), false) {
-					policy.GrantToolOnce(t.Name())
+				if d.Granted {
+					policy.ConsumePathGrants(args)
+					return nil, nil
 				}
-				return nil, nil
 			}
 			return map[string]any{
 				"status": "authorization_denied",
@@ -1418,7 +1419,7 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 		})
 
 		// Tool-execution gate (Normal-mode whitelist = agent.SafeTools).
-		beforeToolCallbacks = append(beforeToolCallbacks, func(_ tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+		beforeToolCallbacks = append(beforeToolCallbacks, func(authCtx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 			name := t.Name()
 			if !RequiresToolAuthorization(name, false) {
 				return nil, nil // safe tool, no authorization needed
@@ -1427,27 +1428,36 @@ func (m *SubAgentManager) RunTask(ctx context.Context, task SubAgentTask) (resul
 			if policy == nil {
 				return nil, nil // no policy = no enforcement
 			}
+			if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+				return nil, nil
+			}
 			if policy.ToolAuthorized(name) {
 				return nil, nil // already authorized (e.g., "Always Allow")
 			}
 			// Tool not authorized — request authorization from the user.
 			resp := authGate(SubAgentAuthRequest{
+				Context:         authCtx,
 				TaskName:        taskName,
 				Kind:            "tool",
 				ToolName:        name,
 				Args:            args,
 				ParentSessionID: parentSessionID,
 			})
-			if resp.Granted {
-				// Apply the grant to the policy based on the user's choice.
-				choice := NormalizeAuthChoice(resp.Choice)
-				switch choice {
-				case "broad2": // "Always Allow" → grant all tools for session
-					policy.GrantAllToolsSession()
-				default: // "Allow" → grant this tool once
-					policy.GrantToolOnce(name)
+			if resp.PlanBypass {
+				if policy.CodePlanFullAccessAllowed(authCtx, parentSessionID) {
+					return nil, nil
 				}
-				return nil, nil
+				return map[string]any{"status": "authorization_denied", "error": "Plan permission was revoked; retry for approval."}, nil
+			}
+			if resp.Granted {
+				d, err := policy.ApplyAuthorizationRequest(&PendingAuthorization{Kind: "tool", Tool: name, Options: ToolApprovalOptions()}, resp.Choice)
+				if err != nil {
+					return nil, err
+				}
+				if d.Granted {
+					policy.ToolAuthorized(name)
+					return nil, nil
+				}
 			}
 			return map[string]any{
 				"status": "authorization_denied",

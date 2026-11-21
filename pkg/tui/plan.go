@@ -337,6 +337,7 @@ func (m model) planApprovalLines(it events.Item, inner int) []string {
 			}
 		}
 		if m.info.Mode == "code" {
+			lines = append(lines, m.planPermissionLines(inner)...)
 			lines = append(lines, m.theme.PlanMuted.Render("↑/↓ move · Enter select · Esc decline"))
 		}
 	case events.PlanApproved:

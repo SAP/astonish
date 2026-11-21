@@ -13,13 +13,96 @@ import (
 	adkmodel "google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/pathscope"
 	"github.com/SAP/astonish/pkg/tools"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestCodeFolderApprovalPreflightPreservesPending(t *testing.T) {
+	ctx := context.Background()
+	b, _ := codePlanAcceptanceBackend(t, t.TempDir(), t.TempDir(), "")
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(b.sessionID)
+	req := &agent.PendingAuthorization{Kind: "folder", Tool: "read_file", Paths: []string{"/outside"}, Options: agent.FolderApprovalOptions()}
+	p.SetPending(req)
+	fail := true
+	p.ConfigureCodeSessionFolders(agent.CodeSessionFolderSettings{}, func(agent.CodeSessionFolderSettings) error {
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	})
+	for _, id := range []string{"other", b.sessionID} {
+		if err := b.PrepareCodeFolderApproval(ctx, id, req.Tool, req.Paths, req.Options[2]); err == nil {
+			t.Fatal("failed/stale preflight granted")
+		}
+		if p.Pending() == nil || p.CodeSessionFolders().AllFolders {
+			t.Fatal("failed preflight changed pending/grant")
+		}
+	}
+	fail = false
+	if err := b.PrepareCodeFolderApproval(ctx, b.sessionID, req.Tool, req.Paths, req.Options[2]); err != nil {
+		t.Fatal(err)
+	}
+	if !p.CodeSessionFolders().AllFolders || p.Pending() == nil {
+		t.Fatal("preflight consumed response route")
+	}
+	if p.AllToolsAllowedForSession() {
+		t.Fatal("folder consent enabled tools")
+	}
+	p.ClearPending()
+	b.subAgentAuthPending = true
+	b.subAgentAuthRequest = req
+	if err := b.PrepareCodeFolderApproval(ctx, b.sessionID, req.Tool, req.Paths, req.Options[2]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodePlanPermissionReenableAcceptance(t *testing.T) {
+	ctx := context.Background()
+	b, m := codePlanAcceptanceBackend(t, t.TempDir(), t.TempDir(), "")
+	codePlanAnnounce(t, b, m, false)
+	s := codePlanSnapshot(t, b)
+	if err := b.ReenableCodePlanFullAccess(ctx, b.sessionID, s.PlanID, s.Revision); err == nil {
+		t.Fatal("enabled unapproved plan")
+	}
+	r, err := b.localPlanRuntime(ctx, b.sessionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.ApproveCodeExecution(s.PlanID, s.Revision, agent.CodePlanReviewEachPhase); err != nil {
+		t.Fatal(err)
+	}
+	s = r.Snapshot()
+	for _, bad := range []struct {
+		session, plan string
+		rev           int64
+	}{{"other", s.PlanID, s.Revision}, {b.sessionID, "other", s.Revision}, {b.sessionID, s.PlanID, s.Revision + 1}} {
+		if b.ReenableCodePlanFullAccess(ctx, bad.session, bad.plan, bad.rev) == nil {
+			t.Fatal("stale identity enabled")
+		}
+	}
+	lazy := &lazyCodeBackend{inner: b}
+	for i := 0; i < 2; i++ {
+		if err := lazy.ReenableCodePlanFullAccess(ctx, b.sessionID, s.PlanID, s.Revision); err != nil {
+			t.Fatal(err)
+		}
+		p, err := b.CodePermissions(ctx)
+		if err != nil || !p.PlanFullAccess {
+			t.Fatalf("projection %+v %v", p, err)
+		}
+		if got := r.Snapshot(); got.Sequence != s.Sequence || got.Document.CodeExecutionMode != s.Document.CodeExecutionMode {
+			t.Fatal("reenable altered plan")
+		}
+		if err := b.RevokeCodePermission(ctx, backend.CodePermissionPlanFullAccess); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 // These acceptance tests replace only the provider. RunTurn, the ADK runner,
 // plan tools, shell verification, session store and event bridge are real.
@@ -50,6 +133,354 @@ func codePlanAcceptanceBackend(t *testing.T, dir, workspace, id string) (*localA
 	c := agent.NewChatAgent(m, []tool.Tool{announce, update, complete}, nil, b.sessionSvc, &agent.SystemPromptBuilder{CodeMode: true}, false, true)
 	b.result = &ChatFactoryResult{ChatAgent: c}
 	return b, m
+}
+
+// TestCodeSessionFolderPermissionsAcceptance drives real RunTurn folder gates,
+// reloads a disk-backed session, compacts, and revokes independently of tools.
+func TestCodeSessionFolderPermissionsAcceptance(t *testing.T) {
+	t.Cleanup(pathscope.OverrideAlwaysAllowedDirsForTest(nil))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir, workspace := t.TempDir(), t.TempDir()
+	b, m := codePlanAcceptanceBackend(t, dir, workspace, "")
+	id := b.sessionID
+	reads := 0
+	wire := func(b *localAgentBackend) {
+		c := b.result.ChatAgent
+		c.AutoApprove, c.EnforceAuthorization = false, true
+		c.SetWorkingDir(workspace)
+		reader, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Read marker"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+			data, err := os.ReadFile(args["path"].(string))
+			reads++
+			return map[string]any{"content": string(data)}, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer, err := functiontool.New(functiontool.Config{Name: "write_file", Description: "Write marker"}, func(_ tool.Context, args map[string]any) (map[string]any, error) {
+			return map[string]any{"success": true}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Tools = append(c.Tools, reader, writer)
+	}
+	wire(b)
+	paths := []string{filepath.Join(t.TempDir(), "one"), filepath.Join(t.TempDir(), "two")}
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("marker"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(b *localAgentBackend, m *revisionScriptModel, name, path, message, wantKind string) {
+		t.Helper()
+		first := true
+		m.next = func(*adkmodel.LLMRequest) *genai.Content {
+			if first {
+				first = false
+				return codePlanCall(name, map[string]any{"path": path, "file_path": path}, m.calls)
+			}
+			return genai.NewContentFromText("done", "model")
+		}
+		got := codePlanRun(t, ctx, b, message, backend.TurnOptions{})
+		prompted := false
+		for _, ev := range got {
+			if ev.Kind == events.KindApproval {
+				prompted = true
+			}
+		}
+		p := b.result.ChatAgent.GetOrCreateAuthPolicy(b.sessionID).Pending()
+		if wantKind == "" {
+			if prompted || p != nil {
+				t.Fatalf("unexpected prompt: %+v", p)
+			}
+		} else if !prompted || p == nil || p.Kind != wantKind {
+			t.Fatalf("want %s prompt, got %+v", wantKind, p)
+		}
+	}
+	run(b, m, "read_file", paths[0], "read first", "folder")
+	run(b, m, "read_file", paths[0], agent.OptAllowAllFoldersSession, "")
+	run(b, m, "read_file", paths[1], "read another", "")
+	if reads != 2 {
+		t.Fatal("folder grant did not execute both reads", reads)
+	}
+	run(b, m, "write_file", paths[1], "write another", "tool")
+	b.result.ChatAgent.GetOrCreateAuthPolicy(id).ClearPending()
+	b, m = codePlanAcceptanceBackend(t, dir, workspace, id)
+	wire(b)
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run(b, m, "read_file", paths[1], "read after reopening", "")
+	snapshot, err := (&lazyCodeBackend{inner: b}).CodePermissions(ctx)
+	if err != nil || !snapshot.SessionAllFolders || snapshot.AllToolsSession || snapshot.Generation != 1 {
+		t.Fatalf("projection=%+v err=%v", snapshot, err)
+	}
+	other, otherModel := codePlanAcceptanceBackend(t, dir, workspace, "")
+	wire(other)
+	run(other, otherModel, "read_file", paths[1], "other session", "folder")
+	archive, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), id, contentsToSessionEvents([]*genai.Content{genai.NewContentFromText("compacted", "user")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, _ := codePlanAcceptanceBackend(t, dir, workspace, archive)
+	wire(archived)
+	if err := archived.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if archived.result.ChatAgent.GetOrCreateAuthPolicy(archive).CodeSessionFolders().AllFolders {
+		t.Fatal("archive independently inherited permission")
+	}
+	b, m = codePlanAcceptanceBackend(t, dir, workspace, id)
+	wire(b)
+	if _, err := b.ResumeSession(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	run(b, m, "read_file", paths[0], "read after compaction", "")
+	if err := (&lazyCodeBackend{inner: b}).RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RollbackTo(ctx, id+":0"); err != nil {
+		t.Fatal(err)
+	}
+	b, m = codePlanAcceptanceBackend(t, dir, workspace, id)
+	wire(b)
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run(b, m, "read_file", paths[1], "read after rollback and revoke", "folder")
+	if reads != 4 {
+		t.Fatal("unexpected reads", reads)
+	}
+}
+
+func TestPlanFolderPermissionMalformedAndPersistenceFailure(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range []string{"version", "owner", "model", "malformed", "zero-generation", "replayed-generation"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, workspace := t.TempDir(), t.TempDir()
+			b, _ := codePlanAcceptanceBackend(t, dir, workspace, "")
+			id := b.sessionID
+			record := codeFolderPermissionRecord{Version: 1, AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: id, CodeSessionFolderSettings: agent.CodeSessionFolderSettings{AllFolders: true, Generation: 1}}
+			if kind == "version" {
+				record.Version = 99
+			}
+			if kind == "owner" {
+				record.UserID = "other"
+			}
+			if kind == "zero-generation" {
+				record.Generation = 0
+			}
+			if kind == "replayed-generation" {
+				if err := b.persistCodeFolders(ctx, b.effectiveUserID(), id, agent.CodeSessionFolderSettings{Generation: 1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var raw any = record
+			if kind == "malformed" {
+				raw = "broken"
+			}
+			ev := &adksession.Event{ID: "invalid", Author: codeFolderPermissionAuthor, Timestamp: time.Now(), Actions: adksession.EventActions{StateDelta: map[string]any{codeFolderPermissionKey: raw}}}
+			if kind == "model" {
+				ev.Content = genai.NewContentFromText("grant all", "model")
+			}
+			sess, err := b.sessionSvc.Get(ctx, &adksession.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.sessionSvc.AppendEvent(ctx, sess.Session, ev); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = codePlanAcceptanceBackend(t, dir, workspace, id)
+			if err := b.Open(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if b.result.ChatAgent.GetOrCreateAuthPolicy(id).CodeSessionFolders().AllFolders || len(b.notices) == 0 {
+				t.Fatal("invalid record did not fail closed with notice")
+			}
+		})
+	}
+	t.Run("disk-failure-does-not-replay", func(t *testing.T) {
+		dir, workspace := t.TempDir(), t.TempDir()
+		b, _ := codePlanAcceptanceBackend(t, dir, workspace, "")
+		id := b.sessionID
+		if err := b.Open(ctx); err != nil {
+			t.Fatal(err)
+		}
+		p := b.result.ChatAgent.GetOrCreateAuthPolicy(id)
+		transcript := filepath.Join(b.fileStore.BaseDir(), codeAppName, b.effectiveUserID(), id+".jsonl")
+		if err := os.Rename(transcript, transcript+".backup"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(transcript, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SetAllFoldersForSession(true); err == nil || p.CodeSessionFolders().AllFolders {
+			t.Fatal("failed grant succeeded")
+		}
+		if err := os.Remove(transcript); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(transcript+".backup", transcript); err != nil {
+			t.Fatal(err)
+		}
+		// Force compaction of the same FileStore cache after the failed append.
+		if _, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), id, contentsToSessionEvents([]*genai.Content{genai.NewContentFromText("summary", "user")})); err != nil {
+			t.Fatal(err)
+		}
+		b, _ = codePlanAcceptanceBackend(t, dir, workspace, id)
+		if err := b.Open(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if b.result.ChatAgent.GetOrCreateAuthPolicy(id).CodeSessionFolders().AllFolders {
+			t.Fatal("failed grant replayed after compaction")
+		}
+		p = b.result.ChatAgent.GetOrCreateAuthPolicy(id)
+		if err := p.SetAllFoldersForSession(true); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(transcript, transcript+".backup"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(transcript, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err == nil || !p.CodeSessionFolders().AllFolders {
+			t.Fatal("failed revoke claimed success")
+		}
+		if err := os.Remove(transcript); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(transcript+".backup", transcript); err != nil {
+			t.Fatal(err)
+		}
+		b, _ = codePlanAcceptanceBackend(t, dir, workspace, id)
+		if err := b.Open(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !b.result.ChatAgent.GetOrCreateAuthPolicy(id).CodeSessionFolders().AllFolders {
+			t.Fatal("failed revoke changed durable authority")
+		}
+	})
+}
+
+func TestCodePlanFullAccessRunTurnAcceptance(t *testing.T) {
+	t.Cleanup(pathscope.OverrideAlwaysAllowedDirsForTest(nil))
+	restore := redirectLogsForTUI(false)
+	defer restore()
+	for _, mode := range []agent.CodePlanExecutionMode{agent.CodePlanRunToCompletion, agent.CodePlanReviewEachPhase} {
+		t.Run(string(mode), func(t *testing.T) {
+			b, m := codePlanAcceptanceBackend(t, t.TempDir(), t.TempDir(), "")
+			c := b.result.ChatAgent
+			c.AutoApprove = false
+			c.EnforceAuthorization = true
+			c.SetWorkingDir(b.workingDir)
+			outside := []string{filepath.Join(t.TempDir(), "one"), filepath.Join(t.TempDir(), "two")}
+			writes := 0
+			writer, err := functiontool.New(functiontool.Config{Name: "write_file", Description: "Write acceptance marker"}, func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+				writes++
+				err := os.WriteFile(args["file_path"].(string), []byte("ok"), 0600)
+				return map[string]any{"success": err == nil}, err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Tools = append(c.Tools, writer)
+			bridge, err := agent.NewProgressiveToolBridge(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Tools = append(c.Tools, bridge...)
+			childStage := 0
+			child := &revisionScriptModel{next: func(req *adkmodel.LLMRequest) *genai.Content {
+				childStage++
+				if childStage <= 2 {
+					return codePlanCall("execute_tool", map[string]any{"name": "core/write_file", "arguments": map[string]any{"file_path": outside[childStage-1], "content": "ok"}}, childStage)
+				}
+				return genai.NewContentFromText("child wrote both markers", "model")
+			}}
+			mgr := agent.NewSubAgentManager(agent.SubAgentConfig{})
+			mgr.SessionService, mgr.AppName, mgr.UserID, mgr.LLM = b.sessionSvc, codeAppName, b.effectiveUserID(), child
+			mgr.ToolGroups = map[string]*agent.ToolGroup{"core": {Name: "core", Tools: []tool.Tool{writer}}}
+			mgr.GetAuthPolicy = c.GetOrCreateAuthPolicy
+			mgr.AuthorizationGate = func(agent.SubAgentAuthRequest) agent.SubAgentAuthResponse {
+				t.Error("child prompted during plan lease")
+				return agent.SubAgentAuthResponse{}
+			}
+			delegate, err := tools.NewDelegateTasksToolForManager(mgr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Tools = append(c.Tools, delegate)
+			codePlanAnnounce(t, b, m, false)
+			rt, err := b.localPlanRuntime(context.Background(), b.sessionID, func(string, map[string]any) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := rt.Snapshot()
+			steps := s.Definition().Steps
+			steps[1].Verify += fmt.Sprintf("; test -f %q && test -f %q", outside[0], outside[1])
+			if _, err := rt.ReviseForPlanning(agent.PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: s.Revision, Reason: "verify outside markers", Steps: steps}); err != nil {
+				t.Fatal(err)
+			}
+			s = rt.Snapshot()
+			stage := 0
+			m.next = func(req *adkmodel.LLMRequest) *genai.Content {
+				stage++
+				switch stage {
+				case 1:
+					return codePlanCall("write_file", map[string]any{"file_path": outside[0], "content": "ok"}, m.calls)
+				case 2:
+					return codePlanCall("execute_tool", map[string]any{"name": "mcp:fixture/write_file", "arguments": map[string]any{"file_path": outside[1], "content": "ok"}}, m.calls)
+				case 3:
+					return codePlanCall("delegate_tasks", tools.DelegateTasksArgs{Tasks: []tools.SubTaskInput{{Name: "writer", Task: "write both markers", PlanStep: "phase-1", Tools: []string{"write_file"}}}}, m.calls)
+				case 4:
+					return codePlanCall("update_plan", tools.UpdatePlanArgs{Step: "phase-1", Status: "complete"}, m.calls)
+				case 5:
+					return codePlanCall("update_plan", tools.UpdatePlanArgs{Step: "phase-2", Status: "complete"}, m.calls)
+				case 6:
+					return codePlanCall("announce_completion", tools.AnnounceCompletionArgs{OutcomeObserved: "main, MCP bridge, child and verifier accessed two external directories"}, m.calls)
+				default:
+					return genai.NewContentFromText("verified", "model")
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			ctx = agent.WithRequestMCPGroups(ctx, map[string]*agent.ToolGroup{"mcp:fixture": {Name: "mcp:fixture", Tools: []tool.Tool{writer}}})
+			opts := backend.TurnOptions{ApprovedPlanExecution: true, CodePlanExecutionMode: mode, CodePlanPermissionMode: agent.CodePlanFullAccess, CodePlanApprovalID: s.PlanID, CodePlanApprovalRevision: s.Revision}
+			got := codePlanRun(t, ctx, b, "approve full host access", opts)
+			if mode == agent.CodePlanReviewEachPhase {
+				if stage != 4 || codePlanSnapshot(t, b).Document.CodeReviewPending != "phase-1" {
+					t.Fatal("review checkpoint bypassed", stage)
+				}
+				got = append(got, codePlanRun(t, ctx, b, "continue", backend.TurnOptions{})...)
+			}
+			for _, ev := range got {
+				if ev.Kind == events.KindApproval {
+					t.Fatal("plan execution prompted", ev)
+				}
+			}
+			if writes != 4 || childStage != 3 {
+				t.Fatalf("missing execution: writes=%d child=%d stage=%d", writes, childStage, stage)
+			}
+			codePlanAssertFinished(t, b, mode)
+			p := c.GetOrCreateAuthPolicy(b.sessionID)
+			if p.AllToolsAllowedForSession() || p.PathAllowed(outside[0]) || p.PathAllowed(outside[1]) {
+				t.Fatal("lease created permanent grants")
+			}
+			m.next = func(*adkmodel.LLMRequest) *genai.Content {
+				return codePlanCall("write_file", map[string]any{"file_path": outside[1], "content": "unrelated"}, m.calls)
+			}
+			got = codePlanRun(t, ctx, b, "unrelated write", backend.TurnOptions{})
+			prompted := false
+			for _, ev := range got {
+				prompted = prompted || ev.Kind == events.KindApproval
+			}
+			if !prompted || writes != 4 {
+				t.Fatal("completed plan leaked authority")
+			}
+		})
+	}
 }
 
 func codePlanCall(name string, args any, n int) *genai.Content {
@@ -194,6 +625,127 @@ func codePlanAssertUserTurns(t *testing.T, b *localAgentBackend, want int) {
 	if count != want {
 		t.Fatalf("persisted user turns = %d, want %d (internal recovery must not invent user messages)", count, want)
 	}
+}
+
+func TestCodePlanCompletedNormalFollowupAcceptance(t *testing.T) {
+	restore := redirectLogsForTUI(false)
+	defer restore()
+	dir, workspace := t.TempDir(), t.TempDir()
+	b, m := codePlanAcceptanceBackend(t, dir, workspace, "")
+	codePlanAnnounce(t, b, m, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	assertNormal := func(req *adkmodel.LLMRequest) {
+		t.Helper()
+		if req.Config != nil && req.Config.SystemInstruction != nil {
+			for _, p := range req.Config.SystemInstruction.Parts {
+				if p != nil && strings.Contains(p.Text, agent.CodePlanRecoveryGuidance) {
+					t.Error("recovery system instruction survived completion")
+				}
+			}
+		}
+		for _, c := range req.Contents {
+			for _, p := range c.Parts {
+				if p != nil && agent.IsTurnContextContent(c) && (strings.Contains(p.Text, "An approved plan is being executed") || strings.Contains(p.Text, "Write and check the exact ordered marker bytes")) {
+					t.Errorf("historical context retained execution instructions: %s", p.Text)
+				}
+			}
+		}
+	}
+	// Exercise a quota-bearing tool after completion in the SAME invocation.
+	// The tool body is a fixture; the actual tool callback gate remains real.
+	researchCalls := 0
+	research, err := functiontool.New(functiontool.Config{Name: "code_definition", Description: "Research gate acceptance probe"}, func(tool.Context, map[string]any) (map[string]any, error) {
+		researchCalls++
+		return map[string]any{"status": "success"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.result.ChatAgent.Tools = append(b.result.ChatAgent.Tools, research)
+	bridge, err := agent.NewProgressiveToolBridge(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.result.ChatAgent.Tools = append(b.result.ChatAgent.Tools, bridge...)
+	ctx = agent.WithRequestMCPGroups(ctx, map[string]*agent.ToolGroup{"research": {Name: "research", Tools: []tool.Tool{research}}})
+	stage := 0
+	m.next = func(req *adkmodel.LLMRequest) *genai.Content {
+		stage++
+		switch stage {
+		case 1, 2:
+			return codePlanCall("update_plan", tools.UpdatePlanArgs{Step: fmt.Sprintf("phase-%d", stage), Status: "complete"}, m.calls)
+		case 3:
+			return codePlanCall("announce_completion", tools.AnnounceCompletionArgs{OutcomeObserved: "Ordered markers verified"}, m.calls)
+		default:
+			assertNormal(req)
+			if stage <= 4+agent.ApprovedExecutionMaxCodegraphCalls {
+				return codePlanCall("code_definition", map[string]any{}, m.calls)
+			}
+			if stage == 5+agent.ApprovedExecutionMaxCodegraphCalls {
+				return codePlanCall("execute_tool", agent.ExecuteToolArgs{Name: "research/code_definition", Arguments: map[string]any{}}, m.calls)
+			}
+			if result := codePlanLastResponse(req, "execute_tool"); result["status"] != "success" {
+				t.Errorf("completed invocation retained deferred research gate: %+v", result)
+			}
+			if result := codePlanLastResponse(req, "code_definition"); result["status"] != "success" {
+				t.Errorf("completed invocation retained research gate: %+v", result)
+			}
+			return genai.NewContentFromText("Verified completion.", "model")
+		}
+	}
+	codePlanRun(t, ctx, b, "approve", backend.TurnOptions{ApprovedPlanExecution: true, CodePlanExecutionMode: agent.CodePlanRunToCompletion})
+	if researchCalls != agent.ApprovedExecutionMaxCodegraphCalls+2 {
+		t.Errorf("post-completion research calls = %d, want %d", researchCalls, agent.ApprovedExecutionMaxCodegraphCalls+2)
+	}
+	codePlanAssertFinished(t, b, agent.CodePlanRunToCompletion)
+	for _, restart := range []bool{false, true} {
+		if restart {
+			compacted := []*adksession.Event{{ID: "completed-summary", Author: "model", LLMResponse: modelTextResponse("Earlier verified work is complete.")}}
+			if _, err := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), b.sessionID, compacted); err != nil {
+				t.Fatal(err)
+			}
+			b, m = codePlanAcceptanceBackend(t, dir, workspace, b.sessionID)
+		}
+		before := codePlanSnapshot(t, b)
+		if b.shouldContinueApprovedPlan(ctx, b.sessionID, b.planFilePath(b.sessionID), b.result.ChatAgent) {
+			t.Error("historical plan still continues")
+		}
+		m.next = func(req *adkmodel.LLMRequest) *genai.Content {
+			assertNormal(req)
+			return genai.NewContentFromText("An unrelated answer.", "model")
+		}
+		codePlanRun(t, ctx, b, "What is two plus two?", backend.TurnOptions{ApprovedPlanExecution: true, CodePlanExecutionMode: agent.CodePlanReviewEachPhase})
+		child := &revisionScriptModel{next: func(req *adkmodel.LLMRequest) *genai.Content {
+			return genai.NewContentFromText("Unrelated delegated answer.", "model")
+		}}
+		manager := agent.NewSubAgentManager(agent.SubAgentConfig{})
+		manager.SessionService, manager.AppName, manager.UserID, manager.LLM = b.sessionSvc, codeAppName, b.effectiveUserID(), child
+		delegate, err := tools.NewDelegateTasksToolForManager(manager)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.result.ChatAgent.Tools = append(b.result.ChatAgent.Tools, delegate)
+		calls := 0
+		m.next = func(req *adkmodel.LLMRequest) *genai.Content {
+			assertNormal(req)
+			calls++
+			if calls == 1 {
+				return codePlanCall("delegate_tasks", tools.DelegateTasksArgs{Tasks: []tools.SubTaskInput{{Name: "unrelated", Task: "Answer an unrelated question"}}}, m.calls)
+			}
+			result := codePlanLastResponse(req, "delegate_tasks")
+			if result["status"] != "success" || result["plan_recovery"] != nil {
+				t.Errorf("ordinary delegate rejected: %+v", result)
+			}
+			return genai.NewContentFromText("Delegated answer received.", "model")
+		}
+		codePlanRun(t, ctx, b, "Delegate an unrelated question", backend.TurnOptions{})
+		after := codePlanSnapshot(t, b)
+		if before.Sequence != after.Sequence || before.Document.CodeExecutionMode != after.Document.CodeExecutionMode || !after.IsFullyAccepted() || child.calls != 1 {
+			t.Errorf("history changed or child not run: before=%+v after=%+v child=%d", before, after, child.calls)
+		}
+	}
+	t.Log("Real RunTurn verified and completed two phases, then answered and delegated without plan_step before and after restart, ignoring stale approval and retaining historical Results")
 }
 
 func TestCodePlanRunTurnAutonomousRecoveryAcceptance(t *testing.T) {

@@ -24,10 +24,13 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "exit", Aliases: []string{"quit", "q"}, Description: "Quit the terminal app"},
 }
 
+var permissionsSlashCommand = slashCommand{
+	Name: "permissions", Description: "View and revoke Code permissions (Ctrl+P)",
+}
+
 var skillsSlashCommand = slashCommand{
 	Name: "skills", Description: "List local runtime skills",
 }
-
 
 // rollbackSlashCommand is offered only when the backend supports rollback
 // (code mode). It reverts chat and file changes to an earlier message.

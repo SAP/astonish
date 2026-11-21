@@ -184,7 +184,11 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if c.EnforceAuthorization {
 			policy := c.GetOrCreateAuthPolicy(ctx.Session().ID())
 			if policy != nil && policy.Pending() != nil {
-				decision := policy.ApplyAuthorizationDecision(userText)
+				decision, authErr := policy.ApplyAuthorizationDecisionWithError(userText)
+				if authErr != nil {
+					yield(nil, authErr)
+					return
+				}
 				if decision != nil {
 					if decision.Granted {
 						userText = fmt.Sprintf(
@@ -805,6 +809,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			var executionResearchMu sync.Mutex
 			executionResearch := map[string]int{}
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+				// Approval flags are captured for the invocation, but Results can
+				// become durable between calls. Historical local plans no longer
+				// impose execution restrictions; remote/legacy gates are unchanged.
+				if runtime, _ := PlanRuntimeFromContext(ctx); runtime != nil && runtime.options.CodeExecution && runtime.Snapshot().IsFullyAccepted() {
+					return nil, nil
+				}
 				t, _ = c.effectiveToolCall(ctx, t, args)
 				name := t.Name()
 				if approvedPlanExecutionToolBlocked(name) {
@@ -880,7 +890,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			emitAuthPrompt := func(kind, toolName, prompt string, options []string, paths []string, args map[string]any) map[string]any {
 				// Only the callback that atomically claims the pending slot may emit
 				// an approval. Parallel tool calls remain suspended behind that owner.
-				if !authPolicy.TrySetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths}) {
+				if !authPolicy.TrySetPending(&PendingAuthorization{Kind: kind, Tool: toolName, Paths: paths, Options: options}) {
 					return map[string]any{
 						"status": "pending_authorization",
 						"info":   "Waiting for user authorization on a previous tool call.",
@@ -918,6 +928,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			// and Ask mode — read-only tools can still target sensitive paths.
 			beforeToolCallbacks = append(beforeToolCallbacks, func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 				t, args = c.effectiveToolCall(ctx, t, args)
+				if authPolicy.CodePlanFullAccessAllowed(ctx, sessionID) {
+					return nil, nil
+				}
 				if authPolicy.Pending() != nil {
 					return map[string]any{
 						"status": "pending_authorization",
@@ -953,6 +966,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 							"status": "pending_authorization",
 							"info":   "Waiting for user authorization on a previous tool call.",
 						}, nil
+					}
+					if authPolicy.CodePlanFullAccessAllowed(ctx, sessionID) {
+						return nil, nil
 					}
 					if authPolicy.ToolAuthorized(name) {
 						return nil, nil // an active grant covers this execution

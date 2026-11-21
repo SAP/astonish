@@ -129,9 +129,9 @@ type PromptOverrides struct {
 	// plan the user already approved. It is independent of Normal/Plan mode.
 	ApprovedPlanExecution bool
 
-	// ApprovedPlanCompleted signals that the approved plan finished (all steps
-	// complete/failed). The plan is kept as reference context but execution
-	// directives are removed, returning the session to normal conversation mode.
+	// ApprovedPlanCompleted is informational: all phases are complete and Results
+	// were durably accepted. Failed phases or checkboxes alone are not completion.
+	// Local Code clears both execution flags and returns to ordinary Normal work.
 	ApprovedPlanCompleted bool
 
 	// ApprovedPlanExecutionExplicit is true only on the explicit execution turn

@@ -130,6 +130,18 @@ func (m model) submitApproval(choice string) (tea.Model, tea.Cmd) {
 		return m.submitPlanApproval(choice)
 	}
 
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "folder" && len(it.Options) == 4 && choice == it.Options[2] {
+		if cap, ok := m.backend.(interface {
+			PrepareCodeFolderApproval(context.Context, string, string, []string, string) error
+		}); ok {
+			if err := cap.PrepareCodeFolderApproval(m.ctx, m.tr.SessionID, it.ToolName, append([]string(nil), it.Paths...), choice); err != nil {
+				m.tr.Apply(events.NewError(err.Error() + ". Retry or deny this folder request."))
+				m.refreshViewport()
+				return m, nil
+			}
+		}
+	}
+
 	// Sub-agent authorization: if the approval overlay was triggered by a
 	// sub-agent (delegate_tasks), send the response directly to the blocked
 	// goroutine instead of calling RunTurn. The sub-agent resumes automatically.
@@ -408,6 +420,9 @@ func (m model) renderApprovalOptions(opts []string) string {
 	}
 	var b strings.Builder
 	for i, o := range opts {
+		if it := m.approvalItem(); it != nil && it.ApprovalKind == "folder" && len(opts) == 4 {
+			o = fmt.Sprintf("%d  %s", i+1, o)
+		}
 		if i == cursor {
 			b.WriteString(th.Approval.Render("❯ "+o) + "\n")
 		} else {
@@ -415,11 +430,15 @@ func (m model) renderApprovalOptions(opts []string) string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(renderApprovalHints(th, []approvalHint{
+	hints := []approvalHint{
 		{Keys: "↑/↓", Label: "move"},
 		{Keys: "enter", Label: "select"},
 		{Keys: "esc", Label: "deny"},
-	}))
+	}
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "folder" && len(opts) == 4 {
+		hints = append(hints, approvalHint{Keys: "3", Label: "any folders"}, approvalHint{Keys: "4", Label: "deny"})
+	}
+	b.WriteString(renderApprovalHints(th, hints))
 	return b.String()
 }
 
@@ -431,6 +450,9 @@ func (m model) renderFolderApprovalOverlay(it *events.Item) string {
 
 	var b strings.Builder
 	b.WriteString(th.Approval.Render("⚠ Folder access required") + "\n\n")
+	if len(m.approvalOptions()) == 4 {
+		b.WriteString(th.Approval.Render("Always allow any folder for this session persists when this saved session is reopened. Allows access outside this project with your OS account permissions. Not sandboxed.") + "\n\n")
+	}
 	b.WriteString(th.Text.Render("Allow ") + th.Brand.Render(tool) +
 		th.Text.Render(" to access files outside the project directory?") + "\n")
 	if len(it.Paths) > 0 {
@@ -628,6 +650,19 @@ func planApprovalKeyHint(option string, index int) string {
 // pickYes/pickNo (those would send n/esc to "Request changes"). Navigation
 // keys still move ApprovalCursor; Enter submits the highlighted option.
 func (m model) handlePlanApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	m.syncCodePermissions()
+	if m.planApprovalPending {
+		return m, nil, true
+	}
+	if m.info.Mode == "code" && msg.String() == "p" {
+		if m.planPermission == agent.CodePlanFullAccess {
+			m.planPermission = agent.CodePlanCurrentApprovals
+		} else {
+			m.planPermission = agent.CodePlanFullAccess
+		}
+		m.refreshViewport()
+		return m, nil, true
+	}
 	opts := m.approvalOptions()
 	key := msg.String()
 	switch key {
@@ -721,6 +756,9 @@ func (m model) renderPlanApprovalFooter() string {
 		rows = append(rows, row)
 	}
 
+	if m.info.Mode == "code" {
+		rows = append(rows, m.planPermissionLines(contentW)...)
+	}
 	border := th.PlanBorder
 	var b strings.Builder
 	b.WriteString(border.Render("╭" + strings.Repeat("─", innerW) + "╮"))
@@ -786,9 +824,12 @@ func (m model) renderPlanApprovalOverlay(it *events.Item) string {
 // planApprovalStartedMsg reports completion of asynchronous plan-decision
 // persistence and approved execution launch.
 type planApprovalStartedMsg struct {
-	ch     <-chan events.Event
-	cancel context.CancelFunc
-	err    error
+	owner    *events.Transcript
+	session  string
+	identity string
+	ch       <-chan events.Event
+	cancel   context.CancelFunc
+	err      error
 }
 
 // submitPlanApproval handles the user's choice in the plan approval dialog.
@@ -796,6 +837,7 @@ type planApprovalStartedMsg struct {
 // execution. "Request changes" lets the user type feedback. "Decline" aborts
 // the plan and returns to Normal mode.
 func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
+	m.syncCodePermissions()
 	var executionMode agent.CodePlanExecutionMode
 	if m.info.Mode == "code" {
 		switch choice {
@@ -810,8 +852,9 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.planApprovalPending = true
-		m.planMode = false
-		m.graphPlanMode = false
+		if m.info.Mode != "code" {
+			m.planMode, m.graphPlanMode = false, false
+		}
 		m.tr.Apply(events.NewSystem("Plan approved. Preparing implementation…"))
 		m.refreshViewport()
 
@@ -821,23 +864,47 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 		if pb, ok := b.(backend.PlanBackend); ok {
 			planPath = pb.ActivePlanFilePath()
 		}
+		permission := agent.CodePlanPermissionMode("")
+		planID := ""
+		var revision int64
+		if m.info.Mode == "code" {
+			permission = agent.CodePlanCurrentApprovals
+			if m.planPermission == agent.CodePlanFullAccess {
+				permission = agent.CodePlanFullAccess
+			}
+			if it := m.approvalItem(); it != nil && it.PlanSnapshot != nil {
+				planID, revision = it.PlanSnapshot.PlanID, it.PlanSnapshot.Revision
+			}
+		}
+		owner, sessionID, identity := m.tr, m.tr.SessionID, m.planPermissionIdentity
 		return m, func() tea.Msg {
-			if lifecycle, ok := b.(backend.PlanLifecycleBackend); ok {
+			result := planApprovalStartedMsg{owner: owner, session: sessionID, identity: identity}
+			if permission != "" && b.Info().SessionID != sessionID {
+				result.err = fmt.Errorf("Code session changed; reopen the pending plan")
+				return result
+			}
+			if lifecycle, ok := b.(backend.PlanLifecycleBackend); ok && permission == "" {
 				if err := lifecycle.RecordPlanDecision(ctx, events.PlanApproved); err != nil {
-					return planApprovalStartedMsg{err: fmt.Errorf("failed to save plan decision: %w", err)}
+					result.err = fmt.Errorf("failed to save plan decision: %w", err)
+					return result
 				}
 			}
 			turnCtx, cancel := context.WithCancel(ctx)
 			ch, err := b.RunTurn(turnCtx, codePlanApprovalMessage(executionMode), backend.TurnOptions{
-				SystemContext:         agent.BuildPlanExecutionSystemContext(planPath),
-				ApprovedPlanExecution: true,
-				CodePlanExecutionMode: executionMode,
+				SystemContext:            agent.BuildPlanExecutionSystemContext(planPath),
+				ApprovedPlanExecution:    true,
+				CodePlanExecutionMode:    executionMode,
+				CodePlanPermissionMode:   permission,
+				CodePlanApprovalID:       planID,
+				CodePlanApprovalRevision: revision,
 			})
 			if err != nil {
 				cancel()
-				return planApprovalStartedMsg{err: err}
+				result.err = err
+				return result
 			}
-			return planApprovalStartedMsg{ch: ch, cancel: cancel}
+			result.ch, result.cancel = ch, cancel
+			return result
 		}
 	}
 
@@ -853,6 +920,7 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.tr.ResolvePlan(status)
+	m.planPermission = agent.CodePlanCurrentApprovals
 	m.ta.Reset()
 	if m.ready {
 		m.layout()
@@ -870,4 +938,270 @@ func (m model) submitPlanApproval(choice string) (tea.Model, tea.Cmd) {
 	}
 	m.refreshViewport()
 	return m, nil
+}
+
+const codeFullAccessWarning = "Allows commands and access outside this project with your OS account permissions; connected tools may affect external services. Not sandboxed."
+
+// Optional trusted local capability. Re-enabling never launches a turn.
+type codePlanPermissionEnabler interface {
+	ReenableCodePlanFullAccess(context.Context, string, string, int64) error
+}
+
+type codePermissionsState struct {
+	open, loading, known, confirm bool
+	refreshPending                bool
+	confirmPlanID                 string
+	confirmRevision               int64
+	cursor                        int
+	err                           string
+	snapshot                      backend.CodePermissionsSnapshot
+}
+type codePermissionsMsg struct {
+	owner    *events.Transcript
+	request  uint64
+	session  string
+	snapshot backend.CodePermissionsSnapshot
+	err      error
+}
+type codePermissionsRefreshMsg struct{}
+
+func (m model) codePermissionsCap() backend.CodePermissionsBackend {
+	if m.info.Mode != "code" || m.botSelected() {
+		return nil
+	}
+	cap, _ := m.backend.(backend.CodePermissionsBackend)
+	return cap
+}
+
+func (m *model) syncCodePermissions() {
+	if m.permissionOwner != m.tr || m.permissionSession != m.tr.SessionID {
+		m.permissions = codePermissionsState{}
+		m.permissionRequest++
+		m.permissionOwner, m.permissionSession = m.tr, m.tr.SessionID
+		m.planApprovalPending = false
+		m.planPermissionIdentity = ""
+		m.planPermission = agent.CodePlanCurrentApprovals
+	}
+	identity := ""
+	if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+		identity = fmt.Sprintf("%d/%s", m.tr.ApprovalIdx, it.Content)
+		if s := it.PlanSnapshot; s != nil {
+			identity = fmt.Sprintf("%s/%d", s.PlanID, s.Revision)
+		}
+	}
+	if identity != m.planPermissionIdentity {
+		m.planPermissionIdentity = identity
+		m.planPermission = agent.CodePlanCurrentApprovals
+	}
+	// Never leave an expired lease visible while a projection read is in flight.
+	if m.permissions.snapshot.PlanFullAccess {
+		s := m.codePermissionPlan()
+		if s == nil || s.PlanID != m.permissions.snapshot.PlanID {
+			m.permissions.snapshot.PlanFullAccess = false
+		}
+	}
+}
+
+func (m model) codePermissionPlan() *agent.PlanSnapshot {
+	for i := len(m.tr.Items) - 1; i >= 0; i-- {
+		it := m.tr.Items[i]
+		if it.Kind != events.ItemPlan {
+			continue
+		}
+		s := it.PlanSnapshot
+		if s != nil && s.Document.Lifecycle == agent.PlanLifecycleApproved && s.Document.CodeExecutionMode.Valid() && len(s.Steps) > 0 && !s.IsFullyAccepted() {
+			return s
+		}
+		return nil
+	}
+	return nil
+}
+
+func (m model) planPermissionLines(width int) []string {
+	label := "Current approvals"
+	if m.planPermission == agent.CodePlanFullAccess {
+		label = "Full access for this plan"
+	}
+	text := "Permissions: " + label + " [p change]"
+	if m.planPermission == agent.CodePlanFullAccess {
+		text += "\n" + codeFullAccessWarning
+	}
+	if m.info.AutoApprove {
+		text += "\nCLI --yolo / --auto-approve override is already active."
+	}
+	if m.planApprovalPending {
+		text += "\nSaving approval…"
+	}
+	return strings.Split(lipgloss.NewStyle().Width(max(1, width)).Render(text), "\n")
+}
+
+func (m *model) refreshCodePermissions() tea.Cmd {
+	m.syncCodePermissions()
+	cap := m.codePermissionsCap()
+	if cap == nil {
+		return nil
+	}
+	m.permissionRequest++
+	request, owner, sessionID, ctx := m.permissionRequest, m.tr, m.tr.SessionID, m.ctx
+	return func() tea.Msg {
+		s, err := cap.CodePermissions(ctx)
+		return codePermissionsMsg{owner: owner, request: request, session: sessionID, snapshot: s, err: err}
+	}
+}
+
+func (m model) openCodePermissions() (tea.Model, tea.Cmd) {
+	if m.codePermissionsCap() == nil {
+		return m, nil
+	}
+	m.syncCodePermissions()
+	m.permissions.open, m.permissions.loading = true, true
+	m.permissions.err, m.permissions.confirm = "", false
+	return m, m.refreshCodePermissions()
+}
+
+func (m model) permissionRows() ([]string, []backend.CodePermissionScope) {
+	var labels []string
+	var scopes []backend.CodePermissionScope
+	if m.permissions.snapshot.PlanFullAccess {
+		labels = append(labels, "Revoke Full access for this plan")
+		scopes = append(scopes, backend.CodePermissionPlanFullAccess)
+	}
+	if m.permissions.snapshot.SessionAllFolders {
+		labels = append(labels, "Revoke All folders for this session")
+		scopes = append(scopes, backend.CodePermissionSessionAllFolders)
+	}
+	if _, ok := m.backend.(codePlanPermissionEnabler); ok && !m.permissions.snapshot.PlanFullAccess && m.codePermissionPlan() != nil {
+		labels = append(labels, "Re-enable full access for this active plan")
+		scopes = append(scopes, "")
+	}
+	return labels, scopes
+}
+
+func (m model) handleCodePermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		if m.permissions.confirm {
+			m.permissions.confirm = false
+		} else {
+			m.permissions.open = false
+		}
+		return m, nil
+	}
+	if m.permissions.loading {
+		return m, nil
+	}
+	if msg.String() == "r" {
+		m.permissions.loading = true
+		return m, m.refreshCodePermissions()
+	}
+	if m.permissions.err != "" || !m.permissions.known {
+		return m, nil
+	}
+	labels, scopes := m.permissionRows()
+	if len(labels) == 0 {
+		return m, nil
+	}
+	m.permissions.cursor = min(m.permissions.cursor, len(labels)-1)
+	switch msg.String() {
+	case "up", "k":
+		m.permissions.cursor = (m.permissions.cursor + len(labels) - 1) % len(labels)
+		m.permissions.confirm = false
+	case "down", "j":
+		m.permissions.cursor = (m.permissions.cursor + 1) % len(labels)
+		m.permissions.confirm = false
+	case "enter":
+		scope := scopes[m.permissions.cursor]
+		if scope == "" && !m.permissions.confirm {
+			s := m.codePermissionPlan()
+			if s == nil {
+				return m, nil
+			}
+			m.permissions.confirmPlanID, m.permissions.confirmRevision = s.PlanID, s.Revision
+			m.permissions.confirm = true
+			return m, nil
+		}
+		var planID string
+		var revision int64
+		if scope == "" {
+			s := m.codePermissionPlan()
+			if s == nil || s.PlanID != m.permissions.confirmPlanID || s.Revision != m.permissions.confirmRevision {
+				m.permissions.confirm = false
+				m.permissions.err = "Plan changed; press r to refresh before confirming."
+				return m, nil
+			}
+			planID, revision = s.PlanID, s.Revision
+		}
+		m.permissions.loading, m.permissions.confirm = true, false
+		m.permissionRequest++
+		request, owner, sessionID, ctx, b, cap := m.permissionRequest, m.tr, m.tr.SessionID, m.ctx, m.backend, m.codePermissionsCap()
+		return m, func() tea.Msg {
+			var err error
+			if b.Info().SessionID != sessionID {
+				err = fmt.Errorf("session changed; reopen permissions")
+			} else if scope == "" {
+				err = b.(codePlanPermissionEnabler).ReenableCodePlanFullAccess(ctx, sessionID, planID, revision)
+			} else {
+				err = cap.RevokeCodePermission(ctx, scope)
+			}
+			var s backend.CodePermissionsSnapshot
+			if err == nil {
+				s, err = cap.CodePermissions(ctx)
+			}
+			return codePermissionsMsg{owner: owner, request: request, session: sessionID, snapshot: s, err: err}
+		}
+	}
+	return m, nil
+}
+
+func (m model) renderCodePermissions() string {
+	text := "Code permissions\n\n"
+	s := m.permissions.snapshot
+	switch {
+	case m.permissions.loading:
+		text += "Loading / saving permissions…"
+	case m.permissions.err != "":
+		text += "Error: " + m.permissions.err + "\nPress r to retry."
+	case !m.permissions.known:
+		text += "Permissions not loaded. Press r to refresh."
+	default:
+		if !s.PlanFullAccess && !s.SessionAllFolders && !s.AllToolsSession && !s.CLIOverride {
+			text += "Current approvals\n"
+		}
+		if s.CLIOverride {
+			text += "CLI --yolo / --auto-approve override (restart without flag to disable)\n"
+		}
+		if s.AllToolsSession {
+			text += "All tools · session (independent of folder access)\n"
+		}
+		labels, _ := m.permissionRows()
+		for i, label := range labels {
+			prefix := "  "
+			if i == m.permissions.cursor {
+				prefix = "▸ "
+			}
+			text += prefix + label + "\n"
+		}
+		if m.permissions.confirm {
+			text += "\n" + codeFullAccessWarning + "\nEnter confirms full access; Esc cancels."
+		}
+	}
+	text += "\n\n↑/↓ select · Enter act · r refresh · Esc close"
+	width := max(1, min(76, m.width-4))
+	return lipgloss.NewStyle().Width(width).MaxHeight(max(1, m.screenHeight()-2)).Render(text)
+}
+
+func (m model) codePermissionFooter() string {
+	if m.info.Mode != "code" || !m.permissions.known || m.permissionOwner != m.tr || m.permissionSession != m.tr.SessionID {
+		return ""
+	}
+	var labels []string
+	if m.permissions.snapshot.PlanFullAccess && m.codePermissionPlan() != nil {
+		labels = append(labels, "Full access · this plan")
+	}
+	if m.permissions.snapshot.SessionAllFolders {
+		labels = append(labels, "Folders · session")
+	}
+	if m.permissions.snapshot.AllToolsSession {
+		labels = append(labels, "Tools · session")
+	}
+	return strings.Join(labels, " · ")
 }

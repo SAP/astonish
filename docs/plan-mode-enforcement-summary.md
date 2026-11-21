@@ -58,6 +58,14 @@ runtime path was forked.
 > `--yolo`. See **[Tool & folder authorization (code mode)](architecture/terminal-app.md#tool--folder-authorization-code-mode)**
 > and `pkg/agent/tool_authorization.go`.
 
+## Mode restrictions versus local Code consent
+
+Plan/Graph-Plan/Ask no-write gates are hard restrictions, not consent prompts: neither a plan lease nor broad session folders nor CLI auto-approval makes writes valid in these modes. Ordinary plan approval selects cadence, not full access. The Code card's **p** selector defaults to **Current approvals**; explicit **Full access for this plan** warns that tools run on the host without tool/folder prompts. It preserves required questions, disabled-tool policy, credentials and phase-review pauses; it is not OS privilege or sandbox isolation.
+
+The lease is invocation/session/plan-bound and process-local. Continuation, retry, correction, Normal-mode revision and same-process compact/resume retain it. Completion requires passing phase evidence **and Results**, then the plan is historical and unrelated Normal work has no old execution directives or delegate phase requirement. Replacement, fresh Plan-mode revision and revocation retire the lease; restart restores cadence but not consent. Independent grants are not cleared. Failed durable publication changes neither authority nor consent.
+
+Folder menu **3 Always allow any folder for this session** is separate durable folder consent; **4 Deny** follows it. Tool menus retain 3=Deny and legacy three-choice folder requests decode their own list. Broad folder consent is owner-validated, saved before retry, restored after restart/compaction and revoked through Code-only **Ctrl+P / /permissions** independently of tools. Rollback preserves latest consent rather than replaying old grants. Different sessions do not inherit it. Host authentication/OS failures remain possible. Remote Chat/Studio/Bot authorization is unchanged. See [permission lifetimes](architecture/terminal-app.md#code-permission-lifetimes-and-controls).
+
 ## Flag plumbing (end to end)
 
 ```

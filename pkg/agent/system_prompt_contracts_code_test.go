@@ -133,6 +133,17 @@ func TestCodeSystemPromptContracts_ImmutableDelegationHandoff(t *testing.T) {
 
 // ─── Code-Mode Contract Tests ────────────────────────────────────────────────
 
+func TestCodeSystemPromptContracts_PermissionLifetimes(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	for _, want := range []string{"Current approvals does not grant full access", "Only explicit Full access for this plan consent", "not restored after process restart", "independent durable folder consent, never an all-tools grant", "mode restrictions, disabled tools and required user questions still apply"} {
+		assertContains(t, prompt, want, "Code consent must not be inferred from plan approval")
+	}
+	completed := BuildPlanCompletedSystemContext(filepath.Join(t.TempDir(), "missing.PLAN.md"))
+	assertContains(t, completed, "historical context", "completed plan is history")
+	assertContains(t, completed, "NO LONGER in execution mode", "completed plan returns to Normal")
+	assertNotContains(t, completed, "EXECUTION RULES:", "completed plan must not direct execution")
+}
+
 func TestCodeSystemPromptContracts_ProjectGuidance(t *testing.T) {
 	cb := maximalCodeBuilder()
 	prompt := cb.Build()

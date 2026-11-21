@@ -81,6 +81,9 @@ type DelegationPlanCapture struct {
 func CaptureDelegationPlan(ctx context.Context) DelegationPlanCapture {
 	runtime, _ := PlanRuntimeFromContext(ctx)
 	capture := DelegationPlanCapture{snapshot: runtime.Snapshot()}
+	if runtime != nil && runtime.options.CodeExecution && capture.snapshot.IsFullyAccepted() {
+		return DelegationPlanCapture{}
+	}
 	if ctx != nil {
 		capture.sourceMirror, _ = ctx.Value(delegationPlanSourceKey{}).(string)
 	}

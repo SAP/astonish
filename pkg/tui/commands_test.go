@@ -1,9 +1,32 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+func TestPermissionsSlashCapabilityAndDraft(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: &permissionTestBackend{}, Width: 90, Height: 30})
+	defer m.cancel()
+	m.ta.SetValue("draft")
+	next, cmd := m.handleSlash("/permissions")
+	m = next.(model)
+	if !m.permissions.open || cmd == nil || m.ta.Value() != "draft" {
+		t.Fatal("slash permissions changed composer or failed to open")
+	}
+	m.permissions.open = false
+	m.info.Mode = "platform"
+	m.ta.SetValue("/perm")
+	m.syncSlashCompletion()
+	if len(m.slash.matches) != 0 {
+		t.Fatal("remote completion exposed Code permissions")
+	}
+	next, _ = m.handleSlash("/permissions")
+	if next.(model).permissions.open {
+		t.Fatal("remote slash opened permissions")
+	}
+}
 
 func TestFilterSlashCommands_EmptyShowsAll(t *testing.T) {
 	got := filterSlashCommands("")

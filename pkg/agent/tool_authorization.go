@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/SAP/astonish/pkg/pathscope"
 )
@@ -72,8 +74,183 @@ func RequiresToolAuthorization(name string, planMode bool) bool {
 //     via ResetForNewTurn.
 //   - session-scoped (folder grants marked "for session"): persist for the life
 //     of the policy.
+type CodePlanPermissionMode string
+
+const (
+	CodePlanCurrentApprovals CodePlanPermissionMode = "current_approvals"
+	CodePlanFullAccess       CodePlanPermissionMode = "full_access"
+)
+
+func (m CodePlanPermissionMode) Valid() bool {
+	return m == CodePlanCurrentApprovals || m == CodePlanFullAccess
+}
+
+// A lease is deliberately process-local. Neither snapshots nor tool payloads
+// can recreate one. Every dispatch requires a private context binding as well.
+type codePlanLease struct {
+	sessionID string
+	planID    string
+	revoked   atomic.Bool
+}
+type codePlanInvocationKey struct{}
+type codePlanInvocation struct {
+	lease   *codePlanLease
+	runtime *PlanRuntime
+}
+
+// GrantCodePlanFullAccess consumes trusted approval intent only after its atomic
+// durable commit. It never changes ordinary tool or folder grants.
+func (p *SessionAuthPolicy) GrantCodePlanFullAccess(sessionID string, r *PlanRuntime) error {
+	if p == nil || r == nil || sessionID == "" {
+		return fmt.Errorf("missing Code approval scope")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.codeApprovalCommitted || r.plan == nil {
+		return fmt.Errorf("full access requires fresh trusted Code approval")
+	}
+	r.plan.mu.Lock()
+	defer r.plan.mu.Unlock()
+	s := snapshotPlanLocked(r.plan)
+	if !codePlanSnapshotActive(s) {
+		return fmt.Errorf("Code execution is not active")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.codePlanLease != nil {
+		p.codePlanLease.revoked.Store(true)
+	}
+	p.codePlanLease = &codePlanLease{sessionID: sessionID, planID: s.PlanID}
+	r.codeLease = p.codePlanLease
+	r.codeApprovalCommitted = false
+	return nil
+}
+
+// ReenableCodePlanFullAccess is a fresh trusted local consent for an already
+// approved plan. It checks displayed identity without changing cadence, progress,
+// or starting execution. It is never callable from model tools.
+func (p *SessionAuthPolicy) ReenableCodePlanFullAccess(sessionID string, r *PlanRuntime, planID string, revision int64) error {
+	if p == nil || r == nil || sessionID == "" {
+		return fmt.Errorf("missing Code approval scope")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.plan == nil || !r.options.CodeExecution {
+		return fmt.Errorf("no active Code plan")
+	}
+	r.plan.mu.Lock()
+	defer r.plan.mu.Unlock()
+	s := snapshotPlanLocked(r.plan)
+	if s.PlanID != planID || s.Revision != revision || !codePlanSnapshotActive(s) {
+		return fmt.Errorf("plan changed or is not approved for execution")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.codePlanLease != nil {
+		p.codePlanLease.revoked.Store(true)
+	}
+	p.codePlanLease = &codePlanLease{sessionID: sessionID, planID: planID}
+	r.codeLease = p.codePlanLease
+	return nil
+}
+
+// CodePlanFullAccessGranted projects process-local consent for trusted local UI.
+// It is not dispatch authorization: callers must use CodePlanFullAccessAllowed
+// with an invocation binding before bypassing either consent gate.
+func (p *SessionAuthPolicy) CodePlanFullAccessGranted(sessionID string, snapshot PlanSnapshot) bool {
+	if p == nil || !codePlanSnapshotActive(snapshot) {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	l := p.codePlanLease
+	return l != nil && !l.revoked.Load() && l.sessionID == sessionID && l.planID == snapshot.PlanID
+}
+
+func (p *SessionAuthPolicy) RevokeCodePlanFullAccess() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.codePlanLease != nil {
+		p.codePlanLease.revoked.Store(true)
+		p.codePlanLease = nil
+	}
+}
+
+// ObserveCodePlanSnapshot retires authority on replacement, planning or Results.
+// Call on restore and after durable publication, never before a failed commit.
+func (p *SessionAuthPolicy) ObserveCodePlanSnapshot(s PlanSnapshot) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if l := p.codePlanLease; l != nil && (l.planID != s.PlanID || !codePlanSnapshotActive(s)) {
+		l.revoked.Store(true)
+		p.codePlanLease = nil
+	}
+}
+
+// BindCodePlanExecution is a trusted local invocation boundary, not a grant.
+// Read-only/planning modes and ordinary unapproved turns cannot activate a lease.
+func (p *SessionAuthPolicy) BindCodePlanExecution(ctx context.Context, sessionID string, r *PlanRuntime) context.Context {
+	if p == nil || r == nil {
+		return ctx
+	}
+	po := PromptOverridesFromContext(ctx)
+	if po == nil || !po.ApprovedPlanExecution || po.PlanMode || po.GraphPlanMode || po.AskMode || po.Bot != nil {
+		return ctx
+	}
+	s := r.Snapshot()
+	p.ObserveCodePlanSnapshot(s)
+	p.mu.Lock()
+	l := p.codePlanLease
+	p.mu.Unlock()
+	if l == nil || l.sessionID != sessionID || l.revoked.Load() || !r.CodeExecutionActive() {
+		return ctx
+	}
+	r.mu.Lock()
+	r.codeLease = l
+	r.mu.Unlock()
+	return context.WithValue(ctx, codePlanInvocationKey{}, codePlanInvocation{lease: l, runtime: r})
+}
+
+// CodePlanFullAccessAllowed rechecks the live runtime on every main/deferred/child
+// call. The session argument is the parent owner for child callbacks.
+func (p *SessionAuthPolicy) CodePlanFullAccessAllowed(ctx context.Context, sessionID string) bool {
+	if p == nil || ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	b, ok := ctx.Value(codePlanInvocationKey{}).(codePlanInvocation)
+	if !ok || b.lease == nil || b.runtime == nil || b.lease.revoked.Load() || b.lease.sessionID != sessionID {
+		return false
+	}
+	if po := PromptOverridesFromContext(ctx); po == nil || !po.ApprovedPlanExecution || po.PlanMode || po.GraphPlanMode || po.AskMode || po.Bot != nil {
+		return false
+	}
+	p.mu.Lock()
+	current := p.codePlanLease == b.lease
+	p.mu.Unlock()
+	if !current {
+		return false
+	}
+	s := b.runtime.Snapshot()
+	return !b.lease.revoked.Load() && s.PlanID == b.lease.planID && codePlanSnapshotActive(s)
+}
+
+func codePlanSnapshotActive(s PlanSnapshot) bool {
+	return s.PlanID != "" && s.Document.CodeExecutionMode.Valid() && s.Document.Lifecycle == PlanLifecycleApproved && len(s.Steps) > 0 && !s.IsFullyAccepted()
+}
+
 type SessionAuthPolicy struct {
-	mu sync.Mutex
+	mu            sync.Mutex
+	codePlanLease *codePlanLease
+	// folderSettingsMu serializes durable changes, including revocation.
+	folderSettingsMu      sync.Mutex
+	folderSettings        CodeSessionFolderSettings
+	persistFolderSettings func(CodeSessionFolderSettings) error
 
 	// root is the absolute, symlink-resolved project working directory. Paths
 	// inside root (or equal to it) are always allowed without a grant.
@@ -130,6 +307,8 @@ type PendingAuthorization struct {
 	Tool string
 	// Paths are the out-of-scope absolute paths (folder requests only).
 	Paths []string
+	// Options captures the exact displayed order; nil retains legacy 1/2/3 semantics.
+	Options []string
 }
 
 // TrySetPending records req only when no authorization request currently owns
@@ -172,6 +351,7 @@ func clonePendingAuthorization(req *PendingAuthorization) *PendingAuthorization 
 	}
 	clone := *req
 	clone.Paths = append([]string(nil), req.Paths...)
+	clone.Options = append([]string(nil), req.Options...)
 	return &clone
 }
 
@@ -358,7 +538,7 @@ func (p *SessionAuthPolicy) PathAllowed(path string) bool {
 	defer p.mu.Unlock()
 
 	// No root configured → folder scoping disabled.
-	if p.root == "" {
+	if p.root == "" || p.folderSettings.AllFolders {
 		return true
 	}
 	if pathWithin(p.root, abs) {
@@ -391,7 +571,10 @@ func (p *SessionAuthPolicy) OutOfScopePaths(args map[string]any) []string {
 	}
 	var out []string
 	for _, abs := range p.resolvedPathArgs(args) {
-		if !p.pathAllowedNoConsume(abs) {
+		p.mu.Lock()
+		allowed := p.pathAllowedNoConsume(abs)
+		p.mu.Unlock()
+		if !allowed {
 			out = append(out, abs)
 		}
 	}
@@ -486,7 +669,7 @@ func (p *SessionAuthPolicy) ConsumePathGrants(args map[string]any) {
 // pathAllowedNoConsume mirrors PathAllowed but never consumes a one-shot grant.
 // Caller must hold p.mu.
 func (p *SessionAuthPolicy) pathAllowedNoConsume(abs string) bool {
-	if p.root == "" {
+	if p.root == "" || p.folderSettings.AllFolders {
 		return true
 	}
 	// Well-known harmless special paths (e.g. /dev/null) are always allowed.
@@ -553,8 +736,9 @@ const (
 	OptAllowToolOnce = "Allow"
 	OptAllowAllTools = "Always Allow"
 	// Folder-access options.
-	OptAllowPathOnce    = "Allow"
-	OptAllowPathSession = "Always Allow"
+	OptAllowPathOnce          = "Allow once"
+	OptAllowPathSession       = "Always allow this folder"
+	OptAllowAllFoldersSession = "Always allow any folder for this session"
 	// Shared deny option.
 	OptDeny = "Deny"
 )
@@ -568,7 +752,7 @@ func ToolApprovalOptions() []string {
 // FolderApprovalOptions is the ordered option list presented for a folder-access
 // authorization prompt.
 func FolderApprovalOptions() []string {
-	return []string{OptAllowPathOnce, OptAllowPathSession, OptDeny}
+	return []string{OptAllowPathOnce, OptAllowPathSession, OptAllowAllFoldersSession, OptDeny}
 }
 
 // AuthorizationDecision is the outcome of applying a user's response to the
@@ -585,68 +769,154 @@ type AuthorizationDecision struct {
 // message (not granted). The pending request is cleared. If there is no pending
 // request, it returns (nil).
 func (p *SessionAuthPolicy) ApplyAuthorizationDecision(response string) *AuthorizationDecision {
-	if p == nil {
-		return nil
-	}
+	d, _ := p.ApplyAuthorizationDecisionWithError(response)
+	return d
+}
 
-	// Claim and clear the current owner atomically. The old Pending()+
-	// ClearPending() sequence allowed two concurrent responses to both apply to
-	// the same request.
+// ApplyAuthorizationDecisionWithError persists consent before permitting a retry.
+func (p *SessionAuthPolicy) ApplyAuthorizationDecisionWithError(response string) (*AuthorizationDecision, error) {
+	if p == nil {
+		return nil, nil
+	}
 	p.mu.Lock()
 	pending := clonePendingAuthorization(p.pending)
 	p.pending = nil
 	p.mu.Unlock()
-	if pending == nil {
-		return nil
+	return p.ApplyAuthorizationRequest(pending, response)
+}
+
+// ApplyAuthorizationRequest centralizes decisions for an owned main or child request.
+func (p *SessionAuthPolicy) ApplyAuthorizationRequest(pending *PendingAuthorization, response string) (*AuthorizationDecision, error) {
+	if p == nil || pending == nil {
+		return nil, nil
 	}
-
-	choice := normalizeChoice(response)
+	choice := DecodeAuthorizationChoice(pending, response)
 	d := &AuthorizationDecision{Kind: pending.Kind, Tool: pending.Tool}
-
-	switch pending.Kind {
-	case "tool":
-		switch choice {
-		case "all", "broad2":
-			// "Always Allow" for a tool: opt out of tool-execution prompts for
-			// the rest of the SESSION (not just this turn), matching the user's
-			// expectation that they won't be asked again.
+	switch choice {
+	case AuthorizationAllFolders:
+		if pending.Kind != "folder" {
+			break
+		}
+		if err := p.SetAllFoldersForSession(true); err != nil {
+			return d, err
+		}
+		d.Granted = true
+	case AuthorizationBroad:
+		if pending.Kind == "tool" {
 			p.GrantAllToolsSession()
 			d.Granted = true
-		case "once", "yes":
-			p.GrantToolOnce(pending.Tool)
-			d.Granted = true
-		default:
-			d.Granted = false
 		}
-	case "folder":
-		switch choice {
-		case "session", "broad2":
+		if pending.Kind == "folder" {
 			for _, path := range pending.Paths {
 				p.GrantPathForSession(path)
 			}
 			d.Granted = true
-		case "once", "yes":
+		}
+	case AuthorizationOnce:
+		if pending.Kind == "tool" {
+			p.GrantToolOnce(pending.Tool)
+			d.Granted = true
+		}
+		if pending.Kind == "folder" {
 			for _, path := range pending.Paths {
 				p.GrantPathOnce(path)
 			}
 			d.Granted = true
-		default:
-			d.Granted = false
-		}
-		// Collapse the folder+tool double-prompt: the folder gate runs before
-		// the tool gate (see chat_agent_run.go), so a tool that ALSO needs
-		// tool-execution authorization (e.g. shell_command) would otherwise
-		// prompt a SECOND time on the retry that follows a folder grant.
-		// Granting this specific tool once for the immediate retry means the
-		// single folder approval the user just gave subsumes the tool approval
-		// for THIS call — one prompt, not two. It does not broaden the grant
-		// beyond this one execution, and the tool gate still guards every other
-		// call in the session.
-		if d.Granted && pending.Tool != "" && RequiresToolAuthorization(pending.Tool, false) {
-			p.GrantToolOnce(pending.Tool)
 		}
 	}
-	return d
+	if d.Granted && pending.Kind == "folder" && RequiresToolAuthorization(pending.Tool, false) {
+		p.GrantToolOnce(pending.Tool)
+	}
+	return d, nil
+}
+
+type AuthorizationChoice string
+
+const (
+	AuthorizationDeny       AuthorizationChoice = "deny"
+	AuthorizationOnce       AuthorizationChoice = "once"
+	AuthorizationBroad      AuthorizationChoice = "broad"
+	AuthorizationAllFolders AuthorizationChoice = "all_folders"
+)
+
+func DecodeAuthorizationChoice(req *PendingAuthorization, response string) AuthorizationChoice {
+	s := strings.TrimSpace(response)
+	if req == nil {
+		return AuthorizationDeny
+	}
+	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' && len(req.Options) > 0 {
+		i := int(s[0] - '1')
+		if i >= len(req.Options) {
+			return AuthorizationDeny
+		}
+		s = req.Options[i]
+	}
+	if strings.EqualFold(s, OptAllowAllFoldersSession) {
+		if req.Kind == "folder" {
+			return AuthorizationAllFolders
+		}
+		return AuthorizationDeny
+	}
+	switch normalizeChoice(s) {
+	case "once", "yes":
+		return AuthorizationOnce
+	case "broad2", "all", "session":
+		return AuthorizationBroad
+	default:
+		return AuthorizationDeny
+	}
+}
+
+// CodeSessionFolderSettings contains only independently persisted folder consent.
+// Owner validation belongs to the trusted local launcher, not the model runtime.
+type CodeSessionFolderSettings struct {
+	AllFolders bool   `json:"all_folders"`
+	Generation uint64 `json:"generation"`
+}
+
+// ConfigureCodeSessionFolders hydrates trusted state and installs its durable writer.
+func (p *SessionAuthPolicy) ConfigureCodeSessionFolders(s CodeSessionFolderSettings, persist func(CodeSessionFolderSettings) error) {
+	p.folderSettingsMu.Lock()
+	defer p.folderSettingsMu.Unlock()
+	p.mu.Lock()
+	p.folderSettings = s
+	p.persistFolderSettings = persist
+	p.mu.Unlock()
+}
+
+func (p *SessionAuthPolicy) CodeSessionFolders() CodeSessionFolderSettings {
+	if p == nil {
+		return CodeSessionFolderSettings{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.folderSettings
+}
+
+func (p *SessionAuthPolicy) SetAllFoldersForSession(allow bool) error {
+	if p == nil {
+		return fmt.Errorf("session folder permissions unavailable")
+	}
+	p.folderSettingsMu.Lock()
+	defer p.folderSettingsMu.Unlock()
+	p.mu.Lock()
+	next, persist := p.folderSettings, p.persistFolderSettings
+	p.mu.Unlock()
+	if next.AllFolders == allow {
+		return nil
+	}
+	if persist == nil {
+		return fmt.Errorf("cannot save folder permission: reopen a saved Code session and try again")
+	}
+	next.AllFolders = allow
+	next.Generation++
+	if err := persist(next); err != nil {
+		return fmt.Errorf("cannot save folder permission; permission unchanged: %w", err)
+	}
+	p.mu.Lock()
+	p.folderSettings = next
+	p.mu.Unlock()
+	return nil
 }
 
 // NormalizeAuthChoice is the exported version of normalizeChoice. It maps a
@@ -679,16 +949,11 @@ func normalizeChoice(response string) string {
 	case "1", "y", "yes", "approve":
 		return "once"
 	}
-	// Broader ("Always Allow" and legacy phrasings) before the plain one-shot
-	// "Allow"/"once" — otherwise "always allow" would match the "allow" case.
-	if strings.Contains(s, "always") ||
-		strings.Contains(s, "all this iteration") ||
-		strings.Contains(s, "allow all") ||
-		strings.Contains(s, "for session") ||
-		strings.Contains(s, "session") {
+	// Decode only known labels and legacy aliases. Free-form model text is never consent.
+	switch s {
+	case "always allow", "always allow this folder", "allow all", "allow all this iteration", "allow for session", "allow for this session", "all", "session":
 		return "broad2"
-	}
-	if s == "allow" || strings.Contains(s, "allow") || strings.Contains(s, "once") {
+	case "allow", "allow once", "once":
 		return "once"
 	}
 	return "deny"

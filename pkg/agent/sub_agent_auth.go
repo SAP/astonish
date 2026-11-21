@@ -1,9 +1,13 @@
 package agent
 
+import "context"
+
 // SubAgentAuthRequest is sent from a sub-agent to the parent when a tool
 // needs user authorization. The sub-agent goroutine blocks until the parent
 // responds via SubAgentAuthResponse.
 type SubAgentAuthRequest struct {
+	// Context carries invocation authority, never a model payload.
+	Context context.Context `json:"-"`
 	// TaskName is the sub-agent task name (for UI context, e.g., "researcher").
 	TaskName string
 	// Kind is "tool" or "folder".
@@ -20,6 +24,8 @@ type SubAgentAuthRequest struct {
 
 // SubAgentAuthResponse is the user's decision on a sub-agent authorization request.
 type SubAgentAuthResponse struct {
+	// PlanBypass requires a fresh lease check and must never create grants.
+	PlanBypass bool
 	// Granted is true if the user allowed the tool to proceed.
 	Granted bool
 	// Choice is the raw user choice text (e.g., "Allow", "Always Allow", "Deny").

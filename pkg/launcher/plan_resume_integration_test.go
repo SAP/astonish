@@ -21,9 +21,113 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/agent"
+	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestPlanFolderPermissionsInMemoryCompactionAndRebuild(t *testing.T) {
+	ctx := context.Background()
+	svc := adksession.InMemoryService()
+	created, err := svc.Create(ctx, &adksession.CreateRequest{AppName: codeAppName, UserID: codeUserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.Session.ID()
+	for i := 0; i < 30; i++ {
+		err := svc.AppendEvent(ctx, created.Session, &adksession.Event{ID: fmt.Sprint(i), Author: "user", Timestamp: time.Now(), LLMResponse: adkmodel.LLMResponse{Content: genai.NewContentFromText(strings.Repeat("history ", 100), "user")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	comp := persistentsession.NewCompactor(100)
+	comp.PreserveRecent = 2
+	b := &localAgentBackend{sessionSvc: svc, sessionID: id, result: &ChatFactoryResult{ChatAgent: &agent.ChatAgent{Compactor: comp}}}
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.result.ChatAgent.GetOrCreateAuthPolicy(id).SetAllFoldersForSession(true); err != nil {
+		t.Fatal(err)
+	}
+	out := b.compactToChild(ctx, id, true)
+	if !out.Did || out.SessionID == id {
+		t.Fatalf("compaction did not create child: %+v", out)
+	}
+	settings := b.result.ChatAgent.GetOrCreateAuthPolicy(out.SessionID).CodeSessionFolders()
+	if !settings.AllFolders || settings.Generation != 1 {
+		t.Fatalf("child lost explicit permission: %+v", settings)
+	}
+	// A rebuilt agent must hydrate from the child's owner-bound record, not a
+	// parent policy pointer or the process-local plan lease.
+	b.result.ChatAgent = &agent.ChatAgent{}
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := b.result.ChatAgent.GetOrCreateAuthPolicy(out.SessionID)
+	if p.CodeSessionFolders() != settings {
+		t.Fatal("model rebuild lost transferred permission")
+	}
+	if err := b.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	b.result.ChatAgent = &agent.ChatAgent{}
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b.result.ChatAgent.GetOrCreateAuthPolicy(out.SessionID).CodeSessionFolders().AllFolders {
+		t.Fatal("rebuild replayed revoked child permission")
+	}
+}
+
+func TestPlanFolderPermissionsRollbackPreservesGrant(t *testing.T) {
+	ctx := context.Background()
+	dir, workspace := t.TempDir(), t.TempDir()
+	b, _ := codePlanAcceptanceBackend(t, dir, workspace, "")
+	id := b.sessionID
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.result.ChatAgent.GetOrCreateAuthPolicy(id).SetAllFoldersForSession(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RollbackTo(ctx, id+":0"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = codePlanAcceptanceBackend(t, dir, workspace, id)
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.CodePermissions(ctx)
+	if err != nil || !got.SessionAllFolders || got.Generation != 2 {
+		t.Fatalf("rollback lost latest grant: %+v, %v", got, err)
+	}
+	if err := b.RevokeCodePermission(ctx, backend.CodePermissionPlanFullAccess); err != nil {
+		t.Fatal(err)
+	}
+	if !b.result.ChatAgent.GetOrCreateAuthPolicy(id).CodeSessionFolders().AllFolders {
+		t.Fatal("plan revocation changed independent folder grant")
+	}
+	// Revocation must survive restoring an older transcript and a fresh process.
+	if err := b.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RollbackTo(ctx, id+":0"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = codePlanAcceptanceBackend(t, dir, workspace, id)
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err = b.CodePermissions(ctx)
+	if err != nil || got.SessionAllFolders || got.Generation <= 2 {
+		t.Fatalf("rollback resurrected revoked folders: %+v, %v", got, err)
+	}
+	b.NewSession()
+	got, err = b.CodePermissions(ctx)
+	if err != nil || got.SessionAllFolders {
+		t.Fatalf("new session inherited consent: %+v, %v", got, err)
+	}
+}
 
 // TestPlanResumesAfterCompactionAndRestart drives the full user-visible chain
 // the durability bug broke: approve → compact → restart → resume → complete.
@@ -121,6 +225,9 @@ func TestPlanResumesAfterCompactionAndRestart(t *testing.T) {
 	}
 	if !strings.Contains(string(final), "## Results") {
 		t.Fatalf("PLAN.md has no Results section after completion:\n%s", final)
+	}
+	if b.shouldContinueApprovedPlan(ctx, id, planPath, c2) {
+		t.Fatal("completed legacy plan must not continue despite the approval seal")
 	}
 }
 

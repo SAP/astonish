@@ -1,6 +1,9 @@
 package agent
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // PlanSnapshot is the durable, authoritative execution view. Revision changes
 // only when a definition is accepted; Sequence also changes for runtime events.
@@ -12,6 +15,20 @@ type PlanSnapshot struct {
 	Document        PlanDocumentInfo      `json:"document"`
 	Steps           []PlanStepInfo        `json:"steps"`
 	PendingRevision *PlanRevisionProposal `json:"pending_revision,omitempty"`
+}
+
+// IsFullyAccepted requires Results and every phase complete. Neither lifecycle
+// labels, failed phases, nor checked boxes without Results establish success.
+func (s PlanSnapshot) IsFullyAccepted() bool {
+	if len(s.Steps) == 0 || strings.TrimSpace(s.Document.Results) == "" {
+		return false
+	}
+	for _, step := range s.Steps {
+		if step.Status != "complete" {
+			return false
+		}
+	}
+	return true
 }
 
 // Clone returns an independent value, including nested file and proposal slices.

@@ -13,6 +13,177 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestCodePlanPermissionLeaseLifetime(t *testing.T) {
+	for _, mode := range []CodePlanExecutionMode{CodePlanRunToCompletion, CodePlanReviewEachPhase} {
+		t.Run(string(mode), func(t *testing.T) {
+			s := codeExecutionFixture(mode)
+			s.Document.Lifecycle = ""
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true, Verify: func(string) (int, string, error) { return 0, "verified", nil }})
+			p := NewSessionAuthPolicy(t.TempDir())
+			if err := p.GrantCodePlanFullAccess("owner", r); err == nil {
+				t.Fatal("unapproved grant")
+			}
+			if err := r.ApproveCodeExecution(s.PlanID, s.Revision, mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+				t.Fatal(err)
+			}
+			base := WithPlanRuntime(WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true}), r)
+			ctx := p.BindCodePlanExecution(base, "owner", r)
+			if !p.CodePlanFullAccessAllowed(ctx, "owner") || p.CodePlanFullAccessAllowed(ctx, "other") || p.CodePlanFullAccessAllowed(base, "owner") {
+				t.Fatal("binding scope")
+			}
+			for _, po := range []*PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}, {AskMode: true}, {}} {
+				ordinary := p.BindCodePlanExecution(WithPromptOverrides(context.Background(), po), "owner", r)
+				if p.CodePlanFullAccessAllowed(ordinary, "owner") {
+					t.Fatal("ordinary turn gained authority")
+				}
+			}
+			p.ResetForNewTurn()
+			if !p.CodePlanFullAccessAllowed(ctx, "owner") {
+				t.Fatal("turn reset revoked lease")
+			}
+			if NewSessionAuthPolicy(p.Root()).CodePlanFullAccessAllowed(ctx, "owner") {
+				t.Fatal("new process/session inherited lease")
+			}
+			if p.AllToolsAllowedForSession() || p.ToolAuthorized("shell_command") || p.PathAllowed("/outside/secret") {
+				t.Fatal("permanent grant leaked")
+			}
+			for _, step := range r.Snapshot().Steps {
+				if got := r.UpdateStep(step.Name, "complete"); got.Code != PlanStepOK {
+					t.Fatal(got)
+				}
+				if !p.CodePlanFullAccessAllowed(ctx, "owner") {
+					t.Fatal("phase/review revoked lease")
+				}
+				if err := r.ContinueCodeReview(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := r.Complete("verified", ""); got.Code != PlanCompletionOK {
+				t.Fatal(got)
+			}
+			if p.CodePlanFullAccessAllowed(ctx, "owner") {
+				t.Fatal("completion retained lease")
+			}
+			if !ctx.Value(codePlanInvocationKey{}).(codePlanInvocation).lease.revoked.Load() {
+				t.Fatal("completion did not revoke reference")
+			}
+		})
+	}
+}
+
+func TestCodePlanPermissionApprovalAtomic(t *testing.T) {
+	s := codeExecutionFixture(CodePlanRunToCompletion)
+	s.Document.Lifecycle = ""
+	fail := true
+	r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true, CommitSnapshot: func(PlanSnapshot) error {
+		if fail {
+			return errors.New("disk failed")
+		}
+		return nil
+	}})
+	p := NewSessionAuthPolicy(t.TempDir())
+	if err := r.ApproveCodeExecution("other", s.Revision, CodePlanRunToCompletion); PlanRuntimeErrorCode(err) != PlanRuntimeStale {
+		t.Fatal(err)
+	}
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision+1, CodePlanRunToCompletion); PlanRuntimeErrorCode(err) != PlanRuntimeStale {
+		t.Fatal(err)
+	}
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); PlanRuntimeErrorCode(err) != PlanRuntimePersistFailed {
+		t.Fatal(err)
+	}
+	if r.CodeExecutionActive() || p.GrantCodePlanFullAccess("owner", r) == nil {
+		t.Fatal("failed approval granted authority")
+	}
+	fail = false
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); PlanRuntimeErrorCode(err) != PlanRuntimeStale {
+		t.Fatal("replayed approval", err)
+	}
+	ctx := p.BindCodePlanExecution(WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true}), "owner", r)
+	next := r.Snapshot().Definition().Steps
+	next[0].Summary = "corrected summary"
+	if _, err := r.Revise(PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: s.Revision, Reason: "clarify", Steps: next}); err != nil {
+		t.Fatal(err)
+	}
+	if !p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("same plan revision lost lease")
+	}
+	next[0].Summary = "planning summary"
+	if _, err := r.ReviseForPlanning(PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: r.Snapshot().Revision, Reason: "replan", Steps: next}); err != nil {
+		t.Fatal(err)
+	}
+	if p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("planning retained lease")
+	}
+	if err := r.SetApproved(); err != nil {
+		t.Fatal(err)
+	}
+	if p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("legacy reapproval resurrected lease")
+	}
+}
+
+func TestCodePlanCompletedAuthorityAndFailedPersistence(t *testing.T) {
+	failCommit := false
+	r := NewPlanRuntimeFromSnapshot(codeExecutionFixture(CodePlanRunToCompletion), PlanRuntimeOptions{CodeExecution: true, Verify: func(string) (int, string, error) { return 0, "passed", nil }, CommitSnapshot: func(PlanSnapshot) error {
+		if failCommit {
+			return errors.New("disk unavailable")
+		}
+		return nil
+	}})
+	loop := newCodePlanLoop(WithPlanRuntime(context.Background(), r))
+	for _, step := range r.Snapshot().Steps {
+		if got := r.UpdateStep(step.Name, "complete"); got.Code != PlanStepOK {
+			t.Fatal(got)
+		}
+	}
+	if !r.CodeExecutionActive() || r.Snapshot().IsFullyAccepted() {
+		t.Fatal("checkboxes alone ended execution")
+	}
+	failCommit = true
+	if got := r.Complete("verified", ""); got.Code == PlanCompletionOK {
+		t.Fatal("failed persistence accepted")
+	}
+	if !r.CodeExecutionActive() {
+		t.Fatal("failed completion ended execution")
+	}
+	failCommit = false
+	if got := r.Complete("verified", ""); got.Code != PlanCompletionOK {
+		t.Fatal(got)
+	}
+	if !r.CodeExecutionEnabled() || r.CodeExecutionActive() || loop.active() || !r.Snapshot().IsFullyAccepted() || !r.PlanState().IsFullyAccepted() {
+		t.Fatal("completion authority mismatch")
+	}
+	before := r.Snapshot()
+	if name, err := r.RegisterDelegate("one", "unrelated"); name != "" || err != nil {
+		t.Fatal(name, err)
+	}
+	if name, err := r.FinishDelegate("one", "late"); name != "" || err != nil {
+		t.Fatal(name, err)
+	}
+	if !reflect.DeepEqual(before, r.Snapshot()) || len(r.plan.taskRegistry) != 0 {
+		t.Fatal("late callback changed history")
+	}
+	if got := r.UpdateStep("one", "running"); got.Code != PlanRuntimeCompleted {
+		t.Fatal(got)
+	}
+	req := &model.LLMRequest{Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText("\nCode execution runtime: "+CodePlanRecoveryGuidance, "system")}}
+	if _, err := loop.beforeModel(nil, req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Config.SystemInstruction.Parts) != 0 {
+		t.Fatal("same-invocation guidance survived")
+	}
+}
+
 func codeExecutionFixture(mode CodePlanExecutionMode) PlanSnapshot {
 	s := runtimeFixture()
 	s.Document.CodeExecutionMode = mode

@@ -10,6 +10,40 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+// CodePermissionScope identifies only revocable local Code grants.
+type CodePermissionScope string
+
+const (
+	CodePermissionPlanFullAccess    CodePermissionScope = "plan_full_access"
+	CodePermissionSessionAllFolders CodePermissionScope = "session_all_folders"
+)
+
+type CodePermissionSource string
+
+const (
+	CodePermissionSourceCurrent CodePermissionSource = "current_approvals"
+	CodePermissionSourcePlan    CodePermissionSource = "plan_full_access"
+	CodePermissionSourceSession CodePermissionSource = "session_all_folders"
+	CodePermissionSourceCLI     CodePermissionSource = "cli_override"
+)
+
+type CodePermissionsSnapshot struct {
+	SessionID         string
+	PlanID            string
+	Generation        uint64
+	CLIOverride       bool
+	PlanFullAccess    bool
+	SessionAllFolders bool
+	AllToolsSession   bool
+	Source            CodePermissionSource
+}
+
+// CodePermissionsBackend is optional and never implemented by remote chat.
+type CodePermissionsBackend interface {
+	CodePermissions(context.Context) (CodePermissionsSnapshot, error)
+	RevokeCodePermission(context.Context, CodePermissionScope) error
+}
+
 // ModelContextWindow is a resolved picker capacity and its fallback provenance.
 type ModelContextWindow struct {
 	Size       int
@@ -141,6 +175,10 @@ type TurnOptions struct {
 	// CodePlanExecutionMode is trusted initial-approval intent, never inferred
 	// from user text. Empty on remote chat and ordinary continuation turns.
 	CodePlanExecutionMode agent.CodePlanExecutionMode
+	// Local trusted approval only; never serialized to remote transports.
+	CodePlanPermissionMode   agent.CodePlanPermissionMode `json:"-"`
+	CodePlanApprovalID       string                       `json:"-"`
+	CodePlanApprovalRevision int64                        `json:"-"`
 	// Attachments are optional multimodal file/image payloads for this turn.
 	Attachments []Attachment
 }

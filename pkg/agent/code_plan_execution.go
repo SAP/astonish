@@ -18,6 +18,40 @@ func (m CodePlanExecutionMode) Valid() bool {
 	return m == CodePlanRunToCompletion || m == CodePlanReviewEachPhase
 }
 
+// ApproveCodeExecution atomically approves the displayed identity and cadence.
+// Reserved for trusted local transports, never model-editable plan definitions.
+func (r *PlanRuntime) ApproveCodeExecution(planID string, baseRevision int64, mode CodePlanExecutionMode) error {
+	if r == nil || !r.options.CodeExecution || !mode.Valid() {
+		return fmt.Errorf("invalid local Code approval")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.codeApprovalCommitted = false
+	if r.plan == nil {
+		return planRuntimeError(PlanRuntimeNoPlan, "no active plan")
+	}
+	r.plan.mu.Lock()
+	defer r.plan.mu.Unlock()
+	s := snapshotPlanLocked(r.plan)
+	if planID == "" || s.PlanID != planID || baseRevision != s.Revision {
+		return planRuntimeError(PlanRuntimeStale, "plan changed before approval")
+	}
+	if err := runtimeEditable(s); err != nil {
+		return err
+	}
+	if s.Document.Lifecycle == PlanLifecycleApproved {
+		return planRuntimeError(PlanRuntimeStale, "plan approval already consumed")
+	}
+	s.Document.Lifecycle = PlanLifecycleApproved
+	s.Document.CodeExecutionMode = mode
+	s.Document.CodeReviewPending = ""
+	if err := r.commitLocked(s); err != nil {
+		return err
+	}
+	r.codeApprovalCommitted = true
+	return nil
+}
+
 // SetCodeExecutionMode is called only by the local approval transport.
 func (r *PlanRuntime) SetCodeExecutionMode(mode CodePlanExecutionMode) error {
 	if !mode.Valid() {
@@ -38,6 +72,16 @@ func (r *PlanRuntime) SetCodeExecutionMode(mode CodePlanExecutionMode) error {
 
 func (r *PlanRuntime) CodeExecutionEnabled() bool {
 	return r != nil && r.options.CodeExecution && r.Snapshot().Document.CodeExecutionMode.Valid()
+}
+
+// CodeExecutionActive is execution authority, unlike Enabled which also identifies
+// historical Code runtimes so their late callbacks never use legacy tracking.
+func (r *PlanRuntime) CodeExecutionActive() bool {
+	if r == nil || !r.options.CodeExecution {
+		return false
+	}
+	s := r.Snapshot()
+	return s.Document.CodeExecutionMode.Valid() && s.Document.Lifecycle == PlanLifecycleApproved && len(s.Steps) > 0 && !s.IsFullyAccepted()
 }
 
 func codeReviewPending(s PlanSnapshot) bool {

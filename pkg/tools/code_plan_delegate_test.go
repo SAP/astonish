@@ -110,6 +110,30 @@ func TestCodePlanDelegateFailureReleasesBatchRegistry(t *testing.T) {
 	}
 }
 
+func TestCodePlanDelegateCompletedReturnsToNormal(t *testing.T) {
+	snapshot := codeDelegateFixture(agent.CodePlanRunToCompletion)
+	for i := range snapshot.Steps {
+		snapshot.Steps[i].Status = "complete"
+	}
+	snapshot.Document.Results = "Verified and accepted"
+	// Legacy snapshots may retain approved lifecycle even after Results.
+	runtime := agent.NewPlanRuntimeFromSnapshot(snapshot, agent.PlanRuntimeOptions{CodeExecution: true})
+	manager := agent.NewSubAgentManager(agent.SubAgentConfig{})
+	manager.SessionService = adksession.InMemoryService()
+	manager.AppName, manager.UserID = "completed-delegate-test", "user"
+	llm := &publicHandoffLLM{}
+	manager.LLM = llm
+	ctx := &delegationToolContext{toolContextStub: toolContextStub{Context: agent.WithPlanRuntime(context.Background(), runtime), sessionID: "parent"}, callID: "normal-batch"}
+	before := runtime.Snapshot()
+	out, err := delegateTasksWithManager(ctx, DelegateTasksArgs{Tasks: []SubTaskInput{{Name: "unrelated", Task: "Answer an unrelated question"}}}, manager)
+	if err != nil || out.Status != "success" || out.PlanRecovery != nil || llm.calls != 1 {
+		t.Fatalf("completed plan blocked ordinary delegation: %+v err=%v calls=%d", out, err, llm.calls)
+	}
+	if !reflect.DeepEqual(before, runtime.Snapshot()) {
+		t.Fatal("ordinary delegation modified historical plan")
+	}
+}
+
 func TestCodePlanDelegateAbsentModePreservesLegacy(t *testing.T) {
 	runtime := agent.NewPlanRuntimeFromSnapshot(codeDelegateFixture(""), agent.PlanRuntimeOptions{CodeExecution: true})
 	manager := agent.NewSubAgentManager(agent.SubAgentConfig{})

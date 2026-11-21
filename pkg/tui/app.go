@@ -22,6 +22,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/store"
@@ -171,7 +172,13 @@ type model struct {
 	reauthLaunched bool
 	// planApprovalPending prevents duplicate approval turns while persistence and
 	// RunTurn execute asynchronously outside Bubble Tea's update loop.
-	planApprovalPending bool
+	planApprovalPending    bool
+	planPermission         agent.CodePlanPermissionMode
+	planPermissionIdentity string
+	permissions            codePermissionsState
+	permissionOwner        *events.Transcript
+	permissionSession      string
+	permissionRequest      uint64
 	// turnStartedAt records when the current turn began (or resumed after a
 	// HITL pause), enabling a live elapsed-time counter in the status bar.
 	// Zero value means the timer is not actively ticking (either no turn or paused).
@@ -421,6 +428,9 @@ type artifactContentLoadedMsg struct {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, m.spin.Tick}
+	if m.codePermissionsCap() != nil {
+		cmds = append(cmds, func() tea.Msg { return codePermissionsRefreshMsg{} })
+	}
 	if m.botSelected() {
 		cmds = append(cmds, func() tea.Msg { return botStartMsg{} })
 	}
@@ -430,7 +440,40 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
+	defer func() {
+		n, ok := next.(model)
+		if !ok {
+			return
+		}
+		ownerChanged := n.permissionOwner != n.tr || n.permissionSession != n.tr.SessionID
+		n.syncCodePermissions()
+		refresh := ownerChanged
+		switch msg.(type) {
+		case eventMsg, turnDoneMsg, historyLoadedMsg, planApprovalStartedMsg:
+			refresh = true
+		}
+		if refresh {
+			if n.permissions.loading {
+				n.permissions.refreshPending = true
+			} else {
+				command = tea.Batch(command, n.refreshCodePermissions())
+			}
+		}
+		next = n
+	}()
+	m.syncCodePermissions()
+	if m.permissions.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleCodePermissionsKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
 	var cmds []tea.Cmd
 
 	if m.planPanel.open && !m.planModalBlocked() {
@@ -464,6 +507,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case codePermissionsRefreshMsg:
+		return m, m.refreshCodePermissions()
+	case codePermissionsMsg:
+		if msg.owner != m.tr || msg.request != m.permissionRequest || msg.session != m.tr.SessionID {
+			return m, nil
+		}
+		m.permissions.loading = false
+		m.permissions.err = ""
+		if msg.err != nil {
+			m.permissions.err = msg.err.Error()
+			m.permissions.known = false
+		} else if msg.snapshot.SessionID == m.tr.SessionID {
+			m.permissions.snapshot, m.permissions.known = msg.snapshot, true
+		} else {
+			m.permissions.known = false
+			m.permissions.err = "Session changed; press r to refresh."
+		}
+		if m.permissions.refreshPending {
+			m.permissions.refreshPending = false
+			return m, m.refreshCodePermissions()
+		}
+		return m, nil
 	case botSnapshotMsg:
 		return m.applyBotSnapshot(msg)
 	case botAdmissionMsg:
@@ -640,6 +705,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if msg.String() == "ctrl+p" && !m.tr.Awaiting && m.codePermissionsCap() != nil {
+			return m.openCodePermissions()
+		}
 		if next, cmd, handled := m.handlePlanProgressKey(msg); handled {
 			return next, cmd
 		}
@@ -881,6 +949,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyArtifactContentLoaded(msg)
 
 	case planApprovalStartedMsg:
+		if msg.owner != nil && (msg.owner != m.tr || msg.session != m.tr.SessionID || msg.identity != m.planPermissionIdentity) {
+			if msg.cancel != nil {
+				msg.cancel()
+			}
+			if msg.owner == m.tr && msg.session == m.tr.SessionID {
+				m.planApprovalPending = false
+			}
+			return m, nil
+		}
 		m.planApprovalPending = false
 		if msg.err != nil {
 			m.tr.Apply(events.NewError("Approved plan did not start: " + msg.err.Error() + ". Press Enter to retry."))
@@ -1134,6 +1211,9 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
+	if m.codePermissionsCap() != nil {
+		extra = append(extra, permissionsSlashCommand)
+	}
 	if m.botCap() != nil {
 		extra = append(extra, botsSlashCommand)
 	}
@@ -2283,11 +2363,17 @@ func (m model) collectSubmitAttachments(composerValue string) []backend.Attachme
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
+	if text == "/permissions" && m.codePermissionsCap() != nil {
+		return m.openCodePermissions()
+	}
 	m.ta.Reset()
 	switch {
 	case text == "/bots" || strings.HasPrefix(text, "/bots "):
 		return m.botCommand(text)
 	case text == "/help" || text == "/?":
+		if m.codePermissionsCap() != nil {
+			m.tr.Apply(events.NewSystem("/permissions · Ctrl+P — view and revoke local Code grants"))
+		}
 		if m.botCap() != nil {
 			m.tr.Apply(events.NewSystem("/bots — remote picker; /bots approvals — exact durable decisions; /bots detach — leave work running"))
 		}
@@ -2760,6 +2846,7 @@ func (m model) composerWrapWidth() int {
 }
 
 func (m *model) refreshViewport() {
+	m.syncCodePermissions()
 	m.layoutDelegationDetail()
 	if !m.ready {
 		return
@@ -3640,7 +3727,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			approvalState := ""
 			if it.PlanStatus == events.PlanPending {
 				// Pending cards contain controls: content alone cannot cache their cursor.
-				approvalState = fmt.Sprintf("%d:%q", m.tr.ApprovalCursor, m.planApprovalOptions(it))
+				approvalState = fmt.Sprintf("%d:%q:%s:%t:%t", m.tr.ApprovalCursor, m.planApprovalOptions(it), m.planPermission, m.planApprovalPending, m.info.AutoApprove)
 			}
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, approvalState, "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
@@ -4350,6 +4437,9 @@ func (m model) View() tea.View {
 }
 
 func (m model) viewContent() string {
+	if m.permissions.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderCodePermissions()))
+	}
 
 	th := m.theme
 	sep := th.Border.Width(m.width).Render(strings.Repeat("─", max(1, m.width)))
@@ -5611,6 +5701,12 @@ func (m model) renderFooterMeta() string {
 	right := ""
 	if m.info.AutoApprove {
 		right = "auto-approve"
+	}
+	if permissions := m.codePermissionFooter(); permissions != "" {
+		if right != "" {
+			right += " · "
+		}
+		right += permissions
 	}
 	leftR := th.FooterMeta.Render(left)
 	leftW := lipgloss.Width(leftR)

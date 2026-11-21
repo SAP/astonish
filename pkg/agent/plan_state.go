@@ -193,18 +193,7 @@ func (ps *PlanState) AllStepsComplete() bool {
 func (ps *PlanState) IsFullyAccepted() bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if strings.TrimSpace(ps.doc.Results) == "" {
-		return false
-	}
-	if len(ps.steps) == 0 {
-		return false
-	}
-	for _, s := range ps.steps {
-		if s.status != "complete" {
-			return false
-		}
-	}
-	return true
+	return snapshotPlanLocked(ps).IsFullyAccepted()
 }
 
 // snapshotLocked returns the plan goal and a copy of its steps.

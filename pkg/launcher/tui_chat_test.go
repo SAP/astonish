@@ -15,6 +15,47 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestPlanCodePermissionsLazyCapability(t *testing.T) {
+	ctx := context.Background()
+	lazy := &lazyCodeBackend{}
+	got, err := lazy.CodePermissions(ctx)
+	if err != nil || got.Source != backend.CodePermissionSourceCurrent || got.SessionAllFolders {
+		t.Fatalf("unopened backend has permissions: %+v, %v", got, err)
+	}
+	if err := lazy.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := codePlanAcceptanceBackend(t, t.TempDir(), t.TempDir(), "")
+	lazy.inner = b
+	if err := b.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.result.ChatAgent.GetOrCreateAuthPolicy(b.sessionID).SetAllFoldersForSession(true); err != nil {
+		t.Fatal(err)
+	}
+	b.autoApprove = true
+	got, err = lazy.CodePermissions(ctx)
+	if err != nil || !got.CLIOverride || !got.SessionAllFolders || got.Source != backend.CodePermissionSourceCLI {
+		t.Fatalf("lost delegated projection: %+v, %v", got, err)
+	}
+	if err := lazy.RevokeCodePermission(ctx, backend.CodePermissionScope("invalid")); err == nil {
+		t.Fatal("lost delegated error")
+	}
+	if err := lazy.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	if err := lazy.RevokeCodePermission(ctx, backend.CodePermissionSessionAllFolders); err != nil {
+		t.Fatal(err)
+	}
+	got, err = lazy.CodePermissions(ctx)
+	if err != nil || got.SessionAllFolders || !got.CLIOverride || got.Generation != 2 {
+		t.Fatalf("bad revoke projection: %+v, %v", got, err)
+	}
+	if _, ok := any(&platformBackend{}).(backend.CodePermissionsBackend); ok {
+		t.Fatal("remote platform exposes local permission capability")
+	}
+}
+
 func TestPlanRevisionTransportAndHistory(t *testing.T) {
 	s := agent.PlanSnapshot{PlanID: "p", Revision: 2, Sequence: 5, Goal: "accepted", PendingRevision: &agent.PlanRevisionProposal{ID: "proposal", BaseRevision: 2}}
 	for _, kind := range []string{"subtask_progress", "plan_snapshot", "plan"} {

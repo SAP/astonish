@@ -135,6 +135,8 @@ type PlanRuntime struct {
 	plan                    *PlanState
 	options                 PlanRuntimeOptions
 	inFlight                map[string]bool
+	codeLease               *codePlanLease
+	codeApprovalCommitted   bool
 	allowInitialReplacement bool
 }
 
@@ -250,6 +252,11 @@ func (r *PlanRuntime) Announce(goal string, doc PlanDocumentInfo, steps []PlanSt
 			return planRuntimeError(PlanRuntimePersistFailed, err.Error())
 		}
 	}
+	if r.codeLease != nil {
+		r.codeLease.revoked.Store(true)
+		r.codeLease = nil
+	}
+	r.codeApprovalCommitted = false
 	// Detach the previous state so late verification cannot mutate this plan.
 	r.plan = NewPlanState(next.Goal, next.Document, next.Steps)
 	r.inFlight = make(map[string]bool)
@@ -320,6 +327,11 @@ func (r *PlanRuntime) commitLocked(next PlanSnapshot) error {
 			return planRuntimeError(PlanRuntimePersistFailed, err.Error())
 		}
 	}
+	if r.codeLease != nil && (r.codeLease.planID != next.PlanID || !codePlanSnapshotActive(next)) {
+		r.codeLease.revoked.Store(true)
+		r.codeLease = nil
+	}
+	r.codeApprovalCommitted = false
 	replacement := NewPlanState(next.Goal, next.Document, next.Steps)
 	oldSteps := map[string]planStep{}
 	for _, step := range r.plan.steps {

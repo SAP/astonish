@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"github.com/SAP/astonish/pkg/agent"
 	"strings"
 	"testing"
 
@@ -10,6 +12,63 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+type durableFolderTestBackend struct {
+	authTestBackend
+	fail bool
+}
+
+func (b *durableFolderTestBackend) PrepareCodeFolderApproval(context.Context, string, string, []string, string) error {
+	if b.fail {
+		return fmt.Errorf("disk full")
+	}
+	return nil
+}
+
+func TestCodeFolderFourChoicesAndRetry(t *testing.T) {
+	for _, key := range []string{"1", "2", "3", "4", "n", "esc"} {
+		b := &durableFolderTestBackend{fail: key == "3"}
+		m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 40})
+		defer m.cancel()
+		m.info.Mode = "code"
+		m.tr.Apply(events.NewAuthorizationApproval("read_file", nil, agent.FolderApprovalOptions(), "folder", []string{"/outside"}))
+		m.ta.SetValue("draft")
+		rendered := stripANSI(m.renderFolderApprovalOverlay(m.approvalItem()))
+		for _, hint := range []string{"3=any folders", "4=deny"} {
+			if !strings.Contains(rendered, hint) {
+				t.Fatalf("missing folder hint %q: %s", hint, rendered)
+			}
+		}
+		k := tea.KeyPressMsg{Code: rune(key[0]), Text: key}
+		if key == "esc" {
+			k = tea.KeyPressMsg{Code: tea.KeyEsc}
+		}
+		next, _, _ := m.handleApprovalKey(k)
+		m = next.(model)
+		if key == "3" {
+			if !m.tr.Awaiting || b.called || m.ta.Value() != "draft" {
+				t.Fatal("persistence failure lost retry")
+			}
+			if !strings.Contains(stripANSI(m.renderFolderApprovalOverlay(m.approvalItem())), "saved session is reopened") {
+				t.Fatal("missing persistence warning")
+			}
+			b.fail = false
+			_, _ = m.submitApproval(agent.FolderApprovalOptions()[2])
+		}
+		want := agent.FolderApprovalOptions()[0]
+		switch key {
+		case "2":
+			want = agent.FolderApprovalOptions()[1]
+		case "3":
+			want = agent.FolderApprovalOptions()[2]
+		case "4", "n", "esc":
+			want = agent.FolderApprovalOptions()[3]
+		}
+		if b.runMsg != want {
+			t.Fatalf("key %s => %q want %q", key, b.runMsg, want)
+		}
+	}
+}
 
 // authTestBackend captures the message RunTurn is called with so tests can
 // assert the option string the approval overlay submits back to the agent.

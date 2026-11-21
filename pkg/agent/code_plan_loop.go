@@ -16,6 +16,7 @@ import (
 // codePlanLoop is invocation-local, local-Code-only, and never fabricates user
 // messages or re-enters ChatAgent.Run (which resets authorization grants).
 type codePlanLoop struct {
+	context       context.Context
 	runtime       *PlanRuntime
 	lastSequence  int64
 	stagnant      int
@@ -30,22 +31,21 @@ func newCodePlanLoop(ctx context.Context) *codePlanLoop {
 		return &codePlanLoop{}
 	}
 	r, _ := PlanRuntimeFromContext(ctx)
-	if !r.CodeExecutionEnabled() {
+	if r == nil || !r.options.CodeExecution {
 		return &codePlanLoop{}
 	}
 	s := r.Snapshot()
-	return &codePlanLoop{runtime: r, lastSequence: s.Sequence, calls: map[string]string{}, reviewAtStart: s.Document.CodeReviewPending}
+	return &codePlanLoop{context: ctx, runtime: r, lastSequence: s.Sequence, calls: map[string]string{}, reviewAtStart: s.Document.CodeReviewPending}
 }
 
 func (l *codePlanLoop) active() bool {
-	if l.runtime == nil {
-		return false
-	}
-	s := l.runtime.Snapshot()
-	return s.Document.Lifecycle == PlanLifecycleApproved && s.Document.Results == "" && len(s.Steps) > 0
+	return l.runtime.CodeExecutionActive()
 }
 
-func (l *codePlanLoop) beforeModel(_ adkagent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (l *codePlanLoop) beforeModel(ctx adkagent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+	if l.runtime != nil && l.runtime.Snapshot().IsFullyAccepted() {
+		projectCompletedCodePlanRequest(l.context, req, l.runtime.Snapshot())
+	}
 	if !l.active() {
 		return nil, nil
 	}

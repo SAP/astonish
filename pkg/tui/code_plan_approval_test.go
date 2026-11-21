@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,343 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+type permissionTestBackend struct {
+	codePlanApprovalCaptureBackend
+	snapshot backend.CodePermissionsSnapshot
+	fail     bool
+	revoked  backend.CodePermissionScope
+	enabled  int
+}
+
+func (b *permissionTestBackend) Info() backend.Info {
+	return backend.Info{Mode: "code", SessionID: b.snapshot.SessionID}
+}
+func (b *permissionTestBackend) CodePermissions(context.Context) (backend.CodePermissionsSnapshot, error) {
+	if b.fail {
+		return backend.CodePermissionsSnapshot{}, fmt.Errorf("unavailable")
+	}
+	return b.snapshot, nil
+}
+func (b *permissionTestBackend) RevokeCodePermission(_ context.Context, s backend.CodePermissionScope) error {
+	b.revoked = s
+	if s == backend.CodePermissionPlanFullAccess {
+		b.snapshot.PlanFullAccess = false
+	} else {
+		b.snapshot.SessionAllFolders = false
+	}
+	return nil
+}
+func (b *permissionTestBackend) ReenableCodePlanFullAccess(_ context.Context, session, plan string, revision int64) error {
+	b.enabled++
+	b.snapshot.PlanFullAccess = true
+	b.snapshot.PlanID = plan
+	return nil
+}
+
+func TestCodePermissionsRefreshDuringSaveIsNotLost(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session"}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 90, Height: 40})
+	defer m.cancel()
+	next, load := m.openCodePermissions()
+	m = next.(model)
+	// A lifecycle event can arrive while the overlay read or revoke is pending.
+	next, _ = m.Update(eventMsg(events.NewSystem("permission changed")))
+	m = next.(model)
+	if !m.permissions.refreshPending {
+		t.Fatal("lifecycle refresh lost while loading")
+	}
+	msg := load().(codePermissionsMsg)
+	next, refresh := m.Update(msg)
+	m = next.(model)
+	if refresh == nil || m.permissions.refreshPending {
+		t.Fatal("pending refresh was not drained")
+	}
+	b.snapshot.SessionAllFolders = true
+	next, _ = m.Update(refresh())
+	m = next.(model)
+	if !m.permissions.snapshot.SessionAllFolders {
+		t.Fatal("new authority was not refreshed")
+	}
+	msg.request = m.permissionRequest
+	msg.snapshot.SessionID = "other"
+	next, _ = m.Update(msg)
+	m = next.(model)
+	if m.permissions.known || m.codePermissionFooter() != "" || m.permissions.err == "" {
+		t.Fatal("wrong-session projection retained authority")
+	}
+}
+
+func TestCodeApprovalStaleAsyncResultPreservesNewPlanDraft(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session"}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 90, Height: 40})
+	defer m.cancel()
+	s := agent.PlanSnapshot{PlanID: "one", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.refreshViewport()
+	next, launch := m.submitPlanApproval(planOptRun)
+	m = next.(model)
+	started := launch().(planApprovalStartedMsg)
+	s.Revision++
+	s.Sequence++
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.refreshViewport()
+	m.ta.SetValue("new plan draft")
+	next, _ = m.Update(started)
+	m = next.(model)
+	if !m.tr.Awaiting || m.ta.Value() != "new plan draft" || m.eventCh != nil || m.planApprovalPending {
+		t.Fatal("stale launch result consumed new approval")
+	}
+}
+
+func TestCodePermissionsCtrlPAndModalInput(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session"}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 40, Height: 18})
+	defer m.cancel()
+	m.ta.SetValue("draft")
+	m.tr.Streaming = true
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	m = next.(model)
+	if !m.permissions.open || cmd == nil {
+		t.Fatal("Ctrl+P unavailable during work")
+	}
+	next, _ = m.Update(tea.PasteMsg{Content: "ignored"})
+	m = next.(model)
+	if m.ta.Value() != "draft" {
+		t.Fatal("modal paste reached composer")
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = next.(model)
+	m.tr.Apply(events.NewPlan("plan", events.PlanPending))
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	m = next.(model)
+	if m.permissions.open || m.tr.ApprovalCursor != 3 {
+		t.Fatal("Ctrl+P replaced approval navigation")
+	}
+}
+
+func TestCodePermissionsReenableRejectsChangedIdentityAndCompletedPlan(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session"}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 90, Height: 40})
+	defer m.cancel()
+	s := agent.PlanSnapshot{PlanID: "active", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	s.Document.Lifecycle = agent.PlanLifecycleApproved
+	s.Document.CodeExecutionMode = agent.CodePlanRunToCompletion
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	next, cmd := m.openCodePermissions()
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	s.Revision++
+	s.Sequence++
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	if cmd != nil || b.enabled != 0 || m.permissions.confirm || m.permissions.err == "" {
+		t.Fatal("confirmation was not bound to displayed identity")
+	}
+	s.Sequence++
+	s.Steps[0].Status = "complete"
+	s.Document.Results = "Verified"
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	labels, _ := m.permissionRows()
+	if len(labels) != 0 {
+		t.Fatalf("completed plan offered enable: %v", labels)
+	}
+}
+
+func TestCodePermissionsOverlayLifecycle(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session", SessionAllFolders: true}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 90, Height: 40})
+	defer m.cancel()
+	m.ta.SetValue("my draft")
+	next, cmd := m.openCodePermissions()
+	m = next.(model)
+	if !m.permissions.open || !m.permissions.loading {
+		t.Fatal("not loading")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if !m.permissions.known || m.permissions.loading {
+		t.Fatalf("load failed %+v", m.permissions)
+	}
+	if !strings.Contains(m.renderFooterMeta(), "Folders · session") {
+		t.Fatal("missing live footer")
+	}
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	if !m.permissions.loading {
+		t.Fatal("revoke not pending")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if b.revoked != backend.CodePermissionSessionAllFolders || strings.Contains(m.renderFooterMeta(), "Folders · session") {
+		t.Fatal("revoke not reflected")
+	}
+	if !strings.Contains(m.renderCodePermissions(), "Current approvals") {
+		t.Fatal("empty projection")
+	}
+	b.fail = true
+	next, cmd = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if m.permissions.err == "" || m.permissions.known {
+		t.Fatal("error claimed known authority")
+	}
+	b.fail = false
+	next, cmd = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = next.(model)
+	if m.permissions.open || m.ta.Value() != "my draft" {
+		t.Fatal("closing changed draft")
+	}
+	m.ta.SetValue("/perm")
+	m.syncSlashCompletion()
+	if len(m.slash.matches) != 1 || m.slash.matches[0].Name != "permissions" {
+		t.Fatal("completion missing")
+	}
+	m.info.Mode = "platform"
+	m.syncSlashCompletion()
+	if len(m.slash.matches) != 0 || m.codePermissionsCap() != nil {
+		t.Fatal("remote exposed permissions")
+	}
+}
+
+func TestCodePermissionsStaleRefreshAndConfirmedReenable(t *testing.T) {
+	b := &permissionTestBackend{snapshot: backend.CodePermissionsSnapshot{SessionID: "session"}}
+	m := newModel(context.Background(), Config{Backend: b, Width: 70, Height: 35})
+	defer m.cancel()
+	s := agent.PlanSnapshot{PlanID: "active", Revision: 2, Sequence: 2, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	s.Document.Lifecycle = agent.PlanLifecycleApproved
+	s.Document.CodeExecutionMode = agent.CodePlanReviewEachPhase
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	next, cmd := m.openCodePermissions()
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	old := m.refreshCodePermissions()
+	newer := m.refreshCodePermissions()
+	next, _ = m.Update(newer())
+	m = next.(model)
+	stale := old().(codePermissionsMsg)
+	stale.snapshot.SessionAllFolders = true
+	next, _ = m.Update(stale)
+	m = next.(model)
+	if m.permissions.snapshot.SessionAllFolders {
+		t.Fatal("stale refresh won")
+	}
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	if cmd != nil || b.enabled != 0 || !m.permissions.confirm || !strings.Contains(m.renderCodePermissions(), "Not sandboxed.") {
+		t.Fatal("missing explicit confirmation")
+	}
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	next, _ = m.Update(cmd())
+	m = next.(model)
+	if b.enabled != 1 || !strings.Contains(m.renderFooterMeta(), "Full access · this plan") {
+		t.Fatal("reenable not reflected")
+	}
+	m.tr = events.NewTranscript()
+	m.syncCodePermissions()
+	if m.permissions.known || m.permissions.open || m.codePermissionFooter() != "" {
+		t.Fatal("session switch leaked grant")
+	}
+}
+
+func TestCodePlanPermissionRepaintsCachedCard(t *testing.T) {
+	m := newTestComposerModel(110)
+	defer m.cancel()
+	m.info.Mode = "code"
+	m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
+	m.refreshViewport()
+	if !strings.Contains(stripANSI(m.vp.View()), "Current approvals") {
+		t.Fatal("default missing")
+	}
+	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	m = next.(model)
+	view := stripANSI(m.vp.View())
+	if !strings.Contains(view, "Full access for this plan") || !strings.Contains(view, "Not") || !strings.Contains(view, "sandboxed.") {
+		t.Fatalf("stale permission card: %s", stripANSI(m.vp.View()))
+	}
+}
+
+func TestCodePermissionSelectionIdentityAndAtomicOptions(t *testing.T) {
+	for _, mode := range []agent.CodePlanExecutionMode{agent.CodePlanRunToCompletion, agent.CodePlanReviewEachPhase} {
+		b := &codePlanApprovalCaptureBackend{}
+		m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 40})
+		defer m.cancel()
+		m.info.Mode = "code"
+		s := agent.PlanSnapshot{PlanID: "permission-plan", Revision: 3, Sequence: 4, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+		m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+		m.ta.SetValue("draft remains")
+		m.refreshViewport()
+		next, _, handled := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+		m = next.(model)
+		if !handled || m.planPermission != agent.CodePlanFullAccess {
+			t.Fatal("p did not select full access")
+		}
+		m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+		m.refreshViewport()
+		if m.planPermission != agent.CodePlanFullAccess {
+			t.Fatal("duplicate reset selection")
+		}
+		if !strings.Contains(strings.Join(m.planPermissionLines(160), "\n"), "Not sandboxed.") {
+			t.Fatal("warning missing")
+		}
+		choice := planOptRun
+		if mode == agent.CodePlanReviewEachPhase {
+			choice = planOptReview
+		}
+		next, cmd := m.submitPlanApproval(choice)
+		m = next.(model)
+		started := cmd().(planApprovalStartedMsg)
+		if started.err != nil {
+			t.Fatal(started.err)
+		}
+		defer started.cancel()
+		if b.opts.CodePlanPermissionMode != agent.CodePlanFullAccess || b.opts.CodePlanApprovalID != s.PlanID || b.opts.CodePlanApprovalRevision != s.Revision {
+			t.Fatalf("unbound approval: %+v", b.opts)
+		}
+		if b.opts.CodePlanExecutionMode != mode {
+			t.Fatal("permission changed cadence")
+		}
+		if m.ta.Value() != "draft remains" {
+			t.Fatal("draft lost before start")
+		}
+	}
+}
+
+func TestCodePermissionSelectionResetsAndFailureKeepsDraft(t *testing.T) {
+	m := newTestComposerModel(100)
+	defer m.cancel()
+	m.info.Mode = "code"
+	s := agent.PlanSnapshot{PlanID: "one", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.refreshViewport()
+	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	m = next.(model)
+	m.planApprovalPending = true
+	m.ta.SetValue("keep me")
+	next, _ = m.Update(planApprovalStartedMsg{err: fmt.Errorf("disk full")})
+	m = next.(model)
+	if m.planPermission != agent.CodePlanFullAccess || !m.tr.Awaiting || m.ta.Value() != "keep me" || m.planApprovalPending {
+		t.Fatal("failure destroyed retry state")
+	}
+	s.Revision++
+	s.Sequence++
+	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.refreshViewport()
+	if m.planPermission != agent.CodePlanCurrentApprovals {
+		t.Fatal("revision retained escalation")
+	}
+}
 
 func TestPlanApprovalViewportCursorRepaints(t *testing.T) {
 	for _, source := range []string{"legacy", "snapshot", "restored"} {
@@ -69,7 +407,7 @@ func TestCodePlanApprovalSingleLineOptionsAndRemoteOptions(t *testing.T) {
 			t.Fatalf("option row %d = %q, want %q", i, got, line)
 		}
 	}
-	if len(lines) != 9 {
+	if len(lines) != 10 {
 		t.Fatalf("expected header, four single-line options and key hint; got %d lines: %v", len(lines), lines)
 	}
 	if !strings.Contains(stripANSI(m.renderHints()), "Enter select") {

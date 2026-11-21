@@ -139,6 +139,21 @@ func (b *lazyCodeBackend) Open(ctx context.Context) error {
 	return b.inner.Open(ctx)
 }
 
+func (b *lazyCodeBackend) CodePermissions(ctx context.Context) (backend.CodePermissionsSnapshot, error) {
+	if inner, ok := b.inner.(backend.CodePermissionsBackend); ok {
+		return inner.CodePermissions(ctx)
+	}
+	return backend.CodePermissionsSnapshot{Source: backend.CodePermissionSourceCurrent}, nil
+}
+func (b *lazyCodeBackend) RevokeCodePermission(ctx context.Context, scope backend.CodePermissionScope) error {
+	if inner, ok := b.inner.(backend.CodePermissionsBackend); ok {
+		return inner.RevokeCodePermission(ctx, scope)
+	}
+	return nil
+}
+
+var _ backend.CodePermissionsBackend = (*lazyCodeBackend)(nil)
+
 func (b *lazyCodeBackend) RecordPlanDecision(ctx context.Context, status events.PlanStatus) error {
 	if inner, ok := b.inner.(backend.PlanLifecycleBackend); ok {
 		return inner.RecordPlanDecision(ctx, status)

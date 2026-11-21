@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -94,6 +95,161 @@ func TestChildBridgeAuthorization(t *testing.T) {
 				t.Fatalf("result=%+v gates=%d executions=%d captures=%d", result, gates.Load(), executed.Load(), captures.Load())
 			}
 		})
+	}
+}
+
+func TestSubAgentAuthSessionAllFolders(t *testing.T) {
+	disableTmpAllowlist(t)
+	p := NewSessionAuthPolicy("/project")
+	p.ConfigureCodeSessionFolders(CodeSessionFolderSettings{}, func(CodeSessionFolderSettings) error { return nil })
+	var writes, folderPrompts, toolPrompts, turns atomic.Int32
+	writer, err := functiontool.New(functiontool.Config{Name: "write_file", Description: "marker"}, func(tool.Context, map[string]any) (map[string]any, error) {
+		writes.Add(1)
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewSubAgentManager(SubAgentConfig{MaxRetries: 1})
+	mgr.AppName, mgr.UserID = "test", "user"
+	mgr.SessionService = adksession.InMemoryService()
+	mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: []tool.Tool{writer}}}
+	mgr.GetAuthPolicy = func(string) *SessionAuthPolicy { return p }
+	mgr.AuthorizationGate = func(req SubAgentAuthRequest) SubAgentAuthResponse {
+		if req.Kind == "folder" {
+			folderPrompts.Add(1)
+			return SubAgentAuthResponse{Granted: true, Choice: OptAllowAllFoldersSession}
+		}
+		toolPrompts.Add(1)
+		return SubAgentAuthResponse{Granted: true, Choice: OptAllowToolOnce}
+	}
+	mgr.LLM = livenessTestLLM{generate: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			n := turns.Add(1)
+			part := &genai.Part{Text: "done"}
+			if n <= 3 {
+				path := "/outside/one"
+				if n == 2 {
+					path = "/another/two"
+				}
+				if n == 3 {
+					if err := p.SetAllFoldersForSession(false); err != nil {
+						t.Error(err)
+					}
+				}
+				part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: string(rune('a' + n)), Name: "execute_tool", Args: map[string]any{"name": "core/write_file", "arguments": map[string]any{"file_path": path}}}}
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}, nil)
+		}
+	}}
+	result := mgr.RunTask(context.Background(), SubAgentTask{Name: "writer", Description: "write", ParentID: "owner", ToolFilter: []string{"write_file"}})
+	if result.Status != "success" || writes.Load() != 3 || folderPrompts.Load() != 2 || toolPrompts.Load() != 1 {
+		t.Fatalf("result=%+v writes=%d folders=%d tools=%d", result, writes.Load(), folderPrompts.Load(), toolPrompts.Load())
+	}
+	if p.AllToolsAllowedForSession() {
+		t.Fatal("folder grant granted all tools")
+	}
+}
+
+func TestSubAgentAuthPlanLeaseRechecksDeferredCalls(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "revoked-between-calls", true: "disabled"}[disabled], func(t *testing.T) {
+			disableTmpAllowlist(t)
+			s := codeExecutionFixture(CodePlanRunToCompletion)
+			s.Document.Lifecycle = ""
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true})
+			p := NewSessionAuthPolicy("/project")
+			if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+				t.Fatal(err)
+			}
+			ctx := p.BindCodePlanExecution(WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true}), "owner", r)
+			var writes, gates, turns atomic.Int32
+			writer, err := functiontool.New(functiontool.Config{Name: "write_file", Description: "marker"}, func(tool.Context, map[string]any) (map[string]any, error) {
+				writes.Add(1)
+				return map[string]any{"ok": true}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := NewSubAgentManager(SubAgentConfig{MaxRetries: 1})
+			mgr.AppName, mgr.UserID = "test", "user"
+			mgr.SessionService = adksession.InMemoryService()
+			mgr.ToolGroups = map[string]*ToolGroup{"core": {Name: "core", Tools: []tool.Tool{writer}}}
+			mgr.GetAuthPolicy = func(string) *SessionAuthPolicy { return p }
+			mgr.AuthorizationGate = func(req SubAgentAuthRequest) SubAgentAuthResponse {
+				gates.Add(1)
+				// Even a stale serialized bypass response must be rechecked;
+				// never convert its Always Allow text into durable grants.
+				return SubAgentAuthResponse{Granted: true, PlanBypass: true, Choice: "Always Allow"}
+			}
+			mgr.LLM = livenessTestLLM{generate: func(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					n := turns.Add(1)
+					if n == 2 {
+						p.RevokeCodePlanFullAccess()
+					}
+					part := &genai.Part{Text: "done"}
+					if n <= 2 {
+						part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: string(rune('a' + n)), Name: "execute_tool", Args: map[string]any{"name": "core/write_file", "arguments": map[string]any{"file_path": "/external/marker", "content": "ok"}}}}
+					}
+					yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}, nil)
+				}
+			}}
+			if disabled {
+				ctx = store.WithDisabledTools(ctx, []string{"write_file"})
+			}
+			result := mgr.RunTask(ctx, SubAgentTask{Name: "writer", Description: "write", ParentID: "owner", ToolFilter: []string{"write_file"}})
+			wantWrites, wantGates := int32(1), int32(1)
+			if disabled {
+				wantWrites, wantGates = 0, 0
+			}
+			if result.Status != "success" || writes.Load() != wantWrites || gates.Load() != wantGates {
+				t.Fatalf("result=%+v writes=%d gates=%d", result, writes.Load(), gates.Load())
+			}
+			if p.AllToolsAllowedForSession() || p.PathAllowed("/external/marker") {
+				t.Fatal("bypass became permanent grant")
+			}
+		})
+	}
+}
+
+func TestSubAgentAuthQueuedBindingsRevoked(t *testing.T) {
+	s := codeExecutionFixture(CodePlanRunToCompletion)
+	s.Document.Lifecycle = ""
+	r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true})
+	p := NewSessionAuthPolicy(t.TempDir())
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+		t.Fatal(err)
+	}
+	ctx := p.BindCodePlanExecution(WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true}), "owner", r)
+	start := make(chan struct{})
+	var ready, done sync.WaitGroup
+	ready.Add(8)
+	done.Add(8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer done.Done()
+			// Requests already hold the parent invocation before revocation.
+			req := SubAgentAuthRequest{Context: ctx, ParentSessionID: "owner", Kind: "tool", ToolName: "write_file"}
+			ready.Done()
+			<-start
+			if p.CodePlanFullAccessAllowed(req.Context, req.ParentSessionID) {
+				t.Error("queued child inherited revoked access")
+			}
+		}()
+	}
+	ready.Wait()
+	p.RevokeCodePlanFullAccess()
+	close(start)
+	done.Wait()
+	if p.AllToolsAllowedForSession() {
+		t.Fatal("revoked child authority became all-tools consent")
 	}
 }
 

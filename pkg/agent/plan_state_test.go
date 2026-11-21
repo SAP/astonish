@@ -4,6 +4,30 @@ import (
 	"testing"
 )
 
+func TestPlanSnapshotIsFullyAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name, result, status string
+		steps, want          bool
+	}{
+		{"empty", "accepted", "complete", false, false},
+		{"checkboxes", "", "complete", true, false},
+		{"blank-results", " \n", "complete", true, false},
+		{"failed", "accepted", "failed", true, false},
+		{"running", "accepted", "running", true, false},
+		{"accepted", "accepted", "complete", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := PlanSnapshot{Document: PlanDocumentInfo{Results: tc.result, Lifecycle: PlanLifecycleApproved}}
+			if tc.steps {
+				s.Steps = []PlanStepInfo{{Name: "one", Status: tc.status}}
+			}
+			if s.IsFullyAccepted() != tc.want || NewPlanState("test", s.Document, s.Steps).IsFullyAccepted() != tc.want {
+				t.Fatal("snapshot/state completion disagree", s)
+			}
+		})
+	}
+}
+
 func TestNewPlanState_PreservesStatus(t *testing.T) {
 	ps := NewPlanState("test", PlanDocumentInfo{}, []PlanStepInfo{
 		{Name: "done", Description: "already finished", Status: "complete"},

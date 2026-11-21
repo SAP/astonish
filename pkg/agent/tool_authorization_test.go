@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/pathscope"
@@ -15,6 +18,97 @@ func disableTmpAllowlist(t *testing.T) {
 	t.Helper()
 	restore := pathscope.OverrideAlwaysAllowedDirsForTest(nil)
 	t.Cleanup(restore)
+}
+
+func TestSessionAuthPolicy_CodePlanCancelResumeRevoke(t *testing.T) {
+	disableTmpAllowlist(t)
+	s := codeExecutionFixture(CodePlanRunToCompletion)
+	s.Document.Lifecycle = ""
+	r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true})
+	p := NewSessionAuthPolicy(t.TempDir())
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+		t.Fatal(err)
+	}
+	if !p.CodePlanFullAccessGranted("owner", r.Snapshot()) || p.CodePlanFullAccessGranted("other", r.Snapshot()) {
+		t.Fatal("permission projection scope")
+	}
+	base := WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true})
+	ctx, cancel := context.WithCancel(p.BindCodePlanExecution(base, "owner", r))
+	cancel()
+	if p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("cancelled invocation authorized")
+	}
+	resumed := p.BindCodePlanExecution(base, "owner", NewPlanRuntimeFromSnapshot(r.Snapshot(), PlanRuntimeOptions{CodeExecution: true}))
+	if !p.CodePlanFullAccessAllowed(resumed, "owner") {
+		t.Fatal("same-process resume lost lease")
+	}
+	folder := t.TempDir()
+	p.GrantPathForSession(folder)
+	p.GrantAllToolsSession()
+	p.RevokeCodePlanFullAccess()
+	if p.CodePlanFullAccessGranted("owner", r.Snapshot()) {
+		t.Fatal("revoked grant still displayed")
+	}
+	if p.CodePlanFullAccessAllowed(resumed, "owner") {
+		t.Fatal("revoked context authorized")
+	}
+	if !p.PathAllowed(filepath.Join(folder, "marker")) || !p.AllToolsAllowedForSession() {
+		t.Fatal("independent grants revoked")
+	}
+}
+
+func TestSessionAuthPolicy_CodePlanReplacement(t *testing.T) {
+	s := codeExecutionFixture(CodePlanRunToCompletion)
+	s.Document.Lifecycle = ""
+	r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CodeExecution: true})
+	p := NewSessionAuthPolicy(t.TempDir())
+	if err := r.ApproveCodeExecution(s.PlanID, s.Revision, CodePlanRunToCompletion); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GrantCodePlanFullAccess("owner", r); err != nil {
+		t.Fatal(err)
+	}
+	ctx := p.BindCodePlanExecution(WithPromptOverrides(context.Background(), &PromptOverrides{ApprovedPlanExecution: true}), "owner", r)
+	botCtx := WithPromptOverrides(ctx, &PromptOverrides{ApprovedPlanExecution: true, Bot: &BotPromptContext{}})
+	if p.CodePlanFullAccessAllowed(botCtx, "owner") {
+		t.Fatal("Bot invocation inherited local Code lease")
+	}
+	remotePolicy := NewSessionAuthPolicy(p.Root())
+	if remotePolicy.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("independent remote policy inherited Code lease")
+	}
+	replacement := r.Snapshot()
+	replacement.PlanID = "new-plan"
+	p.ObserveCodePlanSnapshot(replacement)
+	if p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("replacement retained old invocation authority")
+	}
+	p.ObserveCodePlanSnapshot(r.Snapshot())
+	if p.CodePlanFullAccessAllowed(ctx, "owner") {
+		t.Fatal("rollback resurrected old lease")
+	}
+}
+
+func TestSessionAuthPolicy_FolderPersistenceCallbackUnlocked(t *testing.T) {
+	p := NewSessionAuthPolicy(t.TempDir())
+	p.ConfigureCodeSessionFolders(CodeSessionFolderSettings{}, func(next CodeSessionFolderSettings) error {
+		// A callback may read policy/runtime projections without acquiring policy.mu twice.
+		_ = p.Root()
+		if p.CodeSessionFolders().AllFolders {
+			t.Error("grant published before durable callback returned")
+		}
+		p.GrantAllToolsSession()
+		return nil
+	})
+	if err := p.SetAllFoldersForSession(true); err != nil {
+		t.Fatal(err)
+	}
+	if !p.CodeSessionFolders().AllFolders || !p.AllToolsAllowedForSession() {
+		t.Fatal("callback or persisted grant was lost")
+	}
 }
 
 func TestRequiresToolAuthorization(t *testing.T) {
@@ -507,6 +601,104 @@ func TestApplyAuthorizationDecision_NoPending(t *testing.T) {
 	p := NewSessionAuthPolicy(t.TempDir())
 	if d := p.ApplyAuthorizationDecision("Allow once"); d != nil {
 		t.Error("expected nil decision when nothing is pending")
+	}
+}
+
+func TestFolderAuthorizationDurableIndependentSettings(t *testing.T) {
+	disableTmpAllowlist(t)
+	p := NewSessionAuthPolicy(t.TempDir())
+	outside := filepath.Join(t.TempDir(), "other")
+	writes := 0
+	p.ConfigureCodeSessionFolders(CodeSessionFolderSettings{}, func(s CodeSessionFolderSettings) error {
+		if p.PathAllowed(outside) {
+			t.Fatal("grant published before persistence")
+		}
+		writes++
+		return nil
+	})
+	req := &PendingAuthorization{Kind: "folder", Tool: "shell_command", Paths: []string{outside}, Options: FolderApprovalOptions()}
+	p.SetPending(req)
+	d, err := p.ApplyAuthorizationDecisionWithError("3")
+	if err != nil || !d.Granted || writes != 1 {
+		t.Fatalf("grant=%+v writes=%d err=%v", d, writes, err)
+	}
+	if !p.PathAllowed(filepath.Join(t.TempDir(), "different")) {
+		t.Fatal("other folder not granted")
+	}
+	if !p.ToolAuthorized("shell_command") || p.ToolAuthorized("shell_command") || p.AllToolsAllowedForSession() {
+		t.Fatal("folder permission broadened tool consent")
+	}
+	p.ResetForNewTurn()
+	if !p.PathAllowed(outside) {
+		t.Fatal("new turn lost durable grant")
+	}
+	p.ConfigureCodeSessionFolders(p.CodeSessionFolders(), func(CodeSessionFolderSettings) error { return nil })
+	p.GrantAllToolsSession()
+	if err := p.SetAllFoldersForSession(false); err != nil {
+		t.Fatal(err)
+	}
+	if p.PathAllowed(outside) || !p.AllToolsAllowedForSession() {
+		t.Fatal("revocation did not preserve independence")
+	}
+}
+
+func TestFolderAuthorizationExactChoicesAndLegacyNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		options  []string
+		response string
+		want     AuthorizationChoice
+	}{
+		{nil, "3", AuthorizationDeny},
+		{[]string{"Allow", "Always Allow", "Deny"}, "3", AuthorizationDeny},
+		{FolderApprovalOptions(), "3", AuthorizationAllFolders},
+		{FolderApprovalOptions(), "4", AuthorizationDeny},
+		{FolderApprovalOptions(), "Always allow any folder for this session", AuthorizationAllFolders},
+		{FolderApprovalOptions(), "do not always allow this session", AuthorizationDeny},
+		{FolderApprovalOptions(), "Always allow this folder", AuthorizationBroad},
+	} {
+		if got := DecodeAuthorizationChoice(&PendingAuthorization{Kind: "folder", Options: tc.options}, tc.response); got != tc.want {
+			t.Errorf("%q: got %s want %s", tc.response, got, tc.want)
+		}
+	}
+	if got := DecodeAuthorizationChoice(&PendingAuthorization{Kind: "tool"}, OptAllowAllFoldersSession); got != AuthorizationDeny {
+		t.Fatal("folder choice grants tools")
+	}
+}
+
+func TestFolderAuthorizationPersistFailureAndConcurrentGrants(t *testing.T) {
+	p := NewSessionAuthPolicy(t.TempDir())
+	fail := true
+	writes := 0
+	p.ConfigureCodeSessionFolders(CodeSessionFolderSettings{}, func(CodeSessionFolderSettings) error {
+		writes++
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	})
+	req := &PendingAuthorization{Kind: "folder", Tool: "shell_command", Options: FolderApprovalOptions()}
+	d, err := p.ApplyAuthorizationRequest(req, "3")
+	if err == nil || d.Granted || p.CodeSessionFolders().AllFolders || p.ToolAuthorized("shell_command") {
+		t.Fatal("failed persistence granted access")
+	}
+	fail = false
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := p.SetAllFoldersForSession(true); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if writes != 2 || p.CodeSessionFolders().Generation != 1 {
+		t.Fatal("concurrent grant was not idempotent", writes)
+	}
+	fail = true
+	if err := p.SetAllFoldersForSession(false); err == nil || !p.CodeSessionFolders().AllFolders {
+		t.Fatal("failed revoke claimed success")
 	}
 }
 

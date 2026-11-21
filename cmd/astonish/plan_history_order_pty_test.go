@@ -132,15 +132,28 @@ func TestPlanHistoryOrderCodePTYAcceptance(t *testing.T) {
 	cmd.Dir = work
 	cmd.Env = append(os.Environ(), "ASTONISH_BOT_CLI_CHILD=1", "TERM=xterm-256color", "NO_COLOR=1", "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	term := newHandoffPTY(t, cmd)
+	// The compact plan summary occupies rows 2 and 3; chronology assertions
+	// concern the scrolling transcript, not the intentionally pinned title.
+	transcriptFrame := func() string {
+		rows := strings.Split(term.frame(), "\n")
+		return strings.Join(rows[min(4, len(rows)):], "\n")
+	}
+	assertPlanOffscreen := func() {
+		t.Helper()
+		term.wait(goal, "3/3 phases complete", "100%")
+		if strings.Contains(transcriptFrame(), goal) {
+			t.Fatalf("plan appended below later answer:\n%s", term.frame())
+		}
+	}
 	term.wait("Enter send", laterAnswer)
-	term.assertAbsent(goal)
+	assertPlanOffscreen()
 	t.Log("resume bottom retains the later answer, not an appended plan")
 
 	// Scroll upward through real terminal input until the original completed
 	// plan is visible. This rules out fixing chronology by hiding all plans.
 	scrollToPlan := func() {
 		t.Helper()
-		for i := 0; i < 50 && !strings.Contains(term.frame(), goal); i++ {
+		for i := 0; i < 50 && !strings.Contains(transcriptFrame(), goal); i++ {
 			before := term.frame()
 			term.send("\x1b[<64;35;10M") // Mouse wheel up in the transcript.
 			deadline := time.NewTimer(2 * time.Second)
@@ -155,7 +168,9 @@ func TestPlanHistoryOrderCodePTYAcceptance(t *testing.T) {
 			}
 			deadline.Stop()
 		}
-		term.wait(goal)
+		if !strings.Contains(transcriptFrame(), goal) {
+			t.Fatalf("earlier plan card not reachable in transcript:\n%s", term.frame())
+		}
 	}
 	scrollToPlan()
 	term.send(strings.Repeat("\x1b[<65;35;10M", 100))
@@ -169,14 +184,14 @@ func TestPlanHistoryOrderCodePTYAcceptance(t *testing.T) {
 	term.wait("Revert to this message?", "y revert")
 	term.send("y")
 	term.wait("Rolled back.", implementation, "Enter send")
-	term.assertAbsent(goal)
+	assertPlanOffscreen()
 	term.assertAbsent(laterAnswer)
 	t.Log("rollback bottom retains the implementation answer, not an appended plan")
 
 	scrollToPlan()
 	term.send(strings.Repeat("\x1b[<65;35;10M", 100)) // Mouse wheel down to the retained answer.
 	term.wait(implementation, "Rolled back.")
-	term.assertAbsent(goal)
+	assertPlanOffscreen()
 	term.assertAbsent(laterAnswer)
 	term.close()
 	if calls := modelCalls.Load(); calls != 0 {

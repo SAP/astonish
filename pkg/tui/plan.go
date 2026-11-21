@@ -38,7 +38,6 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 
 	nFiles := 0
 	nNew, nModify, nDelete := 0, 0, 0
-	complete, running, pending := 0, 0, 0
 	for _, s := range steps {
 		nFiles += len(s.Files)
 		for _, f := range s.Files {
@@ -50,16 +49,6 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 			default:
 				nModify++
 			}
-		}
-		switch s.Status {
-		case "complete":
-			complete++
-		case "running":
-			running++
-		case "failed":
-			// failed phases still count toward "done" once nothing is pending/running
-		default:
-			pending++
 		}
 	}
 
@@ -108,7 +97,7 @@ func (m model) renderPlanCard(goal string, doc agent.PlanDocumentInfo, steps []a
 		body = append(body, m.planBand("RESULTS", results, inner)...)
 	}
 
-	footer := planProgressFooter(complete, running, pending, len(steps))
+	footer := planProgressFooter(summarizePlanSteps(steps))
 	body = append(body, m.planApprovalLines(it, inner)...)
 	title := strings.TrimSpace(goal)
 	if title == "" {
@@ -384,14 +373,20 @@ func planFileKindStyle(kind string, th Theme) (string, lipgloss.Style) {
 	}
 }
 
-func planProgressFooter(complete, running, pending, total int) string {
+func planProgressFooter(s planStepSummary) string {
 	switch {
-	case running > 0:
-		return fmt.Sprintf("%d/%d · running", complete, total)
-	case pending == 0 && running == 0:
-		return fmt.Sprintf("%d/%d done", complete, total)
+	case s.Total == 0:
+		return "Progress: unavailable"
+	case s.Failed > 0:
+		return fmt.Sprintf("%d/%d · failed", s.Complete, s.Total)
+	case s.Running > 0:
+		return fmt.Sprintf("%d/%d · running", s.Complete, s.Total)
+	case s.Complete == s.Total:
+		return fmt.Sprintf("%d/%d done", s.Complete, s.Total)
+	case s.Unknown > 0:
+		return fmt.Sprintf("%d/%d · unknown", s.Complete, s.Total)
 	default:
-		return fmt.Sprintf("%d/%d ready", complete, total)
+		return fmt.Sprintf("%d/%d ready", s.Complete, s.Total)
 	}
 }
 

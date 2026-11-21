@@ -22,6 +22,18 @@ closes only the viewer. See [Bot terminal/client](bot-terminal-client.md) for co
 ordered runtime-envelope replay, commands and real subprocess/PTY acceptance.
 Local Code has no Bot execution capability.
 
+## Persistent Code plan progress
+
+The sidebar uses a terminal-native rounded card with an inset dark surface, a bold PLAN PROGRESS heading and Ctrl+G hint, semantic status icons, a prominent completion percentage and solid progress bar. Tall panes separate lifecycle, progress, three aligned running/pending/failed counters, CURRENT and PHASES with rules and whitespace. Phase cards use contrasting subtle surfaces, status-colored icons, bold wrapped descriptions and muted identity/group metadata. Short panes compress the header to preserve usable phase-list space; extremely short panes retain the essential counts/current/status. NO_COLOR removes styling escapes but retains the frame, glyphs and structural hierarchy. Styling lives in `plan_sidebar_style.go`; layout and hit testing share header sizing.
+
+Local Code keeps the latest plan visible in Normal, Plan and Ask modes. At **101 columns or wider**, a **28-column right sidebar plus one divider** shares the transcript/sticky-header body, leaving at least 72 columns for conversation. Header, composer and approval chrome remain full width. Below that threshold a pinned **two-row summary** replaces the sidebar. No plan or a remote Chat session means no progress panel.
+
+**Ctrl+G** toggles a read-only full phase list; **Esc** closes it. Arrow/Page Up/Page Down keys and the mouse wheel scroll that list without changing the conversation offset, composer draft or focus. The sidebar phase list scrolls independently under its pinned goal, lifecycle, counts and current-phase names. Clicking the sidebar header or compact summary opens the full list, which includes recorded verification evidence. Existing modal screens take precedence; Ctrl+C retains normal cancel/clear/quit semantics. Plan approvals still use their existing card controls, with the composer suppressed while pending.
+
+`plan_progress.go` projects the latest ordered `ItemPlan`; `plan_sidebar.go` presents that projection. There are no extra execution counters, polling or persisted UI state. Overall percent is **completed phases / total phases**, not effort or elapsed time. Every recorded running phase is listed, including concurrent waves; phase-local **Progress: unavailable** is explicit because no measurable within-phase total exists. Idle/restored running phases are marked recorded, not live. Unknown or malformed state is not treated as completed, and a malformed latest plan never exposes an older plan as current.
+
+100% phases is **Awaiting completion record** until Results is recorded. Completed, declined, changes-requested and review-paused plans remain visible until replaced or the session changes. A revision may lower progress when evidence is invalidated. Session/latest-plan changes reset only panel navigation; resize and ordinary ordered snapshot updates preserve it. `plan_sidebar_test.go` and `plan_atomic_test.go` cover geometry, modal/input isolation, evidence, approvals and quiet snapshot updates; CLI PTY acceptance lives in `cmd/astonish/code_plan_sidebar_pty_test.go`.
+
 ## Delegation detail adapters
 
 Both backends implement `backend.DelegationDetailBackend`. Platform detail requests use

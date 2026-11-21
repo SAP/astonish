@@ -181,3 +181,35 @@ func TestPlanUpdatesStayQuiet(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanPanelSnapshotUpdatesStayQuiet(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	m.ta.SetValue("keep this draft")
+	m.vp.SetYOffset(5)
+	m.userScrolledUp = true
+	m.planPanel.open = true
+	m.layoutPlanPanel()
+	m.planPanel.detail.SetYOffset(8)
+	m.planPanel.sidebar.SetYOffset(3)
+	offset, detailOffset, panelOffset := m.vp.YOffset(), m.planPanel.detail.YOffset(), m.planPanel.sidebar.YOffset()
+	s := m.tr.Items[0].PlanSnapshot.Clone()
+	s.Sequence++
+	s.Steps[1].Status = "complete"
+	m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.refreshViewport()
+	if m.planProgress().Counts.Complete != 2 || !strings.Contains(m.renderPlanProgressHeader(28), "16%") {
+		t.Fatal("panel did not reflect ordered snapshot")
+	}
+	if !m.planPanel.open || m.planPanel.detail.YOffset() != detailOffset || m.planPanel.sidebar.YOffset() != panelOffset || m.vp.YOffset() != offset || m.ta.Value() != "keep this draft" || !m.ta.Focused() {
+		t.Fatal("snapshot moved panel/transcript or stole draft/focus")
+	}
+	stale := s.Clone()
+	stale.Sequence--
+	stale.Steps[1].Status = "pending"
+	m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &stale})
+	m.refreshViewport()
+	if m.planProgress().Counts.Complete != 2 {
+		t.Fatal("stale snapshot rolled panel backwards")
+	}
+}

@@ -27,6 +27,45 @@ _Last updated: 2025-01-01T00:00:00Z_
 Legend: ` + "`[ ]`" + ` pending · ` + "`[~]`" + ` running · ` + "`[x]`" + ` complete · ` + "`[!]`" + ` failed
 `
 
+func TestPlanProgressFooterSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		statuses []string
+		want     string
+	}{
+		{"empty", nil, "Progress: unavailable"},
+		{"pending", []string{"", "pending"}, "0/2 ready"},
+		{"running", []string{"complete", "running"}, "1/2 · running"},
+		{"failed", []string{"complete", "failed"}, "1/2 · failed"},
+		{"failed-and-running", []string{"failed", "running"}, "0/2 · failed"},
+		{"unknown", []string{"future"}, "0/1 · unknown"},
+		{"complete", []string{"complete", "complete"}, "2/2 done"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := progressSnapshot(tc.statuses...)
+			v := projectSnapshot(s)
+			if got := planProgressFooter(v.Counts); got != tc.want {
+				t.Fatalf("footer = %q want %q", got, tc.want)
+			}
+			m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+			plain := stripANSI(m.renderPlanDocument(events.Item{PlanSnapshot: &s}, 70))
+			if !strings.Contains(plain, tc.want) {
+				t.Fatalf("card disagrees with projection:\n%s", plain)
+			}
+		})
+	}
+}
+
+func TestPlanProgressFooterFailedOnly(t *testing.T) {
+	m := newModel(context.Background(), Config{Backend: staticBackend{}, Width: 80, Height: 24})
+	plain := stripANSI(m.renderPlanDocument(events.Item{PlanSnapshot: &agent.PlanSnapshot{
+		Goal: "Failed verification", Steps: []agent.PlanStepInfo{{Name: "verify", Status: "failed"}},
+	}}, 70))
+	if !strings.Contains(plain, "0/1 · failed") || strings.Contains(plain, "0/1 done") {
+		t.Fatalf("failed work must not be labelled done:\n%s", plain)
+	}
+}
+
 func TestPlanContentDetectedAsItemPlan(t *testing.T) {
 	tr := events.NewTranscript()
 	tr.LinearThread = true
@@ -730,6 +769,3 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 		t.Fatalf("expected the Problem body after the blank line, got %q", plainLines[problemIdx+3])
 	}
 }
-
-
-

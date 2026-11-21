@@ -253,6 +253,7 @@ type model struct {
 	botSnapshot     *store.BotSnapshot
 	botSnapshotErr  error
 	bots            botsState
+	planPanel       planPanelState
 	// overlays
 	sessions         sessionsState
 	rollback         rollbackState
@@ -432,6 +433,14 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	if m.planPanel.open && !m.planModalBlocked() {
+		if _, ok := msg.(tea.PasteMsg); ok {
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
 	// A textarea paste (Ctrl+V keybinding → clipboard read) arrives as a
 	// textarea.pasteMsg. When it carries text, insert it. When it is empty, the
 	// clipboard likely holds an image with no text representation — try an image
@@ -629,6 +638,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				return m, nil
 			}
+		}
+
+		if next, cmd, handled := m.handlePlanProgressKey(msg); handled {
+			return next, cmd
 		}
 
 		// Explicit paste bindings (Ctrl+V / Super+V) prefer clipboard images.
@@ -2612,10 +2625,17 @@ func (m *model) layout() {
 	taH := m.composerTextHeight()
 	composerH := taH + 2 // rounded border top/bottom
 	popupH := m.completionPopupHeight()
-	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps + m.stickyHeaderLines
-	vh := screenH - chrome
-	if vh < 5 {
-		vh = 5
+	chrome := headerH + statusH + composerH + popupH + metaH + hintsH + seps + m.stickyHeaderLines + m.compactPlanHeight()
+	if m.tr != nil && m.tr.Awaiting {
+		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
+			chrome = headerH + 1 + hintsH + m.stickyHeaderLines + m.compactPlanHeight()
+		} else if m.planLayout() != planLayoutHidden {
+			chrome = 4 + lipgloss.Height(m.renderApprovalOverlay()) + m.stickyHeaderLines + m.compactPlanHeight()
+		}
+	}
+	vh := max(1, screenH-chrome)
+	if m.planLayout() == planLayoutHidden {
+		vh = max(5, vh)
 	}
 	oldOffset := 0
 	wasAtBottom := true
@@ -2623,7 +2643,7 @@ func (m *model) layout() {
 		oldOffset = m.vp.YOffset()
 		wasAtBottom = m.vp.AtBottom()
 	}
-	m.vp = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(vh))
+	m.vp = viewport.New(viewport.WithWidth(m.transcriptWidth()), viewport.WithHeight(vh))
 	if !m.theme.NoColor {
 		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#111416"))
 	}
@@ -2645,6 +2665,7 @@ func (m *model) layout() {
 	}
 	m.ta.SetWidth(innerW)
 	m.ta.SetHeight(taH)
+	m.syncPlanPanel()
 }
 
 func (m model) screenHeight() int {
@@ -2727,6 +2748,10 @@ func (m *model) refreshViewport() {
 	if !m.ready {
 		return
 	}
+	if m.vp.Width() != m.transcriptWidth() || m.planPanel.mode != m.planLayout() || m.planPanel.awaiting != m.tr.Awaiting {
+		m.layout()
+	}
+	m.syncPlanPanel()
 	atBottom := m.vp.AtBottom()
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
@@ -2749,7 +2774,7 @@ func (m *model) refreshViewport() {
 			m.stickyExpanded = false
 		}
 		m.stickyPinnedIdx = newIdx
-		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+		m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.transcriptWidth()), m.stickyExpanded), "\n") + 1
 	} else {
 		m.stickyPinnedIdx = -1
 		m.stickyHeaderLines = 0
@@ -2923,10 +2948,13 @@ func footerWorkDirText(path, branch string) string {
 func (m model) viewportTopY() int {
 	// The transcript viewport starts after the one-line header and separator,
 	// plus any sticky user-message header rows currently shown above it.
-	return 2 + m.stickyHeaderLines
+	return 2 + m.compactPlanHeight() + m.stickyHeaderLines
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := m.handlePlanProgressMouse(msg); handled {
+		return next, cmd
+	}
 	mouse := msg.Mouse()
 
 	switch msg.(type) {
@@ -2967,6 +2995,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.planLayout() == planLayoutSidebar && msg.X >= m.transcriptWidth() {
+		return m, nil
+	}
 	// Double-click detection (used both for sticky header and transcript items).
 	now := time.Now()
 	isDouble := now.Sub(m.lastClickAt) < doubleClickWindowMS*time.Millisecond &&
@@ -2980,7 +3011,7 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 	// If the click is in the sticky header zone (rows 2..2+stickyHeaderLines-1),
 	// handle double-click to expand/collapse right on press.
 	if m.stickyHeaderLines > 0 {
-		stickyTop := 2 // after header(1) + sep(1)
+		stickyTop := 2 + m.compactPlanHeight() // after global and plan headers
 		stickyBot := stickyTop + m.stickyHeaderLines
 		if msg.Y >= stickyTop && msg.Y < stickyBot {
 			if isDouble {
@@ -2989,7 +3020,7 @@ func (m model) handleMousePress(msg tea.Mouse) (tea.Model, tea.Cmd) {
 				oldStickyH := m.stickyHeaderLines
 				sticky := m.stickyUserMessage()
 				if sticky != "" {
-					m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.width), m.stickyExpanded), "\n") + 1
+					m.stickyHeaderLines = strings.Count(m.renderStickyUserHeader(sticky, contentWidth(m.transcriptWidth()), m.stickyExpanded), "\n") + 1
 				} else {
 					m.stickyHeaderLines = 0
 				}
@@ -3103,7 +3134,7 @@ func (m model) handleMouseRelease(msg tea.Mouse) (tea.Model, tea.Cmd) {
 
 func (m model) selectionPointForMouse(msg tea.Mouse) (selectionPoint, bool) {
 	top := m.viewportTopY()
-	if msg.Y < top || msg.Y >= top+m.vp.Height() {
+	if (m.planLayout() == planLayoutSidebar && msg.X >= m.transcriptWidth()) || msg.Y < top || msg.Y >= top+m.vp.Height() {
 		return selectionPoint{}, false
 	}
 	line := m.vp.YOffset() + (msg.Y - top)
@@ -3255,7 +3286,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 	var plainLines []string
 	var contentSpans [][2]int
 	th := m.theme
-	cw := contentWidth(m.width)
+	cw := contentWidth(m.transcriptWidth())
 	lineNo := 0
 
 	if m.itemRenderCache == nil {
@@ -3323,7 +3354,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		pl, cs := buildPlainSpanned(padded, spanFor)
 		appendPlainSpanned(pl, cs)
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n") // vertical gap between messages
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3360,7 +3391,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		appendPlainSpanned(cached.plainLines, cached.spans)
 		// Gap row (empty painted row for visual separation).
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n")
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3393,7 +3424,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 		b.WriteString("\n")
 		pl, cs := buildPlainSpanned(painted, spanFor)
 		appendPlainSpanned(pl, cs)
-		gap := m.paintRow("", m.width)
+		gap := m.paintRow("", m.transcriptWidth())
 		b.WriteString(gap)
 		b.WriteString("\n")
 		plainLines = append(plainLines, stripANSI(gap))
@@ -3630,7 +3661,7 @@ func (m model) paintTranscriptBlock(block string) string {
 	}
 	lines := strings.Split(block, "\n")
 	for i, line := range lines {
-		lines[i] = m.paintRow(line, m.width)
+		lines[i] = m.paintRow(line, m.transcriptWidth())
 	}
 	return strings.Join(lines, "\n")
 }
@@ -4324,34 +4355,11 @@ func (m model) viewContent() string {
 		}
 	}
 
+	body := m.conversationBody(m.vp.Height() + m.stickyHeaderLines + m.compactPlanHeight())
 	main := lipgloss.JoinVertical(lipgloss.Left,
-		m.renderHeader(),
-		sep,
-		m.vp.View(),
-		sep,
-		m.renderLiveStatus(),
-		composerBlock,
-		m.renderFooterMeta(),
-		m.renderHints(),
+		m.renderHeader(), sep, body, sep, m.renderLiveStatus(), composerBlock,
+		m.renderFooterMeta(), m.renderHints(),
 	)
-
-	// If a sticky user header is active, insert it between the separator and
-	// the viewport so the user always sees which question the current response
-	// is answering, even when the original user bubble has scrolled out of view.
-	if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
-		stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
-		main = lipgloss.JoinVertical(lipgloss.Left,
-			m.renderHeader(),
-			sep,
-			stickyBlock,
-			m.vp.View(),
-			sep,
-			m.renderLiveStatus(),
-			composerBlock,
-			m.renderFooterMeta(),
-			m.renderHints(),
-		)
-	}
 
 	// Overlays: sessions / model picker or approval card on top of the main chrome.
 	if m.fileViewer.open {
@@ -4396,37 +4404,22 @@ func (m model) viewContent() string {
 			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
 		))
 	}
+	if m.planPanel.open && m.planLayout() != planLayoutHidden {
+		return m.paintBackground(m.renderFullPlanProgress())
+	}
 	if m.tr.Awaiting {
 		it := m.approvalItem()
 		if it != nil && it.ApprovalKind == "plan" {
-			// The plan card itself owns the controls; keep the transcript visible
-			// and suppress the normal composer while it is pending.
-			planParts := []string{
-				m.renderHeader(),
-				sep,
-			}
-			if stickyContent := m.stickyUserMessage(); stickyContent != "" && m.stickyHeaderLines > 0 {
-				stickyBlock := m.paintTranscriptBlock(padBlock(m.renderStickyUserHeader(stickyContent, contentWidth(m.width), m.stickyExpanded)))
-				planParts = append(planParts, stickyBlock)
-			}
-			planParts = append(planParts, m.vp.View(), m.renderHints())
-			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left, planParts...))
+			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+				m.renderHeader(), sep, body, m.renderHints()))
 		}
 		// Non-plan approvals keep the existing overlay behavior.
 		overlay := m.renderApprovalOverlay()
 		// The overlay replaces the composer area but may be taller; cap the
 		// viewport output so the total fits within the terminal height.
-		vpView := m.vp.View()
 		overlayH := strings.Count(overlay, "\n") + 1
 		chrome := 4 + overlayH // header + 2 seps + hints + overlay
-		maxVP := m.screenHeight() - chrome
-		if maxVP < 3 {
-			maxVP = 3
-		}
-		if vpLines := strings.Count(vpView, "\n") + 1; vpLines > maxVP {
-			lines := strings.SplitN(vpView, "\n", maxVP+1)
-			vpView = strings.Join(lines[:maxVP], "\n")
-		}
+		vpView := m.conversationBody(max(1, m.screenHeight()-chrome))
 		return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 			m.renderHeader(),
 			sep,

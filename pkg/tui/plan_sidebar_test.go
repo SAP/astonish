@@ -1,0 +1,430 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/tui/backend"
+	"github.com/SAP/astonish/pkg/tui/events"
+)
+
+func sidebarTestModel(width, height int) model {
+	m := newModel(context.Background(), Config{Backend: staticBackend{info: backend.Info{Mode: "code"}}, Width: width, Height: height})
+	m.ready = true
+	s := agent.PlanSnapshot{PlanID: "sidebar", Revision: 1, Sequence: 1, Goal: "Keep progress visible", Document: agent.PlanDocumentInfo{Lifecycle: agent.PlanLifecycleExecuting}}
+	for i := 0; i < 12; i++ {
+		state := "pending"
+		if i == 0 {
+			state = "complete"
+		}
+		if i == 1 || i == 2 {
+			state = "running"
+		}
+		s.Steps = append(s.Steps, agent.PlanStepInfo{Name: fmt.Sprintf("phase-%d", i+1), Description: fmt.Sprintf("Phase %d description", i+1), Status: state, ParallelGroup: "wave-1", Evidence: "exit 0: verified evidence"})
+	}
+	m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+	m.tr.Streaming = true
+	m.tr.Items = append(m.tr.Items, events.Item{Kind: events.ItemAgent, Content: strings.Repeat("conversation history\n\n", 50)})
+	m.layout()
+	m.refreshViewport()
+	return m
+}
+
+func TestPlanSidebarDualBackendRestoreParity(t *testing.T) {
+	for _, width := range []int{80, 120} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := newDualModeModel(t)
+			defer m.cancel()
+			m.width = width
+			s := progressSnapshot("complete", "failed", "running")
+			s.Goal = "Code-only progress fixture"
+			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
+			m.tr.LoadHistory([]events.HistoryMsg{{Delegation: &ev}})
+			m.refreshViewport()
+			want := m.planProgress()
+			wantLayout := m.planLayout()
+			m.planPanel.open = true
+			m.layoutPlanPanel()
+			m.planPanel.detail.SetYOffset(2)
+
+			next, _ := m.switchBackend()
+			m = next.(model)
+			// Even a remote transcript containing a plan must never get Code chrome.
+			m.tr.Apply(ev)
+			m.refreshViewport()
+			if m.info.Mode != "platform" || m.planLayout() != planLayoutHidden || m.planProgress().Present || m.planPanel.open || m.vp.Width() != width {
+				t.Fatal("actual backend switch leaked Code progress into remote chat")
+			}
+			if strings.Contains(stripANSI(m.View().Content), "Plan progress · ctrl+g") {
+				t.Fatal("remote view contains Code sidebar")
+			}
+			next, _ = m.switchBackend()
+			m = next.(model)
+			// Backend switching intentionally opens the welcome screen. The plan
+			// returns when the user restores the Code session, not from stale UI state.
+			if m.info.Mode != "code" || m.planLayout() != planLayoutHidden || m.planPanel.open {
+				t.Fatal("Code welcome screen inherited a stale panel")
+			}
+			m.tr.LoadHistory([]events.HistoryMsg{{Delegation: &ev}})
+			m.refreshViewport()
+			if got := m.planProgress(); !reflect.DeepEqual(got, want) || m.planLayout() != wantLayout {
+				t.Fatalf("Code session restore changed progress: got %+v want %+v", got, want)
+			}
+			if !strings.Contains(stripANSI(m.View().Content), "1/3 phases complete") {
+				t.Fatal("restored progress is not visible")
+			}
+		})
+	}
+}
+
+func TestPlanSidebarRevisionReplacesVisibleProgress(t *testing.T) {
+	for _, width := range []int{80, 120} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := sidebarTestModel(width, 24)
+			defer m.cancel()
+			s := progressSnapshot("complete", "complete", "complete")
+			s.Steps[1].Evidence = "obsolete evidence"
+			s.Document.Results = "Old completed result"
+			m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+			m.refreshViewport()
+			if !strings.Contains(stripANSI(m.View().Content), "100%") {
+				t.Fatal("initial completion not visible")
+			}
+			s = s.Clone()
+			s.Sequence++
+			s.Revision++
+			s.Document.Results = ""
+			s.Steps[1].Status, s.Steps[2].Status = "pending", "pending"
+			s.Steps[1].Description, s.Steps[1].Evidence = "Revised verification", ""
+			m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+			m.refreshViewport()
+			view := stripANSI(m.View().Content)
+			if !strings.Contains(view, "1/3 phases complete") || !strings.Contains(view, "33%") {
+				t.Fatalf("revised percent did not decrease:\n%s", view)
+			}
+			next, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+			m = next.(model)
+			body := m.renderPlanProgressBody(width, true)
+			if !strings.Contains(body, "Revised verification") || strings.Contains(body, "obsolete evidence") {
+				t.Fatalf("full list retained old definition/evidence:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestPlanSidebarTerminalLifecyclePersists(t *testing.T) {
+	for _, status := range []events.PlanStatus{events.PlanDeclined, events.PlanChangesRequested} {
+		for _, width := range []int{80, 120} {
+			t.Run(fmt.Sprintf("%v/%d", status, width), func(t *testing.T) {
+				m := sidebarTestModel(width, 24)
+				defer m.cancel()
+				m.tr.Streaming = false
+				m.tr.Items[0].PlanStatus = status
+				m.refreshViewport()
+				want := "Declined"
+				if status == events.PlanChangesRequested {
+					want = "Changes requested"
+				}
+				m.vp.GotoBottom()
+				if m.planLayout() == planLayoutHidden || !strings.Contains(stripANSI(m.View().Content), want) {
+					t.Fatalf("%s plan disappeared after scrolling:\n%s", want, stripANSI(m.View().Content))
+				}
+				next, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+				m = next.(model)
+				if !m.planPanel.open || !strings.Contains(stripANSI(m.View().Content), want) {
+					t.Fatal("terminal plan cannot be inspected")
+				}
+			})
+		}
+	}
+}
+
+func TestPlanSidebarLongUnicodeShortTerminal(t *testing.T) {
+	for _, size := range [][2]int{{120, 14}, {101, 14}, {80, 14}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			m := sidebarTestModel(size[0], size[1])
+			defer m.cancel()
+			m.theme.NoColor = true
+			s := m.tr.Items[0].PlanSnapshot
+			s.Goal = strings.Repeat("日本語 🧪 e\u0301 ", 40)
+			for i := range s.Steps {
+				s.Steps[i].Description = strings.Repeat("長い説明🧪", 40)
+				s.Steps[i].Summary = strings.Repeat("詳細 ", 40)
+			}
+			m.refreshViewport()
+			for _, open := range []bool{false, true} {
+				m.planPanel.open = open
+				m.layoutPlanPanel()
+				view := stripANSI(m.View().Content)
+				if lipgloss.Width(view) > size[0] || lipgloss.Height(view) > size[1] {
+					t.Fatalf("open=%v Unicode exceeds %dx%d: %dx%d", open, size[0], size[1], lipgloss.Width(view), lipgloss.Height(view))
+				}
+				if !open && !strings.Contains(view, "1/12 phases complete") {
+					t.Fatal("long title displaced pinned count on short terminal")
+				}
+			}
+		})
+	}
+}
+
+func TestPlanSidebarResponsiveGeometry(t *testing.T) {
+	for _, size := range [][2]int{{120, 30}, {101, 30}, {100, 30}, {80, 24}, {120, 14}, {80, 14}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			m := sidebarTestModel(size[0], size[1])
+			defer m.cancel()
+			expected := planLayoutCompact
+			tw := size[0]
+			if size[0] >= 101 {
+				expected = planLayoutSidebar
+				tw -= 29
+			}
+			if m.planLayout() != expected || m.vp.Width() != tw {
+				t.Fatalf("layout=%v viewport=%d", m.planLayout(), m.vp.Width())
+			}
+			view := stripANSI(m.View().Content)
+			if lipgloss.Height(view) > size[1] {
+				t.Fatalf("height %d exceeds %d:\n%s", lipgloss.Height(view), size[1], view)
+			}
+			for _, line := range strings.Split(view, "\n") {
+				if lipgloss.Width(line) > size[0] {
+					t.Fatalf("overwide %d: %q", lipgloss.Width(line), line)
+				}
+			}
+			if !strings.Contains(view, "1/12 phases complete") {
+				t.Fatalf("progress not pinned:\n%s", view)
+			}
+			if !strings.Contains(view, "phase-2, phase-3") {
+				t.Fatalf("concurrent phases not pinned:\n%s", view)
+			}
+			m.vp.GotoTop()
+			if !strings.Contains(stripANSI(m.View().Content), "1/12 phases complete") {
+				t.Fatal("panel scrolled away")
+			}
+		})
+	}
+}
+
+func TestPlanSidebarFullListPreservesComposerAndTranscript(t *testing.T) {
+	m := sidebarTestModel(80, 24)
+	defer m.cancel()
+	m.ta.SetValue("draft untouched")
+	m.history = []string{"older prompt", "newer prompt"}
+	m.historyIdx = 1
+	m.userScrolledUp = true
+	m.vp.SetYOffset(3)
+	offset, focus := m.vp.YOffset(), m.ta.Focused()
+	history := append([]string(nil), m.history...)
+	historyIdx := m.historyIdx
+	assertUnchanged := func() {
+		t.Helper()
+		if m.ta.Value() != "draft untouched" || m.ta.Focused() != focus || m.vp.YOffset() != offset || !m.userScrolledUp || m.historyIdx != historyIdx || !reflect.DeepEqual(m.history, history) {
+			t.Fatal("full-list navigation changed composer, focus, prompt history, or transcript scroll")
+		}
+	}
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	m = next.(model)
+	if !m.planPanel.open {
+		t.Fatal("Ctrl+G did not open full list")
+	}
+	for i := 0; i < 8; i++ {
+		next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+		m = next.(model)
+	}
+	if m.planPanel.detail.YOffset() == 0 {
+		t.Fatal("full list did not scroll")
+	}
+	if !strings.Contains(stripANSI(m.View().Content), "verified evidence") {
+		t.Fatal("evidence not visible")
+	}
+	assertUnchanged()
+	for _, key := range []tea.KeyPressMsg{{Code: tea.KeyUp}, {Code: tea.KeyDown}, {Code: tea.KeyPgUp}, {Code: tea.KeyHome}, {Code: tea.KeyEnd}, {Code: 'x', Text: "x"}} {
+		next, _ = m.Update(key)
+		m = next.(model)
+		assertUnchanged()
+	}
+	next, _ = m.Update(tea.MouseWheelMsg{X: 20, Y: 10, Button: tea.MouseWheelUp})
+	m = next.(model)
+	assertUnchanged()
+	next, _ = m.Update(tea.PasteMsg{Content: "do not paste"})
+	m = next.(model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(model)
+	if m.planPanel.open || m.ta.Value() != "draft untouched" || m.ta.Focused() != focus || m.vp.YOffset() != offset {
+		t.Fatal("full list changed conversation state")
+	}
+}
+
+func TestPlanSidebarMouseIsolation(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	offset := m.vp.YOffset()
+	next, _ := m.handleMouse(tea.MouseWheelMsg{X: 110, Y: 15, Button: tea.MouseWheelDown})
+	m = next.(model)
+	if m.vp.YOffset() != offset || m.planPanel.sidebar.YOffset() == 0 {
+		t.Fatal("panel wheel moved transcript or did not scroll panel")
+	}
+	if _, ok := m.selectionPointForMouse(tea.Mouse{X: m.transcriptWidth(), Y: m.viewportTopY()}); ok {
+		t.Fatal("divider can select transcript")
+	}
+	next, _ = m.handleMouse(tea.MouseClickMsg{X: 110, Y: 2, Button: tea.MouseLeft})
+	m = next.(model)
+	if !m.planPanel.open {
+		t.Fatal("header click did not open list")
+	}
+}
+
+func TestPlanSidebarSessionModesAndMalformed(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	for _, flags := range [][2]bool{{false, false}, {true, false}, {false, true}} {
+		m.graphPlanMode, m.askMode = flags[0], flags[1]
+		if m.planLayout() != planLayoutSidebar {
+			t.Fatal("Code mode hid plan")
+		}
+	}
+	m.planPanel.open = true
+	m.tr.Items = append(m.tr.Items, events.Item{Kind: events.ItemPlan, Content: "malformed"})
+	m.refreshViewport()
+	if m.planPanel.open || !strings.Contains(m.renderPlanProgressBody(28, false), "unavailable") {
+		t.Fatal("new malformed plan retained old plan state")
+	}
+	m.info.Mode = "platform"
+	m.refreshViewport()
+	if m.planLayout() != planLayoutHidden || m.vp.Width() != 120 {
+		t.Fatal("remote chat kept panel")
+	}
+	m.info.Mode = "code"
+	m.tr = events.NewTranscript()
+	m.refreshViewport()
+	if m.planLayout() != planLayoutHidden || m.planPanel.open {
+		t.Fatal("new session kept plan")
+	}
+}
+
+func TestPlanSidebarNoColorUnicodeAndLifecycle(t *testing.T) {
+	m := sidebarTestModel(101, 30)
+	defer m.cancel()
+	m.theme.NoColor = true
+	s := m.tr.Items[0].PlanSnapshot
+	s.Goal = strings.Repeat("日本語計画 ", 20)
+	for i := range s.Steps {
+		s.Steps[i].Status = "complete"
+	}
+	m.tr.Streaming = false
+	m.refreshViewport()
+	text := m.renderPlanSidebar(28)
+	if strings.Contains(text, "\x1b") || lipgloss.Width(text) > 28 {
+		t.Fatal("invalid plain Unicode panel")
+	}
+	if !strings.Contains(text, "100%") || !strings.Contains(strings.Join(strings.Fields(strings.ReplaceAll(text, "│", " ")), " "), "Awaiting completion record") {
+		t.Fatal("phase completion confused with Results")
+	}
+	s.Document.Results = "proven capability"
+	m.refreshViewport()
+	if !strings.Contains(m.renderPlanSidebar(28), "Results recorded") {
+		t.Fatal("completion record not shown")
+	}
+}
+
+func TestPlanSidebarApprovalActionsAfterInspection(t *testing.T) {
+	for _, width := range []int{80, 120} {
+		for _, tc := range []struct {
+			key    string
+			status events.PlanStatus
+		}{
+			{key: "r", status: events.PlanChangesRequested},
+			{key: "n", status: events.PlanDeclined},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", width, tc.key), func(t *testing.T) {
+				m := sidebarTestModel(width, 30)
+				defer m.cancel()
+				s := progressSnapshot("pending", "pending", "pending")
+				s.PlanID = "approval-actions"
+				s.Document.Lifecycle = ""
+				m.tr = events.NewTranscript()
+				m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+				m.refreshViewport()
+				next, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+				m = next.(model)
+				if !m.planPanel.open {
+					t.Fatal("pending plan cannot be inspected")
+				}
+				next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+				m = next.(model)
+				if m.tr.ApprovalCursor != 0 || m.tr.Items[0].PlanStatus != events.PlanPending {
+					t.Fatal("inspecting phases changed approval selection")
+				}
+				next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+				m = next.(model)
+				if m.planPanel.open || m.tr.Items[0].PlanStatus != events.PlanPending {
+					t.Fatal("closing inspection declined pending approval")
+				}
+				next, _ = m.Update(tea.KeyPressMsg{Code: rune(tc.key[0]), Text: tc.key})
+				m = next.(model)
+				if m.tr.Items[0].PlanStatus != tc.status {
+					t.Fatalf("approval accelerator %q intercepted: got %v", tc.key, m.tr.Items[0].PlanStatus)
+				}
+				if m.planLayout() == planLayoutHidden {
+					t.Fatal("decision removed persistent progress")
+				}
+			})
+		}
+	}
+}
+
+func TestPlanSidebarApprovalAndModalPrecedence(t *testing.T) {
+	for _, w := range []int{120, 101, 100, 80} {
+		m := sidebarTestModel(w, 30)
+		s := agent.PlanSnapshot{PlanID: "approval", Revision: 1, Sequence: 1, Goal: "Approve this plan", Steps: []agent.PlanStepInfo{{Name: "one", Description: "One phase"}}}
+		m.tr = events.NewTranscript()
+		m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+		m.refreshViewport()
+		text := stripANSI(m.View().Content)
+		for _, label := range []string{"Approve", "Decline", "Request changes"} {
+			if !strings.Contains(text, label) {
+				t.Fatalf("width %d missing %s:\n%s", w, label, text)
+			}
+		}
+		next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = next.(model)
+		if m.tr.ApprovalCursor != 1 {
+			t.Fatal("panel captured approval arrow")
+		}
+		m.sessions.open = true
+		if _, _, handled := m.handlePlanProgressKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl}); handled {
+			t.Fatal("plan stole modal key")
+		}
+		m.cancel()
+	}
+}
+
+func TestPlanSidebarResizeAndCancel(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	m.ta.SetValue("draft survives resize")
+	m.vp.SetYOffset(4)
+	m.userScrolledUp = true
+	m.planPanel.open = true
+	m.layoutPlanPanel()
+	m.planPanel.detail.SetYOffset(5)
+	for _, width := range []int{80, 101, 100, 120} {
+		next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+		m = next.(model)
+		if !m.planPanel.open || m.planPanel.detail.YOffset() != 5 || m.ta.Value() != "draft survives resize" || m.vp.YOffset() != 4 {
+			t.Fatalf("resize to %d moved user state", width)
+		}
+	}
+	cancelled := false
+	m.turnCancel = func() { cancelled = true }
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = next.(model)
+	if !cancelled || m.quitting {
+		t.Fatal("full list intercepted turn cancellation")
+	}
+}

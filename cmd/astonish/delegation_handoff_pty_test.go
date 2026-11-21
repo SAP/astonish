@@ -241,11 +241,19 @@ type handoffPTY struct {
 
 func newHandoffPTY(t *testing.T, cmd *exec.Cmd) *handoffPTY {
 	t.Helper()
-	pt, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 26, Cols: 72})
+	return newHandoffPTYSize(t, cmd, 72, 26)
+}
+
+func newHandoffPTYSize(t *testing.T, cmd *exec.Cmd, width, height int) *handoffPTY {
+	t.Helper()
+	if width < 1 || height < 1 {
+		t.Fatal("PTY dimensions must be positive")
+	}
+	pt, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &handoffPTY{t: t, pt: pt, cmd: cmd, screen: newRevisionScreen(72, 26), changed: make(chan struct{}, 1), done: make(chan struct{})}
+	p := &handoffPTY{t: t, pt: pt, cmd: cmd, screen: newRevisionScreen(width, height), changed: make(chan struct{}, 1), done: make(chan struct{})}
 	t.Cleanup(p.close)
 	go func() {
 		defer close(p.done)
@@ -273,6 +281,32 @@ func newHandoffPTY(t *testing.T, cmd *exec.Cmd) *handoffPTY {
 	}()
 	return p
 }
+
+// resize keeps the parser (including partial escape sequences) and existing
+// overlapping cells, while changing the emulator and kernel dimensions under
+// the same lock used by the PTY reader. SIGWINCH from Setsize triggers a repaint.
+func (p *handoffPTY) resize(width, height int) {
+	p.t.Helper()
+	if width < 1 || height < 1 {
+		p.t.Fatal("PTY dimensions must be positive")
+	}
+	p.mu.Lock()
+	s := p.screen
+	old := s.cells
+	s.w, s.h = width, height
+	s.clear()
+	for y := 0; y < min(len(old), height); y++ {
+		copy(s.cells[y], old[y])
+	}
+	s.x, s.y = min(s.x, width-1), min(s.y, height-1)
+	s.top, s.bottom = 0, height-1
+	err := pty.Setsize(p.pt, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)})
+	p.mu.Unlock()
+	if err != nil {
+		p.t.Fatal(err)
+	}
+}
+
 func (p *handoffPTY) close() {
 	p.once.Do(func() {
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
@@ -300,7 +334,7 @@ func (p *handoffPTY) wait(wants ...string) string {
 			}
 		}
 		if ok {
-			p.t.Logf("72x26 frame matches %q:\n%s", wants, frame)
+			p.t.Logf("current PTY frame matches %q:\n%s", wants, frame)
 			return frame
 		}
 		select {

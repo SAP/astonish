@@ -2565,7 +2565,23 @@ func timerTick() tea.Cmd {
 // applyEvent applies one streamed event to the transcript and keeps the header
 // info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
 func (m *model) applyEvent(ev events.Event) {
+	previousRevision := int64(0)
+	if ev.Kind == events.KindPlanSnapshot && ev.PlanSnapshot != nil {
+		for _, it := range m.tr.Items {
+			if it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == ev.PlanSnapshot.PlanID {
+				previousRevision = it.PlanSnapshot.Revision
+				break
+			}
+		}
+	}
 	m.tr.Apply(ev)
+	if previousRevision > 0 && ev.PlanSnapshot.Revision > previousRevision {
+		if it := m.approvalItem(); it != nil && it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == ev.PlanSnapshot.PlanID && it.PlanSnapshot.Sequence == ev.PlanSnapshot.Sequence {
+			// A new approval presentation is not a quiet execution update.
+			m.userScrolledUp = false
+			m.vp.GotoBottom()
+		}
+	}
 	if ev.Kind == events.KindSession && ev.SessionID != "" {
 		m.info.SessionID = ev.SessionID
 	}

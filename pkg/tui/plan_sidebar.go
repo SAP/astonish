@@ -30,6 +30,13 @@ type planPanelState struct {
 	open     bool
 	sidebar  viewport.Model
 	detail   viewport.Model
+
+	// Browsing never disables future transitions. Only a changed selected phase
+	// requests positioning; hidden layouts defer that request until visible.
+	target        string
+	revealPending bool
+	spans         []planPhaseCardSpan
+	revision      int64
 }
 
 func (m model) planProgress() planProgressView {
@@ -240,18 +247,88 @@ func (m model) renderPlanProgressBody(width int, full bool) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// Select in plan order, not live-worker order. Restored running phases are
+// eligible without changing their recorded/not-live presentation.
+func planSidebarTarget(v planProgressView) string {
+	if !v.Available {
+		return ""
+	}
+	switch v.State {
+	case planProgressCompleted, planProgressDeclined, planProgressChangesRequested, planProgressAwaitingApproval, planProgressUnavailable:
+		return ""
+	}
+	for _, p := range v.Phases {
+		if p.Current {
+			return p.Name
+		}
+	}
+	for _, p := range v.Phases {
+		if v.ReviewPending != "" && p.Name == v.ReviewPending {
+			return p.Name
+		}
+	}
+	for _, p := range v.Phases {
+		if p.State == planPhaseFailed {
+			return p.Name
+		}
+	}
+	return ""
+}
+
 func (m *model) layoutPlanPanel() {
 	if m.planLayout() == planLayoutHidden {
 		return
+	}
+	v := m.planProgress()
+	target := planSidebarTarget(v)
+	if target != m.planPanel.target {
+		m.planPanel.target = target
+		m.planPanel.revealPending = target != ""
 	}
 	h := m.vp.Height() + m.stickyHeaderLines
 	inner := planSidebarWidth - 4
 	headerH := lipgloss.Height(m.planPanelHeader(inner, h))
 	offset := m.planPanel.sidebar.YOffset()
+	content, spans := m.layoutPlanPhaseCards(inner)
+	// A definition revision may reflow cards above the reader. Preserve the
+	// first visible surviving card and the row within it, not its old index.
+	if !m.planPanel.revealPending && v.Revision != m.planPanel.revision {
+		for _, old := range m.planPanel.spans {
+			if old.end <= offset || old.start >= offset+m.planPanel.sidebar.Height() {
+				continue
+			}
+			for _, span := range spans {
+				if span.name == old.name {
+					offset = span.start + min(max(0, offset-old.start), span.end-span.start-1)
+					break
+				}
+			}
+			break
+		}
+	}
+	m.planPanel.spans, m.planPanel.revision = spans, v.Revision
 	m.planPanel.sidebar.SetWidth(inner)
 	m.planPanel.sidebar.SetHeight(max(1, h-2-headerH))
-	m.planPanel.sidebar.SetContent(m.renderPlanPhaseCards(inner))
+	m.planPanel.sidebar.SetContent(content)
 	m.planPanel.sidebar.SetYOffset(offset)
+	if m.planPanel.revealPending && m.planLayout() == planLayoutSidebar && !m.planPanel.open && h >= 10 && h-2-headerH > 0 {
+		for _, span := range spans {
+			if span.name != target {
+				continue
+			}
+			offset = m.planPanel.sidebar.YOffset()
+			height := m.planPanel.sidebar.Height()
+			switch {
+			case span.end-span.start > height, span.start < offset:
+				offset = span.start
+			case span.end > offset+height:
+				offset = span.end - height
+			}
+			m.planPanel.sidebar.SetYOffset(offset)
+			m.planPanel.revealPending = false
+			break
+		}
+	}
 	if m.planPanel.open {
 		offset = m.planPanel.detail.YOffset()
 		m.planPanel.detail.SetWidth(max(1, m.width))
@@ -264,7 +341,7 @@ func (m *model) layoutPlanPanel() {
 func (m model) renderPlanSidebar(height int) string {
 	if height < 10 {
 		v := m.planProgress()
-		return planRows(planCountsLabel(v)+"\n"+strings.TrimPrefix(planCurrentNames(v), "Current: ")+"\n"+planLifecycleLabel(v), planSidebarWidth, height)
+		return planRows(planCountsLabel(v)+"\n"+planLifecycleLabel(v), planSidebarWidth, height)
 	}
 	header := m.planPanelHeader(planSidebarWidth-4, height)
 	return m.planPanelFrame(header+"\n"+m.planPanel.sidebar.View(), height)
@@ -290,7 +367,7 @@ func (m model) conversationBody(height int) string {
 	left = planRows(left, max(1, m.transcriptWidth()), bodyH)
 	switch m.planLayout() {
 	case planLayoutSidebar:
-		divider := strings.TrimSuffix(strings.Repeat("│\n", bodyH), "\n")
+		divider := strings.TrimSuffix(strings.Repeat(m.theme.Border.Render("│")+"\n", bodyH), "\n")
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, divider, m.renderPlanSidebar(bodyH))
 	case planLayoutCompact:
 		return m.renderCompactPlanProgress() + "\n" + left
@@ -317,6 +394,7 @@ func (m model) handlePlanProgressKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, b
 	}
 	if msg.String() == "esc" {
 		m.planPanel.open = false
+		m.layoutPlanPanel()
 		return m, nil, true
 	}
 	var cmd tea.Cmd
@@ -339,7 +417,8 @@ func (m model) handlePlanProgressMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd, bo
 	if !compact && !panel {
 		return m, nil, false
 	}
-	if _, ok := msg.(tea.MouseWheelMsg); ok && panel && mouse.X > m.transcriptWidth() {
+	headerEnd := 3 + lipgloss.Height(m.planPanelHeader(planSidebarWidth-4, m.vp.Height()+m.stickyHeaderLines))
+	if _, ok := msg.(tea.MouseWheelMsg); ok && panel && mouse.X > m.transcriptWidth() && mouse.Y >= headerEnd && mouse.Y < headerEnd+m.planPanel.sidebar.Height() && m.vp.Height()+m.stickyHeaderLines >= 10 {
 		var cmd tea.Cmd
 		m.planPanel.sidebar, cmd = m.planPanel.sidebar.Update(msg)
 		return m, cmd, true

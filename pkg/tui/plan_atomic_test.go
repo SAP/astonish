@@ -188,14 +188,14 @@ func TestPlanPanelSnapshotUpdatesStayQuiet(t *testing.T) {
 	m.ta.SetValue("keep this draft")
 	m.vp.SetYOffset(5)
 	m.userScrolledUp = true
+	m = sidebarWheel(m, tea.MouseWheelDown, 1)
 	m.planPanel.open = true
 	m.layoutPlanPanel()
 	m.planPanel.detail.SetYOffset(8)
-	m.planPanel.sidebar.SetYOffset(3)
 	offset, detailOffset, panelOffset := m.vp.YOffset(), m.planPanel.detail.YOffset(), m.planPanel.sidebar.YOffset()
 	s := m.tr.Items[0].PlanSnapshot.Clone()
 	s.Sequence++
-	s.Steps[1].Status = "complete"
+	s.Steps[2].Status = "complete"
 	m.tr.Apply(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
 	m.refreshViewport()
 	if m.planProgress().Counts.Complete != 2 || !strings.Contains(m.renderPlanProgressHeader(28), "16%") {

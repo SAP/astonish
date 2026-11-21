@@ -2213,13 +2213,16 @@ func (b *localAgentBackend) driveTurn(
 				})
 			}
 			if part.FunctionResponse != nil {
-				if part.FunctionResponse.Name == "update_plan" || part.FunctionResponse.Name == "announce_completion" {
+				po := agent.PromptOverridesFromContext(ctx)
+				planningRevision := po != nil && (po.PlanMode || po.GraphPlanMode) &&
+					part.FunctionResponse.Name == "update_plan" && part.FunctionResponse.Response["status"] == string(agent.PlanRevisionResultApplied)
+				if !planningRevision && (part.FunctionResponse.Name == "update_plan" || part.FunctionResponse.Name == "announce_completion") {
 					s := runtime.Snapshot()
 					emit("plan", map[string]any{"snapshot": s, "text": agent.RenderPlanFromInfoWithDoc(s.Goal, s.Document, s.Steps)})
 				}
-				if part.FunctionResponse.Name == "announce_plan" {
+				if part.FunctionResponse.Name == "announce_plan" || planningRevision {
 					status, _ := part.FunctionResponse.Response["status"].(string)
-					if status != "ok" {
+					if status != "ok" && !planningRevision {
 						// Rejected/no-op announcements are ordinary tool results. In
 						// particular, they must not create a second pending approval.
 						emit("tool_result", map[string]any{
@@ -2228,6 +2231,9 @@ func (b *localAgentBackend) driveTurn(
 							"result": part.FunctionResponse.Response,
 						})
 						continue
+					}
+					if planningRevision {
+						emit("tool_result", map[string]any{"name": part.FunctionResponse.Name, "id": part.FunctionResponse.ID, "result": part.FunctionResponse.Response})
 					}
 					// Emit the document and pending approval lifecycle atomically.
 					// This prevents a prompt from ever existing without its plan.
@@ -3168,7 +3174,7 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			continue
 		}
 		for _, p := range plans {
-			if p.anchor == i && p.announcementID == "" {
+			if p.anchor == i && p.announcementID == "" && !p.planningRevision {
 				appendPlan(p)
 			}
 		}
@@ -3176,6 +3182,11 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 			out[latestPlanOutIdx].PlanStatus = events.PlanStatus(lifecycle)
 		}
 		if agent.IsTurnContextEvent(ev) || ev.LLMResponse.Content == nil {
+			for _, p := range plans {
+				if p.planningRevision && p.anchor == i {
+					appendPlan(p)
+				}
+			}
 			continue
 		}
 		role := ev.LLMResponse.Content.Role
@@ -3277,7 +3288,7 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 						continue
 					}
 					if p := announcementPlans[part.FunctionResponse.ID]; p != nil {
-						if p.announcementID == part.FunctionResponse.ID {
+						if p.announcementID == part.FunctionResponse.ID && !p.planningRevision {
 							appendPlan(p)
 						}
 						continue
@@ -3302,16 +3313,25 @@ func (b *localAgentBackend) loadHistory(ctx context.Context, id string) ([]backe
 				})
 			}
 		}
+		// Planning revisions are presented after their tool result, matching live
+		// order so history does not mistake that result for post-approval work.
+		for _, p := range plans {
+			if p.planningRevision && p.anchor == i {
+				appendPlan(p)
+			}
+		}
 	}
 	return out, nil
 }
 
 // localHistoryPlan keeps identity, authoritative contents, and chronology
-// separate: revisions replace contents without creating a later transcript item.
+// separate: execution updates retain their anchor; planning revisions use their
+// latest presentation boundary without duplicating the authoritative card.
 type localHistoryPlan struct {
-	snapshot       agent.PlanSnapshot
-	anchor         int
-	announcementID string
+	snapshot         agent.PlanSnapshot
+	anchor           int
+	announcementID   string
+	planningRevision bool
 }
 
 func localHistoryPlanSnapshot(value any) (agent.PlanSnapshot, bool) {
@@ -3343,6 +3363,9 @@ func localHistoryPlans(allEvents []*session.Event, state any) ([]*localHistoryPl
 			plans = append(plans, p)
 			byID[s.PlanID] = p
 		} else if s.Sequence >= p.snapshot.Sequence {
+			if index >= 0 && s.Revision > p.snapshot.Revision && s.Document.Lifecycle == "" && s.PendingRevision == nil {
+				p.anchor, p.planningRevision = index, true
+			}
 			p.snapshot = s
 		}
 		return p
@@ -3365,6 +3388,13 @@ func localHistoryPlans(allEvents []*session.Event, state any) ([]*localHistoryPl
 			}
 			if call := part.FunctionCall; call != nil && call.Name == "announce_plan" {
 				args[call.ID] = call.Args
+			}
+			if response := part.FunctionResponse; response != nil && response.Name == "update_plan" && response.Response["status"] == string(agent.PlanRevisionResultApplied) {
+				if s, ok := localHistoryPlanSnapshot(response.Response["snapshot"]); ok && s.Document.Lifecycle == "" {
+					if p := record(s, i); p != nil {
+						p.anchor, p.planningRevision = i, true
+					}
+				}
 			}
 			if response := part.FunctionResponse; response != nil && response.Name == "announce_plan" && localHistoryPlanAnnounced(response.Response) {
 				goal, _ := args[response.ID]["goal"].(string)

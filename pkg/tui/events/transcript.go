@@ -199,8 +199,8 @@ type Transcript struct {
 	delegationItemIdx int
 }
 
-// upsertPlanSnapshot updates a durable plan in place. A snapshot never creates
-// another initial approval, and old/replayed sequences cannot roll state back.
+// upsertPlanSnapshot updates a durable plan in place. A higher pending revision
+// is re-presented for plan approval; old/replayed sequences cannot roll state back.
 func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
 	if snapshot == nil || snapshot.PlanID == "" {
 		return
@@ -209,6 +209,7 @@ func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
 	s.Document.PlanID, s.Document.Revision, s.Document.Sequence = s.PlanID, s.Revision, s.Sequence
 	s.Document.PendingRevision = s.PendingRevision.Clone()
 	idx := -1
+	presentRevision := false
 	for i := range t.Items {
 		it := &t.Items[i]
 		if it.Kind != ItemPlan {
@@ -218,6 +219,7 @@ func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
 			if it.PlanSnapshot.Sequence >= s.Sequence {
 				return
 			}
+			presentRevision = s.Revision > it.PlanSnapshot.Revision && s.Document.Lifecycle == "" && s.PendingRevision == nil
 			idx = i
 			break
 		}
@@ -233,6 +235,24 @@ func (t *Transcript) upsertPlanSnapshot(snapshot *agent.PlanSnapshot) {
 		t.Items = append(t.Items, Item{Kind: ItemPlan, PlanStatus: status, ApprovalKind: "plan"})
 		idx = len(t.Items) - 1
 		t.copyLastRouting(&t.Items[idx])
+	}
+	if presentRevision {
+		// Re-present the same plan at the current conversation position. Keep one
+		// authoritative card, not a detached approval for a card far above it.
+		item := t.Items[idx]
+		copy(t.Items[idx:], t.Items[idx+1:])
+		t.Items[len(t.Items)-1] = item
+		if t.delegationItemIdx > idx {
+			t.delegationItemIdx--
+		}
+		if t.ApprovalIdx == idx {
+			t.ClearApproval()
+		} else if t.ApprovalIdx > idx {
+			t.ApprovalIdx--
+		}
+		idx = len(t.Items) - 1
+		t.Items[idx].PlanStatus = PlanPending
+		t.Items[idx].Expanded = true
 	}
 	it := &t.Items[idx]
 	it.PlanSnapshot = &s

@@ -16,8 +16,8 @@ func TestUpdatePlanRevisionModesAndArguments(t *testing.T) {
 		want string
 	}{
 		{"normal", &agent.PromptOverrides{}, "applied"},
-		{"plan", &agent.PromptOverrides{PlanMode: true}, "blocked_revision_mode"},
-		{"graph", &agent.PromptOverrides{GraphPlanMode: true}, "blocked_revision_mode"},
+		{"plan", &agent.PromptOverrides{PlanMode: true}, "applied"},
+		{"graph", &agent.PromptOverrides{GraphPlanMode: true}, "applied"},
 		{"ask", &agent.PromptOverrides{AskMode: true}, "blocked_revision_mode"},
 		{"bot", &agent.PromptOverrides{Bot: &agent.BotPromptContext{}}, "unsupported_bot_revision"},
 	} {
@@ -54,6 +54,31 @@ func TestUpdatePlanRevisionModesAndArguments(t *testing.T) {
 		result, err := updatePlan(ctx, args)
 		if err != nil || result.Status != "invalid_arguments" {
 			t.Fatalf("%+v: %+v %v", args, result, err)
+		}
+	}
+}
+
+func TestPlanningBlocksExecutionCallbacks(t *testing.T) {
+	for _, po := range []*agent.PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}} {
+		ctx := scopedBasicContext{base: agent.WithPromptOverrides(WithPlanCallbacks(context.Background(), PlanCallbacks{
+			Update: func(string, string) agent.PlanStepApplyResult {
+				t.Fatal("planning reached phase execution")
+				return agent.PlanStepApplyResult{}
+			},
+			Complete: func(string, string) agent.PlanCompletionResult {
+				t.Fatal("planning reached completion")
+				return agent.PlanCompletionResult{}
+			},
+		}), po)}
+		for _, status := range []string{"running", "complete", "failed"} {
+			result, err := updatePlan(ctx, UpdatePlanArgs{Step: "phase", Status: status})
+			if err != nil || result.Status != "blocked_plan_execution" {
+				t.Fatalf("%s: %+v %v", status, result, err)
+			}
+		}
+		result, err := announceCompletion(ctx, AnnounceCompletionArgs{OutcomeObserved: "not executed"})
+		if err != nil || result.Status != "blocked_plan_execution" {
+			t.Fatalf("%+v %v", result, err)
 		}
 	}
 }

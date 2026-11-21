@@ -225,7 +225,14 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 			} else {
 				panelWants = append(panelWants, "1/3", "33%", "complete", "running", "pending")
 			}
-			waitPlanPTYRegion(t, term, 92, 120, panelWants...)
+			frame := waitPlanPTYRegion(t, term, 92, 120, panelWants...)
+			panel := planPTYColumns(frame, 92, 120)
+			if strings.Contains(panel, "CURRENT") || strings.Contains(panel, "Current:") {
+				t.Fatalf("duplicate current section: %s", panel)
+			}
+			if !pending {
+				waitPlanPTYRegion(t, term, 92, 120, "● Implement panel", "running · recorded, not live")
+			}
 			if pending {
 				const run = "▸ 1/y  Approve and run autonomously until done"
 				const review = "▸ 2    Approve and pause for review after each phase"
@@ -244,7 +251,7 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 			term.assertAbsent("choose how to proceed")
 			term.send(strings.Repeat("\x1b[<64;10;8M", 70))
 			waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00", "HISTORY MARKER 30")
-			frame := waitPlanPTYRegion(t, term, 92, 120, panelWants...)
+			frame = waitPlanPTYRegion(t, term, 92, 120, panelWants...)
 			left := planPTYColumns(frame, 0, 91)
 			for _, phase := range []string{"Prepare fixture", "Implement panel", "Verify behavior"} {
 				if strings.Contains(left, phase) {
@@ -254,7 +261,7 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 			// Real SIGWINCH round trip proves the synchronized fixture is usable
 			// by the later narrow/full-list acceptance, not just its constructor.
 			term.resize(80, 24)
-			term.wait(snapshot.Goal, "1/3", "33%")
+			term.wait(snapshot.Goal, "1/3", "33%", "Current: Implement panel")
 			term.resize(120, 30)
 			waitPlanPTYRegion(t, term, 92, 120, panelWants...)
 		})
@@ -591,9 +598,17 @@ func (f *sidebarPTYFixture) announce(term *handoffPTY, failFirst bool) {
 func sidebarPTYScrollOffCard(t *testing.T, term *handoffPTY) {
 	t.Helper()
 	term.send(strings.Repeat("\x1b[<64;10;8M", 70))
-	frame := waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
-	if strings.Contains(planPTYColumns(frame, 0, 91), "Phase one") {
-		t.Fatalf("plan card remains visible:\n%s", frame)
+	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00", "HISTORY MARKER 24")
+	// A frame can be observed between terminal write chunks. Wait for the old
+	// card rows to be erased rather than failing on that intermediate paint.
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for strings.Contains(planPTYColumns(term.frame(), 0, 91), "Phase one") {
+		select {
+		case <-term.changed:
+		case <-timer.C:
+			t.Fatalf("plan card remains visible:\n%s", term.frame())
+		}
 	}
 }
 
@@ -603,7 +618,8 @@ func TestCodePlanSidebarPTYLifecycle(t *testing.T) {
 	f.announce(term, true)
 	term.send("\r")
 	f.update("one", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "0/3", "0%", "Current: one", "Progress: unavailable")
+	waitPlanPTYRegion(t, term, 92, 120, "0/3", "0%")
+	waitSidebarPTYRunningCard(t, term, "one", "Phase one")
 	sidebarPTYScrollOffCard(t, term)
 	f.update("one", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "Phase failed", "0/3", "0%", "1 failed")
@@ -617,12 +633,15 @@ func TestCodePlanSidebarPTYLifecycle(t *testing.T) {
 	term.assertAbsent("choose how to proceed")
 	term.send("Retry the failed verifier and continue.\r")
 	f.update("one", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: one", "Progress: unavailable")
+	waitSidebarPTYRunningCard(t, term, "one", "Phase one")
 	f.update("two", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "2 running", "Current: one, two", "Group: samewave", "0%")
+	waitPlanPTYRegion(t, term, 92, 120, "2 running", "0%")
+	waitSidebarPTYRunningCard(t, term, "one", "Phase one")
+	waitSidebarPTYRunningCard(t, term, "two", "Phase two")
 	sidebarPTYScrollOffCard(t, term)
 	f.update("one", "complete")
-	waitPlanPTYRegion(t, term, 92, 120, "1/3", "33%", "Current: two")
+	waitPlanPTYRegion(t, term, 92, 120, "1/3", "33%")
+	waitSidebarPTYRunningCard(t, term, "two", "Phase two")
 	f.update("two", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "2/3", "66%")
 	// A definition-only revision invalidates real evidence; no synthetic
@@ -633,19 +652,20 @@ func TestCodePlanSidebarPTYLifecycle(t *testing.T) {
 	definition.Steps[0].Verify += " && printf revised"
 	goal := "Revised sidebar fixture"
 	f.turn("update_plan", map[string]any{"action": "revise", "revision": agent.PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: s.Revision, Reason: "Strengthen first capability verification", Goal: &goal, Steps: definition.Steps}})
+	term.send(strings.Repeat("\x1b[<64;110;15M", 20))
 	waitPlanPTYRegion(t, term, 92, 120, goal, "0/3", "0%", "Revised phase one")
 	term.assertAbsent("choose how to proceed")
 	f.update("one", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: one")
+	waitSidebarPTYRunningCard(t, term, "one", "")
 	f.update("one", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "1/3", "33%")
 	// Revision invalidates the changed phase and downstream evidence.
 	f.update("two", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: two")
+	waitSidebarPTYRunningCard(t, term, "two", "")
 	f.update("two", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "2/3", "66%")
 	f.update("three", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: three")
+	waitSidebarPTYRunningCard(t, term, "three", "")
 	f.update("three", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "3/3", "100%", "Awaiting completion record")
 	if s := f.durable(); s.Document.Results != "" {
@@ -667,6 +687,164 @@ func TestCodePlanSidebarPTYLifecycle(t *testing.T) {
 	}
 }
 
+// Restore a late active card, then drive actual update_plan tools across a
+// provider barrier. Unlike the inspection helper, these assertions never wheel
+// toward a target: positioning must be performed by the product itself.
+func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
+	f := newSidebarPTYFixture(t)
+	store, err := persistentsession.NewFileStore(f.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stored, err := store.Get(ctx, &adksession.GetRequest{AppName: "astonish_code", UserID: f.user, SessionID: f.sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := agent.PlanSnapshot{PlanID: "active-follow", Revision: 1, Sequence: 1, Goal: "Active follow fixture",
+		Document: agent.PlanDocumentInfo{PlanID: "active-follow", Revision: 1, Sequence: 1, Lifecycle: agent.PlanLifecycleExecuting, CodeExecutionMode: agent.CodePlanRunToCompletion}}
+	for i := 1; i <= 15; i++ {
+		status := "pending"
+		if i < 10 {
+			status = "complete"
+		} else if i == 10 {
+			status = "running"
+		}
+		s.Steps = append(s.Steps, agent.PlanStepInfo{Name: fmt.Sprintf("phase-%02d", i), Description: fmt.Sprintf("Follow phase %02d", i), Status: status, ParallelGroup: "wave", Verify: "printf verified", VerifyKind: "behavior", Evidence: "restored fixture evidence"})
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(ctx, stored.Session, &adksession.Event{ID: "active-follow", Author: "system", Timestamp: time.Now(), Actions: adksession.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: value}}}); err != nil {
+		t.Fatal(err)
+	}
+	term := f.start()
+	defer term.close()
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10", "running · recorded, not live", "Progress: unavailable")
+	term.send("Continue the restored plan.\r")
+	receive := func() chan sidebarPTYModelTurn {
+		t.Helper()
+		select {
+		case reply := <-f.turns:
+			return reply
+		case <-time.After(30 * time.Second):
+			t.Fatal("missing provider barrier")
+			return nil
+		}
+	}
+	reply := receive()
+	tool := func(step, status string) {
+		t.Helper()
+		select {
+		case reply <- sidebarPTYModelTurn{name: "update_plan", args: map[string]any{"step": step, "status": status}}:
+		case <-time.After(30 * time.Second):
+			t.Fatal("provider did not accept tool")
+		}
+		reply = receive() // real result has returned to the agent, not just rendered text
+		got := f.durable()
+		for _, phase := range got.Steps {
+			if phase.Name == step && phase.Status != status {
+				t.Fatalf("tool did not transition %s to %s: %+v", step, status, phase)
+			}
+		}
+	}
+	sidebarPTYScrollOffCard(t, term)
+	history := func(frame string) string {
+		var rows []string
+		for _, row := range strings.Split(planPTYColumns(frame, 0, 91), "\n") {
+			if strings.Contains(row, "HISTORY MARKER") {
+				rows = append(rows, row)
+			}
+		}
+		return strings.Join(rows, "\n")
+	}
+	before := history(term.frame())
+	assertHistory := func() {
+		t.Helper()
+		if got := history(term.frame()); got != before {
+			t.Fatalf("phase follow moved transcript:\nbefore %s\nafter %s", before, got)
+		}
+	}
+	for _, phase := range []int{10, 11} {
+		term.send(strings.Repeat("\x1b[<64;110;15M", 100))
+		waitPlanPTYRegion(t, term, 92, 120, "Follow phase 01")
+		tool(fmt.Sprintf("phase-%02d", phase), "running") // repeated same target
+		// Allow multiple actual paints while insisting manual browsing is stable.
+		deadline := time.After(250 * time.Millisecond)
+		tick := time.NewTicker(20 * time.Millisecond)
+	checkBrowse:
+		for {
+			select {
+			case <-deadline:
+				break checkBrowse
+			case <-tick.C:
+				if !strings.Contains(planPTYColumns(term.frame(), 92, 120), "Follow phase 01") {
+					t.Fatal("same-phase event overrode browsing")
+				}
+				assertHistory()
+			}
+		}
+		tick.Stop()
+		tool(fmt.Sprintf("phase-%02d", phase), "complete")
+		tool(fmt.Sprintf("phase-%02d", phase+1), "running")
+		waitPlanPTYRegion(t, term, 92, 120, fmt.Sprintf("● Follow phase %02d", phase+1), "running", "Progress: unavailable")
+		assertHistory()
+	}
+	// Resizing with the same target must not undo manual browsing. A target
+	// transition while compact is instead revealed on the next wide paint.
+	term.send(strings.Repeat("\x1b[<64;110;15M", 100))
+	waitPlanPTYRegion(t, term, 92, 120, "Follow phase 01")
+	term.resize(80, 24)
+	term.wait("Current: phase-12", "73%")
+	term.resize(120, 30)
+	waitPlanPTYRegion(t, term, 92, 120, "Follow phase 01")
+	// Resizing may change the number of visible rows, but not the top anchor.
+	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
+	term.resize(80, 24)
+	term.wait("Current: phase-12")
+	tool("phase-12", "complete")
+	tool("phase-13", "running")
+	term.wait("Current: phase-13", "80%")
+	term.resize(120, 30)
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 13", "running", "Progress: unavailable")
+	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
+	term.resize(120, 65)
+	frame := waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "PHASES", "80%", "● Follow phase 13")
+	if panel := planPTYColumns(frame, 92, 120); strings.Contains(panel, "CURRENT") || strings.Contains(panel, "Current:") {
+		t.Fatal("wide running sidebar repeated current-phase names")
+	}
+	term.close()
+	// A different persisted plan/session starts from its own late target, not
+	// the prior plan's browsing state. Only isolated fixture sessions are used.
+	replacement, err := store.Create(ctx, &adksession.CreateRequest{AppName: "astonish_code", UserID: f.user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.PlanID = "replacement-follow"
+	s.Document.PlanID = s.PlanID
+	s.Steps[9].Status = "complete"
+	s.Steps[13].Status = "running"
+	raw, err = json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.AppendEvent(ctx, replacement.Session, &adksession.Event{ID: "replacement-follow", Author: "system", Timestamp: time.Now(), Actions: adksession.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: value}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.sessionID = replacement.Session.ID()
+	restored := f.start()
+	defer restored.close()
+	waitPlanPTYRegion(t, restored, 92, 120, "● Follow phase 14", "running · recorded, not live", "Progress: unavailable")
+}
+
 func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	f := newSidebarPTYFixture(t)
 	term := f.start()
@@ -675,7 +853,7 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	term.wait("▸ 2    Approve and pause for review after each phase")
 	term.send("\r")
 	f.update("one", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: one")
+	waitSidebarPTYRunningCard(t, term, "one", "")
 	f.update("one", "complete")
 	term.wait("Paused for review", "Enter send")
 	waitPlanPTYRegion(t, term, 92, 120, "Paused for phase review", "1/3", "33%")
@@ -734,13 +912,13 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	}
 	term.send("continue\r")
 	f.update("two", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: two")
+	waitSidebarPTYRunningCard(t, term, "two", "")
 	f.update("two", "complete")
 	term.wait("Paused for review", "Enter send")
 	waitPlanPTYRegion(t, term, 92, 120, "2/3", "66%")
 	term.send("continue\r")
 	f.update("three", "running")
-	waitPlanPTYRegion(t, term, 92, 120, "Current: three")
+	waitSidebarPTYRunningCard(t, term, "three", "")
 	f.update("three", "complete")
 	waitPlanPTYRegion(t, term, 92, 120, "3/3", "100%", "Awaiting completion record")
 	f.turn("announce_completion", map[string]any{"outcome_observed": "Reviewed all three marker capabilities", "unverified": ""})
@@ -761,6 +939,43 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	}
 	term.assertAbsent("Live sidebar fixture")
 	term.assertAbsent("1/3 phases")
+}
+
+// Inspect one complete running card at a time; concurrent cards need not fit
+// together beneath the pinned summary in a short window.
+func waitSidebarPTYRunningCard(t *testing.T, term *handoffPTY, name, title string) {
+	t.Helper()
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	tick := time.NewTicker(80 * time.Millisecond)
+	defer tick.Stop()
+	for attempts := 0; ; attempts++ {
+		panel := planPTYColumns(term.frame(), 92, 120)
+		lines := strings.Split(panel, "\n")
+		for i, line := range lines {
+			if !strings.Contains(line, "●") || title != "" && !strings.Contains(line, title) {
+				continue
+			}
+			end := i + 1
+			for end < len(lines) && !strings.ContainsAny(lines[end], "●✓○✗") {
+				end++
+			}
+			card := strings.Join(lines[i:end], "\n")
+			if strings.Contains(card, name) && strings.Contains(card, "running") && strings.Contains(card, "Progress: unavailable") {
+				return
+			}
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("running card %s not inspectable:\n%s", name, term.frame())
+		case <-tick.C:
+			if attempts%20 == 0 {
+				term.send(strings.Repeat("\x1b[<64;110;15M", 20))
+			} else {
+				term.send("\x1b[<65;110;15M")
+			}
+		}
+	}
 }
 
 func planPTYColumns(frame string, start, end int) string {

@@ -84,7 +84,11 @@ func TestScopedUnapprovedUpdateNeverVerifies(t *testing.T) {
 		ctx.base = agent.WithPromptOverrides(ctx.base, po)
 		for _, status := range []string{"running", "complete", "done"} {
 			result, err := updatePlan(ctx, UpdatePlanArgs{Step: "one", Status: status})
-			if err != nil || result.Status != agent.PlanRuntimeUnapproved {
+			want := agent.PlanRuntimeUnapproved
+			if po.PlanMode || po.GraphPlanMode {
+				want = "blocked_plan_execution"
+			}
+			if err != nil || result.Status != want {
 				t.Fatalf("%+v %v", result, err)
 			}
 		}

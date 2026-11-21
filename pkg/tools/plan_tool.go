@@ -237,7 +237,7 @@ const (
 )
 
 type UpdatePlanArgs struct {
-	Action   UpdatePlanAction           `json:"action,omitempty" jsonschema:"status (default) updates progress; revise applies a definition-only revision immediately in Normal mode."`
+	Action   UpdatePlanAction           `json:"action,omitempty" jsonschema:"status (default) updates progress; revise applies a definition-only revision immediately in Normal, Plan or Graph-Optimized Plan mode."`
 	Step     string                     `json:"step,omitempty" jsonschema:"Exact phase name for action=status."`
 	Status   string                     `json:"status,omitempty" jsonschema:"running, complete, or failed for action=status."`
 	Revision *agent.PlanRevisionRequest `json:"revision,omitempty" jsonschema:"Definition-only revision request for action=revise. Mutually exclusive with step and status."`
@@ -265,17 +265,12 @@ func updatePlan(ctx tool.Context, args UpdatePlanArgs) (result UpdatePlanResult,
 	if action == "" {
 		action = UpdatePlanStatus
 	}
-	if action == UpdatePlanRevise {
-		if ctx != nil {
-			if po := agent.PromptOverridesFromContext(ctx); po != nil {
-				if po.Bot != nil {
-					return UpdatePlanResult{Status: "unsupported_bot_revision"}, nil
-				}
-				if po.PlanMode || po.GraphPlanMode || po.AskMode {
-					return UpdatePlanResult{Status: "blocked_revision_mode"}, nil
-				}
-			}
+	if ctx != nil {
+		if code := agent.RevisionToolBlocked(agent.PromptOverridesFromContext(ctx), "update_plan", map[string]any{"action": string(action)}); code != "" {
+			return UpdatePlanResult{Status: code}, nil
 		}
+	}
+	if action == UpdatePlanRevise {
 		if args.Revision == nil || args.Step != "" || args.Status != "" {
 			return UpdatePlanResult{Status: "invalid_arguments", Message: "revise requires revision and forbids step/status"}, nil
 		}
@@ -355,6 +350,11 @@ func announceCompletion(ctx tool.Context, args AnnounceCompletionArgs) (result A
 			result.Snapshot = &s
 		}
 	}()
+	if ctx != nil {
+		if code := agent.RevisionToolBlocked(agent.PromptOverridesFromContext(ctx), "announce_completion", nil); code != "" {
+			return AnnounceCompletionResult{Status: code}, nil
+		}
+	}
 	planCompletionCallback := callbacks.Complete
 	if planCompletionCallback == nil {
 		return AnnounceCompletionResult{Status: "no_active_plan"}, nil
@@ -376,6 +376,6 @@ func NewAnnounceCompletionTool() (tool.Tool, error) {
 func NewUpdatePlanTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "update_plan",
-		Description: `Update the active plan. action=status (default) preserves existing step/status progress calls. action=revise applies a definition-only revision immediately in Normal mode, including scope, goal, files, phase order, outcomes and verification changes; it does not execute verification or require revision approval. Use the returned snapshot's identity, revision and phase states. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
+		Description: `Update the active plan. action=status (default) preserves existing step/status progress calls. action=revise applies a definition-only revision immediately in Normal, Plan or Graph-Optimized Plan mode, including scope, goal, files, phase order, outcomes and verification changes; it does not execute verification. Normal-mode revisions need no new approval; successful Plan/Graph-Optimized Plan revisions are re-presented with the normal plan approval choices and wait for execution approval. Use the returned snapshot's identity, revision and phase states. In Plan and Graph-Optimized Plan modes only action=revise is allowed; status changes and completion must wait for Normal mode. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
 	}, updatePlan)
 }

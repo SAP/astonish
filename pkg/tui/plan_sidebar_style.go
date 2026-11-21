@@ -95,18 +95,11 @@ func (m model) planPanelHeader(width, height int) string {
 			return s.title.Width(w).Align(lipgloss.Center).Render(fmt.Sprint(value)) + "\n" + s.muted.Width(w).Align(lipgloss.Center).Render(label)
 		}
 		divider := s.border.Render("│") + "\n" + s.border.Render("│")
-		lines = append(lines, "", lipgloss.JoinHorizontal(lipgloss.Top, stat(v.Counts.Running, "running", col), divider, stat(v.Counts.Pending, "pending", col), divider, stat(v.Counts.Failed, "failed", last)), "", rule, "", s.title.Render("CURRENT"))
-		lines = append(lines, s.muted.Render(wrapPlain(strings.TrimPrefix(planCurrentNames(v), "Current: "), width)), "", rule, "", s.title.Render("PHASES"))
+		lines = append(lines, "", lipgloss.JoinHorizontal(lipgloss.Top, stat(v.Counts.Running, "running", col), divider, stat(v.Counts.Pending, "pending", col), divider, stat(v.Counts.Failed, "failed", last)), "", rule, "", s.title.Render("PHASES"))
 	} else {
 		if height >= 18 && (v.Counts.Running > 1 || v.Counts.Failed > 0) {
 			lines = append(lines, s.muted.Render(fmt.Sprintf("%d running · %d failed", v.Counts.Running, v.Counts.Failed)))
 		}
-		// Preserve concurrent current names without a statistics paragraph.
-		current := planCurrentNames(v)
-		if lipgloss.Width(current) > width {
-			current = strings.TrimPrefix(current, "Current: ")
-		}
-		lines = append(lines, s.muted.Render(wrapPlain(current, width)))
 		if height >= 18 {
 			lines = append(lines, rule, s.title.Render("PHASES"))
 		}
@@ -114,14 +107,29 @@ func (m model) planPanelHeader(width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// planPhaseCardSpan uses the same rendered rows as the viewport content. Phase
+// names are stable identities; indexes describe only the current display order.
+type planPhaseCardSpan struct {
+	name       string
+	index      int
+	start, end int // inclusive start, exclusive end (not including the card gap)
+}
+
 func (m model) renderPlanPhaseCards(width int) string {
+	content, _ := m.layoutPlanPhaseCards(width)
+	return content
+}
+
+func (m model) layoutPlanPhaseCards(width int) (string, []planPhaseCardSpan) {
 	v := m.planProgress()
 	s := m.planPanelStyles()
 	if !v.Available {
-		return s.muted.Render(wrapPlain("The latest plan could not be read. Progress: unavailable", width))
+		return s.muted.Render(wrapPlain("The latest plan could not be read. Progress: unavailable", width)), nil
 	}
 	var cards []string
-	for _, p := range v.Phases {
+	var spans []planPhaseCardSpan
+	row := 0
+	for index, p := range v.Phases {
 		icon, accent := "○", s.muted
 		switch p.State {
 		case planPhaseComplete:
@@ -166,7 +174,9 @@ func (m model) renderPlanPhaseCards(width int) string {
 			rows = append(rows, "  "+s.card.Render(truncateToWidth("Group: "+p.ParallelGroup, textWidth)))
 		}
 		if p.Current {
-			rows = append(rows, s.card.Render("Progress: unavailable"))
+			for _, line := range strings.Split(wrapPlain("Progress: unavailable", max(1, width-1)), "\n") {
+				rows = append(rows, s.card.Render(line))
+			}
 		}
 		// Explicit painted padding keeps resets within the card surface.
 		for i, row := range rows {
@@ -175,9 +185,13 @@ func (m model) renderPlanPhaseCards(width int) string {
 				rows[i] = restorePlanSurface(rows[i], s.card)
 			}
 		}
-		cards = append(cards, strings.Join(rows, "\n"))
+		card := strings.Join(rows, "\n")
+		cards = append(cards, card)
+		end := row + lipgloss.Height(card)
+		spans = append(spans, planPhaseCardSpan{name: p.Name, index: index, start: row, end: end})
+		row = end + 1
 	}
-	return strings.Join(cards, "\n\n")
+	return strings.Join(cards, "\n\n"), spans
 }
 
 // restorePlanSurface restores the owning surface after nested style resets.

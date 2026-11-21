@@ -199,8 +199,30 @@ func TestPlanSidebarResponsiveGeometry(t *testing.T) {
 			if !strings.Contains(view, "1/12 phases complete") {
 				t.Fatalf("progress not pinned:\n%s", view)
 			}
-			if !strings.Contains(view, "phase-2, phase-3") {
-				t.Fatalf("concurrent phases not pinned:\n%s", view)
+			if expected == planLayoutCompact {
+				if !strings.Contains(view, "Current: phase-2, phase-3") {
+					t.Fatalf("compact current phases missing:\n%s", view)
+				}
+			} else {
+				if strings.Contains(m.planPanelHeader(24, size[1]), "Current:") {
+					t.Fatal("wide current row remains")
+				}
+				if size[1] >= 30 {
+					for _, phase := range []string{"phase-2", "phase-3"} {
+						found := false
+						for i := 0; i < 30; i++ {
+							panel := stripANSI(m.renderPlanSidebar(m.vp.Height() + m.stickyHeaderLines))
+							if strings.Contains(panel, phase) && strings.Contains(panel, "running") && strings.Contains(panel, "Progress: unavailable") {
+								found = true
+								break
+							}
+							m.planPanel.sidebar.ScrollDown(1)
+						}
+						if !found {
+							t.Fatalf("running card %s not inspectable", phase)
+						}
+					}
+				}
 			}
 			m.vp.GotoTop()
 			if !strings.Contains(stripANSI(m.View().Content), "1/12 phases complete") {
@@ -426,5 +448,347 @@ func TestPlanSidebarResizeAndCancel(t *testing.T) {
 	m = next.(model)
 	if !cancelled || m.quitting {
 		t.Fatal("full list intercepted turn cancellation")
+	}
+}
+
+func sidebarWheel(m model, button tea.MouseButton, count int) model {
+	y := 3 + lipgloss.Height(m.planPanelHeader(24, m.vp.Height()+m.stickyHeaderLines))
+	for range count {
+		next, _ := m.Update(tea.MouseWheelMsg{X: m.transcriptWidth() + 5, Y: y, Button: button})
+		m = next.(model)
+	}
+	return m
+}
+
+func sidebarApply(m model, s agent.PlanSnapshot) model {
+	next, _ := m.Update(eventMsg(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}))
+	return next.(model)
+}
+
+func sidebarLateSnapshot(m model, active int) agent.PlanSnapshot {
+	s := m.tr.Items[0].PlanSnapshot.Clone()
+	s.Sequence++
+	for i := range s.Steps {
+		s.Steps[i].Status = "pending"
+		if i == active {
+			s.Steps[i].Status = "running"
+		}
+	}
+	return s
+}
+
+func assertSidebarTargetVisible(t *testing.T, m model, name string) {
+	t.Helper()
+	for _, span := range m.planPanel.spans {
+		if span.name != name {
+			continue
+		}
+		offset, height := m.planPanel.sidebar.YOffset(), m.planPanel.sidebar.Height()
+		if span.end-span.start > height {
+			if offset != span.start {
+				t.Fatalf("oversized %s starts at %d, offset %d", name, span.start, offset)
+			}
+		} else if span.start < offset || span.end > offset+height {
+			t.Fatalf("%s span [%d,%d) outside [%d,%d)", name, span.start, span.end, offset, offset+height)
+		}
+		if m.planPanel.revealPending {
+			t.Fatal("visible reveal not consumed")
+		}
+		return
+	}
+	t.Fatalf("missing target %s", name)
+}
+
+func TestPlanSidebarInitialActiveReveal(t *testing.T) {
+	for _, restored := range []bool{false, true} {
+		t.Run(fmt.Sprint(restored), func(t *testing.T) {
+			m := sidebarTestModel(120, 30)
+			defer m.cancel()
+			s := sidebarLateSnapshot(m, 9)
+			m.tr = events.NewTranscript()
+			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
+			if restored {
+				m.tr.LoadHistory([]events.HistoryMsg{{Delegation: &ev}})
+			} else {
+				m.tr.Apply(ev)
+				m.tr.Streaming = true
+			}
+			m.refreshViewport()
+			assertSidebarTargetVisible(t, m, "phase-10")
+			if restored && m.planProgress().Phases[9].Live {
+				t.Fatal("restore claimed live worker")
+			}
+		})
+	}
+	for _, state := range []string{"pending", "complete", "review", "failed", "declined", "approval", "results", "empty", "unavailable"} {
+		t.Run(state, func(t *testing.T) {
+			m := sidebarTestModel(120, 30)
+			defer m.cancel()
+			s := sidebarLateSnapshot(m, -1)
+			s.PlanID = "initial-" + state
+			want := ""
+			switch state {
+			case "complete":
+				for i := range s.Steps {
+					s.Steps[i].Status = "complete"
+				}
+			case "review":
+				s.Steps[9].Status = "complete"
+				s.Document.CodeReviewPending = "phase-10"
+				want = "phase-10"
+			case "failed":
+				s.Steps[9].Status = "failed"
+				want = "phase-10"
+			case "approval":
+				s.Document.Lifecycle = ""
+			case "results":
+				s.Document.Results = "done"
+				s.Steps[9].Status = "running"
+			case "empty":
+				s.Steps = nil
+			}
+			m = sidebarApply(m, s)
+			if state == "declined" {
+				m.tr.Items[len(m.tr.Items)-1].PlanStatus = events.PlanDeclined
+				m.refreshViewport()
+			}
+			if state == "unavailable" {
+				m.tr.Items = append(m.tr.Items, events.Item{Kind: events.ItemPlan, Content: "bad"})
+				m.refreshViewport()
+			}
+			if m.planPanel.target != want {
+				t.Fatalf("target %q want %q", m.planPanel.target, want)
+			}
+			if want != "" {
+				assertSidebarTargetVisible(t, m, want)
+			} else if m.planPanel.sidebar.YOffset() != 0 {
+				t.Fatal("no target moved initial offset")
+			}
+		})
+	}
+}
+
+func TestPlanSidebarRevealOnPhaseChange(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	m = sidebarApply(m, sidebarLateSnapshot(m, 9))
+	assertSidebarTargetVisible(t, m, "phase-10")
+	m.ta.SetValue("safe draft")
+	m.vp.SetYOffset(4)
+	m.userScrolledUp = true
+	transcript, focus := m.vp.YOffset(), m.ta.Focused()
+	for _, target := range []int{10, 11, 8} {
+		m = sidebarWheel(m, tea.MouseWheelUp, 100) // includes edge input
+		if m.planPanel.sidebar.YOffset() != 0 {
+			t.Fatal("wheel did not browse to top")
+		}
+		s := m.tr.Items[0].PlanSnapshot.Clone()
+		s.Sequence++
+		m = sidebarApply(m, s)
+		m.refreshViewport()
+		if m.planPanel.sidebar.YOffset() != 0 {
+			t.Fatal("same target pulled browsing back")
+		}
+		stale := sidebarLateSnapshot(m, 0)
+		stale.Sequence = 1
+		m = sidebarApply(m, stale)
+		if m.planPanel.sidebar.YOffset() != 0 {
+			t.Fatal("stale snapshot pulled browsing back")
+		}
+		m = sidebarApply(m, sidebarLateSnapshot(m, target))
+		assertSidebarTargetVisible(t, m, fmt.Sprintf("phase-%d", target+1))
+		if m.vp.YOffset() != transcript || m.ta.Value() != "safe draft" || m.ta.Focused() != focus {
+			t.Fatal("transition stole transcript/draft/focus")
+		}
+	}
+	// Status changes and concurrent workers do not change the selected identity.
+	m = sidebarWheel(m, tea.MouseWheelUp, 100)
+	s := m.tr.Items[0].PlanSnapshot.Clone()
+	s.Sequence++
+	s.Steps[9].Status = "running"
+	m = sidebarApply(m, s)
+	if m.planPanel.target != "phase-9" || m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("concurrent worker stole target")
+	}
+	s.Sequence++
+	s.Steps[9].Status = "pending"
+	s.Steps[8].Status = "complete"
+	s.Document.CodeReviewPending = "phase-9"
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("same-identity review pulled browsing back")
+	}
+	s.Sequence++
+	s.Document.CodeReviewPending = ""
+	s.Steps[8].Status = "failed"
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("same-identity failure pulled browsing back")
+	}
+	s.Sequence++
+	s.Steps[8].Status = "pending"
+	m = sidebarApply(m, s)
+	if m.planPanel.target != "" || m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("absence moved browsing")
+	}
+	s.Sequence++
+	s.Steps[8].Status = "running"
+	m = sidebarApply(m, s)
+	assertSidebarTargetVisible(t, m, "phase-9")
+	before := m.planPanel.sidebar.YOffset()
+	next, _ := m.Update(tea.MouseWheelMsg{X: 110, Y: 3, Button: tea.MouseWheelDown})
+	m = next.(model)
+	if m.planPanel.sidebar.YOffset() != before {
+		t.Fatal("header wheel scrolled cards")
+	}
+	// A selected target already fully visible must not move the viewport.
+	s = sidebarLateSnapshot(m, 10)
+	_, spans := m.layoutPlanPhaseCards(24)
+	m.planPanel.sidebar.SetYOffset(spans[10].start)
+	before = m.planPanel.sidebar.YOffset()
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != before {
+		t.Fatal("fully visible new target moved viewport")
+	}
+	assertSidebarTargetVisible(t, m, "phase-11")
+	// Losing a target preserves a nonzero browsing offset, too.
+	s = sidebarLateSnapshot(m, -1)
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != before {
+		t.Fatal("no target reset nonzero offset")
+	}
+}
+
+func TestPlanSidebarScrollResetAndResize(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	m = sidebarApply(m, sidebarLateSnapshot(m, 9))
+	m = sidebarWheel(m, tea.MouseWheelUp, 100)
+	resize := func(width, height int) {
+		next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+		m = next.(model)
+	}
+	key := func(code rune, mod tea.KeyMod) {
+		next, _ := m.Update(tea.KeyPressMsg{Code: code, Mod: mod})
+		m = next.(model)
+	}
+	resize(80, 30)
+	resize(120, 30)
+	if m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("resize without transition pulled back")
+	}
+	resize(80, 30)
+	m = sidebarApply(m, sidebarLateSnapshot(m, 10))
+	if !m.planPanel.revealPending {
+		t.Fatal("compact consumed reveal")
+	}
+	resize(120, 30)
+	assertSidebarTargetVisible(t, m, "phase-11")
+	m = sidebarWheel(m, tea.MouseWheelUp, 100)
+	key('g', tea.ModCtrl)
+	key(tea.KeyEscape, 0)
+	if m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("Ctrl+G return without transition pulled back")
+	}
+	key('g', tea.ModCtrl)
+	m = sidebarApply(m, sidebarLateSnapshot(m, 11))
+	m = sidebarApply(m, sidebarLateSnapshot(m, 8)) // latest hidden target wins
+	if !m.planPanel.revealPending || m.planPanel.sidebar.YOffset() != 0 {
+		t.Fatal("covered list consumed reveal")
+	}
+	key(tea.KeyEscape, 0)
+	assertSidebarTargetVisible(t, m, "phase-9")
+	resize(120, 10)
+	m = sidebarApply(m, sidebarLateSnapshot(m, 10))
+	if !m.planPanel.revealPending {
+		t.Fatal("invisible card viewport consumed reveal")
+	}
+	resize(120, 30)
+	assertSidebarTargetVisible(t, m, "phase-11")
+	// Same-target revision: preserve a visible card by identity through reflow.
+	m.planPanel.sidebar.SetYOffset(m.planPanel.spans[4].start + 1)
+	s := m.tr.Items[0].PlanSnapshot.Clone()
+	s.Sequence++
+	s.Revision++
+	s.Steps[0].Description = strings.Repeat("日本語 🧪 e\u0301 ", 15)
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != m.planPanel.spans[4].start+1 {
+		t.Fatal("revision lost visible anchor")
+	}
+	oldOffset := m.planPanel.sidebar.YOffset()
+	s.Sequence++
+	s.Revision++
+	s.Steps = append(s.Steps[:4:4], s.Steps[5:]...)
+	m = sidebarApply(m, s)
+	if m.planPanel.sidebar.YOffset() != oldOffset {
+		t.Fatal("removed anchor did not retain numeric offset")
+	}
+	// Different plan and transcript owner both reset initial positioning.
+	m = sidebarWheel(m, tea.MouseWheelUp, 100)
+	s.Sequence++
+	s.PlanID = "replacement"
+	m = sidebarApply(m, s)
+	assertSidebarTargetVisible(t, m, "phase-11")
+	m = sidebarWheel(m, tea.MouseWheelUp, 100)
+	m.tr = events.NewTranscript()
+	m.tr.SessionID = "other-session"
+	m = sidebarApply(m, s)
+	assertSidebarTargetVisible(t, m, "phase-11")
+}
+
+func TestPlanSidebarTargetPriority(t *testing.T) {
+	m := sidebarTestModel(120, 65)
+	defer m.cancel()
+	s := sidebarLateSnapshot(m, 9)
+	s.Steps[10].Status = "running"
+	s.Steps[6].Status = "failed"
+	s.Document.CodeReviewPending = s.Steps[8].Name
+	for _, want := range []string{"phase-10", "phase-11", "phase-9", "phase-7"} {
+		m = sidebarApply(m, s)
+		if m.planPanel.target != want {
+			t.Fatalf("selected %q, want %q", m.planPanel.target, want)
+		}
+		assertSidebarTargetVisible(t, m, want)
+		s.Sequence++
+		switch want {
+		case "phase-10":
+			s.Steps[9].Status = "complete"
+		case "phase-11":
+			s.Steps[10].Status = "complete"
+		case "phase-9":
+			s.Document.CodeReviewPending = ""
+		}
+	}
+}
+
+func TestPlanSidebarCardSpanLayout(t *testing.T) {
+	m := sidebarTestModel(120, 30)
+	defer m.cancel()
+	s := sidebarLateSnapshot(m, 9)
+	s.Steps[9].Description = strings.Repeat("日本語 🧪 e\u0301 ", 40)
+	m = sidebarApply(m, s)
+	assertSidebarTargetVisible(t, m, "phase-10")
+	for _, width := range []int{12, 24, 40} {
+		content, spans := m.layoutPlanPhaseCards(width)
+		rows := strings.Split(content, "\n")
+		for i, span := range spans {
+			if span.index != i || span.name != s.Steps[i].Name || span.end <= span.start {
+				t.Fatalf("invalid span %+v", span)
+			}
+			if i == 0 && span.start != 0 || i > 0 && span.start != spans[i-1].end+1 {
+				t.Fatal("gap not accounted for")
+			}
+			if i < len(spans)-1 && rows[span.end] != "" {
+				t.Fatal("card span includes gap")
+			}
+			for _, row := range rows[span.start:span.end] {
+				if lipgloss.Width(row) > width {
+					t.Fatalf("wrapped row wider than %d: %q", width, row)
+				}
+			}
+		}
+		if spans[len(spans)-1].end != len(rows) || content != m.renderPlanPhaseCards(width) {
+			t.Fatal("span/render metrics diverged")
+		}
 	}
 }

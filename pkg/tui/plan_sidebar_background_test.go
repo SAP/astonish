@@ -11,6 +11,14 @@ import (
 // Decode SGR backgrounds at each printed cell, including spaces. Text-only
 // assertions cannot detect holes in a colored surface.
 func sidebarBackgroundCells(text string) ([][]string, []string) {
+	return sidebarColorCells(text, false)
+}
+
+func sidebarColorCells(text string, foreground bool) ([][]string, []string) {
+	code, reset := 48, 49
+	if foreground {
+		code, reset = 38, 39
+	}
 	sgr := regexp.MustCompile(`\x1b\[([0-9;:]*)m`)
 	bg := "default"
 	rows := [][]string{{}}
@@ -25,18 +33,20 @@ func sidebarBackgroundCells(text string) ([][]string, []string) {
 			for i := 0; i < len(values); i++ {
 				n, _ := strconv.Atoi(values[i])
 				switch {
-				case n == 0 || n == 49:
+				case n == 0 || n == reset:
 					bg = "default"
-				case n == 48 && i+4 < len(values) && values[i+1] == "2":
-					bg = strings.Join(values[i+2:i+5], ",")
-					i += 4
-				case n == 38 && i+4 < len(values) && values[i+1] == "2":
+				case (n == 38 || n == 48) && i+4 < len(values) && values[i+1] == "2":
+					if n == code {
+						bg = strings.Join(values[i+2:i+5], ",")
+					}
 					i += 4
 				case (n == 38 || n == 48) && i+2 < len(values) && values[i+1] == "5":
-					if n == 48 {
+					if n == code {
 						bg = "index:" + values[i+2]
 					}
 					i += 2
+				case foreground && (n >= 30 && n <= 37 || n >= 90 && n <= 97):
+					bg = fmt.Sprintf("ansi:%d", n)
 				}
 			}
 			text = text[loc[1]:]
@@ -71,6 +81,17 @@ func TestPlanSidebarBackgroundCells(t *testing.T) {
 	// between nested colored spans.
 	text := m.View().Content
 	rows, plain := sidebarBackgroundCells(text)
+	// Styling the separator must not spill into either neighboring surface.
+	divider := m.transcriptWidth()
+	for y, line := range plain {
+		runes := []rune(line)
+		if len(runes) <= divider+1 || runes[divider] != '│' {
+			continue
+		}
+		if rows[y][divider-1] != rows[y][divider] || rows[y][divider+1] != "16,25,34" {
+			t.Fatalf("divider row %d changed adjacent backgrounds: %v", y, rows[y][divider-1:divider+2])
+		}
+	}
 	// Inspect only sidebar columns in the fully composed screen, so unrelated
 	// transcript text cannot satisfy the assertions.
 	for y := range rows {
@@ -80,7 +101,7 @@ func TestPlanSidebarBackgroundCells(t *testing.T) {
 		runes := []rune(plain[y])
 		plain[y] = string(runes[min(start, len(runes)):min(end, len(runes))])
 	}
-	for _, label := range []string{"PLAN PROGRESS", "Results recorded", "100%", "CURRENT", "PHASES"} {
+	for _, label := range []string{"PLAN PROGRESS", "Results recorded", "100%", "3/3 phases complete", "PHASES"} {
 		found := false
 		for y, line := range plain {
 			if !strings.Contains(line, label) {

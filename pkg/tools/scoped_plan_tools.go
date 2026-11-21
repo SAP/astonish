@@ -37,6 +37,9 @@ func scopedPlanCallbacks(ctx tool.Context) PlanCallbacks {
 		c.State = nil
 		c.Announce = runtime.Announce
 		c.Update, c.Complete, c.Snapshot, c.Revise = runtime.UpdateStep, runtime.Complete, runtime.Snapshot, runtime.Revise
+		if po := agent.PromptOverridesFromContext(ctx); po != nil && (po.PlanMode || po.GraphPlanMode) {
+			c.Revise = runtime.ReviseForPlanning
+		}
 		c.KnownSteps = func() []string {
 			var names []string
 			for _, s := range runtime.Snapshot().Steps {

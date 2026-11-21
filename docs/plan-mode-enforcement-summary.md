@@ -193,7 +193,7 @@ plan to a **per-session `PLAN.md`**.
 `update_plan({action: "revise", revision: {plan_id, base_revision, reason, steps, ...}})`.
 The replacement steps are definition-only; optional goal/document live inside `revision`,
 and step/status cannot accompany it. The old `{step,status}` operation is preserved.
-Plan/Graph-Plan/Ask and bot contexts cannot use revision operations, including via deferred tools.
+Plan/Graph-Plan allow definition-only revisions, including via deferred tools and in every graph phase. Ask and bot contexts still cannot revise. Plan/Graph-Plan status changes and `announce_completion` return `blocked_plan_execution`; they cannot run verifiers, start phases, or grant execution approval. Users can request a revision without switching out of Plan mode. A changed planning definition withdraws execution approval atomically and is presented again with the normal plan approval choices; the local turn stops there. Normal-mode revisions remain immediate and quiet. No-op and failed revisions do not open a new approval.
 
 **All valid Normal-mode revisions apply immediately**, including changes to goal/document,
 phase membership/order, files/kinds, outcomes, verify kind and parallel groups. Identical

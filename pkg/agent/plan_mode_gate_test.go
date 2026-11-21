@@ -13,12 +13,25 @@ func planModeToolBlocked(name string) bool {
 }
 
 func TestPlanRevisionModeGate(t *testing.T) {
-	for _, po := range []*PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}, {AskMode: true}, {Bot: &BotPromptContext{}}} {
+	for _, po := range []*PromptOverrides{{AskMode: true}, {Bot: &BotPromptContext{}}} {
 		if RevisionToolBlocked(po, "update_plan", map[string]any{"action": "revise"}) == "" {
 			t.Fatal("restricted mode admitted revision")
 		}
 		if RevisionToolBlocked(po, "update_plan", map[string]any{"step": "phase", "status": "running"}) != "" {
 			t.Fatal("action gate blocked legacy status")
+		}
+	}
+	for _, po := range []*PromptOverrides{{PlanMode: true}, {GraphPlanMode: true}} {
+		if got := RevisionToolBlocked(po, "update_plan", map[string]any{"action": "revise"}); got != "" {
+			t.Fatalf("planning must permit definition revisions: %s", got)
+		}
+		for _, status := range []string{"running", "complete", "failed"} {
+			if got := RevisionToolBlocked(po, "update_plan", map[string]any{"step": "phase", "status": status}); got != "blocked_plan_execution" {
+				t.Fatalf("planning admitted status %s: %s", status, got)
+			}
+		}
+		if got := RevisionToolBlocked(po, "announce_completion", nil); got != "blocked_plan_execution" {
+			t.Fatalf("planning admitted completion: %s", got)
 		}
 	}
 	if RevisionToolBlocked(nil, "update_plan", map[string]any{"action": "revise"}) != "" {
@@ -27,6 +40,16 @@ func TestPlanRevisionModeGate(t *testing.T) {
 	for _, name := range []string{"announce_plan", "update_plan", "announce_completion", "gplan_finalize"} {
 		if !IsPlanManagementTool(name) {
 			t.Fatalf("%s can auto-start a phase", name)
+		}
+	}
+}
+
+func TestPlanningPromptsAllowDefinitionRevisions(t *testing.T) {
+	for name, prompt := range map[string]string{"plan": PlanModeSystemContext, "graph": GraphPlanModeSystemContext} {
+		for _, want := range []string{`update_plan(action="revise"`, "without leaving Plan mode", "Status updates and announce_completion are blocked until Normal mode"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s prompt missing %q", name, want)
+			}
 		}
 	}
 }

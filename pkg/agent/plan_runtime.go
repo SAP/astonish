@@ -56,8 +56,14 @@ func (r *PlanRuntime) PlanState() *PlanState {
 	return r.plan
 }
 
-// RevisionToolBlocked checks the logical operation, including execute_tool wrappers.
+// RevisionToolBlocked checks definition versus execution operations, including
+// effective execute_tool targets. Planning can revise definitions, not run phases.
 func RevisionToolBlocked(po *PromptOverrides, name string, args map[string]any) string {
+	if po != nil && (po.PlanMode || po.GraphPlanMode) {
+		if name == "announce_completion" || (name == "update_plan" && args["action"] != "revise") {
+			return "blocked_plan_execution"
+		}
+	}
 	if name != "update_plan" || args["action"] != "revise" {
 		return ""
 	}
@@ -65,7 +71,7 @@ func RevisionToolBlocked(po *PromptOverrides, name string, args map[string]any) 
 		if po.Bot != nil {
 			return "unsupported_bot_revision"
 		}
-		if po.PlanMode || po.GraphPlanMode || po.AskMode {
+		if po.AskMode {
 			return "blocked_revision_mode"
 		}
 	}
@@ -390,6 +396,16 @@ func runtimeEditable(s PlanSnapshot) error {
 }
 
 func (r *PlanRuntime) Revise(req PlanRevisionRequest) (PlanRevisionResult, error) {
+	return r.revise(req, false)
+}
+
+// ReviseForPlanning applies the definition and withdraws execution approval in
+// one durable commit, ready for the usual plan approval presentation.
+func (r *PlanRuntime) ReviseForPlanning(req PlanRevisionRequest) (PlanRevisionResult, error) {
+	return r.revise(req, true)
+}
+
+func (r *PlanRuntime) revise(req PlanRevisionRequest, planning bool) (PlanRevisionResult, error) {
 	if r == nil {
 		return PlanRevisionResult{}, planRuntimeError(PlanRuntimeNoPlan, "no active plan")
 	}
@@ -420,6 +436,10 @@ func (r *PlanRuntime) Revise(req PlanRevisionRequest) (PlanRevisionResult, error
 	}
 	s = applyRevisionDefinition(s, candidate.Definition, affected)
 	s.Document.RevisionNote = req.Reason
+	if planning {
+		s.Document.Lifecycle = ""
+		s.Document.CodeReviewPending = ""
+	}
 	if err := r.commitLocked(s); err != nil {
 		return PlanRevisionResult{}, err
 	}

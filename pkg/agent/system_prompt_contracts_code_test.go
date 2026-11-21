@@ -268,11 +268,11 @@ func TestCodeSystemPromptContracts_NormalModePlanRevisions(t *testing.T) {
 		})
 	}
 	assertNotContains(t, GraphPlanModeSystemContext, "ask the user to decline and re-announce", "locked-plan guidance must not require replacement for revisions")
-	assertContains(t, GraphPlanModeSystemContext, "Normal-mode update_plan revision workflow", "locked-plan guidance directs safe revisions")
+	assertContains(t, GraphPlanModeSystemContext, `update_plan(action="revise") in the current Normal or Plan mode`, "locked-plan guidance directs safe revisions")
 	assertContains(t, ApprovedPlanExecutionBlockedMessage(), "action=\"revise\"", "blocked announce guidance directs safe revisions")
 
 	cb := NewCodeSystemPromptBuilder(&SystemPromptBuilder{})
-	assertNotContains(t, cb.Build(), "Normal-mode plan revisions", "revision guidance follows plan persistence setting")
+	assertNotContains(t, cb.Build(), "Plan definition revisions (Normal and Plan modes)", "revision guidance follows plan persistence setting")
 }
 
 func TestCodeSystemPromptContracts_AuthorizationGuidance(t *testing.T) {

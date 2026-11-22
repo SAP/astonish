@@ -59,6 +59,7 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	next := &m.backends[m.activeBackendIdx]
 
 	// Lazy-open the backend on first visit.
+	var themeLoadErr error
 	if !next.opened {
 		if err := next.backend.Open(m.ctx); err != nil {
 			// Open failed — revert to original slot and show error.
@@ -70,6 +71,11 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 		next.opened = true
 		// Create a fresh transcript for the newly-opened backend.
 		info := next.backend.Info()
+		if info.Mode == "code" {
+			th, err := resolveInitialCodeTheme(m.ctx, next.backend, m.themeOverride)
+			next.theme = th
+			themeLoadErr = err
+		}
 		tr := events.NewTranscript()
 		tr.SessionID = info.SessionID
 		tr.Provider = info.Provider
@@ -104,8 +110,13 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 		tr.ContextTokens = 0
 		tr.LastUsage = &events.Usage{Input: m.info.Usage.Input, Output: m.info.Usage.Output, Total: m.info.Usage.Total}
 	}
+	if themeLoadErr != nil {
+		tr.Apply(events.NewSystem("Could not load saved Code theme: " + themeLoadErr.Error()))
+	}
 	m.tr = tr
 	next.tr = tr
+	m.themePicker.open = false
+	m.themeGeneration++
 
 	// Swap theme — the core of the visual mode change.
 	m.theme = next.theme

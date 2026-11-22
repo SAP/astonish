@@ -180,6 +180,9 @@ type model struct {
 	planApprovalPending    bool
 	planPermission         agent.CodePlanPermissionMode
 	planPermissionIdentity string
+	themePicker            themePickerState
+	themeGeneration        uint64
+	themeOverride          CodeThemeID
 	permissions            codePermissionsState
 	permissionOwner        *events.Transcript
 	permissionSession      string
@@ -321,10 +324,9 @@ func newModel(parent context.Context, cfg Config) model {
 	ctx, cancel := context.WithCancel(parent)
 	info := cfg.Backend.Info()
 	th := ThemeForMode(info.Mode)
+	var themeLoadErr error
 	if info.Mode == "code" {
-		if resolved, err := ResolveCodeTheme(cfg.ThemeID); err == nil {
-			th = resolved
-		}
+		th, themeLoadErr = resolveInitialCodeTheme(ctx, cfg.Backend, cfg.ThemeID)
 	}
 
 	ta := textarea.New()
@@ -372,6 +374,9 @@ func newModel(parent context.Context, cfg Config) model {
 	for _, n := range info.Notices {
 		tr.Apply(events.NewSystem(n))
 	}
+	if themeLoadErr != nil {
+		tr.Apply(events.NewSystem("Could not load saved Code theme: " + themeLoadErr.Error()))
+	}
 	// Resumed sessions load history asynchronously in Init (historyLoadedMsg).
 
 	m := model{
@@ -380,6 +385,7 @@ func newModel(parent context.Context, cfg Config) model {
 		backend:         cfg.Backend,
 		info:            info,
 		theme:           th,
+		themeOverride:   cfg.ThemeID,
 		tr:              tr,
 		ta:              ta,
 		spin:            sp,
@@ -476,6 +482,11 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 				command = tea.Batch(command, n.refreshCodePermissions())
 			}
 		}
+		if n.themePicker.open && (n.themePicker.slot != n.activeBackendIdx || n.themePicker.backend != n.backend || n.themePicker.owner != n.tr || n.themePicker.session != n.tr.SessionID) {
+			// A dispatched write may finish on disk, but cannot own the new screen.
+			n.themePicker.open = false
+			n.themeGeneration++
+		}
 		next = n
 	}()
 	m.syncCodePermissions()
@@ -483,6 +494,20 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 		switch key := msg.(type) {
 		case tea.KeyPressMsg:
 			return m.handleCodePermissionsKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
+	if msg, ok := msg.(themePreferenceMsg); ok {
+		return m.applyThemePreferenceMsg(msg)
+	}
+	if m.themePicker.open && !m.permissions.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleThemePickerKey(key)
 		case tea.MouseMsg, tea.PasteMsg:
 			return m, nil
 		}
@@ -804,6 +829,11 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 		// Bot streams are observations: keep the composer available for local
 		// commands even when persisted text is partial.
 		if m.tr.Streaming && !m.botSelected() {
+			// Keep the existing mid-turn send lock, but permit the local palette
+			// command. It never enters RunTurn or cancels the current stream.
+			if next, cmd, handled := m.handleStreamingThemeCommand(msg); handled {
+				return next, cmd
+			}
 			switch msg.String() {
 			case "pgup", "pgdown", "up", "down":
 				var cmd tea.Cmd
@@ -1227,6 +1257,9 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
+	if m.codeThemePreferencesCap() != nil {
+		extra = append(extra, themesSlashCommand)
+	}
 	if m.codePermissionsCap() != nil {
 		extra = append(extra, permissionsSlashCommand)
 	}
@@ -2256,6 +2289,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		// Image-only turn still needs a visible/user message marker.
 		text = strings.TrimSpace(rawValue)
 	}
+	if text == "/themes" {
+		return m.openThemePicker()
+	}
 	if m.botSelected() {
 		// Observed text can be partial indefinitely. Local commands must remain
 		// usable while the daemon streams; ordinary input must not enter history.
@@ -2379,6 +2415,9 @@ func (m model) collectSubmitAttachments(composerValue string) []backend.Attachme
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
+	if text == "/themes" {
+		return m.openThemePicker()
+	}
 	if text == "/permissions" && m.codePermissionsCap() != nil {
 		return m.openCodePermissions()
 	}
@@ -2387,6 +2426,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case text == "/bots" || strings.HasPrefix(text, "/bots "):
 		return m.botCommand(text)
 	case text == "/help" || text == "/?":
+		if m.codeThemePreferencesCap() != nil {
+			m.tr.Apply(events.NewSystem("/themes — choose and save a Code color palette"))
+		}
 		if m.codePermissionsCap() != nil {
 			m.tr.Apply(events.NewSystem("/permissions · Ctrl+P — view and revoke local Code grants"))
 		}
@@ -2820,7 +2862,7 @@ func (m model) composerTextHeight() int {
 // no popup is active. Used by layout() to shrink the viewport so the total
 // rendered height stays within the terminal.
 func (m model) completionPopupHeight() int {
-	if m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open {
+	if m.themePicker.open || m.tr.Awaiting || m.sessions.open || m.rollback.open || m.modelPicker.open || m.webSearchPicker.open {
 		return 0
 	}
 	switch {
@@ -4447,6 +4489,9 @@ func (m model) viewContent() string {
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderCodePermissions()))
 	}
 
+	if m.themePicker.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderThemePicker(), lipgloss.WithWhitespaceStyle(m.theme.Background)))
+	}
 	th := m.theme
 	sep := th.Border.Width(m.width).Render(strings.Repeat("─", max(1, m.width)))
 

@@ -10,6 +10,13 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+// CodeThemePreferencesBackend is an optional local-only UI preference capability.
+// It does not extend Backend or add a remote transport contract.
+type CodeThemePreferencesBackend interface {
+	LoadCodeThemePreference(context.Context) (string, error)
+	SaveCodeThemePreference(context.Context, string) error
+}
+
 // CodePermissionScope identifies only revocable local Code grants.
 type CodePermissionScope string
 

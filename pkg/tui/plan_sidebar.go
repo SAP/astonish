@@ -374,7 +374,7 @@ func (m model) conversationBody(height int) string {
 }
 
 func (m model) planModalBlocked() bool {
-	return m.fileViewer.open || m.delegationDetail.open || m.bots.open || m.sessions.open || m.modelPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.rollback.open || m.reauthProvider != ""
+	return m.themePicker.open || m.fileViewer.open || m.delegationDetail.open || m.bots.open || m.sessions.open || m.modelPicker.open || m.webSearchPicker.open || m.skillsPicker.open || m.rollback.open || m.reauthProvider != ""
 }
 
 func (m model) handlePlanProgressKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {

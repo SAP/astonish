@@ -117,6 +117,11 @@ func assertCodeThemePTYComposer(t *testing.T, term *handoffPTY, colored *sidebar
 
 func assertCodeThemePTYCanvas(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, noColor bool) {
 	t.Helper()
+	assertCodeThemePTYCanvasPalette(t, term, colored, noColor, "#101922", "#18232e")
+}
+
+func assertCodeThemePTYCanvasPalette(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, noColor bool, canvas, card string) {
+	t.Helper()
 	term.mu.Lock()
 	defer term.mu.Unlock()
 	for y, row := range colored.background.cells {
@@ -128,7 +133,7 @@ func assertCodeThemePTYCanvas(t *testing.T, term *handoffPTY, colored *sidebarPT
 				}
 				continue
 			}
-			if key != "#101922" && key != "#18232e" && key != "#1a3320" && key != "#3d1f1f" {
+			if key != canvas && key != card && key != "#1a3320" && key != "#3d1f1f" {
 				t.Fatalf("non-theme canvas %s at %d,%d (%q)", key, x, y, colored.screen.cells[y][x])
 			}
 		}
@@ -138,6 +143,226 @@ func assertCodeThemePTYCanvas(t *testing.T, term *handoffPTY, colored *sidebarPT
 // A real Code CLI drill: every frame below is emitted by the actual launch,
 // provider stream, tools, permissions and durable restore, never a model.View
 // invoked by the test. The palette assertions inspect current terminal cells.
+func TestCodeThemesPickerPTYAcceptance(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("plain=%v", plain), func(t *testing.T) {
+			f := newSidebarPTYFixture(t)
+			prefPath, err := config.GetCodeUIPreferencesPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			configDir, err := config.GetConfigDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(configDir, "tools_cache.json"), []byte(`{"version":3,"tools":[{"name":"codegraph_explore","description":"isolated fixture","source":"codegraph","inputSchema":{"type":"object","properties":{}}}]}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(configDir, "config.yaml")
+			term, colored := startCodeThemePTY(t, f, plain, "code")
+			defer func() { term.close() }()
+			term.wait("Ready when you are.", "Enter send")
+			beforeConfig, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#9cafbf", "#101922", plain)
+			term.send("/themes\r")
+			term.wait("Code themes", "Blue-gray", "Dark orange", "Enter apply and save")
+			term.send("\x1b[B")
+			term.wait("› Dark orange")
+			assertCodeThemePTYText(t, term, colored, "Code themes", "#ff8700", "#101922", plain)
+			if _, err = os.Stat(prefPath); !os.IsNotExist(err) {
+				t.Fatalf("navigation wrote preference: %v", err)
+			}
+			term.send("\x1b")
+			term.wait("Ready when you are.", "Enter send")
+			assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#9cafbf", "#101922", plain)
+			if _, err = os.Stat(prefPath); !os.IsNotExist(err) {
+				t.Fatal("cancel wrote preference")
+			}
+			term.send("/themes\r")
+			term.wait("Code themes", "Enter apply and save")
+			term.send("\x1b[B")
+			term.wait("› Dark orange")
+			term.send("\r")
+			term.wait("Ready when you are.", "Enter send")
+			assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#8a8a8a", "#111416", plain)
+			p, err := config.LoadCodeUIPreferences()
+			afterSaveConfig, configErr := os.ReadFile(configPath)
+			if configErr != nil || string(beforeConfig) != string(afterSaveConfig) {
+				t.Fatal("theme save changed config.yaml")
+			}
+			if err != nil || p.ThemeID != "dark-orange" {
+				t.Fatalf("not saved: %+v %v", p, err)
+			}
+			for _, mode := range []struct{ label, rgb string }{{"Normal", "#444444"}, {"Plan", "#af8700"}, {"Ask", "#87d787"}} {
+				assertCodeThemePTYText(t, term, colored, " "+mode.label+" ", mode.rgb, "#111416", plain)
+				term.send("\x1b[Z")
+			}
+			term.close()
+			term, colored = startCodeThemePTY(t, f, plain, "code")
+			term.wait("Ready when you are.", "Enter send")
+			assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#8a8a8a", "#111416", plain)
+			term.close()
+			savedBytes, err := os.ReadFile(prefPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			term, colored = startCodeThemePTY(t, f, plain, "code", "--theme", "blue-gray")
+			term.wait("Ready when you are.", "Enter send")
+			assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#9cafbf", "#101922", plain)
+			p, err = config.LoadCodeUIPreferences()
+			if err != nil || p.ThemeID != "dark-orange" {
+				t.Fatal("override rewrote saved choice")
+			}
+			overrideBytes, err := os.ReadFile(prefPath)
+			if err != nil || string(overrideBytes) != string(savedBytes) {
+				t.Fatal("CLI override changed preference bytes")
+			}
+			if f.calls.Load() != 0 {
+				t.Fatal("/themes contacted provider")
+			}
+			term.close()
+		})
+		t.Run(fmt.Sprintf("populated-restore/plain=%v", plain), func(t *testing.T) {
+			f := newSidebarPTYFixture(t)
+			args := []string{"code", "--dir", f.work, "--resume", f.sessionID}
+			term, colored := startCodeThemePTY(t, f, plain, args...)
+			defer func() { term.close() }()
+			term.wait("Enter send")
+			term.send("Show palette reference.\r")
+			select {
+			case reply := <-f.turns:
+				reply <- sidebarPTYModelTurn{text: "# Palette reference\n\nPalette prose sentinel.\n\n| Component | State |\n| --- | --- |\n| café | TABLE-PICKER-END |\n\n```go\nfunc palette() string { return \"same components\" }\n```\n\nPICKER-DOCUMENT-END"}
+			case <-time.After(30 * time.Second):
+				t.Fatal("no document request")
+			}
+			term.wait("PICKER-DOCUMENT-END", "TABLE-PICKER-END", "Enter send")
+			documentFrame := term.frame()
+			switchCodeThemePTY(t, term, colored, "Dark orange", "#111416", plain)
+			if after := term.frame(); after != documentFrame {
+				t.Fatalf("theme changed stripped terminal rows:\nbefore:\n%s\nafter:\n%s", documentFrame, after)
+			}
+			assertCodeThemePTYText(t, term, colored, "Palette prose sentinel.", "#d0d0d0", "#111416", plain)
+			assertCodeThemePTYText(t, term, colored, "Component", "#ff8700", "#111416", plain)
+			assertCodeThemePTYText(t, term, colored, "func palette()", "#ff8700", "#111416", plain)
+			if frame := term.frame(); !strings.Contains(frame, "┼") || !strings.Contains(frame, "┌") {
+				t.Fatal("palette switch lost framed table")
+			}
+			resizeSidebarPTYColor(term, colored, 72, 65)
+			term.wait("TABLE-PICKER-END", "PICKER-DOCUMENT-END")
+			assertCodeThemePTYText(t, term, colored, "Palette reference", "#ff8700", "#111416", plain)
+			resizeSidebarPTYColor(term, colored, 120, 65)
+			term.wait("Enter send")
+			term.send("Write palette fixture.\r")
+			f.turn("write_file", map[string]any{"path": filepath.Join(f.work, "palette.go"), "content": "package palette\nfunc palette() string { return \"same components\" }\n"})
+			term.wait("Tool authorization required", "Deny")
+			term.send("1")
+			f.turn("", nil)
+			term.wait("Edited 1 file", "Enter send")
+			term.click("Edited 1 file")
+			term.wait("package palette", "palette.go")
+			switchCodeThemePTY(t, term, colored, "Blue-gray", "#101922", plain)
+			term.wait("package palette", "palette.go")
+			assertCodeThemePTYCanvas(t, term, colored, plain)
+			switchCodeThemePTY(t, term, colored, "Dark orange", "#111416", plain)
+			term.wait("package palette", "palette.go")
+			term.click("Edited 1 file")
+			term.wait("▸ Edited 1 file", "Enter send")
+			f.announce(term, false)
+			waitPlanPTYRegion(t, term, 92, 120, "Awaiting approval", "PHASES")
+			assertCodeThemePTYText(t, term, colored, "PLAN PROGRESS", "#ff8700", "#111416", plain)
+			term.send("\r")
+			f.update("one", "running")
+			waitSidebarPTYRunningCard(t, term, "one", "Phase one")
+			// The provider is still awaiting its next tool: opening /themes
+			// cannot cancel this turn or prevent subsequent phase transitions.
+			switchCodeThemePTY(t, term, colored, "Blue-gray", "#101922", plain)
+			waitSidebarPTYRunningCard(t, term, "one", "Phase one")
+			assertCodeThemePTYText(t, term, colored, "PLAN PROGRESS", "#ff8700", "#101922", plain)
+			term.send("\x07")
+			term.wait("Plan progress · esc back")
+			assertCodeThemePTYText(t, term, colored, "Phase one", "default", "#101922", plain)
+			term.send("\x1b")
+			waitSidebarPTYRunningCard(t, term, "one", "Phase one")
+			f.update("one", "complete")
+			f.update("two", "running")
+			f.update("two", "complete")
+			f.update("three", "running")
+			f.update("three", "complete")
+			waitPlanPTYRegion(t, term, 92, 120, "100%", "Awaiting completion record")
+			f.turn("announce_completion", map[string]any{"outcome_observed": "Palette fixture verified", "unverified": ""})
+			f.turn("", nil)
+			term.wait("COMPLETED", "Enter send")
+			switchCodeThemePTY(t, term, colored, "Dark orange", "#111416", plain)
+			assertCodeThemePTYText(t, term, colored, "COMPLETED", "#87d787", "#111416", plain)
+			assertCodeThemePTYText(t, term, colored, "Phase one", "#d0d0d0", "#1a1e21", plain)
+			assertCodeThemePTYCanvasPalette(t, term, colored, plain, "#111416", "#1a1e21")
+			term.close()
+			term, colored = startCodeThemePTY(t, f, plain, args...)
+			waitPlanPTYRegion(t, term, 92, 120, "COMPLETED", "100%", "Results recorded")
+			assertCodeThemePTYText(t, term, colored, "Phase one", "#d0d0d0", "#1a1e21", plain)
+			term.send("\x07")
+			term.wait("Plan progress · esc back")
+			assertCodeThemePTYText(t, term, colored, "Phase one", "default", "#111416", plain)
+			term.send("\x1b")
+			term.wait("Enter send")
+			switchCodeThemePTY(t, term, colored, "Blue-gray", "#101922", plain)
+			assertCodeThemePTYText(t, term, colored, "Phase one", "#e2edf5", "#18232e", plain)
+			p, err := config.LoadCodeUIPreferences()
+			if err != nil || p.ThemeID != "blue-gray" {
+				t.Fatalf("Blue-gray not persisted: %+v %v", p, err)
+			}
+			scrollCodeThemePTYHistory(t, term)
+			waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
+			switchCodeThemePTY(t, term, colored, "Dark orange", "#111416", plain)
+			waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
+			assertCodeThemePTYText(t, term, colored, "Phase one", "#d0d0d0", "#1a1e21", plain)
+		})
+	}
+}
+
+// Select through actual input; matching the header's current cells waits for
+// the asynchronous save/repaint rather than trusting an older stdout frame.
+func switchCodeThemePTY(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, label, canvas string, plain bool) {
+	t.Helper()
+	term.send("/themes\r")
+	term.wait("Code themes", "Enter apply and save")
+	if label == "Dark orange" {
+		term.send("\x1b[B")
+	} else {
+		term.send("\x1b[A")
+	}
+	term.wait("› " + label)
+	term.send("\r")
+	assertCodeThemePTYText(t, term, colored, "Astonish · code", "#ff8700", canvas, plain)
+	// NO_COLOR has no color change to synchronize on; wait until the actual
+	// modal disappears before the next input instead.
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	for strings.Contains(term.frame(), "Code themes") {
+		select {
+		case <-term.changed:
+		case <-deadline.C:
+			t.Fatal("theme picker did not close")
+		}
+	}
+	muted := "#8a8a8a"
+	if canvas == "#101922" {
+		muted = "#9cafbf"
+	}
+	assertCodeThemePTYText(t, term, colored, "fixture / pty-model", muted, canvas, plain)
+	modeColor := "#344552"
+	if canvas == "#111416" {
+		modeColor = "#444444"
+	}
+	// When a plan is executing the mode is Plan rather than Normal.
+	if strings.Contains(term.frame(), " Normal ") {
+		assertCodeThemePTYText(t, term, colored, " Normal ", modeColor, canvas, plain)
+	}
+}
+
 func TestCodeThemePTYAcceptance(t *testing.T) {
 	for _, plain := range []bool{false, true} {
 		for _, launch := range []string{"bare", "default", "explicit"} {

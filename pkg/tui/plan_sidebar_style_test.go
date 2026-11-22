@@ -68,6 +68,29 @@ func TestPlanSidebarHeaderReservesPhaseRows(t *testing.T) {
 	}
 }
 
+func TestPlanSidebarStyledPalettesIdenticalGeometry(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Setenv("NO_COLOR", "")
+		if plain {
+			t.Setenv("NO_COLOR", "1")
+		}
+		for _, height := range []int{8, 18, 35, 52} {
+			m := sidebarTestModel(140, 65)
+			for _, status := range []events.PlanStatus{events.PlanPending, events.PlanApproved, events.PlanChangesRequested, events.PlanDeclined} {
+				m.tr.Items[0].PlanStatus = status
+				m.theme, _ = ResolveCodeTheme(CodeThemeBlueGray)
+				x := m.renderPlanSidebar(height)
+				m.theme, _ = ResolveCodeTheme(CodeThemeDarkOrange)
+				y := m.renderPlanSidebar(height)
+				if stripANSI(x) != stripANSI(y) || lipgloss.Width(x) != lipgloss.Width(y) || lipgloss.Height(x) != lipgloss.Height(y) {
+					t.Fatalf("sidebar geometry changed plain=%v height=%d state=%s", plain, height, status)
+				}
+			}
+			m.cancel()
+		}
+	}
+}
+
 func TestPlanSidebarStyledColorAndStates(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	m := sidebarTestModel(140, 65)

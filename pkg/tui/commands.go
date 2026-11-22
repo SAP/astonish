@@ -24,6 +24,8 @@ var builtInSlashCommands = []slashCommand{
 	{Name: "exit", Aliases: []string{"quit", "q"}, Description: "Quit the terminal app"},
 }
 
+var themesSlashCommand = slashCommand{Name: "themes", Description: "Choose and save a Code color palette"}
+
 var permissionsSlashCommand = slashCommand{
 	Name: "permissions", Description: "View and revoke Code permissions (Ctrl+P)",
 }

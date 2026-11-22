@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 
 	"github.com/SAP/astonish/pkg/client"
 	"strings"
@@ -1447,6 +1448,80 @@ func TestCodeThemeLiveRestoredStates(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestCodeThemePaletteOnlyInvariants(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("plain=%v", plain), func(t *testing.T) {
+			t.Setenv("NO_COLOR", "")
+			if plain {
+				t.Setenv("NO_COLOR", "1")
+			}
+			a, _ := ResolveCodeTheme(CodeThemeBlueGray)
+			b, err := ResolveCodeTheme(CodeThemeDarkOrange)
+			if err != nil || b.CodeThemeID != CodeThemeDarkOrange || b.NoColor != plain {
+				t.Fatalf("dark palette: %+v %v", b, err)
+			}
+			av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+			for i := 0; i < av.NumField(); i++ {
+				x, ok := av.Field(i).Interface().(lipgloss.Style)
+				if !ok {
+					continue
+				}
+				y := bv.Field(i).Interface().(lipgloss.Style)
+				name := av.Type().Field(i).Name
+				if x.GetBold() != y.GetBold() || x.GetItalic() != y.GetItalic() || x.GetUnderline() != y.GetUnderline() || x.GetStrikethrough() != y.GetStrikethrough() || x.GetReverse() != y.GetReverse() || x.GetBlink() != y.GetBlink() || x.GetFaint() != y.GetFaint() || x.GetAlignHorizontal() != y.GetAlignHorizontal() || x.GetAlignVertical() != y.GetAlignVertical() || x.GetWidth() != y.GetWidth() || x.GetHeight() != y.GetHeight() || x.GetMaxWidth() != y.GetMaxWidth() || x.GetMaxHeight() != y.GetMaxHeight() || x.GetPaddingTop() != y.GetPaddingTop() || x.GetPaddingRight() != y.GetPaddingRight() || x.GetPaddingBottom() != y.GetPaddingBottom() || x.GetPaddingLeft() != y.GetPaddingLeft() || x.GetMarginTop() != y.GetMarginTop() || x.GetMarginRight() != y.GetMarginRight() || x.GetMarginBottom() != y.GetMarginBottom() || x.GetMarginLeft() != y.GetMarginLeft() || x.GetBorderStyle() != y.GetBorderStyle() || x.GetBorderTop() != y.GetBorderTop() || x.GetBorderRight() != y.GetBorderRight() || x.GetBorderBottom() != y.GetBorderBottom() || x.GetBorderLeft() != y.GetBorderLeft() {
+					t.Errorf("noncolor style attributes changed: %s", name)
+				}
+				if stripANSI(x.Render("sample 界\nsecond row")) != stripANSI(y.Render("sample 界\nsecond row")) {
+					t.Errorf("style geometry changed: %s", name)
+				}
+			}
+			if a.TableLayout != b.TableLayout {
+				t.Fatal("table layout differs")
+			}
+			if !plain {
+				for _, token := range append(a.SyntaxStyle.Types(), b.SyntaxStyle.Types()...) {
+					x, y := a.SyntaxStyle.Get(token), b.SyntaxStyle.Get(token)
+					if x.Bold != y.Bold || x.Italic != y.Italic || x.Underline != y.Underline {
+						t.Fatalf("syntax weights differ: %v", token)
+					}
+				}
+				if b.Background.GetBackground() != lipgloss.Color("#111416") || b.Card.GetBackground() != lipgloss.Color("#1a1e21") || b.Border.GetForeground() != lipgloss.Color("#444444") || b.Text.GetForeground() != lipgloss.Color("#d0d0d0") || b.Muted.GetForeground() != lipgloss.Color("#8a8a8a") || b.AccentColor != lipgloss.Color("#ff8700") || b.Success.GetForeground() != lipgloss.Color("#87d787") || b.Approval.GetForeground() != lipgloss.Color("#af8700") || b.Danger.GetForeground() != lipgloss.Color("#ff5f5f") {
+					t.Fatal("dark orange roles changed")
+				}
+			}
+			for _, width := range []int{24, 80, 140} {
+				for _, src := range []string{"# Heading\n\n**strong** and *italic* prose 界.", "| ID | Notes |\n| --- | --- |\n| one | **body** long wrapping content |", "```go\n// comment\nfunc main() { println(\"ok\", 12) }\n```", "```diff\n-old\n+new\n```"} {
+					x, y := render.Markdown(src, width, a.RenderStyles()), render.Markdown(src, width, b.RenderStyles())
+					if stripANSI(x) != stripANSI(y) || lipgloss.Width(x) != lipgloss.Width(y) || lipgloss.Height(x) != lipgloss.Height(y) {
+						t.Fatalf("renderer geometry changed at %d:\n%q\n%q", width, x, y)
+					}
+					if plain && (strings.Contains(x, "\x1b[38;") || strings.Contains(x, "\x1b[48;") || strings.Contains(y, "\x1b[38;") || strings.Contains(y, "\x1b[48;")) {
+						t.Fatal("NO_COLOR emitted palette colors")
+					}
+				}
+				ma, mb := model{theme: a, width: width}, model{theme: b, width: width}
+				if stripANSI(ma.renderUserBubble("draft 界", false, width)) != stripANSI(mb.renderUserBubble("draft 界", false, width)) {
+					t.Fatal("user bubble geometry differs")
+				}
+			}
+		})
+	}
+	catalog := BuiltinCodeThemes()
+	if len(catalog) != 2 || catalog[0].ID != CodeThemeBlueGray || !catalog[0].Default || catalog[0].Label != "Blue-gray" || catalog[1].ID != CodeThemeDarkOrange || catalog[1].Default || catalog[1].Label != "Dark orange" {
+		t.Fatalf("catalog: %+v", catalog)
+	}
+	catalog[0].Label = "mutated"
+	if BuiltinCodeThemes()[0].Label != "Blue-gray" {
+		t.Fatal("catalog mutable globally")
+	}
+	if th, err := ResolveCodeTheme("default"); err != nil || th.CodeThemeID != CodeThemeBlueGray {
+		t.Fatal("default alias")
+	}
+	if _, err := ResolveCodeTheme("unknown"); err == nil || !strings.Contains(err.Error(), "blue-gray, dark-orange") {
+		t.Fatal("missing supported IDs")
 	}
 }
 

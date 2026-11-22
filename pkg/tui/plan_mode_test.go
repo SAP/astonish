@@ -14,6 +14,41 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestCodeComposerPalettesPreserveModesAndGeometry(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Setenv("NO_COLOR", "")
+		if plain {
+			t.Setenv("NO_COLOR", "1")
+		}
+		for _, width := range []int{32, 80, 140} {
+			a, b := newTestComposerModel(width), newTestComposerModel(width)
+			a.info.Mode, b.info.Mode = "code", "code"
+			a.theme, _ = ResolveCodeTheme(CodeThemeBlueGray)
+			b.theme, _ = ResolveCodeTheme(CodeThemeDarkOrange)
+			a.ta.SetValue("preserved draft 界")
+			b.ta.SetValue("preserved draft 界")
+			a.theme.ApplyTextareaStyles(&a.ta)
+			b.theme.ApplyTextareaStyles(&b.ta)
+			for i, rgb := range []string{"#444444", "#af8700", "#87d787", "#444444"} {
+				if i > 0 {
+					a.togglePlanMode()
+					b.togglePlanMode()
+				}
+				x, y := a.renderComposer(), b.renderComposer()
+				if stripANSI(x) != stripANSI(y) || lipgloss.Width(x) != lipgloss.Width(y) || lipgloss.Height(x) != lipgloss.Height(y) {
+					t.Fatalf("composer changed plain=%v width=%d mode=%s", plain, width, b.composerModeLabel())
+				}
+				if !plain && b.composerBorderStyle().GetForeground() != lipgloss.Color(rgb) {
+					t.Fatalf("%s lost its distinct color", b.composerModeLabel())
+				}
+				if a.ta.Value() != "preserved draft 界" || b.ta.Value() != a.ta.Value() {
+					t.Fatal("draft changed")
+				}
+			}
+		}
+	}
+}
+
 func TestCodeComposerModeCycleColors(t *testing.T) {
 	for _, plain := range []bool{false, true} {
 		t.Run(fmt.Sprintf("plain=%v", plain), func(t *testing.T) {

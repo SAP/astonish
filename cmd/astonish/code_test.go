@@ -22,13 +22,13 @@ func TestParseCodeFlags_Defaults(t *testing.T) {
 }
 
 func TestParseCodeFlags_Theme(t *testing.T) {
-	for _, name := range []string{"", "blue-gray"} {
+	for _, name := range []string{"", "blue-gray", "dark-orange", "default"} {
 		flags, err := parseCodeFlags([]string{"--theme", name})
 		if err != nil || flags.ThemeID != tui.CodeThemeID(name) {
 			t.Fatalf("theme %q: %+v %v", name, flags, err)
 		}
 	}
-	for _, name := range []string{"unknown", "dark-orange"} {
+	for _, name := range []string{"unknown"} {
 		_, err := parseCodeFlags([]string{"--theme", name})
 		if err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
 			t.Fatalf("invalid theme %q: %v", name, err)

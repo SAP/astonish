@@ -32,7 +32,7 @@ func TestCodeThemeValidationBeforeStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []tui.CodeThemeID{"unknown", "dark-orange"} {
+	for _, name := range []tui.CodeThemeID{"unknown"} {
 		err := RunCodeTUI(context.Background(), &CodeConfig{ThemeID: name, Provider: "missing-provider", WorkingDir: filepath.Join(home, "missing")})
 		if err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
 			t.Fatalf("validation did not precede setup: %v", err)

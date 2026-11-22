@@ -17,14 +17,43 @@ import (
 // CodeThemeID is a launch-time Code palette identifier.
 type CodeThemeID string
 
-const CodeThemeBlueGray CodeThemeID = "blue-gray"
+const (
+	CodeThemeBlueGray   CodeThemeID = "blue-gray"
+	CodeThemeDarkOrange CodeThemeID = "dark-orange"
+)
 
-// ResolveCodeTheme validates a name; an empty name selects the default.
+// CodeThemeOption describes a built-in palette, in picker order.
+type CodeThemeOption struct {
+	ID      CodeThemeID
+	Label   string
+	Default bool
+}
+
+// BuiltinCodeThemes returns a fresh, deterministic catalog.
+func BuiltinCodeThemes() []CodeThemeOption {
+	return []CodeThemeOption{{CodeThemeBlueGray, "Blue-gray", true}, {CodeThemeDarkOrange, "Dark orange", false}}
+}
+
+// ResolveCodeTheme validates a name; empty and default select Blue-gray.
 func ResolveCodeTheme(id CodeThemeID) (Theme, error) {
-	if id != "" && id != CodeThemeBlueGray {
-		return Theme{}, fmt.Errorf("unknown Code theme %q (available: blue-gray)", id)
+	if id == "" || id == "default" {
+		id = CodeThemeBlueGray
 	}
-	return DefaultTheme(), nil
+	var p codePalette
+	switch id {
+	case CodeThemeBlueGray:
+		p = codePalette{"#101922", "#18232e", "#344552", "#e2edf5", "#9cafbf", "#ff8700", "#38df92", "#e5b766", "#ff7f87"}
+	case CodeThemeDarkOrange:
+		p = codePalette{"#111416", "#1a1e21", "#444444", "#d0d0d0", "#8a8a8a", "#ff8700", "#87d787", "#af8700", "#ff5f5f"}
+	default:
+		return Theme{}, fmt.Errorf("unknown Code theme %q (available: blue-gray, dark-orange)", id)
+	}
+	return buildCodeTheme(id, p, os.Getenv("NO_COLOR") != ""), nil
+}
+
+// All component geometry and typography live in buildCodeTheme, never palettes.
+type codePalette struct {
+	canvas, card, border, text, muted, accent, success, warning, danger string
 }
 
 // Theme holds lipgloss styles for the terminal app.
@@ -88,31 +117,36 @@ type Theme struct {
 
 // DefaultTheme returns a dark-terminal-friendly theme.
 func DefaultTheme() Theme {
-	if os.Getenv("NO_COLOR") != "" {
+	th, _ := ResolveCodeTheme(CodeThemeBlueGray)
+	return th
+}
+
+func buildCodeTheme(id CodeThemeID, p codePalette, noColor bool) Theme {
+	if noColor {
 		th := plainTheme()
-		th.CodeThemeID = CodeThemeBlueGray
+		th.CodeThemeID = id
 		th.TableLayout = render.TableLayoutFramed
 		return th
 	}
-	bg := lipgloss.Color("#101922")
-	card := lipgloss.Color("#18232e")
-	border := lipgloss.Color("#344552")
-	text := lipgloss.Color("#e2edf5")
-	muted := lipgloss.Color("#9cafbf")
-	accent := lipgloss.Color("#ff8700")
-	success := lipgloss.Color("#38df92")
-	warning := lipgloss.Color("#e5b766")
-	danger := lipgloss.Color("#ff7f87")
+	bg := lipgloss.Color(p.canvas)
+	card := lipgloss.Color(p.card)
+	border := lipgloss.Color(p.border)
+	text := lipgloss.Color(p.text)
+	muted := lipgloss.Color(p.muted)
+	accent := lipgloss.Color(p.accent)
+	success := lipgloss.Color(p.success)
+	warning := lipgloss.Color(p.warning)
+	danger := lipgloss.Color(p.danger)
 	base := lipgloss.NewStyle().Background(bg)
 	txt := base.Foreground(text)
 	meta := base.Foreground(muted)
 	brand := base.Foreground(accent)
 	box := base.Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
 	return Theme{
-		CodeThemeID: CodeThemeBlueGray, TableLayout: render.TableLayoutFramed,
+		CodeThemeID: id, TableLayout: render.TableLayoutFramed,
 		Background: base, Card: meta.Background(card), ApprovalBorder: base.Foreground(warning), AskBorder: base.Foreground(success), Spinner: brand,
-		SyntaxStyle: chroma.MustNewStyle("astonish-blue-gray", chroma.StyleEntries{
-			chroma.Text: "#e2edf5", chroma.Comment: "#9cafbf italic", chroma.Keyword: "#ff8700 bold", chroma.Name: "#e2edf5", chroma.NameFunction: "#ff8700", chroma.LiteralString: "#38df92", chroma.LiteralNumber: "#e5b766", chroma.Operator: "#ff8700", chroma.Error: "#ff7f87",
+		SyntaxStyle: chroma.MustNewStyle("astonish-"+string(id), chroma.StyleEntries{
+			chroma.Text: p.text, chroma.Comment: p.muted + " italic", chroma.Keyword: p.accent + " bold", chroma.Name: p.text, chroma.NameFunction: p.accent, chroma.LiteralString: p.success, chroma.LiteralNumber: p.warning, chroma.Operator: p.accent, chroma.Error: p.danger,
 		}),
 		Brand: brand.Bold(true), Text: txt, Muted: meta, User: brand.Bold(true), UserBorder: base.Foreground(border),
 		UserBubble: txt.Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(0, 2), UserExpandHint: meta.Italic(true).Align(lipgloss.Right),

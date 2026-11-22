@@ -26,7 +26,7 @@ type codeFlags struct {
 func parseCodeFlags(args []string) (codeFlags, error) {
 	codeCmd := flag.NewFlagSet("code", flag.ContinueOnError)
 
-	themeID := codeCmd.String("theme", "", "Code theme for this launch (blue-gray)")
+	themeID := codeCmd.String("theme", "", "Code palette for this launch: blue-gray, dark-orange (overrides saved /themes preference)")
 	modelPin := codeCmd.String("model", "", "Model to use, as a bare model name or provider:model pin")
 	dir := codeCmd.String("dir", "", "Working directory tools operate against (default: current directory)")
 	autoApprove := codeCmd.Bool("auto-approve", false, "Auto-approve all tool executions")
@@ -110,7 +110,8 @@ func printCodeUsage() {
 	fmt.Println("")
 	fmt.Println("When logged in to a platform (astonish login <url>), press Ctrl+\\")
 	fmt.Println("inside the TUI to switch to the platform chat panel. Code uses the")
-	fmt.Println("blue-gray theme; the header identifies which backend you're in.")
+	fmt.Println("blue-gray by default; /themes selects and remembers a palette. The")
+	fmt.Println("header identifies which backend you're in.")
 	fmt.Println("")
 	fmt.Println("Inside the app, /rollback reverts both the conversation and any file")
 	fmt.Println("changes back to an earlier message.")
@@ -121,7 +122,7 @@ func printCodeUsage() {
 	fmt.Println("  -r, --resume        Resume an existing session by ID")
 	fmt.Println("  --auto-approve      Auto-approve all tool executions")
 	fmt.Println("  --yolo              Alias for --auto-approve")
-	fmt.Println("  --theme             Launch-only Code theme (default: blue-gray)")
+	fmt.Println("  --theme             blue-gray or dark-orange; overrides saved /themes choice")
 	fmt.Println("  --debug             Enable debug output")
 	fmt.Println("  -h, --help          Show this help message")
 	fmt.Println("")

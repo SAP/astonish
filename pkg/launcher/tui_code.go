@@ -102,7 +102,8 @@ func localExecutionContext(ctx context.Context, userID string) (context.Context,
 // the user's working directory. It never contacts a platform — there is no
 // daemon, no HTTP, and no login.
 type CodeConfig struct {
-	// ThemeID selects a launch-only Code theme; it is never persisted.
+	// ThemeID is a launch override (CLI > saved /themes preference > blue-gray).
+	// The override itself is never persisted; /themes explicitly saves local UI state.
 	ThemeID tui.CodeThemeID
 	// Provider/Model optionally pin the LLM for the session (e.g. "openai" /
 	// "gpt-4o"). Empty values fall back to the configured cascade default.

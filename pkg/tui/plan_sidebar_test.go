@@ -14,6 +14,63 @@ import (
 	"github.com/SAP/astonish/pkg/tui/events"
 )
 
+func TestPlanProgressConcisePhasePresentation(t *testing.T) {
+	for _, restored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restored=%v", restored), func(t *testing.T) {
+			m := sidebarTestModel(160, 65)
+			defer m.cancel()
+			m.theme.NoColor = true
+			s := m.tr.Items[0].PlanSnapshot.Clone()
+			s.Steps = []agent.PlanStepInfo{
+				{Name: "internal-complete", Description: "Prepare environment", Status: "complete", ParallelGroup: "hidden-wave"},
+				{Name: "internal-running", Description: "Build capability", Status: "running", ParallelGroup: "hidden-wave"},
+				{Name: "internal-pending", Description: "Verify capability", Status: "pending"},
+				{Name: "internal-failed", Description: "Repair capability", Status: "failed", Summary: "Meaningful failure summary", Evidence: "exit 1: useful evidence"},
+				{Name: "internal-unknown", Description: "Inspect capability", Status: "unexpected"},
+				{Name: "Fallback title", Status: "pending"},
+				{Name: "internal-duplicate", Description: "Verify capability", Status: "pending"},
+			}
+			m.tr = events.NewTranscript()
+			ev := events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s}
+			if restored {
+				m.tr.LoadHistory([]events.HistoryMsg{{Delegation: &ev}})
+			} else {
+				m.tr.Apply(ev)
+				m.tr.Streaming = true
+			}
+			m.refreshViewport()
+			for _, text := range []string{m.renderPlanPhaseCards(80), m.renderPlanProgressBody(80, false), m.renderPlanProgressBody(80, true)} {
+				for _, want := range []string{"✓ Prepare environment", "● Build capability", "○ Verify capability", "✗ Repair capability", "? Inspect capability", "○ Fallback title"} {
+					if !strings.Contains(text, want) {
+						t.Errorf("missing %q:\n%s", want, text)
+					}
+				}
+				for _, absent := range []string{"internal-", "hidden-wave", "Group:", "pending", "running", "complete", "failed", "unexpected", " · live"} {
+					if strings.Contains(text, absent) {
+						t.Errorf("redundant %q:\n%s", absent, text)
+					}
+				}
+				if strings.Contains(text, "recorded, not live") != restored || strings.Count(text, "Verify capability") != 2 {
+					t.Errorf("restore/duplicate title contract changed:\n%s", text)
+				}
+			}
+			full := m.renderPlanProgressBody(80, true)
+			if !strings.Contains(full, "Meaningful failure summary") || !strings.Contains(full, "Evidence: exit 1: useful evidence") {
+				t.Fatal("full list lost verification evidence/summary")
+			}
+			for _, text := range []string{m.renderCompactPlanProgress(), m.renderPlanProgressHeader(160)} {
+				if !strings.Contains(text, "Current: ● Build capability") || strings.Contains(text, "internal-") || strings.Contains(text, "recorded, not live") != restored {
+					t.Errorf("current presentation differs:\n%s", text)
+				}
+			}
+			_, spans := m.layoutPlanPhaseCards(80)
+			if spans[1].name != "internal-running" || m.planPanel.target != "internal-running" {
+				t.Fatal("human titles changed identity anchors")
+			}
+		})
+	}
+}
+
 func sidebarTestModel(width, height int) model {
 	m := newModel(context.Background(), Config{Backend: staticBackend{info: backend.Info{Mode: "code"}}, Width: width, Height: height})
 	m.ready = true
@@ -200,7 +257,7 @@ func TestPlanSidebarResponsiveGeometry(t *testing.T) {
 				t.Fatalf("progress not pinned:\n%s", view)
 			}
 			if expected == planLayoutCompact {
-				if !strings.Contains(view, "Current: phase-2, phase-3") {
+				if !strings.Contains(view, "Current: ● Phase 2 description, ● Phase 3 description") {
 					t.Fatalf("compact current phases missing:\n%s", view)
 				}
 			} else {
@@ -208,11 +265,11 @@ func TestPlanSidebarResponsiveGeometry(t *testing.T) {
 					t.Fatal("wide current row remains")
 				}
 				if size[1] >= 30 {
-					for _, phase := range []string{"phase-2", "phase-3"} {
+					for _, phase := range []string{"● Phase 2", "● Phase 3"} {
 						found := false
 						for i := 0; i < 30; i++ {
 							panel := stripANSI(m.renderPlanSidebar(m.vp.Height() + m.stickyHeaderLines))
-							if strings.Contains(panel, phase) && strings.Contains(panel, "running") && !strings.Contains(panel, "Progress: unavailable") {
+							if strings.Contains(panel, phase) && !strings.Contains(panel, "Progress: unavailable") {
 								found = true
 								break
 							}
@@ -706,8 +763,12 @@ func TestPlanSidebarScrollResetAndResize(t *testing.T) {
 	resize(120, 30)
 	assertSidebarTargetVisible(t, m, "phase-11")
 	// Same-target revision: preserve a visible card by identity through reflow.
-	m.planPanel.sidebar.SetYOffset(m.planPanel.spans[4].start + 1)
 	s := m.tr.Items[0].PlanSnapshot.Clone()
+	s.Sequence++
+	s.Steps[4].Description = "A wrapped phase description with a second row"
+	m = sidebarApply(m, s)
+	m.planPanel.sidebar.SetYOffset(m.planPanel.spans[4].start + 1)
+	s = m.tr.Items[0].PlanSnapshot.Clone()
 	s.Sequence++
 	s.Revision++
 	s.Steps[0].Description = strings.Repeat("日本語 🧪 e\u0301 ", 15)

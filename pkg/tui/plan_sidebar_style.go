@@ -120,22 +120,22 @@ func (m model) layoutPlanPhaseCards(width int) (string, []planPhaseCardSpan) {
 	if !v.Available {
 		return s.muted.Render(wrapPlain("The latest plan could not be read. Progress: unavailable", width)), nil
 	}
+	if len(v.Phases) == 0 {
+		return s.muted.Render("No phases recorded"), nil
+	}
 	var cards []string
 	var spans []planPhaseCardSpan
 	row := 0
 	for index, p := range v.Phases {
-		icon, accent := "○", s.muted
+		title, icon, qualification := planPhasePresentation(p)
+		accent := s.muted
 		switch p.State {
 		case planPhaseComplete:
-			icon, accent = "✓", s.success
+			accent = s.success
 		case planPhaseRunning:
-			icon, accent = "●", s.active
+			accent = s.active
 		case planPhaseFailed:
-			icon, accent = "✗", s.failed
-		}
-		title := p.Description
-		if title == "" {
-			title = p.Name
+			accent = s.failed
 		}
 		textWidth := max(1, width-4)
 		titleLines := strings.Split(wrapPlain(title, textWidth), "\n")
@@ -151,21 +151,10 @@ func (m model) layoutPlanPhaseCards(width int) (string, []planPhaseCardSpan) {
 			}
 			rows = append(rows, prefix+titleStyle.Render(line))
 		}
-		if p.Name != "" && p.Name != title {
-			rows = append(rows, "  "+s.card.Render(truncateToWidth(p.Name, textWidth)))
-		}
-		status := string(p.State)
-		if p.State == planPhasePending {
-			status = "pending · not started"
-		}
-		if p.Current && !p.Live {
-			status += " · recorded, not live"
-		}
-		for _, line := range strings.Split(wrapPlain(status, textWidth), "\n") {
-			rows = append(rows, "  "+s.card.Render(line))
-		}
-		if p.ParallelGroup != "" {
-			rows = append(rows, "  "+s.card.Render(truncateToWidth("Group: "+p.ParallelGroup, textWidth)))
+		if qualification != "" {
+			for _, line := range strings.Split(wrapPlain(qualification, textWidth), "\n") {
+				rows = append(rows, "  "+s.card.Render(line))
+			}
 		}
 		// Explicit painted padding keeps resets within the card surface.
 		for i, row := range rows {
@@ -174,6 +163,9 @@ func (m model) layoutPlanPhaseCards(width int) (string, []planPhaseCardSpan) {
 				rows[i] = restorePlanSurface(rows[i], s.card)
 			}
 		}
+		padding := s.card.Render(strings.Repeat(" ", max(1, width)))
+		rows = append([]string{padding}, rows...)
+		rows = append(rows, padding)
 		card := strings.Join(rows, "\n")
 		cards = append(cards, card)
 		end := row + lipgloss.Height(card)

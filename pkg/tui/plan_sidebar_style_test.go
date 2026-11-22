@@ -26,7 +26,7 @@ func TestPlanSidebarVisualHierarchy(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	for _, absent := range []string{"[===", "CURRENT", "Current:"} {
+	for _, absent := range []string{"[===", "CURRENT", "Current:", "phase-", "Group:", "wave-"} {
 		if strings.Contains(got, absent) {
 			t.Fatalf("redundant/legacy %q remains:\n%s", absent, got)
 		}
@@ -62,7 +62,7 @@ func TestPlanSidebarHeaderReservesPhaseRows(t *testing.T) {
 		t.Fatalf("short fallback must retain counts/lifecycle only: %s", short)
 	}
 	for _, text := range []string{m.renderCompactPlanProgress(), m.renderPlanProgressHeader(80)} {
-		if !strings.Contains(text, "Current: phase-2, phase-3") {
+		if !strings.Contains(text, "Current: ● Phase 2 description, ● Phase 3 description") {
 			t.Fatalf("compact/detail current names lost: %s", text)
 		}
 	}
@@ -107,6 +107,35 @@ func TestPlanSidebarStyledColorAndStates(t *testing.T) {
 		label, _ := m.planPanelStatus(planProgressView{State: state})
 		if label == "" {
 			t.Fatalf("missing state %v", state)
+		}
+	}
+}
+
+func TestPlanPhaseCardsInnerVerticalPadding(t *testing.T) {
+	m := sidebarTestModel(120, 65)
+	defer m.cancel()
+	for _, noColor := range []bool{false, true} {
+		for _, id := range []CodeThemeID{CodeThemeBlueGray, CodeThemeDarkOrange} {
+			m.theme, _ = ResolveCodeTheme(id)
+			m.theme.NoColor = noColor
+			content, spans := m.layoutPlanPhaseCards(24)
+			rows := strings.Split(content, "\n")
+			for _, span := range spans {
+				for _, index := range []int{span.start, span.end - 1} {
+					if plain := stripANSI(rows[index]); plain != strings.Repeat(" ", 24) {
+						t.Fatalf("theme=%s plain=%v phase=%s padding row=%q", id, noColor, span.name, plain)
+					}
+					if !noColor && !strings.Contains(rows[index], m.planPanelStyles().card.Render(strings.Repeat(" ", 24))) {
+						t.Fatal("padding does not use the phase card background")
+					}
+				}
+				if span.end-span.start < 3 || strings.TrimSpace(stripANSI(rows[span.start+1])) == "" {
+					t.Fatal("phase content missing between padding rows")
+				}
+				if span.end < len(rows) && rows[span.end] != "" {
+					t.Fatal("inter-card gap changed")
+				}
+			}
 		}
 	}
 }

@@ -49,7 +49,7 @@ func TestCodePlanRevisionPTYAcceptance(t *testing.T) {
 
 				// Both the revised card in the conversation (not merely the
 				// sidebar) and the normal Code approval choices must be visible.
-				term.wait("1/y  Approve and run autonomously until done", "2    Approve and pause for review after each phase", "Request changes", "Decline", "Enter select")
+				term.wait("1/y  Approve and run", "2    Approve and run with full access", "3    Approve and review each phase", "4    Approve and review with full access", "5/r  Request changes", "6/n  Decline", "Enter select")
 				waitPlanPTYRegion(t, term, 0, 91, fmt.Sprintf("Revision %d acceptance:", round))
 				waitPlanPTYRegion(t, term, 92, 120, "Awaiting approval")
 				term.assertAbsent("Enter send")
@@ -82,10 +82,10 @@ func TestCodePlanRevisionPTYAcceptance(t *testing.T) {
 			}
 
 			if mode == agent.CodePlanReviewEachPhase {
-				term.send("\x1b[B")
-				term.wait("▸ 2    Approve and pause for review after each phase")
+				term.send("\x1b[B\x1b[B")
+				term.wait("▸ 3    Approve and review each phase")
 			} else {
-				term.wait("▸ 1/y  Approve and run autonomously until done")
+				term.wait("▸ 1/y  Approve and run")
 			}
 			term.send("\r")
 			codeRevisionPTYReply(t, f, sidebarPTYModelTurn{text: "REVISED PLAN APPROVAL RECEIVED"})

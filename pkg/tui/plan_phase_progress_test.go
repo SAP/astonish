@@ -16,7 +16,7 @@ func TestPhaseProgressPlaceholderOmitted(t *testing.T) {
 			if strings.Contains(plain, "Progress: unavailable") {
 				t.Errorf("%s still shows per-phase placeholder", name)
 			}
-			if !strings.Contains(plain, "running") {
+			if !strings.Contains(plain, "●") {
 				t.Errorf("%s lost running status", name)
 			}
 		}

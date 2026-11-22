@@ -596,10 +596,15 @@ func TestCodePlanSidebarStyledPTY(t *testing.T) {
 			colored.screen.p.Parse([]byte(term.raw.String()))
 			term.screen = colored.screen
 			term.mu.Unlock()
-			frame := waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "Ctrl+G", "✓ COMPLETED", "Results recorded", "3/3 phases complete", "100%", "━━━", "PHASES", "Group: wave-3", "╰")
+			frame := waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "Ctrl+G", "✓ COMPLETED", "Results recorded", "3/3 phases complete", "100%", "━━━", "PHASES", "restored-session parity", "╰")
 			panel := planPTYColumns(frame, 92, 120)
 			if !strings.Contains(panel, "╭") || strings.Contains(panel, "[===") || strings.Contains(panel, "CURRENT") || strings.Contains(panel, "Current:") {
 				t.Fatalf("invalid simplified layout: %s", panel)
+			}
+			for _, absent := range []string{"progress-authority", "persistent-panel", "live-progress-", "Group:", "wave-", "  complete"} {
+				if strings.Contains(panel, absent) {
+					t.Fatalf("redundant phase metadata %q: %s", absent, panel)
+				}
 			}
 			assertSidebarPTYDivider(t, term, colored, noColor)
 			term.mu.Lock()
@@ -623,7 +628,7 @@ func TestCodePlanSidebarStyledPTY(t *testing.T) {
 			waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "100%", "PHASES", "╰")
 			assertSidebarPTYDivider(t, term, colored, noColor)
 			resizeSidebarPTYColor(term, colored, 120, 65)
-			waitPlanPTYRegion(t, term, 92, 120, "Group: wave-3", "PHASES", "╰")
+			waitPlanPTYRegion(t, term, 92, 120, "restored-session parity", "PHASES", "╰")
 			assertSidebarPTYDivider(t, term, colored, noColor)
 			// The same restored plan must retain matching separators while a
 			// real out-of-project read is blocked on folder authorization.
@@ -664,7 +669,7 @@ func TestCodePlanSidebarPlanApprovalStyledPTY(t *testing.T) {
 			waitPlanPTYRegion(t, term, 92, 120, "PHASES", "╰")
 			assertSidebarPTYDivider(t, term, colored, noColor)
 			resizeSidebarPTYColor(term, colored, 80, 24)
-			term.wait("Current: none", "Approve and run autonomously until done")
+			term.wait("Current: none", "Approve and run")
 			resizeSidebarPTYColor(term, colored, 120, 30)
 			waitPlanPTYRegion(t, term, 92, 120, "Awaiting approval", "PHASES", "╰")
 			assertSidebarPTYDivider(t, term, colored, noColor)
@@ -936,7 +941,7 @@ func sidebarPTYDividerError(colored *sidebarPTYColorScreen, noColor bool) error 
 			separators = append(separators, y)
 		}
 	}
-	planApproval := strings.Contains(text.text(), "Approve and run autonomously until done")
+	planApproval := strings.Contains(text.text(), "Approve and run")
 	wantSeparators := 2
 	if planApproval {
 		wantSeparators = 1 // pending plan suppresses the composer/footer separator
@@ -948,7 +953,7 @@ func sidebarPTYDividerError(colored *sidebarPTYColorScreen, noColor bool) error 
 	if (want == ' ') != noColor {
 		return fmt.Errorf("unexpected default chrome color (plain=%v)", noColor)
 	}
-	end := text.h - 1 // plan approval retains one full-width controls row
+	end := text.h - 2 // plan approval retains full-width permission and controls rows
 	if !planApproval {
 		end = separators[1]
 		if fg.cells[end][divider] != want {

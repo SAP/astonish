@@ -109,27 +109,35 @@ func TestCodePlanApprovalPTYAcceptance(t *testing.T) {
 				return newHandoffPTY(t, cmd)
 			}
 			term := start()
-			const run = "▸ 1/y  Approve and run autonomously until done"
-			const review = "▸ 2    Approve and pause for review after each phase"
-			term.wait(run, "Request changes", "Decline", "Enter select")
-			term.assertAbsent("Continue through verified phases.")
-			term.assertAbsent("Pause for review after each verified phase.")
-			term.send("\x1b[B")
-			term.wait(review)
-			term.assertAbsent(run)
-			term.send("\x1b[A")
+			const run = "▸ 1/y  Approve and run"
+			const review = "▸ 3    Approve and review each phase"
+			term.wait(run, "Request changes", "Decline", "Enter select", "Folders ○", "Tools ○")
+			term.assertAbsent("p change")
+			term.send("p")
 			term.wait(run)
-			term.assertAbsent(review)
+			term.send("\x1b[B")
+			term.wait("▸ 2    Approve and run with full access", "without tool or folder prompts", "Not", "sandboxed.", "Folders ○", "Tools ○")
+			term.send("\t")
+			term.wait(review, "Pause after each verified phase")
+			term.send("\t")
+			term.wait("▸ 4    Approve and review with full access", "no tool or folder prompts", "Not", "sandboxed.", "Folders ○", "Tools ○")
+			term.assertAbsent("CADENCE APPROVAL RECEIVED")
+			term.send("\x1b[Z\x1b[A\x1b[A")
+			term.wait(run)
 			term.send("\x1b[A")
-			term.wait("▸ n    Decline")
+			term.wait("▸ 6/n  Decline")
 			term.send("\x1b[B")
 			term.wait(run)
 			if mode == agent.CodePlanReviewEachPhase {
-				term.send("\x1b[B")
+				term.send("\x1b[B\x1b[B")
 				term.wait(review)
 			}
 			term.send("\r")
 			term.wait("CADENCE APPROVAL RECEIVED")
+			// This fixture proves approval/cadence, not phase execution. Stop the
+			// still-incomplete execution before reopening so its response is flushed.
+			term.send("\x1b")
+			term.wait("Enter send")
 			term.assertAbsent("choose how to proceed")
 			term.close()
 			reopened, err := persistentsession.NewFileStore(storePath)
@@ -156,7 +164,7 @@ func TestCodePlanApprovalPTYAcceptance(t *testing.T) {
 				t.Fatalf("durable cadence=%q want %q", durable.Document.CodeExecutionMode, mode)
 			}
 			term = start()
-			term.wait("CADENCE APPROVAL RECEIVED")
+			term.wait("CADENCE APPROVAL RECEIVED", "Enter send")
 			term.assertAbsent("choose how to proceed")
 			term.close()
 			t.Logf("72x26 real Code PTY repaints arrows, wraps selection, persists %s and resumes without initial approval", mode)
@@ -175,28 +183,27 @@ func TestCodePlanPermissionsPTYAcceptance(t *testing.T) {
 				a, b := codePermissionsPTYOutside(t, f, "outside-a"), codePermissionsPTYOutside(t, f, "outside-b")
 				term := f.start()
 				codePermissionsPTYAnnounce(t, f, term, a, b)
-				term.wait("Permissions: Current approvals")
-				term.send("p")
-				term.wait("Full access for this plan", "Not sandboxed.")
-				if !full {
-					term.send("p")
-					term.wait("Permissions: Current approvals")
-					term.assertAbsent("Not sandboxed.")
-				}
+				term.wait("using current tool and folder approvals", "Folders ○", "Tools ○")
+				term.assertAbsent("p change")
+				term.send("p\x1b[B")
+				term.wait("without tool or folder prompts", "Not", "sandboxed.", "Folders ○", "Tools ○")
+				choice := 1
 				if mode == agent.CodePlanReviewEachPhase {
-					term.send("2")
-				} else {
-					term.send("1")
+					choice = 3
 				}
+				if full {
+					choice++
+				}
+				term.send(fmt.Sprint(choice))
 				f.update("one", "running")
 				if full {
-					term.wait("Full access · this plan")
+					term.wait("Folders ✓  Tools ✓")
 					term.send("\x10") // Ctrl+P remains available during active execution.
 					term.wait("Revoke Full access for this plan")
 					term.send("\x1b")
-					term.wait("Full access · this plan")
+					term.wait("Folders ✓  Tools ✓")
 				} else {
-					term.assertAbsent("Full access · this plan")
+					term.assertAbsent("Folders ✓  Tools ✓")
 				}
 				f.turn("write_file", map[string]any{"path": a, "content": "main-permission-proof"})
 				if !full {
@@ -236,7 +243,7 @@ func TestCodePlanPermissionsPTYAcceptance(t *testing.T) {
 				// its final response before the CLI returns to the composer.
 				codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{text: "PLAN PERMISSIONS COMPLETED"})
 				term.wait("PLAN PERMISSIONS COMPLETED", "Enter send")
-				term.assertAbsent("Full access · this plan")
+				term.assertAbsent("Folders ✓  Tools ✓")
 				if s := f.durable(); !s.IsFullyAccepted() || s.Document.CodeExecutionMode != mode {
 					t.Fatalf("completion/cadence not durable: %+v", s)
 				}
@@ -294,10 +301,10 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	term.send("3")
 	codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{name: "read_file", args: map[string]any{"path": b}})
 	codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{text: "SESSION FOLDERS GRANTED"})
-	term.wait("SESSION FOLDERS GRANTED", "Folders · session", "Enter send")
+	term.wait("SESSION FOLDERS GRANTED", "Folders ✓", "Enter send")
 	term.close()
 	term = f.start() // same durable session, new process; no permission reinjection
-	term.wait("Folders · session", "Enter send")
+	term.wait("Folders ✓", "Enter send")
 	c := codePermissionsPTYOutside(t, f, "folder-c")
 	if err := os.WriteFile(c, []byte("reopened-folder-proof"), 0600); err != nil {
 		t.Fatal(err)
@@ -318,7 +325,7 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	term.wait("Current approvals")
 	term.send("\x1b")
 	term.wait("Enter send")
-	term.assertAbsent("Folders · session")
+	term.assertAbsent("Folders ✓")
 	term.send("Read the new outside folder after revocation.\r")
 	f.turn("read_file", map[string]any{"path": c})
 	codePermissionsPTYFolderPrompt(term)
@@ -329,13 +336,13 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	// Reopen again to prove revocation is durable, not only an overlay repaint.
 	term = f.start()
 	term.wait("Enter send")
-	term.assertAbsent("Folders · session")
+	term.assertAbsent("Folders ✓")
 	term.send("Read after reopening the revoked session.\r")
 	f.turn("read_file", map[string]any{"path": c})
 	codePermissionsPTYFolderPrompt(term)
 	term.send("3") // regrant before switching, so isolation cannot pass vacuously
 	codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{text: "REGRANTED FOR ISOLATION"})
-	term.wait("REGRANTED FOR ISOLATION", "Folders · session", "Enter send")
+	term.wait("REGRANTED FOR ISOLATION", "Folders ✓", "Enter send")
 	term.close()
 	store, err := persistentsession.NewFileStore(f.storePath)
 	if err != nil {
@@ -348,7 +355,7 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	f.sessionID = created.Session.ID()
 	term = f.start()
 	term.wait("Enter send")
-	term.assertAbsent("Folders · session")
+	term.assertAbsent("Folders ✓")
 	term.send("Read the other session's outside folder.\r")
 	f.turn("read_file", map[string]any{"path": c})
 	codePermissionsPTYFolderPrompt(term)
@@ -482,5 +489,5 @@ func codePermissionsPTYAnnounce(t *testing.T, f *sidebarPTYFixture, term *handof
 		steps = append(steps, map[string]any{"name": name, "description": "Permission phase " + name, "details": "Exercise actual outside marker access", "summary": "Verify outside access " + name, "outcome": "Outside marker verified", "verify": verify, "verify_kind": "behavior", "parallel_group": "wave-" + name, "files": []any{map[string]any{"path": path, "kind": "new"}}})
 	}
 	f.turn("announce_plan", map[string]any{"goal": "Plan-scoped permission acceptance", "context": "## Problem\nProve permission scope.\n## Root causes\nIsolated terminal acceptance.\n## Approach\nWrite outside temporary project.\n## Boundaries\nTemporary HOME only.", "what_not_to_do": "Never touch user files", "verification": "Write and read outside markers through main, deferred, child and verifier tools", "steps": steps})
-	term.wait("Approve and run autonomously until done")
+	term.wait("Approve and run")
 }

@@ -223,7 +223,7 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 			if pending {
 				panelWants = append(panelWants, "0/3", "0%")
 			} else {
-				panelWants = append(panelWants, "1/3", "33%", "complete", "running", "pending")
+				panelWants = append(panelWants, "1/3", "33%", "✓ Prepare fixture", "● Implement panel", "○ Verify behavior")
 			}
 			frame := waitPlanPTYRegion(t, term, 92, 120, panelWants...)
 			panel := planPTYColumns(frame, 92, 120)
@@ -231,18 +231,18 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 				t.Fatalf("duplicate current section: %s", panel)
 			}
 			if !pending {
-				waitPlanPTYRegion(t, term, 92, 120, "● Implement panel", "running · recorded, not live")
+				waitPlanPTYRegion(t, term, 92, 120, "● Implement panel", "recorded, not live")
 			}
 			if pending {
-				const run = "▸ 1/y  Approve and run autonomously until done"
-				const review = "▸ 2    Approve and pause for review after each phase"
-				labels := []string{"Approve and run autonomously until done", "Approve and pause for review after each phase", "Request changes", "Decline", "Enter select"}
+				const run = "▸ 1/y  Approve and run"
+				const review = "▸ 3    Approve and review each phase"
+				labels := []string{"Approve and run", "Approve and review each phase", "Request changes", "Decline", "Enter select"}
 				term.wait(append(labels, run)...)
-				term.send("\x1b[B")
+				term.send("\x1b[B\x1b[B")
 				term.wait(append(labels, review)...)
 				term.assertAbsent(run)
 				waitPlanPTYRegion(t, term, 92, 120, panelWants...)
-				term.send("\x1b[A")
+				term.send("\x1b[A\x1b[A")
 				term.wait(append(labels, run)...)
 				term.assertAbsent(review)
 				waitPlanPTYRegion(t, term, 92, 120, panelWants...)
@@ -261,7 +261,7 @@ func TestCodePlanSidebarPTYBasic120x30(t *testing.T) {
 			// Real SIGWINCH round trip proves the synchronized fixture is usable
 			// by the later narrow/full-list acceptance, not just its constructor.
 			term.resize(80, 24)
-			term.wait(snapshot.Goal, "1/3", "33%", "Current: Implement panel")
+			term.wait(snapshot.Goal, "1/3", "33%", "Current: ● Implement panel")
 			term.resize(120, 30)
 			waitPlanPTYRegion(t, term, 92, 120, panelWants...)
 		})
@@ -591,8 +591,8 @@ func (f *sidebarPTYFixture) announce(term *handoffPTY, failFirst bool) {
 		steps = append(steps, map[string]any{"name": name, "description": "Phase " + name, "details": "Run the isolated marker verifier for " + name, "summary": "Verify the " + name + " capability", "outcome": "The " + name + " marker is verified", "verify": verify, "verify_kind": "behavior", "parallel_group": group, "files": []any{map[string]any{"path": marker, "kind": "new"}}})
 	}
 	f.turn("announce_plan", map[string]any{"goal": "Live sidebar fixture", "context": "## Problem\nProve real CLI plan progress.\n## Root causes\nFixture needs terminal evidence.\n## Approach\nRun isolated marker commands.\n## Boundaries\nTemporary HOME only.", "what_not_to_do": "Never touch user sessions or production files", "verification": "Observe phase markers and terminal progress", "steps": steps})
-	term.wait("Approve and run autonomously until done")
-	waitPlanPTYRegion(f.t, term, 92, 120, "Awaiting approval", "0/3", "0%", "pending")
+	term.wait("Approve and run")
+	waitPlanPTYRegion(f.t, term, 92, 120, "Awaiting approval", "0/3", "0%", "○ Phase one")
 }
 
 func sidebarPTYScrollOffCard(t *testing.T, term *handoffPTY) {
@@ -725,10 +725,15 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	}
 	term := f.start()
 	defer term.close()
-	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10", "running · recorded, not live")
+	frame := waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10", "recorded, not live")
+	for _, absent := range []string{"phase-10", "Group:", "wave", "running ·"} {
+		if strings.Contains(planPTYColumns(frame, 92, 120), absent) {
+			t.Fatalf("phase panel leaked %q:\n%s", absent, frame)
+		}
+	}
 	term.assertAbsent("Progress: unavailable")
 	term.send("\x07")
-	term.wait("Plan progress · esc back", "Current: phase-10")
+	term.wait("Plan progress · esc back", "Current: ● Follow phase 10")
 	term.assertAbsent("Progress: unavailable")
 	term.send("\x1b")
 	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 10")
@@ -798,7 +803,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 		tick.Stop()
 		tool(fmt.Sprintf("phase-%02d", phase), "complete")
 		tool(fmt.Sprintf("phase-%02d", phase+1), "running")
-		waitPlanPTYRegion(t, term, 92, 120, fmt.Sprintf("● Follow phase %02d", phase+1), "running")
+		waitPlanPTYRegion(t, term, 92, 120, fmt.Sprintf("● Follow phase %02d", phase+1))
 		assertHistory()
 	}
 	// Resizing with the same target must not undo manual browsing. A target
@@ -806,21 +811,21 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	term.send(strings.Repeat("\x1b[<64;110;15M", 100))
 	waitPlanPTYRegion(t, term, 92, 120, "Follow phase 01")
 	term.resize(80, 24)
-	term.wait("Current: phase-12", "73%")
+	term.wait("Current: ● Follow phase 12", "73%")
 	term.resize(120, 30)
 	waitPlanPTYRegion(t, term, 92, 120, "Follow phase 01")
 	// Resizing may change the number of visible rows, but not the top anchor.
 	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
 	term.resize(80, 24)
-	term.wait("Current: phase-12")
+	term.wait("Current: ● Follow phase 12")
 	tool("phase-12", "complete")
 	tool("phase-13", "running")
-	term.wait("Current: phase-13", "80%")
+	term.wait("Current: ● Follow phase 13", "80%")
 	term.resize(120, 30)
-	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 13", "running")
+	waitPlanPTYRegion(t, term, 92, 120, "● Follow phase 13")
 	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00")
 	term.resize(120, 65)
-	frame := waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "PHASES", "80%", "● Follow phase 13")
+	frame = waitPlanPTYRegion(t, term, 92, 120, "PLAN PROGRESS", "PHASES", "80%", "● Follow phase 13")
 	if panel := planPTYColumns(frame, 92, 120); strings.Contains(panel, "CURRENT") || strings.Contains(panel, "Current:") {
 		t.Fatal("wide running sidebar repeated current-phase names")
 	}
@@ -848,15 +853,15 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 	f.sessionID = replacement.Session.ID()
 	restored := f.start()
 	defer restored.close()
-	waitPlanPTYRegion(t, restored, 92, 120, "● Follow phase 14", "running · recorded, not live")
+	waitPlanPTYRegion(t, restored, 92, 120, "● Follow phase 14", "recorded, not live")
 }
 
 func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	f := newSidebarPTYFixture(t)
 	term := f.start()
 	f.announce(term, false)
-	term.send("\x1b[B")
-	term.wait("▸ 2    Approve and pause for review after each phase")
+	term.send("\x1b[B\x1b[B")
+	term.wait("▸ 3    Approve and review each phase")
 	term.send("\r")
 	f.update("one", "running")
 	waitSidebarPTYRunningCard(t, term, "one", "")
@@ -882,7 +887,7 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	term.send("\x07")
 	term.wait("Plan progress · esc back", "Phase one")
 	term.send("\x1b[6~")
-	term.wait("Phase three", "pending · not started")
+	term.wait("3. ○ Phase three")
 	term.assertAbsent("HISTORY MARKER 00")
 	term.send("\x1b")
 	term.wait("HISTORY MARKER 00", "DRAFT-KEEP", "Plan · 1/3 phases complete · 33%")
@@ -967,7 +972,7 @@ func waitSidebarPTYRunningCard(t *testing.T, term *handoffPTY, name, title strin
 				end++
 			}
 			card := strings.Join(lines[i:end], "\n")
-			if strings.Contains(card, name) && strings.Contains(card, "running") && !strings.Contains(card, "Progress: unavailable") {
+			if strings.Contains(card, name) && !strings.Contains(card, "running") && !strings.Contains(card, "Group:") && !strings.Contains(card, "Progress: unavailable") {
 				return
 			}
 		}

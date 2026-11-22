@@ -133,11 +133,41 @@ func planCountsLabel(v planProgressView) string {
 	return fmt.Sprintf("%d/%d phases complete · %d%%", v.Counts.Complete, v.Counts.Total, v.Percent)
 }
 
+// planPhasePresentation keeps progress surfaces human-readable while retaining
+// raw phase identities in the projection and navigation anchors.
+func planPhasePresentation(p planPhaseView) (title, glyph, qualification string) {
+	title = p.Description
+	if strings.TrimSpace(title) == "" {
+		title = p.Name
+	}
+	switch p.State {
+	case planPhaseComplete:
+		glyph = "✓"
+	case planPhaseRunning:
+		glyph = "●"
+		if !p.Live {
+			qualification = "recorded, not live"
+		}
+	case planPhasePending:
+		glyph = "○"
+	case planPhaseFailed:
+		glyph = "✗"
+	default:
+		glyph = "?"
+	}
+	return
+}
+
 func planCurrentNames(v planProgressView) string {
 	var names []string
 	for _, p := range v.Phases {
 		if p.Current {
-			names = append(names, p.Name)
+			title, glyph, qualification := planPhasePresentation(p)
+			label := glyph + " " + title
+			if qualification != "" {
+				label += " · " + qualification
+			}
+			names = append(names, label)
 		}
 	}
 	if len(names) == 0 {
@@ -209,27 +239,10 @@ func (m model) renderPlanProgressBody(width int, full bool) string {
 		}
 	}
 	for i, p := range v.Phases {
-		title := p.Description
-		if title == "" {
-			title = p.Name
-		}
-		fmt.Fprintf(&b, "%s\n", wrapPlain(fmt.Sprintf("%d. %s", i+1, title), width))
-		if title != p.Name && p.Name != "" {
-			fmt.Fprintf(&b, "%s\n", wrapPlain(p.Name, width))
-		}
-		status := string(p.State)
-		if p.State == planPhasePending {
-			status = "pending · not started"
-		}
-		if p.Current && !p.Live {
-			status += " · recorded, not live"
-		}
-		if p.Live {
-			status += " · live"
-		}
-		fmt.Fprintf(&b, "%s\n", wrapPlain(status, width))
-		if p.ParallelGroup != "" {
-			fmt.Fprintf(&b, "%s\n", wrapPlain("Group: "+p.ParallelGroup, width))
+		title, glyph, qualification := planPhasePresentation(p)
+		fmt.Fprintf(&b, "%s\n", wrapPlain(fmt.Sprintf("%d. %s %s", i+1, glyph, title), width))
+		if qualification != "" {
+			fmt.Fprintf(&b, "%s\n", wrapPlain(qualification, width))
 		}
 		if full {
 			if p.Summary != "" {

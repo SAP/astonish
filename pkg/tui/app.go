@@ -22,7 +22,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
-	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/provider/xai_oauth"
 	"github.com/SAP/astonish/pkg/store"
@@ -178,7 +177,6 @@ type model struct {
 	// planApprovalPending prevents duplicate approval turns while persistence and
 	// RunTurn execute asynchronously outside Bubble Tea's update loop.
 	planApprovalPending    bool
-	planPermission         agent.CodePlanPermissionMode
 	planPermissionIdentity string
 	themePicker            themePickerState
 	themeGeneration        uint64
@@ -2789,6 +2787,9 @@ func (m *model) layout() {
 	if m.tr != nil && m.tr.Awaiting {
 		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
 			chrome = headerH + 1 + hintsH + m.stickyHeaderLines + m.compactPlanHeight()
+			if m.info.Mode == "code" {
+				chrome += metaH
+			}
 		} else if m.planLayout() != planLayoutHidden {
 			chrome = 4 + lipgloss.Height(m.renderApprovalOverlay()) + m.stickyHeaderLines + m.compactPlanHeight()
 		}
@@ -3782,7 +3783,7 @@ func (m *model) renderTranscript() (string, []hitRegion, []artifactHit) {
 			approvalState := ""
 			if it.PlanStatus == events.PlanPending {
 				// Pending cards contain controls: content alone cannot cache their cursor.
-				approvalState = fmt.Sprintf("%d:%q:%s:%t:%t", m.tr.ApprovalCursor, m.planApprovalOptions(it), m.planPermission, m.planApprovalPending, m.info.AutoApprove)
+				approvalState = fmt.Sprintf("%d:%q:%s:%t:%t", m.tr.ApprovalCursor, m.planApprovalOptions(it), m.planPermissionIdentity, m.planApprovalPending, m.info.AutoApprove)
 			}
 			cacheKey := itemCacheKey(cw, it.Kind, it.Content+string(it.PlanStatus), it.Expanded, approvalState, "")
 			if cached, ok := m.itemRenderCache[cacheKey]; ok {
@@ -4567,6 +4568,10 @@ func (m model) viewContent() string {
 	if m.tr.Awaiting {
 		it := m.approvalItem()
 		if it != nil && it.ApprovalKind == "plan" {
+			if m.info.Mode == "code" {
+				return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
+					m.renderHeader(), sep, body, m.renderFooterMeta(), m.renderHints()))
+			}
 			return m.paintBackground(lipgloss.JoinVertical(lipgloss.Left,
 				m.renderHeader(), sep, body, m.renderHints()))
 		}
@@ -5762,7 +5767,7 @@ func (m model) renderFooterMeta() string {
 	left := modelFooterText(provider, modelName)
 	folder := footerWorkDirText(m.info.WorkingDir, m.info.GitBranch)
 	right := ""
-	if m.info.AutoApprove {
+	if m.info.AutoApprove && m.info.Mode != "code" {
 		right = "auto-approve"
 	}
 	if permissions := m.codePermissionFooter(); permissions != "" {
@@ -5770,6 +5775,12 @@ func (m model) renderFooterMeta() string {
 			right += " · "
 		}
 		right += permissions
+	}
+	if m.info.Mode == "code" && right != "" {
+		if m.width <= lipgloss.Width(right) {
+			return m.paintRow(th.FooterMeta.Render(truncateToWidth(right, max(0, m.width))), m.width)
+		}
+		left = truncateToWidth(left, max(0, m.width-lipgloss.Width(right)-1))
 	}
 	leftR := th.FooterMeta.Render(left)
 	leftW := lipgloss.Width(leftR)
@@ -5867,7 +5878,7 @@ func (m model) renderHints() string {
 	if m.tr.Awaiting {
 		if it := m.approvalItem(); it != nil && it.ApprovalKind == "plan" {
 			if m.info.Mode == "code" {
-				return th.Hint.Render("Enter select  ·  1 run  ·  2 review  ·  r changes  ·  Esc decline")
+				return th.Hint.Render("Enter select  ·  1–6 choose  ·  y safe run  ·  r changes  ·  Esc decline")
 			}
 			return th.Hint.Render("enter implement  ·  r request changes  ·  n/esc decline  ·  ↑↓ choose")
 		}

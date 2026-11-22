@@ -74,7 +74,7 @@ func TestCodePermissionsRefreshDuringSaveIsNotLost(t *testing.T) {
 	msg.snapshot.SessionID = "other"
 	next, _ = m.Update(msg)
 	m = next.(model)
-	if m.permissions.known || m.codePermissionFooter() != "" || m.permissions.err == "" {
+	if m.permissions.known || m.codePermissionFooter() != "Folders ?  Tools ?" || m.permissions.err == "" {
 		t.Fatal("wrong-session projection retained authority")
 	}
 }
@@ -122,7 +122,7 @@ func TestCodePermissionsCtrlPAndModalInput(t *testing.T) {
 	m.tr.Apply(events.NewPlan("plan", events.PlanPending))
 	next, _ = m.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
 	m = next.(model)
-	if m.permissions.open || m.tr.ApprovalCursor != 3 {
+	if m.permissions.open || m.tr.ApprovalCursor != 5 {
 		t.Fatal("Ctrl+P replaced approval navigation")
 	}
 }
@@ -174,7 +174,7 @@ func TestCodePermissionsOverlayLifecycle(t *testing.T) {
 	if !m.permissions.known || m.permissions.loading {
 		t.Fatalf("load failed %+v", m.permissions)
 	}
-	if !strings.Contains(m.renderFooterMeta(), "Folders · session") {
+	if !strings.Contains(m.renderFooterMeta(), "Folders ✓") {
 		t.Fatal("missing live footer")
 	}
 	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -184,7 +184,7 @@ func TestCodePermissionsOverlayLifecycle(t *testing.T) {
 	}
 	next, _ = m.Update(cmd())
 	m = next.(model)
-	if b.revoked != backend.CodePermissionSessionAllFolders || strings.Contains(m.renderFooterMeta(), "Folders · session") {
+	if b.revoked != backend.CodePermissionSessionAllFolders || strings.Contains(m.renderFooterMeta(), "Folders ✓") {
 		t.Fatal("revoke not reflected")
 	}
 	if !strings.Contains(m.renderCodePermissions(), "Current approvals") {
@@ -252,13 +252,136 @@ func TestCodePermissionsStaleRefreshAndConfirmedReenable(t *testing.T) {
 	m = next.(model)
 	next, _ = m.Update(cmd())
 	m = next.(model)
-	if b.enabled != 1 || !strings.Contains(m.renderFooterMeta(), "Full access · this plan") {
+	if b.enabled != 1 || !strings.Contains(m.renderFooterMeta(), "Folders ✓  Tools ✓") {
 		t.Fatal("reenable not reflected")
 	}
 	m.tr = events.NewTranscript()
 	m.syncCodePermissions()
-	if m.permissions.known || m.permissions.open || m.codePermissionFooter() != "" {
+	if m.permissions.known || m.permissions.open || m.codePermissionFooter() != "Folders ?  Tools ?" {
 		t.Fatal("session switch leaked grant")
+	}
+}
+
+func TestCodePlanApprovalSelectedDescription(t *testing.T) {
+	want := []string{
+		"Run all verified phases using current tool and folder approvals.",
+		"Run all verified phases without tool or folder prompts for this plan. Not sandboxed.",
+		"Pause after each verified phase, using current tool and folder approvals.",
+		"Pause after each verified phase; no tool or folder prompts for this plan. Not sandboxed.",
+		"Return to planning so you can describe the changes needed.",
+		"Do not execute this plan; return to Normal mode.",
+	}
+	for _, width := range []int{40, 120} {
+		m := newTestComposerModel(width)
+		m.info.Mode = "code"
+		m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
+		m.refreshViewport()
+		for i, description := range want {
+			m.tr.ApprovalCursor = i
+			for name, surface := range map[string]string{
+				"card":    strings.Join(m.planApprovalLines(*m.approvalItem(), width-10), "\n"),
+				"footer":  m.renderPlanApprovalFooter(),
+				"overlay": m.renderPlanApprovalOverlay(m.approvalItem()),
+			} {
+				plain := stripANSI(surface)
+				// Borders and padding separate wrapped lines but no prose may be lost.
+				plain = strings.Map(func(r rune) rune {
+					if strings.ContainsRune("│╭╮╰╯─", r) {
+						return ' '
+					}
+					return r
+				}, plain)
+				plain = strings.Join(strings.Fields(plain), " ")
+				if strings.Count(plain, description) != 1 {
+					t.Fatalf("%s width=%d cursor=%d selected explanation missing/duplicated: %s", name, width, i, plain)
+				}
+				for j, other := range want {
+					if i != j && strings.Contains(plain, other) {
+						t.Fatalf("%s includes unselected description %d", name, j)
+					}
+				}
+				if strings.Contains(plain, "p change") {
+					t.Fatal("obsolete permission toggle")
+				}
+			}
+		}
+		m.planApprovalPending = true
+		if got := strings.Join(m.planApprovalDescriptionLines(120), " "); !strings.Contains(got, want[5]) || !strings.Contains(got, "Saving approval…") {
+			t.Fatalf("pending description: %s", got)
+		}
+		m.info.AutoApprove = true
+		if got := strings.Join(m.planApprovalDescriptionLines(160), " "); strings.Count(got, "safe choices do not disable it") != 1 {
+			t.Fatalf("override notice: %s", got)
+		}
+		m.cancel()
+	}
+}
+
+func TestCodePlanApprovalSafeAccelerators(t *testing.T) {
+	for _, key := range []string{"y", "Y", "1"} {
+		b := &codePlanApprovalCaptureBackend{}
+		m := newModel(context.Background(), Config{Backend: b, Width: 100, Height: 40})
+		m.info.Mode = "code"
+		s := agent.PlanSnapshot{PlanID: "safe", Revision: 2, Sequence: 3, Steps: []agent.PlanStepInfo{{Name: "one"}}}
+		m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
+		m.refreshViewport()
+		m.tr.ApprovalCursor = 3
+		next, cmd, handled := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+		m = next.(model)
+		if !handled || cmd != nil || m.tr.ApprovalCursor != 3 || b.message != "" {
+			t.Fatal("p changed or dispatched approval")
+		}
+		next, cmd, handled = m.handlePlanApprovalKey(tea.KeyPressMsg{Code: rune(key[0]), Text: key})
+		m = next.(model)
+		if !handled || cmd == nil {
+			t.Fatalf("%s did not submit", key)
+		}
+		started := cmd().(planApprovalStartedMsg)
+		if started.err != nil {
+			t.Fatal(started.err)
+		}
+		if b.opts.CodePlanPermissionMode != agent.CodePlanCurrentApprovals || b.opts.CodePlanExecutionMode != agent.CodePlanRunToCompletion || b.opts.CodePlanApprovalID != "safe" || b.opts.CodePlanApprovalRevision != 2 {
+			t.Fatalf("%s inherited highlighted authority: %+v", key, b.opts)
+		}
+		started.cancel()
+		m.cancel()
+	}
+}
+
+func TestCodePlanApprovalNarrowMouseCatalog(t *testing.T) {
+	m := newTestComposerModel(30)
+	defer m.cancel()
+	m.info.Mode = "code"
+	m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
+	m.refreshViewport()
+	for i, option := range m.approvalOptions() {
+		prefix := strings.SplitN(m.planApprovalLabel(option, i), "  ", 2)[0]
+		found := false
+		for line, text := range m.transcriptPlainLines {
+			if col := strings.Index(text, prefix+"  "); col >= 0 {
+				got, ok := m.codePlanApprovalAtPoint(selectionPoint{line: line, col: len([]rune(text[:col])) + 1})
+				if !ok || got != i {
+					t.Fatalf("option %d narrow hit=%d/%t: %q", i, got, ok, text)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("narrow option %d absent", i)
+		}
+	}
+}
+
+func TestCodePlanApprovalExplicitAccessChoices(t *testing.T) {
+	m := newTestComposerModel(110)
+	defer m.cancel()
+	m.info.Mode = "code"
+	m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
+	m.refreshViewport()
+	want := []string{"Approve and run", "Approve and run with full access", "Approve and review each phase", "Approve and review with full access", "Request changes", "Decline"}
+	if !reflect.DeepEqual(m.approvalOptions(), want) {
+		t.Fatalf("catalog = %v", m.approvalOptions())
 	}
 }
 
@@ -268,13 +391,13 @@ func TestCodePlanPermissionRepaintsCachedCard(t *testing.T) {
 	m.info.Mode = "code"
 	m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
 	m.refreshViewport()
-	if !strings.Contains(stripANSI(m.vp.View()), "Current approvals") {
+	if !strings.Contains(stripANSI(m.vp.View()), "Run all verified phases using current tool and folder approvals.") {
 		t.Fatal("default missing")
 	}
-	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(model)
 	view := stripANSI(m.vp.View())
-	if !strings.Contains(view, "Full access for this plan") || !strings.Contains(view, "Not") || !strings.Contains(view, "sandboxed.") {
+	if !strings.Contains(view, "without tool or folder prompts") || !strings.Contains(view, "Not") || !strings.Contains(view, "sandboxed.") {
 		t.Fatalf("stale permission card: %s", stripANSI(m.vp.View()))
 	}
 }
@@ -289,22 +412,22 @@ func TestCodePermissionSelectionIdentityAndAtomicOptions(t *testing.T) {
 		m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
 		m.ta.SetValue("draft remains")
 		m.refreshViewport()
-		next, _, handled := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+		next, _, handled := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
 		m = next.(model)
-		if !handled || m.planPermission != agent.CodePlanFullAccess {
-			t.Fatal("p did not select full access")
+		if !handled || m.tr.ApprovalCursor != 1 {
+			t.Fatal("Down did not highlight full access")
 		}
 		m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
 		m.refreshViewport()
-		if m.planPermission != agent.CodePlanFullAccess {
+		if m.tr.ApprovalCursor != 1 {
 			t.Fatal("duplicate reset selection")
 		}
-		if !strings.Contains(strings.Join(m.planPermissionLines(160), "\n"), "Not sandboxed.") {
+		if !strings.Contains(strings.Join(m.planApprovalDescriptionLines(160), "\n"), "Not sandboxed.") {
 			t.Fatal("warning missing")
 		}
-		choice := planOptRun
+		choice := planOptRunFull
 		if mode == agent.CodePlanReviewEachPhase {
-			choice = planOptReview
+			choice = planOptReviewFull
 		}
 		next, cmd := m.submitPlanApproval(choice)
 		m = next.(model)
@@ -332,20 +455,20 @@ func TestCodePermissionSelectionResetsAndFailureKeepsDraft(t *testing.T) {
 	s := agent.PlanSnapshot{PlanID: "one", Revision: 1, Sequence: 1, Steps: []agent.PlanStepInfo{{Name: "one"}}}
 	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
 	m.refreshViewport()
-	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	next, _, _ := m.handlePlanApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	m = next.(model)
 	m.planApprovalPending = true
 	m.ta.SetValue("keep me")
 	next, _ = m.Update(planApprovalStartedMsg{err: fmt.Errorf("disk full")})
 	m = next.(model)
-	if m.planPermission != agent.CodePlanFullAccess || !m.tr.Awaiting || m.ta.Value() != "keep me" || m.planApprovalPending {
+	if m.tr.ApprovalCursor != 1 || !m.tr.Awaiting || m.ta.Value() != "keep me" || m.planApprovalPending {
 		t.Fatal("failure destroyed retry state")
 	}
 	s.Revision++
 	s.Sequence++
 	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
 	m.refreshViewport()
-	if m.planPermission != agent.CodePlanCurrentApprovals {
+	if m.tr.ApprovalCursor != 0 {
 		t.Fatal("revision retained escalation")
 	}
 }
@@ -392,14 +515,16 @@ func TestCodePlanApprovalSingleLineOptionsAndRemoteOptions(t *testing.T) {
 	defer m.cancel()
 	m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
 	m.info.Mode = "code"
-	m.tr.ApprovalCursor = 1
 	m.refreshViewport()
+	m.tr.ApprovalCursor = 1
 	want := []string{
 		"✦ Plan Ready · choose how to proceed",
-		"  1/y  Approve and run autonomously until done",
-		"▸ 2    Approve and pause for review after each phase",
-		"  r    Request changes",
-		"  n    Decline",
+		"  1/y  Approve and run",
+		"▸ 2    Approve and run with full access",
+		"  3    Approve and review each phase",
+		"  4    Approve and review with full access",
+		"  5/r  Request changes",
+		"  6/n  Decline",
 	}
 	lines := m.planApprovalLines(*m.approvalItem(), 90)
 	for i, line := range want {
@@ -407,7 +532,7 @@ func TestCodePlanApprovalSingleLineOptionsAndRemoteOptions(t *testing.T) {
 			t.Fatalf("option row %d = %q, want %q", i, got, line)
 		}
 	}
-	if len(lines) != 10 {
+	if len(lines) != 12 {
 		t.Fatalf("expected header, four single-line options and key hint; got %d lines: %v", len(lines), lines)
 	}
 	if !strings.Contains(stripANSI(m.renderHints()), "Enter select") {
@@ -441,14 +566,17 @@ func TestCodePlanApprovalModes(t *testing.T) {
 		name, mode, key string
 		down            int
 		want            agent.CodePlanExecutionMode
+		permission      agent.CodePlanPermissionMode
 		status          events.PlanStatus
 	}{
 		{name: "default", mode: "code", want: agent.CodePlanRunToCompletion},
-		{name: "review", mode: "code", down: 1, want: agent.CodePlanReviewEachPhase},
-		{name: "review accelerator", mode: "code", key: "2", want: agent.CodePlanReviewEachPhase},
+		{name: "review", mode: "code", down: 2, want: agent.CodePlanReviewEachPhase},
+		{name: "review accelerator", mode: "code", key: "3", want: agent.CodePlanReviewEachPhase},
+		{name: "run full accelerator", mode: "code", key: "2", want: agent.CodePlanRunToCompletion, permission: agent.CodePlanFullAccess},
+		{name: "review full accelerator", mode: "code", key: "4", want: agent.CodePlanReviewEachPhase, permission: agent.CodePlanFullAccess},
 		{name: "run accelerator", mode: "code", key: "y", want: agent.CodePlanRunToCompletion},
-		{name: "changes", mode: "code", key: "3", status: events.PlanChangesRequested},
-		{name: "decline", mode: "code", key: "4", status: events.PlanDeclined},
+		{name: "changes", mode: "code", key: "5", status: events.PlanChangesRequested},
+		{name: "decline", mode: "code", key: "6", status: events.PlanDeclined},
 		{name: "escape", mode: "code", key: "esc", status: events.PlanDeclined},
 		{name: "platform", mode: "platform"},
 		{name: "platform changes", mode: "platform", key: "2", status: events.PlanChangesRequested},
@@ -508,6 +636,15 @@ func TestCodePlanApprovalModes(t *testing.T) {
 			if capture.opts.CodePlanExecutionMode != tc.want || !capture.opts.ApprovedPlanExecution {
 				t.Fatalf("options: %+v", capture.opts)
 			}
+			if tc.mode == "code" {
+				wantPermission := tc.permission
+				if wantPermission == "" {
+					wantPermission = agent.CodePlanCurrentApprovals
+				}
+				if capture.opts.CodePlanPermissionMode != wantPermission {
+					t.Fatalf("permission = %q, want %q", capture.opts.CodePlanPermissionMode, wantPermission)
+				}
+			}
 			if _, duplicate := m.submitPlanApproval(planOptApprove); duplicate != nil {
 				t.Fatal("duplicate approval launched")
 			}
@@ -529,16 +666,18 @@ func TestCodePlanApprovalNavigationAndMouse(t *testing.T) {
 		m.tr.Apply(events.NewPlan("Short plan", events.PlanPending))
 		m.refreshViewport()
 		opts := m.approvalOptions()
-		if len(opts) != 4 {
+		if len(opts) != 6 {
 			t.Fatalf("Code options %v", opts)
 		}
-		for _, idx := range []int{1, 2, 3, 0} {
-			next, _, _ := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
+		m.syncCodePermissions()
+		m.permissions.known = true
+		for _, idx := range []int{1, 2, 3, 4, 5, 0} {
+			next, cmd, _ := m.handleApprovalKey(tea.KeyPressMsg{Code: tea.KeyDown})
 			m = next.(model)
-			selected := "▸ " + m.planApprovalLabel(opts[idx], idx)
-			if width == 60 && idx == 1 {
-				selected = "▸ 2    Approve and pause for review after each ph…"
+			if cmd != nil || capture.message != "" || m.codePermissionFooter() != "Folders ○  Tools ○" {
+				t.Fatal("navigation dispatched execution or projected authority")
 			}
+			selected := "▸ " + m.planApprovalLabel(opts[idx], idx)
 			if got := stripANSI(m.vp.View()); !strings.Contains(got, selected) {
 				t.Fatalf("width %d cursor %d missing %q: %s", width, idx, selected, got)
 			}
@@ -546,7 +685,7 @@ func TestCodePlanApprovalNavigationAndMouse(t *testing.T) {
 		var point selectionPoint
 		found := false
 		for line, text := range m.transcriptPlainLines {
-			if col := strings.Index(text, "2    Approve and pause for review"); col >= 0 {
+			if col := strings.Index(text, "3    Approve and review each phase"); col >= 0 {
 				point = selectionPoint{line: line, col: len([]rune(text[:col])) + 3}
 				found = true
 				break

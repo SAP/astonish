@@ -2986,10 +2986,7 @@ func (m model) welcomeLines(width int) []string {
 // shows the directory being operated on.
 func (m model) codeWelcomeLines(width int) []string {
 	th := m.theme
-	title := lipgloss.NewStyle().
-		Foreground(m.theme.AccentColor).
-		Background(m.theme.Background.GetBackground()).
-		Bold(true).
+	title := th.Header.
 		Align(lipgloss.Center).
 		Width(width).
 		Render("✦ Astonish Code")
@@ -5626,7 +5623,7 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	}
 	if m.theme.CodeThemeID != "" {
 		if m.graphPlanMode || m.planMode {
-			return m.theme.PlanSection
+			return m.theme.Background.Foreground(m.theme.InputBorderPlan.GetBorderTopForeground())
 		}
 		if m.askMode {
 			return m.theme.AskBorder
@@ -5692,6 +5689,9 @@ func (m model) renderComposerBottomBorder(width int, label string, border lipglo
 		if left < 1 {
 			left = 1
 		}
+	}
+	if m.theme.CodeThemeID != "" && !m.theme.NoColor {
+		bg = bg.Foreground(border.GetForeground())
 	}
 	return border.Render("╰"+strings.Repeat("─", left)) +
 		bg.Render(text) +

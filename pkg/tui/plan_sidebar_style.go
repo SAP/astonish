@@ -44,7 +44,11 @@ func (m model) planPanelHeader(width, height int) string {
 	s := m.planPanelStyles()
 	title := "PLAN PROGRESS"
 	badge := "Ctrl+G"
-	lines := []string{s.title.Render(title) + strings.Repeat(" ", max(1, width-len(title)-len(badge))) + s.muted.Render(badge)}
+	heading := s.title
+	if m.theme.CodeThemeID != "" && !m.theme.NoColor {
+		heading = m.theme.PlanHeader
+	}
+	lines := []string{heading.Render(title) + strings.Repeat(" ", max(1, width-len(title)-len(badge))) + s.muted.Render(badge)}
 	rule := s.border.Render(strings.Repeat("─", width))
 	status, style := m.planPanelStatus(v)
 	goal := v.Goal

@@ -79,6 +79,42 @@ func assertCodeThemePTYText(t *testing.T, term *handoffPTY, colored *sidebarPTYC
 	}
 }
 
+func assertCodeThemePTYComposer(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, label, foreground string, plain bool) {
+	t.Helper()
+	phrase := " " + label + " "
+	assertCodeThemePTYText(t, term, colored, phrase, foreground, "#101922", plain)
+	if plain {
+		foreground = "default"
+	}
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	for y, row := range colored.screen.cells {
+		x := strings.Index(string(row), phrase)
+		if x < 0 || row[0] != '╰' {
+			continue
+		}
+		x = ansi.StringWidth(string(row)[:x])
+		// Check every label and bottom-border cell, plus the matching top/side
+		// outlines. Old frames in raw stdout are deliberately not evidence.
+		for cy := y; cy >= 0; cy-- {
+			for cx, cell := range colored.screen.cells[cy] {
+				labelCell := cy == y && cx >= x && cx < x+len(phrase)
+				borderCell := strings.ContainsRune("╭╮╰╯─│", cell)
+				if labelCell || borderCell {
+					if got := colored.colorNames[colored.foreground.cells[cy][cx]]; got != foreground {
+						t.Fatalf("%s composer cell %d,%d = %s want %s", label, cx, cy, got, foreground)
+					}
+				}
+			}
+			if colored.screen.cells[cy][0] == '╭' {
+				return
+			}
+		}
+		t.Fatal("composer top border missing")
+	}
+	t.Fatalf("composer bottom label %q missing", label)
+}
+
 func assertCodeThemePTYCanvas(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, noColor bool) {
 	t.Helper()
 	term.mu.Lock()
@@ -131,7 +167,14 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 				term, colored := startCodeThemePTY(t, f, plain, args...)
 				defer term.close()
 				term.wait("Ready when you are.", "Enter send")
-				assertCodeThemePTYText(t, term, colored, "Astonish Code", "#86cfee", "#101922", plain)
+				for i, mode := range []struct{ label, rgb string }{{"Normal", "#344552"}, {"Plan", "#e5b766"}, {"Ask", "#38df92"}, {"Normal", "#344552"}} {
+					if i > 0 {
+						term.send("\x1b[Z")
+					} // real Shift+Tab input
+					assertCodeThemePTYComposer(t, term, colored, mode.label, mode.rgb, plain)
+				}
+				assertCodeThemePTYText(t, term, colored, "Astonish · code", "#ff8700", "#101922", plain)
+				assertCodeThemePTYText(t, term, colored, "Astonish Code", "#ff8700", "#101922", plain)
 				assertCodeThemePTYText(t, term, colored, "Ready when you are.", "#9cafbf", "#101922", plain)
 				assertCodeThemePTYCanvas(t, term, colored, plain)
 				resizeSidebarPTYColor(term, colored, 72, 40)
@@ -156,6 +199,9 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 				t.Fatal("no stream request")
 			}
 			term.wait("Reference document", "TABLE-END", "DOCUMENT-END", "func theme()")
+			assertCodeThemePTYText(t, term, colored, "Reference document", "#ff8700", "#101922", plain)
+			assertCodeThemePTYText(t, term, colored, "Component", "#ff8700", "#101922", plain)
+			assertCodeThemePTYText(t, term, colored, "func theme()", "#ff8700", "#101922", plain)
 			assertCodeThemePTYText(t, term, colored, "Readable cool-white prose.", "#e2edf5", "#101922", plain)
 			assertCodeThemePTYCanvas(t, term, colored, plain)
 			frame := term.frame()
@@ -197,6 +243,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 			term.wait("▸ Edited 1 file", "Enter send")
 			f.announce(term, false)
 			waitPlanPTYRegion(t, term, 92, 120, "Awaiting approval", "PHASES", "╰")
+			assertCodeThemePTYText(t, term, colored, "PLAN PROGRESS", "#ff8700", "#101922", plain)
 			assertSidebarPTYDivider(t, term, colored, plain)
 			term.send("\r")
 			f.update("one", "running")
@@ -228,6 +275,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 			term.close()
 			term, colored = startCodeThemePTY(t, f, plain, args...)
 			waitPlanPTYRegion(t, term, 92, 120, "COMPLETED", "Results recorded", "100%", "PHASES", "╰")
+			assertCodeThemePTYText(t, term, colored, "PLAN PROGRESS", "#ff8700", "#101922", plain)
 			assertSidebarPTYDivider(t, term, colored, plain)
 			term.send("/permissions\r")
 			term.wait("Current approvals")

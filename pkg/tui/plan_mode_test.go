@@ -2,14 +2,61 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestCodeComposerModeCycleColors(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(fmt.Sprintf("plain=%v", plain), func(t *testing.T) {
+			if plain {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("NO_COLOR", "")
+			}
+			m := newTestComposerModel(80)
+			m.info.Mode = "code"
+			m.theme = DefaultTheme()
+			platform := model{info: backend.Info{Mode: "platform"}, theme: PlatformTheme()}
+			for i, mode := range []struct{ label, rgb string }{{"Normal", "#344552"}, {"Plan", "#e5b766"}, {"Ask", "#38df92"}, {"Normal", "#344552"}} {
+				if i > 0 {
+					m.togglePlanMode()
+				}
+				out := m.renderComposer()
+				if m.composerModeLabel() != mode.label {
+					t.Fatalf("cycle %d label = %s", i, m.composerModeLabel())
+				}
+				if plain {
+					if strings.Contains(out, "\x1b[38;") || strings.Contains(out, "\x1b[48;") {
+						t.Fatalf("NO_COLOR composer: %q", out)
+					}
+					continue
+				}
+				style := lipgloss.NewStyle().Foreground(lipgloss.Color(mode.rgb)).Background(m.theme.Background.GetBackground())
+				for _, rendered := range []string{style.Render("╭" + strings.Repeat("─", 78) + "╮"), style.Render(" " + mode.label + " ")} {
+					if !strings.Contains(out, rendered) {
+						t.Errorf("%s missing correctly colored border/label %q in %q", mode.label, rendered, out)
+					}
+				}
+				if m.composerBorderStyle().GetForeground() == platform.composerBorderStyle().GetForeground() {
+					t.Errorf("%s collapsed into Platform cyan", mode.label)
+				}
+			}
+			m.planMode = true // legacy/simple Plan uses the same dedicated composer role.
+			if !plain && m.composerBorderStyle().GetForeground() != lipgloss.Color("#e5b766") {
+				t.Error("simple Plan lost amber role")
+			}
+		})
+	}
+}
 
 func TestTurnOptionsPlanMode(t *testing.T) {
 	m := model{}

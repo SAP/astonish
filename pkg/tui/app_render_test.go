@@ -15,6 +15,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
@@ -1457,8 +1458,29 @@ func TestCodeThemeResolverRolesAndResetRepair(t *testing.T) {
 			t.Fatalf("resolve %q: %v", id, err)
 		}
 		st := th.RenderStyles()
+		for _, heading := range []lipgloss.Style{th.Header, th.PlanHeader, th.PlanTitle, st.Heading, st.Heading1, st.Heading2, st.Heading3} {
+			if heading.GetForeground() != lipgloss.Color("#ff8700") {
+				t.Errorf("prominent Code heading foreground = %v, want orange", heading.GetForeground())
+			}
+		}
+		for _, accent := range []lipgloss.Style{th.Brand, th.Number, th.Activity, th.Spinner, th.PlanSection, st.TableHeader, st.CodeHeader} {
+			if accent.GetForeground() != lipgloss.Color("#ff8700") {
+				t.Errorf("Code accent foreground = %v, want orange", accent.GetForeground())
+			}
+		}
+		if th.Text.GetForeground() != lipgloss.Color("#e2edf5") || th.Muted.GetForeground() != lipgloss.Color("#9cafbf") {
+			t.Error("body/metadata colors changed")
+		}
 		if st.TableLayout != render.TableLayoutFramed || st.SyntaxStyle == nil {
 			t.Fatal("renderer lost theme roles")
+		}
+		for _, token := range []chroma.TokenType{chroma.Keyword, chroma.NameFunction, chroma.Operator} {
+			if got := st.SyntaxStyle.Get(token).Colour.String(); got != "#ff8700" {
+				t.Errorf("Code syntax %v = %s, want orange", token, got)
+			}
+		}
+		if st.SyntaxStyle.Get(chroma.LiteralString).Colour.String() != "#38df92" || st.SyntaxStyle.Get(chroma.Error).Colour.String() != "#ff7f87" {
+			t.Error("semantic syntax string/error colors changed")
 		}
 		copy := th
 		copy.Text = copy.Text.Bold(true)

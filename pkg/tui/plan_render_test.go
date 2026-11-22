@@ -653,8 +653,7 @@ Legend: ` + "`[ ]`" + ` pending
 		t.Fatalf("expected plan title text in output:\n%s", plain)
 	}
 
-	// The title line must carry the PlanTitle accent (orange 208). Find the
-	// rendered line containing the title and assert it uses the 208 foreground.
+	// The title line must carry the orange PlanTitle foreground.
 	var titleLine string
 	for _, l := range strings.Split(out, "\n") {
 		if strings.Contains(stripANSI(l), "Distinct title styling") {
@@ -665,8 +664,8 @@ Legend: ` + "`[ ]`" + ` pending
 	if titleLine == "" {
 		t.Fatalf("could not find rendered title line in output:\n%s", out)
 	}
-	if !strings.Contains(titleLine, "38;2;134;207;238") {
-		t.Fatalf("expected PlanTitle accent (208) on the title line, got:\n%q", titleLine)
+	if !strings.Contains(titleLine, "38;2;255;135;0") {
+		t.Fatalf("expected orange PlanTitle on the title line, got:\n%q", titleLine)
 	}
 
 	// NO_COLOR: title text still present, no ANSI escapes.
@@ -711,8 +710,8 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 			break
 		}
 	}
-	if titleLine == "" || !strings.Contains(titleLine, "38;2;134;207;238") {
-		t.Fatalf("expected colored PlanTitle (208) on the title line, got:\n%q", titleLine)
+	if titleLine == "" || !strings.Contains(titleLine, "38;2;255;135;0") {
+		t.Fatalf("expected orange PlanTitle on the title line, got:\n%q", titleLine)
 	}
 
 	// (b) NO "CONTEXT" band label — the overview flows straight from the title.
@@ -728,8 +727,7 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 		t.Fatalf("expected the fenced flow diagram rendered in the overview:\n%s", plain)
 	}
 
-	// (d) section headings (Problem / Boundaries) render in the code-mode accent
-	// (orange 208), matching the reference's colored section titles.
+	// (d) prominent Code section headings use orange, not brand blue.
 	if !strings.Contains(plain, "Problem") || !strings.Contains(plain, "Boundaries") {
 		t.Fatalf("expected Problem and Boundaries section headings in the overview:\n%s", plain)
 	}
@@ -741,8 +739,8 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 			break
 		}
 	}
-	if problemLine == "" || !strings.Contains(problemLine, "38;2;134;207;238") {
-		t.Fatalf("expected the 'Problem' section heading to render in the accent color (208), got:\n%q", problemLine)
+	if problemLine == "" || !strings.Contains(problemLine, "38;2;255;135;0") {
+		t.Fatalf("expected the 'Problem' section heading to render in orange, got:\n%q", problemLine)
 	}
 
 	// (e) vertical pace: a full-width heading bar under Problem, then a blank

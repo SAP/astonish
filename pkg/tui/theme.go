@@ -79,9 +79,8 @@ type Theme struct {
 	FooterMeta       lipgloss.Style
 	Hint             lipgloss.Style
 
-	// AccentColor is the mode-identifying brand accent used by welcome titles
-	// and other brand-identity style builders. Code mode = orange (208), Platform = cyan (39).
-	// The composer border in normal mode uses a separate neutral color (see composerBorderStyle).
+	// AccentColor identifies Code's orange headings and decorative/syntax accents;
+	// Platform remains cyan. Composer mode indications use dedicated roles.
 	AccentColor color.Color
 
 	NoColor bool
@@ -100,7 +99,7 @@ func DefaultTheme() Theme {
 	border := lipgloss.Color("#344552")
 	text := lipgloss.Color("#e2edf5")
 	muted := lipgloss.Color("#9cafbf")
-	accent := lipgloss.Color("#86cfee")
+	accent := lipgloss.Color("#ff8700")
 	success := lipgloss.Color("#38df92")
 	warning := lipgloss.Color("#e5b766")
 	danger := lipgloss.Color("#ff7f87")
@@ -111,9 +110,9 @@ func DefaultTheme() Theme {
 	box := base.Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
 	return Theme{
 		CodeThemeID: CodeThemeBlueGray, TableLayout: render.TableLayoutFramed,
-		Background: base, Card: meta.Background(card), ApprovalBorder: base.Foreground(warning), AskBorder: brand, Spinner: brand,
+		Background: base, Card: meta.Background(card), ApprovalBorder: base.Foreground(warning), AskBorder: base.Foreground(success), Spinner: brand,
 		SyntaxStyle: chroma.MustNewStyle("astonish-blue-gray", chroma.StyleEntries{
-			chroma.Text: "#e2edf5", chroma.Comment: "#9cafbf italic", chroma.Keyword: "#86cfee bold", chroma.Name: "#e2edf5", chroma.NameFunction: "#86cfee", chroma.LiteralString: "#38df92", chroma.LiteralNumber: "#e5b766", chroma.Operator: "#86cfee", chroma.Error: "#ff7f87",
+			chroma.Text: "#e2edf5", chroma.Comment: "#9cafbf italic", chroma.Keyword: "#ff8700 bold", chroma.Name: "#e2edf5", chroma.NameFunction: "#ff8700", chroma.LiteralString: "#38df92", chroma.LiteralNumber: "#e5b766", chroma.Operator: "#ff8700", chroma.Error: "#ff7f87",
 		}),
 		Brand: brand.Bold(true), Text: txt, Muted: meta, User: brand.Bold(true), UserBorder: base.Foreground(border),
 		UserBubble: txt.Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(0, 2), UserExpandHint: meta.Italic(true).Align(lipgloss.Right),
@@ -122,7 +121,7 @@ func DefaultTheme() Theme {
 		DiffAddedBg: txt.Background(lipgloss.Color("#1a3320")), DiffRemovedBg: txt.Background(lipgloss.Color("#3d1f1f")),
 		PlanBorder: base.Foreground(border), PlanHeader: brand.Bold(true), PlanTitle: brand.Bold(true), PlanMuted: meta,
 		PlanPhaseTitle: txt.Bold(true), PlanSummary: txt, PlanDetail: meta, PlanSection: brand, PlanSeparator: base.Foreground(border),
-		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box.BorderForeground(accent), InputPrompt: brand.Bold(true), InputPlaceholder: meta.Italic(true), FooterMeta: meta, Hint: meta, AccentColor: accent,
+		InputBorder: box, InputBorderFocus: box, InputBorderPlan: box.BorderForeground(warning), InputPrompt: brand.Bold(true), InputPlaceholder: meta.Italic(true), FooterMeta: meta, Hint: meta, AccentColor: accent,
 	}
 }
 
@@ -282,13 +281,13 @@ func (th Theme) ApplyTextareaStyles(ta *textarea.Model) {
 
 // RenderStyles maps the TUI theme into pure render.Styles for markdown/diff/activity.
 func (th Theme) RenderStyles() render.Styles {
-	// Heading hierarchy uses the mode accent color (orange in code mode, cyan in
-	// platform) so section headings like "Problem"/"Root causes"/"Boundaries"
-	// read as deterministic accent titles, differentiated by weight.
+	// Headings and table emphasis share the mode identity: Code orange,
+	// Platform cyan. Composer modes deliberately use separate theme roles.
 	accent := th.Text.Foreground(th.AccentColor)
 	if th.NoColor {
 		accent = th.Text
 	}
+	heading := accent
 	return render.Styles{
 		TableLayout: th.TableLayout, TableSurface: th.Background, TableHeader: accent.Bold(true), TableBorder: th.Border, SyntaxStyle: th.SyntaxStyle,
 		Background:    th.Background,
@@ -300,10 +299,10 @@ func (th Theme) RenderStyles() render.Styles {
 		Number:        th.Number,
 		CodeGutter:    th.CodeGutter,
 		CodeHeader:    th.Brand,
-		Heading:       accent.Bold(true),
-		Heading1:      accent.Bold(true),
-		Heading2:      accent.Bold(true),
-		Heading3:      accent,
+		Heading:       heading.Bold(true),
+		Heading1:      heading.Bold(true),
+		Heading2:      heading.Bold(true),
+		Heading3:      heading,
 		Bold:          th.Text.Bold(true),
 		Italic:        th.Text.Italic(true),
 		DiffAddedBg:   th.DiffAddedBg,

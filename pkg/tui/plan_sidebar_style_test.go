@@ -74,6 +74,9 @@ func TestPlanSidebarStyledColorAndStates(t *testing.T) {
 	defer m.cancel()
 	m.theme = DefaultTheme()
 	got := m.renderPlanSidebar(52)
+	if header := m.planPanelHeader(24, 52); !strings.Contains(header, m.theme.PlanHeader.Render("PLAN PROGRESS")) {
+		t.Fatal("sidebar heading bypasses orange PlanHeader role")
+	}
 	if !strings.Contains(got, "\x1b[") {
 		t.Fatal("colored sidebar has no styled output")
 	}

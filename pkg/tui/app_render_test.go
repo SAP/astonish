@@ -18,6 +18,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
+	"github.com/SAP/astonish/pkg/tui/render"
 )
 
 func TestDelegationDetailPairsInterleavedCallIDs(t *testing.T) {
@@ -1354,5 +1355,133 @@ func TestDelegationProgramAcceptance(t *testing.T) {
 	task := got.tr.Items[0].DelegationTasks[0]
 	if len(task.Activity) != 1 || task.Activity[0].Text != "persisted child output" {
 		t.Fatalf("real input did not load HTTP detail: %+v", task)
+	}
+}
+
+func TestCodeBlueGrayCanvasContract(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	th := DefaultTheme()
+	r, g, b, _ := th.Background.GetBackground().RGBA()
+	if r>>8 != 16 || g>>8 != 25 || b>>8 != 34 {
+		t.Fatalf("Code canvas = %d,%d,%d, want 16,25,34", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestCodeThemeLiveRestoredStates(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		noColor := ""
+		if plain {
+			noColor = "1"
+		}
+		t.Setenv("NO_COLOR", noColor)
+		for _, source := range []string{"live", "restored"} {
+			for _, state := range []string{"empty", "loading", "error", "populated"} {
+				t.Run(fmt.Sprintf("%s/%s/plain=%v", source, state, plain), func(t *testing.T) {
+					m := newModel(context.Background(), Config{Backend: staticBackend{info: backend.Info{Mode: "code"}}, Width: 120, Height: 40})
+					defer m.cancel()
+					m.ready = true
+					var sequence []events.Event
+					switch state {
+					case "loading":
+						sequence = []events.Event{events.NewUser("Load reference")}
+					case "error":
+						sequence = []events.Event{events.NewUser("Load reference"), events.NewError("REFERENCE-ERROR")}
+					case "populated":
+						sequence = []events.Event{events.NewUser("Load reference"), events.NewText("FIRST-RESPONSE\n\n| ID | Evidence |\n| --- | --- |\n| café | TABLE-END |"), events.NewToolCall("read_file", "reference", map[string]any{"path": "reference.go"}), events.NewToolResult("read_file", "reference", "reference body"), events.NewText("LAST-RESPONSE"), events.NewDone()}
+					}
+					if source == "restored" {
+						var history []events.HistoryMsg
+						for i := range sequence {
+							ev := sequence[i]
+							kind := string(ev.Kind)
+							if ev.Kind == events.KindText {
+								kind = "agent"
+							}
+							if ev.Kind == events.KindError {
+								history = append(history, events.HistoryMsg{Delegation: &sequence[i]})
+							} else if ev.Kind != events.KindDone {
+								history = append(history, events.HistoryMsg{Kind: kind, Text: ev.Text, ToolName: ev.ToolName, ToolID: ev.ToolID, Args: ev.Args, Result: ev.Result})
+							}
+						}
+						m.tr.LoadHistory(history)
+					} else {
+						for _, ev := range sequence {
+							m.tr.Apply(ev)
+						}
+					}
+					// Loading is transient, not persisted: start a new operation
+					// on both a live and a restored transcript.
+					if state == "loading" {
+						m.tr.Streaming = true
+						m.tr.Status = "Loading reference…"
+						if !strings.Contains(stripANSI(m.renderLiveStatus()), "Loading reference") {
+							t.Fatal("loading status missing")
+						}
+					}
+					m.layout()
+					m.refreshViewport()
+					out := m.View().Content
+					text := stripANSI(out)
+					if plain && (strings.Contains(out, "\x1b[38;") || strings.Contains(out, "\x1b[48;")) {
+						t.Fatal("NO_COLOR emitted foreground/background colors")
+					}
+					if m.theme.CodeThemeID != CodeThemeBlueGray {
+						t.Fatal("state lost named palette")
+					}
+					switch state {
+					case "empty":
+						if !strings.Contains(text, "Ready when you are.") {
+							t.Fatalf("empty welcome missing: %s", text)
+						}
+					case "error":
+						if !strings.Contains(text, "REFERENCE-ERROR") {
+							t.Fatalf("error missing: %s", text)
+						}
+					case "populated":
+						first, last := strings.Index(text, "FIRST-RESPONSE"), strings.Index(text, "LAST-RESPONSE")
+						if first < 0 || last <= first || !strings.Contains(text, "TABLE-END") || !strings.Contains(text, "┬") {
+							t.Fatalf("chronology or framed table missing: %s", text)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodeThemeResolverRolesAndResetRepair(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for _, id := range []CodeThemeID{"", CodeThemeBlueGray} {
+		th, err := ResolveCodeTheme(id)
+		if err != nil || th.CodeThemeID != CodeThemeBlueGray {
+			t.Fatalf("resolve %q: %v", id, err)
+		}
+		st := th.RenderStyles()
+		if st.TableLayout != render.TableLayoutFramed || st.SyntaxStyle == nil {
+			t.Fatal("renderer lost theme roles")
+		}
+		copy := th
+		copy.Text = copy.Text.Bold(true)
+		if th.Text.GetBold() {
+			t.Fatal("theme copy mutated original")
+		}
+		band := "\x1b[48;2;26;51;32m"
+		card := "\x1b[48;2;24;35;46m"
+		got := th.restoreCanvas("a" + ansiReset + "b" + ansiResetShort + "c" + card + "card" + band + "diff")
+		if !strings.Contains(got, ansiReset+th.backgroundSGR()) || !strings.Contains(got, ansiResetShort+th.backgroundSGR()) || !strings.Contains(got, card+"card"+band+"diff") {
+			t.Fatalf("reset/band repair: %q", got)
+		}
+	}
+	if _, err := ResolveCodeTheme("orange"); err == nil {
+		t.Fatal("unknown palette accepted")
+	}
+	if PlatformTheme().RenderStyles().TableLayout != render.TableLayoutLegacy {
+		t.Fatal("Platform table layout changed")
+	}
+	t.Setenv("NO_COLOR", "1")
+	th := DefaultTheme()
+	out := render.Markdown("| ID | Notes |\n| --- | --- |\n| one | **body** |", 60, th.RenderStyles())
+	if !strings.Contains(out, "┌") || strings.Contains(out, "\x1b") || th.backgroundSGR() != "" {
+		t.Fatalf("NO_COLOR frame: %q", out)
 	}
 }

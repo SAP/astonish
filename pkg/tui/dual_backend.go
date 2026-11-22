@@ -110,6 +110,7 @@ func (m model) switchBackend() (tea.Model, tea.Cmd) {
 	// Swap theme — the core of the visual mode change.
 	m.theme = next.theme
 	m.theme.ApplyTextareaStyles(&m.ta)
+	m.spin.Style = m.theme.spinnerStyle()
 
 	// Clear markdown cache (rendered at old theme/width).
 	m.mdCache = nil

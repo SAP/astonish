@@ -105,6 +105,8 @@ type delegationDetailState struct {
 
 // Config configures the terminal chat app.
 type Config struct {
+	// ThemeID overrides Code slots only, without changing platform styling.
+	ThemeID CodeThemeID
 	Backend backend.Backend
 	// AltBackend enables Ctrl+Tab switching between two modes (e.g. code ↔
 	// platform). When nil, the TUI operates in single-backend mode and Ctrl+Tab
@@ -117,6 +119,9 @@ type Config struct {
 
 // Run starts the fullscreen TUI and blocks until exit.
 func Run(ctx context.Context, cfg Config) error {
+	if _, err := ResolveCodeTheme(cfg.ThemeID); err != nil {
+		return err
+	}
 	if cfg.Backend == nil {
 		return fmt.Errorf("tui: backend is required")
 	}
@@ -316,6 +321,11 @@ func newModel(parent context.Context, cfg Config) model {
 	ctx, cancel := context.WithCancel(parent)
 	info := cfg.Backend.Info()
 	th := ThemeForMode(info.Mode)
+	if info.Mode == "code" {
+		if resolved, err := ResolveCodeTheme(cfg.ThemeID); err == nil {
+			th = resolved
+		}
+	}
 
 	ta := textarea.New()
 	ta.Placeholder = "Message Astonish…"
@@ -344,7 +354,7 @@ func newModel(parent context.Context, cfg Config) model {
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	sp.Style = th.spinnerStyle()
 
 	tr := events.NewTranscript()
 	tr.SessionID = info.SessionID
@@ -391,9 +401,15 @@ func newModel(parent context.Context, cfg Config) model {
 	}
 	if cfg.AltBackend != nil {
 		altInfo := cfg.AltBackend.Info()
+		altTheme := ThemeForMode(altInfo.Mode)
+		if altInfo.Mode == "code" {
+			if resolved, err := ResolveCodeTheme(cfg.ThemeID); err == nil {
+				altTheme = resolved
+			}
+		}
 		m.backends[1] = backendSlot{
 			backend:    cfg.AltBackend,
-			theme:      ThemeForMode(altInfo.Mode),
+			theme:      altTheme,
 			historyIdx: -1,
 			opened:     false, // lazily opened on first Ctrl+Tab
 		}
@@ -2747,7 +2763,7 @@ func (m *model) layout() {
 	}
 	m.vp = viewport.New(viewport.WithWidth(m.transcriptWidth()), viewport.WithHeight(vh))
 	if !m.theme.NoColor {
-		m.vp.Style = lipgloss.NewStyle().Background(lipgloss.Color("#111416"))
+		m.vp.Style = m.theme.Background
 	}
 	content, hits, artifactHits := m.viewportContent()
 	m.hitRegions = hits
@@ -2924,8 +2940,8 @@ func (m model) renderWelcome() string {
 		Width(contentW).
 		Padding(1, 2).
 		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("238")).
-		Background(lipgloss.Color("#111416")).
+		BorderForeground(m.theme.Border.GetForeground()).
+		Background(m.theme.Background.GetBackground()).
 		Render(strings.Join(lines, "\n"))
 
 	return lipgloss.Place(
@@ -2935,7 +2951,7 @@ func (m model) renderWelcome() string {
 		lipgloss.Center,
 		body,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+		lipgloss.WithWhitespaceStyle(m.theme.Background),
 	)
 }
 
@@ -2947,7 +2963,7 @@ func (m model) welcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#111416")).
+		Background(m.theme.Background.GetBackground()).
 		Bold(true).
 		Align(lipgloss.Center).
 		Width(width).
@@ -2972,7 +2988,7 @@ func (m model) codeWelcomeLines(width int) []string {
 	th := m.theme
 	title := lipgloss.NewStyle().
 		Foreground(m.theme.AccentColor).
-		Background(lipgloss.Color("#111416")).
+		Background(m.theme.Background.GetBackground()).
 		Bold(true).
 		Align(lipgloss.Center).
 		Width(width).
@@ -3776,19 +3792,12 @@ func (m model) paintRow(line string, width int) string {
 	if width < 1 {
 		width = m.width
 	}
-	line = forceTrueBlackAfterReset(line)
+	line = m.theme.restoreCanvas(line)
 	w := lipgloss.Width(line)
 	if w < width {
-		line += ansiTrueBlackBG + strings.Repeat(" ", width-w)
+		line += m.theme.backgroundSGR() + strings.Repeat(" ", width-w)
 	}
-	return ansiTrueBlackBG + line + ansiDefaultBG
-}
-
-func forceTrueBlackAfterReset(s string) string {
-	s = strings.ReplaceAll(s, ansiReset, ansiReset+ansiTrueBlackBG)
-	// lipgloss v2 uses the short reset form \x1b[m — handle it too.
-	s = strings.ReplaceAll(s, ansiResetShort, ansiResetShort+ansiTrueBlackBG)
-	return s
+	return m.theme.backgroundSGR() + line + ansiDefaultBG
 }
 
 // renderThinkingBubble is the mid-turn sticky agent slot (replaces between tools).
@@ -4482,14 +4491,14 @@ func (m model) viewContent() string {
 		overlay := m.renderSessionsOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 	if m.modelPicker.open {
 		overlay := m.renderModelPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 
@@ -4497,7 +4506,7 @@ func (m model) viewContent() string {
 		overlay := m.renderWebSearchPickerOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 	if m.skillsPicker.open {
@@ -4507,7 +4516,7 @@ func (m model) viewContent() string {
 		overlay := m.renderRollbackOverlay()
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 			lipgloss.WithWhitespaceChars(" "),
-			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+			lipgloss.WithWhitespaceStyle(m.theme.Background),
 		))
 	}
 	if m.planPanel.open && m.planLayout() != planLayoutHidden {
@@ -4548,12 +4557,12 @@ func (m model) paintBackground(s string) string {
 		paintH,
 		lipgloss.Left,
 		lipgloss.Top,
-		forceTrueBlackAfterReset(s),
+		m.theme.restoreCanvas(s),
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+		lipgloss.WithWhitespaceStyle(m.theme.Background),
 	)
 	placed = m.padPaintedHeight(placed, paintH)
-	return ansiTrueBlackBG + placed + ansiDefaultBG
+	return m.theme.backgroundSGR() + placed + ansiDefaultBG
 }
 
 func (m model) padPaintedHeight(s string, height int) string {
@@ -4561,7 +4570,7 @@ func (m model) padPaintedHeight(s string, height int) string {
 		if s != "" {
 			s += "\n"
 		}
-		s += ansiTrueBlackBG + strings.Repeat(" ", m.width)
+		s += m.theme.backgroundSGR() + strings.Repeat(" ", m.width)
 	}
 	return s
 }
@@ -5615,6 +5624,15 @@ func (m model) composerBorderStyle() lipgloss.Style {
 	if m.theme.NoColor {
 		return lipgloss.NewStyle()
 	}
+	if m.theme.CodeThemeID != "" {
+		if m.graphPlanMode || m.planMode {
+			return m.theme.PlanSection
+		}
+		if m.askMode {
+			return m.theme.AskBorder
+		}
+		return m.theme.Border
+	}
 	var c color.Color
 	if m.graphPlanMode {
 		c = lipgloss.Color("172") // amber — plan mode accent
@@ -5629,7 +5647,7 @@ func (m model) composerBorderStyle() lipgloss.Style {
 			c = lipgloss.Color("39") // platform uses cyan even in normal mode
 		}
 	}
-	return lipgloss.NewStyle().Foreground(c).Background(lipgloss.Color("#111416"))
+	return lipgloss.NewStyle().Foreground(c).Background(m.theme.Background.GetBackground())
 }
 
 // composerModeLabel returns the text shown in the composer bottom border.

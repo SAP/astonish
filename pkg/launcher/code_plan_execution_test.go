@@ -19,9 +19,34 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/pathscope"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/SAP/astonish/pkg/tui"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
+
+func TestCodeThemeValidationBeforeStartup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	before, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []tui.CodeThemeID{"unknown", "dark-orange"} {
+		err := RunCodeTUI(context.Background(), &CodeConfig{ThemeID: name, Provider: "missing-provider", WorkingDir: filepath.Join(home, "missing")})
+		if err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
+			t.Fatalf("validation did not precede setup: %v", err)
+		}
+	}
+	after, _ := os.Getwd()
+	if before != after {
+		t.Fatal("invalid theme changed cwd")
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("invalid theme wrote settings: %v %v", entries, err)
+	}
+}
 
 func TestCodeFolderApprovalPreflightPreservesPending(t *testing.T) {
 	ctx := context.Background()

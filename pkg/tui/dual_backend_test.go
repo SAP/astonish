@@ -10,6 +10,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
+	"github.com/SAP/astonish/pkg/tui/render"
 )
 
 func newDualModeModel(t *testing.T) model {
@@ -25,6 +26,36 @@ func newDualModeModel(t *testing.T) model {
 	m.ready = true
 	m.layout()
 	return m
+}
+
+func TestCodeThemeBackendSlots(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	for _, primary := range []string{"code", "platform"} {
+		alt := "platform"
+		if primary == "platform" {
+			alt = "code"
+		}
+		m := newModel(context.Background(), Config{ThemeID: CodeThemeBlueGray, Backend: staticBackend{info: backend.Info{Mode: primary}}, AltBackend: staticBackend{info: backend.Info{Mode: alt}}})
+		defer m.cancel()
+		for i, mode := range []string{primary, alt} {
+			want := ThemeForMode(mode)
+			if m.backends[i].theme.CodeThemeID != want.CodeThemeID || !reflect.DeepEqual(m.backends[i].theme.Background.GetBackground(), want.Background.GetBackground()) {
+				t.Fatalf("slot %d (%s) changed palette", i, mode)
+			}
+			if mode == "platform" && m.backends[i].theme.RenderStyles().TableLayout != render.TableLayoutLegacy {
+				t.Fatal("Code selection enabled framed Platform tables")
+			}
+		}
+		result, _ := m.switchBackend()
+		next := result.(model)
+		want := ThemeForMode(alt)
+		if next.theme.CodeThemeID != want.CodeThemeID || !reflect.DeepEqual(next.theme.Background.GetBackground(), want.Background.GetBackground()) {
+			t.Fatal("backend switch lost the slot palette")
+		}
+	}
+	if err := Run(context.Background(), Config{ThemeID: "invalid"}); err == nil || !strings.Contains(err.Error(), "available: blue-gray") {
+		t.Fatalf("Run must validate before backend open: %v", err)
+	}
 }
 
 func TestCtrlTabSwitchesBackend(t *testing.T) {

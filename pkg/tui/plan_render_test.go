@@ -665,7 +665,7 @@ Legend: ` + "`[ ]`" + ` pending
 	if titleLine == "" {
 		t.Fatalf("could not find rendered title line in output:\n%s", out)
 	}
-	if !strings.Contains(titleLine, "38;5;208") {
+	if !strings.Contains(titleLine, "38;2;134;207;238") {
 		t.Fatalf("expected PlanTitle accent (208) on the title line, got:\n%q", titleLine)
 	}
 
@@ -711,7 +711,7 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 			break
 		}
 	}
-	if titleLine == "" || !strings.Contains(titleLine, "38;5;208") {
+	if titleLine == "" || !strings.Contains(titleLine, "38;2;134;207;238") {
 		t.Fatalf("expected colored PlanTitle (208) on the title line, got:\n%q", titleLine)
 	}
 
@@ -741,7 +741,7 @@ func TestPlanCard_RichOverview_EndToEnd(t *testing.T) {
 			break
 		}
 	}
-	if problemLine == "" || !strings.Contains(problemLine, "38;5;208") {
+	if problemLine == "" || !strings.Contains(problemLine, "38;2;134;207;238") {
 		t.Fatalf("expected the 'Problem' section heading to render in the accent color (208), got:\n%q", problemLine)
 	}
 

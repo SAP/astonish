@@ -6,10 +6,12 @@ import (
 	"fmt"
 
 	"github.com/SAP/astonish/pkg/launcher"
+	"github.com/SAP/astonish/pkg/tui"
 )
 
 // codeFlags holds the parsed CLI flag values for `astonish code`.
 type codeFlags struct {
+	ThemeID     tui.CodeThemeID
 	Provider    string
 	Model       string
 	Dir         string
@@ -24,6 +26,7 @@ type codeFlags struct {
 func parseCodeFlags(args []string) (codeFlags, error) {
 	codeCmd := flag.NewFlagSet("code", flag.ContinueOnError)
 
+	themeID := codeCmd.String("theme", "", "Code theme for this launch (blue-gray)")
 	modelPin := codeCmd.String("model", "", "Model to use, as a bare model name or provider:model pin")
 	dir := codeCmd.String("dir", "", "Working directory tools operate against (default: current directory)")
 	autoApprove := codeCmd.Bool("auto-approve", false, "Auto-approve all tool executions")
@@ -39,7 +42,11 @@ func parseCodeFlags(args []string) (codeFlags, error) {
 		return codeFlags{}, err
 	}
 
+	if _, err := tui.ResolveCodeTheme(tui.CodeThemeID(*themeID)); err != nil {
+		return codeFlags{}, err
+	}
 	f := codeFlags{
+		ThemeID:     tui.CodeThemeID(*themeID),
 		Dir:         *dir,
 		AutoApprove: *autoApprove || *yolo,
 		Debug:       *debugMode,
@@ -76,6 +83,7 @@ func handleCodeCommand(args []string) error {
 	}
 
 	cfg := &launcher.CodeConfig{
+		ThemeID:     flags.ThemeID,
 		Provider:    flags.Provider,
 		Model:       flags.Model,
 		WorkingDir:  flags.Dir,
@@ -101,9 +109,8 @@ func printCodeUsage() {
 	fmt.Println("prompts and folder scoping.")
 	fmt.Println("")
 	fmt.Println("When logged in to a platform (astonish login <url>), press Ctrl+\\")
-	fmt.Println("inside the TUI to switch to the platform chat panel. The UI color")
-	fmt.Println("accent changes (orange=code, blue=platform) so you always know")
-	fmt.Println("which mode you're in.")
+	fmt.Println("inside the TUI to switch to the platform chat panel. Code uses the")
+	fmt.Println("blue-gray theme; the header identifies which backend you're in.")
 	fmt.Println("")
 	fmt.Println("Inside the app, /rollback reverts both the conversation and any file")
 	fmt.Println("changes back to an earlier message.")
@@ -114,11 +121,13 @@ func printCodeUsage() {
 	fmt.Println("  -r, --resume        Resume an existing session by ID")
 	fmt.Println("  --auto-approve      Auto-approve all tool executions")
 	fmt.Println("  --yolo              Alias for --auto-approve")
+	fmt.Println("  --theme             Launch-only Code theme (default: blue-gray)")
 	fmt.Println("  --debug             Enable debug output")
 	fmt.Println("  -h, --help          Show this help message")
 	fmt.Println("")
 	fmt.Println("examples:")
 	fmt.Println("  astonish code")
+	fmt.Println("  astonish code --theme blue-gray")
 	fmt.Println("  astonish code -m openai:gpt-4o")
 	fmt.Println("  astonish code -C ./my-project --auto-approve")
 	fmt.Println("  astonish code --resume <session-id>")

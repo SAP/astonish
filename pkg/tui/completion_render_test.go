@@ -17,7 +17,7 @@ func TestRenderSlashCompletionPaintsEveryRowBlack(t *testing.T) {
 		t.Fatalf("expected popup with multiple lines, got %d: %q", len(lines), stripANSI(out))
 	}
 	for i, line := range lines {
-		if !strings.HasPrefix(line, ansiTrueBlackBG) {
+		if !strings.HasPrefix(line, m.theme.backgroundSGR()) {
 			t.Fatalf("line %d is not explicitly painted black: %q", i, line)
 		}
 	}

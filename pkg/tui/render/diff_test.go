@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 )
 
 func TestFileDiff_Edit(t *testing.T) {
@@ -534,14 +535,39 @@ func TestExpandTabs(t *testing.T) {
 		{"no tabs", "no tabs"},
 		{"\thello", "    hello"},
 		{"\t\thello", "        hello"},
-		{"ab\tcd", "ab  cd"},       // tab at col 2 → pad to col 4
-		{"abc\td", "abc d"},        // tab at col 3 → pad to col 4
-		{"abcd\te", "abcd    e"},   // tab at col 4 → pad to col 8
+		{"ab\tcd", "ab  cd"},     // tab at col 2 → pad to col 4
+		{"abc\td", "abc d"},      // tab at col 3 → pad to col 4
+		{"abcd\te", "abcd    e"}, // tab at col 4 → pad to col 8
 	}
 	for _, tt := range tests {
 		got := expandTabs(tt.in, 4)
 		if got != tt.want {
 			t.Errorf("expandTabs(%q, 4) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestSyntaxThemeHookCodeAndDiff(t *testing.T) {
+	st := DefaultStyles()
+	st.SyntaxStyle = chroma.MustNewStyle("fixture", chroma.StyleEntries{chroma.Text: "#86cfee", chroma.Keyword: "#86cfee"})
+	for _, out := range []string{CodeBlock("return value", "go", 80, st, false), FileDiff(DiffOpts{Path: "foo.go", Old: "return old", New: "return value", Width: 80}, st)} {
+		if !strings.Contains(out, "38;2;134;207;238") {
+			t.Fatalf("syntax hook ignored: %q", out)
+		}
+	}
+	st.NoColor = true
+	if out := CodeBlock("return value", "go", 80, st, false); strings.Contains(out, "\x1b") {
+		t.Fatalf("NO_COLOR syntax: %q", out)
+	}
+}
+
+func TestDiffBandRepairsAllResetForms(t *testing.T) {
+	st := DefaultStyles()
+	code := extractBgCode(st.DiffAddedBg)
+	for _, reset := range []string{"\x1b[0m", "\x1b[m", "\x1b[49m"} {
+		out := padWithBg("before"+reset+"after", 30, st.DiffAddedBg, false)
+		if !strings.Contains(out, reset+code+"after") {
+			t.Fatalf("band lost on reset %q: %q", reset, out)
 		}
 	}
 }

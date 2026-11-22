@@ -13,22 +13,12 @@ type planPanelStyles struct {
 }
 
 func (m model) planPanelStyles() planPanelStyles {
-	plain := lipgloss.NewStyle()
-	if m.theme.NoColor {
-		return planPanelStyles{plain, plain, plain, plain, plain, plain, plain, plain}
+	th := m.theme
+	if th.NoColor {
+		p := lipgloss.NewStyle()
+		return planPanelStyles{p, p, p, p, p, p, p, p}
 	}
-	bg := lipgloss.Color("#101922")
-	card := lipgloss.Color("#18232e")
-	return planPanelStyles{
-		surface: plain.Background(bg),
-		border:  plain.Foreground(lipgloss.Color("#344552")).Background(bg),
-		title:   plain.Foreground(lipgloss.Color("#e2edf5")).Background(bg).Bold(true),
-		muted:   plain.Foreground(lipgloss.Color("#9cafbf")).Background(bg),
-		card:    plain.Foreground(lipgloss.Color("#9cafbf")).Background(card),
-		success: plain.Foreground(lipgloss.Color("#38df92")).Background(bg).Bold(true),
-		active:  plain.Foreground(lipgloss.Color("#e5b766")).Background(bg).Bold(true),
-		failed:  plain.Foreground(lipgloss.Color("#ff7f87")).Background(bg).Bold(true),
-	}
+	return planPanelStyles{th.Background, th.Border, th.Text.Bold(true), th.Muted, th.Card, th.Success.Bold(true), th.Approval.Bold(true), th.Danger.Bold(true)}
 }
 
 func (m model) planPanelStatus(v planProgressView) (string, lipgloss.Style) {

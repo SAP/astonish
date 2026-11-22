@@ -22,9 +22,31 @@ closes only the viewer. See [Bot terminal/client](bot-terminal-client.md) for co
 ordered runtime-envelope replay, commands and real subprocess/PTY acceptance.
 Local Code has no Bot execution capability.
 
+## Blue-gray Code theme
+
+`DefaultTheme` and `ResolveCodeTheme("")` select `CodeThemeBlueGray` (`blue-gray`). `astonish code --theme blue-gray` selects it explicitly for this launch only; there is no saved preference or session/config schema change. Unsupported names fail with the supported-name list before backend setup. Bare TTY `astonish` uses the same default. Each dual-backend slot keeps its own theme: Code selection never recolors Platform chat, Studio or Bot surfaces.
+
+| Semantic role | RGB | Use |
+|---------------|-----|-----|
+| Canvas | `#101922` | Full-screen background, transcript and chrome |
+| Card | `#18232e` | Inset phase cards and document surfaces |
+| Border | `#344552` | Restrained rules and frames |
+| Text | `#e2edf5` | Primary prose and phase descriptions |
+| Muted | `#9cafbf` | Metadata, hints, gutters and secondary copy |
+| Accent | `#86cfee` | Titles, active emphasis and Code outlines |
+| Success | `#38df92` | Completion and Ask-mode indication |
+| Warning | `#e5b766` | Plan mode and caution |
+| Danger | `#ff7f87` | Errors and failures |
+
+`Theme.RenderStyles` supplies Markdown, plan, table, code and diff roles to both live and restored render paths. Code syntax highlighting uses the palette; Platform retains its legacy tables and syntax fallback. Reset repair restores the canvas after full/short ANSI resets without overwriting explicit card or added/removed diff bands. Spinner, textarea, approvals, loading/error/empty states and overlays consume the same theme rather than independent chrome colors. `NO_COLOR` removes palette colors while retaining borders, glyphs, labels, numbered gutters and hierarchy; terminal-native bold/cursor attributes may remain in the full-screen view.
+
+Spacing and weight are cell-based: inset padding, wrapped descriptions, bold titles, muted metadata and consistent rules establish hierarchy without extra chrome rows. The terminal owns **font family, font size, cell metrics and window/tabs**; the app does not force a font or reproduce screenshot pixels. A second dark/orange palette is **deferred**, and must reuse these components rather than fork the layout.
+
+**Acceptance scope.** `TestCodeThemePTYAcceptance` drives isolated real CLI subprocesses with a loopback scripted provider in truecolor and `NO_COLOR`: bare/default/explicit launch welcome, Markdown/code/tables, a write-file diff, plan approval/progress/completed restore, permissions and folder prompts, Ctrl+G/Esc, resizing and transcript scrolling. The sidebar PTY regressions additionally exercise independent navigation and active-plan restore. `TestCodeThemeLiveRestoredStates` checks empty/error/populated rendering and a new loading operation after history restore at model level; `TestCodeThemeBackendSlots` checks Code/Platform palette isolation and switching, not a deployed remote session. Terminal screenshots, exact font fidelity and separate ANSI-16/256-only devices are not established by those checks.
+
 ## Persistent Code plan progress
 
-The sidebar uses a terminal-native rounded card with an inset dark surface, a bold PLAN PROGRESS heading and Ctrl+G hint, semantic status icons, a prominent completion percentage and solid progress bar. Tall panes separate lifecycle, progress and three aligned running/pending/failed counters from PHASES with rules and whitespace; there is no redundant CURRENT block above the phase cards. Phase cards use contrasting subtle surfaces, status-colored icons, bold wrapped descriptions and muted identity/group metadata. Short panes compress the header to preserve usable phase-list space; extremely short panes retain essential counts and status. NO_COLOR removes styling escapes but retains the frame, glyphs and structural hierarchy. Styling lives in `plan_sidebar_style.go`; layout and hit testing share header sizing. `conversationBody` uses the existing `theme.Border` for every row of the vertical body/sidebar divider, matching the horizontal chrome separators in normal and approval layouts without changing panel or card fills.
+The sidebar uses the shared blue-gray Code palette: a terminal-native rounded frame on the canvas with inset card surfaces, a bold PLAN PROGRESS heading and Ctrl+G hint, semantic status icons, a prominent completion percentage and solid progress bar. Tall panes separate lifecycle, progress and three aligned running/pending/failed counters from PHASES with rules and whitespace; there is no redundant CURRENT block above the phase cards. Phase cards use contrasting subtle surfaces, status-colored icons, bold wrapped descriptions and muted identity/group metadata. Short panes compress the header to preserve usable phase-list space; extremely short panes retain essential counts and status. NO_COLOR removes palette colors but retains the frame, glyphs and structural hierarchy; terminal-native bold/cursor attributes may remain. Styling lives in `plan_sidebar_style.go`; layout and hit testing share header sizing. `conversationBody` uses the existing `theme.Border` for every row of the vertical body/sidebar divider, matching the horizontal chrome separators in normal and approval layouts without changing panel or card fills.
 
 Local Code keeps the latest plan visible in Normal, Plan and Ask modes. At **101 columns or wider**, a **28-column right sidebar plus one divider** shares the transcript/sticky-header body, leaving at least 72 columns for conversation. Header, composer and approval chrome remain full width. Below that threshold a pinned **two-row summary** replaces the sidebar. No plan or a remote Chat session means no progress panel.
 
@@ -284,9 +306,10 @@ AdaptiveColor cursor-line backgrounds that break dark alt-screen UIs).
 
 | Surface | Implementation |
 |---------|----------------|
-| Empty state | Centered welcome card inside the viewport for new/empty chats, with an orange centered title and concise onboarding copy; it is not a transcript item and disappears as soon as the first user message starts the conversation |
-| User messages | Full-width warm-accent outline bubble; long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
+| Empty state | Centered welcome card inside the viewport for new/empty chats, with a cool-blue centered Code title (Platform retains its own theme) and concise onboarding copy; it is not a transcript item and disappears as soon as the first user message starts the conversation |
+| User messages | Full-width theme-accent outline bubble (cool blue in Code); long prompts are height-capped and use a bottom-border `double-click to expand/collapse` affordance |
 | Agent markdown | `pkg/tui/render.Markdown` — headings, lists, inline code/bold |
+| Markdown tables | Code uses `TableLayoutFramed`: aligned outer/header/row rules, one-cell padding, emphasized headers, wrapped inline-formatted cells and Unicode cell-width accounting. Identifier columns get space first; when columns cannot fit, labeled stacked rows preserve every cell rather than truncate content. Ragged rows, escaped pipes and incomplete streamed tables retain readable content. Platform keeps `TableLayoutLegacy`. |
 | Code fences | `pkg/tui/render.CodeBlock` — chroma highlight + numeric gutter |
 | Tool activity | `pkg/tui/render.ActivitySummary` + `StatsFromSteps` (`+N/−M`); click-to-expand reveals **raw request args and response JSON** (not file diffs) |
 | Network authorization | Inline transcript notice plus a focused approval card for OpenShell proxy denials; `enter`/`y` allows the blocked host, `b` allows the suggested broader pattern, and `n`/`esc` denies |
@@ -478,7 +501,7 @@ Phase → additive allow-list (`GraphPlanPhaseTools`, single source of truth; th
 
 When the agent finalizes via `announce_plan`, the terminal renders one `ItemPlan` owning both document and initial approval controls, not a detached approval footer. Versioned `plan_snapshot` payloads map to `KindPlanSnapshot` through the shared `mapSSEToEvents` path for local code and remote chat. The transcript updates the matching `plan_id` only for a newer sequence; definition revision alone is insufficient to order runtime updates. The legacy atomic `plan` / `KindPlan` payload remains readable for older sessions.
 
-The card (`pkg/tui/plan.go`) is a structured parse of PLAN.md via `agent.ParsePlanDocument`, not a generic markdown bubble. Layout: amber-bordered frame (code mode `PlanBorder`/`PlanHeader` = 172, matching the Plan-mode composer; platform stays steel-blue 75) with numbered phases, status glyphs (`[○]`/`[●]`/`[✓]`/`[✗]`), `+`/`~`/`−` file kinds, a label-free overview whose `##` headings render as full-width bars (title, rule, blank, body), WHAT NOT TO CHANGE / VERIFY bands, and a `k/n ready|running|done` footer. Chat markdown leaves heading bars off (`HeadingBar` is plan-card only). While pending, the selectable approval controls are rendered inside this same frame. After a decision, the document remains and the controls are replaced in place by `Approved`, `Changes requested`, or `Declined`. Unparseable documents use the same lifecycle section in the markdown fallback, so the plan never goes blank.
+The card (`pkg/tui/plan.go`) is a structured parse of PLAN.md via `agent.ParsePlanDocument`, not a generic markdown bubble. Layout: theme-accent frame (Code uses cool-blue `PlanBorder`/`PlanHeader`; platform stays steel-blue 75, while the Code Plan-mode composer uses the warning role) with numbered phases, status glyphs (`[○]`/`[●]`/`[✓]`/`[✗]`), `+`/`~`/`−` file kinds, a label-free overview whose `##` headings render as full-width bars (title, rule, blank, body), WHAT NOT TO CHANGE / VERIFY bands, and a `k/n ready|running|done` footer. Chat markdown leaves heading bars off (`HeadingBar` is plan-card only). While pending, the selectable approval controls are rendered inside this same frame. After a decision, the document remains and the controls are replaced in place by `Approved`, `Changes requested`, or `Declined`. Unparseable documents use the same lifecycle section in the markdown fallback, so the plan never goes blank.
 
 Approval actions live in `handlePlanApprovalKey` (called from `handleApprovalKey` before generic y/n/esc, the same way network denials are). Local **Code** initial approval has four choices, in this order:
 
@@ -506,16 +529,17 @@ If the Studio SSE connection returns a read error after a session id is known, t
 | Invocation | Behavior |
 |------------|----------|
 | `astonish login <url>` | Authenticate to platform |
-| `astonish` | TUI against platform when stdin/stdout are TTYs and login exists |
+| `astonish` | Local Code TUI when stdin/stdout are TTYs, regardless of login; default blue-gray theme |
 | `astonish chat` | TUI against platform |
 | `astonish chat --resume ID` | Resume session |
 | `astonish chat model provider:model` | Pin model via platform API |
 | `astonish code` | Local in-process coding TUI (no login, sandbox forced off, host CWD) |
+| `astonish code --theme blue-gray` | Explicit launch-only Code palette; default is blue-gray, unsupported names fail; no persisted preference |
 | `astonish code -m provider:model` | Local TUI with a pinned provider/model |
 | `astonish code -C DIR` / `--dir DIR` | Local TUI operating in DIR |
 | `astonish code --auto-approve` / `--yolo` | Local TUI, bypass tool & folder authorization gates |
 | `astonish code --resume ID` | Resume a code-mode session (within a run) |
-| Without login | Error: run `astonish login` for `chat`; `code` works regardless; bare `astonish` prints normal usage |
+| Without login | Error: run `astonish login` for `chat`; `code` and bare TTY `astonish` work regardless |
 | Bare `astonish` with piped stdin or redirected stdout | Prints normal usage plus a hint that interactive chat requires a TTY |
 
 ## Invariants

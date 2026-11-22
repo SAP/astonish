@@ -204,6 +204,6 @@ func (m model) renderSkillsOverlay() string {
 	overlay := m.renderSkillsPickerOverlay()
 	return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, overlay,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#111416"))),
+		lipgloss.WithWhitespaceStyle(m.theme.Background),
 	))
 }

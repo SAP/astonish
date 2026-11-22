@@ -102,6 +102,8 @@ func localExecutionContext(ctx context.Context, userID string) (context.Context,
 // the user's working directory. It never contacts a platform — there is no
 // daemon, no HTTP, and no login.
 type CodeConfig struct {
+	// ThemeID selects a launch-only Code theme; it is never persisted.
+	ThemeID tui.CodeThemeID
 	// Provider/Model optionally pin the LLM for the session (e.g. "openai" /
 	// "gpt-4o"). Empty values fall back to the configured cascade default.
 	Provider string
@@ -126,6 +128,10 @@ type CodeConfig struct {
 func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	if cfg == nil {
 		cfg = &CodeConfig{}
+	}
+
+	if _, err := tui.ResolveCodeTheme(cfg.ThemeID); err != nil {
+		return err
 	}
 
 	// The TUI owns the terminal (bubbletea alt-screen). Any writes to the
@@ -303,7 +309,7 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 		altBackend = pb
 	}
 
-	err = tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend})
+	err = tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend, ThemeID: cfg.ThemeID})
 	if result.Cleanup != nil {
 		result.Cleanup()
 	}
@@ -1394,6 +1400,11 @@ func localPlanSystemContext(s agent.PlanSnapshot, planPath string, completed boo
 }
 
 func isLocalPlanSystemContext(text string) bool {
+	// Completed plans carry only a historical reference, not the old execution
+	// template. Recognize that native context so a fresh accepted plan can replace it.
+	if strings.HasPrefix(text, "Completed Code plan (historical reference only): ") {
+		return true
+	}
 	for _, template := range []string{agent.PlanExecutionSystemContext, agent.PlanCompletedSystemContext} {
 		prefix, _, _ := strings.Cut(template, "__PLAN_BODY__")
 		if strings.HasPrefix(text, prefix) {

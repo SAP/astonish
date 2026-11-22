@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alecthomas/chroma/v2/lexers"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -363,7 +363,7 @@ func renderDiffEditor(path, rawPath string, rows []DiffRow, note string, width i
 		Kind: "diff", Added: added, Removed: removed,
 	}, st)
 	if note != "" {
-		header += st.Muted.Render("  ("+note+")")
+		header += st.Muted.Render("  (" + note + ")")
 	}
 	b.WriteString(header)
 	b.WriteByte('\n')
@@ -416,7 +416,7 @@ func renderDiffEditor(path, rawPath string, rows []DiffRow, note string, width i
 		// them as multiple cells).
 		content = expandTabs(content, 4)
 		if !st.NoColor && lang != "" {
-			if hl := highlightCode(content, lang, false); hl != "" {
+			if hl := highlightCode(content, lang, false, st.SyntaxStyle); hl != "" {
 				content = hl
 			}
 		}
@@ -518,6 +518,8 @@ func padWithBg(content string, width int, bg lipgloss.Style, noColor bool) strin
 	// Insert the background code after every ANSI reset (\x1b[0m) so the
 	// background persists through syntax-highlighted token boundaries.
 	patched := strings.ReplaceAll(content, "\x1b[0m", "\x1b[0m"+bgCode)
+	patched = strings.ReplaceAll(patched, "\x1b[m", "\x1b[m"+bgCode)
+	patched = strings.ReplaceAll(patched, "\x1b[49m", "\x1b[49m"+bgCode)
 	return bgCode + patched + pad + "\x1b[0m"
 }
 

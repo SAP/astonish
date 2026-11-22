@@ -94,7 +94,7 @@ func TestRenderSessionsOverlayPaintsEveryRowBlack(t *testing.T) {
 		t.Fatalf("expected overlay with multiple lines, got %d: %q", len(lines), stripANSI(out))
 	}
 	for i, line := range lines {
-		if !strings.HasPrefix(line, ansiTrueBlackBG) {
+		if !strings.HasPrefix(line, m.theme.backgroundSGR()) {
 			t.Fatalf("line %d is not explicitly painted black: %q", i, line)
 		}
 	}
@@ -281,7 +281,7 @@ func TestApplyHistorySetsTitleFromBackendInfo(t *testing.T) {
 	b := &modelAwareBackend{
 		staticBackend: staticBackend{info: backend.Info{Provider: "openai", Model: "gpt-4o"}},
 		bySession: map[string]backend.Info{
-			"sess-titled": {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
+			"sess-titled":  {Provider: "openai", Model: "gpt-4o", Title: "Fix broken tests"},
 			"sess-notitle": {Provider: "anthropic", Model: "claude-sonnet-4"},
 		},
 	}

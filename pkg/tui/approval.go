@@ -401,7 +401,7 @@ func (m model) renderApprovalOverlay() string {
 		w = 30
 	}
 	return th.InputBorderFocus.
-		BorderForeground(lipgloss.Color("221")).
+		BorderForeground(th.approvalBorderColor()).
 		Width(w).
 		Padding(1, 2).
 		Render(b.String())
@@ -475,7 +475,7 @@ func (m model) renderFolderApprovalOverlay(it *events.Item) string {
 		w = 30
 	}
 	return th.InputBorderFocus.
-		BorderForeground(lipgloss.Color("221")).
+		BorderForeground(th.approvalBorderColor()).
 		Width(w).
 		Padding(1, 2).
 		Render(b.String())
@@ -522,7 +522,7 @@ func (m model) renderNetworkDenialOverlay(it *events.Item) string {
 		w = 30
 	}
 	return th.InputBorderFocus.
-		BorderForeground(lipgloss.Color("221")).
+		BorderForeground(th.approvalBorderColor()).
 		Width(w).
 		Padding(1, 2).
 		Render(b.String())
@@ -815,7 +815,7 @@ func (m model) renderPlanApprovalOverlay(it *events.Item) string {
 		w = 30
 	}
 	return th.InputBorderFocus.
-		BorderForeground(lipgloss.Color("39")).
+		BorderForeground(th.permissionsBorderColor()).
 		Width(w).
 		Padding(1, 2).
 		Render(b.String())

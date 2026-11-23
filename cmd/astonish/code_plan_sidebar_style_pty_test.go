@@ -503,7 +503,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 			assertCodeThemePTYText(t, term, colored, "PLAN PROGRESS", "#ff8700", "#101922", plain)
 			assertSidebarPTYDivider(t, term, colored, plain)
 			term.send("/permissions\r")
-			term.wait("Current approvals")
+			term.wait("Permissions", "› Folders")
 			assertCodeThemePTYCanvas(t, term, colored, plain)
 			term.send("\x1b")
 			term.wait("Enter send")

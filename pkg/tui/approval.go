@@ -1023,11 +1023,12 @@ type codePermissionsState struct {
 	snapshot                      backend.CodePermissionsSnapshot
 }
 type codePermissionsMsg struct {
-	owner    *events.Transcript
-	request  uint64
-	session  string
-	snapshot backend.CodePermissionsSnapshot
-	err      error
+	owner          *events.Transcript
+	request        uint64
+	session        string
+	snapshot       backend.CodePermissionsSnapshot
+	err            error
+	createdSession bool
 }
 type codePermissionsRefreshMsg struct{}
 
@@ -1130,25 +1131,8 @@ func (m model) openCodePermissions() (tea.Model, tea.Cmd) {
 	m.syncCodePermissions()
 	m.permissions.open, m.permissions.loading = true, true
 	m.permissions.err, m.permissions.confirm = "", false
+	m.permissions.cursor = 0
 	return m, m.refreshCodePermissions()
-}
-
-func (m model) permissionRows() ([]string, []backend.CodePermissionScope) {
-	var labels []string
-	var scopes []backend.CodePermissionScope
-	if m.permissions.snapshot.PlanFullAccess {
-		labels = append(labels, "Revoke Full access for this plan")
-		scopes = append(scopes, backend.CodePermissionPlanFullAccess)
-	}
-	if m.permissions.snapshot.SessionAllFolders {
-		labels = append(labels, "Revoke All folders for this session")
-		scopes = append(scopes, backend.CodePermissionSessionAllFolders)
-	}
-	if _, ok := m.backend.(codePlanPermissionEnabler); ok && !m.permissions.snapshot.PlanFullAccess && m.codePermissionPlan() != nil {
-		labels = append(labels, "Re-enable full access for this active plan")
-		scopes = append(scopes, "")
-	}
-	return labels, scopes
 }
 
 func (m model) handleCodePermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1170,20 +1154,34 @@ func (m model) handleCodePermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.permissions.err != "" || !m.permissions.known {
 		return m, nil
 	}
-	labels, scopes := m.permissionRows()
-	if len(labels) == 0 {
-		return m, nil
-	}
-	m.permissions.cursor = min(m.permissions.cursor, len(labels)-1)
+	rows := m.codePermissionRows()
+	m.permissions.cursor = max(0, min(m.permissions.cursor, len(rows)-1))
 	switch msg.String() {
 	case "up", "k":
-		m.permissions.cursor = (m.permissions.cursor + len(labels) - 1) % len(labels)
+		m.permissions.cursor = max(0, m.permissions.cursor-1)
 		m.permissions.confirm = false
 	case "down", "j":
-		m.permissions.cursor = (m.permissions.cursor + 1) % len(labels)
+		m.permissions.cursor = min(len(rows)-1, m.permissions.cursor+1)
 		m.permissions.confirm = false
-	case "enter":
-		scope := scopes[m.permissions.cursor]
+	case "enter", " ":
+		row := rows[m.permissions.cursor]
+		if !row.actionable {
+			return m, nil
+		}
+		if setter, ok := m.backend.(backend.CodeSessionPermissionsBackend); ok && (row.scope == backend.CodePermissionSessionAllFolders || row.scope == backend.CodePermissionSessionAllTools) {
+			allow := !m.permissions.snapshot.SessionAllFolders
+			if row.scope == backend.CodePermissionSessionAllTools {
+				allow = !m.permissions.snapshot.AllToolsSession
+			}
+			m.permissions.loading = true
+			m.permissionRequest++
+			request, owner, id, ctx, scope := m.permissionRequest, m.tr, m.tr.SessionID, m.ctx, row.scope
+			return m, func() tea.Msg {
+				s, err := setter.SetCodeSessionPermission(ctx, id, scope, allow)
+				return codePermissionsMsg{owner: owner, request: request, session: id, snapshot: s, err: err, createdSession: id == ""}
+			}
+		}
+		scope := row.scope
 		if scope == "" && !m.permissions.confirm {
 			s := m.codePermissionPlan()
 			if s == nil {
@@ -1227,40 +1225,7 @@ func (m model) handleCodePermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) renderCodePermissions() string {
-	text := "Code permissions\n\n"
-	s := m.permissions.snapshot
-	switch {
-	case m.permissions.loading:
-		text += "Loading / saving permissions…"
-	case m.permissions.err != "":
-		text += "Error: " + m.permissions.err + "\nPress r to retry."
-	case !m.permissions.known:
-		text += "Permissions not loaded. Press r to refresh."
-	default:
-		if !s.PlanFullAccess && !s.SessionAllFolders && !s.AllToolsSession && !s.CLIOverride {
-			text += "Current approvals\n"
-		}
-		if s.CLIOverride {
-			text += "CLI --yolo / --auto-approve override (restart without flag to disable)\n"
-		}
-		if s.AllToolsSession {
-			text += "All tools · session (independent of folder access)\n"
-		}
-		labels, _ := m.permissionRows()
-		for i, label := range labels {
-			prefix := "  "
-			if i == m.permissions.cursor {
-				prefix = "▸ "
-			}
-			text += prefix + label + "\n"
-		}
-		if m.permissions.confirm {
-			text += "\n" + codeFullAccessWarning + "\nEnter confirms full access; Esc cancels."
-		}
-	}
-	text += "\n\n↑/↓ select · Enter act · r refresh · Esc close"
-	width := max(1, min(76, m.width-4))
-	return lipgloss.NewStyle().Width(width).MaxHeight(max(1, m.screenHeight()-2)).Render(text)
+	return m.renderCodePermissionsPicker()
 }
 
 func (m model) codePermissionFooter() string {

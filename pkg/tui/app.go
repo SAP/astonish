@@ -552,6 +552,11 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 		if msg.owner != m.tr || msg.request != m.permissionRequest || msg.session != m.tr.SessionID {
 			return m, nil
 		}
+		if msg.createdSession && msg.err == nil && msg.session == "" && msg.snapshot.SessionID != "" && m.backend.Info().SessionID == msg.snapshot.SessionID {
+			m.info = m.backend.Info()
+			m.tr.SessionID = msg.snapshot.SessionID
+			m.permissionSession = msg.snapshot.SessionID
+		}
 		m.permissions.loading = false
 		m.permissions.err = ""
 		if msg.err != nil {

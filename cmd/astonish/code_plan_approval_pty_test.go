@@ -199,7 +199,9 @@ func TestCodePlanPermissionsPTYAcceptance(t *testing.T) {
 				if full {
 					term.wait("Folders ✓  Tools ✓")
 					term.send("\x10") // Ctrl+P remains available during active execution.
-					term.wait("Revoke Full access for this plan")
+					term.wait("Plan access", "Full access")
+					term.send("\x1b[B\x1b[B")
+					term.wait("› Plan access", "Enter revokes Full access for this plan")
 					term.send("\x1b")
 					term.wait("Folders ✓  Tools ✓")
 				} else {
@@ -321,8 +323,12 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	}
 	term.send("/permissions\r")
 	term.wait("All folders for this session")
+	term.send("\x1b[B")
+	term.wait("› Tools")
+	term.send("\x1b[A")
+	term.wait("› Folders", "Enter revokes All folders for this session")
 	term.send("\r") // selected broad-folder revoke action
-	term.wait("Current approvals")
+	term.wait("› Folders", "Ask outside project")
 	term.send("\x1b")
 	term.wait("Enter send")
 	term.assertAbsent("Folders ✓")
@@ -362,6 +368,19 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	term.send("4")
 	codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{text: "SESSION ISOLATION VERIFIED"})
 	term.wait("SESSION ISOLATION VERIFIED", "Enter send")
+	term.send("/new\r")
+	term.wait("Message Astonish", "Enter send")
+	for _, key := range []string{"/permissions\r", "\x10"} {
+		term.send(key)
+		term.wait("Permissions", "› Folders", "Ask outside project", "Ask when needed")
+		term.send("\x1b[B")
+		term.wait("› Tools")
+		term.send("\x1b[B")
+		term.wait("› Plan access", "Choose full access when approving a plan")
+		term.assertAbsent("Session changed")
+		term.send("\x1b")
+		term.wait("Enter send")
+	}
 	term.close()
 }
 

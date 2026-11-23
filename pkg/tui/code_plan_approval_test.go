@@ -139,6 +139,7 @@ func TestCodePermissionsReenableRejectsChangedIdentityAndCompletedPlan(t *testin
 	m = next.(model)
 	next, _ = m.Update(cmd())
 	m = next.(model)
+	m.permissions.cursor = 2 // Plan access is a stable row after Folders and Tools.
 	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(model)
 	s.Revision++
@@ -153,9 +154,8 @@ func TestCodePermissionsReenableRejectsChangedIdentityAndCompletedPlan(t *testin
 	s.Steps[0].Status = "complete"
 	s.Document.Results = "Verified"
 	m.applyEvent(events.Event{Kind: events.KindPlanSnapshot, PlanSnapshot: &s})
-	labels, _ := m.permissionRows()
-	if len(labels) != 0 {
-		t.Fatalf("completed plan offered enable: %v", labels)
+	if m.codePermissionRows()[2].actionable {
+		t.Fatal("completed plan offered enable")
 	}
 }
 
@@ -187,7 +187,7 @@ func TestCodePermissionsOverlayLifecycle(t *testing.T) {
 	if b.revoked != backend.CodePermissionSessionAllFolders || strings.Contains(m.renderFooterMeta(), "Folders ✓") {
 		t.Fatal("revoke not reflected")
 	}
-	if !strings.Contains(m.renderCodePermissions(), "Current approvals") {
+	if !strings.Contains(m.renderCodePermissions(), "Ask outside project") {
 		t.Fatal("empty projection")
 	}
 	b.fail = true
@@ -243,6 +243,7 @@ func TestCodePermissionsStaleRefreshAndConfirmedReenable(t *testing.T) {
 	if m.permissions.snapshot.SessionAllFolders {
 		t.Fatal("stale refresh won")
 	}
+	m.permissions.cursor = 2
 	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = next.(model)
 	if cmd != nil || b.enabled != 0 || !m.permissions.confirm || !strings.Contains(m.renderCodePermissions(), "Not sandboxed.") {

@@ -167,6 +167,7 @@ func (m model) startNewSession() (tea.Model, tea.Cmd) {
 	m.backend.NewSession()
 	m.info = m.backend.Info()
 	m.tr.Reset()
+	m.tr.SessionID = m.info.SessionID
 	m.layout()
 	m.refreshViewport()
 	return m, nil
@@ -195,6 +196,7 @@ func (m model) applySessionDeleted(msg sessionDeletedMsg) (tea.Model, tea.Cmd) {
 		m.backend.NewSession()
 		m.info = m.backend.Info()
 		m.tr.Reset()
+		m.tr.SessionID = m.info.SessionID
 		m.refreshViewport()
 	}
 	return m, nil
@@ -244,9 +246,12 @@ func (m model) applyHistory(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
 	if m.info.ContextTokens > 0 {
 		m.tr.ContextTokens = m.info.ContextTokens
 	}
-	if msg.sessionID != "" {
+	if m.info.SessionID == "" && msg.sessionID != "" {
 		m.info.SessionID = msg.sessionID
 	}
+	// History replay does not choose a session identity. Bind the restored
+	// transcript to the same session as the header and backend permission reads.
+	m.tr.SessionID = m.info.SessionID
 	m.info.IsResumed = true
 	if msg.notice != "" && len(entries) > 0 {
 		m.tr.Apply(events.NewSystem(msg.notice))

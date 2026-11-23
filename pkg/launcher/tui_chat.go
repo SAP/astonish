@@ -1062,6 +1062,11 @@ func mapSSEToEvents(sev *client.SSEEvent, debug bool) []events.Event {
 			}
 			return []events.Event{events.NewStatus(text)}
 		}
+	case "code_plan_verification":
+		var p agent.PlanVerificationProgress
+		if json.Unmarshal(data, &p) == nil {
+			return []events.Event{events.NewPlanVerification(p)}
+		}
 	case "plan_snapshot":
 		var p struct {
 			Snapshot *agent.PlanSnapshot `json:"snapshot"`

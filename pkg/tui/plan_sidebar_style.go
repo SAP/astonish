@@ -23,6 +23,9 @@ func (m model) planPanelStyles() planPanelStyles {
 
 func (m model) planPanelStatus(v planProgressView) (string, lipgloss.Style) {
 	s := m.planPanelStyles()
+	if label := m.verificationLabel(); label != "" {
+		return "⟳ " + label, s.active
+	}
 	switch v.State {
 	case planProgressCompleted:
 		return "✓ COMPLETED", s.success

@@ -43,7 +43,7 @@ func (m model) planProgress() planProgressView {
 	if m.info.Mode != "code" || m.tr == nil {
 		return planProgressView{}
 	}
-	return latestPlanProgress(m.tr.Items).withStreaming(m.tr.Streaming)
+	return m.withVerification(latestPlanProgress(m.tr.Items).withStreaming(m.tr.Streaming))
 }
 
 func (m model) planLayout() planLayoutMode {
@@ -211,6 +211,9 @@ func (m model) renderPlanProgressHeader(width int) string {
 		}
 		lines = append(lines, wrapPlain(planCurrentNames(v), width))
 	}
+	if label := m.verificationLabel(); label != "" {
+		lines = append(lines, wrapPlain(label, width), wrapPlain("Command: "+m.verification.progress.Command, width))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -361,6 +364,9 @@ func (m model) renderCompactPlanProgress() string {
 	v := m.planProgress()
 	first := "Plan · " + planCountsLabel(v) + " · ctrl+g · " + planLifecycleLabel(v)
 	second := planCurrentNames(v) + " · " + v.Goal
+	if label := m.verificationLabel(); label != "" {
+		second = label
+	}
 	return planRows(first+"\n"+second, max(1, m.width), 2)
 }
 

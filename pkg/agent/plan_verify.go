@@ -21,11 +21,16 @@ const VerifyFailedFollowupContext = `The last plan phase verify command failed. 
 // DefaultPlanVerify runs command in workdir with a wall-clock cap. Output is
 // truncated so PLAN.md and the tool result stay bounded.
 func DefaultPlanVerify(workdir, command string) (exitCode int, output string, err error) {
+	return defaultPlanVerify(workdir, command, planVerifyTimeout)
+}
+
+// defaultPlanVerify accepts a shorter deadline for subprocess regression tests.
+func defaultPlanVerify(workdir, command string, timeout time.Duration) (exitCode int, output string, err error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return -1, "", fmt.Errorf("empty verify command")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), planVerifyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -37,10 +42,22 @@ func DefaultPlanVerify(workdir, command string) (exitCode int, output string, er
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
-	out, runErr := cmd.CombinedOutput()
-	trimmed := truncateVerifyOutput(out)
+	configurePlanVerifyProcess(cmd)
+	cmd.Cancel = func() error { return killPlanVerifyProcess(cmd) }
+	// Bound inherited output pipes even if a child escapes the process group.
+	cmd.WaitDelay = time.Second
+	var out planVerifyOutputWriter
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	if runErr != nil {
+		// Also clean descendants after a failed shell: Wait may return an
+		// ExitError instead of ErrWaitDelay when inherited pipes timed out.
+		_ = killPlanVerifyProcess(cmd)
+	}
+	trimmed := truncateVerifyOutput(out.data[:out.used])
 	if ctx.Err() == context.DeadlineExceeded {
-		return -1, trimmed, fmt.Errorf("verify timed out after %s", planVerifyTimeout)
+		return -1, trimmed, fmt.Errorf("verify timed out after %s", timeout)
 	}
 	if runErr == nil {
 		return 0, trimmed, nil
@@ -49,6 +66,19 @@ func DefaultPlanVerify(workdir, command string) (exitCode int, output string, er
 		return ee.ExitCode(), trimmed, nil
 	}
 	return -1, trimmed, runErr
+}
+
+// planVerifyOutputWriter retains only the prefix while accepting every byte so
+// noisy commands cannot grow memory or fail with a short write. os/exec serializes
+// writes when Stdout and Stderr are the same comparable writer.
+type planVerifyOutputWriter struct {
+	data [planVerifyMaxOutput]byte
+	used int
+}
+
+func (w *planVerifyOutputWriter) Write(p []byte) (int, error) {
+	w.used += copy(w.data[w.used:], p)
+	return len(p), nil
 }
 
 func truncateVerifyOutput(out []byte) string {

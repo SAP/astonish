@@ -143,20 +143,21 @@ func Run(ctx context.Context, cfg Config) error {
 
 // model is the root bubbletea model.
 type model struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	backend  backend.Backend
-	info     backend.Info
-	theme    Theme
-	tr       *events.Transcript
-	vp       viewport.Model
-	ta       textarea.Model
-	spin     spinner.Model
-	width    int
-	height   int
-	ready    bool
-	err      string
-	quitting bool
+	verification planVerificationState
+	ctx          context.Context
+	cancel       context.CancelFunc
+	backend      backend.Backend
+	info         backend.Info
+	theme        Theme
+	tr           *events.Transcript
+	vp           viewport.Model
+	ta           textarea.Model
+	spin         spinner.Model
+	width        int
+	height       int
+	ready        bool
+	err          string
+	quitting     bool
 	// history of sent prompts for Up/Down.
 	history    []string
 	historyIdx int // -1 = not browsing
@@ -2712,6 +2713,10 @@ func timerTick() tea.Cmd {
 // applyEvent applies one streamed event to the transcript and keeps the header
 // info in sync. It does NOT repaint — callers coalesce a batch and repaint once.
 func (m *model) applyEvent(ev events.Event) {
+	if ev.Kind == events.KindPlanVerification {
+		m.applyPlanVerification(ev)
+		return
+	}
 	previousRevision := int64(0)
 	if ev.Kind == events.KindPlanSnapshot && ev.PlanSnapshot != nil {
 		for _, it := range m.tr.Items {
@@ -4923,6 +4928,9 @@ func (m model) renderLiveStatus() string {
 	th := m.theme
 	if m.err != "" {
 		return m.paintRow(th.Error.Render(m.err), m.width)
+	}
+	if label := m.verificationLabel(); label != "" {
+		return m.paintRow(th.Status.Render(m.spin.View()+" "+label), m.width)
 	}
 	if m.tr.Status != "" || m.tr.Streaming {
 		left := th.Status.Render(m.spin.View() + " " + first(m.tr.Status, "Working…"))

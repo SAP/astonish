@@ -121,11 +121,12 @@ func PlanRuntimeErrorCode(err error) string {
 type CommitPlanSnapshot func(PlanSnapshot) error
 
 type PlanRuntimeOptions struct {
-	CodeExecution  bool // local Code only; absent preserves remote/legacy behavior
-	Workspace      string
-	Acceptance     string
-	Verify         func(string) (int, string, error)
-	CommitSnapshot CommitPlanSnapshot
+	CodeExecution        bool // local Code only; absent preserves remote/legacy behavior
+	Workspace            string
+	Acceptance           string
+	VerificationProgress func(PlanVerificationProgress)
+	Verify               func(string) (int, string, error)
+	CommitSnapshot       CommitPlanSnapshot
 }
 
 // PlanRuntime belongs to one session. The PlanState lock also serializes legacy
@@ -718,7 +719,9 @@ func (r *PlanRuntime) FinishDelegate(stepName, taskName string) (string, error) 
 
 // UpdateStep verifies outside both locks, then checks the captured implementation
 // and step state before publishing evidence. Independent-wave commits do not invalidate work already in flight.
-func (r *PlanRuntime) UpdateStep(step, status string) PlanStepApplyResult {
+func (r *PlanRuntime) UpdateStep(step, status string) (result PlanStepApplyResult) {
+	finishProgress := func(PlanStepApplyResult) {}
+	defer func() { finishProgress(result) }()
 	fail := func(code, message string) PlanStepApplyResult {
 		return PlanStepApplyResult{Name: step, Code: code, Message: message}
 	}
@@ -805,7 +808,9 @@ func (r *PlanRuntime) UpdateStep(step, status string) PlanStepApplyResult {
 	capturedEpoch := p.steps[idx].epoch
 	verify := r.options.Verify
 	workspace := r.options.Workspace
+	progress := r.options.VerificationProgress
 	unlock()
+	finishProgress = startPlanVerificationProgress(progress, PlanVerificationProgress{PlanID: s.PlanID, Revision: s.Revision, Step: step, Command: info.Verify})
 	var exit int
 	var output string
 	var runErr error

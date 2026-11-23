@@ -2300,7 +2300,10 @@ func (b *localAgentBackend) localPlanRuntime(ctx context.Context, sessionID stri
 			emit("error", map[string]any{"error": "plan mirror failed (session snapshot saved; retry next turn): " + err.Error()})
 		}
 	}
-	options := agent.PlanRuntimeOptions{CodeExecution: true, Workspace: b.workingDir, CommitSnapshot: func(s agent.PlanSnapshot) error {
+	options := agent.PlanRuntimeOptions{CodeExecution: true, Workspace: b.workingDir, VerificationProgress: func(p agent.PlanVerificationProgress) {
+		value := map[string]any{"plan_id": p.PlanID, "revision": p.Revision, "step": p.Step, "command": p.Command, "stage": p.Stage, "elapsed": p.Elapsed, "result": p.Result}
+		emit("code_plan_verification", value)
+	}, CommitSnapshot: func(s agent.PlanSnapshot) error {
 		// Re-fetch by the actual app/user scope rather than a shared agent default.
 		current, err := b.sessionSvc.Get(ctx, &session.GetRequest{AppName: codeAppName, UserID: b.effectiveUserID(), SessionID: sessionID})
 		if err != nil {

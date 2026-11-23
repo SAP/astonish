@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 )
@@ -210,10 +211,85 @@ func (m model) handleThemePickerKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 func (m model) renderThemePicker() string {
 	p := m.themePicker
-	lines := []string{m.theme.Brand.Render("Code themes")}
-	for i, option := range BuiltinCodeThemes() {
+	// Budget content before rendering: long catalogs must not push the selected
+	// row or key hints off screen. Account for both borders and padding.
+	box := m.theme.InputBorder.Width(max(1, min(68, m.width-4))).Padding(0, 1)
+	height := max(1, m.screenHeight())
+	if m.width < 6 || height < 5 {
+		box = box.Border(lipgloss.Border{}).Padding(0).Width(max(1, m.width))
+	}
+	width := max(1, box.GetWidth()-box.GetHorizontalFrameSize())
+	bodyHeight := max(1, height-box.GetVerticalFrameSize())
+
+	var footer []string
+	switch p.stage {
+	case ThemePickerLoading:
+		footer = []string{"Loading saved theme…", "Esc cancel"}
+	case ThemePickerSaving:
+		footer = []string{"Saving theme…", "Please wait for disk confirmation"}
+	case ThemePickerLoadError:
+		footer = []string{"r retry load · Enter apply and save · Esc cancel"}
+	case ThemePickerSaveError:
+		footer = []string{"r retry save · ↑/↓ select · Esc close"}
+	default:
+		footer = []string{"↑/↓ select · Enter apply and save · Esc cancel"}
+	}
+	if width < 48 {
+		switch p.stage {
+		case ThemePickerReady:
+			footer = []string{"↑/↓ · Enter save · Esc cancel"}
+		case ThemePickerLoadError:
+			footer = []string{"r retry · Enter save · Esc cancel"}
+		case ThemePickerSaveError:
+			footer = []string{"r retry · ↑/↓ · Esc close"}
+		}
+	}
+	var footerLines []string
+	for _, line := range footer {
+		footerLines = append(footerLines, strings.Split(wrapPlain(line, width), "\n")...)
+	}
+	if p.err != "" {
+		for _, line := range strings.Split(wrapPlain(p.err, width), "\n") {
+			footerLines = append(footerLines, m.theme.Error.Render(line))
+		}
+	}
+	// Exceptionally short screens trade title and extra footer lines for the
+	// selected row and at least one line of operation/help text.
+	titleRows := 1
+	if bodyHeight < 3 {
+		titleRows = 0
+	}
+	footerBudget := max(0, bodyHeight-titleRows-1)
+	if len(footerLines) > footerBudget {
+		footerLines = nil
+		for _, line := range footer {
+			footerLines = append(footerLines, truncateToWidth(line, width))
+		}
+		if p.err != "" {
+			footerLines = append(footerLines, m.theme.Error.Render(truncateToWidth(strings.ReplaceAll(p.err, "\n", " "), width)))
+		}
+		if len(footerLines) > footerBudget {
+			if footerBudget == 1 && len(footer) > 1 {
+				footerLines = []string{truncateToWidth(strings.Join(footer, " · "), width)}
+			} else {
+				footerLines = footerLines[:footerBudget]
+			}
+		}
+	}
+
+	var lines []string
+	if titleRows != 0 {
+		lines = append(lines, m.theme.Brand.Render(truncateToWidth("Code themes", width)))
+	}
+	catalog := BuiltinCodeThemes()
+	maxRows := max(1, bodyHeight-titleRows-len(footerLines))
+	cursor := max(0, min(p.cursor, len(catalog)-1))
+	start := max(0, cursor-maxRows+1)
+	end := min(len(catalog), start+maxRows)
+	for i := start; i < end; i++ {
+		option := catalog[i]
 		marker := "  "
-		if i == p.cursor {
+		if i == cursor {
 			marker = "› "
 		}
 		label := marker + option.Label
@@ -227,27 +303,13 @@ func (m model) renderThemePicker() string {
 			label += " · saved"
 		}
 		style := m.theme.Text
-		if i == p.cursor {
+		if i == cursor {
 			style = m.theme.Brand
 		}
-		lines = append(lines, style.Render(label))
+		lines = append(lines, style.Render(truncateToWidth(label, width)))
 	}
-	switch p.stage {
-	case ThemePickerLoading:
-		lines = append(lines, "Loading saved theme…", "Esc cancel")
-	case ThemePickerSaving:
-		lines = append(lines, "Saving theme…", "Please wait for disk confirmation")
-	case ThemePickerLoadError:
-		lines = append(lines, "r retry load · Enter apply and save · Esc cancel")
-	case ThemePickerSaveError:
-		lines = append(lines, "r retry save · ↑/↓ select · Esc close")
-	default:
-		lines = append(lines, "↑/↓ select · Enter apply and save · Esc cancel")
-	}
-	if p.err != "" {
-		lines = append(lines, m.theme.Error.Render(wrapPlain(p.err, max(1, min(64, m.width-8)))))
-	}
-	return m.theme.InputBorder.Width(max(1, min(68, m.width-4))).Padding(0, 1).Render(strings.Join(lines, "\n"))
+	lines = append(lines, footerLines...)
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 // handleStreamingThemeCommand admits only the /themes spelling while the

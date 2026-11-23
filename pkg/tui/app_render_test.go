@@ -1510,7 +1510,7 @@ func TestCodeThemePaletteOnlyInvariants(t *testing.T) {
 		})
 	}
 	catalog := BuiltinCodeThemes()
-	if len(catalog) != 2 || catalog[0].ID != CodeThemeBlueGray || !catalog[0].Default || catalog[0].Label != "Blue-gray" || catalog[1].ID != CodeThemeDarkOrange || catalog[1].Default || catalog[1].Label != "Dark orange" {
+	if len(catalog) != 10 || catalog[0].ID != CodeThemeBlueGray || !catalog[0].Default || catalog[0].Label != "Blue-gray" || catalog[1].ID != CodeThemeDarkOrange || catalog[1].Default || catalog[1].Label != "Dark orange" {
 		t.Fatalf("catalog: %+v", catalog)
 	}
 	catalog[0].Label = "mutated"

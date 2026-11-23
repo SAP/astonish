@@ -31,7 +31,11 @@ type CodeThemeOption struct {
 
 // BuiltinCodeThemes returns a fresh, deterministic catalog.
 func BuiltinCodeThemes() []CodeThemeOption {
-	return []CodeThemeOption{{CodeThemeBlueGray, "Blue-gray", true}, {CodeThemeDarkOrange, "Dark orange", false}}
+	options := make([]CodeThemeOption, len(codeThemeCatalog))
+	for i, definition := range codeThemeCatalog {
+		options[i] = definition.option
+	}
+	return options
 }
 
 // ResolveCodeTheme validates a name; empty and default select Blue-gray.
@@ -39,16 +43,19 @@ func ResolveCodeTheme(id CodeThemeID) (Theme, error) {
 	if id == "" || id == "default" {
 		id = CodeThemeBlueGray
 	}
-	var p codePalette
-	switch id {
-	case CodeThemeBlueGray:
-		p = codePalette{"#101922", "#18232e", "#344552", "#e2edf5", "#9cafbf", "#ff8700", "#38df92", "#e5b766", "#ff7f87"}
-	case CodeThemeDarkOrange:
-		p = codePalette{"#111416", "#1a1e21", "#444444", "#d0d0d0", "#8a8a8a", "#ff8700", "#87d787", "#af8700", "#ff5f5f"}
-	default:
-		return Theme{}, fmt.Errorf("unknown Code theme %q (available: blue-gray, dark-orange)", id)
+	var available []string
+	for _, definition := range codeThemeCatalog {
+		available = append(available, string(definition.option.ID))
+		if definition.option.ID == id {
+			th := buildCodeTheme(id, definition.palette, os.Getenv("NO_COLOR") != "")
+			if !th.NoColor {
+				th.DiffAddedBg = th.Text.Background(lipgloss.Color(definition.added))
+				th.DiffRemovedBg = th.Text.Background(lipgloss.Color(definition.removed))
+			}
+			return th, nil
+		}
 	}
-	return buildCodeTheme(id, p, os.Getenv("NO_COLOR") != ""), nil
+	return Theme{}, fmt.Errorf("unknown Code theme %q (available: %s)", id, strings.Join(available, ", "))
 }
 
 // All component geometry and typography live in buildCodeTheme, never palettes.

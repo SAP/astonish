@@ -108,7 +108,7 @@ func runBotsCommand(ctx context.Context, c *client.Client, args []string, out io
 		}
 		flags = append(flags, a)
 		name := strings.TrimLeft(strings.SplitN(a, "=", 2)[0], "-")
-		if !strings.Contains(a, "=") && name != "json" && name != "follow" && name != "start-from-title" {
+		if !strings.Contains(a, "=") && name != "dry-run" && name != "json" && name != "follow" && name != "start-from-title" {
 			if i+1 >= len(args) {
 				return fmt.Errorf("missing value for %s", a)
 			}

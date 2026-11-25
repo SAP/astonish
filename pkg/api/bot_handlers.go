@@ -33,6 +33,7 @@ type botVersionDTO struct {
 func registerBotRoutes(router *mux.Router) {
 	router.Use(botContentAccess)
 	router.HandleFunc("/api/studio/bots/{botID}/home", BotHomeSetupHandler).Methods(http.MethodPost)
+	registerBotFileRoutes(router)
 	registerBotSnapshotRoutes(router)
 	registerBotUnfinishedIntakeRoutes(router)
 	registerBotConfigurationRoutes(router)

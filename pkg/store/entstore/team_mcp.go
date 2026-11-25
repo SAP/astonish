@@ -20,7 +20,13 @@ type teamMCPServerStore struct {
 var _ store.MCPServerStore = (*teamMCPServerStore)(nil)
 
 func (s *teamMCPServerStore) List(ctx context.Context) ([]store.MCPServer, error) {
-	servers, err := s.client.McpServer.Query().
+	// Mandate policy resolves configured search inside Bot transactions. Match
+	// the exact owning client, just as network-policy and team-settings reads do.
+	client := s.client
+	if tx, ok := ctx.Value(botPolicyTransactionKey{}).(botPolicyTransaction); ok && tx.outer == client {
+		client = tx.current
+	}
+	servers, err := client.McpServer.Query().
 		Order(mcpserver.ByName()).
 		All(ctx)
 	if err != nil {
@@ -40,7 +46,10 @@ func (s *teamMCPServerStore) Get(ctx context.Context, name string) (*store.MCPSe
 		Only(ctx)
 	if err != nil {
 		if teament.IsNotFound(err) {
-			return nil, fmt.Errorf("mcp server %q not found", name)
+			// Match the platform/org stores: not-found is (nil, nil), not an
+			// error. Callers that iterate all tiers rely on this; returning an
+			// error aborts scoped runtime builds under FallbackForbidden.
+			return nil, nil
 		}
 		return nil, fmt.Errorf("entstore: MCPServerStore.Get: %w", err)
 	}

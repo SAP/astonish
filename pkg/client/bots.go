@@ -67,6 +67,7 @@ func (c *Client) doBotRequest(ctx context.Context, method, path string, body any
 	}
 	return nil, fmt.Errorf("authentication failed")
 }
+
 func (b Bots) List(ctx context.Context) ([]store.Bot, error) {
 	out := []store.Bot{}
 	after := ""
@@ -312,8 +313,9 @@ func (b Bots) Watch(ctx context.Context, id, sessionID, after string, follow boo
 				err = e
 				break
 			}
-			if ev.Type != BotTranscriptEvent && ev.Type != BotReplayComplete {
-				continue
+			if ev.Type == BotTranscriptEvent {
+				stream.Close()
+				return fmt.Errorf("legacy Bot transcript is not a canonical Chat event")
 			}
 			n, e := botCursor(sessionID, ev.ID)
 			if e != nil {
@@ -325,21 +327,35 @@ func (b Bots) Watch(ctx context.Context, id, sessionID, after string, follow boo
 					stream.Close()
 					return fmt.Errorf("Bot replay cursor regressed")
 				}
+				cursor, after = n, ev.ID
 				if !follow {
 					stream.Close()
 					return nil
 				}
 				continue
 			}
-			if n <= cursor {
-				continue
+			var payload struct {
+				Projection struct {
+					EventID   string `json:"event_id"`
+					SessionID string `json:"session_id"`
+					Cursor    string `json:"cursor"`
+				} `json:"_projection"`
 			}
-			if e = consume(*ev); e != nil {
+			if json.Unmarshal([]byte(ev.Data), &payload) != nil || payload.Projection.SessionID != sessionID || payload.Projection.Cursor != ev.ID || (ev.Type != "cursor" && payload.Projection.EventID == "") {
 				stream.Close()
-				return e
+				return fmt.Errorf("invalid Bot presentation metadata")
 			}
-			cursor = n
-			after = ev.ID
+			// Early parts share the previous cursor. Do not discard them (or
+			// duplicates which may now carry the final committed cursor).
+			if ev.Type != "cursor" {
+				if e = consume(*ev); e != nil {
+					stream.Close()
+					return e
+				}
+			}
+			if n > cursor {
+				cursor, after = n, ev.ID
+			}
 		}
 		stream.Close()
 		if ctx.Err() != nil {

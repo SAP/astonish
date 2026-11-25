@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/channels"
 	"github.com/SAP/astonish/pkg/chatruntime"
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -77,10 +79,11 @@ type StudioSessionResponse struct {
 // StudioSessionDetailResponse is the response for GET /api/studio/sessions/{id}.
 type StudioSessionDetailResponse struct {
 	StudioSessionResponse
-	Messages      []StudioMessage       `json:"messages"`
-	FleetMessages []FleetMessageSummary `json:"fleetMessages,omitempty"`
-	Artifacts     []ArtifactInfo        `json:"artifacts,omitempty"`  // files generated during the session
-	TotalUsage    *UsageSummary         `json:"totalUsage,omitempty"` // cumulative token usage across all LLM calls
+	PresentationEvents *[]ChatEvent          `json:"presentationEvents,omitempty"` // canonical Bot-linked restore; nil for ordinary Chat
+	Messages           []StudioMessage       `json:"messages"`
+	FleetMessages      []FleetMessageSummary `json:"fleetMessages,omitempty"`
+	Artifacts          []ArtifactInfo        `json:"artifacts,omitempty"`  // files generated during the session
+	TotalUsage         *UsageSummary         `json:"totalUsage,omitempty"` // cumulative token usage across all LLM calls
 }
 
 // UsageSummary holds cumulative token usage for a session, derived from
@@ -330,9 +333,38 @@ func chatFilesFromAttachments(apiAtts []ChatAttachment) []store.ChatFile {
 	return out
 }
 
+// StudioChatPlanInitializer retains transport-owned persistence and control while
+// accepting only the shared constructor's guarded verifier. It is trusted wiring,
+// never model-supplied state or permission to replace a context binding.
+type StudioChatPlanInitializer func(verify func(string) (int, string, error)) (*agent.PlanRuntime, error)
+
+// StudioChatRuntimeRequest contains already resolved request-local dependencies.
+// The API owns admission and the launcher supplies construction, avoiding an import cycle.
+type StudioChatRuntimeRequest struct {
+	// PlanInitializer must be called by successful factories before returning an
+	// agent, with their guarded verifier. The API rejects an omitted handshake;
+	// it never falls back to a separate verifier for scoped execution.
+	PlanInitializer            StudioChatPlanInitializer
+	Inputs                     *chatruntime.Inputs
+	AppConfig                  *config.AppConfig
+	LLM                        model.LLM
+	SessionService             session.Service
+	SessionID, UserID, AppName string
+	ProviderName, ModelName    string
+	Debug, AutoApprove         bool
+}
+
+type StudioChatRuntime struct {
+	ChatAgent *agent.ChatAgent
+	Cleanup   func()
+}
+
+type StudioChatRuntimeFactory func(context.Context, StudioChatRuntimeRequest) (*StudioChatRuntime, error)
+
 // StudioChatComponents holds the wired components needed by Studio chat handlers.
 // Set via SetStudioChatInitFunc from the launcher package to avoid import cycles.
 type StudioChatComponents struct {
+	RuntimeFactory    StudioChatRuntimeFactory
 	ChatAgent         *agent.ChatAgent
 	LLM               model.LLM
 	SwappableLLM      *provider.SwappableLLM // for hot-swap on model change (nil = hot-swap disabled)
@@ -370,6 +402,89 @@ type ChatManager struct {
 	// active holds cancel functions for in-flight SSE streams keyed by session ID.
 	active map[string]context.CancelFunc
 	amu    sync.Mutex
+
+	continuationMu sync.Mutex
+	continuations  map[chatContinuationKey]*chatContinuationEntry
+}
+
+// StudioChatContinuation contains only paused conversation data, never a model,
+// tool, runner, context or authorization callback. Launcher implements the payload.
+type StudioChatContinuation interface{ Discard() }
+type chatContinuationKey struct{ org, team, owner, app, session string }
+type chatContinuationEntry struct {
+	data StudioChatContinuation
+	busy bool
+}
+
+// BeginContinuation exclusively checks out this authenticated session's data.
+// The returned publisher is generation-fenced: delete/reset invalidates it.
+func (cm *ChatManager) BeginContinuation(ctx context.Context, app, sessionID string) (StudioChatContinuation, func(StudioChatContinuation), error) {
+	p, ok := execution.PrincipalFromContext(ctx)
+	if !ok || p.Validate() != nil || p.Subject == "" || app == "" || sessionID == "" {
+		return nil, nil, fmt.Errorf("authenticated continuation owner required")
+	}
+	key := chatContinuationKey{p.OrgSlug, p.TeamSlug, p.Subject, app, sessionID}
+	cm.continuationMu.Lock()
+	if cm.continuations == nil {
+		cm.continuations = make(map[chatContinuationKey]*chatContinuationEntry)
+	}
+	entry := cm.continuations[key]
+	if entry != nil && entry.busy {
+		// Ordinary Chat replacement remains non-blocking. The old attempt
+		// loses publication rights; it cannot overwrite the replacement.
+		entry = nil
+	}
+	if entry == nil {
+		entry = &chatContinuationEntry{}
+		cm.continuations[key] = entry
+	}
+	data := entry.data
+	entry.data, entry.busy = nil, true
+	cm.continuationMu.Unlock()
+	var once sync.Once
+	return data, func(next StudioChatContinuation) {
+		once.Do(func() {
+			cm.continuationMu.Lock()
+			current := cm.continuations[key] == entry
+			if current {
+				entry.data, entry.busy = next, false
+				if next == nil {
+					delete(cm.continuations, key)
+				}
+			}
+			cm.continuationMu.Unlock()
+			if !current && next != nil {
+				next.Discard()
+			}
+		})
+	}, nil
+}
+
+// ForgetContinuation must follow session-owner authorization at the HTTP boundary.
+// In-flight publishers cannot resurrect an entry removed here.
+func (cm *ChatManager) ForgetContinuation(ctx context.Context, app, sessionID string) {
+	p, ok := execution.PrincipalFromContext(ctx)
+	if !ok || p.Subject == "" {
+		return
+	}
+	key := chatContinuationKey{p.OrgSlug, p.TeamSlug, p.Subject, app, sessionID}
+	cm.continuationMu.Lock()
+	entry := cm.continuations[key]
+	delete(cm.continuations, key)
+	cm.continuationMu.Unlock()
+	if entry != nil && entry.data != nil {
+		entry.data.Discard()
+	}
+}
+
+// forgetConversationState is called only after the handler authorizes deletion.
+func (cm *ChatManager) forgetConversationState(sessionID string) {
+	cm.mu.Lock()
+	comp := cm.components
+	cm.mu.Unlock()
+	if comp != nil {
+		comp.ChatAgent.ForgetConversationState(sessionID)
+	}
 }
 
 const (
@@ -451,9 +566,19 @@ func (cm *ChatManager) Reset() {
 
 	// Stop all background runners
 	getChatRunnerRegistry().StopAll()
+	cm.continuationMu.Lock()
+	oldContinuations := cm.continuations
+	cm.continuations = nil
+	cm.continuationMu.Unlock()
+	for _, entry := range oldContinuations {
+		if entry.data != nil {
+			entry.data.Discard()
+		}
+	}
 
 	cm.mu.Lock()
 	if cm.components != nil {
+		cm.components.ChatAgent.CloseConversationState()
 		if cm.components.Cleanup != nil {
 			cm.components.Cleanup()
 		}
@@ -650,6 +775,22 @@ func resolveStudioRequestLLM(r *http.Request, req StudioChatRequest, sessionID s
 		return nil, nil
 	}
 
+	appCfg := resolveStudioRequestConfig(r, req, sessionID, isNew)
+	if appCfg.General.DefaultProvider == "" {
+		return nil, fmt.Errorf("no AI model configured — run /model to choose a provider and model")
+	}
+	resolvedLLM, err := pool.Get(r.Context(), appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve configured model %s/%s: %w", appCfg.General.DefaultProvider, appCfg.General.DefaultModel, err)
+	}
+	return resolvedLLM, nil
+}
+
+func resolveStudioRequestConfig(r *http.Request, req StudioChatRequest, sessionID string, isNew bool) *config.AppConfig {
+	svc := store.FromRequest(r)
+	if svc == nil {
+		return effectiveAppConfig(r)
+	}
 	appCfg := provider.ResolveEffectiveConfig(r.Context(), svc.PlatformSettings, svc.OrgSettings, svc.Settings)
 	var userDefault provider.UserDefaultSettings
 	if svc.PersonalSettings != nil {
@@ -668,16 +809,7 @@ func resolveStudioRequestLLM(r *http.Request, req StudioChatRequest, sessionID s
 	} else if pinProvider == "" && pinModel == "" && !isNew {
 		pinProvider, pinModel = readSessionPin(r, sessionID)
 	}
-	appCfg = provider.ApplyProviderOverride(appCfg, pinProvider, pinModel)
-	if appCfg.General.DefaultProvider == "" {
-		return nil, fmt.Errorf("no AI model configured — run /model to choose a provider and model")
-	}
-
-	resolvedLLM, err := pool.Get(r.Context(), appCfg.General.DefaultProvider, appCfg.General.DefaultModel, appCfg)
-	if err != nil {
-		return nil, fmt.Errorf("resolve configured model %s/%s: %w", appCfg.General.DefaultProvider, appCfg.General.DefaultModel, err)
-	}
-	return resolvedLLM, nil
+	return provider.ApplyProviderOverride(appCfg, pinProvider, pinModel)
 }
 
 // StudioChatHandler handles POST /api/studio/chat with SSE streaming.
@@ -802,6 +934,11 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Handle slash commands server-side (these are lightweight, no background runner needed)
 	msg := strings.TrimSpace(req.Message)
+	if (msg == "__distill_save__" || msg == "__distill_cancel__" || msg == "__distill_test_run__") && !chatAgent.HasPendingDistillReview(req.SessionID) {
+		SendErrorSSE(w, flusher, "Distill review has expired or was cancelled")
+		SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+		return
+	}
 
 	// /fleet [task]: open fleet dialog, optionally pre-populated with the task
 	if msg == "/fleet" || strings.HasPrefix(msg, "/fleet ") {
@@ -925,7 +1062,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(msg, "/") {
+	if strings.HasPrefix(msg, "/") && (msg != "/distill" || req.SessionID == "") {
 		// Use ctx for slash commands so they inherit the app name context
 		handleSlashCommand(r, w, flusher, cm, sessionService, msg, userID, req.SessionID, effectiveApp)
 		return
@@ -941,129 +1078,6 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if rewrite != "" {
 			msg = rewrite
-		}
-	}
-
-	// Intercept messages for pending distill review (interactive modification loop).
-	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasPendingDistillReview(req.SessionID) {
-		intent := chatAgent.ClassifyDistillReviewIntent(r.Context(), msg)
-
-		switch intent {
-		case agent.DistillIntentSave:
-			// Save the flow — persist a clean user message
-			userText := msg
-			if msg == "__distill_save__" {
-				userText = "Save Flow"
-			}
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText, "")
-
-			// Enrich context with composite FlowStore (personal-first) so
-			// SaveDistillReview persists to the user's personal store.
-			saveCtx := r.Context()
-			if svc := store.FromRequest(r); svc != nil && (svc.PersonalFlows != nil || svc.Flows != nil) {
-				saveCtx = store.WithFlowStore(saveCtx, store.NewCompositeFlowStore(svc.PersonalFlows, svc.Flows))
-			}
-
-			filePath, runCmd, err := chatAgent.SaveDistillReview(saveCtx, req.SessionID)
-			if err != nil {
-				errText := fmt.Sprintf("Failed to save flow: %v", err)
-				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
-			} else {
-				SendSSE(w, flusher, "distill_saved", map[string]interface{}{
-					"filePath":   filePath,
-					"runCommand": runCmd,
-				})
-				persistDistillSaved(r.Context(), sessionService, userID, req.SessionID, filePath, runCmd)
-			}
-			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
-			return
-
-		case agent.DistillIntentCancel:
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
-			chatAgent.CancelDistillReview(req.SessionID)
-			responseText := "Distill review cancelled."
-			SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText, "")
-			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
-			return
-
-		case agent.DistillIntentTestRun:
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
-
-			if chatAgent.FlowRunner == nil {
-				errText := "Test run is not available — the flow runner is not configured in this environment."
-				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
-				SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
-				return
-			}
-
-			SendSSE(w, flusher, "text", map[string]interface{}{"text": "Running test execution with the original parameters...\n\n"})
-
-			// Inject PG credential store into dry-run context so that
-			// BeforeToolCallback in the flow agent can resolve {{CREDENTIAL:...}}
-			// placeholders in tool arguments (e.g., shell_command).
-			dryCtx := r.Context()
-			if svc := store.FromRequest(r); svc != nil && (svc.PersonalCredentials != nil || svc.Credentials != nil) {
-				dryCtx = store.WithCredentialStore(dryCtx, store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials))
-			}
-			dryResult, dryErr := chatAgent.DryRunDistilledFlow(dryCtx, req.SessionID)
-
-			var analysisText string
-			if dryErr != nil {
-				analysisText = fmt.Sprintf("**Test run failed to start:** %v\n\nThe flow could not be executed. This may indicate a configuration issue. You can say \"fix it\" and I'll attempt to correct the flow, or describe specific changes you'd like.", dryErr)
-			} else {
-				// Use LLM to intelligently evaluate the result
-				assessment := chatAgent.EvaluateDryRunResult(r.Context(), req.SessionID, dryResult)
-
-				if dryResult.Success {
-					output := strings.TrimSpace(dryResult.Output)
-					if output != "" && len(output) > 3000 {
-						output = output[:3000] + "\n... (truncated)"
-					}
-					if output != "" {
-						analysisText = fmt.Sprintf("**Test run completed.**\n\n**Output:**\n```\n%s\n```\n\n%s", output, assessment)
-					} else {
-						analysisText = fmt.Sprintf("**Test run completed.**\n\n%s", assessment)
-					}
-				} else {
-					output := strings.TrimSpace(dryResult.Output)
-					if len(output) > 2000 {
-						output = output[:2000] + "\n... (truncated)"
-					}
-					analysisText = fmt.Sprintf("**Test run failed.**\n\n%s", assessment)
-					if output != "" {
-						analysisText += fmt.Sprintf("\n\n**Partial output:**\n```\n%s\n```", output)
-					}
-				}
-			}
-
-			SendSSE(w, flusher, "text", map[string]interface{}{"text": analysisText})
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", analysisText, "")
-			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
-			return
-
-		default: // DistillIntentModify
-			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
-			SendSSE(w, flusher, "text", map[string]interface{}{"text": "Modifying flow...\n"})
-			review, err := chatAgent.ModifyDistillReview(r.Context(), req.SessionID, msg)
-			if err != nil {
-				errText := fmt.Sprintf("Failed to modify flow: %v\nYou can try another change, type `save` to save as-is, or `cancel` to abort.", err)
-				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
-				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
-			} else {
-				SendSSE(w, flusher, "distill_preview", map[string]interface{}{
-					"yaml":        review.YAML,
-					"flowName":    review.FlowName,
-					"description": review.Description,
-					"tags":        review.Tags,
-					"explanation": review.Explanation,
-				})
-				persistDistillPreview(r.Context(), sessionService, userID, req.SessionID, review)
-			}
-			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
-			return
 		}
 	}
 
@@ -1085,7 +1099,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// Intercept messages for active app refinement (iterative visual app loop).
 	// Unlike distill (which fully intercepts), "refine" falls through to normal
 	// agent flow with context injection; only "save" is handled as early-return.
-	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasActiveApp(req.SessionID) {
+	if msg != "/distill" && !chatAgent.HasPendingDistillReview(req.SessionID) && req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasActiveApp(req.SessionID) {
 		llmFunc := makeLLMFuncFromModel(comp.LLM)
 		appIntent := chatAgent.ClassifyAppIntent(r.Context(), msg, llmFunc)
 
@@ -1234,6 +1248,30 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.InjectChatFiles(files)
 	}
 
+	// Resolve the model before capturing scoped inputs so nested calls see the
+	// same request-local model rather than the bootstrap placeholder.
+	requestLLM := comp.LLM
+	if requestLLM == nil {
+		requestLLM = chatAgent.LLM
+	}
+	requestConfig := effectiveAppConfig(r)
+	if store.FromRequest(r) != nil && cm.llmPool != nil {
+		requestConfig = resolveStudioRequestConfig(r, req, sessionID, isNew)
+		if requestConfig.General.DefaultProvider == "" {
+			SendErrorSSE(w, flusher, "no AI model configured — run /model to choose a provider and model")
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+		}
+		resolvedLLM, llmErr := cm.llmPool.Get(r.Context(), requestConfig.General.DefaultProvider, requestConfig.General.DefaultModel, requestConfig)
+		if llmErr != nil {
+			SendErrorSSE(w, flusher, llmErr.Error())
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+		}
+		requestLLM = resolvedLLM
+		runner.InjectLLM(resolvedLLM)
+	}
+
 	// Resolve the same scoped inputs used by non-HTTP Chat consumers. Identity,
 	// session admission, streaming, and scheduler transport stay in the API.
 	var runtimeServices *store.Services
@@ -1250,7 +1288,7 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		Principal: principal, Services: runtimeServices,
 		ResourceScope: chatruntime.ResourceScopePersonal,
 		MemoryScope:   store.MemoryScope(requestedMemoryScope),
-		AppConfig:     effectiveAppConfig(r), MCPConfig: loadMCPConfigForRequest(r),
+		AppConfig:     requestConfig, MCPConfig: loadMCPConfigForRequest(r),
 		Pool: comp.SandboxPool, FilesystemSkills: comp.FilesystemSkills,
 		CredentialResolver: credentialResolverForRequest(r), Redactor: chatAgent.Redactor,
 		FallbackPolicy: chatruntime.FallbackAllowed, Debug: chatAgent.DebugMode,
@@ -1272,60 +1310,50 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	if chatAgent.PlatformReflector != nil {
 		runtimeOptions.MemorySaveOrMerge = chatAgent.PlatformReflector.MemorySaveOrMergeFunc()
 	}
-	runtimeInputs, runtimeErr := chatruntime.Build(r.Context(), runtimeOptions)
-	if runtimeErr != nil {
-		SendErrorSSE(w, flusher, "Failed to resolve scoped Chat runtime")
-		return
+	useScopedRuntime := requestIsPlatformMode(r) && comp.RuntimeFactory != nil
+	if useScopedRuntime {
+		runtimeOptions.FallbackPolicy = chatruntime.FallbackForbidden
+		runtimeOptions.Redactor = credentials.NewRedactor()
+		runtimeOptions.Debug = req.Debug
+		runtimeOptions.LLM = requestLLM
+		runtimeOptions.SessionService, _ = sessionService.(store.SessionStore)
+		runtimeOptions.MemorySaveOrMerge = (&agent.PlatformReflector{LLM: requestLLM, DebugMode: req.Debug}).MemorySaveOrMergeFunc()
+		runtimeOptions.ProviderFactory = provider.GetProvider
 	}
-	runner.ctx, runtimeErr = runtimeInputs.Bind(runner.ctx)
-	// Session storage may use a transport-specific local user ID rather than
-	// the authenticated principal subject. Preserve that existing child-session key.
-	if runtimeErr == nil {
-		runner.InjectUserID(userID)
-	}
-	if runtimeErr != nil {
-		SendErrorSSE(w, flusher, "Failed to bind scoped Chat runtime")
-		return
-	}
-	if appCfg := runtimeOptions.AppConfig; appCfg != nil && appCfg.Sandbox.OpenShell.GatewayAddr != "" {
-		runner.InjectGatewayConfig(openshell.GRPCClientConfig{Addr: appCfg.Sandbox.OpenShell.GatewayAddr, TLS: appCfg.Sandbox.OpenShell.OpenShellGatewayTLS()})
-	}
-
-	planRuntime, planErr := newSessionPlanRuntime(runner.ctx, sessionService, userID, effectiveApp, sessionID, scopedPlanVerifier(runner.ctx, comp.SandboxPool, sessionID), runner.emitEvent)
-	if planErr != nil {
-		SendErrorSSE(w, flusher, planErr.Error())
-		return
-	}
-	if req.PlanMode {
-		// Plan mode permits a fresh announcement regardless of the old lifecycle.
-		// The replacement requires its own execution approval.
-		_ = planRuntime.AllowInitialPlanReplacement()
-	}
-	runner.ctx = agent.WithPlanRuntime(runner.ctx, planRuntime)
-	if d := req.PlanRevisionDecision; d != nil {
-		if _, err := planRuntime.ResolveRevision(d.PlanID, d.ProposalID, d.BaseRevision, d.Decision); err != nil {
-			SendSSE(w, flusher, "error", map[string]any{"error": err.Error(), "code": agent.PlanRuntimeErrorCode(err)})
-			SendSSE(w, flusher, "done", map[string]any{"done": true})
-			return
+	// Callbacks carry the admitted session identity explicitly: strict Bind masks
+	// inherited store keys, including SessionID. Never take it from an SSE viewer.
+	if merge := runtimeOptions.MemorySaveOrMerge; merge != nil {
+		runtimeOptions.MemorySaveOrMerge = func(ctx context.Context, target store.MemoryStore, entry store.MemoryEntry) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			caller, ok := execution.PrincipalFromContext(ctx)
+			if !ok || !reflect.DeepEqual(caller, principal) {
+				return fmt.Errorf("scoped Chat memory owner mismatch")
+			}
+			entry.SessionID = sessionID
+			return merge(store.WithSessionID(ctx, sessionID), target, entry)
 		}
 	}
-	if req.ApprovedPlanExecution {
-		planErr = approveInitialSessionPlan(planRuntime)
-		if planErr != nil {
-			SendSSE(w, flusher, "error", map[string]any{"error": planErr.Error(), "code": agent.PlanRuntimeErrorCode(planErr)})
-			SendSSE(w, flusher, "done", map[string]any{"done": true})
-			return
-		}
-	}
-
-	// Inject RunJobFunc so schedule_job test execution works in platform mode.
-	// Uses the same credential injection as cron for the job's scope so
-	// test_first cannot succeed with personal creds then fail on team-only cron.
-	if reqSvc := store.FromRequest(r); reqSvc != nil && (reqSvc.Scheduler != nil || reqSvc.PersonalScheduler != nil) {
-		runner.InjectRunJobFunc(func(ctx context.Context, jobID string) (string, error) {
+	// Capture scheduler authority before Build: strict factory/tool re-binds must
+	// restore this callback rather than inherit one from the viewer context.
+	// Keep cron's job-scoped credential routing for test_first execution.
+	if reqSvc := runtimeServices; reqSvc != nil && (reqSvc.Scheduler != nil || reqSvc.PersonalScheduler != nil) {
+		runtimeOptions.RunJob = func(ctx context.Context, jobID string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			caller, ok := execution.PrincipalFromContext(ctx)
+			if !ok || !reflect.DeepEqual(caller, principal) {
+				return "", fmt.Errorf("scoped Chat scheduler owner mismatch")
+			}
+			ctx = store.WithSessionID(ctx, sessionID)
 			storeJob, _, jobScope := findSchedulerJob(ctx, reqSvc, jobID)
-			if storeJob == nil {
+			if storeJob == nil || (jobScope == store.JobScopePersonal && storeJob.OwnerID != "" && storeJob.OwnerID != principal.Subject) {
 				return "", fmt.Errorf("job %q not found", jobID)
+			}
+			if storeJob.Mode == string(scheduler.ModeBotTrigger) {
+				return "", fmt.Errorf("Bot schedules require reviewed Bot trigger controls")
 			}
 			storeJob.Scope = jobScope
 			job := storeJobToSchedulerJob(storeJob)
@@ -1379,7 +1407,63 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			return localExec.Execute(execCtx, job)
+		}
+	}
+
+	runtimeInputs, runtimeErr := chatruntime.Build(r.Context(), runtimeOptions)
+	if runtimeErr != nil {
+		slog.Error("scoped chat runtime build failed", "error", runtimeErr)
+		runner.Stop()
+		SendErrorSSE(w, flusher, "Failed to resolve scoped Chat runtime")
+		SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+		return
+	} // Admission owns attempt resources until the runner goroutine takes over.
+	var runtimeCleanup func()
+	var cleanupOnce sync.Once
+	cleanupAttempt := func() {
+		cleanupOnce.Do(func() {
+			if runtimeCleanup != nil {
+				runtimeCleanup()
+			}
+			_ = runtimeInputs.Close()
 		})
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			cleanupAttempt()
+			runner.Stop()
+		}
+	}()
+	runner.ctx, runtimeErr = runtimeInputs.Bind(runner.ctx)
+	// Session storage may use a transport-specific local user ID rather than
+	// the authenticated principal subject. Preserve that existing child-session key.
+	if runtimeErr == nil {
+		runner.InjectUserID(userID)
+	}
+	if runtimeErr != nil {
+		SendErrorSSE(w, flusher, "Failed to bind scoped Chat runtime")
+		SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+		return
+	}
+	if appCfg := runtimeOptions.AppConfig; appCfg != nil && appCfg.Sandbox.OpenShell.GatewayAddr != "" {
+		runner.InjectGatewayConfig(openshell.GRPCClientConfig{Addr: appCfg.Sandbox.OpenShell.GatewayAddr, TLS: appCfg.Sandbox.OpenShell.OpenShellGatewayTLS()})
+	}
+
+	var planRuntime *agent.PlanRuntime
+	var planErr error
+	initializePlan := StudioChatPlanInitializer(func(verify func(string) (int, string, error)) (*agent.PlanRuntime, error) {
+		if _, bound := agent.PlanRuntimeFromContext(runner.ctx); bound {
+			return nil, fmt.Errorf("plan runtime already bound")
+		}
+		planRuntime, planErr = newSessionPlanRuntime(runner.ctx, sessionService, userID, effectiveApp, sessionID, verify, runner.emitEvent)
+		return planRuntime, planErr
+	})
+	if !useScopedRuntime {
+		if _, err := initializePlan(scopedPlanVerifier(runner.ctx, comp.SandboxPool, sessionID)); err != nil {
+			SendErrorSSE(w, flusher, err.Error())
+			return
+		}
 	}
 
 	// If we seeded an app preview, emit it through the runner so the frontend
@@ -1388,19 +1472,195 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 		runner.emitEvent("app_preview", seededAppPreview)
 	}
 
-	// Resolve and inject the request's configured model. Platform startup may use
-	// a placeholder because it has no tenant context; a request with tenant
-	// settings must never fall through to that placeholder when resolution fails.
-	if store.FromRequest(r) != nil && cm.llmPool != nil {
-		resolvedLLM, llmErr := resolveStudioRequestLLM(r, req, sessionID, isNew, cm.llmPool)
-		if llmErr != nil {
-			slog.Warn("per-request LLM resolution failed", "session", sessionID, "error", llmErr)
-			SendErrorSSE(w, flusher, llmErr.Error())
+	if useScopedRuntime {
+		attempt, err := comp.RuntimeFactory(runner.ctx, StudioChatRuntimeRequest{
+			PlanInitializer: initializePlan,
+			Inputs:          runtimeInputs, AppConfig: runtimeOptions.AppConfig, LLM: requestLLM,
+			SessionService: sessionService, SessionID: sessionID, UserID: userID, AppName: effectiveApp,
+			ProviderName: requestConfig.General.DefaultProvider, ModelName: requestConfig.General.DefaultModel,
+			Debug: req.Debug, AutoApprove: req.AutoApprove,
+		})
+		if attempt != nil {
+			runtimeCleanup = attempt.Cleanup
+		}
+		if err != nil || attempt == nil || attempt.ChatAgent == nil {
+			SendErrorSSE(w, flusher, "Failed to construct scoped Chat runtime")
 			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
 			return
 		}
-		runner.InjectLLM(resolvedLLM)
-		slog.Debug("per-request LLM injected", "model", resolvedLLM.Name())
+		// Preserve the existing manager-owned distillation/tutorial lifecycle.
+		// Only data and its mutex are shared; execution callbacks remain fresh.
+		attempt.ChatAgent.ShareConversationState(chatAgent)
+		// Active app previews are presentation state reconstructed above, not
+		// authority. Transfer only this session's state to the isolated agent.
+		if activeApp := chatAgent.GetActiveApp(sessionID); activeApp != nil {
+			attempt.ChatAgent.SetActiveApp(sessionID, activeApp)
+		}
+		chatAgent = attempt.ChatAgent
+	}
+
+	// Construction must supply verification before the runtime becomes authority.
+	if planRuntime == nil {
+		SendErrorSSE(w, flusher, "Scoped Chat plan runtime unavailable")
+		SendSSE(w, flusher, "done", map[string]any{"done": true})
+		return
+	}
+	if req.PlanMode {
+		// Plan mode permits replacement, but never grants execution consent.
+		_ = planRuntime.AllowInitialPlanReplacement()
+	}
+	runner.ctx = agent.WithPlanRuntime(runner.ctx, planRuntime)
+	if d := req.PlanRevisionDecision; d != nil {
+		if _, err := planRuntime.ResolveRevision(d.PlanID, d.ProposalID, d.BaseRevision, d.Decision); err != nil {
+			SendSSE(w, flusher, "error", map[string]any{"error": err.Error(), "code": agent.PlanRuntimeErrorCode(err)})
+			SendSSE(w, flusher, "done", map[string]any{"done": true})
+			return
+		}
+	}
+	if req.ApprovedPlanExecution {
+		if planErr = approveInitialSessionPlan(planRuntime); planErr != nil {
+			SendSSE(w, flusher, "error", map[string]any{"error": planErr.Error(), "code": agent.PlanRuntimeErrorCode(planErr)})
+			SendSSE(w, flusher, "done", map[string]any{"done": true})
+			return
+		}
+	}
+
+	// Distillation is an execution attempt too: use the newly constructed agent
+	// and its bound authority, never the manager's bootstrap model or callbacks.
+	if msg == "/distill" || (req.SessionID != "" && chatAgent.HasPendingDistillReview(req.SessionID)) {
+		boundCtx, err := runtimeInputs.Bind(r.Context())
+		if err != nil {
+			SendErrorSSE(w, flusher, "Failed to bind scoped distillation runtime")
+			return
+		}
+		r = r.WithContext(context.WithValue(store.WithSessionID(boundCtx, sessionID), appNameContextKey, effectiveApp))
+	}
+	if msg == "/distill" {
+		handleSlashCommand(r, w, flusher, cm, sessionService, msg, userID, sessionID, effectiveApp, chatAgent)
+		return
+	}
+
+	// Intercept messages for pending distill review (interactive modification loop).
+	if req.PlanRevisionDecision == nil && !req.ApprovedPlanExecution && req.SessionID != "" && chatAgent.HasPendingDistillReview(req.SessionID) {
+		intent := chatAgent.ClassifyDistillReviewIntent(r.Context(), msg)
+
+		switch intent {
+		case agent.DistillIntentSave:
+			// Save the flow — persist a clean user message
+			userText := msg
+			if msg == "__distill_save__" {
+				userText = "Save Flow"
+			}
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", userText, "")
+
+			// Enrich context with composite FlowStore (personal-first) so
+			// SaveDistillReview persists to the user's personal store.
+			saveCtx := r.Context()
+			if svc := store.FromRequest(r); svc != nil && (svc.PersonalFlows != nil || svc.Flows != nil) {
+				saveCtx = store.WithFlowStore(saveCtx, store.NewCompositeFlowStore(svc.PersonalFlows, svc.Flows))
+			}
+
+			filePath, runCmd, err := chatAgent.SaveDistillReview(saveCtx, req.SessionID)
+			if err != nil {
+				errText := fmt.Sprintf("Failed to save flow: %v", err)
+				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
+			} else {
+				SendSSE(w, flusher, "distill_saved", map[string]interface{}{
+					"filePath":   filePath,
+					"runCommand": runCmd,
+				})
+				persistDistillSaved(r.Context(), sessionService, userID, req.SessionID, filePath, runCmd)
+			}
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+
+		case agent.DistillIntentCancel:
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
+			chatAgent.CancelDistillReview(req.SessionID)
+			responseText := "Distill review cancelled."
+			SendSSE(w, flusher, "text", map[string]interface{}{"text": responseText})
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", responseText, "")
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+
+		case agent.DistillIntentTestRun:
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
+
+			if chatAgent.FlowRunner == nil {
+				errText := "Test run is not available — the flow runner is not configured in this environment."
+				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
+				SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+				return
+			}
+
+			SendSSE(w, flusher, "text", map[string]interface{}{"text": "Running test execution with the original parameters...\n\n"})
+
+			// Inject PG credential store into dry-run context so that
+			// BeforeToolCallback in the flow agent can resolve {{CREDENTIAL:...}}
+			// placeholders in tool arguments (e.g., shell_command).
+			dryCtx := r.Context()
+			if svc := store.FromRequest(r); svc != nil && (svc.PersonalCredentials != nil || svc.Credentials != nil) {
+				dryCtx = store.WithCredentialStore(dryCtx, store.NewMergedCredentialStore(svc.PersonalCredentials, svc.Credentials))
+			}
+			dryResult, dryErr := chatAgent.DryRunDistilledFlow(dryCtx, req.SessionID)
+
+			var analysisText string
+			if dryErr != nil {
+				analysisText = fmt.Sprintf("**Test run failed to start:** %v\n\nThe flow could not be executed. This may indicate a configuration issue. You can say \"fix it\" and I'll attempt to correct the flow, or describe specific changes you'd like.", dryErr)
+			} else {
+				// Use LLM to intelligently evaluate the result
+				assessment := chatAgent.EvaluateDryRunResult(r.Context(), req.SessionID, dryResult)
+
+				if dryResult.Success {
+					output := strings.TrimSpace(dryResult.Output)
+					if output != "" && len(output) > 3000 {
+						output = output[:3000] + "\n... (truncated)"
+					}
+					if output != "" {
+						analysisText = fmt.Sprintf("**Test run completed.**\n\n**Output:**\n```\n%s\n```\n\n%s", output, assessment)
+					} else {
+						analysisText = fmt.Sprintf("**Test run completed.**\n\n%s", assessment)
+					}
+				} else {
+					output := strings.TrimSpace(dryResult.Output)
+					if len(output) > 2000 {
+						output = output[:2000] + "\n... (truncated)"
+					}
+					analysisText = fmt.Sprintf("**Test run failed.**\n\n%s", assessment)
+					if output != "" {
+						analysisText += fmt.Sprintf("\n\n**Partial output:**\n```\n%s\n```", output)
+					}
+				}
+			}
+
+			SendSSE(w, flusher, "text", map[string]interface{}{"text": analysisText})
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", analysisText, "")
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+
+		default: // DistillIntentModify
+			persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "user", msg, "")
+			SendSSE(w, flusher, "text", map[string]interface{}{"text": "Modifying flow...\n"})
+			review, err := chatAgent.ModifyDistillReview(r.Context(), req.SessionID, msg)
+			if err != nil {
+				errText := fmt.Sprintf("Failed to modify flow: %v\nYou can try another change, type `save` to save as-is, or `cancel` to abort.", err)
+				SendSSE(w, flusher, "text", map[string]interface{}{"text": errText})
+				persistSessionMessage(r.Context(), sessionService, userID, req.SessionID, "model", errText, "")
+			} else {
+				SendSSE(w, flusher, "distill_preview", map[string]interface{}{
+					"yaml":        review.YAML,
+					"flowName":    review.FlowName,
+					"description": review.Description,
+					"tags":        review.Tags,
+					"explanation": review.Explanation,
+				})
+				persistDistillPreview(r.Context(), sessionService, userID, req.SessionID, review)
+			}
+			SendSSE(w, flusher, "done", map[string]interface{}{"done": true})
+			return
+		}
 	}
 
 	registry := getChatRunnerRegistry()
@@ -1412,7 +1672,9 @@ func StudioChatHandler(w http.ResponseWriter, r *http.Request) {
 	// (POST /api/studio/sessions/{id}/stop) can cancel the background runner.
 	cm.registerStream(sessionID, runner.Stop)
 
+	transferred = true
 	go func() {
+		defer cleanupAttempt()
 		defer registry.Unregister(sessionID)
 		defer cm.unregisterStream(sessionID)
 		defer func() {
@@ -1566,13 +1828,16 @@ func streamRunnerEvents(w http.ResponseWriter, flusher http.Flusher, httpCtx con
 // (personal pin → user default → team/org/platform cascade) instead of the
 // process-global ChatManager.ProviderName/ModelName.
 // The effectiveApp parameter ensures session creation commands use the correct app namespace.
-func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *ChatManager, sessionService session.Service, cmd, userID, sessionID, effectiveApp string) {
+func handleSlashCommand(r *http.Request, w io.Writer, flusher http.Flusher, cm *ChatManager, sessionService session.Service, cmd, userID, sessionID, effectiveApp string, attempt ...*agent.ChatAgent) {
 	// Inject effectiveApp into context so persistSessionMessage and
 	// persistDistillPreview resolve the correct namespace without needing
 	// an explicit appName argument at every call site.
 	ctx := context.WithValue(r.Context(), appNameContextKey, effectiveApp)
 	comp := cm.components
 	chatAgent := comp.ChatAgent
+	if len(attempt) != 0 && attempt[0] != nil {
+		chatAgent = attempt[0]
+	}
 
 	switch {
 	case cmd == "/help":

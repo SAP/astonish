@@ -1182,8 +1182,12 @@ func init() {
 	sessioneventDescSessionID := sessioneventFields[1].Descriptor()
 	// sessionevent.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	sessionevent.SessionIDValidator = sessioneventDescSessionID.Validators[0].(func(string) error)
+	// sessioneventDescEventID is the schema descriptor for event_id field.
+	sessioneventDescEventID := sessioneventFields[2].Descriptor()
+	// sessionevent.EventIDValidator is a validator for the "event_id" field. It is called by the builders before save.
+	sessionevent.EventIDValidator = sessioneventDescEventID.Validators[0].(func(string) error)
 	// sessioneventDescCreatedAt is the schema descriptor for created_at field.
-	sessioneventDescCreatedAt := sessioneventFields[3].Descriptor()
+	sessioneventDescCreatedAt := sessioneventFields[4].Descriptor()
 	// sessionevent.DefaultCreatedAt holds the default value on creation for the created_at field.
 	sessionevent.DefaultCreatedAt = sessioneventDescCreatedAt.Default.(func() time.Time)
 	settingFields := schema.Setting{}.Fields()

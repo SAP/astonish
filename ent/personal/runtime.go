@@ -661,11 +661,11 @@ func init() {
 	// personalsettings.DefaultBrandTheme holds the default value on creation for the brand_theme field.
 	personalsettings.DefaultBrandTheme = personalsettingsDescBrandTheme.Default.(string)
 	// personalsettingsDescCreatedAt is the schema descriptor for created_at field.
-	personalsettingsDescCreatedAt := personalsettingsFields[4].Descriptor()
+	personalsettingsDescCreatedAt := personalsettingsFields[5].Descriptor()
 	// personalsettings.DefaultCreatedAt holds the default value on creation for the created_at field.
 	personalsettings.DefaultCreatedAt = personalsettingsDescCreatedAt.Default.(func() time.Time)
 	// personalsettingsDescUpdatedAt is the schema descriptor for updated_at field.
-	personalsettingsDescUpdatedAt := personalsettingsFields[5].Descriptor()
+	personalsettingsDescUpdatedAt := personalsettingsFields[6].Descriptor()
 	// personalsettings.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	personalsettings.DefaultUpdatedAt = personalsettingsDescUpdatedAt.Default.(func() time.Time)
 	// personalsettings.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
@@ -760,8 +760,12 @@ func init() {
 	sessioneventDescSessionID := sessioneventFields[1].Descriptor()
 	// sessionevent.SessionIDValidator is a validator for the "session_id" field. It is called by the builders before save.
 	sessionevent.SessionIDValidator = sessioneventDescSessionID.Validators[0].(func(string) error)
+	// sessioneventDescEventID is the schema descriptor for event_id field.
+	sessioneventDescEventID := sessioneventFields[2].Descriptor()
+	// sessionevent.EventIDValidator is a validator for the "event_id" field. It is called by the builders before save.
+	sessionevent.EventIDValidator = sessioneventDescEventID.Validators[0].(func(string) error)
 	// sessioneventDescCreatedAt is the schema descriptor for created_at field.
-	sessioneventDescCreatedAt := sessioneventFields[3].Descriptor()
+	sessioneventDescCreatedAt := sessioneventFields[4].Descriptor()
 	// sessionevent.DefaultCreatedAt holds the default value on creation for the created_at field.
 	sessionevent.DefaultCreatedAt = sessioneventDescCreatedAt.Default.(func() time.Time)
 	slideFields := schema.Slide{}.Fields()

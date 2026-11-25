@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/SAP/astonish/ent/personal/personalsettings"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -75,6 +76,12 @@ func (_c *PersonalSettingsCreate) SetNillableBrandTheme(v *string) *PersonalSett
 	if v != nil {
 		_c.SetBrandTheme(*v)
 	}
+	return _c
+}
+
+// SetBotEmail sets the "bot_email" field.
+func (_c *PersonalSettingsCreate) SetBotEmail(v *store.BotEmailSettings) *PersonalSettingsCreate {
+	_c.mutation.SetBotEmail(v)
 	return _c
 }
 
@@ -234,6 +241,10 @@ func (_c *PersonalSettingsCreate) createSpec() (*PersonalSettings, *sqlgraph.Cre
 	if value, ok := _c.mutation.BrandTheme(); ok {
 		_spec.SetField(personalsettings.FieldBrandTheme, field.TypeString, value)
 		_node.BrandTheme = value
+	}
+	if value, ok := _c.mutation.BotEmail(); ok {
+		_spec.SetField(personalsettings.FieldBotEmail, field.TypeJSON, value)
+		_node.BotEmail = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(personalsettings.FieldCreatedAt, field.TypeTime, value)

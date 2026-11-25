@@ -22,6 +22,8 @@ const (
 	FieldDefaultModel = "default_model"
 	// FieldBrandTheme holds the string denoting the brand_theme field in the database.
 	FieldBrandTheme = "brand_theme"
+	// FieldBotEmail holds the string denoting the bot_email field in the database.
+	FieldBotEmail = "bot_email"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -37,6 +39,7 @@ var Columns = []string{
 	FieldDefaultProvider,
 	FieldDefaultModel,
 	FieldBrandTheme,
+	FieldBotEmail,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 }

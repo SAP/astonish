@@ -28,6 +28,20 @@ func (_c *SessionEventCreate) SetSessionID(v string) *SessionEventCreate {
 	return _c
 }
 
+// SetEventID sets the "event_id" field.
+func (_c *SessionEventCreate) SetEventID(v string) *SessionEventCreate {
+	_c.mutation.SetEventID(v)
+	return _c
+}
+
+// SetNillableEventID sets the "event_id" field if the given value is not nil.
+func (_c *SessionEventCreate) SetNillableEventID(v *string) *SessionEventCreate {
+	if v != nil {
+		_c.SetEventID(*v)
+	}
+	return _c
+}
+
 // SetEventData sets the "event_data" field.
 func (_c *SessionEventCreate) SetEventData(v map[string]interface{}) *SessionEventCreate {
 	_c.mutation.SetEventData(v)
@@ -110,6 +124,11 @@ func (_c *SessionEventCreate) check() error {
 			return &ValidationError{Name: "session_id", err: fmt.Errorf(`personal: validator failed for field "SessionEvent.session_id": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.EventID(); ok {
+		if err := sessionevent.EventIDValidator(v); err != nil {
+			return &ValidationError{Name: "event_id", err: fmt.Errorf(`personal: validator failed for field "SessionEvent.event_id": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.EventData(); !ok {
 		return &ValidationError{Name: "event_data", err: errors.New(`personal: missing required field "SessionEvent.event_data"`)}
 	}
@@ -153,6 +172,10 @@ func (_c *SessionEventCreate) createSpec() (*SessionEvent, *sqlgraph.CreateSpec)
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = id
+	}
+	if value, ok := _c.mutation.EventID(); ok {
+		_spec.SetField(sessionevent.FieldEventID, field.TypeString, value)
+		_node.EventID = &value
 	}
 	if value, ok := _c.mutation.EventData(); ok {
 		_spec.SetField(sessionevent.FieldEventData, field.TypeJSON, value)

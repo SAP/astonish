@@ -806,6 +806,7 @@ var (
 		{Name: "default_provider", Type: field.TypeString, Default: ""},
 		{Name: "default_model", Type: field.TypeString, Default: ""},
 		{Name: "brand_theme", Type: field.TypeString, Default: ""},
+		{Name: "bot_email", Type: field.TypeJSON, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "updated_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 	}
@@ -895,6 +896,7 @@ var (
 	// SessionEventsColumns holds the columns for the "session_events" table.
 	SessionEventsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "event_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "event_data", Type: field.TypeJSON},
 		{Name: "created_at", Type: field.TypeTime, Default: map[string]schema.Expr{"postgres": "now()", "sqlite3": "(datetime('now'))"}},
 		{Name: "session_id", Type: field.TypeString},
@@ -907,7 +909,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "session_events_sessions_events",
-				Columns:    []*schema.Column{SessionEventsColumns[3]},
+				Columns:    []*schema.Column{SessionEventsColumns[4]},
 				RefColumns: []*schema.Column{SessionsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -916,7 +918,12 @@ var (
 			{
 				Name:    "sessionevent_session_id",
 				Unique:  false,
-				Columns: []*schema.Column{SessionEventsColumns[3]},
+				Columns: []*schema.Column{SessionEventsColumns[4]},
+			},
+			{
+				Name:    "sessionevent_session_id_event_id",
+				Unique:  true,
+				Columns: []*schema.Column{SessionEventsColumns[4], SessionEventsColumns[1]},
 			},
 		},
 	}

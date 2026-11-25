@@ -22,6 +22,13 @@ func (SessionEvent) Fields() []ent.Field {
 		field.Int64("id"),
 		field.String("session_id").
 			NotEmpty(),
+		// event_id is populated for Bot-owned transcript rows. Ordinary Chat rows
+		// remain nullable and keep their existing event_data representation.
+		field.String("event_id").
+			Optional().
+			Nillable().
+			Immutable().
+			MaxLen(256),
 		field.JSON("event_data", map[string]any{}),
 		field.Time("created_at").
 			Default(time.Now).
@@ -49,6 +56,7 @@ func (SessionEvent) Edges() []ent.Edge {
 func (SessionEvent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("session_id"),
+		index.Fields("session_id", "event_id").Unique(),
 	}
 }
 

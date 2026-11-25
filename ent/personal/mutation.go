@@ -39,6 +39,7 @@ import (
 	"github.com/SAP/astonish/ent/personal/session"
 	"github.com/SAP/astonish/ent/personal/sessionevent"
 	"github.com/SAP/astonish/ent/personal/slide"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -20570,6 +20571,7 @@ type PersonalSettingsMutation struct {
 	default_provider *string
 	default_model    *string
 	brand_theme      *string
+	bot_email        **store.BotEmailSettings
 	created_at       *time.Time
 	updated_at       *time.Time
 	clearedFields    map[string]struct{}
@@ -20820,6 +20822,55 @@ func (m *PersonalSettingsMutation) ResetBrandTheme() {
 	m.brand_theme = nil
 }
 
+// SetBotEmail sets the "bot_email" field.
+func (m *PersonalSettingsMutation) SetBotEmail(ses *store.BotEmailSettings) {
+	m.bot_email = &ses
+}
+
+// BotEmail returns the value of the "bot_email" field in the mutation.
+func (m *PersonalSettingsMutation) BotEmail() (r *store.BotEmailSettings, exists bool) {
+	v := m.bot_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBotEmail returns the old "bot_email" field's value of the PersonalSettings entity.
+// If the PersonalSettings object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PersonalSettingsMutation) OldBotEmail(ctx context.Context) (v *store.BotEmailSettings, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBotEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBotEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBotEmail: %w", err)
+	}
+	return oldValue.BotEmail, nil
+}
+
+// ClearBotEmail clears the value of the "bot_email" field.
+func (m *PersonalSettingsMutation) ClearBotEmail() {
+	m.bot_email = nil
+	m.clearedFields[personalsettings.FieldBotEmail] = struct{}{}
+}
+
+// BotEmailCleared returns if the "bot_email" field was cleared in this mutation.
+func (m *PersonalSettingsMutation) BotEmailCleared() bool {
+	_, ok := m.clearedFields[personalsettings.FieldBotEmail]
+	return ok
+}
+
+// ResetBotEmail resets all changes to the "bot_email" field.
+func (m *PersonalSettingsMutation) ResetBotEmail() {
+	m.bot_email = nil
+	delete(m.clearedFields, personalsettings.FieldBotEmail)
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *PersonalSettingsMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -20926,7 +20977,7 @@ func (m *PersonalSettingsMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *PersonalSettingsMutation) Fields() []string {
-	fields := make([]string, 0, 6)
+	fields := make([]string, 0, 7)
 	if m.user_id != nil {
 		fields = append(fields, personalsettings.FieldUserID)
 	}
@@ -20938,6 +20989,9 @@ func (m *PersonalSettingsMutation) Fields() []string {
 	}
 	if m.brand_theme != nil {
 		fields = append(fields, personalsettings.FieldBrandTheme)
+	}
+	if m.bot_email != nil {
+		fields = append(fields, personalsettings.FieldBotEmail)
 	}
 	if m.created_at != nil {
 		fields = append(fields, personalsettings.FieldCreatedAt)
@@ -20961,6 +21015,8 @@ func (m *PersonalSettingsMutation) Field(name string) (ent.Value, bool) {
 		return m.DefaultModel()
 	case personalsettings.FieldBrandTheme:
 		return m.BrandTheme()
+	case personalsettings.FieldBotEmail:
+		return m.BotEmail()
 	case personalsettings.FieldCreatedAt:
 		return m.CreatedAt()
 	case personalsettings.FieldUpdatedAt:
@@ -20982,6 +21038,8 @@ func (m *PersonalSettingsMutation) OldField(ctx context.Context, name string) (e
 		return m.OldDefaultModel(ctx)
 	case personalsettings.FieldBrandTheme:
 		return m.OldBrandTheme(ctx)
+	case personalsettings.FieldBotEmail:
+		return m.OldBotEmail(ctx)
 	case personalsettings.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case personalsettings.FieldUpdatedAt:
@@ -21022,6 +21080,13 @@ func (m *PersonalSettingsMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetBrandTheme(v)
+		return nil
+	case personalsettings.FieldBotEmail:
+		v, ok := value.(*store.BotEmailSettings)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBotEmail(v)
 		return nil
 	case personalsettings.FieldCreatedAt:
 		v, ok := value.(time.Time)
@@ -21066,7 +21131,11 @@ func (m *PersonalSettingsMutation) AddField(name string, value ent.Value) error 
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *PersonalSettingsMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(personalsettings.FieldBotEmail) {
+		fields = append(fields, personalsettings.FieldBotEmail)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -21079,6 +21148,11 @@ func (m *PersonalSettingsMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *PersonalSettingsMutation) ClearField(name string) error {
+	switch name {
+	case personalsettings.FieldBotEmail:
+		m.ClearBotEmail()
+		return nil
+	}
 	return fmt.Errorf("unknown PersonalSettings nullable field %s", name)
 }
 
@@ -21097,6 +21171,9 @@ func (m *PersonalSettingsMutation) ResetField(name string) error {
 		return nil
 	case personalsettings.FieldBrandTheme:
 		m.ResetBrandTheme()
+		return nil
+	case personalsettings.FieldBotEmail:
+		m.ResetBotEmail()
 		return nil
 	case personalsettings.FieldCreatedAt:
 		m.ResetCreatedAt()
@@ -23869,6 +23946,7 @@ type SessionEventMutation struct {
 	op             Op
 	typ            string
 	id             *int
+	event_id       *string
 	event_data     *map[string]interface{}
 	created_at     *time.Time
 	clearedFields  map[string]struct{}
@@ -24019,6 +24097,55 @@ func (m *SessionEventMutation) ResetSessionID() {
 	m.session = nil
 }
 
+// SetEventID sets the "event_id" field.
+func (m *SessionEventMutation) SetEventID(s string) {
+	m.event_id = &s
+}
+
+// EventID returns the value of the "event_id" field in the mutation.
+func (m *SessionEventMutation) EventID() (r string, exists bool) {
+	v := m.event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEventID returns the old "event_id" field's value of the SessionEvent entity.
+// If the SessionEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SessionEventMutation) OldEventID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEventID: %w", err)
+	}
+	return oldValue.EventID, nil
+}
+
+// ClearEventID clears the value of the "event_id" field.
+func (m *SessionEventMutation) ClearEventID() {
+	m.event_id = nil
+	m.clearedFields[sessionevent.FieldEventID] = struct{}{}
+}
+
+// EventIDCleared returns if the "event_id" field was cleared in this mutation.
+func (m *SessionEventMutation) EventIDCleared() bool {
+	_, ok := m.clearedFields[sessionevent.FieldEventID]
+	return ok
+}
+
+// ResetEventID resets all changes to the "event_id" field.
+func (m *SessionEventMutation) ResetEventID() {
+	m.event_id = nil
+	delete(m.clearedFields, sessionevent.FieldEventID)
+}
+
 // SetEventData sets the "event_data" field.
 func (m *SessionEventMutation) SetEventData(value map[string]interface{}) {
 	m.event_data = &value
@@ -24152,9 +24279,12 @@ func (m *SessionEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SessionEventMutation) Fields() []string {
-	fields := make([]string, 0, 3)
+	fields := make([]string, 0, 4)
 	if m.session != nil {
 		fields = append(fields, sessionevent.FieldSessionID)
+	}
+	if m.event_id != nil {
+		fields = append(fields, sessionevent.FieldEventID)
 	}
 	if m.event_data != nil {
 		fields = append(fields, sessionevent.FieldEventData)
@@ -24172,6 +24302,8 @@ func (m *SessionEventMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case sessionevent.FieldSessionID:
 		return m.SessionID()
+	case sessionevent.FieldEventID:
+		return m.EventID()
 	case sessionevent.FieldEventData:
 		return m.EventData()
 	case sessionevent.FieldCreatedAt:
@@ -24187,6 +24319,8 @@ func (m *SessionEventMutation) OldField(ctx context.Context, name string) (ent.V
 	switch name {
 	case sessionevent.FieldSessionID:
 		return m.OldSessionID(ctx)
+	case sessionevent.FieldEventID:
+		return m.OldEventID(ctx)
 	case sessionevent.FieldEventData:
 		return m.OldEventData(ctx)
 	case sessionevent.FieldCreatedAt:
@@ -24206,6 +24340,13 @@ func (m *SessionEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSessionID(v)
+		return nil
+	case sessionevent.FieldEventID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEventID(v)
 		return nil
 	case sessionevent.FieldEventData:
 		v, ok := value.(map[string]interface{})
@@ -24250,7 +24391,11 @@ func (m *SessionEventMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *SessionEventMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(sessionevent.FieldEventID) {
+		fields = append(fields, sessionevent.FieldEventID)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -24263,6 +24408,11 @@ func (m *SessionEventMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *SessionEventMutation) ClearField(name string) error {
+	switch name {
+	case sessionevent.FieldEventID:
+		m.ClearEventID()
+		return nil
+	}
 	return fmt.Errorf("unknown SessionEvent nullable field %s", name)
 }
 
@@ -24272,6 +24422,9 @@ func (m *SessionEventMutation) ResetField(name string) error {
 	switch name {
 	case sessionevent.FieldSessionID:
 		m.ResetSessionID()
+		return nil
+	case sessionevent.FieldEventID:
+		m.ResetEventID()
 		return nil
 	case sessionevent.FieldEventData:
 		m.ResetEventData()

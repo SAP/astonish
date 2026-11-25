@@ -10,6 +10,8 @@ import (
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // PersonalSettings holds the schema definition for the PersonalSettings entity.
@@ -34,6 +36,10 @@ func (PersonalSettings) Fields() []ent.Field {
 		// Empty string means inherit platform default (then product default classic).
 		field.String("brand_theme").
 			Default(""),
+		// BotEmail stores mailbox configuration and a scoped credential reference,
+		// never secret material. Absent/cleared values do not inherit a mailbox.
+		field.JSON("bot_email", &store.BotEmailSettings{}).
+			Optional(),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable().

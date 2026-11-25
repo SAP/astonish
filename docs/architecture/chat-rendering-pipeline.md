@@ -8,6 +8,14 @@ native PTY acceptances share the same production worker fixture and assert owner
 refinement → real acknowledgement → complete sourced inline body, including a
 forced reconnect before source completion and Home/reload restore. User-bubble
 uniqueness is measured on bubbles, separately from the historical answered card.
+Saved question approvals remain in Studio's question display list after they are
+consumed, independently of the pending-action list. When a transcript review row
+is absent, the same `BotReviewCard` renders the saved question and answer on live
+refresh and reload. Its persisted question ID anchors it at the matching
+`chat_question` or `ask_user` result in the chronological display projection,
+outside activity folds, before the owner answer and subsequent messages. Only
+questions with no matching transcript position use the trailing recovery fallback;
+an arriving transcript review row deduplicates that fallback by review ID. Consumed questions do not become pending approvals or regain action authority.
 Explicit artifact publication keeps its existing preview/download path; private
 work judgments never become UI controls. Transport uncertainty must not erase
 already committed useful findings or certify an uncommitted result.

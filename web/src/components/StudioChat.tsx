@@ -303,7 +303,7 @@ interface StudioChatProps {
   hideSidebar?: boolean
   botRoute?: import('./bots/botRoute').BotRoute
   userId?: string
-  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; pendingApprovalIds?: string[]; renderReview?: (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
+  botThread?: { botId: string; scope: import('../api/bots').BotScope; readOnly: boolean; status?: import('../api/bots').BotStatusValue; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; renderReview?: (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => React.ReactNode; operations?: BotOperationView[]; decisionsReadOnly?: boolean; runStates?: BotRunState[]; onOperationsChange?: (operations: BotOperationView[]) => void; onSend: (text: string, attachments?: AttachmentPayload[], operations?: BotOperationView[]) => Promise<import('../api/botReviews').BotMessageReceipt | void> }
   initialSessionId?: string | null
   pendingChatMessage?: { message: string; systemContext?: string } | null
   onPendingChatMessageConsumed?: () => void
@@ -2487,14 +2487,25 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
     return sessions.filter(s => (s.title || s.id).toLowerCase().includes(q))
   }, [sessions, sessionFilter])
 
-  const durablePendingApprovalIds = botThread?.pendingApprovalIds || []
+  const durablePendingApprovalIds = [...new Set([...(botThread?.pendingApprovalIds || []), ...(botThread?.questionApprovalIds || [])])]
   const transcriptApprovalIds = useMemo(() => new Set(messages.filter((message): message is Extract<ChatMsg, { type: 'bot_review' }> => message.type === 'bot_review' && message.kind === 'approval').map(message => message.reviewId)), [messages])
-  const fallbackPendingApprovalIds = durablePendingApprovalIds.filter(id => !transcriptApprovalIds.has(id))
+  const questionReviewByIndex = new Map<number, string>()
+  for (const anchor of botThread?.questionApprovalAnchors || []) {
+    if (!durablePendingApprovalIds.includes(anchor.reviewId) || transcriptApprovalIds.has(anchor.reviewId)) continue
+    const index = messages.findIndex(message =>
+      message.type === 'chat_question' ? message.questionId === anchor.questionId :
+      message.type === 'tool_result' && message.toolName === 'ask_user' &&
+      !!message.toolResult && typeof message.toolResult === 'object' &&
+      (message.toolResult as { questionId?: string }).questionId === anchor.questionId)
+    if (index >= 0) questionReviewByIndex.set(index, anchor.reviewId)
+  }
+  const anchoredReviewIds = new Set(questionReviewByIndex.values())
+  const fallbackPendingApprovalIds = durablePendingApprovalIds.filter(id => !transcriptApprovalIds.has(id) && !anchoredReviewIds.has(id))
 
   // One lossless display projection for live and restored transcript records.
   const { activityByStart, skipIndices: toolActivitySkipIndices, lastActivityStart } = useMemo(
-    () => buildChronologicalActivityRenderIndex(messages, botThread ? 'preserve-agent' : 'fold-intermediate'),
-    [messages, !!botThread],
+    () => buildChronologicalActivityRenderIndex(messages.map((message, index) => questionReviewByIndex.has(index) ? { type: 'bot_review', kind: 'approval', reviewId: questionReviewByIndex.get(index)!, eventId: `question/${questionReviewByIndex.get(index)}` } : message), botThread ? 'preserve-agent' : 'fold-intermediate'),
+    [messages, !!botThread, botThread?.questionApprovalAnchors, botThread?.questionApprovalIds],
   )
 
   const liveStreamStatus = useMemo(() => {
@@ -2928,6 +2939,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
             />
           ) : (
             messages.map((msg, index) => {
+              const anchoredReview = questionReviewByIndex.get(index)
+              if (anchoredReview) return <div key={`question/${anchoredReview}`}>{botThread?.renderReview?.('approval', anchoredReview)}</div>
               if (msg.type === 'bot_operation') { const operation = botOperations[msg.operationId]; return operation && botThread ? <BotOperationResult key={msg.eventId} operation={operation} scope={botThread.scope} readOnly={botThread.readOnly || !!botThread.decisionsReadOnly} onChange={next => setBotOperations(prev => mergeBotOperation(prev, next, botThread.botId, initialSessionId || ''))} /> : null }
               if (msg.type === 'bot_review') return <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId, msg.question)}</div>
               // Turn-level activity fold: render block at segment start; skip covered indices.

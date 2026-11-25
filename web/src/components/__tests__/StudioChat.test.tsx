@@ -534,6 +534,40 @@ describe('StudioChat', () => {
     }
   })
 
+  it('anchors a saved question before its answer and later messages live and on replay', async () => {
+    const renderReview = vi.fn(() => <span>Anchored saved question</span>)
+    const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), questionApprovalIds: ['saved-review'], questionApprovalAnchors: [{ reviewId: 'saved-review', questionId: 'exact-question' }], renderReview } }
+    for (const replay of [false, true]) {
+      const view = render(<StudioChat {...props} />)
+      const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+      act(() => {
+        stream.onEvent('tool_call', { name: 'ask_user', args: { prompt: 'Which news?' } })
+        stream.onEvent('tool_result', { name: 'ask_user', result: { questionId: 'exact-question' } })
+        stream.onEvent('user_message', { text: 'Selected news' })
+        stream.onEvent('text', { text: 'New acknowledgement', invocationId: 'ack' })
+        stream.onEvent('turn_complete', {})
+      })
+      const card = screen.getByText('Anchored saved question')
+      expect(card.compareDocumentPosition(screen.getByText('Selected news')) & Node.DOCUMENT_POSITION_FOLLOWING, replay ? 'replay' : 'live').toBeTruthy()
+      act(() => stream.onEvent('text', { text: 'Later final response', invocationId: 'final' }))
+      expect(card.compareDocumentPosition(screen.getByText('Later final response')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(screen.getAllByText('Anchored saved question')).toHaveLength(1)
+      view.unmount()
+    }
+  })
+
+  it('keeps the snapshot question mounted after answering even without a transcript review event', async () => {
+    const renderReview = vi.fn((_kind, id) => <span>Your answer: {id}</span>)
+    const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), pendingApprovalIds: ['saved-answer'], questionApprovalIds: ['saved-answer'], renderReview } }
+    const view = render(<StudioChat {...props} />)
+    expect(await screen.findByText('Your answer: saved-answer')).toBeVisible()
+    view.rerender(<StudioChat {...props} botThread={{ ...props.botThread, pendingApprovalIds: [] }} />)
+    expect(screen.getByText('Your answer: saved-answer')).toBeVisible()
+    view.unmount()
+    render(<StudioChat {...props} botThread={{ ...props.botThread, pendingApprovalIds: [] }} />)
+    expect(await screen.findByText('Your answer: saved-answer')).toBeVisible()
+  })
+
   it('renders a durable pending approval when its transcript review event was missed and deduplicates a later event', async () => {
     const renderReview = vi.fn((_kind, id) => <span>Question card: {id}</span>)
     const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), pendingApprovalIds: ['approval-from-snapshot'], renderReview } }

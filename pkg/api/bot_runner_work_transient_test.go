@@ -180,16 +180,20 @@ func TestBotWorkAssessmentTransientBoundary(t *testing.T) {
 // captured candidate: no producer or research runner is available to replay.
 func TestBotWorkAssessmentTransientEmployeeDelivery(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		twice  bool
-		mkErr  func() error
+		name        string
+		twice       bool
+		mkErr       func() error
 		effectState store.BotReportEffectState
 	}{
 		{"two-errors-false", false, func() error { return llmerror.NewLLMError("test", 503, "", "") }, store.BotReportEffectsReadOnly},
 		{"two-errors-true", true, func() error { return llmerror.NewLLMError("test", 503, "", "") }, store.BotReportEffectsReadOnly},
-		{"interrupted-stream", true, func() error { return llmerror.NewInterruptedStream(llmerror.NewLLMError("test", 503, "partial", "private")) }, store.BotReportEffectsReadOnly},
+		{"interrupted-stream", true, func() error {
+			return llmerror.NewInterruptedStream(llmerror.NewLLMError("test", 503, "partial", "private"))
+		}, store.BotReportEffectsReadOnly},
 		{"unknown-effects-graceful", true, func() error { return llmerror.NewLLMError("test", 503, "", "") }, store.BotReportEffectsUnknown},
-		{"interrupted-unknown-effects", true, func() error { return llmerror.NewInterruptedStream(llmerror.NewLLMError("test", 503, "partial", "private")) }, store.BotReportEffectsUnknown},
+		{"interrupted-unknown-effects", true, func() error {
+			return llmerror.NewInterruptedStream(llmerror.NewLLMError("test", 503, "partial", "private"))
+		}, store.BotReportEffectsUnknown},
 		{"quote-not-captured-protocol", true, func() error { return botContentProtocolFailure(botContentQuoteMismatch, "item", "source", 0, 0) }, store.BotReportEffectsReadOnly},
 		{"candidate-identity-criteria", true, func() error { return errors.New("invalid assessment identity, coverage or evidence") }, store.BotReportEffectsReadOnly},
 	} {
@@ -310,6 +314,16 @@ func TestBotWorkAssessmentContextExpiredDelivery(t *testing.T) {
 	result.Report.EmployeeMessage = &msg
 	if msg.Origin != store.BotEmployeeMessageAgent || msg.Text != text {
 		t.Fatalf("expected agent employee message with candidate text, got %+v", msg)
+	}
+	if final.Candidate.ReadOnlyResult || final.HasReadOnlyEmployeeResult() {
+		t.Fatal("historical review candidate was relabeled as a fresh attested result")
+	}
+	uncertain := result.Report
+	uncertain.EffectState = store.BotReportEffectsUncertain
+	uncertain.EmployeeMessage = nil
+	warning := bot.ComposeEmployeeMessage(ctx, result.Status, uncertain, nil, bot.EmployeeMessageOptions{Work: final})
+	if warning.Origin != store.BotEmployeeMessageFallback || warning.Reason != store.BotEmployeeReasonAgentUnverifiedEffects {
+		t.Fatalf("historical compatibility suppressed uncertain-effect warning: %+v", warning)
 	}
 	if err := result.Report.ValidateEmployeeMessage(result.Status, final); err != nil {
 		t.Fatalf("ValidateEmployeeMessage failed: %v", err)

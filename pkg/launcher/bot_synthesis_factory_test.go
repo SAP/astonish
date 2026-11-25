@@ -167,7 +167,7 @@ func TestBotSynthesisProductionAdapterFinalAnswer(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		llm := resources.Agent.LLM.(*botFactoryLLM)
+		llm := botFactoryModelForTest(t, resources.Agent.LLM)
 		raw.reserve = llm.binding.synthesisReserve
 		boundRead, err := newBotBoundTool(read, llm.binding)
 		if err != nil {
@@ -214,7 +214,7 @@ func TestBotSynthesisProductionFactoryReadThenAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer got.Cleanup()
-	llm := got.Agent.LLM.(*botFactoryLLM)
+	llm := botFactoryModelForTest(t, got.Agent.LLM)
 	reserve := llm.binding.synthesisReserve
 	if reserve.spec.MaxTokens == nil || *reserve.spec.MaxTokens != limit {
 		t.Fatal("effective budget lost")

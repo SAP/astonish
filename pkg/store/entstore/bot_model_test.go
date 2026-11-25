@@ -17,9 +17,9 @@ func TestAuthorizeBotModelConfiguration(t *testing.T) {
 			var bots store.BotStore
 			switch d := r.db.(type) {
 			case personalBotDB:
-				bots = &personalBotStore{client: d.client, auth: r.auth}
+				bots = &personalBotStore{client: d.client, content: d.content, auth: r.auth}
 			case teamBotDB:
-				bots = &teamBotStore{client: d.client, auth: r.auth}
+				bots = &teamBotStore{client: d.client, content: d.content, auth: r.auth}
 			}
 			if _, err := AuthorizeBotModelConfiguration(ctx, bots, run.BotID); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("active run: %v", err)

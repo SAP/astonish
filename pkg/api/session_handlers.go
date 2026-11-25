@@ -307,15 +307,51 @@ func StudioSessionHandler(w http.ResponseWriter, r *http.Request) {
 			redactor = credentials.NewRedactor()
 			redactor.HydrateFromStore(merged)
 		}
-		messages := overlaySessionPlan(eventsToMessages(getResp.Session.Events(), redactor), getResp.Session, redactor)
-		artifacts := collectArtifacts(getResp.Session.Events())
-		// Project persisted astonish-report fences onto matching artifacts so
-		// the frontend can decide which markdown files to embed inline.
-		artifacts = joinReportMarkers(artifacts, collectReportMarkers(getResp.Session.Events()))
-		totalUsage := collectUsage(getResp.Session.Events())
+		events := getResp.Session.Events()
+		var presentation *[]ChatEvent
+		if meta.HasBotLinkage() {
+			scope := store.BotScopePersonal
+			if sessionStore == svc.Sessions {
+				scope = store.BotScopeTeam
+			}
+			repo := svc.PersonalBots
+			if scope == store.BotScopeTeam {
+				repo = svc.Bots
+			}
+			if repo == nil {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			bid, parseErr := uuid.Parse(meta.BotID)
+			sid, sidErr := uuid.Parse(meta.ID)
+			b, readErr := repo.Get(r.Context(), bid)
+			if parseErr != nil || sidErr != nil || readErr != nil || b == nil || !botSessionReadAllowed(r, svc, meta, scope) {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+			clean, display, projectErr := projectLinkedBotSession(r.Context(), &SessionEventProjector{BotID: bid, HomeSessionID: b.HomeSessionID, SessionID: sid, Repository: repo, Redactor: redactor}, events)
+			if projectErr != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to load session")
+				return
+			}
+			events, presentation = clean, &display
+			if resolveSessionStore(svc, sessionID, r) != sessionStore {
+				respondError(w, http.StatusNotFound, "Session not found")
+				return
+			}
+		}
+		messages := eventsToMessages(events, redactor)
+		if !meta.HasBotLinkage() {
+			messages = overlaySessionPlan(messages, getResp.Session, redactor)
+		}
+		artifacts := collectArtifacts(events)
+		// Preserve the ordinary report three-signal gate on sanitized content.
+		artifacts = joinReportMarkers(artifacts, collectReportMarkers(events))
+		totalUsage := collectUsage(events)
 
 		resp := StudioSessionDetailResponse{
 			StudioSessionResponse: storeMetaToResponse(*meta),
+			PresentationEvents:    presentation,
 			Messages:              messages,
 			Artifacts:             artifacts,
 			TotalUsage:            totalUsage,
@@ -1028,6 +1064,9 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		GetChatManager().cancelStream(sessionID)
+		GetChatManager().ForgetContinuation(r.Context(), appName, sessionID)
+		GetChatManager().forgetConversationState(sessionID)
 		// Namespace and ownership verified — now safe to stop any active fleet session.
 		registry := getFleetSessionRegistry()
 		if fs := registry.Get(sessionID); fs != nil {
@@ -1098,6 +1137,9 @@ func StudioDeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		if !requireSessionOwner(w, r, meta.UserID) {
 			return
 		}
+		GetChatManager().cancelStream(sessionID)
+		GetChatManager().ForgetContinuation(r.Context(), appName, sessionID)
+		GetChatManager().forgetConversationState(sessionID)
 		// Namespace and ownership verified — now safe to stop any active fleet session.
 		registry := getFleetSessionRegistry()
 		if fs := registry.Get(sessionID); fs != nil {
@@ -1383,8 +1425,11 @@ func readRetainedBotArtifact(r *http.Request, sessionID string) ([]byte, bool) {
 	if err != nil {
 		return nil, true
 	}
-	if meta == nil || meta.Purpose != store.SessionPurposeBotRun {
+	if meta == nil || !meta.HasBotLinkage() {
 		return nil, false
+	}
+	if meta.Purpose != store.SessionPurposeBotRun {
+		return nil, true // Home-linked Bot content also has no transcript fallback.
 	}
 	ss := resolveSessionStore(svc, sessionID, r)
 	if ss == nil {
@@ -1449,17 +1494,9 @@ func readRetainedBotArtifact(r *http.Request, sessionID string) ([]byte, bool) {
 			}
 			return nil, true
 		}
-		// Deployments without this optional capability retain transcript access,
-		// but only if the reconstructed bytes match the authoritative report.
-		if text, ok := readAuthorizedSessionArtifact(r, ss, sessionID, requested); ok {
-			actual := sha256.Sum256([]byte(text))
-			if strings.EqualFold(artifact.SHA256, hex.EncodeToString(actual[:])) {
-				return []byte(text), true
-			}
-		}
 		return nil, true
 	}
-	return nil, false // Preserve ordinary transcript artifacts not in a report.
+	return nil, true // Bot content never falls back to reconstructed tool transcripts.
 }
 
 func artifactSessionVisible(w http.ResponseWriter, r *http.Request, sessionID string) bool {

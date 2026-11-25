@@ -10,6 +10,9 @@ import (
 )
 
 func workspaceVolume(h *sandbox.BotHomeBinding) string {
+	if suffix, ok := strings.CutPrefix(h.Ref, botHomeVolume(h.Scope)+"-restore-"); ok && validBotHomeVolume(h) {
+		return "astonish-bot-workspace-" + h.Scope.Key() + "-restore-" + suffix
+	}
 	return "astonish-bot-workspace-" + h.Scope.Key()
 }
 

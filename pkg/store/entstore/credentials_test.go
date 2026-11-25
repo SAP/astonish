@@ -36,6 +36,9 @@ func setupPersonalStore(t *testing.T) (*personalCredentialStore, *personalent.Cl
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
+	// Match the production SQLite router: concurrent Bot work and lease
+	// renewal queue on one connection instead of failing with SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
 
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",

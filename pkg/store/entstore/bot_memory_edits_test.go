@@ -150,9 +150,9 @@ func TestReviewedBotMemorySourceGuards(t *testing.T) {
 			}
 			switch m := memories.(type) {
 			case *personalMemoryStore:
-				m.client.Memory.Use(hook)
+				m.client.Bot.Use(hook)
 			case *teamMemoryStore:
-				m.client.Memory.Use(hook)
+				m.client.Bot.Use(hook)
 			}
 			if _, err := svc.ApplyReviewed(ctx, q); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("revocation at commit: %v", err)
@@ -188,20 +188,27 @@ func TestReviewedBotMemoryEvidenceAndContentCAS(t *testing.T) {
 			// Seed an observed record via persistence, not the interactive proposal API.
 			mutate := func(text string, seed bool) {
 				t.Helper()
-				switch m := memories.(type) {
-				case *personalMemoryStore:
-					update := m.client.Memory.UpdateOneID(id).SetChunkText(text)
-					if seed {
-						update.SetMetadata(metadata)
-					}
-					err = update.Exec(ctx)
-				case *teamMemoryStore:
-					update := m.client.Memory.UpdateOneID(id).SetChunkText(text)
-					if seed {
-						update.SetMetadata(metadata)
-					}
-					err = update.Exec(ctx)
+				var db botDraftDB
+				switch s := bots.(type) {
+				case *personalBotStore:
+					db = s.repository().db
+				case *teamBotStore:
+					db = s.repository().db
 				}
+				err = db.Transaction(ctx, func(tx botDraftDB) error {
+					row, err := tx.ReadCorrectionMemory(ctx, id.String())
+					if err != nil {
+						return err
+					}
+					return changeBotDiskMemory(ctx, tx, b.ID, *row, func(e *botDiskMemoryEntry) error {
+						e.Row.Snippet = text
+						if seed {
+							e.Metadata = metadata
+							e.Row.Attribution, err = store.DecodeMemoryAttribution(metadata)
+						}
+						return err
+					})
+				})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -248,27 +255,24 @@ func TestReviewedBotMemoryEvidenceAndContentCAS(t *testing.T) {
 			}
 			// Verify both independent durable copies, not only the in-memory receipt.
 			var originalMetadata, replacementMetadata map[string]any
-			switch m := memories.(type) {
-			case *personalMemoryStore:
-				old, err := m.client.Memory.Get(ctx, id)
-				if err != nil {
-					t.Fatal(err)
+			var db botDraftDB
+			switch s := bots.(type) {
+			case *personalBotStore:
+				db = s.repository().db
+			case *teamBotStore:
+				db = s.repository().db
+			}
+			cat, err := readBotDiskMemory(ctx, db, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range cat.Entries {
+				if e.Row.ID == id.String() {
+					originalMetadata = e.Metadata
 				}
-				newRow, err := m.client.Memory.Get(ctx, uuid.MustParse(receipt.ReplacementIDs[0]))
-				if err != nil {
-					t.Fatal(err)
+				if e.Row.ID == receipt.ReplacementIDs[0] {
+					replacementMetadata = e.Metadata
 				}
-				originalMetadata, replacementMetadata = old.Metadata, newRow.Metadata
-			case *teamMemoryStore:
-				old, err := m.client.Memory.Get(ctx, id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				newRow, err := m.client.Memory.Get(ctx, uuid.MustParse(receipt.ReplacementIDs[0]))
-				if err != nil {
-					t.Fatal(err)
-				}
-				originalMetadata, replacementMetadata = old.Metadata, newRow.Metadata
 			}
 			if originalMetadata["raw_evidence"] != "original payload" {
 				t.Fatal("unrelated original evidence lost")

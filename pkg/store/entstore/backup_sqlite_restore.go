@@ -119,7 +119,13 @@ func (s *Store) restoreSQLiteLogicalBackup(ctx context.Context, archivePath stri
 	if err := checkSQLiteScopeSchemaCompatible(ctx, manifest, s.platformDB, backup.Scope{Kind: "platform"}); err != nil {
 		return nil, err
 	}
-	files, err := backup.ReadArchiveFiles(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase})
+	var files map[string][]byte
+	var err error
+	if opts.fileFirst != nil {
+		files = opts.fileFirst.files
+	} else {
+		files, err = backup.ReadArchiveFiles(archivePath, backup.ReaderOptions{Passphrase: opts.Passphrase})
+	}
 	if err != nil {
 		return nil, err
 	}

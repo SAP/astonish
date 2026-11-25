@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -49,7 +50,11 @@ func (m *configuredSearchWorkerModel) GenerateContent(ctx context.Context, r *mo
 		name, args = "web_fetch", map[string]any{"url": m.url}
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}}}}, nil)
+		call := &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}
+		if _, direct := r.Tools[name]; !direct {
+			call.Name, call.Args = "execute_tool", map[string]any{"name": name, "arguments": args}
+		}
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
 	}
 }
 
@@ -151,9 +156,17 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 			registry := execution.NewBotTurnAuthorizationRegistry(10)
 			defer registry.Close()
 			llm := &configuredSearchWorkerModel{url: detail.URL}
-			worker, err := NewBotWorker(BotWorkerConfig{TurnRegistry: registry, Backend: db, MandatePolicy: policy, Sandbox: lifecycleHTTPBackend{}, Pool: workerTestPool{}, WorkerID: "search-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			backend := newRegressionHomeBackend(t)
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			pool := &titleSkillPool{url: detail.URL}
+			worker, err := NewBotWorker(BotWorkerConfig{TurnRegistry: registry, Backend: db, MandatePolicy: policy, Sandbox: backend, Pool: pool, WorkerID: "search-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, backend, svc, scope)
+				}
 				episode, e := launcher.NewBotResearchEpisode(q.Run.ID, q.Run.SessionID.String(), launcher.BotResearchOpenWeb, nil)
 				if e != nil {
 					return nil, e
@@ -172,7 +185,10 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 					return nil, e
 				}
 				reads = append(reads, search)
-				return &launcher.BotChatSafeResources{Research: episode, Tools: reads, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				// Only configured research extends Chat's catalog; ordinary web_fetch
+				// stays the shared pool-backed executable. The read adapter supplies
+				// mandate classification, never a replacement builtin.
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool, Groups: map[string]*agent.ToolGroup{"bot_research": {Name: "bot_research", Tools: []tool.Tool{search}}}}, Research: episode, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -185,14 +201,7 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -230,8 +239,8 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved, err := repo.GetRun(auth, b.ID, receipt.Run.ID)
-			if err != nil || saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 {
-				t.Fatalf("worker search ordering: run=%+v err=%v search=%d detail=%d", saved, err, searchCalls, detailCalls)
+			if err != nil || saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 || pool.calls != 1 {
+				t.Fatalf("worker search ordering: run=%+v err=%v search=%d detail=%d pool=%d", saved, err, searchCalls, detailCalls, pool.calls)
 			}
 			t.Run("restart-receipts", func(t *testing.T) {
 				worker.Stop()
@@ -243,6 +252,9 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer restoredDB.Close()
+				if err := restoredDB.InstallBotContentHomeBackend(backend); err != nil {
+					t.Fatal(err)
+				}
 				restoredOrg, err := restoredDB.ForOrg(org.Slug)
 				if err != nil {
 					t.Fatal(err)
@@ -260,15 +272,25 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 					t.Fatal(err)
 				}
 				foundSearch, foundDetail := false, false
+				// Chat persists deferred calls under execute_tool. Recover the exact
+				// target from its matching call, rather than assuming direct tools.
+				targets := map[string]string{}
 				for _, event := range events {
 					if event.Content == nil {
 						continue
 					}
 					for _, part := range event.Content.Parts {
+						if call := part.FunctionCall; call != nil && call.Name == "execute_tool" {
+							targets[call.ID], _ = call.Args["name"].(string)
+						}
 						if part.FunctionResponse == nil {
 							continue
 						}
-						switch part.FunctionResponse.Name {
+						name := part.FunctionResponse.Name
+						if name == "execute_tool" {
+							name = targets[part.FunctionResponse.ID]
+						}
+						switch name {
 						case launcher.BotConfiguredSearchToolName:
 							payload, err := json.Marshal(part.FunctionResponse.Response)
 							if err != nil || !strings.Contains(string(payload), detail.URL) || strings.Contains(string(payload), "owned-fixture-secret") {
@@ -276,6 +298,10 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 							}
 							foundSearch = true
 						case "web_fetch":
+							payload, err := json.Marshal(part.FunctionResponse.Response)
+							if err != nil || !strings.Contains(string(payload), "Decisive primary source details.") || strings.Contains(string(payload), "owned-fixture-secret") {
+								t.Fatalf("detail receipt not retained safely: %s %v", payload, err)
+							}
 							if !foundSearch {
 								t.Fatal("restored detail precedes search receipt")
 							}

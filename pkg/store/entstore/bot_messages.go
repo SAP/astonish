@@ -36,8 +36,26 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 	if q.BotID == uuid.Nil || q.Version < 1 || strings.TrimSpace(q.Instructions) == "" || strings.TrimSpace(q.IdempotencyKey) == "" || len(q.IdempotencyKey) > 200 {
 		return nil, store.ErrBotInvalid
 	}
+	if q.ApprovedPlanExecution || q.PlanExecution != nil {
+		return nil, store.ErrBotInvalid
+	}
 	hash, err := botHash(q)
 	if err != nil {
+		return nil, err
+	}
+	// Exact-owner authorization precedes file hydration and lifecycle recovery.
+	// Repeat admission checks in SQL below; this is not an authority grant.
+	b, err := r.Get(ctx, q.BotID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.auth.authorize(ctx, b.OwnerID, true); err != nil {
+		return nil, err
+	}
+	if b.OwnerID != actor {
+		return nil, store.ErrBotForbidden
+	}
+	if _, err := r.db.ReadVersion(ctx, q.BotID, b.Version); err != nil {
 		return nil, err
 	}
 	var receipt *store.BotMessageReceipt
@@ -158,7 +176,7 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 		if err := r.issueMessageMandate(ctx, tx, rec, &run, q); err != nil {
 			return err
 		}
-		if err := tx.InsertRun(ctx, botStoredRun{Task: pinnedTask.Clone(), Run: run, RequestHash: hash, Instructions: q.Instructions, Attachments: q.Attachments}, rec.Bot.OwnerID); err != nil {
+		if err := tx.InsertRun(ctx, botStoredRun{PlanMode: q.PlanMode != nil && *q.PlanMode, Task: pinnedTask.Clone(), Run: run, RequestHash: hash, Instructions: q.Instructions, Attachments: q.Attachments}, rec.Bot.OwnerID); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status, "intent": store.BotOutboxDispatch, "actor_id": actor})

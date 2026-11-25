@@ -28,33 +28,46 @@ func TestBotMemoryCorrectionIsolation(t *testing.T) {
 			switch d := repo.db.(type) {
 			case teamBotDB:
 				memories = &teamMemoryStore{client: d.client, dialect: DialectSQLite}
-				public = &teamBotStore{client: d.client, auth: repo.auth}
+				public = &teamBotStore{client: d.client, content: d.content, auth: repo.auth}
 			case personalBotDB:
 				memories = &personalMemoryStore{client: d.client, dialect: DialectSQLite}
-				public = &personalBotStore{client: d.client, auth: repo.auth}
+				public = &personalBotStore{client: d.client, content: d.content, auth: repo.auth}
 			}
-			for _, session := range []string{other.HomeSessionID.String(), ""} {
-				if err := memories.Add(ctx, store.MemoryEntry{Content: "Private fact", SourcePath: "bot:" + b.ID.String(), SessionID: session, CreatedBy: b.OwnerID.String(), Metadata: map[string]any{"bot_id": b.ID.String()}}); err != nil {
-					t.Fatal(err)
-				}
+			otherSvc, otherDisk := diskMemoryFixture(t, repo, other.ID)
+			if err := otherSvc.Add(ctx, store.MemoryEntry{Content: "Private fact", SourcePath: "bot:" + b.ID.String(), SessionID: other.HomeSessionID.String(), Metadata: map[string]any{"bot_id": b.ID.String()}}); err != nil {
+				t.Fatal(err)
 			}
-			rows, err := memories.List(ctx, "", 100, 0)
+			if err := memories.Add(ctx, store.MemoryEntry{Content: "Private Chat fact", SourcePath: "bot:" + b.ID.String()}); err != nil {
+				t.Fatal(err)
+			}
+			chatRows, err := memories.List(ctx, "", 100, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
+			botRows, err := otherDisk.List(ctx, "", 100, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, targetDisk := diskMemoryFixture(t, repo, b.ID)
+			rows := append(botRows, chatRows...)
 			for _, row := range rows {
+
 				current, _ := repo.Get(ctx, b.ID)
 				q := store.BotCorrection{ID: uuid.New(), BotID: b.ID, ExpectedRevision: current.Revision, SupersededSource: "memory:" + row.ID, Replacement: "Must not write", Evidence: store.BotEvidence{Kind: store.BotEvidenceOwnerConfirmation, Summary: "Confirmed", Source: "owner-message", ActorID: b.OwnerID, ObservedAt: *now}}
 				if err := repo.Correct(ctx, q); err != nil {
 					t.Fatal(err)
 				}
-				if err := public.ReconcileCorrection(ctx, b.ID, q.ID, memories); !errors.Is(err, store.ErrBotForbidden) {
+				if err := public.ReconcileCorrection(ctx, b.ID, q.ID, targetDisk); !errors.Is(err, store.ErrBotForbidden) && !errors.Is(err, store.ErrBotNotFound) {
 					t.Fatalf("cross-Bot/Chat mutation allowed: %v", err)
 				}
 				if _, err := repo.db.FindActivity(ctx, b.ID, "correction-memory:"+q.ID.String()); !errors.Is(err, store.ErrBotNotFound) {
 					t.Fatalf("foreign memory produced receipt: %v", err)
 				}
-				unchanged, err := memories.Get(ctx, row.ID)
+				readStore := memories
+				if row.SessionID == other.HomeSessionID.String() {
+					readStore = otherDisk
+				}
+				unchanged, err := readStore.Get(ctx, row.ID)
 				if err != nil || unchanged.Snippet != row.Snippet {
 					t.Fatalf("foreign memory changed: %+v %v", unchanged, err)
 				}
@@ -67,7 +80,7 @@ func TestBotMemoryCorrectionIsolation(t *testing.T) {
 				case personalBotDB:
 					foreign = &personalMemoryStore{client: d.client}
 				}
-				if err := public.ReconcileCorrection(ctx, b.ID, q.ID, foreign); !errors.Is(err, store.ErrBotForbidden) {
+				if err := repo.ReconcileCorrection(ctx, b.ID, q.ID, foreign); !errors.Is(err, store.ErrBotForbidden) {
 					t.Fatalf("foreign database accepted: %v", err)
 				}
 				if err := public.ReconcileCorrection(context.Background(), b.ID, q.ID, memories); !errors.Is(err, store.ErrBotForbidden) {
@@ -78,19 +91,87 @@ func TestBotMemoryCorrectionIsolation(t *testing.T) {
 	}
 }
 
+func TestBotMemoryCorrectionRepositoryIdentity(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, ctx, _, run, _, now := botRunFixture(t, scope)
+			b, err := repo.Get(ctx, run.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bots, generic := concreteBotMemoryStores(repo)
+			public := bots.(store.BotCorrectionReconciler)
+			svc, disk := diskMemoryFixture(t, repo, b.ID)
+			if err := svc.Add(ctx, store.MemoryEntry{Content: "original", SessionID: run.SessionID.String()}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := disk.ListBySession(ctx, run.SessionID.String())
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("seed: %+v %v", rows, err)
+			}
+			q := store.BotCorrection{ID: uuid.New(), BotID: b.ID, ExpectedRevision: b.Revision, SupersededSource: "memory:" + rows[0].ID, Replacement: "replacement", Evidence: store.BotEvidence{Kind: store.BotEvidenceOwnerConfirmation, Summary: "Confirmed", Source: "owner", ActorID: b.OwnerID, ObservedAt: *now}}
+			if err := repo.Correct(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+			valid := disk.(*botDiskMemoryStore)
+			wrongBot := *valid
+			wrongBot.id = uuid.New()
+			wrongOwner := *valid
+			wrongOwner.owner = nil
+			missingRepo := *valid
+			missingRepo.repo = nil
+			foreignRepo, _, _, _, _, _ := botRunFixture(t, scope)
+			wrongClient := *valid
+			wrongClient.repo = foreignRepo // Keep the expected owner marker: the DB must also match.
+			wrongCodec := *valid
+			copyRepo := *valid.repo
+			switch db := copyRepo.db.(type) {
+			case personalBotDB:
+				db.content = &botContentCodec{}
+				copyRepo.db = db
+			case teamBotDB:
+				db.content = &botContentCodec{}
+				copyRepo.db = db
+			}
+			wrongCodec.repo = &copyRepo
+			var typedNil *botDiskMemoryStore
+			for name, memory := range map[string]store.MemoryStore{
+				"nil": nil, "typed-nil": typedNil, "generic": generic,
+				"wrong-bot": &wrongBot, "wrong-owner": &wrongOwner,
+				"missing-repo": &missingRepo, "wrong-client": &wrongClient, "wrong-codec": &wrongCodec,
+			} {
+				t.Run(name, func(t *testing.T) {
+					if err := public.ReconcileCorrection(ctx, b.ID, q.ID, memory); !errors.Is(err, store.ErrBotForbidden) {
+						t.Fatalf("untrusted memory destination accepted: %v", err)
+					}
+					if _, err := repo.db.FindActivity(ctx, b.ID, "correction-memory:"+q.ID.String()); !errors.Is(err, store.ErrBotNotFound) {
+						t.Fatalf("invalid destination produced receipt: %v", err)
+					}
+				})
+			}
+			if err := public.ReconcileCorrection(context.Background(), b.ID, q.ID, disk); !errors.Is(err, store.ErrBotForbidden) {
+				t.Fatalf("missing principal accepted: %v", err)
+			}
+			for range 2 {
+				if err := public.ReconcileCorrection(ctx, b.ID, q.ID, disk); err != nil {
+					t.Fatal(err)
+				}
+			}
+			replacement, err := disk.Get(ctx, uuid.NewSHA1(q.ID, []byte("memory")).String())
+			if err != nil || replacement == nil || replacement.Snippet != q.Replacement {
+				t.Fatalf("valid destination: %+v %v", replacement, err)
+			}
+		})
+	}
+}
+
 func TestBotMemoryCorrectionOutOfOrder(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, run, _, now := botRunFixture(t, scope)
 			b, _ := repo.Get(ctx, run.BotID)
-			var memories store.MemoryStore
-			switch d := repo.db.(type) {
-			case teamBotDB:
-				memories = &teamMemoryStore{client: d.client, dialect: DialectSQLite}
-			case personalBotDB:
-				memories = &personalMemoryStore{client: d.client, dialect: DialectSQLite}
-			}
-			if err := memories.Add(ctx, store.MemoryEntry{Content: "Thursday", SessionID: run.SessionID.String()}); err != nil {
+			svc, memories := diskMemoryFixture(t, repo, b.ID)
+			if err := svc.Add(ctx, store.MemoryEntry{Content: "Thursday", SessionID: run.SessionID.String()}); err != nil {
 				t.Fatal(err)
 			}
 			rows, err := memories.ListBySession(ctx, run.SessionID.String())
@@ -153,8 +234,8 @@ func TestBotMemoryCorrectionOutOfOrder(t *testing.T) {
 			if err := repo.ReconcileCorrection(ctx, b.ID, q.ID, memories); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("older correction applied: %v", err)
 			}
-			row, _ := memories.Get(ctx, rows[0].ID)
-			if row.Snippet != "Saturday" {
+			row, err := memories.Get(ctx, uuid.NewSHA1(newer.ID, []byte("memory")).String())
+			if err != nil || row == nil || row.Snippet != "Saturday" {
 				t.Fatal("older intent clobbered new correction")
 			}
 		})

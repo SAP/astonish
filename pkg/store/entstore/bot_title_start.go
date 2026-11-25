@@ -52,7 +52,7 @@ func (a *titleAdmission) Register(ctx context.Context, id execution.BotRunIdenti
 }
 
 func persistTitleQuestion(ctx context.Context, tx botDraftDB, saved *botStoredRun) error {
-	data, err := botJSONMap(*saved)
+	data, err := encodeBotRunData(ctx, tx, *saved)
 	if err != nil {
 		return err
 	}

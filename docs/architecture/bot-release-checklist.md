@@ -1,5 +1,59 @@
 # Bot specification traceability and release checklist
 
+## Objective-owned employee gate (controlled local, not deployment)
+
+- Run the exact `--stage employee --employee-phase all` command documented in
+  `tests/e2eboot/README.bots-acceptance.md`. Inspect the new report's actual
+  commands, source/build digests and package-qualified raw JSONL parent/subcase
+  passes. Never substitute historical receipts or a broad package PASS.
+- Require disposable scoped HTTP workers; clarification accepted once; irrelevant
+  fruit → Apple Inc. → material market gap → sourced inline answer without an
+  extra owner turn/reviewer/file; ordinary Chat against the identical fixture;
+  exact historical six/eight envelopes, malformed correction, empty/failed
+  sources and honest partial results; non-news/delegate/scheduled/file paths;
+  exact authorized downloads, revocation/budget and uncertain/crash no-replay.
+- Require real Docker retained transport (owner claim ≤5s and controlled tool-to-
+  model overhead ≤15s), bounded same-Bot exclusion, maintenance independence,
+  pause/stop/drain and cold recovery. Require current built Studio and native
+  PTY ordered live/reconnect/reload delivery, not only reducer tests.
+- Require `TestBotEmployeeObjectiveInquiryHTTP` in both scopes and adequate-first
+  states with exact ordinary-Chat/shared-provider/final-source-body diagnostics
+  and 3-read/4-model or 1-read/2-model counters. Require historical live-six/eight
+  exact-envelope/original-digest diagnostics, SQL 36263/36268 provenance and
+  effective maximum five. Wrong-package/test or missing/spoofed markers fail.
+  `TestBotInteractiveAuthorityHTTPAcceptance`, `TestBotEventsHTTPAcceptance` and
+  `TestBotHistoryStreamHTTPAcceptance` must run/pass without skips. These bindings
+  replace the prior declared gaps; only a completed fresh integrated run passes.
+- Run broad Go, targeted race, frontend tests/typecheck/build and configured lint
+  independently. Record their real exits and blockers. This local tier does not
+  discharge live Kubernetes/PostgreSQL, paid-provider quality/latency or rollout.
+
+
+## Current local release state — 2026-11-23
+
+- [x] Revision 12 phase 6 recorded complete at sequence 485, strict receipt
+  `f2577352711339b7e2fd30b552da5f98318693f99aa935ffc764d1bb7eebd41e`.
+- [x] Fresh scoped Go suite exit 0 (`/tmp/bot-release-go-final.jsonl`) and scoped
+  lint exit 0 (`/tmp/bot-release-lint-retry.log`), supplied evidence, not rerun here.
+- [ ] Final baseline and integrated `all` verification: runs in flight at this
+  update, `/tmp/bot-final-baseline.json` and `/tmp/bot-final-all.json`. Require
+  completed reports and successful exits; **final acceptance is not complete**.
+- [ ] Live Kubernetes/PVC and PostgreSQL: user-requested **DEFERRED, NOT PASS**.
+- [ ] Paid-provider replay and real-provider quality: unverified, not authorized.
+
+Current local consolidation shares ordinary Chat runtime/catalog/dispatch across
+interactive and scheduled/autonomous Bot modes without broadening permissions.
+Compiled storage retains exact private revision staging and historical publication
+IDs; terminal/delegate return joins bookkeeping. SQL reconciliation performance
+is report-only, not a substitute for the unchanged 15-second controlled gate.
+See [current evidence and boundaries](bot-runtime-evidence.md#current-consolidation-evidence--2026-11-23).
+
+The dated checkpoints below are **historical**, including their unresolved status
+at capture time. They do not supersede the current state above or become passes
+retroactively. Keep the original baseline and all failed receipts unchanged.
+No production/driver/plan edit, daemon restart, user Bot retry or rollout is implied.
+
+
 ## Durable-progress controlled gate — 2026-11-16
 
 Run `python3 -B tests/e2eboot/bots_acceptance_driver.py --stage durable-progress`
@@ -410,3 +464,14 @@ Every row remains **missing deployed acceptance** in `tests/scenarios/bots.yaml`
 ## Audit validation and catalog semantics
 
 Run `node tests/scenarios/report.mjs` and `node --test tests/scenarios/parse-run.test.mjs`. These validate/report the scenario catalog and result-parser contracts, **not Bot behavior**. `bots.yaml` uses existing fields and `status: missing`, with empty `test_refs` because no qualifying deployed real-provider E2E evidence has been obtained. The new `TestBotsLiveLifecycle` source exists and compiles, but failed infrastructure preflight before live execution; its existence does not cover any scenario. Real implementation test anchors are intentionally in this document/comments, not phantom passing E2E entries. Do not change status merely because a source test exists. A release evidence record needs exact command, candidate revision, backend, prerequisite configuration, non-skipped assertions, observed IDs/artifacts, failures and cleanup result.
+
+## Runtime-record database storage (format 3) release gate
+
+Bot conversation/session events, activity/outbox payloads, run checkpoints and approval questions/answers are persisted in their existing SQL JSON columns as an explicit versioned representation (format 3), rather than as individual retained sandbox content files. Workspace documents, skills, persona files, memory and task assets remain on disk (format 2). Rollback requires a compatible backup or a dual-reader binary, because older binaries cannot consume format-3 runtime records.
+
+Release gate items:
+
+- [ ] Migrate retained Bots explicitly via `POST /api/studio/bots/{botID}/runtime-storage/migrate` (or `astonish bots migrate-storage`), dry-run first. Confirm `complete:true busy:false` and that logical IDs, physical event IDs, order, cursors, timestamps, status, approval digests and receipts are unchanged. Migration is never triggered implicitly by GET, Snapshot, worker claim or Home setup.
+- [ ] Profile the activity endpoint with `ASTONISH_PROFILE_BOT_ACTIVITY=1`; require `X-Astonish-Bot-Runtime-IO-Covered: true` with `Opens=Puts=Failures=0` and sub-second handler time on database-backed reads. Zero counters without coverage=true are not proof.
+- [ ] Verify a real-provider conversation (accepted answer HTTP 202 → genuine model acknowledgement → tools → proper final → reload) and measure accepted-answer-to-acknowledgement latency SEPARATELY from setup/provider/commit time. Do not claim successful completion alone proves latency.
+- [ ] Confirm backup/restore recognizes format-3 runtime records alongside legacy files, preserves real artifact bytes, and continues to neutralize execution authority on restore. The full-scope platform `filefirst` export still requires every Bot in scope to be Paused/Stopped and quiescent.

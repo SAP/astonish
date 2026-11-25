@@ -16,6 +16,23 @@ Terminal `/bots skills` remains read-only (legacy import is Studio-only); `/skil
 
 The production mandate already includes `bot_skill_list` and `bot_skill_read`. `BotCatalogueClassifier` classifies only these scoped first-party method inspections as verified local reads, just like fenced work/evidence inspection. An empty list or missing method returns normal optional-tool feedback rather than requesting owner approval. The policy allowlist, explicit denials, live lease/budget checks and Bot-scoped repository lookups still apply; foreign MCP/request identities cannot borrow this classification. `bot_skill_use` and `bot_skill_save` remain reversible writes, and child-session mutation denial is unchanged. `TestBotOptionalSkillReadNoApprovalHTTP` exercises real HTTP admission and the production worker/factory for personal native dispatch and team `execute_tool`, checking empty-list/missing-read feedback, a useful final answer, no created skills and no approvals. `TestBotSkillReadClassificationPreservesPolicyCeilings` covers classification, denials and foreign identities.
 
+## Disk persistence and cutover boundary
+
+Skill roots retain metadata and replay heads; immutable revision bodies are stored
+on disk and selected by typed `bot_record_v2` SQL references. Scoped reads hydrate
+and validate the exact revision/digest, not an inline database copy. Retained Home
+selection includes Skill roots and revisions alongside run/task/outbox/session
+content; roots are validated metadata-only records with no body to copy. Staging
+objects are not deleted by selection. See [retained selection](bot-retained-content-selection.md).
+
+The explicit legacy-procedure import above is an application operation on a readable,
+pinned Bot version, not an old database-format migration. Inline development Bot
+records and legacy Bot archives are rejected; no opening, inspection or schema
+reconciliation converts them. Reference-only SQL backup/restore is also blocked
+pending the file-first archive protocol. DDL marker 4 is unchanged. Generic Bot
+memory SQL removal and file-backed MEMORY.md are separate pending work; Skill disk
+persistence does not establish full file-first or physical backend acceptance.
+
 ## Implementation paths
 
 The existing Studio component is `web/src/components/bots/BotSkillsPanel.tsx`, wired by `BotWorkspace.tsx`; transport is `web/src/api/botSkills.ts`. Scoped HTTP handlers live in `pkg/api/bot_skill_handlers.go` and `pkg/api/bot_skill_import_handler.go`. Browser acceptance is `pkg/api/bot_skills_browser_test.go` (`TestBotSkillsBrowserAcceptance`); PTY acceptance is `cmd/astonish/bots_skills_pty_test.go` (`TestBotSkillsPTYAcceptance`), with terminal rendering in `pkg/tui/bot_skills.go` and launcher wiring in `pkg/launcher/tui_bots.go`. These are the canonical implementations, not additional similarly named components.

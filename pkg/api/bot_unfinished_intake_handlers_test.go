@@ -137,21 +137,35 @@ func TestBotUnfinishedIntakeHTTPAcceptance(t *testing.T) {
 	for scope := range ids {
 		path := "/api/studio/bots/intake/" + uuid.NewString() + "?scope=" + scope
 		runPair := func(methodA, bodyA, methodB, bodyB string) map[int]int {
-			statuses := make(chan int, 2)
+			type result struct {
+				status int
+				body   []byte
+			}
+			statuses := make(chan result, 2)
 			var wg sync.WaitGroup
 			for _, q := range []struct{ method, body string }{{methodA, bodyA}, {methodB, bodyB}} {
 				wg.Add(1)
 				go func(method, body string) {
 					defer wg.Done()
-					status, _ := request(method, path, owner, body)
-					statuses <- status
+					status, data := request(method, path, owner, body)
+					statuses <- result{status, data}
 				}(q.method, q.body)
 			}
 			wg.Wait()
 			close(statuses)
 			counts := map[int]int{}
-			for status := range statuses {
-				counts[status]++
+			var first []byte
+			for response := range statuses {
+				if response.status >= 500 {
+					t.Errorf("concurrent intake server error: %d %s", response.status, response.body)
+				}
+				counts[response.status]++
+				if methodA == methodB && bodyA == bodyB && response.status == 200 {
+					if first != nil && string(first) != string(response.body) {
+						t.Fatalf("concurrent replay changed response: %s != %s", first, response.body)
+					}
+					first = response.body
+				}
 			}
 			return counts
 		}

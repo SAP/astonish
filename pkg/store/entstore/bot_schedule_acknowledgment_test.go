@@ -235,9 +235,9 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 				var reader store.BotTranscriptReader
 				switch d := r.db.(type) {
 				case personalBotDB:
-					reader = &personalSessionStore{client: d.client}
+					reader = &personalSessionStore{client: d.client, content: d.content}
 				case teamBotDB:
-					reader = &teamSessionStore{client: d.client}
+					reader = &teamSessionStore{client: d.client, content: d.content}
 				}
 				rows, err := reader.ReadBotTranscript(owner, rec.Bot.HomeSessionID, 0, 200)
 				if err != nil {

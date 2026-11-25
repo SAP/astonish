@@ -24,6 +24,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -209,9 +210,58 @@ func (s botStandardSearchStore) List(ctx context.Context) ([]store.MCPServer, er
 }
 
 type botPublicResearchArgs struct {
-	Facet execution.BotResearchFacet `json:"facet,omitempty" jsonschema:"Admitted public research facet: overview, recent, primary, contradictions."`
-	Query string                     `json:"query,omitempty" jsonschema:"Optional specific public search query (for example, a specific company, ticker, or topic within the assignment)."`
+	Facet       execution.BotResearchFacet `json:"facet,omitempty" jsonschema:"Admitted public research facet: overview, recent, primary, contradictions."`
+	Query       string                     `json:"query,omitempty" jsonschema:"Optional specific public search query (for example, a specific company, ticker, or topic within the assignment)."`
+	MaxResults  int                        `json:"max_results,omitempty"`
+	Recency     string                     `json:"recency,omitempty"`
+	Domains     []string                   `json:"domains,omitempty"`
+	SearchMode  string                     `json:"search_mode,omitempty"`
+	DetailLevel string                     `json:"detail_level,omitempty"`
 }
+
+// effectiveSearchArgs is recomputed under the current grant; original invocation
+// bytes remain untouched for action digest and exact-approval matching.
+func (a botPublicResearchArgs) effectiveSearchArgs(ceiling int) (tools.PerplexityWebSearchArgs, error) {
+	out := tools.PerplexityWebSearchArgs{Query: a.Query, MaxResults: a.MaxResults, Recency: a.Recency, Domains: append([]string(nil), a.Domains...), SearchMode: a.SearchMode, DetailLevel: a.DetailLevel}
+	if ceiling <= 0 || out.MaxResults < 0 {
+		return out, store.ErrBotInvalid
+	}
+	if out.MaxResults == 0 || out.MaxResults > ceiling {
+		out.MaxResults = ceiling
+	}
+	allowed := func(v string, values ...string) bool {
+		if v == "" {
+			return true
+		}
+		for _, value := range values {
+			if v == value {
+				return true
+			}
+		}
+		return false
+	}
+	if !allowed(out.Recency, "day", "week", "month", "year", "recent") || !allowed(out.SearchMode, "general", "academic", "news", "finance") || !allowed(out.DetailLevel, "concise", "normal", "detailed") || len(out.Domains) > 10 {
+		return out, store.ErrBotInvalid
+	}
+	for _, domain := range out.Domains {
+		// Preferences are public hostnames, not URLs, origins or credentials.
+		if len(domain) > 253 || !strings.Contains(domain, ".") || net.ParseIP(domain) != nil || strings.ContainsAny(domain, "/:@{}\\\\ \r\n\x00") || strings.HasSuffix(strings.ToLower(domain), ".local") || strings.HasSuffix(strings.ToLower(domain), ".internal") {
+			return out, store.ErrBotInvalid
+		}
+		for _, label := range strings.Split(domain, ".") {
+			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+				return out, store.ErrBotInvalid
+			}
+			for _, r := range label {
+				if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+					return out, store.ErrBotInvalid
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 type botPublicResearchQuota interface {
 	ReserveBotPublicResearch(context.Context, execution.BotMandateRef, string) error
 }
@@ -222,6 +272,9 @@ type botConfiguredResearchTool struct {
 	factory  tools.LLMFactory
 	episode  *BotResearchEpisode
 	mcp      *botMCPTool
+	// shared executes Chat's already budgeted concrete search, never another catalog.
+	sharedResearchAdapter bool
+	shared                func(tool.Context, any) (map[string]any, error)
 }
 
 // BotConfiguredResearchTool shares the strict BotKnowledge search implementation,
@@ -273,10 +326,10 @@ func (t *botConfiguredResearchTool) prepare(ctx context.Context, raw json.RawMes
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&a); err != nil {
-		return nil, "", err
+		return nil, "", &bot.ToolArgumentError{Cause: err}
 	}
 	if d.Decode(new(any)) != io.EOF {
-		return nil, "", store.ErrBotInvalid
+		return nil, "", &bot.ToolArgumentError{Cause: store.ErrBotInvalid}
 	}
 	grant := t.request.Mandate.Authorization.Snapshot().PublicResearch
 	if grant == nil {
@@ -290,6 +343,9 @@ func (t *botConfiguredResearchTool) prepare(ctx context.Context, raw json.RawMes
 	ceiling.Route = route
 	if err := grant.ValidateWithin(&ceiling); err != nil {
 		return nil, "", err
+	}
+	if _, err := a.effectiveSearchArgs(grant.MaxResults); err != nil {
+		return nil, "", &bot.ToolArgumentError{Cause: err}
 	}
 	customQuery := strings.TrimSpace(a.Query)
 	if customQuery != "" {
@@ -317,11 +373,16 @@ func (t *botConfiguredResearchTool) describe(ctx context.Context, raw json.RawMe
 	return execution.ActionDescriptor{Tool: t.Name(), Arguments: raw, Effect: execution.EffectRead, ConstraintsVerified: true}, nil
 }
 func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchArgs) (result tools.PerplexityWebSearchResult, err error) {
+	original := c
+	c, endReads := botToolReadOperation(original)
+	defer func() { endReads() }()
 	raw, _ := json.Marshal(a)
 	if _, _, err = t.prepare(c, raw); err != nil {
 		return result, err
 	}
-	generation, err := t.episode.Begin(c, t.request.Run.ID, c.SessionID())
+	endReads() // Episode serialization may wait on another network call.
+	generation, err := t.episode.Begin(original, t.request.Run.ID, original.SessionID())
+	c, endReads = botToolReadOperation(original)
 	if err != nil {
 		return result, err
 	}
@@ -332,6 +393,11 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	if err != nil {
 		return result, err
 	}
+	effective, err := a.effectiveSearchArgs(grant.MaxResults)
+	if err != nil {
+		return result, err
+	}
+	effective.Query = q
 	quota, ok := t.request.Mandate.Runtime.(botPublicResearchQuota)
 	if !ok {
 		return result, store.ErrBotUnsupported
@@ -339,7 +405,7 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	// The episode counts only successful durable reservations by this exact
 	// executable. An unknown durable rejection is never inferred to be quota.
 	if t.episode.remainingSearchCalls(grant.MaxCalls) == 0 {
-		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: c.FunctionCallID(), ToolName: t.Name()}})
+		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.NewToolNonexecutionOutcome(c, c.FunctionCallID(), t.Name(), a, bot.ToolFeedbackTerminal))
 		return result, errBotResearchEpisodeQuota
 	}
 	// Durable research ceiling is independent of the dispatch's once-only tool
@@ -347,11 +413,24 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	if err = quota.ReserveBotPublicResearch(c, grantRef(t), c.SessionID()); err != nil {
 		// Reservation rejected before any provider/MCP dispatch. This receipt
 		// attests nonexecution only, not quota classification or discovery success.
-		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: c.FunctionCallID(), ToolName: t.Name()}})
+		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.NewToolNonexecutionOutcome(c, c.FunctionCallID(), t.Name(), a, bot.ToolFeedbackTerminal))
 		return result, err
 	}
 	t.episode.recordSearchReservation()
-	if grant.Route.Engine.IsMCP() {
+	if t.shared != nil {
+		endReads()
+		encoded, _ := json.Marshal(effective)
+		var effectiveValues map[string]any
+		_ = json.Unmarshal(encoded, &effectiveValues)
+		values, callErr := t.shared(original, effectiveValues)
+		if callErr != nil {
+			return result, callErr
+		}
+		body, _ := json.Marshal(values)
+		if err = json.Unmarshal(body, &result); err != nil {
+			return result, err
+		}
+	} else if grant.Route.Engine.IsMCP() {
 		if t.mcp == nil {
 			return result, store.ErrBotUnsupported
 		}
@@ -360,7 +439,8 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 			return result, argumentErr
 		}
 		auth := botMCPAuthorization{target: t.mcp, fingerprint: grant.Route.Fingerprint, check: t.request.Mandate.Check}
-		invocation := botBoundToolContext{Context: c, owner: context.WithValue(c, botMCPAuthorizedKey{}, auth)}
+		endReads()
+		invocation := botBoundToolContext{Context: original, owner: context.WithValue(original, botMCPAuthorizedKey{}, auth)}
 		values, callErr := t.mcp.Run(invocation, arguments)
 		if callErr != nil {
 			return result, callErr
@@ -382,7 +462,7 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 		for _, v := range cfg.Providers[grant.Route.Provider] {
 			redactor.AddSecret("bot-search-provider", v)
 		}
-		result, err = tools.RunPerplexityWebSearch(c, tools.PerplexityWebSearchArgs{Query: q, MaxResults: grant.MaxResults}, cfg, func(ctx context.Context, p, m string, app *config.AppConfig) (model.LLM, error) {
+		result, err = tools.RunPerplexityWebSearch(c, effective, cfg, func(ctx context.Context, p, m string, app *config.AppConfig) (model.LLM, error) {
 			if p != grant.Route.Provider || m != grant.Route.Model {
 				return nil, store.ErrBotForbidden
 			}
@@ -407,13 +487,19 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 				if t.request.Budget == nil {
 					return nil, store.ErrBotUnsupported
 				}
-				if e := t.request.Budget.Check(ctx); e != nil {
+				preflight, closePreflight := entstore.WithBotContentReadOperationIfAbsent(ctx)
+				e := func() error {
+					defer closePreflight()
+					if e := t.request.Budget.Check(preflight); e != nil {
+						return e
+					}
+					_, _, e := t.prepare(preflight, raw)
+					return e
+				}()
+				if e != nil {
 					return nil, e
 				}
-				if _, _, e := t.prepare(ctx, raw); e != nil {
-					return nil, e
-				}
-				var e error
+				endReads() // Never retain bytes through provider initialization or retry waits.
 				inner, e = t.factory(provider.WithConfinedProviderSecrets(ctx), p, m, app)
 				if e == nil {
 					break
@@ -440,6 +526,7 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	} else {
 		return tools.PerplexityWebSearchResult{}, store.ErrBotUnsupported
 	}
+	c, endReads = botToolReadOperation(original)
 	if err = t.request.Mandate.Check(c); err != nil {
 		return tools.PerplexityWebSearchResult{}, err
 	}

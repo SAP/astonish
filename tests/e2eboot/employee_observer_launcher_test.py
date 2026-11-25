@@ -210,15 +210,29 @@ class EmployeeObserverTests(unittest.TestCase):
         run_source = (source.parent / 'pkg/store/bots.go').read_text().split('type BotRun struct {', 1)[1].split('\n}', 1)[0]
         public = set(re.findall(r'json:"([^",]+)', run_source)) - {'-'}
         self.assertEqual(launcher.EMPLOYEE_RUN_FIELDS, public)
+        stored_source = (source.parent / 'pkg/store/entstore/bot_transactions.go').read_text().split('type botStoredRun struct {', 1)[1].split('\n}', 1)[0]
+        private = set(re.findall(r'json:"([^",]+)', stored_source)) - {'-'}
+        # Every colliding name must be explicitly justified by a private envelope
+        # field, rather than silently removing it from the public inventory.
+        self.assertEqual(launcher.EMPLOYEE_RUN_ENVELOPE_FIELDS, public & private)
+        self.assertEqual(launcher.EMPLOYEE_RUN_ENVELOPE_FIELDS, {'task', 'work', 'progress'})
+        self.assertIn('prepared_plans', private)
+        self.assertNotIn('prepared_plans', public)
 
     def test_work_projection_and_private_envelope_remain_distinct(self):
         run = dict(id='mine', bot_id=self.bot, session_id='execution',
-                   work={'protocol': 'agent_led_v1', 'status': 'working'})
+                   work={'protocol': 'agent_led_v1', 'status': 'working'},
+                   progress={'schema_version': 1, 'phase': 'working'},
+                   state_sequence=17, state_committed_at='2026-11-21T18:00:00Z')
         # The repository's work is private BotWorkState, not Run.work's public
         # BotWorkProjection. It must never supply the observed session identity.
         private_work = dict(session_id='private-session', working_notes='PRIVATE-NOTES')
         for wrapper in ('run', 'Run'):
             document = {wrapper: run, 'work': private_work,
+                        'task': {'session_id': 'private-task-session', 'body': 'PRIVATE-TASK'},
+                        'progress': {'checkpoint': {'session_id': 'private-progress-session'}},
+                        'prepared_plans': {'plan': {'session_id': 'private-plan-session',
+                                                    'arguments': 'PRIVATE-ARGUMENTS'}},
                         'CallerCeiling': {'session_id': 'private-session'},
                         'MandateRef': {'id': 'private-mandate'}}
             errors = []
@@ -231,7 +245,7 @@ class EmployeeObserverTests(unittest.TestCase):
             self.assertIsNone(launcher.employee_run_session(row, errors))
             self.assertEqual(errors, [])
             # Other public fields beside Run remain an ambiguous second run.
-            for field in ('task', 'skill_id', 'invocation', 'session_id'):
+            for field in ('skill_id', 'invocation', 'session_id', 'state_sequence', 'state_committed_at'):
                 with self.subTest(wrapper=wrapper, field=field):
                     row['data'] = json.dumps(dict(document, **{field: 'conflict'}))
                     errors = []
@@ -239,7 +253,8 @@ class EmployeeObserverTests(unittest.TestCase):
                     self.assertTrue(errors)
                     self.assertNotIn('PRIVATE-NOTES', json.dumps(errors))
         self.assertTrue({'caller_ceiling', 'callerceiling', 'mandate_ref',
-                         'mandateref', 'credentials', 'working_notes'}.isdisjoint(
+                         'mandateref', 'credentials', 'working_notes', 'prepared_plans',
+                         'title_confirmation', 'runtime_accounting_recorded'}.isdisjoint(
                              launcher.EMPLOYEE_RUN_FIELDS))
 
     def test_run_session_canonical_shapes_exact_identity(self):

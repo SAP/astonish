@@ -35,11 +35,6 @@ import (
 	"google.golang.org/genai"
 )
 
-type taskHTTPBackend struct {
-	lifecycleHTTPBackend
-	sandbox.BotHomeBackend
-}
-
 type taskHTTPCall struct {
 	name string
 	args map[string]any
@@ -51,6 +46,11 @@ type taskHTTPModel struct {
 }
 
 func (m *taskHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if r.Config != nil && r.Config.SystemInstruction != nil && len(r.Config.SystemInstruction.Parts) > 0 && strings.HasPrefix(r.Config.SystemInstruction.Parts[0].Text, "Understand this entire completed Bot turn") {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(`{"schema_version":1,"kind":"no_change","reason":"Controlled task fixture retains its procedure through the task workspace; no new standing knowledge.","proposals":[]}`, "model"), TurnComplete: true}, nil)
+		}
+	}
 	if response, ok := workerWorkAssessment(r, nil); ok {
 		return response
 	}
@@ -61,8 +61,35 @@ func (m *taskHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest
 	}
 	call := m.calls[0]
 	m.calls = m.calls[1:]
+	if call.name == "web_fetch" {
+		// Require a source in the actual shared search response for this turn;
+		// neither retained task prose nor an old research episode is evidence.
+		found, observed := false, false
+		for i := len(r.Contents) - 1; i >= 0 && !observed; i-- {
+			for _, part := range r.Contents[i].Parts {
+				if part == nil || part.FunctionResponse == nil {
+					continue
+				}
+				response := part.FunctionResponse
+				if response.Name == launcher.BotConfiguredSearchToolName || response.Name == "execute_tool" {
+					observed = true
+					raw, _ := json.Marshal(response.Response)
+					found = strings.Contains(string(raw), fmt.Sprint(call.args["url"])) && (strings.Contains(string(raw), "search_results") || strings.Contains(string(raw), "citations"))
+				}
+			}
+		}
+		if !found {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				yield(nil, fmt.Errorf("fresh configured search response did not return the detail source"))
+			}
+		}
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: call.name, Args: call.args}}}}}, nil)
+		fc := &genai.FunctionCall{ID: uuid.NewString(), Name: call.name, Args: call.args}
+		if _, direct := r.Tools[call.name]; !direct {
+			fc.Name, fc.Args = "execute_tool", map[string]any{"name": call.name, "arguments": call.args}
+		}
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: fc}}}}, nil)
 	}
 }
 
@@ -72,6 +99,11 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 	if os.Getenv("ASTONISH_TEST_TASK_EXECUTION") != "1" {
 		t.Skip("explicit physical execution acceptance required")
 	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", wd)
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			ctx := t.Context()
@@ -118,7 +150,11 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(dir, "layers"), UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
+			sessionStore, err := sandbox.NewLocalSessionStore(filepath.Join(dir, "registry"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(sessionStore), LayersDir: os.Getenv("ASTONISH_BOT_HOME_TEST_LAYERS"), OverlayMode: "fuse", UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,6 +164,9 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 				fmt.Fprintf(w, "<html><body>Fresh decisive source observation %d</body></html>", n)
 			}))
 			defer detail.Close()
+			// Public logical source identity; the owned transport maps it to the
+			// local fixture without treating loopback evidence as public research.
+			detailURL := "https://task-evidence.example/source"
 			if err = db.PlatformSettings().Save(auth, &store.PlatformSettings{PerplexityWebSearch: &store.PerplexityWebSearchSettings{Provider: "search", Model: "sonar"}}); err != nil {
 				t.Fatal(err)
 			}
@@ -140,7 +179,7 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			}
 			policy := func(c context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
 				p, e := newProductionBotMandatePolicy(db, &config.AppConfig{})(c, ref)
-				p.Constraints = append(p.Constraints, execution.BotActionResourceConstraint{Action: execution.CapabilityToolExecute, Resources: []string{launcher.BotConfiguredSearchToolName, "web_fetch", detail.URL, "bot_task_list", "bot_task_read", "bot_task_select", "bot_task_capture", "bot_task_update", "bot_task_asset", "bot_task_state", "bot_task_execute"}})
+				p.Constraints = append(p.Constraints, execution.BotActionResourceConstraint{Action: execution.CapabilityToolExecute, Resources: []string{launcher.BotConfiguredSearchToolName, "web_fetch", detailURL, "bot_task_list", "bot_task_read", "bot_task_select", "bot_task_capture", "bot_task_update", "bot_task_asset", "bot_task_state", "bot_task_execute"}})
 				p.PublicResearch = &execution.BotPublicResearchScope{Version: 1, Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 2}
 				return p, e
 			}
@@ -152,13 +191,20 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			if err = workspace.Install(); err != nil {
 				t.Fatal(err)
 			}
-			wc := BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: taskHTTPBackend{BotHomeBackend: backend}, Pool: workerTestPool{}, WorkerID: "task-http", ContextWindow: 16384, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			pool := sandbox.NewBackendPool(backend, sandbox.ResourceLimits{})
+			t.Cleanup(pool.Cleanup)
+			wc := BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: backend, Pool: pool, WorkerID: "task-http", ContextWindow: 16384, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				if !strings.Contains(q.Instructions, "Public research subject:") {
-					return &launcher.BotChatSafeResources{TaskWorkspace: workspace, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, backend, svc, scope)
 				}
-				episode, e := launcher.NewBotResearchEpisode(q.Run.ID, q.Run.SessionID.String(), launcher.BotResearchOpenWeb, nil)
+				if !strings.Contains(q.Instructions, "Public research subject:") && q.Run.Trigger != store.TriggerCron {
+					return &launcher.BotChatSafeResources{TaskWorkspace: workspace, ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &taskCapturePool{titleSkillPool: titleSkillPool{url: detail.URL}, publicURL: detailURL}}, WorkspaceDir: "/workspace", PolicyRuntime: productionBotPolicyRuntime(botLiveGuard{repo: repo, request: q}), VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				}
+				// The shared Chat executable takes an exact public query, not the
+				// retired facet adapter's arguments or private research episode.
+				chatConfig, e := launcher.BotScopedChatConfig(c, s)
 				if e != nil {
 					return nil, e
 				}
@@ -166,14 +212,10 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 				if e != nil {
 					return nil, e
 				}
-				search, e := launcher.BotConfiguredResearchTool(c, q, s, func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
-					return taskSearchEngine{calls: &searchCalls, url: detail.URL}, nil
-				}, nil, episode)
-				if e != nil {
-					return nil, e
+				factory := func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
+					return taskSearchEngine{calls: &searchCalls, url: detailURL}, nil
 				}
-				reads = append(reads, search)
-				return &launcher.BotChatSafeResources{TaskWorkspace: workspace, Research: episode, Tools: reads, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &launcher.BotChatSafeResources{TaskWorkspace: workspace, ChatConfig: chatConfig, ProviderFactory: factory, Catalog: &launcher.ChatCatalogResources{Pool: &taskCapturePool{titleSkillPool: titleSkillPool{url: detail.URL}, publicURL: detailURL}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Mandate: q.Mandate, Guard: botLiveGuard{repo: repo, request: q}, Classifier: taskHTTPResearchClassifier{fallback: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}}
 			worker, err := NewBotWorker(wc)
 			if err != nil {
@@ -208,6 +250,25 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			}
 			b, err = repo.Get(auth, b.ID)
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err = backend.BindBotHomeSession(h, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = backend.CreateSession(auth, sandbox.SessionSpec{SessionID: b.HomeSessionID.String(), Type: sandbox.SessionTypeChat, UserID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug, BotHome: h, TemplateID: sandbox.BaseTemplateID, LayerChain: []string{sandbox.BaseTemplateID}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				c, done := context.WithTimeout(context.Background(), 30*time.Second)
+				defer done()
+				if e := backend.DestroySession(c, b.HomeSessionID.String()); e != nil {
+					t.Error(e)
+				}
+			})
+			if err = backend.WaitForSessionReady(auth, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if err = initializeBotHomeDocuments(auth, backend, h, v, func(commit func() error) error { return commit() }); err != nil {
 				t.Fatal(err)
 			}
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
@@ -263,7 +324,7 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 				}
 			}
 			research := func() {
-				llm.calls = []taskHTTPCall{{launcher.BotConfiguredSearchToolName, map[string]any{"facet": "overview"}}, {"web_fetch", map[string]any{"url": detail.URL}}}
+				llm.calls = []taskHTTPCall{{launcher.BotConfiguredSearchToolName, map[string]any{"query": "Stock Market News"}}, {"web_fetch", map[string]any{"url": detailURL}}}
 			}
 			t.Run("greeting", func(t *testing.T) {
 				execute(admit("Hello", nil))
@@ -306,7 +367,7 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			}
 			old := admit("Repeat retained task", &task.ID)
 			t.Run("owner-correction-pin", func(t *testing.T) {
-				definition := "# Stock Market News\n\nPublic research subject: Stock Market News\n\n## Owner requirements\nInspect configured search then decisive sources. Report source failures honestly.\n\n## Procedure\nUse bot_configured_search overview then web_fetch on the actual returned source. Include source limitations.\n\n## Output\nUse concise bullet points, not a table.\n"
+				definition := "# Stock Market News\n\nPublic research subject: Stock Market News\n\n## Owner requirements\nInspect configured search then decisive sources. Report source failures honestly.\n\n## Procedure\nUse perplexity_web_search with the public Stock Market News query then web_fetch on the actual returned source. Include source limitations.\n\n## Output\nUse concise bullet points, not a table.\n"
 				llm.calls = []taskHTTPCall{{"bot_task_update", map[string]any{"content": definition}}}
 				execute(admit("Correction: use concise bullet points, not a table.", &task.ID))
 				current, e := tasks.GetTask(auth, b.ID, task.ID)
@@ -411,6 +472,108 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			})
 		})
 	}
+}
+
+// taskHTTPResearchClassifier describes only the fixture's exact public search.
+// It does not skip policy: cron still binds scoped configuration and every call
+// passes live mandate/lease checks before the shared executable can run.
+type taskHTTPResearchClassifier struct{ fallback agent.BotActionClassifier }
+
+func (c taskHTTPResearchClassifier) DescribeAction(ctx context.Context, name string, raw json.RawMessage) (execution.ActionDescriptor, error) {
+	if name == "web_fetch" {
+		var args map[string]any
+		if json.Unmarshal(raw, &args) != nil || len(args) != 1 || args["url"] != "https://task-evidence.example/source" {
+			return execution.ActionDescriptor{}, store.ErrBotForbidden
+		}
+		return execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectRead, ConstraintsVerified: true}, nil
+	}
+	if name != launcher.BotConfiguredSearchToolName {
+		return c.fallback.DescribeAction(ctx, name, raw)
+	}
+	var args map[string]any
+	if json.Unmarshal(raw, &args) != nil || len(args) != 1 || args["query"] != "Stock Market News" {
+		return execution.ActionDescriptor{}, store.ErrBotForbidden
+	}
+	return execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectRead, ConstraintsVerified: true}, nil
+}
+
+func TestTaskHTTPResearchClassifierExactPublicQuery(t *testing.T) {
+	classifier := taskHTTPResearchClassifier{fallback: launcher.BotCatalogueClassifier{}}
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		allowed bool
+	}{
+		{"exact", `{"query":"Stock Market News"}`, true},
+		{"retired-facet", `{"facet":"overview"}`, false},
+		{"private-query", `{"query":"private task contents"}`, false},
+		{"extra-context", `{"query":"Stock Market News","context":"private"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, err := classifier.DescribeAction(t.Context(), launcher.BotConfiguredSearchToolName, json.RawMessage(tc.raw))
+			if tc.allowed {
+				if err != nil || action.Effect != execution.EffectRead || !action.ConstraintsVerified {
+					t.Fatalf("exact classification %+v %v", action, err)
+				}
+			} else if err == nil {
+				t.Fatal("unbounded search classified")
+			}
+		})
+	}
+}
+
+func TestTaskHTTPModelRequiresFreshReturnedSource(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response map[string]any
+		allowed  bool
+	}{
+		{"returned-source", map[string]any{"search_results": []any{map[string]any{"url": "https://source.test/news"}}}, true},
+		{"missing-source", map[string]any{"answer": "No sources"}, false},
+		{"failed-search", map[string]any{"error": "unavailable"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &taskHTTPModel{calls: []taskHTTPCall{{"web_fetch", map[string]any{"url": "https://source.test/news"}}}}
+			r := &model.LLMRequest{Tools: map[string]any{"web_fetch": true}, Contents: []*genai.Content{{Role: "tool", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "execute_tool", Response: tc.response}}}}}}
+			for response, err := range m.GenerateContent(t.Context(), r, false) {
+				if tc.allowed {
+					if err != nil || response == nil || response.Content.Parts[0].FunctionCall.Name != "web_fetch" {
+						t.Fatalf("returned source not followed: %+v %v", response, err)
+					}
+				} else if err == nil {
+					t.Fatal("detail retrieval without a returned source")
+				}
+			}
+		})
+	}
+}
+
+type taskCapturePool struct {
+	titleSkillPool
+	publicURL string
+}
+
+func (p *taskCapturePool) GetOrCreate(string) sandbox.ToolNodeClient                     { return p }
+func (p *taskCapturePool) GetOrCreateWithTemplate(string, string) sandbox.ToolNodeClient { return p }
+func (p *taskCapturePool) Call(session, name string, args map[string]interface{}) (json.RawMessage, error) {
+	if name != "web_fetch" || args["url"] != p.publicURL {
+		return nil, store.ErrBotInvalid
+	}
+	values := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		values[k] = v
+	}
+	values["url"] = p.url
+	raw, err := p.titleSkillPool.Call(session, name, values)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	result["final_url"] = p.publicURL
+	return json.Marshal(result)
 }
 
 type taskSearchEngine struct {

@@ -29,6 +29,7 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 	if err != nil {
 		t.Fatal(err)
 	}
+	content := newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}
 	var client *personalent.Client
 	var teamClient *teament.Client
@@ -63,13 +64,13 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 			if err := teamClient.Schema.Create(ctx); err != nil {
 				t.Fatal(err)
 			}
-			return &teamBotStore{client: teamClient, auth: auth}, &teamSessionStore{client: teamClient}
+			return &teamBotStore{client: teamClient, content: content, auth: auth}, &teamSessionStore{client: teamClient, content: content}
 		}
 		client = personalent.NewClient(personalent.Driver(entsql.OpenDB(dialect.SQLite, db)))
 		if err := client.Schema.Create(ctx); err != nil {
 			t.Fatal(err)
 		}
-		return &personalBotStore{client: client, auth: auth}, &personalSessionStore{client: client}
+		return &personalBotStore{client: client, content: content, auth: auth}, &personalSessionStore{client: client, content: content}
 	}
 	scoped, _ := reopen()
 	t.Cleanup(closeDB)
@@ -109,15 +110,15 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 		if len(protocols) == 1 {
 			var saved *botStoredRun
 			if scope == store.BotScopeTeam {
-				saved, err = (teamBotDB{client: teamClient}).ReadRun(ctx, b.ID, run.ID)
+				saved, err = (teamBotDB{client: teamClient, content: content}).ReadRun(ctx, b.ID, run.ID)
 			} else {
-				saved, err = (personalBotDB{client: client}).ReadRun(ctx, b.ID, run.ID)
+				saved, err = (personalBotDB{client: client, content: content}).ReadRun(ctx, b.ID, run.ID)
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			saved.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: b.ID, RunID: run.ID, Version: run.Version, AdmissionEventID: saved.Run.UserEventID, Instructions: saved.Instructions, Charter: version.Charter})
-			data, err := botJSONMap(*saved)
+			data, err := content.encodeRun(ctx, *saved)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -135,15 +136,15 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 		// Production APIs must never downgrade an in-flight work protocol.
 		var saved *botStoredRun
 		if scope == store.BotScopeTeam {
-			saved, err = (teamBotDB{client: teamClient}).ReadRun(ctx, b.ID, run.ID)
+			saved, err = (teamBotDB{client: teamClient, content: content}).ReadRun(ctx, b.ID, run.ID)
 		} else {
-			saved, err = (personalBotDB{client: client}).ReadRun(ctx, b.ID, run.ID)
+			saved, err = (personalBotDB{client: client, content: content}).ReadRun(ctx, b.ID, run.ID)
 		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		saved.Work = store.NewBotWorkState(store.BotWorkContract{BotID: b.ID, RunID: run.ID, Version: run.Version, Instructions: saved.Instructions, Charter: version.Charter})
-		data, err := botJSONMap(*saved)
+		data, err := content.encodeRun(ctx, *saved)
 		if err != nil {
 			t.Fatal(err)
 		}

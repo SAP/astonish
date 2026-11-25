@@ -7,7 +7,13 @@
 ## Agent-origin contract
 
 The envelope additionally supports origin `agent` for the exact captured final
-answer and `operation` for independently validated control receipts. An `agent`
+answer and `operation` for independently validated control receipts. Ordinary
+inquiries default to inline chat; prose length or the label report does not force
+an artifact. A fresh positively attested read-only useful partial shares
+`HasReadOnlyEmployeeResult` eligibility across capture, completion and composition:
+finished `AgentWorkPartial`, exact nonempty unresolved limitations, final/candidate
+identity, and no retained required review/artifact/control or unknown effect.
+The useful partial remains partial, never succeeded. An `agent`
 message has a candidate digest and no model-review fields, legacy quality verdict,
 or invented effect attestation. It binds `BotReport.Work` to private work, preserves
 candidate text/artifacts exactly, and accepts succeeded answered/complete or partial

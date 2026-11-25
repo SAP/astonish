@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
@@ -48,7 +49,7 @@ func (m *draftApprovalHTTPModel) GenerateContent(ctx context.Context, r *model.L
 	m.attempt = false
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: map[string]any{"body": "exact"}}}}}}, nil)
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "execute_tool", Args: map[string]any{"name": "fixture_send", "arguments": map[string]any{"body": "exact"}}}}}}}, nil)
 	}
 }
 
@@ -116,7 +117,9 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			}
 			llm := &draftApprovalHTTPModel{attempt: true}
 			var effects atomic.Int64
-			target, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Harmless counted exact action"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
+			// Keep this send-classified extension distinct from the actual Chat file
+			// tools; approval must guard the counter without replacing their catalog.
+			target, err := functiontool.New(functiontool.Config{Name: "fixture_send", Description: "Harmless counted exact action"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
 				if args["body"] != "exact" {
 					return nil, fmt.Errorf("changed exact arguments: %v", args)
 				}
@@ -130,10 +133,17 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: activationHomeBackend{}, Pool: workerTestPool{}, WorkerID: "draft-approval-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			backend := newRegressionHomeBackend(t)
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "draft-approval-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
-			}, Prepare: func(_ context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				return &launcher.BotChatSafeResources{Tools: []tool.Tool{target}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: draftApprovalHTTPClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, backend, svc, scope)
+				}
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &intentHTTPPool{}, Groups: map[string]*agent.ToolGroup{"fixture": {Name: "fixture", Description: "Counted exact action", Tools: []tool.Tool{target}}}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: draftApprovalHTTPClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -144,21 +154,14 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				t.Fatal(err)
 			}
 			version := store.DefaultBotVersion()
-			version.Autonomy.AllowedTools = []string{"read_file"}
+			version.Autonomy.AllowedTools = []string{"fixture_send"}
 			version.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Cron: "0 * * * *", Timezone: "UTC", Instructions: "Remain disabled during one-time test", Enabled: false}}
 			version.Charter = "Perform one owner-approved exact action"
 			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Draft approval", OwnerID: owner, Version: version, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := entstore.RegisterBotHomeBinding(registry, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -252,6 +255,19 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			if err := json.Unmarshal(request("POST", "test-run", payload, 202), &run); err != nil {
 				t.Fatal(err)
 			}
+			// Recheck membership after HTTP admission, before worker claim. A
+			// retained authenticated request context must not authorize execution
+			// once authoritative organization membership has been revoked.
+			if err := db.Organizations().RemoveMember(ctx, owner.String(), org.ID); err != nil {
+				t.Fatal(err)
+			}
+			poll()
+			if effects.Load() != 0 || llm.calls != 0 {
+				t.Fatal("revoked queued owner reached model or tool")
+			}
+			if err := db.Organizations().AddMember(ctx, owner.String(), org.ID, "member"); err != nil {
+				t.Fatal(err)
+			}
 			assertState(store.BotDraft)
 			poll()
 			assertState(store.BotDraft)
@@ -269,7 +285,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				t.Fatalf("exact checkpoint %+v: %v", checkpoint, err)
 			}
 			var args map[string]any
-			if err := json.Unmarshal(approval.Action.Arguments, &args); err != nil || args["body"] != "exact" || approval.Action.Tool != "read_file" {
+			if err := json.Unmarshal(approval.Action.Arguments, &args); err != nil || args["body"] != "exact" || approval.Action.Tool != "fixture_send" {
 				t.Fatalf("saved action %+v %v", approval.Action, err)
 			}
 			decision := fmt.Sprintf(`{"action_digest":%q,"status":"approved"}`, approval.ActionDigest)
@@ -301,6 +317,23 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 					request("POST", resumePath, resume, 202)
 					assertState(store.BotDraft)
 				}
+			}
+			// Approval is still not authority after membership is revoked. Keep
+			// the approved action unconsumed while worker claim is denied.
+			if err := db.Organizations().RemoveMember(ctx, owner.String(), org.ID); err != nil {
+				t.Fatal(err)
+			}
+			callsBeforeClaim := llm.calls
+			poll()
+			if effects.Load() != 0 || llm.calls != callsBeforeClaim {
+				t.Fatal("revoked approved owner reached model or tool")
+			}
+			if err := db.Organizations().AddMember(ctx, owner.String(), org.ID, "member"); err != nil {
+				t.Fatal(err)
+			}
+			pendingConsumption := approvals()
+			if len(pendingConsumption) != 1 || pendingConsumption[0].Status != store.ApprovalApproved {
+				t.Fatalf("denied worker claim consumed approval: %+v", pendingConsumption)
 			}
 			poll()
 			assertState(store.BotDraft)

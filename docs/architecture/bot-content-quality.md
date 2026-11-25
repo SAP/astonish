@@ -124,6 +124,28 @@ source inspection, material uncertainty and stopping decisions. This is not an
 accepted review, a factual certification, or evidence that every requested detail
 was supplied. Optional `bot_check_work` remains available and budgeted.
 
+The employee owns adaptive relevance and sufficiency judgments in the same shared
+Chat loop: inspect results, refine irrelevant queries, fill material coverage gaps
+and stop when evidence is adequate. No fixed topic checklist or mandatory plan,
+check, finish, reviewer or file is needed for ordinary inquiries. Inline chat is
+the default; explicit artifact requests and pinned delivery contracts retain their
+file path. Scheduled work does not solicit interactive title refinement; later
+owner objectives supersede stale working assumptions while retaining useful context.
+
+`TestBotEmployeeObjectiveInquiryHTTP` exercises production HTTP title/answer routes
+and the actual scoped configured-search executable in personal/team SQLite scopes:
+fruit to company to material market gap, or adequate-first stopping, followed by
+exactly-once inline replay with no reviewer/artifact/mandatory plan.
+`TestBotEmployeeAdaptiveResultSufficiency` covers non-news analysis, empty results,
+genuine trusted pre-dispatch read-error feedback, useful partials and noninteractive
+scheduled/latest-owner adapter requests. These controlled fixtures prove framework
+wiring, not paid-provider judgment, real scheduler or physical Home acceptance.
+
+A finished useful read-only partial requires `AgentWorkPartial` and exact nonempty
+unresolved limitations. The shared `HasReadOnlyEmployeeResult` predicate binds
+capture, commit validation and communication. Partial is never success and cannot
+bypass retained explicit review, artifacts, controls or unknown-effect boundaries.
+
 The worker's `ReadOnlyResult` flag is included in the immutable candidate digest.
 The commit gate checks the report again: missing/unknown/uncertain effects, writes,
 unverified effects, artifacts, approvals, schedules, failures and pending controls
@@ -167,6 +189,38 @@ exact agent-origin message, partial status, tool accounting, candidate identity 
 serialized work/report commit validation. `TestBotEmployeeToolErrorRecoveryBoundary`
 covers terminal error identity and unsafe/missing evidence. These are isolated
 controlled-model tests, not live-daemon or paid-provider acceptance.
+
+## Content quality versus file-delivery success
+
+For file-first Bot work, useful content and delivered bytes are independent
+requirements. The employee explicitly selects `chat_only`, or `file_deliverable`
+with `markdown`/`binary`, using the typed work update. Neither answer length nor
+an apparent filename selects this requirement. A file-deliverable choice and its
+format cannot subsequently be downgraded within the run.
+
+A complete file result needs a trusted immutable saved-file receipt tied to the
+same Bot/run/Home, then the normal accepted report and postcommit publication.
+A model claiming “saved” or listing an artifact is insufficient. The public result
+is a concise summary plus the canonical ordered file envelope, not automatic
+expansion of the file body back into chat. Read-only answer shortcuts do not
+establish delivery of a requested file. Ordinary Chat behavior remains unchanged.
+
+For a complete captured Markdown answer lacking a receipt, the worker may use one
+bounded same-run save/readback/snapshot operation. It saves the full source rather
+than a clipped synthesis draft; it cannot do new research, invoke a model, use a
+shell, acquire approval, or replay an external effect. Oversize, missing, cancelled,
+incomplete, uncertain-effect or binary output does not qualify. Binary delivery
+requires an actual generated file, never text with a binary extension. See
+[completion recovery](bot-synthesis-reserve.md#file-deliverable-completion) for
+budget, policy and receipt checks.
+
+A successful save verifies stored-byte identity, not the truth of the document.
+Conversely, a useful or assessed answer without the required receipt cannot be
+reported as successful file delivery. Existing factual limitations, independent
+effect authority and no-replay rules remain intact. The
+[canonical publication](bot-home-assessment-publication.md#canonical-file-publication)
+is the delivery source for live and restored views; browser/PTY and backup/restore
+acceptance are not implied by these implementation contracts or controlled tests.
 
 ## Synthesis reserve
 

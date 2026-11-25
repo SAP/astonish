@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/execution"
 	"google.golang.org/adk/tool"
 )
@@ -74,11 +77,28 @@ func AuthorizeBotTool(ctx context.Context, identity string, args any) error {
 	return authorizeBotTool(ctx, identity, args, nil)
 }
 
+// botRejectedInvocation is called only before an executable is entered.
+func botRejectedInvocation(ctx tool.Context, target string, args any, disposition bot.ToolFeedbackDisposition) {
+	if !bot.ToolOutcomesEnabled(ctx) || target == common.SearchToolsName || target == common.DescribeToolsName {
+		return
+	}
+	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.NewToolNonexecutionOutcome(ctx, ctx.FunctionCallID(), target, args, disposition))
+}
+
+func botRejectedCause(ctx tool.Context, target string, args any, cause error) {
+	disposition := bot.ToolFeedbackTerminal
+	var invalid *bot.ToolArgumentError
+	if errors.As(cause, &invalid) && ctx.Err() == nil {
+		disposition = bot.ToolFeedbackCorrectCall
+	}
+	botRejectedInvocation(ctx, target, args, disposition)
+}
+
 func authorizeBotTool(ctx context.Context, identity string, args any, capture *execution.ActionDescriptor) error {
-	_, bot := execution.BotRunIdentityFromContext(ctx)
+	_, isBot := execution.BotRunIdentityFromContext(ctx)
 	auth, interactive := execution.BotTurnAuthorizerFromContext(ctx)
 	if interactive {
-		if !bot || execution.RunPolicyFromContext(ctx) != nil {
+		if !isBot || execution.RunPolicyFromContext(ctx) != nil {
 			return botPolicyDenied("invalid interactive execution binding")
 		}
 		if err := auth.AuthorizeTool(ctx, identity); err != nil {
@@ -111,7 +131,7 @@ func authorizeBotTool(ctx context.Context, identity string, args any, capture *e
 		}
 		return nil
 	}
-	if !bot && execution.RunPolicyFromContext(ctx) == nil {
+	if !isBot && execution.RunPolicyFromContext(ctx) == nil {
 		return nil
 	}
 	if args == nil {
@@ -133,6 +153,10 @@ func authorizeBotTool(ctx context.Context, identity string, args any, capture *e
 	if runtime.Classifier != nil {
 		classified, err := runtime.Classifier.DescribeAction(ctx, identity, bytes.Clone(raw))
 		if err != nil {
+			var invalid *bot.ToolArgumentError
+			if errors.As(err, &invalid) {
+				return invalid
+			}
 			return botPolicyDenied("action classification failed")
 		}
 		// A classifier may add verified effect metadata, not replace the invocation.
@@ -238,8 +262,8 @@ func authorizeBotInvocation(ctx tool.Context, identity string, args any) (tool.C
 }
 
 func botAuthorizedInvocationContext(ctx tool.Context, identity string, args any, action execution.ActionDescriptor) (tool.Context, error) {
-	id, bot := execution.BotRunIdentityFromContext(ctx)
-	if !bot {
+	id, isBot := execution.BotRunIdentityFromContext(ctx)
+	if !isBot {
 		return ctx, nil
 	}
 	digest, err := botInvocationDigest(identity, args)
@@ -258,9 +282,9 @@ func botAuthorizedInvocationContext(ctx tool.Context, identity string, args any,
 
 func authorizeBotLazyInvocation(ctx tool.Context, identity string, args any) error {
 	if handoff, ok := ctx.Value(botLazyHandoffKey{}).(*botLazyHandoff); ok {
-		id, bot := execution.BotRunIdentityFromContext(ctx)
+		id, isBot := execution.BotRunIdentityFromContext(ctx)
 		digest, err := botInvocationDigest(identity, args)
-		if !bot || id != handoff.identity || execution.RunPolicyFromContext(ctx) != handoff.policy || err != nil || digest != handoff.digest || !handoff.used.CompareAndSwap(false, true) {
+		if !isBot || id != handoff.identity || execution.RunPolicyFromContext(ctx) != handoff.policy || err != nil || digest != handoff.digest || !handoff.used.CompareAndSwap(false, true) {
 			return botPolicyDenied("invalid or reused lazy execution handoff")
 		}
 		return handoff.validateTarget(ctx)

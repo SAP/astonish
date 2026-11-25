@@ -20,6 +20,31 @@ import (
 )
 
 // Recovery eligibility does not clear Completion.Err or its native identity.
+func TestBotToolErrorTrustedCorrection(t *testing.T) {
+	for _, disposition := range []bot.ToolFeedbackDisposition{bot.ToolFeedbackCorrectCall, bot.ToolFeedbackUnresolvedTarget, bot.ToolFeedbackTerminal} {
+		t.Run(string(disposition), func(t *testing.T) {
+			ctx, req, _ := botChatTestRequest(t)
+			ctx = execution.WithBotRunIdentity(ctx, req.Policy.Identity())
+			ctx, _ = bot.WithToolOutcomes(ctx)
+			journal := &botAgentReadJournal{}
+			ctx = context.WithValue(ctx, botAgentReadJournalKey{}, journal)
+			call := &genai.FunctionCall{ID: "correction", Name: "execute_tool", Args: map[string]any{"name": "read_file", "arguments": map[string]any{}}}
+			journal.capture(ctx, call)
+			bot.RecordToolOutcome(ctx, call.ID, bot.NewToolNonexecutionOutcome(ctx, call.ID, "read_file", map[string]any{}, disposition))
+			cr := newChatRunner("session", "user", studioChatAppName, false)
+			defer cr.cancel()
+			cr.ctx = ctx
+			cr.observeCompletion(&session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "tool", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: map[string]any{"error": errors.New("invalid call")}}}}}}})
+			if got := cr.completion.Err == nil; got != (disposition != bot.ToolFeedbackTerminal) {
+				t.Fatalf("recoverable=%v error=%v", got, cr.completion.Err)
+			}
+			if journal.effectState() != store.BotReportEffectsReadOnly {
+				t.Fatal("known rejection became uncertain effect")
+			}
+		})
+	}
+}
+
 func TestBotEmployeeToolErrorRecoveryBoundary(t *testing.T) {
 	for _, mode := range []string{"read-feedback", "execution-state", "native-error", "policy", "cancel", "budget", "approval", "denied", "context-required", "context-stale", "model-error", "runner-error", "sink-error", "unknown-effects", "uncertain-effects", "changed", "unverified", "artifact", "pending", "missing-response", "missing-final", "missing-event", "blank-final", "legacy", "no-work"} {
 		t.Run(mode, func(t *testing.T) {

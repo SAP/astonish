@@ -13,7 +13,6 @@ import (
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -36,7 +35,16 @@ func BotCatalogueTools(client sandbox.ToolNodeClient, sessionID string, scoped .
 	native = append(native, processes...)
 	result := make([]tool.Tool, 0, len(native))
 	seen := map[string]bool{}
+	confined := map[string]bool{}
+	for _, candidate := range scoped {
+		if _, ok := candidate.(*botConfinedFileTool); ok {
+			confined[candidate.Name()] = true
+		}
+	}
 	for _, t := range native {
+		if confined[t.Name()] {
+			continue
+		}
 		seen[t.Name()] = true
 		// Credential-bearing HTTP needs the session vault provisioning adapter; do
 		// not silently run the node's unauthenticated/global credential fallback.
@@ -55,37 +63,8 @@ func BotCatalogueTools(client sandbox.ToolNodeClient, sessionID string, scoped .
 		seen[t.Name()] = true
 		result = append(result, t)
 	}
-	declarations := tools.GetAllFlowToolDeclarations()
-	declarations = append(declarations,
-		tools.ToolDeclaration{Name: "run_flow", Description: "Execute a saved flow"},
-		tools.ToolDeclaration{Name: "search_flows", Description: "Search saved flows"},
-	)
-	for _, d := range declarations {
-		if seen[d.Name] && d.Name != "http_request" {
-			continue
-		}
-		// A supplied HTTP adapter supersedes the explicitly unavailable default.
-		found := false
-		for _, t := range result {
-			if t.Name() == d.Name {
-				found = true
-				break
-			}
-		}
-		if found {
-			continue
-		}
-		name := d.Name
-		t, err := functiontool.New(functiontool.Config{Name: name, Description: d.Description + ". Requires a request-scoped backend; unavailable adapters fail explicitly."}, func(ctx tool.Context, args map[string]any) (map[string]any, error) {
-			return nil, fmt.Errorf("%w: %s requires a scoped credential, effect and auxiliary-budget adapter", store.ErrBotUnsupported, name)
-		})
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, t)
-		seen[name] = true
-	}
 	return result, nil
+
 }
 
 // Unlike NodeTool, this adapter cannot select a child/viewer sandbox or fall back
@@ -120,37 +99,12 @@ func (t *botSandboxTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	if ctx == nil {
 		return nil, store.ErrBotForbidden
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	var values map[string]any
-	if err = json.Unmarshal(raw, &values); err != nil {
-		return nil, err
-	}
-	values, err = common.NormalizeFileToolArguments(t.Name(), values)
-	if err != nil {
-		return nil, err
-	}
-	if err = common.ValidateToolArguments(t.Tool, values); err != nil {
-		return nil, err
-	}
-	output, err := t.client.Call(t.sessionID, t.Name(), values)
-	if err != nil {
-		// Record the failed access, not a successful effect. Keep the original
-		// transport error so ordinary error handling and cancellation are intact.
-		recordBuiltinToolObservation(ctx, t.sessionID, t.Name(), values, map[string]any{"error": err.Error()})
-		return nil, err
-	}
-	var result map[string]any
-	if err = json.Unmarshal(output, &result); err != nil {
-		return nil, err
-	}
-	recordBuiltinToolObservation(ctx, t.sessionID, t.Name(), values, result)
-	return result, nil
+	return sandbox.RunNodeTool(ctx, t.Tool, t.client, t.sessionID, t.sessionID, args, func(values, result map[string]any, err error) {
+		if err != nil {
+			result = map[string]any{"error": err.Error()}
+		}
+		recordBuiltinToolObservation(ctx, t.sessionID, t.Name(), values, result)
+	})
 }
 
 // No name or model-provided argument is proof that an external effect is safe.

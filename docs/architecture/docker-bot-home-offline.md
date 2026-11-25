@@ -4,6 +4,69 @@
 `BotHomeArtifactBackend` and `BotHomeDeleteBackend` are separate optional
 capabilities; their presence is **not authorization**.
 
+## Session-owned file IO
+
+Routine file/content/workspace operations execute in the Bot's one bound normal
+session container, using its configured Python tool layer. Binding is metadata-only
+and backend-instance-local. A missing launch recipe fails closed: trusted launch
+composition must create the session with its actual template before file codecs
+run; file access must not silently create an @base-only session. Existing recovery
+recipes retain template, owner, resource limits and fresh-credential requirements.
+Codec IO inside SQL never re-enters the session repository: stopped, paused or
+missing compute fails with a lifecycle-preparation error there. Authorized content
+hydration outside SQL may prepare the original HomeSessionID through
+`BotHomeSessionPreparer`; this uses normal StartSession/WaitForSessionReady and
+never fabricates a recipe or creates a file-helper container. HTTP message and
+regular/scheduled run admission hydrate after scope/owner authorization but before
+SQL, then repeat admission checks transactionally. Bot Get/List remain metadata-only
+and do not prepare compute; file-backed discovery reads prepare only when needed.
+
+Production `BotWorker.execute` first reads only the authorized Bot control row,
+rechecks owner directory membership, and restores the existing HomeSessionID launch
+recipe before run/version hydration. Initial provisioning pins the actual version
+sandbox template before selecting staged content into Home. Title-only turns stay
+on staging and create no persistent compute. Run-session IDs remain transcript
+identities; their pool aliases and run cleanup never destroy the shared Home client.
+
+`TestBotNewMessageDockerBetweenCallReproduction` runs the production worker and
+canonical factory with a controlled (unpaid) model: title question, long new message,
+real retained file read, persisted follow-up question, and exactly one physically
+inspected Home-session container. It additionally evicts only that test container
+while retaining its launch recipe, posts a new HTTP message after eviction, then
+independently evicts again before executing the admitted worker turn. Passing this
+sequence proves admission recovery and worker recovery separately. It is not proof
+of a full scheduler polling cycle after eviction, full recipe deletion/reconstruction,
+long-model deliverable generation, or Kubernetes support.
+
+Each operation owns one exec process, not a container. Cancellation marks a unique
+exec token and kills only its matching PID; the shell reaps it and cleans its token.
+Concurrent unrelated execs and the session container remain running. Normal file
+operations create no helper containers. Initial Home/admission, archival and the
+legacy bounded artifact reader still have their separate administrative helpers.
+
+The Home and workspace-private volumes remain independently retained across
+DestroySession. Descriptors select their roots, but are **not a security boundary**:
+the Python interpreter comes from the mutable session overlay. Content stored there
+must not be treated as trusted approval/authority metadata. SQL authorization and
+commit barriers remain external to this content. Existing helper-inspection tests
+remain relevant to archival/admission, not routine file IO.
+
+Physical acceptance: `TestBotSessionFilesDockerLive` requires explicit
+`ASTONISH_TEST_DOCKER=1`, `ASTONISH_SANDBOX_IMAGE`, absolute
+`ASTONISH_BOT_HOME_TEST_LAYERS`, and `ASTONISH_BOT_HOME_TEST_TEMPLATE` naming an
+already provisioned Python tool layer. It verifies five warm cycles with zero
+helper creation, exact private/workspace bytes, isolated cancellation, and changed
+working bytes plus unchanged published bytes after compute destruction/recreation.
+All five binary private revisions and the last workspace write are read back after
+recreation, with stream and resource cleanup errors checked.
+
+The historical `TestHomeFileTransactionHelperDockerLive` and
+`TestBotHomeFilesDockerLive` still construct unbound helper-only backends and are
+not session-cutover acceptance: their helper-count/start/remove fault assumptions
+must be ported before including them in a full physical suite. They are retained,
+not silently deleted or relabelled as passing. The scoped unit suite passing with
+Docker opt-in unset does not establish that these historical live tests pass.
+
 ## Offline artifacts
 
 `launcher.BotHomeManager.ReadArtifact` authorizes the caller using its scoped
@@ -65,6 +128,103 @@ any attached container (including stopped runs), and uses non-forced volume
 removal. Docker's reference check rejects concurrent attachments. Missing owned
 homes are idempotent; arbitrary or differently scoped references are rejected.
 No public endpoint, request boolean, or automatic session cleanup enables purge.
+
+## Immutable content Put readback
+
+Docker and Kubernetes implement the optional `BotHomeContentReadbackBackend` for
+immutable objects up to 8 MiB. The existing confined Put helper publishes under
+the unchanged commit barrier, reopens the committed private object without
+following links, verifies size/digest and file identity, then streams its actual
+stored bytes before exiting. These are not echoed upload bytes. Helper terminal
+and cleanup errors still fail the operation; partial readback is never returned
+as success. Larger objects and backends without the optional capability retain
+the ordinary streaming Put/Open path.
+
+Entstore independently hashes the input and checks the complete returned
+reference, then hashes the stored readback before placing a private byte copy in
+its existing operation/transaction cache (8 MiB, 256 objects). Keys include the
+complete content reference, backend and Home storage identity. The cache neither
+supplies authority nor skips fresh Bot/binding lookups. First Home selection's
+destination verification and final logical validation reuse these bytes rather
+than starting another helper per object. Ending the operation drops the bytes;
+missing or corrupt content in a subsequent operation still fails closed.
+
+Scoped tests exercise the shared Python program on temporary files, Kubernetes
+adapter protocol/commit behavior with local exec, and personal/team SQL selection
+with 11 readback puts and zero separate destination opens. This is not a physical
+Docker or Kubernetes latency claim; combined live timing remains a separate gate.
+
+## Stream archives and cross-process attachment admission
+
+`ExportBotHomeArchive` and `RestoreBotHomeArchive` acquire an exclusive kernel
+`flock` on the existing protected workspace volume's `.workspace-lock`. This is
+not a daemon-host lock or a process-local mutex: independent clients of the same
+Docker engine use the same inode. A confined, fixed-program admission helper
+mounts only that exact private volume, with no Home mount, network, capabilities
+or writable rootfs. Its image, command, labels, stdin lifetime and exact mount are
+validated. The lock file is never unlinked or replaced.
+
+Session creation (including persisted recovery) and stopped/paused session start
+acquire the same lock before admitting a Home attachment. Other Homes have their
+own locks. Export never provisions missing private storage. Missing retained
+start metadata cannot bypass admission by treating a Home-mounted container as
+an ordinary session.
+
+Lock order is **session lifecycle lock, then exact-Home storage lock** for
+attachment. Archive callers must authorize and quiesce writers and complete
+session stop/detach work before invoking the barrier operation; archive takes no
+session lock while holding storage exclusion. Stream callbacks must not call
+session lifecycle APIs. The platform writer barrier remains mandatory: Docker
+attachment exclusion is not authorization or a replacement for worker quiescence.
+
+The acquired lock spans attachment checks, streaming and helper cleanup, including
+cancellation cleanup. Waiting acquisition is cancellable; after acquisition,
+caller cancellation does not release the lock ahead of deferred cleanup. Explicit
+release closes the holder, and client process death closes its Docker stdin so
+the holder exits and the kernel releases the lock. A surviving archive helper
+blocks subsequent session admission until explicit owned cleanup. Unknown or
+stopped attachments reject export/restore; they are never forcibly detached.
+Only validated fixed-program admission holders/waiters are exempt from the
+private-volume attachment check.
+
+The isolated physical gate exercises independent backend instances and a killed
+subprocess, blocked create/recover/start, unrelated-Home progress, cancellation
+ordering, foreign attachment preservation, and a 24 MiB ordinary plus 24 MiB
+protected archive round trip. It does not launch an overlay or exercise the
+public backup CLI/platform writer barrier:
+
+```sh
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_SANDBOX_IMAGE=ghcr.io/sap/astonish-sandbox-base:dev \
+go test ./pkg/sandbox/docker \
+  -run '^TestBotHome(AdmissionDockerLive|StreamArchiveDockerLive)$' \
+  -count=1 -v -timeout=5m
+```
+
+## Helper lifecycle transport cost
+
+File and workspace operations retain **one exclusive disposable helper per
+request**. Terminal exit state and exact nonce/scope cleanup labels are now read
+in one fresh Docker inspection, followed by the same owned removal. Missing or
+running terminal state, nonzero exit, malformed ownership, and removal failures
+fail the request. Mount and volume checks are not cached or omitted. Cancellation
+still joins and removes only the request's helper; no other stream shares it.
+
+`TestBotHomeHelperInspectionDockerLive` traces the real Docker CLI for three file
+listings and three workspace listings: each mode drops from nine container
+inspections to six (one mount and one combined terminal/ownership inspection per
+operation). This removes one CLI/engine round trip, **not container create/start/
+remove overhead**. In the isolated local sample, file listings were 0.971 s before
+and 1.051 s after, workspace listings 1.158 s before and 1.074 s after; this is not
+evidence of an end-to-end latency win. The physical stream suite separately
+verifies immutable snapshots, >16 MiB reads, scoped access, cancellation and no
+leaked helpers.
+
+Persistent helper pooling is deliberately not introduced: retained mounts would
+participate in archive/purge attachment exclusion, and the backend currently has
+no shutdown lifecycle. Reuse needs coordinated admission/drain semantics plus
+exclusive or individually cancellable exec ownership, not merely an idle cache.
+No live Bot or paid model replay is covered by these transport tests.
 
 ## Live acceptance
 

@@ -16,7 +16,29 @@ it('renders the Boston pending question once without permission chrome', () => {
   expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
 })
 
-it('keeps genuine pending permissions generic and actionable', () => {
+it.each(['pending', 'approved', 'consumed'] as const)('shows the captured %s action and scope, not private approval internals', status => {
+  const exactApproval = { ...approval, status, action: {
+    tool: 'journey_exact_action', effect: 'send', recipient: 'owner@example.test',
+    arguments: { body: 'exact', token: 'secret-token', nested: { private_checkpoint: 'private-state', safe: 'retained' } },
+    checkpoint: 'private-outer-state', target_snapshot: { token: 'private-snapshot' },
+  } }
+  const view = render(<BotReviewCard bot={bot} approval={exactApproval} readOnly={status === 'consumed'} onChange={vi.fn()} />)
+  const details = screen.getByLabelText('Captured action details')
+  expect(details.tagName).toBe('PRE')
+  for (const text of ['journey_exact_action', 'send', 'owner@example.test', 'exact', 'retained']) expect(details).toHaveTextContent(text)
+  expect(view.container).not.toHaveTextContent(/secret-token|private-state|private-outer-state|private-snapshot|Saved action\. Review/)
+  view.unmount()
+  render(<BotReviewCard bot={bot} approval={exactApproval} readOnly onChange={vi.fn()} />)
+  expect(screen.getByLabelText('Captured action details')).toHaveTextContent('exact')
+})
+
+it('does not show action arguments on a pending question', () => {
+  render(<BotReviewCard bot={bot} approval={{ ...approval, action: { tool: 'ask_user', arguments: { token: 'secret' } }, interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Choose a channel' } } }} readOnly={false} onChange={vi.fn()} />)
+  expect(screen.queryByLabelText('Captured action details')).not.toBeInTheDocument()
+  expect(screen.queryByText('secret')).not.toBeInTheDocument()
+})
+
+it('keeps genuine pending permissions reviewable and actionable', () => {
   render(<BotReviewCard bot={bot} approval={approval} readOnly={false} onChange={vi.fn()} />)
   expect(screen.getByRole('heading', { name: 'Permission to perform this exact action' })).toBeVisible()
   expect(screen.getByText('pending')).toBeVisible()

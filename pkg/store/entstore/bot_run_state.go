@@ -8,26 +8,28 @@ import (
 	"time"
 )
 
-// appendBotRunStateTx is called only after the durable status CAS, in the same
-// root-serialized transaction. It never infers a transition from a setter.
 func appendBotRunStateTx(ctx context.Context, tx botDraftDB, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
 	return tx.AppendRunState(ctx, b, run, sequence, at)
 }
 
+// Always read authoritative state; only an exact already-persisted sequence/time
+// permits coalescing the envelope write. Transcript and callbacks are never skipped.
 func (d personalBotDB) AppendRunState(ctx context.Context, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
 	saved, err := d.ReadRun(ctx, b.ID, run.ID)
 	if err != nil {
 		return err
 	}
-	saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+	if saved.Run.StateSequence != sequence || !saved.Run.StateCommittedAt.Equal(at) {
+		saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+		data, err := d.contentCodec().encodeRun(ctx, *saved)
+		if err != nil {
+			return err
+		}
+		if _, err = d.client.BotRun.Update().Where(prun.IDEQ(run.ID), prun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
+			return err
+		}
+	}
 	run = saved.Run
-	data, err := botJSONMap(*saved)
-	if err != nil {
-		return err
-	}
-	if _, err = d.client.BotRun.Update().Where(prun.IDEQ(run.ID), prun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
-		return err
-	}
 	event, err := store.NewBotRunStateEvent(b, run, sequence, at)
 	if err != nil {
 		return err
@@ -43,15 +45,17 @@ func (d teamBotDB) AppendRunState(ctx context.Context, b store.Bot, run store.Bo
 	if err != nil {
 		return err
 	}
-	saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+	if saved.Run.StateSequence != sequence || !saved.Run.StateCommittedAt.Equal(at) {
+		saved.Run.StateSequence, saved.Run.StateCommittedAt = sequence, at
+		data, err := d.contentCodec().encodeRun(ctx, *saved)
+		if err != nil {
+			return err
+		}
+		if _, err = d.client.BotRun.Update().Where(trun.IDEQ(run.ID), trun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
+			return err
+		}
+	}
 	run = saved.Run
-	data, err := botJSONMap(*saved)
-	if err != nil {
-		return err
-	}
-	if _, err = d.client.BotRun.Update().Where(trun.IDEQ(run.ID), trun.BotIDEQ(b.ID)).SetData(data).Save(ctx); err != nil {
-		return err
-	}
 	event, err := store.NewBotRunStateEvent(b, run, sequence, at)
 	if err != nil {
 		return err
@@ -63,17 +67,23 @@ func (d teamBotDB) AppendRunState(ctx context.Context, b store.Bot, run store.Bo
 	return nil
 }
 
-// queueBotRunStateNotification retains transaction-local callbacks, including
-// nested title admission. Nothing is published until the outer commit succeeds.
 func queueBotRunStateNotification(ctx context.Context, callbacks *[]func(), state store.BotRunState) {
 	if notify := store.BotRunStateNotifierFromContext(ctx); notify != nil && callbacks != nil {
 		*callbacks = append(*callbacks, func() { notify(ctx, state) })
 	}
 }
 
-// insertBotRunStateActivity is reserved for successful transition producers:
-// admission, claim, commit, recovery, cancellation, quiescence and requeue.
-// Read back SQL state rather than publishing speculative in-memory mutations.
+// The caller already saved state but AppendRunState still verifies SQL itself.
+func insertSavedBotRunStateActivity(ctx context.Context, tx botDraftDB, b store.Bot, run store.BotRun, a store.BotActivity, key string) error {
+	if a.RunID == nil || *a.RunID != run.ID || a.BotID != b.ID || run.BotID != b.ID {
+		return store.ErrBotInvalid
+	}
+	if err := tx.InsertActivity(ctx, a, key); err != nil {
+		return err
+	}
+	return appendBotRunStateTx(ctx, tx, b, run, a.Sequence, a.CreatedAt)
+}
+
 func insertBotRunStateActivity(ctx context.Context, tx botDraftDB, a store.BotActivity, key string) error {
 	if err := tx.InsertActivity(ctx, a, key); err != nil {
 		return err

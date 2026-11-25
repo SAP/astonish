@@ -35,7 +35,7 @@ func TestBotBudgetStopMapperRenderLiveAndReplay(t *testing.T) {
 			// Reconnect repeats the last frame; identity, never paragraph equality,
 			// must prevent a second report.
 			for range 2 {
-				mapped, err := mapper.mapFrame(frame)
+				mapped, err := mapStoredBotFixture(t, &mapper, frame)
 				if err != nil {
 					t.Fatal(err)
 				}

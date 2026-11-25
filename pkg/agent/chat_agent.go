@@ -51,6 +51,9 @@ type KnowledgeRetrievalFunc func(ctx context.Context, semanticQuery, keywordQuer
 // Execution records a trace. After reusable tasks, auto-distillation
 // generates a flow YAML + knowledge doc. /distill remains as manual fallback.
 type ChatAgent struct {
+	// Optional composition-owned synchronous preparation; nil for ordinary Chat.
+	BeginModelPreparation       func(context.Context) context.Context
+	EndModelPreparation         func()
 	LLM                         model.LLM
 	Tools                       []tool.Tool
 	Toolsets                    []tool.Toolset
@@ -120,13 +123,9 @@ type ChatAgent struct {
 	// Internal: reuse AstonishAgent for approval formatting
 	approvalHelper *AstonishAgent
 
-	// Internal: per-session execution traces for on-demand /distill
-	traceHistory         map[string][]*ExecutionTrace // keyed by session ID
-	pendingDistill       map[string]*distillPreview   // keyed by session ID
-	pendingDistillReview map[string]*DistillReview    // keyed by session ID — interactive review state
-	pendingTutorialBP    map[string]*TutorialBlueprintPending
-	approvedTutorialBP   map[string]bool // session has creator-approved blueprint (sticky until re-present/cancel)
-	traceMu              sync.Mutex      // protects traceHistory, pendingDistill, pendingDistillReview, pendingTutorialBP, approvedTutorialBP
+	// Conversation data may outlive an attempt; it never owns tools/models.
+	*chatConversationState
+	conversationStateOnce sync.Once
 
 	// Image side-channel: images stripped from tool results before they
 	// enter session history, available for channels to deliver to users.
@@ -319,6 +318,59 @@ func (c *ChatAgent) preProviderRetrievalTimeout() time.Duration {
 	return c.PreProviderRetrievalTimeout
 }
 
+type chatConversationState struct {
+	closed               bool // reset invalidates this state for every retained attempt
+	generation           map[string]uint64
+	traceMu              sync.Mutex
+	traceHistory         map[string][]*ExecutionTrace
+	pendingDistill       map[string]*distillPreview
+	pendingDistillReview map[string]*DistillReview
+	pendingTutorialBP    map[string]*TutorialBlueprintPending
+	approvedTutorialBP   map[string]bool
+}
+
+// conversationState also preserves zero-value ChatAgent callers. Initialization
+// happens before acquiring the shared data mutex, including on read-only paths.
+func (c *ChatAgent) conversationState() *chatConversationState {
+	c.conversationStateOnce.Do(func() {
+		if c.chatConversationState == nil {
+			c.chatConversationState = &chatConversationState{
+				generation:           make(map[string]uint64),
+				traceHistory:         make(map[string][]*ExecutionTrace),
+				pendingDistill:       make(map[string]*distillPreview),
+				pendingDistillReview: make(map[string]*DistillReview),
+				pendingTutorialBP:    make(map[string]*TutorialBlueprintPending),
+				approvedTutorialBP:   make(map[string]bool),
+			}
+		}
+	})
+	return c.chatConversationState
+}
+
+// ShareConversationState preserves the existing distillation/tutorial lifecycle
+// across disposable agents. This shares data and its lock, never execution
+// dependencies, authorization grants, callbacks or models. Call before Run.
+func (c *ChatAgent) ShareConversationState(owner *ChatAgent) {
+	if owner != nil {
+		c.chatConversationState = owner.conversationState()
+	}
+}
+
+// ForgetConversationState releases session-private review/trace data on deletion.
+func (c *ChatAgent) ForgetConversationState(sessionID string) {
+	if c == nil {
+		return
+	}
+	c.conversationState().traceMu.Lock()
+	defer c.traceMu.Unlock()
+	c.generation[sessionID]++
+	delete(c.traceHistory, sessionID)
+	delete(c.pendingDistill, sessionID)
+	delete(c.pendingDistillReview, sessionID)
+	delete(c.pendingTutorialBP, sessionID)
+	delete(c.approvedTutorialBP, sessionID)
+}
+
 func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Toolset,
 	sessionService session.Service, promptBuilder *SystemPromptBuilder,
 	debugMode bool, autoApprove bool) *ChatAgent {
@@ -333,12 +385,15 @@ func NewChatAgent(llm model.LLM, internalTools []tool.Tool, toolsets []tool.Tool
 		AutoApprove:                 autoApprove,
 		PreProviderRetrievalTimeout: config.DefaultPreProviderRetrievalTimeoutSeconds * time.Second,
 		approvalHelper:              &AstonishAgent{LLM: llm, AutoApprove: autoApprove},
-		traceHistory:                make(map[string][]*ExecutionTrace),
-		pendingDistill:              make(map[string]*distillPreview),
-		pendingDistillReview:        make(map[string]*DistillReview),
-		pendingTutorialBP:           make(map[string]*TutorialBlueprintPending),
-		approvedTutorialBP:          make(map[string]bool),
-		activeApps:                  make(map[string]*ActiveApp),
+		chatConversationState: &chatConversationState{
+			generation:           make(map[string]uint64),
+			traceHistory:         make(map[string][]*ExecutionTrace),
+			pendingDistill:       make(map[string]*distillPreview),
+			pendingDistillReview: make(map[string]*DistillReview),
+			pendingTutorialBP:    make(map[string]*TutorialBlueprintPending),
+			approvedTutorialBP:   make(map[string]bool),
+		},
+		activeApps: make(map[string]*ActiveApp),
 	}
 }
 

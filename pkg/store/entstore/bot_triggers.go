@@ -83,21 +83,29 @@ func triggerFingerprint(t store.TriggerSpec) string {
 	b, _ := json.Marshal(t)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
-func triggerNext(t store.TriggerSpec, now time.Time) (time.Time, error) {
+func triggerSchedule(t store.TriggerSpec) (cron.Schedule, *time.Location, error) {
 	if strings.TrimSpace(t.Cron) == "" || t.Timezone == "" {
-		return time.Time{}, store.ErrBotInvalid
+		return nil, nil, store.ErrBotInvalid
 	}
 	loc, e := time.LoadLocation(t.Timezone)
 	if e != nil {
-		return time.Time{}, store.ErrBotInvalid
+		return nil, nil, store.ErrBotInvalid
 	}
 	// Five-field cron only: no embedded TZ/CRON_TZ or descriptors overriding review.
 	if len(strings.Fields(t.Cron)) != 5 {
-		return time.Time{}, store.ErrBotInvalid
+		return nil, nil, store.ErrBotInvalid
 	}
 	schedule, e := cron.ParseStandard(t.Cron)
 	if e != nil {
-		return time.Time{}, store.ErrBotInvalid
+		return nil, nil, store.ErrBotInvalid
+	}
+	return schedule, loc, nil
+}
+
+func triggerNext(t store.TriggerSpec, now time.Time) (time.Time, error) {
+	schedule, loc, e := triggerSchedule(t)
+	if e != nil {
+		return time.Time{}, e
 	}
 	next := schedule.Next(now.In(loc))
 	if next.IsZero() {

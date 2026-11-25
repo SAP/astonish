@@ -141,7 +141,7 @@ func (d personalBotDB) SaveRunCancellation(ctx context.Context, rec botStoredRec
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func (d teamBotDB) SaveRunCancellation(ctx context.Context, rec botStoredRecord,
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}

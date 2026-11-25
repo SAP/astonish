@@ -72,15 +72,6 @@ func (s *botTaskServices) publish(ctx context.Context, title string, files map[s
 	}
 	return saved, err
 }
-func (s *botTaskServices) hasActiveTask() bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.current != nil
-}
-
 func (s *botTaskServices) observe(ctx context.Context, name string, args any, result map[string]any, cause error) error {
 	if s == nil {
 		return nil
@@ -381,7 +372,7 @@ func newBotTaskTools(b *botFactoryBinding) ([]tool.Tool, error) {
 				// remain native errors without this receipt. Keep invalid input as
 				// tool feedback; never issue the deferred success receipt as well.
 				nonexecuted = true
-				bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: ctx.FunctionCallID(), ToolName: name}})
+				bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.NewToolNonexecutionOutcome(ctx, ctx.FunctionCallID(), name, a, bot.ToolFeedbackCorrectCall))
 				return map[string]any{"error": fmt.Sprintf("%v: bot_task_execute requires a declared executable scripts/*.py path; it does not invoke a Task. Carry out a TASK.md prose procedure directly with authorized tools", store.ErrBotInvalid)}, nil
 			}
 			if a.TaskID != "" {

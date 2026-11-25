@@ -10,18 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
-	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
-	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 )
 
 // HTTP admission + production worker, BudgetLLM, ChatRunner, scoped SQLite
@@ -51,12 +46,12 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					}
 					f.b = *configured
 					estimates := 0
-					f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+					f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: f.workerConfig.Sandbox, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 						ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 10, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) {
 							estimates++
 							// Agent-led work calls the producer directly: allow its tool
 							// request, then deny the final-answer request after the read.
-							if partial && estimates == 1 {
+							if partial && !f.model.called {
 								return 20, nil
 							}
 							return 80000, nil
@@ -64,22 +59,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 						ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 							return f.model, nil
 						},
-						Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-							resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
-							if scheduled {
-								read, e := functiontool.New(functiontool.Config{Name: "read_file", Description: "Read controlled receipt"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
-									f.pool.calls++
-									bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "isolated receipt observed", Source: "fixture://receipt", ObservedAt: time.Now(), ActorID: q.Bot.OwnerID}}})
-									return map[string]any{"content": "isolated receipt"}, nil
-								})
-								if e != nil {
-									return nil, e
-								}
-								resources.Tools = []tool.Tool{read}
-								resources.PolicyRuntime = agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: journeyGuard{repo: f.repo, req: q}}
-							}
-							return resources, nil
-						},
+						Prepare: f.workerConfig.Prepare,
 					})
 					if err != nil {
 						t.Fatal(err)
@@ -178,6 +158,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					} else if run.Usage.InputTokens != 0 || run.Usage.OutputTokens != 0 || run.Usage.ToolCalls != 0 || !strings.Contains(run.Report.Summary, "Used or reserved: 0 tokens") {
 						t.Fatalf("first denial charged usage: %+v", run)
 					}
+					estimatesBeforeReconcile := estimates
 					publisher := &bot.Publisher{Store: f.repo.(store.BotPublicationStore)}
 					for range 2 {
 						if _, err = publisher.Publish(f.ctx, f.b.ID, run.ID); err != nil {
@@ -188,7 +169,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					if err = f.worker.Poll(context.Background()); err != nil {
 						t.Fatal(err)
 					}
-					if f.pool.calls != expectedCalls || estimates != expectedCalls+1 {
+					if f.pool.calls != expectedCalls || estimates != estimatesBeforeReconcile {
 						t.Fatalf("work retried: calls=%d estimates=%d", f.pool.calls, estimates)
 					}
 					restored, e := f.repo.GetRun(f.ctx, f.b.ID, run.ID)

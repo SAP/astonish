@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -60,5 +61,15 @@ func (w *BotWorker) confirmCancelledRun(ctx context.Context, repo store.BotStore
 		}
 		return verify.VerifySessionDestroyed(c, run.SessionID.String())
 	})
-	return cleanup.ConfirmCleanup(internal, q)
+	err = cleanup.ConfirmCleanup(internal, q)
+	if !errors.Is(err, store.ErrBotConflict) {
+		return err
+	}
+	// A later run may have advanced the Bot root beyond this exact teardown
+	// fence after the cleanup receipt was committed. The store correctly refuses
+	// to rewrite historical coordination at a stale fence. For admission, direct
+	// destruction proof for this exact interrupted session is sufficient to show
+	// that it cannot overlap the new run; no work is replayed and no receipt is
+	// invented or replaced.
+	return verify.VerifySessionDestroyed(c, run.SessionID.String())
 }

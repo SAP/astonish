@@ -38,6 +38,21 @@ func (s *botTranscriptFixture) ReadTranscriptEvents(ctx context.Context, app, ow
 	return s.events, s.readErr
 }
 
+func (s *botTranscriptFixture) ReadBotTranscript(ctx context.Context, sid uuid.UUID, after int64, limit int) ([]store.BotTranscriptEvent, error) {
+	events, err := s.ReadTranscriptEvents(ctx, studioChatAppName, s.owner, sid.String())
+	if err != nil {
+		return nil, err
+	}
+	var rows []store.BotTranscriptEvent
+	for i, event := range events {
+		cursor := int64(i + 1)
+		if cursor > after && len(rows) < limit {
+			rows = append(rows, store.BotTranscriptEvent{Cursor: cursor, Event: event})
+		}
+	}
+	return rows, nil
+}
+
 func TestBotHistoryStreamStates(t *testing.T) {
 	owner, viewer, id, sid := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	repo := &botSessionFixtureStore{b: store.Bot{ID: id, OwnerID: owner, Scope: store.BotScopeTeam, HomeSessionID: sid}}
@@ -69,7 +84,7 @@ func TestBotHistoryStreamStates(t *testing.T) {
 		t.Fatal(body)
 	}
 	ss.events = []*adksession.Event{{ID: "saved-event", Author: "execution-owner"}}
-	if body := request(200); !strings.Contains(body, "saved-event") || !strings.Contains(body, "event: transcript") {
+	if body := request(200); !strings.Contains(body, botEventCursor(sid, 1)) || !strings.Contains(body, "event: cursor") {
 		t.Fatal(body)
 	}
 	ss.readErr = errors.New("storage failed")
@@ -202,7 +217,7 @@ func TestBotHistoryStreamHTTPAcceptance(t *testing.T) {
 		if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), &adksession.Event{ID: "persisted-" + scope, Author: "owner", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
-		if body := request("GET", stream, owner, "", 200); !strings.Contains(body, "persisted-"+scope) || !strings.Contains(body, "event: done") {
+		if body := request("GET", stream, owner, "", 200); !strings.Contains(body, botEventCursor(b.HomeSessionID, 1)) || !strings.Contains(body, "event: cursor") || !strings.Contains(body, "event: done") {
 			t.Fatal(body)
 		}
 		if scope == "team" {

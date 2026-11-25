@@ -40,17 +40,13 @@ func TestBotSchedulePresentationWatchReplay(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/events"):
 			w.Header().Set("Content-Type", "text/event-stream")
 			for i, view := range journal {
-				row, err := store.NewBotOperationEvent(view, time.Now())
+				raw, err := json.Marshal(view)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				raw, err := json.Marshal(row)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", root.HomeSessionID, i+1, raw)
+				f := canonicalBotFrame(t, root.HomeSessionID.String(), fmt.Sprintf("operation/%d", i), store.BotOperationKey, string(raw), int64(i+1))
+				fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
 			}
 		default:
 			http.NotFound(w, r)

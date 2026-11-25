@@ -11,6 +11,20 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// botDocumentFiles resolves existing retained files only; it never provisions Home.
+// Scope has already been authenticated and validated by botRequestStore.
+func botDocumentFiles(r *http.Request) (store.BotFiles, error) {
+	svc := store.FromContext(r.Context())
+	if svc == nil || svc.BotFilesFactory == nil {
+		return nil, store.ErrBotUnsupported
+	}
+	scope := store.BotScopePersonal
+	if r.URL.Query().Get("scope") == string(store.BotScopeTeam) {
+		scope = store.BotScopeTeam
+	}
+	return svc.BotFilesFactory(r.Context(), svc, scope)
+}
+
 func registerBotDocumentRoutes(router *mux.Router) {
 	router.HandleFunc("/api/studio/bots/{botID}/documents/{document:.*}/ingest", BotDocumentIngestHandler).Methods(http.MethodPost)
 	router.HandleFunc("/api/studio/bots/{botID}/documents", BotDocumentsHandler).Methods(http.MethodGet)
@@ -41,16 +55,17 @@ func BotDocumentsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	documents, err := botdomain.NewDocuments(repo)
+	files, err := botDocumentFiles(r)
 	if err != nil {
 		botHTTPError(w, err)
 		return
 	}
-	memory, ok := botRequestMemory(w, r)
-	if !ok {
+	documents, err := botdomain.NewDocuments(repo, files)
+	if err != nil {
+		botHTTPError(w, err)
 		return
 	}
-	projection, err := documents.LoadMapped(r.Context(), id, version, memory)
+	projection, err := documents.LoadMapped(r.Context(), id, version, nil)
 	if err != nil {
 		botHTTPError(w, err)
 		return
@@ -84,7 +99,12 @@ func BotDocumentEditHandler(w http.ResponseWriter, r *http.Request) {
 		botHTTPError(w, store.ErrBotInvalid)
 		return
 	}
-	documents, err := botdomain.NewDocuments(repo)
+	files, err := botDocumentFiles(r)
+	if err != nil {
+		botHTTPError(w, err)
+		return
+	}
+	documents, err := botdomain.NewDocuments(repo, files)
 	if err != nil {
 		botHTTPError(w, err)
 		return

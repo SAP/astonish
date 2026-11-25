@@ -40,19 +40,6 @@ type botFlowTool struct {
 	engine   InteractiveFlowRunner
 }
 
-func (f *botFlowTool) configure(llm model.LLM, ts []tool.Tool, r *credentials.Redactor) {
-	f.llm, f.redactor = llm, r
-	for _, t := range ts {
-		if t.Name() != "run_flow" {
-			f.tools = append(f.tools, t)
-		}
-	}
-}
-func (f *botFlowTool) cleanup() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.engine.sessions.Range(func(k, v any) bool { f.engine.CleanupSession(k.(string)); return true })
-}
 func (f *botFlowTool) run(ctx tool.Context, args tools.RunFlowArgs) (*tools.FlowRunResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -57,7 +57,7 @@ func (b *K8sBackend) ReadBotHomeArtifact(ctx context.Context, h *sandbox.BotHome
 			Containers: []corev1.Container{{Name: containerName, Image: b.cfg.SandboxImage, ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
 				Command:         []string{"/bin/sh", "-c", "exec sleep 120"},
 				SecurityContext: &corev1.SecurityContext{RunAsUser: int64Ptr(0), AllowPrivilegeEscalation: botHomeBool(false), ReadOnlyRootFilesystem: botHomeBool(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},
-				VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: h.Scope.Key(), ReadOnly: true}},
+				VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: botHomeStorageSubPath(h), ReadOnly: true}},
 			}},
 			Volumes: []corev1.Volume{{Name: volumeBotHome, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.cfg.HomesPVCName, ReadOnly: true}}}},
 		},
@@ -129,7 +129,7 @@ func (b *K8sBackend) ReadBotHomeArtifact(ctx context.Context, h *sandbox.BotHome
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	command := []string{"/bin/sh", "-c", botHomeReadScript, "home-read", h.Ref, path, strconv.FormatInt(limit, 10)}
+	command := []string{"/bin/sh", "-c", botHomeReadScript, "home-read", botHomeStorageOwner(h), path, strconv.FormatInt(limit, 10)}
 	method, u, buildErr := b.buildExecURL(name, command, false, false, true, true)
 	if buildErr != nil {
 		return nil, buildErr

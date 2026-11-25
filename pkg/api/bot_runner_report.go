@@ -14,9 +14,11 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -28,8 +30,13 @@ import (
 // Authorization remains at the existing tool boundary.
 type botAgentReadJournalKey struct{}
 type botAgentReadCall struct {
-	name string
-	read bool
+	identity execution.BotRunIdentity
+	digest   string
+	name     string // transport identity, including execute_tool
+	concrete string // validated target captured from invocation, never result JSON
+	read     bool
+	source   bool // eligible source read, excluding work/skill bookkeeping
+	bridge   bool
 }
 type botAgentReadJournal struct {
 	mu                      sync.Mutex
@@ -41,11 +48,22 @@ type botAgentReadJournal struct {
 	constrainedTextComplete bool
 }
 
+type botProgressPendingRead struct {
+	Identity execution.BotRunIdentity `json:"identity"`
+	Digest   string                   `json:"digest"`
+	Name     string                   `json:"name"`
+	Concrete string                   `json:"concrete"`
+	Read     bool                     `json:"read"`
+	Source   bool                     `json:"source"`
+	Bridge   bool                     `json:"bridge"`
+}
+
 type botProgressReadJournal struct {
-	Seen      map[string]bool `json:"seen"`
-	Completed map[string]bool `json:"completed"`
-	Confirmed bool            `json:"confirmed"`
-	Uncertain bool            `json:"uncertain"`
+	Seen      map[string]bool                   `json:"seen"`
+	Completed map[string]bool                   `json:"completed"`
+	Pending   map[string]botProgressPendingRead `json:"pending,omitempty"`
+	Confirmed bool                              `json:"confirmed"`
+	Uncertain bool                              `json:"uncertain"`
 }
 
 func (j *botAgentReadJournal) progressSnapshot() *botProgressReadJournal {
@@ -54,12 +72,19 @@ func (j *botAgentReadJournal) progressSnapshot() *botProgressReadJournal {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	s := &botProgressReadJournal{Seen: map[string]bool{}, Completed: map[string]bool{}, Confirmed: j.confirmed, Uncertain: j.uncertain || len(j.calls) != 0}
+	// Preserve bounded in-flight invocation bindings across a progress checkpoint.
+	// The response may arrive after restore and must still settle the exact
+	// classified read. Historical checkpoints without Pending remain fail-closed
+	// through their persisted Uncertain bit.
+	s := &botProgressReadJournal{Seen: map[string]bool{}, Completed: map[string]bool{}, Pending: map[string]botProgressPendingRead{}, Confirmed: j.confirmed, Uncertain: j.uncertain}
 	for k, v := range j.seen {
 		s.Seen[k] = v
 	}
 	for k, v := range j.completed {
 		s.Completed[k] = v
+	}
+	for k, v := range j.calls {
+		s.Pending[k] = botProgressPendingRead{Identity: v.identity, Digest: v.digest, Name: v.name, Concrete: v.concrete, Read: v.read, Source: v.source, Bridge: v.bridge}
 	}
 	return s
 }
@@ -69,6 +94,9 @@ func (j *botAgentReadJournal) restoreProgress(s *botProgressReadJournal) {
 		return
 	}
 	j.calls = map[string]botAgentReadCall{}
+	for k, v := range s.Pending {
+		j.calls[k] = botAgentReadCall{identity: v.Identity, digest: v.Digest, name: v.Name, concrete: v.Concrete, read: v.Read, source: v.Source, bridge: v.Bridge}
+	}
 	j.seen, j.completed = s.Seen, s.Completed
 	j.confirmed, j.uncertain = s.Confirmed, s.Uncertain
 }
@@ -77,15 +105,31 @@ func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionC
 	if call.ID == "" {
 		call.ID = uuid.NewString()
 	}
-	entry := botAgentReadCall{name: call.Name}
-	args := call.Args
+	entry := botAgentReadCall{name: call.Name, bridge: call.Name == common.ExecuteToolName}
+	name, args := call.Name, call.Args
+	valid := true
+	if entry.bridge {
+		// Decode the invocation, not outcome claims in model arguments. Preserve
+		// transport identity for response matching and duplicate detection.
+		var err error
+		name, args, err = common.NormalizeExecuteToolArgs(call.Args)
+		valid = err == nil && name != "" && name != common.ExecuteToolName && name != common.SearchToolsName && name != common.DescribeToolsName
+	}
+	if valid {
+		entry.concrete = name
+		entry.source = name != "" && name != common.SearchToolsName && name != common.DescribeToolsName && !strings.HasPrefix(name, "bot_skill_") && !strings.HasPrefix(name, "bot_work_")
+	}
 	if args == nil {
 		args = map[string]any{}
 	}
 	raw, err := json.Marshal(args)
-	if classifier := agent.BotPolicyRuntimeFromContext(ctx).Classifier; err == nil && classifier != nil {
-		original := execution.ActionDescriptor{Tool: call.Name, Arguments: raw, Effect: execution.EffectUnknown}
-		classified, classifyErr := classifier.DescribeAction(ctx, call.Name, append(json.RawMessage(nil), raw...))
+	entry.identity, _ = execution.BotRunIdentityFromContext(ctx)
+	if valid && err == nil {
+		entry.digest, _ = (execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectUnknown}).Digest()
+	}
+	if classifier := agent.BotPolicyRuntimeFromContext(ctx).Classifier; valid && err == nil && classifier != nil {
+		original := execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectUnknown}
+		classified, classifyErr := classifier.DescribeAction(ctx, name, append(json.RawMessage(nil), raw...))
 		// As at the authorization boundary, classifiers may add constraints but
 		// cannot substitute an executable identity or different arguments.
 		candidate := original
@@ -93,6 +137,13 @@ func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionC
 		want, e1 := original.Digest()
 		got, e2 := candidate.Digest()
 		entry.read = classifyErr == nil && e1 == nil && e2 == nil && want == got && classified.Effect == execution.EffectRead && classified.ConstraintsVerified
+	}
+	// Sealed local catalog discovery performs metadata lookup only. It may settle
+	// effect accounting, but never qualifies as factual source evidence. The
+	// progressive bridge forbids wrapping these identities, so only native calls
+	// can reach this path.
+	if valid && !entry.bridge && (name == common.SearchToolsName || name == common.DescribeToolsName) {
+		entry.read = true
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -103,6 +154,7 @@ func (j *botAgentReadJournal) capture(ctx context.Context, call *genai.FunctionC
 	}
 	if j.seen[call.ID] {
 		entry.read = false
+		entry.source = false
 		j.uncertain = true
 	}
 	j.seen[call.ID] = true
@@ -130,22 +182,27 @@ func (s *botAgentWorkService) captureReadReference(callID string) {
 	s.accessPending[callID] = nil
 }
 
-func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ...bot.ToolOutcome) bool {
+func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ...bot.ToolOutcome) (read, source bool) {
 	if j == nil {
-		return false
+		return false, false
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	entry, ok := j.calls[response.ID]
 	delete(j.calls, response.ID)
-	read := ok && entry.read && entry.name == response.Name
+	read = ok && entry.read && entry.name == response.Name
+	if entry.bridge {
+		// A bridge error may precede resolution or authorization. It cannot
+		// attest execution of the requested read, regardless of model claims.
+		read = read && common.ToolResultSucceeded(response.Response, nil)
+	}
 	noEffect := false
 	verifiedRead := false
 	confirmedEffect := false
 	if len(receipts) == 1 {
 		o := receipts[0]
 		r := o.Nonexecution
-		noEffect = ok && entry.name == response.Name && response.ID != "" && r != nil && r.CallID == response.ID && r.ToolName == response.Name && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		noEffect = ok && entry.name == response.Name && response.ID != "" && r.ValidFor(entry.identity, response.ID, entry.concrete, entry.digest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
 		// A bare Verified flag is not positive effect evidence. Internal Task
 		// bookkeeping supplies actual independently observed Home facts; require
 		// every observation to validate before it can complete a non-read call.
@@ -168,8 +225,11 @@ func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ..
 	if j.completed == nil {
 		j.completed = make(map[string]bool)
 	}
+	// Carry source eligibility out under the same lock that consumes identity.
+	// A prior uncertain call does not suppress a later, independently bound read.
+	source = read && entry.source && !j.completed[response.ID] && (len(receipts) == 0 || (len(receipts) == 1 && receipts[0].Nonexecution == nil && !receipts[0].ReceiptConflict))
 	j.completed[response.ID] = true
-	return read
+	return read, source
 }
 
 // effectState requires complete invocation-bound receipts, not absence of changed
@@ -224,18 +284,37 @@ type botAgentReadModel struct {
 	journal *botAgentReadJournal
 }
 
-func (m *botAgentReadModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *botAgentReadModel) SupportsModelPreflight() bool {
+	next, ok := m.LLM.(interface{ SupportsModelPreflight() bool })
+	return ok && next.SupportsModelPreflight()
+}
+
+func (m *botAgentReadModel) GenerateContent(parent context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Each producer invocation owns fresh bytes, never a tool/previous-call scope.
+		ctx, endReads := entstore.WithBotContentReadPreflight(parent)
+		end := sync.OnceFunc(func() { endReads(); entstore.EndImmutableReadWindow(parent); execution.EndModelPreflight(parent) })
+		defer end()
+		ctx = execution.WithModelPreflightEnd(ctx, end)
+		originalYield := yield
+		yield = func(r *model.LLMResponse, err error) bool { end(); return originalYield(r, err) }
 		if service, ok := bot.BotWorkServicesFromContext(ctx).(*botAgentWorkService); ok {
-			service.mu.Lock()
-			_, err := service.load(ctx)
-			service.mu.Unlock()
+			err := func() error {
+				service.mu.Lock()
+				defer service.mu.Unlock()
+				_, err := service.load(ctx)
+				return err
+			}()
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 		}
+		if !m.SupportsModelPreflight() {
+			end()
+		}
 		for response, err := range m.LLM.GenerateContent(ctx, req, stream) {
+			end() // No response processing/classifier may borrow preflight bytes.
 			if err == nil && response != nil && !response.Partial && response.Content != nil {
 				for _, part := range response.Content.Parts {
 					if part != nil && part.FunctionCall != nil {
@@ -254,7 +333,13 @@ func (m *botAgentReadModel) GenerateContent(ctx context.Context, req *model.LLMR
 // ledger; neither model text nor serialized result maps can mint attestations.
 // The return value permits only a bound source-access failure to remain tool
 // feedback in agent-led work; generic control and native errors still win.
-func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.FunctionResponse) (recoverableReadFailure bool) {
+type botToolObservation struct {
+	SourceEligible    bool
+	KnownNonexecution bool
+	Recoverable       bool
+}
+
+func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.FunctionResponse) (observation botToolObservation) {
 	if _, ok := execution.BotRunIdentityFromContext(cr.ctx); !ok || role == "model" {
 		return
 	}
@@ -278,10 +363,22 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		service.captureAccess(response.ID, outcome.SourceAccess)
 	}
 	journal, _ := cr.ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal)
-	read := journal.take(response, outcome)
+	var invocation botAgentReadCall
+	var boundInvocation bool
+	if journal != nil {
+		journal.mu.Lock()
+		invocation, boundInvocation = journal.calls[response.ID]
+		journal.mu.Unlock()
+	}
+	read, source := journal.take(response, outcome)
+	observation.SourceEligible = source
+	if boundInvocation && invocation.name == response.Name && outcome.Nonexecution.ValidFor(invocation.identity, response.ID, invocation.concrete, invocation.digest) && outcome.Verified && !outcome.ReceiptConflict && len(outcome.Changed) == 0 && len(outcome.Unchanged) == 0 && len(outcome.Unverified) == 0 && len(outcome.Artifacts) == 0 && len(outcome.SourceAccess) == 0 && outcome.RoutineCapture == nil && outcome.ScheduleCapture == nil && outcome.NextRunAt == nil {
+		observation.KnownNonexecution = true
+		observation.Recoverable = cr.ctx.Err() == nil && (outcome.Nonexecution.Disposition == bot.ToolFeedbackCorrectCall || outcome.Nonexecution.Disposition == bot.ToolFeedbackUnresolvedTarget)
+	}
 	journal.observeEffect(outcome, ok)
 	cr.completion.Report.EffectState = journal.effectState()
-	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && read && (!ok || (len(outcome.SourceAccess) == 0 && outcome.Nonexecution == nil)) && !strings.HasPrefix(response.Name, "bot_skill_") && !strings.HasPrefix(response.Name, "bot_work_") {
+	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && source && (!ok || (len(outcome.SourceAccess) == 0 && outcome.Nonexecution == nil)) {
 		service.captureReadReference(response.ID) // bind even when a local read has no HTTP facts
 	}
 	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {
@@ -295,7 +392,8 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		// Source access failure is an observation, not an irreversible veto on
 		// an answer recovered using another source. The journal retains the
 		// complete negative response and the typed access fact remains bound.
-		return cr.ctx.Err() == nil && botBoundSourceAccessFailure(response, outcome.SourceAccess)
+		observation.Recoverable = cr.ctx.Err() == nil && botBoundSourceAccessFailure(response, outcome.SourceAccess)
+		return
 	}
 	if !ok && read {
 		// The actual source response is already journaled above. A read has no
@@ -435,6 +533,12 @@ func botOnlyRecoverableToolFeedback(err error) bool {
 	return false
 }
 
+func botCanPromoteStaleBlockedReadOnlyFinal(c ChatCompletion, req bot.RunRequest, report store.BotReport) bool {
+	return req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 &&
+		c.FinalEventID != "" && strings.TrimSpace(c.FinalText) != "" && len(c.pendingControls) == 0 &&
+		(c.Err == nil || botOnlyRecoverableToolFeedback(c.Err)) && store.BotReportIsReadOnlyResult(report)
+}
+
 // botCanRetainReadOnlyFinal allows the employee's completed communication, not
 // a retry or a claim of full success. The existing candidate/commit boundaries
 // still own final publication. Unknown effects and absent final output fail shut.
@@ -462,7 +566,7 @@ func botCompletionReport(completion ChatCompletion, req bot.RunRequest) store.Bo
 	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 {
 		// The final answer and pending-operation receipt are distinct. Do not
 		// replace independently useful work with the enqueue acknowledgment.
-		final := scheduler.ResolveAdaptiveReportBody(completion.FinalText, bodies)
+		final := completion.FinalText
 		if len(completion.pendingControls) > 0 {
 			ack := botPendingAcknowledgment(completion.pendingControls)
 			if strings.TrimSpace(final) == "" || strings.TrimSpace(final) == strings.TrimSpace(ack) {

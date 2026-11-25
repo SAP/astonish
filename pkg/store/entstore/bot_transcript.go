@@ -3,8 +3,10 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"time"
+
 	"entgo.io/ent/dialect/sql"
-	"entgo.io/ent/dialect/sql/sqljson"
 	personalbot "github.com/SAP/astonish/ent/personal/bot"
 	personalsession "github.com/SAP/astonish/ent/personal/session"
 	personalevent "github.com/SAP/astonish/ent/personal/sessionevent"
@@ -16,7 +18,6 @@ import (
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
-	"time"
 )
 
 // botHomeArtifactEvent projects only the canonical runtime attachment envelope.
@@ -55,6 +56,48 @@ func botHomeRunStateEvent(r store.BotRun, e *adksession.Event) bool {
 
 var _ store.BotTranscriptReader = (*teamSessionStore)(nil)
 var _ store.BotTranscriptReader = (*personalSessionStore)(nil)
+var _ store.BotTranscriptTailReader = (*teamSessionStore)(nil)
+var _ store.BotTranscriptTailReader = (*personalSessionStore)(nil)
+
+func (s *teamSessionStore) ReadBotTranscriptTail(ctx context.Context, id uuid.UUID, cursor int64, limit int) ([]store.BotTranscriptEvent, error) {
+	if id == uuid.Nil || cursor < 1 || limit < 1 || limit > 200 {
+		return nil, store.ErrBotInvalid
+	}
+	rows, err := s.client.SessionEvent.Query().Where(teamevent.SessionIDEQ(id.String()), teamevent.IDLTE(cursor)).Order(teamevent.ByID(sql.OrderDesc())).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(rows)
+	out := make([]store.BotTranscriptEvent, 0, len(rows))
+	for _, row := range rows {
+		e, err := s.decodeStoredEvent(ctx, id.String(), row.EventData)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, store.BotTranscriptEvent{Cursor: int64(row.ID), Event: e})
+	}
+	return out, nil
+}
+
+func (s *personalSessionStore) ReadBotTranscriptTail(ctx context.Context, id uuid.UUID, cursor int64, limit int) ([]store.BotTranscriptEvent, error) {
+	if id == uuid.Nil || cursor < 1 || limit < 1 || limit > 200 {
+		return nil, store.ErrBotInvalid
+	}
+	rows, err := s.client.SessionEvent.Query().Where(personalevent.SessionIDEQ(id.String()), personalevent.IDLTE(int(cursor))).Order(personalevent.ByID(sql.OrderDesc())).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(rows)
+	out := make([]store.BotTranscriptEvent, 0, len(rows))
+	for _, row := range rows {
+		e, err := s.decodeStoredEvent(ctx, id.String(), row.EventData)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, store.BotTranscriptEvent{Cursor: int64(row.ID), Event: e})
+	}
+	return out, nil
+}
 
 func (s *teamSessionStore) ReadBotTranscript(ctx context.Context, id uuid.UUID, after int64, limit int) ([]store.BotTranscriptEvent, error) {
 	if id == uuid.Nil || after < 0 || limit < 1 || limit > 200 {
@@ -66,7 +109,7 @@ func (s *teamSessionStore) ReadBotTranscript(ctx context.Context, id uuid.UUID, 
 	}
 	out := make([]store.BotTranscriptEvent, 0, len(rows))
 	for _, row := range rows {
-		e, err := eventDataToADKEvent(row.EventData)
+		e, err := s.decodeStoredEvent(ctx, id.String(), row.EventData)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +128,7 @@ func (s *personalSessionStore) ReadBotTranscript(ctx context.Context, id uuid.UU
 	}
 	out := make([]store.BotTranscriptEvent, 0, len(rows))
 	for _, row := range rows {
-		e, err := eventDataToADKEvent(row.EventData)
+		e, err := s.decodeStoredEvent(ctx, id.String(), row.EventData)
 		if err != nil {
 			return nil, err
 		}
@@ -192,11 +235,11 @@ func (d teamBotDB) fenceTranscript(ctx context.Context, l store.BotLease, now ti
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	saved, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if saved.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 	return nil
@@ -210,11 +253,11 @@ func (d personalBotDB) fenceTranscript(ctx context.Context, l store.BotLease, no
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	saved, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if saved.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 	return nil
@@ -248,21 +291,20 @@ func (d teamBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r store
 	}
 
 	for _, target := range targets {
-		// The Bot root-row lock serializes retries; IDs are deterministic per turn.
-		duplicate, err := d.client.SessionEvent.Query().Where(func(s *sql.Selector) {
-			s.Where(sql.And(sql.EQ(s.C("session_id"), target), sqljson.ValueEQ("event_data", e.ID, sqljson.Path("ID"))))
-		}).Exist(ctx)
+		// The Bot root-row lock serializes retries; event identity is indexed so
+		// appending never hydrates unrelated retained transcript payloads.
+		duplicate, err := d.client.SessionEvent.Query().Where(teamevent.SessionIDEQ(target), teamevent.EventIDEQ(e.ID)).Exist(ctx)
 		if err != nil {
 			return err
 		}
 		if duplicate {
 			continue
 		}
-		data, err := adkEventToMap(e)
+		data, err := d.contentCodec().encodeSessionEvent(ctx, b.ID, target, e)
 		if err != nil {
 			return err
 		}
-		if _, err = d.client.SessionEvent.Create().SetSessionID(target).SetEventData(data).Save(ctx); err != nil {
+		if _, err = d.client.SessionEvent.Create().SetSessionID(target).SetEventID(e.ID).SetEventData(data).Save(ctx); err != nil {
 			return err
 		}
 		if err := d.client.Session.UpdateOneID(target).SetUpdatedAt(time.Now().UTC()).Exec(ctx); err != nil {
@@ -300,21 +342,20 @@ func (d personalBotDB) appendRunTranscript(ctx context.Context, b store.Bot, r s
 	}
 
 	for _, target := range targets {
-		// The Bot root-row lock serializes retries; IDs are deterministic per turn.
-		duplicate, err := d.client.SessionEvent.Query().Where(func(s *sql.Selector) {
-			s.Where(sql.And(sql.EQ(s.C("session_id"), target), sqljson.ValueEQ("event_data", e.ID, sqljson.Path("ID"))))
-		}).Exist(ctx)
+		// The Bot root-row lock serializes retries; event identity is indexed so
+		// appending never hydrates unrelated retained transcript payloads.
+		duplicate, err := d.client.SessionEvent.Query().Where(personalevent.SessionIDEQ(target), personalevent.EventIDEQ(e.ID)).Exist(ctx)
 		if err != nil {
 			return err
 		}
 		if duplicate {
 			continue
 		}
-		data, err := adkEventToMap(e)
+		data, err := d.contentCodec().encodeSessionEvent(ctx, b.ID, target, e)
 		if err != nil {
 			return err
 		}
-		if _, err = d.client.SessionEvent.Create().SetSessionID(target).SetEventData(data).Save(ctx); err != nil {
+		if _, err = d.client.SessionEvent.Create().SetSessionID(target).SetEventID(e.ID).SetEventData(data).Save(ctx); err != nil {
 			return err
 		}
 		if err := d.client.Session.UpdateOneID(target).SetUpdatedAt(time.Now().UTC()).Exec(ctx); err != nil {

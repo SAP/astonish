@@ -26,11 +26,11 @@ func TestBotHomeWorkspace(t *testing.T) {
 	if image == "" {
 		t.Fatal("explicit local image required")
 	}
-	raw, e := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", image).Output()
+	_, e := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", image).Output()
 	if e != nil {
 		t.Fatal(e)
 	}
-	db := &DockerBackend{cfg: Config{ContainerRuntimePath: "docker", SandboxImage: strings.TrimSpace(string(raw))}}
+	db := newBotRetainedSessionFixture(t, ctx, "docker")
 	home, e := db.EnsureBotHome(ctx, sandbox.BotHomeScope{OrgID: "task-workspace-test", TeamID: "owned", UserID: uuid.NewString(), BotID: uuid.NewString()})
 	if e != nil {
 		t.Fatal(e)
@@ -50,6 +50,7 @@ func TestBotHomeWorkspace(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	id := bindBotRetainedSessionFixture(t, ctx, db, home)
 	files := []sandbox.BotHomeWorkspaceFile{{Path: "TASK.md", Data: []byte("# Task\nInspect retained state\n")}, {Path: "scripts/helper.py", Data: []byte("import sqlite3,socket\ntry:\n socket.create_connection(('1.1.1.1',443),timeout=.1)\n raise RuntimeError('network available')\nexcept OSError: pass\nc=sqlite3.connect('state.sqlite'); c.execute('create table if not exists counts(n integer)'); c.execute('insert into counts values(1)'); c.commit(); print(c.execute('select count(*) from counts').fetchone()[0]); c.close()\n"), Executable: true}}
 	q := sandbox.BotHomeWorkspacePublishRequest{PublicationID: uuid.NewString(), TaskPath: "tasks/" + uuid.NewString(), Files: files}
 	receipt, e := db.PublishBotHomeWorkspace(ctx, home, q)
@@ -90,8 +91,11 @@ func TestBotHomeWorkspace(t *testing.T) {
 	if _, err := db.SnapshotBotHomeWorkspace(ctx, home, "workspace", 1); err == nil {
 		t.Fatal("truncated whole workspace snapshot accepted")
 	}
-	// New backend / new helper container: no in-memory receipts or temporary bytes.
+	// A new backend recovers the exact authorized session, never an IO fallback.
 	db = &DockerBackend{cfg: db.cfg}
+	if err := db.BindBotHomeSession(home, id); err != nil {
+		t.Fatal(err)
+	}
 	got, e := db.ReadBotHomeWorkspace(ctx, home, q.TaskPath+"/TASK.md", 1024)
 	if e != nil || string(got) != string(files[0].Data) {
 		t.Fatalf("reread %s %v", got, e)
@@ -120,7 +124,8 @@ func TestBotHomeWorkspace(t *testing.T) {
 	if e != nil || string(got) != string(state.Data) {
 		t.Fatal(e)
 	}
-	// A script holds the same lock through execution, inventory and commit.
+	// Compiled staging releases the namespace lock during host authorization;
+	// nested reads must see committed bytes, never the script's scratch output.
 	staged := make(chan struct{})
 	release := make(chan struct{})
 	scriptDone := make(chan error, 1)
@@ -136,20 +141,29 @@ func TestBotHomeWorkspace(t *testing.T) {
 		t.Fatal("script did not reach staged guard", ctx.Err())
 	}
 	for _, op := range []string{"read", "write", "snapshot"} {
-		blocked, stop := context.WithTimeout(ctx, 200*time.Millisecond)
+		nested, stop := context.WithTimeout(ctx, 2*time.Second)
 		var err error
 		switch op {
 		case "read":
-			_, err = db.ReadBotHomeWorkspace(blocked, home, state.Path, 1024)
+			var committed []byte
+			committed, err = db.ReadBotHomeWorkspace(nested, home, state.Path, 1024)
+			if err == nil && !bytes.Equal(committed, state.Data) {
+				err = errors.New("nested read exposed staged state")
+			}
 		case "write":
-			err = db.WriteBotHomeWorkspace(blocked, home, sandbox.BotHomeWorkspaceFile{Path: state.Path, Data: []byte("blocked")})
+			err = db.WriteBotHomeWorkspace(nested, home, sandbox.BotHomeWorkspaceFile{Path: state.Path, Data: state.Data})
 		case "snapshot":
-			_, err = db.SnapshotBotHomeWorkspace(blocked, home, q.TaskPath, 4096)
+			var committed *sandbox.BotHomeWorkspaceSnapshot
+			committed, err = db.SnapshotBotHomeWorkspace(nested, home, q.TaskPath, 4096)
+			if err == nil && (len(committed.Files) != 2 || !bytes.Equal(committed.Files[0].Data, files[0].Data)) {
+				err = errors.New("nested snapshot changed immutable revision")
+			}
 		}
 		stop()
-		if err == nil {
+		if err != nil {
 			close(release)
-			t.Fatalf("%s bypassed script storage lock", op)
+			<-scriptDone
+			t.Fatalf("%s could not reenter compiled staged authorization: %v", op, err)
 		}
 	}
 	close(release)

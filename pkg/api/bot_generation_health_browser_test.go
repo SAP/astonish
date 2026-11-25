@@ -159,7 +159,7 @@ func TestBotGenerationHealthBrowser(t *testing.T) {
 	}
 }
 
-func generationHealthBrowserServer(t *testing.T, f *interactiveHTTPFixture, dist string) *httptest.Server {
+func generationHealthBrowserServer(t *testing.T, f *interactiveHTTPFixture, dist string, configure ...func(*mux.Router, *store.Services)) *httptest.Server {
 	t.Helper()
 	target, err := url.Parse(f.server.URL)
 	if err != nil {
@@ -184,7 +184,12 @@ func generationHealthBrowserServer(t *testing.T, f *interactiveHTTPFixture, dist
 		t.Fatal(err)
 	}
 	personal := org.ForUser(f.b.OwnerID.String())
-	svc := &store.Services{TenantRouter: f.db, Bots: org.ForTeam("team").Bots(), Sessions: org.ForTeam("team").Sessions(), PersonalBots: personal.Bots(), PersonalSessions: personal.Sessions(), BotInteractiveReady: true, BotTurnRegistry: f.registry}
+	// Preview redaction requires real request-scoped credential stores, even when
+	// empty. Use only this fixture's isolated stores, never daemon credentials.
+	svc := &store.Services{TenantRouter: f.db, Bots: org.ForTeam("team").Bots(), Sessions: org.ForTeam("team").Sessions(), Credentials: org.ForTeam("team").Credentials(), PersonalBots: personal.Bots(), PersonalSessions: personal.Sessions(), PersonalCredentials: personal.Credentials(), BotInteractiveReady: true, BotTurnRegistry: f.registry}
+	for _, setup := range configure {
+		setup(routes, svc)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, root) {
 			ctx, cancel := context.WithCancel(f.ctx)

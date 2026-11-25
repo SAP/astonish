@@ -11,14 +11,28 @@ import (
 	"github.com/google/uuid"
 )
 
+type memoryReadHook struct {
+	store.BotContentStaging
+	after func()
+}
+
+func (m memoryReadHook) Open(ctx context.Context, ref store.BotContentRef, span store.BotFileRange) (*store.BotFileStream, error) {
+	stream, err := m.BotContentStaging.Open(ctx, ref, span)
+	if err == nil && ref.Kind == store.BotContentMemory {
+		m.after()
+	}
+	return stream, err
+}
+
 func TestBotMemoryForgetDuringRankingFailsClosed(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			_, bots, memories, ctx, b, _ := botMemorySearchFixture(t, scope, "hybrid")
-			if err := memories.Add(ctx, store.MemoryEntry{Content: "quasar retiring", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred}}); err != nil {
+			svc, _ := store.NewBotMemoryService(bots, memories, b.ID, scope)
+			if err := svc.Add(ctx, store.MemoryEntry{Content: "quasar retiring", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred}}); err != nil {
 				t.Fatal(err)
 			}
-			rows, err := memories.ListBySession(ctx, b.HomeSessionID.String())
+			rows, err := svc.ListBySession(ctx, b.HomeSessionID.String())
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("seed: %+v %v", rows, err)
 			}
@@ -26,34 +40,43 @@ func TestBotMemoryForgetDuringRankingFailsClosed(t *testing.T) {
 			var db botDraftDB
 			switch s := bots.(type) {
 			case *personalBotStore:
-				db = personalBotDB{client: s.client}
+				db = personalBotDB{client: s.client, content: s.content}
 			case *teamBotStore:
-				db = teamBotDB{client: s.client}
+				db = teamBotDB{client: s.client, content: s.content}
 			}
 			op := store.BotControlProposal{ID: uuid.New(), BotID: b.ID, SourceUserID: b.OwnerID, Payload: store.BotControlPayload{Operation: store.BotControlMemoryForget, Memory: &store.BotControlMemory{MemoryID: original.ID, ExpectedFingerprint: store.MemoryContentFingerprint(original)}}}
-			// The query embedder runs after current candidates have been selected.
-			// Commit the real forget here, before scoring reads their persisted IDs.
-			embed := func(ctx context.Context, _ string) ([]float32, error) {
-				ctx = context.WithValue(ctx, routineMutationKey{}, true)
-				err := db.Transaction(ctx, func(tx botDraftDB) error {
-					if err := mutateControlMemory(ctx, tx, op, b.HomeSessionID, b.OwnerID, time.Now()); err != nil {
-						return err
+			// Commit a forget after opening the immutable candidate snapshot, before
+			// the ranking result's final current-head validation.
+			var codec *botContentCodec
+			switch s := bots.(type) {
+			case *personalBotStore:
+				codec = s.content
+			case *teamBotStore:
+				codec = s.content
+			}
+			open := codec.Open
+			fired := false
+			codec.Open = func(c context.Context, id store.BotID) (store.BotContentStaging, error) {
+				disk, err := open(c, id)
+				return memoryReadHook{BotContentStaging: disk, after: func() {
+					if fired {
+						return
 					}
-					return verifyControlMemoryMutation(ctx, tx, op)
-				})
-				return []float32{1, 0}, err
+					fired = true
+					c = context.WithValue(c, routineMutationKey{}, true)
+					if err := db.Transaction(c, func(tx botDraftDB) error {
+						return mutateControlMemory(c, tx, op, b.HomeSessionID, b.OwnerID, time.Now())
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}}, err
 			}
-			switch m := memories.(type) {
-			case *personalMemoryStore:
-				m.embedFunc = embed
-			case *teamMemoryStore:
-				m.embedFunc = embed
-			}
-			got, err := memories.(store.BotMemoryPrefilterStore).SearchBySessions(ctx, []string{b.HomeSessionID.String()}, "quasar", 1, 0, "")
+			got, err := svc.Search(ctx, "quasar", 1, 0)
+			codec.Open = open
 			if !errors.Is(err, store.ErrBotConflict) || len(got) != 0 {
 				t.Fatalf("stale candidate recalled: %+v %v", got, err)
 			}
-			after, err := memories.Get(ctx, original.ID)
+			after, err := svc.Get(ctx, original.ID)
 			a := *original.Attribution
 			a.SupersededBy = "routine-operation:" + op.ID.String()
 			original.Attribution = &a
@@ -75,19 +98,20 @@ func TestBotMemoryCurrentBeforeRankingPreservesHistory(t *testing.T) {
 				}
 				marker := "routine-operation:" + uuid.NewString()
 				for i := 0; i < 25; i++ {
-					if err := memories.Add(ctx, store.MemoryEntry{Content: "quasar forgotten", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: marker}}); err != nil {
+					if err := svc.Add(ctx, store.MemoryEntry{Content: "quasar forgotten", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: marker}}); err != nil {
 						t.Fatal(err)
 					}
 				}
 				for _, m := range []struct{ text, marker string }{{"quasar current", ""}, {"quasar corrected", "correction:" + uuid.NewString()}} {
-					if err := memories.Add(ctx, store.MemoryEntry{Content: m.text, SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: m.marker}}); err != nil {
+					if err := svc.Add(ctx, store.MemoryEntry{Content: m.text, SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "owner", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: m.marker}}); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if err := memories.Add(ctx, store.MemoryEntry{Content: "quasar peer", SessionID: peer.HomeSessionID.String(), Embedding: []float32{1, 0}}); err != nil {
+				peerSvc, _ := store.NewBotMemoryService(bots, memories, peer.ID, scope)
+				if err := peerSvc.Add(ctx, store.MemoryEntry{Content: "quasar peer", SessionID: peer.HomeSessionID.String(), Embedding: []float32{1, 0}}); err != nil {
 					t.Fatal(err)
 				}
-				peerBefore, err := memories.ListBySession(ctx, peer.HomeSessionID.String())
+				peerBefore, err := peerSvc.ListBySession(ctx, peer.HomeSessionID.String())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -110,7 +134,7 @@ func TestBotMemoryCurrentBeforeRankingPreservesHistory(t *testing.T) {
 				if err != nil || !reflect.DeepEqual(history, after) {
 					t.Fatal("recall changed history")
 				}
-				peerAfter, err := memories.ListBySession(ctx, peer.HomeSessionID.String())
+				peerAfter, err := peerSvc.ListBySession(ctx, peer.HomeSessionID.String())
 				if err != nil || !reflect.DeepEqual(peerBefore, peerAfter) {
 					t.Fatal("peer changed")
 				}

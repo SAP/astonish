@@ -109,7 +109,7 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 		assertPreferenceContext(req)
 		return nil, false
 	}
-	f.model.called, f.model.name, f.model.args = false, "ask_user", map[string]any{"kind": "text", "prompt": "Which forecast dates?"}
+	f.model.called, f.model.name, f.model.args = false, "execute_tool", map[string]any{"name": "ask_user", "arguments": map[string]any{"kind": "text", "prompt": "Which forecast dates?"}}
 	later := answer(poll(), "Next weekend")
 	if later == initial {
 		t.Fatal("initial question replayed")
@@ -118,7 +118,7 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 	if err != nil || input.Instructions != preference {
 		t.Fatalf("assignment lost: %+v %v", input, err)
 	}
-	f.model.called, f.model.name, f.model.args = false, "read_file", map[string]any{"path": "/isolated/receipt.txt"}
+	f.model.called, f.model.name, f.model.args = false, "read_file", map[string]any{"path": "receipt.txt"}
 	const acknowledgment = "I'll compare the forecasts for next weekend."
 	announced := false
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
@@ -149,6 +149,8 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	seenAnswer, seenAck, seenTool := false, false, false
+	var questionCallID, questionInvocation string
+	questionResponseSeen := false
 	for _, row := range rows {
 		if row.Event == nil || row.Event.Content == nil {
 			continue
@@ -157,7 +159,23 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 			if part == nil {
 				continue
 			}
-			if row.Event.Content.Role == "user" && strings.Contains(part.Text, "Next weekend") {
+			if call := part.FunctionCall; call != nil && call.Name == "execute_tool" && call.Args["name"] == "ask_user" {
+				questionCallID, questionInvocation = call.ID, row.Event.InvocationID
+			}
+			if response := part.FunctionResponse; response != nil && response.Name == "execute_tool" && response.ID == questionCallID {
+				questionResponseSeen = response.Response["prompt"] == "Which forecast dates?"
+			}
+			if row.Event.Author == "user" && strings.Contains(part.Text, `"type":"bot_owner_answer"`) && strings.Contains(part.Text, "Next weekend") {
+				var answer struct {
+					ApprovalID   string                       `json:"approval_id"`
+					CallID       string                       `json:"tool_call_id"`
+					InvocationID string                       `json:"invocation_id"`
+					Tool         string                       `json:"tool"`
+					Response     store.BotInteractionResponse `json:"response"`
+				}
+				if err := json.Unmarshal([]byte(part.Text), &answer); err != nil || !questionResponseSeen || questionCallID == "" || answer.CallID != questionCallID || answer.InvocationID != questionInvocation || answer.ApprovalID != later.String() || answer.Tool != "ask_user" || answer.Response.Answer != "Next weekend" {
+					t.Fatalf("later owner answer lost durable bridge correlation: %s (%v)", part.Text, err)
+				}
 				seenAnswer = true
 			}
 			if part.Text == acknowledgment {

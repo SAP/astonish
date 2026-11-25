@@ -1,18 +1,18 @@
 package tools
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/browser"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
-	"github.com/SAP/astonish/pkg/browser"
 	"github.com/ysmood/gson"
 	"google.golang.org/adk/tool"
 )
@@ -122,48 +122,94 @@ type BrowserPDFResult struct {
 }
 
 func BrowserPDF(mgr *browser.Manager) func(tool.Context, BrowserPDFArgs) (BrowserPDFResult, error) {
-	return func(_ tool.Context, args BrowserPDFArgs) (BrowserPDFResult, error) {
+	return func(ctx tool.Context, args BrowserPDFArgs) (BrowserPDFResult, error) {
+		ensureBrowserSessionAndContext(mgr, ctx)
+		sessionID := mgr.SessionID()
+		if mgr.SandboxEnabled && (ctx == nil || sessionID == "" || mgr.WriteArtifactFunc == nil) {
+			return BrowserPDFResult{}, fmt.Errorf("sandbox PDF artifact transport is not wired")
+		}
+		savePath := args.Path
+		if mgr.SandboxEnabled {
+			if savePath == "" {
+				savePath = fmt.Sprintf("browser-%d.pdf", time.Now().UnixNano())
+			}
+			name := strings.TrimPrefix(savePath, "/workspace/")
+			if name != filepath.Base(name) || strings.ContainsAny(name, "\\\x00\r\n") || name == ".pdf" || !strings.HasSuffix(strings.ToLower(name), ".pdf") {
+				return BrowserPDFResult{}, fmt.Errorf("PDF path must be a basename or /workspace/<basename> ending in .pdf")
+			}
+			savePath = "/workspace/" + name
+		}
 		pg, err := mgr.CurrentPage()
 		if err != nil {
 			return BrowserPDFResult{}, err
 		}
-
-		reader, err := pg.PDF(&proto.PagePrintToPDF{
-			PrintBackground: true,
-		})
+		callCtx := context.Context(context.Background())
+		if ctx != nil {
+			callCtx = ctx
+		}
+		pg = pg.Context(callCtx).Timeout(60 * time.Second)
+		printed, err := (proto.PagePrintToPDF{PrintBackground: true, TransferMode: proto.PagePrintToPDFTransferModeReturnAsStream}).Call(pg)
 		if err != nil {
 			return BrowserPDFResult{}, fmt.Errorf("PDF generation failed: %w", err)
 		}
-		defer reader.Close()
-
-		data, err := io.ReadAll(reader)
-		if err != nil {
-			return BrowserPDFResult{}, fmt.Errorf("failed to read PDF data: %w", err)
+		if printed.Stream == "" {
+			return BrowserPDFResult{}, fmt.Errorf("PDF backend returned no stream")
 		}
-
-		savePath := args.Path
-		if savePath == "" {
-			tmpFile, err := os.CreateTemp("", "browser-*.pdf")
+		defer (proto.IOClose{Handle: printed.Stream}).Call(pg)
+		data := []byte{}
+		chunkSize := 64 << 10
+		for {
+			chunk, err := (proto.IORead{Handle: printed.Stream, Size: &chunkSize}).Call(pg)
 			if err != nil {
-				return BrowserPDFResult{}, fmt.Errorf("failed to create temp file: %w", err)
+				return BrowserPDFResult{}, err
 			}
-			savePath = tmpFile.Name()
-			tmpFile.Close()
+			part := []byte(chunk.Data)
+			if chunk.Base64Encoded {
+				part, err = base64.StdEncoding.DecodeString(chunk.Data)
+				if err != nil {
+					return BrowserPDFResult{}, err
+				}
+			}
+			if len(part) > (32<<20)-len(data) {
+				return BrowserPDFResult{}, fmt.Errorf("PDF exceeds 32 MiB limit")
+			}
+			data = append(data, part...)
+			if chunk.EOF {
+				break
+			}
+			if len(part) == 0 {
+				return BrowserPDFResult{}, fmt.Errorf("PDF stream made no progress")
+			}
+		}
+		if len(data) == 0 {
+			return BrowserPDFResult{}, fmt.Errorf("PDF stream was empty")
+		}
+		if err := callCtx.Err(); err != nil {
+			return BrowserPDFResult{}, err
+		}
+		if mgr.SandboxEnabled {
+			if mgr.SessionID() != sessionID {
+				return BrowserPDFResult{}, fmt.Errorf("browser session changed during PDF capture")
+			}
+			if err := mgr.WriteArtifactFunc(callCtx, sessionID, savePath, data); err != nil {
+				return BrowserPDFResult{}, err
+			}
 		} else {
-			// Ensure parent directory exists
-			if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
-				return BrowserPDFResult{}, fmt.Errorf("failed to create directory: %w", err)
+			if savePath == "" {
+				f, err := os.CreateTemp("", "browser-*.pdf")
+				if err != nil {
+					return BrowserPDFResult{}, err
+				}
+				savePath = f.Name()
+				_ = f.Close()
+			} else if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
+				return BrowserPDFResult{}, err
+			}
+			if err := os.WriteFile(savePath, data, 0644); err != nil {
+				return BrowserPDFResult{}, err
 			}
 		}
-
-		if err := os.WriteFile(savePath, data, 0644); err != nil {
-			return BrowserPDFResult{}, fmt.Errorf("failed to write PDF: %w", err)
-		}
-
-		return BrowserPDFResult{
-			Path:      savePath,
-			SizeBytes: len(data),
-		}, nil
+		return BrowserPDFResult{Path: savePath, SizeBytes: len(data)}, nil
 	}
 }
 
@@ -209,78 +255,35 @@ type BrowserResponseBodyResult struct {
 }
 
 func BrowserResponseBody(mgr *browser.Manager) func(tool.Context, BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
-	return func(_ tool.Context, args BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
+	return func(ctx tool.Context, args BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
+		ensureBrowserSessionAndContext(mgr, ctx)
 		pg, err := mgr.CurrentPage()
 		if err != nil {
 			return BrowserResponseBodyResult{}, err
 		}
-
-		ps := mgr.PageStateFor(pg)
-		if ps == nil {
-			return BrowserResponseBodyResult{}, fmt.Errorf("no page state available")
-		}
-
+		capture := mgr.ResponseCaptureFor(pg)
 		switch args.Action {
 		case "listen":
-			return handleResponseListen(pg, ps, args)
+			if err := capture.Start(pg, args.URLPattern); err != nil {
+				return BrowserResponseBodyResult{}, err
+			}
+			return BrowserResponseBodyResult{Success: true, Listening: true, URLPattern: args.URLPattern, Message: fmt.Sprintf("Listening for responses matching %q", args.URLPattern)}, nil
 		case "read":
-			return handleResponseRead(ps, args)
+			return handleResponseRead(ctx, capture, args)
 		case "stop":
-			return handleResponseStop(ps)
+			pattern := capture.Pattern()
+			if err := capture.Stop(); err != nil {
+				return BrowserResponseBodyResult{}, err
+			}
+			return BrowserResponseBodyResult{Success: true, Message: fmt.Sprintf("Stopped capture for %q", pattern)}, nil
 		default:
 			return BrowserResponseBodyResult{}, fmt.Errorf("invalid action %q: must be listen, read, or stop", args.Action)
 		}
 	}
 }
 
-func handleResponseListen(pg *rod.Page, ps *browser.PageState, args BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
-	if args.URLPattern == "" {
-		return BrowserResponseBodyResult{}, fmt.Errorf("urlPattern is required for action=listen")
-	}
-
-	// Stop any existing capture first.
-	if ps.Capture.IsActive() {
-		_ = ps.Capture.Stop()
-	}
-
-	router := pg.HijackRequests()
-	if err := router.Add(args.URLPattern, "", func(ctx *rod.Hijack) {
-		// Let the request proceed to the real server and capture the response.
-		if err := ctx.LoadResponse(http.DefaultClient, true); err != nil {
-			return
-		}
-
-		// Extract headers as a simple map.
-		headers := make(map[string]string)
-		for k, vs := range ctx.Response.Headers() {
-			headers[k] = strings.Join(vs, ", ")
-		}
-
-		ps.Capture.AddResponse(browser.CapturedResponse{
-			URL:          ctx.Request.URL().String(),
-			Status:       ctx.Response.Payload().ResponseCode,
-			Headers:      headers,
-			Body:         ctx.Response.Body(),
-			ResourceType: string(ctx.Request.Type()),
-			Timestamp:    time.Now(),
-		})
-	}); err != nil {
-		return BrowserResponseBodyResult{}, fmt.Errorf("failed to set up response interceptor: %w", err)
-	}
-
-	ps.Capture.SetRouter(router, args.URLPattern)
-	go router.Run()
-
-	return BrowserResponseBodyResult{
-		Success:    true,
-		Listening:  true,
-		URLPattern: args.URLPattern,
-		Message:    fmt.Sprintf("Listening for responses matching %q", args.URLPattern),
-	}, nil
-}
-
-func handleResponseRead(ps *browser.PageState, args BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
-	if !ps.Capture.IsActive() {
+func handleResponseRead(ctx context.Context, capture *browser.CDPResponseCapture, args BrowserResponseBodyArgs) (BrowserResponseBodyResult, error) {
+	if !capture.IsActive() {
 		return BrowserResponseBodyResult{}, fmt.Errorf("no response interceptor active — call with action=\"listen\" first")
 	}
 
@@ -294,15 +297,20 @@ func handleResponseRead(ps *browser.PageState, args BrowserResponseBodyArgs) (Br
 	}
 
 	// Check if we already have captured responses.
-	responses := ps.Capture.Responses()
+	responses := capture.Responses()
 	if len(responses) == 0 {
 		// Wait for a response up to timeout.
 		timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
 		defer timer.Stop()
 
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		select {
-		case <-ps.Capture.WaitChan():
-			responses = ps.Capture.Responses()
+		case <-ctx.Done():
+			return BrowserResponseBodyResult{}, ctx.Err()
+		case <-capture.WaitChan():
+			responses = capture.Responses()
 		case <-timer.C:
 			return BrowserResponseBodyResult{
 				Success: false,
@@ -336,24 +344,5 @@ func handleResponseRead(ps *browser.PageState, args BrowserResponseBodyArgs) (Br
 		ResourceType: latest.ResourceType,
 		Truncated:    truncated,
 		Message:      fmt.Sprintf("Captured response from %s (status %d, %d chars)", latest.URL, latest.Status, len(latest.Body)),
-	}, nil
-}
-
-func handleResponseStop(ps *browser.PageState) (BrowserResponseBodyResult, error) {
-	if !ps.Capture.IsActive() {
-		return BrowserResponseBodyResult{
-			Success: true,
-			Message: "No active interceptor",
-		}, nil
-	}
-
-	pattern := ps.Capture.Pattern()
-	if err := ps.Capture.Stop(); err != nil {
-		return BrowserResponseBodyResult{}, fmt.Errorf("failed to stop interceptor: %w", err)
-	}
-
-	return BrowserResponseBodyResult{
-		Success: true,
-		Message: fmt.Sprintf("Stopped interceptor for %q", pattern),
 	}, nil
 }

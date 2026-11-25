@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
+
+	"github.com/SAP/astonish/pkg/store"
 )
 
 // BotHomeScope is server-derived authorization scope, not user-selected storage.
@@ -98,6 +101,19 @@ type BotHomeDeleteBackend interface {
 // This does not change the non-forcing DeleteBotHome contract.
 type BotHomeSessionCleanupBackend interface {
 	ReconcileBotHomeSessions(context.Context, *BotHomeBinding, func(context.Context) error) error
+}
+
+// BotHomeFilesBackend is additive: ordinary Home files and trusted immutable
+// content are separate physical roots. Read/list must never provision storage.
+// Implementations confine descriptor walks and join owned streams on Close.
+type BotHomeFilesBackend interface {
+	ListBotHomeFiles(context.Context, *BotHomeBinding, string, string, int) (*store.BotFilePage, error)
+	StatBotHomeFile(context.Context, *BotHomeBinding, string) (*store.BotFileEntry, error)
+	OpenBotHomeFile(context.Context, *BotHomeBinding, string, store.BotFileRange) (*store.BotFileStream, error)
+	WriteBotHomeFile(context.Context, *BotHomeBinding, store.BotFileWrite) (*store.BotFileEntry, error)
+	PutBotContent(context.Context, *BotHomeBinding, store.BotContentKind, int64, io.Reader, int64, func(func() error) error) (*store.BotContentRef, error)
+	OpenBotContent(context.Context, *BotHomeBinding, store.BotContentRef, store.BotFileRange) (*store.BotFileStream, error)
+	PublishBotArtifactSnapshot(context.Context, *BotHomeBinding, string, string, func(func() error) error) (*store.BotContentRef, error)
 }
 
 const MaxBotHomeArtifactBytes int64 = 16 << 20

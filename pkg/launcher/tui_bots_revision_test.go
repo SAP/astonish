@@ -17,7 +17,6 @@ import (
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
 )
 
 // Drive the production watch, not a parallel test-only operation reducer.
@@ -68,18 +67,19 @@ func TestBotComposerOperationRevision(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/events") {
 					w.Header().Set("Content-Type", "text/event-stream")
-					row := adksession.Event{Actions: adksession.EventActions{StateDelta: map[string]any{store.BotOperationKey: op}}}
-					raw, _ := json.Marshal(row)
-					fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: %s\n\n", root.HomeSessionID, raw)
+					writeOperation := func(v store.BotOperationView, eventID string, cursor int64) {
+						raw, _ := json.Marshal(v)
+						frame := canonicalBotFrame(t, root.HomeSessionID.String(), eventID, store.BotOperationKey, string(raw), cursor)
+						fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", frame.ID, frame.Type, frame.Data)
+					}
+					writeOperation(op, "applied", 1)
 					if mode == "duplicates" {
-						fmt.Fprintf(w, "id: %s:2\nevent: transcript\ndata: %s\n\n", root.HomeSessionID, raw)
+						writeOperation(op, "applied", 2)
 						older := op
 						older.Status = store.BotOperationPending
 						older.Revision--
 						older.StateSequence--
-						row.Actions.StateDelta[store.BotOperationKey] = older
-						raw, _ = json.Marshal(row)
-						fmt.Fprintf(w, "id: %s:3\nevent: transcript\ndata: %s\n\n", root.HomeSessionID, raw)
+						writeOperation(older, "older", 3)
 					}
 					return
 				}
@@ -129,7 +129,7 @@ func TestBotComposerOperationRevision(t *testing.T) {
 			}
 			count := 1
 			if mode == "duplicates" {
-				count = 3
+				count = 2
 			}
 			revisionWatch(t, b, count)
 			_, err := b.RunTurn(context.Background(), "next instruction", backend.TurnOptions{})

@@ -32,17 +32,21 @@ func (g *botSingleGrantGuard) Authorize(_ context.Context, a execution.ActionDes
 
 func TestBotChatFactoryExactGrantDispatchOnce(t *testing.T) {
 	f := newBotFactoryFixture(t)
-	a := execution.ActionDescriptor{Tool: "read_file", Effect: execution.EffectUnknown, Arguments: []byte(`{}`)}
+	a := execution.ActionDescriptor{Tool: "approved_probe", Effect: execution.EffectUnknown, Arguments: []byte(`{}`)}
 	digest, _ := a.Digest()
 	grant := execution.ScopedGrant{ID: uuid.New(), Identity: f.req.Policy.Identity(), ActionDigest: digest, ExpiresAt: time.Now().Add(time.Hour)}
 	var err error
+	f.req.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{"approved_probe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.req.Policy, err = f.req.Policy.WithGrant(grant)
 	if err != nil {
 		t.Fatal(err)
 	}
 	guard := &botSingleGrantGuard{grant: grant}
 	effects := 0
-	target, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "An exact-approved read"}, func(tool.Context, map[string]any) (map[string]any, error) {
+	target, err := functiontool.New(functiontool.Config{Name: "approved_probe", Description: "An exact-approved read"}, func(tool.Context, map[string]any) (map[string]any, error) {
 		effects++
 		return map[string]any{"result": "ok"}, nil
 	})
@@ -50,8 +54,15 @@ func TestBotChatFactoryExactGrantDispatchOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := agent.BotPolicyRuntime{Guard: guard, Classifier: BotCatalogueClassifier{}}
-	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-		return &BotChatSafeResources{Tools: []tool.Tool{target}, WorkspaceDir: "/isolated", PolicyRuntime: runtime, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+	prepare := f.cfg.Prepare
+	f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
+		safe, err := prepare(ctx, req, scope)
+		if err != nil {
+			return nil, err
+		}
+		safe.PolicyRuntime = runtime
+		safe.Catalog.Groups = map[string]*agent.ToolGroup{"approved_fixture": {Name: "approved_fixture", Tools: []tool.Tool{target}}}
+		return safe, nil
 	}
 	resources, err := f.construct(t)
 	if err != nil {
@@ -62,17 +73,20 @@ func TestBotChatFactoryExactGrantDispatchOnce(t *testing.T) {
 	ctx = execution.WithRunPolicy(ctx, f.req.Policy)
 	ctx = store.WithSessionID(ctx, f.req.Run.SessionID.String())
 	ctx = agent.WithBotPolicyRuntime(ctx, runtime)
-	bridge, err := agent.NewProgressiveToolBridge(resources.Agent.ToolIndex)
-	if err != nil {
-		t.Fatal(err)
+	var runnable botRunnableTool
+	for _, candidate := range resources.Agent.Tools {
+		if candidate.Name() == "execute_tool" {
+			runnable = candidate.(botRunnableTool)
+			break
+		}
 	}
-	tc := botFactoryHandoffContext{Context: nil, base: ctx, session: f.req.Run.SessionID.String(), functionCallID: "handoff-read-file"}
-	runnable := bridge[1].(interface {
-		Run(tool.Context, any) (map[string]any, error)
-	})
-	args := map[string]any{"name": "read_file", "arguments": map[string]any{}}
+	if runnable == nil {
+		t.Fatal("shared Chat execute_tool missing")
+	}
+	tc := botFactoryHandoffContext{Context: nil, base: ctx, session: f.req.Run.SessionID.String(), functionCallID: "handoff-approved-probe"}
+	args := map[string]any{"name": "approved_probe", "arguments": map[string]any{}}
 	if _, err := runnable.Run(tc, args); err != nil {
-		t.Fatal(err)
+		t.Fatalf("first approved dispatch: effects=%d authorizations=%d err=%v", effects, guard.calls, err)
 	}
 	if effects != 1 || guard.calls != 1 {
 		t.Fatalf("effects=%d authorizations=%d", effects, guard.calls)

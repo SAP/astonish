@@ -64,7 +64,30 @@ type BotMemoryService struct {
 	scope  BotScope
 }
 
+// BotMemoryStoreProvider selects Bot-owned disk memory rather than generic Chat memory.
+type BotMemoryStoreProvider interface {
+	BotMemoryStore(BotID) (MemoryStore, error)
+}
+
+// BotMemoryStoreValidator rejects accidental cross-router composition before
+// selecting the authoritative disk repository. Nil selects that repository directly.
+type BotMemoryStoreValidator interface {
+	ValidateBotMemoryStore(MemoryStore, BotID) error
+}
+
 func NewBotMemoryService(bots BotStore, memory MemoryStore, id BotID, scope BotScope) (*BotMemoryService, error) {
+	if validator, ok := bots.(BotMemoryStoreValidator); ok {
+		if err := validator.ValidateBotMemoryStore(memory, id); err != nil {
+			return nil, err
+		}
+	}
+	if provider, ok := bots.(BotMemoryStoreProvider); ok {
+		var err error
+		memory, err = provider.BotMemoryStore(id)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if bots == nil || memory == nil {
 		return nil, ErrBotUnsupported
 	}

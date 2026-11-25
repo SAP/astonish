@@ -37,6 +37,27 @@ func (r *intakeRepository) Put(ctx context.Context, id uuid.UUID, q store.BotUnf
 	if err != nil {
 		return nil, err
 	}
+	// File publication may be busy before a competing request reaches SQL.
+	// Wait outside transactions/locks, without consuming the SQL CAS retry count.
+	// The filesystem lock itself must remain nonblocking for maintenance ordering.
+	contention, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	waitForPublication := func() error {
+		timer := time.NewTimer(10 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-contention.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return store.ErrBotBusy
+		case <-timer.C:
+			_, err := r.auth.authorize(ctx, uuid.Nil, true)
+			return err
+		}
+	}
 	// Unique insert and bounded reread handle concurrent creates and exact retries.
 	for attempt := 0; attempt < 3; attempt++ {
 		b, err := r.db.read(ctx, id, actor)
@@ -47,6 +68,11 @@ func (r *intakeRepository) Put(ctx context.Context, id uuid.UUID, q store.BotUnf
 			}
 			if e = r.db.insert(ctx, next); e == nil {
 				return next, nil
+			} else if errors.Is(e, store.ErrBotBusy) {
+				if err := waitForPublication(); err != nil {
+					return nil, err
+				}
+				attempt--
 			} else if !errors.Is(e, store.ErrBotConflict) {
 				return nil, e
 			}
@@ -64,6 +90,11 @@ func (r *intakeRepository) Put(ctx context.Context, id uuid.UUID, q store.BotUnf
 		}
 		if err = r.db.cas(ctx, next, b.Revision); err == nil {
 			return next, nil
+		} else if errors.Is(err, store.ErrBotBusy) {
+			if err := waitForPublication(); err != nil {
+				return nil, err
+			}
+			attempt--
 		} else if !errors.Is(err, store.ErrBotConflict) {
 			return nil, err
 		}

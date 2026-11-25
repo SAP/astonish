@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	personalbot "github.com/SAP/astonish/ent/personal/bot"
 	teambot "github.com/SAP/astonish/ent/team/bot"
 	"github.com/SAP/astonish/pkg/store"
@@ -12,6 +13,39 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBotTranscriptTailReader(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, _, ctx, b, lease, _ := botRunFixture(t, scope)
+			run, err := repo.GetRun(ctx, b.BotID, lease.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range 10 {
+				if err := repo.appendBotRunEvent(ctx, lease, run.SessionID, &session.Event{ID: fmt.Sprintf("tail-%02d", i), Author: "bot_runtime"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var tail store.BotTranscriptTailReader
+			switch d := repo.db.(type) {
+			case teamBotDB:
+				tail = &teamSessionStore{client: d.client, content: d.content}
+			case personalBotDB:
+				tail = &personalSessionStore{client: d.client, content: d.content}
+			}
+			rows, err := tail.ReadBotTranscriptTail(ctx, run.SessionID, 12, 4)
+			if err != nil || len(rows) != 4 {
+				t.Fatalf("tail rows=%d err=%v", len(rows), err)
+			}
+			for i := 1; i < len(rows); i++ {
+				if rows[i].Cursor <= rows[i-1].Cursor || rows[i].Cursor > 12 {
+					t.Fatalf("unordered tail: %+v", rows)
+				}
+			}
+		})
+	}
+}
 
 func TestBotTranscriptConcurrentCursor(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
@@ -24,9 +58,9 @@ func TestBotTranscriptConcurrentCursor(t *testing.T) {
 			var reader store.BotTranscriptReader
 			switch d := repo.db.(type) {
 			case teamBotDB:
-				reader = &teamSessionStore{client: d.client}
+				reader = &teamSessionStore{client: d.client, content: d.content}
 			case personalBotDB:
-				reader = &personalSessionStore{client: d.client}
+				reader = &personalSessionStore{client: d.client, content: d.content}
 			}
 			e := &session.Event{ID: uuid.NewSHA1(run.ID, []byte("turn:1")).String(), Author: "bot_runtime"}
 			var wg sync.WaitGroup
@@ -109,6 +143,33 @@ func TestBotTranscriptConcurrentCursor(t *testing.T) {
 			rows, err = reader.ReadBotTranscript(ctx, run.SessionID, rows[0].Cursor, 1)
 			if err != nil || len(rows) != 0 {
 				t.Fatal("cursor repeated event", err)
+			}
+		})
+	}
+}
+
+func TestBotTranscriptAppendDoesNotHydrateHistory(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, _, ctx, b, lease, _ := botRunFixture(t, scope)
+			run, err := repo.GetRun(ctx, b.BotID, lease.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A transcript append must not decode unrelated retained history. The
+			// indexed event identity is the idempotency boundary; historical payload
+			// hydration belongs only to readers.
+			switch d := repo.db.(type) {
+			case teamBotDB:
+				_, err = d.client.SessionEvent.Create().SetSessionID(run.SessionID.String()).SetEventData(map[string]any{"unrelated": "history"}).Save(ctx)
+			case personalBotDB:
+				_, err = d.client.SessionEvent.Create().SetSessionID(run.SessionID.String()).SetEventData(map[string]any{"unrelated": "history"}).Save(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.appendBotRunEvent(ctx, lease, run.SessionID, &session.Event{ID: uuid.NewString(), Author: "bot_runtime"}); err != nil {
+				t.Fatalf("append hydrated unrelated history: %v", err)
 			}
 		})
 	}

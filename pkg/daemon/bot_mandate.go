@@ -56,6 +56,14 @@ func newProductionBotMandatePolicy(backend store.PlatformBackend, cfg *config.Ap
 			return store.BotMandatePolicy{}, err
 		}
 		policy = addBotOwnControlBaseline(policy)
+		// Confined Home operations are captured only in newly issued mandates.
+		// Existing grants remain the ceiling; verification never enriches them.
+		for i := range policy.Constraints {
+			if policy.Constraints[i].Action == execution.CapabilityToolExecute {
+				policy.Constraints[i].Resources = append(policy.Constraints[i].Resources,
+					"read_file", "write_file", "edit_file", "find_files", "file_tree", "publish_file")
+			}
+		}
 		var routine config.BotRoutinePolicyConfig
 		if cfg != nil {
 			routine = cfg.BotRoutinePolicy

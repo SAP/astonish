@@ -2,11 +2,13 @@ package bot
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"errors"
 	"fmt"
-	"sort"
+	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -27,9 +29,9 @@ const (
 	DocumentGroups   DocumentName = "groups/INDEX.md"
 )
 
-// Document is a derived, in-memory view. Content confers no permissions and is
-// never imported as policy. Version is the persona/charter source version; goals
-// are current independently revisioned records, not part of BotVersion.
+// Document is a bounded read of an actual retained Home file. Content confers no
+// permissions and is never imported as policy. SourceVersion is the full file
+// SHA-256; the projection's Version identifies current reviewed configuration.
 type Document struct {
 	RecordMappings         []store.BotMemoryReviewSource `json:"record_mappings,omitempty"`
 	Name                   DocumentName                  `json:"name"`
@@ -46,188 +48,147 @@ type DocumentProjection struct {
 	Documents []Document  `json:"documents"`
 }
 
-// Documents uses the existing scoped repository; it neither owns storage nor
-// writes host files. The eventual home adapter may materialize these projections,
-// but must not interpret edits to a mounted file as an authorized version change.
-type Documents struct{ bots store.BotStore }
-
-func NewDocuments(bots store.BotStore) (*Documents, error) {
-	if bots == nil {
-		return nil, store.ErrBotUnsupported
-	}
-	return &Documents{bots: bots}, nil
+// Documents reads retained Home files. Reviewed configuration edits still use
+// ApplyVersion: file text is never imported as permission or owner authority.
+type Documents struct {
+	bots  store.BotStore
+	Files store.BotFiles
 }
 
-// Load returns an authorized version projection. Zero selects the current
-// version. Goals are explicitly current: the repository does not store historical
-// goal snapshots within versions. This is not a cross-record atomic snapshot.
+func NewDocuments(bots store.BotStore, files ...store.BotFiles) (*Documents, error) {
+	if bots == nil || len(files) > 1 {
+		return nil, store.ErrBotUnsupported
+	}
+	d := &Documents{bots: bots}
+	if len(files) == 1 {
+		d.Files = files[0]
+	}
+	return d, nil
+}
+
+const BotMemoryBootstrapBytes = 12 << 10
+const BotCriticalDocumentBytes = 16 << 10
+
+// BoundDocumentText limits UTF-8 bytes including the explicit retrieval hint.
+// It never changes the underlying file, including externally oversized memory.
+func BoundDocumentText(text, name string, limit int) string {
+	hint := "\n\n[Content omitted from bootstrap; use read_file on " + name + " to read the retained file.]\n"
+	if len(text) <= limit {
+		return text
+	}
+	if limit <= len(hint) {
+		return ""
+	}
+	end := limit - len(hint)
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end] + hint
+}
+
+func readBotDocument(ctx context.Context, files store.BotFiles, id store.BotID, name DocumentName, limit int) (Document, error) {
+	stream, err := files.Open(ctx, id, string(name), store.BotFileRange{Length: int64(limit + 1)})
+	if err != nil {
+		return Document{}, err
+	}
+	if stream == nil || stream.ReadCloser == nil {
+		return Document{}, store.ErrBotInvalid
+	}
+	data, readErr := io.ReadAll(io.LimitReader(stream, int64(limit+2)))
+	closeErr := stream.Close()
+	if readErr != nil {
+		return Document{}, readErr
+	}
+	if closeErr != nil {
+		return Document{}, closeErr
+	}
+	if stream.Entry.Kind != store.BotFileRegular || stream.Entry.Path != string(name) {
+		return Document{}, store.ErrBotInvalid
+	}
+	wantBytes := stream.Entry.SizeBytes
+	if wantBytes > int64(limit+1) {
+		wantBytes = int64(limit + 1)
+	}
+	if wantBytes < 0 || int64(len(data)) != wantBytes {
+		return Document{}, store.ErrBotConflict
+	}
+	digest := stream.Entry.SHA256
+	if int64(len(data)) == stream.Entry.SizeBytes {
+		actual := fmt.Sprintf("%x", sha256.Sum256(data))
+		if digest != "" && digest != actual {
+			return Document{}, store.ErrBotConflict
+		}
+		digest = actual
+	} else if stream.Entry.SizeBytes <= int64(limit) || len(digest) != 64 {
+		return Document{}, store.ErrBotConflict
+	}
+	doc := Document{Name: name, Content: BoundDocumentText(string(data), string(name), limit), SourceVersion: digest, ReadOnly: true, WriteUnsupportedReason: "File text is not authority; use reviewed configuration or authorized file operations"}
+	switch name {
+	case DocumentSoul, DocumentIdentity, DocumentUser, DocumentCharter:
+		// The explicit reviewed Edit API changes configuration, never imports
+		// arbitrary file text as policy. Preserve that separately authorized UI.
+		doc.ReadOnly, doc.WriteUnsupportedReason = false, ""
+	}
+	return doc, nil
+}
+
+// Load returns bounded critical files and the actual MEMORY.md index, never
+// historical reports or a latest-N memory query. A GET cannot initialize Home.
+// Historical configuration revisions do not imply historical working files.
 func (d *Documents) Load(ctx context.Context, id store.BotID, version int64) (*DocumentProjection, error) {
 	if version < 0 {
 		return nil, store.ErrBotInvalid
 	}
-	b, err := d.bots.Get(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if b == nil {
-		return nil, store.ErrBotNotFound
-	}
-	if b.ID != id {
-		return nil, store.ErrBotForbidden
-	}
-	if version == 0 {
-		version = b.Version
-	}
-	v, err := d.bots.GetVersion(ctx, id, version)
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
-		return nil, store.ErrBotNotFound
-	}
-	if v.BotID != id || v.Version != version {
-		return nil, store.ErrBotForbidden
-	}
-	if v.SchemaVersion != store.BotSchemaVersion {
+	if d == nil || d.bots == nil || d.Files == nil {
 		return nil, store.ErrBotUnsupported
 	}
-	goals, err := d.bots.ListGoals(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	goals = append([]store.BotGoal{}, goals...)
-	seen := map[string]bool{}
-	for _, goal := range goals {
-		key := goal.ID.String()
-		if goal.ID == uuid.Nil || goal.BotID != id || seen[key] {
-			return nil, store.ErrBotForbidden
-		}
-		seen[key] = true
-	}
-	sort.Slice(goals, func(i, j int) bool { return goals[i].ID.String() < goals[j].ID.String() })
-	// JSON inside Markdown preserves full goal revision/evidence rather than
-	// fabricating completion claims or losing attribution in a prose summary.
-	encoded, err := json.MarshalIndent(goals, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	goalText := "# Goals\n\nCurrent independently revisioned goal records; not a historical BotVersion snapshot.\n\n```json\n" + string(encoded) + "\n```\n"
-	projection := &DocumentProjection{BotID: id, Version: version, Revision: b.Revision, Documents: []Document{
-		{Name: DocumentSoul, Content: v.Persona.Soul},
-		{Name: DocumentIdentity, Content: v.Persona.Identity},
-		{Name: DocumentUser, Content: v.Persona.User},
-		{Name: DocumentCharter, Content: v.Charter},
-		{Name: DocumentGoals, Content: goalText, ReadOnly: true, WriteUnsupportedReason: "Use revisioned goal operations"},
-	}}
-	for _, goal := range goals {
-		data, err := json.MarshalIndent(goal, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		projection.Documents = append(projection.Documents, Document{Name: DocumentName("goals/" + goal.ID.String() + "/GOAL.md"), Content: "# Goal\n\nCurrent independently revisioned record, not a historical BotVersion snapshot.\n\n```json\n" + string(data) + "\n```\n", SourceVersion: fmt.Sprint(goal.Revision), ReadOnly: true, WriteUnsupportedReason: "Use revisioned goal operations"})
-	}
-	return projection, nil
-}
-
-// LoadMapped projects current source records; memory has no historical version or
-// revisioned Markdown import contract. The service is request-scoped and must be
-// composed from the same authenticated Bot repository and memory scope.
-func (d *Documents) LoadMapped(ctx context.Context, id store.BotID, version int64, memory *store.BotMemoryService) (*DocumentProjection, error) {
-	projection, err := d.Load(ctx, id, version)
-	if err != nil {
-		return nil, err
-	}
-	health, err := NewMemoryHealth(memory)
-	if err != nil {
-		return nil, err
-	}
-	snapshot, err := health.Snapshot(ctx, 2000)
-	if err != nil {
-		return nil, err
-	}
-	if err := d.checkMappedScope(ctx, id, snapshot.Records); err != nil {
-		return nil, err
-	}
-	groups := map[DocumentName][]store.MemorySearchResult{DocumentMemory: snapshot.Records, DocumentPeople: {}, DocumentGroups: {}}
-	for _, row := range snapshot.Records {
-		switch strings.ToLower(strings.TrimSpace(row.Category)) {
-		case "person", "people":
-			groups[DocumentPeople] = append(groups[DocumentPeople], row)
-		case "group", "groups":
-			groups[DocumentGroups] = append(groups[DocumentGroups], row)
-		}
-		if date, err := time.Parse(time.RFC3339, row.CreatedAt); err == nil {
-			name := DocumentName("notes/" + date.UTC().Format("2006-01-02") + ".md")
-			groups[name] = append(groups[name], row)
-		}
-	}
-	names := make([]string, 0, len(groups))
-	for name := range groups {
-		names = append(names, string(name))
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		records := groups[DocumentName(name)]
-		data, err := json.MarshalIndent(records, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		mappings := make([]store.BotMemoryReviewSource, 0, len(records))
-		for _, row := range records {
-			mappings = append(mappings, store.BotMemoryReviewSource{ID: row.ID, SessionID: row.SessionID, ExpectedFingerprint: store.MemoryContentFingerprint(row)})
-		}
-		notice := "Current attributed memory records; use record_mappings for explicit reviewed ingest, not the document-wide fingerprint. People/group categories are descriptive notes, not identity or permission assignments."
-		if snapshot.Truncated {
-			notice += " Bounded to 2000 source records; additional records are omitted."
-		}
-		projection.Documents = append(projection.Documents, Document{Name: DocumentName(name), RecordMappings: mappings, Content: "# " + name + "\n\n" + notice + "\n\n```json\n" + string(data) + "\n```\n", SourceVersion: snapshot.Fingerprint, ReadOnly: true, WriteUnsupportedReason: "Raw Markdown import is unsupported; use explicit reviewed record mappings at the document ingest endpoint"})
-	}
-	return projection, nil
-}
-
-// Defend against accidental composition with another Bot's memory service.
-func (d *Documents) checkMappedScope(ctx context.Context, id store.BotID, rows []store.MemorySearchResult) error {
 	b, err := d.bots.Get(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if b == nil {
-		return store.ErrBotNotFound
+		return nil, store.ErrBotNotFound
 	}
 	if b.ID != id {
-		return store.ErrBotForbidden
+		return nil, store.ErrBotForbidden
 	}
-	allowed := map[string]bool{}
-	if b.HomeSessionID != uuid.Nil {
-		allowed[b.HomeSessionID.String()] = true
+	if version != 0 && version != b.Version {
+		return nil, fmt.Errorf("%w: working files have no historical version projection", store.ErrBotUnsupported)
 	}
-	after := ""
-	seen := map[store.RunID]bool{}
-	for {
-		runs, err := d.bots.ListRuns(ctx, id, store.BotPage{Limit: 200, After: after})
+	result := &DocumentProjection{BotID: id, Version: b.Version, Revision: b.Revision}
+	for _, name := range []DocumentName{DocumentSoul, DocumentIdentity, DocumentUser, DocumentCharter, DocumentMemory} {
+		limit := BotCriticalDocumentBytes
+		if name == DocumentMemory {
+			limit = BotMemoryBootstrapBytes
+		}
+		doc, err := readBotDocument(ctx, d.Files, id, name, limit)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
-		for _, run := range runs {
-			if run.BotID != id || run.ID == uuid.Nil || seen[run.ID] {
-				return store.ErrBotForbidden
-			}
-			seen[run.ID] = true
-			if run.SessionID != uuid.Nil {
-				allowed[run.SessionID.String()] = true
-			}
-		}
-		if len(runs) < 200 {
-			break
-		}
-		after = runs[len(runs)-1].ID.String()
+		result.Documents = append(result.Documents, doc)
 	}
-	for _, row := range rows {
-		if !allowed[row.SessionID] || (row.Scope != "" && row.Scope != string(b.Scope)) {
-			return store.ErrBotForbidden
-		}
+	return result, nil
+}
+
+// LoadMapped retains its signature for callers but deliberately does not query
+// the old memory repository. Optional indexes are actual files, not SQL views.
+// Full subtrees and historical bodies are retrieved via the lazy file browser.
+func (d *Documents) LoadMapped(ctx context.Context, id store.BotID, version int64, _ *store.BotMemoryService) (*DocumentProjection, error) {
+	result, err := d.Load(ctx, id, version)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	for _, name := range []DocumentName{DocumentGoals, DocumentPeople, DocumentGroups, "goals/INDEX.md", "skills/INDEX.md", "tasks/INDEX.md", "knowledge/INDEX.md"} {
+		doc, err := readBotDocument(ctx, d.Files, id, name, BotCriticalDocumentBytes)
+		if errors.Is(err, store.ErrBotNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result.Documents = append(result.Documents, doc)
+	}
+	return result, nil
 }
 
 func mappedDocument(name DocumentName) bool {

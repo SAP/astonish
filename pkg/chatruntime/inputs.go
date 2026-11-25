@@ -12,8 +12,10 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
+	"iter"
 	"reflect"
 	"sync"
 )
@@ -35,6 +37,8 @@ const (
 // BuildOptions contains already-authenticated identity and explicitly scoped dependencies.
 // FallbackForbidden never consults host credentials, config, or tool caches.
 type BuildOptions struct {
+	// ProviderFactory is request-scoped; nil in strict mode never resolves host providers.
+	ProviderFactory        func(context.Context, string, string, *config.AppConfig) (model.LLM, error)
 	Principal              execution.Principal
 	Services               *store.Services
 	ResourceScope          ResourceScope
@@ -60,6 +64,7 @@ type BuildOptions struct {
 type Inputs struct {
 	options     BuildOptions
 	services    *store.Services
+	authority   *liveAuthority
 	memory      store.MemoryStore
 	memoryScope store.MemoryScope
 	memories    store.MemoryStoresByScope
@@ -96,11 +101,14 @@ func BuildScopedChatRuntimeInputs(ctx context.Context, o BuildOptions) (*Inputs,
 	if o.Services == nil && o.FallbackPolicy == FallbackForbidden {
 		return nil, fmt.Errorf("scoped services required")
 	}
+	authority, err := newLiveAuthority(ctx, o.Services, o.ResourceScope, o.Principal)
+	if err != nil {
+		return nil, err
+	}
 	o.Principal.Roles = append([]string(nil), o.Principal.Roles...)
 	o.Principal.Scopes = append([]string(nil), o.Principal.Scopes...)
 	// JSON config contains only serializable configuration. Snapshot maps/slices so
 	// late changes to shared configuration cannot retarget this runtime.
-	var err error
 	o.AppConfig, err = cloneConfig(o.AppConfig)
 	if err != nil {
 		return nil, err
@@ -111,11 +119,11 @@ func BuildScopedChatRuntimeInputs(ctx context.Context, o BuildOptions) (*Inputs,
 	}
 	if o.FallbackPolicy == FallbackForbidden && o.AppConfig != nil {
 		_, server, _ := parseWebTool(o.AppConfig.General.WebSearchTool)
-		if server == "perplexity" {
+		if server == "perplexity" && o.ProviderFactory == nil {
 			return nil, fmt.Errorf("strict Perplexity web search requires a scoped provider factory")
 		}
 	}
-	in := &Inputs{options: o, memoryScope: o.MemoryScope}
+	in := &Inputs{options: o, authority: authority, memoryScope: o.MemoryScope}
 	if in.memoryScope == "" {
 		in.memoryScope = store.MemoryScopeTeam
 	}
@@ -245,16 +253,80 @@ func BuildScopedChatRuntimeInputs(ctx context.Context, o BuildOptions) (*Inputs,
 			in.groups["a2a"] = &agent.ToolGroup{Name: "a2a", Description: "Remote A2A agent skills (invoke external agents via the A2A protocol)", Tools: ts}
 		}
 	}
+	if o.ProviderFactory != nil && o.AppConfig != nil {
+		_, server, _ := parseWebTool(o.AppConfig.General.WebSearchTool)
+		if server == "perplexity" {
+			search, e := tools.NewPerplexityWebSearchTool(o.AppConfig, o.ProviderFactory)
+			if e != nil {
+				return nil, e
+			}
+			in.groups["configured_search"] = &agent.ToolGroup{Name: "configured_search", Description: "Configured web search", Tools: []tool.Tool{search}}
+		}
+	}
+	in.options = o
+	in.options.LLM = in.GuardModel(o.LLM)
+	in.options.Services = nil
 	in.sandbox = resolveSandbox(ctx, in.sandbox.template, o.Templates)
 	return in, nil
 }
 
-func (in *Inputs) Bind(ctx context.Context) (context.Context, error) {
+// GuardModel applies this runtime's identity and live-directory checks without
+// rebinding capabilities or changing model/budget selection. Constructors use it
+// for their default model; Bind installs the same guard for context overrides.
+// The supplied model (including Bot accounting wrappers) remains the delegate.
+func (in *Inputs) GuardModel(llm model.LLM) model.LLM {
+	if in == nil || llm == nil {
+		return llm
+	}
+	if guarded, ok := llm.(*liveAuthorityModelGuard); ok && guarded.inputs == in {
+		return llm
+	}
+	return &liveAuthorityModelGuard{LLM: llm, inputs: in}
+}
+
+type liveAuthorityModelGuard struct {
+	model.LLM
+	inputs *Inputs
+}
+
+// Preserve the delegate's bounded preparation contract. This wrapper only adds
+// fresh directory checks; it does not enter a provider or extend read lifetimes.
+func (m *liveAuthorityModelGuard) SupportsModelPreflight() bool {
+	next, ok := m.LLM.(interface{ SupportsModelPreflight() bool })
+	return ok && next.SupportsModelPreflight()
+}
+
+func (m *liveAuthorityModelGuard) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		// GenerateContent is lazy. Check at iteration time, before even asking the
+		// underlying provider for its sequence, not when a caller saves the iterator.
+		if err := ctx.Err(); err != nil {
+			execution.EndModelPreflight(ctx)
+			yield(nil, err)
+			return
+		}
+		if err := m.inputs.checkAuthority(ctx); err != nil {
+			execution.EndModelPreflight(ctx)
+			yield(nil, err)
+			return
+		}
+		m.LLM.GenerateContent(ctx, req, stream)(yield)
+	}
+}
+
+func (in *Inputs) checkAuthority(ctx context.Context) error {
 	if p, ok := execution.PrincipalFromContext(ctx); ok && !reflect.DeepEqual(p, in.options.Principal) {
-		return nil, fmt.Errorf("runtime principal mismatch")
+		return fmt.Errorf("runtime principal mismatch")
 	}
 	if tc := store.TenantContextFrom(ctx); tc != nil && (tc.OrgSlug != in.options.Principal.OrgSlug || tc.TeamSlug != in.options.Principal.TeamSlug) {
-		return nil, fmt.Errorf("runtime tenant mismatch")
+		return fmt.Errorf("runtime tenant mismatch")
+	}
+	return in.authority.check(ctx, in.options.Principal)
+}
+
+func (in *Inputs) Bind(ctx context.Context) (context.Context, error) {
+	if err := in.checkAuthority(ctx); err != nil {
+		return nil, err
 	}
 	var err error
 	if in.options.FallbackPolicy == FallbackForbidden {
@@ -362,6 +434,9 @@ func (in *Inputs) Bind(ctx context.Context) (context.Context, error) {
 		po.PinnedToolGroups = append(po.PinnedToolGroups, "a2a")
 	}
 	ctx = agent.WithPromptOverrides(ctx, &po)
+	if o.FallbackPolicy == FallbackForbidden || o.ProviderFactory != nil {
+		return WithWebSearchProviderContext(ctx, o.AppConfig, nil), nil
+	}
 	return WithWebSearchContext(ctx, o.AppConfig), nil
 }
 

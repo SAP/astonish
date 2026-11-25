@@ -117,6 +117,7 @@ type knowledgeContext struct {
 	sid, uid string
 }
 
+func (knowledgeContext) FunctionCallID() string                               { return "knowledge-test" }
 func (knowledgeContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 func (c knowledgeContext) SessionID() string                                  { return c.sid }
 func (c knowledgeContext) UserID() string                                     { return c.uid }
@@ -345,8 +346,12 @@ func TestBotKnowledgeFactoryPolicyDenial(t *testing.T) {
 		if e != nil {
 			return nil, e
 		}
-		safe.Tools, e = BotKnowledgeTools(r, s, func(context.Context, string, string, *config.AppConfig) (model.LLM, error) { return m, nil })
-		return safe, e
+		helper, e := tools.NewPerplexityWebSearchTool(safe.ChatConfig, func(context.Context, string, string, *config.AppConfig) (model.LLM, error) { return m, nil })
+		if e != nil {
+			return nil, e
+		}
+		safe.Catalog.Groups = map[string]*agent.ToolGroup{"knowledge": {Name: "knowledge", Tools: []tool.Tool{helper}}}
+		return safe, nil
 	}
 	res, e := f.construct(t)
 	if e != nil {

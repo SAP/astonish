@@ -13,6 +13,52 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 )
 
+// Capability probes are how file-first admission rejects OpenShell. An error-only
+// stub would satisfy the interface and incorrectly pass that admission check.
+func TestBotHomeFileFirstCapabilitiesUnsupported(t *testing.T) {
+	gw := &mockGateway{
+		createFn: func(context.Context, CreateSandboxRequest) (*CreateSandboxResponse, error) {
+			t.Fatal("capability discovery must not create a gateway sandbox")
+			return nil, nil
+		},
+		execFn: func(context.Context, string, ExecRequest) (*ExecResponse, error) {
+			t.Fatal("capability discovery must not execute a gateway command")
+			return nil, nil
+		},
+		deleteFn: func(context.Context, string) error {
+			t.Fatal("capability discovery must not delete a gateway sandbox")
+			return nil
+		},
+	}
+	configured := newTestBackendWithGateway(t, gw)
+	for name, backend := range map[string]*OpenShellBackend{
+		"unconfigured": {},
+		"configured":   configured,
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := any(backend)
+			if _, ok := candidate.(sandbox.BotHomeFilesBackend); ok {
+				t.Fatal("OpenShell must not advertise retained file-first support without protected storage and atomic commits")
+			}
+			if _, ok := candidate.(sandbox.BotHomeWorkspaceBackend); ok {
+				t.Fatal("OpenShell must not advertise protected Task workspace support")
+			}
+			if _, ok := candidate.(sandbox.BotHomeWorkspaceScriptBackend); ok {
+				t.Fatal("OpenShell must not advertise protected Task script execution")
+			}
+			if _, ok := candidate.(sandbox.BotHomeBackend); !ok {
+				t.Fatal("existing retained Home provisioning capability changed")
+			}
+			if _, ok := candidate.(sandbox.BotHomeArtifactBackend); !ok {
+				t.Fatal("existing bounded artifact read capability changed")
+			}
+			if _, ok := candidate.(sandbox.Backend); !ok {
+				t.Fatal("ordinary OpenShell session capability changed")
+			}
+		})
+	}
+}
+
 func TestBotHomeOfflineReadLifecycle(t *testing.T) {
 	for _, scenario := range []string{"ok", "mount-mismatch", "exec-error", "cancel", "oversize", "cleanup-error"} {
 		t.Run(scenario, func(t *testing.T) {

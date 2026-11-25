@@ -209,12 +209,21 @@ func (t *botProposalTool) Run(ctx tool.Context, args any) (map[string]any, error
 	}
 	return t.capture(bound, parsed)
 }
-func (t *botProposalTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *botProposalTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) (err error) {
+	// Declaration checks share only immutable bytes with the other tools in this
+	// request. Authorization is still checked on every call, never memoized.
+	defer func() {
+		if err != nil {
+			t.binding.declarations.close()
+			endBotStartupReads(t.binding.owner)
+		}
+	}()
 	if ctx == nil {
 		return store.ErrBotForbidden
 	}
-	bound := botBoundToolContext{Context: ctx, owner: t.binding.bind(ctx)}
-	if err := t.binding.check(bound); err != nil {
+	binding := t.binding.declarations.bind(t.binding, req)
+	bound := botBoundToolContext{Context: ctx, owner: binding.bind(ctx)}
+	if err := binding.check(bound); err != nil {
 		return err
 	}
 	if err := t.botRunnableTool.ProcessRequest(bound, req); err != nil {

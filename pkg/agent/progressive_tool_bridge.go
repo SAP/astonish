@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/agent"
@@ -53,6 +54,12 @@ type deferredToolResolver struct {
 	scope *ChildToolScope
 }
 
+type unresolvedToolTargetError struct{ name string }
+
+func (e *unresolvedToolTargetError) Error() string {
+	return fmt.Sprintf("tool %q was not found in the available catalog", e.name)
+}
+
 func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (tool.Tool, string, error) {
 	name = strings.TrimSpace(name)
 	if r.scope != nil {
@@ -73,6 +80,15 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 	}
 	resolved := resolveIndexedToolName(r.index, name)
 	qualified := strings.Contains(name, "/")
+	// Durable Bot approvals retain qualified A2A/request identities. Resolve
+	// only an exact group/name pair, never a bare-name authority fallback.
+	if qualified && r.index != nil {
+		if slash := strings.LastIndexByte(name, '/'); slash > 0 {
+			if entry := r.index.GetToolEntry(name[slash+1:]); entry != nil && name == entry.GroupName+"/"+entry.Name {
+				resolved = entry.Name
+			}
+		}
+	}
 	if !qualified && r.index != nil {
 		if entry := r.index.FirstPartyToolEntry(resolved); entry != nil {
 			if isToolDisabled(ctx, name, entry.Name) {
@@ -114,7 +130,7 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 	if r.index != nil {
 		if entry := r.index.GetToolEntry(resolved); entry != nil && entry.Tool != nil {
 			if qualified && name != entry.GroupName+"/"+entry.Name {
-				return nil, "", fmt.Errorf("tool %q was not found in the available catalog", name)
+				return nil, "", &unresolvedToolTargetError{name: name}
 			}
 			if isToolDisabled(ctx, name, entry.Name) {
 				return nil, "", fmt.Errorf("tool %q is disabled", entry.Name)
@@ -125,7 +141,7 @@ func (r deferredToolResolver) resolve(ctx agent.ReadonlyContext, name string) (t
 			return entry.Tool, entry.GroupName, nil
 		}
 	}
-	return nil, "", fmt.Errorf("tool %q was not found in the available catalog", name)
+	return nil, "", &unresolvedToolTargetError{name: name}
 }
 
 func isToolDisabled(ctx agent.ReadonlyContext, names ...string) bool {
@@ -187,6 +203,9 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 	}
 	resolved, group, err := b.resolver.resolve(ctx, args.Name)
 	if err != nil {
+		if _, missing := err.(*unresolvedToolTargetError); missing {
+			botRejectedInvocation(ctx, args.Name, args.Arguments, bot.ToolFeedbackUnresolvedTarget)
+		}
 		return nil, err
 	}
 	runner, ok := resolved.(runnableDeferredTool)
@@ -194,13 +213,15 @@ func (b *executeToolBridge) Run(ctx agent.ToolContext, raw any) (map[string]any,
 		return nil, fmt.Errorf("tool %q is not executable", resolved.Name())
 	}
 	if err := common.ValidateToolArguments(resolved, args.Arguments); err != nil {
+		botRejectedInvocation(ctx, BotToolIdentity(group, resolved.Name()), args.Arguments, bot.ToolFeedbackCorrectCall)
 		return nil, err
 	}
-	ctx, err = authorizeBotInvocation(ctx, BotToolIdentity(group, resolved.Name()), args.Arguments)
+	dispatched, err := authorizeBotInvocation(ctx, BotToolIdentity(group, resolved.Name()), args.Arguments)
 	if err != nil {
+		botRejectedCause(ctx, BotToolIdentity(group, resolved.Name()), args.Arguments, err)
 		return nil, err
 	}
-	return runner.Run(ctx, args.Arguments)
+	return runner.Run(dispatched, args.Arguments)
 }
 
 func decodeExecuteToolArgs(raw any) (ExecuteToolArgs, error) {

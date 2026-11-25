@@ -252,6 +252,40 @@ func (r *botRepository) commitBotSkill(ctx context.Context, tx botDraftDB, saved
 	return finish(store.BotSkillUpdated, "")
 }
 
+// rebindBotSkillReport carries an already validated agent final across only the
+// committer-owned learning transition. It cannot repair caller-supplied mismatches
+// or bless a changed candidate, judgment, observation, or employee message.
+func rebindBotSkillReport(q *store.BotRunCommit, validated store.BotReport, before, after *store.BotWorkState) error {
+	if before == nil || before.Protocol != store.BotWorkProtocolAgentLedV1 || after == nil || before.Revision == after.Revision {
+		return nil
+	}
+	if before.SkillState == nil || after.SkillState == nil || before.SkillState.Stage != store.BotSkillLearningStaged || after.SkillState.Receipt == nil || (after.SkillState.Stage != store.BotSkillLearningCommitted && after.SkillState.Stage != store.BotSkillLearningDeferred) {
+		return store.ErrBotInvalid
+	}
+	expected := before.Clone()
+	expected.Revision++
+	expected.SkillState.Stage = after.SkillState.Stage
+	expected.SkillState.Receipt = after.SkillState.Receipt
+	if !reflect.DeepEqual(expected, after) || !reflect.DeepEqual(q.Report.Skill, after.SkillState.Receipt) {
+		return store.ErrBotInvalid
+	}
+	original := q.Report
+	original.Skill, original.Acknowledgment = validated.Skill, validated.Acknowledgment
+	if !reflect.DeepEqual(original, validated) || validated.ValidateEmployeeMessage(q.Status, before) != nil {
+		return store.ErrBotInvalid
+	}
+	if m := validated.EmployeeMessage; m != nil && m.Origin != store.BotEmployeeMessageAgent {
+		return nil
+	}
+	q.Report.Work = store.BuildBotWorkProjection(after)
+	if m := validated.EmployeeMessage; m != nil {
+		message := *m
+		message.SourceDigest = q.Report.EmployeeMessageSourceDigest(q.Status)
+		q.Report.EmployeeMessage = &message
+	}
+	return q.Report.ValidateEmployeeMessage(q.Status, after)
+}
+
 func fmtSkillObservation(i int) string { return "observation:" + strconv.Itoa(i) }
 func safeSkillCommitURL(raw string) bool {
 	u, err := url.Parse(raw)

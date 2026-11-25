@@ -138,7 +138,7 @@ func TestBotRetainedTaskResearchFinal(t *testing.T) {
 	if workspace.revision.Ref.Revision != 16 || workspace.revision.Ref.Digest == f.req.Run.Task.Digest {
 		t.Fatal("Task revision not retained")
 	}
-	if result.Status != store.RunPartial || !store.BotReportIsReadOnlyResult(result.Report) || work.state.EmployeeReviewAttempts != 0 {
+	if result.Status != store.RunPartial || !work.state.HasUsefulPartialReadOnlyEmployeeResult(result.Status, result.Report) || work.state.EmployeeReviewAttempts != 0 {
 		t.Fatalf("lost limitations or added review: %+v", result)
 	}
 	raw, err := json.Marshal(work.state)

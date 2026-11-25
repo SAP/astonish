@@ -38,7 +38,7 @@ func (b *K8sBackend) botWorkspacePod(h *sandbox.BotHomeBinding, name string) *co
 			Command:         []string{"python3", "-I", "-c", "import time; time.sleep(120)"},
 			SecurityContext: &corev1.SecurityContext{RunAsUser: int64Ptr(0), AllowPrivilegeEscalation: botHomeBool(false), ReadOnlyRootFilesystem: botHomeBool(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},
 			Resources:       corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi"), corev1.ResourceCPU: resource.MustParse("500m")}},
-			VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: h.Scope.Key()}},
+			VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: botHomeStorageSubPath(h)}},
 		}},
 		Volumes: []corev1.Volume{{Name: volumeBotHome, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.cfg.HomesPVCName}}}},
 	}}
@@ -76,6 +76,25 @@ func (b *K8sBackend) workspace(ctx context.Context, h *sandbox.BotHomeBinding, q
 	if err != nil {
 		return err
 	}
+	compiled := sandbox.IsCompiledWorkspaceOperation(q["op"])
+	if compiled {
+		target, resolveErr := b.resolveBotHomeFileTarget(ctx, h)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if target != nil {
+			command := botHomeFilesCommand(h, mountBotHomeScope, true, q["op"] == "publish" || q["op"] == "write" || q["op"] == "knowledge-publish")
+			command[2] = "test \"${ASTONISH_POD_UID:-}\" = " + shellQuote(string(target.uid)) + "; " + strings.Replace(command[2], "--internal-scoped-home-files", "--internal-scoped-home-workspace", 1)
+			current, e := b.resolveBotHomeFileTarget(ctx, h)
+			if e != nil {
+				return e
+			}
+			if current == nil || *current != *target {
+				return errors.New("sandbox/k8s: workspace target changed")
+			}
+			return b.executeWorkspaceCommand(ctx, target.name, command, raw, out)
+		}
+	}
 	name := "astn-home-work-" + string(uuid.NewUUID())
 	token, err := b.reserveBotHome(ctx, h, name)
 	if err != nil {
@@ -83,6 +102,12 @@ func (b *K8sBackend) workspace(ctx context.Context, h *sandbox.BotHomeBinding, q
 	}
 	pods := b.client.CoreV1().Pods(b.cfg.Namespace)
 	expected := b.botWorkspacePod(h, name)
+	if compiled {
+		expected.Spec.Containers[0].Image = b.cfg.SandboxImage
+		expected.Spec.Containers[0].Command = []string{"/bin/sleep", "120"}
+		// The existing lock is opened read/write even on read operations.
+		// No public root is created by the compiled workspace reader.
+	}
 	var uid types.UID
 	submitted, settled := false, false
 	defer func() {
@@ -157,6 +182,14 @@ func (b *K8sBackend) workspace(ctx context.Context, h *sandbox.BotHomeBinding, q
 		}
 	}
 	command := []string{"python3", "-I", "-c", botWorkspaceProgram}
+	if compiled {
+		command = botHomeFilesCommand(h, mountBotHome, true, q["op"] == "publish" || q["op"] == "write" || q["op"] == "knowledge-publish")
+		command[2] = strings.Replace(command[2], "--internal-scoped-home-files", "--internal-scoped-home-workspace", 1)
+	}
+	return b.executeWorkspaceCommand(ctx, name, command, raw, out)
+}
+
+func (b *K8sBackend) executeWorkspaceCommand(ctx context.Context, name string, command []string, raw []byte, out any) (err error) {
 	method, u, e := b.buildExecURL(name, command, false, true, true, true)
 	if e != nil {
 		return e
@@ -170,7 +203,15 @@ func (b *K8sBackend) workspace(ctx context.Context, h *sandbox.BotHomeBinding, q
 	input, approval := io.Pipe()
 	defer input.Close()
 	defer approval.Close()
-	go func() { _, _ = approval.Write(append(raw, '\n')) }()
+	stopInput := context.AfterFunc(ctx, func() { _ = input.CloseWithError(ctx.Err()); _ = approval.CloseWithError(ctx.Err()) })
+	defer stopInput()
+	requestWritten := make(chan error, 1)
+	go func() { _, e := approval.Write(append(raw, '\n')); requestWritten <- e }()
+	defer func() {
+		_ = input.Close()
+		_ = approval.Close()
+		err = errors.Join(err, <-requestWritten)
+	}()
 	control := &sandbox.WorkspaceCommitStream{Context: ctx, Output: stdout, Approve: approval}
 	streamErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdin: input, Stdout: control, Stderr: stderr})
 	code, e := decodeExitError(streamErr)
@@ -232,6 +273,10 @@ func validateWorkspaceReceipt(h *sandbox.BotHomeBinding, r *sandbox.BotHomeWorks
 		return err
 	}
 	raw := bytes.TrimSuffix(canonical.Bytes(), []byte("\n"))
+	// Match the retained Python ensure_ascii=False manifest format, including
+	// separators that encoding/json escapes even with EscapeHTML disabled.
+	raw = bytes.ReplaceAll(raw, []byte(`\u2028`), []byte("\u2028"))
+	raw = bytes.ReplaceAll(raw, []byte(`\u2029`), []byte("\u2029"))
 	sum := sha256.Sum256(raw)
 	if size > sandbox.MaxBotHomeWorkspaceBundleBytes || hex.EncodeToString(sum[:]) != r.Digest {
 		return errors.New("sandbox/k8s: workspace manifest digest mismatch")

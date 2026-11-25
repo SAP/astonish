@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,6 +60,10 @@ func botMemoryAttributedUpdateContract(t *testing.T, bots store.BotStore, memori
 	// cannot clear or replace persisted evidence, including on category-only edits.
 	stripped := before
 	stripped.Attribution = nil
+	memories, err = bots.(store.BotMemoryStoreProvider).BotMemoryStore(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	backend := bots.(store.BotMemoryMutationStore)
 	forged := before
 	forged.Snippet = "bypass"
@@ -84,21 +90,11 @@ func botMemoryAttributedUpdateContract(t *testing.T, bots store.BotStore, memori
 	if err != nil || !reflect.DeepEqual(after.Attribution, before.Attribution) || after.SessionID != before.SessionID {
 		t.Fatalf("Entry stripped evidence/scope: %+v %v", after, err)
 	}
-	var metadata map[string]any
-	switch m := memories.(type) {
-	case *personalMemoryStore:
-		row, err := m.client.Memory.Get(ctx, uuid.MustParse(before.ID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		metadata = row.Metadata
-	case *teamMemoryStore:
-		row, err := m.client.Memory.Get(ctx, uuid.MustParse(before.ID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		metadata = row.Metadata
+	cat, err := readBotDiskMemory(ctx, memories.(*botDiskMemoryStore).repo.db, b.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	metadata := cat.Entries[0].Metadata
 	if metadata["custom"] != "preserved" {
 		t.Fatal("category edit lost metadata")
 	}
@@ -168,9 +164,9 @@ func TestBotMemoryRevokedAtCommit(t *testing.T) {
 				}
 				switch m := memories.(type) {
 				case *teamMemoryStore:
-					m.client.Memory.Use(hook)
+					m.client.Bot.Use(hook)
 				case *personalMemoryStore:
-					m.client.Memory.Use(hook)
+					m.client.Bot.Use(hook)
 				}
 				var err error
 				switch op {
@@ -184,20 +180,10 @@ func TestBotMemoryRevokedAtCommit(t *testing.T) {
 				if !errors.Is(err, store.ErrBotForbidden) {
 					t.Fatalf("commit guard: %v", err)
 				}
-				persisted, err := memories.ListBySession(ctx, a.HomeSessionID.String())
+				role = "member"
+				persisted, err := svc.ListBySession(ctx, a.HomeSessionID.String())
 				if err != nil || len(persisted) != 1 || persisted[0].Snippet != "original" {
 					t.Fatalf("rollback: %+v %v", persisted, err)
-				}
-				var index *vectorIndex
-				switch m := memories.(type) {
-				case *teamMemoryStore:
-					index = m.vecIndex
-				case *personalMemoryStore:
-					index = m.vecIndex
-				}
-				cached := index.search([]float32{1, 0}, 10, 0.9)
-				if len(cached) != 1 || cached[0].ID != rows[0].ID {
-					t.Fatalf("rolled-back mutation changed cache: %+v", cached)
 				}
 			})
 		}
@@ -207,17 +193,17 @@ func TestBotMemoryRevokedAtCommit(t *testing.T) {
 func TestBotMemoryMismatchedMutationStore(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
-			_, bots, _, ctx, a, _ := botMemorySearchFixture(t, scope, "vector")
+			_, bots, _, _, a, _ := botMemorySearchFixture(t, scope, "vector")
 			_, _, other, _, _, _ := botMemorySearchFixture(t, scope, "vector")
-			svc, _ := store.NewBotMemoryService(bots, other, a.ID, scope)
-			if err := svc.Add(ctx, store.MemoryEntry{Content: "denied", SessionID: a.HomeSessionID.String()}); !errors.Is(err, store.ErrBotUnsupported) {
+			_, err := store.NewBotMemoryService(bots, other, a.ID, scope)
+			if !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("cross-store mutation: %v", err)
 			}
 		})
 	}
 }
 
-func TestBotMemoryRevokedDuringEmbedding(t *testing.T) {
+func TestBotMemoryRevokedDuringStaging(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		for _, roleAfter := range []string{"viewer", "revoked"} {
 			for _, op := range []string{"add", "update"} {
@@ -238,17 +224,7 @@ func TestBotMemoryRevokedDuringEmbedding(t *testing.T) {
 					}
 					rows, _ := svc.List(ctx, "", 10, 0)
 					entered, release := make(chan struct{}), make(chan struct{})
-					embed := func(context.Context, string) ([]float32, error) {
-						close(entered)
-						<-release
-						return []float32{0, 1}, nil
-					}
-					switch m := memories.(type) {
-					case *teamMemoryStore:
-						m.embedFunc = embed
-					case *personalMemoryStore:
-						m.embedFunc = embed
-					}
+					blockBotMemoryStaging(t, bots, entered, release)
 					done := make(chan error, 1)
 					go func() {
 						if op == "add" {
@@ -260,14 +236,15 @@ func TestBotMemoryRevokedDuringEmbedding(t *testing.T) {
 					select {
 					case <-entered:
 					case <-time.After(5 * time.Second):
-						t.Fatal("embedding not reached")
+						t.Fatal("disk staging not reached")
 					}
 					role.Store(roleAfter)
 					close(release)
 					if err := <-done; !errors.Is(err, store.ErrBotForbidden) {
 						t.Errorf("revoked mutation: %v", err)
 					}
-					persisted, err := memories.ListBySession(ctx, a.HomeSessionID.String())
+					role.Store("member")
+					persisted, err := svc.ListBySession(ctx, a.HomeSessionID.String())
 					if err != nil || len(persisted) != 1 || persisted[0].Snippet != "original" {
 						t.Fatalf("unauthorized persistence: %+v %v", persisted, err)
 					}
@@ -277,7 +254,7 @@ func TestBotMemoryRevokedDuringEmbedding(t *testing.T) {
 	}
 }
 
-func TestBotMemoryReattributedDuringEmbedding(t *testing.T) {
+func TestBotMemoryReattributedDuringStaging(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			_, bots, memories, ctx, a, b := botMemorySearchFixture(t, scope, "vector")
@@ -287,32 +264,19 @@ func TestBotMemoryReattributedDuringEmbedding(t *testing.T) {
 			}
 			rows, _ := svc.List(ctx, "", 10, 0)
 			entered, release := make(chan struct{}), make(chan struct{})
-			embed := func(context.Context, string) ([]float32, error) {
-				close(entered)
-				<-release
-				return []float32{0, 1}, nil
-			}
-			switch m := memories.(type) {
-			case *teamMemoryStore:
-				m.embedFunc = embed
-			case *personalMemoryStore:
-				m.embedFunc = embed
-			}
+			blockBotMemoryStaging(t, bots, entered, release)
 			done := make(chan error, 1)
 			go func() { done <- svc.Update(ctx, rows[0].ID, "stolen", "") }()
 			select {
 			case <-entered:
 			case <-time.After(5 * time.Second):
-				t.Fatal("embedding not reached")
+				t.Fatal("disk staging not reached")
 			}
-			id := uuid.MustParse(rows[0].ID)
-			var err error
-			switch m := memories.(type) {
-			case *teamMemoryStore:
-				err = m.client.Memory.UpdateOneID(id).SetSessionID(b.HomeSessionID).Exec(ctx)
-			case *personalMemoryStore:
-				err = m.client.Memory.UpdateOneID(id).SetSessionID(b.HomeSessionID).Exec(ctx)
-			}
+			disk, _ := bots.(store.BotMemoryStoreProvider).BotMemoryStore(a.ID)
+			err := changeBotDiskMemory(ctx, disk.(*botDiskMemoryStore).repo.db, a.ID, rows[0], func(e *botDiskMemoryEntry) error {
+				e.Row.SessionID = b.HomeSessionID.String()
+				return nil
+			})
 			close(release)
 			if err != nil {
 				t.Fatal(err)
@@ -322,11 +286,11 @@ func TestBotMemoryReattributedDuringEmbedding(t *testing.T) {
 			}
 			// A delete carrying the service's earlier authorized snapshot must
 			// also fail at its constrained write, without an embedding step.
-			err = bots.(store.BotMemoryMutationStore).MutateBotMemory(ctx, memories, a.ID, store.BotMemoryMutation{Kind: store.BotMemoryDelete, Previous: rows[0]})
+			err = bots.(store.BotMemoryMutationStore).MutateBotMemory(ctx, disk, a.ID, store.BotMemoryMutation{Kind: store.BotMemoryDelete, Previous: rows[0]})
 			if !errors.Is(err, store.ErrBotConflict) && !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("reattributed delete: %v", err)
 			}
-			row, err := memories.Get(ctx, rows[0].ID)
+			row, err := disk.Get(ctx, rows[0].ID)
 			if err != nil || row.Snippet != "original" || row.SessionID != b.HomeSessionID.String() {
 				t.Fatalf("stolen memory: %+v %v", row, err)
 			}
@@ -334,12 +298,65 @@ func TestBotMemoryReattributedDuringEmbedding(t *testing.T) {
 	}
 }
 
+type blockedMemoryStaging struct {
+	store.BotContentStaging
+	once             *sync.Once
+	entered, release chan struct{}
+}
+
+func (s blockedMemoryStaging) Put(ctx context.Context, kind store.BotContentKind, revision, size int64, reader io.Reader, guard func(func() error) error) (*store.BotContentRef, error) {
+	ref, err := s.BotContentStaging.Put(ctx, kind, revision, size, reader, guard)
+	if err == nil && kind == store.BotContentMemory {
+		blocked := false
+		s.once.Do(func() { blocked = true })
+		if blocked {
+			close(s.entered)
+			<-s.release
+		}
+	}
+	return ref, err
+}
+func blockBotMemoryStaging(t *testing.T, bots store.BotStore, entered, release chan struct{}) {
+	t.Helper()
+	var codec *botContentCodec
+	switch b := bots.(type) {
+	case *teamBotStore:
+		codec = b.content
+	case *personalBotStore:
+		codec = b.content
+	}
+	original := codec.Open
+	once := &sync.Once{}
+	codec.Open = func(ctx context.Context, id store.BotID) (store.BotContentStaging, error) {
+		disk, err := original(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return blockedMemoryStaging{disk, once, entered, release}, nil
+	}
+	t.Cleanup(func() { codec.Open = original })
+}
+
+func diskMemoryFixture(t *testing.T, repo *botRepository, id store.BotID) (*store.BotMemoryService, store.MemoryStore) {
+	t.Helper()
+	bots, generic := concreteBotMemoryStores(repo)
+	svc, err := store.NewBotMemoryService(bots, generic, id, repo.auth.scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := bots.(store.BotMemoryStoreProvider).BotMemoryStore(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, disk
+}
+
 func concreteBotMemoryStores(repo *botRepository) (store.BotStore, store.MemoryStore) {
 	switch d := repo.db.(type) {
 	case teamBotDB:
-		return &teamBotStore{client: d.client, auth: repo.auth}, &teamMemoryStore{client: d.client, dialect: DialectSQLite}
+		return &teamBotStore{client: d.client, content: d.content, auth: repo.auth}, &teamMemoryStore{client: d.client, dialect: DialectSQLite}
 	case personalBotDB:
-		return &personalBotStore{client: d.client, auth: repo.auth}, &personalMemoryStore{client: d.client, dialect: DialectSQLite}
+		return &personalBotStore{client: d.client, content: d.content, auth: repo.auth}, &personalMemoryStore{client: d.client, dialect: DialectSQLite}
 	}
 	panic("unknown fixture scope")
 }
@@ -464,14 +481,14 @@ func botMemorySearchFixture(t *testing.T, scope store.BotScope, mode string) (*s
 		if err := client.Schema.Create(ctx); err != nil {
 			t.Fatal(err)
 		}
-		bots = &teamBotStore{client: client, auth: auth}
+		bots = &teamBotStore{client: client, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: p.Subject}), auth: auth}
 		memories = &teamMemoryStore{client: client, db: db, dialect: DialectSQLite, table: "memories", ftsTable: fts, embedFunc: embed, vecIndex: newVectorIndex()}
 	} else {
 		client := personalent.NewClient(personalent.Driver(driver))
 		if err := client.Schema.Create(ctx); err != nil {
 			t.Fatal(err)
 		}
-		bots = &personalBotStore{client: client, auth: auth}
+		bots = &personalBotStore{client: client, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: p.Subject}), auth: auth}
 		memories = &personalMemoryStore{client: client, db: db, dialect: DialectSQLite, table: "memories", ftsTable: fts, embedFunc: embed, vecIndex: newVectorIndex()}
 	}
 	if fts != "" {
@@ -508,12 +525,17 @@ func TestBotMemoryPrefilterBeforeTopK(t *testing.T) {
 				}
 				// Earlier, stronger, same-category other-Bot and unlinked distractors;
 				// these swamp both the old 2*K search pool and ordinary list pagination.
+				peerSvc, _ := store.NewBotMemoryService(bots, memories, b.ID, scope)
 				for i := 0; i < 20; i++ {
-					sid := b.HomeSessionID.String()
+					entry := store.MemoryEntry{Content: "needle", Category: "fact", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}}
+					var err error
 					if i%2 == 0 {
-						sid = uuid.NewString()
+						entry.SessionID = uuid.NewString()
+						err = memories.Add(ctx, entry)
+					} else {
+						err = peerSvc.Add(ctx, entry)
 					}
-					if err := memories.Add(ctx, store.MemoryEntry{Content: "needle", Category: "fact", SessionID: sid, Embedding: []float32{1, 0}}); err != nil {
+					if err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -547,7 +569,8 @@ func TestBotMemoryPrefilterBeforeTopK(t *testing.T) {
 				if err != nil || len(rows) != 1 || !strings.Contains(rows[0].Snippet, "allowed") {
 					t.Fatalf("pagination before isolation: %+v %v", rows, err)
 				}
-				backend := memories.(store.BotMemoryPrefilterStore)
+				disk, _ := bots.(store.BotMemoryStoreProvider).BotMemoryStore(a.ID)
+				backend := disk.(store.BotMemoryPrefilterStore)
 				if rows, err := backend.SearchBySessions(ctx, []string{uuid.NewString()}, "needle", 1, 0, ""); err != nil || len(rows) != 0 {
 					t.Fatalf("unknown session widened: %+v %v", rows, err)
 				}
@@ -564,29 +587,29 @@ func TestBotMemoryPrefilterBeforeTopK(t *testing.T) {
 						t.Fatalf("empty list widened: %+v %v", rows, err)
 					}
 				}
-				foreign, err := memories.ListBySession(ctx, b.HomeSessionID.String())
+				foreign, err := peerSvc.ListBySession(ctx, b.HomeSessionID.String())
 				if err != nil || len(foreign) == 0 {
 					t.Fatal(err)
 				}
-				if _, err := svc.Get(ctx, foreign[0].ID); !errors.Is(err, store.ErrBotForbidden) {
+				if got, err := svc.Get(ctx, foreign[0].ID); err != nil || got != nil {
 					t.Fatalf("cross-Bot get: %v", err)
 				}
-				if err := svc.Update(ctx, foreign[0].ID, "stolen", ""); !errors.Is(err, store.ErrBotForbidden) {
+				if err := svc.Update(ctx, foreign[0].ID, "stolen", ""); !errors.Is(err, store.ErrBotNotFound) {
 					t.Fatalf("cross-Bot update: %v", err)
 				}
-				if err := svc.Delete(ctx, foreign[0].ID); !errors.Is(err, store.ErrBotForbidden) {
+				if err := svc.Delete(ctx, foreign[0].ID); !errors.Is(err, store.ErrBotNotFound) {
 					t.Fatalf("cross-Bot delete: %v", err)
 				}
 				if err := svc.Add(ctx, store.MemoryEntry{Content: "crossBot", SessionID: b.HomeSessionID.String()}); !errors.Is(err, store.ErrBotForbidden) {
 					t.Fatalf("cross-Bot add: %v", err)
 				}
-				// Broken FTS cannot fall back to a global search (or quietly empty results).
+				// Generic FTS failure cannot affect disk-authoritative Bot retrieval.
 				if mode != "vector" {
 					if _, err := db.ExecContext(ctx, "DROP TABLE memories_fts"); err != nil {
 						t.Fatal(err)
 					}
-					if _, err := svc.Search(ctx, "needle", 1, 0); err == nil {
-						t.Fatal("FTS error swallowed")
+					if rows, err := svc.Search(ctx, "needle", 1, 0); err != nil || len(rows) != 1 {
+						t.Fatalf("disk retrieval depended on generic FTS: %v", err)
 					}
 				}
 			})

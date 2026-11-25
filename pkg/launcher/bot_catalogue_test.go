@@ -15,7 +15,6 @@ import (
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/tools"
 )
 
 type catalogueContext struct{ botFactoryToolContext }
@@ -44,9 +43,9 @@ func TestBotCatalogueScopesAndRejectsUnsupported(t *testing.T) {
 	for _, entry := range all {
 		byName[entry.Name()] = entry
 	}
-	for _, d := range tools.GetAllFlowToolDeclarations() {
-		if byName[d.Name] == nil {
-			t.Errorf("missing %s", d.Name)
+	for _, name := range []string{"read_file", "filter_json", "shell_command", "web_fetch", "grep_search"} {
+		if byName[name] == nil {
+			t.Errorf("missing %s", name)
 		}
 	}
 	ctx := catalogueContext{botFactoryToolContext{base: context.Background()}}
@@ -65,8 +64,8 @@ func TestBotCatalogueScopesAndRejectsUnsupported(t *testing.T) {
 		t.Fatal("not pinned to owner sandbox")
 	}
 	for _, name := range []string{"distill_flow", "run_flow", "http_request", "browser_navigate"} {
-		if _, err := byName[name].(botRunnableTool).Run(ctx, map[string]any{}); !errors.Is(err, store.ErrBotUnsupported) {
-			t.Fatalf("%s: %v", name, err)
+		if byName[name] != nil {
+			t.Fatalf("%s: installed an unavailable placeholder", name)
 		}
 	}
 	if c.calls != 5 {

@@ -42,8 +42,22 @@ func BotEmailTools(r bot.RunRequest, scope *BotChatScope, backend sandbox.Backen
 	return result, nil
 }
 
+// bindBotScopedEmailTools adds only Bot policy identity and reply evidence to the
+// shared Chat executables. The outer Bot dispatcher recognizes these adapters,
+// binds exact approval fingerprints and journals their effects before execution.
+func bindBotScopedEmailTools(ts []tool.Tool, r bot.RunRequest, services *store.Services) []tool.Tool {
+	sources := &botEmailReplySources{values: map[string]email.ReplySource{}}
+	result := make([]tool.Tool, 0, len(ts))
+	for _, candidate := range ts {
+		shared := candidate.(*scopedChatEmailTool)
+		result = append(result, &botEmailTool{botRunnableTool: shared, request: r, services: services, backend: shared.options.Backend, client: shared.options.Client, sources: sources, shared: shared})
+	}
+	return result
+}
+
 type botEmailTool struct {
 	botRunnableTool
+	shared   *scopedChatEmailTool
 	request  bot.RunRequest
 	services *store.Services
 	backend  sandbox.Backend
@@ -152,6 +166,13 @@ func (t *botEmailTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if err = common.ValidateToolArguments(t, values); err != nil {
 		return nil, err
 	}
+	if t.shared != nil {
+		result, err := t.shared.run(ctx, args, &auth)
+		if err != nil {
+			return nil, err
+		}
+		return t.captureReplySource(a, result), nil
+	}
 	cs := t.services.Credentials
 	if t.request.Bot.Scope == store.BotScopePersonal {
 		cs = t.services.PersonalCredentials
@@ -178,6 +199,10 @@ func (t *botEmailTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	return t.captureReplySource(a, redactor.RedactMap(result)), nil
+}
+
+func (t *botEmailTool) captureReplySource(a email.Account, result map[string]any) map[string]any {
 	if t.Name() == "email_read" {
 		if evidence, ok := result["_reply_source"]; ok && t.sources != nil {
 			encoded, _ := json.Marshal(evidence)
@@ -190,7 +215,7 @@ func (t *botEmailTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		}
 	}
 	delete(result, "_reply_source")
-	return redactor.RedactMap(result), nil
+	return result
 }
 
 // WithBotEmailClassifier binds account identity and every argument (including all
@@ -341,11 +366,27 @@ type scopedChatEmailTool struct {
 }
 
 func (t *scopedChatEmailTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	return t.run(ctx, args, nil)
+}
+
+// auth is private dispatcher evidence, never a model-supplied option. Autonomous
+// calls retain the non-prefixed node operation and its exact reply snapshot.
+func (t *scopedChatEmailTool) run(ctx tool.Context, args any, auth *botEmailAuthorization) (map[string]any, error) {
 	if ctx == nil {
 		return nil, store.ErrBotForbidden
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Autonomous calls must retain the exact-policy BotEmailTools adapter.
-	if _, ok := execution.BotRunIdentityFromContext(ctx); ok {
+	if auth != nil {
+		if auth.target == nil || auth.target.shared != t || auth.check == nil {
+			return nil, store.ErrBotForbidden
+		}
+		if err := auth.check(ctx); err != nil {
+			return nil, err
+		}
+	} else if _, ok := execution.BotRunIdentityFromContext(ctx); ok {
 		authorizer, trusted := execution.BotTurnAuthorizerFromContext(ctx)
 		if !trusted {
 			return nil, store.ErrBotForbidden
@@ -375,11 +416,17 @@ func (t *scopedChatEmailTool) Run(ctx tool.Context, args any) (map[string]any, e
 	if err = common.ValidateToolArguments(t, values); err != nil {
 		return nil, err
 	}
+	if auth != nil && account.Fingerprint() != auth.fingerprint {
+		return nil, store.ErrBotConflict
+	}
 	cs := services.Credentials
 	if personal {
 		cs = services.PersonalCredentials
 	}
-	if cs == nil {
+	if cs == nil || cs.Get(bound, account.Credential) == nil {
+		// Strict Inputs may inject an unavailable credential store rather than
+		// nil. Require the account's same-scope credential before vault upload;
+		// a merged/ambient store must never fill this gap.
 		return nil, store.ErrBotForbidden
 	}
 	redactor := credentials.NewRedactor()
@@ -387,7 +434,12 @@ func (t *scopedChatEmailTool) Run(ctx tool.Context, args any) (map[string]any, e
 	if err = sandbox.SyncSessionCredentialVault(store.WithCredentialStore(bound, cs), t.options.Backend, nil, t.options.SessionID); err != nil {
 		return nil, fmt.Errorf("email vault: %s", redactor.Redact(err.Error()))
 	}
-	result, err := callScopedEmail(bound, t.options.Client, t.options.SessionID, account, tools.ScopedChatEmailPrefix+t.Name(), values, nil, func() error {
+	operation := tools.ScopedChatEmailPrefix + t.Name()
+	var snapshot *email.ReplySnapshot
+	if auth != nil {
+		operation, snapshot = t.Name(), auth.snapshot
+	}
+	result, err := callScopedEmail(bound, t.options.Client, t.options.SessionID, account, operation, values, snapshot, func() error {
 		current, e := scopedEmailAccount(bound, services, personal)
 		if e != nil {
 			return e
@@ -395,9 +447,12 @@ func (t *scopedChatEmailTool) Run(ctx tool.Context, args any) (map[string]any, e
 		if current.Fingerprint() != account.Fingerprint() {
 			return store.ErrBotConflict
 		}
+		if auth != nil {
+			return auth.check(ctx)
+		}
 		return nil
 	}, redactor)
-	if result != nil {
+	if result != nil && auth == nil {
 		delete(result, "_reply_source")
 	}
 	return result, err

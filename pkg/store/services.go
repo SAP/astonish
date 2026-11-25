@@ -31,14 +31,22 @@ type Services struct {
 
 	// Bots and PersonalBots are distinct scoped repositories. Missing private
 	// capability must never fall back to the team repository.
-	Bots         BotStore
-	PersonalBots BotStore
+	// BotRunStateNotify is a nonblocking postcommit routing accelerator, not authority.
+	BotRunStateNotify func(context.Context, BotRunState)
+	Bots              BotStore
+	PersonalBots      BotStore
 	// Scope-specific trusted adapters; nil disables durable mandate authority.
 	BotMandates         BotMandateRuntime
 	PersonalBotMandates BotMandateRuntime
 	BotMandatePolicy    BotMandatePolicyResolver
 	// BotAuthorizedOperationFactory composes the trusted scope-bound issuer; nil fails closed.
 	BotAuthorizedOperationFactory func(context.Context, *Services, BotScope) (BotAuthorizedOperationStore, error)
+	// BotFilesFactory resolves a scope-bound retained file service from request
+	// dependencies. Nil means unavailable; callers must not fall back across scopes.
+	BotFilesFactory func(context.Context, *Services, BotScope) (BotFiles, error)
+	// BotContentStagingFactory is trusted pre-Home/template storage composition.
+	// Nil fails closed; this factory is never exposed as a public tool.
+	BotContentStagingFactory func(context.Context, BotContentScope) (BotContentStaging, error)
 	// BotHomeSetup is trusted startup composition; nil fails closed. Request
 	// clones preserve it, but never derive it from client data.
 	BotHomeSetup BotHomeSetupFunc

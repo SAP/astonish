@@ -451,6 +451,9 @@ func (m *teamMemoryStore) loadResultsByIDs(ctx context.Context, scored []scoredR
 }
 
 func (m *teamMemoryStore) Add(ctx context.Context, entry store.MemoryEntry) error {
+	if err := m.guardGenericMemorySession(ctx, entry.SessionID); err != nil {
+		return err
+	}
 	metadata, err := prepareMemoryAttribution(ctx, teamBotDB{client: m.client}, entry)
 	if err != nil {
 		return err
@@ -546,6 +549,16 @@ func (m *teamMemoryStore) Update(ctx context.Context, id string, content string,
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return fmt.Errorf("invalid memory ID: %w", err)
+	}
+
+	row, err := m.client.Memory.Get(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if row.SessionID != nil {
+		if err := m.guardGenericMemorySession(ctx, row.SessionID.String()); err != nil {
+			return err
+		}
 	}
 
 	update := m.client.Memory.UpdateOneID(uid).

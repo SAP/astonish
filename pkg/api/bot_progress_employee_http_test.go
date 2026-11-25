@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,54 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+// assertProgressReportText counts public text frames, not occurrences of the
+// report identity (which also appears in canonical projection metadata).
+func assertProgressReportText(t *testing.T, history, invocationID, wantText string) {
+	t.Helper()
+	scan := bufio.NewScanner(strings.NewReader(history))
+	scan.Buffer(make([]byte, 4096), 1<<20)
+	var event string
+	var data []string
+	count := 0
+	consume := func() {
+		if event != "text" {
+			return
+		}
+		var payload struct {
+			InvocationID string `json:"invocationId"`
+			Text         string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(strings.Join(data, "\n")), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.InvocationID == invocationID {
+			count++
+			if payload.Text != wantText {
+				t.Fatalf("report text = %q, want %q", payload.Text, wantText)
+			}
+		}
+	}
+	for scan.Scan() {
+		line := scan.Text()
+		switch {
+		case line == "":
+			consume()
+			event, data = "", nil
+		case strings.HasPrefix(line, "event:"):
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	if err := scan.Err(); err != nil {
+		t.Fatal(err)
+	}
+	consume()
+	if count != 1 {
+		t.Fatalf("final text publications = %d, want 1: %s", count, history)
+	}
+}
 
 // Real HTTP admission, owner factory, worker and SQLite persistence. Provider
 // responses and the isolated tool-node transport are controlled, never live.
@@ -55,7 +104,7 @@ func TestBotProgressEmployeeHTTP(t *testing.T) {
 				steps++
 				if steps <= 3 {
 					time.Sleep(1100 * time.Millisecond)
-					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("read-%d", steps), Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}}}, true
+					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("read-%d", steps), Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 				}
 				return &model.LLMResponse{Content: genai.NewContentFromText("The three observations agree: isolated receipt.", "model")}, true
 			}
@@ -77,9 +126,7 @@ func TestBotProgressEmployeeHTTP(t *testing.T) {
 				t.Fatalf("usage reset or duplicated: %+v", run.Usage)
 			}
 			history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-			if strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-				t.Fatalf("final not exactly once: %s", history)
-			}
+			assertProgressReportText(t, history, "bot-report:"+run.ID.String(), "The three observations agree: isolated receipt.")
 		})
 	}
 }

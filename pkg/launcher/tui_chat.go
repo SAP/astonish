@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -72,7 +73,18 @@ func RunChatTUI(ctx context.Context, cfg *ChatConfig) error {
 			return err
 		}
 	}
-	return tui.Run(ctx, tui.Config{Backend: remote, AltBackend: altBackend})
+	err = tui.Run(ctx, tui.Config{Backend: remote, AltBackend: altBackend})
+	var handoff *backend.WorkspaceHandoffError
+	if errors.As(err, &handoff) {
+		local := &CodeConfig{DebugMode: cfg.DebugMode}
+		if altBackend != nil {
+			info := altBackend.Info()
+			local.Provider = info.Provider
+			local.Model = info.Model
+		}
+		return RunCodeWorkspaceHandoff(ctx, local, handoff.Request)
+	}
+	return err
 }
 
 // newPlatformBackend creates a platformBackend for use as the primary or alt

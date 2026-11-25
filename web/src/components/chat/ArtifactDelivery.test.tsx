@@ -97,3 +97,16 @@ it('refetches media for a changed session and shows denial without a direct-url 
   expect(container.querySelector('video')).toBeNull()
   expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:authorized')
 })
+
+it('Bot adapter uses native download and disables unsupported PDF conversion', async () => {
+  const access = { identity: 'bot/run/artifact', freshness: 'sha', preview: true, readPreview: vi.fn().mockResolvedValue({ content: '# Immutable report', truncated: true }), download: vi.fn().mockResolvedValue(undefined) }
+  const view = render(<EmbeddedFileViewer artifact={artifact} fileAccess={access} />)
+  expect(await screen.findByText(/Preview truncated/)).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+  expect(screen.queryByText('Download as PDF')).toBeNull()
+  fireEvent.click(screen.getByText('Download as Markdown'))
+  await waitFor(() => expect(access.download).toHaveBeenCalledTimes(1))
+  expect(saveAs).not.toHaveBeenCalled(); expect(teamFetch).not.toHaveBeenCalled()
+  const signal = access.readPreview.mock.calls[0][0]
+  view.unmount(); expect(signal.aborted).toBe(true)
+})

@@ -63,14 +63,14 @@ func (m *schedulerDispatchModel) GenerateContent(_ context.Context, req *model.L
 				names[d.Name]++
 			}
 		}
-		if names["list_scheduled_jobs"] != 1 || req.Tools["list_scheduled_jobs"] == nil {
-			m.t.Errorf("authorized scheduler missing: declarations=%v dispatch=%v", names, req.Tools)
+		if names["execute_tool"] != 1 || req.Tools["execute_tool"] == nil {
+			m.t.Errorf("authorized scheduler bridge missing: declarations=%v dispatch=%v", names, req.Tools)
 		}
 		if names["shell_command"] != 0 || req.Tools["shell_command"] != nil {
 			m.t.Error("excluded tool exposed")
 		}
-		if _, ok := req.Tools["list_scheduled_jobs"].(*botBoundTool); !ok {
-			m.t.Errorf("scheduler dispatch lost wrapper: %T", req.Tools["list_scheduled_jobs"])
+		if names["list_scheduled_jobs"] != 0 {
+			m.t.Error("scheduler bypassed progressive provider contract")
 		}
 		raw, _ := json.Marshal(req.Config.Tools)
 		if m.firstDeclarations == "" {
@@ -99,10 +99,12 @@ func (m *schedulerDispatchModel) GenerateContent(_ context.Context, req *model.L
 		}
 		if m.calls == 1 {
 			args := map[string]any{"filter": "weather"}
-			if m.callName == "execute_tool" {
-				args = map[string]any{"name": "list_scheduled_jobs", "arguments": args}
+			target := m.callName
+			if target == "execute_tool" {
+				target = "list_scheduled_jobs"
 			}
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "current-list", Name: m.callName, Args: args}}}}, TurnComplete: true}, nil)
+			args = map[string]any{"name": target, "arguments": args}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "current-list", Name: "execute_tool", Args: args}}}}, TurnComplete: true}, nil)
 			return
 		}
 		yield(&model.LLMResponse{Content: genai.NewContentFromText("Schedules inspected; no schedule changed.", "model"), TurnComplete: true}, nil)
@@ -122,6 +124,10 @@ func testBotSchedulerDispatch(t *testing.T, purpose execution.BotMandatePurpose)
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			f, runtime, _ := discoveryMandateFixture(t)
+			// This fixture exercises restored dispatch, not the compaction model.
+			// Keep all eight attempts plus their retained events in the context window;
+			// otherwise a summarization call consumes the scripted first tool call.
+			f.cfg.ContextWindow = 128 * 1024
 			f.req.Bot.Scope = scope
 			f.req.Bot.Revision = 1
 			runtime.saved.Constraints[1].Resources = []string{"list_scheduled_jobs"}

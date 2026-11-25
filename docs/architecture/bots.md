@@ -1,5 +1,181 @@
 # Bots inside Chat
 
+## Objective-owned employee loop
+
+The immutable `BotWorkContract` records what the owner asked to achieve;
+`BotAgentWork` is revisable working context, not a second agent engine or an
+execution grant. Execution uses Chat's shared agent loop, configured catalog and
+tools. After clarification the employee acknowledges the actual assignment,
+inspects observations, changes queries or requests dependent actions as needed,
+and stops when evidence is sufficient for that objective. This is adaptive
+sufficiency, not a news classifier or fixed research checklist. Adequate first
+results can finish immediately; useful partial results disclose material gaps.
+
+Fresh read-only work defaults to a sourced final conversation answer with an
+integrated self-check: no mandatory plan, reviewer or file publication. Explicit
+artifact requests and explicit review contracts keep their durable publication
+paths; historical candidates/reviews are not repinned. Retained files, model
+prose and remote JSON cannot create permission or receipts. Harmless requested
+search counts are bounded by the saved grant; malformed calls receive concrete
+pre-dispatch feedback, while true authority/budget blockers and uncertain writes
+remain fail-closed and must not replay.
+
+Committed owner-run notifications feed bounded priority dispatch independently
+of maintenance, with per-Bot exclusion and joined cancellation/drain. Immutable
+read-operation windows and same-transaction write coalescing reduce bookkeeping,
+not durability or mutable authority checks. Studio and native terminal consume
+the same ordered committed acknowledgment/tool/final transcript in live and
+restored views; uncommitted final text is never promoted to completed work.
+
+See `bot-runtime-evidence.md` and `tests/e2eboot/README.bots-acceptance.md` for the
+controlled-local employee acceptance tier and mandatory exact Chat-comparison,
+historical-envelope provenance, authority and cold-restore evidence bindings.
+These bindings are requirements, not claims that a started integrated run passed.
+
+
+## Current consolidation boundary — 2026-11-23
+
+Bot remains unreleased. Revision 12 records phase 6 complete at sequence 485,
+strict receipt `f2577352711339b7e2fd30b552da5f98318693f99aa935ffc764d1bb7eebd41e`.
+Fresh scoped Go and lint commands exited 0; final baseline/all runs remain in
+flight (`/tmp/bot-final-baseline.json`, `/tmp/bot-final-all.json`). **Final integrated
+acceptance is pending**, not inferred from earlier phase verification.
+
+Ordinary Chat and all normal interactive/scheduled/autonomous Bot executions use
+the shared scoped runtime, catalog and dispatch. Bot adds identity/work memory,
+scheduling, authorization/accounting and publication hooks, not replacement
+ordinary tool implementations. Title-only clarification stays question-only;
+viewing paused/stopped Bots never triggers work. Catalog availability is not a grant.
+Canonical presentation is shared for live, history, reconnect, Studio and terminal,
+with separate Bot menus/lifecycle controls and joined terminal/delegate bookkeeping.
+
+Compiled retained storage avoids overlay Python. Crash cleanup requires exclusive
+root-lifetime and data-lock authority; private revision stages use exactly
+`tasks/<task>/.revisions/.revision-stage-<canonical-UUID>`. Historical `stage-UUID`
+publication IDs, selected revisions and receipts remain intact, including uncertain
+effects; missing receipts, age or PID never confer cleanup/replay authority.
+SQL reconciliation performance is report-only and does not relax the controlled
+15-second delivery limit. Existing content identities and historical captures remain
+preserved; these changes do not authorize a production migration or deletion.
+
+Local Docker/SQLite evidence is not live Kubernetes/PVC or PostgreSQL acceptance:
+those tiers remain user-requested **DEFERRED, NOT PASS**, while mocked adapters are
+NONPHYSICAL. Paid-provider replay, real-provider quality and rollout are not claimed.
+See [current runtime evidence](bot-runtime-evidence.md#current-consolidation-evidence--2026-11-23).
+
+The implementation checkpoints below retain **historical** boundaries/status at
+capture time; statements of pending work there are not the current release ledger.
+No historical receipt is rewritten or retroactively promoted.
+
+## Shared Chat consolidation — historical implementation checkpoint
+
+Bot is unreleased. The target is the new shared Chat implementation, not a
+production migration or compatibility layer for experimental Bot formats.
+
+Title clarification now constructs its agent through `NewScopedChatRuntime`,
+with a restricted question-only catalog. It does not call execution preparation,
+provision a sandbox, discover external tools, or expose the progressive bridge
+before the owner answers. The existing title policy, typed question capture,
+lease checks and model/tool budgets remain authoritative. The title factory
+journey tests cover personal/team questions, custom answers, corrections,
+revocation and stale authority through the actual Chat runner.
+
+`BotPublicationToolsWithReceipts` separates immutable `publish_file` snapshots
+from the temporary Bot-specific ordinary filesystem adapters. It is an additive
+extension: construction performs no file I/O; publication snapshots actual saved
+bytes through the scoped file service. Tests verify that adding it to the shared
+runtime leaves Chat's read/write/edit/find/tree schemas unchanged and that later
+workspace edits cannot alter a captured snapshot. The existing file-tool bundle
+now consumes this same publication extension, avoiding a second implementation.
+
+**Delivery recovery:** availability of a save callback no longer converts an
+unspecified delivery intent into mandatory Markdown delivery. Explicit
+`file_deliverable` still requires the saved receipt and retains all recovery,
+review and authorization checks; ordinary answers and schedule confirmations do
+not acquire an implicit filesystem write requirement.
+
+**Daemon runtime wiring:** production Bot attempts borrow the sandbox backend and
+pool already owned by Chat bootstrap. Attempt cleanup does not remove the retained
+`HomeSessionID`, destroy its compute, or close the borrowed pool. All execution
+modes receive scoped Chat resources; ordinary tools are assembled by the shared
+runtime, while configured research and immutable publication remain Bot additions.
+Production preparation no longer eagerly probes the workspace or substitutes a
+second generic tool catalog. Existing retained-content recovery/setup still prepares
+the authorized session where the backend requires it before transactional file I/O;
+this is not proof of fully lazy physical startup. Title-only clarification remains
+outside execution preparation.
+
+**Controller acceptance is still in progress.** Isolated HTTP schedule confirmation,
+cadence changes, paused listing/targeted resume, scheduled delivery, and owner
+control pass through the shared bridge. The title configured-search fixture currently
+finds an API read-journal mismatch: successful `web_fetch` through `execute_tool`
+without an out-of-band receipt is reported as uncertain rather than read-only.
+The assertion remains intact. These changes do not establish complete Bot/Chat
+capability parity, live Kubernetes, or built-client acceptance; no migration work or
+deletion of existing user data is authorized.
+
+**Prepared autonomous plans:** `TestBotPreparedPlanAnnouncementResume` now proves
+announce/running/verified completion/Results with exact approvals in personal/team
+scopes through the production factory, API adapter, shared file/shell dispatcher
+and SQLite. `TestBotPreparedPlanVerifierFailureResume` retains exit-7 evidence and
+rejects Results without replay. The trusted content-backed prepared record, not
+editable `PLAN.md`, owns candidate/evidence recovery; the verifier and following
+mirror each need their own exact approval. Missing-engine recovery is rejected
+before effects, published work is not replayed, and ordinary exact-action resume
+remains unchanged. Mandatory runtime prepared-plan/review/engine/store gates reject
+missing or skipped parents and leaves. This controlled factory/API-dispatcher
+slice is not HTTP routes, scheduler or physical backend acceptance; all remaining
+runtime/controller requirements stay blocked. See [prepared plan boundaries](bot-basic-chat-tools.md#prepared-autonomous-plans-exact-approval-and-recovery).
+
+## Database runtime content and retained workspace selection
+
+The scoped Ent adapters, including transactions, retain the typed `bot_record_v2`
+string wrapper for exact metadata integers. Runtime families (Bot session events,
+runs/work/reports/checkpoints and prepared plans, approvals, activity/outbox) now
+write format 3: an exclusive inline byte payload with byte count and SHA-256, not
+a disk reference. Format-2 runtime records remain readable with full immutable-file
+validation; unknown formats and mixed/missing payloads fail closed. Database reads
+need no workspace opener; legacy reads do. No read silently migrates records or
+falls back from corrupt bytes to a newer file.
+
+Bot events reuse ordinary Chat's ADK serializers and scoped Session/SessionEvent
+storage. Ordered history is replayed before caller-requested history filtering, so
+early state deltas and pending tool-call/owner-answer correlation survive reload.
+Physical Bot/session/event linkage, SQL leases/status/expiry, action digests and
+prepared-plan opaque byte leaves remain validated. Ordinary Chat storage is unchanged.
+
+Instructions/persona, goals, tracked items, Task/Skill revisions, knowledge and
+independent intake/templates remain format-2 disk content. Workspace files and
+actual artifact references are not moved into runtime blobs. Older binaries cannot
+consume format 3; rollback requires a compatible backup or a dual-reader binary.
+
+The production daemon installs a trusted `BotHomeFilesBackend` on the Ent store.
+Scoped Bot and Bot-session codecs retain a synchronized capability getter and bind
+`GetBot` to the exact Ent transaction. `bot_content_home_v1` pins the registered
+Home's original org/team/owner identity, not personal staging's schema namespace.
+Explicit Home setup and production preparation call `SelectBotHomeConfiguration`.
+Despite its name, this now selects all supported Bot-owned typed record categories,
+including the Task publication's nested candidate, not just versions and goals.
+It fences the Bot row, validates logical records, copies and verifies destination
+bytes, then atomically selects all SQL refs and routing metadata. Immutable rows
+retain their IDs, timestamps, hashes and coordination fields. Failure rolls back
+SQL selection and preserves staging. Selected refs never fall back to staging;
+new workspace codec writes use Home. Format-3 runtime rows remain unchanged in
+SQL while their nested artifact references remain in the validation inventory.
+Independent template/intake ownership is unchanged.
+See [retained content selection](bot-retained-content-selection.md).
+
+**This is not completed file-first Bot acceptance.** The selector does not clean
+staging. Generic Bot memory SQL/FTS/source-record elimination and compact file-backed
+MEMORY.md remain pending; do not infer their removal from the new Bot codecs.
+Legacy inline development formats are rejected without migration or automatic
+wiping. DDL marker 4 remains DDL-only. Public Bot backup/restore currently rejects
+legacy inline and reference-only SQL archives until the file-first archive protocol
+lands; older archive evidence below does not certify this format. Existing physical
+Docker Home/workspace foundation checks passed separately; they do not establish
+end-to-end disk cutover, UI delivery, dedicated PostgreSQL or physical Kubernetes
+acceptance. This documentation update records implementation, not new live evidence.
+
 ## Agent-led work contracts (runtime activation pending)
 
 The additive `agent_led_v1` work protocol distinguishes employee judgment from
@@ -71,7 +247,7 @@ binding and live acceptance are subsequent phases, not proven capabilities yet.
 
 ## Durable work requirements (implementation in progress)
 
-First claims now pin the saved assignment, charter and goal identities/revisions into the private run JSON envelope. `BotWorkStore` reads and updates this state only under the current scoped worker identity, live lease and revision CAS. Reads return detached copies; updates cannot replace source requirements or rewrite an already submitted candidate. Public run JSON does not expose the private work record. Existing reports and in-flight legacy continuations are not retroactively assessed.
+First claims pin the saved assignment, charter and goal identities/revisions into private disk-backed run content; SQL retains its typed reference and coordination state. `BotWorkStore` reads and updates this state only under the current scoped worker identity, live lease and revision CAS. Reads return detached copies; updates cannot replace source requirements or rewrite an already submitted candidate. Public run JSON does not expose the private work record. Existing reports and in-flight legacy continuations are not retroactively assessed.
 
 The bounded state machine is preparing → producing → candidate-ready → reviewing → accepted, with reviewing → repair-ready → repairing → candidate-ready for at most two corrections. Missing evidence or limits produce blocked work; recovery records interruption without replaying effects. Criteria retain source references and exclusions of unrelated goals require reasons. Assignment and charter cannot be excluded. The assessment input limit is 32 KiB of source contract, 64 criteria and 1 MiB of candidate content; oversized sources are retained with an explicit blocker, never silently dropped to obtain a pass.
 
@@ -184,6 +360,10 @@ Phase 2 evidence does not establish physical home mount/delete/recovery, Bot-saf
 **Phase 3 recorded passed; release acceptance remains open.** The controlled runtime journey covers public activation, two scheduled runs, SQLite reopen, approval continuation and one threshold notification. Post-answer task continuation and recipient-bound email replies now have named source tests; they are not absent. Detached tutorial/human handoff, unsafe Fleet composition and confirmed provider-delivery receipts remain capability gaps. See [release traceability](bot-release-checklist.md), rather than the historical tracker language in [runtime continuation notes](bot-runtime-remaining.md). A skipped test or empty selector never closes a release gate.
 
 `daemon.newProductionBotWorker` composes the backend/pool, owner-scoped model resolver and production capability adapters independently of messaging configuration. `NewBotWorker` installs activation readiness, constructs `launcher.NewBotChatAgentFactory` and `api.BotChatRuntimeAdapter`, and wraps both start and resume with usage capture. `BotWorker.Poll` authenticates active owners through live organization/team membership, rather than inheriting a viewer's principal or accepting a job owner as authority. Team execution strips personal services; provider settings are read strictly through platform/org/team layers, without fallback after a failed scoped read. The persistent home model pin is authoritative.
+
+### Shared Chat construction
+
+`pkg/launcher/chat_construction.go` is the supplied-dependency construction core used by ordinary Chat, interactive Bots and autonomous Bots. It constructs the same ChatAgent/secret vault, wires capability-neutral delegation, clones child compactors, and initializes lexical or semantic catalogs from supplied tools. Bot construction explicitly selects its scoped capability recipe; there is no context-key diversion through `NewWiredChatAgent`. Bot auxiliary compaction still binds the accountable owner's metered model, and catalog entries are wrapped before indexing. No host bootstrap or extra tool registration occurs in the shared core. Resource acquisition, Bot prompt additions, authorization and guarded tool adapters remain recipe-specific; this is not a claim that all Bot capabilities are unified.
 
 The production resource factory obtains its advertised workspace from `$HOME` inside the already home-bound physical sandbox, not a hard-coded `/workspace` or the daemon environment. Docker retains `/root`; explicitly approved absolute paths outside HOME remain unchanged and can be ephemeral. Workspace discovery fails closed on execution failure or malformed paths. A tool's `created:true` is not independent retained-artifact evidence and does not promote a Partial run to success.
 
@@ -421,4 +601,70 @@ Fresh-target SQLite acceptance covers personal/team drafts, immutable versions, 
 
 ## Current verification
 
+### Production sandbox-template handoff acceptance
+
+Ordinary Chat bootstrap exposes its complete `ChatFactoryResult.SharedResources`;
+production Bot assembly borrows it via `productionBotChatResources`. Template and
+session registries, backend and pool retain identity; only the per-attempt bundle
+wrapper is copied. Missing/incomplete dependencies fail closed, never a pool-only
+reconstruction or host/global fallback, and attempt cleanup cannot close the borrowed
+pool. Selected sandbox-template dispatch retains the exact owner session and scope;
+catalog presence does not grant permission or enable scheduled work.
+
+The strict runtime `runtime-template-wiring` gate and controller `controller-daemon`
+inventory both require `TestProductionBotTemplateAssemblySource`,
+`TestProductionBotTemplateBootstrapCapture`,
+`TestProductionBotTemplateMissingBundleFailsClosed`, and
+`TestProductionBotTemplateWiringScopedDispatch` from
+`pkg/daemon/bot_template_wiring_test.go`, including every personal/team ×
+ordinary/interactive/autonomous dispatch leaf. Missing/skipped or wrong-package
+parent/leaf evidence fails even after a successful package exit. Listing and selected
+switch execute the shared tools; save is discovery coverage only. Exact grant,
+changed-argument, foreign-scope, revoked-turn and replay negatives cannot cause
+additional backend work. Mock bootstrap and controlled transport/authorization
+establish dependency and dispatcher behavior, not physical tenant isolation,
+Docker/Kubernetes lifecycle, scheduler admission or hostile-root protection. These
+sandbox templates are distinct from the reviewed Bot-definition templates above.
+See [Bot basic Chat tools](bot-basic-chat-tools.md#production-sandbox-template-dependency-handoff)
+for the exact evidence boundary. Full configured capability/authority, production
+composition and cross-backend requirements remain blocked independently of this tier.
+
 Phases 1–6 are recorded passed by the execution owner; Phase 7 remains running. Historical commands/results above establish only their named boundary. Current controlled memory/cursor passes, physical Docker component evidence and all remaining release gates are in [Bot release checklist](bot-release-checklist.md). This documentation reconciliation checks evidence references and whitespace; it does not rerun runtime acceptance. Kubernetes remains unconfigured, full lint remains failing outside the modified Bot scope (not waived), and local rerun `221e8d1f` has no claimed outcome at this cutoff. Complete feature acceptance is not established by phase bookkeeping or catalog presence.
+
+
+## Explicit runtime storage cutover
+
+New Bot runtime records use format 3 in existing database JSON columns. Workspace
+codecs remain format 2: persona, skills, memory, goals, task assets and artifacts
+stay on disk. GET, Snapshot, Home setup and worker claims do not migrate records.
+
+An authenticated Bot owner (including team scope, with current membership) can run:
+
+```sh
+astonish bots migrate-storage BOT_UUID --scope personal --revision N \
+  --confirm personal:BOT_UUID --dry-run --limit 100 --json
+astonish bots migrate-storage BOT_UUID --scope personal --revision N \
+  --confirm personal:BOT_UUID --limit 100 --json
+```
+
+The remote command uses `POST /api/studio/bots/{botID}/runtime-storage/migrate?scope=personal|team`
+with only `expected_revision`, `dry_run`, and `limit` (1–200). Actor, owner and Home
+paths cannot be supplied. Reports expose typed family counts, revision and
+`complete`/`busy`, never payloads or physical paths. HTTP 409 with `busy: true`
+means active run ownership, runnable runs, or pending dispatch/delivery prevent
+cutover; the command does not pause, stop, activate or reclaim anything.
+
+Dry-run verifies at most the selected batch without writing. Repeat explicit
+requests until `complete: true`; format-3 records are skipped. Each batch is atomic:
+a missing/corrupt legacy object rolls back that batch while prior batches remain.
+The root revision/sequence/fence and exact old record envelope are compared during
+replacement. Session initial-state metadata and every Bot-linked session (including
+delegates) are included. IDs, cursors, timestamps, statuses, approvals and replay
+receipts stay unchanged. Legacy files are retained; migration does not expand GC.
+
+This is an additive **representation** migration, with no DDL or Ent regeneration.
+Older binaries cannot read format 3. Rollback requires a compatible dual-reader
+binary or restoration of a verified pre-cutover backup, not simply downgrading
+an executable. Inventory current work and obtain the required backup/restart
+approval before any real retained Bot cutover. Local disposable tests do not
+constitute PostgreSQL, live daemon or paid-provider migration evidence.

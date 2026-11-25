@@ -8,6 +8,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
@@ -26,6 +27,20 @@ import (
 	"testing"
 	"time"
 )
+
+type employeeOperationsHomeBackend struct {
+	*regressionHomeBackend
+	pending bool
+	session string
+}
+
+func (b *employeeOperationsHomeBackend) VerifySessionDestroyed(_ context.Context, id string) error {
+	b.session = id
+	if b.pending {
+		return fmt.Errorf("old session still terminating")
+	}
+	return nil
+}
 
 type employeeOperationsModel struct {
 	workerTestModel
@@ -118,11 +133,17 @@ func TestBotEmployeeOperationsHTTPAcceptance(t *testing.T) {
 				}
 				registry := execution.NewBotTurnAuthorizationRegistry(10)
 				defer registry.Close()
-				physical := &priorityHTTPBackend{}
+				physical := &employeeOperationsHomeBackend{regressionHomeBackend: newRegressionHomeBackend(t)}
+				if err := db.InstallBotContentHomeBackend(physical); err != nil {
+					t.Fatal(err)
+				}
 				worker, err := NewBotWorker(BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: physical, Pool: workerTestPool{}, WorkerID: "routine-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 					return llm, nil
-				}, Prepare: func(_ context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-					return &launcher.BotChatSafeResources{WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+					s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+						return productionBotFiles(c, physical, svc, scope)
+					}
+					return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 				}})
 				if err != nil {
 					t.Fatal(err)
@@ -143,26 +164,23 @@ func TestBotEmployeeOperationsHTTPAcceptance(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-					t.Fatal(err)
-				}
-				b, err = repo.Get(auth, b.ID)
+				b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 					t.Fatal(err)
 				}
-				var memories store.MemoryStore
+				var memories *store.BotMemoryService
 				var memoryBefore *store.MemorySearchResult
 				if scenario == "memory_deny" {
-					memories = ods.ForTeam(team.Slug).Memories()
+					genericMemory := ods.ForTeam(team.Slug).Memories()
 					if scope == store.BotScopePersonal {
-						memories = ods.ForUser(owner.String()).Memories()
+						genericMemory = ods.ForUser(owner.String()).Memories()
+					}
+					memories, err = store.NewBotMemoryService(repo, genericMemory, b.ID, scope)
+					if err != nil {
+						t.Fatal(err)
 					}
 					if err = memories.Add(auth, store.MemoryEntry{Content: "Prefers Celsius", Category: "fact", SessionID: b.HomeSessionID.String(), CreatedBy: owner.String()}); err != nil {
 						t.Fatal(err)

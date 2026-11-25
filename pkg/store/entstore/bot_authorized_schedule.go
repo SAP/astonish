@@ -98,29 +98,37 @@ func boundedSchedule(tr store.TriggerSpec, now time.Time, l store.BotMandateLimi
 	if l.Validate() != nil {
 		return store.ErrBotForbidden
 	}
-	until := now.AddDate(1, 0, 1)
-	prev, err := triggerNext(tr, now)
+	// Parse once per validation, not once per occurrence (up to 600,000 times).
+	// Retain the timezone on the cursor for the same DST/cron-union semantics.
+	// This reuses only parsed syntax, never authority or a validation result.
+	schedule, loc, err := triggerSchedule(tr)
 	if err != nil {
 		return err
 	}
-	day := ""
+	until := now.AddDate(1, 0, 1)
+	prev := schedule.Next(now.In(loc))
+	if prev.IsZero() {
+		return store.ErrBotInvalid
+	}
+	var dayYear, dayNumber int
 	count := int64(0)
 	for i := 0; i < 600000; i++ {
 		if prev.After(until) {
 			return nil
 		}
-		d := prev.UTC().Format("2006-01-02")
-		if d != day {
-			day = d
+		utc := prev.UTC()
+		year, day := utc.Year(), utc.YearDay()
+		if year != dayYear || day != dayNumber {
+			dayYear, dayNumber = year, day
 			count = 0
 		}
 		count++
 		if count > l.MaxDailyRuns {
 			return store.ErrBotForbidden
 		}
-		next, err := triggerNext(tr, prev)
-		if err != nil {
-			return err
+		next := schedule.Next(prev)
+		if next.IsZero() {
+			return store.ErrBotInvalid
 		}
 		if !next.After(prev) || next.Sub(prev).Seconds() < float64(l.MinScheduleIntervalSeconds) {
 			return store.ErrBotForbidden

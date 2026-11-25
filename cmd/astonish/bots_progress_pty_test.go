@@ -9,8 +9,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -43,11 +41,14 @@ func testBotProgressPTY(t *testing.T, scope store.BotScope) {
 	state.Progress = &store.BotProgressProjection{SchemaVersion: 1, BotID: bot.ID, RunID: state.RunID, SessionID: state.SessionID, Revision: 7, Phase: store.BotProgressEvaluating}
 	base := "/api/studio/bots/" + bot.ID.String()
 	var fixtureMu sync.Mutex
-	rows := []session.Event{{Actions: session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: state}}}}
-	// A raw autonomous tool must not appear in the terminal.
-	toolRow := session.Event{Author: "model"}
-	toolRow.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "private_tool_should_not_render", Args: map[string]any{"secret": "private-argument"}}}}}
-	rows = append(rows, toolRow)
+	type presentation struct {
+		kind string
+		data any
+	}
+	rows := []presentation{{store.BotRunStateKey, state}}
+	// Autonomous private tool rows have no public presentation: only their
+	// cursor is delivered, never private_tool_should_not_render or its args.
+	rows = append(rows, presentation{"cursor", map[string]any{}})
 	wake := make(chan struct{}, 8)
 	var posts atomic.Int32
 	snapshot := func() store.BotSnapshot {
@@ -67,12 +68,12 @@ func testBotProgressPTY(t *testing.T, scope store.BotScope) {
 		} else {
 			state.Progress.Reason = ""
 		}
-		rows = append(rows, session.Event{Actions: session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: state}}})
+		rows = append(rows, presentation{store.BotRunStateKey, state})
 		if final {
-			e := session.Event{Author: "model"}
-			e.Content = genai.NewContentFromText("The reviewed assignment result is ready.", "model")
-			e.InvocationID = "bot-report:" + state.RunID.String()
-			rows = append(rows, e)
+			rows = append(rows, presentation{"text", map[string]any{
+				"text":         "The reviewed assignment result is ready.",
+				"invocationId": "bot-report:" + state.RunID.String(),
+			}})
 		}
 		fixtureMu.Unlock()
 		wake <- struct{}{}
@@ -110,12 +111,11 @@ func testBotProgressPTY(t *testing.T, scope store.BotScope) {
 			sent := 0
 			for {
 				fixtureMu.Lock()
-				pending := append([]session.Event(nil), rows[sent:]...)
+				pending := append([]presentation(nil), rows[sent:]...)
 				fixtureMu.Unlock()
 				for _, row := range pending {
 					sent++
-					raw, _ := json.Marshal(row)
-					fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", bot.HomeSessionID, sent, raw)
+					writeBotCanonicalPTYFrame(t, w, bot.HomeSessionID, state.RunID, sent, fmt.Sprintf("progress:%d", sent), row.kind, row.data)
 				}
 				w.(http.Flusher).Flush()
 				select {

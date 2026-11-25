@@ -15,7 +15,9 @@ const (
 
 // BotCleanupRequest identifies precisely what the runtime verified. Fence is the
 // current bot fence AFTER lifecycle cancellation; RunFence is the old worker's
-// lease fence. Home must match the entire opaque binding, not a session name.
+// lease fence. Run teardown may have no Home because title clarification and
+// other pre-provisioning turns still own a physical run session. When present,
+// Home must match the entire opaque binding. Home cleanup always requires it.
 // This is an internal capability contract, not a public HTTP request body.
 type BotCleanupRequest struct {
 	Kind             BotCleanupKind

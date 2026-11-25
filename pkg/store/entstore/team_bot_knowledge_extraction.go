@@ -39,9 +39,9 @@ func (d teamBotDB) lockKnowledgeRoot(c context.Context, id uuid.UUID) error {
 	}
 	return nil
 }
-func decodeTeamKnowledge(row *teament.BotKnowledgeExtraction) (*knowledgeEnvelope, error) {
-	var v knowledgeEnvelope
-	if e := botDecode(row.Data, &v); e != nil {
+func (d teamBotDB) decodeTeamKnowledge(c context.Context, row *teament.BotKnowledgeExtraction) (*knowledgeEnvelope, error) {
+	v, e := d.contentCodec().decodeKnowledge(c, row.BotID, row.ID, row.Data)
+	if e != nil {
 		return nil, e
 	}
 	s := v.Record.Input.Source
@@ -51,24 +51,24 @@ func decodeTeamKnowledge(row *teament.BotKnowledgeExtraction) (*knowledgeEnvelop
 	if row.LeaseExpiresAt != nil && !v.Lease.ExpiresAt.Equal(*row.LeaseExpiresAt) {
 		return nil, store.ErrBotInvalid
 	}
-	return &v, nil
+	return v, nil
 }
 func (d teamBotDB) readKnowledge(c context.Context, b, id uuid.UUID) (*knowledgeEnvelope, error) {
 	v, e := d.client.BotKnowledgeExtraction.Query().Where(kb.BotIDEQ(b), kb.IDEQ(id)).Only(c)
 	if e != nil {
 		return nil, teamBotError(e)
 	}
-	return decodeTeamKnowledge(v)
+	return d.decodeTeamKnowledge(c, v)
 }
 func (d teamBotDB) findKnowledge(c context.Context, s store.BotKnowledgeExtractionSource) (*knowledgeEnvelope, error) {
 	v, e := d.client.BotKnowledgeExtraction.Query().Where(kb.BotIDEQ(s.BotID), kb.RunIDEQ(s.RunID), kb.OutcomeDigestEQ(s.OutcomeDigest), kb.SourceSequenceEQ(s.Sequence), kb.SourceVersionEQ(s.Version)).Only(c)
 	if e != nil {
 		return nil, teamBotError(e)
 	}
-	return decodeTeamKnowledge(v)
+	return d.decodeTeamKnowledge(c, v)
 }
 func (d teamBotDB) saveKnowledge(c context.Context, v knowledgeEnvelope, expected int64) error {
-	data, e := botJSONMap(v)
+	data, e := d.contentCodec().encodeKnowledge(c, v)
 	if e != nil {
 		return e
 	}

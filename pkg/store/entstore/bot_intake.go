@@ -75,7 +75,6 @@ func (r *botRepository) ReviewAdaptiveJob(ctx context.Context, id uuid.UUID) (*s
 
 type botIntakeDB interface {
 	reviewChat(context.Context, uuid.UUID, uuid.UUID) error
-	insertCarryoverMemory(context.Context, uuid.UUID, uuid.UUID, string, string) error
 	reviewAdaptive(context.Context, uuid.UUID, uuid.UUID, time.Time) (*store.ScheduledJob, error)
 	pauseAdaptive(context.Context, uuid.UUID, time.Time) error
 }
@@ -99,14 +98,6 @@ func (d teamBotDB) reviewChat(ctx context.Context, id, actor uuid.UUID) error {
 		return store.ErrBotForbidden
 	}
 	return nil
-}
-func (d personalBotDB) insertCarryoverMemory(ctx context.Context, sid, actor uuid.UUID, content, category string) error {
-	_, err := d.client.Memory.Create().SetSessionID(sid).SetCreatedBy(actor).SetChunkText(content).SetCategory(category).SetTsv(content).Save(ctx)
-	return personalBotError(err)
-}
-func (d teamBotDB) insertCarryoverMemory(ctx context.Context, sid, actor uuid.UUID, content, category string) error {
-	_, err := d.client.Memory.Create().SetSessionID(sid).SetCreatedBy(actor).SetChunkText(content).SetCategory(category).SetTsv(content).Save(ctx)
-	return teamBotError(err)
 }
 func (d personalBotDB) reviewAdaptive(ctx context.Context, id, actor uuid.UUID, expected time.Time) (*store.ScheduledJob, error) {
 	row, err := d.client.ScheduledJob.Get(ctx, id)
@@ -207,26 +198,14 @@ func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, 
 			return nil, err
 		}
 	}
-	db, ok := tx.(botIntakeDB)
-	if !ok {
-		return nil, store.ErrBotUnsupported
-	}
 	for _, m := range carry.Memories {
 		if strings.TrimSpace(m.Content) == "" {
 			return nil, store.ErrBotInvalid
 		}
-		if err := db.insertCarryoverMemory(ctx, rec.Bot.HomeSessionID, rec.Bot.OwnerID, m.Content, m.Category); err != nil {
-			return nil, err
-		}
 	}
-	if carry.Summary != "" {
-		if err := db.insertCarryoverMemory(ctx, rec.Bot.HomeSessionID, rec.Bot.OwnerID, carry.Summary, "promotion_summary"); err != nil {
-			return nil, err
-		}
-	}
-	// Text artifact snapshots remain durable, inspectable carryover in activity;
-	// never pretend that an unconfined source path is a Bot-home artifact.
-	payload, err := json.Marshal(map[string]any{"operation": operation, "source_id": source, "actor_id": rec.Bot.OwnerID, "artifacts": carry.Artifacts})
+	// Carryover remains in the file-backed lifecycle activity, never generic
+	// memory rows or full-text indexes. Source chat memory is unchanged.
+	payload, err := json.Marshal(map[string]any{"operation": operation, "source_id": source, "actor_id": rec.Bot.OwnerID, "artifacts": carry.Artifacts, "carryover": carry})
 	if err != nil {
 		return nil, err
 	}

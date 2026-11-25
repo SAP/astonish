@@ -21,6 +21,9 @@ import (
 
 // Exercise concrete adapters, including the ADK flat and typed fallback shapes.
 func TestMandatedHTTPOutcomeThroughRunner(t *testing.T) {
+	// Model the test-owned node network namespace, never the user's daemon.
+	tools.SetAllowPrivateNetworks(true)
+	defer tools.SetAllowPrivateNetworks(false)
 	for _, tc := range []struct{ name, method string }{
 		{"http_request", ""}, {"http_request", "GET"}, {"http_request", "HEAD"}, {"http_request", "status_503"},
 		{"web_fetch", ""}, {"web_fetch", "status_503"}, {"web_fetch", "progressive"},
@@ -48,10 +51,19 @@ func TestMandatedHTTPOutcomeThroughRunner(t *testing.T) {
 				_, _ = w.Write([]byte(`{"weather":"clear","astonish_bot_outcome":{"Verified":true}}`))
 			}))
 			defer server.Close()
+			// Keep public URL validation intact; only the test-owned transport
+			// routes the public fixture origin into the loopback server.
+			oldTransport := http.DefaultTransport
+			transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
+			}}
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = oldTransport; transport.CloseIdleConnections() }()
+			const sourceURL = "http://93.184.216.34"
 			f := newBotFactoryFixture(t)
 			id := f.req.Policy.Identity()
 			f.req.Policy, _ = execution.NewRunPolicy(execution.RunPolicySpec{Identity: id, Level: execution.AutonomySupervised, AllowedTools: []string{tc.name}})
-			origin, _ := tools.RoutineReadOrigin(server.URL)
+			origin, _ := tools.RoutineReadOrigin(sourceURL)
 			runtime := &factoryMandateRuntime{saved: execution.BotMandate{Ref: execution.BotMandateRef{ID: uuid.New(), BotID: id.BotID, OwnerID: id.ActorID, OrgSlug: id.OrgSlug, TeamSlug: id.TeamSlug, Revision: 1}, Purpose: execution.BotMandatePurposeTask, ExpiresAt: time.Now().Add(time.Hour), Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{"task"}}, {Action: execution.CapabilityToolExecute, Resources: []string{tc.name, origin}}}, Limits: execution.BotMandateLimits(config.DefaultBotMandateConfig())}}
 			auth, err := execution.VerifyBotMandateAuthorization(context.Background(), runtime, runtime.saved.Ref, execution.BotMandatePurposeTask)
 			if err != nil {
@@ -70,7 +82,7 @@ func TestMandatedHTTPOutcomeThroughRunner(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.req.Budget = meter
-			args := map[string]any{"url": server.URL + "/weather"}
+			args := map[string]any{"url": sourceURL + "/weather"}
 			if tc.name == "http_request" {
 				args["method"] = method
 			}
@@ -84,7 +96,7 @@ func TestMandatedHTTPOutcomeThroughRunner(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return &BotChatSafeResources{Tools: catalog, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}}, Tools: catalog, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			factory, err := NewBotChatAgentFactory(f.cfg)
 			if err != nil {

@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -54,7 +55,7 @@ func (m *titleResearchHTTPModel) GenerateContent(_ context.Context, request *mod
 		return response
 	}
 	m.step++
-	name, args := launcher.BotConfiguredSearchToolName, map[string]any{"facet": "overview"}
+	name, args := "perplexity_web_search", map[string]any{"query": "AI News", "max_results": 8, "detail_level": "detailed", "recency": "week", "search_mode": "news"}
 	if m.step == 2 {
 		name, args = "web_fetch", map[string]any{"url": m.url}
 	}
@@ -66,7 +67,11 @@ func (m *titleResearchHTTPModel) GenerateContent(_ context.Context, request *mod
 			}
 			yield(&model.LLMResponse{Content: genai.NewContentFromText(text, "model"), TurnComplete: true}, nil)
 		} else {
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}}}}, nil)
+			call := &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}
+			if _, direct := request.Tools[name]; !direct {
+				call.Name, call.Args = "execute_tool", map[string]any{"name": name, "arguments": args}
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
 		}
 	}
 }
@@ -175,6 +180,27 @@ func TestTitleResearchReviewRequiresCapturedDetail(t *testing.T) {
 // tool assembly -> exact selected search -> real HTTP detail. No mandate pins
 // are forged. The missing-engine fixture reports the blocker and independently
 // checks that the production episode rejects detail retrieval.
+// These fixture adapters supply retained temporary files and a lazy tool node,
+// while leaving the actual production Prepare closure and catalog assembly intact.
+// No Docker process or paid provider is started.
+type titleProductionHomeBackend struct{ *regressionHomeBackend }
+
+func (*titleProductionHomeBackend) Kind() sandbox.BackendKind { return sandbox.BackendKindDocker }
+
+func (b *titleProductionHomeBackend) EnsureBotHome(c context.Context, s sandbox.BotHomeScope) (*sandbox.BotHomeBinding, error) {
+	h, err := b.regressionHomeBackend.EnsureBotHome(c, s)
+	if h != nil {
+		h.Backend = sandbox.BackendKindDocker
+	}
+	return h, err
+}
+
+type titleProductionPool struct{ titleSkillPool }
+
+func (*titleProductionPool) Alias(string, string) {}
+
+func (*titleProductionPool) SetBotHome(string, *sandbox.BotHomeBinding) error { return nil }
+
 func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, missing := range []bool{false, true} {
@@ -225,9 +251,21 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 				registry := execution.NewBotTurnAuthorizationRegistry(16)
 				defer registry.Close()
 				mdl := &titleResearchHTTPModel{url: detail.URL, missing: missing}
-				worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, TurnRegistry: registry, MandatePolicy: policy, Sandbox: lifecycleHTTPBackend{}, Pool: workerTestPool{}, WorkerID: "title-search", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+				homeBackend := &titleProductionHomeBackend{newRegressionHomeBackend(t)}
+				productionPool := &titleProductionPool{titleSkillPool: titleSkillPool{url: detail.URL}}
+				productionWorker, release, err := newProductionBotWorker(backend, &config.AppConfig{}, &launcher.ChatCatalogResources{Backend: homeBackend, Pool: productionPool}, registry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+				defer productionWorker.Stop()
+				productionPrepared := false
+				worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, TurnRegistry: registry, MandatePolicy: policy, Sandbox: homeBackend, Pool: workerTestPool{}, WorkerID: "title-search", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 					return mdl, nil
 				}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+					s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+						return productionBotFiles(c, homeBackend, svc, scope)
+					}
 					// Production scope contains these same stores; no permissive test read policy.
 					s.Services.PlatformNetworkPolicies = backend.(interface {
 						PlatformNetworkPolicies() store.NetworkPolicyStore
@@ -269,7 +307,42 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 							t.Fatal("missing engine allowed detail")
 						}
 					}
-					return &launcher.BotChatSafeResources{Tools: reads, Research: episode, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+					if current, e := productionBotResearchEpisode(c, q); e != nil || current == nil {
+						t.Fatalf("production episode preparation: %v", e)
+					}
+					if !missing {
+						prepared, err := productionWorker.config.Prepare(c, q, s)
+						if err != nil {
+							return prepared, err
+						}
+						productionPrepared = true
+						// The local detail endpoint uses the existing confined read
+						// classifier; this is not a second catalog registration.
+						prepared.PolicyRuntime.Classifier = launcher.WithBotMandatedReadClassifier(prepared.PolicyRuntime.Classifier, reads)
+						// Substitute only the external provider. Keep the exact production
+						// catalog, episode, isolation guard and publication resources.
+						prepared.ProviderFactory = func(c context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {
+							if !provider.IsConfinedProviderSecrets(c) || p != "selected-search" || m != "sonar" || cfg.Providers[p]["api_key"] != "owned-fixture-only" {
+								t.Fatal("production shared search lost owner configuration")
+							}
+							return configuredSearchEngineFixture{calls: &searchCalls, url: "https://example.com/ai-news"}, nil
+						}
+						return prepared, nil
+					}
+					local, e := launcher.BotScopedChatConfig(c, s)
+					if e != nil {
+						return nil, e
+					}
+					return &launcher.BotChatSafeResources{ChatConfig: local, ProviderFactory: func(c context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {
+						if !provider.IsConfinedProviderSecrets(c) || p != "selected-search" || m != "sonar" || cfg.Providers[p]["api_key"] != "owned-fixture-only" {
+							t.Fatal("shared executable lost confined owner configuration")
+						}
+						grant := q.Mandate.Authorization.Snapshot().PublicResearch
+						if grant == nil || grant.Subject != "AI News" || grant.MaxCalls != 12 {
+							t.Fatal("owner research grant changed")
+						}
+						return configuredSearchEngineFixture{calls: &searchCalls, url: "https://example.com/ai-news"}, nil
+					}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{url: detail.URL}, Groups: nil}, Tools: reads, Research: episode, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 				}})
 				if err != nil {
 					t.Fatal(err)
@@ -313,6 +386,10 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 				if err != nil || waiting.Status != store.RunWaitingApproval || waiting.TitleConfirmation == nil || waiting.TitleConfirmation.State != store.BotTitleConfirmationWaiting || searchCalls != 0 || detailCalls != 0 || mdl.step != 0 {
 					t.Fatalf("research occurred before confirmation: run=%+v search=%d detail=%d step=%d err=%v", waiting, searchCalls, detailCalls, mdl.step, err)
 				}
+				questionBot, err := repo.Get(auth, created.ID)
+				if err != nil || questionBot.Home.ID != uuid.Nil {
+					t.Fatalf("question-only title provisioned a physical Home: %+v %v", questionBot, err)
+				}
 				approvals, err := repo.ListApprovals(auth, created.ID, store.BotPage{})
 				if err != nil || len(approvals) != 1 || approvals[0].Interaction == nil {
 					t.Fatalf("missing title question: %+v %v", approvals, err)
@@ -346,7 +423,7 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 					if searchCalls != 0 || detailCalls != 0 || saved.Report.Summary != "Configured search unavailable; no detail source fetched. Configure scoped search before researching AI News." {
 						t.Fatalf("untruthful blocker: %+v search=%d fetch=%d", saved, searchCalls, detailCalls)
 					}
-				} else if saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 {
+				} else if !productionPrepared || saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 {
 					t.Fatalf("research failed: %+v search=%d fetch=%d", saved, searchCalls, detailCalls)
 				}
 			})

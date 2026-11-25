@@ -5,18 +5,24 @@ import StudioChat from '../StudioChat'
 import BotWorkspace from '../bots/BotWorkspace'
 import * as snapshots from '../../api/botSnapshot'
 import * as reviews from '../../api/botReviews'
+import { BotAPIError } from '../../api/bots'
 import type { BotSnapshot } from '../../api/botSnapshot'
 vi.mock('../../api/botSnapshot', () => ({ getBotSnapshot: vi.fn(), readBotActivityPage: vi.fn().mockResolvedValue({ activity: [] }), writeBotReadCursor: vi.fn() }))
 vi.mock('../../api/botReviews', async original => ({ ...await original<typeof reviews>(), listControlProposals: vi.fn().mockResolvedValue({ proposals: [] }), sendBotMessage: vi.fn() }))
-import { connectBotEvents, type BotStreamOptions, type BotTranscript } from '../../api/botEvents'
+import { connectBotEvents, type BotStreamOptions } from '../../api/botEvents'
 import * as teamContext from '../../api/teamContext'
-import { connectChat, connectChatStream, fetchCacheDiagnostics, fetchKnowledgeDebug, fetchSessionHistory } from '../../api/studioChat'
+import { connectChat, connectChatStream, fetchCacheDiagnostics, fetchKnowledgeDebug, fetchSessionHistory, fetchSessionStatus, patchSessionModel } from '../../api/studioChat'
 
 vi.mock('../../api/botEvents', () => ({ connectBotEvents: vi.fn().mockReturnValue(new AbortController()) }))
 vi.mock('../../api/bots', async original => ({ ...await original<typeof import('../../api/bots')>(), listBots: vi.fn().mockResolvedValue({ bots: [] }) }))
 
+function canonicalFrame(type: string, data: Record<string, unknown>, row: string, cursor: number, part = 0): string {
+  return `id: bot-home:${cursor}\nevent: ${type}\ndata: ${JSON.stringify({ ...data, _projection: { event_id: `bot-home/${row}/${part}`, session_id: 'bot-home', run_id: '11111111-1111-4111-8111-111111111111', turn_id: data.invocationId, cursor: `bot-home:${cursor}` } })}\n\n`
+}
+
 // Mock all API modules
-vi.mock('../../api/studioChat', () => ({
+vi.mock('../../api/studioChat', async original => ({
+  ...await original<typeof import('../../api/studioChat')>(),
   fetchSessions: vi.fn().mockResolvedValue([]),
   fetchSessionHistory: vi.fn().mockResolvedValue([]),
   deleteSession: vi.fn().mockResolvedValue({}),
@@ -51,7 +57,8 @@ vi.mock('../HomePage', () => ({ default: () => <div data-testid="home-page">Home
 vi.mock('../chat/FleetStartDialog', () => ({ default: () => null }))
 vi.mock('../chat/FleetTemplatePicker', () => ({ default: () => null }))
 vi.mock('../chat/FleetExecutionPanel', () => ({ default: () => null }))
-vi.mock('../chat/chatTypes', () => ({
+vi.mock('../chat/chatTypes', async original => ({
+  ...await original<typeof import('../chat/chatTypes')>(),
   getAgentColor: () => '#888',
 }))
 
@@ -64,12 +71,184 @@ vi.mock('remark-gfm', () => ({
 }))
 
 describe('StudioChat', () => {
+  it.each(['personal', 'team'] as const)('renders format-3 public conversation once live and after reload (%s)', async scope => {
+    // SQL encoding is exercised by the Go fixture; the browser receives only
+    // existing canonical Chat projections. Use the real transport here.
+    const transport = await vi.importActual<typeof import('../../api/botEvents')>('../../api/botEvents')
+    const onSend = vi.fn().mockResolvedValue(undefined)
+    const renderReview = vi.fn((_kind: 'approval' | 'proposal', id: string) => <div data-review-id={id}>Which markets?</div>)
+    const question = canonicalFrame('bot_review', { kind: 'approval', reviewId: 'q', invocationId: 'turn', eventId: 'question' }, 'question', 1)
+    const answer = canonicalFrame('user_message', { text: 'U.S. markets and major indexes', invocationId: 'turn', eventId: 'answer' }, 'answer', 2)
+    const acknowledgement = canonicalFrame('text', { text: 'I will research U.S. markets.', invocationId: 'turn' }, 'ack', 3)
+    const tools = canonicalFrame('tool_call', { id: 'search', name: 'perplexity_web_search', args: { query: 'U.S. major indexes' }, invocationId: 'turn' }, 'search', 3)
+      + canonicalFrame('tool_result', { id: 'search', name: 'perplexity_web_search', result: { text: 'Major indexes rose' }, invocationId: 'turn' }, 'search-result', 4)
+    const final = canonicalFrame('text', { text: 'Major indexes rose. Source: https://fixture.test/index', invocationId: 'final-turn' }, 'final', 5)
+      + canonicalFrame('turn_complete', { invocationId: 'final-turn' }, 'final', 6, 1)
+    const replay = 'id: bot-home:6\nevent: replay_complete\ndata: {"persisted":true}\n\n'
+    let writer!: ReadableStreamDefaultController<Uint8Array>
+    const fetch = vi.spyOn(teamContext, 'teamFetch')
+    const mount = () => {
+      vi.mocked(connectBotEvents).mockImplementationOnce(transport.connectBotEvents)
+      fetch.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({ start(c) { writer = c } })))
+      return render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope, readOnly: false, onSend, renderReview }} />)
+    }
+    const push = (text: string) => act(async () => writer.enqueue(new TextEncoder().encode(text)))
+    let view = mount()
+    try {
+      await push('id: bot-home:0\nevent: replay_complete\ndata: {"persisted":true}\n\n')
+      expect(screen.queryByTestId('agent-message-bubble')).not.toBeInTheDocument()
+      await push(question)
+      expect(screen.getByText('Which markets?')).toBeVisible()
+      await push(answer)
+      expect(screen.getByText('U.S. markets and major indexes')).toBeVisible()
+      expect(screen.queryByText('I will research U.S. markets.')).not.toBeInTheDocument()
+      await push(acknowledgement)
+      expect(screen.getByText('I will research U.S. markets.')).toBeVisible()
+      expect(screen.queryByText(/Major indexes rose/)).not.toBeInTheDocument()
+      await push(tools + final + replay)
+      const assertConversation = () => {
+        for (const text of ['U.S. markets and major indexes', 'I will research U.S. markets.', 'Major indexes rose. Source: https://fixture.test/index']) expect(screen.getAllByText(text)).toHaveLength(1)
+        expect(view.container.textContent!.indexOf('U.S. markets')).toBeLessThan(view.container.textContent!.indexOf('I will research'))
+        expect(onSend).not.toHaveBeenCalled()
+        expect(connectChat).not.toHaveBeenCalled()
+        expect(fetchSessionHistory).not.toHaveBeenCalled()
+      }
+      assertConversation()
+      await push(final + replay)
+      assertConversation()
+      view.unmount()
+      view = mount()
+      await push(question + answer + acknowledgement + tools + final + replay)
+      assertConversation()
+    } finally {
+      view.unmount()
+      fetch.mockRestore()
+    }
+  })
+
+  it('preserves a focused unfinished composer draft while an active Chat stream completes', async () => {
+    vi.mocked(fetchSessionStatus).mockResolvedValueOnce({ sessionId: 'draft-stream', running: true })
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({ id: 'draft-stream', title: 'Draft stream', messages: [] })
+    const view = render(<StudioChat theme="dark" initialSessionId="draft-stream" hideSidebar />)
+    await waitFor(() => expect(connectChatStream).toHaveBeenCalled())
+    const stream = vi.mocked(connectChatStream).mock.calls.at(-1)![0]
+    const composer = await screen.findByTestId('chat-input')
+    expect(composer).not.toBeDisabled()
+    composer.focus()
+    fireEvent.change(composer, { target: { value: 'Unfinished next instruction' } })
+    const sendsBefore = vi.mocked(connectChat).mock.calls.length
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    expect(vi.mocked(connectChat).mock.calls).toHaveLength(sendsBefore)
+    await act(async () => { stream.onEvent('text', { text: 'Current turn complete' }); stream.onEvent('done', {}) })
+    expect(screen.getByTestId('chat-input')).toBe(composer)
+    expect(composer).toHaveFocus()
+    expect(composer).toHaveValue('Unfinished next instruction')
+    view.unmount()
+  })
+
+  it.each(['send', 'reconnect', 'bot'] as const)('renders mixed public activity through %s', async mode => {
+    vi.mocked(connectChatStream).mockClear()
+    vi.mocked(fetchSessionStatus).mockResolvedValueOnce({ sessionId: 'mixed', running: mode === 'reconnect' })
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({ id: 'mixed', title: 'Mixed', messages: [] })
+    const onSend = vi.fn()
+    const view = render(<StudioChat theme="dark" initialSessionId="mixed" hideSidebar {...(mode === 'bot' ? { botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend } } : {})} />)
+    if (mode === 'send') {
+      fireEvent.change(await screen.findByTestId('chat-input'), { target: { value: 'Compare public evidence' } })
+      fireEvent.keyDown(screen.getByTestId('chat-input'), { key: 'Enter', code: 'Enter' })
+      await waitFor(() => expect(connectChat).toHaveBeenCalled())
+    } else {
+      await waitFor(() => expect(mode === 'bot' ? connectBotEvents : connectChatStream).toHaveBeenCalled())
+    }
+    const stream = mode === 'send' ? vi.mocked(connectChat).mock.calls.at(-1)![0] : mode === 'reconnect' ? vi.mocked(connectChatStream).mock.calls.at(-1)![0] : vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    await act(async () => {
+      stream.onEvent('text', { text: 'Mixed public acknowledgement' })
+      stream.onEvent('system', { content: 'Public mixed execution boundary' })
+      stream.onEvent('tool_call', { id: 'read', name: 'read_file', args: { path: '/workspace/public-receipt.txt' } })
+      stream.onEvent('tool_result', { id: 'read', name: 'read_file', result: { content: 'Public receipt' } })
+      stream.onEvent('subtask_progress', { event_type: 'delegation_start', batch_id: 'batch', tasks: [{ task_id: 'research', name: 'Mixed research', description: 'Compare evidence' }] })
+      stream.onEvent('subtask_progress', { event_type: 'task_start', batch_id: 'batch', task_id: 'research', task_name: 'Mixed research' })
+      stream.onEvent('subtask_progress', { event_type: 'task_complete', batch_id: 'batch', task_id: 'research', task_name: 'Mixed research', status: 'success' })
+      stream.onEvent('subtask_progress', { event_type: 'plan_snapshot', snapshot: { plan_id: 'plan', goal: 'Mixed verification plan', revision: 1, sequence: 1, document: { lifecycle: 'approved' }, steps: [{ name: 'check', description: 'Verify public receipt', status: 'complete' }] } })
+      stream.onEvent('error', { message: 'Public recoverable error' })
+      stream.onEvent('text', { text: 'Mixed presentation complete' })
+      stream.onEvent('turn_complete', {})
+    })
+    expect(view.container).toHaveTextContent('Mixed public acknowledgement')
+    expect(view.container).toHaveTextContent('Mixed presentation complete')
+    expect(screen.getByTestId('tool-activity-block')).toBeVisible()
+    expect(screen.getByText('Mixed research')).toBeVisible()
+    expect(screen.getByText('Mixed verification plan')).toBeVisible()
+    expect(onSend).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it.each(['send', 'reconnect'] as const)('applies the same ordered presentation events through %s', async mode => {
+    vi.mocked(connectChatStream).mockClear()
+    vi.mocked(fetchSessionStatus).mockResolvedValueOnce({ sessionId: 'shared-events', running: mode === 'reconnect' })
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({ id: 'shared-events', title: 'Shared events', messages: [] })
+    const view = render(<StudioChat theme="dark" initialSessionId="shared-events" hideSidebar />)
+    await waitFor(() => expect(fetchSessionStatus).toHaveBeenCalledWith('shared-events'))
+    if (mode === 'send') {
+      fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'Exercise shared events' } })
+      fireEvent.keyDown(screen.getByTestId('chat-input'), { key: 'Enter', code: 'Enter' })
+      await waitFor(() => expect(connectChat).toHaveBeenCalled())
+    } else {
+      await waitFor(() => expect(connectChatStream).toHaveBeenCalled())
+    }
+    const stream = mode === 'send'
+      ? vi.mocked(connectChat).mock.calls.at(-1)![0]
+      : vi.mocked(connectChatStream).mock.calls.at(-1)![0]
+    await act(async () => {
+      stream.onEvent('text', { text: 'First ' })
+      stream.onEvent('thinking', { text: 'Temporary progress' })
+      stream.onEvent('text', { text: 'segment' })
+      stream.onEvent('system', { content: 'Shared system boundary' })
+      stream.onEvent('flow_output', { content: 'Saved flow output' })
+      stream.onEvent('text', { text: 'Final answer' })
+      stream.onEvent('done', {})
+      stream.onDone?.()
+    })
+    expect(screen.getAllByTestId('agent-message-bubble').map(node => node.textContent)).toEqual([
+      'First segment', 'Saved flow output', 'Final answer',
+    ])
+    expect(screen.getByText('Shared system boundary')).toBeVisible()
+    expect(screen.queryByText('Temporary progress')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument()
+    expect(screen.queryByText(/stopped responding unexpectedly/)).not.toBeInTheDocument()
+    view.unmount()
+  })
+
+  it('does not pin a model or dispatch a wizard command while replaying', async () => {
+    vi.mocked(connectChatStream).mockClear()
+    vi.mocked(patchSessionModel).mockClear()
+    vi.mocked(fetchSessionStatus).mockResolvedValueOnce({ sessionId: 'replay-only', running: true })
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({ id: 'replay-only', title: 'Replay only', messages: [] })
+    const view = render(<StudioChat theme="dark" initialSessionId="replay-only" hideSidebar />)
+    await waitFor(() => expect(connectChatStream).toHaveBeenCalled())
+    const stream = vi.mocked(connectChatStream).mock.calls.at(-1)![0]
+    await act(async () => {
+      stream.onEvent('session', { sessionId: 'replay-only', isNew: true })
+      stream.onEvent('drill_redirect', { wizard_system_prompt: 'Never execute replayed instructions', hint: 'replayed' })
+      stream.onEvent('fleet_plan_redirect', { wizard_system_prompt: 'Never execute replayed instructions', hint: 'replayed' })
+      stream.onEvent('done', {})
+    })
+    expect(connectChat).not.toHaveBeenCalled()
+    expect(patchSessionModel).not.toHaveBeenCalled()
+    view.unmount()
+  })
   const defaultProps = {
     theme: 'dark',
   }
 
   beforeEach(() => {
     vi.mocked(connectChat).mockClear()
+    vi.mocked(connectChatStream).mockClear()
+    vi.mocked(connectBotEvents).mockClear()
+    // Bot watches bypass ordinary status/history reads, and active reconnects
+    // bypass history. Clear unconsumed one-shot responses between examples so
+    // they cannot select another test's transport or restored transcript.
+    vi.mocked(fetchSessionStatus).mockReset().mockResolvedValue({ sessionId: '', running: false })
+    vi.mocked(fetchSessionHistory).mockReset().mockResolvedValue({ id: '', title: '', messages: [] })
     vi.mocked(fetchKnowledgeDebug).mockReset().mockResolvedValue({ sessionId: 'sess-debug', invocationId: 'inv-1', knowledge: null, tools: null })
     vi.mocked(fetchCacheDiagnostics).mockClear()
     const storage = new Map<string, string>()
@@ -155,12 +334,14 @@ describe('StudioChat', () => {
     await waitFor(() => expect(reviews.sendBotMessage).toHaveBeenCalledTimes(1))
     expect(reviews.sendBotMessage).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 6, version: 3 }), 'Pause these updates', expect.any(String), undefined)
     await waitFor(() => expect(input).toHaveValue(''))
-    vi.mocked(reviews.sendBotMessage).mockRejectedValueOnce(new Error('Bot changed; reload and review before retrying'))
+    vi.mocked(reviews.sendBotMessage).mockRejectedValueOnce(new BotAPIError(409, 'Bot changed; reload and review before retrying'))
     fireEvent.change(input, { target: { value: 'Concurrent instruction' } })
     fireEvent.click(screen.getByTestId('send-button'))
-    expect(await screen.findByRole('alert', { name: '' })).toHaveTextContent('may still be running')
+    expect(await screen.findByRole('alert', { name: '' })).toHaveTextContent('refresh and review the current saved action before trying again')
     expect(input).toHaveValue('Concurrent instruction')
-    await act(async () => { stream.onEvent('bot_operation', applied) })
+    await act(async () => { stream.onEvent('bot_operation', applied); stream.onState?.('reconnecting', 'cursor'); stream.onState?.('live', 'cursor') })
+    expect(screen.getByRole('alert', { name: '' })).toHaveTextContent('refresh and review the current saved action before trying again')
+    expect(input).toHaveValue('Concurrent instruction')
     expect(reviews.sendBotMessage).toHaveBeenCalledTimes(2)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -324,7 +505,7 @@ describe('StudioChat', () => {
     expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
   })
 
-  it.each(['personal', 'team'] as const)('keeps %s Bot acknowledgement visible without tool activity live and on replay', async scope => {
+  it.each(['personal', 'team'] as const)('keeps %s Bot acknowledgement visible with public tool activity live and on replay', async scope => {
     const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope, readOnly: false, onSend: vi.fn(), renderReview: () => <span>Your answer: Local release notes</span> } }
     for (const replay of [false, true]) {
       const view = render(<StudioChat {...props} />)
@@ -335,20 +516,35 @@ describe('StudioChat', () => {
         stream.onEvent('text', { text: "I'll read the isolated release notes.", invocationId: 'producer' })
         stream.onEvent('tool_call', { name: 'read_file', args: { path: '/isolated/receipt.txt' } })
         if (replay) {
-          stream.onEvent('tool_result', { name: 'read_file', result: 'PRIVATE_RELEASE_SOURCE_BODY_MUST_NOT_APPEAR' })
+          stream.onEvent('tool_result', { name: 'read_file', result: 'Public release receipt' })
           stream.onEvent('text', { text: 'Title task understood.', invocationId: 'final' })
         }
       })
       const acknowledgement = screen.getByText("I'll read the isolated release notes.")
       expect(acknowledgement).toBeVisible()
-      expect(screen.queryByTestId('tool-activity-block')).not.toBeInTheDocument()
-      expect(view.container).not.toHaveTextContent('/isolated/receipt.txt')
-      expect(view.container).not.toHaveTextContent('PRIVATE_RELEASE_SOURCE_BODY_MUST_NOT_APPEAR')
+      expect(screen.getByTestId('tool-activity-block')).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('tool-activity-block').querySelector('button')!)
+      fireEvent.click(screen.getByRole('button', { name: /read_file/ }))
+      expect(view.container).toHaveTextContent('/isolated/receipt.txt')
+      if (replay) expect(view.container).toHaveTextContent('Public release receipt')
       expect(screen.getByText('Your answer: Local release notes').compareDocumentPosition(acknowledgement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       if (replay) expect(acknowledgement.compareDocumentPosition(screen.getByText('Title task understood.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       else expect(screen.queryByText('Title task understood.')).not.toBeInTheDocument()
       view.unmount()
     }
+  })
+
+  it('renders a durable pending approval when its transcript review event was missed and deduplicates a later event', async () => {
+    const renderReview = vi.fn((_kind, id) => <span>Question card: {id}</span>)
+    const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'bot-home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, onSend: vi.fn(), pendingApprovalIds: ['approval-from-snapshot'], renderReview } }
+    const view = render(<StudioChat {...props} />)
+    expect(await screen.findByText('Question card: approval-from-snapshot')).toBeVisible()
+    expect(renderReview).toHaveBeenCalledWith('approval', 'approval-from-snapshot')
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    act(() => stream.onEvent('bot_review', { kind: 'approval', reviewId: 'approval-from-snapshot', eventId: 'durable-row' }))
+    expect(screen.getAllByText('Question card: approval-from-snapshot')).toHaveLength(1)
+    view.rerender(<StudioChat {...props} botThread={{ ...props.botThread, pendingApprovalIds: [] }} />)
+    expect(screen.getAllByText('Question card: approval-from-snapshot')).toHaveLength(1)
   })
 
   it('passes an upgraded question payload through the canonical review without duplicating the row', async () => {
@@ -407,6 +603,25 @@ describe('StudioChat', () => {
     expect(screen.queryByTestId('user-message')).not.toBeInTheDocument()
   })
 
+  it.each(['draft', 'paused'] as const)('blocks native, paste and dropped attachments in %s while retaining owner text', async status => {
+    const onSend = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', status, readOnly: false, toolFree: true, onSend }} />)
+    await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
+    act(() => vi.mocked(connectBotEvents).mock.calls.at(-1)![0].onState?.('live', 'bot-home:1'))
+    const input = screen.getByTestId('chat-input')
+    expect(input).toBeEnabled()
+    expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
+    const file = new File(['hello'], 'blocked.txt', { type: 'text/plain' })
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } })
+    fireEvent.paste(input, { clipboardData: { items: [{ kind: 'file', getAsFile: () => file }] } })
+    fireEvent.drop(input, { dataTransfer: { files: [file] } })
+    expect(screen.queryByText('blocked.txt')).not.toBeInTheDocument()
+    expect(onSend).not.toHaveBeenCalled()
+    fireEvent.change(input, { target: { value: 'Discuss my setup' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Discuss my setup', undefined, []))
+  })
+
   it.each(['native', 'paste'])('submits Bot %s attachments and retains them on failure', async mode => {
     const onSend = vi.fn().mockRejectedValueOnce(new Error('Upload failed')).mockResolvedValue(undefined)
     const { container } = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend }} />)
@@ -431,7 +646,8 @@ describe('StudioChat', () => {
     let source!: ReadableStreamDefaultController<Uint8Array>
     const body = new ReadableStream<Uint8Array>({ start(controller) { source = controller } })
     const fetch = vi.spyOn(teamContext, 'teamFetch').mockResolvedValueOnce(new Response(body))
-    const frame = `id: bot-home:1\nevent: transcript\ndata: ${JSON.stringify(budgetStop.event)}\n\n`
+    const frame = canonicalFrame('text', { text: budgetStop.event.content.parts[0].text, invocationId: budgetStop.event.invocationId }, budgetStop.event.id, 0)
+      + canonicalFrame('turn_complete', { invocationId: budgetStop.event.invocationId }, budgetStop.event.id, 1, 1)
     const replayComplete = 'id: bot-home:1\nevent: replay_complete\ndata: {"persisted":true}\n\n'
     const send = async (text: string) => act(async () => { source.enqueue(new TextEncoder().encode(text)) })
     const view = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
@@ -451,7 +667,7 @@ describe('StudioChat', () => {
       if (mode === 'live') await send('id: bot-home:0\nevent: replay_complete\ndata: {"persisted":true}\n\n')
       await send(frame + (mode === 'restored' ? replayComplete : ''))
       assertReport()
-      await send(frame + replayComplete)
+      await send(canonicalFrame('turn_complete', { invocationId: budgetStop.event.invocationId }, budgetStop.event.id, 1, 1) + replayComplete)
       assertReport()
       expect(screen.queryByText(/Bot transcript:/)).not.toBeInTheDocument()
     } finally {
@@ -467,14 +683,15 @@ describe('StudioChat', () => {
     const body = new ReadableStream<Uint8Array>({ start(controller) { source = controller } })
     const fetch = vi.spyOn(teamContext, 'teamFetch').mockResolvedValueOnce(new Response(body))
     const encoder = new TextEncoder()
-    const rows: BotTranscript[] = [
-      { ID: 'owner', Author: 'user', InvocationID: 'interactive', Content: { role: 'user', parts: [{ text: 'Schedule weather' }] } },
-      { ID: 'call', InvocationID: 'interactive', Content: { role: 'model', parts: [{ functionCall: { name: 'schedule_job', args: {} } }] } },
-      { ID: 'result', InvocationID: 'interactive', Content: { role: 'user', parts: [{ functionResponse: { name: 'schedule_job', response: { status: 'pending' } } }] } },
-      { ID: 'ack', InvocationID: 'interactive', Content: { role: 'model', parts: [{ text: 'Schedule requested' }] } },
-      ...[1, 2, 3].map(n => ({ ID: `report-${n}`, InvocationID: `bot-report:00000000-0000-4000-8000-00000000000${n}`, Author: 'assistant', Content: { role: 'model', parts: [{ text: 'Identical weather summary' }] } })),
+    const rows = [
+      { type: 'user_message', data: { text: 'Schedule weather', invocationId: 'interactive' } },
+      { type: 'cursor', data: {} },
+      { type: 'cursor', data: {} },
+      { type: 'text', data: { text: 'Schedule requested', invocationId: 'interactive' } },
+      ...[1, 2, 3].map(n => ({ type: 'text', data: { text: 'Identical weather summary', invocationId: `bot-report:00000000-0000-4000-8000-00000000000${n}` } })),
     ]
-    const frame = (index: number) => `id: bot-home:${index + 1}\nevent: transcript\ndata: ${JSON.stringify(rows[index])}\n\n`
+    const frame = (index: number) => canonicalFrame(rows[index].type, rows[index].data, `row-${index}`, index + 1)
+      + (rows[index].type === 'text' ? canonicalFrame('turn_complete', { invocationId: rows[index].data.invocationId }, `row-${index}`, index + 1, 1) : '')
     const replayComplete = (cursor: number) => `id: bot-home:${cursor}\nevent: replay_complete\ndata: {"persisted":true}\n\n`
     const assertReports = (count: number) => {
       const reports = screen.getAllByText('Identical weather summary')
@@ -957,6 +1174,27 @@ describe('StudioChat', () => {
 
 
 describe('Bot employee failure boundary', () => {
+  it.each(['personal', 'team'] as const)('retains useful committed partial findings live and on replay in %s scope', async scope => {
+    for (const readOnly of [false, true]) {
+      const send = vi.fn()
+      const view = render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope, readOnly, status: 'paused', onSend: send }} />)
+      await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
+      const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+      await act(async () => {
+        stream.onEvent('user_message', { text: 'Compare the evidence', eventId: 'owner', _projection: { event_id: 'bot-home/owner/0', session_id: 'bot-home', cursor: 'bot-home:1' } })
+        stream.onEvent('text', { text: 'Verified finding: revenue rose 5%. Limitation: the second source could not be read.', invocationId: 'bot-report:partial', eventId: 'partial', _projection: { event_id: 'bot-home/partial/0', session_id: 'bot-home', cursor: 'bot-home:2' } })
+        stream.onEvent('turn_complete', {})
+        stream.onState?.('reconnecting', 'partial-cursor')
+      })
+      expect(screen.getByTestId('message-area')).toHaveTextContent('Verified finding: revenue rose 5%.')
+      expect(screen.getByTestId('message-area')).toHaveTextContent('second source could not be read')
+      await act(async () => { stream.onState?.('live', 'partial-cursor'); stream.onReplayComplete?.() })
+      expect(document.querySelectorAll('.chat-bubble-user')).toHaveLength(1)
+      expect(screen.getAllByText(/Verified finding:/)).toHaveLength(1)
+      expect(send).not.toHaveBeenCalled()
+      view.unmount()
+    }
+  })
   it.each(['error', 'error_info'])('renders %s safely on fresh mount and reload', async kind => {
     for (let replay = 0; replay < 2; replay++) {
       const view = render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
@@ -991,4 +1229,14 @@ it('shows employee uncertainty during Bot reconnect and clears it only when live
   expect(screen.queryByText(/secret endpoint/)).not.toBeInTheDocument()
   await act(async () => { stream.onState?.('live', 'saved-cursor') })
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it('renders canonical file deliveries exactly once in server order on replay', async () => {
+  render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: true, onSend: vi.fn() }} />)
+  await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
+  const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+  const publication = { schema_version: 1, bot_id: 'bot', run_id: 'r', home_id: 'h', home_session_id: 'bot-home', report_sequence: 1, event_id: 'publication', summary: 'Your files are ready.', artifacts: ['z', 'a'].map(id => ({ id, home_id: 'h', relative_path: id + '.bin', sha256: 'a'.repeat(64), size_bytes: 18000000, media_type: 'application/octet-stream', title: '', preview: 'download' })) }
+  await act(async () => { stream.onEvent('bot_file_publication', publication); stream.onEvent('bot_file_publication', publication); stream.onReplayComplete?.() })
+  expect(screen.getAllByText('Your files are ready.')).toHaveLength(1)
+  expect([...document.querySelectorAll('[data-artifact-id]')].map(e => e.getAttribute('data-artifact-id'))).toEqual(['z', 'a'])
 })

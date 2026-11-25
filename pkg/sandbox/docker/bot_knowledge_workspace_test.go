@@ -1,8 +1,11 @@
 package docker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -14,6 +17,103 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+// This is real per-call node execution, not a mocked transport; it intentionally
+// does not certify session admission, SQL barriers, provisioning or cold restore.
+func TestCompiledKnowledgeNodeDockerNoPython(t *testing.T) {
+	binary := os.Getenv("ASTONISH_TEST_WORKSPACE_BINARY")
+	if binary == "" {
+		t.Skip("explicit freshly built Linux binary required")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	name := "astonish-knowledge-node-" + uuid.NewString()
+	run := func(args ...string) []byte {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker %v: %s %v", args, out, err)
+		}
+		return out
+	}
+	run("container", "create", "--pull=never", "--name="+name, "--network=none", "debian:bookworm-slim", "/bin/sleep", "120")
+	defer exec.Command("docker", "container", "rm", "-f", name).Run()
+	run("cp", binary, name+":/usr/local/bin/astonish-host")
+	run("container", "start", name)
+	run("exec", name, "/bin/sh", "-ec", "chmod 0755 /usr/local/bin/astonish-host; mkdir -p "+botPrivateMount+" "+botHomeMount+"; ! command -v python3; ! command -v python")
+	db := &DockerBackend{cfg: Config{ContainerRuntimePath: "docker"}}
+	checks := 0
+	live := sandbox.WithBotHomeWorkspaceCommitGuard(ctx, func(context.Context) error { checks++; return nil })
+	call := func(op string, record any, out any) error {
+		if !sandbox.IsCompiledWorkspaceOperation(op) {
+			return errors.New("knowledge routed to Python")
+		}
+		raw, err := json.Marshal(map[string]any{"op": op, "binding": "test-binding", "record": record})
+		if err != nil {
+			return err
+		}
+		cmd := db.botCompiledWorkspaceCommand(live, name)
+		input, approval, err := os.Pipe()
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		defer approval.Close()
+		cmd.Stdin = input
+		var result, stderr bytes.Buffer
+		control := &sandbox.WorkspaceCommitStream{Context: live, Output: &result, Approve: approval}
+		cmd.Stdout, cmd.Stderr = control, &stderr
+		written := make(chan error, 1)
+		go func() { _, err := approval.Write(append(raw, '\n')); written <- err }()
+		err = cmd.Run()
+		input.Close()
+		approval.Close()
+		writeErr := <-written
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, stderr.String())
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		if err = control.Finish(); err != nil {
+			return err
+		}
+		return json.Unmarshal(result.Bytes(), out)
+	}
+	_, r := knowledgeFixture(&sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{BotID: uuid.NewString()}})
+	var rows []store.BotKnowledgeFileSummary
+	if err := call("knowledge-snapshot", nil, &rows); err != nil || len(rows) != 0 {
+		t.Fatalf("empty snapshot: %v %+v", err, rows)
+	}
+	var receipt, retry []store.BotKnowledgeFileReadback
+	if err := call("knowledge-publish", r, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := call("knowledge-verify", r, &retry); err != nil || !reflect.DeepEqual(receipt, retry) {
+		t.Fatalf("verify: %v", err)
+	}
+	if err := call("knowledge-publish", r, &retry); err != nil || !reflect.DeepEqual(receipt, retry) {
+		t.Fatalf("retry: %v", err)
+	}
+	if err := call("knowledge-snapshot", nil, &rows); err != nil || len(rows) != 2 || rows[0].Summary != r.Decision.Proposals[0].Content {
+		t.Fatalf("snapshot: %v %+v", err, rows)
+	}
+	if checks != 3 {
+		t.Fatalf("host barriers: %d", checks)
+	}
+	r.ID = uuid.New()
+	for i := range r.Decision.Proposals {
+		r.Decision.Proposals[i].ExpectedDigest = rows[i].Digest
+		r.Decision.Proposals[i].Content = "# replaced\n"
+	}
+	if err := call("knowledge-publish", r, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := call("knowledge-verify", r, &retry); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("real compiled node: empty snapshot, UTF-8 Markdown batch publish, exact retry, directory exchange, verify and fresh host commit barriers without Python")
+}
 
 func knowledgeFixture(b *sandbox.BotHomeBinding) (store.BotKnowledgeExtractionLease, store.BotKnowledgeExtraction) {
 	id := uuid.New()
@@ -57,11 +157,11 @@ func TestBotKnowledgeDockerPhysical(t *testing.T) {
 	}
 	c, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
-	raw, err := exec.CommandContext(c, "docker", "image", "inspect", "--format", "{{.Id}}", image).Output()
+	_, err := exec.CommandContext(c, "docker", "image", "inspect", "--format", "{{.Id}}", image).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := &DockerBackend{cfg: Config{ContainerRuntimePath: "docker", SandboxImage: strings.TrimSpace(string(raw))}}
+	db := newBotRetainedSessionFixture(t, c, "docker")
 	b, err := db.EnsureBotHome(c, sandbox.BotHomeScope{OrgID: "knowledge-physical-test", TeamID: "owned", UserID: uuid.NewString(), BotID: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +174,7 @@ func TestBotKnowledgeDockerPhysical(t *testing.T) {
 		}
 		// DeleteBotHome owns cleanup of both exact labelled volumes.
 	})
+	id := bindBotRetainedSessionFixture(t, c, db, b)
 	l, r := knowledgeFixture(b)
 	held := false
 	live := sandbox.WithBotKnowledgeCommitBarrier(c, func(commit func() error) error { held = true; defer func() { held = false }(); return commit() })
@@ -94,8 +195,11 @@ func TestBotKnowledgeDockerPhysical(t *testing.T) {
 	if err := db.VerifyBotKnowledge(c, b, l, r, readback); err != nil {
 		t.Fatal(err)
 	}
-	// New backend/helper proves retained bytes, not in-memory receipts.
+	// A new backend recovers the exact authorized session and retained bytes.
 	db = &DockerBackend{cfg: db.cfg}
+	if err := db.BindBotHomeSession(b, id); err != nil {
+		t.Fatal(err)
+	}
 	rows, err = db.SnapshotBotKnowledge(c, b)
 	if err != nil || len(rows) != 2 || rows[0].Summary != r.Decision.Proposals[0].Content {
 		t.Fatalf("actual byte snapshot %+v %v", rows, err)

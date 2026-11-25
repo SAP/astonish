@@ -16,7 +16,7 @@ func (d personalBotDB) appendAdmittedMessage(ctx context.Context, b store.Bot, e
 	if !exists {
 		return 0, store.ErrBotForbidden
 	}
-	data, err := adkEventToMap(e)
+	data, err := d.contentCodec().encodeSessionEvent(ctx, b.ID, b.HomeSessionID.String(), e)
 	if err != nil {
 		return 0, err
 	}
@@ -37,7 +37,7 @@ func (d teamBotDB) appendAdmittedMessage(ctx context.Context, b store.Bot, e *se
 	if !exists {
 		return 0, store.ErrBotForbidden
 	}
-	data, err := adkEventToMap(e)
+	data, err := d.contentCodec().encodeSessionEvent(ctx, b.ID, b.HomeSessionID.String(), e)
 	if err != nil {
 		return 0, err
 	}

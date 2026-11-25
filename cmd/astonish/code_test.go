@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+func TestParseCodeFlagsWorkspace(t *testing.T) {
+	for _, args := range [][]string{{"--workspace", "independent"}, {"--workspace", "ask", "--workspace-copy", "current-work", "--workspace-base", "HEAD"}, {"--workspace", "current"}} {
+		if _, e := parseCodeFlags(args); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, args := range [][]string{{"--workspace", "bad"}, {"--workspace-base", "HEAD"}, {"--workspace-copy", "committed"}, {"--workspace", "independent", "--workspace-copy", "bad"}} {
+		if _, e := parseCodeFlags(args); e == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
+
 func TestParseCodeFlags_Defaults(t *testing.T) {
 	flags, err := parseCodeFlags(nil)
 	if err != nil {

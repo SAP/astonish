@@ -108,7 +108,7 @@ func (m *titleDelayModel) GenerateContent(ctx context.Context, req *model.LLMReq
 }
 
 type titleBrowserHomeBackend struct {
-	sandbox.Backend
+	composedBrowserBackend
 	physical sandbox.BotHomeBackend
 	calls    atomic.Int64
 }
@@ -231,7 +231,13 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 		}
 		return json.Marshal(map[string]any{"content": titleBrowserPrivateResult})
 	}
-	home := &titleBrowserHomeBackend{}
+	files := newComposedHTTPFiles(t, pool.dir, repo, b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
+		if name == "read_file" && args["path"] == "receipt.txt" {
+			args["path"] = "/isolated/receipt.txt"
+		}
+		return pool.Call("", name, args)
+	})
+	home := &titleBrowserHomeBackend{composedBrowserBackend: composedBrowserBackend{synthesisHTTPBackend{files: files.disk}}}
 	physicalBefore, physicalAfter := func() {}, func() {}
 	if journey == "title-docker" {
 		physicalBefore, physicalAfter = titlePhysicalHomeProbe(t, ctx, ownerCtx, b, home, repo)
@@ -248,7 +254,8 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 		ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 			return m, nil
 		},
-		Prepare: func(_ context.Context, req bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		Prepare: func(c context.Context, req bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			files.install(c, req, scope)
 			prepared.Add(1)
 			if req.Instructions != assignment {
 				return nil, fmt.Errorf("Prepare received unconfirmed assignment %q", req.Instructions)
@@ -392,10 +399,9 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 		if page.MustEval(`() => [...document.querySelectorAll('[data-testid="ask-user-options"], textarea[aria-label="Custom answer"]')].some(e => e.getClientRects().length)`).Bool() {
 			t.Fatal("answered question retained expanded choices or custom input")
 		}
-		if page.MustEval(`() => [...document.querySelectorAll('[aria-label="Bot workspace"] [data-testid="tool-activity-block"]')].some(e => e.getClientRects().length)`).Bool() {
-			t.Fatal("Bot Home exposed a tool activity card")
-		}
-		for _, forbidden := range []string{"I saved your answer", "queued the continuation", "Consumed", "[[ASTONISH_CHAT_QUESTION", "bot_owner_answer", "read_file", "Tool activity", titleBrowserPrivateResult} {
+		// Public tool activity uses the same projection as Chat; only private
+		// payloads and technical owner-answer receipts must remain hidden.
+		for _, forbidden := range []string{"I saved your answer", "queued the continuation", "Consumed", "[[ASTONISH_CHAT_QUESTION", "bot_owner_answer", titleBrowserPrivateResult} {
 			if page.MustEval(`text => document.querySelector('[aria-label="Bot workspace"]').innerText.includes(text)`, forbidden).Bool() {
 				t.Fatalf("technical receipt or private payload leaked: %s", forbidden)
 			}

@@ -27,6 +27,11 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 	if os.Getenv("ASTONISH_TEST_TASK_WORKSPACE") != "1" {
 		t.Skip("explicit owned Docker acceptance required")
 	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", wd)
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			c, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -62,7 +67,11 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 			if err = data.Teams().AddMember(c, &store.TeamMembership{UserID: owner.String(), TeamID: team.ID, Role: "member"}); err != nil {
 				t.Fatal(err)
 			}
-			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(dir, "layers"), UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
+			sessionStore, err := sandbox.NewLocalSessionStore(filepath.Join(dir, "registry"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(sessionStore), LayersDir: os.Getenv("ASTONISH_BOT_HOME_TEST_LAYERS"), OverlayMode: "fuse", UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,6 +118,22 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 			if err = entstore.RegisterBotHomeBinding(service, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: home}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
+			if err = backend.BindBotHomeSession(h, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = backend.CreateSession(auth, sandbox.SessionSpec{SessionID: b.HomeSessionID.String(), Type: sandbox.SessionTypeChat, UserID: owner.String(), BotHome: h, TemplateID: sandbox.BaseTemplateID, LayerChain: []string{sandbox.BaseTemplateID}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				clean, stop := context.WithTimeout(context.Background(), 30*time.Second)
+				defer stop()
+				if e := backend.DestroySession(clean, b.HomeSessionID.String()); e != nil {
+					t.Error(e)
+				}
+			})
+			if err = backend.WaitForSessionReady(auth, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
@@ -134,6 +159,9 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 					t.Fatal(e)
 				}
 				worker = w.knowledgeCommitContext(worker, repo, ss)
+				if _, snapshotErr := (&launcher.BotKnowledgeWorkspace{Backend: backend, Bots: repo}).Snapshot(worker, b.ID); snapshotErr != nil {
+					t.Fatalf("complete knowledge snapshot: %v", snapshotErr)
+				}
 				report := reviewedRecoveryReply(t, repo, worker, lease, "No tools needed")
 				if e = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunSucceeded, Report: report}); e != nil {
 					t.Fatal(e)

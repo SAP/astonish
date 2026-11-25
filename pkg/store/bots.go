@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/execution"
@@ -21,6 +24,164 @@ type RunID = uuid.UUID
 const BotSchemaVersion = 1
 const BotRetention = 30 * 24 * time.Hour
 const DefaultBotRuntime = 15 * time.Minute
+
+// BotContentRef describes immutable retained bytes, never permission to read them.
+// Services resolve ownership from authenticated scope before opening any object.
+type BotContentKind string
+
+const (
+	BotContentDocument      BotContentKind = "document"
+	BotContentMemory        BotContentKind = "memory"
+	BotContentTask          BotContentKind = "task"
+	BotContentSkill         BotContentKind = "skill"
+	BotContentEvidence      BotContentKind = "evidence"
+	BotContentCheckpoint    BotContentKind = "checkpoint"
+	BotContentArtifact      BotContentKind = "artifact"
+	BotContentTemplate      BotContentKind = "template"
+	BotContentIntake        BotContentKind = "intake"
+	BotContentFormatVersion                = 1
+)
+
+type BotContentScope struct {
+	OrgID   string `json:"org_id,omitempty"`
+	TeamID  string `json:"team_id,omitempty"`
+	OwnerID string `json:"owner_id,omitempty"`
+	BotID   BotID  `json:"bot_id,omitempty"`
+	// IntakeID owns pre-Bot drafts independently; never a synthetic Bot ID.
+	IntakeID uuid.UUID `json:"intake_id,omitzero"`
+}
+
+func (s BotContentScope) Validate() error {
+	if (s.OrgID == "") != (s.TeamID == "") {
+		return ErrBotInvalid
+	}
+	if s.IntakeID != uuid.Nil {
+		if s.BotID != uuid.Nil || s.OwnerID == "" {
+			return ErrBotInvalid
+		}
+	} else if (s.BotID == uuid.Nil && (s.TeamID == "" || s.OwnerID != "")) || (s.BotID != uuid.Nil && s.OwnerID == "") {
+		return ErrBotInvalid
+	}
+	for _, v := range []string{s.OrgID, s.TeamID, s.OwnerID} {
+		if strings.TrimSpace(v) != v || strings.ContainsAny(v, "\x00\r\n") {
+			return ErrBotInvalid
+		}
+	}
+	return nil
+}
+
+type BotContentRef struct {
+	Format    int             `json:"format"`
+	Scope     BotContentScope `json:"scope"`
+	Kind      BotContentKind  `json:"kind"`
+	Key       string          `json:"key"`
+	SHA256    string          `json:"sha256"`
+	SizeBytes int64           `json:"size_bytes"`
+	Revision  int64           `json:"revision"`
+}
+
+func (r BotContentRef) Validate() error {
+	if r.Format != BotContentFormatVersion || r.Scope.Validate() != nil || r.SizeBytes < 0 || r.Revision < 1 || r.Key == "" || r.Key == "." || path.IsAbs(r.Key) || path.Clean(r.Key) != r.Key || r.Key == ".." || strings.HasPrefix(r.Key, "../") || strings.ContainsAny(r.Key, "\\\x00\r\n") {
+		return ErrBotInvalid
+	}
+	switch r.Kind {
+	case BotContentDocument, BotContentMemory, BotContentTask, BotContentSkill, BotContentEvidence, BotContentCheckpoint, BotContentArtifact, BotContentTemplate, BotContentIntake:
+	default:
+		return ErrBotInvalid
+	}
+	if (r.Kind == BotContentIntake) != (r.Scope.IntakeID != uuid.Nil) || (r.Kind == BotContentTemplate) != (r.Scope.BotID == uuid.Nil && r.Scope.IntakeID == uuid.Nil) {
+		return ErrBotInvalid
+	}
+	d, err := hex.DecodeString(r.SHA256)
+	if err != nil || len(d) != sha256.Size || r.SHA256 != strings.ToLower(r.SHA256) {
+		return ErrBotInvalid
+	}
+	return nil
+}
+
+type BotFileKind string
+type BotFilePreviewKind string
+
+const (
+	BotFileRegular         BotFileKind        = "file"
+	BotFileDirectory       BotFileKind        = "directory"
+	BotFilePreviewText     BotFilePreviewKind = "text"
+	BotFilePreviewDownload BotFilePreviewKind = "download"
+	BotFilePageDefault                        = 100
+	BotFilePageMax                            = 500
+	BotFilePreviewMaxBytes int64              = 256 << 10
+)
+
+type BotFileEntry struct {
+	Path       string             `json:"path"`
+	Kind       BotFileKind        `json:"kind"`
+	SizeBytes  int64              `json:"size_bytes"`
+	ModifiedAt time.Time          `json:"modified_at"`
+	Freshness  string             `json:"freshness"`
+	SHA256     string             `json:"sha256,omitempty"`
+	Preview    BotFilePreviewKind `json:"preview"`
+}
+
+type BotFilePage struct {
+	Entries []BotFileEntry `json:"entries"`
+	Next    string         `json:"next,omitempty"`
+}
+
+// Length zero means through EOF. Offset and Length never accept negative values.
+type BotFileRange struct{ Offset, Length int64 }
+
+func (r BotFileRange) Validate() error {
+	if r.Offset < 0 || r.Length < 0 || r.Length > (1<<63-1)-r.Offset {
+		return ErrBotInvalid
+	}
+	return nil
+}
+
+// Close must cancel and join the owned transport; reads surface terminal errors.
+type BotFileStream struct {
+	io.ReadCloser
+	Entry BotFileEntry
+}
+
+// BotFileWrite requires exactly one precondition. An empty expected digest is
+// not permission to overwrite. BeforeCommit is trusted wiring, never tool input.
+type BotFileWrite struct {
+	Path           string
+	SizeBytes      int64
+	Body           io.Reader
+	CreateOnly     bool
+	ExpectedSHA256 string
+	BeforeCommit   func(func() error) error
+}
+
+// BotContentStaging is a trusted control-plane capability, not an agent tool.
+// Callers derive ownership from authenticated repositories and supply commit and
+// cleanup barriers. Bind never removes staged bytes before SQL selects new refs.
+type BotContentStaging interface {
+	Put(context.Context, BotContentKind, int64, int64, io.Reader, func(func() error) error) (*BotContentRef, error)
+	Open(context.Context, BotContentRef, BotFileRange) (*BotFileStream, error)
+	Bind(context.Context, BotContentRef, BotFiles, func(func() error) error) (*BotContentRef, error)
+	Remove(context.Context, BotContentRef, func(func() error) error) error
+	Close() error
+}
+
+// BotFileCommitStore holds the existing run fence and revalidates the exact
+// registered Home while committing already staged bytes. It grants no tool access.
+// Callbacks must not re-enter the repository, start work, or perform arbitrary IO.
+type BotFileCommitStore interface {
+	WithBotFileCommit(context.Context, BotHomeBinding, BotLease, func() error) error
+}
+
+// BotFiles is already scope-bound. Each call must still recheck current access.
+type BotFiles interface {
+	List(context.Context, BotID, string, string, int) (*BotFilePage, error)
+	Stat(context.Context, BotID, string) (*BotFileEntry, error)
+	Open(context.Context, BotID, string, BotFileRange) (*BotFileStream, error)
+	Write(context.Context, BotID, BotFileWrite) (*BotFileEntry, error)
+	PutContent(context.Context, BotID, BotContentKind, int64, io.Reader, int64, func(func() error) error) (*BotContentRef, error)
+	OpenContent(context.Context, BotContentRef, BotFileRange) (*BotFileStream, error)
+	PublishSnapshot(context.Context, BotID, string, string, func(func() error) error) (*BotContentRef, error)
+}
 
 var (
 	ErrBotConflict    = errors.New("bot revision or lease conflict")
@@ -254,12 +415,17 @@ type BotLease struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 type BotArtifact struct {
-	ID           uuid.UUID `json:"id"`
-	HomeID       uuid.UUID `json:"home_id"`
-	RelativePath string    `json:"relative_path"`
-	SHA256       string    `json:"sha256"`
-	MediaType    string    `json:"media_type"`
-	Title        string    `json:"title"`
+	// ContentRef identifies immutable published bytes; absent for ordinary artifacts.
+	ContentRef    *BotContentRef `json:"content_ref,omitempty"`
+	SizeBytes     int64          `json:"size_bytes,omitempty"`
+	Purpose       string         `json:"purpose,omitempty"`
+	MemorySummary string         `json:"memory_summary,omitempty"`
+	ID            uuid.UUID      `json:"id"`
+	HomeID        uuid.UUID      `json:"home_id"`
+	RelativePath  string         `json:"relative_path"`
+	SHA256        string         `json:"sha256"`
+	MediaType     string         `json:"media_type"`
+	Title         string         `json:"title"`
 }
 type BotUsage struct {
 	// RuntimeNanos is cumulative active execution time across checkpoint resumes.
@@ -544,18 +710,21 @@ type BotLifecycleRequest struct {
 	Now              time.Time
 }
 type BotRunRequest struct {
-	TaskID         *uuid.UUID         `json:",omitempty"`
-	SkillID        *uuid.UUID         `json:",omitempty"`
-	Invocation     string             `json:",omitempty"`
-	Intent         BotExecutionIntent `json:",omitempty"`
-	BotID          BotID
-	Version        int64
-	Trigger        TriggerKind
-	TriggerID      uuid.UUID
-	OccurrenceAt   time.Time
-	IdempotencyKey string
-	Instructions   string
-	Attachments    []ChatFile `json:",omitempty"`
+	PlanMode              *bool                    `json:"planMode,omitempty"`
+	ApprovedPlanExecution bool                     `json:"approvedPlanExecution,omitempty"`
+	PlanExecution         *BotPlanExecutionConsent `json:"planExecution,omitempty"`
+	TaskID                *uuid.UUID               `json:",omitempty"`
+	SkillID               *uuid.UUID               `json:",omitempty"`
+	Invocation            string                   `json:",omitempty"`
+	Intent                BotExecutionIntent       `json:",omitempty"`
+	BotID                 BotID
+	Version               int64
+	Trigger               TriggerKind
+	TriggerID             uuid.UUID
+	OccurrenceAt          time.Time
+	IdempotencyKey        string
+	Instructions          string
+	Attachments           []ChatFile `json:",omitempty"`
 }
 type BotClaimRequest struct {
 	BotID     BotID

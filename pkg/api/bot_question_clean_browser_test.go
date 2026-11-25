@@ -42,13 +42,23 @@ func TestBostonQuestionCleanBrowserAcceptance(t *testing.T) {
 	})
 	registerBotRoutes(routes)
 	env.Router.PathPrefix("/api/studio/bots").Handler(entstore.TenantMiddleware(env.Store)(routes))
+	// The recorded text question is an ordinary conversation question, not the
+	// newer title-intake select question. Use ordinary draft/message admission.
+	created := env.Request(t, http.MethodPost, "/api/studio/bots", map[string]any{"name": "Boston fixture acceptance", "idempotency_key": "boston-question-fixture"}, memoryIdentityAdmin)
+	defer created.Body.Close()
+	var draft store.Bot
+	if created.StatusCode != http.StatusCreated || json.NewDecoder(created.Body).Decode(&draft) != nil {
+		t.Fatal("could not create ordinary Boston question fixture")
+	}
+	message := env.Request(t, http.MethodPost, "/api/studio/bots/"+draft.ID.String()+"/messages", map[string]any{"version": draft.Version, "instructions": "Discuss Boston weather update recipients.", "idempotency_key": "boston-question-message"}, memoryIdentityAdmin)
+	defer message.Body.Close()
+	if message.StatusCode != http.StatusAccepted {
+		t.Fatal("could not admit ordinary Boston question fixture")
+	}
 	page := newStreamBrowserPage(t, env, bin, dist).CancelTimeout().Timeout(60 * time.Second)
-	page.MustElementR("button", "^New Bot$").MustClick()
-	page.MustElement(`[aria-label="Bot name"]`).MustInput("Boston fixture acceptance")
-	page.MustElementR("button", "^Start conversation$").MustClick()
+	page.MustNavigate(env.URL + "/#/chat/bots/personal/" + draft.ID.String())
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
-	hash := page.MustEval(`() => location.hash`).Str()
-	id := uuid.MustParse(strings.Split(hash, "/")[4])
+	id := draft.ID
 	org, err := env.Store.ForOrg(env.OrgSlug)
 	if err != nil {
 		t.Fatal(err)
@@ -88,13 +98,23 @@ func TestBostonQuestionCleanBrowserAcceptance(t *testing.T) {
 	a.RunID = runs[0].ID
 	a.Version = b.Version
 	a.ExpiresAt = time.Now().Add(time.Hour)
+	// Historical action hashes predate the current descriptor envelope.
+	a.ActionDigest, err = a.Action.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
 	createdApproval, err := repo.RequestApproval(worker, lease, a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a = *createdApproval
 	report := store.BotReport{Summary: "Question awaits the explicit Bot owner's typed answer; no execution resources are held. Continuation uses the saved conversation under current tool policy.", NeedsApproval: []uuid.UUID{a.ID}, Unverified: []string{"Tool ask_user returned without independently verified outcome metadata."}}
-	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: a.ID, BotID: id, RunID: a.RunID, SessionID: runs[0].SessionID, Version: b.Version, ActionDigest: a.ActionDigest, Fence: lease.Fence})
+	work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report.Work = store.BuildBotWorkProjection(work)
+	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: id, RunID: a.RunID, SessionID: runs[0].SessionID, Version: b.Version, ActionDigest: a.ActionDigest, Fence: lease.Fence})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,7 +53,7 @@ func progressControlFixture(t *testing.T, scope store.BotScope) (*interactiveHTT
 				drained <- f.worker.Drain(ctx)
 			}()
 			time.Sleep(50 * time.Millisecond)
-			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "control-read", Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}}}, true
+			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "control-read", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 		}
 		raw, _ := json.Marshal(req.Contents)
 		if !strings.Contains(string(raw), "isolated receipt") {
@@ -260,10 +260,16 @@ func TestBotProgressStateSSE(t *testing.T) {
 			scan.Buffer(make([]byte, 4096), 1<<20)
 			var found store.BotRunState
 			var sequence int64
+			var event string
+			replayComplete := false
 			for scan.Scan() {
 				line := scan.Text()
-				if line == "event: replay_complete" {
-					break
+				if strings.HasPrefix(line, "event: ") {
+					event = strings.TrimPrefix(line, "event: ")
+					if event == "replay_complete" {
+						replayComplete = true
+						break
+					}
 				}
 				if !strings.HasPrefix(line, "data: ") {
 					continue
@@ -272,20 +278,11 @@ func TestBotProgressStateSSE(t *testing.T) {
 				if strings.Contains(raw, "dispatch_ledger") || strings.Contains(raw, "context_ref") || strings.Contains(raw, "reserved_usage") {
 					t.Fatalf("private progress leaked: %s", raw)
 				}
-				var event struct {
-					Actions struct {
-						StateDelta map[string]json.RawMessage `json:"stateDelta"`
-					} `json:"actions"`
-				}
-				if err := json.Unmarshal([]byte(raw), &event); err != nil {
-					t.Fatal(err)
-				}
-				stateRaw := event.Actions.StateDelta[store.BotRunStateKey]
-				if stateRaw == nil {
+				if event != "bot_run_state" {
 					continue
 				}
 				var state store.BotRunState
-				if err := json.Unmarshal(stateRaw, &state); err != nil {
+				if err := json.Unmarshal([]byte(raw), &state); err != nil {
 					t.Fatal(err)
 				}
 				if state.RunID != before.ID {
@@ -296,6 +293,12 @@ func TestBotProgressStateSSE(t *testing.T) {
 				}
 				sequence = state.StateSequence
 				found = state
+			}
+			if err := scan.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !replayComplete {
+				t.Fatal("SSE ended before replay completed")
 			}
 			if !reflect.DeepEqual(expected, found) {
 				t.Fatalf("snapshot/live divergence: expected %+v got %+v", expected, found)

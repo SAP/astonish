@@ -21,6 +21,11 @@ type botControlMemoryTarget struct {
 
 func (b *botFactoryBinding) controlMemoryTargets(ctx context.Context, repo store.BotStore, revision int64) ([]botControlMemoryTarget, bool, bool, string, error) {
 	targets := []botControlMemoryTarget{}
+	// Ordinary work bootstraps MEMORY.md, not the latest catalogue bodies.
+	// Reviewed memory-control conversations retain their exact correction targets.
+	if !b.req.Run.ControlOnly() {
+		return targets, false, true, "", nil
+	}
 	svc := store.FromContext(ctx)
 	if svc.Memory == nil {
 		return targets, false, false, "", nil

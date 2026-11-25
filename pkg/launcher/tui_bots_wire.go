@@ -3,191 +3,144 @@ package launcher
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/events"
-	adksession "google.golang.org/adk/session"
 )
 
-const botRuntimeStateKey = "bot_runtime_event"
-const botTurnContextStateKey = "_astonish_turn_context"
-
-// Hide model-only context at presentation, never by text prefix or ADK role.
-// The durable row and its transport cursor remain intact.
-func botHiddenTurnContext(e *adksession.Event) bool {
-	hidden, _ := e.Actions.StateDelta[botTurnContextStateKey].(bool)
-	return hidden
-}
-
-// botTranscriptMapper selects the ordered Chat wire projection as soon as the
-// runtime announces itself. ChatRunner emits session before running ADK, so this
-// happens before any of its model/tool rows, on replay as well as live. ADK user
-// rows remain the input source (ChatRunner does not emit user_message). Legacy
-// transcripts without wire envelopes keep their existing ADK rendering.
-// Do not deduplicate by text/tool values: repeated calls and equal text chunks
-// are legitimate. Raw model rows also contain unredacted/internal tool details;
-// mixing them with the wire projection would bypass Chat's UI normalization.
-// One mapper lives for the whole Watch, including transport reconnects.
+// botTranscriptMapper lives for the entire watch, including reconnects. Display
+// identity is independent of cursor: several parts of a committed row can share
+// a cursor, and separate events can legitimately contain identical text.
 type botTranscriptMapper struct {
-	progressSession   bool
-	runtimeTurns      map[string]bool
-	activeRuntimeTurn string // bounded session → done window for ADK invocation binding
-	sequences         map[string]int64
+	seen map[string]bool
 }
 
 func (m *botTranscriptMapper) mapFrame(frame client.SSEEvent) ([]events.Event, error) {
-	var row adksession.Event
-	if err := json.Unmarshal([]byte(frame.Data), &row); err != nil {
-		return nil, fmt.Errorf("decode Bot transcript: %w", err)
-	}
-	if botHiddenTurnContext(&row) {
+	if frame.Type == "cursor" || frame.Type == client.BotReplayComplete {
 		return nil, nil
 	}
-	if raw, ok := row.Actions.StateDelta[store.BotOperationKey]; ok {
-		data, err := json.Marshal(raw)
-		var operation store.BotOperationView
-		if err != nil {
-			return nil, err
-		}
-		if json.Unmarshal(data, &operation) != nil || operation.Validate() != nil {
-			return nil, nil
-		}
-		return []events.Event{{Kind: events.KindBotOperation, BotOperation: &operation}}, nil
+	var payload struct {
+		Projection struct {
+			EventID string `json:"event_id"`
+		} `json:"_projection"`
 	}
-	if raw, ok := row.Actions.StateDelta[store.BotRunStateKey]; ok {
-		data, err := json.Marshal(raw)
-		var state store.BotRunState
-		if err != nil {
-			return nil, err
-		}
-		if err = json.Unmarshal(data, &state); err != nil {
-			return nil, err
-		}
-		if state.Progress != nil && state.ValidateProgress() == nil {
-			m.progressSession = true
-		} else if state.Progress == nil && state.Presentation == store.BotRunPresentationHomeInteractive {
-			// A later ordinary Home conversation retains its normal projection.
-			// Do not make one progress assignment suppress future owner dialogue.
-			m.progressSession = false
-		}
-		return []events.Event{{Kind: events.KindBotRunState, BotRunState: &state}}, nil
+	if err := json.Unmarshal([]byte(frame.Data), &payload); err != nil {
+		return nil, fmt.Errorf("decode Bot presentation: %w", err)
 	}
-	if m.progressSession {
-		// Progress-driven work publishes employee results at canonical report
-		// boundaries. Raw tools, intermediate drafts and runtime diagnostics are
-		// private in both Home and run traces; owner input remains visible.
-		if row.Author != "user" && !strings.HasPrefix(row.InvocationID, "bot-report:") {
-			return nil, nil
-		}
+	if payload.Projection.EventID == "" {
+		return nil, fmt.Errorf("Bot presentation missing event identity")
 	}
-	if raw, ok := row.Actions.StateDelta[botRuntimeStateKey]; ok {
-		wire, err := decodeBotRuntimeEnvelope(raw)
-		if err != nil {
-			return nil, err
-		}
-		if wire.TurnID == "" {
-			wire.TurnID = row.InvocationID
-		}
-		// Only conversation projections suppress matching raw ADK rows.
-		// Control/reference metadata does not mean a turn was rendered.
-		switch wire.Type {
-		case "session", "text", "tool_call", "tool_result":
-			if wire.TurnID != "" {
-				if m.runtimeTurns == nil {
-					m.runtimeTurns = map[string]bool{}
-				}
-				m.runtimeTurns[wire.TurnID] = true
-			}
-		}
-		if wire.TurnID != "" && wire.Sequence > 0 {
-			if m.sequences == nil {
-				m.sequences = map[string]int64{}
-			}
-			if wire.Sequence <= m.sequences[wire.TurnID] {
-				return nil, nil
-			}
-			m.sequences[wire.TurnID] = wire.Sequence
-		}
-		if wire.Type == "session" {
-			m.activeRuntimeTurn = wire.TurnID
-		}
-		if wire.Type == "done" || wire.Type == "turn_complete" {
-			if m.activeRuntimeTurn == wire.TurnID {
-				m.activeRuntimeTurn = ""
-			}
-		}
-		var scope struct {
-			InvocationID string `json:"invocationId"`
-		}
-		if json.Unmarshal(wire.Payload, &scope) == nil && scope.InvocationID != "" && m.runtimeTurns[wire.TurnID] {
-			m.runtimeTurns[scope.InvocationID] = true
-		}
-		return renderBotRuntimeEnvelope(wire), nil
-	}
-	// ADK assigns a different invocation ID from the runtime turn UUID. Its
-	// user row precedes model/tool rows, so bind it within session → done only.
-	if m.activeRuntimeTurn != "" && row.Author == "user" && row.InvocationID != "" {
-		m.runtimeTurns[row.InvocationID] = true
-	}
-	if row.Author != "user" && (m.runtimeTurns[row.InvocationID] || (row.InvocationID == "" && m.activeRuntimeTurn != "")) {
+	if m.seen[payload.Projection.EventID] {
 		return nil, nil
 	}
-	return botTranscriptEvents(frame)
-}
-
-// Keep this transport DTO local: payloads are interpreted only by Chat's shared
-// mapper, not a second evolving set of artifact/delegation/usage DTOs.
-type botRuntimeEnvelope struct {
-	Type     string          `json:"type"`
-	Payload  json.RawMessage `json:"payload"`
-	TurnID   string          `json:"turn_id"`
-	Sequence int64           `json:"sequence"`
-}
-
-func decodeBotRuntimeEnvelope(raw any) (botRuntimeEnvelope, error) {
-	var wire botRuntimeEnvelope
-	data, err := json.Marshal(raw)
-	if err == nil {
-		err = json.Unmarshal(data, &wire)
-	}
-	if err == nil && (wire.Type == "" || len(wire.Payload) == 0 || string(wire.Payload) == "null") {
-		err = fmt.Errorf("missing type or payload")
-	}
-	if err != nil {
-		return wire, fmt.Errorf("decode Bot runtime envelope: %w", err)
-	}
-	return wire, nil
-}
-
-func mapBotRuntimeEnvelope(raw any) ([]events.Event, error) {
-	wire, err := decodeBotRuntimeEnvelope(raw)
+	out, err := botTranscriptEvents(frame)
 	if err != nil {
 		return nil, err
 	}
-	return renderBotRuntimeEnvelope(wire), nil
+	if m.seen == nil {
+		m.seen = make(map[string]bool)
+	}
+	m.seen[payload.Projection.EventID] = true
+	return out, nil
 }
 
-func renderBotRuntimeEnvelope(wire botRuntimeEnvelope) []events.Event {
-	switch wire.Type {
-	case "approval", "plan_approval", "auto_approved":
-		// Replay is observation, never an executable approval. The durable, bound
-		// Bot approval inbox alone supplies decisions and current validity.
-		return nil
+// Canonical execution payloads use Chat's mapper and sole Transcript reducer.
+// Bot-only state is typed here; persisted observation never creates live Chat
+// approval authority. Decisions still come from the scoped Bot approval inbox.
+func botTranscriptEvents(frame client.SSEEvent) ([]events.Event, error) {
+	data := []byte(frame.Data)
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("decode Bot presentation: invalid JSON")
+	}
+	switch frame.Type {
+	case "cursor", client.BotReplayComplete, "approval", "plan_approval", "auto_approved":
+		return nil, nil
+	case "transcript":
+		return nil, fmt.Errorf("legacy Bot transcript is not a canonical Chat event")
+	case "bot_review":
+		var p struct {
+			ReviewID     string `json:"reviewId"`
+			EventID      string `json:"eventId"`
+			InvocationID string `json:"invocationId"`
+			Question     struct {
+				Text string `json:"text"`
+			} `json:"question"`
+		}
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
+		}
+		if p.ReviewID == "" {
+			return nil, nil
+		}
+		text := "Bot requested a review. Use /bots approvals for the current durable interaction."
+		if p.Question.Text != "" {
+			text = p.Question.Text + "\n" + text
+		}
+		ev := events.NewSystem(text)
+		ev.EventID, ev.InvocationID = p.EventID, p.InvocationID
+		return []events.Event{ev}, nil
 	case "chat_question":
-		return []events.Event{events.NewSystem("Bot requested an answer. Use /bots approvals for the current durable interaction.")}
+		return []events.Event{events.NewSystem("Bot requested an answer. Use /bots approvals for the current durable interaction.")}, nil
 	case "user_message":
 		var p struct {
 			Text string `json:"text"`
 		}
-		if json.Unmarshal(wire.Payload, &p) == nil && p.Text != "" {
-			return []events.Event{events.NewUser(p.Text)}
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
 		}
-		return nil
+		if p.Text != "" {
+			return []events.Event{events.NewUser(p.Text)}, nil
+		}
+		return nil, nil
+	case "text":
+		var p struct {
+			Text         string `json:"text"`
+			InvocationID string `json:"invocationId"`
+			EventID      string `json:"eventId"`
+			Projection   struct {
+				EventID string `json:"event_id"`
+			} `json:"_projection"`
+		}
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
+		}
+		if p.EventID == "" {
+			p.EventID = p.Projection.EventID
+		}
+		if events.IsBotReportInvocation(p.InvocationID) && p.EventID != "" {
+			return []events.Event{events.NewBotReport(p.InvocationID, p.EventID, p.Text)}, nil
+		}
+		return mapSSEToEvents(&frame, false), nil
 	case "turn_complete":
-		return []events.Event{events.NewDone()}
+		return []events.Event{events.NewDone()}, nil
+	case store.BotOperationKey:
+		var p store.BotOperationView
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
+		}
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		return []events.Event{{Kind: events.KindBotOperation, BotOperation: &p}}, nil
+	case store.BotRunStateKey:
+		var p store.BotRunState
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
+		}
+		return []events.Event{{Kind: events.KindBotRunState, BotRunState: &p}}, nil
+	case store.BotFilePublicationKey:
+		var p store.BotFilePublication
+		if err := json.Unmarshal(data, &p); err != nil {
+			return nil, err
+		}
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+		ev := events.NewBotReport("bot-report:"+p.RunID.String(), p.EventID, p.Summary)
+		ev.BotFilePublication = &p
+		return []events.Event{ev}, nil
 	default:
-		return mapSSEToEvents(&client.SSEEvent{Type: wire.Type, Data: string(wire.Payload)}, false)
+		return mapSSEToEvents(&frame, false), nil
 	}
 }

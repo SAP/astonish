@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,11 +34,19 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
 			f.worker.Stop()
 			// Enable the genuine Task tools through the production composition seam.
+			files := newComposedHTTPFiles(t, f.dataDir, f.repo, f.b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
+				return f.pool.Call("", name, args)
+			})
+			var synthesisClock atomic.Int64
+			var synthesisDeadline time.Time
 			var err error
-			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return f.model, nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, TaskWorkspace: synthesisReceiptUnusedWorkspace{}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+				files.install(c, q, s)
+				synthesisDeadline = q.Budget.(interface{ Deadline() time.Time }).Deadline()
+				synthesisClock.Store(synthesisDeadline.Add(-time.Hour).UnixNano())
+				return &launcher.BotChatSafeResources{SynthesisNow: func() time.Time { return time.Unix(0, synthesisClock.Load()) }, WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, TaskWorkspace: synthesisReceiptUnusedWorkspace{}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -47,8 +56,8 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A deliberately short, owner-reviewed hard limit makes the existing
-			// synthesis boundary observable without changing a production clock.
+			// Keep the reviewed hard deadline unchanged; only the soft synthesis
+			// clock advances. File fsync/CPU time must not decide when it crosses.
 			v.Budget.MaxRuntimeSeconds = 10
 			body, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Isolated synthesis receipt regression", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 			if err != nil {
@@ -64,7 +73,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 				part := &genai.Part{Text: final}
 				switch step {
 				case 1:
-					part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "research-read", Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}
+					part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "research-read", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}
 				case 2:
 					raw, _ := json.Marshal(req.Contents)
 					if !strings.Contains(string(raw), "isolated receipt") {
@@ -72,7 +81,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 					}
 					// This request began in research mode. Cross the reserve while
 					// generating, so the tool wrapper (not model correction) stops it.
-					time.Sleep(8100 * time.Millisecond)
+					synthesisClock.Store(synthesisDeadline.UnixNano())
 					part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "stopped-task-update", Name: "bot_task_update", Args: map[string]any{"title": "Optional research tracking"}}}
 				case 3:
 					raw, _ := json.Marshal(req.Contents)
@@ -93,7 +102,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 				return response, true
 			}
 			var admission store.BotMessageReceipt
-			if err := json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Read /isolated/receipt.txt and report its contents. Task tracking is optional.","idempotency_key":"synthesis-receipt"}`, f.b.Version), 202), &admission); err != nil {
+			if err := json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Read receipt.txt and report its contents. Task tracking is optional.","idempotency_key":"synthesis-receipt"}`, f.b.Version), 202), &admission); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.worker.Poll(f.ctx); err != nil {
@@ -115,9 +124,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			historyPath := f.path + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
 			for range 2 {
 				history := string(f.request("GET", historyPath, "", 200))
-				if strings.Count(history, "bot-report:"+run.ID.String()) != 1 || !strings.Contains(history, final) {
-					t.Fatalf("final not published exactly once: %s", history)
-				}
+				assertProgressReportText(t, history, "bot-report:"+run.ID.String(), final)
 				if err := f.worker.Poll(f.ctx); err != nil {
 					t.Fatal(err)
 				}

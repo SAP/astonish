@@ -43,7 +43,7 @@ A file-based approach was chosen over SQLite or other databases because:
 - **Portability**: Sessions are plain files in the user's config directory. Easy to back up, move, or delete.
 - **Streaming writes**: JSONL is append-only -- each event is one line appended to the file. No transaction overhead.
 
-The tradeoff is that operations like "find all sessions for a user" require scanning the metadata index, and concurrent writes need mutex protection.
+The tradeoff is that operations like "find all sessions for a user" require scanning the metadata index. Metadata mutations use an instance mutex plus a permanent `index.json.lock` sidecar OS lock across instances/processes. `Add`, `Update`, `Remove` and `RemoveSelected` reload the latest index inside that lock before atomic replacement; `Save` replaces a whole snapshot and does **not** merge stale caller state. Reads see complete old/new files through atomic replacement. This protects metadata updates, not concurrent writers to one transcript or an external filesystem editor.
 
 ### Why Three-Tier State
 
@@ -95,6 +95,16 @@ Fallback: if summarization fails, truncation removes the oldest messages until u
       <session-id>.jsonl      # Event transcript (one JSON object per line)
       <session-id>.jsonl      # ...
 ```
+
+### Local Code project/workspace identity
+
+Code uses a separate `session.FileStore` at `<sessionsDir>/code/` and app `astonish_code`; platform stores and remote session authorization are unchanged. Existing Code user identities are preserved: `codeUserIDForDir` hashes the trimmed absolute invocation-directory string with SHA-256 and appends its first eight bytes as 16 hex characters to `local_user_` (empty path falls back to `local_user`). No project-ID rewrite, canonical-path migration or transcript/PLAN.md relocation is performed.
+
+Managed local workspaces add a registry at `GetConfigDir()/code-workspaces/<project-id>/`. Project identity derives from the canonical Git common directory, while each physical detached worktree has a UUID. Registry session bindings keep the actual app/user/session ownership. A separately locked `owners.json` records exact invocation, original-root and canonical aliases, allowing `/sessions` to discover registered project conversations from the original checkout without a global transcript scan. Previously used subdirectory/path aliases are discovered when registered by launching there. Non-Git Current sessions retain directory-only grouping.
+
+Startup remains a fresh conversation unless the user explicitly resumes. Resume validates recorded ownership and the checkout before loading history; cross-workspace resume requests a same-terminal fresh Code process after cleanup, not a live tool-CWD change. Session history and plan restore use existing storage, but process-local tool/full-access grants, browser state and background jobs are not migrated. Only the resumed owner's existing durable broad-folder consent is restored; new sessions do not inherit it. Missing/removed/foreign checkouts report an error rather than reopening the transcript against different files.
+
+Workspace exit retains files and history; explicit safe checkout removal retains registry/session bindings, JSONL/PLAN.md history and named branches. Checkout retention/removal is separate from ordinary explicit conversation deletion and compaction. A retained transcript does not automatically recreate its removed checkout. See [Managed Local Code Workspaces](code-workspaces.md) for writer leases, baseline capture, reviewed apply, explicit journal recovery, cleanup guards, shared resources and unsupported configurations. Windows runtime is unverified.
 
 ### Event Lifecycle
 

@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 )
 
@@ -31,12 +33,12 @@ func TestInteractiveBotScheduleUsesHomeAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer got.Cleanup()
-	for _, candidate := range got.Agent.Tools {
+	for _, candidate := range factoryCatalogTools(t, got) {
 		if candidate.Name() != "schedule_job" {
 			continue
 		}
 		req := &model.LLMRequest{}
-		if err := candidate.(botRunnableTool).ProcessRequest(botFactoryToolContext{base: f.ctx}, req); err != nil {
+		if err := candidate.(botRunnableTool).ProcessRequest(botFactoryHandoffContext{base: f.ctx, session: f.req.Run.SessionID.String()}, req); err != nil {
 			t.Fatal(err)
 		}
 		raw, err := json.Marshal(req)
@@ -61,7 +63,25 @@ func TestInteractiveBostonScheduleReviewedHomeOwnership(t *testing.T) {
 		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
 	r, c := scheduleFactory(t, f, repo)
-	review := decodeScheduleReview(t, basicCall(t, r, c, "schedule_job", map[string]any{"name": "Boston weather", "mode": "adaptive", "schedule": "* * * * *", "instructions": "Report current Boston weather in the same format as the preceding weather answer."}))
+	args := map[string]any{"name": "Boston weather", "mode": "adaptive", "schedule": "* * * * *", "instructions": "Report current Boston weather in the same format as the preceding weather answer."}
+	// The tool-level approval and subsequent owner configuration review are
+	// independent. Exercise the real bridge with one exact, consumable grant.
+	raw, _ := json.Marshal(args)
+	digest, err := (execution.ActionDescriptor{Tool: "schedule_job", Arguments: raw, Effect: execution.EffectUnknown}).Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := execution.ScopedGrant{ID: uuid.New(), Identity: f.req.Policy.Identity(), ActionDigest: digest, ExpiresAt: time.Now().Add(time.Minute)}
+	policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: grant.Identity, Level: execution.AutonomySupervised, AllowedTools: []string{"schedule_job"}, Grants: []execution.ScopedGrant{grant}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := &planExactGrantGuard{grants: map[string]execution.ScopedGrant{digest: grant}, calls: map[string]int{}}
+	c.base = agent.WithBotPolicyRuntime(execution.WithRunPolicy(c.base, policy), agent.BotPolicyRuntime{Guard: guard, Classifier: BotCatalogueClassifier{}})
+	review := decodeScheduleReview(t, basicCall(t, r, c, "schedule_job", args))
+	if guard.calls["schedule_job"] != 1 || len(guard.grants) != 0 {
+		t.Fatal("schedule did not consume exact approval")
+	}
 	if review.Review.Body.Definition.Enabled || review.Review.Body.Definition.ChannelBinding != nil {
 		t.Fatal("schedule unexpectedly activates or selects transport")
 	}

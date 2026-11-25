@@ -3,8 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"github.com/SAP/astonish/pkg/question"
-	"reflect"
+	"log/slog"
 	"time"
 
 	"github.com/SAP/astonish/pkg/bot"
@@ -39,6 +38,7 @@ func (c *botApprovalCapture) captureQuestion(ctx context.Context, payload json.R
 	}
 	saved, err := c.store.RequestApproval(ctx, c.req.Run.Lease, store.BotApproval{BotID: c.req.Bot.ID, RunID: c.req.Run.ID, Version: c.req.Run.Version, Action: action, ActionDigest: digest, Interaction: interaction, ExpiresAt: time.Now().Add(24 * time.Hour)})
 	if err != nil {
+		slog.Error("bot question approval capture failed", "bot_id", c.req.Bot.ID, "run_id", c.req.Run.ID, "error", err)
 		return err
 	}
 	c.approval = saved
@@ -64,6 +64,10 @@ func (a *BotChatRuntimeAdapter) resumeInteraction(ctx context.Context, req bot.R
 			req.Instructions = c.ConfirmedAssignment
 		}
 	}
+	if approval.Interaction.Kind == store.BotInteractionPlanDefinition {
+		req.PlanMode = false
+		req.Instructions = "Execute the owner's approved plan in this original session. Use update_plan for verified progress and announce_completion for Results. Consent is not a tool permission grant."
+	}
 	return a.runChat(ctx, req, sink, true)
 }
 
@@ -76,80 +80,12 @@ type botResumeInteractionKey struct{}
 // both IDs, keeping the original call and response intact. Missing, ambiguous or
 // subsequently-used transcripts fail closed rather than regenerating the task.
 func botInteractionAnswerMessage(events session.Events, approval *store.BotApproval) (*genai.Content, error) {
-	if events == nil || approval == nil || approval.Interaction == nil || approval.Interaction.ValidateResponse(approval.Response) != nil {
+	if events == nil {
 		return nil, store.ErrBotInvalid
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(approval.Interaction.Payload, &payload); err != nil {
-		return nil, err
+	var source []*session.Event
+	for event := range events.All() {
+		source = append(source, event)
 	}
-	var lastCall *genai.FunctionCall
-	var callInvocation, matchedCall, matchedInvocation string
-	matches := 0
-	for i := 0; i < events.Len(); i++ {
-		e := events.At(i)
-		if e == nil || e.Content == nil || e.Partial {
-			continue
-		}
-		if matches > 0 && e.Author == "user" {
-			return nil, store.ErrBotConflict
-		}
-		for _, p := range e.Content.Parts {
-			if p == nil {
-				continue
-			}
-			if p.FunctionCall != nil {
-				lastCall, callInvocation = p.FunctionCall, e.InvocationID
-			}
-			r := p.FunctionResponse
-			if r == nil || r.Name != "ask_user" || r.Response["questionId"] != approval.Interaction.QuestionID {
-				continue
-			}
-			if lastCall == nil || lastCall.Name != "ask_user" || lastCall.ID == "" || r.ID != lastCall.ID || e.InvocationID != callInvocation || r.Response["status"] != "ok" {
-				return nil, store.ErrBotConflict
-			}
-			// JSON round-trip normalizes option slices across in-memory and DB stores.
-			raw, err := json.Marshal(r.Response)
-			if err != nil {
-				return nil, err
-			}
-			var response map[string]any
-			if err := json.Unmarshal(raw, &response); err != nil {
-				return nil, err
-			}
-			for key, value := range payload {
-				if !reflect.DeepEqual(value, response[key]) {
-					return nil, store.ErrBotConflict
-				}
-			}
-			matches++
-			matchedCall, matchedInvocation = r.ID, e.InvocationID
-		}
-	}
-	if matches != 1 || lastCall == nil || lastCall.ID != matchedCall || callInvocation != matchedInvocation {
-		return nil, store.ErrBotConflict
-	}
-	var q question.Question
-	if err := json.Unmarshal(approval.Interaction.Payload, &q); err != nil {
-		return nil, err
-	}
-	label := approval.Response.Answer
-	for _, option := range q.Options {
-		if option.ID == label && option.Label != "" {
-			label = option.Label
-			break
-		}
-	}
-	// Preserve the model's structured correlation contract. Display is additive
-	// presentation metadata; it never replaces the response IDs or answer value.
-	raw, err := json.Marshal(map[string]any{
-		"type": "bot_owner_answer", "approval_id": approval.ID,
-		"invocation_id": matchedInvocation, "tool_call_id": matchedCall,
-		"tool": "ask_user", "response": approval.Response,
-		"display": map[string]string{"prompt": q.Prompt, "answer": label},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return genai.NewContentFromText(string(raw), "user"), nil
+	return store.BotInteractionAnswerMessage(source, approval)
 }

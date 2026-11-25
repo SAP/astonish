@@ -58,7 +58,7 @@ func TestBotKnowledgeExtractionMigrateV4(t *testing.T) {
 				t.Fatalf("excluded table accepted %v %v", ok, e)
 			}
 			var marker int
-			if e = db.QueryRowContext(c, "SELECT version FROM bot_schema_version").Scan(&marker); e != nil || marker != 4 {
+			if e = db.QueryRowContext(c, "SELECT version FROM bot_schema_version").Scan(&marker); e != nil || marker != botMigrationVersion {
 				t.Fatalf("marker %d %v", marker, e)
 			}
 		})

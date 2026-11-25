@@ -2,14 +2,18 @@ package api
 
 import (
 	"context"
-	"github.com/SAP/astonish/pkg/execution"
-	"github.com/SAP/astonish/pkg/store"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/store"
 )
 
 func TestBotInteractiveAdmissionFailsClosed(t *testing.T) {
-	for _, svc := range []*store.Services{nil, {}, {BotInteractiveReady: true}, {BotTurnRegistry: execution.NewBotTurnAuthorizationRegistry(1)}} {
+	policy := store.BotMandatePolicyResolver(func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
+		return store.BotMandatePolicy{}, store.ErrBotUnsupported
+	})
+	for _, svc := range []*store.Services{nil, {}, {BotInteractiveReady: true}, {BotTurnRegistry: execution.NewBotTurnAuthorizationRegistry(1)}, {BotMandatePolicy: policy}} {
 		ctx := context.Background()
 		if svc != nil {
 			ctx = store.WithServices(ctx, svc)

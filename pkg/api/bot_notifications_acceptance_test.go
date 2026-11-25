@@ -3,9 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,8 +47,9 @@ func (n notificationHTTPTransport) Send(ctx context.Context, q bot.NotificationR
 
 // TestBotNotifications uses production scoped stores, committed run outcomes and
 // a real HTTP transport. Every database belongs to t.TempDir; linked identities
-// supply live authority. Fixture SQL sets run readiness and immutable snapshots,
-// including hostile legacy targets that the live claim gate must reject.
+// supply live authority. Versions are admitted through the production disk-backed
+// store. Fixture SQL sets readiness and hostile control-only target bindings that
+// the live notification claim gate must reject.
 func TestBotNotifications(t *testing.T) { testBotNotifications(t, false) }
 
 func TestBotAgentDeliveryHTTPAcceptance(t *testing.T) { testBotNotifications(t, true) }
@@ -104,6 +103,7 @@ func testBotNotifications(t *testing.T, reopen bool) {
 				}
 				version := store.DefaultBotVersion()
 				version.Charter = "Observe and report"
+				version.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerManual}}
 				b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Notification acceptance", OwnerID: owner, Version: version, IdempotencyKey: "fixture"})
 				if err != nil {
 					t.Fatal(err)
@@ -144,18 +144,13 @@ func testBotNotifications(t *testing.T, reopen bool) {
 					t.Fatal(err)
 				}
 				defer fixtureDB.Close()
-				if _, err := fixtureDB.ExecContext(ctx, "UPDATE bots SET status = 'active' WHERE id = ?", b.ID); err != nil {
-					t.Fatal(err)
-				}
-				run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: 1, Trigger: store.TriggerManual, IdempotencyKey: "run", Instructions: "Observe"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				approved, err := repo.GetVersion(ctx, b.ID, 1)
-				if err != nil {
-					t.Fatal(err)
-				}
+				approved := version
 				approved.Delivery = store.DeliveryPolicy{Notify: store.NotifyOnChange, Bindings: []store.BotChannelBinding{target}}
+				// Foreign-target scenarios retain a hostile SQL control binding below,
+				// but never insert an unsupported inline definition.
+				if linkOwner != owner {
+					approved.Delivery.Bindings = nil
+				}
 				report := store.BotReport{Summary: "Observed outcome", Changed: []store.BotEvidence{{Summary: "A"}, {Summary: "B"}}}
 				now := time.Now().UTC()
 				var goal *store.BotGoal
@@ -174,17 +169,64 @@ func testBotNotifications(t *testing.T, reopen bool) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					approved.Triggers = []store.TriggerSpec{{ID: run.TriggerID, GoalID: &goal.ID}}
 				}
-				raw, err := json.Marshal(approved)
+				b, err = repo.(store.BotConfigurationStore).ConfigureReviewed(ctx, store.BotConfigurationRequest{BotID: b.ID, ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "notification acceptance policy", Autonomy: approved.Autonomy, Budget: approved.Budget, Delivery: approved.Delivery})
 				if err != nil {
 					t.Fatal(err)
 				}
-				hash := sha256.Sum256(raw)
-				if _, err := fixtureDB.ExecContext(ctx, "UPDATE bot_versions SET definition = ?, content_hash = ? WHERE bot_id = ? AND version = 1", string(raw), hex.EncodeToString(hash[:]), b.ID); err != nil {
+				if linkOwner != owner || goal != nil {
+					var raw []byte
+					if err := fixtureDB.QueryRowContext(ctx, "SELECT definition FROM bot_versions WHERE bot_id = ? AND version = ?", b.ID, b.Version).Scan(&raw); err != nil {
+						t.Fatal(err)
+					}
+					var outer map[string]string
+					if err := json.Unmarshal(raw, &outer); err != nil {
+						t.Fatal(err)
+					}
+					var record map[string]json.RawMessage
+					if err := json.Unmarshal([]byte(outer["bot_record_v2"]), &record); err != nil {
+						t.Fatal(err)
+					}
+					if goal != nil {
+						var triggers []map[string]json.RawMessage
+						if err := json.Unmarshal(record["triggers"], &triggers); err != nil {
+							t.Fatal(err)
+						}
+						triggers[0]["goal_id"], _ = json.Marshal(goal.ID)
+						record["triggers"], err = json.Marshal(triggers)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					record["bindings"], err = json.Marshal([]store.BotChannelBinding{target})
+					if err != nil {
+						t.Fatal(err)
+					}
+					encoded, err := json.Marshal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					outer["bot_record_v2"] = string(encoded)
+					encoded, err = json.Marshal(outer)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := fixtureDB.ExecContext(ctx, "UPDATE bot_versions SET definition = ? WHERE bot_id = ? AND version = ?", string(encoded), b.ID, b.Version); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := fixtureDB.ExecContext(ctx, "UPDATE bots SET status = 'active' WHERE id = ?", b.ID); err != nil {
 					t.Fatal(err)
 				}
-				worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: 1, ActorID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug})
+				request := store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, IdempotencyKey: "run", Instructions: "Observe"}
+				if goal != nil {
+					request.TriggerID = version.Triggers[0].ID
+				}
+				run, err := repo.RequestRun(ctx, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug})
 				lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "acceptance", ExpiresAt: now.Add(time.Minute)})
 				if err != nil {
 					t.Fatal(err)

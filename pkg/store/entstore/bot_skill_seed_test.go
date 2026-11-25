@@ -20,9 +20,9 @@ func testIntakeSkillSeed() *store.BotSkillSeed {
 func seedTestDB(b store.BotStore) botDraftDB {
 	switch b := b.(type) {
 	case *personalBotStore:
-		return personalBotDB{client: b.client}
+		return personalBotDB{client: b.client, content: b.content}
 	case *teamBotStore:
-		return teamBotDB{client: b.client}
+		return teamBotDB{client: b.client, content: b.content}
 	}
 	panic("unsupported scope")
 }
@@ -242,8 +242,9 @@ func TestBotTemplateSkillSeedFreshCopies(t *testing.T) {
 	destination, _ := reopen()
 	tc := newTeamClient(t)
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}
-	source := &teamBotStore{client: tc, auth: auth}
-	templates := &teamBotTemplateStore{client: tc, auth: auth}
+	principal, _ := execution.PrincipalFromContext(ctx)
+	source := &teamBotStore{client: tc, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: principal.Subject}), auth: auth}
+	templates := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: tc, auth: auth}
 	def := store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Seed template", Charter: "Observe", SuggestedSchedules: []store.BotScheduleSuggestion{{Cron: "0 8 * * *", Timezone: "UTC", SkillSeed: testIntakeSkillSeed()}}}
 	template, err := templates.Publish(ctx, def, 0)
 	if err != nil {

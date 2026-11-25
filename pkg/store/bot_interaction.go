@@ -22,6 +22,10 @@ type BotInteractionResponse struct {
 }
 
 func (i *BotInteraction) Validate() error {
+	if i != nil && i.Kind == BotInteractionPlanDefinition {
+		_, err := i.PlanDefinition()
+		return err
+	}
 	if i == nil || i.Kind != BotInteractionQuestion || i.QuestionID == "" || len(i.Payload) > 1<<20 {
 		return ErrBotInvalid
 	}
@@ -34,6 +38,12 @@ func (i *BotInteraction) Validate() error {
 func (i *BotInteraction) ValidateResponse(r *BotInteractionResponse) error {
 	if i.Validate() != nil || r == nil || r.QuestionID != i.QuestionID {
 		return ErrBotInvalid
+	}
+	if i.Kind == BotInteractionPlanDefinition {
+		if r.Answer != BotPlanDefinitionApprove {
+			return ErrBotInvalid
+		}
+		return nil
 	}
 	var q question.Question
 	if json.Unmarshal(i.Payload, &q) != nil || q.ValidateAnswer(r.Answer) != nil {

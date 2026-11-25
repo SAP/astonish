@@ -10,6 +10,32 @@ A worker must reconstruct `bot.MandateExecution` from the persisted run referenc
 
 Composition must supply all applicable network-policy tiers and a live membership resolver. Reconstruct the finite ceiling inside the current-policy lookup rather than capturing mutable operator settings as startup authority. `NewBotRoutineReadMandatePolicy` alone is not membership authentication. The legacy `BotMandatedConfiguredSearchTool` remains protocol-limited and does not widen historical grants.
 
+## File-first capabilities are not mandate grants
+
+Both mandate and ephemeral interactive catalogue composition include confined
+`read_file`, `write_file`, `edit_file`, `find_files`, `file_tree` and `publish_file`
+adapters before normal early-return branches. This does not add names to saved
+resources, widen historical grants, bypass the interactive caller ceiling or turn
+a read-only mandate into write authority. Dispatch still requires current exact
+resource/policy, scope, lease, cancellation and budget checks. New grants must be
+explicitly admitted under current policy; old grants are not enriched from
+catalogue presence or `MEMORY.md` text.
+
+Reads/listings are bounded and Home-relative; writes/edits and publication
+snapshots are confined to `outputs/`. Private receipt/authority storage and
+instruction/memory files are not writable through these tools. A trusted local
+readback receipt proves a file operation, not shell execution, public provenance
+or an external action. Unknown shell commands remain unknown effects, not
+reversible writes. See [basic Chat tools](bot-basic-chat-tools.md).
+
+Title-confirmation remains question-only; opening documents or paused Home files
+does not schedule work, provision Home or admit a run. Pending file-first
+acceptance must cover catalogue presence and denied invocation under old or
+insufficient mandates, current-policy revocation, stale lease, cancellation,
+manual/cron/confirmed-title execution and no work while paused. Controlled factory
+checks do not certify physical persistence, publication-to-memory updates or a
+live scheduled run.
+
 ## Configured search-first public research
 
 New owner-backed public research carries a versioned `BotPublicResearchScope`: an admitted public subject/source event, exact configured route fingerprint and symbolic credential handles, typed facets, and finite query/result/call limits. Historical or refreshed mandates never acquire this authority implicitly. `BotConfiguredResearchTool` uses the effective scoped Chat Perplexity provider/model via `RunPerplexityWebSearch` with confined provider secrets and shared model accounting, rather than translating SAP or Sonar configuration into an unrelated fixed HTTP transport. Tavily uses only the selected cached concrete sandbox MCP executable with a private authorization handoff; sibling MCP tools remain unknown effects requiring approval.

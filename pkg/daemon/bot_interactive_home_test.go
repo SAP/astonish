@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,13 +24,61 @@ import (
 )
 
 type autoHomeBackend struct {
-	sandbox.Backend
-	calls  int
-	fail   bool
-	before func()
+	*regressionHomeBackend
+	calls           int
+	fail            bool
+	before          func()
+	recordStartup   bool
+	startupOpens    map[string]int
+	startupContexts []context.Context
+	startupKeys     []string
+	selectionOpens  map[string]int
+	classifiedOpens int
+	startupHomeCtx  context.Context
 }
 
-func (b *autoHomeBackend) EnsureBotHome(_ context.Context, s sandbox.BotHomeScope) (*sandbox.BotHomeBinding, error) {
+func (b *autoHomeBackend) OpenBotContent(ctx context.Context, home *sandbox.BotHomeBinding, ref store.BotContentRef, r store.BotFileRange) (*store.BotFileStream, error) {
+	// The immutable-read cache holds its mutex while calling this backend.
+	// Inspecting operation state here re-enters that mutex and deadlocks. Record
+	// observations only; inspect lifetime at the safe setup/runtime boundaries.
+	if b.recordStartup {
+		if b.startupOpens == nil {
+			b.startupOpens = make(map[string]int)
+		}
+		b.startupOpens[ref.Key]++
+		b.startupKeys = append(b.startupKeys, ref.Key)
+		b.startupContexts = append(b.startupContexts, ctx)
+	}
+	return b.regressionHomeBackend.OpenBotContent(ctx, home, ref, r)
+}
+
+func (b *autoHomeBackend) StatBotHomeFile(ctx context.Context, home *sandbox.BotHomeBinding, path string) (*store.BotFileEntry, error) {
+	// Mutable document initialization runs after immutable Home selection has
+	// returned (and released its cache mutex), while startup is still active.
+	// Selection owns a separate read operation; count its closed contexts apart
+	// from the surrounding startup operation rather than allowing duplicate opens.
+	if b.recordStartup {
+		for i := b.classifiedOpens; i < len(b.startupContexts); i++ {
+			if !startupReadsActive(b.startupContexts[i]) {
+				key := b.startupKeys[i]
+				b.startupOpens[key]--
+				if b.startupOpens[key] == 0 {
+					delete(b.startupOpens, key)
+				}
+				if b.selectionOpens == nil {
+					b.selectionOpens = make(map[string]int)
+				}
+				b.selectionOpens[key]++
+			}
+		}
+		b.classifiedOpens = len(b.startupContexts)
+	}
+	return b.regressionHomeBackend.StatBotHomeFile(ctx, home, path)
+}
+
+func (b *autoHomeBackend) EnsureBotHome(ctx context.Context, s sandbox.BotHomeScope) (*sandbox.BotHomeBinding, error) {
+	b.startupHomeCtx = ctx
+	b.recordStartup = startupReadsActive(ctx)
 	b.calls++
 	if b.before != nil {
 		b.before()
@@ -42,15 +91,25 @@ func (b *autoHomeBackend) EnsureBotHome(_ context.Context, s sandbox.BotHomeScop
 
 type autoHomeRuntime struct {
 	bot.Runtime
-	t     *testing.T
-	repo  store.BotStore
-	calls int
+	t       *testing.T
+	repo    store.BotStore
+	backend *autoHomeBackend
+	calls   int
 }
 
 func (*autoHomeRuntime) Cancel(context.Context, store.BotLease) error { return nil }
 
 func (r *autoHomeRuntime) Start(ctx context.Context, q bot.RunRequest, _ bot.EventSink) (bot.RunResult, error) {
 	r.calls++
+	r.backend.recordStartup = false
+	if startupReadsActive(ctx) || startupReadsActive(r.backend.startupHomeCtx) {
+		r.t.Fatal("startup operation crossed runtime boundary")
+	}
+	for _, retained := range r.backend.startupContexts {
+		if startupReadsActive(retained) {
+			r.t.Fatal("startup backend read operation crossed runtime boundary")
+		}
+	}
 	if q.Bot.Home.ID == uuid.Nil {
 		return bot.RunResult{}, errors.New("runtime without home")
 	}
@@ -93,8 +152,11 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry := execution.NewBotTurnAuthorizationRegistry(32)
-			backend := &autoHomeBackend{}
-			runtime := &autoHomeRuntime{t: t, repo: ods.ForUser(owner).Bots()}
+			backend := &autoHomeBackend{regressionHomeBackend: newRegressionHomeBackend(t)}
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &autoHomeRuntime{t: t, repo: ods.ForUser(owner).Bots(), backend: backend}
 			worker := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "auto-worker", TurnRegistry: registry}, runtime: runtime}
 			svc.BotHomeSetup = worker.provisionHome
 			svc.BotInteractiveReady = true
@@ -148,6 +210,26 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			}
 			repo := ods.ForUser(owner).Bots()
 			ss := ods.ForUser(owner).Sessions()
+			// Viewing an admitted turn must neither provision Home nor claim/run it.
+			for _, path := range []string{"/api/studio/bots?scope=personal", "/api/studio/bots/" + created.ID.String() + "?scope=personal"} {
+				resp, err := server.Client().Get(server.URL + path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("view HTTP %d: %s (%v)", resp.StatusCode, raw, readErr)
+				}
+			}
+			viewed, err := repo.Get(caller, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			viewedRuns, err := repo.ListRuns(caller, created.ID, store.BotPage{Limit: 10})
+			if err != nil || len(viewedRuns) != 1 || viewedRuns[0].Status != store.RunQueued || viewedRuns[0].Lease.Fence != 0 || viewed.Home.ID != uuid.Nil || viewed.HomeSessionID != created.HomeSessionID || backend.calls != 0 || runtime.calls != 0 {
+				t.Fatalf("view changed lifecycle: bot=%+v runs=%+v err=%v", viewed, viewedRuns, err)
+			}
 			runID := created.InitialTurn.Run.ID
 			ownerCtx, _, err := worker.authenticateOwner(ctx, BotSchedulerScope{org.Slug, team.Slug, owner})
 			if err != nil {
@@ -232,13 +314,49 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if mode == "message" {
+				if len(backend.startupOpens) == 0 {
+					t.Fatal("startup never carried immutable-read scope to Home")
+				}
+				for key, count := range backend.selectionOpens {
+					if count != 1 {
+						t.Fatalf("Home selection reopened immutable %s %d times", key, count)
+					}
+				}
+				if len(backend.selectionOpens) == 0 {
+					t.Fatal("Home selection did not verify retained content")
+				}
+				for key, count := range backend.startupOpens {
+					if count != 1 {
+						t.Fatalf("startup reopened immutable %s %d times", key, count)
+					}
+				}
+				for _, retained := range backend.startupContexts {
+					if startupReadsActive(retained) {
+						t.Fatal("completed startup retained read operation")
+					}
+				}
+				t.Logf("startup immutable reads: %d distinct objects, exactly one open each", len(backend.startupOpens))
+			}
 			current, err := repo.Get(caller, created.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.Home.ID == uuid.Nil || current.Status != store.BotDraft || current.Version != 1 || current.Revision != 2 || runtime.calls != 1 {
+			if current.Home.ID == uuid.Nil || current.HomeSessionID != created.HomeSessionID || current.Status != store.BotDraft || current.Version != 1 || current.Revision != 2 || runtime.calls != 1 {
 				t.Fatalf("not safely provisioned: %+v calls=%d", current, runtime.calls)
 			}
+			retained := backend.documentsRoot
+			for _, name := range []string{"SOUL.md", "IDENTITY.md", "USER.md", "CHARTER.md", "MEMORY.md"} {
+				if _, err := os.Stat(filepath.Join(retained, created.ID.String(), name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A selected version cannot silently fall back to the preserved stage.
+			backend.documentsRoot = t.TempDir()
+			if _, err := repo.GetVersion(caller, created.ID, 1); err == nil {
+				t.Fatal("version not selected into retained Home")
+			}
+			backend.documentsRoot = retained
 			runs, err := repo.ListRuns(caller, created.ID, store.BotPage{Limit: 10})
 			if err != nil || len(runs) != 1 || runs[0].Status != store.RunSucceeded {
 				t.Fatalf("runs: %+v %v", runs, err)

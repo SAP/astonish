@@ -3,7 +3,6 @@ package api_test
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
@@ -35,6 +35,171 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
+
+type employeeArtifactClassifier struct{}
+
+func (employeeArtifactClassifier) DescribeAction(_ context.Context, name string, raw json.RawMessage) (execution.ActionDescriptor, error) {
+	return execution.ActionDescriptor{Tool: name, Arguments: raw, Effect: execution.EffectReversibleWrite, ConstraintsVerified: true}, nil
+}
+
+func TestBotEmployeeExplicitFileHTTP(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, scope)
+			defer f.worker.Stop()
+			const objective = "Create and publish a Markdown file containing the exact approved action receipt."
+			const body = "Exact approved action receipt observed."
+			const actionName = "employee_create_receipt"
+			var calls, writes atomic.Int64
+			files := newComposedHTTPFiles(t, f.dataDir, f.repo, f.b, nil)
+			var receiptFiles *journeyReceiptFiles
+			cfg := f.workerConfig
+			cfg.Sandbox = journeyFilesBackend{synthesisHTTPBackend{files: files.disk}}
+			cfg.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+				return &journeyModel{root: f.dataDir, action: actionName, calls: &calls}, nil
+			}
+			cfg.Prepare = func(ctx context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				if q.Instructions != objective || q.Bot.Scope != scope {
+					return nil, fmt.Errorf("objective or scope changed: %+v", q)
+				}
+				files.install(ctx, q, s)
+				receiptFiles = &journeyReceiptFiles{composedHTTPFiles: files, req: q}
+				s.Services.BotFilesFactory = func(ctx context.Context, _ *store.Services, requested store.BotScope) (store.BotFiles, error) {
+					if requested != scope {
+						return nil, store.ErrBotForbidden
+					}
+					if _, err := f.repo.Get(ctx, q.Bot.ID); err != nil {
+						return nil, err
+					}
+					return receiptFiles, nil
+				}
+				publication, receipts, err := launcher.BotPublicationToolsWithReceipts(q, s)
+				if err != nil {
+					return nil, err
+				}
+				action, err := functiontool.New(functiontool.Config{Name: actionName, Description: "Create the owner's requested receipt file in the isolated retained Home and publish it"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
+					if err := agent.AuthorizeBotTool(c, actionName, args); err != nil {
+						return nil, err
+					}
+					if args["body"] != "exact" {
+						return nil, store.ErrBotInvalid
+					}
+					path := filepath.Join(f.dataDir, "home", "reports", "receipt.md")
+					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+						return nil, err
+					}
+					if err := f.repo.(store.BotFileCommitStore).WithBotFileCommit(c, q.Bot.Home, q.Run.Lease, func() error { return os.WriteFile(path, []byte(body), 0600) }); err != nil {
+						return nil, err
+					}
+					actual, err := os.ReadFile(path)
+					if err != nil || string(actual) != body {
+						return nil, fmt.Errorf("created artifact readback: %v", err)
+					}
+					writes.Add(1)
+					publisher := publication[0].(interface {
+						Run(tool.Context, any) (map[string]any, error)
+					})
+					pc := journeyPublicationContext{c}
+					if _, err := publisher.Run(pc, map[string]any{"path": "outputs/receipt.md", "title": "Requested receipt", "purpose": objective, "memory_summary": body}); err != nil {
+						return nil, err
+					}
+					published, ok := bot.TakeToolOutcome(c, pc.FunctionCallID())
+					if !ok || !published.Verified || published.ReceiptConflict {
+						return nil, store.ErrBotConflict
+					}
+					bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Changed: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Created requested receipt and read it back", Source: path, ObservedAt: time.Now().UTC(), ActorID: q.Bot.OwnerID}}})
+					return map[string]any{"report_path": "outputs/receipt.md", "content": string(actual)}, nil
+				})
+				if err != nil {
+					return nil, err
+				}
+				return &launcher.BotChatSafeResources{FileReceipts: receipts, ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool, Groups: map[string]*agent.ToolGroup{"employee": {Name: "employee", Tools: []tool.Tool{action}}}}, WorkspaceDir: f.dataDir, PolicyRuntime: agent.BotPolicyRuntime{Classifier: employeeArtifactClassifier{}, Guard: journeyGuard{repo: f.repo, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+			}
+			worker, err := daemon.NewBotWorker(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer worker.Stop()
+			v, err := f.repo.GetVersion(f.ctx, f.b.ID, f.b.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v.Autonomy.AllowedTools = []string{actionName}
+			configuration, _ := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Authorize requested artifact creation", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
+			if err := json.Unmarshal(f.request("PUT", f.path+"/configuration", string(configuration), 200), &f.b); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"requested file"}`, f.b.Revision), 200), &f.b); err != nil {
+				t.Fatal(err)
+			}
+			var admitted store.BotRun
+			if err := json.Unmarshal(f.request("POST", f.path+"/runs", fmt.Sprintf(`{"version":%d,"instructions":%q,"idempotency_key":"explicit-file"}`, f.b.Version, objective), 202), &admitted); err != nil {
+				t.Fatal(err)
+			}
+			if writes.Load() != 0 {
+				t.Fatal("admission executed artifact creation")
+			}
+			if err := worker.Poll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.repo.GetRun(f.ctx, f.b.ID, admitted.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != store.RunSucceeded || writes.Load() != 1 || len(run.Report.Artifacts) != 1 || run.Report.EmployeeMessage == nil {
+				t.Fatalf("explicit file journey incomplete: writes=%d calls=%d run=%+v", writes.Load(), calls.Load(), run)
+			}
+			if run.Report.Artifacts[0].ContentRef == nil || run.Report.Artifacts[0].SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(body))) || run.Report.Artifacts[0].SizeBytes != int64(len(body)) {
+				t.Fatal("artifact receipt does not describe the employee-created bytes")
+			}
+			pub, err := f.repo.(store.BotPublicationStore).PublishReport(f.ctx, store.BotPublicationRequest{BotID: f.b.ID, RunID: run.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pub.Text != run.Report.EmployeeMessage.Text {
+				t.Fatal("publication differs from committed employee message")
+			}
+			router := mux.NewRouter()
+			router.HandleFunc("/api/studio/bots/{botID}/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}/download", api.BotFileDownloadHandler).Methods("GET")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				svc := &store.Services{TenantRouter: f.db, Bots: f.repo, PersonalBots: f.repo, BotFilesFactory: func(ctx context.Context, _ *store.Services, requested store.BotScope) (store.BotFiles, error) {
+					if requested != scope {
+						return nil, store.ErrBotForbidden
+					}
+					return receiptFiles, nil
+				}}
+				router.ServeHTTP(w, r.WithContext(store.WithServices(f.ctx, svc)))
+			}))
+			defer server.Close()
+			// Mutate the working copy: the published download must retain the exact
+			// bytes actually generated by the employee tool, not read the new file.
+			if err := os.WriteFile(filepath.Join(f.dataDir, "home", "reports", "receipt.md"), []byte("later mutable draft"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			url := fmt.Sprintf("%s/api/studio/bots/%s/runs/%s/reports/%d/artifacts/%s/download?scope=%s", server.URL, f.b.ID, run.ID, pub.ReportSequence, run.Report.Artifacts[0].ID, scope)
+			resp, err := server.Client().Get(url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			downloaded, err := io.ReadAll(resp.Body)
+			if err != nil || resp.StatusCode != 200 || string(downloaded) != body {
+				t.Fatalf("exact download: status=%d body=%q err=%v", resp.StatusCode, downloaded, err)
+			}
+			history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
+			if !strings.Contains(history, pub.Text) {
+				t.Fatal("committed employee message missing from HTTP Home history")
+			}
+			if err := worker.Poll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if writes.Load() != 1 {
+				t.Fatal("completed artifact producer replayed")
+			}
+			t.Log("employee-explicit-file=true owner-objective=true shared-chat-loop=true authorized-write=true trusted-publication=true committed-message=true exact-immutable-download=true no-replay=true")
+		})
+	}
+}
 
 type journeyNotifier struct {
 	url    string
@@ -66,11 +231,87 @@ func (journeyHomeBackend) EnsureBotHome(_ context.Context, s sandbox.BotHomeScop
 	return &sandbox.BotHomeBinding{Scope: s, Backend: "controlled", Ref: "journey-home"}, nil
 }
 
+type journeyFilesBackend struct{ synthesisHTTPBackend }
+
+func (b journeyFilesBackend) OpenBotContent(ctx context.Context, binding *sandbox.BotHomeBinding, ref store.BotContentRef, r store.BotFileRange) (*store.BotFileStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ref.Validate() != nil || r.Validate() != nil || ref.Kind != store.BotContentArtifact || !strings.HasPrefix(ref.Key, "snapshots/") || ref.Scope.BotID.String() != binding.Scope.BotID || ref.Scope.OwnerID != binding.Scope.UserID || ref.Scope.OrgID != binding.Scope.OrgID || ref.Scope.TeamID != binding.Scope.TeamID {
+		return nil, store.ErrBotForbidden
+	}
+	p := filepath.Join(b.files.root, ref.Key)
+	body, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) != ref.SizeBytes || fmt.Sprintf("%x", sha256.Sum256(body)) != ref.SHA256 {
+		return nil, store.ErrBotConflict
+	}
+	h, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = h.Seek(r.Offset, io.SeekStart); err != nil {
+		h.Close()
+		return nil, err
+	}
+	var reader io.Reader = h
+	if r.Length > 0 {
+		reader = io.LimitReader(h, r.Length)
+	}
+	return &store.BotFileStream{ReadCloser: struct {
+		io.Reader
+		io.Closer
+	}{reader, h}, Entry: store.BotFileEntry{Path: ref.Key, Kind: store.BotFileRegular, SizeBytes: ref.SizeBytes, SHA256: ref.SHA256, Preview: store.BotFilePreviewText}}, nil
+}
+
+type journeyPublicationContext struct{ tool.Context }
+
+func (c journeyPublicationContext) FunctionCallID() string {
+	return c.Context.FunctionCallID() + "/publication"
+}
+
+type journeyReceiptFiles struct {
+	*composedHTTPFiles
+	req bot.RunRequest
+}
+
+func (f *journeyReceiptFiles) PublishSnapshot(ctx context.Context, id store.BotID, path, _ string, _ func(func() error) error) (*store.BotContentRef, error) {
+	if id != f.req.Bot.ID || path != "outputs/receipt.md" {
+		return nil, store.ErrBotForbidden
+	}
+	body, err := os.ReadFile(filepath.Join(f.disk.root, "home", "reports", "receipt.md"))
+	if err != nil || string(body) != "Exact approved action receipt observed." {
+		return nil, fmt.Errorf("receipt snapshot source: %v", err)
+	}
+	key := "snapshots/" + uuid.NewString() + ".md"
+	if err := os.MkdirAll(filepath.Join(f.disk.root, "snapshots"), 0700); err != nil {
+		return nil, err
+	}
+	if err := f.repo.(store.BotFileCommitStore).WithBotFileCommit(ctx, f.req.Bot.Home, f.req.Run.Lease, func() error {
+		return os.WriteFile(filepath.Join(f.disk.root, key), body, 0400)
+	}); err != nil {
+		return nil, err
+	}
+	return &store.BotContentRef{Format: store.BotContentFormatVersion, Scope: store.BotContentScope{OrgID: f.req.Principal.OrgSlug, TeamID: f.req.Principal.TeamSlug, OwnerID: f.req.Bot.OwnerID.String(), BotID: id}, Kind: store.BotContentArtifact, Key: key, SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), SizeBytes: int64(len(body)), Revision: 1}, nil
+}
+
+func (f *journeyReceiptFiles) OpenContent(ctx context.Context, ref store.BotContentRef, r store.BotFileRange) (*store.BotFileStream, error) {
+	if _, err := f.repo.Get(ctx, f.req.Bot.ID); err != nil {
+		return nil, err
+	}
+	binding := &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: f.req.Principal.OrgSlug, TeamID: f.req.Principal.TeamSlug, UserID: f.req.Bot.OwnerID.String(), BotID: f.req.Bot.ID.String()}}
+	return (journeyFilesBackend{synthesisHTTPBackend{files: f.disk}}).OpenBotContent(ctx, binding, ref, r)
+}
+
 type journeyPool struct{ sandbox.ToolNodePool }
 
 func (journeyPool) SetBotHome(string, *sandbox.BotHomeBinding) error { return nil }
 
 type journeyModel struct {
+	root   string
+	action string
 	report bool
 	calls  *atomic.Int64
 }
@@ -79,14 +320,26 @@ func (*journeyModel) Name() string { return "journey-model" }
 func (m *journeyModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls.Add(1)
-		if response, ok := journeyWorkAssessment(req); ok {
+		if response, ok := journeyWorkAssessment(req, m.root); ok {
 			yield(response, nil)
 			return
 		}
 		part := &genai.Part{Text: "```astonish-report\npath: reports/receipt.md\n```"}
+		if m.action != "" {
+			part.Text = "Exact approved action receipt observed."
+		}
 		if !m.report {
 			m.report = true
-			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: map[string]any{"body": "exact"}}}
+			action := m.action
+			if action == "" {
+				action = "read_file"
+			}
+			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: action, Args: map[string]any{"body": "exact"}}}
+			if m.action != "" {
+				// Shared Chat exposes catalog extensions through its dispatch bridge.
+				part.FunctionCall.Name = "execute_tool"
+				part.FunctionCall.Args = map[string]any{"name": action, "arguments": map[string]any{"body": "exact"}}
+			}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil)
 	}
@@ -94,7 +347,7 @@ func (m *journeyModel) GenerateContent(_ context.Context, req *model.LLMRequest,
 
 // Controlled assessor validates the actual receipt body; it never bypasses the
 // production controller or writes a verdict directly to the store.
-func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
+func journeyWorkAssessment(req *model.LLMRequest, roots ...string) (*model.LLMResponse, bool) {
 	if req.Config == nil || req.Config.SystemInstruction == nil || len(req.Config.SystemInstruction.Parts) == 0 || len(req.Contents) != 1 {
 		return nil, false
 	}
@@ -121,6 +374,21 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 	} else if strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1") {
 		var work store.BotWorkState
 		_ = json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &work)
+		// File-first review carries references, not inline artifact bodies. The
+		// controlled assessor explicitly opens and verifies the retained snapshot;
+		// the original exact-body and observed-effect verdict stays unchanged.
+		if work.Candidate != nil && len(work.Candidate.Artifacts) == 1 && len(roots) == 1 && roots[0] != "" {
+			artifact := work.Candidate.Artifacts[0]
+			if ref := artifact.ContentRef; ref != nil && ref.Validate() == nil && ref.Scope.BotID == work.Contract.BotID && strings.HasPrefix(ref.Key, "snapshots/") {
+				body, err := os.ReadFile(filepath.Join(roots[0], ref.Key))
+				if err == nil && int64(len(body)) == ref.SizeBytes && fmt.Sprintf("%x", sha256.Sum256(body)) == ref.SHA256 && artifact.SHA256 == ref.SHA256 {
+					if work.Candidate.Bodies == nil {
+						work.Candidate.Bodies = map[string]string{}
+					}
+					work.Candidate.Bodies[artifact.ID.String()] = string(body)
+				}
+			}
+		}
 		verdict := store.BotCriterionUnverified
 		if work.Candidate != nil && work.Candidate.Text == "Exact approved action receipt observed." && len(work.Candidate.Observations) > 0 && len(work.Candidate.Artifacts) == 1 && work.Candidate.Bodies[work.Candidate.Artifacts[0].ID.String()] == work.Candidate.Text {
 			verdict = store.BotCriterionSatisfied
@@ -131,7 +399,31 @@ func journeyWorkAssessment(req *model.LLMRequest) (*model.LLMResponse, bool) {
 				assessments = append(assessments, store.BotCriterionAssessment{CriterionID: criterion.ID, Verdict: verdict, Method: store.BotAssessmentModel, EvidenceRefs: []string{"candidate:" + work.Candidate.Digest}, Explanation: "Inspected captured receipt and actual observed effect."})
 			}
 		}
-		output = store.BotWorkReview{CandidateDigest: work.Candidate.Digest, Criteria: assessments}
+		var input struct {
+			Items             []struct{ ID, Text string } `json:"content_items"`
+			ExecutionEvidence map[string]string           `json:"execution_evidence"`
+		}
+		_ = json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &input)
+		quotes := []map[string]string{}
+		for ref, raw := range input.ExecutionEvidence {
+			var evidence store.BotEvidence
+			if json.Unmarshal([]byte(raw), &evidence) != nil {
+				continue
+			}
+			bytes, err := os.ReadFile(evidence.Source)
+			if err == nil && (string(bytes) == "exact" || string(bytes) == "Exact approved action receipt observed.") {
+				quotes = append(quotes, map[string]string{"ref": ref, "quote": evidence.Summary})
+			}
+		}
+		content := []map[string]any{}
+		for _, item := range input.Items {
+			support := store.BotCriterionUnverified
+			if item.Text == "Exact approved action receipt observed." && verdict == store.BotCriterionSatisfied && len(quotes) > 0 {
+				support = store.BotCriterionSatisfied
+			}
+			content = append(content, map[string]any{"item_id": item.ID, "claim_type": "execution", "execution_sources": quotes, "relevance": store.BotCriterionSatisfied, "support": support, "explanation": "Read the controlled receipt and immutable report; matched the observed execution evidence.", "sources": []any{}})
+		}
+		output = map[string]any{"candidate_digest": work.Candidate.Digest, "criteria": assessments, "content_assessments": content}
 	} else {
 		return nil, false
 	}
@@ -336,7 +628,8 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	triggerID := uuid.New()
-	v.Autonomy.AllowedTools = []string{"read_file"}
+	// Keep the controlled send distinct from the production confined read_file.
+	v.Autonomy.AllowedTools = []string{"journey_exact_action"}
 	link := &store.UserChannel{ID: uuid.NewString(), UserID: owner, ChannelType: "telegram", ExternalID: "1234567", Enabled: true}
 	if err := db.UserChannels().Link(ownerCtx, link); err != nil {
 		t.Fatal(err)
@@ -388,19 +681,37 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	jobs := personal.ScheduledJobs()
 	var modelCalls, effects atomic.Int64
 	physicalIDs := map[uuid.UUID][]string{}
+	files := newComposedHTTPFiles(t, dir, repo, b, nil)
+	pool := &interactiveHTTPPool{dir: dir}
 	makeWorker := func(report bool) *daemon.BotWorker {
-		w, e := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: journeyPool{}, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, s store.BotScope, providerName, modelName string) (model.LLM, error) {
+		w, e := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyFilesBackend{synthesisHTTPBackend{files: files.disk}}, Pool: pool, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, s store.BotScope, providerName, modelName string) (model.LLM, error) {
 			if p.Subject != owner || s != store.BotScopePersonal || providerName != "controlled" || modelName != "journey-model" {
 				return nil, store.ErrBotForbidden
 			}
-			return &journeyModel{report: report, calls: &modelCalls}, nil
-		}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			return &journeyModel{root: dir, action: "journey_exact_action", report: report, calls: &modelCalls}, nil
+		}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			files.repo = s.Services.PersonalBots
+			files.install(c, q, s)
+			receiptFiles := &journeyReceiptFiles{composedHTTPFiles: files, req: q}
+			s.Services.BotFilesFactory = func(ctx context.Context, _ *store.Services, scope store.BotScope) (store.BotFiles, error) {
+				if scope != q.Bot.Scope {
+					return nil, store.ErrBotForbidden
+				}
+				if _, err := files.repo.Get(ctx, q.Bot.ID); err != nil {
+					return nil, err
+				}
+				return receiptFiles, nil
+			}
+			publication, receipts, err := launcher.BotPublicationToolsWithReceipts(q, s)
+			if err != nil {
+				return nil, err
+			}
 			physical, err := os.MkdirTemp(dir, "physical-run-")
 			if err != nil {
 				return nil, err
 			}
 			physicalIDs[q.Run.ID] = append(physicalIDs[q.Run.ID], physical)
-			action, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Controlled isolated exact-action fixture"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
+			action, err := functiontool.New(functiontool.Config{Name: "journey_exact_action", Description: "Controlled isolated exact-action fixture"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
 				if args["body"] != "exact" {
 					return nil, store.ErrBotForbidden
 				}
@@ -415,9 +726,8 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 				}
 				n := effects.Add(1)
 				body := "Exact approved action receipt observed."
-				digest := sha256.Sum256([]byte(body))
 				evidence := store.BotEvidence{Kind: store.BotEvidenceObservation, Summary: "Exact receipt read back", Source: receiptPath, ObservedAt: time.Now().UTC(), ActorID: q.Bot.OwnerID}
-				outcome := bot.ToolOutcome{Verified: true, Artifacts: []bot.ToolReportArtifact{{Artifact: store.BotArtifact{ID: uuid.New(), HomeID: q.Bot.Home.ID, RelativePath: "reports/receipt.md", SHA256: hex.EncodeToString(digest[:]), Title: "Receipt", MediaType: "text/markdown"}, Body: body}}}
+				outcome := bot.ToolOutcome{Verified: true}
 				if n == 1 {
 					outcome.Changed = []store.BotEvidence{evidence}
 					// Independently observe the durable report artifact as a second change.
@@ -444,13 +754,32 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 					evidence.Summary = "Report remains identical to previous occurrence"
 					outcome.Unchanged = []store.BotEvidence{evidence}
 				}
+				// Exercise the production publication accumulator so evidence review
+				// reopens the exact immutable bytes through the scoped file service.
+				publisher := publication[0].(interface {
+					Run(tool.Context, any) (map[string]any, error)
+				})
+				publicationContext := journeyPublicationContext{c}
+				if _, err := publisher.Run(publicationContext, map[string]any{"path": "outputs/receipt.md", "title": "Receipt", "purpose": "Exact action receipt", "memory_summary": body}); err != nil {
+					return nil, err
+				}
+				published, ok := bot.TakeToolOutcome(c, publicationContext.FunctionCallID())
+				if !ok || !published.Verified || published.ReceiptConflict {
+					return nil, store.ErrBotConflict
+				}
+				artifacts := receipts.Artifacts(q)
+				if len(artifacts) != 1 {
+					return nil, store.ErrBotConflict
+				}
 				bot.RecordToolOutcome(c, c.FunctionCallID(), outcome)
-				return map[string]any{"receipt": string(receipt), "report_path": "reports/receipt.md"}, nil
+				return map[string]any{"receipt": string(receipt), "report_path": "outputs/receipt.md"}, nil
 			})
 			if err != nil {
 				return nil, err
 			}
-			return &launcher.BotChatSafeResources{Tools: []tool.Tool{action}, WorkspaceDir: physical, PolicyRuntime: agent.BotPolicyRuntime{Classifier: journeyClassifier{}, Guard: journeyGuard{repo: s.Services.PersonalBots, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+			// Use the shared scoped Chat catalog; the controlled action is an
+			// extension, not a replacement catalog or an authority grant.
+			return &launcher.BotChatSafeResources{FileReceipts: receipts, ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool, Groups: map[string]*agent.ToolGroup{"journey": {Name: "journey", Tools: []tool.Tool{action}}}}, WorkspaceDir: physical, PolicyRuntime: agent.BotPolicyRuntime{Classifier: journeyClassifier{}, Guard: journeyGuard{repo: s.Services.PersonalBots, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 		}})
 		if e != nil {
 			t.Fatal(e)
@@ -601,7 +930,8 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	}
 	_ = json.Unmarshal(request("GET", runPath, "", 200), &run)
 	if run.Status != store.RunSucceeded || len(run.Report.Changed) != 2 || len(run.Report.Artifacts) != 1 || !strings.Contains(run.Report.Summary, "receipt observed") || effects.Load() != 1 || run.SessionID != firstSession || run.Lease.Fence <= firstFence {
-		t.Fatalf("resume failed: %+v effects=%d", run, effects.Load())
+		encoded, _ := json.Marshal(run)
+		t.Fatalf("resume failed: %s effects=%d", encoded, effects.Load())
 	}
 	assertHomeReports(2)
 	request("POST", runPath+"/resume", fmt.Sprintf(`{"approval_id":%q}`, approval.ID.String()), 409)
@@ -847,6 +1177,17 @@ func TestBotChatFirstConversationHTTPAcceptance(t *testing.T) {
 	}
 	var b store.Bot
 	request(root, `{"name":"Chat first","idempotency_key":"create"}`, 201, &b)
+	// Drafting opens existing retained files without provisioning compute or
+	// invoking the execution preparation callback.
+	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: store.BotScopePersonal, Backend: "controlled", StorageKey: "journey-home", Revision: 1}
+	serviceCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "chat-first-registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, Actor: "chat-first-registry", OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := entstore.RegisterBotHomeBinding(serviceCtx, ods.ForUser(owner).Bots(), entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: home}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	files := newComposedHTTPFiles(t, dir, ods.ForUser(owner).Bots(), b, nil)
 	path := root + "/" + b.ID.String() + "/messages"
 	statusResponse, err := server.Client().Get(server.URL + "/api/studio/sessions/" + b.HomeSessionID.String() + "/model-status")
 	if err != nil {
@@ -879,7 +1220,7 @@ func TestBotChatFirstConversationHTTPAcceptance(t *testing.T) {
 		t.Fatal("reopen lost receipt")
 	}
 	llm := &chatFirstModel{}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: journeyPool{}, WorkerID: "chat-first", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, scope store.BotScope, providerName, modelName string) (model.LLM, error) {
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyFilesBackend{synthesisHTTPBackend{files: files.disk}}, Pool: journeyPool{}, WorkerID: "chat-first", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, scope store.BotScope, providerName, modelName string) (model.LLM, error) {
 		if p.Subject != owner || scope != store.BotScopePersonal || providerName != "controlled" || modelName != "chat-first" {
 			return nil, store.ErrBotForbidden
 		}
@@ -930,7 +1271,7 @@ func TestBotChatFirstConversationHTTPAcceptance(t *testing.T) {
 		t.Fatalf("canonical user events: %v", counts)
 	}
 	current, err := repo.Get(auth(ctx), b.ID)
-	if err != nil || current.Status != store.BotDraft || current.Home.ID != uuid.Nil {
+	if err != nil || current.Status != store.BotDraft || current.Home != home {
 		t.Fatalf("conversation changed lifecycle/home: %+v %v", current, err)
 	}
 }

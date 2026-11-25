@@ -1,9 +1,13 @@
 package entstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -27,6 +31,42 @@ func TestBotPausedStoppedConfiguration(t *testing.T) {
 	}
 }
 
+// inactiveConfigurationFiles supplies only the document-read capability exercised
+// here. Files are seeded independently of reviewed configuration, not projected
+// from SQL. All unrelated BotFiles methods remain intentionally unavailable.
+type inactiveConfigurationFiles struct {
+	store.BotFiles
+	botID store.BotID
+	paths map[string]string
+}
+
+func (f *inactiveConfigurationFiles) Open(ctx context.Context, id store.BotID, name string, r store.BotFileRange) (*store.BotFileStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if id != f.botID {
+		return nil, store.ErrBotForbidden
+	}
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	path, ok := f.paths[name]
+	if !ok {
+		return nil, store.ErrBotNotFound
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	size := int64(len(data))
+	start := min(r.Offset, size)
+	end := size
+	if r.Length > 0 {
+		end = min(start+r.Length, size)
+	}
+	return &store.BotFileStream{ReadCloser: io.NopCloser(bytes.NewReader(data[start:end])), Entry: store.BotFileEntry{Path: name, Kind: store.BotFileRegular, SizeBytes: size}}, nil
+}
+
 // Shared by SQLite and live PostgreSQL tests. Start with an executing Bot so the
 // version edit also proves it cannot clear the lifecycle's shutdown barrier.
 func exerciseBotInactiveConfiguration(t *testing.T, repo *botRepository, ctx, worker context.Context, run *store.BotRun, lease store.BotLease, status store.BotStatus) {
@@ -40,6 +80,22 @@ func exerciseBotInactiveConfiguration(t *testing.T, repo *botRepository, ctx, wo
 		t.Fatal(err)
 	}
 	docs, err := botdomain.NewDocuments(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := docs.Load(ctx, b.ID, 0); !errors.Is(err, store.ErrBotUnsupported) {
+		t.Fatalf("document read without files: %v", err)
+	}
+	files := &inactiveConfigurationFiles{botID: b.ID, paths: make(map[string]string)}
+	directory := t.TempDir()
+	for _, name := range []botdomain.DocumentName{botdomain.DocumentSoul, botdomain.DocumentIdentity, botdomain.DocumentUser, botdomain.DocumentCharter, botdomain.DocumentMemory} {
+		path := filepath.Join(directory, string(name))
+		if err := os.WriteFile(path, []byte("Retained file: "+string(name)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		files.paths[string(name)] = path
+	}
+	docs, err = botdomain.NewDocuments(repo, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,8 +183,13 @@ func exerciseBotInactiveConfiguration(t *testing.T, repo *botRepository, ctx, wo
 		t.Fatalf("edit changed lifecycle/barrier: before=%+v after=%+v", before, after)
 	}
 	projection, err := docs.Load(ctx, b.ID, 0)
-	if err != nil || projection.Version != ack.Version {
+	if err != nil || projection.Version != ack.Version || projection.Revision != ack.Revision || len(projection.Documents) != len(files.paths) {
 		t.Fatalf("projection: %+v %v", projection, err)
+	}
+	for _, document := range projection.Documents {
+		if document.Content != "Retained file: "+string(document.Name) || len(document.SourceVersion) != 64 {
+			t.Fatalf("document was not read from retained file: %+v", document)
+		}
 	}
 	saved, err := repo.GetVersion(ctx, b.ID, ack.Version)
 	if err != nil {

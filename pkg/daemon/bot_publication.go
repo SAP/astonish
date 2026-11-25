@@ -13,16 +13,22 @@ import (
 // owner-authenticated polls. It scans committed intents, not mutable run status,
 // so a waiting outcome and its resumed final outcome both survive a restart.
 // Replaying deferred entries revalidates once due; uncertain sends are never retried.
-func ReconcileBotPublications(ctx context.Context, repo store.BotStore, id store.BotID, notifier bot.Notifier) error {
+func ReconcileBotPublications(ctx context.Context, repo store.BotStore, id store.BotID, notifier bot.Notifier, indexers ...func(context.Context, *store.BotPublication) error) error {
 	publications, ok := repo.(store.BotPublicationStore)
 	if !ok {
 		return store.ErrBotUnsupported
+	}
+	list := repo.ListActivity
+	if reader, ok := repo.(interface {
+		ListBotPublicationActivity(context.Context, store.BotID, int64, int) ([]store.BotActivity, error)
+	}); ok {
+		list = reader.ListBotPublicationActivity
 	}
 	publisher := &bot.Publisher{Store: publications, Notifier: notifier}
 	var failures []error
 	var after int64
 	for {
-		activities, err := repo.ListActivity(ctx, id, after, 200)
+		activities, err := list(ctx, id, after, 200)
 		if err != nil {
 			return errors.Join(append(failures, err)...)
 		}
@@ -41,8 +47,18 @@ func ReconcileBotPublications(ctx context.Context, repo store.BotStore, id store
 			if intent.Intent != store.BotOutboxPublish {
 				continue
 			}
-			if _, err := publisher.PublishOutcome(ctx, id, *activity.RunID, activity.Sequence); err != nil {
+			publication, err := publisher.PublishOutcome(ctx, id, *activity.RunID, activity.Sequence)
+			if err != nil {
 				failures = append(failures, err)
+			}
+			// A notification error can coexist with a committed Home publication.
+			// Index failures leave the same receipt available for metadata-only retry.
+			if publication != nil && !publication.Suppressed {
+				for _, index := range indexers {
+					if err := index(ctx, publication); err != nil {
+						failures = append(failures, err)
+					}
+				}
 			}
 		}
 		if len(activities) < 200 {

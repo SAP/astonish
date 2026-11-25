@@ -2,6 +2,9 @@ package launcher
 
 import (
 	"context"
+	"encoding/json"
+
+	"github.com/SAP/astonish/pkg/question"
 	"strings"
 	"testing"
 	"time"
@@ -34,14 +37,14 @@ func TestBotDiscoveryOutcomeThroughFactoryRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != store.RunSucceeded || len(result.Report.Unverified) != 0 {
+	if result.Status != store.RunWaitingApproval || len(result.Report.NeedsApproval) != 1 {
 		t.Fatalf("successful scoped discovery downgraded: status=%s report=%+v", result.Status, result.Report)
 	}
 	// The runner counts all three responses; only the target spends action quota.
-	if llm.calls != 4 || *calls != 1 || result.Usage.ToolCalls != 3 || meter.Usage().ToolCalls != 1 {
+	if llm.calls != 3 || *calls != 1 || result.Usage.ToolCalls != 3 || meter.Usage().ToolCalls != 1 {
 		t.Fatalf("duplicate execution or metadata charged as action: rounds=%d calls=%d usage=%+v", llm.calls, *calls, result.Usage)
 	}
-	if len(result.Report.Changed) != 0 || len(result.Report.Artifacts) != 0 || result.Report.NextRunAt != nil || len(result.Report.Unchanged) != 3 {
+	if len(result.Report.Changed) != 0 || len(result.Report.Artifacts) != 0 || result.Report.NextRunAt != nil || len(result.Report.Unchanged) != 2 {
 		t.Fatalf("metadata fabricated effects or lost target observation: %+v", result.Report)
 	}
 	for i, name := range []string{"search_tools", "describe_tools"} {
@@ -50,7 +53,17 @@ func TestBotDiscoveryOutcomeThroughFactoryRunner(t *testing.T) {
 			t.Fatalf("missing exact-call metadata observation: %+v", e)
 		}
 	}
-	if result.Report.Unchanged[2].Source != "fixture://permitted-action" {
-		t.Fatalf("target ledger replaced: %+v", result.Report)
+	for _, unverified := range result.Report.Unverified {
+		if strings.Contains(unverified, "search_tools") || strings.Contains(unverified, "describe_tools") {
+			t.Fatalf("verified discovery classified as uncertain: %s", unverified)
+		}
+	}
+	repo := f.services.PersonalBots.(*discoveryQuestionStore)
+	if repo.saved == nil || repo.saved.ID != result.Report.NeedsApproval[0] || repo.saved.Interaction == nil || repo.saved.Interaction.Validate() != nil {
+		t.Fatalf("real question checkpoint missing: %+v", repo.saved)
+	}
+	var q question.Question
+	if err := json.Unmarshal(repo.saved.Interaction.Payload, &q); err != nil || q.Prompt != "Which forecast should I use?" {
+		t.Fatalf("question payload: %+v, %v", q, err)
 	}
 }

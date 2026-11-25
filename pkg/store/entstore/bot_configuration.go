@@ -82,7 +82,9 @@ func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDraftDB, 
 		v.Autonomy = q.Autonomy
 		v.Budget = q.Budget
 		if v.Budget.RuntimePolicy != nil {
-			ceiling, err := store.BotRuntimePolicyForConfiguration(ctx, q.BotID, rec.Bot.OwnerID)
+			// Resolve against this transaction's current team policy, never reenter
+			// the outer single-connection pool or reuse a preflight snapshot.
+			ceiling, err := store.BotRuntimePolicyForConfiguration(botPolicyContext(ctx, tx), q.BotID, rec.Bot.OwnerID)
 			if err != nil {
 				return err
 			}
@@ -119,6 +121,29 @@ func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDraftDB, 
 		}
 		if err := tx.DisableBotSchedules(ctx, q.BotID); err != nil {
 			return err
+		}
+		// Configuration creates an immutable version but is not recurrence consent.
+		// Rebind only existing, exact old-version schedule identities; never create
+		// a missing job or enable it. Otherwise resume rejects the stale binding.
+		if len(v.Triggers) > 0 {
+			db, ok := tx.(botTriggerDB)
+			if !ok {
+				return store.ErrBotUnsupported
+			}
+			jobs := db.triggerScheduler()
+			for _, trigger := range v.Triggers {
+				if trigger.ScheduleID == nil {
+					continue
+				}
+				job := jobs.Get(ctx, trigger.ScheduleID.String())
+				if job == nil || job.Mode != "bot_trigger" || job.Scope != string(rec.Bot.Scope) || job.OwnerID != rec.Bot.OwnerID.String() || job.Payload.BotID != rec.Bot.ID.String() || job.Payload.BotVersion != current.Version || job.Payload.BotTriggerID != trigger.ID.String() || job.Payload.Flow != "" || job.Payload.Instructions != "" || len(job.Payload.Params) != 0 || (trigger.Kind == store.TriggerCron && (job.Schedule.Cron != trigger.Cron || job.Schedule.Timezone != trigger.Timezone)) {
+					return store.ErrBotConflict
+				}
+				job.Payload.BotVersion = v.Version
+				if err := jobs.Update(ctx, job); err != nil {
+					return err
+				}
+			}
 		}
 		payload, err := json.Marshal(map[string]any{"operation": "reviewed_configuration", "version": v.Version, "actor_id": actor, "reason": q.Reason})
 		if err != nil {

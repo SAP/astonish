@@ -8,6 +8,7 @@ import (
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -45,6 +46,8 @@ func BotMandatedReadTools(m *bot.MandateExecution, network tools.RoutineReadPoli
 		}
 		return nil
 	}, Authorize: func(ctx context.Context, origin string) error {
+		ctx, end := entstore.WithBotContentReadOperationIfAbsent(ctx)
+		defer end()
 		if err := m.Check(ctx); err != nil {
 			return err
 		}
@@ -56,6 +59,9 @@ func BotMandatedReadTools(m *bot.MandateExecution, network tools.RoutineReadPoli
 			if e != nil {
 				return e
 			}
+			// DNS is external execution, even during descriptor validation.
+			endBotNativeNetworkPreflight(ctx)
+			end()
 			ips, e := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
 			if e != nil {
 				return e
@@ -95,6 +101,19 @@ type botMandatedReadTool struct {
 }
 
 func (t *botMandatedReadTool) Run(c tool.Context, a any) (map[string]any, error) {
+	c, end := botNetworkReadOperation(c)
+	defer end()
+	parent := c
+	reads := context.WithValue(c, botNativeNetworkPreflightKey{}, func() {
+		endBotNativeNetworkPreflight(parent)
+		end()
+	})
+	if bound, ok := c.(botBoundToolContext); ok {
+		bound.owner = reads
+		c = bound
+	} else {
+		c = botContentReadToolContext{Context: c, reads: reads}
+	}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		return nil, err
@@ -102,7 +121,13 @@ func (t *botMandatedReadTool) Run(c tool.Context, a any) (map[string]any, error)
 	if _, err = t.describe(c, raw); err != nil {
 		return nil, err
 	}
+	// Native handlers may resolve DNS and dispatch HTTP. No immutable bytes
+	// from admission may survive that boundary, including borrowed owner bytes.
+	endBotNativeNetworkPreflight(c)
+	end()
 	result, err := t.botRunnableTool.Run(c, a)
+	c, endPostflight := botNetworkReadOperation(c)
+	defer endPostflight()
 	if tools.IsRoutineReadTransportFailure(err) && c.Err() == nil {
 		// ADK otherwise serializes the native error later, outside this adapter's
 		// capture ledger. Return and record that exact bounded failure envelope
@@ -228,13 +253,4 @@ func WithBotMandatedReadClassifier(base agent.BotActionClassifier, catalog []too
 		}
 	}
 	return c
-}
-func botMandateScopedTools(m *bot.MandateExecution, catalog []tool.Tool) []tool.Tool {
-	var allowed []tool.Tool
-	for _, t := range catalog {
-		if t != nil && m.Authorization.Authorize(execution.CapabilityToolExecute, t.Name()) == nil {
-			allowed = append(allowed, t)
-		}
-	}
-	return allowed
 }

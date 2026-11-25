@@ -16,14 +16,16 @@ import (
 type retentionStoreFixture struct {
 	store.BotStore
 	store.BotPublicationStore
-	bot        store.Bot
-	claim      *store.BotHomeCleanupClaim
-	confirmed  bool
-	purged     bool
-	activities []store.BotActivity
+	bot           store.Bot
+	claim         *store.BotHomeCleanupClaim
+	confirmed     bool
+	purged        bool
+	activities    []store.BotActivity
+	activityReads int
 }
 
 func (s *retentionStoreFixture) ListActivity(context.Context, store.BotID, int64, int) ([]store.BotActivity, error) {
+	s.activityReads++
 	return s.activities, nil
 }
 func (s *retentionStoreFixture) ListRuns(context.Context, store.BotID, store.BotPage) ([]store.BotRun, error) {
@@ -146,12 +148,21 @@ func TestBotRetentionKnowledgeCapabilityRequiredOnlyForSource(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo.activities = []store.BotActivity{{BotID: repo.bot.ID, RunID: &runID, Sequence: 1, Kind: store.BotActivityReport, Payload: encoded}}
-			// Isolate retirement from publication: permanent deletion never
-			// publishes old results, but must not hide missing extraction storage.
-			repo.bot.PermanentDelete = true
-			err = w.pollStore(ctx, repo, nil)
+			// Outside permanent deletion, a real extraction source must still
+			// fail closed when its journal capability is missing.
+			err = w.reconcileKnowledge(ctx, repo, nil, repo.bot)
 			if sourced && !errors.Is(err, store.ErrBotUnsupported) || !sourced && err != nil {
 				t.Fatalf("sourced=%v: %v", sourced, err)
+			}
+			// Permanent deletion is control-state cleanup only: neither old
+			// results nor extraction sources may require reading removed content.
+			repo.bot.PermanentDelete = true
+			repo.activityReads = 0
+			if err := w.pollStore(ctx, repo, nil); err != nil {
+				t.Fatal(err)
+			}
+			if repo.activityReads != 0 {
+				t.Fatal("permanent deletion read activity content")
 			}
 			if backend.calls != 1 || !repo.confirmed || !repo.purged {
 				t.Fatal("unrelated extraction capability blocked retirement")

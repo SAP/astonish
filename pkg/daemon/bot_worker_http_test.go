@@ -37,7 +37,7 @@ func assertWorkerHistoryHTTP(t *testing.T, ctx context.Context, repo *workerEven
 		if err != nil {
 			t.Fatal(err)
 		}
-		if response.StatusCode != 200 || response.Header.Get("Content-Type") != "text/event-stream" || !strings.Contains(string(body), "durable controlled result") || !strings.Contains(string(body), "bot_runtime_event") || !strings.Contains(string(body), "event: done") {
+		if response.StatusCode != 200 || response.Header.Get("Content-Type") != "text/event-stream" || !strings.Contains(string(body), "durable controlled result") || !strings.Contains(string(body), "event: text\n") || !strings.Contains(string(body), `"_projection"`) || strings.Contains(string(body), "bot_runtime_event") || !strings.Contains(string(body), "event: done") {
 			t.Fatalf("HTTP replay %d: %s", response.StatusCode, body)
 		}
 	}

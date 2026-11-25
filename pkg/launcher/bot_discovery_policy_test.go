@@ -17,8 +17,6 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -45,29 +43,20 @@ func discoveryMandateFixture(t *testing.T) (*botFactoryFixture, *factoryMandateR
 	f.req.Run.ExecutionMode = execution.BotExecutionModeChatInteractive
 	f.req.Instructions = "send this here every minute"
 	calls := new(int)
-	prepare := f.cfg.Prepare
-	f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
-		safe, err := prepare(ctx, req, scope)
-		if err != nil {
-			return nil, err
-		}
-		for _, name := range []string{"ask_user", "shell_command"} {
-			target, err := functiontool.New(functiontool.Config{Name: name, Description: "ask user a clarifying question with choices"}, func(c tool.Context, _ map[string]any) (map[string]any, error) {
-				if name != "ask_user" {
-					t.Error("excluded target executed")
-				}
-				*calls++
-				bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Controlled permitted action observed", Source: "fixture://permitted-action", ActorID: f.req.Bot.OwnerID, ObservedAt: time.Now().UTC()}}})
-				return map[string]any{"fixture_question": true}, nil
-			})
-			if err != nil {
-				return nil, err
-			}
-			safe.Tools = append(safe.Tools, target)
-		}
-		return safe, nil
-	}
+	repo := &discoveryQuestionStore{clarificationStore: clarificationStore{botFactoryTestRepo: botFactoryTestRepo{fixture: f}}, calls: calls}
+	f.services.Bots, f.services.PersonalBots = repo, repo
+	f.ctx = bot.WithApprovalStore(f.ctx, repo)
 	return f, runtime, calls
+}
+
+type discoveryQuestionStore struct {
+	clarificationStore
+	calls *int
+}
+
+func (s *discoveryQuestionStore) RequestApproval(ctx context.Context, lease store.BotLease, a store.BotApproval) (*store.BotApproval, error) {
+	*s.calls++
+	return s.clarificationStore.RequestApproval(ctx, lease, a)
 }
 
 type discoveryContractModel struct {
@@ -98,15 +87,11 @@ func (m *discoveryContractModel) GenerateContent(_ context.Context, req *model.L
 					m.t.Errorf("search did not return only scoped clarification capability: %s", raw)
 				}
 			case 3:
-				if !strings.Contains(string(raw), `"name":"ask_user"`) || strings.Contains(string(raw), `"name":"shell_command"`) {
+				if !strings.Contains(string(raw), `"name":"ask_user"`) || !strings.Contains(string(raw), `"required":["kind","prompt"]`) {
 					m.t.Errorf("describe lost scoped capability: %s", raw)
 				}
 			case 4:
-				if !strings.Contains(string(raw), `"fixture_question":true`) {
-					m.t.Errorf("allowed target did not execute: %s", raw)
-				}
-			case 5:
-				if !strings.Contains(string(raw), "not found") {
+				if !m.finishAfterAction && !strings.Contains(string(raw), "outside policy") {
 					m.t.Errorf("excluded target not rejected: %s", raw)
 				}
 			}
@@ -123,9 +108,13 @@ func (m *discoveryContractModel) GenerateContent(_ context.Context, req *model.L
 		case 2:
 			name, args = "describe_tools", map[string]any{"names": []any{"ask_user", "shell_command"}}
 		case 3:
-			name, args = "execute_tool", map[string]any{"name": "ask_user", "arguments": map[string]any{}}
+			name, args = "execute_tool", map[string]any{"name": "shell_command", "arguments": map[string]any{"command": "printf forbidden"}}
+			if m.finishAfterAction {
+				name, args = "execute_tool", map[string]any{"name": "ask_user", "arguments": map[string]any{"kind": "text", "prompt": "Which forecast should I use?"}}
+			}
 		case 4:
-			name, args = "execute_tool", map[string]any{"name": "shell_command", "arguments": map[string]any{}}
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("The requested tool is outside the allowed policy; no action was performed.", "model"), TurnComplete: true}, nil)
+			return
 		default:
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("Discovery checked; no schedule created.", "model"), TurnComplete: true}, nil)
 			return
@@ -254,12 +243,12 @@ func TestBotMandateDiscoveryNativeContract(t *testing.T) {
 	}
 	if err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
-			if line != `tool execution failed: tool "shell_command" was not found in the available catalog` {
+			if !strings.Contains(line, "outside policy") && line != "bot run blocked; approval or intervention required" {
 				t.Fatalf("unexpected runtime error: %s", line)
 			}
 		}
 	}
-	if llm.calls != 5 || *calls != 1 {
+	if llm.calls != 4 || *calls != 0 {
 		t.Fatalf("model rounds=%d target calls=%d", llm.calls, *calls)
 	}
 }

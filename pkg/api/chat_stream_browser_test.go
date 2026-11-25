@@ -448,7 +448,7 @@ func TestPlanRevisionBrowserAcceptance(t *testing.T) {
 	visible("Corrected implementation")
 	noReview()
 	if !page.MustEval(`() => window.revisionCard.isConnected && document.activeElement === window.revisionFocus && Math.abs(window.revisionScroll.scrollTop-window.revisionScrollTop) < 2`).Bool() {
-		t.Fatal("revision replaced the plan card or stole composer focus/transcript scroll")
+		t.Fatalf("revision replaced the plan card or stole composer focus/transcript scroll: %s", page.MustEval(`() => JSON.stringify({cardConnected:window.revisionCard.isConnected, focusPreserved:document.activeElement === window.revisionFocus, focus:document.activeElement?.outerHTML, scrollTop:window.revisionScroll.scrollTop, previousScrollTop:window.revisionScrollTop})`).Str())
 	}
 	normal := snapshot()
 	if normal.Revision != 2 || normal.PendingRevision != nil || normal.Steps[1].Details != "Corrected implementation" || !reflect.DeepEqual(before.Steps[0], normal.Steps[0]) {
@@ -618,6 +618,12 @@ func (m *delegationBrowserLLM) GenerateContent(ctx context.Context, req *model.L
 			return
 		}
 		payload, _ := json.Marshal(req.Contents)
+		if req.Config != nil {
+			instructions, _ := json.Marshal(req.Config.SystemInstruction)
+			// Immutable delegation handoffs now live in the system instruction;
+			// user contents alone no longer identify the effective delegated task.
+			payload = append(payload, instructions...)
+		}
 		if strings.Contains(string(payload), "You are evaluating a sub-agent") {
 			text("ACTION: continue\nREASON: deterministic progress")
 			return
@@ -717,6 +723,9 @@ func TestChatDelegationRegressionBrowser(t *testing.T) {
 	page := newStreamBrowserPage(t, env, bin, dist)
 	page.MustElement(`[data-testid="chat-input"]`).MustInput("Run delegation regression").MustType(input.Enter)
 	page.MustElementR("button", "researcher.*probe-alpha").MustClick()
+	// Delegates use Chat's ordinary tool/activity fold. Open that fold before
+	// asserting its first-attempt text rather than requiring flattened content.
+	page.MustElement(`[data-testid="tool-activity-block"] > button[aria-expanded="false"]`).MustClick()
 	page.MustElementR("p", "^ALPHA_FIRST_ATTEMPT$").MustVisible()
 	page.MustElementR("button", "researcher.*probe-beta").MustVisible()
 	panelOrder := func() string {
@@ -734,6 +743,7 @@ func TestChatDelegationRegressionBrowser(t *testing.T) {
 	page.MustElementR("button", "researcher.*probe-alpha").MustVisible()
 	page.MustElementR("button", "^Attempt 2$").MustVisible()
 	page.MustElementR("button", "^Attempt 1$").MustClick()
+	page.MustElement(`[data-testid="tool-activity-block"] > button[aria-expanded="false"]`).MustClick()
 	page.MustElementR("p", "^ALPHA_FIRST_ATTEMPT$").MustVisible()
 	release()
 	page.MustElementR("p", "^Delegation browser finished\\.$").MustVisible()

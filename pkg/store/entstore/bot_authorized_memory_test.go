@@ -18,13 +18,21 @@ import (
 func TestRoutineMemorySearchCorrectionAndForget(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			_, bots, memories, ctx, b, peer := botMemorySearchFixture(t, scope, "fts")
+			_, bots, generic, ctx, b, peer := botMemorySearchFixture(t, scope, "fts")
+			memories, err := bots.(store.BotMemoryStoreProvider).BotMemoryStore(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			peerMemory, err := store.NewBotMemoryService(bots, generic, peer.ID, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var db botDraftDB
 			switch s := bots.(type) {
 			case *personalBotStore:
-				db = personalBotDB{client: s.client}
+				db = personalBotDB{client: s.client, content: s.content}
 			case *teamBotStore:
-				db = teamBotDB{client: s.client}
+				db = teamBotDB{client: s.client, content: s.content}
 			}
 			ctx = context.WithValue(ctx, routineMutationKey{}, true)
 			search := func(text string, count int) {
@@ -73,10 +81,10 @@ func TestRoutineMemorySearchCorrectionAndForget(t *testing.T) {
 			if err != nil || old.Snippet != "Thursday" || old.Attribution.SupersededBy != "routine-operation:"+correction.ID.String() {
 				t.Fatalf("source evidence: %+v %v", old, err)
 			}
-			if err := memories.Add(ctx, store.MemoryEntry{Content: "peer unchanged", SessionID: peer.HomeSessionID.String()}); err != nil {
+			if err := peerMemory.Add(ctx, store.MemoryEntry{Content: "peer unchanged", SessionID: peer.HomeSessionID.String()}); err != nil {
 				t.Fatal(err)
 			}
-			peerBefore, err := memories.ListBySession(ctx, peer.HomeSessionID.String())
+			peerBefore, err := peerMemory.ListBySession(ctx, peer.HomeSessionID.String())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,7 +105,7 @@ func TestRoutineMemorySearchCorrectionAndForget(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(old, oldAfter) {
 				t.Fatalf("neighbor history changed: %+v %v", oldAfter, err)
 			}
-			peerAfter, err := memories.ListBySession(ctx, peer.HomeSessionID.String())
+			peerAfter, err := peerMemory.ListBySession(ctx, peer.HomeSessionID.String())
 			if err != nil || !reflect.DeepEqual(peerBefore, peerAfter) {
 				t.Fatalf("peer changed: %+v %v", peerAfter, err)
 			}
@@ -244,19 +252,17 @@ func TestRoutineMemoryReceiptAtomicReplayAndDenial(t *testing.T) {
 					return
 				}
 				var metadata map[string]any
-				switch d := r.db.(type) {
-				case personalBotDB:
-					row, e := d.client.Memory.Get(owner, uuid.MustParse(id))
-					if e != nil {
-						t.Fatal(e)
+				catalogue, err := readBotDiskMemory(owner, r.db, b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range catalogue.Entries {
+					if entry.Row.ID == id {
+						metadata = entry.Metadata
 					}
-					metadata = row.Metadata
-				case teamBotDB:
-					row, e := d.client.Memory.Get(owner, uuid.MustParse(id))
-					if e != nil {
-						t.Fatal(e)
-					}
-					metadata = row.Metadata
+				}
+				if metadata == nil {
+					t.Fatal("missing disk mutation")
 				}
 				if metadata["reviewed_by"] != nil || metadata["proposal_id"] != nil || metadata["operation_id"] != o.ID.String() {
 					t.Fatalf("human-review attribution: %+v", metadata)

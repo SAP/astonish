@@ -19,15 +19,15 @@ import (
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
-// Exercise native and progressive dispatch through production composition. The
-// model checks the actual empty skill page, not merely that execution continued.
+// Exercise scoped Chat dispatch through production composition. The model uses
+// native tools only when advertised, otherwise the shared progressive bridge,
+// and checks the actual empty skill page, not merely that execution continued.
 type optionalSkillReadHTTPModel struct {
 	workerTestModel
 	t       *testing.T
@@ -86,7 +86,10 @@ func (m *optionalSkillReadHTTPModel) GenerateContent(_ context.Context, req *mod
 			name, args = "bot_skill_read", map[string]any{"skill_id": m.missing.String()}
 		}
 		call := &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}
-		if m.bridge {
+		if _, native := req.Tools[name]; m.bridge || !native {
+			if _, available := req.Tools["execute_tool"]; !available {
+				m.t.Fatalf("optional read %s has neither native nor progressive dispatch", name)
+			}
 			call.Name, call.Args = "execute_tool", map[string]any{"name": name, "arguments": args}
 		}
 		m.stage++
@@ -120,10 +123,14 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 			defer registry.Close()
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
 			mdl := &optionalSkillReadHTTPModel{t: t, bridge: scope == store.BotScopeTeam, missing: uuid.New()}
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: lifecycleHTTPBackend{}, Pool: workerTestPool{}, WorkerID: "optional-skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			homeBackend := testRetainedContentBackend(t, backend)
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: workerTestPool{}, WorkerID: "optional-skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return mdl, nil
-			}, Prepare: func(_ context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				return &launcher.BotChatSafeResources{WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, homeBackend, svc, scope)
+				}
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -137,15 +144,7 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "optional-skills", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil })
-			if err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(ctx, b.ID)
+			b, err = worker.provisionHome(ctx, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}

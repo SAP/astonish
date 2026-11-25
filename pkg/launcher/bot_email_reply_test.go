@@ -106,7 +106,7 @@ func TestBotEmailReplyGraphSnapshot(t *testing.T) {
 			b := &productionCapabilityBackend{}
 			c := &productionCapabilityClient{backend: b}
 			var catalogue []tool.Tool
-			target, ctx := productionFactoryTool(t, f, "email_reply", func(context.Context, string) ([]tool.Tool, func(), error) {
+			target, ctx := productionAdapterTool(t, f, "email_reply", func(context.Context, string) ([]tool.Tool, func(), error) {
 				var err error
 				catalogue, err = BotEmailTools(f.req, &BotChatScope{Services: f.services}, b, c)
 				return catalogue, func() {}, err

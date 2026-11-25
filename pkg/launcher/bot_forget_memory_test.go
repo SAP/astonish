@@ -18,12 +18,24 @@ import (
 // bindings. The provider is controlled; no paid model or live surface is used.
 func testBotForgottenMemoryProvider(t *testing.T, f *botFactoryFixture, r *api.BotChatResources, c basicToolContext, sessionID string) {
 	t.Helper()
-	const forgotten = "forgotten-zircon-preference"
-	a := &store.MemoryAttribution{BotID: f.req.Bot.ID, Source: "original-owner-observation", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: "routine-operation:" + uuid.NewString()}
-	if err := f.services.Memory.Add(f.ctx, store.MemoryEntry{Content: forgotten, Category: "facts", SessionID: sessionID, Attribution: a}); err != nil {
+	repo := f.services.Bots
+	if f.req.Bot.Scope == store.BotScopePersonal {
+		repo = f.services.PersonalBots
+	}
+	memory, err := repo.(store.BotMemoryStoreProvider).BotMemoryStore(f.req.Bot.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := f.services.Memory.ListBySession(f.ctx, sessionID)
+	const forgotten = "forgotten-zircon-preference"
+	a := &store.MemoryAttribution{BotID: f.req.Bot.ID, Source: "original-owner-observation", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred, SupersededBy: "routine-operation:" + uuid.NewString()}
+	runtimeMemory, err := store.NewBotRunMemoryService(repo, memory, f.req.Run.Lease, f.req.Bot.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeMemory.Add(c, store.MemoryEntry{Content: forgotten, Category: "facts", SessionID: sessionID, Attribution: a}); err != nil {
+		t.Fatal(err)
+	}
+	history, err := memory.ListBySession(f.ctx, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,14 +66,21 @@ func testBotForgottenMemoryProvider(t *testing.T, f *botFactoryFixture, r *api.B
 	if !getChecked {
 		t.Fatal("memory_get missing")
 	}
-	// A new attempt refreshes memory from the real store; old content must not
-	// enter the provider's system context, while unrelated active memory survives.
+	// Reopening bootstraps the actual index, never historical memory bodies.
+	const currentIndex = "Current goal: prepare the report; output: outputs/report.md"
+	prior, err := f.files.entry("MEMORY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.Write(f.ctx, f.req.Bot.ID, store.BotFileWrite{Path: "MEMORY.md", Body: strings.NewReader(currentIndex), ExpectedSHA256: prior.SHA256}); err != nil {
+		t.Fatal(err)
+	}
 	fresh, err := f.construct(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fresh.Cleanup()
-	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("What facts are current?", "user")}}
+	request := &model.LLMRequest{Config: &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(fresh.Agent.SystemPrompt.Build(), "system")}, Contents: []*genai.Content{genai.NewContentFromText("What facts are current?", "user")}}
 	for _, err := range fresh.Agent.LLM.GenerateContent(f.ctx, request, false) {
 		if err != nil {
 			t.Fatal(err)
@@ -72,10 +91,10 @@ func testBotForgottenMemoryProvider(t *testing.T, f *botFactoryFixture, r *api.B
 		t.Fatal("provider not exercised")
 	}
 	system := providerSystem(requests[len(requests)-1])
-	if strings.Contains(system, forgotten) || !strings.Contains(system, "quasar replacement") {
+	if strings.Contains(system, forgotten) || strings.Contains(system, "quasar source evidence") || !strings.Contains(system, currentIndex) {
 		t.Fatalf("incorrect current provider context: %s", system)
 	}
-	after, err := f.services.Memory.Get(f.ctx, id)
+	after, err := memory.Get(f.ctx, id)
 	if err != nil || after == nil || after.Snippet != forgotten || after.Attribution.SupersededBy != a.SupersededBy {
 		t.Fatalf("recall destroyed history: %+v %v", after, err)
 	}

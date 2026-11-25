@@ -20,8 +20,6 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // This helper executes the real command dispatcher in a separate process. PTY
@@ -93,20 +91,19 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/events") {
 			watched.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
-			e := adksession.Event{Author: "agent"}
-			e.Partial = true // observer commands must work while daemon text streams
-			e.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Durable terminal report"}}}
+			// Keep the turn open: observer commands must work while text streams.
+			text := "Durable terminal report"
 			feedSID := sid
 			if strings.Contains(r.URL.Path, runSID.String()) {
 				feedSID = runSID
 				runWatched.Add(1)
-				e.Content.Parts[0].Text = "Selected run trace report"
+				text = "Selected run trace report"
 			}
 			if r.URL.Query().Get("after") != "" {
 				cursorLeaks.Add(1)
 			}
-			raw, _ := json.Marshal(e)
-			fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: %s\n\nid: %s:1\nevent: replay_complete\ndata: {}\n\n", feedSID, raw, feedSID)
+			writeBotCanonicalPTYFrame(t, w, feedSID, rid, 1, feedSID.String()+":text", "text", map[string]any{"text": text})
+			fmt.Fprintf(w, "id: %s:1\nevent: replay_complete\ndata: {}\n\n", feedSID)
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
 			return

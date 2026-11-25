@@ -5,23 +5,381 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/skills"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 )
+
+type distillHTTPToolContext struct {
+	tool.Context
+	base    context.Context
+	session string
+}
+
+func (c distillHTTPToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (c distillHTTPToolContext) Value(k any) any                                      { return c.base.Value(k) }
+func (c distillHTTPToolContext) Deadline() (time.Time, bool)                          { return c.base.Deadline() }
+func (c distillHTTPToolContext) Done() <-chan struct{}                                { return c.base.Done() }
+func (c distillHTTPToolContext) Err() error                                           { return c.base.Err() }
+func (c distillHTTPToolContext) SessionID() string                                    { return c.session }
+func (c distillHTTPToolContext) FunctionCallID() string                               { return "distill-fixture" }
+
+// Scoped Chat exposes team resources even for a personal conversation. Seed real
+// execution membership; platform superadmin transport claims are not membership.
+func setupScopedChatHTTPAcceptance(t *testing.T, script *MockLLM, tools []tool.Tool) *memoryHTTPAcceptance {
+	t.Helper()
+	// The common HTTP fixture now provisions real execution membership.
+	return setupMemoryHTTPAcceptance(t, script, tools)
+}
+
+// Non-plan factory fixtures still honor the trusted construction handshake. Their
+// verifier fails closed; executable plan coverage lives in launcher HTTP tests.
+func initializeFixtureChatPlan(req StudioChatRuntimeRequest) error {
+	if req.PlanInitializer == nil {
+		return errors.New("missing transport plan initializer")
+	}
+	_, err := req.PlanInitializer(func(string) (int, string, error) {
+		return -1, "", errors.New("fixture has no guarded shell")
+	})
+	return err
+}
+
+func TestStudioChatHTTPDistillUsesScopedRuntime(t *testing.T) {
+	env := setupScopedChatHTTPAcceptance(t, NewMockLLM(TextTurn("unused")), nil)
+	cm := GetChatManager()
+	if err := cm.ensureReady(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := cm.components.SessionService.Create(t.Context(), &session.CreateRequest{AppName: studioChatAppName, UserID: env.UserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	cm.components.RuntimeFactory = func(ctx context.Context, req StudioChatRuntimeRequest) (*StudioChatRuntime, error) {
+		calls.Add(1)
+		return nil, errors.New("current distill runtime denied")
+	}
+	events := consumeMemoryAcceptanceSSE(t, env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{SessionID: created.Session.ID(), Message: "/distill"}, memoryIdentityAdmin))
+	if calls.Load() != 1 {
+		t.Fatalf("distill bypassed current scoped runtime: calls=%d events=%+v", calls.Load(), events)
+	}
+	assertHasEvent(t, events, "error")
+}
+
+func TestStudioChatHTTPDistillReviewCurrentAttempt(t *testing.T) {
+	firstModel := NewMockLLM(TextTurn("```yaml\nname: retained\nnodes: []\n```"))
+	env := setupScopedChatHTTPAcceptance(t, firstModel, nil)
+	cm := GetChatManager()
+	if err := cm.ensureReady(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	svc := cm.components.SessionService
+	created, err := svc.Create(t.Context(), &session.CreateRequest{AppName: studioChatAppName, UserID: env.UserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.Session.ID()
+	for i, content := range []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "inspect fixture"}}},
+		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "read_file", Args: map[string]any{"path": "fixture"}}}}},
+		{Role: "tool", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "read_file", Response: map[string]any{"content": "fixture"}}}}},
+	} {
+		ev := session.NewEvent("fixture")
+		ev.ID = fmt.Sprintf("fixture-%d", i)
+		ev.Author = "agent"
+		if i == 0 {
+			ev.Author = "user"
+		}
+		ev.LLMResponse.Content = content
+		if err := svc.AppendEvent(t.Context(), created.Session, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var attempts, cleanups, runs, toolRuns atomic.Int32
+	cm.components.ChatAgent.FlowDistiller = &agent.FlowDistiller{LLM: func(context.Context, string) (string, error) {
+		t.Error("bootstrap distiller called")
+		return "", errors.New("stale")
+	}}
+	cm.components.RuntimeFactory = func(ctx context.Context, req StudioChatRuntimeRequest) (*StudioChatRuntime, error) {
+		n := attempts.Add(1)
+		if err := initializeFixtureChatPlan(req); err != nil {
+			return nil, err
+		}
+		currentTool, err := functiontool.New(functiontool.Config{Name: "distill_fixture", Description: "Attempt-local distillation fixture"}, func(tc tool.Context, args map[string]any) (map[string]any, error) {
+			p, ok := execution.PrincipalFromContext(tc)
+			if n != 2 || !ok || p.Subject != env.UserID || tc.SessionID() != id {
+				return nil, fmt.Errorf("stale or foreign tool: attempt=%d owner=%+v", n, p)
+			}
+			toolRuns.Add(1)
+			return map[string]any{"output": "fresh callback"}, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		a := agent.NewChatAgent(req.LLM, []tool.Tool{currentTool}, nil, req.SessionService, &agent.SystemPromptBuilder{}, false, true)
+		a.FlowDistiller = &agent.FlowDistiller{LLM: makeLLMFuncFromModel(req.LLM)}
+		a.FlowRunner = func(ctx context.Context, yaml string, _ map[string]string) (*agent.DryRunExecResult, error) {
+			p, ok := execution.PrincipalFromContext(ctx)
+			if n != 2 || !ok || p.Subject != env.UserID || !strings.Contains(yaml, "retained") {
+				t.Errorf("stale/unscoped dry run: attempt=%d owner=%+v yaml=%s", n, p, yaml)
+			}
+			result, err := a.Tools[0].(interface {
+				Run(tool.Context, any) (map[string]any, error)
+			}).Run(distillHTTPToolContext{base: ctx, session: id}, map[string]any{})
+			if err != nil {
+				return nil, err
+			}
+			runs.Add(1)
+			return &agent.DryRunExecResult{Success: true, Output: fmt.Sprint(result["output"])}, nil
+		}
+		return &StudioChatRuntime{ChatAgent: a, Cleanup: func() { cleanups.Add(1) }}, nil
+	}
+	turn := func(msg string) []ChatEvent {
+		return consumeMemoryAcceptanceSSE(t, env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{SessionID: id, Message: msg}, memoryIdentityAdmin))
+	}
+	assertHasEvent(t, turn("/distill"), "distill_preview")
+	cm.components.LLM = NewMockLLM(TextTurn("TEST"), TextTurn("Current model assessed fresh callback."))
+	events := turn("yes")
+	raw, _ := json.Marshal(events)
+	if !strings.Contains(string(raw), "Current model assessed fresh callback") || runs.Load() != 1 || toolRuns.Load() != 1 || attempts.Load() != 2 || cleanups.Load() != 2 {
+		t.Fatalf("fresh attempt not used: %s calls=%d runs=%d cleanup=%d", raw, attempts.Load(), runs.Load(), cleanups.Load())
+	}
+	cm.components.LLM = NewMockLLM(TextTurn("MODIFY"), TextTurn("```yaml\nname: revised\nnodes: []\n```"))
+	modified := assertHasEvent(t, turn("change the flow name"), "distill_preview")
+	if !strings.Contains(toString(modified.Data["yaml"]), "revised") || attempts.Load() != 3 || cleanups.Load() != 3 {
+		t.Fatal("modification used stale attempt")
+	}
+	foreign := env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{SessionID: id, Message: "__distill_test_run__"}, memoryIdentityForeign)
+	foreign.Body.Close()
+	if foreign.StatusCode < 400 || attempts.Load() != 3 {
+		t.Fatal("foreign review action reached factory")
+	}
+	cm.forgetConversationState(id)
+	assertHasEvent(t, turn("__distill_test_run__"), "error")
+	if attempts.Load() != 3 || runs.Load() != 1 {
+		t.Fatal("expired review executed")
+	}
+	if cm.components.ChatAgent.HasPendingDistillReview(id) {
+		t.Fatal("deleted review retained")
+	}
+}
+
+func TestStudioChatHTTPDistillManagerResetClosesState(t *testing.T) {
+	setupMemoryHTTPAcceptance(t, NewMockLLM(TextTurn("unused")), nil)
+	cm := GetChatManager()
+	if err := cm.ensureReady(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	owner := cm.components.ChatAgent
+	attempt := &agent.ChatAgent{}
+	attempt.ShareConversationState(owner)
+	attempt.SetPendingTutorialBlueprint("retained", &agent.TutorialBlueprintPending{YAML: "draft"})
+	if !owner.HasPendingTutorialBlueprint("retained") {
+		t.Fatal("fixture state was not shared")
+	}
+	cm.Reset()
+	if attempt.HasPendingTutorialBlueprint("retained") || cm.components != nil {
+		t.Fatal("manager reset did not fence retained attempts")
+	}
+}
+
+type chatAdmissionPlatform struct {
+	store.PlatformStore
+	users store.UserStore
+}
+
+func (s *chatAdmissionPlatform) Users() store.UserStore { return s.users }
+
+type chatAdmissionRevokingUsers struct {
+	store.UserStore
+	calls atomic.Int32
+}
+
+func (s *chatAdmissionRevokingUsers) GetByID(ctx context.Context, id string) (*store.User, error) {
+	if s.calls.Add(1) > 1 {
+		return nil, errors.New("directory became unavailable after input construction")
+	}
+	return s.UserStore.GetByID(ctx, id)
+}
+
+func TestStudioChatHTTPScopedAuthorityAdmission(t *testing.T) {
+	for _, denied := range []string{"missing-team", "revoked-team", "revoked-org", "missing-platform", "missing-router", "suspended-user", "bind-directory-unavailable"} {
+		t.Run(denied, func(t *testing.T) {
+			var env *memoryHTTPAcceptance
+			if denied == "missing-team" {
+				env = setupMemoryHTTPAcceptance(t, NewMockLLM(TextTurn("must not run")), nil)
+			} else {
+				env = setupScopedChatHTTPAcceptance(t, NewMockLLM(TextTurn("must not run")), nil)
+			}
+			switch denied {
+			case "missing-team":
+				// Common fixtures now seed membership; explicitly select an
+				// absent team for this denial case instead of omitting setup.
+				env.TeamSlug = "missing-team"
+			case "bind-directory-unavailable":
+				env.Services.Platform = &chatAdmissionPlatform{PlatformStore: env.Services.Platform, users: &chatAdmissionRevokingUsers{UserStore: env.Store.Users()}}
+			case "revoked-team":
+				org, err := env.Store.ForOrg(env.OrgSlug)
+				if err != nil {
+					t.Fatal(err)
+				}
+				team, err := org.Teams().GetTeamBySlug(t.Context(), env.TeamSlug)
+				if err != nil || team == nil {
+					t.Fatalf("fixture team: %+v, %v", team, err)
+				}
+				if err := org.Teams().RemoveMember(t.Context(), env.UserID, team.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "revoked-org":
+				org, err := env.Store.Organizations().GetBySlug(t.Context(), env.OrgSlug)
+				if err != nil || org == nil {
+					t.Fatalf("fixture org: %+v, %v", org, err)
+				}
+				if err := env.Store.Organizations().RemoveMember(t.Context(), env.UserID, org.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-platform":
+				env.Services.Platform = nil
+			case "missing-router":
+				env.Services.TenantRouter = nil
+			case "suspended-user":
+				user, err := env.Store.Users().GetByID(t.Context(), env.UserID)
+				if err != nil || user == nil {
+					t.Fatalf("fixture user: %+v, %v", user, err)
+				}
+				user.Status = "suspended"
+				if err := env.Store.Users().Update(t.Context(), user); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cm := GetChatManager()
+			if err := cm.ensureReady(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			cm.components.RuntimeFactory = func(context.Context, StudioChatRuntimeRequest) (*StudioChatRuntime, error) {
+				calls.Add(1)
+				return nil, errors.New("must not reach factory")
+			}
+			resp := env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{Message: "denied without current authority"}, memoryIdentityAdmin)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "event: error\ndata: {\"error\":\"Failed to resolve scoped Chat runtime\"}\n\nevent: done\ndata: {\"done\":true}\n\n"
+			if denied == "bind-directory-unavailable" {
+				want = strings.Replace(want, "resolve", "bind", 1)
+			}
+			if resp.StatusCode != http.StatusOK || string(body) != want {
+				t.Fatalf("authority failure must be sanitized and terminate with framed done: HTTP %d: %s", resp.StatusCode, body)
+			}
+			if calls.Load() != 0 || len(env.LLM.Script.Calls) != 0 {
+				t.Fatal("denied authority reached runtime factory or model")
+			}
+			registry := getChatRunnerRegistry()
+			registry.mu.RLock()
+			defer registry.mu.RUnlock()
+			if len(registry.runners) != 0 {
+				t.Fatal("denied authority registered a runner")
+			}
+		})
+	}
+}
+
+func TestStudioChatHTTPScopedRuntimeFactory(t *testing.T) {
+	for _, outcome := range []string{"success", "construction-failure", "missing-agent", "missing-result", "missing-plan"} {
+		t.Run(outcome, func(t *testing.T) {
+			fail := outcome != "success"
+			env := setupScopedChatHTTPAcceptance(t, NewMockLLM(TextTurn("scoped reply"), TextTurn("scoped reply"), TextTurn("scoped reply")), nil)
+			cm := GetChatManager()
+			if err := cm.ensureReady(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			shared := cm.components.ChatAgent
+			var calls, cleanups atomic.Int32
+			cm.components.RuntimeFactory = func(ctx context.Context, req StudioChatRuntimeRequest) (*StudioChatRuntime, error) {
+				calls.Add(1)
+				p, ok := execution.PrincipalFromContext(ctx)
+				if !ok || p.Subject != env.UserID || p.OrgSlug != env.OrgSlug || req.UserID != env.UserID || req.AppName != studioChatAppName || req.SessionID == "" {
+					t.Errorf("lost scoped identity: %+v %+v", p, req)
+				}
+				if req.Inputs == nil || req.LLM != env.LLM || req.SessionService == nil {
+					t.Errorf("missing resolved dependencies: %+v", req)
+				}
+				if _, err := req.SessionService.Get(ctx, &session.GetRequest{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}); err != nil {
+					t.Errorf("wrong session: %v", err)
+				}
+				if outcome == "missing-result" {
+					return nil, nil
+				}
+				result := &StudioChatRuntime{Cleanup: func() { cleanups.Add(1) }}
+				if outcome == "construction-failure" {
+					return result, errors.New("scoped construction denied")
+				}
+				if outcome == "missing-agent" {
+					return result, nil
+				}
+				if outcome != "missing-plan" {
+					if err := initializeFixtureChatPlan(req); err != nil {
+						return result, err
+					}
+				}
+				result.ChatAgent = agent.NewChatAgent(req.LLM, nil, nil, req.SessionService, &agent.SystemPromptBuilder{}, false, true)
+				return result, nil
+			}
+			events := consumeMemoryAcceptanceSSE(t, env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{Message: "hello", AutoApprove: true}, memoryIdentityAdmin))
+			t.Logf("events: %+v", events)
+			if fail {
+				assertHasEvent(t, events, "error")
+			} else {
+				assertHasEvent(t, events, "text")
+			}
+			wantCleanups := int32(1)
+			if outcome == "missing-result" {
+				wantCleanups = 0
+			}
+			deadline := time.Now().Add(time.Second)
+			for cleanups.Load() < wantCleanups && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if calls.Load() != 1 || cleanups.Load() != wantCleanups {
+				t.Fatalf("factory calls=%d cleanup=%d, want 1 and %d", calls.Load(), cleanups.Load(), wantCleanups)
+			}
+			if !fail {
+				id := toString(assertHasEvent(t, events, "session").Data["sessionId"])
+				response := env.Request(t, http.MethodPost, "/api/studio/chat", StudioChatRequest{SessionID: id, Message: "foreign request"}, memoryIdentityForeign)
+				response.Body.Close()
+				if response.StatusCode < 400 || calls.Load() != 1 {
+					t.Fatal("foreign owner reached runtime factory")
+				}
+			}
+			if cm.components.ChatAgent != shared {
+				t.Fatal("request replaced global agent")
+			}
+		})
+	}
+}
 
 type apiSkillStore struct {
 	skills               []store.Skill

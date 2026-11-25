@@ -53,7 +53,7 @@ func TestBotMCPRechecksAfterVaultPush(t *testing.T) {
 						s.CachedTools = json.RawMessage(`[{"name":"read_owner","inputSchema":{"type":"object","properties":{}}}]`)
 					}
 					servers := newMemMCPStore(s)
-					target, ctx := productionFactoryTool(t, f, name, func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+					target, ctx := productionAdapterTool(t, f, name, func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 						return BotMCPTools(ctx, productionCapabilityPool{backend: blocking, client: client}, id, servers)
 					})
 					ctx = approveMCPTestTool(t, target, ctx, map[string]any{})

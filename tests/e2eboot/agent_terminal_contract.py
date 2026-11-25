@@ -270,6 +270,7 @@ def screen(frame):
     grid = [[' '] * cols for _ in range(rows)]
     y = x = i = 0
     top, bottom = 0, rows - 1
+    autowrap = True
 
     def line_feed(row):
         if row == bottom:
@@ -288,12 +289,21 @@ def screen(frame):
             if query:
                 i += len(query.group())
                 continue
+            if text.startswith('\x1bM', i):
+                if y == top:
+                    grid[top:bottom+1] = [[' '] * cols] + grid[top:bottom]
+                else:
+                    y = max(0, y - 1)
+                i += 2
+                continue
             match = re.match(r'\x1b\[([?0-9;]*)([A-Za-z])', text[i:])
             check(match is not None, 'unsupported terminal escape')
             args, command = match.groups()
             i += len(match.group())
             if args.startswith('?'):
-                check(args in ('?25', '?1049', '?2004', '?1004', '?1002', '?1006', '?2026') and command in ('h', 'l'), 'unsupported terminal mode')
+                check(args in ('?7', '?25', '?1049', '?2004', '?1004', '?1002', '?1006', '?2026') and command in ('h', 'l'), 'unsupported terminal mode')
+                if args == '?7':
+                    autowrap = command == 'h'
                 if args == '?1049':
                     check(command == 'h', 'alternate screen already closed')
                     grid = [[' '] * cols for _ in range(rows)]
@@ -375,8 +385,11 @@ def screen(frame):
             check(char.isprintable() and not unicodedata.combining(char)
                   and unicodedata.east_asian_width(char) not in ('W', 'F'), 'unsupported terminal glyph/control')
             if x == cols:
-                x = 0
-                y = line_feed(y)
+                if autowrap:
+                    x = 0
+                    y = line_feed(y)
+                else:
+                    x = cols - 1
             grid[y][x] = char
             x += 1
     return '\n'.join(''.join(row).rstrip() for row in grid).rstrip()

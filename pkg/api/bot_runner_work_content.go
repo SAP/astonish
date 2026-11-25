@@ -61,12 +61,40 @@ type botWorkContentInput struct {
 
 func botContentInput(w *store.BotWorkState) botWorkContentInput {
 	in := botWorkContentInput{BotWorkState: w, Sources: map[string]string{}, Origins: map[string]botContentSourceOrigin{}, ExecutionEvidence: map[string]string{}, OwnerScope: map[string]string{}, Items: []botWorkContentItem{}}
-	// Cover all publishable bytes, not model-selected stories. Line segmentation is
-	// structural only; semantic claim decomposition remains the assessor's job.
-	for bodyIndex, body := range botPublishedBodies(w.Candidate) {
-		for lineIndex, line := range strings.Split(body, "\n") {
-			if strings.TrimSpace(line) != "" {
-				in.Items = append(in.Items, botWorkContentItem{ID: fmt.Sprintf("body:%d:line:%d", bodyIndex, lineIndex), Text: line})
+	// Keep the established line IDs for short candidates. For long documents,
+	// group consecutive lines without dropping any bytes; semantic decomposition
+	// remains the assessor's job and every group still requires coverage. Use
+	// substantial groups so long reports do not exhaust the bounded review JSON
+	// response just repeating per-item assessment scaffolding.
+	bodies := botPublishedBodies(w.Candidate)
+	lines := 0
+	for _, body := range bodies {
+		lines += len(strings.Split(body, "\n"))
+	}
+	group := 1
+	if lines > botWorkContentMaxItems {
+		available := botWorkContentMaxItems - len(bodies)
+		if available < 1 {
+			available = 1
+		}
+		group = (lines + available - 1) / available
+		if group < 64 {
+			group = 64
+		}
+	}
+	for bodyIndex, body := range bodies {
+		parts := strings.SplitAfter(body, "\n")
+		for lineIndex := 0; lineIndex < len(parts); lineIndex += group {
+			end := lineIndex + group
+			if end > len(parts) {
+				end = len(parts)
+			}
+			text := strings.Join(parts[lineIndex:end], "")
+			if group == 1 {
+				text = strings.TrimSuffix(text, "\n")
+			}
+			if strings.TrimSpace(text) != "" || group > 1 && text != "" {
+				in.Items = append(in.Items, botWorkContentItem{ID: fmt.Sprintf("body:%d:line:%d", bodyIndex, lineIndex), Text: text})
 			}
 		}
 	}

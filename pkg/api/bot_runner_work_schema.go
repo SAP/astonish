@@ -37,7 +37,7 @@ func botWorkResponseSchema(prompt string, inputs ...[]byte) map[string]any {
 		props := result["properties"].(map[string]any)
 		props["repair_kind"] = enum([]string{string(botEmployeeRepairNone), string(botEmployeeRepairText), string(botEmployeeRepairFormatting), string(botEmployeeRepairResearch)})
 		for _, field := range []string{"missing_dimensions", "source_needs", "public_queries"} {
-			props[field] = map[string]any{"type": "array", "items": text(), "maxItems": 8}
+			props[field] = map[string]any{"type": "array", "items": map[string]any{"type": "string", "minLength": 1, "maxLength": 1024}, "maxItems": 8}
 		}
 		props["formatted_text"] = text()
 		formatted := botWorkResponseSchema(botWorkReviewPrompt, inputs...)

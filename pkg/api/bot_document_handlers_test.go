@@ -12,6 +12,9 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Boundary validation must reject before attempting any file IO.
+type documentBoundaryFiles struct{ store.BotFiles }
+
 func TestBotDocumentsHTTPBoundary(t *testing.T) {
 	actor := uuid.NewString()
 	c, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor, OrgSlug: "org", TeamSlug: "team", Authenticated: true})
@@ -38,7 +41,9 @@ func TestBotDocumentsHTTPBoundary(t *testing.T) {
 			repo := &botMemoryBoundaryStore{bot: &store.Bot{}}
 			router := mux.NewRouter()
 			registerBotRoutes(router)
-			req := httptest.NewRequest(tc.method, "/api/studio/bots/"+uuid.NewString()+"/documents"+tc.path, strings.NewReader(tc.body)).WithContext(store.WithServices(c, &store.Services{PersonalBots: repo}))
+			req := httptest.NewRequest(tc.method, "/api/studio/bots/"+uuid.NewString()+"/documents"+tc.path, strings.NewReader(tc.body)).WithContext(store.WithServices(c, &store.Services{PersonalBots: repo, BotFilesFactory: func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) {
+				return documentBoundaryFiles{}, nil
+			}}))
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 			if w.Code != tc.status || repo.calls != 1 {

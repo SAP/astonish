@@ -1,33 +1,15 @@
 package launcher
 
 import (
-	"encoding/json"
-	"testing"
-
-	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/tui/events"
-	adksession "google.golang.org/adk/session"
-	"google.golang.org/genai"
+	"testing"
 )
 
 func TestBotTranscriptReasoningUsage(t *testing.T) {
-	for _, metadata := range []*genai.GenerateContentResponseUsageMetadata{
-		{PromptTokenCount: 10, ThoughtsTokenCount: 4096},
-		{PromptTokenCount: 10, ThoughtsTokenCount: 4096, TotalTokenCount: 4106},
-		{PromptTokenCount: 10, TotalTokenCount: 4106},
-	} {
-		e := adksession.Event{Author: "agent"}
-		e.UsageMetadata = metadata
-		raw, err := json.Marshal(e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := botTranscriptEvents(client.SSEEvent{Type: client.BotTranscriptEvent, Data: string(raw)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got) != 2 || got[0].Kind != events.KindUsage || got[0].Usage.Input != 10 || got[0].Usage.Output != 4096 || got[0].Usage.Total != 4106 {
-			t.Fatalf("metadata=%+v events=%+v", metadata, got)
+	for _, payload := range []string{`{"input":10,"output":4096,"total":4106}`, `{"input_tokens":10,"output_tokens":4096,"total_tokens":4106}`} {
+		got, err := botTranscriptEvents(runtimeTranscriptFrame(t, "usage", payload, 1))
+		if err != nil || len(got) != 1 || got[0].Kind != events.KindUsage || got[0].Usage.Input != 10 || got[0].Usage.Output != 4096 || got[0].Usage.Total != 4106 {
+			t.Fatalf("usage: %+v %v", got, err)
 		}
 	}
 }

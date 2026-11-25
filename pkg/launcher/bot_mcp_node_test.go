@@ -61,7 +61,7 @@ func TestBotMCPNodeRemote(t *testing.T) {
 			client := &productionCapabilityClient{backend: b}
 			pool := productionCapabilityPool{backend: b, client: client}
 			servers := newMemMCPStore(store.MCPServer{Name: "controlled", Transport: transport, URL: endpoint.URL, Env: map[string]string{"Authorization": "Bearer {{CREDENTIAL:owner:token}}", "X-Owner": "bot-owner"}})
-			discovery, discoveryCtx := productionFactoryTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+			discovery, discoveryCtx := productionAdapterTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 				return BotMCPTools(ctx, pool, id, servers)
 			})
 			if client.calls != 0 || authCalls.Load() != 0 {
@@ -71,7 +71,7 @@ func TestBotMCPNodeRemote(t *testing.T) {
 			if _, err := discovery.Run(discoveryCtx, map[string]any{}); err != nil {
 				t.Fatal(err)
 			}
-			target, ctx := productionFactoryTool(t, f, "mcp:controlled/read_owner", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+			target, ctx := productionAdapterTool(t, f, "mcp:controlled/read_owner", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 				return BotMCPTools(ctx, pool, id, servers)
 			})
 			ctx = approveMCPTestTool(t, target, ctx, map[string]any{"mode": "safe"})
@@ -125,14 +125,14 @@ func TestBotMCPNodeStdio(t *testing.T) {
 	client := &productionCapabilityClient{backend: b}
 	pool := productionCapabilityPool{backend: b, client: client}
 	servers := newMemMCPStore(store.MCPServer{Name: "controlled", Command: exe, Args: []string{"-test.run=^TestBotMCPNodeStdioFixture$"}, Env: map[string]string{"ASTONISH_MCP_FIXTURE": "1", "TOKEN": "{{CREDENTIAL:owner:token}}"}})
-	discovery, discoveryCtx := productionFactoryTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+	discovery, discoveryCtx := productionAdapterTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 		return BotMCPTools(ctx, pool, id, servers)
 	})
 	discoveryCtx = approveMCPTestTool(t, discovery, discoveryCtx, map[string]any{})
 	if _, err := discovery.Run(discoveryCtx, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
-	target, ctx := productionFactoryTool(t, f, "mcp:controlled/read_owner", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+	target, ctx := productionAdapterTool(t, f, "mcp:controlled/read_owner", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 		return BotMCPTools(ctx, pool, id, servers)
 	})
 	ctx = approveMCPTestTool(t, target, ctx, map[string]any{})

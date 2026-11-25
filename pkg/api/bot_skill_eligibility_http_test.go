@@ -82,9 +82,7 @@ func TestBotAgentLearningEligibilityHTTPAcceptance(t *testing.T) {
 						t.Fatalf("seed reconciliation changed skill: %+v %v", headAfterPoll, err)
 					}
 					history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-					if strings.Count(history, "bot-report:"+seed.ID.String()) != 1 {
-						t.Fatal("seed final publication missing or duplicated")
-					}
+					assertCanonicalHTTPReport(t, history, "bot-report:"+seed.ID.String(), "The receipt was read; the proposed method is a draft.")
 					if selected.Status != store.BotSkillDraft {
 						t.Fatal("newly learned method retroactively activated from pre-creation work")
 					}

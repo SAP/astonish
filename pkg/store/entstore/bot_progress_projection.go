@@ -11,7 +11,7 @@ import (
 // saveProgressEnvelope requires the caller's root sequence/lease CAS in the same
 // transaction. It changes no lease or scheduling columns.
 func saveProgressEnvelope(ctx context.Context, tx botDraftDB, saved *botStoredRun) error {
-	data, err := botJSONMap(*saved)
+	data, err := encodeBotRunData(ctx, tx, *saved)
 	if err != nil {
 		return err
 	}

@@ -194,7 +194,19 @@ func (s *botMandateRuntime) verify(ctx context.Context, db botDraftDB, ref store
 	}
 	return m, rec, nil
 }
+
+// BeginModelPreflight is an optional capability for the budget decorator. SQL
+// authority is re-read on every call; only full-ref immutable bytes are shared.
+func (s *botMandateRuntime) BeginModelPreflight(ctx context.Context) (context.Context, func()) {
+	return WithBotContentReadOperationIfAbsent(ctx)
+}
+
 func (s *botMandateRuntime) VerifyBotMandate(ctx context.Context, ref store.BotMandateRef, purpose store.BotMandatePurpose) (store.BotMandate, error) {
+	if ctx == nil {
+		return store.BotMandate{}, store.ErrBotForbidden
+	}
+	ctx, end := WithBotContentReadOperationIfAbsent(ctx)
+	defer end()
 	m, rec, err := s.verify(ctx, s.repo.db, ref, purpose)
 	if err == nil && rec.Bot.Status == store.BotPaused && purpose != execution.BotMandatePurposeOperation && !mandateProgressWhilePaused(ctx, s.repo.db, rec, ref) {
 		return store.BotMandate{}, store.ErrBotForbidden
@@ -407,9 +419,11 @@ func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, 
 type pausedControlTool string
 
 const (
-	pausedControlCapture pausedControlTool = "propose_bot_control"
-	pausedControlAsk     pausedControlTool = "ask_user"
-	pausedControlList    pausedControlTool = "list_scheduled_jobs"
+	pausedControlCapture    pausedControlTool = "propose_bot_control"
+	pausedControlAsk        pausedControlTool = "ask_user"
+	pausedControlList       pausedControlTool = "list_scheduled_jobs"
+	pausedControlWorkRead   pausedControlTool = "bot_work_read"
+	pausedControlWorkUpdate pausedControlTool = "bot_work_update"
 )
 
 // Only exact control tools and non-task routine resources survive pause. This is
@@ -423,7 +437,7 @@ func pausedControlConstraints(in []execution.BotActionResourceConstraint) []exec
 		var resources []string
 		for _, r := range c.Resources {
 			switch pausedControlTool(r) {
-			case pausedControlCapture, pausedControlAsk, pausedControlList:
+			case pausedControlCapture, pausedControlAsk, pausedControlList, pausedControlWorkRead, pausedControlWorkUpdate:
 				resources = append(resources, r)
 				continue
 			}

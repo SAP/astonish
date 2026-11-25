@@ -18,6 +18,7 @@ import (
 var botsSlashCommand = slashCommand{Name: "bots", Description: "Browse remote Bots; /bots runs, home, approvals, stop-run, detach"}
 
 type botsState struct {
+	files                    *botFilesState
 	skills                   *botSkillsState
 	exceptions               bool
 	continueRun              bool
@@ -75,6 +76,7 @@ type botDecisionMsg struct {
 func (m model) botCap() backend.BotBackend { b, _ := m.backend.(backend.BotBackend); return b }
 func (m model) botSelected() bool          { b := m.botCap(); return b != nil && b.SelectedBot() != nil }
 func (m *model) detachBotWatch() {
+	m.cancelBotFiles()
 	if m.botCancel != nil {
 		m.botCancel()
 		m.botCancel = nil
@@ -94,6 +96,8 @@ func (m model) botCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch text {
+	case "/bots files":
+		return m.openBotFiles()
 	case "/bots skills":
 		return m.openBotSkills()
 	case "/bots exceptions":
@@ -250,6 +254,9 @@ func (m model) applyBotWatch(v botWatchMsg) (tea.Model, tea.Cmd) {
 	return m, waitBotEvent(m.botEvents)
 }
 func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.bots.files != nil {
+		return m.handleBotFilesKey(msg.String())
+	}
 	if m.bots.skills != nil {
 		return m.handleBotSkillsKey(msg.String())
 	}
@@ -395,6 +402,9 @@ func (m model) handleBotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m model) renderBotsOverlay() string {
+	if m.bots.files != nil {
+		return m.renderBotFiles()
+	}
 	if m.bots.skills != nil {
 		return m.renderBotSkills()
 	}

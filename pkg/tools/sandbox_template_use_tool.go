@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
+	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -34,14 +35,12 @@ type useSandboxTemplateDeps struct {
 	templateRegistry *sandbox.TemplateRegistry
 }
 
-var useSandboxTemplateDepsVar *useSandboxTemplateDeps
-
 // NewUseSandboxTemplateTool creates the use_sandbox_template tool.
 // This tool runs on the HOST (not inside the container) so it can tear down
 // the current session container and replace it with one cloned from the
 // specified template. It is intentionally NOT listed in sandbox.containerTools.
 func NewUseSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistry *sandbox.TemplateRegistry) (tool.Tool, error) {
-	useSandboxTemplateDepsVar = &useSandboxTemplateDeps{
+	deps := &useSandboxTemplateDeps{
 		nodePool:         nodePool,
 		templateRegistry: templateRegistry,
 	}
@@ -57,7 +56,9 @@ func NewUseSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistr
 			"browser_navigate URLs, not the bridge IP. Before run_drill in Studio, " +
 			"use this tool when the suite template differs from the current sandbox. " +
 			"IMPORTANT: This operation takes a few seconds as it recreates the container.",
-	}, useSandboxTemplate)
+	}, func(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandboxTemplateResult, error) {
+		return useSandboxTemplate(ctx, args, deps)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +70,7 @@ func NewUseSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistr
 // Docker/K8s/OpenShell sessions. Destroys the current session sandbox and
 // recreates it from the named overlay template.
 func NewUseSandboxTemplateToolFromBackend(pool sandbox.ToolNodePool, backend sandbox.Backend, templateRegistry *sandbox.TemplateRegistry) (tool.Tool, error) {
-	useSandboxTemplateDepsVar = &useSandboxTemplateDeps{
+	deps := &useSandboxTemplateDeps{
 		toolPool:         pool,
 		backend:          backend,
 		templateRegistry: templateRegistry,
@@ -85,22 +86,22 @@ func NewUseSandboxTemplateToolFromBackend(pool sandbox.ToolNodePool, backend san
 			"Browser tools use in-container Chromium — use localhost/127.0.0.1 in " +
 			"browser_navigate URLs. Before run_drill in Studio, " +
 			"use this tool when the suite template differs from the current sandbox.",
-	}, useSandboxTemplate)
+	}, func(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandboxTemplateResult, error) {
+		return useSandboxTemplate(ctx, args, deps)
+	})
 	if err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
-func useSandboxTemplate(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandboxTemplateResult, error) {
-	if useSandboxTemplateDepsVar == nil {
+func useSandboxTemplate(ctx tool.Context, args UseSandboxTemplateArgs, deps *useSandboxTemplateDeps) (UseSandboxTemplateResult, error) {
+	if deps == nil || deps.templateRegistry == nil || (deps.nodePool == nil && (deps.backend == nil || deps.toolPool == nil)) {
 		return UseSandboxTemplateResult{
 			Status:  "error",
 			Message: "Sandbox template system is not initialized. Ensure sandbox mode is enabled.",
 		}, nil
 	}
-
-	deps := useSandboxTemplateDepsVar
 
 	// Validate template name
 	name := strings.TrimSpace(args.TemplateName)
@@ -193,14 +194,15 @@ func useSandboxTemplate(ctx tool.Context, args UseSandboxTemplateArgs) (UseSandb
 	}, nil
 }
 
-func useSandboxTemplateBackend(_ tool.Context, sessionID, name string, deps *useSandboxTemplateDeps) (UseSandboxTemplateResult, error) {
+func useSandboxTemplateBackend(ctx tool.Context, sessionID, name string, deps *useSandboxTemplateDeps) (UseSandboxTemplateResult, error) {
 	slog.Info("replacing session sandbox with template", "component", "sandbox-template", "session", sessionID[:min(8, len(sessionID))], "template", name)
-	bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	bctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := deps.backend.DestroySession(bctx, sessionID); err != nil {
-		slog.Warn("destroy before template switch failed", "component", "sandbox-template", "error", err)
+		return UseSandboxTemplateResult{Status: "error", Message: fmt.Sprintf("Failed to destroy sandbox before template switch: %v", err)}, nil
 	}
 	deps.toolPool.Remove(sessionID)
+	deps.toolPool.SetSessionScope(sessionID, store.OrgSlugFromContext(ctx), store.TeamSlugFromContext(ctx))
 	client := deps.toolPool.GetOrCreateWithTemplate(sessionID, name)
 	if client == nil {
 		return UseSandboxTemplateResult{

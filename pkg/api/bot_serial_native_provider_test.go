@@ -258,8 +258,10 @@ func TestBotApprovalCaptureNativeSerialProviderWire(t *testing.T) {
 				if string(before) != string(after) || len(bodies) != 0 || generations.Load() != wantGenerations {
 					t.Fatal("request mutation or unexpected generation")
 				}
-				if adapterName == "sap-claude" && (authCalls.Load() != 2 || deployments.Load() != 1) {
-					t.Fatalf("SAP constructor exchange: auth=%d deployments=%d", authCalls.Load(), deployments.Load())
+				// Discovery and inference reuse the provider-local token while it is
+				// valid; ordinary and checkpoint turns must not reauthenticate.
+				if adapterName == "sap-claude" && (authCalls.Load() != 1 || deployments.Load() != 1) {
+					t.Fatalf("SAP shared discovery/inference exchange: auth=%d deployments=%d", authCalls.Load(), deployments.Load())
 				}
 			})
 		}

@@ -25,7 +25,7 @@ func TestBotUnfinishedDatabaseCASAndTombstone(t *testing.T) {
 			var assertCleared func(uuid.UUID)
 			if scope == store.BotScopePersonal {
 				_, c := setupPersonalStore(t)
-				db = personalIntakeDB{c}
+				db = personalIntakeDB{client: c, content: newScopedBotContentCodec(t.TempDir(), "org", "team")}
 				assertEmpty = func() {
 					if n, e := c.Bot.Query().Count(ctx); e != nil || n != 0 {
 						t.Fatalf("Bot side effect: %d %v", n, e)
@@ -48,7 +48,7 @@ func TestBotUnfinishedDatabaseCASAndTombstone(t *testing.T) {
 				}
 			} else {
 				c := newTeamClient(t)
-				db = teamIntakeDB{c}
+				db = teamIntakeDB{client: c, content: newScopedBotContentCodec(t.TempDir(), "org", "team")}
 				assertEmpty = func() {
 					if n, e := c.Bot.Query().Count(ctx); e != nil || n != 0 {
 						t.Fatalf("Bot side effect: %d %v", n, e)

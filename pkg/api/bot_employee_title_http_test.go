@@ -20,6 +20,8 @@ import (
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
@@ -128,6 +130,24 @@ func TestBotTitleConfirmationHTTPAcceptance(t *testing.T) {
 				a, err := repo.RequestApproval(worker, lease, store.BotApproval{BotID: run.BotID, RunID: run.ID, Version: run.Version, Action: action, ActionDigest: digest, Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "title-q", Payload: payload}, ExpiresAt: time.Now().Add(time.Hour)})
 				if err != nil {
 					t.Fatal(err)
+				}
+				// Approval alone is not an answer identity: persist the question's
+				// real call/response pair under the worker lease, as the runner does.
+				var questionArgs map[string]any
+				if err := json.Unmarshal(payload, &questionArgs); err != nil {
+					t.Fatal(err)
+				}
+				questionResponse := map[string]any{"status": "ok"}
+				for key, value := range questionArgs {
+					questionResponse[key] = value
+				}
+				for _, event := range []*session.Event{
+					{ID: "title-question-call", Author: "model", InvocationID: "title-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "title-question-call", Name: "ask_user", Args: questionArgs}}}}}},
+					{ID: "title-question-response", Author: "user", InvocationID: "title-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "title-question-call", Name: "ask_user", Response: questionResponse}}}}}},
+				} {
+					if err := repo.(store.BotTranscriptStore).AppendBotRunEvent(worker, lease, run.SessionID, event); err != nil {
+						t.Fatal(err)
+					}
 				}
 				checkpoint, _ := json.Marshal(bot.ApprovalCheckpoint{Format: bot.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: run.BotID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 				if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {

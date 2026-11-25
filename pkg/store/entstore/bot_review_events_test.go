@@ -16,9 +16,9 @@ func reviewTranscript(t *testing.T, ctx context.Context, r *botRepository, b sto
 	var reader store.BotTranscriptReader
 	switch db := r.db.(type) {
 	case personalBotDB:
-		reader = &personalSessionStore{client: db.client}
+		reader = &personalSessionStore{client: db.client, content: db.content}
 	case teamBotDB:
-		reader = &teamSessionStore{client: db.client}
+		reader = &teamSessionStore{client: db.client, content: db.content}
 	default:
 		t.Fatal("unsupported fixture")
 	}

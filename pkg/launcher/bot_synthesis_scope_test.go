@@ -24,7 +24,7 @@ func TestBotEmptyCompletionOutsideSynthesisDoesNotRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			llm := got.Agent.LLM.(*botFactoryLLM)
+			llm := botFactoryModelForTest(t, got.Agent.LLM)
 			ctx := context.Context(f.ctx)
 			switch name {
 			case "assessment":

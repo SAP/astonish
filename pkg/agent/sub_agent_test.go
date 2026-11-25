@@ -40,15 +40,32 @@ func TestQueuedDelegationCancellationAndDeadline(t *testing.T) {
 			var progress []SubTaskProgressEvent
 			mgr.SubTaskProgress = func(e SubTaskProgressEvent) { progress = append(progress, e) }
 			got := mgr.RunTasks(ctx, []SubAgentTask{{Name: "queued", ParentID: "parent"}})[0]
-			want, state := "cancelled", "cancelled"
+			want, state := "cancelled", TaskCancelled
 			if deadline {
-				want, state = "timeout", "failed"
+				want, state = "timeout", TaskFailed
 			}
 			if got.Status != want {
 				t.Fatalf("status=%s want %s", got.Status, want)
 			}
-			if len(progress) != 2 || progress[0].Status != "queued" || progress[1].Status != state {
+			// The two lifecycle transitions are followed by manager-only join
+			// bookkeeping. A queued task still joins even though no attempt ran.
+			if len(progress) != 3 || progress[0].Type != "task_state" || progress[0].Status != string(TaskQueued) ||
+				progress[1].Type != "task_failed" || progress[1].Status != string(state) ||
+				progress[2].Type != string(TaskJoined) || progress[2].Status != want {
 				t.Fatalf("transitions=%+v", progress)
+			}
+			for i, event := range progress {
+				if event.Sequence != uint64(i+1) || event.SessionID != "parent" || event.TaskName != "queued" ||
+					event.BatchID == "" || event.BatchID != got.BatchID || event.TaskID == "" || event.TaskID != got.TaskID ||
+					event.ChildSessionID == "" || event.ChildSessionID != got.ChildSessionID {
+					t.Fatalf("event %d lost ordered task identity: %+v; result=%+v", i, event, got)
+				}
+			}
+			if got.Error != fmt.Sprintf("%v before task started", ctx.Err()) || progress[1].Error != got.Error || progress[2].Error != got.Error {
+				t.Fatalf("cancellation error not preserved: result=%+v transitions=%+v", got, progress)
+			}
+			if got.Attempts != 0 || len(got.AttemptHistory) != 0 || progress[2].Attempt != 0 || got.joined == nil {
+				t.Fatalf("queued cancellation must join without an executed attempt: result=%+v join=%+v", got, progress[2])
 			}
 		})
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 )
@@ -257,6 +258,8 @@ func (p *botProgressRuntime) mutation(ctx context.Context) (store.BotProgressMut
 	return m, nil
 }
 func (p *botProgressRuntime) Begin(ctx context.Context, kind store.BotProgressDispatchKind, digest string, usage store.BotUsage) (*store.BotProgressDispatchReceipt, error) {
+	ctx, end := entstore.WithBotContentReadOperationIfAbsent(ctx)
+	defer end()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unsafe {
@@ -274,6 +277,8 @@ func (p *botProgressRuntime) Begin(ctx context.Context, kind store.BotProgressDi
 	return receipt, err
 }
 func (p *botProgressRuntime) Settle(ctx context.Context, id uuid.UUID, outcome store.BotProgressDispatchOutcome, usage store.BotUsage, evidence string) error {
+	ctx, end := entstore.WithBotContentReadOperationIfAbsent(ctx)
+	defer end()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	m, err := p.mutation(ctx)
@@ -308,7 +313,7 @@ type botProgressWorking struct {
 	ReadJournal *botProgressReadJournal `json:"read_journal,omitempty"`
 }
 
-func (p *botProgressRuntime) compose(ctx context.Context, resources *BotChatResources) (context.Context, error) {
+func (p *botProgressRuntime) compose(ctx context.Context, resources *BotChatResources, initial ...session.Session) (context.Context, error) {
 	if resources.ProgressDispatch != p {
 		return ctx, errBotProgressIntegrationUnavailable
 	}
@@ -322,6 +327,15 @@ func (p *botProgressRuntime) compose(ctx context.Context, resources *BotChatReso
 	if controller == nil || controller.Boundary == nil {
 		return ctx, errBotProgressIntegrationUnavailable
 	}
+	// Progress evaluation is a long-horizon safety/cadence check, not per-turn
+	// orchestration. Seed its cadence from durable run start so the first settled
+	// model/tool boundary does not immediately trigger an auxiliary provider call.
+	if p.req.Progress == nil && p.req.Run.StartedAt != nil && !p.req.Run.StartedAt.IsZero() {
+		controller.SeedCadence(*p.req.Run.StartedAt)
+	} else if p.req.Progress == nil && !p.req.Run.CreatedAt.IsZero() {
+		controller.SeedCadence(p.req.Run.CreatedAt)
+	}
+	controller.BeginBookkeeping = entstore.WithBotContentReadOperationIfAbsent
 	controller.LLM = resources.Agent.LLM
 	controller.Interval = time.Duration(policy.EvaluationIntervalSeconds) * time.Second
 	controller.Timeout = time.Duration(policy.ModelCallTimeoutSeconds) * time.Second
@@ -330,39 +344,60 @@ func (p *botProgressRuntime) compose(ctx context.Context, resources *BotChatReso
 	// The agent hook turns this decision into the genuine ask_user tool call; it
 	// must not fabricate a response or an owner answer at this boundary.
 	controller.AskUser = func(context.Context, string) error { return nil }
-	getSession := func(c context.Context) (*session.GetResponse, error) {
-		return resources.SessionService.Get(c, &session.GetRequest{AppName: resources.AppName, UserID: p.req.Bot.OwnerID.String(), SessionID: p.req.Run.SessionID.String()})
+	observedSessions := &botProgressSessions{Service: resources.SessionService, app: resources.AppName, user: p.req.Bot.OwnerID.String(), id: p.req.Run.SessionID.String()}
+	if len(initial) > 0 {
+		observedSessions.current = initial[0]
 	}
+	resources.SessionService = observedSessions
+	resources.Agent.SessionService = observedSessions
+	getSession := observedSessions.snapshot
 	controller.Observe = func(c context.Context) (bot.ProgressObservation, error) {
-		s, err := getSession(c)
+		c, end := entstore.WithBotContentReadOperationIfAbsent(c)
+		defer end() // Never retain immutable bytes across the evaluator/provider call.
+		s, _, err := getSession(c)
 		if err != nil {
 			return bot.ProgressObservation{}, err
 		}
-		if s == nil || s.Session == nil || s.Session.ID() != p.req.Run.SessionID.String() || s.Session.UserID() != p.req.Bot.OwnerID.String() || s.Session.AppName() != resources.AppName {
-			return bot.ProgressObservation{}, store.ErrBotForbidden
-		}
-		return p.observeContext(c, resources, s.Session)
+		return p.observeContext(c, resources, s)
 	}
 	controller.Commit = func(c context.Context, o bot.ProgressObservation, d bot.ProgressDecision, at time.Time) error {
+		c, end := entstore.WithBotContentReadOperationIfAbsent(c)
+		defer end()
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.unsafe || len(p.pending) != 0 {
 			return bot.ErrProgressBoundaryUnsafe
 		}
+		// A yield can occur immediately after a tool response, before the next
+		// producer preflight flushes its pending durable evidence references.
+		// Persist those references before binding the checkpoint's work revision;
+		// otherwise a fresh process restores the transcript but loses the source
+		// index required by independent employee assessment.
+		if service, ok := bot.BotWorkServicesFromContext(c).(*botAgentWorkService); ok {
+			service.mu.Lock()
+			var err error
+			if len(service.accessPending) != 0 || service.accessErr != nil {
+				_, err = service.load(c)
+			}
+			service.mu.Unlock()
+			if err != nil {
+				return err
+			}
+		}
 		m, err := p.mutation(c)
 		if err != nil {
 			return err
 		}
-		s, err := getSession(c)
+		_, eventCount, err := getSession(c)
 		if err != nil {
 			return err
 		}
 		journal, _ := c.Value(botAgentReadJournalKey{}).(*botAgentReadJournal)
-		working, err := json.Marshal(botProgressWorking{Assignment: p.req.Instructions, SessionID: p.req.Run.SessionID.String(), EventCount: s.Session.Events().Len(), ReadJournal: journal.progressSnapshot()})
+		working, err := json.Marshal(botProgressWorking{Assignment: p.req.Instructions, SessionID: p.req.Run.SessionID.String(), EventCount: eventCount, ReadJournal: journal.progressSnapshot()})
 		if err != nil {
 			return err
 		}
-		cp := &store.BotProgressCheckpoint{Kind: store.BotProgressCheckpointV1, SchemaVersion: store.BotProgressSchemaVersion, Binding: m.Binding, Revision: m.ExpectedRevision + 1, TurnID: p.req.Run.ID, TranscriptHighWater: int64(s.Session.Events().Len()), NextEligibleAt: at, DispatchLedgerCursor: p.cursor, Usage: p.req.Run.Usage}
+		cp := &store.BotProgressCheckpoint{Kind: store.BotProgressCheckpointV1, SchemaVersion: store.BotProgressSchemaVersion, Binding: m.Binding, Revision: m.ExpectedRevision + 1, TurnID: p.req.Run.ID, TranscriptHighWater: int64(eventCount), NextEligibleAt: at, DispatchLedgerCursor: p.cursor, Usage: p.req.Run.Usage}
 		if b, ok := p.req.Budget.(interface{ Usage() store.BotUsage }); ok {
 			cp.Usage = b.Usage()
 		}
@@ -396,11 +431,11 @@ func (p *botProgressRuntime) compose(ctx context.Context, resources *BotChatReso
 		if json.Unmarshal(working, &saved) != nil || saved.SessionID != p.req.Run.SessionID.String() {
 			return ctx, store.ErrBotInvalid
 		}
-		s, err := getSession(ctx)
+		_, eventCount, err := getSession(ctx)
 		if err != nil {
 			return ctx, err
 		}
-		if s.Session.Events().Len() < saved.EventCount {
+		if eventCount < saved.EventCount {
 			return ctx, fmt.Errorf("%w: checkpoint transcript unavailable", store.ErrBotConflict)
 		}
 		p.restoredJournal = saved.ReadJournal

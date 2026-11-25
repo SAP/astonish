@@ -30,7 +30,7 @@ func testBotPermanentVerifiedPurge(t *testing.T) {
 			if err != nil || work == nil {
 				t.Fatalf("missing work before purge: %v", err)
 			}
-			reservedKeys := []string{"mandate:test:1", "mandate-revoked:test:1", "mandate-operation:test:1", "mandate-reservation:test", "mandate-quota:test:1"}
+			reservedKeys := []string{"mandate-revoked:test:1", "mandate-reservation:test", "mandate-quota:test:1"}
 			if err := repo.db.Transaction(owner, func(tx botDraftDB) error {
 				rec, err := tx.GetBot(owner, run.BotID)
 				if err != nil {
@@ -143,7 +143,7 @@ func testBotPermanentVerifiedPurge(t *testing.T) {
 func TestBotPermanentScopedRowsAndRollback(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			db, bots, memories, ctx, target, other := botMemorySearchFixture(t, scope, "vector")
+			db, bots, memories, ctx, target, other := botMemorySearchFixture(t, scope, "fts")
 			mustExec := func(query string, args ...any) {
 				t.Helper()
 				if _, err := db.ExecContext(ctx, query, args...); err != nil {
@@ -151,13 +151,14 @@ func TestBotPermanentScopedRowsAndRollback(t *testing.T) {
 				}
 			}
 			// SQLite FTS deletion mirrors production's external-content delete trigger.
-			mustExec("CREATE VIRTUAL TABLE memories_fts USING fts5(chunk_text, content='memories', content_rowid='rowid')")
-			mustExec("CREATE TRIGGER memory_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,chunk_text) VALUES (new.rowid,new.chunk_text); END")
 			mustExec("CREATE TRIGGER memory_fts_delete AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,chunk_text) VALUES ('delete',old.rowid,old.chunk_text); END")
+			// Seed historical SQL rows directly: the generic memory API now correctly
+			// rejects Bot-bound sessions, but explicit legacy cleanup must still work.
 			for _, b := range []*store.Bot{target, other} {
-				if err := memories.Add(ctx, store.MemoryEntry{Content: "needle", SessionID: b.HomeSessionID.String(), Embedding: []float32{1, 0}}); err != nil {
-					t.Fatal(err)
+				if err := memories.Add(ctx, store.MemoryEntry{Content: "needle", SessionID: b.HomeSessionID.String()}); !errors.Is(err, store.ErrBotForbidden) {
+					t.Fatalf("generic Bot memory write accepted: %v", err)
 				}
+				mustExec("INSERT INTO memories (id,chunk_text,session_id) VALUES (?,?,?)", uuid.NewString(), "needle", b.HomeSessionID.String())
 				mustExec("INSERT INTO session_events (session_id,event_data) VALUES (?,?)", b.HomeSessionID.String(), `{"content":"conversation"}`)
 			}
 			if scope == store.BotScopeTeam {

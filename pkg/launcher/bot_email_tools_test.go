@@ -16,13 +16,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/chatruntime"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/email"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
 
@@ -61,13 +66,220 @@ func emailTestSettings() *store.BotEmailSettings {
 	return &store.BotEmailSettings{Provider: "imap", Address: "owner@example.com", IMAPServer: "localhost:993", SMTPServer: "localhost:587", Credential: "mail", Folder: "INBOX"}
 }
 func emailTestTarget(t *testing.T, f *botFactoryFixture, name string, b *productionCapabilityBackend, c *productionCapabilityClient) (botRunnableTool, tool.Context) {
-	return productionFactoryTool(t, f, name, func(context.Context, string) ([]tool.Tool, func(), error) {
+	return productionAdapterTool(t, f, name, func(context.Context, string) ([]tool.Tool, func(), error) {
 		ts, err := BotEmailTools(f.req, &BotChatScope{Services: f.services}, b, c)
 		return ts, func() {}, err
 	})
 }
 func emailSendArguments() map[string]any {
 	return map[string]any{"to": []string{"recipient@example.com"}, "subject": "Reviewed subject", "body": "Reviewed body"}
+}
+
+// emailRecordingClient is a fake sandbox transport: no mailbox, network or model
+// runs. It records the real callScopedEmail envelope and uploaded scoped vault.
+type emailRecordingClient struct {
+	sandbox.ToolNodeClient
+	backend *productionCapabilityBackend
+	calls   int
+	request email.NodeRequest
+}
+
+func (c *emailRecordingClient) Call(id, operation string, args map[string]any) (json.RawMessage, error) {
+	c.calls++
+	if operation != email.NodeOperation || id != c.backend.owner {
+		return nil, fmt.Errorf("wrong email transport/session")
+	}
+	raw, _ := json.Marshal(args)
+	if err := json.Unmarshal(raw, &c.request); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(`{"messages":[{"subject":"scoped message"}],"_reply_source":{"private":true}}`), nil
+}
+
+func TestStudioChatRuntimeFactoryScopedEmailTransport(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing-account=%v", missing), func(t *testing.T) {
+			f := newBotFactoryFixture(t)
+			personal := emailTestSettings()
+			team := *personal
+			team.Address = "team@example.com"
+			f.services.Settings = &emailTeamSettings{settings: &team}
+			if !missing {
+				f.services.PersonalSettings = &emailPersonalSettings{settings: personal}
+			}
+			f.services.PersonalCredentials = sessioncreds.NewStore(map[string]*store.Credential{"mail": {Type: store.CredPassword, Password: "personal-secret-12345"}})
+			f.services.Credentials = sessioncreds.NewStore(map[string]*store.Credential{"mail": {Type: store.CredPassword, Password: "team-secret-12345"}})
+			cfg := &config.AppConfig{}
+			inputs, err := chatruntime.Build(t.Context(), chatruntime.BuildOptions{Principal: f.req.Principal, Services: f.services, ResourceScope: chatruntime.ResourceScopePersonal, AppConfig: cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := &productionCapabilityBackend{}
+			c := &emailRecordingClient{backend: b}
+			pool := productionCapabilityPool{backend: b, client: c}
+			factory := newStudioChatRuntimeFactory(ChatFactoryConfig{AppConfig: cfg}, ChatCatalogResources{Backend: b, Pool: pool}, nil)
+			ctx, _ := execution.WithPrincipal(t.Context(), f.req.Principal)
+			runtime, err := factory(ctx, api.StudioChatRuntimeRequest{Inputs: inputs, AppConfig: cfg, LLM: provider.NewPlaceholderLLM(), SessionService: session.InMemoryService(), SessionID: "email-owner-session", UserID: f.req.Principal.Subject})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(runtime.Cleanup)
+			entry := runtime.ChatAgent.ToolIndex.GetToolEntry("email_list")
+			if entry == nil {
+				t.Fatal("Studio factory omitted scoped email transport")
+			}
+			if c.calls != 0 || len(b.vault) != 0 {
+				t.Fatal("eager email access")
+			}
+			out, err := entry.Tool.(chatRuntimeRunnable).Run(runtimeFlowDrillContext{runtimeTestToolContext{lifetime: ctx}}, map[string]any{})
+			if missing {
+				if !errors.Is(err, store.ErrBotUnsupported) || c.calls != 0 || len(b.vault) != 0 {
+					t.Fatalf("account fallback: %v calls=%d", err, c.calls)
+				}
+				return
+			}
+			if err != nil || c.calls != 1 || c.request.Account.Address != personal.Address || c.request.Tool != tools.ScopedChatEmailPrefix+"email_list" {
+				t.Fatalf("wrong email dispatch: %v %+v", err, c.request)
+			}
+			vault, err := sessioncreds.Parse(b.vault)
+			if err != nil || vault.Get(ctx, "mail").Password != "personal-secret-12345" || strings.Contains(string(b.vault), "team-secret") {
+				t.Fatalf("wrong scoped vault: %v", err)
+			}
+			if out["messages"] == nil || out["_reply_source"] != nil {
+				t.Fatalf("wrong public result: %v", out)
+			}
+		})
+	}
+}
+
+func TestStudioChatRuntimeFactoryEmailMissingTransportDoesNotInherit(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	cfg := &config.AppConfig{}
+	inputs, err := chatruntime.Build(t.Context(), chatruntime.BuildOptions{Principal: f.req.Principal, Services: f.services, ResourceScope: chatruntime.ResourceScopePersonal, AppConfig: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapTools, err := tools.GetEmailToolsForClient(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newStudioChatRuntimeFactory(ChatFactoryConfig{AppConfig: cfg}, ChatCatalogResources{Pool: &catalogTestPool{}, EmailTools: bootstrapTools}, nil)
+	runtime, err := factory(t.Context(), api.StudioChatRuntimeRequest{Inputs: inputs, AppConfig: cfg, LLM: provider.NewPlaceholderLLM(), SessionService: session.InMemoryService(), SessionID: "no-email-transport", UserID: f.req.Principal.Subject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Cleanup)
+	if runtime.ChatAgent.ToolIndex.GetToolEntry("email_list") != nil {
+		t.Fatal("inherited bootstrap email transport")
+	}
+}
+
+func TestScopedChatEmailAccountIsolation(t *testing.T) {
+	for _, scope := range []chatruntime.ResourceScope{chatruntime.ResourceScopePersonal, chatruntime.ResourceScopeTeam} {
+		for _, mode := range []string{"configured", "missing-account", "missing-vault", "missing-credential", "foreign-owner", "foreign-team", "autonomous", "cancelled"} {
+			t.Run(string(scope)+"/"+mode, func(t *testing.T) {
+				f := newBotFactoryFixture(t)
+				personal, team := emailTestSettings(), emailTestSettings()
+				personal.Address, team.Address = "personal@example.com", "team@example.com"
+				f.services.PersonalSettings = &emailPersonalSettings{settings: personal}
+				f.services.Settings = &emailTeamSettings{settings: team}
+				f.services.PersonalCredentials = sessioncreds.NewStore(map[string]*store.Credential{"mail": {Type: store.CredPassword, Password: "personal-secret-12345"}})
+				f.services.Credentials = sessioncreds.NewStore(map[string]*store.Credential{"mail": {Type: store.CredPassword, Password: "team-secret-12345"}})
+				wantAddress, wantSecret, otherSecret := team.Address, "team-secret-12345", "personal-secret-12345"
+				if scope == chatruntime.ResourceScopePersonal {
+					wantAddress, wantSecret, otherSecret = personal.Address, "personal-secret-12345", "team-secret-12345"
+					if mode == "missing-account" {
+						f.services.PersonalSettings = nil
+					}
+					if mode == "missing-vault" {
+						f.services.PersonalCredentials = nil
+					}
+				} else {
+					if mode == "missing-account" {
+						f.services.Settings = nil
+					}
+					if mode == "missing-vault" {
+						f.services.Credentials = nil
+					}
+				}
+				if mode == "missing-credential" {
+					if scope == chatruntime.ResourceScopePersonal {
+						f.services.PersonalCredentials = sessioncreds.NewStore(nil)
+					} else {
+						f.services.Credentials = sessioncreds.NewStore(nil)
+					}
+				}
+				inputs, err := chatruntime.Build(t.Context(), chatruntime.BuildOptions{Principal: f.req.Principal, Services: f.services, ResourceScope: scope})
+				if err != nil {
+					t.Fatal(err)
+				}
+				b := &productionCapabilityBackend{}
+				c := &emailRecordingClient{backend: b}
+				ts, err := ScopedChatEmailTools(ScopedChatEmailOptions{Inputs: inputs, Scope: scope, Backend: b, Client: c, SessionID: "scoped-mail"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, _ := execution.WithPrincipal(t.Context(), f.req.Principal)
+				switch mode {
+				case "foreign-owner", "foreign-team":
+					p := f.req.Principal
+					if mode == "foreign-owner" {
+						p.Subject = uuid.NewString()
+					} else {
+						p.TeamSlug = "foreign"
+					}
+					ctx, _ = execution.WithPrincipal(t.Context(), p)
+				case "autonomous":
+					ctx = execution.WithBotRunIdentity(ctx, f.req.Policy.Identity())
+				case "cancelled":
+					cancelled, cancel := context.WithCancel(ctx)
+					cancel()
+					ctx = cancelled
+				}
+				var target botRunnableTool
+				for _, candidate := range ts {
+					if candidate.Name() == "email_list" {
+						target = candidate.(botRunnableTool)
+					}
+				}
+				_, err = target.Run(runtimeFlowDrillContext{runtimeTestToolContext{lifetime: ctx}}, map[string]any{})
+				if mode != "configured" {
+					if err == nil || c.calls != 0 || len(b.vault) != 0 {
+						t.Fatalf("denial had effects: err=%v calls=%d vault=%d", err, c.calls, len(b.vault))
+					}
+					return
+				}
+				if err != nil || c.calls != 1 || c.request.Account.Address != wantAddress {
+					t.Fatalf("wrong dispatch: %v %+v", err, c.request)
+				}
+				vault, err := sessioncreds.Parse(b.vault)
+				if err != nil || vault.Get(ctx, "mail").Password != wantSecret || strings.Contains(string(b.vault), otherSecret) {
+					t.Fatalf("vault scope leak: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestScopedEmailTransportSharedWithAutonomousAdapter(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	f.services.PersonalSettings = &emailPersonalSettings{settings: emailTestSettings()}
+	f.services.PersonalCredentials = sessioncreds.NewStore(map[string]*store.Credential{"mail": {Type: store.CredPassword, Password: productionTestSecret}})
+	b := &productionCapabilityBackend{}
+	c := &emailRecordingClient{backend: b}
+	target, ctx := productionAdapterTool(t, f, "email_list", func(context.Context, string) ([]tool.Tool, func(), error) {
+		ts, err := BotEmailTools(f.req, &BotChatScope{Services: f.services}, b, c)
+		return ts, func() {}, err
+	})
+	args := map[string]any{}
+	ctx = approveMCPTestTool(t, target, ctx, args)
+	out, err := target.Run(ctx, args)
+	if err != nil || c.calls != 1 || c.request.Tool != "email_list" || c.request.Account.Address != emailTestSettings().Address {
+		t.Fatalf("autonomous common transport: %v %+v", err, c.request)
+	}
+	if out["_reply_source"] != nil {
+		t.Fatal("private reply evidence exposed")
+	}
 }
 
 func TestScopedChatEmailSchemasNoEagerAccess(t *testing.T) {

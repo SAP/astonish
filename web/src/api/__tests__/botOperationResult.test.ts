@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { botOperationsBusy, mergeBotOperation, OperationStatus, type BotOperationView } from '../botOperationResult'
-import { createBotTranscriptMapper, dispatchBotTranscript } from '../botEvents'
+import { connectBotEvents } from '../botEvents'
+import { teamFetch } from '../teamContext'
+vi.mock('../teamContext', () => ({ teamFetch: vi.fn() }))
+beforeEach(() => vi.mocked(teamFetch).mockReset())
 const operation: BotOperationView = { schema_version: 1, bot_id: 'bot', home_session_id: 'home', operation_id: 'one', revision: 1, state_sequence: 1, operation: 'schedule_create', status: 'pending', decision: 'execute', summary: 'Daily weather schedule' }
 describe('authoritative operations', () => {
   it.each(Object.values(OperationStatus))('accepts exact %s status', status => {
@@ -22,12 +25,25 @@ describe('authoritative operations', () => {
     const states = {}
     expect(mergeBotOperation(states, { ...operation, ...delta }, 'bot', 'home')).toBe(states)
   })
-  it('dispatches durable state outside runtime and ignores unknown versions without raw text', () => {
-    const emit = vi.fn(), mapper = createBotTranscriptMapper()
-    dispatchBotTranscript({ Actions: { StateDelta: { bot_operation: operation } } }, emit, mapper)
-    expect(emit).toHaveBeenCalledWith('bot_operation', operation)
-    emit.mockClear()
-    dispatchBotTranscript({ Actions: { StateDelta: { bot_operation: { ...operation, schema_version: 2 } as unknown as BotOperationView } }, Content: { parts: [{ text: 'must not show' }] } }, emit, mapper)
-    expect(emit).not.toHaveBeenCalled()
+  it('delivers canonical durable state while the consumer ignores unknown versions without raw text', async () => {
+    const unknown = { ...operation, schema_version: 2 }
+    const frames = [operation, unknown].map((data, index) => {
+      const cursor = `home:${index + 1}`
+      return `id: ${cursor}\nevent: bot_operation\ndata: ${JSON.stringify({ ...data, _projection: { event_id: `home/operation-${index}/0`, session_id: 'home', run_id: 'run', cursor } })}\n\n`
+    }).join('')
+    vi.mocked(teamFetch).mockResolvedValueOnce(new Response(`${frames}id: home:2\nevent: done\ndata: {"persisted":true}\n\n`))
+    let states = {}
+    const emit = vi.fn((type, data) => {
+      if (type === 'bot_operation') states = mergeBotOperation(states, data, 'bot', 'home')
+    })
+    const done = vi.fn(), error = vi.fn()
+    const controller = connectBotEvents({ botId: 'bot', sessionId: 'home', scope: 'personal', onEvent: emit, onDone: done, onError: error })
+    try {
+      await vi.waitFor(() => expect(done).toHaveBeenCalledOnce())
+      expect(error).not.toHaveBeenCalled()
+      expect(emit.mock.calls).toEqual([['bot_operation', operation], ['bot_operation', unknown]])
+      expect(states).toEqual({ one: operation })
+      expect(emit.mock.calls.some(([type]) => type === 'text')).toBe(false)
+    } finally { controller.abort() }
   })
 })

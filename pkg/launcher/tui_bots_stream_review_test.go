@@ -51,34 +51,48 @@ func TestBotSnapshotCancelsInflightTransport(t *testing.T) {
 
 func TestBotWatchReconnectContentAndEnvelopeChronology(t *testing.T) {
 	id, sid := uuid.New(), uuid.New()
-	rows := []string{
-		runtimeTranscriptFrame(t, "session", `{"sessionId":"`+sid.String()+`"}`, 1).Data,
-		`{"Author":"user","Content":{"role":"user","parts":[{"text":"question"}]}}`,
-		`{"Author":"agent","Content":{"parts":[{"text":"answer"},{"functionCall":{"name":"read_file","id":"c1","args":{}}},{"functionResponse":{"name":"read_file","id":"c1","response":{"result":"ok"}}}]},"Actions":{"ArtifactDelta":{"report.md":1}},"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`,
-	}
+	rows := []client.SSEEvent{}
 	for i, wire := range []struct{ typ, payload string }{
+		{"session", `{"sessionId":"` + sid.String() + `"}`},
+		{"user_message", `{"text":"question"}`},
 		{"text", `{"text":"answer"}`},
-		{"tool_call", `{"name":"read_file","args":{}}`},
-		{"tool_result", `{"name":"read_file","result":{"result":"ok"}}`},
-		{"artifact", `{"path":"report.md","fileName":"report.md"}`},
-		{"usage", `{"input_tokens":3,"output_tokens":2,"total_tokens":5}`},
-		{"approval", `{"name":"shell_command","args":{}}`},
-		{"done", `{"done":true}`},
+		{"tool_call", `{"name":"read_file","id":"c","args":{}}`},
+		{"tool_result", `{"name":"read_file","id":"c","result":"ok"}`},
+		{"artifact", `{"path":"report.md"}`},
+		{"usage", `{"input_tokens":3,"output_tokens":2}`},
+		{"approval", `{"name":"shell_command"}`},
+		{"turn_complete", `{}`},
 	} {
-		rows = append(rows, runtimeTranscriptFrame(t, wire.typ, wire.payload, int64(i+2)).Data)
+		// Every early frame deliberately shares the previous committed cursor.
+		cursor := int64(0)
+		if i == 8 {
+			cursor = 1
+		}
+		rows = append(rows, canonicalBotFrame(t, sid.String(), fmt.Sprintf("row/%d", i), wire.typ, wire.payload, cursor))
 	}
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
-		if n == 2 && r.URL.Query().Get("after") != fmt.Sprintf("%s:%d", sid, len(rows)) {
+		if n == 2 && r.URL.Query().Get("after") != sid.String()+":1" {
 			t.Errorf("reconnect cursor=%s", r.URL.Query().Get("after"))
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		for i, row := range rows {
-			fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", sid, i+1, row)
+		if n == 3 && r.URL.Query().Get("after") != sid.String()+":2" {
+			t.Errorf("duplicate did not advance cursor=%s", r.URL.Query().Get("after"))
 		}
-		if n > 1 {
-			fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", sid, len(rows)+1, runtimeTranscriptFrame(t, "text", `{"text":"sentinel"}`, 20).Data)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			for _, f := range rows {
+				fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
+			}
+		}
+		if n == 2 {
+			// A replayed identity still advances transport once its row is committed.
+			f := canonicalBotFrame(t, sid.String(), "row/8", "turn_complete", `{}`, 2)
+			fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
+		}
+		if n == 3 {
+			f := canonicalBotFrame(t, sid.String(), "sentinel", "text", `{"text":"sentinel"}`, 3)
+			fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
 		}
 	}))
 	defer srv.Close()
@@ -87,30 +101,20 @@ func TestBotWatchReconnectContentAndEnvelopeChronology(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	stop := errors.New("observed reconnect")
-	counts := map[events.Kind]int{}
 	var order []events.Kind
 	err := b.WatchBot(ctx, func(e events.Event) error {
 		if e.Text == "sentinel" {
 			return stop
 		}
-		counts[e.Kind]++
 		order = append(order, e.Kind)
 		return nil
 	})
-	if !errors.Is(err, stop) || calls.Load() != 2 {
-		t.Fatalf("err=%v connections=%d", err, calls.Load())
+	if !errors.Is(err, stop) || calls.Load() != 3 {
+		t.Fatalf("err=%v calls=%d", err, calls.Load())
 	}
-	for _, kind := range []events.Kind{events.KindUser, events.KindText, events.KindToolCall, events.KindToolResult, events.KindArtifact, events.KindUsage} {
-		if counts[kind] != 1 {
-			t.Errorf("%s count=%d", kind, counts[kind])
-		}
-	}
-	wantOrder := []events.Kind{events.KindSession, events.KindUser, events.KindDone, events.KindText, events.KindToolCall, events.KindStatus, events.KindToolResult, events.KindArtifact, events.KindUsage, events.KindDone}
-	if fmt.Sprint(order) != fmt.Sprint(wantOrder) {
-		t.Fatalf("chronology %v want %v", order, wantOrder)
-	}
-	if counts[events.KindDone] != 2 || counts[events.KindApproval] != 0 {
-		t.Fatalf("metadata altered chronology/decisions: %v", counts)
+	want := []events.Kind{events.KindSession, events.KindUser, events.KindText, events.KindToolCall, events.KindStatus, events.KindToolResult, events.KindArtifact, events.KindUsage, events.KindDone}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("order=%v want=%v", order, want)
 	}
 }
 
@@ -131,13 +135,10 @@ func TestBotSnapshotRefreshesInfoAuthority(t *testing.T) {
 }
 
 func TestBotTranscriptMetadataDoesNotCloseText(t *testing.T) {
-	for _, row := range []string{
-		`{"author":"bot_runtime","actions":{"stateDelta":{"bot_runtime_event":{"type":"approval","payload":{"name":"shell_command"}}}}}`,
-		`{"actions":{"stateDelta":{"status":"running"}}}`,
-	} {
-		got, err := botTranscriptEvents(client.SSEEvent{Type: client.BotTranscriptEvent, Data: row})
+	for _, typ := range []string{"approval", "auto_approved", "plan_approval", "cursor", "replay_complete"} {
+		got, err := botTranscriptEvents(runtimeTranscriptFrame(t, typ, `{}`, 1))
 		if err != nil || len(got) != 0 {
-			t.Fatalf("metadata altered chronology: %+v, %v", got, err)
+			t.Fatalf("metadata altered chronology: %+v %v", got, err)
 		}
 	}
 }

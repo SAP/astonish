@@ -9,6 +9,9 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +19,24 @@ import (
 	"testing"
 	"time"
 )
+
+func appendTitleQuestionFixture(t *testing.T, ctx context.Context, repo *botRepository, lease store.BotLease, sid uuid.UUID, payload json.RawMessage) {
+	t.Helper()
+	var response map[string]any
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	response["status"] = "ok"
+	callID, invocation := uuid.NewString(), uuid.NewString()
+	for _, e := range []*session.Event{
+		{ID: uuid.NewString(), Author: "chat", InvocationID: invocation, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: callID, Name: "ask_user"}}}}}},
+		{ID: uuid.NewString(), Author: "chat", InvocationID: invocation, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: callID, Name: "ask_user", Response: response}}}}}},
+	} {
+		if err := repo.appendBotRunEvent(ctx, lease, sid, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 // TestBotTitleConfirmationProcessRestart executes two separate copies of the test
 // binary. Only the parent owns the directory: the waiting process must exit
@@ -177,6 +198,7 @@ func botTitleConfirmationRestartProcess(t *testing.T, stage, dir string, scope s
 		if err != nil {
 			t.Fatal(err)
 		}
+		appendTitleQuestionFixture(t, worker, repo, lease, first.Run.SessionID, evidence.Payload)
 		evidence.ApprovalID = a.ID
 		evidence.Checkpoint, err = json.Marshal(botdomain.ApprovalCheckpoint{Format: botdomain.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: first.ID, RunID: first.Run.ID, SessionID: first.Run.SessionID, Version: first.Run.Version, ActionDigest: digest, Fence: lease.Fence})
 		if err != nil {
@@ -393,6 +415,7 @@ func TestBotTitlePublicResearchAdmission(t *testing.T) {
 			if err != nil || again.ID != a.ID {
 				t.Fatal("question replay", err)
 			}
+			appendTitleQuestionFixture(t, worker, repo, lease, first.Run.SessionID, payload)
 			checkpoint, _ := json.Marshal(botdomain.ApprovalCheckpoint{Format: botdomain.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: first.ID, RunID: first.Run.ID, SessionID: first.Run.SessionID, Version: first.Run.Version, ActionDigest: digest, Fence: lease.Fence})
 			if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting", NeedsApproval: []uuid.UUID{a.ID}}}); err != nil {
 				t.Fatal(err)
@@ -437,7 +460,9 @@ func TestBotTitlePublicResearchAdmission(t *testing.T) {
 			if err != nil || fresh.Provenance.TitleConfirmation == nil || fresh.Mandate.PublicResearch == nil || fresh.Mandate.PublicResearch.Subject != "AI News" || fresh.Provenance.SourceDigest != confirmed.Run.TitleConfirmation.AssignmentDigest {
 				t.Fatal("fresh authority not bound safely", err)
 			}
-			if fresh.Mandate.RuntimePolicy != nil || !fresh.Mandate.ExpiresAt.Equal(record.Mandate.ExpiresAt) || fresh.Mandate.Limits != record.Mandate.Limits { t.Fatal("title answer expanded saved runtime authority") }
+			if fresh.Mandate.RuntimePolicy != nil || !fresh.Mandate.ExpiresAt.Equal(record.Mandate.ExpiresAt) || fresh.Mandate.Limits != record.Mandate.Limits {
+				t.Fatal("title answer expanded saved runtime authority")
+			}
 			if err := mandateRuntime.ReserveBotMandateRun(ctx, *confirmed.Run.MandateRef, first.Run.ID); err != nil {
 				t.Fatalf("confirmed same-run reservation: %v", err)
 			}

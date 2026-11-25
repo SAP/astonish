@@ -111,8 +111,15 @@ func TestBotAgentAccessFlushedBeforeModelAndRetainedOnFailure(t *testing.T) {
 			bad := fact
 			bad.BodyDigest = strings.Repeat("0", 64)
 			service.captureAccess("source", []store.BotSourceAccessFact{bad})
-			if _, err := service.Read(ctx, bot.BotWorkReadRequest{}); !errors.Is(err, store.ErrBotInvalid) {
-				t.Fatalf("digest mismatch accepted: %v", err)
+			// Prompt reads are read-only; pending receipt validation is mandatory
+			// at the producer preflight, before any provider dispatch.
+			called = false
+			var preflightErr error
+			for _, err := range wrapped.GenerateContent(bot.WithBotWorkServices(ctx, service), &model.LLMRequest{}, false) {
+				preflightErr = err
+			}
+			if !errors.Is(preflightErr, store.ErrBotInvalid) || called {
+				t.Fatalf("digest mismatch reached provider: called=%v err=%v", called, preflightErr)
 			}
 			if len(saved.state.AgentWork.SourceAccess) != 1 {
 				t.Fatal("bad digest overwrote source")

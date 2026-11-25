@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/gorilla/mux"
 )
@@ -317,21 +319,98 @@ func BrowserVNCInfoHandler(w http.ResponseWriter, r *http.Request) {
 // continues running — only the visual sharing session ends.
 //
 // Route: POST /api/browser/handoff-done
-func BrowserHandoffDoneHandler(w http.ResponseWriter, r *http.Request) {
-	mgr := GetBrowserManager()
-	if mgr != nil {
-		// Revoke the VNC handoff token for the container (if any).
-		// This causes the auth middleware to reject subsequent VNC proxy
-		// requests, effectively ending the visual sharing session.
-		containerName := mgr.ContainerName()
-		if containerName != "" {
-			browser.GetHandoffTokenRegistry().Revoke(containerName)
-		}
+type scopedBrowserHandoff struct {
+	owner     execution.Principal
+	sessionID string
+	container string
+	manager   *browser.Manager
+	created   time.Time
+}
 
-		// Stop any active CDP handoff server (used in host mode).
-		mgr.StopHandoff()
+var scopedBrowserHandoffs = struct {
+	sync.Mutex
+	active map[*scopedBrowserHandoff]struct{}
+}{active: make(map[*scopedBrowserHandoff]struct{})}
+
+// BindScopedBrowserHandoff binds tools and the Done route to one attempt-owned
+// manager. The returned release must run before that manager is disposed.
+// Tokens retain their existing format, lifetime and middleware validation.
+func BindScopedBrowserHandoff(ctx context.Context, sessionID string, mgr *browser.Manager) (func(string, string) (string, error), func(), error) {
+	owner, ok := execution.PrincipalFromContext(ctx)
+	if !ok || owner.Validate() != nil || owner.Subject == "" || sessionID == "" || mgr == nil {
+		return nil, nil, fmt.Errorf("authenticated browser session required")
 	}
+	entry := &scopedBrowserHandoff{owner: owner, sessionID: sessionID, manager: mgr}
+	closed := false
+	register := func(container, session string) (string, error) {
+		scopedBrowserHandoffs.Lock()
+		defer scopedBrowserHandoffs.Unlock()
+		if closed || ctx.Err() != nil || session != sessionID || container == "" || mgr.SessionID() != sessionID || mgr.ContainerName() != container {
+			return "", fmt.Errorf("browser handoff session unavailable")
+		}
+		for old := range scopedBrowserHandoffs.active {
+			if time.Since(old.created) > 30*time.Minute {
+				delete(scopedBrowserHandoffs.active, old)
+				browser.GetHandoffTokenRegistry().Revoke(old.container)
+				continue
+			}
+			if old != entry && old.container == container {
+				return "", fmt.Errorf("browser handoff already active")
+			}
+		}
+		token, err := browser.GetHandoffTokenRegistry().Register(container)
+		if err != nil {
+			return "", err
+		}
+		entry.container, entry.created = container, time.Now()
+		scopedBrowserHandoffs.active[entry] = struct{}{}
+		return token, nil
+	}
+	release := func() {
+		scopedBrowserHandoffs.Lock()
+		defer scopedBrowserHandoffs.Unlock()
+		closed = true
+		if _, active := scopedBrowserHandoffs.active[entry]; active {
+			delete(scopedBrowserHandoffs.active, entry)
+			browser.GetHandoffTokenRegistry().Revoke(entry.container)
+		}
+	}
+	return register, release, nil
+}
 
+// BrowserHandoffDoneHandler accepts an optional session_id selector. Legacy
+// callers without a selector may finish their sole active handoff, never an
+// arbitrary global manager or another owner's session.
+func BrowserHandoffDoneHandler(w http.ResponseWriter, r *http.Request) {
+	owner, ok := execution.PrincipalFromContext(r.Context())
+	if !ok || owner.Validate() != nil || owner.Subject == "" {
+		respondError(w, http.StatusNotFound, "browser handoff not found")
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	scopedBrowserHandoffs.Lock()
+	var target *scopedBrowserHandoff
+	for entry := range scopedBrowserHandoffs.active {
+		if entry.owner.Subject != owner.Subject || entry.owner.OrgSlug != owner.OrgSlug || entry.owner.TeamSlug != owner.TeamSlug || (sessionID != "" && entry.sessionID != sessionID) || time.Since(entry.created) > 30*time.Minute {
+			continue
+		}
+		if target != nil {
+			scopedBrowserHandoffs.Unlock()
+			respondError(w, http.StatusConflict, "browser session selector required")
+			return
+		}
+		target = entry
+	}
+	if target == nil {
+		scopedBrowserHandoffs.Unlock()
+		respondError(w, http.StatusNotFound, "browser handoff not found")
+		return
+	}
+	delete(scopedBrowserHandoffs.active, target)
+	browser.GetHandoffTokenRegistry().Revoke(target.container)
+	// Keep release from disposing the manager until StopHandoff completes.
+	target.manager.StopHandoff()
+	scopedBrowserHandoffs.Unlock()
 	respondJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "browser sharing session ended",

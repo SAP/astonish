@@ -1,11 +1,13 @@
 package entstore
 
 import (
+	"errors"
+	"testing"
+	"time"
+
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
-	"testing"
-	"time"
 )
 
 func TestBotTitleStartAtomicReplay(t *testing.T) {
@@ -29,14 +31,23 @@ func TestBotTitleStartAtomicReplay(t *testing.T) {
 			if first.Status != store.BotDraft || !first.Run.IsInteractiveChat() || first.UserEventID == "" || first.HistoryCursor == 0 {
 				t.Fatalf("receipt: %+v", first)
 			}
-			again, err := repo.CreateDraftAndStart(ctx, q)
-			if err != nil || again.Run.ID != first.Run.ID || again.Bot.ID != first.Bot.ID {
-				t.Fatalf("replay: %+v %v", again, err)
+			assertReplay := func() {
+				t.Helper()
+				again, err := repo.CreateDraftAndStart(ctx, q)
+				if err != nil {
+					t.Fatalf("replay: %v", err)
+				}
+				if again.Run.ID != first.Run.ID || again.Bot.ID != first.Bot.ID || again.HomeSessionID != first.HomeSessionID || again.UserEventID != first.UserEventID || again.HistoryCursor != first.HistoryCursor {
+					t.Fatalf("replay identities changed: first=%+v again=%+v", first, again)
+				}
 			}
-			q.Name = "Different"
-			if _, err := repo.CreateDraftAndStart(ctx, q); err != store.ErrBotConflict {
-				t.Fatalf("mismatch: %v", err)
+			assertReplay()
+			conflicting := q
+			conflicting.Name = "Different"
+			if receipt, err := repo.CreateDraftAndStart(ctx, conflicting); !errors.Is(err, store.ErrBotConflict) || receipt != nil {
+				t.Fatalf("mismatch: receipt=%+v err=%v", receipt, err)
 			}
+			assertReplay()
 		})
 	}
 }

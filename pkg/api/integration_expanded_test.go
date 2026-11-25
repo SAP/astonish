@@ -176,7 +176,13 @@ func TestIntegration_X14_StateDelta_FailureInfo(t *testing.T) {
 		assertEventData(t, ev, "title", "Max Retries Exceeded")
 		assertEventData(t, ev, "reason", "Failed after 3 attempts.")
 		assertEventData(t, ev, "suggestion", "Try a different model or simplify your request.")
-		assertEventData(t, ev, "originalError", "connection timeout")
+		// Original provider diagnostics remain trusted evidence, not public UI.
+		if _, exposed := ev.Data["originalError"]; exposed {
+			t.Fatal("private originalError exposed")
+		}
+		if !strings.Contains(runner.Completion().Err.Error(), "connection timeout") {
+			t.Fatal("trusted original error lost")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for error_info event")
 	}

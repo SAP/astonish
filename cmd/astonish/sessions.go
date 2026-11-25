@@ -531,19 +531,22 @@ func handleSessionsClear() error {
 		return nil
 	}
 
-	// Delete all transcript files
+	// Delete only the IDs in the snapshot the user confirmed. Sessions created
+	// while the prompt or cleanup was running must survive.
+	ids := make([]string, 0, count)
 	deleted := 0
 	for id, meta := range data.Sessions {
+		ids = append(ids, id)
 		removeSessionFiles(sessDir, meta.AppName, meta.UserID, meta.ID)
 		// Best-effort: destroy sandbox container if one exists
 		sandbox.TryDestroySession(appCfg, id, nil)
 		deleted++
 	}
 
-	// Clear the index
-	data.Sessions = make(map[string]persistentsession.SessionMeta)
-	if err := index.Save(data); err != nil {
-		return fmt.Errorf("failed to save cleared index: %w", err)
+	// Remove confirmed records from the latest index, without holding index locks
+	// during transcript or sandbox cleanup.
+	if err := index.RemoveSelected(ids); err != nil {
+		return fmt.Errorf("failed to clear selected sessions: %w", err)
 	}
 
 	fmt.Printf("Deleted %d session(s).\n", deleted)

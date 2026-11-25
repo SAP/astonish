@@ -26,3 +26,10 @@ type BotTranscriptEvent struct {
 type BotTranscriptReader interface {
 	ReadBotTranscript(context.Context, uuid.UUID, int64, int) ([]BotTranscriptEvent, error)
 }
+
+// BotTranscriptTailReader is an optional reconnect accelerator. It returns at
+// most limit rows ending at or before cursor, ordered oldest to newest. It does
+// not change full history pagination or grant read authority.
+type BotTranscriptTailReader interface {
+	ReadBotTranscriptTail(context.Context, uuid.UUID, int64, int) ([]BotTranscriptEvent, error)
+}

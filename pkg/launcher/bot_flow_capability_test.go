@@ -7,7 +7,6 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
-	"google.golang.org/adk/tool"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,10 +37,7 @@ flow:
     to: END
 `}
 	f.services.PersonalFlows = fs
-	target, ctx := productionFactoryTool(t, f, "run_flow", func(context.Context, string) ([]tool.Tool, func(), error) {
-		x, e := BotRunFlowTool()
-		return []tool.Tool{x}, func() {}, e
-	})
+	target, ctx := productionFactoryTool(t, f, "run_flow", ChatCatalogResources{})
 	out, err := target.Run(ctx, map[string]any{"flow_name": "owner-flow"})
 	if err != nil {
 		t.Fatal(err)
@@ -87,14 +83,7 @@ flow:
 			if allowed {
 				allow = []string{"http_request"}
 			}
-			target, ctx := productionFactoryTool(t, f, "run_flow", func(_ context.Context, id string) ([]tool.Tool, func(), error) {
-				flow, err := BotRunFlowTool()
-				if err != nil {
-					return nil, nil, err
-				}
-				h, err := BotHTTPTool(b, client, id)
-				return []tool.Tool{flow, h}, func() {}, err
-			}, allow...)
+			target, ctx := productionFactoryTool(t, f, "run_flow", ChatCatalogResources{Pool: productionCapabilityPool{backend: b, client: client}}, allow...)
 			out, err := target.Run(ctx, map[string]any{"flow_name": "owner-child-flow"})
 			raw, _ := json.Marshal(out)
 			if strings.Contains(string(raw), productionTestSecret) {

@@ -25,7 +25,7 @@ import (
 
 // A physical temporary-directory backend, not Docker/Kubernetes acceptance.
 type permanentHomeFixture struct {
-	sandbox.Backend
+	*regressionHomeBackend
 	root string
 	fail bool
 }
@@ -127,8 +127,13 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 		return c
 	}
 	db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-	backend := &permanentHomeFixture{root: filepath.Join(dir, "homes")}
+	retained := newRegressionHomeBackend(t)
+	backend := &permanentHomeFixture{regressionHomeBackend: retained, root: retained.documentsRoot}
+	if err := db.InstallBotContentHomeBackend(backend); err != nil {
+		t.Fatal(err)
+	}
 	worker := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, WorkerID: "permanent-test"}}
+	svc.BotFilesFactory = worker.filesForRequest
 	svc.BotHomeSetup = worker.provisionHome
 	router := mux.NewRouter()
 	api.RegisterRoutes(router, svc, db, entstore.TenantMiddleware(db))
@@ -201,14 +206,6 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 					t.Fatalf("SQL count %s = %d, want %d: %v", query, n, want, e)
 				}
 			}
-			jobs := map[store.BotID]string{}
-			for _, seeded := range []store.Bot{b, other} {
-				jobs[seeded.ID] = uuid.NewString()
-				execSQL(`INSERT INTO scheduled_jobs(id,name,schedule,mode,payload,status) VALUES (?,'delete-proof','* * * * *','bot_trigger',?,'active')`, jobs[seeded.ID], fmt.Sprintf(`{"bot_id":%q}`, seeded.ID))
-				task := uuid.NewString()
-				execSQL(`INSERT INTO bot_tasks(id,bot_id,key,home_path,title) VALUES (?,?,'proof','tasks/proof','Proof')`, task, seeded.ID.String())
-				execSQL(`INSERT INTO bot_task_revisions(id,bot_id,task_id,revision,digest,size_bytes,authority_constraint_ref,data) VALUES (?,?,?,1,'proof',5,'fixture','{}')`, uuid.NewString(), seeded.ID.String(), task)
-			}
 			path := "/api/studio/bots/" + b.ID.String()
 			request("POST", path+"/permanent-delete"+suffix, owner, `{"expected_revision":1,"confirm":false}`, 400)
 			request("POST", path+"/permanent-delete"+suffix, owner, `{"expected_revision":1,"confirm":true,"reason":"not allowed"}`, 400)
@@ -225,6 +222,17 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			source, e := repo.RequestRun(ownerCtx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentDraftConversation, Trigger: store.TriggerManual, Instructions: "temporary run", IdempotencyKey: "delete-source"})
 			if e != nil {
 				t.Fatal(e)
+			}
+			// Seed obsolete development rows only after normal Home/run admission.
+			// File-first admission deliberately rejects these envelopes; explicit
+			// permanent deletion must still remove them without hydrating content.
+			jobs := map[store.BotID]string{}
+			for _, seeded := range []store.Bot{b, other} {
+				jobs[seeded.ID] = uuid.NewString()
+				execSQL(`INSERT INTO scheduled_jobs(id,name,schedule,mode,payload,status) VALUES (?,'delete-proof','* * * * *','bot_trigger',?,'active')`, jobs[seeded.ID], fmt.Sprintf(`{"bot_id":%q}`, seeded.ID))
+				task := uuid.NewString()
+				execSQL(`INSERT INTO bot_tasks(id,bot_id,key,home_path,title) VALUES (?,?,'proof','tasks/proof','Proof')`, task, seeded.ID.String())
+				execSQL(`INSERT INTO bot_task_revisions(id,bot_id,task_id,revision,digest,size_bytes,authority_constraint_ref,data) VALUES (?,?,?,1,'proof',5,'fixture','{}')`, uuid.NewString(), seeded.ID.String(), task)
 			}
 			child := uuid.NewString()
 			execSQL(`INSERT INTO sessions(id,parent_id) VALUES (?,?)`, child, b.HomeSessionID.String())
@@ -257,6 +265,9 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			}
 			if _, e := repo.Get(ownerCtx, b.ID); e != nil {
 				t.Fatal("retry root lost", e)
+			}
+			if _, e := os.Stat(b.Home.StorageKey); !os.IsNotExist(e) {
+				t.Fatal("verified cleanup left Home content before purge retry", e)
 			}
 			restarted := &BotWorker{config: worker.config}
 			// A verified retry no longer needs the physical backend at all.

@@ -17,8 +17,8 @@ func TestBotSourceIntakeTemplateReceiptRecovery(t *testing.T) {
 	owner := uuid.MustParse(ownerPrincipal.Subject)
 	tc := newTeamClient(t)
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}
-	source := &teamBotStore{client: tc, auth: auth}
-	templates := &teamBotTemplateStore{client: tc, auth: auth}
+	source := &teamBotStore{client: tc, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()}), auth: auth}
+	templates := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: tc, auth: auth}
 	template, err := templates.Publish(ctx, store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Template", Charter: "Observe"}, 0)
 	if err != nil {
 		t.Fatal(err)

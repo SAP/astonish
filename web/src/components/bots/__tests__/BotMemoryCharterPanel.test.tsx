@@ -81,3 +81,15 @@ it('records reviewed correction intent before a separate reconcile action', asyn
   fireEvent.click(screen.getByRole('button', { name: 'Apply saved correction to memory' }))
   expect(await screen.findByText('Memory correction applied.')).toBeInTheDocument()
 })
+
+it('does not read documents while Details is closed and preserves drafts on reopen', async () => {
+  const view = render(<BotMemoryCharterPanel bot={bot} readOnly={false} enabled={false} />)
+  expect(api.getBotDocuments).not.toHaveBeenCalled(); expect(api.getBotMemoryHealth).not.toHaveBeenCalled()
+  view.rerender(<BotMemoryCharterPanel bot={bot} readOnly={false} enabled />)
+  fireEvent.change(await screen.findByLabelText('Content SOUL.md'), { target: { value: 'Unfinished draft' } })
+  const signal = vi.mocked(api.getBotDocuments).mock.calls[0][1]!
+  view.rerender(<BotMemoryCharterPanel bot={bot} readOnly={false} enabled={false} />)
+  expect(signal.aborted).toBe(true)
+  view.rerender(<BotMemoryCharterPanel bot={bot} readOnly={false} enabled />)
+  expect(await screen.findByLabelText('Content SOUL.md')).toHaveValue('Unfinished draft')
+})

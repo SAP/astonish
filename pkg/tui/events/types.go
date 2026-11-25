@@ -110,6 +110,7 @@ type DelegationTask struct {
 
 // Event is one unit of chat progress. Fields are optional by Kind.
 type Event struct {
+	BotFilePublication       *store.BotFilePublication
 	PlanSnapshot             *agent.PlanSnapshot
 	InvocationID             string // canonical publication identity for KindBotReport
 	EventID                  string // stable persisted publication row

@@ -24,6 +24,18 @@ function savedAnswerLabel(approval?: BotApproval): string | undefined {
   if (payload.kind === QUESTION_KINDS.text) return response.answer
 }
 
+// Presentation only: the server's saved descriptor/digest remains authoritative.
+// Never serialize the approval, checkpoint or arbitrary private descriptor fields.
+function capturedActionDetails(action: BotApproval['action']): string {
+  const publicFields = ['tool', 'effect', 'arguments', 'recipient', 'merchant', 'currency', 'spend_minor', 'target_fingerprint', 'target_snapshot'] as const
+  const details = Object.fromEntries(publicFields.filter(key => action[key] !== undefined).map(key => [key, action[key]]))
+  return JSON.stringify(details, (key, value: unknown) => {
+    if (/secret|token|password|credential|authorization|checkpoint|private/i.test(key)) return undefined
+    if (typeof value === 'string' && value.includes('SECRET_')) return '[redacted]'
+    return value
+  }, 2)
+}
+
 /** Shared by the canonical transcript card and the optional recovery inbox. */
 export function BotReviewCard({ bot, proposal, approval, question, awaitingApproval = false, readOnly, onChange, requiresContinueInteractive = false }: { bot: Bot; proposal?: BotControlProposal; approval?: BotApproval; question?: import('@/api/questions').Question; awaitingApproval?: boolean; requiresContinueInteractive?: boolean; readOnly: boolean; onChange: () => void }) {
   const now = useBotClock()
@@ -77,7 +89,7 @@ export function BotReviewCard({ bot, proposal, approval, question, awaitingAppro
       {p.status === ProposalStatus.Proposed && <div className="flex flex-wrap gap-2"><Button disabled={disabled} onClick={() => act(async () => { setDecidedProposal(await decideControlProposal(bot, p, 'confirm')) })}>Confirm exact change</Button><Button variant="outline" disabled={disabled} onClick={() => act(async () => { setDecidedProposal(await decideControlProposal(bot, p, 'reject')) })}>Reject</Button></div>}
       {p.reconciliation_pending && <BotEmployeeMessage role="status">{botEmployeeFeedback({ kind: 'reconciliation_pending' })}</BotEmployeeMessage>}
       {(p.status === ProposalStatus.Stale || p.status === ProposalStatus.Expired || expired) && <BotEmployeeMessage>{botEmployeeFeedback({ kind: 'fresh_proposal_required' })}</BotEmployeeMessage>}
-    </> : <>{!a!.interaction && <p className="whitespace-pre-wrap break-words">{typeof a!.action.summary === 'string' ? a!.action.summary : typeof a!.action.description === 'string' ? a!.action.description : 'Saved action. Review its scope before continuing.'}</p>}{(!a!.interaction || a!.status !== 'pending' || expired) && <p>{expired && a!.status === 'pending' ? 'expired' : a!.status}</p>}
+    </> : <>{!a!.interaction && <>{(typeof a!.action.summary === 'string' || typeof a!.action.description === 'string') && <p className="whitespace-pre-wrap break-words">{typeof a!.action.summary === 'string' ? a!.action.summary : a!.action.description as string}</p>}<pre aria-label="Captured action details" tabIndex={0} className="max-h-80 overflow-auto rounded-md border border-border bg-muted p-3 whitespace-pre-wrap break-words text-xs">{capturedActionDetails(a!.action)}</pre></>}{(!a!.interaction || a!.status !== 'pending' || expired) && <p>{expired && a!.status === 'pending' ? 'expired' : a!.status}</p>}
       {a!.status === 'pending' && <div className={a!.interaction ? 'w-full' : 'flex flex-wrap gap-2'}>{a!.interaction ? <QuestionCard key={`${a!.id}/${a!.interaction.question_id}`} question={{ ...a!.interaction.payload, questionId: a!.interaction.question_id }} disabled={disabled} onAnswer={async ({ answer }) => { setPendingAnswer(answer); if (requiresContinueInteractive) { setNeedsContinue(true); throw new Error(botEmployeeFeedback({ kind: 'answer_authorization_required' })) } try { const result = await approveAndContinue(bot, a!, answer); saveAnswer(result.approval, a!, answer); onChange() } catch (e) { if (e instanceof BotAPIError && e.status === 403) setNeedsContinue(true); throw new Error(botLocalFailure(e, BotFailureKind.Decision).message, { cause: e }) } }} /> : <Button disabled={disabled} onClick={() => approve()}>Approve & continue</Button>}{!a!.interaction && <Button variant="outline" disabled={disabled} onClick={() => act(async () => { setDecidedApproval(await decideBotApproval(bot, a!, 'denied')) })}>Deny</Button>}</div>}
       {a!.status === 'approved' && !receipt && <><BotEmployeeMessage>{botEmployeeFeedback({ kind: 'approved_checkpoint', paused: bot.status === BotStatus.Paused })}</BotEmployeeMessage><Button disabled={disabled || bot.status === BotStatus.Paused} onClick={() => approve()}>Continue approved action</Button></>}
     </>}

@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -32,6 +33,25 @@ type botProgressBridge struct {
 }
 
 func (p *botProgressBridge) boundary(ctx context.Context) error {
+	return p.drain(ctx, func(ctx context.Context) error {
+		if d := bot.ProgressDispatchFromContext(ctx); d != nil {
+			return d.Boundary(ctx)
+		}
+		return nil
+	})
+}
+
+// drain settles persisted dispatches before exactly one authoritative boundary.
+func (p *botProgressBridge) drain(ctx context.Context, boundary func(context.Context) error) (err error) {
+	observe := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageBookkeeping)
+	defer func() { observe(err) }()
+	defer func() {
+		if err != nil {
+			entstore.EndImmutableReadWindow(ctx)
+		}
+	}()
+	ctx, end := entstore.WithBotContentReadOperationIfAbsent(ctx)
+	defer end()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active != 0 {
@@ -43,8 +63,8 @@ func (p *botProgressBridge) boundary(ctx context.Context) error {
 		}
 		p.pending = p.pending[1:]
 	}
-	if d := bot.ProgressDispatchFromContext(ctx); d != nil {
-		return d.Boundary(ctx)
+	if boundary != nil {
+		return boundary(ctx)
 	}
 	return nil
 }
@@ -99,7 +119,13 @@ func (b *botFactoryBinding) progressTool(ctx botBoundToolContext, t botRunnableT
 	}
 	call, cancel := context.WithTimeout(ctx, time.Duration(b.req.Version.Budget.RuntimePolicy.ToolCallTimeoutSeconds)*time.Second)
 	defer cancel()
+	entstore.EndImmutableReadWindow(ctx)
+	observe := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageTool)
 	result, callErr := run(preserveBotToolBinding(ctx, botProgressToolContext{Context: ctx, call: call}), args)
+	observe(errors.Join(callErr, call.Err()))
+	if ctx.Err() == nil && callErr == nil {
+		entstore.BeginImmutableReadWindow(ctx)
+	}
 	callErr = errors.Join(callErr, call.Err())
 	outcome := store.BotProgressDispatchUncertain
 	if botProgressPinnedRead(t, args) {
@@ -126,10 +152,10 @@ func (b *botFactoryBinding) progressTool(ctx botBoundToolContext, t botRunnableT
 	// not infer nonexecution from an error or a response's status/success fields.
 	if receipt, ok := bot.TakeToolOutcome(ctx, ctx.FunctionCallID()); ok {
 		bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), receipt)
-		if !receipt.ReceiptConflict && receipt.Nonexecution != nil && receipt.Nonexecution.CallID == ctx.FunctionCallID() && receipt.Nonexecution.ToolName == t.Name() {
+		if receipt.NonexecutionFor(ctx, ctx.FunctionCallID(), t.Name(), args) {
 			outcome = store.BotProgressDispatchNotExecuted
 			evidence = "tool-receipt:" + ctx.FunctionCallID()
-		} else if !receipt.ReceiptConflict && receipt.Verified && len(receipt.Unverified) == 0 {
+		} else if receipt.Nonexecution == nil && !receipt.ReceiptConflict && receipt.Verified && len(receipt.Unverified) == 0 {
 			outcome = store.BotProgressDispatchSettled
 			evidence = "tool-receipt:" + ctx.FunctionCallID()
 		}
@@ -142,7 +168,16 @@ func (b *botFactoryBinding) progressTool(ctx botBoundToolContext, t botRunnableT
 // never proof of read semantics. A failed read settles an operation, not evidence
 // that the requested source was retrieved.
 func botProgressPinnedRead(t botRunnableTool, args any) bool {
-	switch t.(type) {
+	switch concrete := t.(type) {
+	case *botWorkflowTool:
+		// The factory-pinned generic question handler has no external effect.
+		// Interactive caller-ceiling dispatch intentionally has no autonomous
+		// classifier; never infer this from a remote tool's name or result.
+		return concrete.kind == botWorkflowSlides && concrete.Name() == "ask_user"
+	case *botConfinedFileTool:
+		// Only the concrete retained-Home read adapters qualify; confined writes
+		// still require their independent readback receipt to settle.
+		return t.Name() == "read_file" || t.Name() == "find_files" || t.Name() == "file_tree"
 	case *sandbox.NodeTool, *botSandboxTool:
 	default:
 		return false
@@ -181,6 +216,11 @@ type botProgressLLM struct {
 	binding *botFactoryBinding
 }
 
+func (l *botProgressLLM) SupportsModelPreflight() bool {
+	next, ok := l.LLM.(interface{ SupportsModelPreflight() bool })
+	return ok && next.SupportsModelPreflight()
+}
+
 func (l *botProgressLLM) EstimateInputTokens(ctx context.Context, request *model.LLMRequest) (int64, error) {
 	return provider.EstimateModelInput(ctx, l.LLM, request)
 }
@@ -207,8 +247,18 @@ func (l *botProgressLLM) GenerateContent(ctx context.Context, request *model.LLM
 			defer cancel()
 		}
 		var usage store.BotUsage
-		defer func() { finish(store.BotProgressDispatchSettled, usage, "") }()
+		failed := false
+		joined := false
+		defer func() {
+			finish(store.BotProgressDispatchSettled, usage, "")
+			if call.Err() == nil && !failed && joined {
+				entstore.BeginImmutableReadWindow(ctx)
+			} else {
+				entstore.EndImmutableReadWindow(ctx)
+			}
+		}()
 		for r, e := range l.LLM.GenerateContent(call, request, stream) {
+			failed = failed || e != nil
 			if r != nil && r.UsageMetadata != nil {
 				input, output := bot.ModelUsageTokens(r.UsageMetadata)
 				// Usage snapshots are cumulative, including repeated trailers.
@@ -221,6 +271,7 @@ func (l *botProgressLLM) GenerateContent(ctx context.Context, request *model.LLM
 				return
 			}
 		}
+		joined = true
 		if call.Err() != nil {
 			yield(nil, call.Err())
 		}

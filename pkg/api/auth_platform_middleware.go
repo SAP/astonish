@@ -36,6 +36,35 @@ func PlatformAuthMiddleware(pa *PlatformAuth, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Native downloads accept only an exact GET/HEAD cookie credential.
+		// Recheck directory access even when a browser also sends its session.
+		if ticket, ok := botFileRequestTicket(r); ok {
+			if pa.IsNoAuth() {
+				if !isLoopbackRequest(r) || validateNoAuthRequest(r) != nil {
+					respondError(w, http.StatusForbidden, "Download origin forbidden")
+					return
+				}
+			}
+			if p, present := execution.PrincipalFromContext(r.Context()); present {
+				if p.Subject != ticket.user || p.OrgSlug != ticket.org || p.TeamSlug != ticket.team {
+					respondError(w, http.StatusForbidden, "Download identity mismatch")
+					return
+				}
+			} else if token := extractAccessToken(r); token != "" {
+				claims, err := pa.jwt.ValidateAccessToken(token)
+				if err != nil || claims.UserID != ticket.user || claims.OrgSlug != ticket.org || resolveTeamSlug(r, claims) != ticket.team {
+					handleUnauthenticated(w, r)
+					return
+				}
+			}
+			ctx, err := pa.botFileTicketContext(r, ticket)
+			if err != nil {
+				respondError(w, http.StatusForbidden, "Download access revoked")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		// An OAuth protocol adapter may already have validated a scoped Astonish
 		// bearer and attached its canonical principal. Do not reinterpret that
 		// token as a legacy platform JWT or replace it with the local identity.

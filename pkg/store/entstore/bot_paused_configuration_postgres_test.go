@@ -47,9 +47,9 @@ func TestIntegrationPostgresBotHomeBindingRegistration(t *testing.T) {
 		var fresh store.BotStore
 		switch d := f.repo.db.(type) {
 		case teamBotDB:
-			fresh = &teamBotStore{client: d.client, auth: f.repo.auth}
+			fresh = &teamBotStore{client: d.client, content: d.content, auth: f.repo.auth}
 		case personalBotDB:
-			fresh = &personalBotStore{client: d.client, auth: f.repo.auth}
+			fresh = &personalBotStore{client: d.client, content: d.content, auth: f.repo.auth}
 		}
 		got, err := fresh.Get(f.owner, b.ID)
 		if err != nil || got.Home != q.Home || got.Revision != b.Revision+1 || got.Status != store.BotDraft {

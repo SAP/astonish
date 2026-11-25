@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	prun "github.com/SAP/astonish/ent/personal/botrun"
@@ -90,7 +91,7 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 			return store.ErrBotConflict
 		}
 		c, err := botdomain.DecodeApprovalCheckpoint(saved.Run.Checkpoint, saved.Run)
-		if err != nil || !c.Matches(*a) || c.Fence != saved.Run.Lease.Fence {
+		if err != nil || !c.Matches(*a) || c.Fence > saved.Run.Lease.Fence || (c.Fence != saved.Run.Lease.Fence && a.Status != store.ApprovalApproved) {
 			return store.ErrBotConflict
 		}
 		if saved.Run.IsInteractiveChat() && (saved.Run.TitleConfirmation == nil || saved.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed) && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
@@ -165,7 +166,7 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 			if err := r.confirmTitleAssignment(ctx, tx, rec, saved, *a); err != nil {
 				return err
 			}
-			if err := r.queueApprovedCheckpoint(ctx, tx, rec, saved, c.Fence, a.ID); err != nil {
+			if err := r.queueApprovedCheckpoint(ctx, tx, rec, saved, saved.Run.Lease.Fence, a.ID); err != nil {
 				return err
 			}
 		}
@@ -241,10 +242,12 @@ func (r *botRepository) RequeueApprovedRun(ctx context.Context, id, runID, appro
 			return store.ErrBotConflict
 		}
 		c, _ := botdomain.DecodeApprovalCheckpoint(saved.Run.Checkpoint, saved.Run)
-		if c.Fence != saved.Run.Lease.Fence {
+		if c.Fence > saved.Run.Lease.Fence {
 			return store.ErrBotConflict
 		}
-		return r.queueApprovedCheckpoint(ctx, tx, rec, saved, c.Fence, approvalID)
+		// Denied resumes retain the original checkpoint bytes; queue CAS still
+		// binds the latest completed lease, never the historical approval fence.
+		return r.queueApprovedCheckpoint(ctx, tx, rec, saved, saved.Run.Lease.Fence, approvalID)
 	})
 }
 
@@ -256,7 +259,7 @@ func (r *botRepository) queueApprovedCheckpoint(ctx context.Context, tx botDraft
 	}
 	saved.Run.Status = store.RunQueued
 	saved.CommitHash = ""
-	data, err := botJSONMap(*saved)
+	data, err := encodeBotRunData(ctx, tx, *saved)
 	if err != nil {
 		return err
 	}
@@ -276,7 +279,7 @@ func (r *botRepository) queueApprovedCheckpoint(ctx context.Context, tx botDraft
 		return store.ErrBotConflict
 	}
 	payload, _ := json.Marshal(map[string]any{"run_id": runID, "status": store.RunQueued, "approval_id": approvalID})
-	return insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: id, RunID: &runID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: r.clock()}, "approval-resume:"+approvalID.String())
+	return insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: id, RunID: &runID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: r.clock()}, "approval-resume:"+approvalID.String()+":"+fmt.Sprint(fence))
 }
 func (r *botRepository) LoadResumeApproval(ctx context.Context, l store.BotLease) (*store.BotApproval, error) {
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {

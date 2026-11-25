@@ -37,6 +37,7 @@ func studioChatComponentsFromFactoryResult(result *ChatFactoryResult, sandboxEna
 		return nil
 	}
 	return &api.StudioChatComponents{
+		RuntimeFactory:    result.RuntimeFactory,
 		ChatAgent:         result.ChatAgent,
 		LLM:               result.LLM,
 		SwappableLLM:      result.SwappableLLM,
@@ -57,14 +58,15 @@ func studioChatComponentsFromFactoryResult(result *ChatFactoryResult, sandboxEna
 
 // StudioServer wraps the HTTP server with lifecycle management.
 type StudioServer struct {
-	server       *http.Server
-	listener     net.Listener
-	port         int
-	platformAuth *api.PlatformAuth               // non-nil in platform mode
-	backend      studioBackend                   // non-nil in platform mode
-	tenantMW     func(http.Handler) http.Handler // tenant resolution middleware
-	services     *store.Services
-	oauthServer  *oauthserver.Server
+	server          *http.Server
+	listener        net.Listener
+	port            int
+	platformAuth    *api.PlatformAuth               // non-nil in platform mode
+	backend         studioBackend                   // non-nil in platform mode
+	tenantMW        func(http.Handler) http.Handler // tenant resolution middleware
+	services        *store.Services
+	oauthServer     *oauthserver.Server
+	chatInitialized func(*ChatFactoryResult)
 }
 
 // StudioOption configures optional StudioServer behavior.
@@ -109,6 +111,13 @@ func WithTenantMiddleware(mw func(http.Handler) http.Handler) StudioOption {
 
 func WithOAuthServer(server *oauthserver.Server) StudioOption {
 	return func(s *StudioServer) { s.oauthServer = server }
+}
+
+// WithStudioChatInitialized observes successful Studio bootstrap construction.
+// The callback runs synchronously before PreWarm returns. It borrows the result;
+// Studio remains its lifecycle owner. It must not re-enter the Chat manager.
+func WithStudioChatInitialized(callback func(*ChatFactoryResult)) StudioOption {
+	return func(s *StudioServer) { s.chatInitialized = callback }
 }
 
 // NewStudioServer creates a configured Studio server without starting it.
@@ -179,6 +188,9 @@ func NewStudioServer(port int, opts ...StudioOption) (*StudioServer, error) {
 			})
 		}
 
+		if s.chatInitialized != nil {
+			s.chatInitialized(result)
+		}
 		return studioChatComponentsFromFactoryResult(result, sandbox.IsSandboxEnabled(&appCfg.Sandbox)), nil
 	})
 

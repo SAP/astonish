@@ -14,6 +14,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// OpenShell deliberately does not implement sandbox.BotHomeFilesBackend or
+// sandbox.BotHomeWorkspaceBackend. The gateway's bounded artifact helper does
+// not provide existing-only retained storage access, protected immutable objects,
+// or atomic file commits. Capability consumers must reject file-first setup and
+// execution as unsupported, not fall back to artifact reads or session files.
+// Do not add stub file methods: interface satisfaction advertises real support.
+// Ordinary OpenShell sessions and the bounded artifact capability stay unchanged.
+
 // ReadBotHomeArtifact uses a short-lived gateway sandbox, never the daemon's
 // filesystem or an existing run. A persisted template alone is not mount proof:
 // the command also checks the actual read-only mount and process/home ownership.

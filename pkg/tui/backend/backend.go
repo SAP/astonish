@@ -65,14 +65,21 @@ type ModelContextBackend interface {
 
 // Info is static session metadata shown in the TUI header / footer.
 type Info struct {
-	SessionID string
-	Provider  string
-	Model     string
-	Mode      string // "platform" or "code"
-	ServerURL string
-	Org       string
-	Team      string
-	User      string
+	ProjectRoot       string
+	WorkspaceID       string
+	WorkspacePath     string
+	WorkspaceMode     WorkspaceMode
+	WorkspaceActive   bool
+	WorkspaceRetained bool
+	WorkspacePrompt   bool
+	SessionID         string
+	Provider          string
+	Model             string
+	Mode              string // "platform" or "code"
+	ServerURL         string
+	Org               string
+	Team              string
+	User              string
 	// WorkingDir is the host directory tools operate against. Only set in
 	// code mode (the local, unsandboxed coding tool); empty in platform mode.
 	WorkingDir string
@@ -105,10 +112,16 @@ type Info struct {
 
 // SessionSummary is one row in the sessions picker.
 type SessionSummary struct {
-	ID           string
-	Title        string
-	UpdatedAt    string
-	MessageCount int
+	ProjectRoot       string
+	WorkspaceID       string
+	WorkspacePath     string
+	WorkspaceMode     WorkspaceMode
+	WorkspaceActive   bool
+	WorkspaceRetained bool
+	ID                string
+	Title             string
+	UpdatedAt         string
+	MessageCount      int
 }
 
 // HistoryEntry is one message loaded when resuming a session.

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Download, Edit3, ExternalLink, FilePlus, FileText, Film } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -29,6 +29,8 @@ function getFileType(path: string): string {
 }
 
 interface ArtifactCardProps {
+  fileAccess?: import('./chatTypes').FileAccessAdapter
+  sizeBytes?: number
   data: ArtifactMessage
   sessionId?: string | null
   onOpenInPanel?: (path: string) => void
@@ -36,7 +38,9 @@ interface ArtifactCardProps {
 
 // Inline artifact card showing a file that was created/modified by a tool.
 // Displays the filename, path, and buttons to open in the Files panel or download.
-export default function ArtifactCard({ data, sessionId, onOpenInPanel }: ArtifactCardProps) {
+export default function ArtifactCard({ data, sessionId, onOpenInPanel, fileAccess, sizeBytes }: ArtifactCardProps) {
+  const downloadAbort = useRef<AbortController | null>(null)
+  useEffect(() => () => downloadAbort.current?.abort(), [fileAccess?.identity])
   const fileName = getFileName(data.path)
   const fileType = getFileType(data.path)
   const isEdit = data.toolName === 'edit_file'
@@ -48,6 +52,12 @@ export default function ArtifactCard({ data, sessionId, onOpenInPanel }: Artifac
     setDownloadError(null)
     setDownloading(true)
     try {
+      if (fileAccess) {
+        downloadAbort.current?.abort()
+        downloadAbort.current = new AbortController()
+        await fileAccess.download(downloadAbort.current.signal)
+        return
+      }
       const blob = await fetchArtifactBlob(data.path, sessionId || undefined)
       const { saveAs } = await import('file-saver')
       saveAs(blob, fileName)
@@ -77,6 +87,7 @@ export default function ArtifactCard({ data, sessionId, onOpenInPanel }: Artifac
         )}
       </div>
       <div className="flex min-w-0 flex-1 flex-col">
+        {sizeBytes !== undefined && <span className="text-xs">{sizeBytes.toLocaleString()} bytes</span>}
         <div className="flex items-center gap-1.5">
           {isVideo
             ? <Film size={12} className="shrink-0 text-rose-400" />

@@ -12,6 +12,12 @@ import (
 )
 
 func WithWebSearchContext(ctx context.Context, appCfg *config.AppConfig) context.Context {
+	return WithWebSearchProviderContext(ctx, appCfg, provider.GetProvider)
+}
+
+// WithWebSearchProviderContext never chooses a provider factory implicitly.
+// A nil factory installs metadata only, for catalogs that already own the tool.
+func WithWebSearchProviderContext(ctx context.Context, appCfg *config.AppConfig, factory tools.LLMFactory) context.Context {
 	if appCfg == nil {
 		return ctx
 	}
@@ -37,8 +43,8 @@ func WithWebSearchContext(ctx context.Context, appCfg *config.AppConfig) context
 	overrides.WebExtractAvailable = &extractAvailable
 	overrides.WebExtractToolName = extractName
 
-	if searchAvailable && searchServer == "perplexity" {
-		perplexityTool, err := tools.NewPerplexityWebSearchTool(appCfg, provider.GetProvider)
+	if searchAvailable && searchServer == "perplexity" && factory != nil {
+		perplexityTool, err := tools.NewPerplexityWebSearchTool(appCfg, factory)
 		if err != nil {
 			slog.Warn("failed to create request-scoped perplexity_web_search tool", "error", err)
 		} else {

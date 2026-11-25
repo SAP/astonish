@@ -16,13 +16,16 @@ const (
 
 // BotMessageRequest is a home conversation turn, not consent to activate a Bot.
 type BotMessageRequest struct {
-	TaskID          *uuid.UUID               `json:"task_id,omitempty"`
-	ScheduleCommand *BotOwnerScheduleCommand `json:"schedule_command,omitempty"`
-	BotID           BotID                    `json:"-"`
-	Version         int64                    `json:"version"`
-	IdempotencyKey  string                   `json:"idempotency_key"`
-	Instructions    string                   `json:"instructions"`
-	Attachments     []ChatFile               `json:"attachments,omitempty"`
+	PlanMode              *bool                    `json:"planMode,omitempty"`
+	ApprovedPlanExecution bool                     `json:"approvedPlanExecution,omitempty"`
+	PlanExecution         *BotPlanExecutionConsent `json:"planExecution,omitempty"`
+	TaskID                *uuid.UUID               `json:"task_id,omitempty"`
+	ScheduleCommand       *BotOwnerScheduleCommand `json:"schedule_command,omitempty"`
+	BotID                 BotID                    `json:"-"`
+	Version               int64                    `json:"version"`
+	IdempotencyKey        string                   `json:"idempotency_key"`
+	Instructions          string                   `json:"instructions"`
+	Attachments           []ChatFile               `json:"attachments,omitempty"`
 }
 
 type BotMessageReceipt struct {

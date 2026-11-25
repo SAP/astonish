@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
-	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -107,13 +107,8 @@ func workflowFactory(t *testing.T, f *botFactoryFixture, names ...string) (func(
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.cfg.Prepare = func(_ context.Context, r bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
-		ts, err := BotWorkflowTools(r, s)
-		if err != nil {
-			return nil, err
-		}
-		return &BotChatSafeResources{Tools: ts, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
-	}
+	// Keep the shared Chat configuration and scoped catalog from the fixture;
+	// ordinary workflow tools must be discovered and executed by Chat itself.
 	r, err := f.construct(t)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +126,18 @@ func workflowFactory(t *testing.T, f *botFactoryFixture, names ...string) (func(
 		t.Fatal("missing Chat bridge")
 	}
 	return func(n string, a map[string]any) (map[string]any, error) {
-		return execute.Run(tc, map[string]any{"name": n, "arguments": a})
+		out, err := execute.Run(tc, map[string]any{"name": n, "arguments": a})
+		// Progressive dispatch returns target failures as structured tool output.
+		// Preserve this fixture's error assertions without mistaking transport
+		// success for successful execution of the underlying action.
+		if err == nil {
+			if message, ok := out["error"].(string); ok && message != "" {
+				err = errors.New(message)
+			} else if out["status"] == "error" {
+				err = fmt.Errorf("%v", out["message"])
+			}
+		}
+		return out, err
 	}, r.Cleanup
 }
 
@@ -187,11 +193,11 @@ func TestBotWorkflowUnsupportedNoFallback(t *testing.T) {
 		args   map[string]any
 		reason string
 	}{
-		{"read_drill", map[string]any{"name": "host-file"}, "filesystem fallback"},
-		{"resolve_credential", map[string]any{"name": "host-key"}, "global fallback"},
-		{"test_credential", map[string]any{"name": "host-key"}, "daemon OAuth"},
-		{"add_deck_image", map[string]any{"deck_slug": "owner", "url": "http://127.0.0.1/secret"}, "daemon HTTP"},
-		{"create_deck", map[string]any{"slug": "owner", "title": "Owner", "titleImage": "https://example.com/image.png"}, "daemon HTTP"},
+		{"read_drill", map[string]any{"name": "host-file"}, "team-scoped store not available"},
+		{"resolve_credential", map[string]any{"name": "host-key"}, "not found"},
+		{"test_credential", map[string]any{"name": "host-key"}, "not found"},
+		{"add_deck_image", map[string]any{"deck_slug": "owner", "url": "http://127.0.0.1/secret"}, "non-public address"},
+		{"create_deck", map[string]any{"slug": "owner", "title": "Owner", "template": "classic", "titleKind": "default", "titleImage": "http://127.0.0.1/secret"}, "non-public address"},
 		{"ask_user", map[string]any{"prompt": "hello", "kind": "yesno"}, "checkpoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,9 +205,9 @@ func TestBotWorkflowUnsupportedNoFallback(t *testing.T) {
 			f.services.PersonalDocs = &workflowDocs{}
 			call, done := workflowFactory(t, f, tc.name)
 			defer done()
-			_, err := call(tc.name, tc.args)
+			out, err := call(tc.name, tc.args)
 			if err == nil || !strings.Contains(err.Error(), tc.reason) {
-				t.Fatalf("%v", err)
+				t.Fatalf("result=%v err=%v", out, err)
 			}
 		})
 	}
@@ -219,12 +225,32 @@ func TestBotWorkflowTeamNeverUsesPersonal(t *testing.T) {
 	if _, err := call("list_decks", map[string]any{}); err == nil {
 		t.Fatal("team read personal decks")
 	}
-	if _, err := call("save_credential", map[string]any{"name": "x", "type": "bearer", "token": "secret"}); err == nil {
-		t.Fatal("team wrote credential")
+	if out, err := call("save_credential", map[string]any{"name": "x", "type": "bearer", "token": "secret"}); err == nil {
+		t.Fatalf("team wrote credential: result=%v personal_writes=%d", out, cs.writes)
 	}
 	if cs.writes != 0 || ds.calls != 0 {
 		t.Fatal("personal store reached")
 	}
+}
+
+type workflowScopedDrafts struct {
+	store.FleetSetupDraftStore
+	t              *testing.T
+	owner, session string
+	calls          int
+}
+
+func (s *workflowScopedDrafts) Get(ctx context.Context, id string) (*store.FleetSetupDraft, bool) {
+	s.calls++
+	principal, ok := execution.PrincipalFromContext(ctx)
+	if !ok || principal.Subject != s.owner || store.TeamSlugFromContext(ctx) != "owner-team" || store.SessionIDFromContext(ctx) != s.session {
+		s.t.Fatal("draft lookup lost owner/team/session scope")
+	}
+	// This owner-scoped store contains only the current session's draft.
+	if id != "owned-draft" {
+		return nil, false
+	}
+	return &store.FleetSetupDraft{ID: id, SetupProfileKey: "generic"}, true
 }
 
 func TestBotWorkflowFleetProfileAndExactReview(t *testing.T) {
@@ -239,8 +265,22 @@ func TestBotWorkflowFleetProfileAndExactReview(t *testing.T) {
 	if !strings.Contains(string(raw), "generic") {
 		t.Fatalf("profile handler not reached: %s", raw)
 	}
-	if _, err = call("get_setup_profile", map[string]any{"profile_key": "generic", "draft_id": "other-session"}); err == nil || !strings.Contains(err.Error(), "ownership") {
+	if _, err = call("get_setup_profile", map[string]any{"profile_key": "generic", "draft_id": "other-session"}); !errors.Is(err, store.ErrUnsupported) {
 		t.Fatalf("draft isolation: %v", err)
+	}
+	done()
+	drafts := &workflowScopedDrafts{t: t, owner: f.req.Bot.OwnerID.String(), session: f.req.Run.SessionID.String()}
+	f.services.FleetSetupDrafts = drafts
+	call, scopedDone := workflowFactory(t, f, "get_setup_profile")
+	defer scopedDone()
+	if _, err := call("get_setup_profile", map[string]any{"profile_key": "generic", "draft_id": "owned-draft"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call("get_setup_profile", map[string]any{"profile_key": "generic", "draft_id": "other-session"}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("foreign draft lookup: %v", err)
+	}
+	if drafts.calls != 2 {
+		t.Fatalf("scoped draft reads=%d", drafts.calls)
 	}
 	action, err := (BotCatalogueClassifier{}).DescribeAction(context.Background(), "save_credential", json.RawMessage(`{"name":"x"}`))
 	if err != nil || action.Effect != execution.EffectUnknown {

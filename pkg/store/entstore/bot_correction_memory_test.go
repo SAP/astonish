@@ -19,16 +19,8 @@ func TestBotMemoryCorrectionReconcile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			index := newVectorIndex()
-			embed := func(context.Context, string) ([]float32, error) { return []float32{1, 0}, nil }
-			var memories store.MemoryStore
-			switch d := repo.db.(type) {
-			case teamBotDB:
-				memories = &teamMemoryStore{client: d.client, dialect: DialectSQLite, embedFunc: embed, vecIndex: index}
-			case personalBotDB:
-				memories = &personalMemoryStore{client: d.client, dialect: DialectSQLite, embedFunc: embed, vecIndex: index}
-			}
-			if err := memories.Add(ctx, store.MemoryEntry{Content: "Thursday", Category: "delivery", SessionID: run.SessionID.String(), CreatedBy: b.OwnerID.String()}); err != nil {
+			svc, memories := diskMemoryFixture(t, repo, b.ID)
+			if err := svc.Add(ctx, store.MemoryEntry{Content: "Thursday", Category: "delivery", SessionID: run.SessionID.String(), CreatedBy: b.OwnerID.String()}); err != nil {
 				t.Fatal(err)
 			}
 			rows, err := memories.ListBySession(ctx, run.SessionID.String())
@@ -99,45 +91,51 @@ func TestBotMemoryCorrectionReconcile(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			row, err := memories.Get(ctx, rows[0].ID)
-			if err != nil || row.Snippet != "Friday" || row.Category != "delivery" || row.SessionID != run.SessionID.String() {
+			replacementID := uuid.NewSHA1(q.ID, []byte("memory")).String()
+			row, err := memories.Get(ctx, replacementID)
+			if err != nil || row == nil || row.Snippet != "Friday" || row.Category != "delivery" || row.SessionID != run.SessionID.String() {
 				t.Fatalf("not reconciled with provenance: %+v %v", row, err)
 			}
-			if got := index.search([]float32{1, 0}, 10, 0); len(got) != 0 {
-				t.Fatalf("stale cached embedding: %v", got)
+			history, err := memories.Get(ctx, rows[0].ID)
+			if err != nil || history == nil || history.Snippet != "Thursday" || history.Attribution == nil || history.Attribution.SupersededBy == "" {
+				t.Fatalf("lost original evidence: %+v %v", history, err)
+			}
+			if old, err := svc.Search(ctx, "Thursday", 10, 0); err != nil || len(old) != 0 {
+				t.Fatalf("stale recall: %+v %v", old, err)
 			}
 			switch d := repo.db.(type) {
 			case teamBotDB:
-				stored, err := d.client.Memory.Get(ctx, uuid.MustParse(row.ID))
-				if err != nil || len(stored.Embedding) != 0 || stored.Tsv == nil || *stored.Tsv != "Friday" {
-					t.Fatalf("stale persisted retrieval: %+v %v", stored, err)
+				if n, err := d.client.Memory.Query().Count(ctx); err != nil || n != 0 {
+					t.Fatalf("SQL memory rows: %d %v", n, err)
 				}
 			case personalBotDB:
-				stored, err := d.client.Memory.Get(ctx, uuid.MustParse(row.ID))
-				if err != nil || len(stored.Embedding) != 0 || stored.Tsv == nil || *stored.Tsv != "Friday" {
-					t.Fatalf("stale persisted retrieval: %+v %v", stored, err)
+				if n, err := d.client.Memory.Query().Count(ctx); err != nil || n != 0 {
+					t.Fatalf("SQL memory rows: %d %v", n, err)
 				}
 			}
-			// A completed old correction must not overwrite a subsequent memory edit.
-			if err := memories.Update(ctx, row.ID, "Saturday", row.Category); err != nil {
+			// A completed old correction must not overwrite a subsequently reviewed edit.
+			review := store.BotMemoryReview{ID: uuid.New(), ExpectedRevision: b.Revision + 1, Kind: store.BotMemoryReviewDocument, Document: "MEMORY.md", Confirmed: true, Reason: "newer owner review", Edits: []store.BotMemoryReviewEdit{{SessionID: row.SessionID, Content: "Saturday", Category: row.Category, Sources: []store.BotMemoryReviewSource{{ID: row.ID, SessionID: row.SessionID, ExpectedFingerprint: store.MemoryContentFingerprint(*row)}}}}}
+			receipt, err := svc.ApplyReviewed(ctx, review)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if err := reconciler.ReconcileCorrection(ctx, b.ID, q.ID, memories); err != nil {
 				t.Fatal(err)
 			}
-			row, _ = memories.Get(ctx, row.ID)
-			if row.Snippet != "Saturday" {
+			row, _ = memories.Get(ctx, receipt.ReplacementIDs[0])
+			if row == nil || row.Snippet != "Saturday" {
 				t.Fatal("replay overwrote newer memory")
 			}
+
 			saved, _ := repo.Get(ctx, b.ID)
-			if saved.Version != b.Version || saved.Revision != b.Revision+1 {
+			if saved.Version != b.Version || saved.Revision != b.Revision+2 {
 				t.Fatalf("memory changed authority: %+v", saved)
 			}
 			if err := reconciler.ReconcileCorrection(ctx, b.ID, uuid.New(), memories); !errors.Is(err, store.ErrBotNotFound) {
 				t.Fatalf("missing intent: %v", err)
 			}
-			if got := index.search([]float32{1, 0}, 10, 0); len(got) != 1 {
-				t.Fatalf("receipt replay evicted newer embedding: %v", got)
+			if got, err := svc.Search(ctx, "Saturday", 10, 0); err != nil || len(got) != 1 {
+				t.Fatalf("receipt replay lost current recall: %v %v", got, err)
 			}
 			if err := revoked.ReconcileCorrection(ctx, b.ID, q.ID, memories); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("receipt bypassed live membership: %v", err)

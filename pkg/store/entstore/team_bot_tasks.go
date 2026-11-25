@@ -101,8 +101,8 @@ func (d teamBotDB) readTaskPublication(c context.Context, b, id uuid.UUID) (*tas
 	if e != nil {
 		return nil, teamBotError(e)
 	}
-	var v taskPublicationEnvelope
-	if e = botDecode(row.Data, &v); e != nil {
+	v, e := decodeTaskPublication(c, d.contentCodec(), b, row.Data)
+	if e != nil {
 		return nil, e
 	}
 	p := &v.Publication
@@ -111,7 +111,7 @@ func (d teamBotDB) readTaskPublication(c context.Context, b, id uuid.UUID) (*tas
 	}
 	p.State = store.BotTaskPublicationState(row.PublicationState)
 	p.WorkspaceReceiptRef = row.WorkspaceReceiptRef
-	return &v, nil
+	return v, nil
 }
 func (d teamBotDB) readTaskPublications(c context.Context, b uuid.UUID) ([]taskPublicationEnvelope, error) {
 	rows, e := d.client.BotTaskRevision.Query().Where(bottaskrevision.BotIDEQ(b)).Order(ent.Asc(bottaskrevision.FieldID)).Limit(1001).All(c)
@@ -132,7 +132,7 @@ func (d teamBotDB) readTaskPublications(c context.Context, b uuid.UUID) ([]taskP
 	return out, nil
 }
 func (d teamBotDB) insertTaskPublication(c context.Context, v taskPublicationEnvelope) error {
-	data, e := botJSONMap(v)
+	data, e := encodeTaskPublication(c, d.contentCodec(), v)
 	if e != nil {
 		return e
 	}

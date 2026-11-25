@@ -39,7 +39,7 @@ func (r *botRepository) ConfirmCleanup(ctx context.Context, q store.BotCleanupRe
 	if !ok || p.Validate() != nil || p.Kind != execution.PrincipalKindService || p.Subject != "" || p.Surface != execution.SurfaceCode || !p.HasScope(store.BotCleanupScope) || r.auth.orgSlug == "" || p.OrgSlug != r.auth.orgSlug || r.auth.teamSlug != "" && p.TeamSlug != r.auth.teamSlug || !verifiedContext {
 		return store.ErrBotForbidden
 	}
-	if q.BotID == uuid.Nil || q.ExpectedRevision < 1 || q.Fence < 0 || q.Home.ID == uuid.Nil || q.Home.BotID != q.BotID || q.Home.Scope != r.auth.scope || q.Home.Revision < 1 {
+	if q.BotID == uuid.Nil || q.ExpectedRevision < 1 || q.Fence < 0 {
 		return store.ErrBotInvalid
 	}
 	switch q.Kind {
@@ -47,8 +47,11 @@ func (r *botRepository) ConfirmCleanup(ctx context.Context, q store.BotCleanupRe
 		if q.RunID == uuid.Nil || q.RunFence < 1 || q.RunFence >= q.Fence {
 			return store.ErrBotInvalid
 		}
+		if q.Home.ID != uuid.Nil && (q.Home.BotID != q.BotID || q.Home.Scope != r.auth.scope || q.Home.Revision < 1) {
+			return store.ErrBotInvalid
+		}
 	case store.BotCleanupHome:
-		if q.RunID != uuid.Nil || q.RunFence != 0 {
+		if q.RunID != uuid.Nil || q.RunFence != 0 || q.Home.ID == uuid.Nil || q.Home.BotID != q.BotID || q.Home.Scope != r.auth.scope || q.Home.Revision < 1 {
 			return store.ErrBotInvalid
 		}
 	default:
@@ -93,7 +96,7 @@ func (r *botRepository) ConfirmCleanup(ctx context.Context, q store.BotCleanupRe
 		if err != nil {
 			return err
 		}
-		return tx.InsertActivity(ctx, store.BotActivity{BotID: q.BotID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: now}, fmt.Sprintf("cleanup-confirmed:%s:%d:%d", q.Kind, q.ExpectedRevision, q.Fence))
+		return insertCleanupActivity(ctx, tx, store.BotActivity{BotID: q.BotID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: now}, fmt.Sprintf("cleanup-confirmed:%s:%d:%d", q.Kind, q.ExpectedRevision, q.Fence))
 	})
 }
 
@@ -120,12 +123,12 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 	// newer claim or lifecycle transition cannot be adopted by an old verifier.
 	recovered := false
 	if q.Kind == store.BotCleanupRunTeardown && rec.ActiveRunID == nil && rec.LeaseExpiresAt == nil && q.Fence == q.RunFence+1 {
-		run, err := db.ReadRun(ctx, q.BotID, q.RunID)
+		run, err := readCleanupRun(ctx, db, q.BotID, q.RunID)
 		if err != nil {
 			return false, err
 		}
 		if run.Run.Status == store.RunInterrupted && run.CommitHash == "recovered" && run.Run.Lease.Fence == q.RunFence && run.Run.SessionID != uuid.Nil {
-			a, err := db.FindActivity(ctx, q.BotID, fmt.Sprintf("recovery:%s:%d", q.RunID, q.RunFence))
+			a, err := readCleanupRunActivity(ctx, db, q.BotID, fmt.Sprintf("recovery:%s:%d", q.RunID, q.RunFence))
 			if err != nil {
 				return false, err
 			}
@@ -145,7 +148,7 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 			return false, store.ErrBotConflict
 		}
 		if !recovered {
-			if _, err := db.FindActivity(ctx, q.BotID, fmt.Sprintf("cancel:%s", q.RunID)); err != nil {
+			if _, err := readCleanupRunActivity(ctx, db, q.BotID, fmt.Sprintf("cancel:%s", q.RunID)); err != nil {
 				return false, store.ErrBotConflict
 			}
 		}
@@ -177,7 +180,7 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 		if rec.ActiveRunID == nil || *rec.ActiveRunID != q.RunID {
 			return false, store.ErrBotConflict
 		}
-		run, err := db.ReadRun(ctx, q.BotID, q.RunID)
+		run, err := readCleanupRun(ctx, db, q.BotID, q.RunID)
 		if err != nil {
 			return false, err
 		}

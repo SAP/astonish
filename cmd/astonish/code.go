@@ -2,8 +2,10 @@ package astonish
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/SAP/astonish/pkg/tui/backend"
 
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/tui"
@@ -11,13 +13,16 @@ import (
 
 // codeFlags holds the parsed CLI flag values for `astonish code`.
 type codeFlags struct {
-	ThemeID     tui.CodeThemeID
-	Provider    string
-	Model       string
-	Dir         string
-	AutoApprove bool
-	Debug       bool
-	Resume      string
+	ThemeID       tui.CodeThemeID
+	Provider      string
+	Model         string
+	Dir           string
+	AutoApprove   bool
+	Debug         bool
+	Resume        string
+	Workspace     backend.WorkspaceMode
+	WorkspaceBase string
+	WorkspaceCopy backend.WorkspaceCopyMode
 }
 
 // parseCodeFlags parses the argv slice into a codeFlags struct. The -m/--model
@@ -25,6 +30,9 @@ type codeFlags struct {
 // is split into Provider/Model.
 func parseCodeFlags(args []string) (codeFlags, error) {
 	codeCmd := flag.NewFlagSet("code", flag.ContinueOnError)
+	workspace := codeCmd.String("workspace", "current", "current, independent or ask (checkout isolation, not a sandbox)")
+	workspaceBase := codeCmd.String("workspace-base", "", "local Git ref for independent workspace")
+	workspaceCopy := codeCmd.String("workspace-copy", "", "committed or current-work")
 
 	themeID := codeCmd.String("theme", "", "Code palette for this launch: blue-gray, dark-orange (overrides saved /themes preference)")
 	modelPin := codeCmd.String("model", "", "Model to use, as a bare model name or provider:model pin")
@@ -51,6 +59,7 @@ func parseCodeFlags(args []string) (codeFlags, error) {
 		AutoApprove: *autoApprove || *yolo,
 		Debug:       *debugMode,
 		Resume:      *resumeSession,
+		Workspace:   backend.WorkspaceMode(*workspace), WorkspaceBase: *workspaceBase, WorkspaceCopy: backend.WorkspaceCopyMode(*workspaceCopy),
 	}
 
 	// A -m value may be either "provider:model" or a bare model name.
@@ -63,6 +72,9 @@ func parseCodeFlags(args []string) (codeFlags, error) {
 		}
 	}
 
+	if err := launcher.ValidateCodeWorkspaceOptions(f.Workspace, f.WorkspaceBase, f.WorkspaceCopy); err != nil {
+		return codeFlags{}, err
+	}
 	return f, nil
 }
 
@@ -90,8 +102,14 @@ func handleCodeCommand(args []string) error {
 		AutoApprove: flags.AutoApprove,
 		DebugMode:   flags.Debug,
 		SessionID:   flags.Resume,
+		Workspace:   flags.Workspace, WorkspaceBase: flags.WorkspaceBase, WorkspaceCopy: flags.WorkspaceCopy,
 	}
-	return launcher.RunCodeTUI(context.Background(), cfg)
+	err = launcher.RunCodeTUI(context.Background(), cfg)
+	var handoff *backend.WorkspaceHandoffError
+	if errors.As(err, &handoff) {
+		return launcher.RunCodeWorkspaceHandoff(context.Background(), cfg, handoff.Request)
+	}
+	return err
 }
 
 func printCodeUsage() {
@@ -123,6 +141,9 @@ func printCodeUsage() {
 	fmt.Println("  --auto-approve      Auto-approve all tool executions")
 	fmt.Println("  --yolo              Alias for --auto-approve")
 	fmt.Println("  --theme             blue-gray or dark-orange; overrides saved /themes choice")
+	fmt.Println("  --workspace         current (default), independent or ask")
+	fmt.Println("  --workspace-base    Local Git ref for independent checkout (default: HEAD)")
+	fmt.Println("  --workspace-copy    committed (default) or current-work; independent/ask only")
 	fmt.Println("  --debug             Enable debug output")
 	fmt.Println("  -h, --help          Show this help message")
 	fmt.Println("")

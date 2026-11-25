@@ -10,6 +10,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
@@ -29,18 +31,21 @@ import (
 )
 
 // This model has no store access or knowledge of the test's current phase. Its
-// answer is derived exclusively from the actual Chat system instruction.
+// answer is derived exclusively from an explicit scoped memory_get response.
 type correctionFollowupModel struct {
 	prompts []string
 	answers []string
 	reviews []string
+	// Responses from the shared dispatcher are named execute_tool; match them
+	// to the exact invocation rather than guessing a target from that name.
+	invocations map[string]string
 }
 
 func (*correctionFollowupModel) Name() string { return "controlled" }
 func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool {
 		if w.Candidate.Text == "No delivery fact in active context." {
-			return true
+			return false
 		}
 		// The review must see current captured evidence, not the producer's
 		// answer, its previous prompt, or an obsolete delivery notice.
@@ -59,6 +64,22 @@ func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LL
 		return response
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
+		callMemory := func(name string, args map[string]any) {
+			call := &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}
+			if r.Tools[name] == nil {
+				if r.Tools["execute_tool"] == nil {
+					yield(nil, fmt.Errorf("scoped memory tool %s and shared dispatcher are not advertised", name))
+					return
+				}
+				call.Name, call.Args = "execute_tool", map[string]any{"name": name, "arguments": args}
+			}
+			if m.invocations == nil {
+				m.invocations = make(map[string]string)
+			}
+			m.invocations[call.ID] = name
+			m.answers = append(m.answers, "")
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}, TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
+		}
 		var prompt string
 		if r.Config != nil && r.Config.SystemInstruction != nil {
 			for _, p := range r.Config.SystemInstruction.Parts {
@@ -67,15 +88,20 @@ func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LL
 		}
 		m.prompts = append(m.prompts, prompt)
 		foundMemory := false
+		var memoryBody string
 		for _, content := range r.Contents {
 			for _, part := range content.Parts {
-				foundMemory = foundMemory || part.FunctionResponse != nil && part.FunctionResponse.Name == "memory_get"
+				if part.FunctionResponse != nil && m.invocations[part.FunctionResponse.ID] == "memory_get" {
+					foundMemory = true
+					raw, _ := json.Marshal(part.FunctionResponse.Response)
+					memoryBody = string(raw)
+				}
 			}
 		}
 		if !foundMemory {
 			for _, content := range r.Contents {
 				for _, part := range content.Parts {
-					if part.FunctionResponse == nil || part.FunctionResponse.Name != "memory_search" {
+					if part.FunctionResponse == nil || m.invocations[part.FunctionResponse.ID] != "memory_search" {
 						continue
 					}
 					raw, _ := json.Marshal(part.FunctionResponse.Response["result"])
@@ -84,23 +110,26 @@ func (m *correctionFollowupModel) GenerateContent(_ context.Context, r *model.LL
 							Path string `json:"path"`
 						} `json:"results"`
 					}
-					_ = json.Unmarshal(raw, &result)
-					if len(result.Results) > 0 {
-						m.answers = append(m.answers, "")
-						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "memory_get", Args: map[string]any{"path": result.Results[0].Path}}}}}, TurnComplete: true}, nil)
+					if err := json.Unmarshal(raw, &result); err != nil {
+						yield(nil, fmt.Errorf("decode scoped memory search: %w: %s", err, raw))
 						return
 					}
+					if len(result.Results) > 0 {
+						callMemory("memory_get", map[string]any{"path": result.Results[0].Path})
+						return
+					}
+					yield(nil, fmt.Errorf("scoped memory search returned no delivery evidence: %v", part.FunctionResponse.Response))
+					return
 				}
 			}
-			m.answers = append(m.answers, "")
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "memory_search", Args: map[string]any{"query": "Delivery", "max_results": 6}}}}}, TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
+			callMemory("memory_search", map[string]any{"query": "Delivery", "max_results": 6})
 			return
 		}
 		answer := "No delivery fact in active context."
-		if strings.Contains(prompt, "Delivery is Thursday") {
+		if strings.Contains(memoryBody, "Delivery is Thursday") {
 			answer = "Delivery is Thursday"
 		}
-		if strings.Contains(prompt, "Delivery is Friday") {
+		if strings.Contains(memoryBody, "Delivery is Friday") {
 			answer = "Delivery is Friday"
 		}
 		m.answers = append(m.answers, answer)
@@ -121,18 +150,23 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				t.Fatal(err)
 			}
 			llm := &correctionFollowupModel{}
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: activationHomeBackend{}, Pool: workerTestPool{}, WorkerID: "correction-worker", ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			backend := newRegressionHomeBackend(t)
+			if err := db.(*entstore.Store).InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "correction-worker", ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
 			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				memoryTools, e := launcher.BotMemoryTools(q, s)
-				if e != nil {
-					return nil, e
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, backend, svc, scope)
 				}
 				repo := s.Services.Bots
 				if q.Bot.Scope == store.BotScopePersonal {
 					repo = s.Services.PersonalBots
 				}
-				return &launcher.BotChatSafeResources{Tools: memoryTools, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				// The shared Chat composition installs scoped Bot memory tools;
+				// the catalog pool is controlled and the live memory-only policy stays intact.
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -164,14 +198,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "correction", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = entstore.RegisterBotHomeBinding(registry, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -212,11 +239,15 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			if err = json.Unmarshal(post("/goals", fmt.Sprintf(`{"title":"Receive delivery","completion_criteria":"Owner confirms parcel received","due_at":%q}`, due.Format(time.RFC3339)), 201), &goal); err != nil {
 				t.Fatal(err)
 			}
-			now := time.Now().UTC().Truncate(time.Second)
-			if err = memories.Add(auth, store.MemoryEntry{Content: "Delivery is Thursday", Category: "delivery", SessionID: b.HomeSessionID.String(), CreatedBy: owner, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "delivery-receipt", ObservedAt: now, Status: store.MemoryKnowledgeVerified, Evidence: &store.BotEvidence{Kind: store.BotEvidenceObservation, Source: "delivery-receipt", Summary: "Original delivery notice", ObservedAt: now, ActorID: b.OwnerID}}}); err != nil {
+			botMemory, err := store.NewBotMemoryService(repo, memories, b.ID, scope)
+			if err != nil {
 				t.Fatal(err)
 			}
-			rows, err := memories.ListBySession(auth, b.HomeSessionID.String())
+			now := time.Now().UTC().Truncate(time.Second)
+			if err = botMemory.Add(auth, store.MemoryEntry{Content: "Delivery is Thursday", Category: "delivery", SessionID: b.HomeSessionID.String(), CreatedBy: owner, Attribution: &store.MemoryAttribution{BotID: b.ID, Source: "delivery-receipt", ObservedAt: now, Status: store.MemoryKnowledgeVerified, Evidence: &store.BotEvidence{Kind: store.BotEvidenceObservation, Source: "delivery-receipt", Summary: "Original delivery notice", ObservedAt: now, ActorID: b.OwnerID}}}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := botMemory.ListBySession(auth, b.HomeSessionID.String())
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("seed memory: %+v %v", rows, err)
 			}
@@ -270,14 +301,14 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 					t.Fatalf("new followup lost agent work protocol: %+v", saved.Report.Work)
 				}
 				prompt := llm.prompts[before]
-				if !strings.Contains(prompt, want) {
-					t.Errorf("%s: actual Chat system instruction missing active memory %q", key, want)
+				if !strings.Contains(prompt, "MEMORY.md") {
+					t.Errorf("%s: actual Chat system instruction missing compact MEMORY.md", key)
+				}
+				if strings.Contains(prompt, "Delivery is Thursday") || strings.Contains(prompt, "Delivery is Friday") {
+					t.Errorf("%s: full delivery fact bootstrapped instead of explicitly retrieved", key)
 				}
 				if !strings.Contains(prompt, goal.Title) {
 					t.Errorf("%s: actual Chat system instruction missing durable goal %q", key, goal.Title)
-				}
-				if key == "after-correction" && strings.Contains(prompt, "Delivery is Thursday") {
-					t.Error("superseded delivery remains in active context")
 				}
 				if llm.answers[before+2] != want {
 					t.Errorf("%s: model derived %q, want %q", key, llm.answers[before+2], want)
@@ -307,14 +338,32 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			correctionID := uuid.NewString()
 			evidence := fmt.Sprintf(`{"source":"owner-review","summary":"Owner reviewed updated delivery notice","observed_at":%q}`, now.Format(time.RFC3339))
 			post("/corrections", fmt.Sprintf(`{"id":%q,"expected_revision":%d,"superseded_source":%q,"replacement":"Delivery is Friday","goal_ids":[%q],"evidence":%s}`, correctionID, b.Revision, "memory:"+memoryID, goal.ID, evidence), 202)
-			pending, err := memories.Get(auth, memoryID)
+			pending, err := botMemory.Get(auth, memoryID)
 			if err != nil || pending.Snippet != "Delivery is Thursday" {
 				t.Fatalf("record intent applied prematurely: %+v %v", pending, err)
 			}
 			post("/corrections/"+correctionID+"/reconcile", "", 200)
-			corrected, err := memories.Get(auth, memoryID)
-			if err != nil || corrected.Snippet != "Delivery is Friday" {
-				t.Fatalf("correction not reconciled: %+v %v", corrected, err)
+			post("/corrections/"+correctionID+"/reconcile", "", 200) // exact retry is idempotent
+			// Disk corrections retain the source, unlike the legacy in-place
+			// protocol whose correction: marker was still considered current.
+			// Only the supersession link may change: original text, creator,
+			// observation, confidence and evidence must all survive intact.
+			expectedHistory := rows[0]
+			expectedAttribution := *rows[0].Attribution
+			expectedAttribution.SupersededBy = "superseded:correction:" + correctionID
+			expectedHistory.Attribution = &expectedAttribution
+			historical, err := botMemory.Get(auth, memoryID)
+			if err != nil || historical == nil || !reflect.DeepEqual(*historical, expectedHistory) {
+				t.Fatalf("original correction evidence not retained: got %+v want %+v: %v", historical, expectedHistory, err)
+			}
+			replacementID := uuid.NewSHA1(uuid.MustParse(correctionID), []byte("memory")).String()
+			corrected, err := botMemory.Get(auth, replacementID)
+			if err != nil || corrected == nil || corrected.Snippet != "Delivery is Friday" || corrected.Attribution == nil || corrected.Attribution.Source != "correction:"+correctionID || corrected.Attribution.Evidence == nil || corrected.Attribution.Evidence.ActorID != b.OwnerID {
+				t.Fatalf("correction not reconciled with owner evidence: %+v %v", corrected, err)
+			}
+			active, err := botMemory.Search(auth, "Delivery", 10, 0)
+			if err != nil || len(active) != 1 || active[0].ID != replacementID {
+				t.Fatalf("active retrieval must select only the reviewed replacement: %+v %v", active, err)
 			}
 			b, err = repo.Get(auth, b.ID)
 			if err != nil {

@@ -7,13 +7,9 @@ import (
 	"strings"
 	"time"
 
-	personalent "github.com/SAP/astonish/ent/personal"
 	personalbot "github.com/SAP/astonish/ent/personal/bot"
-	personalmemory "github.com/SAP/astonish/ent/personal/memory"
 	personalsession "github.com/SAP/astonish/ent/personal/session"
-	teament "github.com/SAP/astonish/ent/team"
 	teambot "github.com/SAP/astonish/ent/team/bot"
-	teammemory "github.com/SAP/astonish/ent/team/memory"
 	teamsession "github.com/SAP/astonish/ent/team/session"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -23,59 +19,32 @@ var _ store.BotMemoryReviewStore = (*personalBotStore)(nil)
 var _ store.BotMemoryReviewStore = (*teamBotStore)(nil)
 
 func (s *personalBotStore) ApplyReviewedBotMemory(ctx context.Context, memories store.MemoryStore, id store.BotID, q store.BotMemoryReview) (*store.BotMemoryReviewReceipt, error) {
-	m, ok := memories.(*personalMemoryStore)
-	if !ok || m.client != s.client {
+	m, ok := memories.(*botDiskMemoryStore)
+	if !ok || m == nil || m.repo == nil || m.owner != s.client || m.id != id || memoryBackendIdentity(m.repo.db) != s.content {
 		return nil, store.ErrBotUnsupported
 	}
-	var result *store.BotMemoryReviewReceipt
-	var applied bool
-	embeddings, err := prepareReviewedMemory(ctx, s.repository(), id, q, m.embedFunc)
-	if err != nil {
-		return nil, err
-	}
-	err = personalBotMemoryTransaction(ctx, m, func(c *personalent.Client, exec botMemorySQLExec) error {
-		// The PostgreSQL bridge must carry receipt hooks as well as memory hooks.
-		if c != m.client && m.dialect == DialectPostgres {
-			c.BotOutbox.Use(m.client.BotOutbox.Hooks()...)
-		}
-		var err error
-		result, err = applyReviewedMemory(ctx, s.repository(), personalBotDB{client: c}, id, q, embeddings, m.dialect, exec, &applied)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	if applied {
-		commitReviewedCache(m.vecIndex, m.dialect, result, embeddings)
-	}
-	return result, nil
+	return applyReviewedDiskMemory(ctx, s.repository(), id, q)
 }
 func (s *teamBotStore) ApplyReviewedBotMemory(ctx context.Context, memories store.MemoryStore, id store.BotID, q store.BotMemoryReview) (*store.BotMemoryReviewReceipt, error) {
-	m, ok := memories.(*teamMemoryStore)
-	if !ok || m.client != s.client {
+	m, ok := memories.(*botDiskMemoryStore)
+	if !ok || m == nil || m.repo == nil || m.owner != s.client || m.id != id || memoryBackendIdentity(m.repo.db) != s.content {
 		return nil, store.ErrBotUnsupported
+	}
+	return applyReviewedDiskMemory(ctx, s.repository(), id, q)
+}
+func applyReviewedDiskMemory(ctx context.Context, r *botRepository, id store.BotID, q store.BotMemoryReview) (*store.BotMemoryReviewReceipt, error) {
+	embeddings, err := prepareReviewedMemory(ctx, r, id, q, nil)
+	if err != nil {
+		return nil, err
 	}
 	var result *store.BotMemoryReviewReceipt
 	var applied bool
-	embeddings, err := prepareReviewedMemory(ctx, s.repository(), id, q, m.embedFunc)
-	if err != nil {
-		return nil, err
-	}
-	err = teamBotMemoryTransaction(ctx, m, func(c *teament.Client, exec botMemorySQLExec) error {
-		if c != m.client && m.dialect == DialectPostgres {
-			c.BotOutbox.Use(m.client.BotOutbox.Hooks()...)
-		}
+	err = r.db.Transaction(ctx, func(db botDraftDB) error {
 		var err error
-		result, err = applyReviewedMemory(ctx, s.repository(), teamBotDB{client: c}, id, q, embeddings, m.dialect, exec, &applied)
+		result, err = applyReviewedMemory(ctx, r, db, id, q, embeddings, DialectSQLite, nil, &applied)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	if applied {
-		commitReviewedCache(m.vecIndex, m.dialect, result, embeddings)
-	}
-	return result, nil
+	return result, err
 }
 func prepareReviewedMemory(ctx context.Context, r *botRepository, id store.BotID, q store.BotMemoryReview, embed store.EmbedFunc) ([][]float32, error) {
 	if err := q.Validate(); err != nil {
@@ -95,17 +64,6 @@ func prepareReviewedMemory(ctx context.Context, r *botRepository, id store.BotID
 		}
 	}
 	return embeddings, ctx.Err()
-}
-func commitReviewedCache(index *vectorIndex, d Dialect, receipt *store.BotMemoryReviewReceipt, embeddings [][]float32) {
-	// Update the in-process vector cache only after commit, never on replay.
-	if index == nil || d != DialectSQLite {
-		return
-	}
-	for i, id := range receipt.ReplacementIDs {
-		if embeddings[i] != nil {
-			index.add(id, embeddings[i])
-		}
-	}
 }
 
 // One transaction binds current authority, Bot revision, session linkage, source
@@ -235,92 +193,41 @@ func lockReviewedSession(ctx context.Context, db botDraftDB, id uuid.UUID, sessi
 	return nil
 }
 func lockReviewedSource(ctx context.Context, db botDraftDB, s store.BotMemoryReviewSource) (*store.MemorySearchResult, error) {
-	// Lock before reading: a content-only predicate cannot detect concurrent changes
-	// to evidence/category. The subsequent fingerprint covers those fields too.
-	id := uuid.MustParse(s.ID)
-	sid := uuid.MustParse(s.SessionID)
-	var n int
-	var err error
-	switch db := db.(type) {
-	case personalBotDB:
-		n, err = db.client.Memory.Update().Where(personalmemory.IDEQ(id), personalmemory.SessionIDEQ(sid)).SetSessionID(sid).Save(ctx)
-	case teamBotDB:
-		n, err = db.client.Memory.Update().Where(teammemory.IDEQ(id), teammemory.SessionIDEQ(sid)).SetSessionID(sid).Save(ctx)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if n != 1 {
-		return nil, store.ErrBotForbidden
-	}
 	row, err := db.ReadCorrectionMemory(ctx, s.ID)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil || row.SessionID != s.SessionID || store.MemoryContentFingerprint(*row) != s.ExpectedFingerprint {
+	if row == nil || row.SessionID != s.SessionID {
+		return nil, store.ErrBotForbidden
+	}
+	if store.MemoryContentFingerprint(*row) != s.ExpectedFingerprint {
 		return nil, store.ErrBotConflict
 	}
 	return row, nil
 }
 func insertReviewedMemory(ctx context.Context, db botDraftDB, id, sid, actor uuid.UUID, e store.BotMemoryReviewEdit, metadata map[string]any, embedding []float32, d Dialect, exec botMemorySQLExec, createdAt time.Time) error {
-	var err error
-	switch db := db.(type) {
-	case personalBotDB:
-		c := db.client.Memory.Create().SetID(id).SetSessionID(sid).SetCreatedBy(actor).SetCreatedAt(createdAt).SetChunkText(e.Content).SetNillableCategory(nilStrPtr(e.Category)).SetMetadata(metadata)
-		if d == DialectSQLite {
-			c.SetTsv(e.Content)
-			if embedding != nil {
-				c.SetEmbedding(float32SliceToBytes(embedding))
-			}
-		}
-		_, err = c.Save(ctx)
-	case teamBotDB:
-		c := db.client.Memory.Create().SetID(id).SetSessionID(sid).SetCreatedBy(actor).SetCreatedAt(createdAt).SetChunkText(e.Content).SetNillableCategory(nilStrPtr(e.Category)).SetMetadata(metadata)
-		if d == DialectSQLite {
-			c.SetTsv(e.Content)
-			if embedding != nil {
-				c.SetEmbedding(float32SliceToBytes(embedding))
-			}
-		}
-		_, err = c.Save(ctx)
-	}
-	if err == nil && d == DialectPostgres && embedding != nil {
-		_, err = exec(ctx, "UPDATE memories SET embedding = $1::vector WHERE id = $2 AND session_id = $3", float32SliceToPGVectorString(embedding), id, sid)
-	}
-	return err
+	return insertBotDiskMemory(ctx, db, id, sid, actor, e.Content, e.Category, metadata, createdAt)
 }
 func supersedeReviewedSource(ctx context.Context, db botDraftDB, row store.MemorySearchResult, key string, now time.Time, botID uuid.UUID) error {
-	id := uuid.MustParse(row.ID)
-	// Legacy records gain only inferred origin, never owner-confirmed knowledge.
-	update := func(metadata map[string]any) (map[string]any, error) {
-		if row.Attribution == nil {
-			return store.EncodeMemoryAttribution(metadata, &store.MemoryAttribution{BotID: botID, Source: "legacy-memory:" + row.ID, ObservedAt: now, Status: store.MemoryKnowledgeInferred, SupersededBy: key})
-		}
-		return store.SupersedeMemoryAttribution(metadata, key)
+	// Disk corrections preserve the old row rather than replacing it in place.
+	// Do not reuse the legacy correction: marker, which means current to older
+	// recall consumers because that protocol rewrote the source row itself.
+	if strings.HasPrefix(key, "correction:") {
+		key = "superseded:" + key
 	}
-	switch db := db.(type) {
-	case personalBotDB:
-		old, err := db.client.Memory.Get(ctx, id)
+	return changeBotDiskMemory(ctx, db, botID, row, func(e *botDiskMemoryEntry) error {
+		var err error
+		if e.Row.Attribution == nil {
+			e.Metadata, err = store.EncodeMemoryAttribution(e.Metadata, &store.MemoryAttribution{BotID: botID, Source: "memory:" + row.ID, ObservedAt: now, Status: store.MemoryKnowledgeInferred, SupersededBy: key})
+		} else {
+			e.Metadata, err = store.SupersedeMemoryAttribution(e.Metadata, key)
+		}
 		if err != nil {
 			return err
 		}
-		metadata, err := update(old.Metadata)
-		if err != nil {
-			return err
-		}
-		return db.client.Memory.UpdateOneID(id).SetMetadata(metadata).Exec(ctx)
-	case teamBotDB:
-		old, err := db.client.Memory.Get(ctx, id)
-		if err != nil {
-			return err
-		}
-		metadata, err := update(old.Metadata)
-		if err != nil {
-			return err
-		}
-		return db.client.Memory.UpdateOneID(id).SetMetadata(metadata).Exec(ctx)
-	}
-	return store.ErrBotUnsupported
+		e.Row.Attribution, err = store.DecodeMemoryAttribution(e.Metadata)
+		return err
+	})
 }
 func reviewedDocumentCategory(q store.BotMemoryReview, category string) error {
 	switch strings.ToLower(strings.TrimSpace(category)) {

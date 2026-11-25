@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/SAP/astonish/pkg/config"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/flowstore"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/tool"
@@ -79,6 +80,38 @@ func SetFlowRunnerAccess(fra FlowRunnerAccess) {
 	flowRunnerAccessVar = fra
 }
 
+// flowRunnerContextKey carries presence separately from the runner: an explicitly
+// absent scoped runner must never select the daemon-global runner.
+type flowRunnerContextKey struct{}
+type scopedFlowRunner struct{ runner FlowRunnerAccess }
+
+// WithFlowRunnerContext binds execution authority for run_flow. The supplied
+// runner must use only this runtime's policy/budget-bound model and tools.
+// A nil runner explicitly disables flow execution, including host fallback.
+func WithFlowRunnerContext(ctx context.Context, runner FlowRunnerAccess) context.Context {
+	return context.WithValue(ctx, flowRunnerContextKey{}, scopedFlowRunner{runner: runner})
+}
+
+func flowRunnerFromContext(ctx context.Context) (FlowRunnerAccess, bool) {
+	if ctx != nil {
+		if scoped, ok := ctx.Value(flowRunnerContextKey{}).(scopedFlowRunner); ok {
+			return scoped.runner, true
+		}
+	}
+	if requiresScopedFlowDrillExecution(ctx) {
+		return nil, true
+	}
+	return flowRunnerAccessVar, false
+}
+
+// Authenticated platform calls must explicitly supply execution authority. A
+// missing binding is not permission to use a daemon runner or host executor.
+// Legacy callers without an identity and local Code keep their host semantics.
+func requiresScopedFlowDrillExecution(ctx context.Context) bool {
+	principal, present := execution.PrincipalFromContext(ctx)
+	return present && principal.Kind != execution.PrincipalKindLocal
+}
+
 // --- run_flow tool ---
 
 // RunFlowArgs defines the arguments for the run_flow tool.
@@ -99,7 +132,19 @@ type RunFlowResult struct {
 }
 
 func runFlow(ctx tool.Context, args RunFlowArgs) (RunFlowResult, error) {
-	if flowRunnerAccessVar == nil {
+	runner, scoped := flowRunnerFromContext(ctx)
+	if scoped {
+		if err := ctx.Err(); err != nil {
+			return RunFlowResult{}, err
+		}
+		if runner == nil {
+			return RunFlowResult{}, fmt.Errorf("scoped flow execution is unavailable")
+		}
+		if getEffectiveFlowStore(ctx) == nil {
+			return RunFlowResult{}, fmt.Errorf("scoped flow store is unavailable; filesystem fallback disabled")
+		}
+	}
+	if runner == nil {
 		return RunFlowResult{
 			Status:  "error",
 			Message: "Flow execution is not available — the daemon must be running.",
@@ -144,14 +189,14 @@ func runFlow(ctx tool.Context, args RunFlowArgs) (RunFlowResult, error) {
 	// Check if there's a paused session waiting for input.
 	// If so, extract the value from parameters and resume.
 	var inputResponse string
-	if pausedNode := flowRunnerAccessVar.GetPausedNode(sessionKey); pausedNode != "" {
+	if pausedNode := runner.GetPausedNode(sessionKey); pausedNode != "" {
 		if val, ok := args.Parameters[pausedNode]; ok {
 			inputResponse = val
 		}
 
 		// Validate against available options when the paused node has
 		// a fixed set of choices (selection-type input).
-		if pausedOptions := flowRunnerAccessVar.GetPausedOptions(sessionKey); len(pausedOptions) > 0 {
+		if pausedOptions := runner.GetPausedOptions(sessionKey); len(pausedOptions) > 0 {
 			if inputResponse == "" {
 				return RunFlowResult{
 					Status:       "waiting_for_input",
@@ -200,7 +245,7 @@ func runFlow(ctx tool.Context, args RunFlowArgs) (RunFlowResult, error) {
 	}
 
 	// Execute the flow
-	result, err := flowRunnerAccessVar.RunFlow(
+	result, err := runner.RunFlow(
 		ctx,
 		flowPath,
 		args.Parameters,
@@ -208,6 +253,9 @@ func runFlow(ctx tool.Context, args RunFlowArgs) (RunFlowResult, error) {
 		sessionKey,
 	)
 	if err != nil {
+		if scoped {
+			return RunFlowResult{}, err
+		}
 		return RunFlowResult{
 			Status:  "error",
 			Message: fmt.Sprintf("Flow execution failed: %v", err),
@@ -227,7 +275,7 @@ func runFlow(ctx tool.Context, args RunFlowArgs) (RunFlowResult, error) {
 
 	// Clean up completed/errored sessions
 	if result.Status == "completed" || result.Status == "error" {
-		flowRunnerAccessVar.CleanupSession(sessionKey)
+		runner.CleanupSession(sessionKey)
 	}
 
 	return toolResult, nil
@@ -343,6 +391,10 @@ func scanFlowParametersFromConfig(agentCfg *config.AgentConfig) []FlowParameter 
 // runFlowFromStore handles flow execution in platform mode, where flows are
 // stored in the database rather than on the filesystem.
 func runFlowFromStore(ctx tool.Context, fs store.FlowStore, args RunFlowArgs) (RunFlowResult, error) {
+	runner, scoped := flowRunnerFromContext(ctx)
+	if runner == nil {
+		return RunFlowResult{}, fmt.Errorf("flow execution is unavailable")
+	}
 	// Load flow YAML from the database.
 	yamlContent, err := fs.GetFlow(ctx, args.FlowName)
 	if err != nil {
@@ -374,13 +426,13 @@ func runFlowFromStore(ctx tool.Context, fs store.FlowStore, args RunFlowArgs) (R
 
 	// Check if there's a paused session waiting for input.
 	var inputResponse string
-	if pausedNode := flowRunnerAccessVar.GetPausedNode(sessionKey); pausedNode != "" {
+	if pausedNode := runner.GetPausedNode(sessionKey); pausedNode != "" {
 		if val, ok := args.Parameters[pausedNode]; ok {
 			inputResponse = val
 		}
 
 		// Validate against available options.
-		if pausedOptions := flowRunnerAccessVar.GetPausedOptions(sessionKey); len(pausedOptions) > 0 {
+		if pausedOptions := runner.GetPausedOptions(sessionKey); len(pausedOptions) > 0 {
 			if inputResponse == "" {
 				return RunFlowResult{
 					Status:       "waiting_for_input",
@@ -428,7 +480,7 @@ func runFlowFromStore(ctx tool.Context, fs store.FlowStore, args RunFlowArgs) (R
 	}
 
 	// Execute the flow from YAML content.
-	result, err := flowRunnerAccessVar.RunFlowFromYAML(
+	result, err := runner.RunFlowFromYAML(
 		ctx,
 		yamlContent,
 		args.FlowName,
@@ -437,6 +489,9 @@ func runFlowFromStore(ctx tool.Context, fs store.FlowStore, args RunFlowArgs) (R
 		sessionKey,
 	)
 	if err != nil {
+		if scoped {
+			return RunFlowResult{}, err
+		}
 		return RunFlowResult{
 			Status:  "error",
 			Message: fmt.Sprintf("Flow execution failed: %v", err),
@@ -456,7 +511,7 @@ func runFlowFromStore(ctx tool.Context, fs store.FlowStore, args RunFlowArgs) (R
 
 	// Clean up completed/errored sessions.
 	if result.Status == "completed" || result.Status == "error" {
-		flowRunnerAccessVar.CleanupSession(sessionKey)
+		runner.CleanupSession(sessionKey)
 	}
 
 	return toolResult, nil

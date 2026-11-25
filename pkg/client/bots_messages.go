@@ -9,12 +9,13 @@ import (
 
 // SendMessage admits one continuous home conversation turn without lifecycle consent.
 func (b Bots) SendMessage(ctx context.Context, id string, version int64, key, instructions string) (*store.BotMessageReceipt, error) {
+	return b.SendMessageRequest(ctx, id, store.BotMessageRequest{Version: version, IdempotencyKey: key, Instructions: instructions})
+}
+
+// SendMessageRequest exposes optional turn controls without changing legacy callers.
+func (b Bots) SendMessageRequest(ctx context.Context, id string, request store.BotMessageRequest) (*store.BotMessageReceipt, error) {
 	var receipt store.BotMessageReceipt
-	err := b.request(ctx, "POST", b.path("/"+url.PathEscape(id)+"/messages"), struct {
-		Version      int64  `json:"version"`
-		Key          string `json:"idempotency_key"`
-		Instructions string `json:"instructions"`
-	}{version, key, instructions}, &receipt)
+	err := b.request(ctx, "POST", b.path("/"+url.PathEscape(id)+"/messages"), request, &receipt)
 	return &receipt, err
 }
 
@@ -23,8 +24,18 @@ func (b Bots) ContinueInteractive(ctx context.Context, id, runID string, revisio
 	if revision < 1 || key == "" {
 		return nil, fmt.Errorf("reviewed revision and idempotency key required")
 	}
+	return b.ContinueInteractiveRequest(ctx, id, runID, store.BotContinueInteractiveRequest{ExpectedRevision: revision, IdempotencyKey: key, Response: response})
+}
+
+// ContinueInteractiveRequest retains the originating run and accepts optional controls.
+// Definition execution consent requires the exact persisted originating identity;
+// it never grants additional tool permission or starts a replacement run.
+func (b Bots) ContinueInteractiveRequest(ctx context.Context, id, runID string, request store.BotContinueInteractiveRequest) (*store.BotRun, error) {
+	if request.ExpectedRevision < 1 || request.IdempotencyKey == "" {
+		return nil, fmt.Errorf("reviewed revision and idempotency key required")
+	}
 	var run store.BotRun
-	err := b.request(ctx, "POST", b.path("/"+url.PathEscape(id)+"/runs/"+url.PathEscape(runID)+"/continue-interactive"), store.BotContinueInteractiveRequest{ExpectedRevision: revision, IdempotencyKey: key, Response: response}, &run)
+	err := b.request(ctx, "POST", b.path("/"+url.PathEscape(id)+"/runs/"+url.PathEscape(runID)+"/continue-interactive"), request, &run)
 	return &run, err
 }
 

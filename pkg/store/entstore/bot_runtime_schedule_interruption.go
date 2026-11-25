@@ -36,14 +36,11 @@ func (d personalBotDB) scheduledInterruptionRecords(ctx context.Context, bot, ru
 	}
 	records := make([]botScheduledInterruptionRecord, 0, len(rows))
 	for _, row := range rows {
-		var a store.BotActivity
-		if err := botDecode(row.Payload, &a); err != nil {
+		a, err := d.contentCodec().decodeActivity(ctx, bot, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
+		if err != nil {
 			return nil, err
 		}
-		if a.BotID != bot || a.Sequence != row.Sequence || a.Kind != store.BotActivityKind(row.Kind) {
-			return nil, store.ErrBotInvalid
-		}
-		records = append(records, botScheduledInterruptionRecord{key: row.DeduplicationKey, activity: a})
+		records = append(records, botScheduledInterruptionRecord{key: row.DeduplicationKey, activity: *a})
 	}
 	return records, nil
 }
@@ -55,14 +52,11 @@ func (d teamBotDB) scheduledInterruptionRecords(ctx context.Context, bot, run uu
 	}
 	records := make([]botScheduledInterruptionRecord, 0, len(rows))
 	for _, row := range rows {
-		var a store.BotActivity
-		if err := botDecode(row.Payload, &a); err != nil {
+		a, err := d.contentCodec().decodeActivity(ctx, bot, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
+		if err != nil {
 			return nil, err
 		}
-		if a.BotID != bot || a.Sequence != row.Sequence || a.Kind != store.BotActivityKind(row.Kind) {
-			return nil, store.ErrBotInvalid
-		}
-		records = append(records, botScheduledInterruptionRecord{key: row.DeduplicationKey, activity: a})
+		records = append(records, botScheduledInterruptionRecord{key: row.DeduplicationKey, activity: *a})
 	}
 	return records, nil
 }

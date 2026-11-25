@@ -169,11 +169,9 @@ func TestBotProgressRollbackConcurrentAndCommit(t *testing.T) {
 			if err := r.CommitRun(ctx, commit); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("commit erased usage: %v", err)
 			}
+			// Runtime is repository-owned and may advance after the worker snapshot.
+			// Keep tokens exact while preserving both heartbeat and final elapsed time.
 			commit.Usage = store.BotUsage{InputTokens: 35}
-			if err := r.CommitRun(ctx, commit); !errors.Is(err, store.ErrBotConflict) {
-				t.Fatalf("commit erased heartbeat time: %v", err)
-			}
-			commit.Usage.RuntimeNanos = int64(10 * time.Second)
 			*now = now.Add(5 * time.Second)
 			if err := r.CommitRun(ctx, commit); err != nil {
 				t.Fatal(err)

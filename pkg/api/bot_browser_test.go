@@ -69,6 +69,21 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 		return nil
 	})
 	bots := mux.NewRouter()
+	registry := execution.NewBotTurnAuthorizationRegistry(8)
+	defer registry.Close()
+	bots.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			svc := *store.FromContext(r.Context())
+			svc.BotInteractiveReady, svc.BotTurnRegistry = true, registry
+			ctx, err := execution.WithAuthenticationEvidence(r.Context(), execution.AuthenticationEvidence{Method: execution.AuthMethodPlatformJWT, ExpiresAt: time.Now().Add(time.Hour)})
+			if err != nil {
+				t.Error(err)
+				http.Error(w, "fixture authentication", http.StatusInternalServerError)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(store.WithServices(ctx, &svc)))
+		})
+	})
 	registerBotRoutes(bots)
 	env.Router.PathPrefix("/api/studio/bots").Handler(entstore.TenantMiddleware(env.Store)(bots))
 	page := newStreamBrowserPage(t, env, bin, dist).CancelTimeout().Timeout(3 * time.Minute)
@@ -191,7 +206,8 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	page.MustElementR("button", "^Start conversation$").MustClick()
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
 	page.MustElementR("p", "draft · Private").MustVisible()
-	page.MustElementR("p", "Bot transcript: live").MustVisible()
+	// Shared Chat delivery is proved by the persisted live event below, not a legacy Bot badge.
+	page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustVisible()
 	if page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustProperty("disabled").Bool() {
 		t.Fatal("draft conversation unavailable")
 	}
@@ -265,12 +281,61 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs, err := repo.ListRuns(owner, stored.ID, store.BotPage{})
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("active send runs: %+v %v", runs, err)
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("active send must retain title startup and queue one execution: %+v %v", runs, err)
 	}
-	runID := runs[0].ID
-	worker := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: stored.ID, RunID: runID, Version: stored.Version, ActorID: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug})
+	var executionRun *store.BotRun
+	startupCount := 0
+	for _, candidate := range runs {
+		switch candidate.Intent {
+		case store.BotIntentDraftConversation:
+			startupCount++
+		case store.BotIntentRegular:
+			executionRun = &candidate
+		}
+	}
+	if startupCount != 1 || executionRun == nil || executionRun.ID == uuid.Nil {
+		t.Fatalf("missing distinct title startup/execution: %+v", runs)
+	}
+	// There is no daemon in this fixture to consume the title-only turn. Drain
+	// that interactive owner-priority request without inventing a confirmation,
+	// so it cannot block the later autonomous claim. Keep its durable identity.
+	for _, startup := range runs {
+		if startup.Intent != store.BotIntentDraftConversation {
+			continue
+		}
+		startupWorker := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: stored.ID, RunID: startup.ID, Version: startup.Version, ActorID: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug})
+		startupLease, err := repo.ClaimRun(startupWorker, store.BotClaimRequest{BotID: stored.ID, RunID: startup.ID, WorkerID: "browser-controlled-startup", ExpiresAt: time.Now().UTC().Add(4 * time.Minute)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.CommitRun(startupWorker, store.BotRunCommit{Lease: startupLease, Status: store.RunCancelled, Report: store.BotReport{Summary: "Controlled title-only turn ended without confirming an assignment"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runID, runVersion := executionRun.ID, executionRun.Version
+	worker := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: stored.ID, RunID: runID, Version: runVersion, ActorID: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug})
 	lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: stored.ID, RunID: runID, WorkerID: "browser-controlled-owner", ExpiresAt: time.Now().UTC().Add(5 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Studio send is interactive Chat: it cannot host an external-action
+	// approval. End only this fixture turn, then admit a separate autonomous
+	// owner request for the paused exact-action inbox journey.
+	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunCancelled, Report: store.BotReport{Summary: "Controlled Chat turn ended before external action", Work: store.BuildBotWorkProjection(work)}}); err != nil {
+		t.Fatal(err)
+	}
+	autonomous, err := repo.RequestRun(owner, store.BotRunRequest{BotID: stored.ID, Version: runVersion, Trigger: store.TriggerManual, Instructions: "Review an exact external action", IdempotencyKey: "browser-controlled-external-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, runVersion = autonomous.ID, autonomous.Version
+	worker = execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: stored.ID, RunID: runID, Version: runVersion, ActorID: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug})
+	lease, err = repo.ClaimRun(worker, store.BotClaimRequest{BotID: stored.ID, RunID: runID, WorkerID: "browser-controlled-owner", ExpiresAt: time.Now().UTC().Add(5 * time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +344,7 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approval, err := repo.RequestApproval(worker, lease, store.BotApproval{BotID: stored.ID, RunID: runID, Version: stored.Version, Action: action, ActionDigest: digest, ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	approval, err := repo.RequestApproval(worker, lease, store.BotApproval{BotID: stored.ID, RunID: runID, Version: runVersion, Action: action, ActionDigest: digest, ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,13 +352,20 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: approval.ID, BotID: stored.ID, RunID: runID, SessionID: run.SessionID, Version: stored.Version, ActionDigest: digest, Fence: lease.Fence})
+	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.ApprovalCheckpointFormat, ApprovalID: approval.ID, BotID: stored.ID, RunID: runID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting for browser review", NeedsApproval: []store.RunID{approval.ID}}}); err != nil {
+	// Commit the repository's current lease-bound work projection, not a
+	// viewer projection or a fabricated completion/accepted result.
+	work, err = repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: store.RunWaitingApproval, Checkpoint: checkpoint, Report: store.BotReport{Summary: "Waiting for browser review", NeedsApproval: []store.RunID{approval.ID}, Work: store.BuildBotWorkProjection(work)}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("controlled title and Chat turns cancelled; autonomous exact-action approval committed")
 	page.MustReload()
 	page.MustElementR("button", "^Details$").MustClick()
 	page.MustElementR("button", "^Pause$").MustClick()
@@ -304,7 +376,8 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	page.MustElementR(`[role="dialog"] [aria-label="Bot review"] pre`, "review@example.invalid").MustVisible()
 	page.MustElementR(`[role="dialog"] [aria-label="Bot review"] pre`, "Reviewed browser action only").MustVisible()
 	page.MustElementR(`[role="dialog"] [aria-label="Bot review"] button`, "^Approve & continue$").MustClick()
-	page.MustElementR(`[role="dialog"] [aria-label="Bot review"] p`, "Approved; continuation blocked by pause").MustVisible()
+	page.MustElementR(`[role="dialog"] [aria-label="Bot review"] p`, "I saved your approval, but I’m still paused\\.").MustVisible()
+	t.Log("paused approval feedback visible; reload durable decision")
 	page.MustReload()
 	page.MustElementR("button", "^Details$").MustClick()
 	page.MustElementR("summary", "^Review inbox$").MustClick()
@@ -326,11 +399,18 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	page.MustElementR("summary", "^Goals$").MustClick()
 	page.MustElementR("h3", "^Browser persisted goal · active$").MustVisible()
 	page.MustElementR("p", "paused · Private").MustVisible()
-	page.MustElementR("button", "^Delete Bot$").MustClick()
-	page.MustElement(`[aria-label="Lifecycle reason"]`).MustInput("Retain read-only history")
-	page.MustElementR("button", "^Confirm delete$").MustClick()
+	// The Delete Bot menu now performs irreversible deletion. This fixture
+	// intentionally exercises retained read-only history instead; use the real
+	// repository's reversible lifecycle transition without deleting disk content.
+	paused, err := repo.Get(owner, stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.BeginDelete(owner, store.BotLifecycleRequest{BotID: stored.ID, ActorID: paused.OwnerID, ExpectedRevision: paused.Revision, Reason: "Retain read-only history"}); err != nil {
+		t.Fatal(err)
+	}
+	page.MustReload()
 	page.MustElementR("p", "deleted · Private").MustVisible()
-	page.MustElementR("button", "^Close$").MustClick()
 	if !page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustProperty("disabled").Bool() {
 		t.Fatal("deleted composer can execute")
 	}
@@ -400,8 +480,35 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	page.MustElementR("p", "^Completion criteria: Report an official change with a source$").MustVisible()
 	page.MustElementR("summary", "^Memory & charter$").MustClick()
 	page.MustElementR("h2", "^Memory Health$").MustVisible()
-	page.MustElementR("pre", "Selected browser fact").MustVisible()
-	page.MustElementR("pre", "Reviewed browser summary").MustVisible()
+	// This fixture deliberately has no retained Home transport. Reviewed
+	// carryover is durable lifecycle content, not legacy generic memory rows or
+	// fabricated MEMORY.md. Verify its exact stored value and the honest empty /
+	// unavailable UI states; physical retained reads are covered separately.
+	activities, err := repo.ListActivity(owner, uuid.MustParse(strings.TrimPrefix(promotedHash, "#/chat/bots/personal/")), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var carryover store.BotCarryover
+	foundCarryover := false
+	for _, activity := range activities {
+		if activity.Kind != store.BotActivityLifecycle {
+			continue
+		}
+		var payload struct {
+			Carryover store.BotCarryover `json:"carryover"`
+		}
+		if err := json.Unmarshal(activity.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Carryover.Summary == "Reviewed browser summary" {
+			carryover, foundCarryover = payload.Carryover, true
+		}
+	}
+	if !foundCarryover || len(carryover.Memories) != 1 || carryover.Memories[0].Content != "Selected browser fact" || len(carryover.Goals) != 1 || carryover.Goals[0].Title != "Reviewed browser goal" || carryover.Goals[0].CompletionCriteria != "Report an official change with a source" {
+		t.Fatalf("reviewed carryover not preserved exactly: %+v", carryover)
+	}
+	page.MustElementR("button", "^Retry documents$").MustVisible()
+	page.MustElementR("p", "^No memory records yet\\.$").MustVisible()
 	page.MustElementR("p", "Evaluated: .* · Scope: personal").MustVisible()
 	if page.MustEval(`() => document.body.innerText.includes('Original Chat evidence stays here.')`).Bool() {
 		t.Fatal("unselected transcript copied into Bot")
@@ -423,5 +530,5 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	page.MustElementR("button", "^Details$").MustClick()
 	page.MustElementR("summary", "^Goals$").MustClick()
 	page.MustElementR("h3", "^Reviewed browser goal · active$").MustVisible()
-	t.Log("PASS built SPA: minimal private draft → live scoped transcript → Details goals/memory → preserved Chat draft → explicit activation → stable home send/reload → exact approve-and-continue persisted/reloaded → pause → deleted read-only history → reviewed Chat promotion → real goals/documents/Memory Health → unchanged source Chat → restored promoted goal (controlled pending-action fixture; no scheduled worker result claimed)")
+	t.Log("PASS built SPA: minimal private draft → live scoped transcript → Details goals/memory → preserved Chat draft → explicit activation → stable home send/reload → exact approve-and-continue persisted/reloaded → pause → deleted read-only history → reviewed Chat promotion → real goals and Memory Health with unavailable Home documents → exact durable carryover → unchanged source Chat → restored promoted goal (controlled pending-action fixture; no retained Home transport or scheduled worker result claimed)")
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,8 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 			must(source.Organizations().Create(ctx, &store.Organization{ID: orgID, Slug: p.OrgSlug, Name: "Archive", Status: "active"}))
 			must(source.Organizations().AddMember(ctx, p.Subject, orgID, "owner"))
 			must(source.ProvisionOrg(ctx, orgID, p.OrgSlug))
+			backend := newTaskWorkspaceDockerBackend(t)
+			must(source.InstallBotContentHomeBackend(backend))
 			org, err := source.ForOrg(p.OrgSlug)
 			must(err)
 			must(org.Teams().CreateTeam(ctx, &store.Team{ID: teamID, Slug: p.TeamSlug, Name: "Archive", SchemaName: "team_archive"}))
@@ -57,8 +60,6 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 				repo = services.PersonalBots
 			}
 			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Archive task", OwnerID: uuid.MustParse(p.Subject), Version: f.req.Version, IdempotencyKey: "archive"})
-			must(err)
-			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(dir, "layers"), UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
 			must(err)
 			home, err := backend.EnsureBotHome(ctx, sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()})
 			must(err)
@@ -75,6 +76,12 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 			service, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "owned-archive", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
 			must(err)
 			must(entstore.RegisterBotHomeBinding(service, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: string(home.Backend), StorageKey: home.Ref, Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }))
+			b, err = repo.Get(ctx, b.ID)
+			must(err)
+			// This is supported first-time Home selection for a file-first draft,
+			// not legacy adoption or archive migration.
+			must(entstore.SelectBotHomeConfiguration(ctx, repo, *home, backend))
+			prepareTaskWorkspaceDockerSession(t, ctx, backend, home, b.HomeSessionID.String())
 			tasks := repo.(store.BotTaskStore)
 			w := &BotTaskWorkspace{Backend: backend, Bots: repo, Tasks: tasks}
 			must(w.Install())
@@ -107,38 +114,59 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 			pending.Mutation.IdempotencyKey = "pending"
 			publication, err := tasks.PrepareTaskPublication(ctx, pending)
 			must(err)
-			_, err = repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Unprovisioned", OwnerID: uuid.MustParse(p.Subject), Version: f.req.Version, IdempotencyKey: "no-home"})
+			// Quiesce through public lifecycle APIs; pending candidates remain
+			// held historical bytes and never advance the committed task head.
+			must(repo.(store.BotTaskRecoveryStore).HoldTaskPublications(ctx, b.ID, "offline archive"))
+			b, err = repo.Get(ctx, b.ID)
 			must(err)
-			archivePath := filepath.Join(t.TempDir(), "workspace.astonish-backup")
-			options := entstore.PlatformBackupExportOptions{OrgSlug: p.OrgSlug, WorkspaceBackend: backend, WorkspaceBinding: func(_ backup.Scope, id store.BotID, h store.BotHomeBinding) (*sandbox.BotHomeBinding, error) {
-				return &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: id.String()}, Backend: sandbox.BackendKind(h.Backend), Ref: h.StorageKey}, nil
-			}, WorkspaceFence: func(c context.Context, s backup.Scope, fn func() error) error {
-				var bots store.BotStore
-				if s.Kind == "personal" {
-					bots = services.PersonalBots
-				} else {
-					bots = services.Bots
-				}
-				return entstore.WithBotWorkspaceArchiveFence(c, bots, fn)
-			}}
-			must(source.ExportPlatformBackup(ctx, archivePath, options))
-			sourceScope := backup.Scope{Kind: "team", OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug}
+			// Fresh offline fixture state, matching the public CLI archive fixture.
+			// No activation/readiness override or Bot execution is involved.
+			sourcePath := filepath.Join(dir, "orgs", p.OrgSlug, "teams", p.TeamSlug+".db")
 			if scope == store.BotScopePersonal {
-				sourceScope = backup.Scope{Kind: "personal", OrgSlug: p.OrgSlug, UserID: p.Subject}
+				sourcePath = filepath.Join(dir, "orgs", p.OrgSlug, "personal", p.Subject+".db")
 			}
-			archived, err := entstore.ReadBotWorkspaceArchive(archivePath, backup.ReaderOptions{}, sourceScope, b.ID)
+			fixtureSQL, err := sql.Open("sqlite", sourcePath)
+			must(err)
+			_, err = fixtureSQL.ExecContext(ctx, "UPDATE bots SET status='paused' WHERE id=? AND status='draft'", b.ID.String())
+			must(err)
+			must(fixtureSQL.Close())
+			b, err = repo.Get(ctx, b.ID)
 			must(err)
 			before, err := backend.SnapshotBotHomeWorkspace(ctx, home, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes)
 			must(err)
-			if before.Receipt.Digest != archived.Snapshot.Receipt.Digest {
-				t.Fatal("archive differed from fenced physical snapshot")
-			}
+			// Stop configured compute before the file-first exporter acquires
+			// its own SQL/attachment fences; export must not resume it.
+			must(backend.StopSession(ctx, b.HomeSessionID.String()))
+			archivePath := filepath.Join(t.TempDir(), "workspace.astonish-backup")
+			options := entstore.PlatformBackupExportOptions{OrgSlug: p.OrgSlug, FileBackend: func(context.Context) (entstore.BotBackupBackend, error) { return backend, nil }}
+			must(source.ExportPlatformBackup(ctx, archivePath, options))
+			_, err = entstore.VerifyPlatformBackup(ctx, archivePath, backup.ReaderOptions{})
+			must(err)
 			targetDir := t.TempDir()
 			_, target, err := entstore.NewPlatformServices(ctx, entstore.Config{DSN: filepath.Join(targetDir, "platform.db"), DataDir: targetDir})
 			must(err)
 			defer target.Close()
-			_, err = target.RestorePlatformBackup(ctx, archivePath, entstore.PlatformRestoreOptions{MapOrg: map[string]string{p.OrgSlug: "archive-target"}})
+			targetBackend := newTaskWorkspaceDockerBackend(t)
+			must(target.InstallBotContentHomeBackend(targetBackend))
+			ordering := &taskWorkspaceArchiveRestoreBackend{DockerBackend: targetBackend, beforeSQL: func() {
+				inspect, err := sql.Open("sqlite", filepath.Join(targetDir, "platform.db"))
+				must(err)
+				defer inspect.Close()
+				var selected int
+				must(inspect.QueryRowContext(ctx, "SELECT COUNT(*) FROM organizations").Scan(&selected))
+				if selected != 0 {
+					t.Fatal("target SQL selected before Home file installation")
+				}
+			}}
+			restoreOptions := entstore.PlatformRestoreOptions{MapOrg: map[string]string{p.OrgSlug: "archive-target"}, FileBackend: func(context.Context) (entstore.BotRestoreBackend, error) { return ordering, nil }}
+			_, err = target.RestorePlatformBackup(ctx, archivePath, restoreOptions)
 			must(err)
+			if ordering.installed != 1 {
+				t.Fatalf("expected one physical Home installation before SQL, got %d", ordering.installed)
+			}
+			if _, err := target.RestorePlatformBackup(ctx, archivePath, restoreOptions); err == nil {
+				t.Fatal("duplicate/nonempty restore accepted")
+			}
 			p.OrgSlug = "archive-target"
 			targetCtx, err := execution.WithPrincipal(context.Background(), p)
 			must(err)
@@ -152,31 +180,40 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 			}
 			recovered, err := targetRepo.Get(targetCtx, b.ID)
 			must(err)
-			if recovered.Home.StorageKey != home.Ref {
-				t.Fatal("logical restore changed Home before explicit setup")
+			if recovered.Home.StorageKey == home.Ref || recovered.Home.ID != b.Home.ID || recovered.Home.Revision != b.Home.Revision+1 || recovered.Status != store.BotPaused {
+				t.Fatal("file-first restore reused source storage, lost identity or resumed execution")
 			}
-			destination, err := backend.EnsureBotHome(targetCtx, sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()})
-			must(err)
-			cleanup(destination)
+			destination := &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()}, Backend: sandbox.BackendKind(recovered.Home.Backend), Ref: recovered.Home.StorageKey}
+			t.Cleanup(func() {
+				c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := targetBackend.DeleteBotHome(c, destination); err != nil {
+					t.Error(err)
+				}
+			})
+			// Recovery already installed files before selecting SQL. Configure fresh
+			// disposable target compute only for workspace receipt/read verification.
+			prepareTaskWorkspaceDockerSession(t, targetCtx, targetBackend, destination, uuid.NewString())
 			foreign := *destination
 			foreign.Scope.TeamID = "foreign-team"
-			if err := entstore.ReconcileRestoredBotWorkspaceHome(targetCtx, targetRepo, backend, archived, &foreign); err == nil {
+			if _, err := targetBackend.SnapshotBotHomeWorkspace(targetCtx, &foreign, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes); err == nil {
 				t.Fatal("foreign Home binding accepted")
 			}
-			if err := entstore.ReconcileRestoredBotWorkspaceHome(targetCtx, targetRepo, backend, archived, home); err == nil {
+			if _, err := targetBackend.SnapshotBotHomeWorkspace(targetCtx, home, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes); err == nil {
 				t.Fatal("source Home accepted as target")
 			}
-			must(entstore.ReconcileRestoredBotWorkspaceHome(targetCtx, targetRepo, backend, archived, destination))
-			if err := entstore.ReconcileRestoredBotWorkspaceHome(targetCtx, targetRepo, backend, archived, destination); err == nil {
-				t.Fatal("duplicate/nonempty restore accepted")
-			}
-			after, err := backend.SnapshotBotHomeWorkspace(targetCtx, destination, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes)
+			after, err := targetBackend.SnapshotBotHomeWorkspace(targetCtx, destination, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes)
 			must(err)
 			content := map[string][]byte{}
 			for _, file := range after.Files {
 				content[file.Path] = file.Data
 			}
 			for _, file := range before.Files {
+				if _, ok := content[file.Path]; !ok {
+					t.Fatalf("physical restore lost path %s", file.Path)
+				}
+				// Mapping scrubs execution authority in heads/receipts; both remain
+				// in the inventory, but must not be asserted as fresh permission.
 				if strings.HasPrefix(file.Path, ".receipts/") || strings.HasSuffix(file.Path, "/.head") {
 					continue
 				}
@@ -184,13 +221,39 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 					t.Fatalf("physical restore mismatch %s", file.Path)
 				}
 			}
-			if len(after.Files) != len(before.Files) || !bytes.Equal(content[q.Task.HomePath+"/state/state.sqlite"], state) {
-				t.Fatal("physical SQLite or inventory lost")
+			// File-first recovery adds exactly one private install-completion marker.
+			if len(after.Files) != len(before.Files)+1 || string(content[".archive-state"]) != "restoring\nverified\n" || !bytes.Equal(content[q.Task.HomePath+"/state/state.sqlite"], state) {
+				t.Fatalf("physical SQLite or inventory lost: before=%d after=%d marker=%q", len(before.Files), len(after.Files), content[".archive-state"])
 			}
-			readback, err := backend.ReadBotHomeWorkspace(targetCtx, destination, q.Task.HomePath+"/TASK.md", 1024)
+			restoredTask, err := targetRepo.(store.BotTaskStore).GetTask(targetCtx, b.ID, taskID)
 			must(err)
-			if !bytes.Equal(readback, definition.Data) {
-				t.Fatal("rebound receipt did not resolve immutable definition")
+			if restoredTask.Head == nil || restoredTask.Head.TaskID != task.Head.TaskID || restoredTask.Head.Revision != task.Head.Revision || restoredTask.Head.Revision == pending.Candidate.Ref.Revision {
+				t.Fatal("restore advanced or lost committed task head")
+			}
+			// Scope mapping deliberately keeps old receipts historical. They cannot
+			// authorize an ordinary workspace read in the restored scope before
+			// explicit reconciliation; immutable definition bytes remain exact.
+			if _, err := targetBackend.ReadBotHomeWorkspace(targetCtx, destination, q.Task.HomePath+"/TASK.md", 1024); err == nil || !strings.Contains(err.Error(), "workspace receipt identity") {
+				t.Fatalf("historical receipt unexpectedly authorized restored read: %v", err)
+			}
+			definitionCount := 0
+			for _, file := range after.Files {
+				if strings.HasPrefix(file.Path, q.Task.HomePath+"/.revisions/") && strings.HasSuffix(file.Path, "/TASK.md") {
+					definitionCount++
+					if !bytes.Equal(file.Data, definition.Data) {
+						t.Fatal("restored immutable definition bytes changed")
+					}
+				}
+			}
+			if definitionCount != 1 {
+				t.Fatalf("expected exactly one committed definition, got %d", definitionCount)
+			}
+			must(backend.StartSession(ctx, b.HomeSessionID.String()))
+			must(backend.WaitForSessionReady(ctx, b.HomeSessionID.String()))
+			sourceAfter, err := backend.SnapshotBotHomeWorkspace(ctx, home, "workspace", sandbox.MaxBotHomeWorkspaceBundleBytes)
+			must(err)
+			if sourceAfter.Receipt.Digest != before.Receipt.Digest {
+				t.Fatal("target restore modified independently owned source Home")
 			}
 			path := filepath.Join(targetDir, "orgs", p.OrgSlug, "teams", p.TeamSlug+".db")
 			if scope == store.BotScopePersonal {
@@ -207,4 +270,21 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 
 		})
 	}
+}
+
+// Observe the public importer's physical installation without changing its
+// journaling, ownership checks, barriers, or SQL publication path.
+type taskWorkspaceArchiveRestoreBackend struct {
+	*docker.DockerBackend
+	beforeSQL func()
+	installed int
+}
+
+func (b *taskWorkspaceArchiveRestoreBackend) RestoreBotHomeArchive(ctx context.Context, home *sandbox.BotHomeBinding, manifest *sandbox.BotHomeArchiveManifest, r io.Reader, barrier sandbox.BotHomeArchiveBarrier) error {
+	if err := b.DockerBackend.RestoreBotHomeArchive(ctx, home, manifest, r, barrier); err != nil {
+		return err
+	}
+	b.beforeSQL()
+	b.installed++
+	return nil
 }

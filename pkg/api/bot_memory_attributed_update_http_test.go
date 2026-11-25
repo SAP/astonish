@@ -97,15 +97,25 @@ func TestBotMemoryAttributedUpdateHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()
-			var memories store.MemoryStore
+			var repo store.BotStore
+			var generic store.MemoryStore
 			if scope == "personal" {
-				memories = ods.ForUser(owner).Memories()
+				repo, generic = ods.ForUser(owner).Bots(), ods.ForUser(owner).Memories()
 			} else {
-				memories = ods.ForTeam(team.Slug).Memories()
+				repo, generic = ods.ForTeam(team.Slug).Bots(), ods.ForTeam(team.Slug).Memories()
 			}
+			memories, err := store.NewBotMemoryService(repo, generic, b.ID, b.Scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryCtx = store.WithTenantContext(memoryCtx, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
 			now := time.Now().UTC().Truncate(time.Second)
 			attr := &store.MemoryAttribution{BotID: b.ID, Source: "receipt:observed", ObservedAt: now, Status: store.MemoryKnowledgeVerified, Evidence: &store.BotEvidence{Kind: store.BotEvidenceObservation, Source: "receipt:observed", Summary: "Observed original", ObservedAt: now, ActorID: b.OwnerID}}
-			if err := memories.Add(ctx, store.MemoryEntry{SessionID: b.HomeSessionID.String(), CreatedBy: owner, Content: "observed original", Category: "fact", Attribution: attr}); err != nil {
+			if err := memories.Add(memoryCtx, store.MemoryEntry{SessionID: b.HomeSessionID.String(), CreatedBy: owner, Content: "observed original", Category: "fact", Attribution: attr}); err != nil {
 				t.Fatal(err)
 			}
 			var listed struct {

@@ -2,6 +2,7 @@ package entstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -59,8 +60,42 @@ func TestBotApproveContinueAtomic(t *testing.T) {
 				case "stopped", "deleted", "changed-version", "stale-checkpoint", "changed-action":
 					err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
 						if scenario == "changed-action" {
-							a.Action.Arguments = []byte(`{"body":"replacement"}`)
-							return tx.UpdateApproval(ctx, *a, store.ApprovalPending, *now)
+							// Seed corruption below the validating writer: retain the original
+							// authority digest but point at a different, valid disk action.
+							changed := *a
+							changed.Action.Arguments = []byte(`{"body":"replacement"}`)
+							changed.ActionDigest, err = changed.Action.Digest()
+							if err != nil {
+								return err
+							}
+							var codec *botContentCodec
+							switch db := tx.(type) {
+							case personalBotDB:
+								codec = db.contentCodec()
+							case teamBotDB:
+								codec = db.contentCodec()
+							}
+							data, e := codec.encodeApproval(ctx, changed)
+							if e != nil {
+								return e
+							}
+							var record botApprovalRecord
+							if e = decodeBotRecord(data, &record); e != nil {
+								return e
+							}
+							record.ActionDigest = a.ActionDigest
+							raw, e := json.Marshal(record)
+							if e != nil {
+								return e
+							}
+							data = map[string]any{"bot_record_v2": string(raw)}
+							switch db := tx.(type) {
+							case personalBotDB:
+								return db.client.BotApproval.UpdateOneID(a.ID).SetData(data).Exec(ctx)
+							case teamBotDB:
+								return db.client.BotApproval.UpdateOneID(a.ID).SetData(data).Exec(ctx)
+							}
+							return store.ErrBotUnsupported
 						}
 						switch db := tx.(type) {
 						case personalBotDB:

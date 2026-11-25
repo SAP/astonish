@@ -22,7 +22,7 @@ func TestBotScheduleUpdatePatchBoundary(t *testing.T) {
 			resources, ctx = scheduleFactory(t, f, repo)
 			defer resources.Cleanup()
 			var chosen botRunnableTool
-			for _, entry := range resources.Agent.Tools {
+			for _, entry := range factoryCatalogTools(t, resources) {
 				if entry.Name() == "update_scheduled_job" {
 					chosen = entry.(botRunnableTool)
 				}

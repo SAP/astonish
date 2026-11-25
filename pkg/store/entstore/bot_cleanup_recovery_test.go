@@ -77,6 +77,52 @@ func TestBotRecoveredCleanupFencesRaces(t *testing.T) {
 	}
 }
 
+func TestBotRecoveredCleanupWithoutRetainedHome(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			r, owner, _, run, lease, now, _, _ := scheduledInterruptionFixture(t, scope)
+			*now = now.Add(2 * time.Minute)
+			if err := r.RecoverRun(owner, lease); err != nil {
+				t.Fatal(err)
+			}
+			switch db := r.db.(type) {
+			case personalBotDB:
+				if _, err := db.client.Bot.UpdateOneID(run.BotID).ClearHomeBinding().Save(owner); err != nil {
+					t.Fatal(err)
+				}
+			case teamBotDB:
+				if _, err := db.client.Bot.UpdateOneID(run.BotID).ClearHomeBinding().Save(owner); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatal("unexpected database")
+			}
+			root, err := r.db.GetBot(owner, run.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root.Bot.Home.ID != uuid.Nil {
+				t.Fatal("retained Home still present")
+			}
+			q := store.BotCleanupRequest{Kind: store.BotCleanupRunTeardown, BotID: run.BotID, RunID: run.ID, RunFence: lease.Fence, Fence: root.Fence, ExpectedRevision: root.Bot.Revision}
+			calls := 0
+			verified := cleanupRuntimeContext(t, func(_ context.Context, got store.BotCleanupRequest) error {
+				calls++
+				if got != q {
+					return store.ErrBotForbidden
+				}
+				return nil
+			})
+			if err := r.ConfirmCleanup(verified, q); err != nil {
+				t.Fatalf("title-only teardown receipt: %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("physical verifier calls=%d", calls)
+			}
+		})
+	}
+}
+
 func TestBotRecoveredCleanupReceipt(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {

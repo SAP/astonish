@@ -8,49 +8,107 @@ import (
 	"strings"
 )
 
-// Delete revokes every issued reference, including historical and schedule refs.
-// Pause deliberately does not use this path: lifecycle gates suspend execution
-// while the mandate ceiling and cumulative accounting survive owner updates.
+// Delete revokes historical and scheduled authority without opening content.
+// SQL tombstones survive restore. Applying operations retain their exact head,
+// pending marker and receipt; deletion is not evidence of an absent effect.
 func (r *botRepository) revokeOperationStateTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord) error {
 	refs := map[store.BotMandateRef]bool{}
-	for after := int64(0); ; {
-		rows, err := tx.ReadActivity(ctx, rec.Bot.ID, after, 200)
+	operations := map[uuid.UUID]botCleanupAuthority{}
+	for after := int64(0); after >= 0; {
+		rows, next, err := readCleanupAuthorities(ctx, tx, rec.Bot.ID, after)
 		if err != nil {
 			return err
 		}
+		after = next
 		for _, row := range rows {
-			after = row.Sequence
-			if row.Kind != mandateRecordKind {
-				continue
+			a := row.Authority
+			if strings.HasPrefix(row.Key, "mandate:") && (a.Mandate == nil || a.Mandate.Ref.ID == uuid.Nil || a.ID != uuid.Nil) {
+				return store.ErrBotInvalid
 			}
-			var m store.BotMandateRecord
-			if json.Unmarshal(row.Payload, &m) == nil && m.Mandate.Ref.Validate() == nil {
-				refs[m.Mandate.Ref] = true
+			if strings.HasPrefix(row.Key, "mandate-operation:") && (a.ID == uuid.Nil || a.Mandate != nil) {
+				return store.ErrBotInvalid
 			}
-		}
-		if len(rows) < 200 {
-			break
+			if a.Mandate != nil && a.Mandate.Ref.ID != uuid.Nil {
+				ref := a.Mandate.Ref
+				if ref.Validate() != nil || ref.BotID != rec.Bot.ID || ref.OwnerID != rec.Bot.OwnerID.String() || ref.OrgSlug != r.auth.orgSlug || r.auth.teamSlug != "" && ref.TeamSlug != r.auth.teamSlug || row.Key != mandateKey(ref) {
+					return store.ErrBotInvalid
+				}
+				refs[ref] = true
+			}
+			if a.ID != uuid.Nil {
+				if a.Revision < 1 || a.MandateRef.Validate() != nil || a.MandateRef.BotID != rec.Bot.ID || a.MandateRef.OwnerID != rec.Bot.OwnerID.String() || row.Key != operationKey(a.ID, a.Revision) {
+					return store.ErrBotInvalid
+				}
+				if old, ok := operations[a.ID]; !ok || old.Revision < a.Revision {
+					operations[a.ID] = *a
+				}
+			}
 		}
 	}
 	for ref := range refs {
-		m, err := readMandate(ctx, tx, ref)
+		exists, err := cleanupRevokedExists(ctx, tx, ref)
 		if err != nil {
 			return err
 		}
-		if m.RevokedAt == nil {
+		if !exists {
 			if err = appendMandateRecord(ctx, tx, rec, mandateRevokedKey(ref), map[string]any{"ref": ref, "revoked": true}, r.clock()); err != nil {
 				return err
 			}
 		}
-		if err = r.cancelMandateOperationsTx(ctx, tx, rec, ref); err != nil {
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]any{}
+	}
+	for id, a := range operations {
+		if !refs[a.MandateRef] {
+			return store.ErrBotInvalid
+		}
+		raw, err := json.Marshal(rec.Metadata[operationHeadKey(id)])
+		if err != nil {
 			return err
+		}
+		var revision int64
+		if json.Unmarshal(raw, &revision) != nil || revision != a.Revision {
+			return store.ErrBotInvalid
+		}
+		switch a.Status {
+		case store.BotOperationPending, store.BotOperationBlocked:
+			a.Status = store.BotOperationCancelled
+			a.Revision++
+			rec.Metadata[botOperationCleanupPrefix+id.String()] = a
+			delete(rec.Metadata, "authorized-pending:"+id.String())
+		case store.BotOperationApplying:
+		case store.BotOperationApplied, store.BotOperationFailed, store.BotOperationCancelled:
+		default:
+			return store.ErrBotInvalid
+		}
+	}
+	for key := range rec.Metadata {
+		if strings.HasPrefix(key, "mandate_operation_head:") {
+			id, err := uuid.Parse(strings.TrimPrefix(key, "mandate_operation_head:"))
+			if err != nil {
+				return store.ErrBotInvalid
+			}
+			if _, ok := operations[id]; !ok {
+				return store.ErrBotInvalid
+			}
+		}
+		if strings.HasPrefix(key, "authorized-pending:") {
+			id, err := uuid.Parse(strings.TrimPrefix(key, "authorized-pending:"))
+			if err != nil {
+				return store.ErrBotInvalid
+			}
+			if _, ok := operations[id]; !ok {
+				return store.ErrBotInvalid
+			}
 		}
 	}
 	delete(rec.Metadata, mandateHeadKey)
-	// Retain accounting until actual purge, including soft-delete/restore.
 	return saveMandateMetadata(ctx, tx, rec)
 }
 
+// Explicit single-mandate revocation still uses validated current content. This
+// path is not the legacy deletion boundary.
 func (r *botRepository) cancelMandateOperationsTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, ref store.BotMandateRef) error {
 	rt := &botAuthorizedOperationRuntime{botMandateRuntime: &botMandateRuntime{repo: r}}
 	for key, value := range rec.Metadata {
@@ -73,8 +131,6 @@ func (r *botRepository) cancelMandateOperationsTx(ctx context.Context, tx botDra
 		if err != nil {
 			return err
 		}
-		// Applying effects may already exist. Keep the exact operation/receipt and
-		// pending marker for reconciliation, rather than claiming cancellation.
 		if o.Status == store.BotOperationApplying {
 			continue
 		}

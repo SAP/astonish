@@ -167,14 +167,14 @@ func (m *Manager) InitializeSingleToolset(ctx context.Context, serverName string
 
 	transport, stderrBuf, err := m.createTransportForServer(serverName, serverConfig)
 	if err != nil {
+		closeMCPResource(transport, -1)
 		slog.Warn("failed to create transport for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 		return nil, fmt.Errorf("failed to create transport: %w (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
 	}
 
-	// Create ADK mcptoolset
-	toolset, err := mcptoolset.New(mcptoolset.Config{
-		Transport: transport,
-	})
+	// New is lazy: the ADK toolset owns the eventual client session,
+	// whereas SDK CommandTransport itself does not implement Close.
+	toolset, err := newSingleToolset(transport, mcptoolset.New)
 	if err != nil {
 		slog.Warn("failed to create toolset for MCP server", FailureLogAttrs(serverName, serverConfig, err, stderrBuf)...)
 		return nil, fmt.Errorf("failed to create toolset: %w (Stderr: %s)", err, DiagnosticStderr(stderrBuf))
@@ -188,6 +188,7 @@ func (m *Manager) InitializeSingleToolset(ctx context.Context, serverName string
 
 	m.toolsets = append(m.toolsets, toolset)
 	m.namedToolsets = append(m.namedToolsets, *namedToolset)
+	m.transports = append(m.transports, transport)
 	slog.Info("initialized single MCP server", "component", "mcp", "server", serverName)
 
 	return namedToolset, nil
@@ -264,6 +265,11 @@ func (m *Manager) InitializeSelectiveToolsets(ctx context.Context, serverNames [
 // Cleanup closes all MCP transports and clears the manager state
 // Should be called when the flow run completes
 func (m *Manager) Cleanup() {
+	// Close ADK client sessions first. Stdio and remote SDK transports do
+	// not necessarily expose Close; closing their owning toolset is required.
+	for i, toolset := range m.toolsets {
+		closeMCPResource(toolset, i)
+	}
 	for i, transport := range m.transports {
 		if closer, ok := transport.(interface{ Close() error }); ok {
 			if err := closer.Close(); err != nil {
@@ -275,6 +281,25 @@ func (m *Manager) Cleanup() {
 	m.toolsets = nil
 	m.namedToolsets = nil
 	slog.Info("MCP manager cleaned up", "component", "mcp")
+}
+
+// newSingleToolset keeps partial-construction cleanup explicit and testable.
+func newSingleToolset(transport mcp.Transport, build func(mcptoolset.Config) (tool.Toolset, error)) (tool.Toolset, error) {
+	toolset, err := build(mcptoolset.Config{Transport: transport})
+	if err != nil {
+		closeMCPResource(toolset, -1)
+		closeMCPResource(transport, -1)
+		return nil, err
+	}
+	return toolset, nil
+}
+
+func closeMCPResource(resource any, index int) {
+	if closer, ok := resource.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			slog.Warn("failed to close MCP resource", "component", "mcp", "index", index, "error", err)
+		}
+	}
 }
 
 // createTransportForServer resolves credential placeholders in env, then builds

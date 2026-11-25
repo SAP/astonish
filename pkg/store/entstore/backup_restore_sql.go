@@ -25,6 +25,20 @@ func restoreLogicalEntries(ctx context.Context, db *sql.DB, dialect Dialect, sch
 		return err
 	}
 	defer tx.Rollback()
+	if opts.fileFirst != nil && targetScope.Kind == "platform" {
+		// This read and the subsequent inserts share one SQLite transaction. A
+		// concurrent writer either makes this fail or causes SQLITE_BUSY on upgrade;
+		// it cannot cause an import to merge into a newly populated target.
+		for _, table := range []string{"users", "organizations", "org_memberships", "oidc_providers", "platform_settings", "platform_secrets"} {
+			var count int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteSQLiteIdent(table)).Scan(&count); err != nil {
+				return err
+			}
+			if count != 0 {
+				return store.ErrBotConflict
+			}
+		}
+	}
 	for _, entry := range ordered {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -68,18 +82,44 @@ func restoreLogicalEntry(ctx context.Context, tx *sql.Tx, dialect Dialect, schem
 		if err != nil {
 			return 0, err
 		}
+		if opts.fileFirst == nil {
+			if err := validateBotArchiveRow(entry.Entity, row); err != nil {
+				return 0, err
+			}
+		}
 		if action == "restore_disabled" && entry.Entity == "scheduled_jobs" {
 			row["status"] = "paused"
 		}
-		row = remapRestoreRow(entry.Scope, targetScope, entry.Entity, row, opts)
-		if err := quiesceRestoredBotRow(entry.Entity, row); err != nil {
-			return 0, fmt.Errorf("quiesce %s record %s: %w", entry.Entity, record.ID, err)
+		if opts.fileFirst != nil && (entry.Entity == "session_events" || entry.Entity == "team_audit_log" || entry.Entity == "bot_intakes") {
+			// These envelopes are not generic recursively mapped JSON. Their file
+			// edges are rewritten below; historical actors and payloads stay opaque.
+			row = remapBotRestoreRow(entry.Scope, targetScope, entry.Entity, row, opts)
+			if entry.Entity == "bot_intakes" {
+				row["owner_id"] = fileFirstMappedOwner(entry.Scope.OrgSlug, backupString(row, "owner_id"), opts)
+			}
+		} else {
+			row = remapRestoreRow(entry.Scope, targetScope, entry.Entity, row, opts)
 		}
-		if err := validateRestoredBotTaskRow(entry.Entity, row); err != nil {
-			return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
-		}
-		if err := validateRestoredBotSkillRow(entry.Entity, row); err != nil {
-			return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+		if opts.fileFirst != nil {
+			if err := mapFileFirstRow(entry.Entity, row, opts.fileFirst); err != nil {
+				return 0, fmt.Errorf("map %s: %w", entry.Entity, err)
+			}
+			if err := quiesceFileFirstRestoreRow(entry.Entity, row, opts.fileFirst); err != nil {
+				return 0, err
+			}
+			if entry.Entity == "bots" && opts.fileFirst.interruptSQL {
+				return 0, errFileFirstSQLInterrupted
+			}
+		} else {
+			if err := quiesceRestoredBotRow(entry.Entity, row); err != nil {
+				return 0, fmt.Errorf("quiesce %s record %s: %w", entry.Entity, record.ID, err)
+			}
+			if err := validateRestoredBotTaskRow(entry.Entity, row); err != nil {
+				return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+			}
+			if err := validateRestoredBotSkillRow(entry.Entity, row); err != nil {
+				return 0, fmt.Errorf("validate %s record %s: %w", entry.Entity, record.ID, err)
+			}
 		}
 		if entry.Entity == "bot_tasks" {
 			table := quoteIdent(dialect, "bots")

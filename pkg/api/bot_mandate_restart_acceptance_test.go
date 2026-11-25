@@ -135,14 +135,35 @@ func testBotAgentContinuityRestartHTTP(t *testing.T, cancel bool) {
 	// The verifier, quota, leases and factory are real; only the model and home backend are controlled.
 	mdl := &interactiveHTTPModel{name: "web_fetch", args: map[string]any{"url": upstream.URL}, principal: execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}, t: t}
 	mdl.assessment = f.model.assessment
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: f.pool, MandatePolicy: policy, WorkerID: "restart-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+	// Shared Chat executes web_fetch through its sandbox transport, not a
+	// separate mandated-read implementation. Restrict the controlled transport
+	// to this test-owned server and return the actual HTTP response bytes.
+	f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+		url, _ := args["url"].(string)
+		if name != "web_fetch" || url != upstream.URL {
+			return nil, fmt.Errorf("unexpected scoped transport request: %s %v", name, args)
+		}
+		response, err := upstream.Client().Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"url": url, "final_url": url, "status": response.StatusCode, "content": string(body), "content_type": response.Header.Get("Content-Type"), "truncated": false})
+	}
+	files := newComposedHTTPFiles(t, f.dataDir, repo, f.b, nil)
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: "restart-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
 	}, Prepare: func(c context.Context, r bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		files.install(c, r, scope)
 		reads, err := launcher.BotMandatedReadTools(r.Mandate, tools.RoutineReadPolicy{Authorize: func(context.Context, string) error { return nil }, AllowIP: func(context.Context, string, net.IP) error { return nil }})
 		if err != nil {
 			return nil, err
 		}
-		return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", Tools: reads, PolicyRuntime: agent.BotPolicyRuntime{Mandate: r.Mandate, Guard: restartMandateGuard{r, repo}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+		return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, Tools: reads, PolicyRuntime: agent.BotPolicyRuntime{Mandate: r.Mandate, Guard: restartMandateGuard{r, repo}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

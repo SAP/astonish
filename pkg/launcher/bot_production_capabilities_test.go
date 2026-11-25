@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
-	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
@@ -118,27 +117,41 @@ type productionCapabilityPool struct {
 func (p productionCapabilityPool) GetBackend() sandbox.Backend               { return p.backend }
 func (p productionCapabilityPool) GetOrCreate(string) sandbox.ToolNodeClient { return p.client }
 func (p productionCapabilityPool) SetSessionScope(string, string, string)    {}
-func productionFactoryTool(t *testing.T, f *botFactoryFixture, name string, prepare func(context.Context, string) ([]tool.Tool, func(), error), additionalAllowed ...string) (botRunnableTool, tool.Context) {
+
+// productionAdapterTool isolates legacy transport adapters and their terminal
+// authorization boundary. It deliberately does not claim shared catalog coverage.
+func productionAdapterTool(t *testing.T, f *botFactoryFixture, name string, prepare func(context.Context, string) ([]tool.Tool, func(), error), additionalAllowed ...string) (botRunnableTool, tool.Context) {
 	t.Helper()
 	policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: append([]string{name}, additionalAllowed...)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.req.Policy = policy
-	f.cfg.Prepare = func(ctx context.Context, r bot.RunRequest, _ *BotChatScope) (*BotChatSafeResources, error) {
-		ts, cleanup, err := prepare(ctx, r.Run.SessionID.String())
-		return &BotChatSafeResources{Tools: ts, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: cleanup}, err
-	}
 	r, err := f.construct(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Cleanup)
+	binding := botFactoryModelForTest(t, r.Agent.LLM).binding
+	ts, cleanup, err := prepare(binding.owner, f.req.Run.SessionID.String())
+	if cleanup != nil {
+		t.Cleanup(cleanup)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := agent.BotPolicyRuntimeFromContext(binding.owner)
+	runtime.Classifier = WithBotMCPClassifier(WithBotEmailClassifier(botFactoryTestClassifier{}, ts), ts)
+	binding.owner = agent.WithBotPolicyRuntime(binding.owner, runtime)
 	ctx := execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, policy.Identity()), policy)
 	ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}})
-	for _, candidate := range r.Agent.Tools {
+	for _, candidate := range ts {
 		if candidate.Name() == name {
-			return candidate.(botRunnableTool), botFactoryHandoffContext{base: ctx, session: "viewer-child", functionCallID: "production-" + name}
+			bound, err := newBotBoundTool(candidate, binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return bound.(botRunnableTool), botFactoryHandoffContext{base: ctx, session: "viewer-child", functionCallID: "production-" + name}
 		}
 	}
 	t.Fatal("missing capability")
@@ -161,10 +174,7 @@ func TestBotProductionHTTPFactory(t *testing.T) {
 	f.services.PersonalCredentials = sessioncreds.NewStore(map[string]*store.Credential{"owner": {Type: store.CredBearer, Token: productionTestSecret}})
 	b := &productionCapabilityBackend{}
 	client := &productionCapabilityClient{backend: b}
-	target, ctx := productionFactoryTool(t, f, "http_request", func(_ context.Context, id string) ([]tool.Tool, func(), error) {
-		h, e := BotHTTPTool(b, client, id)
-		return []tool.Tool{h}, func() {}, e
-	})
+	target, ctx := productionFactoryTool(t, f, "http_request", ChatCatalogResources{Pool: productionCapabilityPool{backend: b, client: client}})
 	out, err := target.Run(ctx, map[string]any{"url": srv.URL, "credential": "owner"})
 	if err != nil {
 		t.Fatal(err)

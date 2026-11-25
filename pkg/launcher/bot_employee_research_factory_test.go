@@ -47,7 +47,7 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	f.req.Policy = policy
 	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
 		// No external adapter is used in this construction test.
-		return &BotChatSafeResources{Research: episode, Tools: []tool.Tool{searchTool}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{searchTool}}}}, Research: episode, Tools: []tool.Tool{searchTool}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
 	resources, err := f.construct(t)
 	if err != nil {
@@ -76,15 +76,22 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	if fresh.Agent.SubAgentManager != nil {
 		t.Fatal("research producer exposes delegates")
 	}
-	if len(fresh.Agent.Tools) != 1 || fresh.Agent.Tools[0].Name() != BotConfiguredSearchToolName {
-		t.Fatalf("unexpected tools: %v", fresh.Agent.Tools)
+	if len(fresh.Agent.Tools) != 2 {
+		t.Fatalf("unexpected research tools: %v", fresh.Agent.Tools)
+	}
+	continuedTools := map[string]botRunnableTool{}
+	for _, candidate := range fresh.Agent.Tools {
+		continuedTools[candidate.Name()] = candidate.(botRunnableTool)
+	}
+	if continuedTools[BotConfiguredSearchToolName] == nil || continuedTools["web_fetch"] == nil {
+		t.Fatal("narrowed research catalog must contain exactly configured search and web_fetch")
 	}
 	// The original and repair share the exact configured episode and total quota.
-	original := resources.Agent.Tools[0].(botRunnableTool)
+	original := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName).Tool.(botRunnableTool)
 	if _, err = original.Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "overview"}); err != nil {
 		t.Fatal(err)
 	}
-	continued := fresh.Agent.Tools[0].(botRunnableTool)
+	continued := continuedTools[BotConfiguredSearchToolName]
 	if _, err = continued.Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "recent"}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +103,7 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	}
 	// Both model and tools bind the narrowed runtime even when invoked with a
 	// caller carrying the original full policy.
-	llm := fresh.Agent.LLM.(*botFactoryLLM)
+	llm := botFactoryModelForTest(t, fresh.Agent.LLM)
 	if llm.binding.req.Budget != f.req.Budget || llm.binding.req.Run.ID != f.req.Run.ID || !llm.researchOnly {
 		t.Fatal("research lifetime mismatch")
 	}
@@ -187,7 +194,17 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 				}
 			}))
 			defer source.Close()
-			origin, _ := tools.RoutineReadOrigin(source.URL)
+			const sourceURL = "http://93.184.216.34"
+			oldTransport := http.DefaultTransport
+			transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if strings.HasPrefix(address, "93.184.216.34:") {
+					address = source.Listener.Addr().String()
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}}
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = oldTransport; transport.CloseIdleConnections() }()
+			origin, _ := tools.RoutineReadOrigin(sourceURL)
 			public := &execution.BotPublicResearchScope{Version: 1, Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview, execution.BotResearchRecent}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 2}
 			policy := func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return store.BotMandatePolicy{TTL: time.Hour, Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{BotConfiguredSearchToolName, "web_fetch", origin}}}, Limits: store.BotMandateLimits(config.DefaultBotMandateConfig()), PublicResearch: public}, nil
@@ -241,6 +258,12 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			// typed criteria under the claimed worker lease; owner prose is not a
 			// review-policy switch.
 			reviewWork := f.req.Work.Clone()
+			// This two-sentence journey tests read-only research and text repair,
+			// not artifact delivery. Pin its typed chat intent before execution;
+			// do not widen the read-only mandate to authorize file writes.
+			if err := reviewWork.AgentWork.SetDelivery(store.BotDeliveryChatOnly, ""); err != nil {
+				t.Fatal(err)
+			}
 			reviewWork.Criteria = []store.BotWorkCriterion{{ID: "employee-assignment", SourceIDs: []string{"assignment", "charter"}, Text: "Report the broad index move and market breadth with decisive source support.", VerificationKind: store.BotWorkVerificationModel, FulfillmentScope: store.BotWorkCriterionCurrentTurn}}
 			f.req.Work, err = repo.(store.BotWorkStore).SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: f.req.Work.Revision, State: *reviewWork})
 			if err != nil {
@@ -367,7 +390,7 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 						args = map[string]any{"facet": "overview"}
 					case 2:
 						name = "web_fetch"
-						args = map[string]any{"url": source.URL + "/index"}
+						args = map[string]any{"url": sourceURL + "/index"}
 					case 3:
 						if formatOnly {
 							name = BotConfiguredSearchToolName
@@ -376,7 +399,7 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					case 4:
 						if formatOnly {
 							name = "web_fetch"
-							args = map[string]any{"url": source.URL + "/breadth"}
+							args = map[string]any{"url": sourceURL + "/breadth"}
 						} else {
 							name = BotConfiguredSearchToolName
 							args = map[string]any{"facet": "recent"}
@@ -384,25 +407,25 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 					case 5:
 						if !formatOnly {
 							name = "web_fetch"
-							args = map[string]any{"url": source.URL + "/breadth"}
+							args = map[string]any{"url": sourceURL + "/breadth"}
 						}
 					}
 					if scenario.sourceFailure {
 						switch round {
 						case 5:
-							name, args = "web_fetch", map[string]any{"url": source.URL + "/blocked"}
+							name, args = "web_fetch", map[string]any{"url": sourceURL + "/blocked"}
 						case 6:
-							name, args = "web_fetch", map[string]any{"url": source.URL + "/thin"}
+							name, args = "web_fetch", map[string]any{"url": sourceURL + "/thin"}
 						case 7:
-							name, args = "web_fetch", map[string]any{"url": source.URL + "/breadth"}
+							name, args = "web_fetch", map[string]any{"url": sourceURL + "/breadth"}
 						}
 					}
 					if scenario.recovery {
 						switch round {
 						case 3:
-							name, args = "web_fetch", map[string]any{"url": source.URL + "/blocked"}
+							name, args = "web_fetch", map[string]any{"url": sourceURL + "/blocked"}
 						case 4:
-							name, args = "web_fetch", map[string]any{"url": source.URL + "/thin"}
+							name, args = "web_fetch", map[string]any{"url": sourceURL + "/thin"}
 						case 5:
 							name, args = "", nil
 						case 6:
@@ -446,6 +469,17 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 						}
 					}
 					if name != "" {
+						// Shared Chat defers ordinary capabilities behind execute_tool;
+						// the narrowed research continuation advertises its reads directly.
+						direct := false
+						for _, configured := range q.Config.Tools {
+							for _, declaration := range configured.FunctionDeclarations {
+								direct = direct || declaration.Name == name
+							}
+						}
+						if !direct {
+							args, name = map[string]any{"name": name, "arguments": args}, "execute_tool"
+						}
 						out.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("guided-%d", round), Name: name, Args: args}}}}
 					} else {
 						answer := final
@@ -467,16 +501,17 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			llm := &guidedHTTPModel{endpoint: server.URL}
 			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
 			f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
 				search, err := BotConfiguredResearchTool(ctx, req, s, func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
 					searchCalls++
 					order = append(order, "search")
-					url := source.URL + "/index"
+					url := sourceURL + "/index"
 					if searchCalls == 2 {
-						url = source.URL + "/breadth"
+						url = sourceURL + "/breadth"
 					}
 					searchText := "Sources: " + url
 					if scenario.recovery {
-						searchText += " alternate article: " + source.URL + "/breadth blocked: " + source.URL + "/blocked thin: " + source.URL + "/thin"
+						searchText += " alternate article: " + sourceURL + "/breadth blocked: " + sourceURL + "/blocked thin: " + sourceURL + "/thin"
 					}
 					return &knowledgeModel{text: searchText}, nil
 				}, nil, episode)
@@ -487,7 +522,7 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
-				return &BotChatSafeResources{Research: episode, Tools: append([]tool.Tool{search}, reads...), WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{search}}}}, Research: episode, Tools: append([]tool.Tool{search}, reads...), WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			factory, err := NewBotChatAgentFactory(f.cfg)
 			if err != nil {

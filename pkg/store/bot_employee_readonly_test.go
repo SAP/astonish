@@ -91,3 +91,68 @@ func TestBotReadOnlyEmployeeCompletionBinding(t *testing.T) {
 		t.Fatal("relabelled persisted candidate")
 	}
 }
+
+func TestBotReadOnlyEmployeeUsefulPartialCompletion(t *testing.T) {
+	w := NewBotAgentWorkState(BotWorkContract{BotID: uuid.New(), RunID: uuid.New(), Version: 1, Instructions: "Analyze source"})
+	w.EmployeeReviewPolicy = BotEmployeeReviewEvidenceBoundV1
+	w.Phase = BotWorkFinished
+	w.AgentWork.Disposition = AgentWorkPartial
+	w.Unresolved = []string{"The source does not include the current quarter."}
+	w.Candidate = &BotWorkCandidate{Revision: 1, EventID: "partial-final", Text: "Prior-quarter revenue rose 5%. The source does not include the current quarter.", ReadOnlyResult: true}
+	w.Candidate.Digest = w.Candidate.ContentDigest()
+	report := BotReport{Summary: w.Candidate.Text, EffectState: BotReportEffectsReadOnly, Unverified: append([]string(nil), w.Unresolved...), Work: BuildBotWorkProjection(w)}
+	q := BotRunCommit{Lease: BotLease{BotID: w.Contract.BotID, RunID: w.Contract.RunID}, Status: RunPartial, Report: report}
+	if BotReportIsReadOnlyResult(report) {
+		t.Fatal("global strict read-only predicate weakened")
+	}
+	if err := ValidateBotWorkCompletion(w, q); err != nil {
+		t.Fatalf("useful positively attested partial cannot commit: %v", err)
+	}
+	if _, err := NewBotEmployeeAgentMessage(RunPartial, report, w); err != nil {
+		t.Fatalf("useful partial cannot communicate: %v", err)
+	}
+	for _, mode := range []string{"unknown", "uncertain", "changed", "missing-limitations", "blank-limitations", "different-limitations", "succeeded", "pending-review", "criteria", "control", "empty-answer", "missing-event", "summary-drift", "file-contract"} {
+		t.Run(mode, func(t *testing.T) {
+			next := w.Clone()
+			commit := q
+			commit.Report = report
+			switch mode {
+			case "unknown":
+				commit.Report.EffectState = BotReportEffectsUnknown
+			case "uncertain":
+				commit.Report.EffectState = BotReportEffectsUncertain
+			case "changed":
+				commit.Report.Changed = []BotEvidence{{Summary: "write"}}
+			case "missing-limitations":
+				next.Unresolved = nil
+				commit.Report.Unverified = nil
+			case "blank-limitations":
+				next.Unresolved = []string{" "}
+				commit.Report.Unverified = []string{" "}
+			case "different-limitations":
+				commit.Report.Unverified = []string{"another gap"}
+			case "succeeded":
+				commit.Status = RunSucceeded
+			case "pending-review":
+				next.EmployeeReviewPending = true
+			case "criteria":
+				next.Criteria = []BotWorkCriterion{{}}
+			case "control":
+				next.Candidate.Bodies = map[string]string{"pending-control:0": "{}"}
+			case "empty-answer":
+				next.Candidate.Text = " "
+			case "missing-event":
+				next.Candidate.EventID = ""
+			case "summary-drift":
+				commit.Report.Summary = "other answer"
+			case "file-contract":
+				next.AgentWork.DeliveryIntent = BotDeliveryFileDeliverable
+			}
+			next.Candidate.Digest = next.Candidate.ContentDigest()
+			commit.Report.Work = BuildBotWorkProjection(next)
+			if err := ValidateBotWorkCompletion(next, commit); err == nil {
+				t.Fatalf("unsafe partial accepted: %s", mode)
+			}
+		})
+	}
+}

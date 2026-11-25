@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { BotAPIError, type Bot } from '@/api/bots'
 import { getBotDocuments, getBotMemoryHealth, saveBotDocument, submitBotCorrection, reconcileBotCorrection, type BotDocument, type BotDocuments, type BotMemoryHealth, type MemoryRecord, type CorrectionRequest } from '@/api/botMemory'
 
-export interface BotMemoryCharterPanelProps { bot: Bot; readOnly: boolean; onChange?: () => void }
+export interface BotMemoryCharterPanelProps { enabled?: boolean; bot: Bot; readOnly: boolean; onChange?: () => void }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 const editableDocuments = new Set(['SOUL.md', 'IDENTITY.md', 'USER.md', 'CHARTER.md'])
 const Stage = { Edit: 'edit', Review: 'review', Saving: 'saving', Conflict: 'conflict', Saved: 'saved' } as const
@@ -96,7 +96,7 @@ function CorrectionEditor({ bot, record, readOnly, onChange }: BotMemoryCharterP
   </section>
 }
 
-function Panel({ bot, readOnly, onChange }: BotMemoryCharterPanelProps) {
+function Panel({ bot, readOnly, onChange, enabled = true }: BotMemoryCharterPanelProps) {
   const [documents, setDocuments] = useState<BotDocuments>(), [health, setHealth] = useState<BotMemoryHealth>()
   const [documentError, setDocumentError] = useState(''), [healthError, setHealthError] = useState('')
   const [documentAttempt, setDocumentAttempt] = useState(0), [healthAttempt, setHealthAttempt] = useState(0)
@@ -104,15 +104,17 @@ function Panel({ bot, readOnly, onChange }: BotMemoryCharterPanelProps) {
   const [healthLoading, setHealthLoading] = useState(true)
   const { id, scope } = bot
   useEffect(() => {
+    if (!enabled) return
     const controller = new AbortController(); setDocumentError('')
     getBotDocuments({ id, scope }, controller.signal).then(value => { if (!controller.signal.aborted) setDocuments(value) }).catch(e => { if (!controller.signal.aborted) setDocumentError(message(e)) })
     return () => controller.abort()
-  }, [id, scope, documentAttempt]) // Revision changes must not discard a local draft.
+  }, [id, scope, documentAttempt, enabled]) // Revision changes must not discard a local draft.
   useEffect(() => {
+    if (!enabled) return
     const controller = new AbortController(); setHealthError(''); setHealthLoading(true)
     getBotMemoryHealth({ id, scope }, controller.signal).then(value => { if (!controller.signal.aborted) setHealth(value) }).catch(e => { if (!controller.signal.aborted) setHealthError(message(e)) }).finally(() => { if (!controller.signal.aborted) setHealthLoading(false) })
     return () => controller.abort()
-  }, [id, scope, healthAttempt])
+  }, [id, scope, healthAttempt, enabled])
   return <section className="space-y-5 text-foreground">
     <h2 className="font-semibold">Memory &amp; persona documents</h2>
     <p className="text-sm text-muted-foreground">Descriptive prose never grants rights, changes tool policy, or confirms evidence. Current memory and goals are not historical persona snapshots.</p>

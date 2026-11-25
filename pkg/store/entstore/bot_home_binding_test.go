@@ -50,7 +50,7 @@ func TestBotHomeBindingPersistence(t *testing.T) {
 					if e := c.Schema.Create(ctx); e != nil {
 						t.Fatal(e)
 					}
-					s := &teamBotStore{client: c, auth: auth}
+					s := &teamBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()}), auth: auth}
 					public = s
 					repo = s.repository()
 					closeDB = c.Close
@@ -59,7 +59,7 @@ func TestBotHomeBindingPersistence(t *testing.T) {
 					if e := c.Schema.Create(ctx); e != nil {
 						t.Fatal(e)
 					}
-					s := &personalBotStore{client: c, auth: auth}
+					s := &personalBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()}), auth: auth}
 					public = s
 					repo = s.repository()
 					closeDB = c.Close

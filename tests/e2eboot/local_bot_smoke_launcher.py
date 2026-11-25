@@ -729,7 +729,12 @@ EMPLOYEE_EVIDENCE_COLUMNS = {
 EMPLOYEE_JSON_COLUMNS = frozenset(('data', 'event_data', 'payload', 'home_binding'))
 # Public JSON fields of store.BotRun (pkg/store/bots.go). Repository metadata
 # such as Instructions and OccurrenceAt is not a second public run document.
-EMPLOYEE_RUN_FIELDS = frozenset('task work skill_id invocation continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
+EMPLOYEE_RUN_FIELDS = frozenset('progress state_sequence state_committed_at task work skill_id invocation continuation_reason execution_mode presentation user_event_id history_cursor intent id bot_id version session_id trigger trigger_id idempotency_key status lease created_at started_at finished_at todos checkpoint report usage provider model'.split())
+# botStoredRun uses these same names for private state, distinct from Run's
+# compact projections. They are allowed only as opaque envelope siblings; never
+# merge their contents into Run or use them to discover a session. PreparedPlans
+# and other private-only metadata are deliberately absent from EMPLOYEE_RUN_FIELDS.
+EMPLOYEE_RUN_ENVELOPE_FIELDS = frozenset(('task', 'work', 'progress'))
 
 
 def employee_blob(value):
@@ -804,9 +809,9 @@ def employee_run_session(row, errors):
         fields = {key.lower(): value for key, value in document.items()}
         if 'run' in fields:
             # Private repository metadata is allowed, but not a second public identity.
-            # botStoredRun.work is private BotWorkState; only Run.work is the
-            # public projection. Do not use the outer work to discover sessions.
-            if (EMPLOYEE_RUN_FIELDS - {'work'}).intersection(fields):
+            # Private task/work/progress state is not the corresponding public
+            # projection. Only the nested Run can supply session identity.
+            if (EMPLOYEE_RUN_FIELDS - EMPLOYEE_RUN_ENVELOPE_FIELDS).intersection(fields):
                 raise ValueError('mixed run')
             document = employee_object(fields['run'])
             fields = {key.lower(): value for key, value in document.items()}
@@ -1160,6 +1165,7 @@ def employee_command(state, action):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--verify-chat-first', action='store_true')
+    parser.add_argument('--cleanup-network', action='store_true', help='remove only the exact empty network of a retired recorded fixture; retain Homes and data')
     parser.add_argument('--state', type=Path, help='resume owned checkpoint without creating another Bot')
     parser.add_argument('--restart-owned', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--refresh-browser', action='store_true', help='explicitly rebuild only the idle owned harness, recording old/new hashes without resetting consent')
@@ -1172,6 +1178,13 @@ def main(argv=None):
     parser.add_argument('--verify-bot-agent', action='store_true', help='fresh isolated agent candidate journey; incomplete proof remains blocked')
     parser.add_argument('--employee-command', choices=('read', 'restart-tick', 'restart-paused', 'restart-denied'), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.cleanup_network:
+        if not args.state or any(value for key, value in vars(args).items() if key not in ('cleanup_network', 'state')):
+            parser.error('--cleanup-network requires only --state')
+        from fixture_network_cleanup import cleanup_recorded_network
+        receipt = cleanup_recorded_network(json.loads(args.state.read_text()), REPO)
+        print(json.dumps({'removed_network': receipt}), flush=True)
+        return 0
     if args.verify_bot_tasks:
         if (not args.config or args.state or args.verify_bot_agent or args.verify_bot_skills
                 or args.verify_bot_quality or args.verify_bot_employee or args.verify_chat_model

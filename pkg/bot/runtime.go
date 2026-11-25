@@ -234,6 +234,9 @@ type BotWorkReadResult struct {
 type BotWorkReadRequest struct {
 	Cursor string
 	Limit  int
+	// PromptSnapshot requests latest current-run evidence already owned by the
+	// runner. Explicit tool reads retain their durable pagination semantics.
+	PromptSnapshot bool
 }
 type BotWorkChangeKind string
 
@@ -242,17 +245,20 @@ const (
 	BotWorkCancelItem     BotWorkChangeKind = "cancel_item"
 	BotWorkReplaceNotes   BotWorkChangeKind = "replace_notes"
 	BotWorkSetDisposition BotWorkChangeKind = "set_disposition"
+	BotWorkSetDelivery    BotWorkChangeKind = "set_delivery"
 	BotWorkSetRemaining   BotWorkChangeKind = "set_remaining"
 )
 
 type BotWorkChangeRequest struct {
-	ExpectedRevision int64
-	CallID           string // supplied by the bound ToolContext, not a public tool argument
-	Kind             BotWorkChangeKind
-	Item             *store.BotWorkItem
-	Notes            string
-	Disposition      store.AgentWorkDisposition
-	Remaining        []store.BotWorkObligation
+	DeliveryIntent    store.BotDeliveryIntent
+	DeliverableFormat store.BotDeliverableFormat
+	ExpectedRevision  int64
+	CallID            string // supplied by the bound ToolContext, not a public tool argument
+	Kind              BotWorkChangeKind
+	Item              *store.BotWorkItem
+	Notes             string
+	Disposition       store.AgentWorkDisposition
+	Remaining         []store.BotWorkObligation
 }
 type BotEvidenceReadRequest struct {
 	CallID        string
@@ -312,6 +318,7 @@ func ProgressDispatchFromContext(ctx context.Context) ProgressDispatch {
 }
 
 type RunRequest struct {
+	PlanMode bool // durable owner-selected mode; never inherited from Home history
 	// ProgressYieldRequested is a trusted worker drain signal, never model input.
 	ProgressYieldRequested func() bool
 	// CurrentLease follows supervisor renewals without extending authority.

@@ -145,10 +145,13 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 			cmd.Env = append(os.Environ(), "ASTONISH_BOT_CLI_CHILD=1", "TERM=xterm-256color", "NO_COLOR=1", "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			term := newHandoffPTY(t, cmd)
 			defer term.close()
-			term.wait("▸ 1/y  Approve and run autonomously until done")
+			term.wait("▸ 1/y  Approve and run", "3    Approve and review each phase")
 			if mode == agent.CodePlanReviewEachPhase {
+				// Full-access run is now option 2; choose review with current approvals.
 				term.send("\x1b[B")
-				term.wait("▸ 2    Approve and pause for review after each phase")
+				term.wait("▸ 2    Approve and run with full access")
+				term.send("\x1b[B")
+				term.wait("▸ 3    Approve and review each phase")
 			}
 			term.send("\r")
 			assertMarker := func(name string) {

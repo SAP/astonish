@@ -128,16 +128,7 @@ func mutateControlMemory(ctx context.Context, db botDraftDB, p store.BotControlP
 	return nil
 }
 func insertControlMemory(ctx context.Context, db botDraftDB, id, session, actor uuid.UUID, content, category string, metadata map[string]any, now time.Time) error {
-	switch d := db.(type) {
-	case personalBotDB:
-		_, err := d.client.Memory.Create().SetID(id).SetSessionID(session).SetCreatedBy(actor).SetCreatedAt(now).SetChunkText(content).SetNillableCategory(nilStrPtr(category)).SetMetadata(metadata).Save(ctx)
-		return err
-	case teamBotDB:
-		_, err := d.client.Memory.Create().SetID(id).SetSessionID(session).SetCreatedBy(actor).SetCreatedAt(now).SetChunkText(content).SetNillableCategory(nilStrPtr(category)).SetMetadata(metadata).Save(ctx)
-		return err
-	default:
-		return store.ErrBotUnsupported
-	}
+	return insertBotDiskMemory(ctx, db, id, session, actor, content, category, metadata, now)
 }
 
 func (r *botRepository) applyControlMemoryTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {

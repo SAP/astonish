@@ -241,7 +241,31 @@ func BotReportIsReadOnlyResult(r BotReport) bool {
 // It recognizes only a fresh worker-attested candidate, never a persisted review
 // attempt or pending control. The report classification is rechecked at commit.
 func (w *BotWorkState) HasReadOnlyEmployeeResult() bool {
-	return w != nil && w.Protocol == BotWorkProtocolAgentLedV1 && w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && w.Candidate != nil && w.Candidate.ReadOnlyResult && w.Candidate.Digest == w.Candidate.ContentDigest() && len(w.Candidate.Artifacts) == 0 && len(w.Candidate.RuntimeBlockers) == 0 && !BotWorkHasPendingControlCandidate(w) && w.Review == nil && len(w.Criteria) == 0 && w.Repairs == 0 && w.EmployeeReviewAttempts == 0 && !w.EmployeeReviewPending && !w.EmployeeRepairPending
+	return w != nil && w.Phase == BotWorkFinished && w.AgentWork != nil && w.AgentWork.DeliveryIntent != BotDeliveryFileDeliverable && (w.AgentWork.Disposition != AgentWorkPartial || botEmployeeLimitationsPresent(w.Unresolved)) && w.Protocol == BotWorkProtocolAgentLedV1 && w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && w.Candidate != nil && strings.TrimSpace(w.Candidate.Text) != "" && strings.TrimSpace(w.Candidate.EventID) != "" && w.Candidate.ReadOnlyResult && w.Candidate.Digest == w.Candidate.ContentDigest() && len(w.Candidate.Artifacts) == 0 && len(w.Candidate.RuntimeBlockers) == 0 && !BotWorkHasPendingControlCandidate(w) && w.Review == nil && len(w.Criteria) == 0 && w.Repairs == 0 && w.EmployeeReviewAttempts == 0 && !w.EmployeeReviewPending && !w.EmployeeRepairPending
+}
+
+func botEmployeeLimitationsPresent(limitations []string) bool {
+	if len(limitations) == 0 {
+		return false
+	}
+	for _, limitation := range limitations {
+		if strings.TrimSpace(limitation) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// HasUsefulPartialReadOnlyEmployeeResult preserves source limitations, not uncertain
+// effects. The exact candidate, positive runtime attestation and fresh no-review
+// contract are required at capture, commit and communication.
+func (w *BotWorkState) HasUsefulPartialReadOnlyEmployeeResult(status RunStatus, report BotReport) bool {
+	if status != RunPartial || !w.HasReadOnlyEmployeeResult() || w.AgentWork.Disposition != AgentWorkPartial || !botEmployeeLimitationsPresent(w.Unresolved) || !reflect.DeepEqual(report.Unverified, w.Unresolved) || report.Summary != w.Candidate.Text || report.ReviewLimitation != nil {
+		return false
+	}
+	strict := report
+	strict.Unverified = nil
+	return BotReportIsReadOnlyResult(strict)
 }
 
 func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
@@ -249,7 +273,7 @@ func ValidateBotWorkCompletion(w *BotWorkState, q BotRunCommit) error {
 		if err := w.Validate(); err != nil {
 			return err
 		}
-		if w.Candidate != nil && w.Candidate.ReadOnlyResult && (!w.HasReadOnlyEmployeeResult() || !BotReportIsReadOnlyResult(q.Report)) {
+		if w.Candidate != nil && w.Candidate.ReadOnlyResult && (!w.HasReadOnlyEmployeeResult() || (!BotReportIsReadOnlyResult(q.Report) && !w.HasUsefulPartialReadOnlyEmployeeResult(q.Status, q.Report)) || (w.AgentWork.Disposition == AgentWorkPartial && !w.HasUsefulPartialReadOnlyEmployeeResult(q.Status, q.Report))) {
 			return ErrBotInvalid
 		}
 		if w.EmployeeReviewPolicy == BotEmployeeReviewEvidenceBoundV1 && (q.Status == RunSucceeded || len(q.Report.Artifacts) != 0 || w.Candidate != nil && q.Report.Summary == w.Candidate.Text || q.Report.EmployeeMessage != nil && q.Report.EmployeeMessage.Origin == BotEmployeeMessageAgent) && !w.HasAcceptedEmployeeReview() && !w.HasReadOnlyEmployeeResult() && !(w.AgentWork != nil && w.AgentWork.Disposition == AgentWorkPartial && q.Status == RunPartial) {

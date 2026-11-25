@@ -38,7 +38,7 @@ func (b *K8sBackend) validateBotHome(h *sandbox.BotHomeBinding) error {
 	if b.cfg.HomesPVCName == "" {
 		return sandbox.ErrBotHomeUnsupported
 	}
-	if h.Backend != sandbox.BackendKindK8s || h.Ref != b.botHomeRef(h.Scope) {
+	if h.Backend != sandbox.BackendKindK8s || !b.validBotHomeReference(h) {
 		return fmt.Errorf("sandbox/k8s: invalid or conflicting bot home reference")
 	}
 	return nil
@@ -102,15 +102,15 @@ func (b *K8sBackend) applyBotHome(pod *corev1.Pod, h *sandbox.BotHomeBinding) {
 	pod.Annotations[annotationBotHome] = string(raw)
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: volumeBotHome, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.cfg.HomesPVCName}}})
 	c := &pod.Spec.Containers[0]
-	c.Env = append(c.Env, corev1.EnvVar{Name: "ASTONISH_BOT_HOME", Value: "1"}, corev1.EnvVar{Name: "HOME", Value: "/root"})
-	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: volumeBotHome, MountPath: mountBotHome, SubPath: h.Scope.Key() + "/data"})
+	c.Env = append(c.Env, corev1.EnvVar{Name: "ASTONISH_BOT_HOME", Value: "1"}, corev1.EnvVar{Name: "HOME", Value: "/root"}, corev1.EnvVar{Name: "ASTONISH_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}})
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: volumeBotHome, MountPath: mountBotHome, SubPath: botHomeStorageSubPath(h) + "/data"}, corev1.VolumeMount{Name: volumeBotHome, MountPath: mountBotHomeScope, SubPath: botHomeStorageSubPath(h)})
 	pod.Spec.AutomountServiceAccountToken = botHomeBool(false)
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 		Name: "bot-home-init", Image: b.cfg.SandboxImage, ImagePullPolicy: imagePullPolicy(b.cfg.SandboxImage),
 		Command:         []string{"/bin/sh", "-c", botHomeInitScript},
-		Env:             []corev1.EnvVar{{Name: "EXPECTED_OWNER", Value: h.Ref}},
+		Env:             []corev1.EnvVar{{Name: "EXPECTED_OWNER", Value: botHomeStorageOwner(h)}},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: int64Ptr(0)},
-		VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: h.Scope.Key()}},
+		VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: botHomeStorageSubPath(h)}},
 	})
 }
 
@@ -144,8 +144,8 @@ if [ -f .owner ]; then
   [ -d data ] || exit 1
 else
   mkdir .initializing
-  for item in .[^.]* ..?* *; do
-    case "$item" in .initializing|data|'.[^.]*'|'..?*'|'*') continue ;; esac
+  for item in .[!.]* ..?* *; do
+    case "$item" in .initializing|data|'.[!.]*'|'..?*'|'*') continue ;; esac
     echo "unowned bot home metadata" >&2; exit 1
   done
   mkdir -p data
@@ -216,6 +216,7 @@ func (b *K8sBackend) validatePodBotHome(pod *corev1.Pod, h *sandbox.BotHomeBindi
 		return fmt.Errorf("sandbox/k8s: existing pod bot home conflict")
 	}
 	volumes, mounts := 0, 0
+	seenMounts := make(map[string]bool)
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == volumeBotHome {
 			volumes++
@@ -228,13 +229,17 @@ func (b *K8sBackend) validatePodBotHome(pod *corev1.Pod, h *sandbox.BotHomeBindi
 		for _, m := range c.VolumeMounts {
 			if m.Name == volumeBotHome {
 				mounts++
-				if h == nil || c.Name != containerName || m.SubPath != h.Scope.Key()+"/data" || m.SubPathExpr != "" || m.MountPath != mountBotHome {
+				if seenMounts[m.MountPath] {
+					return fmt.Errorf("sandbox/k8s: duplicate retained mount")
+				}
+				seenMounts[m.MountPath] = true
+				if h == nil || c.Name != containerName || m.SubPathExpr != "" || m.ReadOnly || m.MountPropagation != nil || !((m.SubPath == botHomeStorageSubPath(h)+"/data" && m.MountPath == mountBotHome) || (m.SubPath == botHomeStorageSubPath(h) && m.MountPath == mountBotHomeScope)) {
 					return fmt.Errorf("sandbox/k8s: existing pod home mount conflict")
 				}
 			}
 		}
 	}
-	if h != nil && (volumes != 1 || mounts != 1) {
+	if h != nil && (volumes != 1 || mounts != 2) {
 		return fmt.Errorf("sandbox/k8s: existing pod missing retained home")
 	}
 	initMounts := 0
@@ -244,7 +249,7 @@ func (b *K8sBackend) validatePodBotHome(pod *corev1.Pod, h *sandbox.BotHomeBindi
 				continue
 			}
 			initMounts++
-			if h == nil || c.Name != "bot-home-init" || m.SubPath != h.Scope.Key() || m.SubPathExpr != "" || m.MountPath != mountBotHome {
+			if h == nil || c.Name != "bot-home-init" || m.SubPath != botHomeStorageSubPath(h) || m.SubPathExpr != "" || m.MountPath != mountBotHome {
 				return fmt.Errorf("sandbox/k8s: existing pod home initializer conflict")
 			}
 		}

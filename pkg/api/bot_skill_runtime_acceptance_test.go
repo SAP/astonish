@@ -137,6 +137,20 @@ func TestScriptedEmployeeReviewEvidence(t *testing.T) {
 	}
 }
 
+// assertCanonicalHTTPReport binds exactly one public text delivery to its run.
+// Repeated identities in projection metadata are not additional deliveries.
+func assertCanonicalHTTPReport(t *testing.T, body, invocationID, wantText string) {
+	t.Helper()
+	if got := canonicalHTTPReportCount(t, body, invocationID); got != 1 {
+		t.Fatalf("report %s delivered %d times, want exactly once", invocationID, got)
+	}
+	for _, event := range canonicalHTTPTextEvents(t, body) {
+		if event.InvocationID == invocationID && event.Text != wantText {
+			t.Fatalf("report %s text = %q, want %q", invocationID, event.Text, wantText)
+		}
+	}
+}
+
 // Controlled real HTTP/worker/factory test; no learning or orientation model.
 func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -160,7 +174,7 @@ func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 						var revision int64
 						for _, content := range req.Contents {
 							for _, p := range content.Parts {
-								if p.FunctionResponse != nil && p.FunctionResponse.Name == "bot_work_read" {
+								if p.FunctionResponse != nil && p.FunctionResponse.ID == "read-work" && (p.FunctionResponse.Name == "bot_work_read" || p.FunctionResponse.Name == "execute_tool") {
 									raw, _ := json.Marshal(p.FunctionResponse.Response)
 									var result struct {
 										Result struct {
@@ -204,9 +218,7 @@ func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 					t.Fatalf("fresh receipt reads=%d", f.pool.calls)
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-				if strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-					t.Fatal("answer publication missing or duplicated")
-				}
+				assertCanonicalHTTPReport(t, history, "bot-report:"+run.ID.String(), "The scoped receipt was read. A reusable method is proposed, not independently certified.")
 				// A second assignment explicitly chooses the draft and obtains fresh
 				// evidence. Prior capture IDs are not reusable evidence in this run.
 				selected := list.Skills[0]
@@ -424,9 +436,7 @@ func TestBotAgentLearningRejectionHTTPAcceptance(t *testing.T) {
 						t.Fatalf("rejection created a method: %+v %v", list, err)
 					}
 					history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-					if !strings.Contains(history, final) || strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-						t.Fatal("useful answer was not published exactly once")
-					}
+					assertCanonicalHTTPReport(t, history, "bot-report:"+run.ID.String(), final)
 				})
 			}
 		}
@@ -448,7 +458,11 @@ func TestBotAgentOptionalWorkSchemaHTTPAcceptance(t *testing.T) {
 						part = capabilityHTTPCall(mode, "malformed-optional", name, map[string]any{"unexpected": true})
 					} else {
 						raw, _ := json.Marshal(req.Contents)
-						if !strings.Contains(string(raw), `"status":"invalid_request"`) {
+						feedback := string(raw)
+						// The shared bridge rejects malformed arguments before the
+						// optional tool; direct tools retain invalid_request feedback.
+						bridgeRejected := strings.Contains(feedback, `"name":"execute_tool"`) && strings.Contains(feedback, `"error":"tool \"`+name+`\":`)
+						if !strings.Contains(feedback, `"status":"invalid_request"`) && !bridgeRejected {
 							t.Fatalf("missing recoverable schema feedback: %s", raw)
 						}
 						work := f.model.work()
@@ -463,9 +477,7 @@ func TestBotAgentOptionalWorkSchemaHTTPAcceptance(t *testing.T) {
 					t.Fatalf("optional schema error stopped work: %+v", run)
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-				if !strings.Contains(history, final) || strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-										t.Fatal("useful final missing or duplicated")
-				}
+				assertCanonicalHTTPReport(t, history, "bot-report:"+run.ID.String(), final)
 			})
 		}
 	}
@@ -579,7 +591,7 @@ func TestBotSkillRuntimeHTTPAcceptance(t *testing.T) {
 		for _, scenario := range []string{"format-recovery", "draft-before-tools", "reuse", "feedback", "greeting", "malformed", "sensitive-content", "revoked-orientation", "source-learning-reuse", "method-learning", "learning-rejected"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
 				toolName := "read_file"
-				args := map[string]any{"path": "/workspace/receipt.txt"}
+				args := map[string]any{"path": "receipt.txt"}
 				var retrievals atomic.Int32
 				if scenario == "source-learning-reuse" || scenario == "format-recovery" {
 					source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

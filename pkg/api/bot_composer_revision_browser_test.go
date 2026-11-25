@@ -79,7 +79,7 @@ func (p *composerRevisionProbe) serve(t *testing.T, w http.ResponseWriter, r *ht
 	_, _ = w.Write(recorded.Body.Bytes())
 	p.responses <- composerRevisionResponse{body.Version, recorded.Code}
 }
-func (p *composerRevisionProbe) check(t *testing.T, page *rod.Page, repo store.BotStore, ctx context.Context, initial store.Bot) {
+func (p *composerRevisionProbe) check(t *testing.T, page *rod.Page, repo store.BotStore, ctx context.Context, initial store.Bot, poll func() error) {
 	t.Helper()
 	receive := func() composerRevisionResponse {
 		select {
@@ -107,14 +107,20 @@ func (p *composerRevisionProbe) check(t *testing.T, page *rod.Page, repo store.B
 	if err != nil || len(runs) != 2 {
 		t.Fatalf("next message not durably admitted: %v %v", runs, err)
 	}
+	// The fixture has no polling daemon. Complete the admitted second turn before
+	// sending again; shared Chat deliberately disables send while a turn is queued.
+	if err := poll(); err != nil {
+		t.Fatal(err)
+	}
 	p.race.Store(true)
 	page.MustElement(`[data-testid="chat-input"]`).MustInput("Keep this concurrent instruction")
+	page.MustWait(`() => !document.querySelector('[data-testid="send-button"]').disabled`)
 	page.MustElement(`[data-testid="send-button"]`).MustClick()
 	conflict := receive()
 	if conflict.version != current.Version || conflict.status != http.StatusConflict {
 		t.Fatalf("concurrent conflict: %+v", conflict)
 	}
-	page.MustElementR(`[aria-label="Bot workspace"] [role="alert"]`, "Bot changed; reload and review before retrying").MustVisible()
+	page.MustElementR(`[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]`, "I need you to refresh and review the current saved action before trying again").MustVisible()
 	page.MustWait(`() => !document.querySelector('[data-testid="send-button"]').disabled`)
 	if page.MustEval(`() => document.querySelector('[data-testid="chat-input"]').value`).Str() != "Keep this concurrent instruction" {
 		t.Fatal("conflict erased draft")

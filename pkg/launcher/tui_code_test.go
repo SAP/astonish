@@ -516,11 +516,17 @@ func TestLocalPlanSystemContextUsesSnapshot(t *testing.T) {
 	s := agent.PlanSnapshot{Goal: "Accepted session plan", Steps: []agent.PlanStepInfo{{Name: "current-phase", Details: "Use the accepted definition"}}}
 	for _, completed := range []bool{false, true} {
 		text := localPlanSystemContext(s, "", completed)
-		if !strings.Contains(text, s.Goal) || !strings.Contains(text, s.Steps[0].Details) || !strings.Contains(text, "PLAN.md") {
-			t.Fatalf("missing authoritative content: %s", text)
+		if !strings.Contains(text, s.Goal) || !strings.Contains(text, "PLAN.md") {
+			t.Fatalf("missing authoritative identity/location: %s", text)
 		}
-		if strings.Contains(text, "NO LONGER in execution mode") != completed {
+		if strings.Contains(text, s.Steps[0].Details) == completed {
+			t.Fatalf("active instructions must exist only before completion: %s", text)
+		}
+		if strings.Contains(text, "Ordinary Normal mode is active") != completed {
 			t.Fatalf("incorrect completion context: %s", text)
+		}
+		if completed && text != agent.CompletedCodePlanReference(s, "PLAN.md") {
+			t.Fatalf("completion must use the shared historical-only reference: %s", text)
 		}
 		if !isLocalPlanSystemContext(text) || !isLocalPlanSystemContext(agent.EscapeCurlyPlaceholders(text)) {
 			t.Fatal("generated plan context not recognized")

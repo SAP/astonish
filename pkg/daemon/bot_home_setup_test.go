@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +35,18 @@ func (s *setupHomeBackend) EnsureBotHome(_ context.Context, scope sandbox.BotHom
 	return &sandbox.BotHomeBinding{Scope: scope, Backend: "controlled", Ref: "home-" + scope.BotID}, nil
 }
 
+type setupHomeFilesBackend struct {
+	setupHomeBackend
+	sandbox.BotHomeFilesBackend
+	lastBinding   sandbox.BotHomeBinding
+	documentsRoot string
+}
+
+func (s *setupHomeFilesBackend) ListBotHomeFiles(_ context.Context, h *sandbox.BotHomeBinding, _ string, _ string, _ int) (*store.BotFilePage, error) {
+	s.lastBinding = *h
+	return &store.BotFilePage{Entries: []store.BotFileEntry{{Path: "MEMORY.md", Kind: store.BotFileRegular}}}, nil
+}
+
 // Real HTTP routes and tenant middleware, SQLite and the daemon's installed
 // provisioner. Storage backend is controlled; this does not claim live Docker.
 func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
@@ -44,6 +57,9 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if info, err := os.Stat(filepath.Join(dir, "bot-content")); err != nil || !info.IsDir() {
+		t.Fatal("startup did not provision content storage", err)
+	}
 	org := &store.Organization{ID: uuid.NewString(), Slug: "home-setup", Name: "Home", Status: "active"}
 	if err = db.Organizations().Create(ctx, org); err != nil {
 		t.Fatal(err)
@@ -78,11 +94,56 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	backend := &setupHomeBackend{}
+	backend := &setupHomeFilesBackend{documentsRoot: t.TempDir()}
 	worker := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, WorkerID: "home-test"}}
+	svc.BotFilesFactory = worker.filesForRequest
 	svc.BotHomeSetup = worker.provisionHome
 	router := mux.NewRouter()
 	api.RegisterRoutes(router, svc, db, entstore.TenantMiddleware(db))
+	// Test-only endpoint exercises production factory cloning through actual
+	// tenant middleware. Public file routes are added in the delivery phase.
+	probe := entstore.TenantMiddleware(db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		services := store.FromRequest(r)
+		if services == nil || services.BotFilesFactory == nil {
+			http.Error(w, "files unavailable", 503)
+			return
+		}
+		files, e := services.BotFilesFactory(r.Context(), services, store.BotScope(r.URL.Query().Get("scope")))
+		if e != nil {
+			http.Error(w, "files unavailable", 503)
+			return
+		}
+		id, e := uuid.Parse(r.URL.Query().Get("bot"))
+		if e != nil {
+			http.Error(w, "invalid bot", 400)
+			return
+		}
+		if services.BotContentStagingFactory == nil {
+			http.Error(w, "staging factory lost", 503)
+			return
+		}
+		p, _ := execution.PrincipalFromContext(r.Context())
+		if p.Subject == owner {
+			staging, err := services.BotContentStagingFactory(r.Context(), store.BotContentScope{OrgID: org.Slug, TeamID: team.Slug, OwnerID: owner, BotID: id})
+			if err != nil {
+				http.Error(w, "staging unavailable", 503)
+				return
+			}
+			if err := staging.Close(); err != nil {
+				http.Error(w, "staging close", 503)
+				return
+			}
+		}
+		_, e = files.List(r.Context(), id, ".", "", 0)
+		if e != nil {
+			http.Error(w, "not authorized", 403)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	router.Handle("/test-retained-files", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probe.ServeHTTP(w, r.WithContext(store.WithServices(r.Context(), svc)))
+	}))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Test-Actor")
 		c := r.Context()
@@ -139,6 +200,13 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			if backend.calls != 0 {
 				t.Fatal("backend called before authorization")
 			}
+			savedSandbox := worker.config.Sandbox
+			worker.config.Sandbox = &setupHomeBackend{}
+			request("POST", path+suffix, owner, `{"expected_revision":1}`, 503)
+			worker.config.Sandbox = savedSandbox
+			if backend.calls != 0 {
+				t.Fatal("unsupported setup provisioned storage")
+			}
 			saved := svc.BotHomeSetup
 			svc.BotHomeSetup = nil
 			request("POST", path+suffix, owner, `{"expected_revision":1}`, 503)
@@ -151,6 +219,18 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			if provisioned.Status != store.BotDraft || provisioned.Revision != 2 || provisioned.Home.ID == uuid.Nil || provisioned.Version != b.Version {
 				t.Fatalf("unsafe setup: %+v", provisioned)
 			}
+			probeURL := "/test-retained-files?scope=" + scope + "&bot=" + b.ID.String()
+			beforeReads := backend.calls
+			request("GET", probeURL, owner, "", 204)
+			viewerStatus := 403
+			if scope == "team" {
+				viewerStatus = 204
+			}
+			request("GET", probeURL, reader, "", viewerStatus)
+			if backend.calls != beforeReads || backend.lastBinding.Scope.UserID != owner || backend.lastBinding.Ref != provisioned.Home.StorageKey {
+				t.Fatal("read provisioned or rebound storage")
+			}
+			request("GET", "/test-retained-files?scope="+other+"&bot="+b.ID.String(), owner, "", 403)
 			again := request("POST", path+suffix, owner, `{"expected_revision":1}`, 200)
 			if again.Home != provisioned.Home || again.Revision != 2 {
 				t.Fatal("retry mutated home")
@@ -299,7 +379,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					expired, e := proposals.ProposeControl(wctx, store.BotControlProposalRequest{Lease: lease, IdempotencyKey: "expires-before-confirm", ExpiresAt: time.Now().Add(50 * time.Millisecond), Payload: payload})
+					expired, e := proposals.ProposeControl(wctx, store.BotControlProposalRequest{Lease: lease, IdempotencyKey: "expires-before-confirm", ExpiresAt: time.Now().Add(time.Second), Payload: payload})
 					if e != nil {
 						t.Fatal(e)
 					}

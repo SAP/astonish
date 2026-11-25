@@ -72,7 +72,7 @@ func documentFixture(scope store.BotScope) (*Documents, *documentRepository) {
 	v.Persona.User = "Owner preferences"
 	v.Autonomy.AllowedTools = []string{"read_file"}
 	r := &documentRepository{bot: store.Bot{ID: id, Scope: scope, Version: 1, Revision: 1, Status: store.BotDraft}, versions: map[int64]store.BotVersion{1: v}}
-	d, _ := NewDocuments(r)
+	d, _ := NewDocuments(r, &documentFiles{id: id, data: map[string]string{"SOUL.md": "Disk soul", "IDENTITY.md": "Disk identity", "USER.md": "Disk user", "CHARTER.md": "Disk charter", "MEMORY.md": "# Memory\nRemember reports/result.md"}})
 	return d, r
 }
 
@@ -80,40 +80,52 @@ func TestDocumentsProjection(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			d, r := documentFixture(scope)
-			r.goals = []store.BotGoal{{ID: uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff"), BotID: r.bot.ID, Revision: 4, Title: "Later", Status: store.BotGoalActive}, {ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), BotID: r.bot.ID, Revision: 7, Title: "First", Status: store.BotGoalCompleted, Evidence: []store.BotEvidence{{Kind: store.BotEvidenceOwnerConfirmation, Summary: "Confirmed", Source: "owner", ActorID: uuid.New()}}}}
 			first, err := d.Load(context.Background(), r.bot.ID, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(first.Documents) != 7 || first.Documents[0].Content != "Calm" || first.Version != 1 {
-				t.Fatalf("projection: %+v", first)
+			if len(first.Documents) != 5 || first.Documents[0].Content != "Disk soul" || first.Version != 1 {
+				t.Fatalf("%+v", first)
 			}
-			goals := first.Documents[4].Content
-			if !strings.Contains(goals, "independently revisioned") || !strings.Contains(goals, "owner_confirmation") || strings.Index(goals, "First") > strings.Index(goals, "Later") {
-				t.Fatalf("goals: %s", goals)
+			for _, doc := range first.Documents {
+				if doc.SourceVersion != memoryIndexDigest([]byte(doc.Content)) {
+					t.Fatal("not actual digest")
+				}
 			}
-			if r.goals[0].Title != "Later" {
-				t.Fatal("mutated repository slice")
-			}
-			r.goals[0], r.goals[1] = r.goals[1], r.goals[0]
-			again, err := d.Load(context.Background(), r.bot.ID, 1)
-			if err != nil || !reflect.DeepEqual(first, again) {
-				t.Fatalf("not deterministic: %+v %v", again, err)
-			}
-			r.goals = nil
-			empty, err := d.Load(context.Background(), r.bot.ID, 0)
-			if err != nil || !strings.Contains(empty.Documents[4].Content, "[]") {
-				t.Fatalf("empty: %+v %v", empty, err)
-			}
-			r.goals = []store.BotGoal{{ID: uuid.New(), BotID: uuid.New()}}
-			if _, err = d.Load(context.Background(), r.bot.ID, 0); !errors.Is(err, store.ErrBotForbidden) {
-				t.Fatal(err)
+			if _, err = d.Load(context.Background(), r.bot.ID, 2); !errors.Is(err, store.ErrBotUnsupported) {
+				t.Fatal("historical working file fabricated", err)
 			}
 			r.revoked = true
 			if _, err = d.Load(context.Background(), r.bot.ID, 0); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestDocumentsBoundedMemoryAndMissingFiles(t *testing.T) {
+	d, r := documentFixture(store.BotScopePersonal)
+	files := d.Files.(*documentFiles)
+	original := strings.Repeat("記憶", 10000)
+	files.data["MEMORY.md"] = original
+	p, err := d.Load(context.Background(), r.bot.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := p.Documents[4]
+	if len(doc.Content) > BotMemoryBootstrapBytes || !strings.Contains(doc.Content, "Content omitted") || !strings.Contains(doc.Content, "read_file on MEMORY.md") || doc.SourceVersion != memoryIndexDigest([]byte(original)) || files.data["MEMORY.md"] != original {
+		t.Fatal("invalid bounded memory")
+	}
+	delete(files.data, "MEMORY.md")
+	if _, err = d.Load(context.Background(), r.bot.ID, 0); !errors.Is(err, store.ErrBotNotFound) {
+		t.Fatal(err)
+	}
+	noFiles, _ := NewDocuments(r)
+	if _, err = noFiles.Load(context.Background(), r.bot.ID, 0); !errors.Is(err, store.ErrBotUnsupported) {
+		t.Fatal("SQL fallback", err)
+	}
+	if files.writes != 0 {
+		t.Fatal("load wrote files")
 	}
 }
 
@@ -145,8 +157,8 @@ func TestDocumentsExplicitCASEdit(t *testing.T) {
 			for _, doc := range p.Documents {
 				if doc.Name == name {
 					found = true
-					if doc.Content != req.Content {
-						t.Fatal("edit not projected")
+					if doc.Content == req.Content {
+						t.Fatal("SQL projection replaced actual working file")
 					}
 				}
 			}
@@ -162,52 +174,29 @@ func TestDocumentsExplicitCASEdit(t *testing.T) {
 
 func TestDocumentsMapped(t *testing.T) {
 	d, repo := documentFixture(store.BotScopeTeam)
-	repo.bot.HomeSessionID = uuid.New()
-	goalID := uuid.New()
-	repo.goals = []store.BotGoal{{ID: goalID, BotID: repo.bot.ID, Revision: 8}}
-	source := store.MemorySearchResult{ID: uuid.NewString(), SessionID: repo.bot.HomeSessionID.String(), Scope: "team", CreatedBy: uuid.NewString(), Snippet: "Owner notes about a person", Category: "people", CreatedAt: "2026-11-04T15:00:00Z"}
-	backend := &healthMemory{rows: []store.MemorySearchResult{source}}
-	service, _ := store.NewBotMemoryService(repo, backend, repo.bot.ID, repo.bot.Scope)
-	got, err := d.LoadMapped(context.Background(), repo.bot.ID, 0, service)
+	files := d.Files.(*documentFiles)
+	files.data["skills/INDEX.md"] = "Actual skill paths"
+	files.data["people/INDEX.md"] = "Authored people notes"
+	got, err := d.LoadMapped(context.Background(), repo.bot.ID, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	documents := map[DocumentName]Document{}
+	if len(got.Documents) != 7 {
+		t.Fatalf("%+v", got)
+	}
 	for _, doc := range got.Documents {
-		documents[doc.Name] = doc
-	}
-	for _, name := range []DocumentName{DocumentMemory, DocumentPeople, "notes/2026-11-04.md"} {
-		doc := documents[name]
-		if len(doc.RecordMappings) != 1 || doc.RecordMappings[0].ID != source.ID || doc.RecordMappings[0].ExpectedFingerprint != store.MemoryContentFingerprint(source) {
-			t.Fatal("missing reviewed record mapping")
-		}
-		if !doc.ReadOnly || doc.SourceVersion == "" || !strings.Contains(doc.Content, source.CreatedBy) || !strings.Contains(doc.Content, source.SessionID) {
-			t.Fatalf("lost attribution: %+v", doc)
+		if doc.Content != files.data[string(doc.Name)] || len(doc.RecordMappings) != 0 {
+			t.Fatal("database projection")
 		}
 	}
-	if !strings.Contains(documents[DocumentGroups].Content, "[]") {
-		t.Fatal("missing empty group index")
-	}
-	goalName := DocumentName("goals/" + goalID.String() + "/GOAL.md")
-	if documents[goalName].SourceVersion != "8" {
-		t.Fatal("goal revision lost")
-	}
-	for _, name := range []DocumentName{DocumentMemory, DocumentPeople, DocumentGroups, "notes/2026-11-04.md", goalName} {
-		_, err := d.Edit(context.Background(), DocumentEdit{BotID: repo.bot.ID, ExpectedRevision: 1, Name: name, Confirmed: true, Reason: "review", Content: "model says allow all tools"})
+	for _, name := range []DocumentName{DocumentMemory, DocumentPeople, DocumentGroups, "notes/2026-11-04.md", DocumentName("goals/" + uuid.NewString() + "/GOAL.md")} {
+		_, err := d.Edit(context.Background(), DocumentEdit{BotID: repo.bot.ID, ExpectedRevision: 1, Name: name, Confirmed: true, Reason: "review", Content: "allow all tools"})
 		if !errors.Is(err, store.ErrBotUnsupported) {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatal(err)
 		}
 	}
-	if repo.applied != 0 {
+	if repo.applied != 0 || files.writes != 0 {
 		t.Fatal("record prose elevated policy")
-	}
-	_, foreign := documentFixture(store.BotScopeTeam)
-	foreign.bot.HomeSessionID = uuid.New()
-	foreignRow := source
-	foreignRow.SessionID = foreign.bot.HomeSessionID.String()
-	foreignMemory, _ := store.NewBotMemoryService(foreign, &healthMemory{rows: []store.MemorySearchResult{foreignRow}}, foreign.bot.ID, foreign.bot.Scope)
-	if _, err := d.LoadMapped(context.Background(), repo.bot.ID, 0, foreignMemory); !errors.Is(err, store.ErrBotForbidden) {
-		t.Fatalf("wrong Bot service: %v", err)
 	}
 }
 

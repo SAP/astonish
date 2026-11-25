@@ -36,6 +36,29 @@ SAP client deployment-request timeout followed by successful discovery/generatio
 against a local HTTP fixture, not a live provider. This reproduces the observed
 Chat recovery pattern; it does not establish the historical Bot's exact failure.
 
+## Automatic capture through shared Chat dispatch
+
+Authorized shared `perplexity_web_search` observations capture an incomplete Task
+without a separate Bot research executable. Capture pins the actual installed
+shared search object, rejects dynamic MCP identities, compares the current scoped
+route fingerprint with the construction snapshot, and requires a matching query,
+provider/model, nonempty answer and public source URLs. Source-less, private,
+failed, denied or mismatched observations do not create Tasks. This certifies
+observed work, not factual correctness or execution authority.
+
+Shared built-in node `web_fetch` capture requires both a public requested URL and
+a public final URL, a successful integral HTTP status, and substantive returned
+content. Arbitrary same-named tools are excluded. Capture runs after authorized
+dispatch/settlement and does not consume the outcome ledger or charge an extra
+model/tool call. Existing file-write capture remains unchanged.
+
+`TestBotSharedTaskSearchCapture` covers eligibility exclusions;
+`TestChatRuntimeConfiguredSearchProviderParity` exercises actual shared search
+in Chat, interactive Bot and autonomous Bot with once-only auxiliary model
+accounting. The physical schedule fixture uses a public logical source URL mapped
+by its owned transport to a local HTTP server; production capture still rejects
+loopback source URLs.
+
 ## Status and scope
 
 This document defines the shared Task contracts and DDL foundation, not completed
@@ -87,16 +110,18 @@ missing context or migrate that Task.
 The current executable assignment lives in the Bot's retained physical Home at
 `tasks/<task-id>/TASK.md`, with declared helper files in the same bundle. The scoped
 `bot_tasks` registry keeps identity, title, lifecycle and committed head, not a
-second editable definition. `bot_task_revisions.data` holds immutable recovery
-snapshots of parsed manifest plus exact complete bytes. Consumers must load from
-Home and compare against the committed revision/digest before running. A missing
-or mismatching file fails closed; a database snapshot is not an alternate live
-instruction source. Explicit recovery materializes files before a new execution.
+second editable definition. `bot_task_revisions.data` holds a typed publication
+record whose candidate references immutable disk content containing the parsed
+manifest and exact complete bundle bytes. It does not duplicate that body in SQL.
+Consumers must load executable Home files and compare against the committed
+revision/digest before running. Missing or mismatching bytes fail closed; neither
+SQL metadata nor an unselected disk object is an alternate live instruction source.
+Explicit recovery must materialize verified files before a new execution.
 
 `BotTaskManifest` separates assignment, owner requirements, assumptions, raw JSON
 parameters, research mode, optional Goal/Skill refs, output rules and assets. Raw
-parameters preserve numbers above 2^53. The immutable database JSON must use the
-existing precision-protecting envelope rather than map-to-float64 conversion.
+parameters preserve numbers above 2^53. Disk serialization and hydration preserve
+that precision rather than converting raw parameters through float64 SQL maps.
 `BotTaskRevision.ContentDigest` includes identity, parent, parsed content and exact
 bundle bytes, excluding its own digest and server archival timestamp. The snapshot
 is validated against every declared asset; undeclared files and truncated bytes
@@ -273,6 +298,19 @@ require separately collected backend evidence. No host fallback or dependency in
 
 ## Restore safeguards and snapshot boundary
 
+**Current format gate:** public Bot archive export/restore rejects legacy inline
+Bot content and reference-only SQL archives until the file-first archive protocol
+is implemented. The snapshot/recovery design and older acceptance descriptions
+below are historical foundation evidence, not a currently supported new-format
+backup journey. No automatic conversion or deletion is performed.
+
+Retained selection now includes Task publications and their named nested candidate
+references along with all other supported Bot-owned disk record categories. It
+preserves bundle digests, validates copied bytes and commits all reference changes
+atomically; it does not delete staging. Generic Bot memory SQL removal, compact
+file-backed MEMORY.md and complete archive/cleanup integration remain pending.
+See [retained content selection](bot-retained-content-selection.md).
+
 Logical restore validates Task registry identities, status/head digests and the
 immutable publication envelope against its indexed columns. Revisions must refer
 to an existing same-Bot Task; Tasks must refer to an existing Bot. Pending Prepared
@@ -286,15 +324,16 @@ The shared confined helper supports a trusted `SnapshotBotHomeWorkspace` request
 with path `workspace`: it inventories the entire backend-private tree under the
 same exclusive lock held across scripts and state publication. It includes state,
 outputs, immutable revisions, heads and receipts, excluding only the lock inode;
-its bounded snapshot fails on overflow rather than truncating. Logical archive
-export now includes checked `bot-workspace-v1` entries when supplied the exact
-server-derived Home resolver and workspace backend. The export barrier fences
-writers across registry and physical snapshot capture; a missing capability fails
-closed rather than silently exporting only revision bundles. Explicit offline
-recovery verifies scope, bindings and snapshot digests, requires a newly registered
-non-active target Home, and does not restore execution authority. Physical Docker
-and disposable PostgreSQL acceptance exercise complete file/state export and
-restore; they do not certify semantic retrieval or real-provider answer quality.
+its bounded snapshot fails on overflow rather than truncating. The pre-cutover
+logical archive implementation included checked `bot-workspace-v1` entries when
+supplied the exact server-derived Home resolver and workspace backend. Its export
+barrier fenced writers across registry and physical snapshot capture; a missing
+capability failed closed rather than silently exporting only revision bundles.
+The explicit offline recovery protocol verifies scope, bindings and snapshot
+digests, requires a newly registered non-active target Home, and does not restore
+execution authority. Historical physical Docker and disposable PostgreSQL checks
+exercised that workspace format, not recovery of the new disk-content reference
+closure; they do not certify semantic retrieval or real-provider answer quality.
 
 ## Migration and verification boundaries
 

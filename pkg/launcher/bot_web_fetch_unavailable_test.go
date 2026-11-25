@@ -223,6 +223,12 @@ func (m *sourceRedactionModel) GenerateContent(_ context.Context, q *model.LLMRe
 			if len(m.saved.state.AgentWork.SourceAccess) != m.calls-1 {
 				m.t.Fatalf("source not bound before next provider request: %+v", m.saved.state.AgentWork)
 			}
+			for i, fact := range m.saved.state.AgentWork.SourceAccess {
+				callID := []string{"blocked", "alternate"}[i]
+				if fact.CallID != callID || fact.EvidenceRef != "capture:"+callID || fact.BodyDigest == "" {
+					m.t.Fatalf("source lost concrete invocation evidence before provider request %d: %+v", m.calls, fact)
+				}
+			}
 			for _, content := range q.Contents {
 				for _, p := range content.Parts {
 					if p.FunctionResponse == nil {
@@ -247,7 +253,7 @@ func (m *sourceRedactionModel) GenerateContent(_ context.Context, q *model.LLMRe
 			} else {
 				args["method"] = "GET"
 			}
-			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: path, Name: m.tool, Args: args}}}}
+			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: path, Name: "execute_tool", Args: map[string]any{"name": m.tool, "arguments": args}}}}}
 		}
 		yield(&model.LLMResponse{Content: content, TurnComplete: true}, nil)
 	}
@@ -305,7 +311,7 @@ func TestBotSourceRedactionThroughBothFactories(t *testing.T) {
 						}
 					}
 					f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-						return &BotChatSafeResources{Tools: selected, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+						return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, Tools: selected, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 					}
 				}
 				factory, err := NewBotChatAgentFactory(f.cfg)

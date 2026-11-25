@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
+	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -20,6 +24,7 @@ func TestBotProgressRecoveryHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			runtimeBefore := databaseRuntimeFileSnapshot(t, f.dataDir)
 			*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
 			}
@@ -44,7 +49,7 @@ func TestBotProgressRecoveryHTTP(t *testing.T) {
 						drain <- f.worker.Drain(ctx)
 					}()
 					time.Sleep(50 * time.Millisecond)
-					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "durable-read", Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}}}, true
+					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "durable-read", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 				}
 				// A fresh factory must restore the old tool response, not run it again.
 				raw, _ := json.Marshal(req.Contents)
@@ -97,8 +102,92 @@ func TestBotProgressRecoveryHTTP(t *testing.T) {
 				t.Fatalf("recovery restarted assignment or invoked review: before=%s/%s after=%s/%s models=%d", before.Run.ID, before.Run.SessionID, after.ID, after.SessionID, calls)
 			}
 			history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-			if strings.Count(history, "bot-report:"+after.ID.String()) != 1 {
-				t.Fatalf("final not exactly once: %s", history)
+			assertProgressReportText(t, history, "bot-report:"+after.ID.String(), "The saved receipt confirms isolated receipt.")
+			if again := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200)); again != history {
+				t.Fatal("recovery reload changed durable event identities/order")
+			}
+			if calls != 2 || f.pool.calls != 1 {
+				t.Fatal("reading restored conversation executed work")
+			}
+			if runtimeAfter := databaseRuntimeFileSnapshot(t, f.dataDir); !reflect.DeepEqual(runtimeBefore, runtimeAfter) {
+				t.Fatal("checkpoint recovery wrote runtime files")
+			}
+		})
+	}
+}
+
+// Run the existing shared delegate manager against Bot-linked SQL sessions, then
+// read a bounded history without invoking either model or tool dispatch again.
+func TestBotDatabaseDelegateStateReplayHTTP(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			defer f.worker.Stop()
+			before := databaseRuntimeFileSnapshot(t, f.dataDir)
+			org, err := f.db.ForOrg("interactive")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ss := org.ForUser(f.b.OwnerID.String()).Sessions()
+			if scope == store.BotScopeTeam {
+				ss = org.ForTeam("team").Sessions()
+			}
+			const initial = "U.S. markets and major indexes"
+			calls := 0
+			mdl := &employeeConfiguredSearchFixture{run: func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				calls++
+				return &model.LLMResponse{Content: genai.NewContentFromText("Delegate checked major indexes.", "model")}, nil
+			}}
+			manager := agent.NewSubAgentManager(agent.SubAgentConfig{TaskTimeout: 10 * time.Second, DelegationTimeout: 15 * time.Second})
+			manager.LLM, manager.SessionService, manager.AppName, manager.UserID = mdl, ss, "astonish", f.b.OwnerID.String()
+			childID := uuid.NewString()
+			results := manager.RunTasks(f.ctx, []agent.SubAgentTask{{Name: "index-reader", Description: "Check major indexes", Instructions: "Return the index check", ParentID: f.b.HomeSessionID.String(), ChildSessionID: childID, SessionState: map[string]any{"market_selection": initial}}})
+			if len(results) != 1 || results[0].Status != "success" || calls != 1 {
+				t.Fatalf("delegate=%+v calls=%d", results, calls)
+			}
+			children, err := ss.ListChildren(f.ctx, f.b.HomeSessionID.String())
+			if err != nil || len(children) != 1 || children[0].ID != childID || children[0].BotID != f.b.ID.String() {
+				t.Fatalf("parent linkage=%+v err=%v", children, err)
+			}
+			compactor := persistentsession.NewCompactor(1024)
+			compactor.PreserveRecent = 1
+			compactor.LLM = func(context.Context, string) (string, error) { return "Earlier index observations summarized.", nil }
+			compacted, err := compactor.CompactContents(f.ctx, []*genai.Content{genai.NewContentFromText(initial, "user"), genai.NewContentFromText("Earlier observations", "model"), genai.NewContentFromText("Keep this latest result", "user")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, content := range compacted {
+				event := &session.Event{ID: fmt.Sprintf("shared-compaction-%d", i), Author: "model", LLMResponse: model.LLMResponse{Content: content}, Actions: session.EventActions{StateDelta: map[string]any{"compaction_seen": true}}}
+				if err = ss.AppendFleetEvent(f.ctx, childID, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			get := func() *session.GetResponse {
+				r, e := ss.Get(f.ctx, &session.GetRequest{AppName: "astonish", UserID: f.b.OwnerID.String(), SessionID: childID, NumRecentEvents: 1})
+				if e != nil {
+					t.Fatal(e)
+				}
+				return r
+			}
+			for range 2 {
+				r := get()
+				if value, err := r.Session.State().Get("market_selection"); err != nil || value != initial {
+					t.Fatalf("bounded reload lost initial state: %v %v", value, err)
+				}
+				if value, err := r.Session.State().Get("compaction_seen"); err != nil || value != true {
+					t.Fatalf("state delta replay: %v %v", value, err)
+				}
+			}
+			events, err := ss.ReadTranscriptEvents(f.ctx, "astonish", f.b.OwnerID.String(), childID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(events)
+			if !strings.Contains(string(raw), "Context Summary") || !strings.Contains(string(raw), initial) || calls != 1 {
+				t.Fatalf("compaction/reload lost anchor or executed delegate: %s calls=%d", raw, calls)
+			}
+			if after := databaseRuntimeFileSnapshot(t, f.dataDir); !reflect.DeepEqual(before, after) {
+				t.Fatal("delegate/state replay wrote runtime files")
 			}
 		})
 	}

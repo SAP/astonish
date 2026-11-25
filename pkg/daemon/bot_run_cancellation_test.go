@@ -25,9 +25,11 @@ func (b *cancellationReceiptBackend) VerifySessionDestroyed(_ context.Context, i
 
 type cancellationReceiptStore struct {
 	store.BotStore
-	run       store.BotRun
-	bot       store.Bot
-	confirmed bool
+	run         store.BotRun
+	bot         store.Bot
+	confirmed   bool
+	confirmErr  error
+	confirmCall int
 }
 
 func (s *cancellationReceiptStore) GetRun(context.Context, store.BotID, store.RunID) (*store.BotRun, error) {
@@ -37,6 +39,10 @@ func (s *cancellationReceiptStore) Get(context.Context, store.BotID) (*store.Bot
 	return &s.bot, nil
 }
 func (s *cancellationReceiptStore) ConfirmCleanup(ctx context.Context, q store.BotCleanupRequest) error {
+	s.confirmCall++
+	if s.confirmErr != nil {
+		return s.confirmErr
+	}
 	p, ok := execution.PrincipalFromContext(ctx)
 	if !ok || p.Kind != execution.PrincipalKindService || !p.HasScope(store.BotCleanupScope) {
 		return store.ErrBotForbidden
@@ -75,6 +81,15 @@ func TestBotWorkerCancellationRequiresPhysicalReceipt(t *testing.T) {
 	if physical.session != repo.run.SessionID.String() {
 		t.Fatal("wrong physical run")
 	}
+	// A newer Bot fence makes the historical receipt non-writable, but direct
+	// proof that this exact old session is destroyed must not block new work.
+	repo.confirmed = false
+	repo.confirmErr = store.ErrBotConflict
+	physical.session = ""
+	if err = worker.confirmCancelledRun(ctx, repo, id, rid); err != nil || repo.confirmed || physical.session != repo.run.SessionID.String() {
+		t.Fatalf("historical confirmed teardown blocked admission: %v", err)
+	}
+	repo.confirmErr = nil
 	repo.confirmed = false
 	physical.session = ""
 	worker.config.WorkerID = "another-worker"

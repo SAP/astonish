@@ -24,12 +24,21 @@ func TestBotCatalogueGuardedDispatchFamilies(t *testing.T) {
 	for _, name := range []string{"shell_command", "browser_navigate", "run_flow", "mcp_controlled_read", "native_controlled"} {
 		t.Run(name, func(t *testing.T) {
 			f := newBotFactoryFixture(t)
-			policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{name}})
+			if name == "run_flow" {
+				f.services.PersonalFlows = &productionFlowStore{yaml: "description: controlled\nnodes:\n  - name: read\n    type: tool\n    tools_selection: [read_file]\n    args:\n      path: /isolated/receipt.txt\nflow:\n  - from: START\n    to: read\n  - from: read\n    to: END\n"}
+			}
+			allowed := []string{name}
+			if name == "run_flow" {
+				allowed = append(allowed, "read_file")
+			}
+			policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: allowed})
 			if err != nil {
 				t.Fatal(err)
 			}
 			f.req.Policy = policy
 			effects := 0
+			client := &sourceAccessCatalogueClient{response: json.RawMessage(`{"exit_code":0,"stdout":"controlled","content":"controlled"}`)}
+			count := func() int { return effects + client.calls }
 			target, err := functiontool.New(functiontool.Config{Name: name, Description: "Controlled scoped adapter"}, func(ctx tool.Context, args map[string]any) (map[string]any, error) {
 				effects++
 				if store.UserIDFromContext(ctx) != f.req.Principal.Subject {
@@ -40,8 +49,19 @@ func TestBotCatalogueGuardedDispatchFamilies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{Tools: []tool.Tool{target}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+			prepare := f.cfg.Prepare
+			f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
+				safe, err := prepare(ctx, req, scope)
+				if err != nil {
+					return nil, err
+				}
+				safe.Catalog.Groups = map[string]*agent.ToolGroup{}
+				if name == "shell_command" || name == "run_flow" {
+					safe.Catalog.Pool = &sharedBotDispatchPool{client: client}
+				} else {
+					safe.Catalog.Groups["controlled"] = &agent.ToolGroup{Name: "controlled", Tools: []tool.Tool{target}}
+				}
+				return safe, nil
 			}
 			r, err := f.construct(t)
 			if err != nil {
@@ -50,7 +70,7 @@ func TestBotCatalogueGuardedDispatchFamilies(t *testing.T) {
 			defer r.Cleanup()
 			ctx := execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, policy.Identity()), policy)
 			ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}})
-			tc := botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}
+			tc := basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}}
 			var execute tool.Tool
 			for _, candidate := range r.Agent.Tools {
 				if candidate.Name() == "execute_tool" {
@@ -60,20 +80,27 @@ func TestBotCatalogueGuardedDispatchFamilies(t *testing.T) {
 			if execute == nil {
 				t.Fatal("ordinary Chat discovery bridge missing")
 			}
+			args := map[string]any{}
+			if name == "shell_command" {
+				args["command"] = "printf controlled"
+			}
+			if name == "run_flow" {
+				args["flow_name"] = "controlled"
+			}
 			if _, err := execute.(interface {
 				Run(tool.Context, any) (map[string]any, error)
-			}).Run(tc, map[string]any{"name": name, "arguments": map[string]any{}}); err != nil {
+			}).Run(tc, map[string]any{"name": name, "arguments": args}); err != nil {
 				t.Fatal(err)
 			}
-			if effects != 1 {
+			if count() != 1 {
 				t.Fatal("adapter not executed")
 			}
 			// Live revocation is re-read, even when the original tool remains indexed.
 			f.req.Bot.Status = store.BotPaused
 			_, err = execute.(interface {
 				Run(tool.Context, any) (map[string]any, error)
-			}).Run(tc, map[string]any{"name": name, "arguments": map[string]any{}})
-			if err == nil || effects != 1 {
+			}).Run(tc, map[string]any{"name": name, "arguments": args})
+			if err == nil || count() != 1 {
 				t.Fatal("revoked adapter dispatched")
 			}
 		})

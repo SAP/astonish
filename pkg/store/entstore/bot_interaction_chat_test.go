@@ -226,14 +226,15 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 		router.HandleFunc("/api/studio/bots/{botID}/approvals", api.BotApprovalsHandler).Methods(http.MethodGet)
 		router.HandleFunc("/api/studio/bots/{botID}/approvals/{approvalID}/decision", api.BotApprovalDecisionHandler).Methods(http.MethodPost)
 		router.HandleFunc("/api/studio/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods(http.MethodPost)
+		router.HandleFunc("/api/studio/bots/{botID}/sessions/{sessionID}/history", api.BotHistoryStreamHandler).Methods(http.MethodGet)
 		router.HandleFunc("/api/studio/bots/{botID}/runs/{runID}/resume", api.BotResumeRunHandler).Methods(http.MethodPost)
 		requestCtx, err := execution.WithPrincipal(ctx, principal)
 		if err != nil {
 			t.Fatal(err)
 		}
-		services := &store.Services{PersonalBots: scoped}
+		services := &store.Services{PersonalBots: scoped, PersonalSessions: ss}
 		if scope == store.BotScopeTeam {
-			services = &store.Services{Bots: scoped}
+			services = &store.Services{Bots: scoped, Sessions: ss}
 		}
 		requestCtx = store.WithServices(requestCtx, services)
 		requestCtx = store.WithTenantContext(requestCtx, &store.TenantContext{UserID: principal.Subject, OrgSlug: principal.OrgSlug, TeamSlug: principal.TeamSlug})
@@ -295,7 +296,36 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	if _, err := scoped.DecideApproval(ctx, decision); err == nil {
 		t.Fatal("unknown choice accepted")
 	}
+	assertAnswerEcho := func() {
+		t.Helper()
+		b, err := scoped.Get(ctx, botID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sid := range []uuid.UUID{saved.SessionID, b.HomeSessionID} {
+			rows, err := ss.(store.BotTranscriptReader).ReadBotTranscript(ctx, sid, 0, 200)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for _, row := range rows {
+				if row.Event.ID == "bot-owner-answer:"+a.ID.String() {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("accepted answer must be durable before worker startup: session=%s echoes=%d", sid, count)
+			}
+			for reconnect := 0; reconnect < 2; reconnect++ {
+				data := httpCall(p, http.MethodGet, base+"/sessions/"+sid.String()+"/history", nil, http.StatusOK)
+				if bytes.Count(data, []byte(`"text":"Safe"`)) != 1 || bytes.Contains(data, []byte("bot_owner_answer")) {
+					t.Fatalf("history/reconnect must project one public answer: %s", data)
+				}
+			}
+		}
+	}
 	httpCall(p, http.MethodPost, decisionPath, decisionBody, decisionStatus)
+	assertAnswerEcho()
 	// Identical retries are idempotent; changing an accepted answer is not.
 	httpCall(p, http.MethodPost, decisionPath, decisionBody, decisionStatus)
 	decision.Response = &store.BotInteractionResponse{QuestionID: a.Interaction.QuestionID, Answer: "other"}
@@ -327,6 +357,7 @@ func testBotQuestionSQLiteReopenChatRunner(t *testing.T, scope store.BotScope, c
 	}
 	assertContinuationProtocolReport(t, result.Report, protocol, questionReceiptText)
 	scoped, ss = reopen()
+	assertAnswerEcho()
 	saved, err = scoped.GetRun(ctx, botID, runID)
 	if err != nil || saved.Status != result.Status || saved.Report.Summary != result.Report.Summary {
 		t.Fatalf("final report did not survive reopen: %+v err=%v", saved, err)

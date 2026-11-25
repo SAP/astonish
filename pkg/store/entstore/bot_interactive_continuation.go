@@ -87,6 +87,17 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			return err
 		}
 		run := &saved.Run
+		if q.ApprovedPlanExecution || q.PlanExecution != nil {
+			if !q.ApprovedPlanExecution || q.PlanExecution == nil || q.PlanExecution.RunID != run.ID || q.PlanExecution.SessionID != run.SessionID.String() || q.PlanExecution.Validate() != nil || q.PlanMode != nil && *q.PlanMode || q.Response != nil || q.Kind != "" {
+				return store.ErrBotInvalid
+			}
+			if rec.Bot.Revision != q.ExpectedRevision || rec.Bot.Version != run.Version || rec.ActiveRunID != nil || run.Status != store.RunWaitingApproval || !interactiveStatus(*run, rec.Bot.Status) {
+				return store.ErrBotConflict
+			}
+		}
+		if q.PlanMode != nil && !run.IsInteractiveChat() {
+			return store.ErrBotForbidden
+		}
 		progressContinuation := q.Kind == store.BotContinuationProgress
 		mandatedProgress := progressContinuation && run.MandateRef != nil
 		if !mandatedProgress && (!run.IsInteractiveChat() || run.CallerCeiling == nil || admission == nil) {
@@ -135,6 +146,23 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			if e != nil {
 				return e
 			}
+			if approval.Interaction != nil && approval.Interaction.Kind == store.BotInteractionPlanDefinition {
+				definition, err := approval.Interaction.PlanDefinition()
+				if err != nil || !q.ApprovedPlanExecution || q.PlanExecution == nil || definition != *q.PlanExecution {
+					return store.ErrBotConflict
+				}
+				events, err := preparedPlanEvents(ctx, tx, *run)
+				if err != nil {
+					return err
+				}
+				base, err := preparedPlanBase(events)
+				if err != nil || base.PlanID != definition.PlanID || base.Revision != definition.Revision || base.Sequence != definition.Sequence {
+					return store.ErrBotConflict
+				}
+				q.Response = &store.BotInteractionResponse{QuestionID: definition.PlanID, Answer: store.BotPlanDefinitionApprove}
+			} else if q.ApprovedPlanExecution {
+				return store.ErrBotConflict
+			}
 			if !c.Matches(*approval) || approval.Interaction == nil || approval.Status != store.ApprovalPending || !r.clock().Before(approval.ExpiresAt) || approval.Interaction.ValidateResponse(q.Response) != nil {
 				return store.ErrBotConflict
 			}
@@ -151,10 +179,10 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			}
 		} else {
 			id := execution.BotRunIdentity{BotID: run.BotID, RunID: run.ID, Version: run.Version, ActorID: actor.String(), OrgSlug: r.auth.orgSlug, TeamSlug: run.CallerCeiling.Principal.TeamSlug}
-			// A paused progress assignment may still have live, bounded caller
-			// authority. Reuse it without extending expiry; only expired/lost authority
-			// goes through fresh authenticated registration and ceiling intersection.
-			if !progressContinuation || r.interactiveAnswerAuthority(ctx, *run) != nil {
+			// Progress and definition-consent continuations may reuse live,
+			// bounded authority without extending expiry. Ordinary queue recovery
+			// still requires lost authority before fresh registration.
+			if (!progressContinuation && !q.ApprovedPlanExecution) || r.interactiveAnswerAuthority(ctx, *run) != nil {
 				auth, err := admission.RegisterContinuation(ctx, id, *run.CallerCeiling)
 				if err != nil {
 					return store.ErrBotForbidden
@@ -166,6 +194,12 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 				ceiling := auth.CallerCeiling()
 				run.CallerCeiling = &ceiling
 			}
+		}
+		if q.ApprovedPlanExecution {
+			saved.PlanMode = false
+		}
+		if q.PlanMode != nil {
+			saved.PlanMode = *q.PlanMode
 		}
 		run.ContinuationReason = ""
 		if saved.ContinuationRequests == nil {
@@ -213,7 +247,7 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			if err := tx.AdvanceSequence(ctx, q.BotID, rec.LastSequence); err != nil {
 				return err
 			}
-			data, err := botJSONMap(*saved)
+			data, err := encodeBotRunData(ctx, tx, *saved)
 			if err != nil {
 				return err
 			}

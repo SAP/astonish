@@ -197,6 +197,12 @@ func (r *botRepository) CheckpointProgress(ctx context.Context, q store.BotProgr
 		}
 		s.Run.Usage = cp.Usage
 		s.Progress = next
+		now := r.clock()
+		payload, _ := json.Marshal(map[string]any{"run_id": s.Run.ID, "progress_revision": cp.Revision})
+		activity := store.BotActivity{BotID: s.Run.BotID, RunID: &s.Run.ID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: now}
+		if next.Phase != store.BotProgressSuspended {
+			s.Run.StateSequence, s.Run.StateCommittedAt = activity.Sequence, now
+		}
 		if next.Phase == store.BotProgressSuspended {
 			if err := suspendProgressQuota(ctx, tx, rec, s); err != nil {
 				return err
@@ -213,8 +219,12 @@ func (r *botRepository) CheckpointProgress(ctx context.Context, q store.BotProgr
 				return err
 			}
 		}
-		payload, _ := json.Marshal(map[string]any{"run_id": s.Run.ID, "progress_revision": cp.Revision})
-		if err := insertBotRunStateActivity(ctx, tx, store.BotActivity{BotID: s.Run.BotID, RunID: &s.Run.ID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: r.clock()}, fmt.Sprintf("progress-checkpoint:%s:%d", s.Run.ID, cp.Revision)); err != nil {
+		key := fmt.Sprintf("progress-checkpoint:%s:%d", s.Run.ID, cp.Revision)
+		if next.Phase == store.BotProgressSuspended {
+			if err := insertBotRunStateActivity(ctx, tx, activity, key); err != nil {
+				return err
+			}
+		} else if err := insertSavedBotRunStateActivity(ctx, tx, rec.Bot, s.Run, activity, key); err != nil {
 			return err
 		}
 		result = next.Clone()

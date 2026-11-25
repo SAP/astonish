@@ -43,6 +43,12 @@ func TestBotAgentSkillCommitRequiresProposalEvidence(t *testing.T) {
 			if err != nil || saved.Report.Skill == nil || saved.Report.Skill.Kind != store.BotSkillRejected {
 				t.Fatalf("missing explicit method rejection: %+v %v", saved, err)
 			}
+			if saved.Report.EmployeeMessage == nil || saved.Report.EmployeeMessage.Origin != store.BotEmployeeMessageAgent || saved.Report.EmployeeMessage.Text != report.Summary {
+				t.Fatalf("learning receipt replaced validated final: %+v", saved.Report.EmployeeMessage)
+			}
+			if saved.Report.Work.WorkRevision != w.Revision+1 || saved.Report.ValidateEmployeeMessageIntegrity(saved.Status) != nil {
+				t.Fatal("learning receipt left stale report binding")
+			}
 			head, err := r.GetSkill(owner, run.BotID, v.SkillID)
 			if err != nil || head.HeadRevision != 1 || head.Status != store.BotSkillDraft {
 				t.Fatalf("unsupported method changed draft: %+v %v", head, err)

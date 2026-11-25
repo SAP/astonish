@@ -1,5 +1,17 @@
 # Paused writer recovery after daemon restart
 
+## Database process acceptance
+
+`TestBotProgressProcessRestartAcceptance` kills only its owned test subprocess
+and opens the same disposable SQL database in a replacement process. Settled reads
+and settled external HTTP writes retain their receipts and are not redispatched;
+an unsettled write waits for the production five-minute lease to expire and stays
+interrupted rather than being silently repeated or reported successful. The harness
+allows seven minutes per subprocess sequence so it cannot kill recovery before
+that real lease expires. This changes only test supervision, never runtime limits,
+lease duration, persisted timestamps or authority. Fresh owner authentication is
+required for the explicit continuation of a settled interactive checkpoint.
+
 ## Authenticated owner-message priority
 
 A newly admitted owner message transactionally quiesces only the current running

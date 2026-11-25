@@ -17,7 +17,6 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -31,8 +30,9 @@ func TestBotRecoveredScheduleCleanupHTTP(t *testing.T) {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
 				backend, owner := setupChannelResolverFixture(t, "recovery", "exact-team", "telegram", "linked")
 				ctx := t.Context()
+				homeBackend := testRetainedContentBackend(t, backend)
 				physical := &cancellationReceiptBackend{err: errors.New("exact old session still exists")}
-				worker := &BotWorker{config: BotWorkerConfig{Backend: backend, WorkerID: "replacement", Sandbox: physical}, runtime: admissionOnlyRuntime{}}
+				worker := &BotWorker{config: BotWorkerConfig{Backend: backend, WorkerID: "replacement", Sandbox: homeBackend, Pool: workerTestPool{}}, runtime: admissionOnlyRuntime{}}
 				auth, org, err := worker.authenticateOwner(ctx, BotSchedulerScope{"recovery", "exact-team", owner})
 				if err != nil {
 					t.Fatal(err)
@@ -51,14 +51,8 @@ func TestBotRecoveredScheduleCleanupHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 				backend.(store.BotActivationInstaller).SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-				registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "recovery", TeamSlug: "exact-team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := entstore.RegisterBotHomeBinding(registry, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-					t.Fatal(err)
-				}
-				b, err = repo.Get(auth, b.ID)
+				b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
+				worker.config.Sandbox = &regressionCancellationBackend{regressionHomeBackend: homeBackend, receipt: physical}
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -159,7 +153,7 @@ func TestBotRecoveredScheduleCleanupHTTP(t *testing.T) {
 					physical.err = nil
 					// A newly composed worker discovers the interrupted record; it does not
 					// execute or adopt the old run, and replays the durable receipt on retry.
-					worker = &BotWorker{config: BotWorkerConfig{Backend: backend, WorkerID: "replacement-2", Sandbox: physical}, runtime: admissionOnlyRuntime{}}
+					worker = &BotWorker{config: BotWorkerConfig{Backend: backend, WorkerID: "replacement-2", Sandbox: &regressionCancellationBackend{regressionHomeBackend: homeBackend, receipt: physical}}, runtime: admissionOnlyRuntime{}}
 					if err := worker.pollStore(auth, repo, nil); err != nil {
 						t.Fatal(err)
 					}

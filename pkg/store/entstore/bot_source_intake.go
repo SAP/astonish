@@ -200,7 +200,7 @@ func sourceIntakeTransaction(ctx context.Context, db botDraftDB, fn func(botDraf
 			return err
 		}
 		defer tx.Rollback()
-		if err := fn(personalBotDB{client: tx.Client()}); err != nil {
+		if err := fn(personalBotDB{client: tx.Client(), content: d.content}); err != nil {
 			return err
 		}
 		return personalBotError(tx.Commit())
@@ -210,7 +210,7 @@ func sourceIntakeTransaction(ctx context.Context, db botDraftDB, fn func(botDraf
 			return err
 		}
 		defer tx.Rollback()
-		if err := fn(teamBotDB{client: tx.Client()}); err != nil {
+		if err := fn(teamBotDB{client: tx.Client(), content: d.content, policyOuter: d.client}); err != nil {
 			return err
 		}
 		return teamBotError(tx.Commit())

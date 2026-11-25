@@ -300,7 +300,7 @@ func TestPlanRevisionCodePTYAcceptance(t *testing.T) {
 	send("/plan\r")
 	send("create revision plan\r")
 	wait("Plan Ready")
-	wait("Approve & implement")
+	wait("Approve and run")
 	wait("Request changes")
 	wait("Decline")
 	arm(1)
@@ -331,7 +331,7 @@ func TestPlanRevisionCodePTYAcceptance(t *testing.T) {
 		term.mu.Lock()
 		frame := term.screen.text()
 		term.mu.Unlock()
-		for _, forbidden := range []string{"Approve revision", "Reject revision", "Request changes", "Revision approval", "BEFORE:", "AFTER:", "Approve & implement"} {
+		for _, forbidden := range []string{"Approve revision", "Reject revision", "Request changes", "Revision approval", "BEFORE:", "AFTER:", "Approve and run"} {
 			if strings.Contains(frame, forbidden) {
 				t.Fatalf("unexpected current-screen review %q:\n%s", forbidden, frame)
 			}
@@ -370,13 +370,18 @@ func TestPlanRevisionCodePTYAcceptance(t *testing.T) {
 	waitScreen("PTY turn 4 ready")
 	assertNoReview()
 	// A new Plan-mode announcement replaces an already approved, resumed plan.
+	// Stop the autonomous model continuation at a real input boundary before
+	// changing modes; seeing an assistant final alone does not mean it is idle.
+	// This cancels the turn, not the approved plan being replaced.
+	send("\x1b")
+	waitScreen("Enter send")
 	previousID := s.PlanID
 	mu.Lock()
 	stage, issued, planningCall = 0, false, 0
 	mu.Unlock()
 	send("/plan\r")
 	send("replace the old plan with a new plan\r")
-	waitScreen("Approve & implement", "Request changes", "Decline")
+	waitScreen("Approve and run", "Request changes", "Decline")
 	s = state(func(s agent.PlanSnapshot) bool { return s.PlanID != "" && s.PlanID != previousID })
 	if s.Revision != 1 || s.Document.Lifecycle != "" || s.Document.Results != "" {
 		t.Fatalf("replacement is not fresh: %+v", s)

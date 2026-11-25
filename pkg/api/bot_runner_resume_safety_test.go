@@ -51,6 +51,9 @@ func TestBotResumeNoReplayAfterEffect(t *testing.T) {
 			if err == nil || result.Status != store.RunPartial || result.Failure == nil || !result.Failure.UncertainEffect || executed.Load() != 1 || s.consumed != 1 {
 				t.Fatalf("%+v %v executed=%d consumed=%d", result, err, executed.Load(), s.consumed)
 			}
+			if result.Report.EffectState != store.BotReportEffectsUncertain {
+				t.Fatalf("uncertain executed action lost typed report state: %q", result.Report.EffectState)
+			}
 			if err := result.Report.ValidateEmployeeMessageIntegrity(result.Status); err != nil {
 				t.Fatalf("final exact-action outcome has a stale employee envelope: %v", err)
 			}

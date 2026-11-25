@@ -92,7 +92,7 @@ func (m *agentWorkPromptModel) GenerateContent(_ context.Context, req *model.LLM
 		}
 		content := genai.NewContentFromText("A bounded answer from the supplied evidence.", "model")
 		if m.update && len(m.prompts) == 1 {
-			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "prompt-update", Name: botWorkUpdateTool, Args: map[string]any{"expected_revision": m.repo.state.Revision, "kind": string(bot.BotWorkReplaceNotes), "notes": "updated-private-note"}}}}}
+			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "prompt-update", Name: "execute_tool", Args: map[string]any{"name": botWorkUpdateTool, "arguments": map[string]any{"expected_revision": m.repo.state.Revision, "kind": string(bot.BotWorkReplaceNotes), "notes": "updated-private-note"}}}}}}
 		}
 		yield(&model.LLMResponse{Content: content, TurnComplete: true}, nil)
 	}

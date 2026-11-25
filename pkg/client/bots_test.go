@@ -59,6 +59,9 @@ func TestBotsResolveAmbiguity(t *testing.T) {
 }
 func TestBotsWatchReconnectCursorAndDetach(t *testing.T) {
 	sid, id := uuid.NewString(), uuid.NewString()
+	writeFrame := func(w http.ResponseWriter, cursor int, eventID, text string) {
+		fmt.Fprintf(w, "id: %s:%d\nevent: text\ndata: {\"text\":%q,\"_projection\":{\"event_id\":%q,\"session_id\":%q,\"cursor\":%q}}\n\n", sid, cursor, text, eventID, sid, fmt.Sprintf("%s:%d", sid, cursor))
+	}
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
@@ -67,13 +70,14 @@ func TestBotsWatchReconnectCursorAndDetach(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if n == 1 {
-			fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: %s\n\n", sid, strings.Repeat("x", 90000))
+			writeFrame(w, 1, "first", strings.Repeat("x", 90000))
 			return
 		}
 		if r.URL.Query().Get("after") != sid+":1" {
 			t.Error("cursor lost")
 		}
-		fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: duplicate\n\nid: %s:2\nevent: transcript\ndata: next\n\n", sid, sid)
+		writeFrame(w, 1, "first", "duplicate")
+		writeFrame(w, 2, "second", "next")
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	}))
@@ -84,15 +88,15 @@ func TestBotsWatchReconnectCursorAndDetach(t *testing.T) {
 	count := 0
 	err := b.Watch(ctx, id, sid, "", true, func(e SSEEvent) error {
 		count++
-		if count == 2 {
-			if e.Data != "next" {
-				t.Error("duplicate delivered")
+		if count == 3 {
+			if !strings.Contains(e.Data, `"text":"next"`) {
+				t.Error("next frame not delivered")
 			}
 			cancel()
 		}
 		return nil
 	})
-	if err != context.Canceled || count != 2 || calls.Load() != 2 {
+	if err != context.Canceled || count != 3 || calls.Load() != 2 {
 		t.Fatalf("%v count=%d calls=%d", err, count, calls.Load())
 	}
 	if err := b.Watch(context.Background(), id, sid, uuid.NewString()+":1", false, func(SSEEvent) error { return nil }); err == nil {

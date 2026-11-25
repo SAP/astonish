@@ -12,6 +12,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
@@ -29,6 +30,7 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 				f.req.Run.IdempotencyKey = "owner-followup"
 			}
 			authCalls, deploymentCalls, generationCalls := 0, 0, 0
+			var discoveryToken string
 			var timeoutNextDeployment atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -45,7 +47,7 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 						http.Error(w, "scoped-secret", http.StatusUnauthorized)
 						return
 					}
-					fmt.Fprint(w, `{"access_token":"fixture-token","expires_in":3600}`)
+					fmt.Fprintf(w, `{"access_token":"fixture-token-%d","expires_in":3600}`, authCalls)
 				case "/v2/lm/deployments":
 					deploymentCalls++
 					if timeoutNextDeployment.Swap(false) {
@@ -54,7 +56,8 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 						<-r.Context().Done()
 						return
 					}
-					if r.Header.Get("Authorization") != "Bearer fixture-token" || r.Header.Get("AI-Resource-Group") != "default" {
+					discoveryToken = fmt.Sprintf("Bearer fixture-token-%d", authCalls)
+					if r.Header.Get("Authorization") != discoveryToken || r.Header.Get("AI-Resource-Group") != "default" {
 						t.Error("wrong SAP deployment authority")
 					}
 					if turn == "deployment-failure" {
@@ -64,6 +67,9 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 					fmt.Fprint(w, `{"resources":[{"id":"search-deployment","status":"RUNNING","details":{"resources":{"backendDetails":{"model":{"name":"sonar-pro"}}}}}]}`)
 				case "/v2/inference/deployments/search-deployment/chat/completions":
 					generationCalls++
+					if r.Header.Get("Authorization") != discoveryToken || r.Header.Get("AI-Resource-Group") != "default" {
+						t.Error("inference did not reuse this provider's discovery authority")
+					}
 					var req map[string]any
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 						t.Error(err)
@@ -132,7 +138,7 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 				t.Fatal("detail allowed before search")
 			}
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{Research: episode, Tools: []tool.Tool{search}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{search}}}}, Research: episode, Tools: []tool.Tool{search}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			resources, err := f.construct(t)
 			if err != nil {
@@ -140,7 +146,11 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 			}
 			defer resources.Cleanup()
 			timeoutNextDeployment.Store(turn == "transient-deployment-timeout")
-			result, err := resources.Agent.Tools[0].(botRunnableTool).Run(tc, map[string]any{"facet": "overview"})
+			entry := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
+			if entry == nil {
+				t.Fatal("shared catalog missing configured search")
+			}
+			result, err := entry.Tool.(botRunnableTool).Run(tc, map[string]any{"facet": "overview"})
 			if failureReason != "" {
 				if err == nil || !strings.Contains(err.Error(), failureReason) {
 					t.Fatalf("Bot lost initialization diagnostic (Chat reports %q): %v", failureReason, err)
@@ -169,9 +179,11 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 					t.Fatalf("no source: %s", raw)
 				}
 			}
-			wantAuth, wantDeployment := 4, 2
+			// Each Chat/Bot provider authenticates once for discovery and reuses
+			// that token for inference; failed discovery creates a fresh provider.
+			wantAuth, wantDeployment := 2, 2
 			if turn == "transient-deployment-timeout" {
-				wantAuth, wantDeployment = 5, 3
+				wantAuth, wantDeployment = 3, 3
 			}
 			if authCalls != wantAuth || deploymentCalls != wantDeployment || generationCalls != 2 || runtime.calls != 1 {
 				t.Fatalf("SAP calls auth=%d deployment=%d generation=%d", authCalls, deploymentCalls, generationCalls)

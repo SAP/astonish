@@ -61,9 +61,36 @@ func TestBotReviewedPromotionHTTP(t *testing.T) {
 				t.Fatalf("source modified: %+v %+v", before, after)
 			}
 			bp := "/api/studio/bots/" + b.ID.String()
-			memories := string(f.request("GET", bp+"/memory"+suffix, nil, 200))
-			if !strings.Contains(memories, "Selected fact") || !strings.Contains(memories, "Reviewed summary only") {
-				t.Fatal(memories)
+			// Reviewed carryover is retained in file-backed lifecycle evidence,
+			// not copied into generic Chat memory or asserted as new Bot knowledge.
+			var activities struct {
+				Activity []store.BotActivity `json:"activity"`
+			}
+			if err := json.Unmarshal(f.request("GET", bp+"/activity"+suffix, nil, 200), &activities); err != nil {
+				t.Fatal(err)
+			}
+			carryovers := 0
+			for _, event := range activities.Activity {
+				if event.Kind != store.BotActivityLifecycle || event.Sequence != 1 {
+					continue
+				}
+				var payload struct {
+					SourceID  uuid.UUID          `json:"source_id"`
+					ActorID   uuid.UUID          `json:"actor_id"`
+					Carryover store.BotCarryover `json:"carryover"`
+				}
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				want := q.Carryover
+				want.Summary = "Reviewed summary only"
+				if payload.SourceID != sid || payload.ActorID.String() != f.owner || !reflect.DeepEqual(payload.Carryover, want) {
+					t.Fatalf("reviewed carryover changed: %+v", payload)
+				}
+				carryovers++
+			}
+			if carryovers != 1 {
+				t.Fatalf("got %d carryover records after replay", carryovers)
 			}
 			goals := string(f.request("GET", bp+"/goals"+suffix, nil, 200))
 			if !strings.Contains(goals, "Report changes") {

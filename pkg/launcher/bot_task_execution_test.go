@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"strings"
@@ -14,8 +15,6 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -141,7 +140,7 @@ func (m *retainedTaskExecutionModel) GenerateContent(_ context.Context, q *model
 					m.t.Errorf("production model input missing %q", required)
 				}
 			}
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "inventory-read", Name: "read_file", Args: map[string]any{}}}}}}, nil)
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "inventory-read", Name: "read_file", Args: map[string]any{"path": "inventory.txt"}}}}}}, nil)
 			return
 		}
 		seen := false
@@ -166,7 +165,7 @@ func TestBotRetainedTaskToolContractAndPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	binding := resources.Agent.LLM.(*botFactoryLLM).binding
+	binding := botFactoryModelForTest(t, resources.Agent.LLM).binding
 	tools, err := newBotTaskTools(binding)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +225,7 @@ func TestBotRetainedTaskGuidanceModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
-			binding := resources.Agent.LLM.(*botFactoryLLM).binding
+			binding := botFactoryModelForTest(t, resources.Agent.LLM).binding
 			binding.req.Interactive = interactive
 			text, err := binding.tasks.guidance(f.ctx)
 			if err != nil {
@@ -250,18 +249,17 @@ func TestBotRetainedTaskProductionFactoryExecution(t *testing.T) {
 	llm := &retainedTaskExecutionModel{t: t}
 	f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
 	reads := 0
-	read, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "Read controlled inventory"}, func(ctx tool.Context, _ map[string]any) (map[string]any, error) {
+	node := &remainingModeNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
 		reads++
-		bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true})
-		return map[string]any{"content": "Available: 17"}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+		if name != "read_file" || args["path"] != "inventory.txt" {
+			return nil, errors.New("unexpected inventory read")
+		}
+		return json.RawMessage(`{"content":"Available: 17"}`), nil
+	}}
 	prepare := f.cfg.Prepare
 	f.cfg.Prepare = func(c context.Context, r bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 		resources, err := prepare(c, r, s)
-		resources.Tools = []tool.Tool{read}
+		resources.Catalog.Pool = &remainingModePool{client: node}
 		return resources, err
 	}
 	factory, err := NewBotChatAgentFactory(f.cfg)

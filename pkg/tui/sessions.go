@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -135,7 +136,15 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessions = sessionsState{}
 			return m, nil
 		}
-		id := m.sessions.items[m.sessions.cursor].ID
+		item := m.sessions.items[m.sessions.cursor]
+		id := item.ID
+		if m.workspaceCap() != nil && item.WorkspaceID != "" && item.WorkspacePath != "" && filepath.Clean(item.WorkspacePath) != filepath.Clean(m.info.WorkingDir) {
+			next, _ := m.openWorkspacePicker(false)
+			n := next.(model)
+			n.sessions = sessionsState{}
+			n.workspacePicker.request = backend.WorkspaceLaunchRequest{Mode: backend.WorkspaceCurrent, WorkspaceID: item.WorkspaceID, WorkingDir: item.WorkspacePath, SessionID: id}
+			return n.dispatchWorkspace(workspaceLaunch)
+		}
 		m.sessions = sessionsState{loading: true, open: true}
 		return m, m.resumeSessionCmd(id)
 	case "d", "backspace", "delete":
@@ -155,6 +164,13 @@ func (m model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startNewSession() (tea.Model, tea.Cmd) {
+	if m.workspaceCap() != nil {
+		return m.openWorkspacePicker(false)
+	}
+	return m.startCurrentSession()
+}
+
+func (m model) startCurrentSession() (tea.Model, tea.Cmd) {
 	if m.botSelected() {
 		m.detachBotWatch()
 		m.botCap().DetachBot()
@@ -323,6 +339,12 @@ func (m model) renderSessionsOverlay() string {
 			id := s.ID
 			if len(id) > 8 {
 				id = id[:8]
+			}
+			if s.WorkspaceMode != "" {
+				id += " · " + string(s.WorkspaceMode)
+			}
+			if s.WorkspaceActive {
+				id += " · busy"
 			}
 			title := s.Title
 			if title == "" {

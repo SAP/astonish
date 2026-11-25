@@ -56,16 +56,16 @@ func newSpendFixture(t *testing.T, scope store.BotScope, runCap, monthCap int64)
 			if err = c.Schema.Create(ctx); err != nil {
 				t.Fatal(err)
 			}
-			f.repo.db = teamBotDB{client: c}
-			f.api = &teamBotStore{client: c, auth: auth}
+			f.repo.db = teamBotDB{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "spend-org", TeamID: "spend-team", OwnerID: owner.String()})}
+			f.api = &teamBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "spend-org", TeamID: "spend-team", OwnerID: owner.String()}), auth: auth}
 		} else {
 			c := personalent.NewClient(personalent.Driver(drv))
 			closeDB = c.Close
 			if err = c.Schema.Create(ctx); err != nil {
 				t.Fatal(err)
 			}
-			f.repo.db = personalBotDB{client: c}
-			f.api = &personalBotStore{client: c, auth: auth}
+			f.repo.db = personalBotDB{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "spend-org", TeamID: "spend-team", OwnerID: owner.String()})}
+			f.api = &personalBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "spend-org", TeamID: "spend-team", OwnerID: owner.String()}), auth: auth}
 		}
 	}
 	open()

@@ -23,7 +23,7 @@ type approvalIdentityToolContext struct {
 func (c approvalIdentityToolContext) FunctionCallID() string { return c.id }
 
 func TestBotApprovalIdentityEvidence(t *testing.T) {
-	for _, scenario := range []string{"exact", "other-id", "other-name", "different-args", "different-context-id", "failed-ledger", "spoof-only", "duplicate-response"} {
+	for _, scenario := range []string{"exact", "bridge-exact", "bridge-failed-ledger", "bridge-duplicate-response", "bridge-other-target", "bridge-different-args", "other-id", "other-name", "different-args", "different-context-id", "failed-ledger", "spoof-only", "duplicate-response"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, req, _ := botChatTestRequest(t)
 			ctx = execution.WithBotRunIdentity(ctx, req.Policy.Identity())
@@ -32,6 +32,19 @@ func TestBotApprovalIdentityEvidence(t *testing.T) {
 			action := execution.ActionDescriptor{Tool: "read_file", Effect: execution.EffectSend, Arguments: json.RawMessage(`{"phase":"approval"}`), ConstraintsVerified: true}
 			if scenario == "different-args" {
 				action.Arguments = json.RawMessage(`{"phase":"other"}`)
+			}
+			bridge := scenario == "bridge-exact" || scenario == "bridge-failed-ledger" || scenario == "bridge-duplicate-response" || scenario == "bridge-other-target" || scenario == "bridge-different-args"
+			if bridge {
+				name := "read_file"
+				phase := "approval"
+				if scenario == "bridge-other-target" {
+					name = "other_tool"
+				}
+				if scenario == "bridge-different-args" {
+					phase = "other"
+				}
+				capture.invocation.Name = "execute_tool"
+				capture.invocation.Args = map[string]any{"name": name, "arguments": map[string]any{"phase": phase}}
 			}
 			digest, _ := action.Digest()
 			requestCtx := approvalIdentityToolContext{Context: ctx, id: "blocked"}
@@ -46,24 +59,27 @@ func TestBotApprovalIdentityEvidence(t *testing.T) {
 			ctx = context.WithValue(ctx, botApprovalCaptureKey{}, capture)
 			cr := &ChatRunner{ctx: ctx}
 			response := &genai.FunctionResponse{ID: "blocked", Name: "read_file", Response: map[string]any{"approval_required": true, "executed": false}}
+			if bridge {
+				response.Name = "execute_tool"
+			}
 			if scenario == "other-id" {
 				response.ID = "earlier"
 			}
 			if scenario == "other-name" {
 				response.Name = "other_tool"
 			}
-			if scenario == "failed-ledger" {
+			if scenario == "failed-ledger" || scenario == "bridge-failed-ledger" {
 				bot.RecordToolOutcome(ctx, "blocked", bot.ToolOutcome{Verified: false, Unverified: []string{"genuine failed effect"}})
 			}
 			cr.observeBotToolOutcome("tool", response)
-			if scenario == "duplicate-response" {
+			if scenario == "duplicate-response" || scenario == "bridge-duplicate-response" {
 				cr.observeBotToolOutcome("tool", response)
 			}
 			want := 1
-			if scenario == "exact" {
+			if scenario == "exact" || scenario == "bridge-exact" {
 				want = 0
 			}
-			if scenario == "failed-ledger" {
+			if scenario == "failed-ledger" || scenario == "bridge-failed-ledger" {
 				want = 2
 			}
 			if len(cr.completion.Report.Unverified) != want {

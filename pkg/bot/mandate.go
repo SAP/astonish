@@ -70,6 +70,19 @@ func (b *MandateBudget) CheckInFlight(ctx context.Context) error {
 	return b.SharedRunBudget.CheckInFlight(ctx)
 }
 
+// BeginModelPreflight owns only synchronous budget validation and reservation.
+// The provider must close it before generation or yielding even an error.
+func (b *MandateBudget) BeginModelPreflight(ctx context.Context) (context.Context, func()) {
+	if b.Mandate != nil {
+		if scopes, ok := b.Mandate.Runtime.(interface {
+			BeginModelPreflight(context.Context) (context.Context, func())
+		}); ok {
+			return scopes.BeginModelPreflight(ctx)
+		}
+	}
+	return ctx, func() {}
+}
+
 func (b *MandateBudget) Check(ctx context.Context) error {
 	if err := b.Mandate.Check(ctx); err != nil {
 		return err

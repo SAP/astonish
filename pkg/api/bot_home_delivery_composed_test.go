@@ -37,6 +37,8 @@ import (
 type composedHomeModel struct {
 	t                       *testing.T
 	schedule, emitted       bool
+	describeEmitted         bool
+	scheduleRef             string
 	review                  *json.RawMessage
 	declarations, questions *atomic.Int64
 }
@@ -57,39 +59,61 @@ func (m *composedHomeModel) GenerateContent(_ context.Context, req *model.LLMReq
 					m.t.Error("schedule model did not receive exact user instruction and preceding weather context")
 				}
 			}
-			found := false
+			advertised := make(map[string]bool)
 			for _, ts := range req.Config.Tools {
 				for _, d := range ts.FunctionDeclarations {
-					if d.Name == "schedule_job" {
-						found = true
-						raw, _ := json.Marshal(d)
-						text := string(raw)
-						if !strings.Contains(text, "home chat") || strings.Contains(text, "delivery_mode") || strings.Contains(text, "delivery_channels") || strings.Contains(text, "Do NOT assume owner") {
-							m.questions.Add(1)
-							m.t.Errorf("recipient questionnaire declaration leaked: %s", text)
-						}
-						m.declarations.Add(1)
-					}
+					advertised[d.Name] = true
 				}
 			}
-			if !m.emitted && !found {
-				m.t.Error("schedule_job declaration absent from actual interactive model request")
+			if !advertised["describe_tools"] || !advertised["execute_tool"] || advertised["schedule_job"] {
+				m.t.Errorf("expected shared progressive schedule catalog, got %v", advertised)
 			}
 			part.Text = "Review the disabled every-minute Boston weather schedule for this Home chat."
 			for _, c := range req.Contents {
 				for _, p := range c.Parts {
-					if p.FunctionResponse != nil && p.FunctionResponse.Name == "schedule_job" {
-						raw, _ := json.Marshal(p.FunctionResponse.Response)
+					if p.FunctionResponse == nil {
+						continue
+					}
+					raw, _ := json.Marshal(p.FunctionResponse.Response)
+					switch p.FunctionResponse.Name {
+					case "describe_tools":
+						if m.scheduleRef != "" {
+							continue
+						}
+						var described agent.DescribeToolsResult
+						if err := json.Unmarshal(raw, &described); err != nil {
+							m.t.Fatalf("decode deferred schedule schema: %v", err)
+						}
+						if len(described.Errors) != 0 || len(described.Tools) != 1 || described.Tools[0].Name != "schedule_job" {
+							m.t.Fatalf("schedule_job missing from describe_tools: %s", raw)
+						}
+						declaration, _ := json.Marshal(described.Tools[0])
+						text := string(declaration)
+						if !strings.Contains(text, "home chat") || strings.Contains(text, "delivery_mode") || strings.Contains(text, "delivery_channels") || strings.Contains(text, "Do NOT assume owner") {
+							m.questions.Add(1)
+							m.t.Errorf("recipient questionnaire declaration leaked: %s", text)
+						}
+						m.scheduleRef = described.Tools[0].Name
+						m.declarations.Add(1)
+					case "execute_tool":
 						*m.review = raw
 					}
 				}
 			}
 		}
-		if !m.emitted {
+		if m.schedule && !m.describeEmitted {
+			// Inspect the deferred schema through the same fixed bridge as Chat;
+			// discovery must not install a duplicate direct schedule declaration.
+			m.describeEmitted = true
+			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "describe_tools", Args: map[string]any{"names": []string{"schedule_job"}}}}
+		} else if !m.emitted {
 			m.emitted = true
-			name, args := "read_file", map[string]any{"path": "/isolated/boston-weather.json"}
+			name, args := "read_file", map[string]any{"path": "boston-weather.json"}
 			if m.schedule {
-				name, args = "schedule_job", map[string]any{"name": "Boston weather", "mode": "adaptive", "schedule": "* * * * *", "instructions": "Report current Boston weather in this Home chat."}
+				if m.scheduleRef == "" {
+					m.t.Fatal("schedule execution attempted without discovered schema")
+				}
+				name, args = "execute_tool", map[string]any{"name": m.scheduleRef, "arguments": map[string]any{"name": "Boston weather", "mode": "adaptive", "schedule": "* * * * *", "instructions": "Report current Boston weather in this Home chat."}}
 			}
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}
 		}
@@ -109,7 +133,7 @@ type composedWeatherPool struct {
 }
 
 func (p *composedWeatherPool) Call(_ string, name string, args map[string]interface{}) (json.RawMessage, error) {
-	if name != "read_file" || args["path"] != "/isolated/boston-weather.json" {
+	if name != "read_file" || args["path"] != "boston-weather.json" {
 		return nil, fmt.Errorf("unexpected controlled tool: %s %+v", name, args)
 	}
 	p.weather.Add(1)
@@ -239,9 +263,13 @@ func TestBotHomeDeliveryComposedHTTPAcceptance(t *testing.T) {
 	var declarations, questions, weather, external atomic.Int64
 	pool := &composedWeatherPool{weather: &weather}
 	scheduleMode := false
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 200, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+	files := newComposedHTTPFiles(t, dir, repo, b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
+		return pool.Call("", name, args)
+	})
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 200, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return &composedHomeModel{t: t, schedule: scheduleMode, review: &review, declarations: &declarations, questions: &questions}, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		files.install(c, q, s)
 		resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
 		if !q.Run.IsInteractiveChat() {
 			action, e := functiontool.New(functiontool.Config{Name: "read_file", Description: "Read controlled Boston weather observation"}, func(c tool.Context, args map[string]any) (map[string]any, error) {

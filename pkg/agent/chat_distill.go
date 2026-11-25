@@ -155,6 +155,7 @@ func (c *ChatAgent) reconstructTraces(ctx context.Context, ds DistillSession) []
 // confirmation. The result is cached internally for use by ConfirmAndDistill.
 func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (string, error) {
 	sessionID := ds.SessionID
+	generation := c.conversationGeneration(sessionID)
 
 	var sessionTraces []*ExecutionTrace
 
@@ -165,7 +166,7 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 		sessionTraces = reconstructTracesFromService(ctx, ss, ds, c.DebugMode)
 	} else {
 		// Personal mode — in-memory traces from this ChatAgent instance
-		c.traceMu.Lock()
+		c.conversationState().traceMu.Lock()
 		sessionTraces = c.traceHistory[sessionID]
 		c.traceMu.Unlock()
 
@@ -174,7 +175,9 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 		if len(sessionTraces) == 0 && c.SessionService != nil && ds.AppName != "" && ds.UserID != "" {
 			reconstructed := c.reconstructTraces(ctx, ds)
 			if len(reconstructed) > 0 {
-				c.traceMu.Lock()
+				if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+					return "", err
+				}
 				c.traceHistory[sessionID] = reconstructed
 				sessionTraces = reconstructed
 				c.traceMu.Unlock()
@@ -197,7 +200,9 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 	// If only one substantive trace, skip the LLM assessment
 	if len(substantive) == 1 {
 		desc := fmt.Sprintf("%s (%d tool calls)", substantive[0].UserRequest, substantive[0].ToolCallCount())
-		c.traceMu.Lock()
+		if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+			return "", err
+		}
 		c.pendingDistill[sessionID] = &distillPreview{
 			Description: desc,
 			Traces:      substantive,
@@ -211,7 +216,9 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 		// No LLM available for assessment, fall back to most recent substantive trace
 		last := substantive[len(substantive)-1]
 		desc := fmt.Sprintf("%s (%d tool calls)", last.UserRequest, last.ToolCallCount())
-		c.traceMu.Lock()
+		if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+			return "", err
+		}
 		c.pendingDistill[sessionID] = &distillPreview{
 			Description: desc,
 			Traces:      []*ExecutionTrace{last},
@@ -243,7 +250,9 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 		// Fall back to most recent substantive trace
 		last := substantive[len(substantive)-1]
 		desc := fmt.Sprintf("%s (%d tool calls)", last.UserRequest, last.ToolCallCount())
-		c.traceMu.Lock()
+		if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+			return "", err
+		}
 		c.pendingDistill[sessionID] = &distillPreview{
 			Description: desc,
 			Traces:      []*ExecutionTrace{last},
@@ -291,7 +300,9 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 		description = strings.Join(reqs, " → ")
 	}
 
-	c.traceMu.Lock()
+	if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+		return "", err
+	}
 	c.pendingDistill[sessionID] = &distillPreview{
 		Description: description,
 		Traces:      selected,
@@ -303,14 +314,14 @@ func (c *ChatAgent) PreviewDistill(ctx context.Context, ds DistillSession) (stri
 // HasPendingDistill returns true if there is a pending distill preview
 // for the given session, waiting for user confirmation.
 func (c *ChatAgent) HasPendingDistill(sessionID string) bool {
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	defer c.traceMu.Unlock()
 	return c.pendingDistill[sessionID] != nil
 }
 
 // CancelPendingDistill clears any pending distill preview for the given session.
 func (c *ChatAgent) CancelPendingDistill(sessionID string) {
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	delete(c.pendingDistill, sessionID)
 	c.traceMu.Unlock()
 }
@@ -320,7 +331,7 @@ func (c *ChatAgent) CancelPendingDistill(sessionID string) {
 func (c *ChatAgent) ConfirmAndDistill(ctx context.Context, ds DistillSession, print func(string)) error {
 	sessionID := ds.SessionID
 
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	preview := c.pendingDistill[sessionID]
 	delete(c.pendingDistill, sessionID) // clear regardless of outcome
 	c.traceMu.Unlock()
@@ -620,7 +631,7 @@ func (c *ChatAgent) extractInputParams(ctx context.Context, yamlStr string, trac
 	}
 
 	// Call LLM
-	response, err := c.FlowDistiller.LLM(context.Background(), prompt)
+	response, err := c.FlowDistiller.LLM(ctx, prompt)
 	if err != nil {
 		if c.DebugMode {
 			slog.Debug("llm param extraction failed", "component", "chat", "error", err)
@@ -689,8 +700,9 @@ func (c *ChatAgent) extractInputParams(ctx context.Context, yamlStr string, trac
 // render a preview. The user can then request modifications or save.
 func (c *ChatAgent) DistillToReview(ctx context.Context, ds DistillSession, print func(string)) (*DistillReview, error) {
 	sessionID := ds.SessionID
+	generation := c.conversationGeneration(sessionID)
 
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	preview := c.pendingDistill[sessionID]
 	delete(c.pendingDistill, sessionID)
 	c.traceMu.Unlock()
@@ -729,8 +741,10 @@ func (c *ChatAgent) DistillToReview(ctx context.Context, ds DistillSession, prin
 		Traces:      preview.Traces,
 	}
 
-	c.traceMu.Lock()
-	c.pendingDistillReview[sessionID] = review
+	if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+		return nil, err
+	}
+	c.pendingDistillReview[sessionID] = cloneDistillReview(review)
 	c.traceMu.Unlock()
 
 	return review, nil
@@ -739,21 +753,21 @@ func (c *ChatAgent) DistillToReview(ctx context.Context, ds DistillSession, prin
 // HasPendingDistillReview returns true if there is a pending distill review
 // for the given session, waiting for user modifications or save.
 func (c *ChatAgent) HasPendingDistillReview(sessionID string) bool {
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	defer c.traceMu.Unlock()
 	return c.pendingDistillReview[sessionID] != nil
 }
 
 // GetPendingDistillReview returns the current distill review for the session, or nil.
 func (c *ChatAgent) GetPendingDistillReview(sessionID string) *DistillReview {
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	defer c.traceMu.Unlock()
-	return c.pendingDistillReview[sessionID]
+	return cloneDistillReview(c.pendingDistillReview[sessionID])
 }
 
 // CancelDistillReview clears any pending distill review for the given session.
 func (c *ChatAgent) CancelDistillReview(sessionID string) {
-	c.traceMu.Lock()
+	c.conversationState().traceMu.Lock()
 	delete(c.pendingDistillReview, sessionID)
 	c.traceMu.Unlock()
 }
@@ -761,8 +775,9 @@ func (c *ChatAgent) CancelDistillReview(sessionID string) {
 // ModifyDistillReview modifies the pending distill review based on user feedback.
 // Returns the updated DistillReview with the new YAML and explanation.
 func (c *ChatAgent) ModifyDistillReview(ctx context.Context, sessionID string, changeRequest string) (*DistillReview, error) {
-	c.traceMu.Lock()
-	review := c.pendingDistillReview[sessionID]
+	generation := c.conversationGeneration(sessionID)
+	c.conversationState().traceMu.Lock()
+	review := cloneDistillReview(c.pendingDistillReview[sessionID])
 	c.traceMu.Unlock()
 
 	if review == nil {
@@ -795,14 +810,21 @@ func (c *ChatAgent) ModifyDistillReview(ctx context.Context, sessionID string, c
 		// Continue with best-effort result
 	}
 
-	// Update the review
-	c.traceMu.Lock()
+	// Update the review only while its conversation still exists.
+	if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+		return nil, err
+	}
+	if c.pendingDistillReview[sessionID] == nil {
+		c.traceMu.Unlock()
+		return nil, fmt.Errorf("distill review was cancelled")
+	}
 	review.YAML = result.YAML
 	review.FlowName = result.FlowName
 	review.Description = result.Description
 	review.Tags = result.Tags
 	review.Explanation = result.Explanation
 	review.Modifications = append(review.Modifications, changeRequest)
+	c.pendingDistillReview[sessionID] = cloneDistillReview(review)
 	c.traceMu.Unlock()
 
 	return review, nil
@@ -811,8 +833,8 @@ func (c *ChatAgent) ModifyDistillReview(ctx context.Context, sessionID string, c
 // SaveDistillReview saves the current distill review to disk and registers it.
 // Returns the file path and a suggested run command.
 func (c *ChatAgent) SaveDistillReview(ctx context.Context, sessionID string) (filePath string, runCmd string, err error) {
-	c.traceMu.Lock()
-	review := c.pendingDistillReview[sessionID]
+	c.conversationState().traceMu.Lock()
+	review := cloneDistillReview(c.pendingDistillReview[sessionID])
 	delete(c.pendingDistillReview, sessionID)
 	c.traceMu.Unlock()
 
@@ -992,12 +1014,16 @@ Respond with exactly one word: TEST, SAVE, CANCEL, or MODIFY`, msg)
 // It extracts input parameters from the original trace and passes them to the runner.
 // Returns the execution result and stores it on the DistillReview for self-improvement.
 func (c *ChatAgent) DryRunDistilledFlow(ctx context.Context, sessionID string) (*DryRunExecResult, error) {
+	generation := c.conversationGeneration(sessionID)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if c.FlowRunner == nil {
 		return nil, fmt.Errorf("flow runner is not configured — dry-run execution is unavailable")
 	}
 
-	c.traceMu.Lock()
-	review := c.pendingDistillReview[sessionID]
+	c.conversationState().traceMu.Lock()
+	review := cloneDistillReview(c.pendingDistillReview[sessionID])
 	c.traceMu.Unlock()
 
 	if review == nil {
@@ -1035,7 +1061,9 @@ func (c *ChatAgent) DryRunDistilledFlow(ctx context.Context, sessionID string) (
 	}
 
 	// Store result on the review for self-improvement context
-	c.traceMu.Lock()
+	if err := c.lockConversationGeneration(sessionID, generation); err != nil {
+		return nil, err
+	}
 	if r := c.pendingDistillReview[sessionID]; r != nil {
 		r.LastDryRunOutput = result.Output
 		r.LastDryRunError = result.Error
@@ -1052,8 +1080,8 @@ func (c *ChatAgent) EvaluateDryRunResult(ctx context.Context, sessionID string, 
 		return c.staticDryRunSummary(result)
 	}
 
-	c.traceMu.Lock()
-	review := c.pendingDistillReview[sessionID]
+	c.conversationState().traceMu.Lock()
+	review := cloneDistillReview(c.pendingDistillReview[sessionID])
 	c.traceMu.Unlock()
 
 	if review == nil {

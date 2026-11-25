@@ -13,8 +13,11 @@ import (
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
 	"io"
 	"net"
 	"net/http"
@@ -105,6 +108,24 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	approval, err := f.repo.RequestApproval(worker, lease, store.BotApproval{BotID: receipt.ID, RunID: run.ID, Version: run.Version, Action: action, ActionDigest: digest, Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "weather-task", Payload: payload}, ExpiresAt: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Persist the real ask_user source pair before owner acceptance, just as the
+	// runtime does. The saved approval/checkpoint alone cannot mint an answer.
+	var questionArgs map[string]any
+	if err := json.Unmarshal(payload, &questionArgs); err != nil {
+		t.Fatal(err)
+	}
+	questionResponse := map[string]any{"status": "ok"}
+	for key, value := range questionArgs {
+		questionResponse[key] = value
+	}
+	for _, event := range []*session.Event{
+		{ID: "weather-question-call", Author: "model", InvocationID: "weather-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "weather-question-call", Name: "ask_user", Args: questionArgs}}}}}},
+		{ID: "weather-question-response", Author: "user", InvocationID: "weather-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "weather-question-call", Name: "ask_user", Response: questionResponse}}}}}},
+	} {
+		if err := f.repo.(store.BotTranscriptStore).AppendBotRunEvent(worker, lease, run.SessionID, event); err != nil {
+			t.Fatal(err)
+		}
 	}
 	checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.InteractionCheckpointFormat, ApprovalID: approval.ID, BotID: receipt.ID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 	if err != nil {

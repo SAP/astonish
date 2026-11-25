@@ -20,7 +20,7 @@ func TestBotSynthesisStoppedReceiptExactInvocation(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			binding := got.Agent.LLM.(*botFactoryLLM).binding
+			binding := botFactoryModelForTest(t, got.Agent.LLM).binding
 			meter, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300}, time.Now())
 			if err != nil {
 				t.Fatal(err)
@@ -43,7 +43,7 @@ func TestBotSynthesisStoppedReceiptExactInvocation(t *testing.T) {
 				t.Fatalf("result=%v calls=%d err=%v", result, target.calls, err)
 			}
 			outcome, ok := bot.TakeToolOutcome(base, ctx.FunctionCallID())
-			if !ok || outcome.Nonexecution == nil || *outcome.Nonexecution != (bot.ToolNonexecutionReceipt{CallID: ctx.FunctionCallID(), ToolName: target.Name()}) {
+			if !ok || !outcome.NonexecutionFor(base, ctx.FunctionCallID(), target.Name(), map[string]any{}) || outcome.Nonexecution.Disposition != bot.ToolFeedbackTerminal {
 				t.Fatalf("missing exact nonexecution receipt: %+v", outcome)
 			}
 			if !outcome.Verified || len(outcome.Changed) != 0 || len(outcome.Unchanged) != 0 || outcome.ReceiptConflict {

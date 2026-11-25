@@ -34,17 +34,12 @@ func projectBotHomeNarrative(e *session.Event, homeID, sessionID uuid.UUID) *ses
 					projected.Actions = session.EventActions{}
 					return &projected
 				}
-			case "tool_call", "tool_result":
-				var tool struct {
-					Name string `json:"name"`
-				}
-				if json.Unmarshal(wire.Payload, &tool) == nil && tool.Name == "ask_user" {
-					return e
-				}
-				projected.Content = nil
-				projected.Actions = session.EventActions{}
-				return &projected
-			case "thinking", "subtask_progress":
+			case "tool_call", "tool_result", "subtask_progress":
+				// The shared presentation allowlist, not the execution mode, decides
+				// which activity is public. Preserve identity while stripping opaque
+				// checkpoint fields before both live and restored views.
+				return publicBotTranscript(e)
+			case "thinking":
 				projected.Content = nil
 				projected.Actions = session.EventActions{}
 				return &projected
@@ -55,7 +50,9 @@ func projectBotHomeNarrative(e *session.Event, homeID, sessionID uuid.UUID) *ses
 		content := *e.Content
 		content.Parts = nil
 		for _, p := range e.Content.Parts {
-			if p == nil || p.Thought || p.FunctionCall != nil && p.FunctionCall.Name != "ask_user" || p.FunctionResponse != nil && p.FunctionResponse.Name != "ask_user" {
+			// Ordinary ADK activity follows the same sanitized public projection
+			// as runtime-envelope activity; Home is not a text-only transcript.
+			if p == nil || p.Thought {
 				continue
 			}
 			content.Parts = append(content.Parts, p)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
@@ -81,6 +82,73 @@ func (v *sessionVault) credentialStore() store.CredentialStore {
 //	Response: {"id":"1","result":{"content":"..."}}\n
 //	Error:    {"id":"1","error":"file not found"}\n
 func handleNodeCommand(args []string) error {
+	if len(args) > 0 && args[0] == "--internal-home-admission" {
+		if len(args) != 2 || (sandbox.BotHomeAdmissionMode(args[1]) != sandbox.BotHomeAdmissionWait && sandbox.BotHomeAdmissionMode(args[1]) != sandbox.BotHomeAdmissionTry) {
+			return fmt.Errorf("invalid internal admission invocation")
+		}
+		return sandbox.RunBotHomeAdmission(sandbox.BotHomeAdmissionMode(args[1]), os.Stdin, os.Stdout)
+	}
+	if len(args) > 0 && (args[0] == "--internal-scoped-home-files" || args[0] == "--internal-scoped-home-workspace") {
+		// The transport supplies a scoped PVC mount on fd 9 and the expected
+		// owner. These arguments are not registered as model-callable tools.
+		if len(args) != 4 || (args[2] != "public" && args[2] != "private") || (args[3] != "read" && args[3] != "mutate") {
+			return fmt.Errorf("invalid internal scoped file invocation")
+		}
+		mount := os.NewFile(9, "retained-scope")
+		if mount == nil {
+			return fmt.Errorf("missing retained scope descriptor")
+		}
+		defer mount.Close()
+		needPrivate := args[2] == "private"
+		home, private, err := sandbox.OpenBotHomeFileRoots(mount, args[1], needPrivate, needPrivate && args[3] == "mutate")
+		if err != nil {
+			return fmt.Errorf("open retained file roots: %w", err)
+		}
+		defer home.Close()
+		if private != nil {
+			defer private.Close()
+		}
+		if args[0] == "--internal-scoped-home-workspace" {
+			return sandbox.RunBotHomeWorkspace(private, os.Stdin, os.Stdout)
+		}
+		return sandbox.RunBotHomeFiles(home, private, os.Stdin, os.Stdout)
+	}
+	if len(args) > 0 && args[0] == "--internal-scoped-home-archive" {
+		if len(args) != 3 || (args[2] != "export" && args[2] != "restore") {
+			return fmt.Errorf("invalid internal scoped archive invocation")
+		}
+		mount := os.NewFile(9, "retained-scope")
+		defer mount.Close()
+		home, private, err := sandbox.OpenBotHomeFileRoots(mount, args[1], true, args[2] == "restore")
+		if err != nil {
+			return fmt.Errorf("open retained archive roots: %w", err)
+		}
+		defer home.Close()
+		defer private.Close()
+		return sandbox.RunBotHomeArchive(home, private, os.Stdin, os.Stdout, false)
+	}
+	if len(args) > 0 && args[0] == "--internal-home-archive" {
+		if len(args) != 2 || args[1] != "admission-held" {
+			return fmt.Errorf("invalid internal archive invocation")
+		}
+		home, private := os.NewFile(9, "retained-home"), os.NewFile(8, "retained-private")
+		defer home.Close()
+		defer private.Close()
+		return sandbox.RunBotHomeArchive(home, private, os.Stdin, os.Stdout, true)
+	}
+	if len(args) > 0 && args[0] == "--internal-home-workspace" {
+		private := os.NewFile(8, "retained-private")
+		defer private.Close()
+		return sandbox.RunBotHomeWorkspace(private, os.Stdin, os.Stdout)
+	}
+	if len(args) > 0 && args[0] == "--internal-home-files" {
+		// Only the backend supplies these inherited root descriptors. No ready
+		// message or model dispatch is involved in the storage protocol.
+		home, private := os.NewFile(9, "retained-home"), os.NewFile(8, "retained-private")
+		defer home.Close()
+		defer private.Close()
+		return sandbox.RunBotHomeFiles(home, private, os.Stdin, os.Stdout)
+	}
 	ctx := context.Background()
 	vault := &sessionVault{}
 	encoder := json.NewEncoder(os.Stdout)

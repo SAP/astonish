@@ -18,6 +18,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,7 +42,7 @@ func (db *DockerBackend) CreateSession(ctx context.Context, spec sandbox.Session
 	return db.createSessionLocked(ctx, spec)
 }
 
-func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.SessionSpec) (*sandbox.Session, error) {
+func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.SessionSpec) (result *sandbox.Session, resultErr error) {
 	cname := containerName(spec.SessionID)
 	state, err := db.settledContainerState(ctx, cname)
 	if err != nil {
@@ -112,10 +113,23 @@ func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.S
 		}
 		meta = newDockerSessionMetadata(spec)
 	}
+	admission, err := db.lockBotHomeAdmission(ctx, spec.BotHome, true)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, releaseBotHomeAdmission(admission))
+		if resultErr != nil {
+			result = nil
+		}
+	}()
 	if err := db.validateBotHome(ctx, spec.BotHome); err != nil {
 		return nil, err
 	}
 	if spec.BotHome != nil {
+		if err := db.rejectHomeArchiveAttachment(ctx, spec.BotHome); err != nil {
+			return nil, err
+		}
 		if spec.UserID != "" && spec.UserID != spec.BotHome.Scope.UserID {
 			return nil, fmt.Errorf("sandbox/docker: bot home user mismatch")
 		}
@@ -164,7 +178,7 @@ func (db *DockerBackend) createSessionLocked(ctx context.Context, spec sandbox.S
 }
 
 // StartSession resumes the existing container, including a paused container.
-func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) error {
+func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) (resultErr error) {
 	unlock, err := db.lockSession(ctx, sessionID)
 	if err != nil {
 		return err
@@ -183,6 +197,28 @@ func (db *DockerBackend) StartSession(ctx context.Context, sessionID string) err
 		return nil
 	case sandbox.SessionStateGone:
 		return db.recreateFromPersistLocked(ctx, sessionID)
+	}
+	// Gone sessions acquire admission in createSessionLocked; never nest flock.
+	meta, err := db.readSessionMetadata(sessionID)
+	if err != nil {
+		return err
+	}
+	if meta != nil && meta.BotHome != nil {
+		admission, err := db.lockBotHomeAdmission(ctx, meta.BotHome, true)
+		if err != nil {
+			return err
+		}
+		defer func() { resultErr = errors.Join(resultErr, releaseBotHomeAdmission(admission)) }()
+		if err := db.rejectHomeArchiveAttachment(ctx, meta.BotHome); err != nil {
+			return err
+		}
+		if err := db.validateBotHomeContainer(ctx, sessionID, meta.BotHome); err != nil {
+			return err
+		}
+	} else if err := db.validateBotHomeContainer(ctx, sessionID, nil); err != nil {
+		// Missing recovery metadata must not turn a retained container into an
+		// ordinary start that bypasses the exact-Home admission protocol.
+		return err
 	}
 	raw, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{.State.Status}}", cname)
 	if err != nil {
@@ -550,6 +586,7 @@ func (db *DockerBackend) dockerRunArgs(spec sandbox.SessionSpec, cname, layerCha
 		args = append(args, eqFlag("--env", k+"="+v))
 	}
 	if spec.BotHome != nil {
+		args = append(args, eqFlag("--mount", "type=volume,source="+workspaceVolume(spec.BotHome)+",target="+botPrivateMount+",volume-nocopy"))
 		args = append(args, eqFlag("--label", botHomeScopeLabel+"="+spec.BotHome.Scope.Key()), eqFlag("--mount", "type=volume,source="+spec.BotHome.Ref+",target="+botHomeMount+",volume-nocopy"), eqFlag("--env", "HOME=/root"))
 	}
 	for k, v := range db.cfg.Labels {

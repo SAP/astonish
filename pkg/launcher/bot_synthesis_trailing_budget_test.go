@@ -66,7 +66,7 @@ func TestBotSynthesisTrailingBudgetFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer got.Cleanup()
-				llm := got.Agent.LLM.(*botFactoryLLM)
+				llm := botFactoryModelForTest(t, got.Agent.LLM)
 				llm.binding.synthesisReserve.final = true
 				var failure error
 				failures, published := 0, 0

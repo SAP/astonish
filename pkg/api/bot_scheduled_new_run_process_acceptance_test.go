@@ -46,6 +46,95 @@ type newRunProcessEvidence struct {
 	TriggerID     uuid.UUID
 }
 
+// The local scheduled fixture executes a genuine scheduler occurrence and shared
+// worker against SQL. It does not claim physical Docker teardown acceptance.
+func TestBotDatabaseScheduledOccurrenceHTTP(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			defer f.worker.Stop()
+			before := databaseRuntimeFileSnapshot(t, f.dataDir)
+			f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
+			if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"owned SQL scheduled acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
+				t.Fatal(err)
+			}
+			triggers := f.repo.(store.BotTriggerStore)
+			tid := uuid.New()
+			b, err := triggers.ChangeTrigger(f.ctx, store.BotTriggerChange{BotID: f.b.ID, TriggerID: tid, ExpectedRevision: f.b.Revision, Action: store.BotTriggerSave, Reason: "owned occurrence", Definition: store.TriggerSpec{Kind: store.TriggerCron, Instructions: "Report major indexes once.", Cron: "* * * * *", Timezone: "UTC"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = triggers.ChangeTrigger(f.ctx, store.BotTriggerChange{BotID: b.ID, TriggerID: tid, ExpectedRevision: b.Revision, Action: store.BotTriggerEnable, Reason: "owned occurrence"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			org, err := f.db.ForOrg("interactive")
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobs := org.ForUser(b.OwnerID.String()).ScheduledJobs()
+			if scope == store.BotScopeTeam {
+				jobs = org.ForTeam("team").ScheduledJobs()
+			}
+			listed := jobs.List(f.ctx)
+			if len(listed) != 1 {
+				t.Fatalf("scheduled jobs=%d", len(listed))
+			}
+			job := listed[0]
+			due := time.Now().Add(-3 * time.Minute).UTC()
+			job.NextRun = &due
+			if err = jobs.Update(f.ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			admitted := newRunTick(t, f.ctx, f.repo, job)
+			if admitted.Duplicate || admitted.Coalesced {
+				t.Fatal("first occurrence was not fresh")
+			}
+			duplicate := newRunTick(t, f.ctx, f.repo, job)
+			if !duplicate.Duplicate || duplicate.Run.ID != admitted.Run.ID {
+				t.Fatal("scheduled occurrence duplicate created another run")
+			}
+			calls := 0
+			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+				if seq, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
+					return w.Candidate != nil && w.Candidate.Text == "Observed scoped result."
+				}); ok {
+					for response, err := range seq {
+						if err != nil {
+							t.Fatal(err)
+						}
+						return response, true
+					}
+				}
+				calls++
+				return &model.LLMResponse{Content: genai.NewContentFromText("Observed scoped result.", "model")}, true
+			}
+			if err = f.worker.Poll(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.repo.GetRun(f.ctx, b.ID, admitted.Run.ID)
+			if err != nil || run.Status != store.RunSucceeded || calls != 1 {
+				t.Fatalf("scheduled run=%+v calls=%d err=%v", run, calls, err)
+			}
+			home := f.path + "/sessions/" + b.HomeSessionID.String() + "/stream"
+			history := f.request("GET", home, "", 200)
+			assertProgressReportText(t, string(history), "bot-report:"+run.ID.String(), "Observed scoped result.")
+			if !reflect.DeepEqual(history, f.request("GET", home, "", 200)) {
+				t.Fatal("scheduled reload changed event IDs/order")
+			}
+			if err = f.worker.Poll(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatal("scheduled reload/maintenance re-executed occurrence")
+			}
+			if after := databaseRuntimeFileSnapshot(t, f.dataDir); !reflect.DeepEqual(before, after) {
+				t.Fatal("scheduled runtime wrote files")
+			}
+		})
+	}
+}
+
 // This opt-in live harness SIGKILLs an owned OS process inside the production
 // worker's model dispatch, then starts a distinct process over the same SQLite.
 // Docker is real: a running, owned session container must block cleanup, and the
@@ -165,7 +254,7 @@ func newRunReadEvidence(t *testing.T, path string) newRunProcessEvidence {
 // The Home is the existing scoped fixture. Teardown is NOT attested by a fake:
 // the concrete Docker backend issues inspect against the canonical session name.
 type newRunPhysicalBackend struct {
-	journeyHomeBackend
+	composedBrowserBackend
 	physical *docker.DockerBackend
 }
 
@@ -178,7 +267,7 @@ func newRunBackend(t *testing.T, dir string) newRunPhysicalBackend {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newRunPhysicalBackend{physical: physical}
+	return newRunPhysicalBackend{composedBrowserBackend: composedBrowserBackend{synthesisHTTPBackend{files: &synthesisHTTPFiles{root: dir}}}, physical: physical}
 }
 
 type newRunModel struct {
@@ -194,7 +283,9 @@ func newRunWorker(t *testing.T, db store.PlatformBackend, dir string, mdl model.
 	pool := &interactiveHTTPPool{dir: dir}
 	w, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: newRunBackend(t, dir), Pool: pool, WorkerID: uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 512, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
-	}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		files := newComposedHTTPFiles(t, dir, s.Services.PersonalBots, q.Bot, nil)
+		files.install(c, q, s)
 		resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
 		resources.PolicyRuntime = agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: journeyGuard{repo: s.Services.PersonalBots, req: q}}
 		return resources, nil
@@ -354,7 +445,8 @@ func newRunProcessChild(t *testing.T, stage string) {
 		if err = worker.Poll(f.ctx); err != nil {
 			t.Fatal(err)
 		}
-		t.Fatal("worker returned without SIGKILL")
+		stopped, readErr := f.repo.GetRun(f.ctx, b.ID, admitted.Run.ID)
+		t.Fatalf("worker returned without SIGKILL: run=%+v failure=%+v read_error=%v", stopped, stopped.Report.Failure, readErr)
 	}
 	if stage != "restart" {
 		t.Fatal("unknown stage")

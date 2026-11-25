@@ -72,6 +72,7 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 	return func(yield func(*model.LLMResponse, error) bool) {
 		ctx := parentCtx
 		if req == nil {
+			EndModelPreflight(ctx)
 			yield(nil, errors.New("nil budget model request"))
 			return
 		}
@@ -85,29 +86,41 @@ func (b *BudgetLLM) GenerateContent(parentCtx context.Context, req *model.LLMReq
 			ctx, cancel = context.WithDeadline(ctx, deadline.Deadline())
 			defer cancel()
 		}
-		if err := b.budget.Check(ctx); err != nil {
-			yield(nil, err)
-			return
-		}
-		input, snapshot, err := b.estimateInput(ctx, req)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		output := int64(b.options.MaxOutputTokens)
-		if b.options.SupportsOutputLimit && req.Config != nil && req.Config.MaxOutputTokens > 0 {
-			output = min(output, int64(req.Config.MaxOutputTokens))
-		}
-		if input < 0 || input > math.MaxInt64-output {
-			yield(nil, errors.New("invalid input token estimate"))
-			return
-		}
-		cost, err := b.price(input, output)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		r, err := b.budget.ReserveModel(ctx, execution.BudgetReservation{InputTokens: input, OutputTokens: output, CostMicros: cost})
+		var input, output int64
+		var snapshot *budgetInputSnapshot
+		// The optional scope covers synchronous checks/reservation only. The
+		// closure closes it before any provider call or consumer yield (even errors).
+		r, err := func() (execution.BudgetReservation, error) {
+			defer EndModelPreflight(ctx)
+			preflight := ctx
+			if scoped, ok := b.budget.(interface {
+				BeginModelPreflight(context.Context) (context.Context, func())
+			}); ok {
+				var end func()
+				preflight, end = scoped.BeginModelPreflight(ctx)
+				defer end()
+			}
+			if err := b.budget.Check(preflight); err != nil {
+				return execution.BudgetReservation{}, err
+			}
+			var err error
+			input, snapshot, err = b.estimateInput(preflight, req)
+			if err != nil {
+				return execution.BudgetReservation{}, err
+			}
+			output = int64(b.options.MaxOutputTokens)
+			if b.options.SupportsOutputLimit && req.Config != nil && req.Config.MaxOutputTokens > 0 {
+				output = min(output, int64(req.Config.MaxOutputTokens))
+			}
+			if input < 0 || input > math.MaxInt64-output {
+				return execution.BudgetReservation{}, errors.New("invalid input token estimate")
+			}
+			cost, err := b.price(input, output)
+			if err != nil {
+				return execution.BudgetReservation{}, err
+			}
+			return b.budget.ReserveModel(preflight, execution.BudgetReservation{InputTokens: input, OutputTokens: output, CostMicros: cost})
+		}()
 		if err != nil {
 			yield(nil, err)
 			return

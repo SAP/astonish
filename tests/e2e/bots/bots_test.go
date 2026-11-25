@@ -87,6 +87,7 @@ func TestBotsLiveKubernetesRetainedHome(t *testing.T) {
 	})
 	kubectl := func(args ...string) string {
 		t.Helper()
+		args = append([]string{"--kubeconfig", os.Getenv("KUBECONFIG"), "--context", os.Getenv("ASTONISH_E2E_KUBE_CONTEXT")}, args...)
 		out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("kubectl %v: %v: %s", args, err, out)
@@ -245,4 +246,32 @@ func TestBotsLiveKubernetesRetainedHome(t *testing.T) {
 	// Shared retained claim survives run teardown and authorized scoped purge.
 	kubectl("get", "pvc", "-n", e2eboot.SandboxNamespace(), os.Getenv("ASTONISH_E2E_HOMES_PVC"))
 	t.Log("real Kubernetes: distinct pod UIDs; backend/registry reopened; HOME persisted without scratch; offline artifacts bounded; attached/foreign purge denied; scoped purge leaves other Bot and PVC intact")
+}
+
+func TestBotsLiveKubernetesAllModeRetainedLifecycle(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) { e2eboot.NewRetainedHomeLifecycle(t, scope).Run(t, false) })
+	}
+}
+
+func TestBotsLiveKubernetesNoPythonScheduledContinuationDelegate(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) { e2eboot.NewRetainedHomeLifecycle(t, scope).Run(t, true) })
+	}
+}
+
+func TestBotsLiveKubernetesTeamLifecycleExactDownloads(t *testing.T) {
+	f := e2eboot.NewRetainedHomeLifecycle(t, store.BotScopeTeam)
+	f.Run(t, true)
+	f.StopAndBrowse(t)
+}
+
+// The cold backup tier must not accidentally count unsupported production
+// Kubernetes/PostgreSQL archive support as success. It exercises stopped cold
+// browsing first, then calls the production backup path and fails on refusal.
+func TestBotsLiveKubernetesStoppedColdBrowseBackupRestore(t *testing.T) {
+	f := e2eboot.NewRetainedHomeLifecycle(t, store.BotScopePersonal)
+	f.Run(t, true)
+	f.StopAndBrowse(t)
+	f.ColdBackupRestore(t)
 }

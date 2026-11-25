@@ -48,5 +48,12 @@ func NewBotRunMemoryService(bots BotStore, memory MemoryStore, lease BotLease, s
 	if bots == nil {
 		return nil, ErrBotUnsupported
 	}
+	if provider, ok := bots.(BotMemoryStoreProvider); ok {
+		var err error
+		memory, err = provider.BotMemoryStore(lease.BotID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return NewBotMemoryService(botRunMemoryRepository{BotStore: bots, lease: lease}, memory, lease.BotID, scope)
 }

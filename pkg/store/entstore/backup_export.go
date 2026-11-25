@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/SAP/astonish/pkg/backup"
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -14,7 +16,17 @@ import (
 
 const backupModeLogical = "logical"
 
+type BotBackupBackend interface {
+	sandbox.BotHomeFilesBackend
+	sandbox.BotHomeStreamArchiveBackend
+}
+
 type PlatformBackupExportOptions struct {
+	// FileBackend is lazy; SQLite owns the writer fence, not the caller.
+	FileBackend      func(context.Context) (BotBackupBackend, error)
+	contentDirectory string
+	spoolDirectory   string
+	fileInventory    *fileFirstSQLInventory
 	Backend          string
 	Compression      backup.Compression
 	RedactSecrets    bool
@@ -29,11 +41,46 @@ type PlatformBackupExportOptions struct {
 }
 
 func (s *Store) ExportPlatformBackup(ctx context.Context, archivePath string, opts PlatformBackupExportOptions) error {
+	// Never expose a partial archive or truncate the last good backup on refusal.
+	// Keep plaintext and encrypted intermediates in a private sibling directory so
+	// the final rename stays on the destination filesystem.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	directory, err := os.MkdirTemp(filepath.Dir(archivePath), ".platform-backup-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(directory)
+	staged := filepath.Join(directory, "archive")
+	if err := s.exportPlatformBackup(ctx, staged, opts); err != nil {
+		return err
+	}
+	if _, err := VerifyPlatformBackup(ctx, staged, backup.ReaderOptions{Passphrase: opts.Passphrase}); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(staged, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0600); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := errors.Join(file.Sync(), file.Close()); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return os.Rename(staged, archivePath)
+}
+
+func (s *Store) exportPlatformBackup(ctx context.Context, archivePath string, opts PlatformBackupExportOptions) error {
 	if opts.Passphrase != "" {
 		plainPath := archivePath + ".plain"
 		plainOpts := opts
 		plainOpts.Passphrase = ""
-		if err := s.ExportPlatformBackup(ctx, plainPath, plainOpts); err != nil {
+		if err := s.exportPlatformBackup(ctx, plainPath, plainOpts); err != nil {
 			return err
 		}
 		defer os.Remove(plainPath)

@@ -286,3 +286,228 @@ elif op=='list':
 else: raise ValueError('operation')
 print(json.dumps(result),flush=True)
 `
+
+// BotHomeFilesProgram is independent of the private Task protocol. The launcher
+// supplies home and private directory descriptors (private may be None). stdin is
+// one JSON line, followed by exactly size bytes for write/put. Mutations emit a
+// {"commit":true} line and wait for "commit\n"; only then do they rename and emit
+// the final JSON entry. open emits an entry line followed by raw range bytes.
+// All other operations emit one JSON result line. Errors exit nonzero; before
+// a raw stream starts they also emit {"error":{"code":"..."}}. Only ENOENT
+// below an already-open root is not_found; root setup remains a terminal failure.
+const BotHomeFilesProgram = `
+import os,sys,json,stat,hashlib,uuid,fcntl,datetime,heapq,errno
+inp=sys.stdin.buffer
+streaming=False
+def emit(v):
+ sys.stdout.buffer.write((json.dumps(v)+'\n').encode());sys.stdout.buffer.flush()
+def failure(kind,value,tb):
+ if not streaming:
+  code='failed'
+  if isinstance(value,FileNotFoundError): code='not_found'
+  elif isinstance(value,(PermissionError,NotADirectoryError)) or isinstance(value,OSError) and value.errno==errno.ELOOP: code='forbidden'
+  elif isinstance(value,ValueError) and str(value) in ('path','mount escape','not single-link regular file','private root unavailable'): code='forbidden'
+  emit({'error':{'code':code}})
+ sys.__excepthook__(kind,value,tb)
+sys.excepthook=failure
+q=json.loads(inp.readline(65537))
+def parts(p,rootok=False):
+ if rootok and p=='.': return []
+ if not isinstance(p,str) or not p or len(p)>4096 or '\\' in p or any(ord(c)<32 or ord(c)==127 for c in p): raise ValueError('path')
+ a=p.split('/')
+ if len(a)>64 or any(x in ('','.','..') or len(x.encode())>255 for x in a): raise ValueError('path')
+ return a
+def mountid(fd):
+ try:
+  with open('/proc/self/fdinfo/'+str(fd)) as f:
+   for line in f:
+    if line.startswith('mnt_id:'): return line.split()[1]
+ except FileNotFoundError: pass
+ return os.fstat(fd).st_dev
+def check(fd,r,regular=False):
+ s=os.fstat(fd)
+ if s.st_dev!=os.fstat(r).st_dev or mountid(fd)!=mountid(r): raise ValueError('mount escape')
+ if regular and (not stat.S_ISREG(s.st_mode) or s.st_nlink!=1): raise ValueError('not single-link regular file')
+ return s
+def directory(r,a,create=False):
+ if r is None: raise ValueError('private root unavailable')
+ fd=os.dup(r)
+ try:
+  for x in a:
+   if create:
+    try: os.mkdir(x,0o700,dir_fd=fd)
+    except FileExistsError: pass
+   n=os.open(x,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+   try: check(n,r)
+   except: os.close(n);raise
+   os.close(fd);fd=n
+  return fd
+ except: os.close(fd);raise
+def fileopen(r,p):
+ a=parts(p);d=directory(r,a[:-1])
+ try: fd=os.open(a[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=d)
+ finally: os.close(d)
+ try: check(fd,r,True);return fd
+ except: os.close(fd);raise
+def digest(fd):
+ h=hashlib.sha256();os.lseek(fd,0,0)
+ while True:
+  b=os.read(fd,65536)
+  if not b: break
+  h.update(b)
+ return h.hexdigest()
+def entry(p,s,h=''):
+ ext=os.path.splitext(p)[1].lower()
+ text=ext in ('.txt','.md','.json','.yaml','.yml','.csv','.tsv','.py','.go','.js','.ts','.tsx','.jsx','.html','.css','.xml','.svg','.mmd','.mermaid','.sql','.sh','.toml','.ini','.log')
+ return {'path':p,'kind':'directory' if stat.S_ISDIR(s.st_mode) else 'file','size_bytes':s.st_size,'modified_at':datetime.datetime.fromtimestamp(s.st_mtime,datetime.timezone.utc).isoformat(),'freshness':str(s.st_mtime_ns)+':'+str(s.st_ctime_ns)+':'+str(s.st_size),'sha256':h,'preview':'text' if text else 'download'}
+def identity(s): return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+def privatequota(r,add):
+ # Share the Task workspace's aggregate limits, including prospective staging.
+ budget=[8192,4096,536870912-add]
+ def walk(d):
+  with os.scandir(d) as it:
+   for e in it:
+    budget[0]-=1
+    if budget[0]<0: raise ValueError('directory quota')
+    f=os.open(e.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=d)
+    try:
+     s=check(f,r)
+     if stat.S_ISDIR(s.st_mode): walk(f)
+     elif stat.S_ISREG(s.st_mode) and s.st_nlink==1:
+      budget[1]-=1;budget[2]-=s.st_size
+     else: raise ValueError('link or special file')
+     if budget[1]<0 or budget[2]<0: raise ValueError('workspace quota')
+    finally: os.close(f)
+ walk(r)
+ # The temporary file becomes the final object. Reserve its directory too.
+ if budget[0]<2 or budget[1]<1 or budget[2]<0: raise ValueError('workspace quota')
+op=q['op'];p=q.get('path','');r=private if q.get('private',False) else home
+if op=='list':
+ a=parts(p,True);d=directory(home,a)
+ try:
+  n=q.get('limit',100);after=q.get('after','')
+  if not isinstance(n,int) or n<1 or n>500: raise ValueError('limit')
+  def candidates():
+   with os.scandir(d) as it:
+    for e in it:
+     name=e.name
+     try:
+      parts(name)
+      if name<=after: continue
+      fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=d)
+      try:
+       s=check(fd,home)
+       if not stat.S_ISDIR(s.st_mode) and (not stat.S_ISREG(s.st_mode) or s.st_nlink!=1): continue
+       yield (name,entry('/'.join(a+[name]),s))
+      finally: os.close(fd)
+     except (OSError,ValueError,UnicodeError): continue
+  rows=heapq.nsmallest(n+1,candidates(),key=lambda v:v[0])
+  emit({'entries':[v[1] for v in rows[:n]],'next':rows[n-1][0] if len(rows)>n else ''})
+ finally: os.close(d)
+elif op in ('stat','open'):
+ fd=fileopen(r,p)
+ try:
+  s=check(fd,r,True);h=digest(fd)
+  if identity(s)!=identity(os.fstat(fd)): raise ValueError('file changed')
+  if q.get('sha256',h)!=h or q.get('size',s.st_size)!=s.st_size: raise ValueError('content mismatch')
+  if op=='stat': emit(entry(p,s,h))
+  else:
+   offset=q.get('offset',0);length=q.get('length',0)
+   if offset<0 or length<0 or offset>s.st_size: raise ValueError('range')
+   remaining=min(length,s.st_size-offset) if length else s.st_size-offset
+   streaming=True;emit(entry(p,s,h));os.lseek(fd,offset,0)
+   while remaining:
+    b=os.read(fd,min(65536,remaining))
+    if not b: raise ValueError('short read')
+    sys.stdout.buffer.write(b);remaining-=len(b)
+   sys.stdout.buffer.flush()
+   if identity(s)!=identity(os.fstat(fd)): raise ValueError('file changed')
+ finally: os.close(fd)
+elif op in ('write','put','snapshot'):
+ immutable=op!='write';r=private if immutable else home
+ if immutable:
+  kind=q.get('kind','artifact');revision=q.get('revision',1)
+  if kind not in ('document','memory','task','skill','evidence','checkpoint','artifact') or type(revision)!=int or revision<1: raise ValueError('content identity')
+  p='content-v1/'+kind+'-'+str(revision)+'-'+uuid.uuid4().hex
+  lock=os.open('.workspace-lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=r)
+  check(lock,r,True);fcntl.flock(lock,fcntl.LOCK_EX)
+  if op=='snapshot':
+   quota_source=fileopen(home,q['path'])
+   try: reserved=os.fstat(quota_source).st_size
+   finally: os.close(quota_source)
+  else: reserved=q['size']
+  if type(reserved)!=int or reserved<0: raise ValueError('size')
+  privatequota(r,reserved)
+ a=parts(p);d=directory(r,a[:-1],True);tmp='.stage-'+uuid.uuid4().hex;fd=None
+ try:
+  fcntl.flock(d,fcntl.LOCK_EX)
+  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=d)
+  h=hashlib.sha256();size=0
+  if op=='snapshot':
+   src=fileopen(home,q['path']);before=os.fstat(src)
+   try:
+    while True:
+     b=os.read(src,65536)
+     if not b: break
+     h.update(b);size+=len(b)
+     if size>reserved: raise ValueError('source grew beyond quota reservation')
+     with os.fdopen(os.dup(fd),'wb') as dst: dst.write(b)
+    if identity(before)!=identity(os.fstat(src)): raise ValueError('source changed')
+   finally: os.close(src)
+  else:
+   left=q['size']
+   if not isinstance(left,int) or left<0: raise ValueError('size')
+   while left:
+    b=inp.read(min(left,65536))
+    if not b: raise ValueError('short input')
+    with os.fdopen(os.dup(fd),'wb') as dst: dst.write(b)
+    h.update(b);size+=len(b);left-=len(b)
+  os.fsync(fd);os.close(fd);fd=None
+  def staged():
+   stagedfd=os.open(tmp,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=d)
+   try:
+    s=check(stagedfd,r,True)
+    if s.st_size!=size or digest(stagedfd)!=h.hexdigest() or identity(s)!=identity(os.fstat(stagedfd)): raise ValueError('staged bytes changed')
+   finally: os.close(stagedfd)
+  def precondition():
+   if immutable or q.get('create_only',False):
+    try: os.stat(a[-1],dir_fd=d,follow_symlinks=False)
+    except FileNotFoundError: return
+    raise ValueError('conflict')
+   expected=q.get('expected','')
+   if len(expected)!=64: raise ValueError('precondition required')
+   old=fileopen(r,p)
+   try:
+    if digest(old)!=expected: raise ValueError('conflict')
+   finally: os.close(old)
+  precondition();emit({'commit':True})
+  if inp.readline(16)!=b'commit\n': raise ValueError('commit denied')
+  again=directory(r,a[:-1])
+  try:
+   if (os.fstat(again).st_dev,os.fstat(again).st_ino)!=(os.fstat(d).st_dev,os.fstat(d).st_ino): raise ValueError('parent changed')
+  finally: os.close(again)
+  precondition();staged();os.rename(tmp,a[-1],src_dir_fd=d,dst_dir_fd=d);os.fsync(d)
+  s=os.stat(a[-1],dir_fd=d,follow_symlinks=False)
+  if q.get('readback',False):
+   if op!='put' or size>8388608: raise ValueError('readback bound')
+   stored=fileopen(r,p)
+   try:
+    s=check(stored,r,True)
+    if s.st_size!=size or digest(stored)!=h.hexdigest(): raise ValueError('stored bytes changed')
+    streaming=True;emit(entry(p,s,h.hexdigest()));os.lseek(stored,0,0)
+    left=size
+    while left:
+     b=os.read(stored,min(left,65536))
+     if not b: raise ValueError('short readback')
+     sys.stdout.buffer.write(b);left-=len(b)
+    sys.stdout.buffer.flush()
+    if identity(s)!=identity(os.fstat(stored)): raise ValueError('stored bytes changed')
+   finally: os.close(stored)
+  else: emit(entry(p,s,h.hexdigest()))
+ finally:
+  if fd is not None: os.close(fd)
+  try: os.unlink(tmp,dir_fd=d)
+  except FileNotFoundError: pass
+  os.close(d)
+else: raise ValueError('operation')
+`

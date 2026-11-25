@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/pgutil"
+	"github.com/google/uuid"
 )
 
 // --- store.TenantRouter implementation ---
@@ -42,14 +44,23 @@ func (s *Store) ForOrg(orgSlug string) (store.OrgDataStore, error) {
 			return cached.(*orgDataStore), nil
 		}
 
-		// Open connection to the org database.
-		orgClient, orgDB, err := s.openOrgDB(orgSlug)
+		// Resolve once so child pools cannot mix legacy and generation databases.
+		var dbName string
+		if s.dialect == DialectPostgres {
+			var err error
+			dbName, err = s.resolveOrgPostgresDBName(context.Background(), orgSlug)
+			if err != nil {
+				return nil, err
+			}
+		}
+		orgClient, orgDB, err := s.openOrgDBResolved(context.Background(), orgSlug, dbName)
 		if err != nil {
 			return nil, fmt.Errorf("entstore: ForOrg(%s): %w", orgSlug, err)
 		}
 
 		ds := &orgDataStore{
 			orgSlug:     orgSlug,
+			dbName:      dbName,
 			client:      orgClient,
 			db:          orgDB,
 			dialect:     s.dialect,
@@ -178,14 +189,102 @@ func (s *Store) deriveSchemaAwareDSN(dbName, schemaName string) (string, error) 
 	return u.String(), nil
 }
 
+// safePostgresTenantName rejects truncation, search-path syntax and path/SQL metacharacters.
+func safePostgresTenantName(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveOrgPostgresDBName reads trusted platform routing, never archive/model fields.
+// Only a missing canonical row retains the legacy pre-provisioning fallback.
+func (s *Store) resolveOrgPostgresDBName(ctx context.Context, slug string) (string, error) {
+	if err := validateSlug(slug); err != nil {
+		return "", err
+	}
+	var name string
+	err := s.platformDB.QueryRowContext(ctx, `SELECT db_name FROM public.organizations WHERE slug = $1`, slug).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		name = s.orgDBName(slug)
+	} else if err != nil {
+		return "", fmt.Errorf("resolve org database: %w", err)
+	}
+	if !safePostgresTenantName(name) {
+		return "", store.ErrBotConflict
+	}
+	if name == s.orgDBName(slug) {
+		return name, nil
+	}
+	const prefix = "astonish_restore_"
+	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+32 {
+		return "", store.ErrBotConflict
+	}
+	for _, c := range strings.TrimPrefix(name, prefix) {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", store.ErrBotConflict
+		}
+	}
+	var comment string
+	if err := s.platformDB.QueryRowContext(ctx, `SELECT COALESCE(shobj_description(oid, 'pg_database'), '') FROM pg_database WHERE datname = $1`, name).Scan(&comment); err != nil {
+		return "", fmt.Errorf("resolve generation receipt: %w", err)
+	}
+	parts := strings.Split(comment, ":")
+	if len(parts) != 5 || parts[0] != "astonish-filefirst" || parts[1] == "" || parts[2] == "" || parts[3] != s.instanceSuffix || postgresRestoreDatabaseName(parts[4]) != name {
+		return "", store.ErrBotConflict
+	}
+	if len(parts[2]) != 64 {
+		return "", store.ErrBotConflict
+	}
+	for _, c := range parts[2] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", store.ErrBotConflict
+		}
+	}
+	generation, err := uuid.Parse(parts[4])
+	if err != nil || generation.String() != parts[4] {
+		return "", store.ErrBotConflict
+	}
+	return name, nil
+}
+
+// postgresDBName pins child pools to the same database as the parent pool.
+func (o *orgDataStore) postgresDBName(ctx context.Context) (string, error) {
+	if o.dbName != "" {
+		return o.dbName, nil
+	}
+	return o.parentStore.resolveOrgPostgresDBName(ctx, o.orgSlug)
+}
+
 func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
+	var name string
+	if s.dialect == DialectPostgres {
+		var err error
+		name, err = s.resolveOrgPostgresDBName(context.Background(), slug)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return s.openOrgDBResolved(context.Background(), slug, name)
+}
+
+// openOrgDBResolved is private: its name is supplied only by canonical routing,
+// normal provisioning or the receipt-checked staging opener.
+func (s *Store) openOrgDBResolved(ctx context.Context, slug, dbName string) (*orgent.Client, *sql.DB, error) {
 	if err := validateSlug(slug); err != nil {
 		return nil, nil, fmt.Errorf("open org db: %w", err)
 	}
 	slug = filepath.Base(slug) // sanitize for path safety (also satisfies static analysis)
 	switch s.dialect {
 	case DialectPostgres:
-		dbName := s.orgDBName(slug)
+		if !safePostgresTenantName(dbName) {
+			return nil, nil, store.ErrBotConflict
+		}
 		dsn, err := s.deriveDSN(dbName)
 		if err != nil {
 			return nil, nil, err
@@ -203,14 +302,14 @@ func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
 
 		// Ensure pgvector extension exists before auto-migration (needed for
 		// vector(384) columns). Idempotent — harmless if already present.
-		if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+		if _, err := db.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
 			slog.Warn("openOrgDB: could not ensure pgvector extension",
 				"org", slug, "error", err)
 		}
 
 		// Migrate legacy pgstore table schemas to match Ent's expectations
 		// (e.g. team_memberships composite PK → UUID id PK). Idempotent.
-		migrateOrgLegacySchema(context.Background(), db)
+		migrateOrgLegacySchema(ctx, db)
 
 		// Auto-migrate: create any missing tables (e.g. team_memberships added
 		// after the org was originally provisioned). Skip ModifyColumn to
@@ -218,7 +317,7 @@ func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
 		// DropIndex and DropColumn to preserve pg_extras indexes (IVFFlat,
 		// GIN, partial) and restore the Ent defaults that WithSkipChanges
 		// overrides.
-		if err := client.Schema.Create(context.Background(),
+		if err := client.Schema.Create(ctx,
 			entschema.WithSkipChanges(entschema.ModifyColumn|entschema.DropIndex|entschema.DropColumn),
 		); err != nil {
 			db.Close()
@@ -277,6 +376,65 @@ func (s *Store) openOrgDB(slug string) (*orgent.Client, *sql.DB, error) {
 	}
 }
 
+// openStagedPostgresOrg is an offline restore capability, not a public router.
+// It accepts only an exact durable CREATE receipt from the trusted journal. The
+// returned handle is private (not cached); caller must Close it before publication.
+func (s *Store) openStagedPostgresOrg(ctx context.Context, j *restoreJournal, d postgresRestoreDatabase) (*orgDataStore, error) {
+	if err := s.checkStagedPostgresOrg(ctx, j, d); err != nil {
+		return nil, err
+	}
+	client, db, err := s.openOrgDBResolved(ctx, d.OrgSlug, d.Name)
+	if err != nil {
+		return nil, err
+	}
+	o := &orgDataStore{orgSlug: d.OrgSlug, dbName: d.Name, client: client, db: db,
+		dialect: s.dialect, embedFunc: s.embedFunc, parentStore: s,
+		teams: make(map[string]*teamDataStore), users: make(map[string]*personalDataStore)}
+	if err := s.applyPGExtras(ctx, ScopeOrg, db); err != nil {
+		o.Close()
+		return nil, err
+	}
+	if err := pgutil.ApplyGrants(ctx, db, "org"); err != nil {
+		o.Close()
+		return nil, err
+	}
+	return o, nil
+}
+
+func (s *Store) checkStagedPostgresOrg(ctx context.Context, j *restoreJournal, d postgresRestoreDatabase) error {
+	if s.dialect != DialectPostgres || j == nil || j.Phase != restoreSQLImporting || validateSlug(d.OrgSlug) != nil || !d.Created || d.OID <= 0 || d.Cleaned || d.Ready {
+		return store.ErrBotConflict
+	}
+	if err := validatePostgresRestoreDatabase(s, j, d); err != nil {
+		return err
+	}
+	found := false
+	for _, recorded := range j.PostgresDatabases {
+		if recorded == d {
+			found = true
+		}
+	}
+	if !found {
+		return store.ErrBotConflict
+	}
+	var oid int64
+	var comment string
+	if err := s.platformDB.QueryRowContext(ctx, `SELECT oid, COALESCE(shobj_description(oid, 'pg_database'), '') FROM pg_database WHERE datname = $1`, d.Name).Scan(&oid, &comment); err != nil {
+		return err
+	}
+	if oid != d.OID || comment != postgresRestoreReceipt(j, d) {
+		return store.ErrBotConflict
+	}
+	var published int
+	if err := s.platformDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM public.organizations WHERE db_name = $1`, d.Name).Scan(&published); err != nil {
+		return err
+	}
+	if published != 0 {
+		return store.ErrBotConflict
+	}
+	return nil
+}
+
 func (s *Store) provisionOrgPostgres(ctx context.Context, slug string) error {
 	dbName := s.orgDBName(slug)
 	// Quote the database name for safety.
@@ -291,7 +449,7 @@ func (s *Store) provisionOrgPostgres(ctx context.Context, slug string) error {
 	}
 
 	// Open connection to the new database and run Ent auto-migration.
-	client, db, err := s.openOrgDB(slug)
+	client, db, err := s.openOrgDBResolved(ctx, slug, dbName)
 	if err != nil {
 		return fmt.Errorf("open new org db: %w", err)
 	}
@@ -381,7 +539,10 @@ func (s *Store) provisionOrgSQLite(ctx context.Context, slug string) error {
 }
 
 func (s *Store) decommissionOrgPostgres(ctx context.Context, orgSlug string) error {
-	dbName := s.orgDBName(orgSlug)
+	dbName, err := s.resolveOrgPostgresDBName(ctx, orgSlug)
+	if err != nil {
+		return err
+	}
 	quoted := fmt.Sprintf(`"%s"`, strings.ReplaceAll(dbName, `"`, `""`))
 
 	// Terminate existing connections.
@@ -412,6 +573,7 @@ func (s *Store) decommissionOrgSQLite(_ context.Context, orgSlug string) error {
 
 type orgDataStore struct {
 	orgSlug   string
+	dbName    string // immutable validated PostgreSQL route; shared by all child pools
 	client    *orgent.Client
 	db        *sql.DB
 	dialect   Dialect
@@ -879,10 +1041,34 @@ func (o *orgDataStore) Close() error {
 
 // --- Team/Personal DB helpers ---
 
+func (o *orgDataStore) resolveTeamPostgresSchema(ctx context.Context, slug string) (string, error) {
+	if err := validateSlug(slug); err != nil {
+		return "", err
+	}
+	var name string
+	err := o.db.QueryRowContext(ctx, `SELECT schema_name FROM public.teams WHERE slug = $1`, slug).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		name = teamSchemaName(slug)
+	} else if err != nil {
+		return "", err
+	}
+	// A persisted field is not permission to redirect into another team's schema.
+	if !safePostgresTenantName(name) || name != teamSchemaName(slug) {
+		return "", store.ErrBotConflict
+	}
+	return name, nil
+}
+
 func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
+	if err := validateSlug(teamSlug); err != nil {
+		return nil, err
+	}
 	switch o.dialect {
 	case DialectPostgres:
-		schemaName := teamSchemaName(teamSlug)
+		schemaName, err := o.resolveTeamPostgresSchema(context.Background(), teamSlug)
+		if err != nil {
+			return nil, err
+		}
 		quoted := fmt.Sprintf(`"%s"`, strings.ReplaceAll(schemaName, `"`, `""`))
 
 		// Ensure the PG schema exists (idempotent). Handles the case where
@@ -979,7 +1165,10 @@ func (o *orgDataStore) openTeamDB(teamSlug string) (*teamDataStore, error) {
 // openTeamDBBySchema opens a connection to the org database with search_path
 // targeting the given team schema.
 func (o *orgDataStore) openTeamDBBySchema(schemaName string) (*teament.Client, *sql.DB, error) {
-	orgDBName := o.parentStore.orgDBName(o.orgSlug)
+	orgDBName, err := o.postgresDBName(context.Background())
+	if err != nil {
+		return nil, nil, err
+	}
 	dsn, err := o.parentStore.deriveSchemaAwareDSN(orgDBName, schemaName)
 	if err != nil {
 		return nil, nil, err
@@ -1006,6 +1195,9 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 	switch o.dialect {
 	case DialectPostgres:
 		schemaName := personalSchemaName(userID)
+		if !safePostgresTenantName(schemaName) {
+			return nil, store.ErrBotConflict
+		}
 		quoted := fmt.Sprintf(`"%s"`, strings.ReplaceAll(schemaName, `"`, `""`))
 
 		// Ensure the PG schema exists (idempotent). This handles the case
@@ -1106,7 +1298,10 @@ func (o *orgDataStore) openPersonalDB(userID string) (*personalDataStore, error)
 // openPersonalDBBySchema opens a connection to the org database with search_path
 // targeting the given personal schema.
 func (o *orgDataStore) openPersonalDBBySchema(schemaName string) (*personalent.Client, *sql.DB, error) {
-	orgDBName := o.parentStore.orgDBName(o.orgSlug)
+	orgDBName, err := o.postgresDBName(context.Background())
+	if err != nil {
+		return nil, nil, err
+	}
 	dsn, err := o.parentStore.deriveSchemaAwareDSN(orgDBName, schemaName)
 	if err != nil {
 		return nil, nil, err
@@ -1168,11 +1363,11 @@ func (o *orgDataStore) botMembership(ctx context.Context, userID string) (string
 func (t *teamDataStore) BotTemplates() store.BotTemplateStore {
 	// Reuse the same live membership callback as the team's Bot repository.
 	bots := t.Bots().(*teamBotStore)
-	return &teamBotTemplateStore{client: t.client, auth: bots.auth}
+	return &teamBotTemplateStore{client: t.client, auth: bots.auth, content: newBotTemplateContent(botContentDirectory(t.parentOrg.parentStore.dataDir), t.orgSlug, t.teamSlug)}
 }
 
 func (t *teamDataStore) Bots() store.BotStore {
-	return &teamBotStore{client: t.client, credentials: t.Credentials(), auth: botRepositoryAuth{orgSlug: t.orgSlug, teamSlug: t.teamSlug, scope: store.BotScopeTeam, checkDelivery: t.parentOrg.parentStore.checkBotDelivery, readiness: t.parentOrg.parentStore.checkBotActivation, check: func(ctx context.Context, userID string) (string, error) {
+	return &teamBotStore{client: t.client, content: t.parentOrg.parentStore.scopedBotContentCodec(t.orgSlug, t.teamSlug), credentials: t.Credentials(), auth: botRepositoryAuth{orgSlug: t.orgSlug, teamSlug: t.teamSlug, scope: store.BotScopeTeam, checkDelivery: t.parentOrg.parentStore.checkBotDelivery, readiness: t.parentOrg.parentStore.checkBotActivation, check: func(ctx context.Context, userID string) (string, error) {
 		if _, err := t.parentOrg.botMembership(ctx, userID); err != nil {
 			return "", err
 		}
@@ -1195,11 +1390,15 @@ func (p *personalDataStore) Bots() store.BotStore {
 		auth.readiness = p.parentOrg.parentStore.checkBotActivation
 		auth.checkDelivery = p.parentOrg.parentStore.checkBotDelivery
 	}
-	return &personalBotStore{client: p.client, credentials: p.Credentials(), auth: auth}
+	var content *botContentCodec
+	if p.parentOrg != nil && p.parentOrg.parentStore != nil {
+		content = p.parentOrg.parentStore.scopedBotContentCodec(auth.orgSlug, "")
+	}
+	return &personalBotStore{client: p.client, content: content, credentials: p.Credentials(), auth: auth}
 }
 
 func (t *teamDataStore) Sessions() store.SessionStore {
-	return &teamSessionStore{client: t.client}
+	return &teamSessionStore{client: t.client, content: t.parentOrg.parentStore.scopedBotContentCodec(t.orgSlug, t.teamSlug)}
 }
 func (t *teamDataStore) Memories() store.MemoryStore {
 	ms := &teamMemoryStore{
@@ -1318,7 +1517,11 @@ func (p *personalDataStore) Memories() store.MemoryStore {
 func (p *personalDataStore) Docs() store.DocsStore { return &personalDocsStore{client: p.client} }
 func (p *personalDataStore) Apps() store.AppStore  { return &personalAppStore{client: p.client} }
 func (p *personalDataStore) Sessions() store.SessionStore {
-	return &personalSessionStore{client: p.client}
+	var content *botContentCodec
+	if p.parentOrg != nil && p.parentOrg.parentStore != nil {
+		content = p.parentOrg.parentStore.scopedBotContentCodec(p.parentOrg.orgSlug, "")
+	}
+	return &personalSessionStore{client: p.client, content: content}
 }
 func (p *personalDataStore) AppState() store.AppStateStore {
 	return &personalAppStateStore{client: p.client}

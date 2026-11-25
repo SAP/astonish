@@ -95,7 +95,7 @@ func (r *botRepository) reconcileScheduledQueueTx(ctx context.Context, tx botDra
 }
 
 func (d personalBotDB) saveScheduledQueueRun(ctx context.Context, saved botStoredRun, previous int64) error {
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (d personalBotDB) saveScheduledQueueRun(ctx context.Context, saved botStore
 	return nil
 }
 func (d teamBotDB) saveScheduledQueueRun(ctx context.Context, saved botStoredRun, previous int64) error {
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}

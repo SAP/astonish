@@ -2,7 +2,9 @@ package api
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -175,7 +177,7 @@ func BotCorrectionHandler(w http.ResponseWriter, r *http.Request) {
 // BotReconcileCorrectionHandler applies only the repository's saved intent.
 // This bodyless action cannot replace its actor, evidence, source or replacement.
 func BotReconcileCorrectionHandler(w http.ResponseWriter, r *http.Request) {
-	repo, actor, ok := botRequestStore(w, r)
+	repo, _, ok := botRequestStore(w, r)
 	if !ok {
 		return
 	}
@@ -195,8 +197,7 @@ func BotReconcileCorrectionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	b, err := repo.Get(r.Context(), id)
-	if err != nil {
+	if _, err := repo.Get(r.Context(), id); err != nil {
 		botHTTPError(w, err)
 		return
 	}
@@ -205,31 +206,17 @@ func BotReconcileCorrectionHandler(w http.ResponseWriter, r *http.Request) {
 		botHTTPError(w, store.ErrBotUnsupported)
 		return
 	}
-	svc := store.FromRequest(r)
-	if svc == nil || svc.TenantRouter == nil {
+	// Select disk memory from the same authenticated, scope-bound repository.
+	// Generic Chat memory (or a second router lookup) is not a Bot fallback.
+	provider, ok := repo.(store.BotMemoryStoreProvider)
+	if !ok {
 		botHTTPError(w, store.ErrBotUnsupported)
 		return
 	}
-	tc := store.TenantContextFrom(r.Context())
-	org, err := svc.TenantRouter.ForOrg(tc.OrgSlug)
+	memories, err := provider.BotMemoryStore(id)
 	if err != nil {
 		botHTTPError(w, err)
 		return
-	}
-	if org == nil {
-		botHTTPError(w, store.ErrBotUnsupported)
-		return
-	}
-	var memories store.MemoryStore
-	switch b.Scope {
-	case store.BotScopePersonal:
-		if personal := org.ForUser(actor.String()); personal != nil {
-			memories = personal.Memories()
-		}
-	case store.BotScopeTeam:
-		if team := org.ForTeam(tc.TeamSlug); team != nil {
-			memories = team.Memories()
-		}
 	}
 	if memories == nil {
 		botHTTPError(w, store.ErrBotUnsupported)
@@ -314,8 +301,73 @@ func BotSaveTrackedItemHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// botActivityProfileWriter publishes counters at header commit, after repository
+// work, without buffering the response. Server-Timing is time-to-headers only;
+// handler_total in the trailer/log includes encoding and body writes. Neither is
+// middleware/client total; the acceptance client must measure through EOF.
+// Counter headers are observations, not proof: consumers MUST require
+// X-Astonish-Bot-Runtime-IO-Covered=true before accepting a zero-I/O claim.
+type botActivityProfileWriter struct {
+	http.ResponseWriter
+	profile     *store.BotRuntimeIOProfile
+	start       time.Time
+	status      int
+	bytes       int64
+	writeFailed bool
+}
+
+func (w *botActivityProfileWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *botActivityProfileWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	s := w.profile.Snapshot()
+	w.Header().Set("X-Astonish-Bot-Runtime-Opens", strconv.FormatInt(s.Opens, 10))
+	w.Header().Set("X-Astonish-Bot-Runtime-Puts", strconv.FormatInt(s.Puts, 10))
+	w.Header().Set("X-Astonish-Bot-Runtime-Failures", strconv.FormatInt(s.Failures, 10))
+	w.Header().Set("X-Astonish-Bot-Runtime-IO-Covered", strconv.FormatBool(s.Covered))
+	w.Header().Add("Server-Timing", "bot_activity_headers;dur="+strconv.FormatFloat(float64(time.Since(w.start))/float64(time.Millisecond), 'f', 3, 64))
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *botActivityProfileWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(body)
+	w.bytes += int64(n)
+	w.writeFailed = w.writeFailed || err != nil || n != len(body)
+	return n, err
+}
+
 func BotActivityHandler(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ASTONISH_PROFILE_BOT_ACTIVITY") == "1" {
+		requestID := uuid.NewString()
+		start := time.Now()
+		ctx, profile := store.WithBotRuntimeIOProfiler(r.Context(), func(v store.BotRuntimeIOTiming) {
+			slog.Info("bot activity profile", "request_id", requestID, "stage", v.Operation.String(), "sequence", v.Sequence, "duration_ns", v.Duration.Nanoseconds(), "failed", v.Failed)
+		})
+		r = r.WithContext(store.WithBotActivityProfiler(ctx, func(v store.BotActivityTiming) {
+			slog.Info("bot activity profile", "request_id", requestID, "stage", v.Stage, "sequence", v.Sequence, "duration_ns", v.Duration.Nanoseconds())
+		}))
+		pw := &botActivityProfileWriter{ResponseWriter: w, profile: profile, start: start}
+		w = pw
+		w.Header().Set("X-Astonish-Bot-Activity-Request-ID", requestID)
+		// The total cannot be a normal header: it includes response encoding and
+		// writes. A trailer preserves streaming and the existing JSON body.
+		w.Header().Add("Trailer", "X-Astonish-Bot-Activity-Handler-Total-Ns")
+		defer func() {
+			total := time.Since(start)
+			w.Header().Set("X-Astonish-Bot-Activity-Handler-Total-Ns", strconv.FormatInt(total.Nanoseconds(), 10))
+			snapshot := profile.Snapshot()
+			slog.Info("bot activity profile", "request_id", requestID, "stage", "handler_total", "duration_ns", total.Nanoseconds(), "runtime_opens", snapshot.Opens, "runtime_puts", snapshot.Puts, "runtime_failures", snapshot.Failures, "runtime_io_covered", snapshot.Covered, "status", pw.status, "response_bytes", pw.bytes, "write_failed", pw.writeFailed)
+		}()
+	}
+	setup := store.ObserveBotActivity(r.Context(), "request_store", 0)
 	repo, _, ok := botRequestStore(w, r)
+	setup()
 	if !ok {
 		return
 	}
@@ -349,7 +401,9 @@ func BotActivityHandler(w http.ResponseWriter, r *http.Request) {
 	if events == nil {
 		events = []store.BotActivity{}
 	}
+	encode := store.ObserveBotActivity(r.Context(), "json_encode_and_write", 0)
 	botWriteJSON(w, 200, struct {
 		Activity []store.BotActivity `json:"activity"`
 	}{events})
+	encode()
 }

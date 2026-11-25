@@ -77,7 +77,7 @@ func TestAgentTerminalRealPTYDecoder(t *testing.T) {
 			write(map[string]any{})
 		case base + "/sessions/" + bot.HomeSessionID.String() + "/events":
 			w.Header().Set("Content-Type", "text/event-stream")
-			report := fmt.Sprintf("id: %s:1\nevent: transcript\ndata: {\"author\":\"agent\",\"invocationId\":\"bot-report:regression\",\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Actual terminal decoder result.\"}]}}\n\n", bot.HomeSessionID)
+			report := fmt.Sprintf("id: %s:1\nevent: text\ndata: {\"eventId\":\"terminal-result\",\"_projection\":{\"event_id\":\"terminal-result\",\"session_id\":\"%s\",\"cursor\":\"%s:1\"},\"invocationId\":\"bot-report:%s\",\"text\":\"Actual terminal decoder result.\"}\n\n", bot.HomeSessionID, bot.HomeSessionID, bot.HomeSessionID, bot.ID)
 			select {
 			case <-publish:
 				fmt.Fprint(w, report) // second connection restores the same publication

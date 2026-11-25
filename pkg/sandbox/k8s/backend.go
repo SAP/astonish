@@ -276,6 +276,8 @@ type K8sBackend struct {
 	// SPDY factory; tests override this to inject a stub.
 	execExecutorFactory execExecutorFactory
 
+	botFileSessions sync.Map // immutable Home binding -> canonical trusted session ID
+
 	// startedAt records construction time for Health reporting.
 	startedAt time.Time
 }

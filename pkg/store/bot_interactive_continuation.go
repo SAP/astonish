@@ -7,16 +7,20 @@ import (
 
 // Explicit continuation never changes task input or activates autonomous schedules.
 type BotContinuationKind string
+
 const BotContinuationProgress BotContinuationKind = "progress_v1"
 
 type BotContinueInteractiveRequest struct {
- Kind BotContinuationKind `json:"kind,omitempty"`
- CheckpointRevision int64 `json:"checkpoint_revision,omitempty"`
-	BotID            BotID                   `json:"-"`
-	RunID            RunID                   `json:"-"`
-	ExpectedRevision int64                   `json:"expected_revision"`
-	IdempotencyKey   string                  `json:"idempotency_key"`
-	Response         *BotInteractionResponse `json:"response,omitempty"`
+	PlanMode              *bool                    `json:"planMode,omitempty"`
+	ApprovedPlanExecution bool                     `json:"approvedPlanExecution,omitempty"`
+	PlanExecution         *BotPlanExecutionConsent `json:"planExecution,omitempty"`
+	Kind                  BotContinuationKind      `json:"kind,omitempty"`
+	CheckpointRevision    int64                    `json:"checkpoint_revision,omitempty"`
+	BotID                 BotID                    `json:"-"`
+	RunID                 RunID                    `json:"-"`
+	ExpectedRevision      int64                    `json:"expected_revision"`
+	IdempotencyKey        string                   `json:"idempotency_key"`
+	Response              *BotInteractionResponse  `json:"response,omitempty"`
 }
 type BotContinuationReason string
 

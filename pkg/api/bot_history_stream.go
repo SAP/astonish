@@ -66,12 +66,42 @@ func BotHistoryStreamHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bot session not found", http.StatusNotFound)
 		return
 	}
-	// Authorization uses the viewer, but transcript attribution is the recorded
-	// execution owner. Never install that owner as the request principal.
-	events, err := ss.ReadTranscriptEvents(r.Context(), studioChatAppName, meta.UserID, meta.ID)
-	if err != nil {
-		http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
+	// Both endpoints read the same durable positions, never synthetic offsets.
+	reader, ok := ss.(store.BotTranscriptReader)
+	if !ok {
+		http.Error(w, "Bot transcript unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	allowed := func() bool {
+		if r.Context().Err() != nil {
+			return false
+		}
+		current, err := ss.GetSessionMeta(r.Context(), sid.String())
+		return err == nil && current != nil && current.ID == sid.String() && current.BotID == id.String() && botSessionReadAllowed(r, svc, current, scope)
+	}
+	var rows []store.BotTranscriptEvent
+	var readCursor int64
+	for {
+		if !allowed() {
+			http.Error(w, "Bot session not found", http.StatusNotFound)
+			return
+		}
+		page, err := reader.ReadBotTranscript(r.Context(), sid, readCursor, botEventPageSize)
+		if err != nil {
+			http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
+			return
+		}
+		for _, row := range page {
+			if row.Cursor <= readCursor || row.Event == nil {
+				http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
+				return
+			}
+			readCursor = row.Cursor
+			rows = append(rows, row)
+		}
+		if len(page) < botEventPageSize {
+			break
+		}
 	}
 	approvals, err := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 200})
 	if err != nil {
@@ -79,41 +109,45 @@ func BotHistoryStreamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Encode before committing SSE headers so malformed storage fails atomically.
-	payloads := make([][]byte, 0, len(events))
-	for _, event := range events {
-		if event == nil {
-			continue
-		}
-		payload, err := marshalBotTranscriptEvent(projectBotHomeNarrative(projectBotReviewQuestion(projectBotQuestionTranscript(event, approvals), approvals, id, sid), b.HomeSessionID, sid), id, sid)
+	var frames []BotPresentationFrame
+	var cursor int64
+	projector := &SessionEventProjector{BotID: id, HomeSessionID: b.HomeSessionID, SessionID: sid, Repository: repo}
+	for _, row := range rows {
+		projection, err := projector.ProjectBot(r.Context(), row, approvals)
 		if err != nil {
 			http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
 			return
 		}
-		payloads = append(payloads, payload)
+		parts, err := projection.BotFrames(cursor)
+		if err != nil {
+			http.Error(w, "Bot transcript unavailable", http.StatusInternalServerError)
+			return
+		}
+		frames = append(frames, parts...)
+		cursor = row.Cursor
 	}
-	if !botSessionReadAllowed(r, svc, meta, scope) {
+	if !allowed() {
 		http.Error(w, "Bot session not found", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	for i, payload := range payloads {
-		if r.Context().Err() != nil || !botSessionReadAllowed(r, svc, meta, scope) {
+	controller := http.NewResponseController(w)
+	for _, frame := range frames {
+		if !allowed() {
 			return
 		}
-		if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", i+1, botTranscriptEvent, payload); err != nil {
+		if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", botEventCursor(sid, frame.Cursor), frame.Type, frame.Data); err != nil {
 			return
 		}
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+		if controller.Flush() != nil {
+			return
 		}
 	}
-	if r.Context().Err() != nil {
+	if !allowed() {
 		return
 	}
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: {\"persisted\":true,\"count\":%d}\n\n", botTranscriptDone, len(payloads))
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
+	_, _ = fmt.Fprintf(w, "id: %s\nevent: %s\ndata: {\"persisted\":true,\"count\":%d}\n\n", botEventCursor(sid, cursor), botTranscriptDone, len(frames))
+	_ = controller.Flush()
 }

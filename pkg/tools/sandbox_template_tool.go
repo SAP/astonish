@@ -52,8 +52,6 @@ type sandboxTemplateDeps struct {
 	sessionRegistry  *sandbox.SessionRegistry
 }
 
-var sandboxTemplateDepsVar *sandboxTemplateDeps
-
 // NewSaveSandboxTemplateTool creates the save_sandbox_template tool with the
 // given dependencies captured from the factory scope. Returns the tool and
 // an error if creation fails.
@@ -63,7 +61,7 @@ var sandboxTemplateDepsVar *sandboxTemplateDeps
 // the repo inside the container. Later, fleet sessions clone from this
 // custom template instead of @base.
 func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
-	sandboxTemplateDepsVar = &sandboxTemplateDeps{
+	deps := &sandboxTemplateDeps{
 		nodePool:         nodePool,
 		templateRegistry: templateRegistry,
 		sessionRegistry:  sessionRegistry,
@@ -84,7 +82,9 @@ func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegist
 			"The returned template_name should be passed to save_fleet_plan's template field. " +
 			"IMPORTANT: This tool stops the container node process, snapshots the container, " +
 			"and restarts the node. Tool calls will be temporarily unavailable during the snapshot.",
-	}, saveSandboxTemplate)
+	}, func(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSandboxTemplateResult, error) {
+		return saveSandboxTemplate(ctx, args, deps)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func NewSaveSandboxTemplateTool(nodePool *sandbox.NodeClientPool, templateRegist
 // NewSaveSandboxTemplateToolFromBackend creates save_sandbox_template for
 // Docker/K8s/OpenShell sessions. Captures the session upper as a named layer.
 func NewSaveSandboxTemplateToolFromBackend(backend sandbox.Backend, templateRegistry *sandbox.TemplateRegistry, sessionRegistry *sandbox.SessionRegistry) (tool.Tool, error) {
-	sandboxTemplateDepsVar = &sandboxTemplateDeps{
+	deps := &sandboxTemplateDeps{
 		backend:          backend,
 		templateRegistry: templateRegistry,
 		sessionRegistry:  sessionRegistry,
@@ -112,22 +112,23 @@ func NewSaveSandboxTemplateToolFromBackend(backend sandbox.Backend, templateRegi
 			"Pass overwrite=true to replace an existing template with the same name. " +
 			"Cannot overwrite the reserved name 'base'. " +
 			"The returned template_name should be passed to save_fleet_plan's template field.",
-	}, saveSandboxTemplate)
+	}, func(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSandboxTemplateResult, error) {
+		return saveSandboxTemplate(ctx, args, deps)
+	})
 	if err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
-func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs) (SaveSandboxTemplateResult, error) {
-	if sandboxTemplateDepsVar == nil {
+func saveSandboxTemplate(ctx tool.Context, args SaveSandboxTemplateArgs, deps *sandboxTemplateDeps) (SaveSandboxTemplateResult, error) {
+	if deps == nil || deps.templateRegistry == nil {
 		return SaveSandboxTemplateResult{
 			Status:  "error",
 			Message: "Sandbox template system is not initialized. Ensure sandbox mode is enabled.",
 		}, nil
 	}
 
-	deps := sandboxTemplateDepsVar
 	if deps.backend != nil {
 		return saveSandboxTemplateBackend(ctx, args, deps)
 	}
@@ -167,7 +168,7 @@ func saveSandboxTemplateBackend(ctx tool.Context, args SaveSandboxTemplateArgs, 
 		}, nil
 	}
 
-	bctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	bctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	art, err := deps.backend.SaveSessionAsTemplate(bctx, sessionID)

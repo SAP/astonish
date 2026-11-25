@@ -8,6 +8,35 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+func TestBotDocumentsPromptFileFirst(t *testing.T) {
+	text := BotDocumentsPrompt([]bot.Document{
+		{Name: bot.DocumentSoul, Content: "Actual soul {not_a_variable}"},
+		{Name: bot.DocumentMemory, Content: strings.Repeat("memory detail ", 2000)},
+		{Name: bot.DocumentMemory, Content: "DUPLICATE_INDEX"},
+		{Name: "reports/prior.md", Content: "OLD_REPORT_BODY"},
+	})
+	for _, want := range []string{"Actual soul", "MEMORY.md", "Content omitted", "read_file", "not full historical work", "permission authority"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+	if strings.Contains(text, "OLD_REPORT_BODY") || strings.Contains(text, "DUPLICATE_INDEX") || len(text) > bot.BotMemoryBootstrapBytes+2000 {
+		t.Fatal("unbounded or historical prompt")
+	}
+	if BotDocumentsPrompt(nil) != "" {
+		t.Fatal("empty prompt")
+	}
+	builder := &SystemPromptBuilder{}
+	builder.applyBotPrompt(NewBotPromptOverrides(nil, bot.RunRequest{Bot: store.Bot{Name: "Files"}}))
+	if !strings.Contains(builder.SchedulerHints, "Deliver ordinary information requests directly in chat") || !strings.Contains(builder.SchedulerHints, "explicitly requests a file") || !strings.Contains(builder.SchedulerHints, "publish_file") {
+		t.Fatal("missing inline default or explicit file delivery guidance")
+	}
+	code := &SystemPromptBuilder{CodeMode: true}
+	if code.applyBotPrompt(NewBotPromptOverrides(nil, bot.RunRequest{})) || strings.Contains(code.SchedulerHints, "Work file-first") {
+		t.Fatal("changed Code mode")
+	}
+}
+
 func TestBotMemoryPromptBoundedCurrent(t *testing.T) {
 	rows := []store.MemorySearchResult{
 		{Snippet: "Delivery is Friday", Attribution: &store.MemoryAttribution{Source: "receipt", Status: store.MemoryKnowledgeVerified, SupersededBy: "correction:123"}},

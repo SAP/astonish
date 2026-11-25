@@ -1,3 +1,4 @@
+import BotFilesPanel from './BotFilesPanel'
 import { useCallback, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogDescription, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -24,6 +25,8 @@ import { RunStatus, canContinueBotProgress } from '@/api/botRunState'
 import { BotReviewCard } from './BotReviewCard'
 import type { BotOperationView } from '@/api/botOperationResult'
 
+const conversationToolFree = (bot: api.Bot) => bot.status === api.BotStatus.Draft || bot.status === api.BotStatus.Paused
+
 const conversationReadOnly = (bot: api.Bot, userId?: string) => {
   const readOnly = !userId || bot.owner_id !== userId
   return bot.status === api.BotStatus.Deleted || bot.status === api.BotStatus.Stopped || ((bot.status === api.BotStatus.Draft || bot.status === api.BotStatus.Paused) ? readOnly : !userId || (bot.scope === 'personal' && readOnly))
@@ -44,7 +47,7 @@ function LoadedBotWorkspace({ bot, route, theme, userId, refresh, revision, snap
   const approvals = useResource(s => api.listBotApprovals(bot.id, bot.scope, s), bot.id, revision)
   const request = useRef<{ signature: string; key: string } | null>(null)
   const readOnly = !userId || bot.owner_id !== userId
-  const toolFree = false
+  const toolFree = conversationToolFree(bot)
   const conversationUnavailable = conversationReadOnly(bot, userId)
   const allApprovals = [...new Map([...(snapshot.data?.pending_approvals || []), ...(approvals.data?.approvals || [])].map(a => [a.id, a])).values()].sort((a, b) => Date.parse(a.expires_at) - Date.parse(b.expires_at))
   const onOperationsChange = useCallback((operations: BotOperationView[]) => {
@@ -56,6 +59,7 @@ function LoadedBotWorkspace({ bot, route, theme, userId, refresh, revision, snap
     if (toolFree && attachments?.length) throw new Error('Attachments are unavailable in tool-free conversation.')
     const current = await snapshot.syncOperations(operations)
     if (conversationReadOnly(current, userId)) throw new Error('This Bot conversation is read-only.')
+    if (conversationToolFree(current) && attachments?.length) throw new Error('Attachments are unavailable in tool-free conversation.')
     const signature = JSON.stringify([current.id, current.version, text, attachments])
     if (request.current?.signature !== signature) request.current = { signature, key: crypto.randomUUID() }
     const receipt = await sendBotMessage(current, text, request.current.key, attachments)
@@ -66,11 +70,11 @@ function LoadedBotWorkspace({ bot, route, theme, userId, refresh, revision, snap
   const renderReview = (kind: 'proposal' | 'approval', id: string, question?: import('@/api/questions').Question) => <BotReviewCard key={`${kind}/${id}`} question={question} awaitingApproval={kind === 'approval'} bot={bot} proposal={kind === 'proposal' ? proposals.data?.proposals.find(p => p.id === id) : undefined} approval={kind === 'approval' ? allApprovals.find(a => a.id === id) : undefined} requiresContinueInteractive={snapshot.data?.run_states?.some(s => s.run_id === allApprovals.find(a => a.id === id)?.run_id && s.reason === 'continuation_required')} readOnly={readOnly || !!snapshot.error || !!proposals.error || !!approvals.error || bot.status === api.BotStatus.Deleted} onChange={refresh} />
   return <section aria-label="Bot workspace" className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden bg-background text-foreground">
     <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2"><div className="min-w-0"><h1 className="font-semibold truncate">{bot.name}</h1><p className="text-xs text-muted-foreground">{bot.status} · {bot.scope === 'personal' ? 'Private' : 'Team'}</p></div>
-      <Dialog modal={false} open={details} onOpenChange={setDetails}><DialogTrigger asChild><Button variant="ghost">Details</Button></DialogTrigger><DialogPrimitive.Portal forceMount><DialogPrimitive.Overlay className={details ? 'fixed inset-0 z-50 bg-black/60' : 'hidden'} /><DialogPrimitive.Content forceMount aria-hidden={!details} style={!details ? { display: 'none' } : undefined} className="fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%] z-50 rounded-xl border bg-card p-6 shadow-xl w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90dvh] overflow-y-auto"><DialogTitle>{bot.name} details</DialogTitle><DialogDescription>Settings, history and exceptional decisions. Routine work reports its answer in Chat. Closing Details preserves unfinished edits until you leave this Bot.</DialogDescription><DialogPrimitive.Close asChild><Button variant="ghost">Close</Button></DialogPrimitive.Close><BotDetails bot={bot} readOnly={readOnly} revision={revision} refresh={refresh} snapshot={snapshot} route={route} reviews={<>{proposals.error && <p role="alert">{proposals.error}<Button onClick={proposals.retry}>Retry reviews</Button></p>}{proposals.data?.proposals.map(p => renderReview('proposal', p.id))}{allApprovals.filter(a => a.status === 'pending' || a.status === 'approved').map(a => renderReview('approval', a.id))}</>} /></DialogPrimitive.Content></DialogPrimitive.Portal></Dialog>
+      <Dialog modal={false} open={details} onOpenChange={setDetails}><DialogTrigger asChild><Button variant="ghost">Details</Button></DialogTrigger><DialogPrimitive.Portal forceMount><DialogPrimitive.Overlay className={details ? 'fixed inset-0 z-50 bg-black/60' : 'hidden'} /><DialogPrimitive.Content forceMount aria-hidden={!details} style={!details ? { display: 'none' } : undefined} className="fixed top-[50%] left-[50%] translate-x-[-50%] translate-y-[-50%] z-50 rounded-xl border bg-card p-6 shadow-xl w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90dvh] overflow-y-auto"><DialogTitle>{bot.name} details</DialogTitle><DialogDescription>Settings, history and exceptional decisions. Routine work reports its answer in Chat. Closing Details preserves unfinished edits until you leave this Bot.</DialogDescription><DialogPrimitive.Close asChild><Button variant="ghost">Close</Button></DialogPrimitive.Close><BotDetails enabled={details} bot={bot} readOnly={readOnly} revision={revision} refresh={refresh} snapshot={snapshot} route={route} reviews={<>{proposals.error && <p role="alert">{proposals.error}<Button onClick={proposals.retry}>Retry reviews</Button></p>}{proposals.data?.proposals.map(p => renderReview('proposal', p.id))}{allApprovals.filter(a => a.status === 'pending' || a.status === 'approved').map(a => renderReview('approval', a.id))}</>} /></DialogPrimitive.Content></DialogPrimitive.Portal></Dialog>
     </header>
     {snapshot.error && <p role="alert" className="px-4 text-sm">Updates unavailable. {snapshot.error} <Button variant="link" onClick={refresh}>Retry</Button></p>}
     {snapshot.data?.run_states?.filter(s => (canContinueBotProgress(s) || s.reason === 'continuation_required' && (s.status === RunStatus.Interrupted || s.status === RunStatus.Queued)) && !allApprovals.some(a => a.run_id === s.run_id && a.status === 'pending')).map(s => <BotContinueInteractive key={`${bot.id}/${s.run_id}/${canContinueBotProgress(s) ? s.progress?.revision : s.state_sequence}`} bot={bot} runId={s.run_id} checkpointRevision={canContinueBotProgress(s) ? s.progress?.revision : undefined} disabled={conversationUnavailable || readOnly || !!snapshot.error || !!approvals.error} onChange={refresh} />)}
-    <StudioChat key={bot.id} theme={theme} initialSessionId={bot.home_session_id} hideSidebar botThread={{ botId: bot.id, scope: bot.scope, status: bot.status, readOnly: conversationUnavailable, toolFree, operations: snapshot.data?.operations || [], decisionsReadOnly: readOnly || !!snapshot.error, runStates: snapshot.data?.run_states, onSend: send, onOperationsChange, renderReview }} />
+    <StudioChat key={bot.id} theme={theme} initialSessionId={bot.home_session_id} hideSidebar botThread={{ botId: bot.id, scope: bot.scope, status: bot.status, readOnly: conversationUnavailable, toolFree, operations: snapshot.data?.operations || [], decisionsReadOnly: readOnly || !!snapshot.error, runStates: snapshot.data?.run_states, pendingApprovalIds: allApprovals.filter(approval => approval.status === 'pending').map(approval => approval.id), onSend: send, onOperationsChange, renderReview }} />
   </section>
 }
 export function BotWorkDetails({ work, unavailable = false, loading = false }: { work?: api.BotWorkProjection; unavailable?: boolean; loading?: boolean }) {
@@ -84,10 +88,10 @@ export function BotWorkDetails({ work, unavailable = false, loading = false }: {
   </details>
 }
 export function BotRunWorkDetails({ run, unavailable = false }: { run: api.BotRun; unavailable?: boolean }) {
-  const scopedWork = !run.work || run.work.bot_id === run.bot_id && run.work.run_id === run.id
+  const source = api.botRunDetailsSource(run)
   const receipt = run.report?.skill
   const scopedReceipt = receipt?.schema_version === 1 && receipt.bot_id === run.bot_id && receipt.run_id === run.id
-  return <>{!run.work && run.report?.quality ? <BotQualityDetails quality={run.report.quality} unavailable={unavailable} /> : <BotWorkDetails work={scopedWork ? run.work : undefined} unavailable={unavailable || !scopedWork} />}{scopedReceipt && <p>{unavailable ? 'Last known learning' : 'Learning'}: {receipt.kind} · used revision {receipt.used_revision} · committed revision {receipt.committed_revision || 'none'}</p>}</>
+  return <>{source.kind === api.BotRunDetailsKind.Quality ? <BotQualityDetails quality={source.quality} unavailable={unavailable} /> : <BotWorkDetails work={source.kind === api.BotRunDetailsKind.Work ? source.work : undefined} unavailable={unavailable || source.kind === api.BotRunDetailsKind.Unavailable} />}{scopedReceipt && <p>{unavailable ? 'Last known learning' : 'Learning'}: {receipt.kind} · used revision {receipt.used_revision} · committed revision {receipt.committed_revision || 'none'}</p>}</>
 }
 export function BotQualityDetails({ quality, unavailable = false }: { quality?: api.BotQualityReport; unavailable?: boolean }) {
   if (unavailable) return <p role="status">Assessment unavailable</p>
@@ -99,7 +103,7 @@ export function BotQualityDetails({ quality, unavailable = false }: { quality?: 
   </details>
 }
 
-function BotDetails({ bot, readOnly, revision, refresh, snapshot, reviews, route }: { bot: api.Bot; readOnly: boolean; revision: number; refresh: () => void; snapshot: ReturnType<typeof useBotSnapshot>; reviews: React.ReactNode; route: BotRoute }) {
+function BotDetails({ enabled, bot, readOnly, revision, refresh, snapshot, reviews, route }: { bot: api.Bot; readOnly: boolean; revision: number; refresh: () => void; snapshot: ReturnType<typeof useBotSnapshot>; reviews: React.ReactNode; route: BotRoute; enabled: boolean }) {
   const version = useResource(s => api.getBotVersion(bot.id, bot.version, bot.scope, s), bot.id, revision)
   const runs = useResource(s => api.listBotRuns(bot.id, bot.scope, s), bot.id, revision)
   const goals = useResource(s => api.listBotGoals(bot.id, bot.scope, s), bot.id, revision)
@@ -108,18 +112,23 @@ function BotDetails({ bot, readOnly, revision, refresh, snapshot, reviews, route
   const unavailable = readOnly || bot.status === api.BotStatus.Deleted
   const [error, setError] = useState('')
   return <div className="space-y-4"><p className="text-xs">Version {effectiveBot.version} · revision {effectiveBot.revision}</p><Button variant="outline" onClick={refresh}>Refresh Bot</Button>
+    <BotFilesPanel bot={bot} enabled={enabled} revision={revision} />
+    <section aria-label="Database-backed Configuration" className="space-y-3">    <h2 className="font-semibold">Database-backed Configuration</h2><p className="text-sm text-muted-foreground">Policy, model selection, schedule and status are control state, not files. Content does not grant permissions.</p>
     {version.error && <p role="alert">{version.error}<Button onClick={version.retry}>Retry policy</Button></p>}{version.data && <BotPolicySummary version={version.data} />}
     {snapshot.data?.run_states?.map(state => <BotProgressDetails key={state.run_id} state={state} />)}
     <BotLifecycleControls bot={bot} readOnly={readOnly || !version.data || !!snapshot.error} onChange={refresh} />
     <details><summary>Execution setup</summary><BotHomeSetup bot={effectiveBot} disabled={unavailable} onPrepared={next => { setPrepared(next); refresh() }} onRefresh={refresh} />{!readOnly && bot.home_session_id && <BotHomeModel sessionId={bot.home_session_id} />}<BotTestOnce bot={effectiveBot} disabled={unavailable || !version.data || !effectiveBot.home} onRun={run => { refresh(); window.location.hash = botPath(bot.id, bot.scope, run.id) }} /></details>
+    <details><summary>Goals</summary>{goals.error && <p role="alert">{goals.error}<Button onClick={goals.retry}>Retry goals</Button></p>}{goals.data && <BotGoals bot={bot} goals={goals.data.goals} readOnly={unavailable} onChange={refresh} />}</details>
+    <details><summary>Schedule & triggers</summary>{version.data && <BotSchedule bot={bot} version={version.data} readOnly={unavailable} onChange={refresh} />}</details>
+    <details><summary>Memory & charter</summary><BotMemoryCharterPanel enabled={enabled} bot={bot} readOnly={unavailable} onChange={refresh} /></details>
+    <details><summary>Configuration</summary><BotConfigurationPanel bot={bot} readOnly={unavailable} onChange={refresh} />{!readOnly && <BotTemplatePublication />}</details>
+    </section>
+    <section aria-label="Activity" className="space-y-3"><h2 className="font-semibold">Activity</h2>
     <details open={!!route.runId}><summary>Runs & activity</summary><p>{snapshot.data?.unread_count || 0} unread updates · {snapshot.data?.pending_approvals.length || 0} decisions waiting</p>{snapshot.data?.latest_outcome ? <><p>{snapshot.data.latest_outcome.report.summary || snapshot.data.latest_outcome.status}</p><BotRunWorkDetails run={snapshot.data.latest_outcome} unavailable={!!snapshot.error} /></> : <p>No work result yet</p>}{runs.error && <p role="alert">{runs.error}<Button onClick={runs.retry}>Retry runs</Button></p>}{runs.data?.runs.length === 0 && <p>No runs yet.</p>}{runs.data?.runs.filter(run => run.id !== route.runId).map(run => <article key={run.id} className="border rounded p-3"><a href={`#${botPath(bot.id, bot.scope, run.id)}`}>{run.status} · {run.trigger}</a><p>{run.report.summary || 'No report yet.'}</p><BotRunWorkDetails run={run} unavailable={!!runs.error} /><BotStopRun bot={bot} run={run} disabled={unavailable} onChange={refresh} /><p>{run.provider}/{run.model} · {run.usage.tool_calls} tool calls</p>{run.report.changed?.map((e, i) => <p key={i}>Changed: {e.summary} — {e.source}</p>)}{run.report.unchanged?.map((e, i) => <p key={i}>Unchanged: {e.summary}</p>)}{run.report.unverified?.map((e, i) => <p key={i}>Unverified: {e}</p>)}</article>)}{snapshot.activity.map(a => <p key={a.sequence}>#{a.sequence} {a.kind} · {a.created_at}</p>)}<Button onClick={() => snapshot.markRead(Math.max(0, ...snapshot.activity.map(a => a.sequence))).catch(e => setError(botLocalFailure(e).message))}>Mark displayed activity read</Button>{error && <BotEmployeeMessage role="alert">{error}</BotEmployeeMessage>}</details>
       {route.runId && <BotRunDetails key={route.runId} bot={bot} runId={route.runId} readOnly={unavailable} revision={revision} refresh={refresh} />}
     <details><summary>Operation evidence</summary><p>{snapshot.data?.mandate?.available ? 'A stored mandate is available. Each action still checks current authorization.' : 'No stored mandate is available.'}</p>{snapshot.error ? <p role="alert">Operation evidence is unavailable. Refresh before relying on these results.</p> : (snapshot.data?.operations || []).length ? (snapshot.data?.operations || []).map(operation => <p key={operation.operation_id}>{operation.summary} · {operation.status}</p>) : <p>No operation results yet.</p>}</details>
     <details><summary>Review inbox</summary>{reviews}</details>
-    <details><summary>Goals</summary>{goals.error && <p role="alert">{goals.error}<Button onClick={goals.retry}>Retry goals</Button></p>}{goals.data && <BotGoals bot={bot} goals={goals.data.goals} readOnly={unavailable} onChange={refresh} />}</details>
-    <details><summary>Schedule & triggers</summary>{version.data && <BotSchedule bot={bot} version={version.data} readOnly={unavailable} onChange={refresh} />}</details>
-    <details><summary>Memory & charter</summary><BotMemoryCharterPanel bot={bot} readOnly={unavailable} onChange={refresh} /></details>
-    <details><summary>Configuration</summary><BotConfigurationPanel bot={bot} readOnly={unavailable} onChange={refresh} />{!readOnly && <BotTemplatePublication />}</details>
+    </section>
   </div>
 }
 function BotRunDetails({ bot, runId, readOnly, revision, refresh }: { bot: api.Bot; runId: string; readOnly: boolean; revision: number; refresh: () => void }) {

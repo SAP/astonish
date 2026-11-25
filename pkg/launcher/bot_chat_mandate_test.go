@@ -7,8 +7,6 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"testing"
 	"time"
 )
@@ -41,20 +39,14 @@ func TestBotChatFactoryMandateWithoutTurnRegistry(t *testing.T) {
 	f.req.Mandate = &bot.MandateExecution{Authorization: auth, Runtime: runtime, Identity: id}
 	f.req.Run.MandateRef = &runtime.saved.Ref
 	f.req.Run.ExecutionMode = execution.BotExecutionModeChatInteractive
+	client := &sourceAccessCatalogueClient{response: []byte(`{"content":"mandate read"}`)}
 	prepare := f.cfg.Prepare
 	f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 		safe, err := prepare(ctx, req, s)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			safe.Catalog.Pool = &sharedBotDispatchPool{client: client}
 		}
-		for _, name := range []string{"read_file", "shell_command"} {
-			native, e := functiontool.New(functiontool.Config{Name: name, Description: "test"}, func(tool.Context, struct{}) (struct{}, error) { return struct{}{}, nil })
-			if e != nil {
-				return nil, e
-			}
-			safe.Tools = append(safe.Tools, native)
-		}
-		return safe, nil
+		return safe, err
 	}
 	missing := f.req.Mandate
 	f.req.Mandate = nil
@@ -72,17 +64,26 @@ func TestBotChatFactoryMandateWithoutTurnRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	found := false
-	for _, native := range resources.Agent.Tools {
-		if native.Name() == "shell_command" || native.Name() == "delegate_tasks" {
-			t.Fatalf("unscoped catalogue: %s", native.Name())
+	for _, name := range []string{"shell_command", "delegate_tasks"} {
+		entry := resources.Agent.ToolIndex.GetToolEntry(name)
+		if entry == nil {
+			t.Fatalf("shared catalog missing %s", name)
 		}
-		if native.Name() == "read_file" {
-			found = true
+		invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+		if _, err := entry.Tool.(botRunnableTool).Run(invocation, map[string]any{}); err == nil {
+			t.Fatalf("mandate allowed unauthorized %s", name)
 		}
 	}
-	if !found {
+	if client.calls != 0 {
+		t.Fatalf("unauthorized node execution: %d", client.calls)
+	}
+	read := resources.Agent.ToolIndex.GetToolEntry("read_file")
+	if read == nil {
 		t.Fatal("mandate read missing")
+	}
+	invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+	if _, err := read.Tool.(botRunnableTool).Run(invocation, map[string]any{"path": "outputs/report.md"}); err != nil || client.calls != 1 {
+		t.Fatalf("authorized read failed: calls=%d err=%v", client.calls, err)
 	}
 	runtime.revoked = true
 	if _, err = f.construct(t); err == nil {

@@ -187,18 +187,20 @@ func NewProviderWithConfig(ctx context.Context, modelName, clientID, clientSecre
 		}
 	}
 
-	// Resolve deployment ID
-	deploymentID, err := resolveDeploymentIDWithConfig(ctx, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup)
-	if err != nil {
-		return nil, err
-	}
-
+	// Discovery and inference share this provider-local token cache. Discarding
+	// discovery's valid token would make the first inference depend on a second
+	// exchange; no token is shared across provider configurations.
 	transport := &sapTransport{
 		base:          httpool.Transport(),
 		clientID:      clientID,
 		clientSecret:  clientSecret,
 		authURL:       authURL,
 		resourceGroup: resourceGroup,
+	}
+
+	deploymentID, err := resolveDeploymentIDWithTransport(ctx, modelName, baseURL, resourceGroup, transport)
+	if err != nil {
+		return nil, err
 	}
 
 	// Initialize OpenAI provider for fallback/delegation
@@ -250,11 +252,6 @@ func readSAPDeploymentResponse(body io.Reader) ([]byte, error) {
 // resolveDeploymentIDWithConfig finds the deployment ID for a given model name using explicit config.
 func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, clientSecret, authURL, baseURL, resourceGroup string) (string, error) {
 	resourceGroup = effectiveResourceGroup(resourceGroup)
-	// Check map first
-	if mapped, ok := ModelIDMap[modelName]; ok {
-		modelName = mapped
-	}
-
 	t := &sapTransport{
 		base:          httpool.Transport(),
 		clientID:      clientID,
@@ -263,6 +260,13 @@ func resolveDeploymentIDWithConfig(ctx context.Context, modelName, clientID, cli
 		resourceGroup: resourceGroup,
 	}
 
+	return resolveDeploymentIDWithTransport(ctx, modelName, baseURL, resourceGroup, t)
+}
+
+func resolveDeploymentIDWithTransport(ctx context.Context, modelName, baseURL, resourceGroup string, t *sapTransport) (string, error) {
+	if mapped, ok := ModelIDMap[modelName]; ok {
+		modelName = mapped
+	}
 	if !strings.HasSuffix(baseURL, "/v2") {
 		baseURL = strings.TrimRight(baseURL, "/") + "/v2"
 	}

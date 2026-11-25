@@ -12,8 +12,12 @@ intentionally resets its local state; a revision refresh does not.
 All requests use `teamFetch` and an explicit `scope` query parameter through the
 new `web/src/api/botMemory.ts` client. No generic cross-scope memory endpoint is used.
 
-- `GET /api/studio/bots/{id}/documents`: current projected persona, charter,
-  goals, memory, people/group indexes and notes, with source mappings.
+- `GET /api/studio/bots/{id}/documents`: bounded reads of actual retained
+  SOUL/IDENTITY/USER/CHARTER/MEMORY files and available optional indexes, not SQL
+  record projections. `MEMORY.md` is bounded to 12 KiB including its read hint;
+  other documents to 16 KiB each. `source_version` is the full file SHA-256.
+  Missing critical files/capability fail; missing optional indexes are omitted.
+  GET never provisions Home. Historical working-file projections are unsupported.
 - `PUT /api/studio/bots/{id}/documents/{document}`: allowlisted SOUL.md,
   IDENTITY.md, USER.md and CHARTER.md edits with expected Bot revision, reason,
   and explicit confirmation.
@@ -39,8 +43,11 @@ Reload fetches comparison data separately: it never replaces the draft. The user
 must explicitly accept the current revision/source fingerprints, then review again.
 Mapped-source rebase fails closed if any source is absent from the bounded snapshot.
 
-Read-only projected Markdown is never submitted as authority. Reviewed mapping
-writes create attributed replacements and retain original evidence and the receipt.
+Read-only file Markdown is never submitted as authority. Reviewed mapping
+writes create attributed disk replacements and retain original evidence and the
+receipt. File-only documents may have no record mappings: an ingest receipt is
+not proof that the separately read Home Markdown was rewritten. The disk head
+and Bot revision are CAS-guarded; generic SQL memory writes are not a fallback.
 Persona content cannot assign rights, verified evidence, actors, or tool policy.
 Recommendations are never executed automatically. The UI renders raw provenance
 as text/JSON, not executable HTML.
@@ -59,4 +66,48 @@ per explicit operation, using the first source's session as the displayed target
 Goal-linked correction selection is not yet exposed (`goal_ids` is empty).
 
 Verification is focused Vitest interaction/transport testing and TypeScript checks.
-A live authenticated Studio/backend acceptance run remains required at integration.
+File-first integration still requires an authenticated Studio/backend journey in
+both scopes: display retained files, show empty optional indexes and independent
+missing-file errors, preserve a draft across a conflict, explicitly rebase source
+fingerprints, apply a reviewed disk replacement and reopen its receipt/history.
+Opening Details while paused must not provision compute or start work. Capture a
+later provider request to prove bounded MEMORY/critical-file bootstrap and explicit
+retrieval of prior content. Publication-to-MEMORY indexing, durable artifact cards
+and native terminal parity are separate acceptance gates, not consequences of a
+successful editor save. No live acceptance was run for this documentation update.
+
+## File browser and control-state boundary
+
+Details now has a lazy **Files** section for actual retained Home directories,
+instruction files and MEMORY.md. The **Database-backed Configuration** label
+separates policy, model selection, schedules and lifecycle state from files.
+Reviewed edits and exceptional decisions keep their existing permission gates.
+The memory panel accepts optional `enabled` (default true); the force-mounted
+Details container supplies its open state so closed Details starts no document
+or health reads, while local edits survive closing. Published Chat cards refer
+to immutable snapshots rather than these mutable working files. **Activity** groups
+runs, operation evidence and the review inbox separately from configuration.
+
+Ordinary user dotfiles are hidden by default. **Show hidden files** sends the
+explicit `show_hidden=true` listing flag; switching visibility resets navigation,
+selection and pagination. This is a visibility preference, never authorization:
+credential trees (`.ssh`, `.aws`, `.config/astonish`, etc.), environment secrets,
+Git internals, runtime storage and `.stage-`/`.tmp-` writer objects remain denied
+on listing, stat, preview and download URLs. Descriptor-relative Home reads still
+reject symlinks, hardlinks, special files and mount escapes; the trusted content
+workspace remains a different physical root.
+
+Paused/stopped Bots remain readable. Closing, deletion, scope/Bot/Home identity
+changes abort selected reads and clear bytes. Transient listing errors retain a
+labelled last-known list; 401/403/404/410 discard it. Unsupported and unprepared
+Homes are explicit errors/statuses, never provisioning requests. The native
+attachment path exposes ticket authorization errors in the viewer but does not
+claim browser download completion; errors after handoff belong to the browser's
+download manager. Binary bytes are never buffered in JavaScript.
+
+`TestBotFileWorkspaceBrowserAcceptance` uses built Studio, production HTTP
+handlers and disposable filesystem/SQLite fixtures in personal and team scopes.
+It exercises hidden-file opt-in/exclusion, escaped HTML, Markdown, native 17 MiB
+download bytes, reload identities, and 390/1280px light/dark layouts without a
+model invocation. This tier does not substitute for physical Docker/Kubernetes
+retention or full worker publication provenance.

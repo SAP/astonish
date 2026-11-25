@@ -12,15 +12,12 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/bot"
-	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
-	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -141,14 +138,12 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 				llm := &blockedPublicationModel{t: t, rejectExplanation: rejectExplanation}
 				var err error
 				f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{
-					Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+					Backend: f.db, Sandbox: f.workerConfig.Sandbox, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 					ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 1000, SupportsOutputLimit: true},
 					ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 						return llm, nil
 					},
-					Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-						return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
-					},
+					Prepare: f.workerConfig.Prepare,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -208,7 +203,7 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 						t.Fatal("fallback lost on reload")
 					}
 					history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-					if strings.Count(history, m.Text) != 1 || strings.Contains(history, blockedPublicationText) || strings.Contains(history, "REVIEWER_ONLY") {
+					if canonicalHTTPTextCount(t, history, m.Text) != 1 || strings.Contains(history, blockedPublicationText) || strings.Contains(history, "REVIEWER_ONLY") {
 						t.Fatalf("unsafe fallback history: %s", history)
 					}
 					return
@@ -225,30 +220,24 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 				reportID := "bot-report:" + run.ID.String()
 				check := func(frame blockedPublicationFrame) bool {
 					t.Helper()
-					if frame.kind != "transcript" {
+					if strings.Contains(frame.data, "REVIEWER_ONLY") || strings.Contains(frame.data, "couldn't verify everything") {
+						t.Fatalf("reviewer/generic appendix leaked: %s", frame.data)
+					}
+					if frame.kind != "text" {
 						return false
 					}
-					var event session.Event
+					var event canonicalHTTPText
 					if err := json.Unmarshal([]byte(frame.data), &event); err != nil {
 						t.Fatal(err)
 					}
-					if event.Content != nil {
-						var text strings.Builder
-						for _, p := range event.Content.Parts {
-							text.WriteString(p.Text)
+					if event.InvocationID == reportID {
+						if event.Text != blockedPublicationText {
+							t.Fatalf("Home modified employee explanation: %q", event.Text)
 						}
-						if strings.Contains(text.String(), "REVIEWER_ONLY") || strings.Contains(text.String(), "couldn't verify everything") {
-							t.Fatalf("reviewer/generic appendix leaked: %q", text.String())
-						}
-						if event.InvocationID == reportID {
-							if text.String() != blockedPublicationText {
-								t.Fatalf("Home modified employee explanation: %q", text.String())
-							}
-							return true
-						}
-						if strings.Contains(text.String(), blockedPublicationText) {
-							t.Fatalf("duplicate employee draft outside report: %s", event.ID)
-						}
+						return true
+					}
+					if strings.Contains(event.Text, blockedPublicationText) {
+						t.Fatalf("duplicate employee draft outside report: %s", frame.id)
 					}
 					return false
 				}
@@ -291,7 +280,7 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 						t.Fatalf("Home report count after publication retry: %d", reports)
 					}
 					history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-					if strings.Count(history, blockedPublicationText) != 1 || strings.Contains(history, "REVIEWER_ONLY") || strings.Contains(history, "couldn't verify everything") {
+					if canonicalHTTPTextCount(t, history, blockedPublicationText) != 1 || strings.Contains(history, "REVIEWER_ONLY") || strings.Contains(history, "couldn't verify everything") {
 						t.Fatalf("history changed/duplicated employee message: %s", history)
 					}
 				}

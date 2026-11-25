@@ -76,7 +76,7 @@ func TestBotTaskQualityBaselineWholeReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	text, err := resources.Agent.LLM.(*botFactoryLLM).binding.tasks.guidance(f.ctx)
+	text, err := botFactoryModelForTest(t, resources.Agent.LLM).binding.tasks.guidance(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestBotTaskQualityBaselineTaskBinding(t *testing.T) {
 			case "missing-input":
 				repo.event = nil
 			}
-			text, err := resources.Agent.LLM.(*botFactoryLLM).binding.tasks.guidance(f.ctx)
+			text, err := botFactoryModelForTest(t, resources.Agent.LLM).binding.tasks.guidance(f.ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +155,7 @@ func TestBotTaskQualityBaselineRevisionBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
-			s := resources.Agent.LLM.(*botFactoryLLM).binding.tasks
+			s := botFactoryModelForTest(t, resources.Agent.LLM).binding.tasks
 			current := f.req.Task.Clone()
 			current.Ref.Revision = 2
 			run := repo.runs[0]
@@ -187,7 +187,7 @@ func TestBotTaskQualityBaselineConfirmedAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	s := resources.Agent.LLM.(*botFactoryLLM).binding.tasks
+	s := botFactoryModelForTest(t, resources.Agent.LLM).binding.tasks
 	run := repo.runs[0]
 	confirmation := &store.BotTitleConfirmation{
 		Version: store.BotTitleConfirmationVersion, State: store.BotTitleConfirmationConfirmed,
@@ -228,7 +228,7 @@ func TestBotTaskQualityBaselineOwnerContractAndUntrustedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	text, err := resources.Agent.LLM.(*botFactoryLLM).binding.tasks.guidance(f.ctx)
+	text, err := botFactoryModelForTest(t, resources.Agent.LLM).binding.tasks.guidance(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestBotTaskQualityBaselineRedactsBeforeSampling(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	binding := resources.Agent.LLM.(*botFactoryLLM).binding
+	binding := botFactoryModelForTest(t, resources.Agent.LLM).binding
 	binding.redactTask = func(s string) string { return strings.ReplaceAll(s, secret, "[redacted]") }
 	text, err := binding.tasks.guidance(f.ctx)
 	if err != nil {
@@ -289,7 +289,7 @@ func TestBotTaskQualityAutomaticRecipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	binding := resources.Agent.LLM.(*botFactoryLLM).binding
+	binding := botFactoryModelForTest(t, resources.Agent.LLM).binding
 	capture := &qualityCaptureWorkspace{retainedTaskWorkspace: w}
 	binding.tasks.workspace = capture
 	binding.tasks.current = nil

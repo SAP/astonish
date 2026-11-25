@@ -59,7 +59,7 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 	if len(scenarios) > 0 {
 		scenario = scenarios[0]
 	}
-	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, store.BotScopePersonal)
+	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"}, store.BotScopePersonal)
 	defer f.worker.Stop()
 	*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 		return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
@@ -135,7 +135,7 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 			}
 			output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": response.Content.Parts[0].Text}}})
 		} else if productions.Add(1) == 1 {
-			output = append(output, map[string]any{"type": "function_call", "call_id": "receipt-read", "name": "read_file", "arguments": `{"path":"/isolated/receipt.txt"}`})
+			output = append(output, map[string]any{"type": "function_call", "call_id": "receipt-read", "name": "read_file", "arguments": `{"path":"receipt.txt"}`})
 		} else {
 			if !wire.Stream {
 				t.Error("health-enabled main generation did not use Responses SSE")
@@ -330,7 +330,7 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 	}
 	after := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
 	assertPrivate(after)
-	if strings.Count(after, "bot-report:"+run.ID.String()) != 1 || !strings.Contains(after, "Observed scoped result.") {
+	if canonicalHTTPReportCount(t, after, "bot-report:"+run.ID.String()) != 1 || canonicalHTTPTextCount(t, after, "Observed scoped result.") != 1 {
 		t.Fatalf("missing exactly-one Home final: %s", after)
 	}
 	t.Logf("upstream_event_batches=%d same_lease_fence=%d", pulses.Load(), run.Lease.Fence)

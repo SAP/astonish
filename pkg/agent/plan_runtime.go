@@ -127,6 +127,7 @@ type PlanRuntimeOptions struct {
 	VerificationProgress func(PlanVerificationProgress)
 	Verify               func(string) (int, string, error)
 	CommitSnapshot       CommitPlanSnapshot
+	PrepareOperation     PreparePlanOperation
 }
 
 // PlanRuntime belongs to one session. The PlanState lock also serializes legacy
@@ -139,6 +140,7 @@ type PlanRuntime struct {
 	codeLease               *codePlanLease
 	codeApprovalCommitted   bool
 	allowInitialReplacement bool
+	prepared                map[string]PlanPreparedOperation
 }
 
 func NewPlanRuntime(plan *PlanState, options PlanRuntimeOptions) *PlanRuntime {
@@ -244,24 +246,19 @@ func (r *PlanRuntime) Announce(goal string, doc PlanDocumentInfo, steps []PlanSt
 		next.Steps[i].Status = "pending"
 		next.Steps[i].Evidence = ""
 	}
-	next.PlanID = uuid.NewString()
-	next.Revision = 1
-	next.Sequence = 1
-	syncPlanSnapshotMetadata(&next)
-	if r.options.CommitSnapshot != nil {
-		if err := r.options.CommitSnapshot(next.Clone()); err != nil {
-			return planRuntimeError(PlanRuntimePersistFailed, err.Error())
-		}
+	if r.plan != nil {
+		r.plan.mu.Lock()
+		defer r.plan.mu.Unlock()
+	}
+	op := r.prepareSnapshotLocked(PlanPreparedAnnounce, next)
+	if err := r.publishPreparedLocked(op); err != nil {
+		return err
 	}
 	if r.codeLease != nil {
 		r.codeLease.revoked.Store(true)
 		r.codeLease = nil
 	}
 	r.codeApprovalCommitted = false
-	// Detach the previous state so late verification cannot mutate this plan.
-	r.plan = NewPlanState(next.Goal, next.Document, next.Steps)
-	r.inFlight = make(map[string]bool)
-	r.allowInitialReplacement = false
 	return nil
 }
 
@@ -287,21 +284,7 @@ func (r *PlanRuntime) CommitSnapshot(next PlanSnapshot) error {
 			next.Steps[i].Status = "pending"
 			next.Steps[i].Evidence = ""
 		}
-		if next.PlanID == "" {
-			next.PlanID = uuid.NewString()
-		}
-		if next.Revision == 0 {
-			next.Revision = 1
-		}
-		next.Sequence++
-		syncPlanSnapshotMetadata(&next)
-		if r.options.CommitSnapshot != nil {
-			if err := r.options.CommitSnapshot(next.Clone()); err != nil {
-				return planRuntimeError(PlanRuntimePersistFailed, err.Error())
-			}
-		}
-		r.plan = NewPlanState(next.Goal, next.Document, next.Steps)
-		return nil
+		return r.publishPreparedLocked(r.prepareSnapshotLocked(PlanPreparedSnapshot, next))
 	}
 	r.plan.mu.Lock()
 	defer r.plan.mu.Unlock()
@@ -315,19 +298,10 @@ func (r *PlanRuntime) CommitSnapshot(next PlanSnapshot) error {
 // commitLocked publishes only after durable persistence succeeds. Both locks
 // are held; the callback receives its own deep copy and cannot mutate next.
 func (r *PlanRuntime) commitLocked(next PlanSnapshot) error {
-	if next.PlanID == "" {
-		next.PlanID = uuid.NewString()
-	}
-	if next.Revision == 0 {
-		next.Revision = 1
-	}
-	next.Sequence++
-	syncPlanSnapshotMetadata(&next)
-	if r.options.CommitSnapshot != nil {
-		if err := r.options.CommitSnapshot(next.Clone()); err != nil {
-			return planRuntimeError(PlanRuntimePersistFailed, err.Error())
-		}
-	}
+	return r.publishPreparedLocked(r.prepareSnapshotLocked(PlanPreparedSnapshot, next))
+}
+
+func (r *PlanRuntime) applySnapshotLocked(next PlanSnapshot) {
 	if r.codeLease != nil && (r.codeLease.planID != next.PlanID || !codePlanSnapshotActive(next)) {
 		r.codeLease.revoked.Store(true)
 		r.codeLease = nil
@@ -351,7 +325,6 @@ func (r *PlanRuntime) commitLocked(next PlanSnapshot) error {
 	r.plan.doc = replacement.doc
 	r.plan.steps = replacement.steps
 	r.plan.generation++
-	return nil
 }
 
 // Bootstrap persists identity for a legacy plan once, without changing its
@@ -646,7 +619,7 @@ func (r *PlanRuntime) RegisterDelegate(stepName, taskName string) (string, error
 		return "", nil
 	}
 	sn, tn := strings.ToLower(p.steps[idx].name), strings.ToLower(taskName)
-	if p.taskRegistry[sn][tn] {
+	if p.taskRegistry[sn][tn] && !p.completedTasks[sn][tn] {
 		return "", nil
 	}
 	started := ""
@@ -664,6 +637,9 @@ func (r *PlanRuntime) RegisterDelegate(stepName, taskName string) (string, error
 		p.taskRegistry[sn] = make(map[string]bool)
 	}
 	p.taskRegistry[sn][tn] = true
+	// Re-dispatching a completed legacy name makes it active again, only after
+	// persistence has succeeded. Duplicate starts of active tasks are no-ops.
+	delete(p.completedTasks[sn], tn)
 	return started, nil
 }
 
@@ -689,7 +665,7 @@ func (r *PlanRuntime) FinishDelegate(stepName, taskName string) (string, error) 
 		return "", planRuntimeError(PlanRuntimeUnapproved, "the plan is not approved for execution")
 	}
 	idx := p.findStepLocked(stepName)
-	if idx < 0 || p.steps[idx].status != "running" {
+	if idx < 0 {
 		return "", nil
 	}
 	sn, tn := strings.ToLower(p.steps[idx].name), strings.ToLower(taskName)
@@ -706,6 +682,11 @@ func (r *PlanRuntime) FinishDelegate(stepName, taskName string) (string, error) 
 		p.completedTasks[sn] = make(map[string]bool)
 	}
 	p.completedTasks[sn][tn] = true
+	// A failed or already verified phase still needs its delegate released,
+	// but must not request verification or promote phase status/evidence.
+	if p.steps[idx].status != "running" {
+		return "", nil
+	}
 	if len(p.taskRegistry[sn]) == 0 {
 		return "", nil
 	}
@@ -753,6 +734,31 @@ func (r *PlanRuntime) UpdateStep(step, status string) (result PlanStepApplyResul
 		return fail(PlanRuntimeBusy, "phase verification is already running")
 	}
 	want := normalizePlanStatus(status)
+	var preparedVerify PlanPreparedOperation
+	if want == "complete" {
+		for _, op := range r.prepared {
+			if op.Kind != PlanPreparedVerify || op.Step != step {
+				continue
+			}
+			if preparedDigest(op.Base) != preparedDigest(s) {
+				unlock()
+				return fail(PlanRuntimeStale, "prepared verification base changed; reconcile retained evidence")
+			}
+			if op.Stage == PlanPreparedVerifying {
+				unlock()
+				return fail(PlanRuntimeVerificationUncertain, "verification outcome is unknown; do not replay")
+			}
+			if op.Stage == PlanPreparedSettled {
+				err := r.publishPreparedLocked(op)
+				unlock()
+				if err != nil {
+					return fail(PlanRuntimeErrorCode(err), err.Error())
+				}
+				return op.Result
+			}
+			preparedVerify = op.Clone()
+		}
+	}
 	if r.options.CodeExecution && (codeReviewPending(s) || want == "running" || want == "complete") {
 		if err := codePhaseBlock(s, step); err != nil {
 			unlock()
@@ -803,6 +809,25 @@ func (r *PlanRuntime) UpdateStep(step, status string) (result PlanStepApplyResul
 		unlock()
 		return fail(PlanStepNoVerify, "this phase has no verify command; revise the plan")
 	}
+	if preparedVerify.ID == "" {
+		preparedVerify = PlanPreparedOperation{Version: 1, ID: uuid.NewString(), Kind: PlanPreparedVerify, Stage: PlanPreparedReady, Base: s.Clone(), Step: step, RequestDigest: preparedDigest(struct {
+			Base PlanSnapshot
+			Step string
+		}{s, step})}
+	}
+	if err := r.notifyPreparedLocked(preparedVerify); err != nil {
+		unlock()
+		return fail(PlanRuntimeErrorCode(err), err.Error())
+	}
+	preparedVerify.Stage = PlanPreparedVerifying
+	if err := r.notifyPreparedLocked(preparedVerify); err != nil {
+		// No dispatch happened; retain the safe Ready stage locally. A durable
+		// ambiguous Verifying write is conservative after process loss.
+		preparedVerify.Stage = PlanPreparedReady
+		r.retainPreparedLocked(preparedVerify)
+		unlock()
+		return fail(PlanRuntimeErrorCode(err), err.Error())
+	}
 	r.inFlight[step] = true
 	capturedID := s.PlanID
 	capturedEpoch := p.steps[idx].epoch
@@ -829,6 +854,7 @@ func (r *PlanRuntime) UpdateStep(step, status string) (result PlanStepApplyResul
 	current := snapshotPlanLocked(p)
 	idx = p.findStepExactLocked(step)
 	if r.plan != p || current.PlanID != capturedID || idx < 0 || p.steps[idx].epoch != capturedEpoch || !implementationEqual(current.Steps[idx].Definition(), info.Definition()) || current.Steps[idx].Status != info.Status || current.Steps[idx].Evidence != info.Evidence || current.Document.Results != "" {
+		delete(r.prepared, preparedVerify.ID)
 		return fail(PlanRuntimeStale, "phase changed while verification was running; evidence discarded")
 	}
 	evidence := formatPlanEvidence(exit, output)
@@ -854,11 +880,26 @@ func (r *PlanRuntime) UpdateStep(step, status string) (result PlanStepApplyResul
 			}
 		}
 	}
-	if err := r.commitLocked(current); err != nil {
+	preparedVerify.Stage = PlanPreparedSettled
+	preparedVerify.Base = snapshotPlanLocked(p) // merge independent-wave commits after captured implementation checks
+	preparedVerify.Verification = &PlanSettledVerification{ExitCode: exit, Output: output}
+	if runErr != nil {
+		preparedVerify.Verification.Error = runErr.Error()
+	}
+	preparedVerify.Result = PlanStepApplyResult{Name: step, Applied: applied, Code: code, Message: message, Output: output}
+	if current.PlanID == "" {
+		current.PlanID = uuid.NewString()
+	}
+	if current.Revision == 0 {
+		current.Revision = 1
+	}
+	current.Sequence++
+	syncPlanSnapshotMetadata(&current)
+	preparedVerify.Candidate = &current
+	if err := r.publishPreparedLocked(preparedVerify); err != nil {
 		return fail(PlanRuntimeErrorCode(err), err.Error())
 	}
-	p.manuallyTracked = true
-	return PlanStepApplyResult{Name: step, Applied: applied, Code: code, Message: message, Output: output}
+	return preparedVerify.Result
 }
 func passingPlanEvidence(evidence string) bool {
 	return evidence == "exit 0" || strings.HasPrefix(evidence, "exit 0;")

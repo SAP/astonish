@@ -61,7 +61,7 @@ func TestBotSynthesisFactoryMeasuredPromptContinues(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			binding := got.Agent.LLM.(*botFactoryLLM).binding
+			binding := botFactoryModelForTest(t, got.Agent.LLM).binding
 			binding.req.Version.Budget = spec
 			q := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(strings.Repeat("evidence ", 27000), "user")}, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "read_file"}}}}}}
 			generate := func() {

@@ -17,77 +17,86 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// Same wire shape as daemon bot_worker.persistRuntimeEvent: the complete Chat
-// payload is in StateDelta, not ArtifactDelta or Content.
+// runtimeTranscriptFrame is the public canonical Chat frame, not a storage row.
 func runtimeTranscriptFrame(t *testing.T, typ, payload string, sequence int64) client.SSEEvent {
 	t.Helper()
-	wire := bot.RuntimeEvent{SessionID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), TurnID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Sequence: sequence, Type: typ, Payload: json.RawMessage(payload)}
-	row := session.Event{ID: uuid.NewString(), InvocationID: wire.TurnID.String(), Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{"bot_runtime_event": wire}}}
-	data, err := json.Marshal(row)
+	return canonicalBotFrame(t, "11111111-1111-1111-1111-111111111111", fmt.Sprintf("runtime/%d", sequence), typ, payload, sequence)
+}
+
+func canonicalBotFrame(t *testing.T, sessionID, eventID, typ, payload string, cursor int64) client.SSEEvent {
+	t.Helper()
+	var data map[string]any
+	if err := json.Unmarshal([]byte(payload), &data); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("%s:%d", sessionID, cursor)
+	data["_projection"] = map[string]any{"session_id": sessionID, "event_id": eventID, "cursor": id}
+	raw, err := json.Marshal(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client.SSEEvent{Type: client.BotTranscriptEvent, Data: string(data)}
+	return client.SSEEvent{Type: typ, ID: id, Data: string(raw)}
 }
 
 func TestBotTranscriptTurnContextMarker(t *testing.T) {
-	const quote = "[Astonish Per-Turn Context — not user-authored]\n## Relevant Tools For This Request\nannounce_plan / delegate_tasks"
-	for _, camel := range []bool{false, true} {
-		for _, runtime := range []bool{false, true} {
-			for _, legacy := range []bool{false, true} {
-				t.Run(fmt.Sprintf("camel=%t/runtime=%t/legacy=%t", camel, runtime, legacy), func(t *testing.T) {
-					mapper := botTranscriptMapper{}
-					mapRow := mapper.mapFrame
-					if legacy {
-						mapRow = botTranscriptEvents
-					}
-					if runtime {
-						if _, err := mapRow(runtimeTranscriptFrame(t, "session", `{}`, 1)); err != nil {
-							t.Fatal(err)
-						}
-					}
-					for _, tc := range []struct {
-						name, text string
-						marker     any
-						hidden     bool
-					}{
-						{"real", "real input", nil, false},
-						{"hidden", quote, true, true},
-						{"quote", quote, nil, false},
-						{"false", quote, false, false},
-						{"string", quote, "true", false},
-						{"equal quote", quote, nil, false},
-					} {
-						t.Run(tc.name, func(t *testing.T) {
-							delta := map[string]any{}
-							if tc.marker != nil {
-								delta["_astonish_turn_context"] = tc.marker
-							}
-							content := map[string]any{"role": "user", "parts": []any{map[string]any{"text": tc.text}}}
-							row := map[string]any{"Author": "user", "InvocationID": "22222222-2222-2222-2222-222222222222", "Content": content, "Actions": map[string]any{"StateDelta": delta}}
-							if camel {
-								row = map[string]any{"author": "user", "invocationId": "22222222-2222-2222-2222-222222222222", "content": content, "actions": map[string]any{"stateDelta": delta}}
-							}
-							raw, err := json.Marshal(row)
-							if err != nil {
-								t.Fatal(err)
-							}
-							got, err := mapRow(client.SSEEvent{Type: client.BotTranscriptEvent, Data: string(raw)})
-							if err != nil {
-								t.Fatal(err)
-							}
-							if tc.hidden {
-								if len(got) != 0 {
-									t.Fatalf("hidden context emitted events (including completion): %+v", got)
-								}
-							} else if len(got) != 2 || got[0].Kind != events.KindUser || got[0].Text != tc.text || got[1].Kind != events.KindDone {
-								t.Fatalf("real user input lost: %+v", got)
-							}
-						})
-					}
-				})
-			}
+	mapper := botTranscriptMapper{}
+	for _, typ := range []string{"cursor", "replay_complete"} {
+		got, err := mapper.mapFrame(client.SSEEvent{Type: typ, Data: `{}`})
+		if err != nil || len(got) != 0 {
+			t.Fatalf("control frame rendered: %v %v", got, err)
 		}
+	}
+	got, err := mapper.mapFrame(runtimeTranscriptFrame(t, "user_message", `{"text":"[Astonish Per-Turn Context — not user-authored]"}`, 1))
+	if err != nil || len(got) != 1 || got[0].Kind != events.KindUser {
+		t.Fatalf("user quote lost: %v %v", got, err)
+	}
+	for _, frame := range []client.SSEEvent{{Type: "transcript", Data: `{"author":"user","content":{"parts":[{"text":"private"}]}}`}, {Type: "text", Data: `{"text":"unbound"}`}, {Type: "text", Data: `{`}} {
+		if _, err := mapper.mapFrame(frame); err == nil {
+			t.Fatalf("accepted noncanonical frame: %+v", frame)
+		}
+	}
+}
+
+func mapStoredBotFixture(t *testing.T, mapper *botTranscriptMapper, frame client.SSEEvent) ([]events.Event, error) {
+	t.Helper()
+	var row session.Event
+	if err := json.Unmarshal([]byte(frame.Data), &row); err != nil {
+		return nil, err
+	}
+	if row.ID == "" {
+		row.ID = uuid.NewString()
+	}
+	sid := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	projector := api.SessionEventProjector{BotID: uuid.New(), SessionID: sid, HomeSessionID: sid}
+	projection, err := projector.ProjectBot(context.Background(), store.BotTranscriptEvent{Cursor: 1, Event: &row}, nil)
+	if err != nil {
+		return nil, err
+	}
+	frames, err := projection.BotFrames(0)
+	if err != nil {
+		return nil, err
+	}
+	var out []events.Event
+	for _, frame := range frames {
+		mapped, err := mapper.mapFrame(client.SSEEvent{Type: frame.Type, Data: string(frame.Data)})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mapped...)
+	}
+	return out, nil
+}
+
+func TestBotCanonicalReviewIsObservation(t *testing.T) {
+	m := botTranscriptMapper{}
+	frame := runtimeTranscriptFrame(t, "bot_review", `{"reviewId":"review","eventId":"saved","invocationId":"turn","question":{"text":"Which city?"}}`, 1)
+	got, err := m.mapFrame(frame)
+	if err != nil || len(got) != 1 || got[0].Kind != events.KindSystem || got[0].EventID != "saved" || got[0].InvocationID != "turn" {
+		t.Fatalf("review: %+v %v", got, err)
+	}
+	got, err = m.mapFrame(frame)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("duplicate review: %+v %v", got, err)
 	}
 }
 
@@ -128,7 +137,7 @@ func TestBotRuntimeProductionCapture(t *testing.T) {
 	result, err := adapter.Start(f.ctx, f.req, func(_ context.Context, wire bot.RuntimeEvent) error {
 		// Exactly the daemon's storage envelope; capture it in the same ordered
 		// journal as actual ADK appends, not a hand-reordered wire-only fixture.
-		capture.record(&session.Event{ID: uuid.NewSHA1(wire.TurnID, []byte(fmt.Sprint(wire.Sequence))).String(), InvocationID: wire.TurnID.String(), Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{botRuntimeStateKey: wire}}})
+		capture.record(&session.Event{ID: uuid.NewSHA1(wire.TurnID, []byte(fmt.Sprint(wire.Sequence))).String(), InvocationID: wire.TurnID.String(), Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{"bot_runtime_event": wire}}})
 		return nil
 	})
 	if err != nil || result.Status != store.RunSucceeded {
@@ -136,17 +145,29 @@ func TestBotRuntimeProductionCapture(t *testing.T) {
 	}
 	mapper := botTranscriptMapper{}
 	texts, users, adkModels := 0, 0, 0
-	for _, row := range capture.rows {
+	projector := api.SessionEventProjector{BotID: f.req.Bot.ID, HomeSessionID: f.req.Bot.HomeSessionID, SessionID: f.req.Run.SessionID}
+	for i, row := range capture.rows {
 		if row.Author != "bot_runtime" && row.Content != nil && row.Content.Role == "model" {
 			adkModels++
 		}
-		raw, err := json.Marshal(row)
+		if row.ID == "" {
+			row.ID = uuid.NewString()
+		}
+		projection, err := projector.ProjectBot(f.ctx, store.BotTranscriptEvent{Cursor: int64(i + 1), Event: row}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := mapper.mapFrame(client.SSEEvent{Data: string(raw)})
+		frames, err := projection.BotFrames(int64(i))
 		if err != nil {
 			t.Fatal(err)
+		}
+		var got []events.Event
+		for _, frame := range frames {
+			mapped, err := mapper.mapFrame(client.SSEEvent{Type: frame.Type, Data: string(frame.Data)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, mapped...)
 		}
 		for _, ev := range got {
 			if ev.Kind == events.KindText {

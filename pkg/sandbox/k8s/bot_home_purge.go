@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
@@ -183,11 +184,25 @@ func (b *K8sBackend) DeleteBotHome(ctx context.Context, h *sandbox.BotHomeBindin
 
 func (b *K8sBackend) botHomePurgePod(h *sandbox.BotHomeBinding, p botHomePurge) *corev1.Pod {
 	deadline := int64(120)
+	program := botHomePurgeScript
+	if botHomeIsRestoreTarget(h) {
+		// A failed cold restore can have staged private objects as well as HOME
+		// data. Purge only this generation's private child, under the same owner,
+		// mount and durable attachment fences, before publishing the receipt.
+		program = strings.Replace(program, `mv -T "$root/.purging" "$root/.purged"`, `
+[ ! -L "$root/workspace-private" ] || exit 1
+if [ -e "$root/workspace-private" ]; then
+ [ -d "$root/workspace-private" ] && [ "$(readlink -f "$root/workspace-private")" = "$root/workspace-private" ] || exit 1
+ find -P "$root/workspace-private" -xdev -depth -delete
+fi
+[ ! -e "$root/workspace-private" ] && [ ! -L "$root/workspace-private" ] || exit 1
+mv -T "$root/.purging" "$root/.purged"`, 1)
+	}
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: p.Name, Namespace: b.cfg.Namespace, Annotations: map[string]string{"astonish.io/home-purge": p.Name}}, Spec: corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever, ActiveDeadlineSeconds: &deadline, AutomountServiceAccountToken: botHomeBool(false),
-		Containers: []corev1.Container{{Name: containerName, Image: p.Image, ImagePullPolicy: imagePullPolicy(p.Image), Command: []string{"/bin/sh", "-c", botHomePurgeScript, "home-purge", h.Ref, p.Name},
+		Containers: []corev1.Container{{Name: containerName, Image: p.Image, ImagePullPolicy: imagePullPolicy(p.Image), Command: []string{"/bin/sh", "-c", program, "home-purge", botHomeStorageOwner(h), p.Name},
 			SecurityContext: &corev1.SecurityContext{RunAsUser: int64Ptr(0), AllowPrivilegeEscalation: botHomeBool(false), ReadOnlyRootFilesystem: botHomeBool(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"DAC_OVERRIDE", "FOWNER"}}},
-			VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: h.Scope.Key()}}}},
+			VolumeMounts:    []corev1.VolumeMount{{Name: volumeBotHome, MountPath: mountBotHome, SubPath: botHomeStorageSubPath(h)}}}},
 		Volumes: []corev1.Volume{{Name: volumeBotHome, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: b.cfg.HomesPVCName}}}},
 	}}
 }

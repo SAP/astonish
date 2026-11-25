@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { botURL, permanentDeleteBot, setupBotHome, createBot, promoteChatToBot, getBotTemplate, forkBotTemplate, botLifecycle, decideBotApproval, type Bot, type BotApproval, type BotTemplate } from '../bots'
-import { connectBotEvents, dispatchBotTranscript } from '../botEvents'
+import { connectBotEvents } from '../botEvents'
 import { teamFetch } from '../teamContext'
 vi.mock('../teamContext', () => ({ teamFetch: vi.fn() }))
 const fetchMock = vi.mocked(teamFetch)
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => fetchMock.mockReset())
 describe('scoped Bot transport', () => {
   it.each(['personal', 'team'] as const)('permanently deletes %s with confirmation but no reason', async scope => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))
@@ -70,23 +70,69 @@ describe('scoped Bot transport', () => {
     await decideBotApproval({ id: 'a', scope: 'personal' } as Bot, { id: 'p', action_digest: 'digest' } as BotApproval, 'denied')
     expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string)).toEqual({ action_digest: 'digest', status: 'denied' })
   })
-  it('unwraps runtime wire events and excludes thought text', () => {
-    const emit = vi.fn()
-    dispatchBotTranscript({ ID: 'report-row', InvocationID: 'report-turn', Actions: { StateDelta: { bot_runtime_event: { type: 'report_marker', payload: { path: '/report.md' } } } } }, emit)
-    dispatchBotTranscript({ ID: 'text-row', InvocationID: 'text-turn', Content: { parts: [{ thought: true, text: 'secret' }, { text: 'visible' }] } }, emit)
-    expect(emit.mock.calls).toEqual([['report_marker', { path: '/report.md', eventId: 'report-row', invocationId: 'report-turn' }], ['text', { text: 'visible', eventId: 'text-row', invocationId: 'text-turn' }], ['turn_complete', { eventId: 'text-row', invocationId: 'text-turn' }]])
+  it('forwards backend-projected reports and public text with stable identities', async () => {
+    const emit = vi.fn(), done = vi.fn(), error = vi.fn()
+    const events: [string, object][] = [
+      ['report_marker', { path: '/report.md', eventId: 'report-row', invocationId: 'report-turn' }],
+      ['text', { text: 'visible', eventId: 'text-row', invocationId: 'text-turn' }],
+      ['turn_complete', { eventId: 'text-row', invocationId: 'text-turn' }],
+    ]
+    // A text row has two public parts; only its final part commits the row cursor.
+    const frames = events.map(([type, data], index) => {
+      const cursor = `sid:${index === 2 ? 2 : 1}`
+      const eventId = index === 0 ? 'sid/report-row/0' : `sid/text-row/${index - 1}`
+      return `id: ${cursor}\nevent: ${type}\ndata: ${JSON.stringify({ ...data, _projection: { event_id: eventId, session_id: 'sid', run_id: 'run', cursor } })}\n\n`
+    }).join('')
+    fetchMock.mockResolvedValueOnce(new Response(`${frames}id: sid:2\nevent: done\ndata: {"persisted":true}\n\n`))
+    const controller = connectBotEvents({ botId: 'bot', sessionId: 'sid', scope: 'personal', onEvent: emit, onDone: done, onError: error })
+    try {
+      await vi.waitFor(() => expect(done).toHaveBeenCalledOnce())
+      expect(error).not.toHaveBeenCalled()
+      expect(emit.mock.calls).toEqual(events)
+      expect(JSON.stringify(emit.mock.calls)).not.toContain('secret')
+      expect(JSON.stringify(emit.mock.calls)).not.toContain('_projection')
+    } finally { controller.abort() }
   })
-  it('frames split CRLF, deduplicates cursor and aborts the reader', async () => {
-    const emit = vi.fn(), state = vi.fn(), cancel = vi.fn()
-    const event = JSON.stringify({ Actions: { StateDelta: { bot_runtime_event: { type: 'text', payload: { text: 'once' } } } } })
-    fetchMock.mockResolvedValue(new Response(new ReadableStream({ start(c) {
-      for (const chunk of [`id: sid:1\r\nevent: transcript\r\ndata: ${event}\r`, `\n\r\nid: sid:1\nevent: transcript\ndata: ${event}\n\n`, 'id: sid:1\nevent: replay_complete\ndata: {"persisted":true}\n\n']) c.enqueue(new TextEncoder().encode(chunk))
+  it('frames split CRLF, deduplicates stable identity and aborts the reader', async () => {
+    const emit = vi.fn(), state = vi.fn(), cancel = vi.fn(), replay = vi.fn(), error = vi.fn()
+    const event = JSON.stringify({ text: 'once', _projection: { event_id: 'sid/row/0', session_id: 'sid', run_id: 'run', cursor: 'sid:1' } })
+    fetchMock.mockResolvedValueOnce(new Response(new ReadableStream({ start(c) {
+      for (const chunk of [`id: sid:1\r\nevent: text\r\ndata: ${event}\r`, `\n\r\nid: sid:1\nevent: text\ndata: ${event}\n\n`, 'id: sid:1\nevent: replay_complete\ndata: {"persisted":true}\n\n']) c.enqueue(new TextEncoder().encode(chunk))
     }, cancel })))
-    const controller = connectBotEvents({ botId: 'a/b', sessionId: 'sid', scope: 'personal', onEvent: emit, onState: state })
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1))
-    expect(state).toHaveBeenCalledWith('live', 'sid:1')
-    expect(fetchMock.mock.calls[0][0]).toContain('/a%2Fb/sessions/sid/events?scope=personal')
-    controller.abort()
+    const controller = connectBotEvents({ botId: 'a/b', sessionId: 'sid', scope: 'personal', onEvent: emit, onState: state, onReplayComplete: replay, onError: error })
+    try {
+      await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce())
+      expect(emit.mock.calls).toEqual([['text', { text: 'once' }]])
+      expect(error).not.toHaveBeenCalled()
+      expect(state).toHaveBeenCalledWith('live', 'sid:1')
+      expect(fetchMock.mock.calls[0][0]).toContain('/a%2Fb/sessions/sid/events?scope=personal')
+    } finally { controller.abort() }
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce())
+  })
+  it('reconnects from the committed row cursor and deduplicates replayed parts by stable identity', async () => {
+    vi.useFakeTimers()
+    const emit = vi.fn(), state = vi.fn(), done = vi.fn(), error = vi.fn()
+    const frame = (type: string, data: object, row: string, part: number, cursor: string) =>
+      `id: ${cursor}\nevent: ${type}\ndata: ${JSON.stringify({ ...data, _projection: { event_id: `sid/${row}/${part}`, session_id: 'sid', run_id: 'run', cursor } })}\n\n`
+    const report = frame('report_marker', { path: '/report.md' }, 'report', 0, 'sid:1')
+    // The first text part retains the previous row cursor until turn_complete.
+    const text = frame('text', { text: 'once' }, 'text', 0, 'sid:1')
+    const complete = frame('turn_complete', { eventId: 'text' }, 'text', 1, 'sid:2')
+    fetchMock.mockResolvedValueOnce(new Response(report + text))
+    fetchMock.mockResolvedValueOnce(new Response(text + complete + 'id: sid:2\nevent: done\ndata: {"persisted":true}\n\n'))
+    const controller = connectBotEvents({ botId: 'bot', sessionId: 'sid', scope: 'personal', onEvent: emit, onState: state, onDone: done, onError: error })
+    try {
+      await vi.waitFor(() => expect(state).toHaveBeenCalledWith('reconnecting', 'sid:1'))
+      expect(emit.mock.calls).toEqual([['report_marker', { path: '/report.md' }], ['text', { text: 'once' }]])
+      expect(done).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1000)
+      await vi.waitFor(() => expect(done).toHaveBeenCalledOnce())
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'sid:1' })
+      expect(emit.mock.calls).toEqual([['report_marker', { path: '/report.md' }], ['text', { text: 'once' }], ['turn_complete', { eventId: 'text' }]])
+      expect(state).toHaveBeenLastCalledWith('live', 'sid:2')
+      expect(error).not.toHaveBeenCalled()
+    } finally { controller.abort(); vi.useRealTimers() }
   })
   it('does not retry forbidden streams or call ordinary Chat', async () => {
     fetchMock.mockResolvedValue(new Response('forbidden', { status: 403 }))

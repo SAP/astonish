@@ -48,11 +48,11 @@ func strictA2ATools(ctx context.Context, s *store.Services, resolver credentials
 	for name := range merged {
 		card, err := mgr.GetAgentCard(name)
 		if err != nil {
-			return nil, fmt.Errorf("A2A %q card: %w", name, err)
+			continue // optional discovery: explicit invocation has no tool to select
 		}
 		client, err := mgr.GetClient(name)
 		if err != nil {
-			return nil, fmt.Errorf("A2A %q client: %w", name, err)
+			continue
 		}
 		for _, t := range a2aclient.GenerateTools(name, card, client) {
 			tools = append(tools, a2aclient.ToADKTool(t))

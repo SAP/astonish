@@ -3,7 +3,132 @@
 Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 `botBoundTool` before dispatch: owner scope, live lease/revocation, exact action
 policy and the shared run budget precede adapter execution. There is no host
-fallback when an adapter is unavailable.
+fallback when an adapter is unavailable. Production workers use a five-minute
+fenced lease with fresh authorization, budget and lease renewal every twenty
+seconds. The longer expiry is only crash/stall tolerance for large retained stores;
+it does not cache or extend caller authority, suppress heartbeats, or permit a
+late result after renewal failure.
+
+## Committed owner-priority dispatch
+
+Production `BotWorker.Start` owns three joined loops: bounded mailbox admission,
+independent durable discovery, and maintenance. It never calls the synchronous
+`Poll` fixture wrapper. The optional `Services.BotRunStateNotify` callback is
+composed once with a request's existing notifier; repository callbacks still run
+only after the outer SQL transaction commits. Worker and scheduler owner contexts
+carry the same callback.
+
+A hint retains only Bot/run identifiers, routing identifiers, sequence and lane,
+never the request context, hydrated content or authentication authority. The
+capacity-256 mailbox coalesces newer pending sequences and drops acceleration on
+overflow (counted by `dispatchOverflow`); a separate discovery generation recovers
+durable queues. Each run page is visited once, with typed teardown, owner and
+autonomous priorities. Fresh directory membership, current Bot/run state, original
+interactive caller-team/TurnRegistry checks and Supervisor SQL claims remain the
+authority. Actual run metadata corrects the hint's lane before execution, so cron
+work sharing a Home cannot consume the reserved owner capacity.
+
+Two execution slots allow at most one autonomous run, reserving capacity for owner
+work. Process-local per-Bot exclusion lasts through runtime completion and joined
+teardown; maintenance locks only its own Bot. Same-Bot cleanup/live-claim checks
+remain mandatory, while unrelated maintenance cannot block owner admission.
+Pending hints for active Bots survive completion and are freshly resolved; newer
+nonqueued states invalidate pending acceleration without undoing committed effects.
+Stop and Drain close admission under the same mutex as WaitGroup additions. Stop
+cancels and joins loops, polls and executions; Drain stops discovery/maintenance
+and requests progress handoff before joining, falling back to Stop on deadline.
+`TestBotWorkerDispatchCapacitySameBotAndJoinedStop` holds admitted attempts at
+fresh identity resolution to prove autonomous capacity cannot occupy the owner
+slot, a newer same-Bot hint survives without overlap, and exclusion is retained
+until cancellation has joined even a slow adapter. Concurrent-notifier/Stop and
+trusted-routing tests additionally exercise the closed admission gate and request
+context lifetime independently of execution authority.
+
+`TestBotPromptDispatchMaintenanceBlocked` exercises real ephemeral loopback HTTP,
+scoped SQLite, production routes, `Start`, Supervisor claims and shared Chat's
+controlled model in personal/team scopes. Maintenance and another Bot's autonomous
+startup remain held while owner work must reach claim/model within five seconds.
+It checks duplicate hints, per-Bot slot ownership and an independent worker's live
+claim check. This is controlled framework/HTTP evidence, not a paid provider,
+physical Docker/Kubernetes or deployed-daemon latency claim.
+
+## Shared-construction policy checks
+
+`NewScopedChatRuntime` rejects concrete catalog entries that cannot implement the
+scoped executable boundary when context binding, authorization or accounting is
+installed. It must not publish such tools unchanged. A cancelled tool invocation
+is rejected before the underlying handler dispatches. The same guarded object is
+used in direct and catalog views, and additive hooks cannot replace ordinary
+capabilities by name. Explicitly transferred cleanup executes once, including on
+constructor failure; injected shared resources are not implicitly owned.
+
+The focused `TestChatRuntimeCapabilityParity` retains the fixture-registration
+identity/accounting/denial check and runs `configured-three-mode-subset` from
+`chat_runtime_three_mode_test.go`. The subset constructs ordinary scoped Chat and
+both actual Bot factory modes with the same configured node pool. It executes
+built-in `read_file` and `filter_json`, checking exact file output and filtering,
+run-session binding, cancelled calls, paused-Bot reads, autonomous shell refusal
+without exact approval, and exactly-once Bot cleanup. Its node transport invokes
+`tools.ExecuteTool` on test-owned temporary data; no paid model or user daemon is
+involved. The repository authority is a controlled fixture, not fresh SQL
+membership evidence.
+
+This is partial constructor/dispatch evidence, **not** full three-mode capability
+parity. The full runtime gate remains blocked until identical configured
+file/shell/process/search/browser/MCP/A2A/flow/drill/email/plan/template execution,
+personal/team authority matrices, production wiring and Docker **and** Kubernetes
+lazy-session lifecycle/recovery are exercised. Separate ordinary Chat HTTP/protocol
+fixtures cannot stand in for the missing three-mode sequence.
+
+## Complete shared runtime composition
+
+The ordinary host bootstrap now supplies resolved delegation callbacks, context
+capacity, flow registry/executor, knowledge retrieval and reflector to
+`NewScopedChatRuntime`, then returns that constructor's result with host metadata.
+It no longer rebuilds delegation, compaction or the flow distiller afterward.
+The shared constructor owns scanner configuration, normalized delegated MCP
+search/extract names, child event/artifact/progress forwarding, Code authorization,
+and isolated parent/child compactors. It discovers no provider or host resource.
+Directly supplied toolsets also reach the flow distiller, alongside grouped
+sets, using the same guarded instances as the live agent and flow executor.
+`TestChatRuntimeDirectToolsetDistillation` verifies successful validation of a
+flow using a direct-only capability without executing it and retains denial on
+that capability's executable view.
+
+A supplied flow executor receives the bound guarded catalog for scoped/policy
+runtimes, and cancellation is checked before dispatch. Unscoped bootstrap flows
+retain the live request catalog rather than replacing it with the startup catalog.
+This binds the callback; it does **not** certify that every injected flow engine
+uses the supplied catalog or eliminates the host InteractiveFlowRunner's existing
+resource discovery. That engine requires separate scoped migration.
+
+Host-only legacy plan/graph-plan and tool-manager global registrations remain in
+`chat_factory.go` for compatibility, after successful construction. They are not
+installed by the scoped constructor. Migrating those consumers and Bot production
+is still separate work; the focused constructor tests are not physical backend,
+provider, controller or full acceptance evidence.
+
+## Shared node dispatch
+
+Ordinary Chat's `NodeTool.Run` and the Bot catalogue's fixed-session adapter both
+use `sandbox.RunNodeTool`: structured/map argument conversion, file-path alias
+normalization, schema validation, caller metadata copying, node invocation and
+result decoding have one implementation. Bot caller cache identity is the pinned
+run session, never a model-supplied `_caller`; Chat retains its agent identity.
+Missing Bot context/client/session fails closed, without pool lookup or local
+fallback. Bot observation records normalized arguments and transport success or
+failure after dispatch; the surrounding `botBoundTool` policy gate is unchanged.
+
+Chat alone acquires pooled clients and prepares network policy and HTTP credential
+vaults. The dispatcher never imports host credentials into Bot resources.
+Context-aware clients may implement `ContextCallingToolClient`; legacy clients
+retain synchronous `Call` semantics (including the existing backend execution
+timeout), with cancellation checked before dispatch and no speculative retries.
+Non-object results use Chat's existing `result` wrapper in both modes.
+
+Backend-client parity tests exercise actual pool/client NDJSON encoding and
+response parsing against a controlled backend. These are transport evidence, not
+physical Docker execution or model-performance evidence.
 
 ## Model-aware generation limits
 
@@ -289,11 +414,54 @@ Slides/drill handlers are not blindly wrapped as sandbox tools: the node's
 invoke children outside Bot-bound effect/budget checks. They require a separately
 reviewed transport and child-authorization adapter, not catalogue-only wrappers.
 
+## Retained documents and confined file work
+
+Production file-first composition requires scoped `BotFiles` and content storage;
+missing capabilities fail explicitly without daemon-host or legacy SQL fallback.
+Docker/Kubernetes backend support must be distinguished from physical acceptance;
+OpenShell file-first creation/execution is unsupported, not a reduced-content mode.
+Ordinary OpenShell sessions and existing Home/OverlayFS lifecycle are unchanged.
+
+`Documents.Load` reads actual SOUL/IDENTITY/USER/CHARTER files (16 KiB each) and
+`MEMORY.md` (12 KiB including a retrieval hint). `LoadMapped` reads available Home
+indexes instead of SQL projections. Oversized files are not truncated on disk.
+GETs never initialize Home or start work. Bootstrap excludes full historical
+reports and latest-N memory dumps; prior content is retrieved explicitly.
+
+`BotFileToolsWithReceipts` installs confined `read_file`, `write_file`, `edit_file`,
+`find_files`, `file_tree` and `publish_file` in ordinary execution, interactive and
+mandate composition before normal catalogue early returns. Reads/listings are
+bounded and lazy; writes/edits/snapshots are restricted to `outputs/`, with digest
+CAS for overwrites and independent write readback. Private content receipts,
+credentials, policy and executable setup are not writable through these tools.
+The private Task workspace is not the ordinary Home tree. Concrete trusted
+wrappers replace generic names; presence does not grant permission, enrich old
+mandates or waive owner scope, live lease, current policy, approval or budget.
+Title-confirmation remains question-only; paused browsing performs no work.
+
+Snapshot receipts come from the trusted `BotFileReceipts` accumulator, not final
+model JSON. They attest saved bytes, not execution or committed chat delivery.
+Publication-to-MEMORY integration is not certified by this documentation update.
+Acceptance must show one committed identity per delivery, immutable prior bytes,
+compact deduplicated goals/outcomes/paths and publication refs in MEMORY, and
+metadata-only index retry without replaying work. File text never grants rights.
+
+Run `TestBotFileFirstWorkerHTTP` and scoped file/memory/document/mandate regressions;
+then separately exercise retained physical storage, reopen/provider-prompt capture,
+explicit old-file retrieval, paused/stale/cancelled/foreign access, large binary
+download, SQL sentinel absence and backup/restore. Docker, dedicated Kubernetes/
+PostgreSQL, built Studio and native PTY evidence are distinct gates; absent
+prerequisites block their tier rather than count as a pass. No live validation
+was performed for this documentation-only update.
+
 ## Memory, plans and delegated results
 
 `BotMemoryTools` preserves Chat's memory argument/result schemas while binding
 `memory_save`, `memory_search`, `memory_get` and `memory_delete` to
-`NewBotRunMemoryService`. Reads prefilter to this Bot's linked home/run sessions;
+`NewBotRunMemoryService` over the scoped disk-memory catalogue. SQL retains a
+CAS-guarded typed head reference, not memory bodies, embeddings or nested source
+snapshots; generic SQL memory Add/Update exclude Bot-linked sessions. Reads
+prefilter to this Bot's linked home/run sessions;
 mutations require the current run lease. Saves carry run attribution, redact
 credential values and may overwrite a matching category only in the current run.
 Deletes cannot remove prior-run evidence; verified attributed content cannot be
@@ -302,7 +470,9 @@ are shadowed, with no personal/team fallback.
 
 `newBotPlanTools` provides `announce_plan`, `update_plan` and
 `announce_completion` using Chat's plan lifecycle. Session state is authoritative
-across attempts; `PLAN.md` is projected through the guarded sandbox `write_file`.
+across attempts. A `PLAN.md` mirror is not guaranteed by the confined file tool:
+root/absolute paths and writes lacking create-only or digest CAS are rejected.
+Plan state alone is not evidence of a physical retained file.
 Verification invokes the already-bound `shell_command` in the run workspace,
 never Chat's daemon-host default verifier. Authorizing planning does not authorize
 the verification command's effects or waive its budget/approval checks.

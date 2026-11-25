@@ -25,6 +25,10 @@ func TestBotCurrentMemoryCorrectionTargets(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			f, repo := controlContextFixture(t)
+			f.req.Run.Intent = store.BotIntentConversation
+			f.req.Bot.Status = store.BotPaused
+			f.req.Run.UserEventID = "memory-review"
+			f.req.Bot.HomeSessionID = f.req.Run.SessionID
 			f.req.Bot.Scope = scope
 			r := botMemoryTargetRepo{repo}
 			f.services.Bots, f.services.PersonalBots = r, r
@@ -33,17 +37,15 @@ func TestBotCurrentMemoryCorrectionTargets(t *testing.T) {
 			row := store.MemorySearchResult{ID: uuid.NewString(), Snippet: "Delivery is Friday", Category: "facts", SessionID: f.req.Run.SessionID.String(), Scope: string(scope)}
 			memory := &botPromptMemoryStore{rows: []store.MemorySearchResult{row}}
 			f.services.Memory = memory
-			resources, err := f.construct(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resources.Cleanup()
+			owner := store.WithServices(botFactoryOwnerContext(f.ctx, f.req), f.services)
+			binding := &botFactoryBinding{owner: owner, req: f.req, verifyIsolation: func(context.Context) error { return nil }}
+			llm := &botFactoryLLM{LLM: f.resolver.model, binding: binding}
 			// Refresh after construction: the source fingerprint must not be cached.
 			memory.rows[0].Snippet = "Delivery is Thursday"
 			f.req.Bot.Revision = 8
 			req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Actually delivery is Monday; please correct what you remember.", "user")}}
 			before, _ := json.Marshal(req)
-			for _, err := range resources.Agent.LLM.GenerateContent(context.Background(), req, false) {
+			for _, err := range llm.GenerateContent(context.Background(), req, false) {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -75,6 +77,10 @@ func TestBotCurrentMemoryTargetSafety(t *testing.T) {
 	for _, tc := range []string{"empty", "unavailable", "foreign", "fence", "revision", "oversized", "superseded", "invalid-id", "bounded", "untrusted"} {
 		t.Run(tc, func(t *testing.T) {
 			f, repo := controlContextFixture(t)
+			f.req.Run.Intent = store.BotIntentConversation
+			f.req.Bot.Status = store.BotPaused
+			f.req.Run.UserEventID = "memory-review"
+			f.req.Bot.HomeSessionID = f.req.Run.SessionID
 			r := botMemoryTargetRepo{repo}
 			f.services.Bots, f.services.PersonalBots = r, r
 			row := store.MemorySearchResult{ID: uuid.NewString(), Snippet: "Delivery Friday", Category: "facts", SessionID: f.req.Run.SessionID.String(), Scope: string(f.req.Bot.Scope)}

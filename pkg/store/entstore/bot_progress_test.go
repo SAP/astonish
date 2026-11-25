@@ -31,6 +31,7 @@ func progressFixture(t *testing.T, scope store.BotScope, reopen ...*func()) (*bo
 	var activate func(uuid.UUID) error
 	var closeDB func() error
 	path := filepath.Join(t.TempDir(), "progress.db")
+	contentRoot := t.TempDir()
 	open := func() {
 		sqlDB, err := sql.Open("sqlite", path)
 		if err != nil {
@@ -46,14 +47,14 @@ func progressFixture(t *testing.T, scope store.BotScope, reopen ...*func()) (*bo
 			if err = c.Schema.Create(ctx); err != nil {
 				t.Fatal(err)
 			}
-			db, closeDB = teamBotDB{client: c}, c.Close
+			db, closeDB = teamBotDB{client: c, content: newBotContentCodec(contentRoot, store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}, c.Close
 			activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus("active").Exec(ctx) }
 		} else {
 			c := personalent.NewClient(personalent.Driver(driver))
 			if err = c.Schema.Create(ctx); err != nil {
 				t.Fatal(err)
 			}
-			db, closeDB = personalBotDB{client: c}, c.Close
+			db, closeDB = personalBotDB{client: c, content: newBotContentCodec(contentRoot, store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}, c.Close
 			activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus("active").Exec(ctx) }
 		}
 	}

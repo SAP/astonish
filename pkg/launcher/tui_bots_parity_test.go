@@ -88,7 +88,8 @@ func TestBotWatchWaitsForNewHomeAdmission(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: {\"author\":\"user\",\"content\":{\"parts\":[{\"text\":\"admitted\"}]}}\n\n", sid)
+		f := canonicalBotFrame(t, sid.String(), "admitted", "user_message", `{"text":"admitted"}`, 1)
+		fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
 	}))
 	defer srv.Close()
 	b := newBotPlatformBackend(&platformBackend{client: client.NewWithConfig(srv.URL)}, "personal")
@@ -111,11 +112,14 @@ func TestBotWatchReplayDeduplicatesAllKinds(t *testing.T) {
 	id, sid := uuid.New(), uuid.New()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		row := `{"author":"agent","content":{"role":"model","parts":[{"text":"hello"},{"functionCall":{"name":"read_file","id":"call","args":{}}},{"functionResponse":{"name":"read_file","id":"call","response":{"result":"ok"}}}]},"actions":{"artifactDelta":{"report.md":1}},"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`
 		for i := 0; i < 2; i++ {
-			fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: %s\n\n", sid, row)
+			for j, wire := range []struct{ typ, payload string }{{"text", `{"text":"hello"}`}, {"tool_call", `{"name":"read_file","id":"call","args":{}}`}, {"tool_result", `{"name":"read_file","id":"call","result":"ok"}`}, {"artifact", `{"path":"report.md"}`}, {"usage", `{"input":3,"output":2}`}} {
+				f := canonicalBotFrame(t, sid.String(), fmt.Sprint(j), wire.typ, wire.payload, 1)
+				fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
+			}
 		}
-		fmt.Fprintf(w, "id: %s:2\nevent: transcript\ndata: {\"author\":\"agent\",\"content\":{\"parts\":[{\"text\":\"sentinel\"}]}}\n\n", sid)
+		f := canonicalBotFrame(t, sid.String(), "sentinel", "text", `{"text":"sentinel"}`, 2)
+		fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", f.ID, f.Type, f.Data)
 	}))
 	defer srv.Close()
 	b := newBotPlatformBackend(&platformBackend{client: client.NewWithConfig(srv.URL)}, "personal")

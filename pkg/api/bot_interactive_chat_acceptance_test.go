@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,7 +33,77 @@ import (
 	"google.golang.org/genai"
 )
 
+// canonicalHTTPText is the public Chat text payload, not the persisted ADK event.
+// Projection metadata may repeat invocationId; it must never count as delivery.
+type canonicalHTTPText struct {
+	InvocationID string `json:"invocationId"`
+	Text         string `json:"text"`
+}
+
+func canonicalHTTPTextEvents(t *testing.T, body string) []canonicalHTTPText {
+	t.Helper()
+	r := bufio.NewReader(strings.NewReader(body))
+	var texts []canonicalHTTPText
+	for {
+		if _, err := r.Peek(1); err == io.EOF {
+			return texts
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		frame := readBlockedPublicationFrame(t, r)
+		if frame.kind != "text" {
+			continue
+		}
+		var text canonicalHTTPText
+		if err := json.Unmarshal([]byte(frame.data), &text); err != nil {
+			t.Fatalf("invalid canonical text payload: %v", err)
+		}
+		texts = append(texts, text)
+	}
+}
+
+func canonicalHTTPReportCount(t *testing.T, body, invocationID string) int {
+	t.Helper()
+	count := 0
+	for _, event := range canonicalHTTPTextEvents(t, body) {
+		if event.InvocationID == invocationID {
+			count++
+		}
+	}
+	return count
+}
+
+func canonicalHTTPTextCount(t *testing.T, body, text string) int {
+	t.Helper()
+	count := 0
+	for _, event := range canonicalHTTPTextEvents(t, body) {
+		if event.Text == text {
+			count++
+		}
+	}
+	return count
+}
+
+func TestCanonicalHTTPPublicationCounts(t *testing.T) {
+	body := "event: text\ndata: {\"invocationId\":\"bot-report:run\",\"text\":\"Reviewed answer\",\"_projection\":{\"turn_id\":\"bot-report:run\"}}\n\n" +
+		"event: bot_run_state\ndata: {\"invocationId\":\"bot-report:run\",\"text\":\"Reviewed answer\"}\n\n"
+	if got := canonicalHTTPReportCount(t, body, "bot-report:run"); got != 1 {
+		t.Fatalf("metadata/non-text event counted as delivery: %d", got)
+	}
+	if got := canonicalHTTPTextCount(t, body, "Reviewed answer"); got != 1 {
+		t.Fatalf("non-text event counted as answer: %d", got)
+	}
+	if got := canonicalHTTPReportCount(t, body+body, "bot-report:run"); got != 2 {
+		t.Fatalf("duplicate delivery hidden: %d", got)
+	}
+	if got := canonicalHTTPReportCount(t, body, "bot-report:other"); got != 0 {
+		t.Fatalf("another run counted as delivery: %d", got)
+	}
+}
+
 type interactiveHTTPModel struct {
+	chatOnly    bool
+	deliverySet bool
 	qualityMode string
 	productions int
 	reviews     int
@@ -48,6 +119,12 @@ type interactiveHTTPModel struct {
 func (*interactiveHTTPModel) Name() string { return "interactive-http" }
 func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		// Follow the shared Chat catalog: deferred tools use its real bridge,
+		// while declared tools and tool-free review requests remain unchanged.
+		originalYield := yield
+		yield = func(response *model.LLMResponse, err error) bool {
+			return originalYield(scriptedHTTPProgressiveResponse(req, response), err)
+		}
 		p, _ := execution.PrincipalFromContext(ctx)
 		if p.Subject != m.principal.Subject || p.Authentication != m.principal.Authentication || p.Surface != m.principal.Surface {
 			m.t.Errorf("provider lost original principal: %+v", p)
@@ -64,6 +141,13 @@ func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.L
 				return
 			}
 		}
+		// Conversational fixtures declare delivery through the same optional
+		// model tool as production, rather than bypassing file recovery.
+		if m.chatOnly && !m.deliverySet {
+			m.deliverySet = true
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "bot_work_update", Args: map[string]any{"expected_revision": m.work().Revision, "kind": "set_delivery", "delivery_intent": string(store.BotDeliveryChatOnly)}}}}}}, nil)
+			return
+		}
 		part := &genai.Part{Text: "Observed scoped result."}
 		if m.qualityMode != "" {
 			m.productions++
@@ -75,7 +159,20 @@ func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.L
 		}
 		if !m.called {
 			m.called = true
-			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: m.name, Args: m.args}}
+			args := m.args
+			if m.name == "read_file" {
+				args = make(map[string]any, len(m.args))
+				for k, v := range m.args {
+					args[k] = v
+				}
+				if path, ok := args["path"].(string); ok {
+					args["path"] = strings.TrimPrefix(path, "/isolated/")
+				}
+				if args["path"] == nil {
+					args["path"] = "receipt.txt"
+				}
+			}
+			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: m.name, Args: args}}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil)
 	}
@@ -88,6 +185,9 @@ type interactiveHTTPPool struct {
 	callOverride func(string, map[string]interface{}) (json.RawMessage, error)
 }
 
+// Controlled transport has no credential push backend; never dispatch through
+// the nil embedded pool when a network tool checks this optional capability.
+func (p *interactiveHTTPPool) GetBackend() sandbox.Backend                      { return nil }
 func (p *interactiveHTTPPool) SetBotHome(string, *sandbox.BotHomeBinding) error { return nil }
 func (p *interactiveHTTPPool) GetOrCreate(string) sandbox.ToolNodeClient        { return p }
 func (p *interactiveHTTPPool) GetOrCreateWithTemplate(string, string) sandbox.ToolNodeClient {
@@ -298,9 +398,18 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 		raw, _ := json.Marshal(output)
 		return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 	}
-	workerConfig := daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+	// Controlled retained Home files satisfy the same mandatory factory and
+	// post-run memory IO capabilities used by the synthesis HTTP fixture.
+	files := newComposedHTTPFiles(t, dir, repo, b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
+		return pool.Call("", name, args)
+	})
+	workerConfig := daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		// Title-start fixtures may create another Bot in this same tenant.
+		runFiles := *files
+		runFiles.id = q.Bot.ID
+		runFiles.install(c, q, s)
 		// Capabilities come only from the owner-reviewed HTTP configuration.
 		configured, err := repo.GetVersion(c, q.Bot.ID, q.Version.Version)
 		if err != nil || !slices.Equal(configured.Autonomy.AllowedTools, q.Version.Autonomy.AllowedTools) {
@@ -412,6 +521,16 @@ func (f *interactiveHTTPFixture) capabilityTurn(mode capabilityHTTPMode, tools [
 }
 
 func capabilityHTTPCall(mode capabilityHTTPMode, id, name string, args map[string]any) *genai.Part {
+	if name == "read_file" {
+		copyArgs := make(map[string]any, len(args))
+		for key, value := range args {
+			copyArgs[key] = value
+		}
+		if path, ok := copyArgs["path"].(string); ok {
+			copyArgs["path"] = strings.TrimPrefix(path, "/isolated/")
+		}
+		args = copyArgs
+	}
 	if mode == capabilityAutonomous && (name == "read_file" || name == "web_fetch") {
 		args = map[string]any{"name": name, "arguments": args}
 		name = "execute_tool"
@@ -458,7 +577,7 @@ func TestBotAgentProgressHTTPAcceptance(t *testing.T) {
 					t.Fatalf("progress lost at final capture: %+v steps=%d", run, step)
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-				if strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
+				if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 {
 					t.Fatal("missing/duplicate final publication")
 				}
 				progressHistory := string(f.request("GET", f.path+"/sessions/"+run.SessionID.String()+"/stream", "", 200))
@@ -499,7 +618,7 @@ func TestBotAgentCheckHTTPAcceptance(t *testing.T) {
 						part := &genai.Part{Text: "The source says isolated receipt."}
 						switch step {
 						case 1:
-							part = capabilityHTTPCall(mode, "source-read", "read_file", map[string]any{"path": "/isolated/receipt.txt"})
+							part = capabilityHTTPCall(mode, "source-read", "read_file", map[string]any{"path": "receipt.txt"})
 						case 2:
 							part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "inspect-source", Name: "bot_evidence_read", Args: map[string]any{"call_id": "source-read"}}}
 						case 3:
@@ -677,13 +796,13 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 					}
 					path := f.path + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
 					history := string(f.request("GET", path, "", 200))
-					if strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
+					if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 {
 						t.Fatal("fallback final not published exactly once")
 					}
 					if err := f.worker.Poll(context.Background()); err != nil {
 						t.Fatal(err)
 					}
-					if step != 6 || checks != 1 || f.pool.calls != 2 || requests["/primary"] != 1 || requests["/alternative"] != 1 || strings.Count(string(f.request("GET", path, "", 200)), "bot-report:"+run.ID.String()) != 1 {
+					if step != 6 || checks != 1 || f.pool.calls != 2 || requests["/primary"] != 1 || requests["/alternative"] != 1 || canonicalHTTPReportCount(t, string(f.request("GET", path, "", 200)), "bot-report:"+run.ID.String()) != 1 {
 						t.Fatal("reconciliation replayed completed reads/check/publication")
 					}
 				})
@@ -697,7 +816,7 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			for _, mode := range []string{"interactive", "autonomous"} {
 				t.Run(mode, func(t *testing.T) {
-					f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
+					f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"}, scope)
 					defer f.worker.Stop()
 					f.model.called = true // no optional tools are prerequisites to answering
 					calls := 0
@@ -740,13 +859,13 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 					}
 					path := f.path + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
 					home := string(f.request("GET", path, "", 200))
-					if strings.Count(home, "bot-report:"+run.ID.String()) != 1 || !strings.Contains(home, run.Report.Summary) {
+					if canonicalHTTPReportCount(t, home, "bot-report:"+run.ID.String()) != 1 || canonicalHTTPTextCount(t, home, run.Report.Summary) != 1 {
 						t.Fatal("final answer not published exactly once")
 					}
 					if err := f.worker.Poll(context.Background()); err != nil {
 						t.Fatal(err)
 					}
-					if calls != 1 || f.pool.calls != 0 || strings.Count(string(f.request("GET", path, "", 200)), "bot-report:"+run.ID.String()) != 1 {
+					if calls != 1 || f.pool.calls != 0 || canonicalHTTPReportCount(t, string(f.request("GET", path, "", 200)), "bot-report:"+run.ID.String()) != 1 {
 						t.Fatal("reconciliation replayed task or publication")
 					}
 				})
@@ -758,7 +877,7 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 func TestBotInteractiveChatHTTPAcceptance(t *testing.T) {
 	for _, paused := range []bool{false, true} {
 		t.Run(fmt.Sprint("paused=", paused), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"})
+			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"})
 			if paused {
 				if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"explicit setup"}`, f.b.Revision), 200), &f.b); err != nil {
 					t.Fatal(err)
@@ -767,17 +886,25 @@ func TestBotInteractiveChatHTTPAcceptance(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			f.model.chatOnly = true
 			run := f.turn()
-			if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 1 || run.Usage.ToolCalls != 1 {
+			if !f.model.deliverySet || run.Report.Summary != "Observed scoped result." || len(run.Report.Artifacts) != 0 {
+				t.Fatalf("short conversation changed: %+v", run)
+			}
+			if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 2 || run.Usage.ToolCalls != 2 {
 				t.Fatalf("tool runtime calls=%d run=%+v", f.pool.calls, run)
 			}
 		})
 	}
 }
 func TestBotInteractivePersonalHTTPAcceptance(t *testing.T) {
-	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, store.BotScopePersonal)
+	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"}, store.BotScopePersonal)
+	f.model.chatOnly = true
 	run := f.turn()
-	if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 1 || run.Usage.ToolCalls != 1 {
+	if !f.model.deliverySet || run.Report.Summary != "Observed scoped result." || len(run.Report.Artifacts) != 0 {
+		t.Fatalf("short conversation changed: %+v", run)
+	}
+	if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 2 || run.Usage.ToolCalls != 2 {
 		t.Fatalf("personal runtime calls=%d run=%+v", f.pool.calls, run)
 	}
 }
@@ -785,7 +912,7 @@ func TestBotInteractivePersonalHTTPAcceptance(t *testing.T) {
 func TestBotInteractiveMissingRegistryHTTPAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
+			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"}, scope)
 			var receipt store.BotMessageReceipt
 			if err := json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Read","idempotency_key":"expired"}`, f.b.Version), 202), &receipt); err != nil {
 				t.Fatal(err)
@@ -806,7 +933,7 @@ func TestBotInteractiveMissingRegistryHTTPAcceptance(t *testing.T) {
 }
 
 func TestBotInteractiveAuthorityHTTPAcceptance(t *testing.T) {
-	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat"})
+	f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat"})
 	run := f.turn()
 	if !f.model.called {
 		t.Fatalf("authority acceptance never reached provider dispatch: %+v", run)

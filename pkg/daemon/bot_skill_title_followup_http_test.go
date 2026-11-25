@@ -21,7 +21,6 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
@@ -168,9 +167,13 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 			registry := execution.NewBotTurnAuthorizationRegistry(32)
 			defer registry.Close()
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: lifecycleHTTPBackend{}, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			homeBackend := testRetainedContentBackend(t, backend)
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return mdl, nil
-			}, Prepare: func(c context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, homeBackend, svc, scope)
+				}
 				mdl.stage, mdl.interactive = 0, q.Run.IsInteractiveChat()
 				mdl.skillScheduleModel.source = source.URL
 				mdl.work = func() *store.BotWorkState {
@@ -219,14 +222,7 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "skill-schedule", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}

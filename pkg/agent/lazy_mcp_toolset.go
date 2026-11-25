@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/mcp"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
@@ -142,6 +147,16 @@ type LazyMCPToolset struct {
 // and lazily connects to the MCP server only when a tool is actually invoked.
 func NewLazyMCPToolset(serverName string, entries []cache.ToolEntry,
 	serverCfg config.MCPServerConfig, debugMode bool) *LazyMCPToolset {
+	serverCfg.Args = slices.Clone(serverCfg.Args)
+	serverCfg.Env = maps.Clone(serverCfg.Env)
+	if serverCfg.Enabled != nil {
+		enabled := *serverCfg.Enabled
+		serverCfg.Enabled = &enabled
+	}
+	entries = slices.Clone(entries)
+	for i := range entries {
+		entries[i].InputSchema = slices.Clone(entries[i].InputSchema)
+	}
 	return &LazyMCPToolset{
 		serverName: serverName,
 		serverCfg:  serverCfg,
@@ -150,10 +165,9 @@ func NewLazyMCPToolset(serverName string, entries []cache.ToolEntry,
 	}
 }
 
-// SetSandboxPool enables sandbox-aware MCP server startup. When set, stdio
-// transport MCP servers will be started inside the session's container/pod
-// instead of on the host. SSE transport servers are unaffected (they connect
-// to remote URLs and don't need containerization).
+// SetSandboxPool enables sandbox-aware MCP execution. Stdio servers run inside
+// the session sandbox; remote transports use the same sandbox's node protocol,
+// credential vault and network policy rather than the daemon's network.
 //
 // Accepts any ToolNodePool implementation (Incus via AsNodePool, or the
 // backend-agnostic backendPool from NewBackendPool). The Backend is extracted
@@ -207,17 +221,21 @@ func (l *LazyMCPToolset) resolvedServerConfig(ctx context.Context) (config.MCPSe
 	return mcp.ResolveMCPServerConfig(l.serverCfg, resolver)
 }
 
-// isSandboxMode returns true if the MCP server should run inside a container/pod.
-// True when a sandbox backend is set AND the transport is stdio.
+// isSandboxMode reports stdio process routing. Remote node calls are handled
+// separately by lazyProxyTool.Run and never enter the stdio initializer.
 func (l *LazyMCPToolset) isSandboxMode() bool {
-	if l.isSSETransport() {
-		return false
-	}
+	return l.hasSandbox() && !l.isRemoteTransport()
+}
+
+func (l *LazyMCPToolset) hasSandbox() bool {
 	return l.sandboxBackend != nil || l.sandboxPool != nil || l.sandboxClient != nil
 }
 
-// isSSETransport returns true if the MCP server uses SSE transport (remote URL).
-// SSE servers always stay on the host — only stdio servers get containerized.
+func (l *LazyMCPToolset) isRemoteTransport() bool {
+	return l.isSSETransport() || l.serverCfg.Transport == "streamableHTTP"
+}
+
+// isSSETransport reports the legacy remote SSE transport.
 func (l *LazyMCPToolset) isSSETransport() bool {
 	return l.serverCfg.Transport == "sse"
 }
@@ -252,6 +270,10 @@ func (l *LazyMCPToolset) Tools(_ adkagent.ReadonlyContext) ([]tool.Tool, error) 
 func (l *LazyMCPToolset) ensureServerStarted(ctx context.Context, sessionID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.hasSandbox() && l.isRemoteTransport() {
+		return fmt.Errorf("remote sandbox MCP requires node dispatch")
+	}
 
 	// Sandbox mode: per-session state
 	if l.isSandboxMode() {
@@ -689,10 +711,138 @@ func (p *lazyProxyTool) ProcessRequest(_ tool.Context, req *model.LLMRequest) er
 	return nil
 }
 
+// MCPToolBinding exposes policy metadata only for the genuine lazy MCP proxy.
+// Its private target prevents arbitrary tools from claiming terminal ownership.
+// Schema sanitization is transparent; no executable or transport is replaced.
+type MCPToolBinding struct{ proxy *lazyProxyTool }
+
+func LazyMCPToolBinding(t tool.Tool) (MCPToolBinding, bool) {
+	switch t := t.(type) {
+	case *lazyProxyTool:
+		return MCPToolBinding{proxy: t}, true
+	case *sanitizedTool:
+		return LazyMCPToolBinding(t.Tool)
+	default:
+		return MCPToolBinding{}, false
+	}
+}
+
+func (b MCPToolBinding) Identity() string {
+	return BotToolIdentity("mcp:"+b.proxy.toolset.serverName, b.proxy.Name())
+}
+
+func mcpPolicyFingerprint(cfg config.MCPServerConfig) string {
+	if cfg.Transport == "" {
+		cfg.Transport = "stdio"
+	}
+	enabled := cfg.IsEnabled()
+	cfg.Enabled = &enabled
+	raw, _ := json.Marshal(cfg)
+	sum := sha256.Sum256(raw)
+	return "mcp-config-v1:" + hex.EncodeToString(sum[:])
+}
+
+// DescribeAction validates the current scoped symbolic configuration against the
+// executable snapshot. Tool annotations and names never establish read authority.
+func (b MCPToolBinding) DescribeAction(ctx context.Context, name string, args json.RawMessage) (execution.ActionDescriptor, error) {
+	if b.proxy == nil || name != b.Identity() {
+		return execution.ActionDescriptor{}, botPolicyDenied("MCP executable identity changed")
+	}
+	stores := store.MCPServerStoresFromContext(ctx)
+	if stores == nil {
+		return execution.ActionDescriptor{}, botPolicyDenied("missing scoped MCP stores")
+	}
+	var current *store.MCPServer
+	for _, s := range []store.MCPServerStore{stores.Platform, stores.Org, stores.Team} {
+		if s == nil {
+			continue
+		}
+		row, err := s.Get(ctx, b.proxy.toolset.serverName)
+		if err != nil {
+			return execution.ActionDescriptor{}, err
+		}
+		if row != nil {
+			current = row
+		}
+	}
+	if current == nil || current.Name != b.proxy.toolset.serverName || !current.IsEnabled() {
+		return execution.ActionDescriptor{}, botPolicyDenied("MCP server unavailable")
+	}
+	enabled := current.IsEnabled()
+	transport := current.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	cfg := config.MCPServerConfig{Command: current.Command, Args: current.Args, Env: current.Env, Transport: transport, URL: current.URL, Enabled: &enabled}
+	fingerprint := mcpPolicyFingerprint(b.proxy.toolset.serverCfg)
+	if mcpPolicyFingerprint(cfg) != fingerprint {
+		return execution.ActionDescriptor{}, botPolicyDenied("MCP server configuration changed")
+	}
+	return execution.ActionDescriptor{Tool: name, Arguments: args, Effect: execution.EffectUnknown, TargetFingerprint: fingerprint}, nil
+}
+
+type mcpTerminalCheckKey struct{}
+type mcpTerminalCheck struct {
+	proxy    *lazyProxyTool
+	check    func(context.Context) error
+	evidence *botLazyHandoff
+}
+
+// Prepare authorizes once at the owner-bound accounting boundary. Progressive
+// dispatch evidence is consumed and renewed for this same terminal only; direct
+// calls perform full authorization. The private one-use token still binds exact
+// identity, effective arguments, policy and symbolic target at the lazy boundary.
+func (b MCPToolBinding) Prepare(ctx tool.Context, args any, check func(context.Context) error) (tool.Context, error) {
+	if b.proxy == nil || check == nil {
+		return nil, botPolicyDenied("missing MCP binding")
+	}
+	var prepared tool.Context
+	var err error
+	if handoff, ok := ctx.Value(botLazyHandoffKey{}).(*botLazyHandoff); ok {
+		if err = AuthorizeBotBoundTool(ctx, ctx, b.Identity(), args, mcpPolicyFingerprint(b.proxy.toolset.serverCfg)); err != nil {
+			return nil, err
+		}
+		prepared, err = botAuthorizedInvocationContext(ctx, b.Identity(), args, handoff.action)
+	} else {
+		prepared, err = authorizeBotInvocation(ctx, b.Identity(), args)
+	}
+	if err != nil {
+		return nil, err
+	}
+	evidence, ok := prepared.Value(botLazyHandoffKey{}).(*botLazyHandoff)
+	if !ok {
+		return nil, botPolicyDenied("missing MCP authorization evidence")
+	}
+	return &botPolicyToolContext{Context: prepared, context: context.WithValue(prepared, mcpTerminalCheckKey{}, mcpTerminalCheck{b.proxy, check, evidence})}, nil
+}
+
+func (p *lazyProxyTool) checkTerminal(ctx tool.Context, args any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if binding, ok := ctx.Value(mcpTerminalCheckKey{}).(mcpTerminalCheck); ok {
+		digest, err := botInvocationDigest(BotToolIdentity("mcp:"+p.toolset.serverName, p.Name()), args)
+		if binding.proxy != p || err != nil || digest != binding.evidence.digest {
+			return botPolicyDenied("MCP terminal changed")
+		}
+		if err := binding.check(ctx); err != nil {
+			return err
+		}
+		return binding.evidence.validateTarget(ctx)
+	}
+	return nil
+}
+
 // Run lazily starts the MCP server (if not already started) and delegates to the real tool.
 // The session ID is extracted from the tool.Context and passed through to
 // ensureServerStarted, which uses it to get the correct container when sandbox is enabled.
 func (p *lazyProxyTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("MCP invocation requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Defense-in-depth: verify MCP server access before connecting/executing.
 	// Even if a tool was injected into the LLM request (e.g., via a stale
 	// ToolIndex match), block execution if the user's team doesn't have
@@ -703,11 +853,17 @@ func (p *lazyProxyTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		}, nil
 	}
 
+	if err := p.checkTerminal(ctx, args); err != nil {
+		return nil, err
+	}
 	if err := authorizeBotLazyInvocation(ctx, BotToolIdentity("mcp:"+p.toolset.serverName, p.Name()), args); err != nil {
 		return nil, err
 	}
 
 	sessionID := ctx.SessionID()
+	if p.toolset.hasSandbox() && p.toolset.isRemoteTransport() {
+		return p.runRemoteInSandbox(ctx, args)
+	}
 	liveTool, err := p.toolset.getLiveTool(ctx, p.entry.Name, sessionID)
 	if err != nil {
 		return nil, err
@@ -727,9 +883,99 @@ func (p *lazyProxyTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 		transport = state.transport
 	}
 	p.toolset.mu.Unlock()
+	if err := p.checkTerminal(ctx, args); err != nil {
+		return nil, err
+	}
 	result, err := runner.Run(ctx, args)
 	if transport != nil && (transport.IsClosed() || isTransientMCPError(err)) {
 		_ = transport.Close()
 	}
 	return result, err
+}
+
+// runRemoteInSandbox sends symbolic configuration to the existing node handler.
+// Each call owns its connection there; neither an uncertain call nor a denied
+// node request may be replayed on the daemon host.
+func (p *lazyProxyTool) runRemoteInSandbox(ctx tool.Context, args any) (map[string]any, error) {
+	id := ctx.SessionID()
+	if id == "" {
+		return nil, fmt.Errorf("sandbox MCP requires a session identity")
+	}
+	l := p.toolset
+	if !l.serverCfg.IsEnabled() || strings.TrimSpace(l.serverCfg.URL) == "" {
+		return nil, fmt.Errorf("invalid or disabled remote MCP server %q", l.serverName)
+	}
+	values, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("MCP tool %q requires object arguments", p.Name())
+	}
+	var client sandbox.ToolNodeClient
+	if l.sandboxClient != nil {
+		client = l.sandboxClient
+	} else if l.sandboxPool != nil {
+		client = sandbox.GetPoolClientFromContext(ctx, l.sandboxPool, id)
+	}
+	// Seed only the existing scoped allow rules, never the MCP endpoint itself.
+	if setter, ok := client.(interface {
+		SetNetworkAllowEndpoints([]sandbox.NetworkAllowEndpoint)
+	}); ok {
+		if stores := store.NetworkPolicyStoresFromContext(ctx); stores != nil {
+			var endpoints []sandbox.NetworkAllowEndpoint
+			for _, s := range []store.NetworkPolicyStore{stores.Platform, stores.Org, stores.Team} {
+				if s == nil {
+					continue
+				}
+				rules, err := s.List(ctx)
+				if err != nil {
+					return nil, err
+				}
+				for _, rule := range rules {
+					if rule.Action == store.NetworkPolicyAllow {
+						endpoints = append(endpoints, sandbox.NetworkAllowEndpoint{Host: rule.Host, Port: rule.Port})
+					}
+				}
+			}
+			setter.SetNetworkAllowEndpoints(endpoints)
+		}
+	}
+	if err := sandbox.EnsureToolClientReady(ctx, client, id); err != nil {
+		return nil, err
+	}
+	owner := sandbox.CanonicalSessionID(client, id)
+	if sandbox.NetworkPolicyPreSeeder != nil {
+		sandbox.NetworkPolicyPreSeeder(ctx, owner)
+	}
+	if err := sandbox.SyncSessionCredentialVault(ctx, l.sandboxBackend, nil, owner); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !isMCPServerAccessible(ctx, l.serverName) {
+		return nil, fmt.Errorf("access denied: MCP server %q", l.serverName)
+	}
+	raw, err := json.Marshal(mcp.NodeRequest{Action: mcp.NodeCall, Config: l.serverCfg, Tool: p.Name(), Arguments: values})
+	if err != nil {
+		return nil, err
+	}
+	var request map[string]any
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return nil, err
+	}
+	if err := p.checkTerminal(ctx, args); err != nil {
+		return nil, err
+	}
+	if caller, ok := client.(sandbox.ContextCallingToolClient); ok {
+		raw, err = caller.CallContext(ctx, id, mcp.NodeOperation, request)
+	} else {
+		raw, err = client.Call(id, mcp.NodeOperation, request)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("invalid MCP node response")
+	}
+	return result, nil
 }

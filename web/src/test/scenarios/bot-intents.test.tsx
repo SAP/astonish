@@ -11,9 +11,10 @@ vi.mock('@/api/studioChat', async original => ({
 }))
 vi.mock('@/components/chat/EmbeddedFileViewer', () => ({ default: () => <div>Report viewer</div> }))
 let wire: ReadableStreamDefaultController<Uint8Array>
-const frame = (id: string, event: unknown) => `id: ${id}\nevent: transcript\ndata: ${JSON.stringify(event)}\n\n`
-const user = { Author: 'user', Content: { parts: [{ text: 'Discuss the plan' }] } }
-const reply = { Author: 'assistant', Content: { parts: [{ text: 'We can review it without tools.' }] } }
+const frame = (id: string, event: { type: string; data: Record<string, unknown> }) => `id: ${id}\nevent: ${event.type}\ndata: ${JSON.stringify({ ...event.data, _projection: { event_id: `${id.split(':')[0]}/${id}/0`, session_id: id.split(':')[0], run_id: 'run', cursor: id } })}\n\n`
+const replayComplete = (id = 'home:0') => `id: ${id}\nevent: replay_complete\ndata: {"persisted":true}\n\n`
+const user = { type: 'user_message', data: { text: 'Discuss the plan' } }
+const reply = { type: 'text', data: { text: 'We can review it without tools.' } }
 beforeEach(() => {
   vi.mocked(teamFetch).mockReset().mockImplementation(async () => new Response(new ReadableStream<Uint8Array>({ start(controller) { wire = controller } }), { headers: { 'Content-Type': 'text/event-stream' } }))
 })
@@ -22,7 +23,7 @@ it('paused conversation uses the shared durable watch, deduplicates replay, and 
   const onSend = vi.fn().mockResolvedValue(undefined)
   const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'home', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: false, status: 'paused' as const, toolFree: true, onSend } }
   const view = render(<StudioChat {...props} />)
-  await emit('event: replay_complete\ndata: {}\n\n')
+  await emit(replayComplete())
   expect(screen.getByText(/Autonomous work paused/)).toBeVisible()
   expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
   fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'Discuss the plan' } })
@@ -39,7 +40,7 @@ it('paused conversation uses the shared durable watch, deduplicates replay, and 
   expect(screen.getAllByText('We can review it without tools.')).toHaveLength(1)
   view.unmount()
   render(<StudioChat {...props} />)
-  await emit(frame('home:1', user) + frame('home:2', reply) + 'event: replay_complete\ndata: {}\n\n')
+  await emit(frame('home:1', user) + frame('home:2', reply) + replayComplete('home:2'))
   expect(screen.getAllByText('Discuss the plan')).toHaveLength(1)
   expect(screen.getAllByText('We can review it without tools.')).toHaveLength(1)
   expect(onSend).toHaveBeenCalledTimes(1)
@@ -47,9 +48,9 @@ it('paused conversation uses the shared durable watch, deduplicates replay, and 
 })
 it('draft test trace uses the existing read-only transcript and report harness on live and reload', async () => {
   const props = { theme: 'dark', hideSidebar: true, initialSessionId: 'test', botThread: { botId: 'bot', scope: 'personal' as const, readOnly: true, onSend: vi.fn() } }
-  const report = { Actions: { StateDelta: { bot_runtime_event: { type: 'artifact', payload: { path: '/report.md', isReport: true } } } } }
-  const marker = { Actions: { StateDelta: { bot_runtime_event: { type: 'report_marker', payload: { path: '/report.md', title: 'Test report' } } } } }
-  const replay = frame('test:1', user) + frame('test:2', reply) + frame('test:3', report) + frame('test:4', marker) + 'event: replay_complete\ndata: {}\n\n'
+  const report = { type: 'artifact', data: { path: '/report.md', fileType: 'Markdown', isReport: true } }
+  const marker = { type: 'report_marker', data: { path: '/report.md', title: 'Test report' } }
+  const replay = frame('test:1', user) + frame('test:2', reply) + frame('test:3', report) + frame('test:4', marker) + replayComplete('test:4')
   const view = render(<StudioChat {...props} />)
   await emit(replay)
   expect(screen.getByTestId('chat-input')).toBeDisabled()
@@ -69,11 +70,11 @@ it('restores the working indicator before tokens and keeps it across generic don
   // Bot runs and operations share Working; ordinary chat uses Thinking.
   expect(await screen.findByTestId('thinking-indicator')).toHaveTextContent(/^Working…$/)
   expect(screen.getByTestId('thinking-indicator')).toBeVisible()
-  await emit('event: replay_complete\ndata: {}\n\n' + frame('home:3', { Actions: { StateDelta: { bot_runtime_event: { type: 'done', payload: {} } } } }))
+  await emit(replayComplete() + frame('home:3', { type: 'done', data: {} }))
   expect(screen.getByTestId('thinking-indicator')).toBeVisible()
-  await emit(frame('home:4', { Actions: { StateDelta: { bot_run_state: { ...state, status: 'succeeded', state_sequence: 4 } } } }))
+  await emit(frame('home:4', { type: 'bot_run_state', data: { ...state, status: 'succeeded', state_sequence: 4 } }))
   expect(screen.getByTestId('thinking-indicator')).toBeVisible()
-  await emit(frame('home:6', { Actions: { StateDelta: { bot_run_state: { ...state, status: 'waiting_approval', state_sequence: 6 } } } }))
+  await emit(frame('home:6', { type: 'bot_run_state', data: { ...state, status: 'waiting_approval', state_sequence: 6 } }))
   expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument()
   view.unmount()
   render(<StudioChat {...props} />)
@@ -83,14 +84,14 @@ it('restores the working indicator before tokens and keeps it across generic don
 it.each(['stopped', 'deleted'] as const)('quiesces a closed %s Bot despite stale running snapshot', async status => {
   const state = { schema_version: 1, bot_id: 'bot', run_id: 'r', session_id: 'trace', home_session_id: 'home', presentation: 'home_interactive', status: 'running' as const, state_sequence: 5 }
   render(<StudioChat theme="dark" hideSidebar initialSessionId="home" botThread={{botId:'bot',scope:'personal',status,readOnly:true,runStates:[state],onSend:vi.fn()}} />)
-  await emit('event: replay_complete\ndata: {}\n\n')
+  await emit(replayComplete())
   expect(screen.queryByTestId('thinking-indicator')).not.toBeInTheDocument()
   expect(screen.getByTestId('chat-input')).toBeDisabled()
 })
 it('transport error cannot claim a running Bot finished', async () => {
   const state = { schema_version: 1, bot_id: 'bot', run_id: 'r', session_id: 'trace', home_session_id: 'home', presentation: 'home_interactive', status: 'running' as const, state_sequence: 5 }
   render(<StudioChat theme="dark" hideSidebar initialSessionId="home" botThread={{botId:'bot',scope:'personal',readOnly:false,runStates:[state],onSend:vi.fn()}} />)
-  await emit('event: replay_complete\ndata: {}\n\n')
+  await emit(replayComplete())
   await act(async () => wire.error(new Error('Disconnected')))
   expect(screen.getByTestId('thinking-indicator')).toBeVisible()
 })

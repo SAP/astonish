@@ -65,7 +65,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 				if steps < 12 {
 					steps++
 					name := "read_file"
-					args := map[string]any{"path": "/isolated/receipt.txt"}
+					args := map[string]any{"path": "receipt.txt"}
 					if mandated {
 						name = "web_fetch"
 						args = map[string]any{"url": fmt.Sprintf("%s/%d", upstream.URL, steps)}
@@ -74,7 +74,37 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 				}
 				return &model.LLMResponse{Content: genai.NewContentFromText("Compared all twelve observations: measured revenue and costs agree.", "model")}, true
 			}
-			f.pool.callOverride = func(string, map[string]interface{}) (json.RawMessage, error) {
+			f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+				if mandated {
+					if name != "web_fetch" {
+						return nil, fmt.Errorf("unexpected profile tool %q", name)
+					}
+					// Shared Chat dispatches the ordinary web_fetch through the node
+					// pool, not the legacy replacement in safe.Tools. Exercise its
+					// real handler with only this fixture's pinned source permitted.
+					raw, err := json.Marshal(args)
+					if err != nil {
+						return nil, err
+					}
+					var fetch tools.WebFetchArgs
+					if err = json.Unmarshal(raw, &fetch); err != nil {
+						return nil, err
+					}
+					ctx := tools.WithRoutineReadPolicy(f.ctx, tools.RoutineReadPolicy{
+						Authorize: func(_ context.Context, requested string) error {
+							if requested != origin {
+								return store.ErrBotForbidden
+							}
+							return nil
+						},
+						AllowIP: func(context.Context, string, net.IP) error { return nil },
+					})
+					result, err := tools.WebFetch(contentFetchContext{ctx: ctx}, fetch)
+					if err != nil {
+						return nil, err
+					}
+					return json.Marshal(result)
+				}
 				return json.Marshal(map[string]any{"content": payload})
 			}
 			cfg := f.workerConfig
@@ -100,7 +130,9 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 					t.Fatal("missing durable mandate")
 				}
 				cfg.MandatePolicy = policy
-				cfg.Prepare = func(c context.Context, r bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				cfg.Prepare = func(c context.Context, r bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+					files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.pool.dir}, repo: f.repo, id: r.Bot.ID, scope: f.scope}
+					files.install(c, r, s)
 					f.model.principal = r.Principal
 					seedStart := time.Now()
 					for i := 0; i < scenario.ledgerRows; i++ {
@@ -115,7 +147,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 					if e != nil {
 						return nil, e
 					}
-					return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", Tools: reads, PolicyRuntime: agent.BotPolicyRuntime{Mandate: r.Mandate, Guard: restartMandateGuard{r, f.repo}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+					return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, Tools: reads, PolicyRuntime: agent.BotPolicyRuntime{Mandate: r.Mandate, Guard: restartMandateGuard{r, f.repo}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 				}
 			} else {
 				raw, _ = json.Marshal(store.BotMessageRequest{Version: f.b.Version, Instructions: "Compare twelve independent public observations.", IdempotencyKey: "profile"})

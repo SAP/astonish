@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,48 @@ func TestBotKnowledgeExtractionProposalClosedSchema(t *testing.T) {
 		t.Fatal("clone alias")
 	}
 }
+func TestBotKnowledgeExtractionDecisionClonePreservesDigest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		proposals []BotKnowledgeProposal
+	}{
+		{name: "nil"},
+		{name: "empty", proposals: []BotKnowledgeProposal{}},
+		{name: "nonempty_nil_evidence", proposals: []BotKnowledgeProposal{{Kind: BotKnowledgeProposalPreference, Path: "preferences/currency.md", Content: "EUR"}}},
+		{name: "nonempty_empty_evidence", proposals: []BotKnowledgeProposal{{Kind: BotKnowledgeProposalPreference, Path: "preferences/currency.md", Content: "EUR", EvidenceIDs: []string{}}}},
+		{name: "nonempty_evidence", proposals: []BotKnowledgeProposal{{Kind: BotKnowledgeProposalPreference, Path: "preferences/currency.md", Content: "EUR", EvidenceIDs: []string{"x"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := BotKnowledgeExtractionDecision{SchemaVersion: BotKnowledgeExtractionSchemaVersion, Kind: BotKnowledgeDecisionNoChange, Reason: "preference", Proposals: tc.proposals}
+			if len(d.Proposals) > 0 {
+				d.Kind = BotKnowledgeDecisionChanges
+			}
+			if err := d.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			before := BotKnowledgeDigest(d)
+			clone := d.Clone()
+			if !reflect.DeepEqual(d, clone) {
+				t.Errorf("clone changed decision shape: original %#v; clone %#v", d, clone)
+			}
+			if got := BotKnowledgeDigest(clone); got != before {
+				t.Errorf("clone changed digest: got %s, want %s", got, before)
+			}
+			if len(clone.Proposals) > 0 {
+				clone.Proposals[0].Content = "changed"
+				if len(clone.Proposals[0].EvidenceIDs) > 0 {
+					clone.Proposals[0].EvidenceIDs[0] = "changed"
+				}
+				clone.Proposals[0].EvidenceIDs = append(clone.Proposals[0].EvidenceIDs, "new")
+			}
+			clone.Proposals = append(clone.Proposals, BotKnowledgeProposal{Content: "new"})
+			if got := BotKnowledgeDigest(d); got != before {
+				t.Errorf("mutating clone changed original digest: got %s, want %s", got, before)
+			}
+		})
+	}
+}
+
 func TestBotKnowledgeExtractionLeaseFreshAuthority(t *testing.T) {
 	now := time.Now()
 	l := BotKnowledgeExtractionLease{BotID: uuid.New(), ExtractionID: uuid.New(), WorkerID: "worker", Fence: 1, ExpiresAt: now.Add(time.Minute)}

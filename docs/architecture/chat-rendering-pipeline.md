@@ -1,5 +1,21 @@
 # Chat Rendering Pipeline
 
+## Bot employee live/restore contract
+
+Bot employee completion remains a canonical committed Chat message, not a new
+approval state or an optimistic success label. The physical objective browser and
+native PTY acceptances share the same production worker fixture and assert owner
+refinement → real acknowledgement → complete sourced inline body, including a
+forced reconnect before source completion and Home/reload restore. User-bubble
+uniqueness is measured on bubbles, separately from the historical answered card.
+Explicit artifact publication keeps its existing preview/download path; private
+work judgments never become UI controls. Transport uncertainty must not erase
+already committed useful findings or certify an uncommitted result.
+`TestBotEmployeeCanonicalReportLiveReplay` checks completed, useful partial,
+known pre-dispatch denied, and genuinely uncertain bodies verbatim in both native
+terminal layouts; scheduled-report boundary tests keep autonomous occurrences
+separate even when two committed bodies have identical text.
+
 ## Overview
 
 The Studio Chat (`StudioChat.tsx`) is the primary user interface for Astonish. It orchestrates 17 sub-components, manages 35 state variables, handles 29 SSE event types from the backend, and renders 21 distinct message types. This document is the authoritative reference for how the pipeline works, how to extend it, and what rules must be followed.
@@ -121,26 +137,40 @@ opt-in and positive duration-safe nested policy fields; existing legacy limits a
 unrelated saves are preserved. Progress mode is server-gated by default, not a new
 client creation default. Ordinary Chat/code-mode execution indicators are unchanged.
 
+### Provider failure privacy
+
+`ChatRunner` records original errors in trusted typed completion before replacing
+public `error`/`error_info` payloads with server-authored operational-failure text.
+Credential redaction alone cannot make provider diagnostics safe: they may contain
+unregistered tokens, internal endpoints or request bodies. Ordinary Chat persists
+only the same public text; legacy runner-owned `error-*` / `[Error: ...]` rows are
+sanitized on history reads without rewriting storage. Bot runs do not append
+synthetic error messages to Home: their committed typed report is the single
+public failure response. Bot transcript projection also strips legacy synthetic
+rows and sanitizes historical runtime error envelopes. These boundaries apply to
+Studio live/reload/reconnect and terminal consumers; trusted diagnostics and
+non-replayable failure classification remain unchanged.
+
 ### Bot narration visibility
 
-Bot Home uses `buildChronologicalActivityRenderIndex(messages, 'preserve-agent')`:
-published model acknowledgement/progress stays in the main transcript, both live
-and on reload. Tool activity blocks are not mounted in Bot conversations; preserving
-narration does not grant visibility to autonomous tool names, arguments or results.
-Ordinary Chat retains `fold-intermediate` and its expandable tool details. This is presentation only: no synthetic acknowledgement,
-new wire event, source-result disclosure, or report-gate change. The runtime releases
-interim text only at a tool boundary; final text still uses committed publication.
-The terminal Bot wire mapper consumes the same ordered text/tool envelopes without
-this Studio activity-fold policy.
+Bot Home uses the shared chronological activity rendering and public event
+projection. Ordinary ADK file calls/results and delegation lifecycle remain visible;
+private checkpoint/storage telemetry is classified before rendering, not suppressed
+by tool name or by hiding every Home activity block. Public acknowledgement/progress
+stays ordered with tools, plans, errors and artifacts live and on reload. The terminal
+Bot wire mapper consumes the same public envelopes. No synthetic acknowledgement or
+report promotion is implied: reviewed publication and ordinary Chat's last-turn,
+Markdown/backend-`isReport` gate remain separate.
 
 SSE parsing is implemented **manually** using the `ReadableStream` API in `web/src/api/studioChat.ts` -- not the browser's native `EventSource`. This is because the initial request is a `POST` (EventSource only supports GET).
 
-Two functions share identical parsing logic:
+All three transports use the same `readSSEStream` framing and reader ownership:
 
 | Function | HTTP Method | Endpoint | Purpose |
 |----------|------------|----------|---------|
 | `connectChat()` | POST | `/api/studio/chat` | Send a new message, receive streaming response |
 | `connectChatStream()` | GET | `/api/studio/sessions/{id}/stream` | Reconnect to an active background runner |
+| `connectBotEvents()` | GET | `/api/studio/bots/{botID}/sessions/{id}/events` | Read canonical durable events without starting work |
 
 **Parsing flow:**
 1. Read chunks from `response.body.getReader()` via `TextDecoder`
@@ -149,7 +179,7 @@ Two functions share identical parsing logic:
 4. `JSON.parse(data)` and call `onEvent(eventType, parsedData)`
 5. On stream end, call `onDone()`
 
-**Both connect paths must have identical event handlers.** When adding a new event type, the `case` must be added to both the `connectChat` handler (in `sendMessage`) and the `connectChatStream` handler (in the reconnect logic). Missing one causes events to be silently dropped on reconnect. Persisted transcript DTOs must also map the type during history loading; for example, `docs_update` is projected into a typed slide message and rendered by `SlidesCard` in all three paths.
+**One application boundary handles send and reconnect.** `StudioChat.applyChatEvent` applies ordinary Chat and canonical Bot presentation events. Transport-specific context keeps initial model pinning and command redirects send-only, so replay cannot start a wizard turn. Add presentation handling once at this boundary. Persisted transcript DTOs must also map the type during history loading; for example, `docs_update` is projected into a typed slide message and rendered by `SlidesCard` in all paths.
 
 ## Streaming progress, completion and delivery boundaries
 
@@ -746,3 +776,100 @@ Bot `error` and `error_info` publications are presented as safe first-person ass
 Authorization cards retain exact action fields, choices, digests, expiry, read-only checks and decision controls. Their surrounding prose and failed decision feedback are safe employee messages; question payload wording and option identities remain unchanged. Workspace resource hooks normalize errors before rendering and preserve their existing data-retention/invalidation behavior. Terminal Bot error items are projected through the ordinary assistant bubble at render time, leaving stored error events and operation heads untouched; ordinary Chat/Code remains diagnostic. Terminal errors lacking structured status use outcome-unknown rather than guessing authorization from strings.
 
 Coverage is client-local: mounted Studio replay/remount, decision matrices and terminal render tests. This does not claim a live daemon/browser drill or exhaustive coverage of every settings panel, historical tool output, or backend-generated legacy summary.
+
+## Bot file publication and retained workspace
+
+Bot threads consume the typed `bot_file_publication` state delta through the same
+`dispatchBotTranscript` mapper for live and restored transcript rows. The mapper
+preserves the server artifact order and deduplicates committed event IDs. Studio
+renders the short summary followed by cards keyed by immutable artifact ID.
+Cards explicitly open historical files using Bot/run/report/artifact coordinates,
+not the newest working path. This does not widen ordinary Chat's last-turn,
+Markdown and backend `isReport` promotion gate.
+
+`BotFilesPanel` lists ordinary retained Home only while Details is open. Opening
+a directory fetches that directory; selecting a file alone starts preview IO.
+Close or identity changes abort reads and clear preview state. Transient list
+errors retain a disabled, labelled last-known listing; 401/403/404/410 clear it.
+Refresh invalidates selected bytes, and browser-online refresh touches only an
+open panel. No read provisions a Home, invokes a model or resumes work.
+
+The optional `FileAccessAdapter` in the existing EmbeddedFileViewer and
+ArtifactCard keeps ordinary session artifact defaults unchanged. Bot previews
+are bounded JSON text rendered as Markdown or escaped source. Unsupported media
+is download-only; Bot views do not offer session PDF conversion. Native downloads
+POST a scope-bound authorization ticket then click an attachment link, using the
+HttpOnly download cookie. JavaScript never buffers the binary response.
+
+Built-browser acceptance: `TestBotFileWorkspaceBrowserAcceptance` uses built
+Studio, production HTTP handlers, isolated SQLite, controlled physical files and an exact public publication
+receipt adapter;
+it is not evidence for Docker/Kubernetes persistence or worker publication.
+
+## Strict conversation-parity acceptance accounting
+
+`bots_acceptance_driver.py --stage chat-consolidation` retains four distinct
+requirements, not a generic backend acceptance blocker:
+
+| Requirement | Required fresh tiers and scenario parents |
+|---|---|
+| `events-full-presentation-matrix` | Entire `events-http`, `events-projection`, `events-production-capture`; `TestBotPresentationMatrixHTTPAcceptance`, `TestBotHomePresentationMatrixHTTPAcceptance`, `TestSessionEventProjectorOrderedParity`, `TestSessionEventProjectorHomeOrdinaryADKActivity`, `TestSessionEventProjectorHomeOrdinaryADKDelegation`, `TestBotHomeNarrativeHistoricalTelemetry`, `TestBotRuntimeProductionCapture` |
+| `events-linked-session-restore` | Same three event tiers; `TestBotLinkedSessionRestoreProjectionHTTPAcceptance` and both direct ADK Home parents |
+| `clients-all-mode-conversation` | Entire `clients-browser`, `clients-pty`, `events-http`, `events-projection`; `TestBotChatFirstOrderedConversationBrowserAcceptance`, `TestBotScheduledWorkspaceBrowserAcceptance`, `TestBotConversationPresentationBrowserAcceptance` (including reviewed preview/exact native bytes), `TestBotChatFirstConversationHTTPAcceptance`, `TestBotClientStatesSharedVisualBrowserAcceptance`, `TestBotConversationPresentationPTYAcceptance` |
+| `clients-shared-visual-parity` | Entire browser/PTY/terminal plus HTTP/projection tiers; direct shared visual/state parent, both ADK Home parents, linked restore, mixed browser/PTY, `TestBotTranscriptSharedRendering`, `TestSessionEventProjectorOrderedParity` |
+
+The ADK file parent requires all `write_file`, `edit_file`, `load_file` groups
+and each `success`/`failure` child. The direct built Studio parent requires
+personal/team scopes; loading/read-failure/retry/empty, disconnect/cursor/draft/
+busy/catchup, scope cancellation, Escape, populated/paused/stopped/deleted,
+and the team read-only viewer child. Its comparison requires
+`shared_public_visual_comparison/ordinary_comparison`, `/Bot_live_reconnect`
+and `/Bot_restore` under **each** scope. Ordinary baseline here is actual
+ordinary Chat restored public output, not a full ordinary ChatRunner admission
+journey. Native PTY retains its existing draft/active/paused obligations.
+
+Standalone `--phase clients` executes HTTP/projection dependencies freshly;
+`--phase all` runs each dependency once. A stale report, missing parent or any
+missing/skipped child, foreign package, unfinished package, subset manifest,
+missing opt-in/browser/built SPA, or absent owned JSONL evidence blocks closure.
+Synthetic driver tests prove this accounting, never physical browser acceptance.
+
+Both mixed HTTP parents require personal/team and all eight `live`, `history`,
+`reconnect`, `revoked` leaves. The Home parent uses the Home-bound ADK store,
+appends after subscribing, compares complete ordered public live/history frames,
+and reconnects inside a multipart row without losing either concurrent call.
+It checks partial text, equal-text distinct identities, delegation/plan/error,
+private/unreviewed cursor-only rows and reviewed delivery. This is controlled
+HTTP presentation evidence, not a worker publication or retained-backend claim;
+existing committed-publication/review pipeline tests remain required.
+
+Reports remove `built browser` and `native PTY` from `unverified` only after
+required-tier accounting validates fresh complete owned JSONL logs, exact
+commands, package/subcase manifests and prerequisites. PASS labels alone cannot
+remove those entries. Paid-provider workflow remains unverified, and the explicit
+local profile records live Kubernetes/PostgreSQL as DEFERRED, NOT PASS.
+
+The earlier `/tmp/phase5-final-accounting-events.json` was blocked on the missing
+Home HTTP scenario; it is historical evidence and is not reused after expanding
+the required inventory. Final acceptance reruns standalone events followed by
+clients, including fresh HTTP/projection dependencies in the client run.
+
+Fresh standalone events receipt (2026-11-22): `/tmp/phase5-home-final-events.json`
+reports PASS for all three gates and both event IDs in 55.817 seconds. Owned logs
+record 106 passing test outcomes, zero failures/skips, and the Home parent,
+both scopes and all eight leaves. This supersedes the earlier blocked inventory,
+not by importing it but by rerunning the expanded manifest.
+Fresh standalone clients receipt (2026-11-22): `/tmp/phase5-home-final-clients.json`
+reports PASS for all six gates and both client IDs in 289.572 seconds. Owned logs
+in `astonish-chat-consolidation-t9uufiqu` record 158 passing test outcomes with zero
+failures/skips: built Studio (30 required outcomes), native PTY (16), terminal
+projection (5), transport (2), and freshly rerun HTTP/projection dependencies
+(60/22 required outcomes). The HTTP dependency includes the Home parent and all
+eight scope/state leaves; no receipt from the earlier inventory was imported.
+The complete standalone events → clients process exited 0, with 264 passing
+outcomes across its owned logs. Built browser and native PTY are verified in this
+client receipt; only paid-provider workflow, Kubernetes and PostgreSQL remain
+unverified, with the latter two explicitly deferred rather than passed.
+
+No phase-4 receipt/requirement or production/schema/daemon behavior changes are
+part of this accounting update.

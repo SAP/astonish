@@ -53,7 +53,7 @@ func (m *scheduleCadenceModel) GenerateContent(_ context.Context, r *model.LLMRe
 			yield(nil, fmt.Errorf("unexpected cadence retry"))
 			return
 		}
-		if m.bridge {
+		if _, direct := r.Tools[call.Name]; m.bridge || !direct {
 			call = &genai.FunctionCall{ID: call.ID, Name: "execute_tool", Args: map[string]any{"name": call.Name, "arguments": call.Args}}
 		}
 		m.step++

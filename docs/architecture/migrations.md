@@ -39,14 +39,74 @@ Chat/job rows, reject newer versions and avoid stamping a failed migration.
 PostgreSQL upgrade/claim tests and old-backup compatibility remain required
 before the Bot persistence phase is complete. Do not weaken backup hash checks.
 
+## Bounded Bot continuation hydration
+
+Bot-linked ADK session `Get` calls hydrate only the latest eight committed events,
+in cursor order. Durable Bot work, checkpoints, mandates and current authority are
+loaded through their existing stores; this window is conversational context only.
+Ordinary Chat session loading is unchanged. Full Bot history remains durable and
+pageable through `BotTranscriptReader`, so Studio restore and audit do not lose old
+rows. This prevents a long-lived file-backed Home from making every new model turn
+O(total transcript history).
+
+## Bot transcript event identity (DDL marker 5)
+
+`botMigrationVersion=5` adds nullable `session_events.event_id` in personal and
+team scopes plus a unique `(session_id,event_id)` index. Bot-owned transcript
+writers populate the deterministic event ID; ordinary Chat rows remain NULL and
+keep their existing inline representation. Reconciliation backfills only the
+small `bot_record_v2` SQL metadata envelope and never opens retained Home payloads.
+Existing non-null `(session_id,event_id)` identities are reserved before backfill.
+For duplicate legacy envelopes, the lowest row receives indexed identity and later
+mirrored duplicates remain nullable/readable; migration never deletes transcript
+rows or violates the unique index. Transcript append idempotency now uses one indexed lookup instead of decoding every
+historical event while holding the Bot write fence. Existing event bodies, cursors,
+file references, tenant routing and replay semantics remain unchanged.
+
+Verification:
+
+```sh
+go test ./pkg/store/entstore -run '^TestBot(Transcript|Migration|ContentSessionPersistence)' -count=1
+```
+
+## Bot disk-content format (no DDL migration)
+
+`botMigrationVersion` is **5**, tracking DDL only. The scoped disk codecs use
+explicit `bot_record_v2` persisted DTOs in existing columns: SQL contains typed
+references and coordination metadata; hydrated document, Task/Skill bundle, run,
+approval, knowledge and transcript bodies are read from immutable disk content.
+No Ent regeneration or table drop is required for this cutover. The logical
+`store.BotSchemaVersion=1` is independent of both the DDL and storage formats.
+
+`SelectBotHomeConfiguration` now selects all supported Bot-owned typed categories,
+including the Task publication's named nested candidate, into the verified retained
+Home in one fenced transaction. It validates copied bytes and preserves logical
+digests. Templates and pre-Bot intakes remain independently scoped. Selection does
+not delete staging; see [retained content selection](bot-retained-content-selection.md).
+
+Inline development records are explicitly unsupported. There is no migration,
+backfill, dual read, SQL body fallback or automatic deletion; schema reconciliation
+still permits ordinary Chat to open the shared database. An old Bot requires
+explicit development cleanup and new creation rather than implicit conversion.
+
+The public backup gate rejects Bot-bearing legacy inline archives **and**
+reference-only SQL archives until the file-first archive protocol is implemented.
+Empty Bot tables and the DDL marker alone do not imply incompatible Bot content.
+Historical schema-hash compatibility checks below do not override this content
+format gate or prove new-format recovery. Generic Bot memory SQL/FTS/source-record
+removal and compact file-backed MEMORY.md remain pending; these codecs alone do
+not establish completed file-first acceptance. Existing Docker foundation evidence
+does not replace dedicated PostgreSQL or physical Kubernetes cutover acceptance.
+
 ## Bot skill persistence (DDL marker 2)
 
-`botMigrationVersion=2` adds `bot_skills` and immutable `bot_skill_revisions`
-in personal/team Ent scopes. This marker is deliberately independent of
-`store.BotSchemaVersion=1`: historical immutable BotVersion JSON remains valid.
-No open, read, or schema reconciliation converts scheduler instructions or memory
-into skills. `ConvertLegacySkill` currently returns `ErrBotUnsupported`; explicit
-legacy conversion belongs to the wakeup integration phase.
+Historical DDL marker 2 adds `bot_skills` and immutable `bot_skill_revisions`
+in personal/team Ent scopes. DDL is deliberately independent of the logical
+`store.BotSchemaVersion=1`; unchanged logical schemas do not make inline SQL
+content compatible with the disk codec. No open, read or schema reconciliation
+converts scheduler instructions or memory into skills. Explicit procedure import
+from a readable pinned version is separate from database migration; see
+[Skill inspection](bot-skill-inspection.md).
 
 Skill worker mutations hold the Bot root lease fence, revalidate live membership,
 and use work/head CAS plus content-bound idempotency. Orientation adds exactly one
@@ -73,15 +133,15 @@ separate acceptance requirements.
 
 ## Bot Task persistence (DDL marker 3)
 
-`botMigrationVersion=3` adds scoped personal/team `bot_tasks` and
+Historical DDL marker 3 adds scoped personal/team `bot_tasks` and
 `bot_task_revisions` through the current additive Ent reconciliation workflow.
 The registry stores identity/lifecycle and head revision/digest, not another editable
-copy of live TASK.md instructions. Immutable revision JSON holds archival/recovery
-bundle bytes using the existing precision-protecting envelope; publication state,
-original authority ref and backend receipt ref are separate envelope columns.
-Task heads are independent from BotVersion and Skill heads. Historical document
-schema versions, JSON bytes/hashes and legacy schedule payloads remain unchanged.
-No reconciliation backfills Tasks or converts existing instructions into Tasks.
+copy of live TASK.md instructions. Current revision SQL contains a typed publication
+record and a candidate disk reference, not archival bundle bytes. Publication state,
+original authority ref and backend receipt ref remain coordination fields. Task
+heads are independent from BotVersion and Skill heads. DDL reconciliation does not
+rewrite historical content, backfill Tasks or convert existing instructions;
+unchanged rows are not a legacy-content compatibility guarantee.
 
 The schemas and generated migration metadata are produced by running
 `go run generate.go` in `ent/personal` and `ent/team`. Their generate.go files are
@@ -117,9 +177,10 @@ requires a separate disposable-database run; SQLite proof is not PostgreSQL proo
 `botMigrationVersion=4` adds personal/team `bot_knowledge_extractions` and
 `bot_knowledge_file_heads` using additive Ent reconciliation. Generate with
 `go run generate.go` in each scope, without historical document version or Atlas
-checksum changes. Full source tuples are unique; exact input remains in the
-precision-protecting `bot_document` envelope. New input requires a trusted
-complete-source verifier plus a canonical terminal run and result activity.
+checksum changes. Full source tuples are unique. Current typed knowledge records
+retain disk references for exact input and prepared decision content, not the old
+inline `bot_document` body. New input requires a trusted complete-source verifier
+plus a canonical terminal run and result activity.
 
 Extraction claims are independent from terminal run leases. Each mutation locks
 the Bot root, rechecks live editable membership/original actor and current root
@@ -137,6 +198,43 @@ SQLite checks: `go test ./pkg/store/entstore -run 'TestBotKnowledgeExtraction|Te
 PostgreSQL concurrency, production source-verifier/worker wiring, actual physical
 publication and paid-model execution are separate acceptance requirements; these
 store tests do not prove completed learning.
+
+## Personal mailbox configuration (additive settings column)
+
+Personal mailbox persistence adds only nullable JSON `personal_settings.bot_email`
+through the existing scoped Ent reconciliation. Its typed value is
+`store.BotEmailSettings`: provider/address/endpoints/folder plus a credential name,
+not a password or token. Credentials remain in the existing encrypted credential
+store in the caller's own scope. Missing legacy values and explicit clears remain
+nil (SQL NULL), with no platform/team mailbox inheritance. Provider/model/theme
+preferences, row identities and the local-user UUID sentinel are unchanged.
+
+Generate only personal scope with `cd ent/personal && go run generate.go`;
+`go generate` is not the generator for this ignore-tagged program. Generated
+migration metadata is the active additive migration; do not edit historical Atlas
+SQL/checksums or backfill old rows. This settings addition does not change the Bot
+aggregate DDL marker or Bot content format. No user database was migrated during
+implementation.
+
+`TestPersonalSettingsBotEmailLegacySQLiteUpgrade` creates a disposable old-schema
+SQLite database with no mailbox column, reopens through scoped reconciliation,
+checks preserved preferences and nil legacy mailboxes, then updates/reopens/clears
+configuration and checks owner isolation and SQL NULL. The generated column
+contract is checked separately without presenting it as a live PostgreSQL test.
+Verification:
+
+```sh
+go test ./pkg/store/entstore -run 'Test(PersonalSettings|TeamSettingsBotEmail)' -count=1
+go test -race ./pkg/store/entstore -run 'Test(PersonalSettings|TeamSettingsBotEmail)' -count=1
+go test ./pkg/daemon -run '^TestBotConfiguredServiceAdmissionHTTP$' -count=1
+```
+
+The HTTP admission suite exercises actual configured loopback SMTP delivery via
+shared adapters in personal Studio, interactive and scheduled exact-approval resume
+modes, plus team Bot modes. It also covers A2A and drill admission. Controlled
+models/SQLite/test-owned transports are not paid-provider, Docker/Kubernetes or
+live PostgreSQL evidence. Live PostgreSQL validation is explicitly deferred by the
+user; PostgreSQL Ent compilation and nullable JSON metadata remain checked.
 
 ## Historical Atlas workflow (not the active Ent implementation)
 

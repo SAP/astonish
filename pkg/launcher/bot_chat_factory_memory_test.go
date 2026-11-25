@@ -93,7 +93,14 @@ func TestBotChatCurrentMemoryScopeAndFence(t *testing.T) {
 				repo := botPromptMemoryRepo{botFactoryTestRepo{fixture: f}}
 				f.services.Bots, f.services.PersonalBots = repo, repo
 				row := store.MemorySearchResult{Snippet: "Delivery is Friday", SessionID: f.req.Run.SessionID.String(), Scope: string(scope), Attribution: &store.MemoryAttribution{BotID: f.req.Bot.ID, Source: "notice", ObservedAt: time.Now(), Status: store.MemoryKnowledgeInferred}}
-				m := &botPromptMemoryStore{rows: []store.MemorySearchResult{row, {Snippet: "another Bot private memory", SessionID: uuid.NewString(), Scope: string(scope)}}}
+				prior, err := f.files.entry("MEMORY.md")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.files.Write(f.ctx, f.req.Bot.ID, store.BotFileWrite{Path: "MEMORY.md", Body: strings.NewReader("Delivery is Friday"), ExpectedSHA256: prior.SHA256}); err != nil {
+					t.Fatal(err)
+				}
+				m := &botPromptMemoryStore{rows: []store.MemorySearchResult{row, {Snippet: "another Bot private memory", SessionID: uuid.NewString(), Scope: string(scope)}}, after: func() { t.Fatal("bootstrap queried SQL memory instead of retained files") }}
 				f.services.Memory = m
 				owner := store.WithServices(botFactoryOwnerContext(f.ctx, f.req), f.services)
 				b := &botFactoryBinding{owner: owner, req: f.req, verifyIsolation: func(context.Context) error { return nil }}
@@ -108,36 +115,33 @@ func TestBotChatCurrentMemoryScopeAndFence(t *testing.T) {
 				}
 				prompt := resources.Agent.SystemPrompt.Build()
 				for _, name := range []string{"memory_save", "memory_search", "memory_get", "memory_delete"} {
-					count := 0
-					for _, candidate := range resources.Agent.Tools {
-						if candidate.Name() != name {
-							continue
-						}
-						count++
-						var bound *botFactoryBinding
-						switch tool := candidate.(type) {
-						case *botBoundTool:
-							bound = tool.binding
-						case *interactiveBotTool:
-							bound = tool.binding
-						}
-						if bound == nil || store.MemoryStoreFromContext(bound.owner) != nil || store.ThreeTierSearcherFromContext(bound.owner) != nil {
-							t.Fatalf("%s has unbound or owner-wide memory fallback", name)
-						}
+					entry := resources.Agent.ToolIndex.GetToolEntry(name)
+					if entry == nil {
+						t.Fatalf("missing discoverable scoped tool %s", name)
 					}
-					if count != 1 {
-						t.Fatalf("%s count=%d", name, count)
+					shared, ok := entry.Tool.(*chatRuntimeTool)
+					if !ok {
+						t.Fatalf("%s bypasses shared dispatch: %T", name, entry.Tool)
 					}
+					ctx := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: viewer}, sid: f.req.Run.SessionID.String()}}
+					bound, release, err := shared.binding.bind(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if store.MemoryStoreFromContext(bound) != nil || store.ThreeTierSearcherFromContext(bound) != nil {
+						t.Fatalf("%s has owner-wide memory fallback", name)
+					}
+					release()
 				}
 				resources.Cleanup()
 				if !strings.Contains(prompt, "Delivery is Friday") || strings.Contains(prompt, "another Bot private memory") {
 					t.Fatal("factory prompt lost scope")
 				}
-				m.leak = true
+				f.files.fail = store.ErrBotForbidden
 				if text, err = b.currentMemory(viewer); !errors.Is(err, store.ErrBotForbidden) || text != "" {
-					t.Fatalf("foreign row accepted: %q %v", text, err)
+					t.Fatalf("file read failure ignored: %q %v", text, err)
 				}
-				m.leak = false
+				f.files.fail = nil
 				for _, mutate := range []func(){
 					func() { f.req.Bot.OwnerID = uuid.New() },
 					func() { f.req.Bot.Version++ },
@@ -149,7 +153,7 @@ func TestBotChatCurrentMemoryScopeAndFence(t *testing.T) {
 					}
 					f.req.Bot = original
 				}
-				m.after = func() { f.req.Run.Lease.Fence++ }
+				f.req.Run.Lease.Fence++
 				if text, err = b.currentMemory(viewer); !errors.Is(err, store.ErrBotConflict) || text != "" {
 					t.Fatalf("stale fence accepted: %q %v", text, err)
 				}

@@ -185,7 +185,16 @@ func RecordBotKnowledgeUsage(c context.Context, s store.BotStore, source store.B
 			return store.ErrBotConflict
 		}
 		saved.Run.Usage = usage
-		data, err := botJSONMap(saved)
+		var codec *botContentCodec
+		switch d := tx.(type) {
+		case personalBotDB:
+			codec = d.contentCodec()
+		case teamBotDB:
+			codec = d.contentCodec()
+		default:
+			return store.ErrBotUnsupported
+		}
+		data, err := codec.encodeRun(c, *saved)
 		if err != nil {
 			return err
 		}

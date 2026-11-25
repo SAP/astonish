@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,7 +32,11 @@ func workspaceFake(t *testing.T, b *K8sBackend) *fake.Clientset {
 	b.restConfig = &rest.Config{Host: "https://fake.invalid"}
 	client.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
-		if !safeBotWorkspacePod(p, p) || p.Spec.Containers[0].VolumeMounts[0].SubPath == "" || p.Spec.Containers[0].Image != BotWorkspaceHelperImage {
+		expectedImage := BotWorkspaceHelperImage
+		if strings.HasPrefix(p.Name, "astn-home-files-") || (len(p.Spec.Containers[0].Command) > 0 && p.Spec.Containers[0].Command[0] == "/bin/sleep") {
+			expectedImage = b.cfg.SandboxImage
+		}
+		if !safeBotWorkspacePod(p, p) || p.Spec.Containers[0].VolumeMounts[0].SubPath == "" || p.Spec.Containers[0].Image != expectedImage {
 			t.Fatal("unsafe helper manifest")
 		}
 		p.UID = types.UID("owned-helper")
@@ -53,7 +58,7 @@ func TestBotHomeWorkspaceProtocol(t *testing.T) {
 			b.execExecutorFactory = func(_ *rest.Config, _ string, u *url.URL) (remoteExecutor, error) {
 				called = true
 				args := u.Query()["command"]
-				if len(args) != 4 || args[0] != "python3" || args[3] != botWorkspaceProgram || u.Query().Get("stdin") != "true" {
+				if len(args) != 3 || args[0] != "/bin/sh" || !strings.Contains(args[2], "/usr/local/bin/astonish-host node --internal-scoped-home-workspace") || strings.Contains(args[2], "python") || u.Query().Get("stdin") != "true" {
 					t.Fatalf("unsafe exec %v", u)
 				}
 				return homeReadExecutor(func(ctx context.Context, o remotecommand.StreamOptions) error {
@@ -177,14 +182,37 @@ func TestBotHomeWorkspaceRejectBeforeAPI(t *testing.T) {
 	}
 }
 
-// Local Python filesystem fixtures exercise the server-owned program with a
-// substituted mount path and empty mountinfo fixture. They do not prove
-// PVC/kubelet confinement or the Linux nested-mount check.
+// Linux fixtures exercise the compiled runtime and scoped descriptor opening.
+// Non-Linux fixtures retain the legacy interpreter as a compatibility oracle;
+// neither path alone certifies a live Kubernetes PVC/kubelet attachment.
 func workspaceLocal(t *testing.T, root string, q map[string]any, out any) error {
 	t.Helper()
 	raw, e := json.Marshal(q)
 	if e != nil {
 		return e
+	}
+	if runtime.GOOS == "linux" && sandbox.IsCompiledWorkspaceOperation(q["op"]) {
+		mount, err := os.Open(root)
+		if err != nil {
+			return err
+		}
+		defer mount.Close()
+		mutate := q["op"] == "publish" || q["op"] == "write"
+		home, private, err := sandbox.OpenBotHomeFileRoots(mount, strings.Repeat("a", 64), true, mutate)
+		if err != nil {
+			return err
+		}
+		defer home.Close()
+		defer private.Close()
+		var result bytes.Buffer
+		err = sandbox.RunBotHomeWorkspace(private, bytes.NewReader(append(append(raw, '\n'), []byte("commit\ncommit\n")...)), &result)
+		if err != nil {
+			return err
+		}
+		if out != nil {
+			return json.Unmarshal(bytes.ReplaceAll(result.Bytes(), []byte("WORKSPACE_READY\n"), nil), out)
+		}
+		return nil
 	}
 	mountinfo := filepath.Join(root, "mountinfo-fixture")
 	if e := os.WriteFile(mountinfo, nil, 0600); e != nil {
@@ -209,7 +237,11 @@ func workspaceFixture(t *testing.T) (string, map[string]any) {
 	if e := os.Mkdir(filepath.Join(root, "data"), 0700); e != nil {
 		t.Fatal(e)
 	}
-	if e := os.WriteFile(filepath.Join(root, ".owner"), []byte("owner\n"), 0600); e != nil {
+	owner := "owner"
+	if runtime.GOOS == "linux" {
+		owner = strings.Repeat("a", 64)
+	}
+	if e := os.WriteFile(filepath.Join(root, ".owner"), []byte(owner+"\n"), 0600); e != nil {
 		t.Fatal(e)
 	}
 	return root, map[string]any{"owner": "owner", "binding": "scope"}

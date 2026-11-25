@@ -8,7 +8,7 @@ import (
 var _ sandbox.BotHomeWorkspaceArchiveBackend = (*DockerBackend)(nil)
 
 func (db *DockerBackend) RestoreBotHomeWorkspace(c context.Context, b *sandbox.BotHomeBinding, snapshot *sandbox.BotHomeWorkspaceSnapshot) error {
-	if err := sandbox.ValidateBotHomeWorkspaceSnapshot(snapshot); err != nil {
+	if err := sandbox.ValidateLegacyWorkspaceSnapshot(snapshot); err != nil {
 		return err
 	}
 	if b == nil || b.Validate() != nil {

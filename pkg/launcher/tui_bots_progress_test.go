@@ -6,18 +6,17 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 	"testing"
 )
 
 func TestBotProgressMapperPrivacyAndLaterConversation(t *testing.T) {
-	for _, replay := range []bool{false, true} {
-		t.Run(map[bool]string{false: "live", true: "restore"}[replay], func(t *testing.T) {
+	for _, mode := range []string{"live", "restore"} {
+		t.Run(mode, func(t *testing.T) {
 			m := botTranscriptMapper{}
-			apply := func(row session.Event) []events.Event {
-				raw, _ := json.Marshal(row)
-				out, err := m.mapFrame(client.SSEEvent{Data: string(raw)})
+			var sequence int64
+			apply := func(typ, payload string) []events.Event {
+				sequence++
+				out, err := m.mapFrame(runtimeTranscriptFrame(t, typ, payload, sequence))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -25,36 +24,30 @@ func TestBotProgressMapperPrivacyAndLaterConversation(t *testing.T) {
 			}
 			s := store.BotRunState{SchemaVersion: 1, BotID: uuid.New(), RunID: uuid.New(), SessionID: uuid.New(), StateSequence: 1, Status: store.RunRunning}
 			s.Progress = &store.BotProgressProjection{SchemaVersion: 1, BotID: s.BotID, RunID: s.RunID, SessionID: s.SessionID, Revision: 1, Phase: store.BotProgressWorking}
-			if got := apply(session.Event{Actions: session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: s}}}); len(got) != 1 || got[0].Kind != events.KindBotRunState {
+			raw, _ := json.Marshal(s)
+			if got := apply(store.BotRunStateKey, string(raw)); len(got) != 1 || got[0].Kind != events.KindBotRunState {
 				t.Fatal("missing state")
 			}
-			row := session.Event{Author: "model"}
-			row.Content = genai.NewContentFromText("private working draft", "model")
-			if len(apply(row)) != 0 {
-				t.Fatal("private draft leaked")
+			// Privacy is enforced by the server projection. Hidden working rows arrive
+			// as transport-only cursor frames, never as raw ADK text/tool payloads.
+			for i := 0; i < 2; i++ {
+				if got, err := m.mapFrame(client.SSEEvent{Type: "cursor", Data: `{}`}); err != nil || len(got) != 0 {
+					t.Fatal("hidden row rendered")
+				}
 			}
-			row.Content = &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "private_tool"}}}}
-			if len(apply(row)) != 0 {
-				t.Fatal("tool leaked")
-			}
-			row.Author = "user"
-			row.Content = genai.NewContentFromText("owner input", "user")
-			if len(apply(row)) == 0 {
+			if got := apply("user_message", `{"text":"owner input"}`); len(got) != 1 || got[0].Kind != events.KindUser {
 				t.Fatal("owner hidden")
 			}
-			row.Author = "model"
-			row.InvocationID = "bot-report:" + s.RunID.String()
-			row.Content = genai.NewContentFromText("final report", "model")
-			if len(apply(row)) == 0 {
+			report, _ := json.Marshal(map[string]any{"text": "final report", "invocationId": "bot-report:" + s.RunID.String()})
+			if len(apply("text", string(report))) == 0 {
 				t.Fatal("committed report hidden")
 			}
 			s.RunID = uuid.New()
 			s.Progress = nil
 			s.Presentation = store.BotRunPresentationHomeInteractive
-			apply(session.Event{Actions: session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: s}}})
-			row.InvocationID = "ordinary-conversation"
-			row.Content = genai.NewContentFromText("useful owner conversation", "model")
-			if len(apply(row)) == 0 {
+			raw, _ = json.Marshal(s)
+			apply(store.BotRunStateKey, string(raw))
+			if got := apply("text", `{"text":"useful owner conversation","invocationId":"ordinary-conversation"}`); len(got) != 1 || got[0].Kind != events.KindText {
 				t.Fatal("progress hid subsequent ordinary conversation")
 			}
 		})

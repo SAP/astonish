@@ -17,8 +17,14 @@ import (
 	"github.com/google/uuid"
 )
 
-func attributionContract(t *testing.T, bots store.BotStore, memories store.MemoryStore, ctx context.Context, a, b *store.Bot, scope store.BotScope, runID uuid.UUID, sessionID string) string {
+func attributionContract(t *testing.T, bots store.BotStore, _ store.MemoryStore, ctx context.Context, a, b *store.Bot, scope store.BotScope, runID uuid.UUID, sessionID string) string {
 	t.Helper()
+	// Bot services and their direct read view use the authoritative disk route.
+	// Generic Chat memory remains excluded rather than becoming a legacy fallback.
+	memories, err := bots.(store.BotMemoryStoreProvider).BotMemoryStore(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc, err := store.NewBotMemoryService(bots, memories, a.ID, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -122,9 +128,14 @@ func attributionContract(t *testing.T, bots store.BotStore, memories store.Memor
 			t.Fatal("legacy upgraded")
 		}
 	}
-	for _, f := range []store.MemoryAttributionFilter{{BotID: b.ID}, {BotID: a.ID, GoalID: foreignGoal.ID}, {BotID: a.ID, RunID: uuid.New()}} {
-		if _, err := svc.SearchAttributed(ctx, f, "needle", 1, 0, ""); err == nil {
-			t.Fatal("foreign filter accepted")
+	if _, err := svc.SearchAttributed(ctx, store.MemoryAttributionFilter{BotID: b.ID}, "needle", 1, 0, ""); !errors.Is(err, store.ErrBotForbidden) {
+		t.Fatalf("foreign Bot filter accepted: %v", err)
+	}
+	// A disk view never leaves this Bot's catalogue. Foreign goal/run filters
+	// may return no matches, but must never widen retrieval to another Bot.
+	for _, f := range []store.MemoryAttributionFilter{{BotID: a.ID, GoalID: foreignGoal.ID}, {BotID: a.ID, RunID: uuid.New()}} {
+		if rows, err := svc.SearchAttributed(ctx, f, "needle", 1, 0, ""); err != nil || len(rows) != 0 {
+			t.Fatalf("foreign goal/run filter widened retrieval: %+v %v", rows, err)
 		}
 	}
 	if rows, err := memories.(store.AttributedMemoryStore).SearchAttributed(ctx, nil, filter, "needle", 1, 0, ""); err != nil || len(rows) != 0 {
@@ -165,7 +176,14 @@ func TestMemoryAttributionSQLiteReopen(t *testing.T) {
 					}
 				}
 				id := attributionContract(t, bots, memories, ctx, a, b, scope, uuid.Nil, a.HomeSessionID.String())
-				original, err := memories.Get(ctx, id)
+				disk, err := bots.(store.BotMemoryStoreProvider).BotMemoryStore(a.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, err := memories.Get(ctx, id); err != nil || got != nil {
+					t.Fatalf("Bot memory leaked into generic Chat: %+v %v", got, err)
+				}
+				original, err := disk.Get(ctx, id)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -188,11 +206,11 @@ func TestMemoryAttributionSQLiteReopen(t *testing.T) {
 				case *teamMemoryStore:
 					client := teament.NewClient(teament.Driver(driver))
 					memories = &teamMemoryStore{client: client, db: reopened, dialect: DialectSQLite, table: "memories", ftsTable: old.ftsTable, embedFunc: old.embedFunc}
-					bots = &teamBotStore{client: client, auth: bots.(*teamBotStore).auth}
+					bots = &teamBotStore{client: client, content: bots.(*teamBotStore).content, auth: bots.(*teamBotStore).auth}
 				case *personalMemoryStore:
 					client := personalent.NewClient(personalent.Driver(driver))
 					memories = &personalMemoryStore{client: client, db: reopened, dialect: DialectSQLite, table: "memories", ftsTable: old.ftsTable, embedFunc: old.embedFunc}
-					bots = &personalBotStore{client: client, auth: bots.(*personalBotStore).auth}
+					bots = &personalBotStore{client: client, content: bots.(*personalBotStore).content, auth: bots.(*personalBotStore).auth}
 				}
 				svc, _ := store.NewBotMemoryService(bots, memories, a.ID, scope)
 				got, err := svc.Get(ctx, id)
@@ -203,15 +221,23 @@ func TestMemoryAttributionSQLiteReopen(t *testing.T) {
 				if err != nil || len(rows) != 1 || rows[0].ID != id {
 					t.Fatalf("reopen search: %+v %v", rows, err)
 				}
-				if _, err := reopened.Exec("UPDATE memories SET metadata = ? WHERE id = ?", `{"astonish_memory_attribution_v1":"{}"}`, id); err != nil {
+				// Tamper the disk attribution, not the deliberately empty SQL table.
+				disk, err = bots.(store.BotMemoryStoreProvider).BotMemoryStore(a.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				memoryDB := disk.(*botDiskMemoryStore).repo.db
+				if err := changeBotDiskMemory(ctx, memoryDB, a.ID, *got, func(entry *botDiskMemoryEntry) error {
+					entry.Row.Attribution.BotID = b.ID
+					return nil
+				}); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := svc.Get(ctx, id); !errors.Is(err, store.ErrBotForbidden) {
 					t.Fatalf("corrupt attribution treated as legacy: %v", err)
 				}
-				rows, err = svc.SearchAttributed(ctx, store.MemoryAttributionFilter{BotID: a.ID, GoalID: original.Attribution.GoalID}, "needle", 1, 0, "fact")
-				if err != nil || len(rows) != 0 {
-					t.Fatalf("corrupt candidate: %+v %v", rows, err)
+				if _, err := svc.SearchAttributed(ctx, store.MemoryAttributionFilter{BotID: a.ID, GoalID: original.Attribution.GoalID}, "needle", 1, 0, "fact"); !errors.Is(err, store.ErrBotForbidden) {
+					t.Fatalf("corrupt catalogue did not fail closed: %v", err)
 				}
 			})
 		}
@@ -226,15 +252,9 @@ func TestMemoryAttributionCorrection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var memories store.MemoryStore
-			switch d := repo.db.(type) {
-			case personalBotDB:
-				memories = &personalMemoryStore{client: d.client, dialect: DialectSQLite}
-			case teamBotDB:
-				memories = &teamMemoryStore{client: d.client, dialect: DialectSQLite}
-			}
+			svc, memories := diskMemoryFixture(t, repo, b.ID)
 			a := &store.MemoryAttribution{BotID: b.ID, RunID: run.ID, Source: "inference:date", ObservedAt: *now, Status: store.MemoryKnowledgeInferred}
-			if err := memories.Add(ctx, store.MemoryEntry{Content: "Thursday", SessionID: run.SessionID.String(), Attribution: a, Metadata: map[string]any{"custom": "kept"}}); err != nil {
+			if err := svc.Add(ctx, store.MemoryEntry{Content: "Thursday", SessionID: run.SessionID.String(), Attribution: a, Metadata: map[string]any{"custom": "kept"}}); err != nil {
 				t.Fatal(err)
 			}
 			rows, err := memories.ListBySession(ctx, run.SessionID.String())
@@ -251,17 +271,22 @@ func TestMemoryAttributionCorrection(t *testing.T) {
 				}
 			}
 			got, err := memories.Get(ctx, rows[0].ID)
-			if err != nil || got.Attribution == nil || got.Attribution.SupersededBy != "correction:"+q.ID.String() || got.Attribution.Status != store.MemoryKnowledgeInferred || got.Attribution.Source != a.Source || got.Snippet != "Friday" {
+			if err != nil || got.Attribution == nil || got.Attribution.SupersededBy != "superseded:correction:"+q.ID.String() || got.Attribution.Status != store.MemoryKnowledgeInferred || got.Attribution.Source != a.Source || got.Snippet != "Thursday" {
 				t.Fatalf("correction provenance: %+v %v", got, err)
 			}
+			replacement, err := memories.Get(ctx, uuid.NewSHA1(q.ID, []byte("memory")).String())
+			if err != nil || replacement == nil || replacement.Snippet != "Friday" || replacement.Attribution == nil || replacement.Attribution.Status != store.MemoryKnowledgeVerified || replacement.Attribution.Source != "correction:"+q.ID.String() || !reflect.DeepEqual(replacement.Attribution.Evidence, &q.Evidence) {
+				t.Fatalf("replacement provenance: %+v %v", replacement, err)
+			}
+			catalogue, err := readBotDiskMemory(ctx, repo.db, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var metadata map[string]any
-			switch d := repo.db.(type) {
-			case personalBotDB:
-				row, _ := d.client.Memory.Get(ctx, uuid.MustParse(got.ID))
-				metadata = row.Metadata
-			case teamBotDB:
-				row, _ := d.client.Memory.Get(ctx, uuid.MustParse(got.ID))
-				metadata = row.Metadata
+			for _, entry := range catalogue.Entries {
+				if entry.Row.ID == got.ID {
+					metadata = entry.Metadata
+				}
 			}
 			if metadata["custom"] != "kept" {
 				t.Fatal("lost unrelated metadata")

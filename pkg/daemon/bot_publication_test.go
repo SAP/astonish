@@ -14,6 +14,7 @@ type publicationReconcileStore struct {
 	store.BotPublicationStore
 	activities []store.BotActivity
 	seen       []store.BotPublicationRequest
+	publishErr error
 }
 
 func (s *publicationReconcileStore) ListActivity(_ context.Context, _ store.BotID, after int64, limit int) ([]store.BotActivity, error) {
@@ -30,8 +31,36 @@ func (s *publicationReconcileStore) ListActivity(_ context.Context, _ store.BotI
 }
 func (s *publicationReconcileStore) PublishReport(_ context.Context, q store.BotPublicationRequest) (*store.BotPublication, error) {
 	s.seen = append(s.seen, q)
+	if s.publishErr != nil {
+		return nil, s.publishErr
+	}
 	return &store.BotPublication{BotID: q.BotID, RunID: q.RunID, ReportSequence: q.ReportSequence}, nil
 }
+func TestBotPublicationMemoryCommitAndRetry(t *testing.T) {
+	id, run := uuid.New(), uuid.New()
+	s := &publicationReconcileStore{publishErr: store.ErrBotConflict, activities: []store.BotActivity{{BotID: id, RunID: &run, Sequence: 1, Kind: store.BotActivityReport, Payload: json.RawMessage(`{"intent":"publish"}`)}}}
+	// Use the typed intent spelling rather than depending on a fixture literal.
+	s.activities[0].Payload, _ = json.Marshal(map[string]any{"intent": store.BotOutboxPublish})
+	calls := 0
+	index := func(context.Context, *store.BotPublication) error {
+		calls++
+		if calls == 1 {
+			return store.ErrBotConflict
+		}
+		return nil
+	}
+	if err := ReconcileBotPublications(t.Context(), s, id, nil, index); err == nil || calls != 0 {
+		t.Fatal("index ran before publication commit", err, calls)
+	}
+	s.publishErr = nil
+	if err := ReconcileBotPublications(t.Context(), s, id, nil, index); err == nil || calls != 1 {
+		t.Fatal("index failure lost", err, calls)
+	}
+	if err := ReconcileBotPublications(t.Context(), s, id, nil, index); err != nil || calls != 2 {
+		t.Fatal("metadata-only retry failed", err, calls)
+	}
+}
+
 func TestBotPublicationReconciliation(t *testing.T) {
 	id, run := uuid.New(), uuid.New()
 	s := &publicationReconcileStore{}

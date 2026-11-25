@@ -69,7 +69,13 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 					var observation struct {
 						Observation bot.ProgressObservation `json:"observation"`
 					}
-					if err := json.Unmarshal([]byte(req.Contents[0].Parts[0].Text), &observation); err != nil {
+					// The controller keeps its trusted JSON-mode instruction separate
+					// from the observation payload with a blank line.
+					instruction, payload, ok := strings.Cut(req.Contents[0].Parts[0].Text, "\n\n")
+					if !ok || !strings.HasPrefix(instruction, "Return JSON") {
+						t.Fatal("progress request lacks JSON-mode instruction and observation payload")
+					}
+					if err := json.Unmarshal([]byte(payload), &observation); err != nil {
 						t.Fatal(err)
 					}
 					if observation.Observation.Assignment != assignment || len(observation.Observation.EvidenceRefs) != steps {
@@ -87,7 +93,7 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 				if steps < 3 {
 					steps++
 					clock.now = clock.now.Add(2*time.Hour + time.Second)
-					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("clock-read-%d", steps), Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}}}, true
+					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("clock-read-%d", steps), Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 				}
 				rows, e := f.repo.ListRuns(f.ctx, f.b.ID, store.BotPage{})
 				if e != nil || len(rows) != 1 {
@@ -112,9 +118,7 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 				t.Fatal("clock did not span six hours")
 			}
 			history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-			if strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
-				t.Fatal("final not exactly once")
-			}
+			assertProgressReportText(t, history, "bot-report:"+run.ID.String(), "All three saved observations agree: isolated receipt.")
 			t.Logf("controller_clock_seconds=%d evaluations=%d run=%s final_publications=1 tool_calls=%d", int(clock.now.Sub(start).Seconds()), evaluations, run.ID, run.Usage.ToolCalls)
 		})
 	}

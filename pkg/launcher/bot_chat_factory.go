@@ -3,14 +3,11 @@ package launcher
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
-	"net/url"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +19,8 @@ import (
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
-	persistentsession "github.com/SAP/astonish/pkg/session"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/tools"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -61,11 +57,19 @@ type BotChatScope struct {
 // before returning; Tools must never fall back to host execution. It must return
 // partial resources with Cleanup on failure. Empty Tools is a valid toolless run.
 type BotChatSafeResources struct {
+	// ProviderFactory is explicitly supplied by the trusted composition root. It
+	// receives scoped config only; nil never permits ambient provider fallback.
+	ProviderFactory func(context.Context, string, string, *config.AppConfig) (model.LLM, error)
 	// ChatConfig and Catalog are trusted owner-scoped Chat dependencies, never host defaults.
 	ChatConfig    *config.AppConfig
 	Catalog       *ChatCatalogResources
 	TaskWorkspace bot.TaskWorkspace
 	Research      *BotResearchEpisode
+	// SynthesisNow optionally supplies the soft stopping-policy clock. It never
+	// changes budget, lease, authorization or operation deadlines.
+	SynthesisNow func() time.Time
+	// FileReceipts is trusted per-attempt publication evidence, never model JSON.
+	FileReceipts  *BotFileReceipts
 	Tools         []tool.Tool
 	WorkspaceDir  string
 	PolicyRuntime agent.BotPolicyRuntime
@@ -147,7 +151,7 @@ func BotChatServicesForOwner(org store.OrgDataStore, principal execution.Princip
 	if team == nil {
 		return nil, store.ErrBotUnsupported
 	}
-	svc := &store.Services{Mode: store.ModePlatform, Scheduler: team.ScheduledJobs(), Sessions: team.Sessions(), Bots: team.Bots(), Credentials: team.Credentials(), Memory: team.Memories(), Flows: team.Flows(), Docs: team.Docs(), Apps: team.Apps(), TeamSkills: team.Skills(), TeamMCPServers: team.MCPServers(), TeamNetworkPolicies: team.NetworkPolicies(), Settings: team.Settings()}
+	svc := &store.Services{Mode: store.ModePlatform, Scheduler: team.ScheduledJobs(), Sessions: team.Sessions(), Bots: team.Bots(), Credentials: team.Credentials(), Memory: team.Memories(), Flows: team.Flows(), Docs: team.Docs(), Apps: team.Apps(), TeamSkills: team.Skills(), TeamMCPServers: team.MCPServers(), A2AAgents: org.OrgA2AAgents(), TeamA2AAgents: team.A2AAgents(), TeamNetworkPolicies: team.NetworkPolicies(), Settings: team.Settings()}
 	if scope == store.BotScopePersonal {
 		personal := org.ForUser(principal.Subject)
 		if personal == nil {
@@ -170,16 +174,35 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		return nil, fmt.Errorf("%w: explicit Bot scope, isolation, budget wrapper and context window required", store.ErrBotUnsupported)
 	}
 	return func(ctx context.Context, req bot.RunRequest) (resources *api.BotChatResources, err error) {
+		// Include request validation in construction's synchronous read operation.
+		// Authorization and lease state remain fresh SQL reads on every check.
+		_, startup := ctx.Value(botStartupReadsKey{}).(func())
+		endContentReads := func() {}
+		if !startup || entstore.WithBotContentReadOperationFromContext(context.Background(), ctx) == context.Background() {
+			ctx, endContentReads = entstore.WithBotContentReadOperation(ctx)
+		}
+		defer endContentReads()
 		if err = validateBotFactoryRequest(ctx, req); err != nil {
 			return nil, err
 		}
 		// Keep cancellation/deadlines, discard all ambient viewer/service/LLM values.
 		owner, cancelOwner := context.WithCancel(botFactoryOwnerContext(ctx, req))
+		// Construction borrows the adapter's first-request operation, or owns a
+		// synchronous operation when called independently. Current SQL/root/mandate
+		// checks still execute; borrowed bytes end at the model/tool boundary.
+		owner = entstore.CopyImmutableReadWindow(owner, ctx)
+		owner = entstore.WithBotContentReadOperationFromContext(owner, ctx)
+		if end, ok := ctx.Value(botStartupReadsKey{}).(func()); ok {
+			owner = context.WithValue(owner, botStartupReadsKey{}, end)
+		}
 		// The adapter installs this server-only ledger before factory construction.
 		// Carry it explicitly without restoring any ambient viewer values.
+		owner = api.WithBotPreparedPlanSessionFromContext(owner, ctx)
+		owner = api.WithBotDefinitionConsentFromContext(owner, ctx)
 		owner = bot.WithToolOutcomesFromContext(owner, ctx)
 		owner = bot.WithBotWorkServicesFromContext(owner, ctx)
-		cleanups := []func(){cancelOwner}
+		declarations := &botDeclarationReads{}
+		cleanups := []func(){cancelOwner, declarations.close}
 		var once sync.Once
 		cleanup := func() {
 			once.Do(func() {
@@ -256,7 +279,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		if req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
 			redactor := credentials.NewRedactor()
 			owner = credentials.WithRedactor(owner, redactor)
-			binding := &botFactoryBinding{owner: owner, req: req}
+			binding := &botFactoryBinding{declarations: declarations, owner: owner, req: req}
 			questionRuntime := agent.BotPolicyRuntime{Guard: botTitleQuestionPolicy{binding}, Classifier: botTitleQuestionPolicy{binding}}
 			owner = agent.WithBotPolicyRuntime(owner, questionRuntime)
 			binding.owner = owner
@@ -270,9 +293,25 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			}
 			binding.installProgressBridge()
 			llm := &botTitleQuestionLLM{LLM: &botProgressLLM{LLM: wrapped, binding: binding}, binding: binding}
-			chat := agent.NewChatAgent(llm, nil, nil, scoped.Sessions, &agent.SystemPromptBuilder{Tools: []tool.Tool{bound}}, false, false)
-			chat.Tools = []tool.Tool{bound}
-			chat.Redactor = redactor
+			// Title clarification is a restricted view of the shared Chat runtime,
+			// not another agent construction path. No catalog discovery, backend,
+			// pool or host bootstrap is needed before the owner answers.
+			wired, err := NewScopedChatRuntime(owner, ChatRuntimeDependencies{
+				Config: &ChatFactoryConfig{AppConfig: &config.AppConfig{}, PlatformMode: true,
+					ProviderName: resolved.Provider, ModelName: resolved.Model},
+				LLM: llm, Sessions: scoped.Sessions, SessionID: req.Run.SessionID.String(),
+				Catalog: &ChatCatalog{MainThreadTools: []tool.Tool{bound}},
+				Prompt:  &agent.SystemPromptBuilder{}, Redactor: redactor,
+				Credentials: credentials.NewStoreAdapter(creds),
+			}, ChatRuntimeHooks{})
+			if err != nil {
+				return nil, err
+			}
+			cleanups = append(cleanups, wired.Cleanup)
+			chat := wired.ChatAgent
+			// The pending-title policy permits only the actual question tool;
+			// progressive discovery is intentionally unavailable in this state.
+			chat.Tools = wired.InternalTools
 			repo := store.BotStoreFromContext(owner, req.Bot.Scope)
 			transcript, ok := repo.(store.BotTranscriptStore)
 			if !ok {
@@ -306,6 +345,33 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		if err = validateBotFactoryRequest(ctx, req); err != nil {
 			return nil, err
 		}
+		// Install only Bot publication/receipt extensions. Ordinary filesystem
+		// execution stays in the shared Chat catalog and receives no name-only grant.
+		if !req.Run.ControlOnly() || botFactoryInteractive(req) || req.Mandate != nil {
+			if safe.FileReceipts == nil {
+				fileTools, receipts, fileErr := BotPublicationToolsWithReceipts(req, scoped)
+				if fileErr != nil {
+					return nil, fileErr
+				}
+				// Never leave an ambient adapter with the same executable name.
+				names := map[string]bool{}
+				for _, t := range fileTools {
+					names[t.Name()] = true
+				}
+				kept := make([]tool.Tool, 0, len(safe.Tools)+len(fileTools))
+				for _, t := range safe.Tools {
+					if t == nil {
+						return nil, store.ErrBotUnsupported
+					}
+					if !names[t.Name()] {
+						kept = append(kept, t)
+					}
+				}
+				safe.Tools = append(kept, fileTools...)
+				safe.FileReceipts = receipts
+			}
+			safe.PolicyRuntime.Classifier = botSharedFileClassifier{fallback: safe.PolicyRuntime.Classifier}
+		}
 		if !botFactoryInteractive(req) {
 			safe.PolicyRuntime.Classifier = WithBotMandatedReadClassifier(safe.PolicyRuntime.Classifier, safe.Tools)
 			safe.PolicyRuntime.Classifier = WithBotEmailClassifier(safe.PolicyRuntime.Classifier, safe.Tools)
@@ -316,7 +382,23 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			}
 			owner = agent.WithBotPolicyRuntime(owner, safe.PolicyRuntime)
 		}
-		binding := &botFactoryBinding{synthesisReserve: newBotSynthesisReserve(req.Budget, req.Version.Budget), research: safe.Research, owner: owner, req: req, ownerEmail: scoped.OwnerEmail, verifyIsolation: safe.VerifyIsolation}
+		// Interactive prepared plans also need the trusted classifier; installing
+		// metadata does not replace their turn authorizer with autonomy policy.
+		owner = agent.WithBotPolicyRuntime(owner, safe.PolicyRuntime)
+		binding := &botFactoryBinding{declarations: declarations, synthesisReserve: newBotSynthesisReserve(req.Budget, req.Version.Budget), research: safe.Research, owner: owner, req: req, ownerEmail: scoped.OwnerEmail, verifyIsolation: safe.VerifyIsolation}
+		if binding.synthesisReserve != nil {
+			if req.Mandate != nil {
+				binding.synthesisReserve.authorityDeadline = req.Mandate.Authorization.Snapshot().ExpiresAt
+			} else if req.Run.CallerCeiling != nil {
+				binding.synthesisReserve.authorityDeadline = req.Run.CallerCeiling.ExpiresAt
+			}
+			if deadline := binding.synthesisReserve.deadline(); !deadline.IsZero() {
+				binding.synthesisReserve.reserveTime = min(max(time.Duration(0), time.Until(deadline))/5, 60*time.Second)
+			}
+		}
+		if binding.synthesisReserve != nil && safe.SynthesisNow != nil {
+			binding.synthesisReserve.now = safe.SynthesisNow
+		}
 		taskRepo := services.Bots
 		if req.Bot.Scope == store.BotScopePersonal {
 			taskRepo = services.PersonalBots
@@ -349,8 +431,9 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		// the same metered auxiliary capability there before publishing resources.
 		owner = agent.WithBotAuxiliaryLLM(owner, llm)
 		binding.owner = owner
-		injection := &botWiredInjection{scope: scoped, safe: safe, binding: binding, llm: llm, contextWindow: contextWindow, credentials: creds}
-		wired, err := NewWiredChatAgent(context.WithValue(owner, botWiredKey{}, injection), &ChatFactoryConfig{AppConfig: &config.AppConfig{}, ProviderName: resolved.Provider, ModelName: resolved.Model, PlatformMode: true, SessionService: scoped.Sessions})
+		deps := &botChatDependencies{scope: scoped, safe: safe, binding: binding, llm: llm, contextWindow: contextWindow, credentials: creds}
+		chatCfg := &ChatFactoryConfig{AppConfig: &config.AppConfig{}, ProviderName: resolved.Provider, ModelName: resolved.Model, PlatformMode: true, SessionService: scoped.Sessions}
+		wired, err := newBotScopedChatRuntime(owner, chatCfg, deps)
 		if wired != nil && wired.Cleanup != nil {
 			cleanups = append(cleanups, wired.Cleanup)
 		}
@@ -375,49 +458,23 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		if req.Bot.Scope == store.BotScopePersonal {
 			sessionStore = services.PersonalSessions
 		}
-		evidenceReader, _ := sessionStore.(store.BotTranscriptReader)
-		previousWork := func(c context.Context) (*store.BotWorkProjection, error) {
-			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
-			defer cancel()
-			if err := binding.check(bound); err != nil {
-				return nil, err
-			}
-			var latest *store.BotRun
-			cursor := uuid.Nil
-			for page := 0; page < botWorkHistoryMaxPages; page++ {
-				if err := bound.Err(); err != nil {
-					return nil, err
-				}
-				rows, err := repo.ListRuns(bound, req.Bot.ID, store.BotPage{Limit: botWorkHistoryPageSize, After: cursor.String()})
-				if err != nil {
-					return nil, err
-				}
-				if err := bound.Err(); err != nil {
-					return nil, err
-				}
-				if len(rows) > botWorkHistoryPageSize {
-					return nil, fmt.Errorf("%w: oversized run history page", store.ErrBotInvalid)
-				}
-				for i := range rows {
-					run := rows[i]
-					if bytes.Compare(run.ID[:], cursor[:]) <= 0 {
-						return nil, fmt.Errorf("%w: run history cursor did not advance", store.ErrBotInvalid)
-					}
-					cursor = run.ID
-					if run.ID != req.Run.ID && run.FinishedAt != nil && run.FinishedAt.Before(req.Run.CreatedAt) && run.Report.Work != nil && (latest == nil || run.FinishedAt.After(*latest.FinishedAt)) {
-						latest = &run
-					}
-				}
-				if len(rows) < botWorkHistoryPageSize {
-					if latest == nil {
-						return nil, nil
-					}
-					return latest.Report.Work, nil
-				}
-			}
-			return nil, fmt.Errorf("previous work: %w", errBotWorkHistoryExhausted)
+		wired.ChatAgent.BeginModelPreparation = func(c context.Context) context.Context {
+			// Prompt-only services are installed by the adapter after construction.
+			// Carry only the read operation back, not the captured owner's values.
+			return entstore.WithBotContentReadOperationFromContext(c, declarations.begin(binding.bind(c)))
 		}
+		wired.ChatAgent.EndModelPreparation = declarations.close
+		evidenceReader, _ := sessionStore.(store.BotTranscriptReader)
+		// Historical work bodies are not bootstrap material. MEMORY.md supplies
+		// compact continuity; explicit file reads retrieve older deliverables.
+		// Current-run recovery still uses the exact lease-bound Work store.
 		priorRun := func(c context.Context) (*bot.BotPriorRunContext, error) {
+			// Manual/title continuations have no recurring occurrence to compare.
+			// Do not put their mandatory active-run validation under an optional
+			// history deadline merely to return no prior occurrence.
+			if req.Run.Trigger != store.TriggerCron || req.Run.TriggerID == uuid.Nil || req.Run.CreatedAt.IsZero() {
+				return nil, nil
+			}
 			bound, cancel := context.WithTimeout(binding.bind(c), botWorkHistoryTimeout)
 			defer cancel()
 			if err := binding.check(bound); err != nil {
@@ -496,30 +553,30 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			freshBinding := &botFactoryBinding{synthesisReserve: binding.synthesisReserve, owner: owner, req: r, research: binding.research, researchOnly: true, verifyIsolation: binding.verifyIsolation}
 			freshBinding.progress = binding.progress
 			freshModel := &botFactoryLLM{LLM: &botProgressLLM{LLM: wrapped, binding: freshBinding}, binding: freshBinding, researchOnly: true}
-			var reads []tool.Tool
-			for _, t := range safe.Tools {
-				if t.Name() == "perplexity_web_search" {
-					if _, configured := t.(*botConfiguredResearchTool); !configured {
-						continue // no aliases or arbitrary adapters posing as configured search
-					}
-				}
-				if t.Name() != "perplexity_web_search" && t.Name() != "web_fetch" {
-					continue
-				}
-				bound, e := newBotBoundTool(t, freshBinding)
-				if e != nil {
-					cancel()
-					return nil, e
-				}
-				reads = append(reads, bound)
+			freshSafe := *safe
+			freshSafe.PolicyRuntime = directed.PolicyRuntime
+			fresh, e := newBotScopedChatRuntime(owner, chatCfg, &botChatDependencies{scope: scoped, safe: &freshSafe, binding: freshBinding, llm: freshModel, contextWindow: contextWindow, credentials: creds})
+			if e != nil {
+				cancel()
+				return nil, e
 			}
-			prompt := &agent.SystemPromptBuilder{WorkspaceDir: safe.WorkspaceDir, SandboxEnabled: true, SandboxWorkspaceDir: safe.WorkspaceDir, Tools: reads}
-			chat := agent.NewChatAgent(freshModel, nil, nil, scoped.Sessions, prompt, false, false)
-			chat.Tools = reads
-			chat.Redactor = wired.ChatAgent.Redactor
-			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cancel, PolicyRuntime: &directed.PolicyRuntime}, nil
+			var reads []tool.Tool
+			for _, name := range []string{"perplexity_web_search", "web_fetch"} {
+				if entry := fresh.ChatAgent.ToolIndex.GetToolEntry(name); entry != nil {
+					reads = append(reads, entry.Tool)
+				}
+			}
+			index, e := newChatToolIndex(owner, reads, nil, nil, nil)
+			if e != nil {
+				fresh.Cleanup()
+				cancel()
+				return nil, e
+			}
+			chat := fresh.ChatAgent
+			chat.Tools, chat.Toolsets, chat.ToolIndex, chat.SubAgentManager = reads, nil, index, nil
+			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: func() { fresh.Cleanup(); cancel() }, PolicyRuntime: &directed.PolicyRuntime}, nil
 		}
-		return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PriorRun: priorRun, PreviousWork: previousWork, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		return &api.BotChatResources{ArtifactBody: binding.artifactReviewReader(scoped, safe.FileReceipts), RepairFileDelivery: binding.fileDeliveryRepair(scoped, safe.FileReceipts), RecoverFileDelivery: binding.fileDeliveryRecovery(scoped, safe.FileReceipts), PublishedFiles: func() []store.BotArtifact { return safe.FileReceipts.Artifacts(req) }, ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PriorRun: priorRun, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
 }
 
@@ -638,12 +695,25 @@ func validateBotFactoryRequest(ctx context.Context, req bot.RunRequest) error {
 		if !ok {
 			return store.ErrBotUnsupported
 		}
-		approval, err := rs.LoadResumeApproval(ctx, req.Run.Lease)
-		if err != nil {
-			return err
-		}
-		if approval == nil || !checkpoint.Matches(*approval) || checkpoint.Fence >= req.Run.Lease.Fence {
-			return store.ErrBotConflict
+		prepared := api.BotPreparedPlanSessionFromContext(ctx)
+		if prepared != nil && prepared.Resume != nil && prepared.Resume.Stage != store.BotPlanAwaitingApproval {
+			// Only the adapter's private recovered continuation may use consumed
+			// approval evidence. Re-read under the current lease, never trust args.
+			current, err := prepared.Store.LoadBotPlanByApproval(ctx, req.Run.Lease, checkpoint.ApprovalID)
+			if err != nil {
+				return err
+			}
+			if current.OperationID != prepared.Resume.OperationID || current.Revision != prepared.Resume.Revision || checkpoint.Fence >= req.Run.Lease.Fence {
+				return store.ErrBotConflict
+			}
+		} else {
+			approval, err := rs.LoadResumeApproval(ctx, req.Run.Lease)
+			if err != nil {
+				return err
+			}
+			if approval == nil || !checkpoint.Matches(*approval) || checkpoint.Fence >= req.Run.Lease.Fence {
+				return store.ErrBotConflict
+			}
 		}
 	}
 	l := req.Run.Lease
@@ -683,8 +753,7 @@ func botFactoryOwnerContext(ctx context.Context, req bot.RunRequest) context.Con
 	return store.WithSessionID(owner, req.Run.SessionID.String())
 }
 
-type botWiredKey struct{}
-type botWiredInjection struct {
+type botChatDependencies struct {
 	scope         *BotChatScope
 	safe          *BotChatSafeResources
 	binding       *botFactoryBinding
@@ -693,12 +762,17 @@ type botWiredInjection struct {
 	credentials   store.CredentialStore
 }
 type botFactoryBinding struct {
+	declarations     *botDeclarationReads
 	progress         *botProgressBridge
 	synthesisReserve *botSynthesisReserve
 	researchOnly     bool
 	tasks            *botTaskServices
+	// Captured from the genuine shared catalog, never a name-only tool lookup at dispatch.
+	taskSearch       botRunnableTool
+	taskSearchConfig *config.AppConfig
 	redactTask       func(string) string
 	research         *BotResearchEpisode
+	sharedResearch   *botConfiguredResearchTool
 	ownerEmail       func(context.Context) (store.BotOwnerEmailDelivery, error)
 	owner            context.Context
 	req              bot.RunRequest
@@ -738,7 +812,16 @@ func (b *botFactoryBinding) checkWithBudget(ctx context.Context, checkBudget fun
 	if repo == nil {
 		return store.ErrBotUnsupported
 	}
+	// One synchronous guard chain may verify the same immutable provenance via
+	// the lease, budget, mandate and isolation paths. Keep all live checks, but
+	// give each path the same owner-bound operation, including direct callers
+	// outside construction/declaration preparation.
 	bound := b.bind(ctx)
+	endReads := func() {}
+	if entstore.WithBotContentReadOperationFromContext(context.Background(), bound) == context.Background() {
+		bound, endReads = entstore.WithBotContentReadOperation(bound)
+	}
+	defer endReads()
 	current, err := repo.Get(bound, b.req.Bot.ID)
 	if err != nil {
 		return err
@@ -757,11 +840,11 @@ func (b *botFactoryBinding) checkWithBudget(ctx context.Context, checkBudget fun
 	if !reflect.DeepEqual(run.TitleConfirmation, b.req.Run.TitleConfirmation) || run.TitleConfirmation.ValidateBinding(*run, current.OwnerID) != nil {
 		return store.ErrBotConflict
 	}
-	if err := checkBudget(ctx); err != nil {
+	if err := checkBudget(bound); err != nil {
 		return err
 	}
 	if b.req.Mandate != nil {
-		if err := b.req.Mandate.Check(b.bind(ctx)); err != nil {
+		if err := b.req.Mandate.Check(bound); err != nil {
 			return err
 		}
 	}
@@ -769,7 +852,7 @@ func (b *botFactoryBinding) checkWithBudget(ctx context.Context, checkBudget fun
 		if b.req.Authorization == nil {
 			return store.ErrBotForbidden
 		}
-		if err := b.req.Authorization.Authorize(b.bind(ctx), execution.CapabilityChat); err != nil {
+		if err := b.req.Authorization.Authorize(bound, execution.CapabilityChat); err != nil {
 			return err
 		}
 	}
@@ -779,7 +862,7 @@ func (b *botFactoryBinding) checkWithBudget(ctx context.Context, checkBudget fun
 		}
 		return nil // no physical workspace exists during title clarification
 	}
-	return b.verifyIsolation(ctx)
+	return b.verifyIsolation(bound)
 }
 
 // bind keeps invocation cancellation and narrowed child policy, but resolves
@@ -789,7 +872,11 @@ func (b *botFactoryBinding) bind(ctx context.Context) context.Context {
 	if b.researchOnly || b.req.Policy == nil || policy == nil || policy.Identity() != b.req.Policy.Identity() {
 		policy = b.req.Policy
 	}
-	return execution.WithRunPolicy(botBoundContext{Context: ctx, owner: b.owner}, policy)
+	owner := api.PreserveCapturedDrillOccurrence(entstore.WithBotContentReadOperationFromContext(b.owner, ctx), ctx)
+	if end, ok := ctx.Value(botNativeNetworkPreflightKey{}).(func()); ok {
+		owner = context.WithValue(owner, botNativeNetworkPreflightKey{}, end)
+	}
+	return execution.WithRunPolicy(botBoundContext{Context: ctx, owner: owner}, policy)
 }
 
 type botBoundContext struct {
@@ -805,12 +892,38 @@ type botFactoryLLM struct {
 	researchOnly bool
 }
 
+func (l *botFactoryLLM) SupportsModelPreflight() bool { return true }
+
 func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		observePreflight := entstore.ObserveBotExecutionStage(ctx, entstore.BotStagePreflight)
+		observeProvider := func(error) {}
+		var stageErr error
+		defer func() { observeProvider(stageErr) }()
+		// Share declaration bytes with the synchronous factory checks.
+		declaration := l.binding.declarations.bind(l.binding, req)
 		// Invocation-only purpose controls prompt composition, never authority.
 		// Read before bind deliberately discards later viewer context values.
 		purpose := bot.ModelCallPurposeFromContext(ctx)
-		bound := l.binding.bind(ctx)
+		prepared := entstore.WithBotContentReadOperationFromContext(declaration.bind(ctx), ctx)
+		bound, endReads := entstore.WithBotContentReadOperationIfAbsent(prepared)
+		endContentReads := sync.OnceFunc(func() {
+			endReads()
+			observePreflight(stageErr)
+			entstore.EndImmutableReadWindow(bound)
+			l.binding.declarations.close()
+			endBotStartupReads(l.binding.owner)
+			provider.EndModelPreflight(ctx)
+			observeProvider = entstore.ObserveBotExecutionStage(bound, entstore.BotStageProvider)
+		})
+		defer endContentReads()
+		originalYield := yield
+		yield = func(r *model.LLMResponse, err error) bool {
+			stageErr = errors.Join(stageErr, err)
+			endContentReads()
+			return originalYield(r, err)
+		}
+		bound = provider.WithModelPreflightEnd(bound, endContentReads)
 		if err := l.binding.check(bound); err != nil {
 			yield(nil, err)
 			return
@@ -843,6 +956,10 @@ func (l *botFactoryLLM) GenerateContent(ctx context.Context, req *model.LLMReque
 			if l.binding.synthesisReserve != nil && request != nil {
 				bound = provider.WithBudgetInputGuidance(bound, request)
 			}
+		}
+		// Transfer cleanup only to wrappers with an explicit preflight contract.
+		if next, ok := l.LLM.(interface{ SupportsModelPreflight() bool }); synthesis || !ok || !next.SupportsModelPreflight() {
+			endContentReads()
 		}
 		if synthesis {
 			// The final-only path drains every attempt before deciding whether one
@@ -913,6 +1030,8 @@ type botTitleQuestionLLM struct {
 
 func (m *botTitleQuestionLLM) GenerateContent(ctx context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		m.binding.declarations.close()
+		endBotStartupReads(m.binding.owner)
 		bound := m.binding.bind(ctx)
 		for attempt := 0; attempt < 2; attempt++ {
 			if err := m.binding.check(bound); err != nil {
@@ -967,429 +1086,51 @@ func (m *botTitleQuestionLLM) GenerateContent(ctx context.Context, request *mode
 	}
 }
 
-// currentMemory loads only session-prefiltered Bot rows, with live owner,
-// version and lease checks before and after retrieval. No generic fallback.
+// currentMemory loads the actual bounded critical Home files and MEMORY.md.
+// Historical memory rows and report bodies are never bootstrap material.
 func (b *botFactoryBinding) currentMemory(ctx context.Context) (string, error) {
 	bound := b.bind(ctx)
 	if err := b.check(bound); err != nil {
 		return "", err
 	}
 	svc := store.FromContext(bound)
-	if svc.Memory == nil {
-		return "", nil
+	if svc == nil || svc.BotFilesFactory == nil {
+		return "", store.ErrBotUnsupported
 	}
-	repo := svc.Bots
-	if b.req.Bot.Scope == store.BotScopePersonal {
-		repo = svc.PersonalBots
-	}
-	memory, err := store.NewBotRunMemoryService(repo, svc.Memory, b.req.Run.Lease, b.req.Bot.Scope)
+	repo := store.BotStoreFromContext(bound, b.req.Bot.Scope)
+	files, err := svc.BotFilesFactory(bound, svc, b.req.Bot.Scope)
 	if err != nil {
 		return "", err
 	}
-	rows, err := memory.List(bound, "", 20, 0)
+	documents, err := bot.NewDocuments(repo, files)
+	if err != nil {
+		return "", err
+	}
+	projection, err := documents.Load(bound, b.req.Bot.ID, 0)
 	if err != nil {
 		return "", err
 	}
 	if err := b.check(bound); err != nil {
 		return "", err
 	}
-	text := agent.BotMemoryPrompt(rows)
+	text := agent.BotDocumentsPrompt(projection.Documents)
 	if redactor := credentials.RedactorFromContext(bound); redactor != nil {
 		text, _ = redactor.Placeholderize(text)
 	}
 	return text, nil
 }
 
-// priorRetrievalContext reads only exact run sessions obtained from the scoped
-// Bot repository. It never reads Home/generic user history or replays a tool.
-// Bodies, queries, headers and free-form errors are represented by digests only.
+// priorRetrievalContext supplies retrieval guidance without opening historical
+// run checkpoints or transcripts. Critical Home files and compact MEMORY.md are
+// loaded by currentMemory; historical sources require explicit file reads.
 func (b *botFactoryBinding) priorRetrievalContext(ctx context.Context) (string, error) {
-	bound, cancel := context.WithTimeout(b.bind(ctx), botWorkHistoryTimeout)
-	defer cancel()
-	if err := b.check(bound); err != nil {
+	if err := b.check(b.bind(ctx)); err != nil {
 		return "", err
 	}
-	svc := store.FromContext(bound)
-	repo := store.BotStoreFromContext(bound, b.req.Bot.Scope)
-	sessions := svc.Sessions
-	if b.req.Bot.Scope == store.BotScopePersonal {
-		sessions = svc.PersonalSessions
-	}
-	reader, ok := sessions.(store.BotTranscriptReader)
-	if !ok || repo == nil {
-		return "", nil
-	}
-	var candidates []store.BotRun
-	after := ""
-	incomplete := false
-	for page := 0; page < 3; page++ {
-		rows, err := repo.ListRuns(bound, b.req.Bot.ID, store.BotPage{Limit: 100, After: after})
-		if err != nil {
-			return "", err
-		}
-		for _, run := range rows {
-			if run.BotID != b.req.Bot.ID {
-				return "", store.ErrBotForbidden
-			}
-			if run.ID != b.req.Run.ID && run.SessionID != uuid.Nil && run.SessionID != b.req.Run.SessionID && run.SessionID != b.req.Bot.HomeSessionID && (b.req.Run.CreatedAt.IsZero() || !run.CreatedAt.After(b.req.Run.CreatedAt)) {
-				candidates = append(candidates, run)
-				sort.Slice(candidates, func(i, j int) bool { return candidates[i].CreatedAt.After(candidates[j].CreatedAt) })
-				if len(candidates) > 3 {
-					candidates = candidates[:3]
-					incomplete = true
-				}
-			}
-		}
-		if len(rows) < 100 {
-			break
-		}
-		after = rows[len(rows)-1].ID.String()
-		incomplete = incomplete || page == 2
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].CreatedAt.After(candidates[j].CreatedAt) })
-	if len(candidates) > 3 {
-		candidates = candidates[:3]
-		incomplete = true
-	}
-	var lines []string
-	bytesUsed := 0
-	for _, listed := range candidates {
-		cursor := int64(0)
-		for page := 0; page < 3; page++ {
-			if err := b.check(bound); err != nil {
-				return "", err
-			}
-			exact, err := repo.GetRun(bound, b.req.Bot.ID, listed.ID)
-			if err != nil {
-				return "", err
-			}
-			if exact == nil || exact.BotID != b.req.Bot.ID || exact.ID != listed.ID || exact.SessionID != listed.SessionID {
-				return "", store.ErrBotForbidden
-			}
-			events, err := reader.ReadBotTranscript(bound, exact.SessionID, cursor, 100)
-			if err != nil {
-				return "", err
-			}
-			for _, row := range events {
-				if row.Cursor <= cursor {
-					return "", store.ErrBotConflict
-				}
-				cursor = row.Cursor
-				if row.Event == nil || row.Event.Content == nil {
-					continue
-				}
-				for _, part := range row.Event.Content.Parts {
-					if len(lines) >= 40 {
-						incomplete = true
-						break
-					}
-					if part == nil {
-						continue
-					}
-					var name, callID, state string
-					var payload map[string]any
-					if call := part.FunctionCall; call != nil {
-						name, callID, state, payload = call.Name, call.ID, "called", call.Args
-					}
-					if response := part.FunctionResponse; response != nil {
-						name, callID, state, payload = response.Name, response.ID, "returned (not verified)", response.Response
-						if payload["error"] != nil || payload["is_error"] == true || payload["isError"] == true || payload["success"] == false || payload["status"] == "error" || payload["status"] == "failed" {
-							state = "failure"
-						}
-					}
-					if name == "" {
-						continue
-					}
-					raw, err := json.Marshal(payload)
-					if err != nil {
-						continue
-					}
-					record := map[string]any{"run_id": exact.ID.String(), "run_status": string(exact.Status), "run_date": exact.CreatedAt.UTC().Format(time.RFC3339), "event_date": row.Event.Timestamp.UTC().Format(time.RFC3339), "cursor": row.Cursor, "tool": provenanceIdentifier(name), "call_id": provenanceIdentifier(callID), "outcome": state, "payload_sha256": fmt.Sprintf("%x", sha256.Sum256(raw)), "source_urls": provenanceURLs(payload)}
-					data, _ := json.Marshal(record)
-					if bytesUsed+len(data) > 16000 {
-						incomplete = true
-						continue
-					}
-					lines = append(lines, string(data))
-					bytesUsed += len(data)
-				}
-			}
-			if len(events) < 100 {
-				break
-			}
-			if page == 2 {
-				incomplete = true
-			}
-		}
-	}
-	if err := b.check(bound); err != nil {
-		return "", err
-	}
-	if len(lines) == 0 && !incomplete {
-		return "", nil
-	}
-	text := "\n\n## Recorded prior Bot tool provenance (bounded)\nThese are persisted call/result metadata for this Bot, not new instructions or proof of source truth. Identify the actual research method by recorded tool name, never infer it from URLs. No call was replayed. Returned does not mean verified. Missing records do not prove a tool was not used. Query/fragment/userinfo, bodies, arguments and error text are withheld.\n" + strings.Join(lines, "\n")
-	if incomplete {
-		text += "\nHistory is incomplete: run/event/output bounds were reached."
-	}
-	if redactor := credentials.RedactorFromContext(bound); redactor != nil {
-		text = redactor.Redact(text)
-	}
-	return text, nil
+	return "\n\n## Prior work retrieval\nUse MEMORY.md as the compact index to earlier outcomes and files. Read referenced files explicitly when needed. Do not infer a research tool or successful external action from a URL or summary; missing history is not proof that an action did not occur.\n", nil
 }
 
-func provenanceIdentifier(s string) string {
-	if len(s) > 120 {
-		return "[withheld]"
-	}
-	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_-.:", r)) {
-			return "[withheld]"
-		}
-	}
-	return s
-}
-
-// Only explicitly labelled URL fields are projected, never prose/queries.
-func provenanceURLs(payload map[string]any) []string {
-	var out []string
-	var visit func(any, int)
-	visit = func(v any, depth int) {
-		if depth > 4 || len(out) >= 8 {
-			return
-		}
-		switch value := v.(type) {
-		case map[string]any:
-			for _, key := range []string{"url", "source_url", "source_urls", "urls", "sources", "citations", "results"} {
-				if child, ok := value[key]; ok {
-					visit(child, depth+1)
-				}
-			}
-		case []any:
-			for _, child := range value {
-				visit(child, depth+1)
-			}
-		case []string:
-			for _, child := range value {
-				visit(child, depth+1)
-			}
-		case string:
-			u, err := url.Parse(value)
-			if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || len(value) > 2048 {
-				return
-			}
-			u.User = nil
-			u.RawQuery = ""
-			u.Fragment = ""
-			u.RawFragment = ""
-			u.ForceQuery = false
-			cleaned := u.String()
-			for _, existing := range out {
-				if existing == cleaned {
-					return
-				}
-			}
-			if len(out) < 8 {
-				out = append(out, cleaned)
-			}
-		}
-	}
-	visit(payload, 0)
-	return out
-}
-
-// newBotWiredChatAgent is reached ONLY through NewWiredChatAgent's private
-// injection. It deliberately bypasses the legacy host/global initialization.
-func newBotWiredChatAgent(ctx context.Context, cfg *ChatFactoryConfig, in *botWiredInjection) (*ChatFactoryResult, error) {
-	if botFactoryInteractive(in.binding.req) {
-		return newInteractiveBotWiredChatAgent(ctx, cfg, in)
-	}
-	redactor := credentials.NewRedactor()
-	redactor.HydrateFromStore(in.credentials)
-	in.binding.owner = credentials.WithRedactor(tools.WithTaskResultStore(in.binding.owner, tools.NewTaskResultStore()), redactor)
-	resolver := credentials.NewStoreAdapter(in.credentials)
-	mgr := agent.NewSubAgentManager(agent.SubAgentConfig{})
-	mgr.LLM, mgr.SessionService, mgr.Redactor, mgr.CredentialStore = in.llm, in.scope.Sessions, redactor, resolver
-	mgr.AppName, mgr.UserID = "astonish", in.binding.req.Bot.OwnerID.String()
-	mgr.SandboxEnabled, mgr.SandboxWorkspaceDir = true, in.safe.WorkspaceDir
-	var native []tool.Tool
-	for _, t := range in.safe.Tools {
-		if t == nil {
-			return nil, store.ErrBotUnsupported
-		}
-		if in.binding.req.Mandate != nil && in.binding.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, t.Name()) != nil {
-			continue
-		}
-		wrapped, err := newBotBoundTool(t, in.binding)
-		if err != nil {
-			return nil, err
-		}
-		native = append(native, wrapped)
-	}
-	workTools, err := newBotWorkTools(in.binding)
-	if err != nil {
-		return nil, err
-	}
-	skillTools, err := newBotSkillTools(in.binding, in.scope)
-	if err != nil {
-		return nil, err
-	}
-	workTools = append(workTools, skillTools...)
-	taskTools, err := newBotTaskTools(in.binding)
-	if err != nil {
-		return nil, err
-	}
-	workTools = append(workTools, taskTools...)
-	if in.binding.tasks != nil {
-		in.safe.PolicyRuntime.Classifier = WithBotTaskClassifier(in.safe.PolicyRuntime.Classifier, taskTools)
-		in.binding.owner = agent.WithBotPolicyRuntime(in.binding.owner, in.safe.PolicyRuntime)
-	}
-	memoryTools, err := BotMemoryTools(in.binding.req, in.scope)
-	if err != nil {
-		return nil, err
-	}
-	for _, t := range memoryTools {
-		found := false
-		for _, existing := range native {
-			if existing.Name() == t.Name() {
-				found = true
-			}
-		}
-		if !found {
-			workTools = append(workTools, t)
-		}
-	}
-	for _, t := range workTools {
-		bound, err := newBotBoundTool(t, in.binding)
-		if err != nil {
-			return nil, err
-		}
-		native = append(native, bound)
-	}
-	var flowCleanups []func()
-	for _, t := range in.safe.Tools {
-		if d, ok := t.(*botDrillTool); ok {
-			d.configure(in.binding, native, in.llm)
-		}
-		if f, ok := t.(*botFlowTool); ok {
-			f.configure(in.llm, native, redactor)
-			flowCleanups = append(flowCleanups, f.cleanup)
-		}
-	}
-	mgr.ToolGroups = map[string]*agent.ToolGroup{"bot": {Name: "bot", Description: "Explicitly isolated Bot capabilities", Tools: botChildWorkTools(native)}}
-	delegate, err := tools.NewDelegateTasksToolForManager(mgr)
-	if err != nil {
-		return nil, err
-	}
-	boundDelegate, err := newBotBoundTool(delegate, in.binding)
-	if err != nil {
-		return nil, err
-	}
-	all := append(append([]tool.Tool(nil), native...), boundDelegate)
-	memoryText, err := in.binding.currentMemory(ctx)
-	if err != nil {
-		return nil, err
-	}
-	workspaceText, err := in.binding.tasks.guidance(ctx)
-	if err != nil {
-		return nil, err
-	}
-	provenanceText, err := in.binding.priorRetrievalContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	prompt := &agent.SystemPromptBuilder{WorkspaceDir: in.safe.WorkspaceDir, SandboxEnabled: true, SandboxWorkspaceDir: in.safe.WorkspaceDir}
-	prompt.BuildOverride = func(clone *agent.SystemPromptBuilder) string {
-		plain := *clone
-		plain.BuildOverride = nil
-		return plain.Build() + memoryText + workspaceText + provenanceText
-	}
-	chat := agent.NewChatAgent(in.llm, nil, nil, in.scope.Sessions, prompt, false, false)
-	planTools, err := newBotPlanTools(chat, native, in.safe.WorkspaceDir)
-	if err != nil {
-		return nil, err
-	}
-	readResult, err := tools.NewReadTaskResultTool()
-	if err != nil {
-		return nil, err
-	}
-	for _, t := range append(planTools, readResult) {
-		bound, err := newBotBoundTool(t, in.binding)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, bound)
-	}
-	if err := restoreBotPlan(ctx, chat, in.scope, in.binding.req.Run.SessionID.String(), in.binding.req.Bot.OwnerID.String()); err != nil {
-		return nil, err
-	}
-	if in.binding.req.Mandate != nil {
-		all = botMandateScopedTools(in.binding.req.Mandate, all)
-	}
-	index := agent.NewLexicalToolIndex()
-	if err := index.PrimeTools(ctx, all, nil); err != nil {
-		return nil, err
-	}
-	childIndex := agent.NewLexicalToolIndex()
-	if err := childIndex.PrimeTools(ctx, botChildWorkTools(all), nil); err != nil {
-		return nil, err
-	}
-	mgr.ToolIndex = childIndex
-	// Use ordinary Chat's progressive discovery/dispatch bridge over the entire
-	// guarded catalogue. The bridge resolves bound tools, never raw adapters.
-	bridge, err := botProviderTools(index, in.binding)
-	if err != nil {
-		return nil, err
-	}
-	providerTools := append(append([]tool.Tool(nil), all...), bridge...)
-	// No tool catalogue or discovery bridge in owner conversation mode. Even a
-	// hallucinated tool call is denied by the empty run policy and bound dispatch.
-	if in.binding.req.Run.ControlOnly() && in.binding.req.Mandate == nil {
-		providerTools = nil
-		all = nil
-	}
-	// Capture is deliberately outside external dispatch and its deny-all policy.
-	// Reject duplicate names rather than allowing an adapter to impersonate it.
-	for _, candidate := range providerTools {
-		if candidate.Name() == botProposalToolName {
-			return nil, store.ErrBotForbidden
-		}
-	}
-	proposalTool, err := newBotProposalTool(in.binding)
-	if err != nil {
-		return nil, err
-	}
-	if proposalTool != nil {
-		proposalTool, err = agent.NewBotProposalCaptureTool(proposalTool)
-		if err != nil {
-			return nil, err
-		}
-		providerTools = append(providerTools, proposalTool)
-		all = append(all, proposalTool)
-	}
-	prompt.Tools = all
-	chat.Tools = providerTools
-	chat.ToolIndex, chat.SubAgentManager, chat.Redactor, chat.CredentialStore = index, mgr, redactor, resolver
-	chat.PendingSecrets = credentials.NewPendingVault(redactor)
-	mgr.PendingSecrets = chat.PendingSecrets
-	mgr.EventForwarder = chat.ForwardSubTaskEvent
-	mgr.FileArtifactCapture = chat.CaptureFileArtifact
-	chat.Compactor = persistentsession.NewCompactor(in.contextWindow)
-	// Bind auxiliary calls too; makeLLMFunc's context override must not select an
-	// unbudgeted viewer model.
-	chat.Compactor.LLM = func(callCtx context.Context, prompt string) (string, error) {
-		return makeLLMFunc(in.llm)(in.binding.bind(callCtx), prompt)
-	}
-	mgr.Compactor = chat.Compactor.Clone()
-	done := make(chan struct{})
-	close(done)
-	return &ChatFactoryResult{ChatAgent: chat, LLM: in.llm, ProviderName: cfg.ProviderName, ModelName: cfg.ModelName, ProviderConfigured: true, Compactor: chat.Compactor, InternalTools: all, SessionService: in.scope.Sessions, PromptBuilder: prompt, IndexingDone: done, Cleanup: func() {
-		for _, cleanup := range flowCleanups {
-			cleanup()
-		}
-	}}, nil
-}
-
+// Runnable shape shared by Bot policy dispatch and Chat execution.
 type botRunnableTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
@@ -1397,6 +1138,8 @@ type botRunnableTool interface {
 	ProcessRequest(tool.Context, *model.LLMRequest) error
 }
 type botBoundTool struct {
+	identity string
+	next     func(tool.Context, any) (map[string]any, error)
 	botRunnableTool
 	binding *botFactoryBinding
 }
@@ -1428,6 +1171,8 @@ func preserveBotToolBinding(original, wrapped tool.Context) tool.Context {
 }
 
 func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	t.binding.declarations.close()
+	endBotStartupReads(t.binding.owner)
 	// A newly admitted draft conversation may only ask its pending title
 	// question. The authoritative binding, session, arguments, authorization,
 	// and budget checks below still gate the genuine question handler.
@@ -1438,12 +1183,26 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if ctx == nil || ctx.SessionID() == "" {
 		return nil, store.ErrBotForbidden
 	}
-	bound := botBoundToolContext{Context: ctx, owner: t.binding.bind(ctx)}
+	owner, endReads := entstore.WithBotContentReadOperation(t.binding.bind(ctx))
+	defer endReads()
+	if _, nativeRead := t.botRunnableTool.(*botMandatedReadTool); nativeRead {
+		owner = context.WithValue(owner, botNativeNetworkPreflightKey{}, endReads)
+	}
+	owner = preparedLeafContext(owner, ctx)
+	bound := botBoundToolContext{Context: ctx, owner: owner}
 	if err := t.binding.check(bound); err != nil {
 		return nil, err
 	}
+	identity := t.Name()
+	if t.identity != "" {
+		identity = t.identity
+	}
+	sharedMCP, isSharedMCP := agent.LazyMCPToolBinding(t.botRunnableTool)
+	if isSharedMCP {
+		identity = sharedMCP.Identity()
+	}
 	if t.binding.req.Mandate != nil {
-		if err := t.binding.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, t.Name()); err != nil {
+		if err := t.binding.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, identity); err != nil {
 			return nil, err
 		}
 	}
@@ -1467,10 +1226,11 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		if err := t.binding.req.Budget.ReserveTool(bound, "ask_user"); err != nil {
 			return nil, err
 		}
+		endReads()
 		return t.binding.progressTool(bound, t.botRunnableTool, args, t.botRunnableTool.Run)
 	}
 	if t.binding.synthesisReserve.synthesis() {
-		return botSynthesisStoppedResult(bound, t.Name()), nil
+		return botSynthesisStoppedResult(bound, t.Name(), args), nil
 	}
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
@@ -1502,11 +1262,27 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		mcpAuth = botMCPAuthorization{target: mcpTool, fingerprint: botMCPFingerprint(mcpTool.config), check: t.binding.check}
 		targetFingerprint = []string{mcpAuth.fingerprint}
 	}
-	if err := agent.AuthorizeBotBoundTool(bound, ctx, t.Name(), args, targetFingerprint...); err != nil {
+	if isSharedMCP {
+		// The accounting wrapper owns authorization once; the genuine lazy proxy
+		// consumes only the private terminal handoff and rechecks live authority.
+		bound.owner = agent.PreserveBotInvocationHandoff(bound.owner, ctx)
+		prepared, err := sharedMCP.Prepare(bound, args, t.binding.checkDuringGeneration)
+		if err != nil {
+			return nil, err
+		}
+		bound.owner = prepared
+	} else if err := agent.AuthorizeBotBoundTool(bound, ctx, identity, args, targetFingerprint...); err != nil {
 		return nil, err
 	}
-	if err := t.binding.req.Budget.ReserveTool(bound, t.Name()); err != nil {
+	if err := t.binding.req.Budget.ReserveTool(bound, identity); err != nil {
 		return nil, err
+	}
+	// Concrete native reads end this operation at their network boundary, after
+	// progress journaling and adapter validation. Other tools end it here.
+	if _, nativeRead := t.botRunnableTool.(*botMandatedReadTool); nativeRead {
+		bound.owner = context.WithValue(bound.owner, botNativeNetworkPreflightKey{}, endReads)
+	} else {
+		endReads()
 	}
 	if emailAuth.target != nil {
 		invocation := botBoundToolContext{Context: bound, owner: context.WithValue(bound, botEmailAuthorizedKey{}, emailAuth)}
@@ -1517,9 +1293,11 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return t.binding.progressTool(invocation, mcpAuth.target, args, mcpAuth.target.Run)
 	}
 	result, err := t.binding.progressTool(bound, t.botRunnableTool, args, func(c tool.Context, a any) (map[string]any, error) {
-		return t.binding.runSynthesisTool(c, t.botRunnableTool, a)
+		result, err := t.binding.runSynthesisTool(c, botDispatchTarget(t.botRunnableTool, t.next), a)
+		recordBotSharedNodeObservation(c, t.botRunnableTool, a, result, err)
+		return result, err
 	})
-	if t.binding.tasks != nil && (substantiveTaskTool(t.botRunnableTool) || (t.binding.tasks.hasActiveTask() && (t.Name() == "web_fetch" || t.Name() == "http_request"))) {
+	if t.binding.tasks != nil && substantiveTaskTool(t.botRunnableTool) {
 		if captureErr := t.binding.tasks.observe(bound, t.Name(), args, result, err); captureErr != nil {
 			return result, errors.Join(err, captureErr)
 		}
@@ -1529,12 +1307,20 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 
 // Tool request processors may otherwise observe viewer credentials while adding
 // their declarations. Supply the same captured owner scope as Run.
-func (t *botBoundTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *botBoundTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) (err error) {
+	// A failed declaration processor ends this logical operation too.
+	defer func() {
+		if err != nil {
+			t.binding.declarations.close()
+			endBotStartupReads(t.binding.owner)
+		}
+	}()
 	if ctx == nil {
 		return store.ErrBotForbidden
 	}
-	bound := botBoundToolContext{Context: ctx, owner: t.binding.bind(ctx)}
-	if err := t.binding.check(bound); err != nil {
+	binding := t.binding.declarations.bind(t.binding, req)
+	bound := botBoundToolContext{Context: ctx, owner: binding.bind(ctx)}
+	if err := binding.check(bound); err != nil {
 		return err
 	}
 	if err := t.botRunnableTool.ProcessRequest(bound, req); err != nil {

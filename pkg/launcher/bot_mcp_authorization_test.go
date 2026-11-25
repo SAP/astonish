@@ -78,7 +78,7 @@ func TestBotMCPSecurityDiscoveryFences(t *testing.T) {
 			}
 			s := store.MCPServer{Name: "controlled", Command: exe, Args: []string{"-test.run=^TestBotMCPNodeStdioFixture$"}, Env: map[string]string{"ASTONISH_MCP_FIXTURE": "1"}}
 			servers := newMemMCPStore(s)
-			target, ctx := productionFactoryTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
+			target, ctx := productionAdapterTool(t, f, "mcp-discovery:controlled", func(ctx context.Context, id string) ([]tool.Tool, func(), error) {
 				return BotMCPTools(ctx, productionCapabilityPool{backend: b, client: client}, id, servers)
 			})
 			if client.calls != 0 || len(b.vault) != 0 {

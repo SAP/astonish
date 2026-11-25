@@ -3,15 +3,61 @@ package a2aclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/a2a"
 	"github.com/SAP/astonish/pkg/store"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+func TestADKToolProcessRequest(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			wrapped := ToADKTool(&A2ATool{name: "a2a_test", description: "fixture"})
+			processor, ok := wrapped.(interface {
+				ProcessRequest(tool.Context, *model.LLMRequest) error
+			})
+			if !ok {
+				t.Fatal("adapter lacks executable request contract")
+			}
+			req := &model.LLMRequest{}
+			if existing {
+				req.Config = &genai.GenerateContentConfig{Tools: []*genai.Tool{nil, {FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "existing"}}}}}
+			}
+			if err := processor.ProcessRequest(nil, req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Tools[wrapped.Name()] != wrapped {
+				t.Fatal("wrong dispatch identity")
+			}
+			count := 0
+			for _, entry := range req.Config.Tools {
+				if entry == nil {
+					continue
+				}
+				for _, decl := range entry.FunctionDeclarations {
+					if decl.Name == wrapped.Name() {
+						count++
+						if decl.Parameters.Properties["message"] == nil {
+							t.Fatal("lost parameter schema")
+						}
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("declarations = %d", count)
+			}
+			if err := processor.ProcessRequest(nil, req); err == nil {
+				t.Fatal("duplicate accepted")
+			}
+		})
+	}
+}
 
 func TestADKToolDeclaration(t *testing.T) {
 	inner := &A2ATool{

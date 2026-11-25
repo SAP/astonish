@@ -17,6 +17,9 @@ import (
 // hash. The source has no Bot tables/columns; the target is a current deployment.
 func TestRestorePlatformBackupSQLitePreBotArchive(t *testing.T) { testBotLegacyArchive(t, 0) }
 
+// These historical-schema fixtures contain only ordinary Chat rows, not Bot
+// content. They must remain importable; content-bearing archives are covered by
+// TestBotLegacyContentArchiveRejectedBeforeWrites and are never converted.
 func TestBotSkillRestoreSQLitePreSkillArchive(t *testing.T) { testBotLegacyArchive(t, 1) }
 
 func TestBotTaskRestoreSQLiteMarker2Archive(t *testing.T) { testBotLegacyArchive(t, 2) }

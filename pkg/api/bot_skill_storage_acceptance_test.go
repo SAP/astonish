@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ type skillStorageHTTPFixture struct {
 	owner, member string
 	org           *store.Organization
 	team          *store.Team
+	homeBackend   *skillRecoveryFiles
 	server        *httptest.Server
 }
 
@@ -84,6 +86,11 @@ func (f *skillStorageHTTPFixture) open() {
 		f.t.Fatal(err)
 	}
 	// Controlled readiness proves storage, not infrastructure availability.
+	if f.homeBackend != nil {
+		if err := f.db.InstallBotContentHomeBackend(f.homeBackend); err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
 }
 func (f *skillStorageHTTPFixture) context(actor string) context.Context {
@@ -101,7 +108,13 @@ func (f *skillStorageHTTPFixture) start() {
 		actor := r.Header.Get("X-Test-Actor")
 		ctx := r.Context()
 		if actor != "" {
-			ctx = f.context(actor)
+			var err error
+			ctx, err = execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug, Authenticated: true})
+			if err != nil {
+				http.Error(w, "invalid test principal", http.StatusUnauthorized)
+				return
+			}
+			ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: actor, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug})
 			ctx = context.WithValue(ctx, platformUserKey{}, &PlatformUser{ID: actor, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug, Role: "member"})
 		}
 		router.ServeHTTP(w, r.WithContext(ctx))
@@ -182,6 +195,15 @@ func (f *skillStorageHTTPFixture) bot(scope store.BotScope) *store.Bot {
 		f.t.Fatal(err)
 	}
 	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: uuid.NewString(), Revision: 1}
+	if f.homeBackend != nil {
+		home.Backend = "docker"
+		if err := os.Mkdir(filepath.Join(f.homeBackend.root, home.StorageKey), 0700); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.homeBackend.root, home.StorageKey, "MEMORY.md"), []byte("# Skill recovery\nRetain immutable skill history.\n"), 0600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	if err := entstore.RegisterBotHomeBinding(service, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: home}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
 		f.t.Fatal(err)
 	}
@@ -196,63 +218,113 @@ func (f *skillStorageHTTPFixture) bot(scope store.BotScope) *store.Bot {
 	return updated
 }
 
-// pinLegacyAttempt restores only an empty historical work contract in this
-// fixture's owned SQLite database before claim. No verdict, candidate or skill
-// is seeded; all subsequent mutations still use the fenced production stores.
+// pinLegacyAttempt seeds an empty assessment contract through the scoped test
+// helper. Canonical run decoding validates both SQL controls and immutable content.
 func (f *skillStorageHTTPFixture) pinLegacyAttempt(b *store.Bot, run *store.BotRun) {
 	f.t.Helper()
-	path := filepath.Join(f.cfg.DataDir, "orgs", f.org.Slug, "teams", f.team.Slug+".db")
-	if b.Scope == store.BotScopePersonal {
-		path = filepath.Join(f.cfg.DataDir, "orgs", f.org.Slug, "personal", f.owner+".db")
-	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
-	if err != nil {
+	if err := entstore.PinBotAssessmentRunFixture(f.t, f.context(f.owner), f.repo(b.Scope), b.ID, run.ID); err != nil {
 		f.t.Fatal(err)
 	}
-	defer db.Close()
-	ctx := f.context(f.owner)
-	var raw []byte
-	if err := db.QueryRowContext(ctx, "SELECT data FROM bot_runs WHERE id = ? AND bot_id = ? AND status = 'queued'", run.ID.String(), b.ID.String()).Scan(&raw); err != nil {
-		f.t.Fatal(err)
+}
+
+func TestBotAssessmentRunFixtureScopeAndState(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newSkillStorageHTTPFixture(t)
+			b := f.bot(scope)
+			repo, ctx := f.repo(scope), f.context(f.owner)
+			run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, Instructions: "Fixture assignment", IdempotencyKey: uuid.NewString()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, actor := range []context.Context{context.Background(), f.context(f.member)} {
+				if err := entstore.PinBotAssessmentRunFixture(t, actor, repo, b.ID, run.ID); !errors.Is(err, store.ErrBotForbidden) {
+					t.Fatalf("unauthorized fixture pin: %v", err)
+				}
+			}
+			other := f.bot(scope)
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, repo, other.ID, run.ID); !errors.Is(err, store.ErrBotNotFound) {
+				t.Fatalf("cross-Bot fixture pin: %v", err)
+			}
+			otherScope := store.BotScopeTeam
+			if scope == store.BotScopeTeam {
+				otherScope = store.BotScopePersonal
+			}
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, f.repo(otherScope), b.ID, run.ID); !errors.Is(err, store.ErrBotNotFound) {
+				t.Fatalf("cross-scope fixture pin: %v", err)
+			}
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, repo, b.ID, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, repo, b.ID, run.ID); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("already pinned fixture accepted: %v", err)
+			}
+			worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: f.owner, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug})
+			lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "fixture-check", ExpiresAt: time.Now().Add(time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
+			if err != nil || work == nil || work.Protocol != store.BotWorkProtocolLegacyAssessment || work.Candidate != nil || work.Review != nil || work.Contract.Instructions != "Fixture assignment" {
+				t.Fatalf("pristine assessment contract not retained: %+v %v", work, err)
+			}
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, repo, b.ID, run.ID); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("started fixture accepted: %v", err)
+			}
+		})
 	}
-	var storage map[string]string
-	if err := json.Unmarshal(raw, &storage); err != nil {
-		f.t.Fatal(err)
-	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(storage["bot_document"]), &envelope); err != nil {
-		f.t.Fatal(err)
-	}
-	if len(envelope["work"]) != 0 {
-		f.t.Fatal("historical fixture already has work")
-	}
-	input, err := f.repo(b.Scope).(store.BotRuntimeStore).LoadRunInput(ctx, b.ID, run.ID)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	work := store.NewBotWorkState(store.BotWorkContract{BotID: b.ID, RunID: run.ID, Version: run.Version, Instructions: input.Instructions, Charter: input.Version.Charter})
-	if err := work.Validate(); err != nil {
-		f.t.Fatal(err)
-	}
-	envelope["work"], err = json.Marshal(work)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	updated, err := json.Marshal(envelope)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	storage["bot_document"] = string(updated)
-	updated, err = json.Marshal(storage)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	result, err := db.ExecContext(ctx, "UPDATE bot_runs SET data = ? WHERE id = ? AND bot_id = ? AND status = 'queued' AND CAST(data AS TEXT) = ?", string(updated), run.ID.String(), b.ID.String(), string(raw))
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
-		f.t.Fatalf("legacy storage fixture pin: rows=%d err=%v", n, err)
+}
+
+// Corruption is intentional fixture input. Only the logical digest is changed;
+// the helper must reject it before constructing or writing a work contract.
+func TestBotAssessmentRunFixtureRejectsCorruptDigest(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newSkillStorageHTTPFixture(t)
+			b := f.bot(scope)
+			repo, ctx := f.repo(scope), f.context(f.owner)
+			run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, Instructions: "Fixture assignment", IdempotencyKey: uuid.NewString()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.cfg.DataDir, "orgs", f.org.Slug, "teams", f.team.Slug+".db")
+			if scope == store.BotScopePersonal {
+				path = filepath.Join(f.cfg.DataDir, "orgs", f.org.Slug, "personal", f.owner+".db")
+			}
+			db, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var raw []byte
+			if err := db.QueryRowContext(ctx, "SELECT data FROM bot_runs WHERE id = ? AND bot_id = ?", run.ID.String(), b.ID.String()).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			storage := skillDecode[map[string]string](t, raw)
+			record := skillDecode[map[string]json.RawMessage](t, []byte(storage["bot_record_v2"]))
+			record["logical_digest"] = json.RawMessage(`"` + strings.Repeat("0", 64) + `"`)
+			corrupt, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storage["bot_record_v2"] = string(corrupt)
+			corrupt, err = json.Marshal(storage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, "UPDATE bot_runs SET data = ? WHERE id = ? AND bot_id = ?", string(corrupt), run.ID.String(), b.ID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if err := entstore.PinBotAssessmentRunFixture(t, ctx, repo, b.ID, run.ID); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("corrupt logical digest accepted: %v", err)
+			}
+			if err := db.QueryRowContext(ctx, "SELECT data FROM bot_runs WHERE id = ? AND bot_id = ?", run.ID.String(), b.ID.String()).Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != string(corrupt) {
+				t.Fatal("failed fixture pin changed the stored run")
+			}
+		})
 	}
 }
 

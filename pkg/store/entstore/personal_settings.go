@@ -48,6 +48,7 @@ func (ps *personalSettingsStore) Get(ctx context.Context) (*store.PersonalSettin
 		return nil, fmt.Errorf("get personal settings: %w", err)
 	}
 	return &store.PersonalSettings{
+		BotEmail:        ent.BotEmail,
 		DefaultProvider: ent.DefaultProvider,
 		DefaultModel:    ent.DefaultModel,
 		BrandTheme:      ent.BrandTheme,
@@ -68,19 +69,27 @@ func (ps *personalSettingsStore) Save(ctx context.Context, settings *store.Perso
 	}
 
 	if existing != nil {
-		return existing.Update().
+		update := existing.Update().
 			SetDefaultProvider(settings.DefaultProvider).
 			SetDefaultModel(settings.DefaultModel).
-			SetBrandTheme(settings.BrandTheme).
-			Exec(ctx)
+			SetBrandTheme(settings.BrandTheme)
+		if settings.BotEmail == nil {
+			update.ClearBotEmail()
+		} else {
+			update.SetBotEmail(settings.BotEmail)
+		}
+		return update.Exec(ctx)
 	}
 
-	_, err = ps.client.PersonalSettings.Create().
+	create := ps.client.PersonalSettings.Create().
 		SetUserID(uid).
 		SetDefaultProvider(settings.DefaultProvider).
 		SetDefaultModel(settings.DefaultModel).
-		SetBrandTheme(settings.BrandTheme).
-		Save(ctx)
+		SetBrandTheme(settings.BrandTheme)
+	if settings.BotEmail != nil {
+		create.SetBotEmail(settings.BotEmail)
+	}
+	_, err = create.Save(ctx)
 	if err != nil {
 		return fmt.Errorf("save personal settings: create: %w", err)
 	}

@@ -92,7 +92,8 @@ func TestBotBudgetStopBrowserAcceptance(t *testing.T) {
 	page.MustElement(`[aria-label="Bot name"]`).MustInput("Budget stop acceptance")
 	page.MustElementR("button", "^Start conversation$").MustClick()
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
-	page.MustElementR("p", "Bot transcript: live").MustVisible()
+	// Shared Chat delivery is proved by the exact persisted report below, not a legacy Bot badge.
+	page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustVisible()
 	id := uuid.MustParse(strings.Split(page.MustEval(`() => location.hash`).Str(), "/")[4])
 	org, err := env.Store.ForOrg(env.OrgSlug)
 	if err != nil {
@@ -121,6 +122,7 @@ func TestBotBudgetStopBrowserAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := execution.WithBotRunIdentity(owner, identity)
+	worker = bot.WithApprovalStore(worker, &resumeTestStore{})
 	lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: id, RunID: runs[0].ID, WorkerID: "budget-browser", ExpiresAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)

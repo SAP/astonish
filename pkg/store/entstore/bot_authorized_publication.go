@@ -97,9 +97,9 @@ func canonicalScheduleOperationEvent(ctx context.Context, tx botDraftDB, rec *bo
 	var reader store.BotTranscriptReader
 	switch d := tx.(type) {
 	case personalBotDB:
-		reader = &personalSessionStore{client: d.client}
+		reader = &personalSessionStore{client: d.client, content: d.content}
 	case teamBotDB:
-		reader = &teamSessionStore{client: d.client}
+		reader = &teamSessionStore{client: d.client, content: d.content}
 	default:
 		return "", store.ErrBotUnsupported
 	}

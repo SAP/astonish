@@ -2,8 +2,6 @@ package api_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
@@ -40,6 +39,7 @@ import (
 )
 
 type browserIntentModel struct {
+	context  *atomic.Value
 	calls    *atomic.Int64
 	proposal bool
 	emitted  bool
@@ -47,8 +47,20 @@ type browserIntentModel struct {
 
 func (*browserIntentModel) Name() string { return "journey-model" }
 func (m *browserIntentModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls.Add(1)
+	if m.context != nil && req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part != nil && part.Text != "" {
+				m.context.Store(part.Text)
+			}
+		}
+	}
+	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
+		return w.Candidate.Text == "Draft test browser reply." || w.Candidate.Text == "Active browser conversational reply." || w.Candidate.Text == "Paused browser conversational reply." || w.Candidate.Text == "Responsibility proposed, not applied. Please confirm the saved review."
+	}); ok {
+		return response
+	}
 	return func(yield func(*model.LLMResponse, error) bool) {
-		m.calls.Add(1)
 		if m.proposal && !m.emitted {
 			m.emitted = true
 			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "I will propose the responsibility for your review."}, {FunctionCall: &genai.FunctionCall{ID: "browser-responsibility", Name: "propose_bot_control", Args: map[string]any{"payload": map[string]any{"operation": "responsibility", "reason": "Owner requested public notices", "responsibility": "Track reviewed browser notices"}}}}}}}, nil)
@@ -147,9 +159,11 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		t.Fatal(err)
 	}
 	auth := func(c context.Context) context.Context {
-		var scopes []string
+		// Every journey uses the same fresh owner Chat admission. This grants
+		// conversation/continuation, not authority for the captured exact action.
+		scopes := []string{"chat"}
 		if strings.HasPrefix(journey, "title") {
-			scopes = []string{"chat", "tool:execute"}
+			scopes = append(scopes, "tool:execute")
 		}
 		p, e := execution.WithPrincipal(c, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: scopes})
 		if e != nil {
@@ -202,6 +216,9 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		{root + "/{botID}/goals", "GET", api.BotGoalsHandler},
 		{root + "/{botID}/sessions/{sessionID}/events", "GET", api.BotEventsHandler},
 		{root + "/{botID}/sessions/{sessionID}/stream", "GET", api.BotHistoryStreamHandler},
+		{root + "/{botID}/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}/preview", "GET", api.BotFilePreviewHandler},
+		{root + "/{botID}/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}/download", "GET", api.BotFileDownloadHandler},
+		{root + "/{botID}/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}/download-ticket", "POST", api.BotFileDownloadTicketHandler},
 	} {
 		router.HandleFunc(route.path, route.handler).Methods(route.method)
 	}
@@ -279,7 +296,10 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	page := browser.MustPage(server.URL + "/#/chat").Timeout(45 * time.Second)
 	page = page.WithPanic(func(v any) {
 		text, _ := page.CancelTimeout().Eval(`() => document.body.innerText`)
-		t.Fatalf("browser failure: %v\n%v", v, text)
+		if text != nil {
+			t.Fatalf("browser failure: %v\nDOM: %s", v, text.Value.Str())
+		}
+		t.Fatalf("browser failure: %v (DOM unavailable)", v)
 	})
 	var b store.Bot
 	if teamJourney {
@@ -312,6 +332,8 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			t.Fatal(err)
 		}
 	} else {
+		t.Log("scheduled fixture: waiting for initial Studio shell")
+		page.MustElementR("button", "^New Bot$").MustVisible()
 		// Legacy scheduled journeys need an inert draft: title-first creation is
 		// independently exercised above, without intercepting any HTTP response.
 		if err = json.Unmarshal(request("POST", root, `{"name":"Scheduled browser watcher","idempotency_key":"scheduled-fixture"}`, 201), &b); err != nil {
@@ -341,7 +363,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		runTitleBrowserAssertions(t, ctx, page, repo, ownerCtx, db, registry, b, journey)
 		return
 	}
-	v.Autonomy.AllowedTools = []string{"read_file"}
+	v.Autonomy.AllowedTools = []string{"journey_exact_action"}
 	configuration, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "Reviewed isolated local capability", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 	if err != nil {
 		t.Fatal(err)
@@ -380,24 +402,56 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	if err = personal.SetSessionPin(ownerCtx, b.HomeSessionID.String(), "controlled", "journey-model"); err != nil {
 		t.Fatal(err)
 	}
+	var modelContext atomic.Value
 	var calls, effects atomic.Int64
 	var textOnly, propose atomic.Bool
 	textOnly.Store(true)
+	files := newComposedHTTPFiles(t, dir, repo, b, nil)
+	// Offline HTTP delivery reads the same retained snapshots as scoped Chat,
+	// without starting a worker or borrowing a viewer/host file service.
+	ownerPrincipal, _ := execution.PrincipalFromContext(ownerCtx)
+	deliveryFiles := &journeyReceiptFiles{composedHTTPFiles: files, req: bot.RunRequest{Bot: b, Principal: ownerPrincipal}}
+	svc.PersonalCredentials = personal.Credentials()
+	svc.BotFilesFactory = func(c context.Context, scoped *store.Services, scope store.BotScope) (store.BotFiles, error) {
+		if scoped != svc || scope != store.BotScopePersonal {
+			return nil, store.ErrBotForbidden
+		}
+		if _, err := scoped.PersonalBots.Get(c, b.ID); err != nil {
+			return nil, err
+		}
+		return deliveryFiles, nil
+	}
+	pool := &interactiveHTTPPool{dir: dir}
 	makeWorker := func(report bool) *daemon.BotWorker {
-		w, e := daemon.NewBotWorker(daemon.BotWorkerConfig{TurnRegistry: registry, Backend: db, Sandbox: journeyHomeBackend{}, Pool: journeyPool{}, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, s store.BotScope, pn, mn string) (model.LLM, error) {
+		w, e := daemon.NewBotWorker(daemon.BotWorkerConfig{TurnRegistry: registry, Backend: db, Sandbox: journeyFilesBackend{synthesisHTTPBackend{files: files.disk}}, Pool: pool, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, s store.BotScope, pn, mn string) (model.LLM, error) {
 			if p.Subject != owner || s != store.BotScopePersonal || pn != "controlled" || mn != "journey-model" {
 				return nil, store.ErrBotForbidden
 			}
 			if textOnly.Load() {
-				return &browserIntentModel{calls: &calls, proposal: propose.Load()}, nil
+				return &browserIntentModel{context: &modelContext, calls: &calls, proposal: propose.Load()}, nil
 			}
-			return &journeyModel{report: report, calls: &calls}, nil
-		}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			return &journeyModel{root: dir, action: "journey_exact_action", report: report, calls: &calls}, nil
+		}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			files.repo = s.Services.PersonalBots
+			receiptFiles := &journeyReceiptFiles{composedHTTPFiles: files, req: q}
+			s.Services.BotFilesFactory = func(ctx context.Context, _ *store.Services, scope store.BotScope) (store.BotFiles, error) {
+				if scope != q.Bot.Scope {
+					return nil, store.ErrBotForbidden
+				}
+				if _, err := files.repo.Get(ctx, q.Bot.ID); err != nil {
+					return nil, err
+				}
+				return receiptFiles, nil
+			}
+			publication, receipts, err := launcher.BotPublicationToolsWithReceipts(q, s)
+			if err != nil {
+				return nil, err
+			}
 			work, e := os.MkdirTemp(dir, "isolated-local-tool-")
 			if e != nil {
 				return nil, e
 			}
-			action, e := functiontool.New(functiontool.Config{Name: "read_file", Description: "Controlled local receipt action"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
+			action, e := functiontool.New(functiontool.Config{Name: "journey_exact_action", Description: "Controlled local receipt action"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
 				if args["body"] != "exact" {
 					return nil, store.ErrBotForbidden
 				}
@@ -411,14 +465,32 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 				}
 				effects.Add(1)
 				body := "Exact approved action receipt observed."
-				digest := sha256.Sum256([]byte(body))
-				bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Changed: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Scheduled browser receipt read back", Source: receiptPath, ObservedAt: time.Now().UTC(), ActorID: q.Bot.OwnerID}}, Artifacts: []bot.ToolReportArtifact{{Artifact: store.BotArtifact{ID: uuid.New(), HomeID: q.Bot.Home.ID, RelativePath: "reports/receipt.md", SHA256: hex.EncodeToString(digest[:]), Title: "Receipt", MediaType: "text/markdown"}, Body: body}}})
-				return map[string]any{"receipt": string(got), "report_path": "reports/receipt.md"}, nil
+				// Persist real report bytes and publish through the production accumulator.
+				reportDir := filepath.Join(dir, "home", "reports")
+				if err := os.MkdirAll(reportDir, 0700); err != nil {
+					return nil, err
+				}
+				if err := os.WriteFile(filepath.Join(reportDir, "receipt.md"), []byte(body), 0600); err != nil {
+					return nil, err
+				}
+				publisher := publication[0].(interface {
+					Run(tool.Context, any) (map[string]any, error)
+				})
+				publicationContext := journeyPublicationContext{c}
+				if _, err := publisher.Run(publicationContext, map[string]any{"path": "outputs/receipt.md", "title": "Receipt", "purpose": "Exact action receipt", "memory_summary": body}); err != nil {
+					return nil, err
+				}
+				published, ok := bot.TakeToolOutcome(c, publicationContext.FunctionCallID())
+				if !ok || !published.Verified || published.ReceiptConflict || len(receipts.Artifacts(q)) != 1 {
+					return nil, store.ErrBotConflict
+				}
+				bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Changed: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Scheduled browser receipt read back", Source: receiptPath, ObservedAt: time.Now().UTC(), ActorID: q.Bot.OwnerID}}})
+				return map[string]any{"receipt": string(got), "report_path": "outputs/receipt.md"}, nil
 			})
 			if e != nil {
 				return nil, e
 			}
-			return &launcher.BotChatSafeResources{Tools: []tool.Tool{action}, WorkspaceDir: work, PolicyRuntime: agent.BotPolicyRuntime{Classifier: journeyClassifier{}, Guard: journeyGuard{repo: s.Services.PersonalBots, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+			return &launcher.BotChatSafeResources{FileReceipts: receipts, ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool, Groups: map[string]*agent.ToolGroup{"journey": {Name: "journey", Tools: []tool.Tool{action}}}}, WorkspaceDir: work, PolicyRuntime: agent.BotPolicyRuntime{Classifier: journeyClassifier{}, Guard: journeyGuard{repo: s.Services.PersonalBots, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 		}})
 		if e != nil {
 			t.Fatal(e)
@@ -426,11 +498,17 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		return w
 	}
 	worker := makeWorker(false)
+	// Install readiness only after the scoped shared Chat worker was constructed;
+	// HTTP approval retains the very same live turn registry as that worker.
+	svc.BotInteractiveReady = true
 	defer func() { worker.Stop() }()
 	homeURL := server.URL + "/#/chat/bots/personal/" + b.ID.String()
 	page.MustReload()
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
-	page.MustElementR("p", "Bot transcript: live").MustVisible()
+	// Shared Studio Chat no longer renders a Bot-only transcript status paragraph.
+	// The restored Home must instead expose the actual enabled conversation composer.
+	page.MustElement(`[aria-label="Bot workspace"] [data-testid="chat-input"]`).MustVisible()
+	page.MustWait(`() => !document.querySelector('[aria-label="Bot workspace"] [data-testid="chat-input"]').disabled`)
 	page = page.CancelTimeout().Timeout(3 * time.Minute)
 	if journey != "scheduled" {
 		propose.Store(true)
@@ -571,6 +649,11 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		}
 		for _, row := range rows {
 			homeCursor = row.Cursor
+			if prompt, _ := row.Event.Actions.StateDelta["_astonish_system_prompt"].(string); prompt != "" {
+				// Shared Chat keeps Bot execution hints in the hidden system prompt,
+				// not a manufactured user-role turn-context event.
+				contextRows++
+			}
 			if row.Event.Content == nil {
 				continue
 			}
@@ -588,16 +671,20 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			}
 		}
 	}
-	if contextRows == 0 || genuineInputs != 1 {
-		t.Fatalf("Home provenance missing: boolean-marked context=%d genuine inputs=%d", contextRows, genuineInputs)
+	// The shared runtime deliberately does not persist Bot prompt instructions
+	// as transcript content. Prove a real model-facing prompt existed instead.
+	prompt, _ := modelContext.Load().(string)
+	if prompt == "" || genuineInputs != 1 {
+		t.Fatalf("Transcript provenance missing: model prompt=%t genuine inputs=%d", prompt != "", genuineInputs)
 	}
 	assertHomeContextHidden := func() {
 		t.Helper()
-		// Wait through the last durable row, not merely the first live callback.
-		page.MustWait(`cursor => [...document.querySelectorAll('[aria-label="Bot workspace"] [role="status"]')].some(p => p.textContent.includes('Bot transcript: live') && p.textContent.includes('cursor ' + cursor))`, fmt.Sprintf("%s:%d", b.HomeSessionID, homeCursor))
+		// Shared Studio Chat renders the restored ordered messages, not a Bot-only
+		// cursor/status paragraph. Require both durable messages before inspection.
+		page.MustElementR(`[aria-label="Bot workspace"] p`, "Draft browser one-shot").MustVisible()
 		page.MustElementR(`[aria-label="Bot workspace"] p`, "Draft test browser reply").MustVisible()
 		text := page.MustElement(`[aria-label="Bot workspace"]`).MustText()
-		if strings.Count(text, "Draft browser one-shot") != 1 || strings.Contains(text, "[Astonish Per-Turn Context") || strings.Contains(text, "Relevant Tools For This Request") {
+		if strings.Count(text, "Draft browser one-shot") != 1 || strings.Contains(text, "[Astonish Per-Turn Context") || strings.Contains(text, "Relevant Tools For This Request") || strings.Contains(text, "Bot execution runtime:") {
 			t.Fatalf("Home leaked internal context or lost/duplicated real input:\n%s", text)
 		}
 	}
@@ -608,7 +695,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	if calls.Load() != beforeReload {
 		t.Fatal("Home context-filter reload reran model")
 	}
-	t.Logf("Home and reload: %d boolean-marked context rows retained in history, genuine input shown once, internal context absent, cursor=%s:%d", contextRows, b.HomeSessionID, homeCursor)
+	t.Logf("Home and reload: %d hidden context rows, model-facing prompt observed, genuine input shown once, internal context absent, cursor=%s:%d", contextRows, b.HomeSessionID, homeCursor)
 	assertDisabled := func(status store.BotStatus) {
 		t.Helper()
 		current, e := repo.Get(ownerCtx, b.ID)
@@ -716,6 +803,10 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		return receipt, nil
 	}}
 	adapter := &journeyJobs{ctx: ownerCtx, store: jobs}
+	t.Logf("scheduled fixture durable job=%+v adapter=%+v", jobs.Get(ownerCtx, job.ID), adapter.Get(job.ID))
+	for _, listed := range adapter.List() {
+		t.Logf("scheduled fixture listed job=%+v", listed)
+	}
 	adapter.drop.Store(true)
 	engine := scheduler.New(adapter, executor.Execute, scheduler.WithoutBotTriggerDelivery(nil), nil)
 	engine.Start(ctx)
@@ -727,6 +818,8 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			t.Fatal(receipt)
 		}
 		runID = receipt.RunID
+	case <-time.After(65 * time.Second):
+		t.Fatalf("real scheduler tick missing: durable=%+v adapter=%+v", jobs.Get(ownerCtx, job.ID), adapter.Get(job.ID))
 	case <-ctx.Done():
 		t.Fatal("real scheduler tick missing", ctx.Err())
 	}
@@ -764,17 +857,22 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		}
 	}
 	assertHome(1)
-	// Observe actual durable worker report via the already-open HTTP/SSE stream.
-	if run.Report.Summary == "" {
-		t.Fatal("worker produced no waiting report summary")
+	// Observe the actual public employee narrative via the open HTTP/SSE stream,
+	// not the private diagnostic summary retained on the worker report.
+	if run.Report.EmployeeMessage == nil || run.Report.EmployeeMessage.Text == "" {
+		t.Fatal("worker produced no public waiting message")
 	}
-	page.MustElementR(`[aria-label="Bot workspace"] p`, regexp.QuoteMeta(run.Report.Summary)).MustVisible()
-	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] pre`, "read_file").MustVisible()
+	page.MustElementR(`[aria-label="Bot workspace"] p`, regexp.QuoteMeta(run.Report.EmployeeMessage.Text)).MustVisible()
+	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] pre`, "journey_exact_action").MustVisible()
 	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] pre`, "exact").MustVisible()
 	page.MustReload()
-	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] pre`, "read_file").MustVisible()
+	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] pre`, "journey_exact_action").MustVisible()
 	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] button`, "^Approve & continue$").MustClick()
-	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] p`, "Approved; continuation queued").MustVisible()
+	page.MustWait(`() => { const root = document.querySelector('[aria-label="Bot workspace"]'); return root.innerText.includes('I saved your approval and queued') || !!root.querySelector('[role="alert"]'); }`)
+	if alert := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"] [role="alert"]')?.textContent || ''`).Str(); alert != "" {
+		t.Fatalf("exact approve-and-continue failed: %s", alert)
+	}
+	page.MustElementR(`[aria-label="Bot workspace"] [aria-label="Bot review"] p`, "I saved your approval and queued").MustVisible()
 	approvals, err := repo.ListApprovals(ownerCtx, b.ID, store.BotPage{})
 	if err != nil || len(approvals) != 1 || approvals[0].Status != store.ApprovalApproved || approvals[0].ActionDigest != digest {
 		t.Fatalf("approval did not persist: %+v %v", approvals, err)
@@ -810,6 +908,48 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		t.Fatalf("resume failed: %+v effects=%d", run, effects.Load())
 	}
 	assertHome(2)
+	// Resolve only the committed, reviewed publication; mutable workspace bytes
+	// cannot substitute for the exact approved deliverable on this HTTP route.
+	var reportSequence int64
+	for cursor := int64(0); ; {
+		activities, err := repo.ListActivity(ownerCtx, b.ID, cursor, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, activity := range activities {
+			cursor = activity.Sequence
+			if activity.Kind == store.BotActivityReport && activity.RunID != nil && *activity.RunID == runID {
+				var outcome struct {
+					Intent store.BotOutboxKind `json:"intent"`
+					Status store.RunStatus     `json:"status"`
+				}
+				if err := json.Unmarshal(activity.Payload, &outcome); err != nil {
+					t.Fatal(err)
+				}
+				if outcome.Intent == store.BotOutboxPublish && outcome.Status == store.RunSucceeded {
+					reportSequence = activity.Sequence
+				}
+			}
+		}
+		if len(activities) < 200 {
+			break
+		}
+	}
+	if reportSequence == 0 {
+		t.Fatal("successful committed publication sequence missing")
+	}
+	artifactURL := fmt.Sprintf("%s/runs/%s/reports/%d/artifacts/%s", path, runID, reportSequence, run.Report.Artifacts[0].ID)
+	var preview struct {
+		Content   string `json:"content"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal(request("GET", artifactURL+"/preview", "", http.StatusOK), &preview); err != nil || preview.Truncated || preview.Content != "Exact approved action receipt observed." {
+		t.Fatalf("reviewed artifact preview: %+v %v", preview, err)
+	}
+	if downloaded := request("GET", artifactURL+"/download", "", http.StatusOK); string(downloaded) != preview.Content {
+		t.Fatalf("exact artifact download differs: %q", downloaded)
+	}
+	t.Log("reviewed retained artifact: production preview and exact downloadable receipt bytes observed")
 	page.MustElementR(`[aria-label="Bot workspace"] p`, "Exact approved action receipt observed").MustVisible()
 	page.MustElementR("button", "^Details$").MustClick()
 	page.MustElementR("summary", "^Runs & activity$").MustClick()
@@ -837,6 +977,9 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	if err != nil || current.Status != store.BotPaused {
 		t.Fatalf("pause not persisted: %+v %v", current, err)
 	}
+	if downloaded := request("GET", artifactURL+"/download", "", http.StatusOK); string(downloaded) != preview.Content {
+		t.Fatalf("paused offline artifact download differs: %q", downloaded)
+	}
 	request("POST", path+"/runs", fmt.Sprintf(`{"version":%d,"instructions":"must not run","idempotency_key":"paused-browser"}`, current.Version), http.StatusForbidden)
 	if err = worker.Poll(ctx); err != nil {
 		t.Fatal(err)
@@ -847,7 +990,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	// Paused text stays on the home watch and is mirrored by the production runtime.
 	textOnly.Store(true)
 	if !page.MustElement(`[aria-label="Bot workspace"] button[title="Attach files (images, PDFs, text files)"]`).MustProperty("disabled").Bool() {
-		t.Fatal("paused conversation allows attachments")
+		t.Error("paused conversation allows attachments")
 	}
 	pausedBaseline, err := repo.ListRuns(ownerCtx, b.ID, store.BotPage{})
 	if err != nil {

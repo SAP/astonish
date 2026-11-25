@@ -78,6 +78,7 @@ func (w *BotWorker) prepareInteractiveHome(ctx context.Context, repo store.BotSt
 	if err != nil {
 		return err
 	}
+	caller = entstore.WithBotContentReadOperationFromContext(caller, ctx)
 	caller = execution.WithBotRunIdentity(caller, identity)
 	caller = execution.WithBotTurnAuthorizer(caller, auth)
 	caller, cancel := context.WithDeadline(caller, run.CallerCeiling.ExpiresAt)

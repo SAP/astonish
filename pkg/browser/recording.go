@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,6 +85,9 @@ func (m *Manager) StartRecording(opts RecordingOptions) (StartRecordingResult, e
 	if m == nil {
 		return StartRecordingResult{}, fmt.Errorf("browser Manager is nil")
 	}
+	if m.SandboxEnabled && (m.StatArtifactFunc == nil || m.SessionID() == "") {
+		return StartRecordingResult{}, fmt.Errorf("sandbox recording metadata transport is not wired")
+	}
 
 	// Ensure browser is up before taking the lock for recording state.
 	if _, err := m.GetOrLaunch(); err != nil {
@@ -152,6 +156,11 @@ func (m *Manager) StopRecording() (RecordingResult, error) {
 	m.mu.Lock()
 	rec := m.recording
 	m.recording = nil
+	sandboxEnabled, sessionID, stat := m.SandboxEnabled, m.sessionID, m.StatArtifactFunc
+	ctx := m.requestCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Unlock()
 
 	if rec == nil {
@@ -166,12 +175,18 @@ func (m *Manager) StopRecording() (RecordingResult, error) {
 
 	duration := time.Since(rec.startedAt).Seconds()
 	var size int64
-	if fi, err := os.Stat(rec.path); err == nil {
+	if sandboxEnabled {
+		if stat == nil || sessionID == "" {
+			return RecordingResult{}, fmt.Errorf("sandbox recording metadata transport is not wired")
+		}
+		var err error
+		size, err = stat(ctx, sessionID, rec.path)
+		if err != nil {
+			return RecordingResult{}, fmt.Errorf("stat sandbox recording: %w", err)
+		}
+	} else if fi, err := os.Stat(rec.path); err == nil {
 		size = fi.Size()
 	}
-	// Container paths are not visible on the host filesystem; size stays 0
-	// unless a later pull/stat fills it in. Tools still get the path for
-	// sandbox artifact download.
 
 	m.logger.Printf("recording stopped: %s (%.1fs, %d bytes)", rec.path, duration, size)
 	return RecordingResult{

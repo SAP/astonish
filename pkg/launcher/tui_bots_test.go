@@ -2,27 +2,25 @@ package launcher
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
-	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestBotTranscriptSharedRendering(t *testing.T) {
-	e := adksession.Event{Author: "agent"}
-	e.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "**report**"}, {FunctionCall: &genai.FunctionCall{Name: "read_file", ID: "call1", Args: map[string]any{"path": "a"}}}, {FunctionResponse: &genai.FunctionResponse{Name: "read_file", ID: "call1", Response: map[string]any{"result": "ok"}}}}}
-	raw, _ := json.Marshal(e)
-	got, err := botTranscriptEvents(client.SSEEvent{Type: client.BotTranscriptEvent, Data: string(raw)})
-	if err != nil {
-		t.Fatal(err)
+	var got []events.Event
+	mapper := botTranscriptMapper{}
+	for i, wire := range []struct{ typ, payload string }{{"text", `{"text":"**report**"}`}, {"tool_call", `{"name":"read_file","id":"call1","args":{"path":"a"}}`}, {"tool_result", `{"name":"read_file","id":"call1","result":"ok"}`}, {"turn_complete", `{}`}} {
+		out, err := mapper.mapFrame(runtimeTranscriptFrame(t, wire.typ, wire.payload, int64(i+1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, out...)
 	}
-	if len(got) != 4 || got[0].Kind != events.KindText || got[1].Kind != events.KindToolCall || got[2].ToolID != "call1" || got[3].Kind != events.KindDone {
+	if len(got) != 5 || got[0].Kind != events.KindText || got[1].Kind != events.KindToolCall || got[2].Kind != events.KindStatus || got[3].ToolID != "call1" || got[4].Kind != events.KindDone {
 		t.Fatalf("%+v", got)
 	}
 	tr := events.NewTranscript()

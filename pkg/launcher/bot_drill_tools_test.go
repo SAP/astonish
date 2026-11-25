@@ -20,6 +20,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
 	"google.golang.org/adk/tool"
 )
@@ -122,28 +123,70 @@ func drillGrants(t *testing.T, f *botFactoryFixture, actions map[string][]map[st
 
 func drillFactory(t *testing.T, f *botFactoryFixture, b *drillBackend, c *drillClient, classifier agent.BotActionClassifier) (map[string]botRunnableTool, tool.Context, *drillGuard) {
 	t.Helper()
+	// Confined reads use the retained Home service, not the shell node.
+	if _, err := f.files.Write(f.ctx, f.req.Bot.ID, store.BotFileWrite{Path: "outputs/second", Body: strings.NewReader("ok"), SizeBytes: 2, CreateOnly: true}); err != nil {
+		t.Fatal(err)
+	}
 	guard := &drillGuard{consumed: map[uuid.UUID]bool{}}
-	f.cfg.Prepare = func(ctx context.Context, _ bot.RunRequest, _ *BotChatScope) (*BotChatSafeResources, error) {
-		ds, err := BotDrillTools(b, "physical-run")
+	prepare := f.cfg.Prepare
+	f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
+		safe, err := prepare(ctx, req, scope)
 		if err != nil {
 			return nil, err
 		}
-		ts, err := BotCatalogueTools(c, "physical-run", ds...)
-		if err != nil {
-			return nil, err
-		}
-		return &BotChatSafeResources{Tools: ts, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: guard, Classifier: classifier}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+		safe.PolicyRuntime = agent.BotPolicyRuntime{Guard: guard, Classifier: classifier}
+		return safe, nil
 	}
 	r, err := f.construct(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Cleanup)
-	result := map[string]botRunnableTool{}
-	for _, x := range r.Agent.Tools {
-		if v, ok := x.(botRunnableTool); ok {
-			result[x.Name()] = v
+	// These tests target the isolated Bot drill adapter (including its pinned
+	// transport and confined-file contract), not the shared factory drill engine.
+	binding := botFactoryModelForTest(t, r.Agent.LLM).binding
+	// Preserve this fixture's explicitly reviewed legacy parent/child descriptors.
+	// Captured scheduling is exercised through the shared HTTP dispatcher instead.
+	runtime := agent.BotPolicyRuntimeFromContext(binding.owner)
+	runtime.Classifier = classifier
+	binding.owner = agent.WithBotPolicyRuntime(binding.owner, runtime)
+	binding.owner = store.WithTeamFlowStore(binding.owner, f.services.Flows)
+	ds, err := BotDrillTools(b, "physical-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := BotFileTools(f.req, &BotChatScope{Services: f.services})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := BotCatalogueTools(c, "physical-run", append(ds, fs...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	browserTools, err := tools.GetBrowserTools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range browserTools {
+		if x.Name() != "browser_wait_for" && x.Name() != "browser_click" {
+			continue
 		}
+		// The adapter boundary is node-only even if the underlying declaration
+		// belongs to a browser tool. A policy rejection must precede transport.
+		raw = append(raw, &botSandboxTool{Tool: x, client: c, sessionID: "physical-run"})
+	}
+	result := map[string]botRunnableTool{}
+	var bound []tool.Tool
+	for _, x := range raw {
+		wrapped, err := newBotBoundTool(x, binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound = append(bound, wrapped)
+		result[x.Name()] = wrapped.(botRunnableTool)
+	}
+	for _, d := range ds {
+		d.(*botDrillTool).configure(binding, bound, f.resolver.model)
 	}
 	ctx := execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity()), f.req.Policy)
 	return result, botFactoryHandoffContext{base: ctx, session: "child-session"}, guard
@@ -152,7 +195,7 @@ func drillFactory(t *testing.T, f *botFactoryFixture, b *drillBackend, c *drillC
 func drillData(mode string) map[string]string {
 	return map[string]string{
 		"suite":  "name: suite\ntype: drill_suite\nsuite_config: {}\n",
-		"first":  "name: first\ntype: drill\nsuite: suite\ndrill_config:\n  mode: " + mode + "\n  on_fail: continue\n  max_retries: 2\nnodes:\n  - name: one\n    type: tool\n    args: {tool: shell_command, command: 'printf one'}\n  - name: two\n    type: tool\n    args: {tool: read_file, path: /workspace/second}\n",
+		"first":  "name: first\ntype: drill\nsuite: suite\ndrill_config:\n  mode: " + mode + "\n  on_fail: continue\n  max_retries: 2\nnodes:\n  - name: one\n    type: tool\n    args: {tool: shell_command, command: 'printf one'}\n  - name: two\n    type: tool\n    args: {tool: read_file, path: outputs/second}\n",
 		"second": "name: second\ntype: drill\nsuite: suite\nnodes:\n  - name: three\n    type: tool\n    args: {tool: shell_command, command: 'printf three'}\n",
 	}
 }
@@ -201,15 +244,16 @@ func TestBotDrillExactPolicyPinnedSandbox(t *testing.T) {
 	drillGrants(t, f, map[string][]map[string]any{
 		"run_drill":     {{"suite_name": "suite"}},
 		"shell_command": {{"command": "printf one"}, {"command": "printf three"}},
-		"read_file":     {{"path": "/workspace/second"}},
+		"read_file":     {{"path": "outputs/second"}},
 	})
 	b, c := &drillBackend{}, &drillClient{secret: "drill-output-secret-123456"}
 	ts, ctx, g := drillFactory(t, f, b, c, BotCatalogueClassifier{})
+	readsBefore := f.files.calls
 	got, err := ts["run_drill"].Run(ctx, map[string]any{"suite_name": "suite"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["status"] != "passed" || c.calls != 3 || c.session != "physical-run" || len(b.ids) != 0 {
+	if got["status"] != "passed" || c.calls != 2 || f.files.calls-readsBefore != 1 || c.session != "physical-run" || len(b.ids) != 0 {
 		t.Fatalf("%v calls=%d id=%s", got, c.calls, c.session)
 	}
 	if !reflect.DeepEqual(g.seen, []string{"run_drill", "shell_command", "read_file", "shell_command"}) {
@@ -223,8 +267,12 @@ func TestBotDrillExactPolicyPinnedSandbox(t *testing.T) {
 
 func TestBotDrillDeniedStepStopsTutorialAndSuite(t *testing.T) {
 	f := newBotFactoryFixture(t)
-	f.services.Flows = drillFlowStore{data: drillData("tutorial")}
-	drillGrants(t, f, map[string][]map[string]any{"run_drill": {{"suite_name": "suite"}}, "shell_command": {{"command": "printf one"}, {"command": "printf three"}}, "read_file": nil})
+	data := drillData("tutorial")
+	// Confined reads are verified read-only and no longer need exact approval.
+	// Keep this denial test consequential: only the first/third shell steps are approved.
+	data["first"] = strings.Replace(data["first"], "tool: read_file, path: outputs/second", "tool: shell_command, command: 'printf two'", 1)
+	f.services.Flows = drillFlowStore{data: data}
+	drillGrants(t, f, map[string][]map[string]any{"run_drill": {{"suite_name": "suite"}}, "shell_command": {{"command": "printf one"}, {"command": "printf three"}}})
 	c := &drillClient{}
 	ts, ctx, _ := drillFactory(t, f, &drillBackend{}, c, BotCatalogueClassifier{})
 	_, err := ts["run_drill"].Run(ctx, map[string]any{"suite_name": "suite"})
@@ -242,7 +290,7 @@ func TestBotDrillChildCeilingAndLiveRevocation(t *testing.T) {
 			drillGrants(t, f, map[string][]map[string]any{
 				"run_drill":     {{"suite_name": "suite"}},
 				"shell_command": {{"command": "printf one"}, {"command": "printf three"}},
-				"read_file":     {{"path": "/workspace/second"}},
+				"read_file":     {{"path": "outputs/second"}},
 			})
 			c := &drillClient{}
 			ts, ctx, _ := drillFactory(t, f, &drillBackend{}, c, BotCatalogueClassifier{})

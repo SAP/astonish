@@ -252,10 +252,11 @@ func TestBotTaskWorkspace(t *testing.T) {
 	if e = w.VerifyReceipt(c, p, "opaque"); !errors.Is(e, store.ErrBotConflict) {
 		t.Fatal(e)
 	}
-	revision := store.BotTaskRevision{Manifest: store.BotTaskManifest{Assets: p.Candidate.Manifest.Assets}, Bundle: map[string][]byte{file.Path: file.Data}}
+	ref := store.BotTaskRef{TaskID: task, Revision: 1, Digest: strings.Repeat("a", 64)}
+	revision := store.BotTaskRevision{ID: uuid.New(), BotID: id, Ref: ref, Manifest: store.BotTaskManifest{Assets: p.Candidate.Manifest.Assets}, Bundle: nil}
 	w.Tasks = taskWorkspaceRegistry{revision: revision}
 	backend.snap.Files = []sandbox.BotHomeWorkspaceFile{file}
-	if _, e = w.Load(c, id, store.BotTaskRef{TaskID: task}); e != nil {
+	if _, e = w.Load(c, id, ref); e != nil {
 		t.Fatal(e)
 	}
 	// Fake canonical backend bytes remain "retained" (an uncommitted head),
@@ -268,7 +269,7 @@ func TestBotTaskWorkspace(t *testing.T) {
 		t.Fatal("truncated selected read")
 	}
 	backend.snap.Files[0].Data = []byte("tampered")
-	if _, e = w.Load(c, id, store.BotTaskRef{TaskID: task}); !errors.Is(e, store.ErrBotConflict) {
+	if _, e = w.Load(c, id, ref); !errors.Is(e, store.ErrBotConflict) {
 		t.Fatal(e)
 	}
 	if e = (&BotTaskWorkspace{}).Install(); !errors.Is(e, store.ErrBotUnsupported) {

@@ -30,10 +30,6 @@ import (
 	"github.com/SAP/astonish/pkg/store/entstore"
 )
 
-type lifecycleHTTPBackend struct{ activationHomeBackend }
-
-func (lifecycleHTTPBackend) VerifySessionDestroyed(context.Context, string) error { return nil }
-
 type authorizedScheduleHTTPModel struct {
 	workerTestModel
 	schedule    bool
@@ -42,11 +38,36 @@ type authorizedScheduleHTTPModel struct {
 	control     map[string]any
 	cadence     *scheduleCadenceModel
 	pausedRead  *pausedScheduleReadModel
+	// Only owner acknowledgments are chat-only; scheduled report work retains
+	// its ordinary file-delivery contract.
+	chatOnly    bool
+	deliverySet bool
+	work        func() (*store.BotWorkState, error)
 }
 
 func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if response, ok := workerWorkAssessment(r, nil); ok {
 		return response
+	}
+	if m.chatOnly && !m.deliverySet {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			_, direct := r.Tools["bot_work_update"]
+			if _, bridge := r.Tools["execute_tool"]; !direct && !bridge {
+				yield(nil, fmt.Errorf("conversational fixture requires authorized bot_work_update or Chat dispatch bridge"))
+				return
+			}
+			work, err := m.work()
+			if err != nil || work == nil {
+				yield(nil, fmt.Errorf("load conversational delivery revision: work=%v err=%v", work, err))
+				return
+			}
+			m.deliverySet = true
+			call := &genai.FunctionCall{ID: "schedule-chat-delivery", Name: "bot_work_update", Args: map[string]any{"expected_revision": work.Revision, "kind": "set_delivery", "delivery_intent": string(store.BotDeliveryChatOnly)}}
+			if !direct {
+				call.Name, call.Args = "execute_tool", map[string]any{"name": "bot_work_update", "arguments": call.Args}
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
+		}
 	}
 	if m.pausedRead != nil {
 		return m.pausedRead.GenerateContent(ctx, r, stream)
@@ -77,12 +98,61 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 	return func(yield func(*model.LLMResponse, error) bool) {
 		args := map[string]any{"name": "Daily report", "schedule": "0 9 * * *", "timezone": "UTC", "instructions": "Read the daily report", "invocation": "Deliver the daily report", "mode": "adaptive"}
 		call := &genai.FunctionCall{ID: uuid.NewString(), Name: "schedule_job", Args: args}
-		if !m.direct {
+		if _, available := r.Tools["schedule_job"]; !m.direct || !available {
 			call.Name, call.Args = "execute_tool", map[string]any{"name": "schedule_job", "arguments": args}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
 	}
 }
+func TestAuthorizedScheduleHTTPConversationalDelivery(t *testing.T) {
+	m := &authorizedScheduleHTTPModel{chatOnly: true, pendingDone: true}
+	revision := int64(7)
+	m.work = func() (*store.BotWorkState, error) {
+		return &store.BotWorkState{Revision: revision}, nil
+	}
+	request := &model.LLMRequest{Tools: map[string]any{"bot_work_update": struct{}{}}}
+	for _, want := range []int64{7, 11} {
+		// Prepare resets the declaration for each owner run; never reuse the
+		// preceding run's revision or suppress its actual tool invocation.
+		revision, m.deliverySet = want, false
+		responses := 0
+		for response, err := range m.GenerateContent(t.Context(), request, false) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			responses++
+			call := response.Content.Parts[0].FunctionCall
+			if call == nil || call.Name != "bot_work_update" || call.Args["expected_revision"] != want || call.Args["kind"] != "set_delivery" || call.Args["delivery_intent"] != string(store.BotDeliveryChatOnly) {
+				t.Fatalf("wrong delivery protocol: %+v", call)
+			}
+		}
+		if responses != 1 || !m.deliverySet || !m.pendingDone {
+			t.Fatalf("declaration consumed or repeated the producer: responses=%d model=%+v", responses, m)
+		}
+	}
+	for response, err := range m.GenerateContent(t.Context(), request, false) {
+		if err != nil || response.Content.Parts[0].FunctionCall != nil || !strings.Contains(response.Content.Parts[0].Text, "pending") {
+			t.Fatalf("declaration did not resume pending acknowledgment: %+v %v", response, err)
+		}
+	}
+	m.deliverySet = false
+	for response, err := range m.GenerateContent(t.Context(), &model.LLMRequest{}, false) {
+		if response != nil || err == nil || !strings.Contains(err.Error(), "authorized bot_work_update") {
+			t.Fatalf("missing tool must remain a blocker: %+v %v", response, err)
+		}
+	}
+	if m.deliverySet {
+		t.Fatal("missing tool changed delivery state")
+	}
+	// An actual report task is not relabeled chat-only by this wrapper.
+	m.chatOnly, m.pendingDone = false, true
+	for response, err := range m.GenerateContent(t.Context(), request, false) {
+		if err != nil || response.Content.Parts[0].FunctionCall != nil || m.deliverySet {
+			t.Fatalf("nonconversational run acquired chat-only delivery: %+v %v", response, err)
+		}
+	}
+}
+
 func authorizedHTTPPolicy(_ context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
 	return store.BotMandatePolicy{TTL: 24 * time.Hour, Scopes: []string{string(execution.CapabilityChat), string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{ref.BotID.String()}}, {Action: execution.CapabilityToolExecute, Resources: []string{"schedule_job", "update_scheduled_job", "remove_scheduled_job", "read_file"}}}, Limits: store.BotMandateLimits{MinScheduleIntervalSeconds: 60, MaxSchedules: 4, MaxDailyRuns: 10, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 300, MaxToolCalls: 20, MaxTokens: 20000, MaxTotalToolCalls: 100, MaxTotalTokens: 100000}}, nil
 }
@@ -202,10 +272,21 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			policy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return newProductionBotMandatePolicy(db, &config.AppConfig{})(ctx, ref)
 			}
-			workerConfig := BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: lifecycleHTTPBackend{}, Pool: workerTestPool{}, WorkerID: "schedule-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			backend := newRegressionHomeBackend(t)
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			workerConfig := BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "schedule-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
-			}, Prepare: func(_ context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-				return &launcher.BotChatSafeResources{WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				llm.chatOnly, llm.deliverySet = q.Run.IsInteractiveChat(), false
+				llm.work = func() (*store.BotWorkState, error) {
+					return repo.(store.BotWorkStore).LoadWork(c, q.Run.Lease)
+				}
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, backend, svc, scope)
+				}
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}}
 			worker, err := NewBotWorker(workerConfig)
 			if err != nil {
@@ -238,14 +319,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -308,7 +382,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if ops[0].Status != store.BotOperationApplied || ops[0].Receipt.Schedule.NextRun == nil || !ops[0].Receipt.Schedule.Enabled {
 				t.Fatalf("not applied %+v", ops[0])
 			}
-			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || len(saved.Report.Unchanged) != 1 || !strings.Contains(saved.Report.Unchanged[0].Source, ops[0].ID.String()) {
+			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || len(saved.Report.Unchanged) != 2 || !strings.HasSuffix(saved.Report.Unchanged[0].Source, "/schedule-chat-delivery") || !strings.Contains(saved.Report.Unchanged[1].Source, ops[0].ID.String()) {
 				t.Fatal("applied receipt must follow the terminal source and refer to its separately acknowledged operation")
 			}
 			approvals, err := repo.ListApprovals(auth, b.ID, store.BotPage{})
@@ -351,17 +425,28 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 				if e = json.Unmarshal(data, &turn); e != nil {
 					t.Fatal(e)
 				}
+				var persisted *store.BotRun
+				var operations []store.BotOperation
 				for attempt := 0; attempt < 3; attempt++ {
 					if e = worker.Poll(ctx); e != nil {
 						t.Fatal(e)
 					}
+					persisted, e = repo.GetRun(auth, b.ID, turn.Run.ID)
+					if e != nil || persisted == nil || persisted.MandateRef == nil {
+						t.Fatalf("missing control mandate: %+v %v", persisted, e)
+					}
+					operations, e = rt.ListAuthorizedOperations(auth, *persisted.MandateRef)
+					if e != nil {
+						t.Fatal(e)
+					}
+					// Poll is synchronous and normally applies the operation before
+					// returning. Stop on the durable outcome, rather than charge two
+					// extra full maintenance scans to this admission-to-receipt limit.
+					if len(operations) == 1 && operations[0].Status == store.BotOperationApplied {
+						break
+					}
 				}
-				persisted, e := repo.GetRun(auth, b.ID, turn.Run.ID)
-				if e != nil || persisted.MandateRef == nil {
-					t.Fatalf("missing control mandate: %+v %v", persisted, e)
-				}
-				operations, e := rt.ListAuthorizedOperations(auth, *persisted.MandateRef)
-				if e != nil || len(operations) != 1 || operations[0].Status != store.BotOperationApplied {
+				if len(operations) != 1 || operations[0].Status != store.BotOperationApplied {
 					t.Fatalf("control %s: %+v %v run=%+v", text, operations, e, persisted)
 				}
 				return operations[0]
@@ -395,10 +480,10 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			}
 			llm.cadence = nil
 			cadenceRun, err := repo.GetRun(auth, b.ID, cadence.Provenance.SourceRunID)
-			if err != nil || cadenceRun.Status != store.RunSucceeded || cadenceRun.Usage.ToolCalls != 2 || len(cadenceRun.Report.Unverified) != 0 || len(cadenceRun.Report.Changed) != 0 || len(cadenceRun.Report.Unchanged) != 2 || !strings.Contains(cadenceRun.Report.Summary, "pending") || cadenceRun.Report.NextRunAt != nil {
+			if err != nil || cadenceRun.Status != store.RunSucceeded || cadenceRun.Usage.ToolCalls != 3 || len(cadenceRun.Report.Unverified) != 0 || len(cadenceRun.Report.Changed) != 0 || len(cadenceRun.Report.Unchanged) != 3 || !strings.Contains(cadenceRun.Report.Summary, "pending") || cadenceRun.Report.NextRunAt != nil {
 				t.Fatalf("cadence source accounting: %+v %v", cadenceRun, err)
 			}
-			if !strings.Contains(cadenceRun.Report.Unchanged[0].Source, "cadence-list") || cadence.Receipt.ObservedAt.Before(*cadenceRun.FinishedAt) || cadence.Receipt.Schedule.TriggerID != receipt.TriggerID || cadence.Receipt.Schedule.ScheduleID != receipt.ScheduleID {
+			if !strings.HasSuffix(cadenceRun.Report.Unchanged[0].Source, "/schedule-chat-delivery") || !strings.Contains(cadenceRun.Report.Unchanged[1].Source, "cadence-list") || cadence.Receipt.ObservedAt.Before(*cadenceRun.FinishedAt) || cadence.Receipt.Schedule.TriggerID != receipt.TriggerID || cadence.Receipt.Schedule.ScheduleID != receipt.ScheduleID {
 				t.Fatalf("cadence lost call/target/source ordering: %+v", cadence)
 			}
 			jobAfter := jobs.Get(auth, receipt.ScheduleID.String())
@@ -447,12 +532,15 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			}
 			llm.pausedRead = nil
 			readRun, e := repo.GetRun(auth, b.ID, resumed.Provenance.SourceRunID)
-			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 2 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 2 || readRun.Report.NextRunAt != nil {
+			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 3 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 3 || readRun.Report.NextRunAt != nil {
 				t.Fatalf("paused read accounting: %+v %v", readRun, e)
 			}
 			// Both the list and independently verified pending capture are observations,
 			// not mutations. The worker's later receipt establishes application.
-			listObservation, captureObservation := readRun.Report.Unchanged[0], readRun.Report.Unchanged[1]
+			if !strings.HasSuffix(readRun.Report.Unchanged[0].Source, "/schedule-chat-delivery") {
+				t.Fatalf("missing exact delivery declaration: %+v", readRun.Report.Unchanged)
+			}
+			listObservation, captureObservation := readRun.Report.Unchanged[1], readRun.Report.Unchanged[2]
 			if listObservation.Kind != store.BotEvidenceObservation || !strings.HasSuffix(listObservation.Source, "/"+readRun.ID.String()+"/paused-list") {
 				t.Fatalf("lost exact-call list evidence: %+v", listObservation)
 			}
@@ -482,6 +570,9 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			}
 			_, db, err = entstore.NewPlatformServices(ctx, cfg)
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
 				t.Fatal(err)
 			}
 			ods, err = db.ForOrg(org.Slug)
@@ -571,21 +662,29 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			}
 			scheduleReport, runReport := false, false
 			canonicalSchedule := false
-			for _, e := range events {
+			scheduleAt, runAt, runReports := -1, -1, 0
+			for eventIndex, e := range events {
 				raw, _ := json.Marshal(e.Actions.StateDelta[store.BotOperationKey])
 				var view store.BotOperationView
 				if json.Unmarshal(raw, &view) == nil && view.Operation == store.BotControlScheduleCreate && view.Status == store.BotOperationApplied {
 					canonicalSchedule = true
+					if view.OperationID == ops[0].ID {
+						scheduleAt = eventIndex
+					}
 				}
 				if e.Content != nil {
 					for _, p := range e.Content.Parts {
 						scheduleReport = scheduleReport || strings.Contains(p.Text, "Schedule schedule_create applied")
-						runReport = runReport || strings.TrimSpace(p.Text) == strings.TrimSpace(bot.RenderReport(*result))
+						if strings.TrimSpace(p.Text) == strings.TrimSpace(bot.RenderReport(*result)) {
+							runReport = true
+							runAt = eventIndex
+							runReports++
+						}
 					}
 				}
 			}
-			if scheduleReport || !canonicalSchedule || !runReport {
-				t.Fatalf("Home reports schedule=%t run=%t", scheduleReport, runReport)
+			if scheduleReport || !canonicalSchedule || !runReport || scheduleAt < 0 || runAt <= scheduleAt || runReports != 1 {
+				t.Fatalf("Home must confirm the original schedule before exactly one scheduled result: schedule=%t run=%t scheduleAt=%d runAt=%d reports=%d", scheduleReport, runReport, scheduleAt, runAt, runReports)
 			}
 		})
 	}

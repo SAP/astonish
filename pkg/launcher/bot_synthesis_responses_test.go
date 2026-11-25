@@ -74,7 +74,7 @@ func TestBotSynthesisResponsesCompletedWire(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
-			llm := resources.Agent.LLM.(*botFactoryLLM)
+			llm := botFactoryModelForTest(t, resources.Agent.LLM)
 			llm.binding.synthesisReserve.final = true
 			count := 0
 			for response, err := range llm.GenerateContent(f.ctx, &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Deliver the design.", "user")}}, false) {

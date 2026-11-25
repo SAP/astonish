@@ -92,7 +92,11 @@ func (r *botRepository) ReserveHomeCleanup(ctx context.Context, home store.BotHo
 		if err := db.SaveHomeCleanupClaim(ctx, *rec, data, now); err != nil {
 			return err
 		}
-		if err := tx.InsertActivity(ctx, store.BotActivity{BotID: home.BotID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: raw, CreatedAt: now}, fmt.Sprintf("home-cleanup-claimed:%d:%d", revision, rec.Fence)); err != nil {
+		claimPayload, err := json.Marshal(map[string]any{"claim": claim})
+		if err != nil {
+			return err
+		}
+		if err := insertCleanupActivity(ctx, tx, store.BotActivity{BotID: home.BotID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: claimPayload, CreatedAt: now}, fmt.Sprintf("home-cleanup-claimed:%d:%d", revision, rec.Fence)); err != nil {
 			return err
 		}
 		result = &claim

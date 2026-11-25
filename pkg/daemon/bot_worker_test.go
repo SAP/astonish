@@ -12,6 +12,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
@@ -23,6 +24,12 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+func TestBotWorkerProductionSupervisorLeaseMargin(t *testing.T) {
+	if botWorkerLeaseDuration != 5*time.Minute || botWorkerRenewInterval != 20*time.Second || botWorkerRenewInterval >= botWorkerLeaseDuration {
+		t.Fatalf("lease=%s renew=%s", botWorkerLeaseDuration, botWorkerRenewInterval)
+	}
+}
 
 type workerTestBackend struct{ sandbox.Backend }
 
@@ -53,6 +60,9 @@ func (m *workerTestModel) GenerateContent(ctx context.Context, r *model.LLMReque
 
 type workerEventRepo struct {
 	store.BotStore
+	store.BotFileCommitStore
+	store.BotMemoryStoreProvider
+	store.BotTranscriptStore
 	b           store.Bot
 	r           store.BotRun
 	appendEvent func(context.Context, string, *session.Event) error
@@ -96,6 +106,10 @@ type workerEventSessions struct {
 func (s workerEventSessions) GetSessionMeta(context.Context, string) (*store.SessionMeta, error) {
 	return &s.meta, nil
 }
+func (s workerEventSessions) ReadBotTranscript(ctx context.Context, id uuid.UUID, after int64, limit int) ([]store.BotTranscriptEvent, error) {
+	return s.SessionStore.(store.BotTranscriptReader).ReadBotTranscript(ctx, id, after, limit)
+}
+
 func (s workerEventSessions) AppendFleetEvent(c context.Context, id string, e *session.Event) error {
 	if s.fail != nil {
 		return s.fail
@@ -139,14 +153,19 @@ func TestBotWorkerWiredRuntimeDurableEventsAndOwnerPin(t *testing.T) {
 	llm := &workerTestModel{}
 	cleaned := 0
 	var eventRepo *workerEventRepo
-	w, err := NewBotWorker(BotWorkerConfig{Backend: backend, Sandbox: workerTestBackend{}, Pool: workerTestPool{}, WorkerID: "controlled-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(c context.Context, p execution.Principal, scope store.BotScope, providerName, modelName string) (model.LLM, error) {
+	homeBackend := testRetainedContentBackend(t, backend)
+	pool := &titleSkillPool{}
+	w, err := NewBotWorker(BotWorkerConfig{Backend: backend, Sandbox: homeBackend, Pool: pool, WorkerID: "controlled-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(c context.Context, p execution.Principal, scope store.BotScope, providerName, modelName string) (model.LLM, error) {
 		if p.Subject != owner.String() || scope != store.BotScopeTeam || providerName != "home-provider" || modelName != "home-model" {
 			t.Fatalf("wrong pin/owner: %+v %s/%s", p, providerName, modelName)
 		}
 		return llm, nil
 	}, Prepare: func(_ context.Context, _ bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		scope.Services.Bots = eventRepo
-		return &launcher.BotChatSafeResources{WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() { cleaned++ }}, nil
+		scope.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+			return productionBotFiles(c, homeBackend, svc, scope)
+		}
+		return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() { cleaned++ }}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -162,8 +181,19 @@ func TestBotWorkerWiredRuntimeDurableEventsAndOwnerPin(t *testing.T) {
 	}
 	principal, _ := execution.PrincipalFromContext(auth)
 	ss := ods.ForTeam(team.Slug).Sessions()
-	homeID, sessionID := uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{homeID, sessionID} {
+	storedRepo := ods.ForTeam(team.Slug).Bots()
+	storedVersion := store.DefaultBotVersion()
+	storedVersion.Charter = "Report the controlled observation."
+	storedBot, err := storedRepo.CreateDraft(auth, store.BotCreateRequest{Name: "Event fixture", OwnerID: owner, Version: storedVersion, IdempotencyKey: "events"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedBot, err = w.provisionHome(auth, storedRepo, storedBot.ID, storedBot.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeID, sessionID := storedBot.HomeSessionID, uuid.New()
+	for _, id := range []uuid.UUID{sessionID} {
 		if _, err := ss.Create(auth, &session.CreateRequest{AppName: "astonish", UserID: owner.String(), SessionID: id.String()}); err != nil {
 			t.Fatal(err)
 		}
@@ -174,7 +204,7 @@ func TestBotWorkerWiredRuntimeDurableEventsAndOwnerPin(t *testing.T) {
 	if err := ods.ForTeam(team.Slug).SetSessionPin(auth, sessionID.String(), "wrong-provider", "wrong-model"); err != nil {
 		t.Fatal(err)
 	}
-	botID, runID := uuid.New(), uuid.New()
+	botID, runID := storedBot.ID, uuid.New()
 	identity := execution.BotRunIdentity{BotID: botID, RunID: runID, Version: 1, ActorID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug}
 	policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: identity, Level: execution.AutonomySupervised})
 	if err != nil {
@@ -186,8 +216,8 @@ func TestBotWorkerWiredRuntimeDurableEventsAndOwnerPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := bot.RunRequest{Bot: store.Bot{ID: botID, OwnerID: owner, Scope: store.BotScopeTeam, HomeSessionID: homeID, Status: store.BotActive, Version: 1}, Version: version, Run: store.BotRun{ID: runID, BotID: botID, Version: 1, SessionID: sessionID, Status: store.RunRunning, Lease: store.BotLease{BotID: botID, RunID: runID, Fence: 1, WorkerID: "controlled-worker", ExpiresAt: time.Now().Add(time.Minute)}}, Principal: principal, Policy: policy, Budget: budget, Instructions: "Report the controlled observation."}
-	repo := &workerEventRepo{b: req.Bot, r: req.Run}
+	req := bot.RunRequest{Bot: store.Bot{Home: storedBot.Home, ID: botID, OwnerID: owner, Scope: store.BotScopeTeam, HomeSessionID: homeID, Status: store.BotActive, Version: 1}, Version: version, Run: store.BotRun{ID: runID, BotID: botID, Version: 1, SessionID: sessionID, Status: store.RunRunning, Lease: store.BotLease{BotID: botID, RunID: runID, Fence: 1, WorkerID: "controlled-worker", ExpiresAt: time.Now().Add(time.Minute)}}, Principal: principal, Policy: policy, Budget: budget, Instructions: "Report the controlled observation."}
+	repo := &workerEventRepo{BotStore: storedRepo, BotFileCommitStore: storedRepo.(store.BotFileCommitStore), BotMemoryStoreProvider: storedRepo.(store.BotMemoryStoreProvider), BotTranscriptStore: storedRepo.(store.BotTranscriptStore), b: req.Bot, r: req.Run}
 	eventRepo = repo
 	projected := workerEventSessions{SessionStore: ss, meta: store.SessionMeta{ID: sessionID.String(), UserID: owner.String(), BotID: botID.String(), BotRunID: runID.String()}}
 	repo.appendEvent = func(c context.Context, id string, e *session.Event) error {

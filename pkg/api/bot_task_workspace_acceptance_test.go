@@ -31,8 +31,25 @@ func TestBotTaskWorkspaceHTTPAcceptance(t *testing.T) {
 			repo := f.repo(scope)
 			ctx := f.context(f.owner)
 			dir := t.TempDir()
-			sessions := sandbox.NewSessionRegistryFromStore(nil)
-			backend, e := docker.New(docker.Config{Sessions: sessions, LayersDir: filepath.Join(dir, "layers"), UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
+			localSessions, e := sandbox.NewLocalSessionStore(filepath.Join(dir, "sandbox-registry"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			sessions := sandbox.NewSessionRegistryFromStore(localSessions)
+			layers := os.Getenv("ASTONISH_BOT_HOME_TEST_LAYERS")
+			if !filepath.IsAbs(layers) || os.Getenv("ASTONISH_SANDBOX_IMAGE") == "" {
+				t.Fatal("explicit test image and absolute retained layer directory required")
+			}
+			uppers, e := os.MkdirTemp(filepath.Dir(layers), "api-task-workspace-uppers-")
+			if e != nil {
+				t.Fatal(e)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(uppers); err != nil {
+					t.Error(err)
+				}
+			})
+			backend, e := docker.New(docker.Config{Sessions: sessions, LayersDir: layers, UppersDir: uppers, SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE"), OverlayMode: "fuse"})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -59,6 +76,28 @@ func TestBotTaskWorkspaceHTTPAcceptance(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			if b.HomeSessionID == uuid.Nil {
+				t.Fatal("registered Home has no canonical session")
+			}
+			sessionID := b.HomeSessionID.String()
+			if err := backend.PrepareBotHomeSession(ctx, h, sessionID); err == nil || !strings.Contains(err.Error(), "missing or mismatched authorized Bot session recipe") {
+				t.Fatalf("unconfigured Home must fail closed: %v", err)
+			}
+			t.Cleanup(func() {
+				c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := backend.DestroySession(c, sessionID); err != nil {
+					t.Error(err)
+				}
+			})
+			// Fixture-authorized template setup precedes file transactions; reads
+			// and publication cannot manufacture a session or an authority grant.
+			if _, err := backend.CreateSession(ctx, sandbox.SessionSpec{SessionID: sessionID, Type: sandbox.SessionTypeChat, UserID: f.owner, BotHome: h.Clone(), TemplateID: sandbox.BaseTemplateID, LayerChain: []string{sandbox.BaseTemplateID}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
+				t.Fatal(err)
+			}
 			b, e = repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "owned workspace acceptance"})
 			if e != nil {
 				t.Fatal(e)
@@ -67,7 +106,7 @@ func TestBotTaskWorkspaceHTTPAcceptance(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: f.owner, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug})
+			worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: run.Version, ActorID: f.owner, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug})
 			lease, e := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "workspace-test", ExpiresAt: time.Now().Add(time.Minute)})
 			if e != nil {
 				t.Fatal(e)

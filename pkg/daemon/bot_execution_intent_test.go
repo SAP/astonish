@@ -7,16 +7,16 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 	"io"
 	"iter"
@@ -26,6 +26,23 @@ import (
 	"strings"
 	"testing"
 )
+
+// intentHTTPPool is a fail-closed transport for the actual shared Chat catalog.
+// These fixtures require no physical tool dispatch; count any accidental attempt.
+type intentHTTPPool struct {
+	workerTestPool
+	effects int
+}
+
+func (p *intentHTTPPool) GetOrCreate(string) sandbox.ToolNodeClient                     { return p }
+func (p *intentHTTPPool) GetOrCreateWithTemplate(string, string) sandbox.ToolNodeClient { return p }
+func (*intentHTTPPool) SetSessionScope(string, string, string)                          {}
+func (*intentHTTPPool) BindSession(string)                                              {}
+func (*intentHTTPPool) EnsureReady(string) error                                        { return nil }
+func (p *intentHTTPPool) Call(string, string, map[string]interface{}) (json.RawMessage, error) {
+	p.effects++
+	return nil, store.ErrBotForbidden
+}
 
 type intentAttemptModel struct {
 	workerTestModel
@@ -85,29 +102,20 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 				t.Fatal(err)
 			}
 			llm := &intentAttemptModel{}
-			effects := 0
-			var targets []tool.Tool
-			// One physical test tool detects accidental resource reuse without
-			// duplicating the factory's built-in delegation/interaction tools.
-			for _, name := range []string{"read_file"} {
-				target, err := functiontool.New(functiontool.Config{Name: name, Description: "Count execution"}, func(tool.Context, map[string]any) (map[string]any, error) {
-					effects++
-					return map[string]any{"ok": true}, nil
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				targets = append(targets, target)
-			}
+			pool := &intentHTTPPool{}
 			prepareCalls := 0
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: activationHomeBackend{}, Pool: workerTestPool{}, WorkerID: "intent-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			backend := newRegressionHomeBackend(t)
+			if err := db.InstallBotContentHomeBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "intent-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
 			}, Prepare: func(_ context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				prepareCalls++
 				if q.Run.ControlOnly() {
 					t.Fatal("control-only conversation prepared physical execution resources")
 				}
-				return &launcher.BotChatSafeResources{Tools: targets, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -134,14 +142,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := entstore.RegisterBotHomeBinding(registry, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,6 +195,10 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 				if err := worker.Poll(ctx); err != nil {
 					t.Fatal(err)
 				}
+				saved, err := repo.GetRun(auth, b.ID, run.ID)
+				if err != nil || saved.Status != store.RunSucceeded || saved.Intent != intent {
+					t.Fatalf("run %+v: %v", saved, err)
+				}
 				if intent == store.BotIntentConversation {
 					seen := false
 					for _, content := range llm.requests[len(llm.requests)-1] {
@@ -207,10 +212,6 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 						raw, _ := json.Marshal(llm.requests[len(llm.requests)-1])
 						t.Fatalf("conversation model never saw prior Bot home history: %s", raw)
 					}
-				}
-				saved, err := repo.GetRun(auth, b.ID, run.ID)
-				if err != nil || saved.Status != store.RunSucceeded || saved.Intent != intent {
-					t.Fatalf("run %+v: %v", saved, err)
 				}
 				after, err := repo.Get(auth, b.ID)
 				if err != nil || after.Status != b.Status {
@@ -322,8 +323,8 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 						if prepareCalls != 1 {
 							t.Fatalf("conversation prepared resources: calls=%d; only draft test may prepare", prepareCalls)
 						}
-						if effects != 0 {
-							t.Fatalf("conversation executed %s: %d effects", name, effects)
+						if pool.effects != 0 {
+							t.Fatalf("conversation executed %s: %d effects", name, pool.effects)
 						}
 						after, err := repo.Get(auth, b.ID)
 						if err != nil || after.Status != store.BotPaused {

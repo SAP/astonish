@@ -29,10 +29,10 @@ import (
 )
 
 type taskContinuityConfig struct {
-	Dir, Owner, Scope, Bot, Task, Address, Image string
-	MasterKey                                    string
-	ProductionPort                               int
-	Home                                         sandbox.BotHomeBinding
+	Dir, Owner, Scope, Bot, Task, Address, Image, Layers, Uppers string
+	MasterKey                                                    string
+	ProductionPort                                               int
+	Home                                                         sandbox.BotHomeBinding
 }
 
 func taskContinuityOpen(t *testing.T, q taskContinuityConfig) (*entstore.Store, store.BotStore, context.Context, *docker.DockerBackend) {
@@ -54,7 +54,11 @@ func taskContinuityOpen(t *testing.T, q taskContinuityConfig) (*entstore.Store, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(q.Dir, "layers"), UppersDir: filepath.Join(q.Dir, "uppers"), SandboxImage: q.Image})
+	sessions, err := sandbox.NewLocalSessionStore(filepath.Join(q.Dir, "sandbox-registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(sessions), LayersDir: q.Layers, UppersDir: q.Uppers, SandboxImage: q.Image, OverlayMode: "fuse"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +121,15 @@ func TestBotTaskContinuityDaemonProcess(t *testing.T) {
 	}
 	db, repo, auth, backend := taskContinuityOpen(t, q)
 	defer db.Close()
+	// Trusted fixture startup restores only the persisted, explicitly selected
+	// recipe. HTTP reads and transactional file codecs never start compute.
+	bot, err := repo.Get(auth, uuid.MustParse(q.Bot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.PrepareBotHomeSession(auth, &q.Home, bot.HomeSessionID.String()); err != nil {
+		t.Fatal(err)
+	}
 	workspace := &launcher.BotTaskWorkspace{Bots: repo, Tasks: repo.(store.BotTaskStore), Backend: backend}
 	if err = workspace.Install(); err != nil {
 		t.Fatal(err)
@@ -196,7 +209,25 @@ func TestBotTaskContinuityHTTPAcceptance(t *testing.T) {
 			dir := t.TempDir()
 			owner := uuid.New()
 			orgID := uuid.NewString()
-			q := taskContinuityConfig{Dir: dir, Owner: owner.String(), Scope: string(scope), MasterKey: masterKey, Image: os.Getenv("ASTONISH_SANDBOX_IMAGE")}
+			q := taskContinuityConfig{Dir: dir, Owner: owner.String(), Scope: string(scope), MasterKey: masterKey, Image: os.Getenv("ASTONISH_SANDBOX_IMAGE"), Layers: os.Getenv("ASTONISH_BOT_HOME_TEST_LAYERS")}
+			if q.Image == "" || !filepath.IsAbs(q.Layers) {
+				t.Fatal("test-owned image and absolute retained layer path required")
+			}
+			// Ambient TMPDIR may be invisible to Docker (macOS /var/folders;
+			// Colima /tmp is VM-local). Follow the existing physical Docker fixtures:
+			// allocate a unique test-owned root beside the explicitly shared layers.
+			// Persist it for seeding and both children, and register cleanup first
+			// so children/compute/Home are removed before ONLY this created root.
+			uppers, err := os.MkdirTemp(filepath.Dir(q.Layers), "task-continuity-uppers-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(uppers); err != nil {
+					t.Error(err)
+				}
+			})
+			q.Uppers = uppers
 			_, seed, err := entstore.NewPlatformServices(ctx, entstore.Config{DSN: filepath.Join(dir, "platform.db"), DataDir: dir})
 			if err != nil {
 				t.Fatal(err)
@@ -274,6 +305,28 @@ func TestBotTaskContinuityHTTPAcceptance(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			// A Home registration alone must never manufacture a default recipe.
+			if err = backend.BindBotHomeSession(home, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if err = backend.PrepareBotHomeSession(auth, home, b.HomeSessionID.String()); err == nil || !strings.Contains(err.Error(), "missing or mismatched authorized Bot session recipe") {
+				t.Fatalf("unconfigured Home session preparation must fail closed, got %v", err)
+			}
+			// Explicit fixture-authorized tool recipe, not a file-service default.
+			// Retaining a Python script does not require executing it or installing Python.
+			if _, err = backend.CreateSession(auth, sandbox.SessionSpec{SessionID: b.HomeSessionID.String(), Type: sandbox.SessionTypeChat, UserID: owner.String(), BotHome: home.Clone(), TemplateID: sandbox.BaseTemplateID, LayerChain: []string{sandbox.BaseTemplateID}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				c, done := context.WithTimeout(context.Background(), 30*time.Second)
+				defer done()
+				if e := backend.DestroySession(c, b.HomeSessionID.String()); e != nil {
+					t.Error(e)
+				}
+			})
+			if err = backend.WaitForSessionReady(auth, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
 			// Owner file retention is independent of execution readiness; this
 			// fixture does not activate a paid-model-capable Bot.
 			workspace := &launcher.BotTaskWorkspace{Bots: repo, Tasks: repo.(store.BotTaskStore), Backend: backend}
@@ -309,6 +362,14 @@ func TestBotTaskContinuityHTTPAcceptance(t *testing.T) {
 			}
 			if err = workspace.Write(auth, store.BotTaskMutation{BotID: b.ID, ActorID: owner, IdempotencyKey: "state"}, sandbox.BotHomeWorkspaceFile{Path: task.HomePath + "/state/observations.sqlite", Data: state}); err != nil {
 				t.Fatal(err)
+			}
+			// Leave compute stopped while retaining its authorized recipe and Home.
+			// Child startup, not the HTTP read, explicitly prepares that recipe.
+			if err = backend.StopSession(auth, b.HomeSessionID.String()); err != nil {
+				t.Fatal(err)
+			}
+			if state, e := backend.SessionState(auth, b.HomeSessionID.String()); e != nil || state != sandbox.SessionStateStopped {
+				t.Fatalf("expected retained stopped compute, got %s: %v", state, e)
 			}
 			db.Close()
 			listener, err := net.Listen("tcp", "127.0.0.1:0")

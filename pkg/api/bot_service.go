@@ -48,8 +48,21 @@ func botRequestStore(w http.ResponseWriter, r *http.Request) (store.BotStore, uu
 		http.Error(w, "Bot storage unavailable", http.StatusServiceUnavailable)
 		return nil, uuid.Nil, false
 	}
+	if svc := store.FromContext(r.Context()); svc != nil && svc.BotRunStateNotify != nil && r.Context().Value(botRunDispatchNotifierKey{}) == nil {
+		previous := store.BotRunStateNotifierFromContext(r.Context())
+		notify := svc.BotRunStateNotify
+		ctx := store.WithBotRunStateNotifier(r.Context(), func(c context.Context, state store.BotRunState) {
+			if previous != nil {
+				previous(c, state)
+			}
+			notify(c, state)
+		})
+		*r = *r.WithContext(context.WithValue(ctx, botRunDispatchNotifierKey{}, true))
+	}
 	return repo, actor, true
 }
+
+type botRunDispatchNotifierKey struct{}
 
 // botContentAccess gates registered Bot content routes while leaving worker reads
 // and the exact deletion status/retry endpoint available. Session aliases use the
@@ -101,7 +114,11 @@ func botInteractiveAdmissionContext(r *http.Request) (context.Context, error) {
 	if svc == nil {
 		return nil, store.ErrBotUnsupported
 	}
-	// Durable source-bound admission is independent of a process-local registry.
+	if !svc.BotInteractiveReady {
+		return nil, store.ErrBotUnsupported
+	}
+	// Durable source-bound admission is independent of a process-local registry,
+	// but never independent of a composed worker that can consume the admission.
 	if svc.BotMandatePolicy != nil {
 		p, ok := execution.PrincipalFromContext(r.Context())
 		e, verified := execution.AuthenticationEvidenceFromContext(r.Context())

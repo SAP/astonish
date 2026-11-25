@@ -78,14 +78,16 @@ type DelegationStatus string
 const (
 	DelegationStart    DelegationEventType = "delegation_start"
 	DelegationComplete DelegationEventType = "delegation_complete"
-	TaskQueued         DelegationStatus    = "queued"
-	TaskRunning        DelegationStatus    = "running"
-	TaskWaiting        DelegationStatus    = "waiting_on_model"
-	TaskEvaluating     DelegationStatus    = "evaluating"
-	TaskRetrying       DelegationStatus    = "retrying"
-	TaskComplete       DelegationStatus    = "complete"
-	TaskFailed         DelegationStatus    = "failed"
-	TaskCancelled      DelegationStatus    = "cancelled"
+	// TaskJoined is internal manager bookkeeping emitted only after fan-out joins.
+	TaskJoined     DelegationEventType = "task_joined"
+	TaskQueued     DelegationStatus    = "queued"
+	TaskRunning    DelegationStatus    = "running"
+	TaskWaiting    DelegationStatus    = "waiting_on_model"
+	TaskEvaluating DelegationStatus    = "evaluating"
+	TaskRetrying   DelegationStatus    = "retrying"
+	TaskComplete   DelegationStatus    = "complete"
+	TaskFailed     DelegationStatus    = "failed"
+	TaskCancelled  DelegationStatus    = "cancelled"
 )
 
 // DelegationSequence is shared by all attempts in a batch.
@@ -291,6 +293,8 @@ type TaskAttempt struct {
 	Error          string `json:"error,omitempty"`
 }
 type TaskResult struct {
+	// joined is manager-owned provenance, never serialized or populated from child output.
+	joined                          *taskJoinIdentity
 	BatchID, TaskID, ChildSessionID string
 	AttemptHistory                  []TaskAttempt
 	Name                            string          // Matches SubAgentTask.Name
@@ -302,6 +306,33 @@ type TaskResult struct {
 	Error                           string          // Error message if Status != "success"
 	Attempts                        int             // Number of task attempts made
 	InactivityReason                string          // Non-empty when the inactivity watchdog cancelled the task
+}
+
+// taskJoinIdentity binds a completed fan-out result to the original admitted task
+// and the exact attempts observed by the manager. It is not child session state.
+type taskJoinIdentity struct {
+	batchID, taskID, parentID, initialChildID, finalChildID string
+	attempts                                                []TaskAttempt
+}
+
+// MatchesJoinedTask validates server join provenance against the original task.
+// A result reconstructed from JSON, or with altered identity/attempt metadata,
+// cannot attest a join. Child prose and claimed effects are deliberately ignored.
+func (r TaskResult) MatchesJoinedTask(t SubAgentTask) bool {
+	j := r.joined
+	if j == nil || r.Status != "success" || r.Error != "" ||
+		j.batchID != t.BatchID || j.taskID != t.TaskID || j.parentID != t.ParentID || j.initialChildID != t.ChildSessionID ||
+		r.BatchID != j.batchID || r.TaskID != j.taskID || r.ChildSessionID != j.finalChildID ||
+		r.Attempts != len(j.attempts) || len(r.AttemptHistory) != len(j.attempts) || len(j.attempts) == 0 {
+		return false
+	}
+	for i, attempt := range j.attempts {
+		if r.AttemptHistory[i] != attempt || attempt.Attempt != i+1 || attempt.ChildSessionID == "" {
+			return false
+		}
+	}
+	first, last := j.attempts[0], j.attempts[len(j.attempts)-1]
+	return first.ChildSessionID == j.initialChildID && last.ChildSessionID == j.finalChildID && last.Status == "success" && last.Error == ""
 }
 
 // ToolGroup defines a named group of tools that sub-agents can request.
@@ -691,6 +722,29 @@ func (m *SubAgentManager) RunTasks(ctx context.Context, tasks []SubAgentTask) []
 	}
 
 	wg.Wait()
+	// All children (including retries) have returned before join provenance exists.
+	// Keep a private copy so callers cannot rewrite the observed attempt chain.
+	for i := range tasks {
+		r, t := &results[i], tasks[i]
+		r.joined = &taskJoinIdentity{
+			batchID: t.BatchID, taskID: t.TaskID, parentID: t.ParentID,
+			initialChildID: t.ChildSessionID, finalChildID: r.ChildSessionID,
+			attempts: append([]TaskAttempt(nil), r.AttemptHistory...),
+		}
+	}
+	// Attempt terminal events precede retry evaluation. Only this manager-owned
+	// join, after every child and retry has returned, releases plan delegates.
+	if m.SubTaskProgress != nil {
+		for i, t := range tasks {
+			r := results[i]
+			m.SubTaskProgress(SubTaskProgressEvent{
+				Type: string(TaskJoined), SessionID: t.ParentID, BatchID: t.BatchID,
+				TaskID: t.TaskID, ChildSessionID: r.ChildSessionID,
+				TaskName: t.Name, PlanStep: t.PlanStep, Attempt: r.Attempts,
+				Status: r.Status, Error: r.Error, Sequence: t.Sequence.Next(),
+			})
+		}
+	}
 	return results
 }
 

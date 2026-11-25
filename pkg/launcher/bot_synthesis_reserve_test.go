@@ -12,6 +12,27 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestBotSynthesisReserveAuthorityDeadline(t *testing.T) {
+	meter, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newBotSynthesisReserve(meter, store.BudgetSpec{MaxRuntimeSeconds: 300})
+	now := time.Now()
+	r.authorityDeadline = now.Add(100 * time.Second)
+	r.reserveTime = 20 * time.Second
+	r.now = func() time.Time { return now }
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Research", "user")}, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "web_fetch"}}}}}}
+	if _, final, err := r.prepare(context.Background(), req, nil); err != nil || final {
+		t.Fatalf("premature authority reserve final=%v err=%v", final, err)
+	}
+	now = r.authorityDeadline.Add(-10 * time.Second)
+	out, final, err := r.prepare(context.Background(), req, nil)
+	if err != nil || !final || len(out.Config.Tools) != 0 {
+		t.Fatalf("authority reserve not enforced final=%v err=%v out=%+v", final, err, out)
+	}
+}
+
 func TestBotSynthesisReserveResearchThenFinal(t *testing.T) {
 	limit := int64(100000)
 	meter, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300, MaxTokens: &limit}, time.Now())

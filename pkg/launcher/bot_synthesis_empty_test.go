@@ -56,7 +56,7 @@ func TestBotSynthesisEmptyCompletionSafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			llm := got.Agent.LLM.(*botFactoryLLM)
+			llm := botFactoryModelForTest(t, got.Agent.LLM)
 			llm.binding.synthesisReserve.final = true
 			ctx, cancel := context.WithCancel(f.ctx)
 			defer cancel()
@@ -202,7 +202,7 @@ func testBotSynthesisCompletionHTTP(t *testing.T, draft string) {
 		t.Fatal(err)
 	}
 	defer got.Cleanup()
-	llm := got.Agent.LLM.(*botFactoryLLM)
+	llm := botFactoryModelForTest(t, got.Agent.LLM)
 	llm.binding.synthesisReserve.final = true
 	query := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Prepare a design using already retained evidence.", "user")}, Config: &genai.GenerateContentConfig{MaxOutputTokens: 256, Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "read_file"}}}}}}
 	finals := 0
@@ -247,7 +247,7 @@ func testBotSynthesisCompletionHTTP(t *testing.T, draft string) {
 	adapter, err := api.NewBotChatRuntimeAdapter(func(ctx context.Context, req bot.RunRequest) (*api.BotChatResources, error) {
 		resources, err := factory(ctx, req)
 		if err == nil {
-			resources.Agent.LLM.(*botFactoryLLM).binding.synthesisReserve.final = true
+			botFactoryModelForTest(t, resources.Agent.LLM).binding.synthesisReserve.final = true
 		}
 		return resources, err
 	})

@@ -1,5 +1,382 @@
 # Bot release acceptance
 
+## Objective-owned employee acceptance
+
+Long full runs must run as owned background jobs watched through actual exit.
+Each mandatory Docker latency parent has its own exact `go test -json -count=1`
+command with `-timeout=15m`; no tests/subcases or measured five-second dispatch /
+fifteen-second between-call bounds are relaxed.
+
+After observing the complete `all` process exit zero (not merely its start):
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py --completed-evidence seal \
+  --evidence-kind employee --employee-report /absolute/completed/report.json \
+  --employee-exit 0 --receipt /absolute/new/employee-receipt.json
+python3 -B tests/e2eboot/bots_acceptance_driver.py --completed-evidence verify \
+  --evidence-kind employee --receipt /absolute/new/employee-receipt.json \
+  --sha256 EXACT_PRINTED_COMPLETED_RECEIPT_SHA256
+```
+
+The short verifier rechecks the current full ordered manifest, exact raw
+package/subcase run-pass events, subcase-bound diagnostics, no skips, real
+build/gate zero exits, top-level all context, unchanged source, report/log hashes
+and the exact current Studio/candidate/node artifact set. Missing, duplicated,
+stale, edited or merely RUNNING evidence blocks. Optional `--quality` and
+repeatable `--coverage-report` attach the existing strict broad Go/frontend/lint
+quality receipts and raw logs; omission makes no quality claim. Live
+Kubernetes/PostgreSQL, paid-provider quality/latency and deployment remain
+unverified. Only actual full completion permits an approved plan revision to a
+short hash-pinned verification; sealing never launches or substitutes acceptance.
+
+
+```sh
+ASTONISH_SANDBOX_IMAGE=astonish-storage-completion-a1474521:local \
+ASTONISH_BOT_HOME_TEST_LAYERS='/Users/I851355/Library/Application Support/astonish/sandbox/layers' \
+ASTONISH_TEST_DOCKER=1 ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 \
+ASTONISH_BOT_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage employee --employee-phase all
+```
+
+Phases: `contracts`, `dispatch`, `delivery`, `latency`, `presentation`, `all`.
+Each invocation builds current Studio and retained isolated candidate/node
+binaries and records source/artifact hashes. Exact named parent/subcase tests
+must RUN/PASS in the correct package; any skip (including an unknown child),
+malformed raw JSON, unfinished test, nonzero exit or missing physical prerequisite
+fails/blocks. `--report /absolute/new/report.json` selects the report; otherwise
+an owned temporary directory retains report, build logs, JSONL and binaries.
+No inherited deployment/provider credentials, real daemon, existing Bot or
+production database is used. HTTP servers select disposable loopback ports.
+
+`all` requires `TestBotEmployeeObjectiveInquiryHTTP` in personal/team and both
+adequate-first states: ordinary Chat compares identical actual configured
+Perplexity tool/source observations and final sourced body with Bot. Exact
+subcase-bound markers and counters (adaptive: three reads/four model calls;
+adequate-first: one read/two model calls) are mandatory. Historical
+`TestBotSharedResearchAdvertisedSchema/live-six|live-eight` replay both verbatim
+Apple envelopes, preserving original digest and SQL 36263/36268 provenance while
+bounding effective results to five. The driver rejects missing/spoofed markers,
+wrong package/test, and output outside a running exact test. Mandatory HTTP
+`TestBotInteractiveAuthorityHTTPAcceptance`, `TestBotEventsHTTPAcceptance` and
+`TestBotHistoryStreamHTTPAcceptance` cover authority and cold event/history
+restore without skips. These exact bindings replace the previously declared
+comparison/provenance gaps, not the need for a fresh completed integrated run.
+Scoped phase PASS remains only that phase's controlled evidence. Browser/native
+PTY workers and adapter `read_file` sufficiency fixtures are distinct tiers.
+
+Physical Docker is mandatory for local acceptance; unavailable live Kubernetes/
+PostgreSQL, paid-provider judgment/latency and deployment remain UNVERIFIED,
+never PASS. Broad Go/frontend/lint/race gates run separately. Long-running
+commands emit 30-second heartbeats and terminate only their owned process group;
+started builds are not completion. Historical completed-evidence sealing cannot
+promote this new stage or substitute old receipts for current exact diagnostics.
+
+
+## Current verification ledger — 2026-11-23
+
+Revision 12 phase 6 is recorded complete at sequence 485 with strict receipt
+`f2577352711339b7e2fd30b552da5f98318693f99aa935ffc764d1bb7eebd41e`.
+Fresh scoped Go suite `/tmp/bot-release-go-final.jsonl` and scoped lint
+`/tmp/bot-release-lint-retry.log` both exited 0 (supplied evidence; no rerun here).
+**Final integrated acceptance is still pending**: final baseline and `all` runs
+are in flight, targeting `/tmp/bot-final-baseline.json` and `/tmp/bot-final-all.json`.
+Require completed per-invocation evidence and successful exits before final closure.
+`all` executes the original baseline assertions as well as the integrated manifests;
+it must not replace them with a placeholder or promote an implemented subset.
+Preserve original historical baseline captures and failures; a fresh verification
+is not permission to recapture or rewrite those artifacts.
+
+Local evidence covers shared ordinary Chat/Bot runtime/catalog/dispatch while
+retaining scope/approval/budget fences, compiled no-overlay-Python storage, exact
+private revision-stage crash cleanup with historical publication IDs preserved,
+and joined terminal/delegate bookkeeping. SQL reconciliation performance remains
+**report-only**; read-count assertions and the controlled **15-second** limit remain
+binding. See [current evidence](../../docs/architecture/bot-runtime-evidence.md#current-consolidation-evidence--2026-11-23)
+for exact staging and physical/nonphysical boundaries.
+
+Live Kubernetes/PVC and PostgreSQL remain explicitly **DEFERRED, NOT PASS** in the
+user-requested local profile. Mocked helper/adapter tests remain mandatory but are
+not physical evidence. Paid-provider replay and real-provider quality are not
+claimed or authorized. No user daemon restart/Bot retry, deployment or data deletion
+is implied. Older progress/blocker descriptions below are **historical** snapshots,
+not current phase status; their receipts remain unchanged.
+
+
+## Explicit user-requested local infrastructure scope
+
+Append `--defer-kubernetes-postgresql` to the current plan's commands:
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage chat-consolidation --phase runtime --defer-kubernetes-postgresql
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage chat-consolidation --phase controller --defer-kubernetes-postgresql
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage chat-consolidation --phase storage --defer-kubernetes-postgresql
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage file-first --defer-kubernetes-postgresql
+```
+
+This boolean flag is accepted only for file-first or chat-consolidation (all seven
+phase choices, including baseline/all). It selects the report profile
+`local-deferred-kubernetes-postgresql`; default remains strict. Live Kubernetes and
+PostgreSQL integration tiers/prerequisites are explicitly **DEFERRED/user-requested,
+NOT PASS**, nonblocking for this profile and retained for later user testing.
+No cluster probe or live DSN is required/run for these exclusions. Runtime,
+controller and storage mappings retain every nonphysical dependency: PostgreSQL
+mocked store tests, Kubernetes bootstrap/safety and local adapter fixtures remain
+mandatory without ambient DSN/KUBECONFIG/PG routing. Cross-backend cold restore is
+Docker-only locally, with the other backend portion visibly deferred.
+
+Docker, performance, browser/PTY, authority, mailbox persistence and all other
+unresolved requirements remain binding; 0 means remaining mandatory evidence is
+PASS, **not** full Kubernetes/PostgreSQL acceptance. `all` does not bypass existing
+full-phase missing-evidence blockers. Reports support `--report PATH`; excluded
+gates/scenarios have no successful/fresh physical evidence. See
+`docs/architecture/bot-runtime-evidence.md` for the scope contract. Historical
+strict failure receipts below are unchanged.
+
+## Chat consolidation baseline (not green)
+
+```sh
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_SANDBOX_IMAGE="${BOT_TEST_IMAGE:?Existing local image}" \
+ASTONISH_BOT_HOME_TEST_LAYERS="${BOT_TEST_LAYERS:?Absolute default layers}" \
+python3 -B tests/e2eboot/bots_acceptance_driver.py \
+  --stage chat-consolidation --phase baseline
+```
+
+This stage runs `TestBotEnhancedChatBaseline` in launcher, API and daemon packages
+sequentially, using controlled models and isolated HTTP/store fixtures. It records
+package-qualified run/pass evidence and each executed subtest; skipped children,
+missing tests, foreign-package passes and unfinished packages fail. Separate owned
+JSONL logs and a JSON report are printed under `CHAT_CONSOLIDATION_REPORT`.
+
+It then runs the success-asserting `TestBotEnhancedChatNoPythonDocker` against a
+new disposable session using the unchanged default template. Its **specific
+physically diagnosed** missing-Python failure may be labeled REPRODUCED for
+historical diagnosis only: **REPRODUCED now fails the baseline (exit 1)**. The
+revised plan requires fresh FIXED evidence and all preserved baseline assertions;
+an old expected failure cannot authorize phase completion. Missing Docker/layers/
+image is BLOCKED, not an expected regression. No provider keys or production
+configuration enter these commands. No daemon restart, live Bot retry or Python
+installation is performed. Assertions have not been weakened.
+
+### Runtime/storage progress reports (full phases remain BLOCKED)
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py \
+  --stage chat-consolidation --phase runtime --report /tmp/chat-runtime-progress.json
+
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_SANDBOX_IMAGE="${BOT_TEST_IMAGE:?Explicit source-built local test image}" \
+ASTONISH_BOT_HOME_TEST_LAYERS="${BOT_TEST_LAYERS:?Absolute existing default layers}" \
+python3 -B tests/e2eboot/bots_acceptance_driver.py \
+  --stage chat-consolidation --phase storage --report /tmp/chat-storage-progress.json
+```
+
+The available local image at handoff was `astonish-storage-proper-20585a9b:local`;
+this is **not** a driver default or proof of source freshness. The operator must
+explicitly select a test-owned image built from the sources under review and the
+absolute retained layers path. The driver never builds/pulls an image, installs
+Python, provisions a cluster, or discovers production credentials. These commands
+can perform disposable fixture operations only when explicitly configured.
+
+| Gate | Fresh evidence and precise boundary |
+| --- | --- |
+| `runtime-http` | `pkg/api::TestStudioChatHTTPScopedRuntimeFactory`, including success, construction-failure, missing-agent and missing-result children; actual isolated POST `/api/studio/chat` and SSE with controlled model, not deployed UI |
+| `runtime-construction` | `pkg/launcher::TestStudioChatRuntimeFactoryUsesSharedScopedConstructor` and the explicitly named current `TestChatRuntime*` catalog/dispatch/lifetime/scoped flow/drill fixtures; not physical backend parity |
+| `storage-docker` | `pkg/sandbox/docker::TestCompiledHomeFilesNoPythonDocker`, `TestBotHomeStreamArchiveDockerLive`, `TestBotHomeArchivePrivateWriterContentionDockerLive`, `TestBotHomeCompiledArchiveDockerLive`; physical retained-file/compiled archive subset only |
+| `storage-docker-backup-cli` | `cmd/astonish::TestBotFileFirstBackupCLI`, `TestBotFileFirstStoppedBackupCLI`; built public CLI create/verify/restore, failed allocation cleanup/retry, detached or stopped Chat source, fresh target and exact reopened HTTP bytes; personal/team SQLite/Docker only. Requires the same explicit Docker image/layers opt-ins. |
+| `storage-compiled-linux` | `pkg/sandbox::TestCompiledHomeFilesProtocol`, `TestCompiledHomeFilesScopedRoots`, `TestCompiledHomeFilesFenceAndStreamErrors`; compiled root protocol fixtures, require Linux and explicit `ASTONISH_TEST_COMPILED_HOME_FILES=1` |
+| `storage-kubernetes-adapter-fixture` | `pkg/sandbox/k8s::TestBotHomeFilesFilesystem`, `TestBotHomeFilesConfinement`, `TestCompiledWorkspaceUnicodeReceipt`, `TestCompiledWorkspaceJoinsRequestWriter`, `TestCompiledWorkspaceWarmNoHelper`; fake Kubernetes API/transport fixtures, **not live Kubernetes** |
+
+On an explicitly prepared Linux fixture host, the adapter gate additionally requires
+`ASTONISH_BOT_FILES_TEST_BINARY=/absolute/path/to/fresh/astonish` naming an existing
+executable built from the changed sources. That binary is passed only to the adapter
+gate; there is no implicit build, cross-platform emulation or infrastructure setup.
+The root protocol gate runs compiled Go fixtures in process and needs no external
+node binary. Missing opt-ins/platform/binary block the corresponding gate without
+launching it. Live Kubernetes has its own `storage-live-kubernetes` BLOCKED entry;
+passing an adapter fixture can never satisfy that requirement. Dedicated live
+namespace/PVC/KUBECONFIG acceptance still needs a separate fully wired physical gate.
+
+Reports contain `gates` with exact `package`, `required` parent/child names,
+`command` (`-count=1`), `boundary`, `status`, `passed`, `fresh`, redacted owned JSONL
+`log`, `errors` and elapsed time. `fresh` means execution was attempted in this
+invocation, not that it passed. No historical log or receipt is imported. Skips,
+missing children, wrong-package passes, absent run events, unfinished tests/packages
+and nonzero exits fail the gate. A PASS is **only that named subset**.
+
+`evidence_policy`, `phase_acceptance`, and named `remaining_requirements` make the
+non-completion explicit. Runtime still requires three-mode full capability parity,
+authority/budget/no-replay coverage, lazy/reused/recovered sessions on both backends
+and complete production/external-capability wiring. Storage still requires live
+Kubernetes, the full offline browse/download/cold backup-restore path, ordinary
+Chat-tool parity, complete fence/transport and cancellation/reaping matrices,
+durable data/authorization coverage and the complete compiled migration. Each
+remaining requirement stays BLOCKED even if related subset tests pass.
+
+Thus successful subset runs still return **2 / BLOCKED**, while an executed gate
+failure returns **1 / FAIL**; no runtime/storage/controller subset returns 0. This
+does not change approvals, reclassify a capability or mark any whole phase complete.
+`--phase all` executes runtime/storage/controller/events/clients manifests and
+keeps the outstanding full-acceptance obligations; it is not a release shortcut.
+`--phase events` runs canonical HTTP, projection and production-capture tests.
+`--phase clients` runs the built workspace browser, native PTY, terminal projection
+and client transport fixtures. The browser tier requires explicit
+`ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1` and an absolute executable
+`ASTONISH_BOT_BROWSER_PATH`, plus a previously built Studio bundle. Without those
+inputs, it is BLOCKED while independent terminal tiers still run. Both phases
+retain full conversation/visual parity blockers; a named subset pass is not phase
+completion.
+`--phase` is rejected for other stages; partial/config/paid-provider flags remain
+rejected. File-first and durable-progress gates are unchanged. This is not
+Kubernetes, PostgreSQL, built-browser, native-PTY or release certification.
+
+### Controller executable evidence (full controller remains BLOCKED)
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py \
+  --stage chat-consolidation --phase controller --report /tmp/chat-controller-progress.json
+```
+
+The controller now executes these fixed selectors, not an unconditional placeholder:
+
+| Tier | Required tests and boundary |
+| --- | --- |
+| `controller-api` | `pkg/api`: `TestBotEnhancedChatBaseline`, `TestBotTitleConfirmedLaterQuestionContinuation`, `TestBotProgressRecoveryHTTP`, `TestBotProgressLifecycleHTTP`, `TestBotProgressRestartHTTP`, `TestBotTitleAnswerAuthorityHTTPRegression`, `TestBotHistoryStreamHTTPAcceptance`, `TestBotResumeNoReplayAfterEffect`. Isolated HTTP/worker progress, typed answers and history plus adapter no-replay; controlled models, not physical compute. |
+| `controller-daemon` | `pkg/daemon`: `TestBotEnhancedChatBaseline`, `TestBotFileFirstWorkerHTTP`, `TestBotWorkerPollRecoversCrashAfterDatabaseReopen`, `TestBotWorkerPublicationIdlePollAndUncertainReplay`, `TestProductionBotWorkerBorrowsChatResources`, `TestBotHomeSessionRecoveryPreflight`, `TestBotIntentHTTPWorkerDraftApprovalExactOnce`, `TestBotApproveContinueHTTPWorkerExactOnce`, `TestBotUncertainEffectRestartHTTPNoReplay`. HTTP title/search/schedule/owner-priority and file-first fixtures plus narrower lifecycle/resource checks; approval journeys revoke membership after admission and approval/requeue before claim. |
+| `controller-store` | `pkg/store/entstore`: `TestBotRuntimeSupervisorLeaseLossCancels`, `TestBotHomeFileCommitFence`, `TestBotApprovalResumeFenced`, `TestBotApprovalRequeueCurrentAuthority`, `TestBotApprovalConcurrentConsumption`, `TestBotProgressQueuedAuthorityLoss`, `TestBotAuthorizedScheduleQueuedReconciliation`, `TestBackupFileFirstRestoreGuards`, `TestBackupFileFirstRestoreFilesBeforeSQL`, `TestBackupFileFirstRestore`, `TestBackupFileFirstMappingRunAuthorityAndOpaqueContent`, `TestBackupFileFirstMappingIndependentOwnership`, `TestBackupFileFirstReconciliationPreservesQuiescence`. Temporary SQLite authority plus the files-before-SQL fault fixture; not physical cross-backend restore. |
+| `controller-docker` | `pkg/daemon`: `TestBotEnhancedChatNoPythonDocker`, `TestBotNewMessageDockerBetweenCallReproduction`, `TestBotEnhancedChatTeamNoPythonDocker`. Explicit opt-in physical personal and team default-layer subset, including a stopped-compute read; no all-mode or live Kubernetes claim. |
+
+The runtime manifest also requires `TestChatRuntimeRestrictedChildAuthority`,
+`TestChatRuntimeNestedDrillFences`, and `TestChatRuntimeChildCancellationJoinedReturn`
+with exact scope/mode/fence leaves. These exercise actual strict sub-agent and
+nested drill dispatch plus joined child-model cancellation; physical aliasing,
+transport reaping, and the full flow/plan authority matrix remain separate.
+The controller uncertain-effect case performs one actual HTTP write whose response
+is lost, then reopens SQLite and reconstructs the worker after terminal persistence.
+Repeated admission/resume/polls cannot repeat it; a separate authorized receipt GET
+cannot rewrite the old uncertain report. Models, classifier, isolation and sandbox
+transport/Home are controlled, so this is not mid-effect process-crash or generic
+production HTTP classification evidence.
+
+The first three tiers execute without Docker. The Docker tier requires explicit
+`ASTONISH_TEST_DOCKER=1`, `ASTONISH_SANDBOX_IMAGE` (test-owned, built from reviewed
+sources), and absolute `ASTONISH_BOT_HOME_TEST_LAYERS` containing
+`@base/rootfs/bin/sh`, as for storage above. No implicit image build/pull, Python
+installation, daemon restart, paid provider, cluster or production configuration
+is launched. Missing inputs block that tier, not the independent controlled tiers.
+
+`CONSOLIDATION_CONTROLLER_SUBTESTS` pins the personal/team children, title-answer
+options, schedule/owner-priority/paused-recovery wrappers, durable authority cases,
+publication failures, no-replay failures and restore guard cases. Concurrent approval
+consumption requires both scope children, each with eight contenders and one winner.
+Names are fixed,
+not discovered from test source or historical logs. Every required child must have
+this invocation's exact package-qualified run then pass, and every started test and
+package must finish. Malformed JSON evidence, missing children, skips, nonzero
+exits or execution failures are FAIL, never BLOCKED or accepted regression evidence.
+Owned logs and diagnostics are scrubbed; provider/configuration secrets and
+infrastructure opt-ins are excluded from controlled child environments.
+
+The strengthened no-Python fixture requires SUCCESS, exact **165 downloadable
+bytes after two disposable-compute evictions**, original retained session identity,
+the unchanged **24 total / 8 per-key hydration-open limits** and **15-second**
+controlled between-call limit. A reported earlier 22/7-open run is historical context only:
+the driver never imports it as evidence. Only a fresh successful execution can pass
+the named Docker tier, and that still cannot pass the controller phase.
+
+Explicit remaining BLOCKED obligations are:
+
+- `controller-all-mode-no-python`: combined scheduled/autonomous/continuation/delegate
+  physical no-Python execution and retained reuse/recovery across all modes/backends.
+- `controller-team-physical`: physical team ownership/lifecycle and exact bytes.
+- `controller-files-before-sql`: fault-injected restore ordering, interruption and rollback, covered by `TestBackupFileFirstRestoreFilesBeforeSQL`.
+- `controller-cold-cross-backend`: stopped-compute browse/download/cold restore without
+  GET provisioning or Bot startup, paused schedules and fresh ownership on both backends.
+- `controller-authority-matrix`: complete personal/team, three-mode lease, membership,
+  budget, exact approval, child authority and uncertain-effect no-replay matrix.
+
+A controller report therefore exits 2 when the available named tiers pass but gaps
+remain; any executed tier failure takes precedence and exits 1. `phase_acceptance`
+remains BLOCKED in either case. Built Studio, native PTY, live Kubernetes,
+PostgreSQL concurrency and paid-provider workflow are separately unverified.
+
+## File-first Bots (strict mandatory-tier gate; acceptance pending)
+
+```sh
+ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 \
+ASTONISH_TEST_DOCKER=1 \
+ASTONISH_TEST_TASK_CONTINUITY=1 \
+ASTONISH_BOT_BROWSER_PATH="${BOT_BROWSER:?Absolute executable browser}" \
+ASTONISH_SANDBOX_IMAGE="${BOT_TEST_IMAGE:?Existing local image}" \
+ASTONISH_BOT_HOME_TEST_LAYERS="${BOT_TEST_LAYERS:?Absolute existing layers}" \
+ASTONISH_TEST_DSN="${DISPOSABLE_BOT_TEST_DSN:?Dedicated disposable PostgreSQL}" \
+ASTONISH_BOTS_TEST_DB_ISOLATED=1 \
+KUBECONFIG="${BOT_TEST_KUBECONFIG:?Absolute dedicated config}" \
+ASTONISH_BOTS_K8S_CONTEXT="${BOT_TEST_CONTEXT:?Explicit current context}" \
+ASTONISH_BOTS_K8S_ISOLATED=1 ASTONISH_E2E_DEDICATED=1 \
+ASTONISH_E2E_SANDBOX_NAMESPACE="${BOT_TEST_NAMESPACE:?Dedicated sandbox namespace}" \
+ASTONISH_E2E_CONTROL_PLANE_NAMESPACE="${BOT_TEST_CONTROL_NAMESPACE:?Distinct control namespace}" \
+ASTONISH_E2E_HOMES_PVC="${BOT_TEST_HOMES_PVC:?Independent Bound RWX claim}" \
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage file-first \
+  --report /tmp/astonish-file-first-report.json
+```
+
+All inputs are explicit; no host paths, provider credentials or image defaults
+are inferred. On the development Mac the supplied browser may be
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, image
+`ghcr.io/sap/astonish-sandbox-base:dev`, and layers
+`/Users/I851355/Library/Application Support/astonish/sandbox/layers`; these are
+operator examples, not script defaults. Layers must contain
+`@base/rootfs/bin/sh`. Frontend dependencies must already be installed. The
+sandbox image must also be available to the dedicated cluster nodes.
+
+The driver first checks **all** required infrastructure, then makes read-only
+Docker image/daemon and Kubernetes context/namespace/Bound-RWX PVC probes. It
+never pulls images, switches contexts, provisions a database or changes a daemon.
+Kubernetes additionally needs pre-provisioned `astonish-layers` and
+`astonish-uppers` claims; namespace conventions and the shared E2E cleanup warning
+below apply. Explicit isolation acknowledgements are required, not proof of
+isolation. No provider secrets, production DSN/config, inherited GOFLAGS/MAKEFLAGS,
+live override or restart-stage variables enter controlled subprocesses. Only the
+PostgreSQL and Kubernetes tiers receive the disposable DSN, and only Kubernetes
+receives the dedicated kubeconfig. Local fixtures require no provider credentials.
+The existing Kubernetes bootstrap may still block/skip without its own setup;
+that cannot count as passing evidence and this driver never supplies fake keys.
+
+Required current-invocation gates after building Studio:
+
+| Tier | Exact tests |
+| --- | --- |
+| HTTP | `pkg/api`: `TestBotFileContentPersistenceHTTP` (personal/team), `TestBotFileDeliveryHTTP`, `TestBotFileFirstPublicationSSE` |
+| Worker | `pkg/daemon`: `TestBotFileFirstWorkerHTTP` (personal/team) |
+| Built browser | `pkg/api`: `TestBotFileWorkspaceBrowserAcceptance` (personal/team) |
+| Native PTY | `cmd/astonish`: `TestBotFileWorkspacePTYAcceptance` (personal/team) |
+| Physical Docker | `pkg/daemon`: `TestProductionBotWorkspaceDockerLive`; `pkg/sandbox/docker`: `TestBotHomeDockerPersistenceLive` |
+| Task continuity | `pkg/daemon`: `TestBotTaskContinuityHTTPAcceptance`, explicitly opted in with `ASTONISH_TEST_TASK_CONTINUITY=1` |
+| Public backup CLI | `cmd/astonish`: **`TestBotFileFirstBackupCLI`** — required implementation/evidence gap, never replaced by a library backup test |
+| Dedicated PostgreSQL | `pkg/store/entstore`, `-tags=integration`: `TestBotAgentPostgresContinuityCASProjection`, `TestBotAgentPostgresContinuityRestoreQuiescence`, `TestBotTaskWorkspaceArchivePostgresDocker` (all personal/team) |
+| Dedicated Kubernetes | `tests/e2e/bots`, `-tags=e2e`, `-timeout=20m`: `TestBotsLiveKubernetesRetainedHome` |
+
+Each Go command uses `-json -count=1`, exact top-level selectors, and requires
+package-qualified **run then pass** events plus package completion. Mandatory
+personal/team subtests must also run and pass. Empty/no-tests exit 0, skipped
+children, absent tests, foreign packages, unfinished tests/packages, and nonzero
+subprocess exits cannot pass. Independent test gates continue after failures;
+`TestBotFileFirstBackupCLI` not executing is explicitly **BLOCKED**. The JSON
+report includes every mandatory tier even when no commands could start, elapsed
+time, errors and unverified boundaries. No historical receipts are accepted.
+
+`--local-only`, `--preflight`, `--config`, `--postgres`, `--soak`, and
+`--real-provider` are rejected for this stage: PostgreSQL and Kubernetes are
+mandatory, not optional flags. Missing prerequisites exit **2/BLOCKED** before
+any launch. Failed tests exit **1/FAIL**; zero is possible only when every named
+gate passes. These are named-gate results, not full release certification.
+Full raw PostgreSQL sentinel/body-free coverage and the full deployed file-first
+workflow beyond the retained-home case remain unverified obligations, as does
+real-provider output quality. Backup implementation is still underway; no
+passing backup or full file-first acceptance is claimed here. Controlled Python
+self-tests test orchestration, not physical browser/PTY/Docker/cluster behavior.
+
 ## Durable progress (strict controlled acceptance)
 
 ```sh

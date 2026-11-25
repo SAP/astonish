@@ -1,20 +1,24 @@
 package api_test
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 // pinLegacyHTTPAttempt restores only the protocol pin of a historical queued
-// attempt in this fixture's owned SQLite file, before the worker has started.
+// attempt in this fixture's owned disk content and SQLite reference, before the worker starts.
 // Admission, authority, execution, assessment and publication still use production
 // stores and factories. No candidate or verdict is seeded, and production cannot
 // downgrade a run through SaveWork.
@@ -47,18 +51,45 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	if err := json.Unmarshal(raw, &storage); err != nil {
 		t.Fatal(err)
 	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(storage["bot_record_v2"]), &record); err != nil {
+		t.Fatal(err)
+	}
+	var ref store.BotContentRef
+	if err := json.Unmarshal(record["content"], &ref); err != nil {
+		t.Fatal(err)
+	}
+	scopeJSON, _ := json.Marshal(ref.Scope)
+	root := filepath.Join(f.dataDir, "bot-content", fmt.Sprintf("%x", sha256.Sum256(scopeJSON)))
+	if !strings.HasPrefix(ref.Key, "staged-v1/") || filepath.Base(ref.Key) != strings.TrimPrefix(ref.Key, "staged-v1/") {
+		t.Fatal("fixture requires its own staged content")
+	}
+	contentBytes, err := os.ReadFile(filepath.Join(root, filepath.Base(ref.Key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content map[string]json.RawMessage
+	if err := json.Unmarshal(contentBytes, &content); err != nil {
+		t.Fatal(err)
+	}
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(storage["bot_document"]), &envelope); err != nil {
+	if err := json.Unmarshal(content["stored"], &envelope); err != nil {
 		t.Fatal(err)
 	}
 	if len(envelope["work"]) != 0 {
 		t.Fatal("fixture attempt already has work")
 	}
-	input, err := f.repo.(store.BotRuntimeStore).LoadRunInput(f.ctx, run.BotID, run.ID)
-	if err != nil {
+	// This fixture pins queued content before claim. LoadRunInput is intentionally
+	// lease-bound and must not be used to bypass that production boundary.
+	var instructions string
+	if err := json.Unmarshal(envelope["Instructions"], &instructions); err != nil {
 		t.Fatal(err)
 	}
-	work := store.NewBotWorkState(store.BotWorkContract{BotID: run.BotID, RunID: run.ID, Version: run.Version, Instructions: input.Instructions, Charter: input.Version.Charter})
+	version, err := f.repo.GetVersion(f.ctx, run.BotID, run.Version)
+	if err != nil {
+		t.Fatalf("queued fixture version: %v", err)
+	}
+	work := store.NewBotWorkState(store.BotWorkContract{BotID: run.BotID, RunID: run.ID, Version: run.Version, Instructions: instructions, Charter: version.Charter})
 	if reviewed {
 		work = store.NewBotAgentWorkState(work.Contract)
 		work.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
@@ -67,15 +98,87 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	if err := work.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	envelope["work"], err = json.Marshal(work)
+	// Keep the typed codec's field order for its logical digest. Only the work
+	// pin changes; admission authority remains the original SQL control.
+	workJSON, err := json.Marshal(work)
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := json.Marshal(envelope)
+	stored := strings.Replace(string(content["stored"]), `"ExternalAdmissionValidated":`, `"work":`+string(workJSON)+`,"ExternalAdmissionValidated":`, 1)
+	var control map[string]json.RawMessage
+	if err := json.Unmarshal(record["control"], &control); err != nil {
+		t.Fatal(err)
+	}
+	logical := strings.TrimSuffix(stored, "}")
+	// Reconstruct typed Run coordination exactly as the production codec does;
+	// queued response projections can differ from their stored SQL controls.
+	var logicalRun store.BotRun
+	if err := json.Unmarshal(envelope["Run"], &logicalRun); err != nil {
+		t.Fatal(err)
+	}
+	runValue := reflect.ValueOf(&logicalRun).Elem()
+	for i := 0; i < runValue.NumField(); i++ {
+		name := runValue.Type().Field(i).Name
+		if name == "Work" || name == "Progress" || name == "TitleConfirmation" {
+			continue
+		}
+		if value, ok := control[name]; ok {
+			if err := json.Unmarshal(value, runValue.Field(i).Addr().Interface()); err != nil {
+				t.Fatalf("queued fixture control %s: %v", name, err)
+			}
+		}
+	}
+	runJSON, err := json.Marshal(logicalRun)
 	if err != nil {
 		t.Fatal(err)
 	}
-	storage["bot_document"] = string(updated)
+	logical = strings.Replace(logical, `"Run":`+string(envelope["Run"]), `"Run":`+string(runJSON), 1)
+	if admitted := control["ExternalAdmissionValidated"]; len(admitted) > 0 {
+		logical = strings.Replace(logical, `"ExternalAdmissionValidated":false`, `"ExternalAdmissionValidated":`+string(admitted), 1)
+	}
+	// Manual autonomous admission has a SQL-only owner pin. Rehydrate it in
+	// codec order for the digest without placing that authority on disk.
+	if owner := control["SkillAdmissionOwner"]; len(owner) > 0 && string(owner) != "null" {
+		logical = strings.Replace(logical, `"work":`, `"skill_admission_owner":`+string(owner)+`,"work":`, 1)
+	}
+	for _, field := range []struct{ sql, json string }{{"MandateRef", "mandate_ref"}, {"CallerCeiling", "caller_ceiling"}} {
+		if value := control[field.sql]; len(value) > 0 && string(value) != "null" {
+			logical += `,"` + field.json + `":` + string(value)
+		}
+	}
+	logical += "}"
+	record["logical_digest"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256([]byte(logical))))
+	control["Work"], _ = json.Marshal(struct {
+		SchemaVersion               int
+		Revision                    int64
+		Protocol                    store.BotWorkProtocol
+		Phase                       store.BotWorkPhase
+		RequirementsDigest          string
+		EmployeeReviewPolicy        store.BotEmployeeReviewPolicy
+		EmployeeReviewAttempts      int
+		EmployeeReviewPending       bool
+		EmployeeRepairPending       bool
+		ResponseOutcome             store.BotWorkResponseOutcome
+		Repairs                     int
+		SkillAuthorityConstraintRef string
+	}{SchemaVersion: work.SchemaVersion, Revision: work.Revision, Protocol: work.Protocol, Phase: work.Phase, RequirementsDigest: work.RequirementsDigest, EmployeeReviewPolicy: work.EmployeeReviewPolicy})
+	record["control"], _ = json.Marshal(control)
+	content["stored"] = json.RawMessage(stored)
+	updated, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.Key = fmt.Sprintf("staged-v1/%s-%d-%s", ref.Kind, ref.Revision, uuid.NewString())
+	ref.SizeBytes, ref.SHA256 = int64(len(updated)), fmt.Sprintf("%x", sha256.Sum256(updated))
+	if err := os.WriteFile(filepath.Join(root, filepath.Base(ref.Key)), updated, 0600); err != nil {
+		t.Fatal(err)
+	}
+	record["content"], _ = json.Marshal(ref)
+	updated, err = json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage["bot_record_v2"] = string(updated)
 	updated, err = json.Marshal(storage)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +189,14 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
 		t.Fatalf("legacy fixture pin: rows=%d err=%v", n, err)
+	}
+	// The production decoder must authenticate the new reference immediately;
+	// don't let a malformed test pin masquerade as a worker failure later.
+	if _, err := f.repo.GetRun(f.ctx, run.BotID, run.ID); err != nil {
+		t.Fatalf("queued fixture readback: %v", err)
+	}
+	if strings.Contains(string(updated), instructions) || strings.Contains(string(updated), `"bot_document"`) {
+		t.Fatal("protocol fixture leaked content into SQL")
 	}
 }
 
@@ -158,12 +269,10 @@ func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
 				t.Fatal("rejected candidate restored into Home")
 			}
 			for _, id := range ids {
-				if strings.Count(history, id) != 1 {
-					t.Fatalf("publication not independently visible once: %s count=%d", id, strings.Count(history, id))
-				}
+				assertCanonicalHTTPReport(t, history, id, finalText)
 			}
-			if strings.Count(history, finalText) != 3 {
-				t.Fatalf("want three distinct final reports, got %d", strings.Count(history, finalText))
+			if canonicalHTTPTextCount(t, history, finalText) != 3 {
+				t.Fatalf("want three distinct final reports, got %d", canonicalHTTPTextCount(t, history, finalText))
 			}
 			// Reconciliation/reload cannot publish the same committed result twice.
 			if err := f.worker.Poll(f.ctx); err != nil {
@@ -171,9 +280,7 @@ func TestBotWorkPublicationHTTPAcceptance(t *testing.T) {
 			}
 			reloaded := string(f.request("GET", historyPath, "", 200))
 			for _, id := range ids {
-				if strings.Count(reloaded, id) != 1 {
-					t.Fatal("duplicate after reconcile/reload", id)
-				}
+				assertCanonicalHTTPReport(t, reloaded, id, finalText)
 			}
 		})
 	}

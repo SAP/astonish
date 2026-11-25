@@ -6,9 +6,108 @@ Docker implements confined retained Task bundles and network-disabled Python/SQL
 helpers through `BotHomeWorkspaceBackend` and `BotHomeWorkspaceScriptBackend`.
 The helper image is separately provisioned and digest-pinned; no runtime pull,
 installation or host fallback occurs. Physical Docker acceptance lives in
-`bot_task_acceptance.py --stage workspace`. Kubernetes and OpenShell do not yet
-expose this new optional capability; existing Home reads/deletion remain unchanged.
+`bot_task_acceptance.py --stage workspace`. Direct Kubernetes also implements
+`BotHomeWorkspaceBackend`, but not the optional script-execution interface;
+physical support requires its dedicated live acceptance, not merely interface
+conformance. OpenShell exposes neither workspace interface.
+Existing Home lifecycle and deletion contracts remain unchanged.
 See [Task workspace](bot-task-workspace.md) for limits and publication recovery.
+
+## Additive retained-file capability (file-first foundation)
+
+`BotHomeFilesBackend` is separate from the generic `Backend`, provisioning
+(`BotHomeBackend`), buffered artifact reads (`BotHomeArtifactBackend`) and private
+Task workspace interfaces. Docker and direct Kubernetes implement the optional
+contract over their existing retained storage. Its operations are:
+
+- `ListBotHomeFiles` / `StatBotHomeFile` for ordinary working Home metadata;
+- `OpenBotHomeFile` for ranged, closeable streams and `WriteBotHomeFile` for
+  preconditioned atomic file replacement;
+- `PutBotContent` / `OpenBotContent` for protected immutable content;
+- `PublishBotArtifactSnapshot` for an immutable copy of actual working-file bytes.
+
+Ordinary mutable Home paths are not protected object keys. The trusted private
+workspace remains a separate root, inaccessible from agent runtime mounts; its
+Task-only listing is not the Home file tree. `BotContentRef` carries bounded
+ownership, version, key, digest, size and revision metadata, never a body or an
+authorization grant. Scope and write authority are checked by trusted composition.
+Read/list operations resolve registered storage and must not provision a Home,
+start a run or use daemon filesystem fallback. Listings default to 100 entries,
+cap at 500 and allow `.` only as a directory root; file paths remain canonical
+Home-relative paths. Streaming is independent of the old 16 MiB buffered artifact
+transport. Closing a stream must cancel and join its owned helper work.
+
+The compiled Linux file protocol reclaims crash-left `.stage-<32 lowercase hex>`
+regular, single-link files in the destination directory on the next authorized
+write/put/snapshot, before reserving quota. Reclamation holds the existing
+exclusive directory flock through stage creation, host commit approval and
+rename/cleanup: an active compatible writer in that directory must finish first;
+an independent writer in another directory is neither scanned nor deleted.
+Lookup uses confined `openat2`, verifies inode identity without following links,
+and fsyncs the directory after unlink. Reserved special files fail closed rather
+than being adopted or followed. This is namespace ownership plus the kernel lock,
+not an age/PID/receipt/content-derived authorization grant. Reads/list/startup
+remain non-mutating. Only exact file-protocol stage names are reclaimed by this
+protocol; ordinary dotfiles and workspace `.tmp-*` stages are untouched by it.
+Unrecovered directories and residues still consume physical quota.
+`TestCompiledHomeFilesCrashRecoveryPreservesIndependentWriter` executes SIGKILL,
+recovery, exact residue removal and independent active commit in Linux processes;
+`TestCompiledHomeFilesRecoveryRejectsSpecialStages` covers links/FIFO/directories.
+
+The compiled Linux **workspace** protocol has separate crash reclamation in
+`workspaceReclaimStages` (`pkg/sandbox/bot_home_workspace_compiled_recovery_linux.go`).
+Mutating workspace operations first try a nonblocking exclusive flock on a freshly
+opened root-directory descriptor, then take the exclusive `.workspace-lock`.
+Only with both holds may recovery run, before operation quota checks. If an active
+compatible writer holds the root lifetime lock, the newcomer takes a shared hold
+and skips recovery. The exclusive lifetime hold is downgraded to shared before
+operation dispatch and retained through host authorization and cleanup. Thus the
+host exchange may release `.workspace-lock` for nested writers without allowing
+recovery to delete a live stage or deadlock behind its callback. The data lock
+alone is not proof of stage inactivity.
+
+Recovery walks the confined workspace with an 8192-entry bound, reclaiming only
+exact `.tmp-<canonical lowercase UUID>` single-link regular files and exact
+`tasks/<task>/.revisions/.revision-stage-<canonical lowercase UUID>` directory
+trees. Reserved revision trees are validated before their children are deleted;
+confined `openat2`, inode/directory identity rechecks and directory fsync protect
+lookup and unlink. Links, special files and cross-mount lookups fail closed, not
+followed or adopted. Ordinary dotfiles, state, published revisions and historical
+`stage-<UUID>` revision names are preserved: those historical names are valid
+publication IDs, and missing receipts do not prove ownership or authorize
+cleanup. No age, PID, receipt, staged bytes or host approval supplies reclamation
+authority; cleanup never replays an uncertain publication. Reads/list/resolve do
+not reclaim, and an interrupted restore marker still requires disposal of that
+target rather than adoption or retry.
+`TestCompiledWorkspaceCrashRecovery`,
+`TestCompiledWorkspaceRecoveryPreservesActiveWriter`,
+`TestCompiledWorkspaceRecoveryNestedWriter`,
+`TestCompiledWorkspaceRecoveryPreservesRevisionsAndReads`,
+`TestCompiledWorkspaceRecoveryRejectsSpecialStages` and
+`TestCompiledWorkspaceRecoveryBeforeQuota` cover these boundaries. These source
+contracts and tests do not by themselves establish full physical backend acceptance.
+
+**OpenShell is unsupported for file-first Bots.** It deliberately does not
+implement `BotHomeFilesBackend`: its gateway contract does not supply the
+existing-only storage, protected immutable content and atomic commit guarantees
+needed here. Error-only stub methods would falsely advertise support. File-first
+admission/execution must reject the missing capability with a typed unsupported
+result, not degrade to buffered artifact reads or ordinary session file access.
+`TestBotHomeFileFirstCapabilitiesUnsupported` checks both configured and
+unconfigured backends while preserving ordinary session, retained Home and
+bounded artifact interfaces. `TestBotHomeOfflineRejectAndPurgeBlocker` separately
+checks the existing `ErrBotHomeUnsupported` purge result. Neither test claims live
+gateway proof; no gateway action is needed to discover unsupported capabilities.
+
+This is an additive storage foundation, **not completion of the file-first Bot
+cutover**. Durable pre-Home staging, verified binding of staged objects and
+team-owned template storage still require explicit composition and acceptance;
+there is no temporary-directory or SQL-body fallback. The new interface alone
+does not prove those paths, UI delivery or disk-authoritative Bot persistence.
+OverlayFS/layer composition, Home allocation, remounts and session cleanup remain
+unchanged. Docker and Kubernetes physical acceptance must be reported separately;
+missing configured infrastructure blocks that tier, not a simulated pass.
+See [Home retention](bot-home-retention.md) for lifecycle boundaries.
 
 > **Status (Incus removed).** Local sessions on macOS and Linux use Docker
 > OverlayFS (`pkg/sandbox/docker/`). `sandbox.backend: incus` is a legacy

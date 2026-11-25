@@ -170,14 +170,20 @@ func ComposeEmployeeMessage(ctx context.Context, status store.RunStatus, report 
 		// When a safe read-only/text-only candidate is delivered gracefully as
 		// AgentWorkPartial in BotWorkFinished, preserve the agent's candidate answer
 		// rather than replacing it with a generic "couldn't confirm completion" fallback.
-		gracefulPartial := status == store.RunPartial &&
-			opts.Work != nil &&
-			opts.Work.EmployeeReviewPolicy == store.BotEmployeeReviewEvidenceBoundV1 &&
-			opts.Work.Phase == store.BotWorkFinished &&
-			opts.Work.AgentWork != nil &&
-			opts.Work.AgentWork.Disposition == store.AgentWorkPartial &&
-			len(opts.Work.Unresolved) > 0 &&
-			reflect.DeepEqual(report.Unverified, opts.Work.Unresolved)
+		gracefulPartial := opts.Work.HasUsefulPartialReadOnlyEmployeeResult(status, report)
+		// Historical review/repair candidates retain their existing partial
+		// communication contract; they never become fresh read-only candidates.
+		if !gracefulPartial && opts.Work != nil && opts.Work.Candidate != nil && !opts.Work.Candidate.ReadOnlyResult && (opts.Work.EmployeeReviewAttempts > 0 || len(opts.Work.Criteria) > 0) {
+			strict := report
+			strict.Unverified = nil
+			// Older text-only review candidates predate runtime read attestation.
+			// This compatibility check never sets Candidate.ReadOnlyResult and
+			// never accepts positively uncertain effects.
+			if strict.EffectState == store.BotReportEffectsUnknown {
+				strict.EffectState = store.BotReportEffectsReadOnly
+			}
+			gracefulPartial = status == store.RunPartial && opts.Work.Phase == store.BotWorkFinished && opts.Work.AgentWork != nil && opts.Work.AgentWork.Disposition == store.AgentWorkPartial && len(opts.Work.Unresolved) > 0 && reflect.DeepEqual(report.Unverified, opts.Work.Unresolved) && store.BotReportIsReadOnlyResult(strict)
+		}
 		if cause == nil && ((!gracefulPartial && len(report.Unverified) != 0) || report.ReviewLimitation != nil || report.EffectState == store.BotReportEffectsUncertain) {
 			return store.NewBotEmployeeFallback(status, report, store.BotEmployeeOutcomeReason(status, report))
 		}

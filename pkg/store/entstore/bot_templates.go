@@ -1,9 +1,7 @@
 package entstore
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,8 +17,9 @@ import (
 // teamBotTemplateStore stores reviewed, independently copied definitions only.
 // No source Bot lookup is performed, so private records cannot leak implicitly.
 type teamBotTemplateStore struct {
-	client *teament.Client
-	auth   botRepositoryAuth
+	client  *teament.Client
+	auth    botRepositoryAuth
+	content *botIndependentContent
 }
 
 var _ store.BotTemplateStore = (*teamBotTemplateStore)(nil)
@@ -75,34 +74,6 @@ func validateBotTemplate(def store.BotTemplateDefinition) error {
 	}
 	return nil
 }
-func decodeBotTemplate(row *teament.BotTemplate) (*store.BotTemplate, error) {
-	// Reject unknown fields instead of silently dropping an accidentally stored
-	// credential/memory/grant field when presenting a supposedly safe definition.
-	raw, err := json.Marshal(row.Definition)
-	if err != nil {
-		return nil, err
-	}
-	if envelope, ok := row.Definition["bot_document"]; ok {
-		text, ok := envelope.(string)
-		if !ok || len(row.Definition) != 1 {
-			return nil, store.ErrBotInvalid
-		}
-		raw = []byte(text)
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	var def store.BotTemplateDefinition
-	if err := d.Decode(&def); err != nil {
-		return nil, store.ErrBotInvalid
-	}
-	if err := validateBotTemplate(def); err != nil {
-		return nil, err
-	}
-	if def.Name != row.Name {
-		return nil, store.ErrBotInvalid
-	}
-	return &store.BotTemplate{ID: row.ID, Revision: row.Revision, Definition: def, PublishedBy: row.PublishedBy, PublishedAt: row.PublishedAt}, nil
-}
 func (s *teamBotTemplateStore) Get(ctx context.Context, id uuid.UUID) (*store.BotTemplate, error) {
 	if _, err := s.authorize(ctx, false); err != nil {
 		return nil, err
@@ -111,7 +82,7 @@ func (s *teamBotTemplateStore) Get(ctx context.Context, id uuid.UUID) (*store.Bo
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	return decodeBotTemplate(row)
+	return s.decodeBotTemplate(ctx, row)
 }
 func (s *teamBotTemplateStore) List(ctx context.Context, page store.BotPage) ([]store.BotTemplate, error) {
 	if _, err := s.authorize(ctx, false); err != nil {
@@ -131,7 +102,7 @@ func (s *teamBotTemplateStore) List(ctx context.Context, page store.BotPage) ([]
 	}
 	result := make([]store.BotTemplate, 0, len(rows))
 	for _, row := range rows {
-		v, err := decodeBotTemplate(row)
+		v, err := s.decodeBotTemplate(ctx, row)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +126,21 @@ func (s *teamBotTemplateStore) Publish(ctx context.Context, def store.BotTemplat
 	if err := validateBotTemplate(def); err != nil {
 		return nil, err
 	}
-	data, err := botJSONMap(def)
+	id := uuid.New()
+	if expected > 0 {
+		old, err := s.client.BotTemplate.Query().Where(bottemplate.NameEQ(def.Name)).Only(ctx)
+		if err != nil {
+			return nil, teamBotError(err)
+		}
+		if old.Revision != expected {
+			return nil, store.ErrBotConflict
+		}
+		if _, err := s.decodeBotTemplate(ctx, old); err != nil {
+			return nil, err
+		}
+		id = old.ID
+	}
+	data, err := s.content.encode(ctx, id, store.BotContentTemplate, expected+1, def)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +152,7 @@ func (s *teamBotTemplateStore) Publish(ctx context.Context, def store.BotTemplat
 	now := time.Now().UTC()
 	var row *teament.BotTemplate
 	if expected == 0 {
-		row, err = tx.BotTemplate.Create().SetName(def.Name).SetDefinition(data).SetRevision(1).SetPublishedBy(actor).SetPublishedAt(now).Save(ctx)
+		row, err = tx.BotTemplate.Create().SetID(id).SetName(def.Name).SetDefinition(data).SetRevision(1).SetPublishedBy(actor).SetPublishedAt(now).Save(ctx)
 		if err != nil {
 			return nil, teamBotError(err)
 		}
@@ -194,7 +179,7 @@ func (s *teamBotTemplateStore) Publish(ctx context.Context, def store.BotTemplat
 	if err != nil {
 		return nil, err
 	}
-	result, err := decodeBotTemplate(row)
+	result, err := s.decodeBotTemplate(ctx, row)
 	if err != nil {
 		return nil, err
 	}

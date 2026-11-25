@@ -141,7 +141,11 @@ func TestPlanRevisionHTTPAcceptance(t *testing.T) {
 			queue(ToolCallTurn(name, updateArgs), TextTurn("Approval required."))
 			got := turn(StudioChatRequest{SessionID: id, Message: "Try completion", PlanMode: planMode, AutoApprove: true})
 			raw, _ := json.Marshal(got)
-			if !strings.Contains(string(raw), agent.PlanRuntimeUnapproved) || len(pool.ids) != 0 || !reflect.DeepEqual(before, snapshot(id)) {
+			wantBlocked := agent.PlanRuntimeUnapproved
+			if planMode {
+				wantBlocked = agent.RevisionToolBlocked(&agent.PromptOverrides{PlanMode: true}, "update_plan", map[string]any{"step": "one", "status": "complete"})
+			}
+			if !strings.Contains(string(raw), wantBlocked) || len(pool.ids) != 0 || !reflect.DeepEqual(before, snapshot(id)) {
 				t.Fatalf("unapproved planMode=%v wrapped=%v mutated or verified: %s", planMode, wrapped, raw)
 			}
 		}
@@ -617,14 +621,17 @@ func TestScopedChatRuntimeChannelPrincipalPreservesContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	env := setupMemoryHTTPAcceptance(t, NewMockLLM(), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	principal := execution.Principal{Kind: execution.PrincipalKindLocal, Authentication: execution.AuthMethodLocalOS, Surface: execution.SurfaceCode, Subject: "channel-user", Authenticated: true}
+	principal := execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug, Authenticated: true}
 	ctx, err = execution.WithPrincipal(ctx, principal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx = store.WithServices(ctx, &store.Services{Mode: store.ModePlatform, PlatformMCPServers: &channelRuntimeMCPStore{servers: []store.MCPServer{{Name: "scoped-channel", Transport: "sse", URL: "https://example.invalid/mcp", Enabled: boolPtr(true), CachedTools: cached}}}})
+	svc := *env.Services
+	svc.PlatformMCPServers = &channelRuntimeMCPStore{servers: []store.MCPServer{{Name: "scoped-channel", Transport: "sse", URL: "https://example.invalid/mcp", Enabled: boolPtr(true), CachedTools: cached}}}
+	ctx = store.WithServices(ctx, &svc)
 	ctx = agent.WithPromptOverrides(ctx, &agent.PromptOverrides{SessionContext: "existing channel context"})
 	bound := WithChannelRuntimeContext(ctx, nil)
 	if agent.RequestMCPGroupsFromContext(bound)["mcp:scoped-channel"] == nil {

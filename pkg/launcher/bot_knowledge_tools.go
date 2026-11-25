@@ -351,7 +351,7 @@ func (t *botOptionalSchemaTool) Run(ctx tool.Context, args any) (map[string]any,
 		}
 		// Validation rejected the concrete invocation before its handler ran.
 		// Record out-of-band; returned JSON is only feedback, never a receipt.
-		bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, Nonexecution: &bot.ToolNonexecutionReceipt{CallID: ctx.FunctionCallID(), ToolName: t.Name()}})
+		bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.NewToolNonexecutionOutcome(ctx, ctx.FunctionCallID(), t.Name(), args, bot.ToolFeedbackCorrectCall))
 		return map[string]any{"status": "invalid_request", "message": "Use known item IDs and captured evidence references, valid statuses and bounded content. This request did not update work.", "current": map[string]any{"staged": false, "message": "Optional request was not executed. Use the declared argument schema and retry only if useful; otherwise continue the assignment."}}, nil
 	}
 	return t.botRunnableTool.Run(ctx, args)

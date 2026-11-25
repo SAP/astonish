@@ -342,12 +342,12 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 					t.Fatalf("content repair bounds failed: %+v productions=%d reviews=%d", run, productions, reviews)
 				}
 				history := string(f.request("GET", historyPath, "", 200))
-				if strings.Contains(history, unsupported) || strings.Count(history, "bot-report:"+run.ID.String()) != 1 {
+				if strings.Contains(history, unsupported) || canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 {
 					t.Fatal("rejected or duplicate publication")
 				}
 				f.worker.Poll(f.ctx)
 				history = string(f.request("GET", historyPath, "", 200))
-				if strings.Count(history, "bot-report:"+run.ID.String()) != 1 || fetches != 1 || f.pool.calls != 1 {
+				if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 || fetches != 1 || f.pool.calls != 1 {
 					t.Fatal("replayed tools/publication")
 				}
 			})

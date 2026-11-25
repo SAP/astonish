@@ -62,11 +62,20 @@ class LauncherTests(unittest.TestCase):
                 create.assert_not_called()
                 self.assertNotIn('SECRET_SENTINEL', output.getvalue())
 
-    def test_task_run_projection_rejects_mixed_outer_task(self):
+    def test_task_run_projection_does_not_promote_private_outer_task(self):
         self.assertIn('task', launcher.EMPLOYEE_RUN_FIELDS)
         errors = []
-        row = dict(id='run', bot_id='bot', data={'Run': {'id':'run', 'bot_id':'bot', 'session_id':'session'}, 'task':{}})
-        self.assertIsNone(launcher.employee_run_session(row, errors)); self.assertTrue(errors)
+        # botStoredRun.task is a private revision, not the compact Run.task ref.
+        row = dict(id='run', bot_id='bot', data={'Run': {'id':'run', 'bot_id':'bot', 'session_id':'session'},
+                                               'task': {'session_id': 'private-session'}})
+        self.assertEqual(launcher.employee_run_session(row, errors), 'session')
+        self.assertEqual(errors, [])
+        del row['data']['Run']['session_id']
+        self.assertIsNone(launcher.employee_run_session(row, errors))
+        self.assertEqual(errors, [])
+        row['data']['session_id'] = 'private-session'
+        self.assertIsNone(launcher.employee_run_session(row, errors))
+        self.assertTrue(errors)
 
     def test_task_mode_fresh_exclusive_and_blocked(self):
         import io, json, hashlib

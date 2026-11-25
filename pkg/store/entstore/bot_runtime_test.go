@@ -80,6 +80,51 @@ func (runtimeTestBudget) SettleModel(context.Context, uuid.UUID, execution.Budge
 func (runtimeTestBudget) ReserveTool(context.Context, string) error { return nil }
 func (runtimeTestBudget) Check(context.Context) error               { return nil }
 
+func TestBotHomeFileCommitFence(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		for _, mode := range []string{"allowed", "stale-lease", "wrong-home", "cancelled", "callback-error"} {
+			t.Run(string(scope)+"/"+mode, func(t *testing.T) {
+				repo, _, owner, run, home := runtimeFixture(t, scope)
+				p, _ := execution.PrincipalFromContext(owner)
+				ctx := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: run.BotID, RunID: run.ID, Version: run.Version, ActorID: p.Subject, OrgSlug: "org", TeamSlug: "team"})
+				lease, err := repo.ClaimRun(ctx, store.BotClaimRequest{BotID: run.BotID, RunID: run.ID, WorkerID: "file-test", ExpiresAt: time.Now().Add(time.Minute)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				binding := home.home
+				switch mode {
+				case "stale-lease":
+					lease.Fence++
+				case "wrong-home":
+					binding.StorageKey += "wrong"
+				case "cancelled":
+					c, cancel := context.WithCancel(ctx)
+					cancel()
+					ctx = c
+				}
+				calls := 0
+				failure := errors.New("physical commit failed")
+				err = repo.withBotFileCommit(ctx, binding, lease, func() error {
+					calls++
+					if mode == "callback-error" {
+						return failure
+					}
+					return nil
+				})
+				if (err == nil) != (mode == "allowed") {
+					t.Fatalf("commit: %v", err)
+				}
+				if (calls == 1) != (mode == "allowed" || mode == "callback-error") {
+					t.Fatalf("unsafe callback count %d", calls)
+				}
+				if mode == "callback-error" && !errors.Is(err, failure) {
+					t.Fatal("lost physical error", err)
+				}
+			})
+		}
+	}
+}
+
 func TestBotAgentClaimInitializesUnstartedWork(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
@@ -376,9 +421,9 @@ func runtimeFixture(t *testing.T, scope store.BotScope) (*botRepository, store.B
 	var scoped store.BotStore
 	switch db := repo.db.(type) {
 	case personalBotDB:
-		scoped = &personalBotStore{client: db.client, auth: repo.auth}
+		scoped = &personalBotStore{client: db.client, content: db.content, auth: repo.auth}
 	case teamBotDB:
-		scoped = &teamBotStore{client: db.client, auth: repo.auth}
+		scoped = &teamBotStore{client: db.client, content: db.content, auth: repo.auth}
 	}
 	return repo, scoped, ctx, run, &runtimeTestHome{home: home}
 }
@@ -533,6 +578,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 				t.Fatal(err)
 			}
 			dsn := "file:" + filepath.Join(t.TempDir(), "work.db") + "?_fk=1&_busy_timeout=5000"
+			content := newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})
 			var closeDB func() error
 			var repo *botRepository
 			open := func() {
@@ -551,7 +597,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 					if err := c.Schema.Create(ctx); err != nil {
 						t.Fatal(err)
 					}
-					db, closeDB = personalBotDB{client: c}, c.Close
+					db, closeDB = personalBotDB{client: c, content: content}, c.Close
 				} else {
 					c := teament.NewClient(teament.Driver(driver))
 					if err != nil {
@@ -560,7 +606,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 					if err := c.Schema.Create(ctx); err != nil {
 						t.Fatal(err)
 					}
-					db, closeDB = teamBotDB{client: c}, c.Close
+					db, closeDB = teamBotDB{client: c, content: content}, c.Close
 				}
 				repo = &botRepository{db: db, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}}
 			}

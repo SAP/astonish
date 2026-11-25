@@ -72,7 +72,7 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 			fail := false
 			switch b := bots.(type) {
 			case *personalBotStore:
-				jobs = personalBotDB{client: b.client}.triggerScheduler()
+				jobs = personalBotDB{client: b.client, content: b.content}.triggerScheduler()
 				b.client.BotIntake.Use(func(next personal.Mutator) personal.Mutator {
 					return personal.MutateFunc(func(ctx context.Context, m personal.Mutation) (personal.Value, error) {
 						if fail {
@@ -82,7 +82,7 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 					})
 				})
 			case *teamBotStore:
-				jobs = teamBotDB{client: b.client}.triggerScheduler()
+				jobs = teamBotDB{client: b.client, content: b.content}.triggerScheduler()
 				b.client.BotIntake.Use(func(next team.Mutator) team.Mutator {
 					return team.MutateFunc(func(ctx context.Context, m team.Mutation) (team.Value, error) {
 						if fail {
@@ -121,9 +121,9 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 			var db botDraftDB
 			switch b := bots.(type) {
 			case *personalBotStore:
-				db = personalBotDB{client: b.client}
+				db = personalBotDB{client: b.client, content: b.content}
 			case *teamBotStore:
-				db = teamBotDB{client: b.client}
+				db = teamBotDB{client: b.client, content: b.content}
 			}
 			switch d := db.(type) {
 			case personalBotDB:

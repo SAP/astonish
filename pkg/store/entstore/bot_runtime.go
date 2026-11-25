@@ -62,8 +62,18 @@ type botWorkDB interface {
 	updateWorkRun(context.Context, botStoredRun, store.BotLease, time.Time) error
 }
 
+// encodeBotRunData keeps transaction-local content lookup optional without
+// widening botDraftDB or dropping capabilities from its concrete adapters.
+func encodeBotRunData(ctx context.Context, tx botDraftDB, saved botStoredRun) (map[string]any, error) {
+	d, ok := tx.(interface{ contentCodec() *botContentCodec })
+	if !ok {
+		return nil, store.ErrBotUnsupported
+	}
+	return d.contentCodec().encodeRun(ctx, saved)
+}
+
 func (d personalBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l store.BotLease, now time.Time) error {
-	data, err := botJSONMap(run)
+	data, err := d.contentCodec().encodeRun(ctx, run)
 	if err != nil {
 		return err
 	}
@@ -77,7 +87,7 @@ func (d personalBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l st
 	return nil
 }
 func (d teamBotDB) updateWorkRun(ctx context.Context, run botStoredRun, l store.BotLease, now time.Time) error {
-	data, err := botJSONMap(run)
+	data, err := d.contentCodec().encodeRun(ctx, run)
 	if err != nil {
 		return err
 	}
@@ -135,9 +145,8 @@ func (r *botRepository) SaveWork(ctx context.Context, q store.BotWorkUpdate) (*s
 		next.Revision++
 		run.Work = next
 		run.Run.Work = store.BuildBotWorkProjection(next)
-		if err := writer.updateWorkRun(ctx, *run, q.Lease, now); err != nil {
-			return err
-		}
+		var activity store.BotActivity
+		var activityBot store.Bot
 		if next.Protocol == store.BotWorkProtocolAgentLedV1 {
 			rec, err := tx.GetBot(ctx, q.Lease.BotID)
 			if err != nil {
@@ -150,8 +159,15 @@ func (r *botRepository) SaveWork(ctx context.Context, q store.BotWorkUpdate) (*s
 			if err != nil {
 				return err
 			}
-			activity := store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: now}
-			if err := insertBotRunStateActivity(ctx, tx, activity, fmt.Sprintf("work:%s:%d", q.Lease.RunID, next.Revision)); err != nil {
+			activity = store.BotActivity{BotID: q.Lease.BotID, RunID: &q.Lease.RunID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityRun, Payload: payload, CreatedAt: now}
+			activityBot = rec.Bot
+			run.Run.StateSequence, run.Run.StateCommittedAt = activity.Sequence, now
+		}
+		if err := writer.updateWorkRun(ctx, *run, q.Lease, now); err != nil {
+			return err
+		}
+		if next.Protocol == store.BotWorkProtocolAgentLedV1 {
+			if err := insertSavedBotRunStateActivity(ctx, tx, activityBot, run.Run, activity, fmt.Sprintf("work:%s:%d", q.Lease.RunID, next.Revision)); err != nil {
 				return err
 			}
 		}
@@ -214,7 +230,7 @@ func (r *botRepository) LoadRunInput(ctx context.Context, id store.BotID, runID 
 		if err != nil {
 			return err
 		}
-		input = store.BotRunInput{Progress: saved.Progress.Clone(), Task: saved.Task.Clone(), Work: saved.Work.Clone(), Bot: rec.Bot, Version: *version, Run: saved.Run, Goals: goals, Instructions: saved.Instructions, Attachments: saved.Attachments, ExternalAdmissionValidated: saved.ExternalAdmissionValidated}
+		input = store.BotRunInput{PlanMode: saved.PlanMode, Progress: saved.Progress.Clone(), Task: saved.Task.Clone(), Work: saved.Work.Clone(), Bot: rec.Bot, Version: *version, Run: saved.Run, Goals: goals, Instructions: saved.Instructions, Attachments: saved.Attachments, ExternalAdmissionValidated: saved.ExternalAdmissionValidated}
 		if c := saved.Run.TitleConfirmation; c != nil {
 			if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil {
 				return store.ErrBotInvalid

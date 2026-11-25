@@ -2,6 +2,8 @@ package entstore
 
 import (
 	"context"
+	"errors"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,7 @@ import (
 )
 
 type personalBotStore struct {
+	content      *botContentCodec
 	taskVerifier func(context.Context, store.BotTaskPublication, string) error
 	credentials  store.CredentialStore
 	client       *personalent.Client
@@ -32,7 +35,7 @@ type personalBotStore struct {
 }
 
 func (s *personalBotStore) repository() *botRepository {
-	return &botRepository{auth: s.auth, db: personalBotDB{client: s.client}}
+	return &botRepository{auth: s.auth, db: personalBotDB{client: s.client, content: s.content}}
 }
 func (s *personalBotStore) CreateDraft(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
 	return s.repository().CreateDraft(ctx, r)
@@ -66,14 +69,14 @@ func (d personalBotDB) ReadGoals(ctx context.Context, id uuid.UUID) ([]store.Bot
 	}
 	result := make([]store.BotGoal, 0, len(rows))
 	for _, row := range rows {
-		var g store.BotGoal
-		if err := botDecode(row.Data, &g); err != nil {
+		g, err := d.contentCodec().decodeGoal(ctx, id, row.Data)
+		if err != nil {
 			return nil, err
 		}
-		if g.ID != row.ID || g.BotID != id {
+		if g.ID != row.ID || g.BotID != id || g.Revision != row.Revision {
 			return nil, store.ErrBotInvalid
 		}
-		result = append(result, g)
+		result = append(result, *g)
 	}
 	return result, nil
 }
@@ -82,17 +85,17 @@ func (d personalBotDB) ReadGoal(ctx context.Context, id, goalID uuid.UUID) (*sto
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	var g store.BotGoal
-	if err := botDecode(row.Data, &g); err != nil {
+	g, err := d.contentCodec().decodeGoal(ctx, id, row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if g.ID != goalID || g.BotID != id || g.Revision != row.Revision {
 		return nil, store.ErrBotInvalid
 	}
-	return &g, nil
+	return g, nil
 }
 func (d personalBotDB) UpdateGoal(ctx context.Context, g store.BotGoal, revision int64) error {
-	data, err := botJSONMap(g)
+	data, err := d.contentCodec().encodeGoal(ctx, g)
 	if err != nil {
 		return err
 	}
@@ -122,20 +125,21 @@ func (d personalBotDB) AdvanceSequence(ctx context.Context, id uuid.UUID, seq in
 	return nil
 }
 func (d personalBotDB) ReadActivity(ctx context.Context, id uuid.UUID, after int64, limit int) ([]store.BotActivity, error) {
+	// Inline/cleanup records require no files; legacy bodies use the instrumented runtime reader.
+	store.MarkBotRuntimeIOProfileCovered(ctx)
+	query := store.ObserveBotActivity(ctx, "sql_activity_query", 0)
 	rows, err := d.client.BotOutbox.Query().Where(botoutbox.BotIDEQ(id), botoutbox.SequenceGT(after)).Order(personalent.Asc(botoutbox.FieldSequence)).Limit(limit).All(ctx)
+	query()
 	if err != nil {
 		return nil, err
 	}
 	result := make([]store.BotActivity, 0, len(rows))
 	for _, row := range rows {
-		var a store.BotActivity
-		if err := botDecode(row.Payload, &a); err != nil {
+		a, err := d.contentCodec().decodeActivity(ctx, id, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
+		if err != nil {
 			return nil, err
 		}
-		if a.BotID != id || a.Sequence != row.Sequence {
-			return nil, store.ErrBotInvalid
-		}
-		result = append(result, a)
+		result = append(result, *a)
 	}
 	return result, nil
 }
@@ -158,9 +162,9 @@ func (s *personalBotStore) RenewLease(ctx context.Context, l store.BotLease, exp
 func (s *personalBotStore) AppendActivity(ctx context.Context, l store.BotLease, a store.BotActivity) (store.BotActivity, error) {
 	return s.repository().AppendActivity(ctx, l, a)
 }
-func decodePersonalBotRun(row *personalent.BotRun) (*botStoredRun, error) {
-	var saved botStoredRun
-	if err := botDecode(row.Data, &saved); err != nil {
+func decodePersonalBotRun(ctx context.Context, codec *botContentCodec, row *personalent.BotRun) (*botStoredRun, error) {
+	saved, err := codec.decodeRun(ctx, row.BotID, row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if !saved.Run.ExecutionMode.Valid() || saved.Run.ID != row.ID || saved.Run.BotID != row.BotID || saved.Run.Version != row.Version || saved.Run.SessionID.String() != row.SessionID {
@@ -172,22 +176,22 @@ func decodePersonalBotRun(row *personalent.BotRun) (*botStoredRun, error) {
 	if row.LeaseExpiresAt != nil {
 		saved.Run.Lease.ExpiresAt = *row.LeaseExpiresAt
 	}
-	saved.Run.Progress = progressProjection(&saved)
-	return &saved, nil
+	saved.Run.Progress = progressProjection(saved)
+	return saved, nil
 }
 func (d personalBotDB) FindRun(ctx context.Context, id uuid.UUID, key string) (*botStoredRun, error) {
 	row, err := d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.IdempotencyKeyEQ(key)).Only(ctx)
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	return decodePersonalBotRun(row)
+	return decodePersonalBotRun(ctx, d.contentCodec(), row)
 }
 func (d personalBotDB) ReadRun(ctx context.Context, id, rid uuid.UUID) (*botStoredRun, error) {
 	row, err := d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.IDEQ(rid)).Only(ctx)
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	return decodePersonalBotRun(row)
+	return decodePersonalBotRun(ctx, d.contentCodec(), row)
 }
 func (d personalBotDB) ReadRuns(ctx context.Context, id uuid.UUID, limit int, after uuid.UUID) ([]store.BotRun, error) {
 	q := d.client.BotRun.Query().Where(botrun.BotIDEQ(id)).Order(personalent.Asc(botrun.FieldID)).Limit(limit)
@@ -200,7 +204,7 @@ func (d personalBotDB) ReadRuns(ctx context.Context, id uuid.UUID, limit int, af
 	}
 	out := make([]store.BotRun, 0, len(rows))
 	for _, row := range rows {
-		r, err := decodePersonalBotRun(row)
+		r, err := decodePersonalBotRun(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +216,7 @@ func (d personalBotDB) CountRunsSince(ctx context.Context, id uuid.UUID, since t
 	return d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.CreatedAtGTE(since)).Count(ctx)
 }
 func (d personalBotDB) InsertRun(ctx context.Context, saved botStoredRun, owner uuid.UUID) error {
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -232,7 +236,7 @@ func (d personalBotDB) ClaimLease(ctx context.Context, b botStoredRecord, saved 
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -246,15 +250,15 @@ func (d personalBotDB) ClaimLease(ctx context.Context, b botStoredRecord, saved 
 	return nil
 }
 func (d personalBotDB) RenewRunLease(ctx context.Context, l store.BotLease, now, expires time.Time) error {
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	control, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if control.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(personalInteractiveRunStatuses(saved.Run)...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LeaseExpiresAtGT(now), bot.LeaseExpiresAtLTE(expires)).SetLeaseExpiresAt(expires).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(personalInteractiveRunStatuses(control.run())...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LeaseExpiresAtGT(now), bot.LeaseExpiresAtLTE(expires)).SetLeaseExpiresAt(expires).Save(ctx)
 	if err != nil {
 		return personalBotError(err)
 	}
@@ -272,15 +276,15 @@ func (d personalBotDB) RenewRunLease(ctx context.Context, l store.BotLease, now,
 }
 
 func (d personalBotDB) AdvanceLeaseSequence(ctx context.Context, l store.BotLease, seq int64, now time.Time) error {
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	control, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if control.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(personalInteractiveRunStatuses(saved.Run)...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LastSeqEQ(seq), bot.LeaseExpiresAtGT(now)).AddLastSeq(1).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(personalInteractiveRunStatuses(control.run())...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LastSeqEQ(seq), bot.LeaseExpiresAtGT(now)).AddLastSeq(1).Save(ctx)
 	if err != nil {
 		return personalBotError(err)
 	}
@@ -302,32 +306,32 @@ func (s *personalBotStore) DecideApproval(ctx context.Context, q store.BotApprov
 func (s *personalBotStore) ConsumeApproval(ctx context.Context, q store.BotApprovalConsumption) error {
 	return s.repository().ConsumeApproval(ctx, q)
 }
-func decodePersonalBotApproval(row *personalent.BotApproval) (*store.BotApproval, error) {
-	var a store.BotApproval
-	if err := botDecode(row.Data, &a); err != nil {
+func decodePersonalBotApproval(ctx context.Context, c *botContentCodec, row *personalent.BotApproval) (*store.BotApproval, error) {
+	a, err := c.decodeApproval(ctx, row.BotID, row.Data)
+	if err != nil {
 		return nil, err
 	}
-	digest, err := a.Action.Digest()
-	if err != nil || digest != row.ActionDigest || a.ID != row.ID || a.BotID != row.BotID || a.RunID != row.RunID || a.Version != row.Version {
+	if a.ActionDigest != row.ActionDigest || a.ID != row.ID || a.BotID != row.BotID || a.RunID != row.RunID || a.Version != row.Version {
 		return nil, store.ErrBotInvalid
 	}
 	a.Status = store.ApprovalStatus(row.Status)
 	a.ExpiresAt = row.ExpiresAt
-	return &a, nil
+	a.CreatedAt = row.CreatedAt
+	return a, nil
 }
 func (d personalBotDB) FindApproval(ctx context.Context, id, rid uuid.UUID, digest string) (*store.BotApproval, error) {
 	row, err := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id), botapproval.RunIDEQ(rid), botapproval.ActionDigestEQ(digest)).Only(ctx)
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	return decodePersonalBotApproval(row)
+	return decodePersonalBotApproval(ctx, d.contentCodec(), row)
 }
 func (d personalBotDB) ReadApproval(ctx context.Context, id, aid uuid.UUID) (*store.BotApproval, error) {
 	row, err := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id), botapproval.IDEQ(aid)).Only(ctx)
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	return decodePersonalBotApproval(row)
+	return decodePersonalBotApproval(ctx, d.contentCodec(), row)
 }
 func (d personalBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit int, after uuid.UUID) ([]store.BotApproval, error) {
 	q := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id)).Order(personalent.Asc(botapproval.FieldID)).Limit(limit)
@@ -340,7 +344,7 @@ func (d personalBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit in
 	}
 	out := make([]store.BotApproval, 0, len(rows))
 	for _, row := range rows {
-		a, err := decodePersonalBotApproval(row)
+		a, err := decodePersonalBotApproval(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +353,7 @@ func (d personalBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit in
 	return out, nil
 }
 func (d personalBotDB) InsertApproval(ctx context.Context, a store.BotApproval) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeApproval(ctx, a)
 	if err != nil {
 		return err
 	}
@@ -357,7 +361,7 @@ func (d personalBotDB) InsertApproval(ctx context.Context, a store.BotApproval) 
 	return personalBotError(err)
 }
 func (d personalBotDB) UpdateApproval(ctx context.Context, a store.BotApproval, from store.ApprovalStatus, now time.Time) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeApproval(ctx, a)
 	if err != nil {
 		return err
 	}
@@ -394,7 +398,7 @@ func (d personalBotDB) FinishRun(ctx context.Context, b botStoredRecord, saved b
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -457,12 +461,12 @@ func (d personalBotDB) QuiesceBotRuns(ctx context.Context, id uuid.UUID, stop bo
 	}
 	out := make([]store.BotRun, 0, len(rows))
 	for _, row := range rows {
-		saved, err := decodePersonalBotRun(row)
+		saved, err := decodePersonalBotRun(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
 		next := quiescedBotRun(*saved, stop, now)
-		data, err := botJSONMap(next)
+		data, err := d.contentCodec().encodeRun(ctx, next)
 		if err != nil {
 			return nil, err
 		}
@@ -534,21 +538,29 @@ func (d personalBotDB) ReadTrackedItems(ctx context.Context, goalID uuid.UUID) (
 	if err != nil {
 		return nil, err
 	}
+	goal, err := d.client.BotGoal.Get(ctx, goalID)
+	if err != nil {
+		return nil, personalBotError(err)
+	}
 	out := make([]store.BotTrackedItem, 0, len(rows))
 	for _, row := range rows {
-		var item store.BotTrackedItem
-		if err := botDecode(row.Data, &item); err != nil {
+		item, err := d.contentCodec().decodeTracked(ctx, goal.BotID, row.Revision, row.Data)
+		if err != nil {
 			return nil, err
 		}
 		if item.ID != row.ID || item.GoalID != goalID || string(item.Status) != string(row.Status) {
 			return nil, store.ErrBotInvalid
 		}
-		out = append(out, item)
+		out = append(out, *item)
 	}
 	return out, nil
 }
 func (d personalBotDB) WriteTrackedItem(ctx context.Context, item store.BotTrackedItem, revision int64) error {
-	data, err := botJSONMap(item)
+	goal, err := d.client.BotGoal.Get(ctx, item.GoalID)
+	if err != nil {
+		return personalBotError(err)
+	}
+	data, err := d.contentCodec().encodeTracked(ctx, goal.BotID, item, revision)
 	if err != nil {
 		return err
 	}
@@ -621,10 +633,18 @@ func (s *personalBotStore) Correct(ctx context.Context, q store.BotCorrection) e
 var _ store.BotCorrectionReconciler = (*personalBotStore)(nil)
 
 func (s *personalBotStore) ReconcileCorrection(ctx context.Context, id store.BotID, correctionID uuid.UUID, memories store.MemoryStore) error {
-	return s.repository().ReconcileCorrection(ctx, id, correctionID, memories)
+	m, ok := memories.(*botDiskMemoryStore)
+	if !ok || m == nil || m.repo == nil || m.id != id || m.owner != s.client {
+		return store.ErrBotForbidden
+	}
+	db, ok := m.repo.db.(personalBotDB)
+	if !ok || db.client != s.client || db.content != s.content {
+		return store.ErrBotForbidden
+	}
+	return s.repository().ReconcileCorrection(ctx, id, correctionID, m)
 }
 func (d personalBotDB) ReadCorrectionMemory(ctx context.Context, id string) (*store.MemorySearchResult, error) {
-	return (&personalMemoryStore{client: d.client}).Get(ctx, id)
+	return findBotDiskMemory(ctx, d, id)
 }
 func (d personalBotDB) CorrectionSessionBot(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	row, err := d.client.Session.Get(ctx, id.String())
@@ -637,18 +657,8 @@ func (d personalBotDB) CorrectionSessionBot(ctx context.Context, id uuid.UUID) (
 	return *row.BotID, nil
 }
 func (d personalBotDB) ApplyCorrectionMemory(ctx context.Context, id, sessionID uuid.UUID, previous, replacement string, sqlite bool) error {
-	u := d.client.Memory.Update().Where(memory.IDEQ(id), memory.SessionIDEQ(sessionID), memory.ChunkTextEQ(previous)).SetChunkText(replacement).ClearEmbedding()
-	if sqlite {
-		u.SetTsv(replacement)
-	}
-	n, err := u.Save(ctx)
-	if err != nil {
-		return personalBotError(err)
-	}
-	if n != 1 {
-		return store.ErrBotConflict
-	}
-	return nil
+	// In-place attributed correction is unsupported; reviewed replacements retain history.
+	return store.ErrBotUnsupported
 }
 
 func (d personalBotDB) FindActivity(ctx context.Context, id uuid.UUID, key string) (*store.BotActivity, error) {
@@ -656,14 +666,7 @@ func (d personalBotDB) FindActivity(ctx context.Context, id uuid.UUID, key strin
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	var a store.BotActivity
-	if err := botDecode(row.Payload, &a); err != nil {
-		return nil, err
-	}
-	if a.BotID != id || a.Sequence != row.Sequence || string(a.Kind) != row.Kind {
-		return nil, store.ErrBotInvalid
-	}
-	return &a, nil
+	return d.contentCodec().decodeActivity(ctx, id, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
 }
 func (d personalBotDB) AdvanceCorrection(ctx context.Context, rec botStoredRecord, now time.Time) error {
 	n, err := d.client.Bot.Update().Where(bot.IDEQ(rec.Bot.ID), bot.RevisionEQ(rec.Bot.Revision), bot.LastSeqEQ(rec.LastSequence), bot.StatusNEQ(bot.StatusDeleted)).AddRevision(1).AddLastSeq(1).SetUpdatedAt(now).Save(ctx)
@@ -809,10 +812,17 @@ func (d personalBotDB) PurgeBot(ctx context.Context, rec botStoredRecord, cutoff
 	if _, err := d.client.BotOutbox.Delete().Where(botoutbox.BotIDEQ(id)).Exec(ctx); err != nil {
 		return err
 	}
+	// All ownership and physical-cleanup checks passed under the root lock.
+	// Delete staging before SQL forgets its owner; rollback leaves a retryable
+	// irreversible tombstone, never a successful purge with leftover bytes.
+	if err := d.contentCodec().purgeStaging(ctx, rec); err != nil {
+		return err
+	}
 	return personalBotError(d.client.Bot.DeleteOneID(id).Exec(ctx))
 }
 
 type personalBotDB struct {
+	content     *botContentCodec
 	client      *personalent.Client
 	afterCommit *[]func()
 }
@@ -832,8 +842,11 @@ func (d personalBotDB) Transaction(ctx context.Context, fn func(botDraftDB) erro
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	operation, end := sandbox.WithBotHomeFileOperation(ctx)
+	defer end()
 	var callbacks []func()
-	if err := fn(personalBotDB{client: tx.Client(), afterCommit: &callbacks}); err != nil {
+	callbackErr := fn(personalBotDB{client: tx.Client(), content: transactionBotContentCodec(d.content, operation), afterCommit: &callbacks})
+	if err := errors.Join(callbackErr, end()); err != nil {
 		return err
 	}
 	if err := personalBotError(tx.Commit()); err != nil {
@@ -918,21 +931,14 @@ func (d personalBotDB) ReadVersion(ctx context.Context, id uuid.UUID, version in
 	if err != nil {
 		return nil, personalBotError(err)
 	}
-	var v store.BotVersion
-	if err := botDecode(row.Definition, &v); err != nil {
-		return nil, err
-	}
-	if v.BotID != id || v.Version != version || v.SchemaVersion != store.BotSchemaVersion {
-		return nil, store.ErrBotInvalid
-	}
-	return &v, nil
+	return d.contentCodec().decodeVersion(ctx, id, version, row.Definition)
 }
 func (d personalBotDB) InsertVersion(ctx context.Context, v store.BotVersion, hash string) error {
-	data, err := botJSONMap(v)
+	data, err := d.contentCodec().encodeVersion(ctx, v)
 	if err != nil {
 		return err
 	}
-	_, err = d.client.BotVersion.Create().SetBotID(v.BotID).SetVersion(v.Version).SetSchemaVersion(v.SchemaVersion).SetDefinition(data).SetContentHash(hash).SetCreatedBy(v.CreatedBy).SetChangeReason(v.ChangeReason).SetCreatedAt(v.CreatedAt).Save(ctx)
+	_, err = d.client.BotVersion.Create().SetBotID(v.BotID).SetVersion(v.Version).SetSchemaVersion(v.SchemaVersion).SetDefinition(data).SetContentHash(hash).SetCreatedBy(v.CreatedBy).SetCreatedAt(v.CreatedAt).Save(ctx)
 	return personalBotError(err)
 }
 func (d personalBotDB) InsertHomeSession(ctx context.Context, b store.Bot) error {
@@ -940,7 +946,7 @@ func (d personalBotDB) InsertHomeSession(ctx context.Context, b store.Bot) error
 	return personalBotError(err)
 }
 func (d personalBotDB) InsertGoal(ctx context.Context, g store.BotGoal) error {
-	data, err := botJSONMap(g)
+	data, err := d.contentCodec().encodeGoal(ctx, g)
 	if err != nil {
 		return err
 	}
@@ -948,7 +954,7 @@ func (d personalBotDB) InsertGoal(ctx context.Context, g store.BotGoal) error {
 	return personalBotError(err)
 }
 func (d personalBotDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeActivity(ctx, a)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,12 +26,20 @@ func TestRestorePlatformBackupSQLiteFreshTarget(t *testing.T) {
 			name = "explicit-runtime-options"
 		}
 		t.Run(name, func(t *testing.T) {
-			testRestorePlatformBackupSQLiteFreshTarget(t, PlatformRestoreOptions{EnableScheduledJobs: enable, IncludeTransient: enable})
+			testRestorePlatformBackupSQLiteFreshTarget(t, PlatformRestoreOptions{EnableScheduledJobs: enable, IncludeTransient: enable}, false)
 		})
 	}
 }
 
-func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformRestoreOptions) {
+func TestBotRestorePlatformBackupSQLiteRejectsSQLOnlyRecovery(t *testing.T) {
+	for _, enable := range []bool{false, true} {
+		t.Run(fmt.Sprint(enable), func(t *testing.T) {
+			testRestorePlatformBackupSQLiteFreshTarget(t, PlatformRestoreOptions{EnableScheduledJobs: enable, IncludeTransient: enable}, true)
+		})
+	}
+}
+
+func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformRestoreOptions, includeBots bool) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
 	sourceDSN := "file:" + filepath.Join(sourceDir, "platform.db")
@@ -78,69 +87,116 @@ func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformResto
 	if err := orgStore.Teams().AddMember(ctx, &store.TeamMembership{UserID: userID, TeamID: team.ID, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "restore", TeamSlug: "ops", Authenticated: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := uuid.MustParse(userID)
-	botIDs := map[store.BotScope]uuid.UUID{}
-	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		var repo store.BotStore
-		if scope == store.BotScopePersonal {
-			repo = orgStore.ForUser(userID).Bots()
-		} else {
-			repo = orgStore.ForTeam("ops").Bots()
+	if includeBots {
+		if err := os.MkdirAll(filepath.Join(sourceDir, "bot-content"), 0700); err != nil {
+			t.Fatal(err)
 		}
-		v := store.DefaultBotVersion()
-		v.Charter = "Retain this responsibility"
-		b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Backup Bot", OwnerID: owner, Version: v, IdempotencyKey: "backup-bot", Goals: []store.BotGoal{{Title: "Delivery", CompletionCriteria: "Received"}}})
+		botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "restore", TeamSlug: "ops", Authenticated: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		botIDs[scope] = b.ID
-		goals, err := repo.ListGoals(botCtx, b.ID)
-		if err != nil {
+		owner := uuid.MustParse(userID)
+		botIDs := map[store.BotScope]uuid.UUID{}
+		for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+			var repo store.BotStore
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			} else {
+				repo = orgStore.ForTeam("ops").Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "Retain this responsibility"
+			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Backup Bot", OwnerID: owner, Version: v, IdempotencyKey: "backup-bot", Goals: []store.BotGoal{{Title: "Delivery", CompletionCriteria: "Received"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			botIDs[scope] = b.ID
+			goals, err := repo.ListGoals(botCtx, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.SaveTrackedItem(botCtx, b.ID, store.BotTrackedItem{ID: uuid.New(), GoalID: goals[0].ID, Title: "Confirm delivery", Status: store.BotTrackedOpen}, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.Correct(botCtx, store.BotCorrection{ID: uuid.New(), BotID: b.ID, ExpectedRevision: 1, SupersededSource: "memory:date", Replacement: "Friday", Evidence: store.BotEvidence{Kind: store.BotEvidenceOwnerConfirmation, ActorID: owner, Source: "owner", Summary: "Date corrected", ObservedAt: time.Now().UTC()}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deletedIDs := map[store.BotScope]uuid.UUID{}
+		deletedUntil := map[store.BotScope]time.Time{}
+		for scope := range botIDs {
+			var repo store.BotStore
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			} else {
+				repo = orgStore.ForTeam("ops").Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "Retained deletion"
+			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Deleted Bot", OwnerID: owner, Version: v, IdempotencyKey: "deleted"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.BeginDelete(botCtx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Retain for restore"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deletedIDs[scope] = b.ID
+			deletedUntil[scope] = *b.RestoreUntil
+		}
+		for scope, id := range botIDs {
+			dbPath := filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db")
+			if scope == store.BotScopePersonal {
+				dbPath = filepath.Join(sourceDir, "orgs", "restore", "personal", userID+".db")
+			}
+			seedBotRecoveryRows(t, dbPath, id)
+		}
+		if _, err := orgStore.ForTeam("ops").BotTemplates().Publish(botCtx, store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Backup template", Charter: "Reviewed public observation"}, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := repo.SaveTrackedItem(botCtx, b.ID, store.BotTrackedItem{ID: uuid.New(), GoalID: goals[0].ID, Title: "Confirm delivery", Status: store.BotTrackedOpen}, 1); err != nil {
-			t.Fatal(err)
+		archivePath := filepath.Join(t.TempDir(), "unsupported.astonish-backup")
+		if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); !errors.Is(err, store.ErrBotUnsupported) {
+			t.Fatalf("SQL-only Bot export must fail closed: %v", err)
 		}
-		if err := repo.Correct(botCtx, store.BotCorrection{ID: uuid.New(), BotID: b.ID, ExpectedRevision: 1, SupersededSource: "memory:date", Replacement: "Friday", Evidence: store.BotEvidence{Kind: store.BotEvidenceOwnerConfirmation, ActorID: owner, Source: "owner", Summary: "Date corrected", ObservedAt: time.Now().UTC()}}); err != nil {
-			t.Fatal(err)
+		if _, err := backup.Verify(archivePath); err == nil {
+			t.Fatal("failed export left a valid SQL-only archive")
 		}
-	}
-	deletedIDs := map[store.BotScope]uuid.UUID{}
-	deletedUntil := map[store.BotScope]time.Time{}
-	for scope := range botIDs {
-		var repo store.BotStore
-		if scope == store.BotScopePersonal {
-			repo = orgStore.ForUser(userID).Bots()
-		} else {
-			repo = orgStore.ForTeam("ops").Bots()
+		for scope, id := range botIDs {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			b, err := repo.Get(botCtx, id)
+			if err != nil || b.Status != store.BotActive {
+				t.Fatalf("failed export changed source Bot: %+v %v", b, err)
+			}
+			retained, err := repo.Get(botCtx, deletedIDs[scope])
+			if err != nil || retained.Status != store.BotDeleted || retained.RestoreUntil == nil || !retained.RestoreUntil.Equal(deletedUntil[scope]) {
+				t.Fatalf("failed export changed retained deletion: %+v %v", retained, err)
+			}
+			version, err := repo.GetVersion(botCtx, id, 1)
+			if err != nil || version.Charter != "Retain this responsibility" {
+				t.Fatalf("failed export changed disk content: %+v %v", version, err)
+			}
+			goals, err := repo.ListGoals(botCtx, id)
+			if err != nil || len(goals) != 1 || goals[0].Revision != 2 || goals[0].CompletionCriteria != "Received" {
+				t.Fatalf("failed export changed goal evidence: %+v %v", goals, err)
+			}
+			items, err := repo.ListTrackedItems(botCtx, id, goals[0].ID)
+			if err != nil || len(items) != 1 || items[0].Title != "Confirm delivery" {
+				t.Fatalf("failed export changed commitments: %+v %v", items, err)
+			}
+			activity, err := repo.ListActivity(botCtx, id, 0, 50)
+			if err != nil || len(activity) != 3 {
+				t.Fatalf("failed export changed activity: %+v %v", activity, err)
+			}
+			dbPath := filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db")
+			if scope == store.BotScopePersonal {
+				dbPath = filepath.Join(sourceDir, "orgs", "restore", "personal", userID+".db")
+			}
+			assertBotRecoveryRows(t, dbPath)
 		}
-		v := store.DefaultBotVersion()
-		v.Charter = "Retained deletion"
-		b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Deleted Bot", OwnerID: owner, Version: v, IdempotencyKey: "deleted"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err = repo.BeginDelete(botCtx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Retain for restore"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		deletedIDs[scope] = b.ID
-		deletedUntil[scope] = *b.RestoreUntil
-	}
-	for scope, id := range botIDs {
-		dbPath := filepath.Join(sourceDir, "orgs", "restore", "teams", "ops.db")
-		if scope == store.BotScopePersonal {
-			dbPath = filepath.Join(sourceDir, "orgs", "restore", "personal", userID+".db")
-		}
-		seedBotRecoveryRows(t, dbPath, id)
-	}
-	template, err := orgStore.ForTeam("ops").BotTemplates().Publish(botCtx, store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Backup template", Charter: "Reviewed public observation"}, 0)
-	if err != nil {
-		t.Fatal(err)
+		return
 	}
 	archivePath := filepath.Join(t.TempDir(), "restore.astonish-backup")
 	if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); err != nil {
@@ -190,79 +246,17 @@ func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformResto
 	} else {
 		assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db"), "scheduled_jobs", "status", "active")
 	}
-	for scope := range botIDs {
-		dbPath := filepath.Join(targetDir, "orgs", "restore", "teams", "ops.db")
-		if scope == store.BotScopePersonal {
-			dbPath = filepath.Join(targetDir, "orgs", "restore", "personal", userID+".db")
-		}
-		assertBotRecoveryRows(t, dbPath)
-	}
-	restoredOrg, err := target.ForOrg("restore")
-	if err != nil {
-		t.Fatal(err)
-	}
-	restoredTemplate, err := restoredOrg.ForTeam("ops").BotTemplates().Get(botCtx, template.ID)
-	if err != nil || restoredTemplate.Revision != 1 || restoredTemplate.Definition.Charter != template.Definition.Charter {
-		t.Fatalf("template restore: %+v %v", restoredTemplate, err)
-	}
-	for scope, id := range botIDs {
-		var repo store.BotStore
-		var sessions store.SessionStore
-		if scope == store.BotScopePersonal {
-			ds := restoredOrg.ForUser(userID)
-			repo = ds.Bots()
-			sessions = ds.Sessions()
-		} else {
-			ds := restoredOrg.ForTeam("ops")
-			repo = ds.Bots()
-			sessions = ds.Sessions()
-		}
-		retained, err := repo.Get(botCtx, deletedIDs[scope])
-		if err != nil || retained.Status != store.BotDeleted || retained.RestoreUntil == nil || !retained.RestoreUntil.Equal(deletedUntil[scope]) {
-			t.Fatalf("retained deletion: %+v %v", retained, err)
-		}
-		restored, err := repo.Restore(botCtx, store.BotLifecycleRequest{BotID: retained.ID, ExpectedRevision: retained.Revision, ActorID: owner, Reason: "Restore after backup"})
-		if err != nil || restored.Status != store.BotPaused {
-			t.Fatalf("restore retained Bot: %+v %v", restored, err)
-		}
-		b, err := repo.Get(botCtx, id)
-		if err != nil {
-			t.Fatalf("restored %s Bot: %v", scope, err)
-		}
-		if b.Status != store.BotPaused || b.Revision != 3 || b.OwnerID != owner {
-			t.Fatalf("restored Bot state: %+v", b)
-		}
-		v, err := repo.GetVersion(botCtx, id, 1)
-		if err != nil || v.Charter != "Retain this responsibility" {
-			t.Fatalf("version: %+v %v", v, err)
-		}
-		goals, err := repo.ListGoals(botCtx, id)
-		if err != nil || len(goals) != 1 || goals[0].Revision != 2 {
-			t.Fatalf("goals: %+v %v", goals, err)
-		}
-		items, err := repo.ListTrackedItems(botCtx, id, goals[0].ID)
-		if err != nil || len(items) != 1 {
-			t.Fatalf("commitments: %+v %v", items, err)
-		}
-		activity, err := repo.ListActivity(botCtx, id, 0, 50)
-		if err != nil || len(activity) != 3 {
-			t.Fatalf("activity: %+v %v", activity, err)
-		}
-		meta, err := sessions.GetSessionMeta(botCtx, b.HomeSessionID.String())
-		if err != nil || meta == nil || meta.BotID != id.String() || meta.Retention != store.SessionRetentionBot {
-			t.Fatalf("home linkage: %+v %v", meta, err)
-		}
-		other := restoredOrg.ForTeam("ops").Bots()
-		if scope == store.BotScopeTeam {
-			other = restoredOrg.ForUser(userID).Bots()
-		}
-		if _, err := other.Get(botCtx, id); !errors.Is(err, store.ErrBotNotFound) {
-			t.Fatalf("restored cross-scope leak: %v", err)
-		}
-	}
 }
 
 func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
+	testRestorePlatformBackupSQLiteMappedOrgAndTeam(t, false)
+}
+
+func TestBotRestorePlatformBackupSQLiteRejectsMappedSQLOnlyRecovery(t *testing.T) {
+	testRestorePlatformBackupSQLiteMappedOrgAndTeam(t, true)
+}
+
+func testRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T, includeBots bool) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
 	sourceDSN := "file:" + filepath.Join(sourceDir, "platform.db")
@@ -304,26 +298,50 @@ func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
 	if err := orgStore.Teams().AddMember(ctx, &store.TeamMembership{UserID: userID, TeamID: team.ID, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
-	botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "oldorg", TeamSlug: "ops", Authenticated: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := map[store.BotScope]uuid.UUID{}
-	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
-		var repo store.BotStore = orgStore.ForTeam("ops").Bots()
-		if scope == store.BotScopePersonal {
-			repo = orgStore.ForUser(userID).Bots()
+	if includeBots {
+		if err := os.MkdirAll(filepath.Join(sourceDir, "bot-content"), 0700); err != nil {
+			t.Fatal(err)
 		}
-		v := store.DefaultBotVersion()
-		v.Charter = "oldorg"
-		b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "ops", OwnerID: uuid.MustParse(userID), Version: v, IdempotencyKey: "mapped", Goals: []store.BotGoal{{Title: "oldorg", CompletionCriteria: userID}}})
+		botCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: userID, OrgSlug: "oldorg", TeamSlug: "ops", Authenticated: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		ids[scope] = b.ID
-		if err := repo.MarkRead(botCtx, store.BotReadCursor{BotID: b.ID, ViewerID: uuid.MustParse(userID), Sequence: 1}); err != nil {
-			t.Fatal(err)
+		ids := map[store.BotScope]uuid.UUID{}
+		for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "oldorg"
+			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "ops", OwnerID: uuid.MustParse(userID), Version: v, IdempotencyKey: "mapped", Goals: []store.BotGoal{{Title: "oldorg", CompletionCriteria: userID}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids[scope] = b.ID
+			if err := repo.MarkRead(botCtx, store.BotReadCursor{BotID: b.ID, ViewerID: uuid.MustParse(userID), Sequence: 1}); err != nil {
+				t.Fatal(err)
+			}
 		}
+		archivePath := filepath.Join(t.TempDir(), "unsupported-mapped.astonish-backup")
+		if err := source.ExportPlatformBackup(ctx, archivePath, PlatformBackupExportOptions{Backend: "sqlite"}); !errors.Is(err, store.ErrBotUnsupported) {
+			t.Fatalf("SQL-only Bot mapping export must fail closed: %v", err)
+		}
+		for scope, id := range ids {
+			var repo store.BotStore = orgStore.ForTeam("ops").Bots()
+			if scope == store.BotScopePersonal {
+				repo = orgStore.ForUser(userID).Bots()
+			}
+			b, err := repo.Get(botCtx, id)
+			if err != nil || b.Name != "ops" || b.OwnerID.String() != userID || b.Status != store.BotDraft {
+				t.Fatalf("failed export changed source ownership: %+v %v", b, err)
+			}
+			v, err := repo.GetVersion(botCtx, id, 1)
+			if err != nil || v.Charter != "oldorg" || v.CreatedBy.String() != userID {
+				t.Fatalf("failed export changed reviewed content: %+v %v", v, err)
+			}
+		}
+		return
 	}
 	newUserID := uuid.NewString()
 
@@ -359,51 +377,6 @@ func TestRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T) {
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "neworg", "org.db"), "teams", "slug", "platform")
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "neworg", "org.db"), "teams", "schema_name", "team_platform")
 	assertRestoredTableContains(t, filepath.Join(targetDir, "orgs", "neworg", "teams", "platform.db"), "apps", "slug", "backup-app")
-	newCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: newUserID, OrgSlug: "neworg", TeamSlug: "platform", Authenticated: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ods, err := target.ForOrg("neworg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for scope, id := range ids {
-		var repo store.BotStore = ods.ForTeam("platform").Bots()
-		var sessions store.SessionStore = ods.ForTeam("platform").Sessions()
-		if scope == store.BotScopePersonal {
-			repo = ods.ForUser(newUserID).Bots()
-			sessions = ods.ForUser(newUserID).Sessions()
-		}
-		b, err := repo.Get(newCtx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if b.Name != "ops" || b.OwnerID.String() != newUserID || b.Status != store.BotDraft {
-			t.Fatalf("mapped Bot: %+v", b)
-		}
-		v, err := repo.GetVersion(newCtx, id, 1)
-		if err != nil || v.Charter != "oldorg" || v.CreatedBy.String() != userID {
-			t.Fatalf("changed reviewed version: %+v %v", v, err)
-		}
-		goals, err := repo.ListGoals(newCtx, id)
-		if err != nil || len(goals) != 1 || goals[0].Title != "oldorg" || goals[0].CompletionCriteria != userID {
-			t.Fatalf("changed evidence: %+v %v", goals, err)
-		}
-		meta, err := sessions.GetSessionMeta(newCtx, b.HomeSessionID.String())
-		if err != nil || meta.UserID != newUserID || meta.BotID != id.String() {
-			t.Fatalf("mapped home: %+v %v", meta, err)
-		}
-		if err := repo.MarkRead(newCtx, store.BotReadCursor{BotID: id, ViewerID: uuid.MustParse(newUserID), Sequence: 1}); err != nil {
-			t.Fatal(err)
-		}
-		after, err := repo.Get(newCtx, id)
-		if err != nil || after.Revision != b.Revision {
-			t.Fatal("mapped read cursor lost")
-		}
-		if _, err := repo.Get(botCtx, id); !errors.Is(err, store.ErrBotForbidden) {
-			t.Fatalf("old principal accepted: %v", err)
-		}
-	}
 	if _, err := os.Stat(filepath.Join(targetDir, "orgs", "oldorg")); !os.IsNotExist(err) {
 		t.Fatalf("old org directory exists after mapped restore, stat error = %v", err)
 	}
@@ -959,12 +932,11 @@ func assertBotRecoveryRows(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// Refused export must not quiesce, revoke, consume, or discard source state.
 	for _, q := range []string{
-		`SELECT COUNT(*) FROM bots WHERE status='active' OR lease_expires_at IS NOT NULL OR cleanup_complete=true`,
-		`SELECT COUNT(*) FROM bot_runs WHERE status IN ('queued','running','waiting_approval') OR worker_id!='' OR lease_expires_at IS NOT NULL OR fence!=9`,
-		`SELECT COUNT(*) FROM bot_approvals WHERE status IN ('pending','approved')`,
-		`SELECT COUNT(*) FROM scheduled_jobs WHERE mode='bot_trigger' AND (status!='paused' OR next_run_at IS NOT NULL)`,
-		`SELECT COUNT(*) FROM bot_outbox WHERE delivered_at IS NULL AND (available_at < '9999-01-01' OR last_error='')`,
+		`SELECT COUNT(*) FROM bots WHERE status='active' AND (fence!=8 OR lease_expires_at IS NULL OR cleanup_complete!=true)`,
+		`SELECT COUNT(*) FROM bot_runs WHERE worker_id!='old-worker' OR lease_expires_at IS NULL OR fence!=8`,
+		`SELECT COUNT(*) FROM scheduled_jobs WHERE mode='bot_trigger' AND (status!='active' OR next_run_at IS NULL)`,
 	} {
 		var n int
 		if err := db.QueryRow(q).Scan(&n); err != nil {
@@ -974,18 +946,17 @@ func assertBotRecoveryRows(t *testing.T, path string) {
 			t.Errorf("unsafe restored rows (%d): %s", n, q)
 		}
 	}
-	var interrupted, terminal, approvals int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM bot_runs WHERE status='interrupted'`).Scan(&interrupted); err != nil {
-		t.Fatal(err)
+	for _, status := range []store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunInterrupted, store.RunSucceeded, store.RunPartial, store.RunFailed, store.RunSkipped, store.RunCancelled} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM bot_runs WHERE status=?`, string(status)).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("source run state %s changed: count=%d err=%v", status, count, err)
+		}
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM bot_runs WHERE status IN ('succeeded','partial','failed','skipped','cancelled')`).Scan(&terminal); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM bot_approvals WHERE status='revoked'`).Scan(&approvals); err != nil {
-		t.Fatal(err)
-	}
-	if interrupted != 4 || terminal != 5 || approvals != 3 {
-		t.Fatalf("history states lost: %d %d %d", interrupted, terminal, approvals)
+	for _, status := range []store.ApprovalStatus{store.ApprovalPending, store.ApprovalApproved, store.ApprovalConsumed, store.ApprovalDenied, store.ApprovalExpired, store.ApprovalRevoked} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM bot_approvals WHERE status=?`, string(status)).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("source approval state %s changed: count=%d err=%v", status, count, err)
+		}
 	}
 	rows, err := db.Query(`SELECT status,data FROM bot_runs`)
 	if err != nil {

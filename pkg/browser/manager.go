@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -269,6 +271,17 @@ type Manager struct {
 	// When true, the browser runs inside the session container instead of locally.
 	SandboxEnabled bool
 
+	// Session artifact callbacks are injected by the shared runtime. Sandbox
+	// tools fail closed when absent; neither callback may use daemon paths.
+	WriteArtifactFunc func(context.Context, string, string, []byte) error
+	StatArtifactFunc  func(context.Context, string, string) (int64, error)
+	// RegisterHandoffFunc binds the authenticated owner and session at construction.
+	// ScopedHandoff forbids the legacy process-global registry fallback.
+	RegisterHandoffFunc func(containerName, sessionID string) (string, error)
+	ScopedHandoff       bool
+
+	responseCaptures map[*rod.Page]*CDPResponseCapture
+
 	// recording tracks an in-progress session capture (nil when idle).
 	recording *activeRecording
 
@@ -283,6 +296,122 @@ type Manager struct {
 
 	// demoOverlay tracks tutorial highlight boxes and the visible demo cursor.
 	demoOverlay *demoOverlayState
+}
+
+// CDPResponseCapture observes the page's actual network responses. It never
+// replays requests from the daemon (which would lose browser cookies, TLS and
+// sandbox routing). Cancellation/generation prevents stale listeners publishing
+// into a replacement capture.
+type CDPResponseCapture struct {
+	*ResponseCapture
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	generation uint64
+	pattern    string
+}
+
+func (m *Manager) ResponseCaptureFor(pg *rod.Page) *CDPResponseCapture {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.responseCaptures == nil {
+		m.responseCaptures = make(map[*rod.Page]*CDPResponseCapture)
+	}
+	capture := m.responseCaptures[pg]
+	if capture == nil {
+		capture = &CDPResponseCapture{ResponseCapture: NewResponseCapture()}
+		m.responseCaptures[pg] = capture
+	}
+	return capture
+}
+
+func (c *CDPResponseCapture) IsActive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cancel != nil
+}
+func (c *CDPResponseCapture) Pattern() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pattern
+}
+func (c *CDPResponseCapture) Stop() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	c.generation++
+	c.pattern = ""
+	c.responses.Clear()
+	select {
+	case <-c.notify:
+	default:
+	}
+	return nil
+}
+
+func (c *CDPResponseCapture) Start(pg *rod.Page, pattern string) error {
+	if pattern == "" {
+		return fmt.Errorf("urlPattern is required for action=listen")
+	}
+	match, err := regexp.Compile(proto.PatternToReg(pattern))
+	if err != nil {
+		return err
+	}
+	_ = c.Stop()
+	ctx, cancel := context.WithCancel(pg.GetContext())
+	page := pg.Context(ctx)
+	// Bound retained browser buffers as well as our decoded bodies.
+	maxTotal, maxResource := 8<<20, 2<<20
+	if err := (proto.NetworkEnable{MaxTotalBufferSize: &maxTotal, MaxResourceBufferSize: &maxResource}).Call(page); err != nil {
+		cancel()
+		return err
+	}
+	c.mu.Lock()
+	c.cancel, c.pattern = cancel, pattern
+	generation := c.generation
+	c.mu.Unlock()
+	pending := make(map[proto.NetworkRequestID]*proto.NetworkResponseReceived)
+	wait := page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if match.MatchString(e.Response.URL) && len(pending) < 256 {
+			pending[e.RequestID] = e
+		}
+	}, func(e *proto.NetworkLoadingFailed) {
+		delete(pending, e.RequestID)
+	}, func(e *proto.NetworkLoadingFinished) {
+		response := pending[e.RequestID]
+		delete(pending, e.RequestID)
+		if response == nil || e.EncodedDataLength > float64(maxResource) {
+			return
+		}
+		body, err := (proto.NetworkGetResponseBody{RequestID: e.RequestID}).Call(page)
+		if err != nil {
+			return
+		}
+		data := []byte(body.Body)
+		if body.Base64Encoded {
+			data, err = base64.StdEncoding.DecodeString(body.Body)
+			if err != nil {
+				return
+			}
+		}
+		if len(data) > maxResource {
+			return
+		}
+		headers := make(map[string]string, len(response.Response.Headers))
+		for k, v := range response.Response.Headers {
+			headers[k] = v.String()
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.cancel == nil || c.generation != generation {
+			return
+		}
+		c.AddResponse(CapturedResponse{URL: response.Response.URL, Status: response.Response.Status, Headers: headers, Body: string(data), ResourceType: string(response.Type), Timestamp: time.Now()})
+	})
+	go wait()
+	return nil
 }
 
 // NewManager creates a Manager with the given config. The browser is NOT
@@ -369,6 +498,17 @@ func (m *Manager) EnsureSessionID(id string) {
 // Close is best-effort and panic-safe: a dead or never-connected rod Browser
 // can panic on Close, and we must still finish the session rebound.
 func (m *Manager) clearBrowserConnectionLocked() {
+	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
+	m.activePg = nil
+	m.cdpURL = ""
+	m.incognito = nil // belongs to the old browser connection
+	m.pagesMu.Lock()
+	m.pages = make(map[proto.TargetTargetID]*PageState)
+	m.pagesMu.Unlock()
 	m.detachLocalBrowserLocked()
 	if m.browser != nil {
 		b := m.browser
@@ -531,6 +671,10 @@ func (m *Manager) EnsureCDPReady() error {
 // Must be called with m.mu held.
 func (m *Manager) resetBrowserLocked() {
 	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
 	m.detachLocalBrowserLocked()
 
 	m.activePg = nil
@@ -1489,6 +1633,10 @@ func (m *Manager) Cleanup() {
 
 	// Finalize any in-progress recording before tearing down the display.
 	m.stopRecordingLocked()
+	for _, capture := range m.responseCaptures {
+		_ = capture.Stop()
+	}
+	m.responseCaptures = nil
 	m.detachLocalBrowserLocked()
 
 	// Stop any active handoff session

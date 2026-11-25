@@ -1,6 +1,10 @@
 package events
 
-import "regexp"
+import (
+	"fmt"
+	"github.com/SAP/astonish/pkg/store"
+	"regexp"
+)
 
 // Match the canonical publication identity emitted by the store and recognized
 // by Studio. Neither headings nor arbitrary bot-report prefixes imply a boundary.
@@ -25,6 +29,20 @@ func (t *Transcript) appendBotReport(ev Event) {
 	}
 	// Do not apply Done: an autonomous publication must not finalize another
 	// running tool turn, clear its status, or adopt its model routing badge.
-	t.Items = append(t.Items, Item{Kind: ItemAgent, InvocationID: ev.InvocationID, EventID: ev.EventID, Content: ev.Text})
+	text := ev.Text
+	var publication *store.BotFilePublication
+	if p := ev.BotFilePublication; p != nil {
+		if p.Validate() != nil || p.EventID != ev.EventID || p.Summary != ev.Text {
+			return
+		}
+		cp := *p
+		cp.Artifacts = append([]store.BotPublishedArtifact(nil), p.Artifacts...)
+		publication = &cp
+		for _, a := range p.Artifacts {
+			text += fmt.Sprintf("\n\nFile: %s (%d bytes) — %s", a.RelativePath, a.SizeBytes, a.Preview)
+		}
+		text += "\n\n/bots files → p: published files (preview or save)"
+	}
+	t.Items = append(t.Items, Item{Kind: ItemAgent, InvocationID: ev.InvocationID, EventID: ev.EventID, Content: text, BotFilePublication: publication})
 	t.nextTextReplaces = false
 }

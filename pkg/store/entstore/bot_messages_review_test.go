@@ -18,9 +18,9 @@ import (
 func messageReviewReader(repo *botRepository) store.BotTranscriptReader {
 	switch d := repo.db.(type) {
 	case personalBotDB:
-		return &personalSessionStore{client: d.client}
+		return &personalSessionStore{client: d.client, content: d.content}
 	case teamBotDB:
-		return &teamSessionStore{client: d.client}
+		return &teamSessionStore{client: d.client, content: d.content}
 	}
 	panic("unsupported fixture")
 }

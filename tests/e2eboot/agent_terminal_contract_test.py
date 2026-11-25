@@ -113,6 +113,15 @@ class TerminalContractTests(unittest.TestCase):
         frame = encoded('abcdef\r\nlast'); frame.update(rows=2, cols=5)
         self.assertEqual(screen(frame), 'f\nlast')
 
+    def test_terminal_autowrap_modes_and_reverse_index(self):
+        frame = encoded('\x1b[?7labcdef'); frame.update(rows=2, cols=5)
+        self.assertEqual(screen(frame), 'abcdf')
+        frame = encoded('\x1b[?7labcde\x1b[?7hf'); frame.update(rows=2, cols=5)
+        self.assertEqual(screen(frame), 'abcde\nf')
+        frame = encoded('top\r\none\r\ntwo\r\nbottom\x1b[2;3r\x1b[2;1H\x1bMnew')
+        frame.update(rows=4, cols=12)
+        self.assertEqual(screen(frame), 'top\nnew\none\nbottom')
+
     def test_terminal_renderer_modes_and_concealed_style(self):
         wire = '\x1b[?2004h\x1b[?1004h\x1b[?2026h\x1b[7mvisible\x1b[0m\x1b[?2026l'
         self.assertEqual(screen(encoded(wire)), 'visible')

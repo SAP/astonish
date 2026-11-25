@@ -45,7 +45,7 @@ func TestBotRepositoryReopen(t *testing.T) {
 			_ = c.Close()
 			t.Fatal(err)
 		}
-		return c, &teamBotStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
+		return c, &teamBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()}), auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	}
 	c, r := open()
 	v := store.DefaultBotVersion()
@@ -137,7 +137,7 @@ func TestBotCommittedResultSurvivesReopen(t *testing.T) {
 			_ = c.Close()
 			t.Fatal(err)
 		}
-		return c, &teamBotStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
+		return c, &teamBotStore{client: c, content: newReopenBotContentCodec(t, filepath.Join(filepath.Dir(path), "content"), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()}), auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	}
 	c, r := open()
 	v := store.DefaultBotVersion()

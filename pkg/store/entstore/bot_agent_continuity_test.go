@@ -213,7 +213,7 @@ func TestBotAgentContinuityRestoreRejectsUnknownWork(t *testing.T) {
 	}
 }
 
-// Exercise the importer and an actual connection reopen, not only row conversion.
+// Legacy inline work must fail before import; reopen proves the refusal is durable.
 func TestBotAgentContinuitySQLiteRestoreReopen(t *testing.T) {
 	r, owner, worker, run, lease, _ := botRunFixture(t, store.BotScopePersonal)
 	before := continuityAgentWork(t, r, owner, worker, lease)
@@ -255,8 +255,8 @@ func TestBotAgentContinuitySQLiteRestoreReopen(t *testing.T) {
 			}
 			scope := backup.Scope{Kind: "personal", OrgSlug: "org", UserID: r.auth.userID}
 			entry := backup.Entry{Entity: "bot_runs", Path: "runs", Kind: "jsonl", Scope: scope}
-			if err := restoreLogicalEntries(owner, db, DialectSQLite, "", scope, map[string][]byte{"runs": []byte(archive.String())}, []backup.Entry{entry}, PlatformRestoreOptions{IncludeTransient: true, EnableScheduledJobs: true}, &backup.RestoreResult{}); err != nil {
-				t.Fatal(err)
+			if err := restoreLogicalEntries(owner, db, DialectSQLite, "", scope, map[string][]byte{"runs": []byte(archive.String())}, []backup.Entry{entry}, PlatformRestoreOptions{IncludeTransient: true, EnableScheduledJobs: true}, &backup.RestoreResult{}); !errors.Is(err, store.ErrBotUnsupported) {
+				t.Fatalf("inline work archive must be rejected: %v", err)
 			}
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
@@ -265,34 +265,13 @@ func TestBotAgentContinuitySQLiteRestoreReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var raw, status, workerID string
-			var fence int64
-			var expiry sql.NullString
-			if err := db.QueryRow(`SELECT data, status, fence, worker_id, lease_expires_at FROM bot_runs WHERE id=?`, run.ID.String()).Scan(&raw, &status, &fence, &workerID, &expiry); err != nil {
-				t.Fatal(err)
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM bot_runs`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("rejected archive persisted work/authority: count=%d err=%v", count, err)
 			}
-			doc, _, err := restoredBotStoredDocument(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, err := json.Marshal(doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var restored botStoredRun
-			if err := json.Unmarshal(encoded, &restored); err != nil {
-				t.Fatal(err)
-			}
-			phase := store.BotWorkInterrupted
-			if finished {
-				phase = store.BotWorkFinished
-			}
-			assertContinuityWork(t, before, restored.Work, phase)
-			if status != string(store.RunInterrupted) || restored.Run.Status != store.RunInterrupted || fence <= lease.Fence || workerID != "" || expiry.Valid {
-				t.Fatal("restored run retained execution authority")
-			}
-			if !reflect.DeepEqual(restored.Run.Work, store.BuildBotWorkProjection(restored.Work)) || !reflect.DeepEqual(restored.Run.Work, restored.Run.Report.Work) {
-				t.Fatal("persisted restore projections differ")
+			source, err := r.db.ReadRun(owner, run.BotID, run.ID)
+			if err != nil || !reflect.DeepEqual(source.Work, before) || source.Run.Status != store.RunRunning {
+				t.Fatalf("rejected import changed source continuity: %+v %v", source, err)
 			}
 		})
 	}

@@ -70,7 +70,8 @@ type BrowserRecordingStatusResult struct {
 }
 
 func BrowserRecordingStatus(mgr *browser.Manager) func(tool.Context, BrowserRecordingStatusArgs) (BrowserRecordingStatusResult, error) {
-	return func(_ tool.Context, _ BrowserRecordingStatusArgs) (BrowserRecordingStatusResult, error) {
+	return func(ctx tool.Context, _ BrowserRecordingStatusArgs) (BrowserRecordingStatusResult, error) {
+		ensureBrowserSessionAndContext(mgr, ctx)
 		st := mgr.RecordingStatus()
 		return BrowserRecordingStatusResult{
 			Recording:      st.Recording,

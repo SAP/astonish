@@ -2,7 +2,6 @@ package launcher
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -13,13 +12,12 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -55,7 +53,7 @@ func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMR
 		for _, c := range req.Contents {
 			for _, p := range c.Parts {
 				foundTask = foundTask || c.Role == "user" && p.Text == homeWeatherTask
-				if p.FunctionResponse != nil && p.FunctionResponse.Name == "http_request" {
+				if p.FunctionResponse != nil && p.FunctionResponse.Name == "execute_tool" {
 					raw, _ := json.Marshal(p.FunctionResponse.Response)
 					foundWeather = len(raw) > 39000 && strings.Contains(string(raw), "24")
 				}
@@ -70,7 +68,7 @@ func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMR
 		content := genai.NewContentFromText(homeWeatherAnswer, "model")
 		input, output := int32(31241), int32(97)
 		if m.calls == 1 {
-			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "weather-fetch", Name: "http_request", Args: map[string]any{"url": homeWeatherURL, "method": "GET"}}}}}
+			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "weather-fetch", Name: "execute_tool", Args: map[string]any{"name": "http_request", "arguments": map[string]any{"url": homeWeatherURL, "method": "GET"}}}}}}
 			input, output = 9135, 81
 		} else if m.calls != 2 || !foundWeather {
 			yield(nil, fmt.Errorf("unexpected continuation: calls=%d weather=%v", m.calls, foundWeather))
@@ -123,6 +121,11 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.services.PersonalBots = repo
+	// scheduleFixture replaces the scoped services; retain the file capability
+	// and seeded instruction files supplied by newBotFactoryFixture.
+	f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) {
+		return f.files, nil
+	}
 	f.services.Memory = nil
 	_, err = f.sessions.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: b.OwnerID.String(), SessionID: run.SessionID.String(), State: map[string]any{"execution_owner": "bot"}})
 	if err != nil {
@@ -135,21 +138,15 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 		return provider.NewBudgetLLM(llm, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
 	}
 	fetches := 0
-	fetch, err := functiontool.New(functiontool.Config{Name: "http_request", Description: "Read controlled weather fixture"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
+	node := &remainingModeNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
 		fetches++
-		if args["url"] != homeWeatherURL || args["method"] != "GET" {
-			return nil, fmt.Errorf("unexpected fetch: %v", args)
+		if name != "http_request" || args["url"] != homeWeatherURL || args["method"] != "GET" {
+			return nil, fmt.Errorf("unexpected fetch: %s %v", name, args)
 		}
-		response := map[string]any{"status_code": 200, "body": `{"current_condition":[{"temp_C":"24","weatherDesc":[{"value":"Clear"}]}],"fixture_padding":"` + strings.Repeat("x", 39417) + `"}`}
-		raw, _ := json.Marshal(response)
-		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: []store.BotEvidence{{Source: homeWeatherURL, Summary: homeWeatherAnswer, Kind: store.BotEvidenceObservation, ObservedAt: time.Now().UTC(), ActorID: b.OwnerID}}, SourceAccess: []store.BotSourceAccessFact{{EvidenceRef: "capture:" + c.FunctionCallID(), CallID: c.FunctionCallID(), OriginalURL: homeWeatherURL, Status: store.BotSourceAccessReturned, HTTPStatus: 200, ObservedAt: time.Now().UTC(), BodyDigest: fmt.Sprintf("%x", sha256.Sum256(raw))}}})
-		return response, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+		return json.Marshal(map[string]any{"status_code": 200, "body": `{"current_condition":[{"temp_C":"24","weatherDesc":[{"value":"Clear"}]}],"fixture_padding":"` + strings.Repeat("x", 39417) + `"}`})
+	}}
 	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-		return &BotChatSafeResources{Tools: []tool.Tool{fetch}, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: node}}, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
 	factory, err := NewBotChatAgentFactory(f.cfg)
 	if err != nil {

@@ -2,17 +2,19 @@ package entstore
 
 import (
 	"context"
-	"encoding/json"
 	team "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/ent/team/botintake"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
 
-type teamIntakeDB struct{ client *team.Client }
+type teamIntakeDB struct {
+	client  *team.Client
+	content *botContentCodec
+}
 
 func (s *teamBotStore) UnfinishedIntakes() store.BotUnfinishedIntakeStore {
-	return &intakeRepository{auth: s.auth, db: teamIntakeDB{s.client}}
+	return &intakeRepository{auth: s.auth, db: teamIntakeDB{client: s.client, content: s.content}}
 }
 func (d teamIntakeDB) read(ctx context.Context, id, owner uuid.UUID) (*store.BotUnfinishedIntake, error) {
 	row, err := d.client.BotIntake.Query().Where(botintake.IDEQ(id), botintake.OwnerIDEQ(owner)).Only(ctx)
@@ -26,15 +28,13 @@ func (d teamIntakeDB) read(ctx context.Context, id, owner uuid.UUID) (*store.Bot
 		return nil, store.ErrBotConflict
 	}
 	b := &store.BotUnfinishedIntake{ID: row.ID, OwnerID: row.OwnerID, Scope: store.BotScopeTeam, Revision: row.Revision, UpdatedAt: row.UpdatedAt, Discarded: row.Discarded, LastMutationHash: row.MutationHash}
-	if len(row.Content) > 0 {
-		if err := json.Unmarshal(row.Content, &b.Content); err != nil {
-			return nil, err
-		}
+	if err := d.content.decodeIntake(ctx, b, row.Content); err != nil {
+		return nil, err
 	}
 	return b, nil
 }
 func (d teamIntakeDB) insert(ctx context.Context, b *store.BotUnfinishedIntake) error {
-	content, err := json.Marshal(b.Content)
+	content, err := d.content.encodeIntake(ctx, b)
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func (d teamIntakeDB) cas(ctx context.Context, b *store.BotUnfinishedIntake, rev
 	if b.Content == nil {
 		update.ClearContent()
 	} else {
-		content, err := json.Marshal(b.Content)
+		content, err := d.content.encodeIntake(ctx, b)
 		if err != nil {
 			return err
 		}

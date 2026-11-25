@@ -19,6 +19,9 @@ import (
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // Exercise the actual answer handler with a personal repository while the
@@ -163,6 +166,24 @@ func TestBotTitleAnswerAuthorityHTTPRegression(t *testing.T) {
 					approval, err := repo.RequestApproval(worker, lease, store.BotApproval{BotID: run.BotID, RunID: run.ID, Version: run.Version, Action: action, ActionDigest: digest, Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "title-q", Payload: payload}, ExpiresAt: time.Now().Add(time.Hour)})
 					if err != nil {
 						t.Fatal(err)
+					}
+					// Persist the actual question invocation/response before the owner can
+					// answer it. A bare approval is deliberately not transcript identity.
+					var questionArgs map[string]any
+					if err := json.Unmarshal(payload, &questionArgs); err != nil {
+						t.Fatal(err)
+					}
+					questionResponse := map[string]any{"status": "ok"}
+					for key, value := range questionArgs {
+						questionResponse[key] = value
+					}
+					for _, event := range []*session.Event{
+						{ID: "title-question-call", Author: "model", InvocationID: "title-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "title-question-call", Name: "ask_user", Args: questionArgs}}}}}},
+						{ID: "title-question-response", Author: "user", InvocationID: "title-question", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "title-question-call", Name: "ask_user", Response: questionResponse}}}}}},
+					} {
+						if err := repo.(store.BotTranscriptStore).AppendBotRunEvent(worker, lease, run.SessionID, event); err != nil {
+							t.Fatal(err)
+						}
 					}
 					checkpoint, err := json.Marshal(bot.ApprovalCheckpoint{Format: bot.InteractionCheckpointFormat, ApprovalID: approval.ID, BotID: run.BotID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 					if err != nil {

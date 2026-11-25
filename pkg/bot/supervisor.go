@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,6 +39,10 @@ type SupervisorConfig struct {
 	LeaseDuration          time.Duration
 	RenewInterval          time.Duration
 	ProgressYieldRequested func() bool
+	// BeginHeartbeatReads optionally owns immutable-byte reuse for one synchronous
+	// heartbeat. It must not cache authority or leases; its close runs before any
+	// wait or runtime cancellation. Each heartbeat gets a fresh operation.
+	BeginHeartbeatReads func(context.Context) (context.Context, func())
 }
 
 // Supervisor executes one already admitted manual/scheduled run or explicitly requeued exact
@@ -120,6 +125,11 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	if err != nil {
 		var denied *RunError
 		if errors.As(err, &denied) && denied.Class == ErrorPermission {
+			if len(input.Run.Checkpoint) > 0 {
+				// Admission has not claimed or dispatched this continuation. Leave
+				// its exact saved checkpoint and approval untouched for fresh checks.
+				return zero, err
+			}
 			// Terminalize denied queued attempts without touching a home/model/tool.
 			now := time.Now().UTC()
 			lease, claimErr := s.config.Store.ClaimRun(ctx, store.BotClaimRequest{BotID: botID, RunID: runID, WorkerID: s.config.WorkerID, Now: now, ExpiresAt: now.Add(s.config.LeaseDuration)})
@@ -249,22 +259,7 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 				mu.Lock()
 				l := latest
 				mu.Unlock()
-				renewCtx, release := context.WithDeadline(runCtx, l.ExpiresAt)
-				var next store.BotLease
-				var renewErr error
-				if prepared.Authorization != nil {
-					renewErr = prepared.Authorization.Authorize(renewCtx, execution.CapabilityChat)
-				}
-				if prepared.Mandate != nil {
-					renewErr = prepared.Mandate.Check(renewCtx)
-				}
-				if renewErr == nil {
-					renewErr = prepared.Budget.Check(renewCtx)
-				}
-				if renewErr == nil {
-					next, renewErr = s.config.Store.RenewLease(renewCtx, l, time.Now().UTC().Add(s.config.LeaseDuration))
-				}
-				release()
+				next, renewErr := s.renewHeartbeat(runCtx, prepared, l)
 				mu.Lock()
 				if renewErr != nil {
 					renewalErr = renewErr
@@ -281,7 +276,7 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	input.Run.Lease = lease
 	input.Run.Status = store.RunRunning
 	input.Run.StartedAt = &now
-	request := RunRequest{Task: input.Task.Clone(), Work: input.Work.Clone(), Mandate: prepared.Mandate, Bot: input.Bot, Version: input.Version, Run: input.Run, Principal: p, Authorization: prepared.Authorization, Interactive: prepared.Mandate == nil && input.Run.IsInteractiveChat(), Policy: prepared.Policy, Budget: prepared.Budget, Goals: input.Goals, Instructions: input.Instructions, Attachments: input.Attachments, Now: now}
+	request := RunRequest{PlanMode: input.PlanMode, Task: input.Task.Clone(), Work: input.Work.Clone(), Mandate: prepared.Mandate, Bot: input.Bot, Version: input.Version, Run: input.Run, Principal: p, Authorization: prepared.Authorization, Interactive: prepared.Mandate == nil && input.Run.IsInteractiveChat(), Policy: prepared.Policy, Budget: prepared.Budget, Goals: input.Goals, Instructions: input.Instructions, Attachments: input.Attachments, Now: now}
 	request.Progress = input.Progress.Clone()
 	request.ProgressYieldRequested = s.config.ProgressYieldRequested
 	request.ProgressStore, _ = s.config.Store.(store.BotProgressStore)
@@ -326,7 +321,20 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 		// CheckpointProgress committed the queued handoff and released the lease.
 		return result, nil
 	}
-	result = supervisorOutcome(result, err)
+	outcomeErr := err
+	var denial *RunError
+	if errors.As(err, &denial) && denial.Class == ErrorBlocked && !denial.UncertainEffect && result.Status == store.RunWaitingApproval && result.Failure == nil && len(input.Run.Checkpoint) > 0 && bytes.Equal(result.Checkpoint, input.Run.Checkpoint) {
+		// The adapter attests a pre-dispatch denial. Preserve a waiting result
+		// only with the same exact checkpoint and still-unused durable authority.
+		checkpoint, checkpointErr := DecodeApprovalCheckpoint(result.Checkpoint, input.Run)
+		if resumes, ok := s.config.Store.(store.BotApprovalResumeStore); ok && checkpointErr == nil {
+			approval, approvalErr := resumes.LoadResumeApproval(ctx, lease)
+			if approvalErr == nil && approval != nil && approval.Status == store.ApprovalApproved && checkpoint.Matches(*approval) {
+				outcomeErr = nil
+			}
+		}
+	}
+	result = supervisorOutcome(result, outcomeErr)
 	if transitionErr := ValidateRunTransition(store.RunRunning, result.Status, RunTransitionGuard{}); transitionErr != nil {
 		return result, errors.Join(err, transitionErr)
 	}
@@ -335,6 +343,32 @@ func (s *Supervisor) Execute(ctx context.Context, botID store.BotID, runID store
 	}
 	commitErr := s.config.Store.CommitRun(ctx, store.BotRunCommit{ModelSelection: result.ModelSelection, Lease: lease, Status: result.Status, Report: result.Report, Usage: result.Usage, Todos: result.Todos, Checkpoint: result.Checkpoint})
 	return result, errors.Join(err, commitErr)
+}
+
+// renewHeartbeat retains every fresh authority, budget and lease check. Only
+// immutable content bytes may be reused, and only until this call returns.
+func (s *Supervisor) renewHeartbeat(ctx context.Context, prepared RunPreparation, lease store.BotLease) (store.BotLease, error) {
+	ctx, release := context.WithDeadline(ctx, lease.ExpiresAt)
+	defer release()
+	if s.config.BeginHeartbeatReads != nil {
+		var end func()
+		ctx, end = s.config.BeginHeartbeatReads(ctx)
+		defer end()
+	}
+	var err error
+	if prepared.Authorization != nil {
+		err = prepared.Authorization.Authorize(ctx, execution.CapabilityChat)
+	}
+	if prepared.Mandate != nil {
+		err = prepared.Mandate.Check(ctx)
+	}
+	if err == nil {
+		err = prepared.Budget.Check(ctx)
+	}
+	if err != nil {
+		return store.BotLease{}, err
+	}
+	return s.config.Store.RenewLease(ctx, lease, time.Now().UTC().Add(s.config.LeaseDuration))
 }
 
 // bindFailureWork supplies only missing failure metadata from the leased store.

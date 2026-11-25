@@ -99,9 +99,9 @@ func TestBotWorkDraftPublicationBoundary(t *testing.T) {
 			var reader store.BotTranscriptReader
 			switch d := repo.db.(type) {
 			case personalBotDB:
-				reader = &personalSessionStore{client: d.client}
+				reader = &personalSessionStore{client: d.client, content: d.content}
 			case teamBotDB:
-				reader = &teamSessionStore{client: d.client}
+				reader = &teamSessionStore{client: d.client, content: d.content}
 			}
 			injected := &adksession.Event{ID: uuid.NewString(), Author: "user", InvocationID: "untrusted", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Deliver two sourced facts", FunctionResponse: &genai.FunctionResponse{ID: "injected", Name: "write_file", Response: map[string]any{"secret": "must not mirror"}}}}}}, Actions: adksession.EventActions{StateDelta: map[string]any{"artifact": "injected"}}}
 			if err := repo.appendBotRunEvent(worker, lease, run.SessionID, injected); err != nil {
@@ -267,11 +267,11 @@ func TestBotConversationPublication(t *testing.T) {
 				var appendRun func(*adksession.Event) error
 				switch db := repo.db.(type) {
 				case personalBotDB:
-					s := &personalSessionStore{client: db.client}
+					s := &personalSessionStore{client: db.client, content: db.content}
 					sessions = s
 					appendRun = func(e *adksession.Event) error { return s.appendEventInternal(ctx, run.SessionID.String(), e) }
 				case teamBotDB:
-					s := &teamSessionStore{client: db.client}
+					s := &teamSessionStore{client: db.client, content: db.content}
 					sessions = s
 					appendRun = func(e *adksession.Event) error { return s.appendEventInternal(ctx, run.SessionID.String(), e) }
 				}

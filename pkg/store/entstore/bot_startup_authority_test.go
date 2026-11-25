@@ -33,6 +33,14 @@ func TestBotTenantMiddlewarePreservesStartupAuthority(t *testing.T) {
 		base.BotInteractiveReady = ready
 		base.BotTurnRegistry = registry
 		called := false
+		filesCalled := false
+		base.BotFilesFactory = func(_ context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+			filesCalled = true
+			if svc == base || scope != store.BotScopePersonal {
+				t.Error("file factory lost request scope")
+			}
+			return nil, store.ErrBotUnsupported
+		}
 		handler := TenantMiddleware(db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			called = true
 			scoped := store.FromRequest(r)
@@ -41,6 +49,11 @@ func TestBotTenantMiddlewarePreservesStartupAuthority(t *testing.T) {
 			}
 			if scoped.BotInteractiveReady != ready {
 				t.Errorf("startup readiness lost: got %v want %v", scoped.BotInteractiveReady, ready)
+			}
+			if scoped.BotFilesFactory == nil {
+				t.Error("startup file factory lost")
+			} else if _, err := scoped.BotFilesFactory(r.Context(), scoped, store.BotScopePersonal); err != store.ErrBotUnsupported || !filesCalled {
+				t.Error("startup file factory replaced")
 			}
 			if scoped.BotTurnRegistry != registry {
 				t.Error("startup turn registry lost or replaced")

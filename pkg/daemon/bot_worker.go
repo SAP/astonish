@@ -21,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -30,6 +31,7 @@ import (
 // no ordinary Chat factory or host-tool fallback is used. ChannelManager is
 // consulted only for delivery of already-authorized publication targets.
 type BotWorkerConfig struct {
+	ObserveExecution  func(entstore.BotExecutionTiming)
 	KnowledgeSafety   bot.KnowledgeExtractionSafety
 	KnowledgeRedactor func(context.Context, execution.Principal, store.BotScope) (*credentials.Redactor, error)
 	MandatePolicy     store.BotMandatePolicyResolver
@@ -62,6 +64,17 @@ type BotWorker struct {
 	runtime           bot.Runtime
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
+	loopCancel        context.CancelFunc
+	pending           map[botDispatchKey]botDispatchHint
+	activeBots        map[store.BotID]bool
+	activeCancels     map[store.BotID]context.CancelFunc
+	maintenanceBots   map[store.BotID]bool
+	maintenanceCancel map[store.BotID]context.CancelFunc
+	activeSlots       int
+	ownerSlots        int
+	autonomousSlots   int
+	dispatchWake      chan struct{}
+	dispatchOverflow  atomic.Uint64
 	mandateCleanupMu  sync.Mutex
 	mandateCleanup    map[execution.BotRunIdentity]*bot.MandateExecution
 }
@@ -153,6 +166,14 @@ func (w *BotWorker) authenticateOwner(ctx context.Context, s BotSchedulerScope) 
 	owner = store.WithUserID(owner, u.ID)
 	owner = store.WithOrgSlug(owner, org.Slug)
 	owner = store.WithTeamSlug(owner, s.TeamSlug)
+	// Preserve only the bounded immutable-read operation across the value-free
+	// identity boundary. Directory membership and authority are always rechecked.
+	owner = entstore.CopyBotExecutionObserver(owner, ctx)
+	if w.config.ObserveExecution != nil {
+		owner = entstore.WithBotExecutionObserver(owner, w.config.ObserveExecution)
+	}
+	owner = entstore.WithBotContentReadOperationFromContext(owner, ctx)
+	owner = store.WithBotRunStateNotifier(owner, w.NotifyRunState)
 	return owner, data, nil
 }
 
@@ -195,6 +216,8 @@ func (botControlGuard) Authorize(context.Context, execution.ActionDescriptor) (e
 type botEventLeaseKey struct{}
 
 func (r botMeteredRuntime) Start(ctx context.Context, q bot.RunRequest, s bot.EventSink) (out bot.RunResult, err error) {
+	ctx, endStartupReads := launcher.WithBotStartupReads(ctx)
+	defer endStartupReads()
 	defer func() {
 		if b, ok := q.Budget.(interface{ Usage() store.BotUsage }); ok {
 			out.Usage = b.Usage()
@@ -207,6 +230,8 @@ func (r botMeteredRuntime) Start(ctx context.Context, q bot.RunRequest, s bot.Ev
 }
 
 func (r botMeteredRuntime) Resume(ctx context.Context, q bot.RunRequest, s bot.EventSink) (out bot.RunResult, err error) {
+	ctx, endStartupReads := launcher.WithBotStartupReads(ctx)
+	defer endStartupReads()
 	defer func() {
 		if b, ok := q.Budget.(interface{ Usage() store.BotUsage }); ok {
 			out.Usage = b.Usage()
@@ -228,6 +253,12 @@ func (w *BotWorker) loadScope(ctx context.Context, r bot.RunRequest) (*launcher.
 	if err != nil {
 		return nil, err
 	}
+	// Shared Chat captures these authoritative directories before stripping the
+	// tenant router from team tool services. Admission-time membership alone is
+	// not sufficient: each subsequent model/tool dispatch must recheck it.
+	svc.Platform, svc.TenantRouter = w.config.Backend, w.config.Backend
+	svc.BotFilesFactory = w.filesForRequest
+	svc.BotRunStateNotify = w.NotifyRunState
 	svc.PlatformSettings, svc.OrgSettings = w.config.Backend.PlatformSettings(), w.config.Backend.OrgSettings(r.Principal.OrgSlug)
 	svc.MCPServers = org.OrgMCPServers()
 	if networks, ok := w.config.Backend.(interface {
@@ -301,23 +332,40 @@ func (w *BotWorker) Start(ctx context.Context) {
 	}
 	w.started = true
 	ctx, w.cancel = context.WithCancel(ctx)
-	w.wg.Add(1)
+	loops, cancel := context.WithCancel(ctx)
+	w.loopCancel = cancel
+	w.initDispatchLocked()
+	w.wg.Add(3)
 	w.lifecycleMu.Unlock()
 	go func() {
 		defer w.wg.Done()
-		ticker := time.NewTicker(w.config.PollInterval)
-		defer ticker.Stop()
 		for {
-			if err := w.Poll(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("[bots] poll: %v", err)
-			}
 			select {
-			case <-ctx.Done():
+			case <-loops.Done():
 				return
-			case <-ticker.C:
+			case <-w.dispatchWake:
 			}
+			w.dispatchPending(ctx)
 		}
 	}()
+	go w.workerLoop(loops, func(c context.Context) error { return w.scan(c, botScanDiscovery) })
+	go w.workerLoop(loops, func(c context.Context) error { return w.scan(c, botScanMaintenance) })
+}
+
+func (w *BotWorker) workerLoop(ctx context.Context, work func(context.Context) error) {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.config.PollInterval)
+	defer ticker.Stop()
+	for {
+		if err := work(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("[bots] discovery/maintenance: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // Drain requests a durable handoff at the next settled progress boundary.
@@ -327,6 +375,9 @@ func (w *BotWorker) Drain(ctx context.Context) error {
 	w.lifecycleMu.Lock()
 	w.activationStopped.Store(true)
 	w.progressDrain.Store(true)
+	if w.loopCancel != nil {
+		w.loopCancel()
+	}
 	w.lifecycleMu.Unlock()
 	done := make(chan struct{})
 	go func() { w.wg.Wait(); close(done) }()
@@ -345,6 +396,12 @@ func (w *BotWorker) Stop() {
 	w.activationStopped.Store(true)
 	if w.cancel != nil {
 		w.cancel()
+	}
+	for _, cancel := range w.activeCancels {
+		cancel()
+	}
+	for _, cancel := range w.maintenanceCancel {
+		cancel()
 	}
 	for _, cancel := range w.pollCancels {
 		cancel()
@@ -377,7 +434,15 @@ func (w *BotWorker) Poll(ctx context.Context) error {
 		w.lifecycleMu.Unlock()
 		w.wg.Done()
 	}()
-	cleanupErr := w.retryMandateCleanup(ctx)
+	return w.scan(ctx, botScanSynchronous)
+}
+
+func (w *BotWorker) scan(ctx context.Context, mode botScanMode) error {
+	ctx = context.WithValue(ctx, botScanModeKey{}, mode)
+	var cleanupErr error
+	if mode != botScanDiscovery {
+		cleanupErr = w.retryMandateCleanup(ctx)
+	}
 	orgs, err := w.config.Backend.Organizations().List(ctx)
 	if err != nil {
 		return errors.Join(cleanupErr, err)
@@ -434,7 +499,7 @@ func (w *BotWorker) Poll(ctx context.Context) error {
 						failures = append(failures, fmt.Errorf("bots: %s store unavailable (org=%s team=%s owner=%s)", scope, org.Slug, team.Slug, member.ID))
 						continue // Never substitute another scope or treat unavailable data as empty.
 					}
-					if err := w.pollStore(owner, repo, ss); err != nil {
+					if err := w.scanStore(owner, repo, ss, mode); err != nil {
 						failures = append(failures, err)
 					}
 				}
@@ -444,6 +509,9 @@ func (w *BotWorker) Poll(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 func (w *BotWorker) pollStore(ctx context.Context, repo store.BotStore, ss store.SessionStore) error {
+	return w.scanStore(ctx, repo, ss, botScanSynchronous)
+}
+func (w *BotWorker) scanStore(ctx context.Context, repo store.BotStore, ss store.SessionStore, mode botScanMode) error {
 	p, authenticated := execution.PrincipalFromContext(ctx)
 	if !authenticated || p.Validate() != nil {
 		return store.ErrBotForbidden
@@ -459,96 +527,135 @@ func (w *BotWorker) pollStore(ctx context.Context, repo store.BotStore, ss store
 			if b.OwnerID.String() != p.Subject {
 				continue
 			}
+			if mode == botScanDiscovery {
+				if !b.PermanentDelete {
+					if err := w.discoverBot(ctx, repo, b); err != nil {
+						failures = append(failures, err)
+					}
+				}
+				continue
+			}
+			if mode == botScanMaintenance {
+				w.lifecycleMu.Lock()
+				w.initDispatchLocked()
+				busy := w.activeBots[b.ID] || w.maintenanceBots[b.ID]
+				var maintenanceCtx context.Context
+				var cancel context.CancelFunc
+				if !busy {
+					maintenanceCtx, cancel = context.WithCancel(ctx)
+					w.maintenanceBots[b.ID] = true
+					w.maintenanceCancel[b.ID] = cancel
+				}
+				w.lifecycleMu.Unlock()
+				if busy {
+					continue
+				}
+				err := w.maintainBot(maintenanceCtx, repo, ss, b)
+				cancel()
+				w.lifecycleMu.Lock()
+				delete(w.maintenanceBots, b.ID)
+				delete(w.maintenanceCancel, b.ID)
+				w.wakeDispatchLocked()
+				w.lifecycleMu.Unlock()
+				if err != nil {
+					failures = append(failures, err)
+				}
+				continue
+			}
+			// Permanent deletion is a control-state cleanup path. After physical
+			// cleanup, run content may already be gone while SQL purge is pending.
+			// Never hydrate that content before consuming the durable cleanup receipt.
+			if b.PermanentDelete {
+				if err := w.reconcileRetention(ctx, repo, b); err != nil {
+					failures = append(failures, err)
+				}
+				continue
+			}
 			// Reconcile committed intents even without queued work, including
 			// outcomes committed just before pause or worker restart.
-			if !b.PermanentDelete {
-				if err := w.reconcileAuthorizedOperations(ctx, repo, b.ID); err != nil {
-					failures = append(failures, err)
-				}
-				if err := w.reconcilePublications(ctx, repo, b.ID); err != nil {
-					failures = append(failures, err)
-				}
+			if err := w.reconcileAuthorizedOperations(ctx, repo, b.ID); err != nil {
+				failures = append(failures, err)
+			}
+			if err := w.reconcilePublications(ctx, repo, b.ID); err != nil {
+				failures = append(failures, err)
 			}
 			// Paused/stopped Bots still need expired attempts recovered; recovery
 			// records uncertainty and never requeues the run.
 			// Traverse all pages per lane: teardown first, owner turns next,
 			// autonomous work last. UUID pagination must not decide priority.
-			for lane := 0; lane < 3; lane++ {
-				runPage := store.BotPage{Limit: 200}
-				for {
-					runs, err := repo.ListRuns(ctx, b.ID, runPage)
-					if err != nil {
-						return err
-					}
-					for _, r := range runs {
-						runLane := 0
-						if r.Status == store.RunQueued || r.Status == store.RunWaitingApproval {
-							runLane = 2
-							if r.Presentation == store.BotRunPresentationHomeInteractive && r.Trigger != store.TriggerCron {
-								runLane = 1
-							}
-						}
-						if runLane != lane {
+			var lanes [3][]store.BotRun
+			runPage := store.BotPage{Limit: 200}
+			for {
+				runs, err := repo.ListRuns(ctx, b.ID, runPage)
+				if err != nil {
+					return err
+				}
+				for _, r := range runs {
+					lane := dispatchLane(r)
+					lanes[lane] = append(lanes[lane], r)
+				}
+				if len(runs) < runPage.Limit {
+					break
+				}
+				runPage.After = runs[len(runs)-1].ID.String()
+			}
+			for lane := botDispatchTeardown; lane <= botDispatchAutonomous; lane++ {
+				runs := lanes[lane]
+				for _, r := range runs {
+					if r.MandateRef == nil && r.IsInteractiveChat() && r.CallerCeiling != nil && (r.Status == store.RunQueued || r.Status == store.RunWaitingApproval) {
+						original := r.CallerCeiling.Principal
+						// Personal stores are enumerated under every team. Only the
+						// original caller's team can inspect or dispatch this turn.
+						if original.Subject != p.Subject || original.OrgSlug != p.OrgSlug || original.TeamSlug != p.TeamSlug {
 							continue
 						}
-						if r.MandateRef == nil && r.IsInteractiveChat() && r.CallerCeiling != nil && (r.Status == store.RunQueued || r.Status == store.RunWaitingApproval) {
-							original := r.CallerCeiling.Principal
-							// Personal stores are enumerated under every team. Only the
-							// original caller's team can inspect or dispatch this turn.
-							if original.Subject != p.Subject || original.OrgSlug != p.OrgSlug || original.TeamSlug != p.TeamSlug {
-								continue
-							}
-							identity := execution.BotRunIdentity{BotID: b.ID, RunID: r.ID, Version: r.Version, ActorID: original.Subject, OrgSlug: original.OrgSlug, TeamSlug: original.TeamSlug}
-							auth, authErr := w.config.TurnRegistry.Authorizer(identity, *r.CallerCeiling, w.currentInteractivePrincipal)
-							if authErr == nil {
-								caller, e := execution.WithPrincipal(botWorkerContext{ctx}, original)
-								if e != nil {
-									authErr = e
-								} else {
-									authErr = auth.Authorize(execution.WithBotRunIdentity(caller, identity), execution.CapabilityChat)
-								}
-							}
-							if authErr != nil {
-								continuations, ok := repo.(store.BotInteractiveContinuationStore)
-								if !ok {
-									failures = append(failures, store.ErrBotUnsupported)
-								} else if _, e := continuations.RequireInteractiveContinuation(ctx, b.ID, r.ID); e != nil && !errors.Is(e, store.ErrBotConflict) {
-									failures = append(failures, e)
-								}
-								continue
+						identity := execution.BotRunIdentity{BotID: b.ID, RunID: r.ID, Version: r.Version, ActorID: original.Subject, OrgSlug: original.OrgSlug, TeamSlug: original.TeamSlug}
+						auth, authErr := w.config.TurnRegistry.Authorizer(identity, *r.CallerCeiling, w.currentInteractivePrincipal)
+						if authErr == nil {
+							caller, e := execution.WithPrincipal(botWorkerContext{ctx}, original)
+							if e != nil {
+								authErr = e
+							} else {
+								authErr = auth.Authorize(execution.WithBotRunIdentity(caller, identity), execution.CapabilityChat)
 							}
 						}
-						if r.Status == store.RunInterrupted {
-							if err := w.confirmCancelledRun(ctx, repo, b.ID, r.ID); err != nil && !errors.Is(err, store.ErrBotConflict) && !errors.Is(err, store.ErrBotUnsupported) {
-								failures = append(failures, err)
-							}
-							continue // Verify teardown only; never replay interrupted work.
-						}
-						if r.Status == store.RunRunning && !time.Now().Before(r.Lease.ExpiresAt) {
-							// The repository rechecks authoritative expiry and fence.
-							recovery, ok := repo.(interface {
-								RecoverRun(context.Context, store.BotLease) error
-							})
+						if authErr != nil {
+							continuations, ok := repo.(store.BotInteractiveContinuationStore)
 							if !ok {
 								failures = append(failures, store.ErrBotUnsupported)
-								continue
+							} else if _, e := continuations.RequireInteractiveContinuation(ctx, b.ID, r.ID); e != nil && !errors.Is(e, store.ErrBotConflict) {
+								failures = append(failures, e)
 							}
-							if err := recovery.RecoverRun(ctx, r.Lease); err != nil && !errors.Is(err, store.ErrBotConflict) {
-								failures = append(failures, err)
-							}
-							continue // Never automatically retry uncertain effects.
-						}
-						if r.Intent.AllowsStatus(b.Status) && r.Status == store.RunQueued {
-							if err := w.execute(ctx, repo, ss, b.ID, r.ID); err != nil && !errors.Is(err, store.ErrBotConflict) {
-								log.Printf("[bots] run %s: %v", r.ID, err)
-							}
+							continue
 						}
 					}
-					if len(runs) < runPage.Limit {
-						break
+					if r.Status == store.RunInterrupted {
+						if err := w.confirmCancelledRun(ctx, repo, b.ID, r.ID); err != nil && !errors.Is(err, store.ErrBotConflict) && !errors.Is(err, store.ErrBotUnsupported) {
+							failures = append(failures, err)
+						}
+						continue // Verify teardown only; never replay interrupted work.
 					}
-					runPage.After = runs[len(runs)-1].ID.String()
+					if r.Status == store.RunRunning && !time.Now().Before(r.Lease.ExpiresAt) {
+						// The repository rechecks authoritative expiry and fence.
+						recovery, ok := repo.(interface {
+							RecoverRun(context.Context, store.BotLease) error
+						})
+						if !ok {
+							failures = append(failures, store.ErrBotUnsupported)
+							continue
+						}
+						if err := recovery.RecoverRun(ctx, r.Lease); err != nil && !errors.Is(err, store.ErrBotConflict) {
+							failures = append(failures, err)
+						}
+						continue // Never automatically retry uncertain effects.
+					}
+					if r.Intent.AllowsStatus(b.Status) && r.Status == store.RunQueued {
+						if err := w.execute(ctx, repo, ss, b.ID, r.ID); err != nil && !errors.Is(err, store.ErrBotConflict) {
+							log.Printf("[bots] run %s: %v", r.ID, err)
+						}
+					}
 				}
+
 			}
 			if err := w.reconcileKnowledge(ctx, repo, ss, b); err != nil {
 				failures = append(failures, err)
@@ -581,13 +688,29 @@ func botRunBudget(in store.BotRunInput, now time.Time) (*bot.SharedRunBudget, er
 	return bot.RestoreRunBudget(in.Version.Budget, now, u)
 }
 
+const (
+	botWorkerLeaseDuration = 5 * time.Minute
+	botWorkerRenewInterval = 20 * time.Second
+)
+
 func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.SessionStore, id store.BotID, runID store.RunID) error {
+	// Preflight, readiness, claim and Home binding are one synchronous startup
+	// operation. Do not carry its immutable bytes into the runtime/model loop.
+	ctx, endStartupReads := entstore.WithBotContentReadOperation(ctx)
+	defer endStartupReads() // includes every pre-runtime failure
 	ctx = w.knowledgeCommitContext(ctx, repo, ss)
-	if err := w.prepareInteractiveHome(ctx, repo, id, runID); err != nil {
+	homeTiming := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageHomeSession)
+	if err := w.prepareExistingBotHomeSession(ctx, repo, id); err != nil {
+		homeTiming(err)
 		return err
 	}
+	if err := w.prepareInteractiveHome(ctx, repo, id, runID); err != nil {
+		homeTiming(err)
+		return err
+	}
+	homeTiming(nil)
 	homes := &launcher.BotHomeManager{Backend: w.config.Sandbox.(sandbox.BotHomeBackend), Pool: w.config.Pool, Bots: repo}
-	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{ProgressYieldRequested: w.progressDrain.Load, Store: repo, Runtime: w.runtime, Homes: homes, WorkerID: w.config.WorkerID, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
+	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{BeginHeartbeatReads: entstore.WithBotContentReadOperation, ProgressYieldRequested: w.progressDrain.Load, Store: repo, Runtime: botStartupReadRuntime{Runtime: w.runtime, end: endStartupReads}, Homes: homes, WorkerID: w.config.WorkerID, LeaseDuration: botWorkerLeaseDuration, RenewInterval: botWorkerRenewInterval, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
 		identity, _ := execution.BotRunIdentityFromContext(c)
 		if !in.Run.ExecutionMode.Valid() {
 			return bot.RunPreparation{}, store.ErrBotForbidden
@@ -635,7 +758,7 @@ func (w *BotWorker) reconcilePublications(ctx context.Context, repo store.BotSto
 		authority, _ := repo.(store.BotDeliveryAuthorizer)
 		notifier = botChannelNotifier{getManager: w.config.ChannelManager, authority: authority}
 	}
-	return ReconcileBotPublications(ctx, repo, id, notifier)
+	return ReconcileBotPublications(ctx, repo, id, notifier, func(c context.Context, p *store.BotPublication) error { return w.indexPublication(c, repo, p) })
 }
 
 // ChannelManager has no provider-receipt API. Never invent a provider ID from
@@ -742,4 +865,363 @@ func (w *BotWorker) SchedulerCallbacks() BotSchedulerCallbacks {
 		}
 		return nil, nil, store.ErrBotForbidden
 	}}
+}
+
+// botDispatchLane is scheduling priority only; repository claims remain authority.
+type botDispatchLane uint8
+
+const (
+	botDispatchTeardown botDispatchLane = iota
+	botDispatchOwner
+	botDispatchAutonomous
+)
+
+type botScanModeKey struct{}
+type botScanMode uint8
+
+const (
+	botScanSynchronous botScanMode = iota
+	botScanDiscovery
+	botScanMaintenance
+)
+
+type botDispatchKey struct {
+	botID store.BotID
+	runID store.RunID
+}
+type botDispatchHint struct {
+	key      botDispatchKey
+	route    BotSchedulerScope
+	scope    store.BotScope
+	sequence int64
+	lane     botDispatchLane
+}
+
+const botDispatchMailboxCapacity = 256
+
+func (w *BotWorker) initDispatchLocked() {
+	if w.pending == nil {
+		w.pending = make(map[botDispatchKey]botDispatchHint)
+	}
+	if w.activeBots == nil {
+		w.activeBots = make(map[store.BotID]bool)
+	}
+	if w.activeCancels == nil {
+		w.activeCancels = make(map[store.BotID]context.CancelFunc)
+	}
+	if w.maintenanceBots == nil {
+		w.maintenanceBots = make(map[store.BotID]bool)
+	}
+	if w.maintenanceCancel == nil {
+		w.maintenanceCancel = make(map[store.BotID]context.CancelFunc)
+	}
+	if w.dispatchWake == nil {
+		w.dispatchWake = make(chan struct{}, 1)
+	}
+}
+func (w *BotWorker) wakeDispatchLocked() {
+	select {
+	case w.dispatchWake <- struct{}{}:
+	default:
+	}
+}
+
+// NotifyRunState copies routing identifiers only. In particular no request context,
+// principal, content or authentication evidence survives this postcommit callback.
+func (w *BotWorker) NotifyRunState(ctx context.Context, state store.BotRunState) {
+	p, ok := execution.PrincipalFromContext(ctx)
+	if !ok || p.Validate() != nil || state.BotID == uuid.Nil || state.RunID == uuid.Nil {
+		return
+	}
+	hint := botDispatchHint{key: botDispatchKey{state.BotID, state.RunID}, route: BotSchedulerScope{p.OrgSlug, p.TeamSlug, p.Subject}, sequence: state.StateSequence, lane: botDispatchAutonomous}
+	if state.Presentation == store.BotRunPresentationHomeInteractive {
+		hint.lane = botDispatchOwner
+	}
+	w.enqueueDispatch(hint, state.Status == store.RunQueued)
+}
+func (w *BotWorker) enqueueDispatch(h botDispatchHint, queued bool) {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	if w.activationStopped.Load() {
+		return
+	}
+	w.initDispatchLocked()
+	old, exists := w.pending[h.key]
+	if exists && h.sequence < old.sequence {
+		return
+	}
+	if !queued {
+		delete(w.pending, h.key)
+		return // a newer nonqueued state invalidates acceleration, not effects
+	}
+	if !exists && len(w.pending) >= botDispatchMailboxCapacity {
+		w.dispatchOverflow.Add(1)
+		return // only acceleration is lost; independent discovery reads durable queues
+	}
+	w.pending[h.key] = h
+	if h.lane == botDispatchOwner {
+		if cancel := w.maintenanceCancel[h.key.botID]; cancel != nil {
+			cancel() // owner acceleration interrupts reconciliation, never execution
+		}
+		log.Printf("[bots] dispatch enqueue bot_id=%s run_id=%s lane=%d sequence=%d active=%d owner=%d autonomous=%d pending=%d", h.key.botID, h.key.runID, h.lane, h.sequence, w.activeSlots, w.ownerSlots, w.autonomousSlots, len(w.pending))
+	}
+	w.wakeDispatchLocked()
+}
+
+func dispatchLane(r store.BotRun) botDispatchLane {
+	if r.Status != store.RunQueued && r.Status != store.RunWaitingApproval {
+		return botDispatchTeardown
+	}
+	if r.Presentation == store.BotRunPresentationHomeInteractive && r.Trigger != store.TriggerCron {
+		return botDispatchOwner
+	}
+	return botDispatchAutonomous
+}
+
+// discoverBot scans each page once, partitioning metadata into typed lanes. No
+// runtime or cleanup is performed on the discovery goroutine.
+func (w *BotWorker) discoverBot(ctx context.Context, repo store.BotStore, b store.Bot) error {
+	p, _ := execution.PrincipalFromContext(ctx)
+	page := store.BotPage{Limit: 200}
+	for {
+		runs, err := repo.ListRuns(ctx, b.ID, page)
+		if err != nil {
+			return err
+		}
+		for _, r := range runs {
+			if r.CallerCeiling != nil && r.MandateRef == nil {
+				original := r.CallerCeiling.Principal
+				if original.Subject != p.Subject || original.OrgSlug != p.OrgSlug || original.TeamSlug != p.TeamSlug {
+					continue
+				}
+			}
+			if r.Status != store.RunQueued {
+				continue
+			}
+			w.enqueueDispatch(botDispatchHint{key: botDispatchKey{b.ID, r.ID}, route: BotSchedulerScope{p.OrgSlug, p.TeamSlug, p.Subject}, scope: b.Scope, sequence: r.StateSequence, lane: dispatchLane(r)}, true)
+		}
+		if len(runs) < page.Limit {
+			return nil
+		}
+		page.After = runs[len(runs)-1].ID.String()
+	}
+}
+
+const (
+	botDispatchBaseSlots  = 2
+	botDispatchOwnerBurst = 1
+)
+
+func (w *BotWorker) dispatchPending(ctx context.Context) {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	for !w.activationStopped.Load() && ctx.Err() == nil {
+		var chosen botDispatchHint
+		found := false
+		for _, h := range w.pending {
+			if w.activeBots[h.key.botID] || (h.lane == botDispatchAutonomous && w.autonomousSlots >= 1) {
+				continue
+			}
+			limit := botDispatchBaseSlots
+			if h.lane == botDispatchOwner {
+				limit += botDispatchOwnerBurst
+			}
+			if w.activeSlots >= limit {
+				continue
+			}
+			if !found || h.lane < chosen.lane {
+				chosen, found = h, true
+			}
+		}
+		if !found {
+			return
+		}
+		delete(w.pending, chosen.key)
+		w.activeBots[chosen.key.botID] = true
+		w.activeSlots++
+		if chosen.lane == botDispatchOwner {
+			w.ownerSlots++
+		}
+		if chosen.lane == botDispatchAutonomous {
+			w.autonomousSlots++
+		}
+		log.Printf("[bots] dispatch start bot_id=%s run_id=%s lane=%d active=%d owner=%d autonomous=%d pending=%d", chosen.key.botID, chosen.key.runID, chosen.lane, w.activeSlots, w.ownerSlots, w.autonomousSlots, len(w.pending))
+		runCtx, cancel := context.WithCancel(ctx)
+		w.activeCancels[chosen.key.botID] = cancel
+		w.wg.Add(1) // admission and Stop/Drain's closed gate use the same mutex
+		go func(h botDispatchHint) {
+			defer w.wg.Done()
+			defer func() {
+				cancel()
+				w.lifecycleMu.Lock()
+				delete(w.activeBots, h.key.botID)
+				delete(w.activeCancels, h.key.botID)
+				w.activeSlots--
+				if h.lane == botDispatchOwner {
+					w.ownerSlots--
+				}
+				if h.lane == botDispatchAutonomous {
+					w.autonomousSlots--
+				}
+				log.Printf("[bots] dispatch release bot_id=%s run_id=%s lane=%d active=%d owner=%d autonomous=%d pending=%d", h.key.botID, h.key.runID, h.lane, w.activeSlots, w.ownerSlots, w.autonomousSlots, len(w.pending))
+				w.wakeDispatchLocked()
+				w.lifecycleMu.Unlock()
+			}()
+			if err := w.executeHint(runCtx, h); err != nil && runCtx.Err() == nil && !errors.Is(err, store.ErrBotConflict) {
+				log.Printf("[bots] dispatch: %v", err)
+			}
+		}(chosen)
+	}
+}
+
+func (w *BotWorker) executeHint(ctx context.Context, h botDispatchHint) error {
+	owner, org, err := w.authenticateOwner(ctx, h.route)
+	if err != nil {
+		return err
+	}
+	scopes := []store.BotScope{h.scope}
+	if h.scope == "" {
+		scopes = []store.BotScope{store.BotScopePersonal, store.BotScopeTeam}
+	}
+	for _, scope := range scopes {
+		var repo store.BotStore
+		var ss store.SessionStore
+		if scope == store.BotScopePersonal {
+			data := org.ForUser(h.route.UserID)
+			if data != nil {
+				repo, ss = data.Bots(), data.Sessions()
+			}
+		} else if scope == store.BotScopeTeam {
+			data := org.ForTeam(h.route.TeamSlug)
+			if data != nil {
+				repo, ss = data.Bots(), data.Sessions()
+			}
+		}
+		if repo == nil || ss == nil {
+			continue
+		}
+		b, err := repo.Get(owner, h.key.botID)
+		if err != nil || b == nil || b.OwnerID.String() != h.route.UserID || b.PermanentDelete {
+			continue
+		}
+		r, err := repo.GetRun(owner, b.ID, h.key.runID)
+		if err != nil {
+			return err
+		}
+		if r.Status != store.RunQueued || !r.Intent.AllowsStatus(b.Status) {
+			return nil
+		}
+		// Presentation is only an acceleration hint: a cron occurrence sharing
+		// the Home must not consume the slot reserved for owner continuations.
+		if lane := dispatchLane(*r); lane != h.lane {
+			h.lane, h.scope, h.sequence = lane, b.Scope, r.StateSequence
+			w.enqueueDispatch(h, true)
+			return nil
+		}
+		if r.CallerCeiling != nil && r.MandateRef == nil {
+			original := r.CallerCeiling.Principal
+			if original.Subject != h.route.UserID || original.OrgSlug != h.route.OrgSlug || original.TeamSlug != h.route.TeamSlug {
+				return store.ErrBotForbidden
+			}
+			identity := execution.BotRunIdentity{BotID: b.ID, RunID: r.ID, Version: r.Version, ActorID: original.Subject, OrgSlug: original.OrgSlug, TeamSlug: original.TeamSlug}
+			auth, authErr := w.config.TurnRegistry.Authorizer(identity, *r.CallerCeiling, w.currentInteractivePrincipal)
+			if authErr == nil {
+				caller, e := execution.WithPrincipal(entstore.CopyBotExecutionObserver(botWorkerContext{owner}, owner), original)
+				authErr = e
+				if e == nil {
+					authErr = auth.Authorize(execution.WithBotRunIdentity(caller, identity), execution.CapabilityChat)
+				}
+			}
+			if authErr != nil {
+				if continuations, ok := repo.(store.BotInteractiveContinuationStore); ok {
+					_, err = continuations.RequireInteractiveContinuation(owner, b.ID, r.ID)
+					return err
+				}
+				return authErr
+			}
+		}
+		// Same-Bot teardown dependencies are mandatory even for an accelerated
+		// owner hint. Another worker's live claim cannot be bypassed locally.
+		page := store.BotPage{Limit: 200}
+		for {
+			runs, err := repo.ListRuns(owner, b.ID, page)
+			if err != nil {
+				return err
+			}
+			for _, old := range runs {
+				if old.ID == r.ID {
+					continue
+				}
+				if old.Status == store.RunRunning {
+					if time.Now().Before(old.Lease.ExpiresAt) {
+						return store.ErrBotConflict
+					}
+					// Owner admission must not wait for the maintenance ticker. Recover
+					// the expired predecessor under its exact durable lease/fence, then
+					// require the same physical teardown receipt as normal maintenance.
+					recovery, ok := repo.(interface {
+						RecoverRun(context.Context, store.BotLease) error
+					})
+					if !ok {
+						return store.ErrBotUnsupported
+					}
+					if err := recovery.RecoverRun(owner, old.Lease); err != nil {
+						return err
+					}
+					old.Status = store.RunInterrupted
+				}
+				if old.Status == store.RunInterrupted {
+					if err := w.confirmCancelledRun(owner, repo, b.ID, old.ID); err != nil {
+						return err
+					}
+				}
+			}
+			if len(runs) < page.Limit {
+				break
+			}
+			page.After = runs[len(runs)-1].ID.String()
+		}
+		return w.execute(owner, repo, ss, b.ID, r.ID)
+	}
+	return store.ErrBotNotFound
+}
+
+// maintainBot owns only this Bot's control/teardown dependencies. Discovery and
+// admission of unrelated Bots never join this maintenance call.
+func (w *BotWorker) maintainBot(ctx context.Context, repo store.BotStore, ss store.SessionStore, b store.Bot) error {
+	if b.PermanentDelete {
+		return w.reconcileRetention(ctx, repo, b)
+	}
+	var failures []error
+	page := store.BotPage{Limit: 200}
+	for {
+		runs, err := repo.ListRuns(ctx, b.ID, page)
+		if err != nil {
+			return err
+		}
+		for _, r := range runs {
+			if r.Status == store.RunInterrupted {
+				if err := w.confirmCancelledRun(ctx, repo, b.ID, r.ID); err != nil && !errors.Is(err, store.ErrBotConflict) && !errors.Is(err, store.ErrBotUnsupported) {
+					failures = append(failures, err)
+				}
+			}
+			if r.Status == store.RunRunning && !time.Now().Before(r.Lease.ExpiresAt) {
+				if recovery, ok := repo.(interface {
+					RecoverRun(context.Context, store.BotLease) error
+				}); ok {
+					if err := recovery.RecoverRun(ctx, r.Lease); err != nil && !errors.Is(err, store.ErrBotConflict) {
+						failures = append(failures, err)
+					}
+				} else {
+					failures = append(failures, store.ErrBotUnsupported)
+				}
+			}
+		}
+		if len(runs) < page.Limit {
+			break
+		}
+		page.After = runs[len(runs)-1].ID.String()
+	}
+	failures = append(failures, w.reconcileAuthorizedOperations(ctx, repo, b.ID), w.reconcilePublications(ctx, repo, b.ID), w.reconcileKnowledge(ctx, repo, ss, b), w.reconcileRetention(ctx, repo, b))
+	return errors.Join(failures...)
 }

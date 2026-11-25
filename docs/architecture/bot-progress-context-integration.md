@@ -1,5 +1,187 @@
 # Durable progress context integration status
 
+## Database continuation fixtures
+
+`TestBotProgressRecoveryHTTP` resumes the same run/session in a fresh shared
+worker using a settled tool response, with no repeat dispatch. Home replay is
+byte-identical across reads and does not execute work or write runtime files.
+`TestBotDatabaseScheduledOccurrenceHTTP` admits a real occurrence through
+`scheduler.Executor`, checks duplicate admission retains its run ID, executes the
+existing worker once, and replays its committed final without redispatch in both
+SQL scopes. It does not substitute for physical Docker restart acceptance.
+
+`TestBotDatabaseDelegateStateReplayHTTP` runs the existing `SubAgentManager`
+against a Bot-linked scoped session service. Child creation inherits parent Bot
+linkage and retains caller initial state. Content emitted by the existing shared
+compactor and subsequent state deltas survive transcript reload; requesting only
+one recent event still replays the complete initial state. Reload never invokes
+the delegate model again. This checks serialization of existing compaction output,
+not a new durable compaction engine or automatic transcript replacement policy.
+
+## Payload-free production timing
+
+`BotWorkerConfig.ObserveExecution` installs the same context observer used by the
+shared factory. Trusted owner rebinding carries only this callback, not request
+values or authority. `BotExecutionTiming` carries typed stage/result and interval
+endpoints/duration; no prompts, arguments, credentials or error text are emitted.
+Callbacks can run concurrently and must synchronize their own storage.
+
+The repository measures queue residence from the latest committed queued state
+(falling back to run creation), actual ClaimRun, RequestApproval and CommitRun,
+including rejected calls. The Chat adapter measures startup before producer entry,
+owner admission to first durably accepted text event, and final settled progress
+bookkeeping separately from CommitRun. Factory hooks continue to measure preflight,
+provider, executable tool and between-call bookkeeping. Local intervals retain Go's
+monotonic clock; persisted admission times use wall clock and clamp future times.
+Each interval closes once, including errors. Aggregate setup and queue spans can
+contain smaller intervals: use interval unions, never add/subtract nested durations
+as independent provider/tool exclusions. Physical latency accounting is unchanged.
+
+## Read-only prompt refresh and mandatory access persistence
+
+Optional `BuildBotPrompt` refreshes use `botAgentWorkService.loadSnapshot`: live
+authorization, lease-bound work reads and protocol checks still run, but pending
+source-access facts are not committed under the optional two-second read deadline.
+Mandatory producer preflight continues to call `load`, binding and durably saving
+pending facts with the existing CAS before dispatch. This avoids abandoned
+multi-file writes and repeated commits caused by treating a prompt read as a
+mutation. Explicit work mutations retain their existing flush behavior; no
+provider/tool/yield read-scope lifetime is extended.
+
+Prompt-only work reads request `PromptSnapshot` and use the adapter's already
+persisted current-run session when available. They retain the latest bounded
+response references in chronological event/part order, excluding prior Home
+history; hashes and event/call identities are unchanged. An empty snapshot is
+valid and does not trigger historical hydration. Unavailable snapshots fall back
+to the scoped transcript reader. Explicit `bot_work_read` pagination and exact
+`bot_evidence_read` retrieval remain unchanged; no permission decision is cached.
+
+## Synchronous producer preparation
+
+The Bot factory installs optional ChatAgent preparation callbacks at ADK instruction
+construction. Immutable prompt reads and tool declarations share a request-owned
+operation. The factory borrows that operation for live checks and control context;
+its progress decorator transfers cleanup to BudgetLLM through an explicit capability.
+BudgetLLM closes the operation after reservation and before provider iterator
+creation or any consumer yield, including errors. Unknown decorators and synthesis
+retries close conservatively at the factory boundary. Progress evaluation is a
+separate boundary: ChatAgent closes preparation before invoking its controller.
+Consumer events and invocation cleanup also close preparation. Ordinary Chat has
+no callbacks. SQL authority is never reused. This does not promise a single cache
+across an intervening evaluator or compactor model call.
+
+API work-state loading and approval capture participate in the same explicit
+preflight contract when every inner decorator supports it. Their scopes close
+before unknown model entry, actual provider creation, response processing and
+consumer yield, including failure and panic paths. Each new model invocation
+performs fresh work and authorization checks. Supervisor heartbeats separately
+own a synchronous read operation spanning mandate/budget checks and lease renewal;
+the operation closes before returning to the heartbeat wait. Neither mechanism
+retains immutable bytes across model execution or between heartbeats.
+
+Optional prompt refreshes are read-only. Pending captured evidence is persisted
+by mandatory producer preflight or, when yielding first, before checkpoint work
+revision binding. This preserves the evidence index for independent review after
+process restart without making the optional two-second prompt refresh perform
+multi-file writes. Progress checkpoints also retain the bounded invocation binding
+for each in-flight tool call (run identity, canonical argument digest, transport
+and concrete target, and trusted read/source classification). A successful response
+after restore can therefore settle that exact call; missing, malformed, mismatched,
+duplicate, historical-format, or write-effect bindings remain uncertain and keep
+the no-replay boundary. Final commits merge repository-accounted elapsed runtime from
+an intervening heartbeat, but still reject lower durable tool, token or cost usage.
+
+## Progress evaluator JSON input contract
+
+Progress evaluation prepends a trusted request to return JSON to the user-role
+input, before the unchanged observation/previous-decision payload. Some configured
+providers enforce JSON-mode eligibility against input messages without counting
+system instructions. Both initial and format-correction attempts carry this
+prefix. The existing 64 KiB raw-observation cap remains unchanged; the constant
+format prefix adds only bounded overhead. System instructions and the prefix
+explicitly treat the payload as untrusted data, never authority. The owner's
+assignment, evidence and previous decision are not rewritten, and bookkeeping
+scope lifetimes are unchanged. `TestBotProgressEvaluationProportionalRigor`
+checks the exact prefix and byte-preserved payload on both attempts.
+
+## Synchronous progress bookkeeping reads
+
+`ProgressController.BeginBookkeeping` is installed by the API composition with
+an immutable-content read operation. Boundary/drain, observation and the first
+evaluator boundary share that operation. For decorators explicitly implementing
+`SupportsModelPreflight`, the controller transfers cleanup through the neutral
+`execution.WithModelPreflightEnd` contract. The Bot factory preserves only the
+immutable operation across owner rebinding and chains caller cleanup to its own;
+BudgetLLM closes both before actual provider entry, including iterator creation.
+Unknown models still close eagerly. Correction attempts receive fresh scopes. After evaluation,
+settlement/boundary and checkpoint commit share a new operation, which closes
+before owner interaction or failure backoff. Direct observation/commit/drain
+callers still own a short scope when none exists. SQL authority, lease and CAS
+checks remain live on every call; no mutable Home or permission data is cached.
+`TestProgressSynchronousBookkeepingLifetime` checks this ordering.
+
+## Controlled execution timing
+
+An optional request-local observer records typed preflight/provider/tool/bookkeeping
+stages, success/failure and durations only. It carries no prompt, tool arguments,
+source bodies or authority, and is copied explicitly through owner rebinding.
+Observers must be concurrency-safe and nonblocking. These stages are diagnostic
+intervals, not additive accounting: nested stage durations must not be subtracted
+from a wall-clock boundary twice. The physical between-call fixture resets auxiliary
+provider duration after each actual tool return, so previous calls cannot hide the
+next gap. Its employee extension reports admission and execution through final commit
+separately and checks completion without another approval or mandatory artifact.
+The maintenance gate measures from the persisted queued-state commit timestamp to
+an actual persisted StartedAt plus nonzero lease fence, not HTTP response return
+or an arbitrary nonqueued status. Completion logs also expose queue-to-claim,
+claimed-through-finish, producer-return-to-fixture-end and state-commit-to-return;
+these overlapping diagnostics are not summed or excluded from the 15-second gap.
+`TestBotProgressEvaluationProportionalRigorStrictJSONHTTP` checks both the initial
+and correction requests against a strict loopback JSON-mode endpoint.
+
+## Same-transaction state-envelope coalescing
+
+Agent-led `SaveWork` and non-suspended `CheckpointProgress` assign the activity's
+state sequence and timestamp before their existing envelope write. The saved-run
+activity helper inserts the durable activity and delegates to `AppendRunState`,
+which still reads authoritative persisted state. Personal and team adapters omit
+only the redundant envelope encode/SQL update when that persisted sequence/time
+matches exactly. Ordered durable transcript append and after-commit notification
+still execute. Suspended checkpoint lifecycle writes and all other transition
+producers retain their original persistence path. File fsync/readback precedes SQL
+selection as before; this does not batch reservations with executable effects.
+
+## Transaction-local unchanged checkpoint writes
+
+A transaction remembers one fully authenticated run-content reference and a
+SHA-256 digest of the fields not reconstructed by `applyRunControl`. Context
+saves, dispatch accounting and quota bookkeeping reuse that exact immutable
+reference only when Bot/run/version and this digest match. All nested work,
+progress, title and replay changes still write a new checkpoint. No payload
+bytes, authority decisions or caller-owned pointers are retained in the receipt;
+it is not shared with later transactions. SQL root fencing, lease predicates,
+logical digests and activity/checkpoint atomicity are unchanged. Fresh reads
+continue to verify the actual referenced content before a receipt is recorded.
+
+## File-authoritative private activity records
+
+Progress context bytes and control-proposal payloads (including decision receipts)
+are retained as immutable activity content, not embedded in SQL outbox JSON.
+Personal and team activity adapters use their transaction's content codec for both
+writes and hydration. SQL retains the context binding and digest, and a typed
+proposal projection containing identity, version/revision fences, operation,
+request/draft digests, status, decision actor/time and reconciliation state. The
+codec checks these projections against the hydrated content before replay,
+listing or decisions; file text alone cannot replace SQL authority. Dispatch
+request/receipt/settlement fencing metadata remains in the existing typed SQL
+projection. Missing content, digest mismatches and unsupported inline formats
+fail closed; there is no legacy inline-content fallback.
+
+`TestBotContentProgressControlPersistence` exercises personal/team SQLite
+transactions, raw-SQL sentinel exclusion, database reopen, context and proposal
+replay/listing, altered authority rejection and missing-file rejection. This is
+local store evidence, not dedicated PostgreSQL or live sandbox acceptance.
+
 New Bots select `progress_v1` through `AppConfig.EffectiveBotRuntimePolicy` when
 neither an explicit runtime policy nor historical `bot_mandates` operator ceilings
 are configured. Explicit legacy policy and saved finite ceilings retain their

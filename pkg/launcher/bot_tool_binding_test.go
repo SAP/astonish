@@ -47,7 +47,7 @@ func bindingQuestionFixture(t *testing.T, progress bool, timeout time.Duration) 
 		t.Fatal(err)
 	}
 	t.Cleanup(resources.Cleanup)
-	binding := resources.Agent.LLM.(*botFactoryLLM).binding
+	binding := botFactoryModelForTest(t, resources.Agent.LLM).binding
 	binding.owner = bot.WithInteractionOwner(binding.owner)
 	probe := &progressDispatchProbe{}
 	if progress {
@@ -124,8 +124,33 @@ func TestBotWorkflowBindingThroughProgressAndTimeout(t *testing.T) {
 				if probe.settled != 1 {
 					t.Fatalf("settlements = %d", probe.settled)
 				}
+				if probe.outcome != store.BotProgressDispatchSettled {
+					t.Fatalf("genuine question classified as uncertain external effect: %+v", probe)
+				}
 			}
 		})
+	}
+}
+
+func TestBotWorkflowQuestionProgressWithoutAutonomousClassifier(t *testing.T) {
+	b, target, _, probe := bindingQuestionFixture(t, true, time.Second)
+	// Interactive Chat is authorized by the caller ceiling, not an autonomous classifier.
+	b.owner = agent.WithBotPolicyRuntime(b.owner, agent.BotPolicyRuntime{})
+	ctx := botBoundToolContext{Context: bindingQuestionContext(b, b.owner), owner: b.owner}
+	result, err := b.progressTool(ctx, target.botRunnableTool, map[string]any{"kind": "text", "prompt": "Which destination?"}, func(c tool.Context, args any) (map[string]any, error) {
+		return b.runSynthesisTool(c, target.botRunnableTool, args)
+	})
+	if err != nil || result["status"] != "ok" {
+		t.Fatalf("genuine question: %v %v", result, err)
+	}
+	if err := b.progress.boundary(b.owner); err != nil {
+		t.Fatal(err)
+	}
+	if probe.outcome != store.BotProgressDispatchSettled {
+		t.Fatalf("genuine question classified as uncertain external effect: %+v", probe)
+	}
+	if botProgressPinnedRead(progressNamedTool{name: "ask_user"}, nil) {
+		t.Fatal("untrusted question name acquired pinned read semantics")
 	}
 }
 

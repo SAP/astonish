@@ -20,7 +20,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
 )
 
 // Real Execute + Bubble Tea process. A deliberately delayed pre-commit header
@@ -117,10 +116,7 @@ func TestBotComposerRevisionPTYAcceptance(t *testing.T) {
 			case <-r.Context().Done():
 				return
 			}
-			row := adksession.Event{Author: "bot_runtime", Actions: adksession.EventActions{StateDelta: map[string]any{store.BotOperationKey: op}}}
-			raw, _ := json.Marshal(row)
-			fmt.Fprintf(w, "id: %s:1\nevent: transcript\ndata: %s\n\n", root.HomeSessionID, raw)
-			w.(http.Flusher).Flush()
+			writeBotCanonicalPTYFrame(t, w, root.HomeSessionID, uuid.Nil, 1, "revision-applied", store.BotOperationKey, op)
 			<-r.Context().Done()
 		default:
 			t.Errorf("unexpected route %s", r.URL)
@@ -211,7 +207,9 @@ func TestBotComposerRevisionPTYAcceptance(t *testing.T) {
 	// Let the old header response arrive after reconciliation. It must not put
 	// version 2 back into the next request.
 	release.Do(func() { close(releaseOld) })
-	wait("status unavailable")
+	// 5d892dc5 preserves the last known lifecycle label on a failed refresh.
+	// A regressed snapshot is uncertainty, not proof that the Bot stopped.
+	wait("active · Updates unavailable")
 	send("retain this conflict draft\r")
 	wait("I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.")
 	if feedback := read(); strings.Contains(feedback, "server error (") || strings.Contains(feedback, "Bot changed; reload and review before retrying.") {

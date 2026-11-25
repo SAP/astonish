@@ -68,16 +68,27 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 				t.Fatal(budgetErr)
 			}
 			f.req.Budget = meter
-			path := filepath.Join(t.TempDir(), "read.txt")
-			if err := os.WriteFile(path, []byte("observed"), 0600); err != nil {
+			path := "outputs/read.txt"
+			if err := os.MkdirAll(filepath.Join(f.files.root, "outputs"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			args := map[string]any{"path": path}
+			if err := os.WriteFile(filepath.Join(f.files.root, path), []byte("observed"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := map[string]any{"path": filepath.Join(f.files.root, path)}
 			switch tc.name {
 			case "web_fetch":
 				args = map[string]any{"url": "http://93.184.216.34/weather?status=" + strconv.Itoa(tc.status), "mode": "raw"}
 			case "write_file":
 				args["content"] = "changed"
+				entry, err := f.files.entry(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args["expected_sha256"] = entry.SHA256
+				f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) {
+					return fileOutcomeFiles{BotFiles: f.files, strip: tc.strip}, nil
+				}
 			case "shell_command":
 				args = map[string]any{"command": "printf observed"}
 			}
@@ -85,7 +96,7 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			llm := &fileOutcomeModel{name: tc.name, args: args}
 			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: filepath.Dir(path), VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: f.files.root, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			factory, err := NewBotChatAgentFactory(f.cfg)
 			if err != nil {
@@ -95,16 +106,30 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			writesBefore := f.files.writes
 			result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
-			if err != nil {
+			if tc.strip {
+				if err == nil || !strings.Contains(err.Error(), store.ErrBotConflict.Error()) {
+					t.Fatalf("missing retained receipt did not fail closed: %v", err)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
-			if node.calls != 1 || result.Usage.ToolCalls != 1 {
+			wantNode, wantWrites := 1, 0
+			// Ordinary file tools now execute through Chat's sandbox node; the
+			// retained-file service is reserved for publication and internal state.
+			if node.calls != wantNode || f.files.writes-writesBefore != wantWrites || result.Usage.ToolCalls != 1 {
 				t.Fatalf("executions=%d usage=%+v", node.calls, result.Usage)
 			}
 			want := store.RunSucceeded
 			if tc.partial {
 				want = store.RunPartial
+			}
+			if tc.strip {
+				want = store.RunFailed
+				if len(result.Report.Unverified) != 1 || len(result.Report.Changed)+len(result.Report.Unchanged) != 0 {
+					t.Fatalf("missing receipt upgraded: %+v", result.Report)
+				}
 			}
 			if result.Status != want {
 				t.Fatalf("status=%s want=%s report=%+v", result.Status, want, result.Report)

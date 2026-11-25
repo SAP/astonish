@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/SAP/astonish/pkg/execution"
 	"strings"
 	"sync"
 	"time"
@@ -37,10 +39,63 @@ type ToolOutcome struct {
 
 // ToolNonexecutionReceipt binds a trusted rejection to its exact invocation.
 // This type is server-only; provider JSON and tool arguments cannot mint it.
+type ToolFeedbackDisposition string
+
+const (
+	ToolFeedbackTerminal         ToolFeedbackDisposition = "terminal"
+	ToolFeedbackCorrectCall      ToolFeedbackDisposition = "correct_call"
+	ToolFeedbackUnresolvedTarget ToolFeedbackDisposition = "unresolved_target"
+)
+
 type ToolNonexecutionReceipt struct {
-	CallID   string
-	ToolName string
+	CallID         string
+	ToolName       string
+	Identity       execution.BotRunIdentity
+	ArgumentDigest string
+	Disposition    ToolFeedbackDisposition
 }
+
+// NewToolNonexecutionOutcome is only for a boundary which knows dispatch has not
+// started. A repair permits a new corrected invocation, never replay of this one.
+func NewToolNonexecutionOutcome(ctx context.Context, callID, target string, args any, disposition ToolFeedbackDisposition) ToolOutcome {
+	identity, ok := execution.BotRunIdentityFromContext(ctx)
+	if !ok || callID == "" || target == "" {
+		return ToolOutcome{}
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return ToolOutcome{}
+	}
+	digest, err := (execution.ActionDescriptor{Tool: target, Arguments: raw, Effect: execution.EffectUnknown}).Digest()
+	if err != nil {
+		return ToolOutcome{}
+	}
+	return ToolOutcome{Verified: true, Nonexecution: &ToolNonexecutionReceipt{CallID: callID, ToolName: target, Identity: identity, ArgumentDigest: digest, Disposition: disposition}}
+}
+
+func (r *ToolNonexecutionReceipt) ValidFor(identity execution.BotRunIdentity, callID, target, digest string) bool {
+	validDisposition := r != nil && (r.Disposition == ToolFeedbackTerminal || r.Disposition == ToolFeedbackCorrectCall || r.Disposition == ToolFeedbackUnresolvedTarget)
+	return validDisposition && r.Identity == identity && r.CallID == callID && callID != "" && r.ToolName == target && target != "" && r.ArgumentDigest == digest && digest != ""
+}
+
+// NonexecutionFor validates the complete exclusive attestation, not only its ID.
+// Mixed effect/source records and duplicate receipts never establish nonexecution.
+func (o ToolOutcome) NonexecutionFor(ctx context.Context, callID, target string, args any) bool {
+	want := NewToolNonexecutionOutcome(ctx, callID, target, args, ToolFeedbackTerminal).Nonexecution
+	return want != nil && o.Nonexecution.ValidFor(want.Identity, callID, target, want.ArgumentDigest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.Artifacts) == 0 && len(o.SourceAccess) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+}
+
+// ToolArgumentError is minted only by trusted pre-dispatch argument validation.
+// Authorization, budget, cancellation and unknown execution errors do not use it.
+type ToolArgumentError struct{ Cause error }
+
+func (e *ToolArgumentError) Error() string {
+	return "Invalid tool arguments; correct the call using its described schema."
+}
+func (e *ToolArgumentError) Unwrap() error { return e.Cause }
 
 // ToolReportArtifact binds captured report bytes to a server-observed home file.
 // Its digest and home ownership are checked again by the runtime adapter.
@@ -62,6 +117,13 @@ type ToolOutcomes struct {
 	records map[string]ToolOutcome
 }
 type toolOutcomesKey struct{}
+
+// ToolOutcomesEnabled allows boundaries to avoid touching invocation-only fields
+// when no per-attempt ledger was installed (for example metadata-only callers).
+func ToolOutcomesEnabled(ctx context.Context) bool {
+	ledger, _ := ctx.Value(toolOutcomesKey{}).(*ToolOutcomes)
+	return ledger != nil
+}
 
 func WithToolOutcomes(ctx context.Context) (context.Context, *ToolOutcomes) {
 	ledger := &ToolOutcomes{records: make(map[string]ToolOutcome)}

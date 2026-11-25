@@ -6,7 +6,9 @@ import (
 	"reflect"
 
 	personalmemory "github.com/SAP/astonish/ent/personal/memory"
+	personalsession "github.com/SAP/astonish/ent/personal/session"
 	teammemory "github.com/SAP/astonish/ent/team/memory"
+	teamsession "github.com/SAP/astonish/ent/team/session"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
@@ -104,6 +106,39 @@ func validateMemoryAttribution(ctx context.Context, db botDraftDB, session strin
 	return nil
 }
 
+// Generic SQL memory is not a Bot content store. Check the persisted binding,
+// never caller context or optional attribution, before embedding or writing.
+// Missing/invalid session IDs retain the ordinary memory store's behavior.
+func (m *personalMemoryStore) guardGenericMemorySession(ctx context.Context, sessionID string) error {
+	sid, err := uuid.Parse(sessionID)
+	if err != nil {
+		return nil
+	}
+	bound, err := m.client.Session.Query().Where(personalsession.IDEQ(sid.String()), personalsession.BotIDNotNil()).Exist(ctx)
+	if err != nil {
+		return err
+	}
+	if bound {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+
+func (m *teamMemoryStore) guardGenericMemorySession(ctx context.Context, sessionID string) error {
+	sid, err := uuid.Parse(sessionID)
+	if err != nil {
+		return nil
+	}
+	bound, err := m.client.Session.Query().Where(teamsession.IDEQ(sid.String()), teamsession.BotIDNotNil()).Exist(ctx)
+	if err != nil {
+		return err
+	}
+	if bound {
+		return store.ErrBotForbidden
+	}
+	return nil
+}
+
 func prepareMemoryAttribution(ctx context.Context, db botDraftDB, entry store.MemoryEntry) (map[string]any, error) {
 	if err := validateMemoryAttribution(ctx, db, entry.SessionID, entry.Attribution); err != nil {
 		return nil, err
@@ -135,26 +170,31 @@ func guardMemoryAttribution(ctx context.Context, db botDraftDB, botID store.BotI
 }
 
 func (d personalBotDB) SupersedeMemoryAttribution(ctx context.Context, id uuid.UUID, source string) error {
-	row, err := d.client.Memory.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	metadata, err := store.SupersedeMemoryAttribution(row.Metadata, source)
-	if err != nil {
-		return err
-	}
-	return d.client.Memory.UpdateOneID(id).SetMetadata(metadata).Exec(ctx)
+	return supersedeDiskMemoryAttribution(ctx, d, id, source)
 }
 func (d teamBotDB) SupersedeMemoryAttribution(ctx context.Context, id uuid.UUID, source string) error {
-	row, err := d.client.Memory.Get(ctx, id)
+	return supersedeDiskMemoryAttribution(ctx, d, id, source)
+}
+func supersedeDiskMemoryAttribution(ctx context.Context, db botDraftDB, id uuid.UUID, source string) error {
+	row, err := db.ReadCorrectionMemory(ctx, id.String())
 	if err != nil {
 		return err
 	}
-	metadata, err := store.SupersedeMemoryAttribution(row.Metadata, source)
-	if err != nil {
-		return err
+	if row == nil {
+		return store.ErrBotNotFound
 	}
-	return d.client.Memory.UpdateOneID(id).SetMetadata(metadata).Exec(ctx)
+	if row.Attribution == nil {
+		return store.ErrBotConflict
+	}
+	return changeBotDiskMemory(ctx, db, row.Attribution.BotID, *row, func(e *botDiskMemoryEntry) error {
+		var err error
+		e.Metadata, err = store.SupersedeMemoryAttribution(e.Metadata, source)
+		if err != nil {
+			return err
+		}
+		e.Row.Attribution, err = store.DecodeMemoryAttribution(e.Metadata)
+		return err
+	})
 }
 
 var _ store.AttributedMemoryStore = (*personalMemoryStore)(nil)

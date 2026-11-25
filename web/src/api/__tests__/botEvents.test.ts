@@ -1,179 +1,275 @@
-import { expect, it, vi } from 'vitest'
-import { connectBotEvents, createBotTranscriptMapper, dispatchBotTranscript, type BotTranscript } from '../botEvents'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { connectBotEvents, type BotStreamOptions } from '../botEvents'
 import { teamFetch } from '../teamContext'
 
 vi.mock('../teamContext', () => ({ teamFetch: vi.fn() }))
 
-const quotedContext = '[Astonish Per-Turn Context — not user-authored]\n## Relevant Tools For This Request\nannounce_plan / delegate_tasks'
-const userRow = (camel: boolean, text: string, marker?: unknown): BotTranscript => JSON.parse(JSON.stringify(camel
-  ? { author: 'user', invocationId: 'turn', content: { role: 'user', parts: [{ text }] }, actions: { stateDelta: { _astonish_turn_context: marker } } }
-  : { Author: 'user', InvocationID: 'turn', Content: { role: 'user', parts: [{ text }] }, Actions: { StateDelta: { _astonish_turn_context: marker } } }))
-
-it('distinguishes chunked replay completion from per-row live connectivity', async () => {
-  const emit = vi.fn(), state = vi.fn(), replay = vi.fn()
+const controllers: AbortController[] = []
+beforeEach(() => { vi.useFakeTimers(); vi.mocked(teamFetch).mockReset() })
+afterEach(async () => {
+  controllers.splice(0).forEach(controller => controller.abort())
+  await vi.advanceTimersByTimeAsync(0)
+  vi.useRealTimers()
+})
+const encoder = new TextEncoder()
+const metadata = (cursor = 'home:1', eventId = 'home/row/0') => ({
+  event_id: eventId, session_id: 'home', run_id: 'run', turn_id: 'turn', sequence: 1, cursor,
+})
+const frame = (event: string, payload: unknown, id = 'home:1', newline = '\n') =>
+  [`id: ${id}`, `event: ${event}`, `data: ${JSON.stringify(payload)}`, '', ''].join(newline)
+const canonical = (event: string, payload: Record<string, unknown> = {}, cursor = 'home:1', eventId = 'home/row/0') =>
+  frame(event, { ...payload, _projection: metadata(cursor, eventId) }, cursor)
+function source(initial = '', byteSplit = false) {
   let writer!: ReadableStreamDefaultController<Uint8Array>
-  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(new ReadableStream({ start(c) { writer = c } })))
-  const controller = connectBotEvents({ botId: 'bot', sessionId: 'home', scope: 'personal', onEvent: emit, onState: state, onReplayComplete: replay })
-  const push = (text: string) => writer.enqueue(new TextEncoder().encode(text))
-  try {
-    push(`id: home:1\nevent: transcript\ndata: ${JSON.stringify(userRow(false, 'initial'))}\n\n`)
-    await vi.waitFor(() => expect(state).toHaveBeenCalledWith('live', 'home:1'))
-    expect(replay).not.toHaveBeenCalled()
-    push('id: home:1\nevent: replay_com')
-    await Promise.resolve()
-    expect(replay).not.toHaveBeenCalled()
-    push('plete\ndata: {}\n\n')
-    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1))
-  } finally { controller.abort() }
-})
-
-it.each([false, true])('hides only boolean-marked context without completion (camel: %s)', camel => {
-  for (const runtime of [false, true]) {
-    const mapper = createBotTranscriptMapper(), emit = vi.fn()
-    if (runtime) dispatchBotTranscript(wire('session', {}, 'turn'), emit, mapper)
-    dispatchBotTranscript(userRow(camel, 'real input'), emit, mapper, 'home:1')
-    expect(emit.mock.calls).toEqual([
-      ['user_message', { text: 'real input', invocationId: 'turn', eventId: 'home:1' }],
-      ['turn_complete', { invocationId: 'turn', eventId: 'home:1' }],
-    ])
-    emit.mockClear()
-    dispatchBotTranscript(userRow(camel, quotedContext, true), emit, mapper, 'home:2')
-    dispatchBotTranscript(userRow(camel, 'Model-only context without a heading', true), emit, mapper, 'home:2b')
-    expect(emit).not.toHaveBeenCalled()
-    // Neither quoted headings nor false/string markers are provenance. Equal
-    // legitimate messages must survive even inside a correlated runtime turn.
-    for (const marker of [undefined, false, 'true']) {
-      for (const id of ['home:3', 'home:4']) {
-        dispatchBotTranscript(userRow(camel, quotedContext, marker), emit, mapper, id)
-      }
-    }
-    expect(emit.mock.calls.filter(([type]) => type === 'user_message').map(([, p]) => p.text)).toEqual(Array(6).fill(quotedContext))
-    expect(emit.mock.calls.filter(([type]) => type === 'turn_complete')).toHaveLength(6)
+  const cancel = vi.fn()
+  const body = new ReadableStream<Uint8Array>({ start(c) { writer = c }, cancel })
+  const push = (text: string) => {
+    const bytes = encoder.encode(text)
+    if (byteSplit) { for (const byte of bytes) writer.enqueue(new Uint8Array([byte])) }
+    else writer.enqueue(bytes)
   }
+  if (initial) push(initial)
+  return { body, push, cancel, close: () => writer.close() }
+}
+function connect(extra: Partial<BotStreamOptions> = {}) {
+  const callbacks = { onEvent: vi.fn(), onError: vi.fn(), onDone: vi.fn(), onReplayComplete: vi.fn(), onState: vi.fn() }
+  const controller = connectBotEvents({ botId: 'bot', sessionId: 'home', scope: 'personal', ...callbacks, ...extra })
+  controllers.push(controller)
+  return { ...callbacks, controller }
+}
+const flush = () => vi.advanceTimersByTimeAsync(0)
+
+// Format 3 remains private SQL storage, never a new public SSE envelope.
+it('preserves database conversation projection through reconnect and reload without optimistic acknowledgement', async () => {
+  const question = canonical('bot_review', { reviewId: 'approval', question: { questionId: 'q', kind: 'text', prompt: 'Which markets?' } }, 'home:1', 'home/question/0')
+  const answer = canonical('user_message', { text: 'U.S. markets and major indexes', eventId: 'answer', invocationId: 'turn' }, 'home:2', 'home/answer/0')
+  const ack = canonical('text', { text: 'I will research U.S. markets.', invocationId: 'turn' }, 'home:2', 'home/ack/0')
+  const final = canonical('text', { text: 'Major indexes rose.', invocationId: 'turn' }, 'home:4', 'home/final/0')
+  const done = canonical('turn_complete', { invocationId: 'turn' }, 'home:5', 'home/final/1')
+  const first = source(question + answer), second = source(ack + final + done)
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(second.body))
+  const live = connect()
+  await flush()
+  expect(live.onEvent.mock.calls.map(([type]) => type)).toEqual(['bot_review', 'user_message'])
+  expect(live.onDone).not.toHaveBeenCalled()
+  first.push(ack)
+  await flush()
+  first.close()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:2' })
+  expect(live.onEvent.mock.calls.map(([type]) => type)).toEqual(['bot_review', 'user_message', 'text', 'text', 'turn_complete'])
+  live.controller.abort()
+  await flush()
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(source(question + answer + ack + final + done).body))
+  const reload = connect()
+  await flush()
+  expect(reload.onEvent.mock.calls).toEqual(live.onEvent.mock.calls)
+  expect(vi.mocked(teamFetch).mock.calls[2][1]?.headers).toEqual({})
 })
 
-it('advances the stream cursor past hidden context without emitting a completion', async () => {
-  const emit = vi.fn(), state = vi.fn()
-  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(new ReadableStream({ start(c) {
-    c.enqueue(new TextEncoder().encode(`id: home:2\nevent: transcript\ndata: ${JSON.stringify(userRow(true, quotedContext, true))}\n\nid: home:2\nevent: replay_complete\ndata: {"persisted":true}\n\n`))
-  } })))
-  const controller = connectBotEvents({ botId: 'bot', sessionId: 'home', scope: 'personal', onEvent: emit, onState: state })
-  try {
-    await vi.waitFor(() => expect(state).toHaveBeenCalledWith('live', 'home:2'))
-    expect(emit).not.toHaveBeenCalled()
-  } finally {
-    controller.abort()
-  }
+it('forwards canonical Chat payloads without a Bot presentation mapper', async () => {
+  const events: [string, Record<string, unknown>][] = [
+    ['user_message', { text: 'Readable owner answer', invocationId: 'turn', eventId: 'answer' }],
+    ['bot_review', { kind: 'approval', reviewId: 'review', invocationId: 'turn', eventId: 'question', question: { questionId: 'q', kind: 'text', prompt: 'Which topic?' } }],
+    ['tool_call', { name: 'read_file', args: { path: 'report.md' }, id: 'call' }],
+    ['tool_result', { name: 'read_file', result: { content: 'report' }, id: 'call' }],
+    ['text', { text: 'report' }], ['turn_complete', {}],
+    ['bot_operation', { operation_id: 'op', status: 'pending_approval' }],
+    ['bot_run_state', { run_id: 'r', status: 'running' }],
+    ['bot_file_publication', { event_id: 'publication', artifacts: [] }],
+    ['report_marker', { path: '/report.md' }], ['error', { error: 'Tool failed' }],
+  ]
+  const stream = source(events.map(([type, data], i) => canonical(type, data, `home:${i + 1}`, `home/row-${i}/0`)).join(''))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(stream.body))
+  const result = connect()
+  await flush()
+  expect(result.onEvent.mock.calls).toEqual(events)
+  expect(result.onDone).not.toHaveBeenCalled()
 })
 
-const wire = (type: string, payload: Record<string, unknown>, turn?: string, id = 'review-row'): BotTranscript => JSON.parse(JSON.stringify({
-  id, invocationId: turn, author: 'bot_runtime',
-  actions: { stateDelta: { bot_runtime_event: { type, payload, turn_id: turn, sequence: 1 } } },
-}))
-
-it('hides historical fallback only while a typed question is pending and preserves later or quoted prose', () => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  const text = 'I need your answer or authorization before I can continue.'
-  const row = (value: string): BotTranscript => ({ Author: 'assistant', Content: { parts: [{ text: value }] } })
-  dispatchBotTranscript(row(text), emit, mapper)
-  dispatchBotTranscript(wire('chat_question', { questionId: 'q', kind: 'text', prompt: 'Which topic?' }), emit, mapper)
-  dispatchBotTranscript(row(text), emit, mapper)
-  dispatchBotTranscript(row(`Quoted: ${text}`), emit, mapper)
-  dispatchBotTranscript(userRow(false, 'Research'), emit, mapper)
-  dispatchBotTranscript(row(text), emit, mapper)
-  expect(emit.mock.calls.filter(([type]) => type === 'text').map(([, p]) => p.text)).toEqual([text, `Quoted: ${text}`, text])
-  expect(emit).toHaveBeenCalledWith('chat_question', expect.objectContaining({ questionId: 'q' }))
+it('shares byte-split UTF8, CRLF and multiline framing; malformed JSON never advances', async () => {
+  const data = { text: '雪🌍', _projection: metadata() }
+  const encoded = JSON.stringify(data, null, 2).split('\n').map(line => `data: ${line}`).join('\r\n')
+  const first = source(`: heartbeat\r\nid: home:1\r\nevent: user_message\r\n${encoded}\r\n\r\nid: home:2\r\nevent: text\r\ndata: {invalid\r\n\r\n`, true)
+  const second = source()
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(second.body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(result.onEvent.mock.calls).toEqual([['user_message', { text: '雪🌍' }]])
+  expect(result.onState).not.toHaveBeenCalledWith('live', 'home:2')
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:1' })
+  expect(first.cancel).toHaveBeenCalledTimes(1)
+  expect(first.body.locked).toBe(false)
 })
 
-it('projects the real question payload with its runtime approval reference', () => {
-  const emit = vi.fn()
-  dispatchBotTranscript(wire('chat_question', { approval_id: 'a', questionId: 'q', kind: 'select', prompt: 'Which AI news?', options: [{ id: 'research', label: 'Research papers' }], allow_custom_answer: true }), emit)
-  expect(emit).toHaveBeenCalledWith('bot_review', expect.objectContaining({ reviewId: 'a', question: expect.objectContaining({ questionId: 'q', prompt: 'Which AI news?' }) }))
+it('replays an interrupted row by stable part identity, not shared cursor or equal text', async () => {
+  const firstPart = canonical('text', { text: 'again' }, 'home:0', 'home/row/0')
+  const first = source(firstPart)
+  first.close()
+  const second = source(firstPart + canonical('text', { text: 'again' }, 'home:0', 'home/row/1') + canonical('turn_complete', {}, 'home:1', 'home/row/2'))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(second.body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:0' })
+  expect(result.onEvent.mock.calls).toEqual([['text', { text: 'again' }], ['text', { text: 'again' }], ['turn_complete', {}]])
+  expect(result.onState).toHaveBeenLastCalledWith('live', 'home:1')
 })
 
-it.each(['proposal', 'approval'])('normalizes canonical persisted %s references to the StudioChat contract', kind => {
-  const emit = vi.fn()
-  dispatchBotTranscript(wire('bot_review', { kind, review_id: 'review-1' }, 'review-turn'), emit)
-  expect(emit.mock.calls).toEqual([['bot_review', { kind, reviewId: 'review-1', eventId: 'review-row', invocationId: 'review-turn' }]])
+it('commits a duplicate final part while suppressing its already applied identity', async () => {
+  const first = source(canonical('text', { text: 'once' }, 'home:0'))
+  first.close()
+  const second = source(canonical('text', { text: 'once' }, 'home:2'))
+  second.close()
+  const third = source()
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(second.body)).mockResolvedValueOnce(new Response(third.body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(2100)
+  expect(result.onEvent.mock.calls).toEqual([['text', { text: 'once' }]])
+  expect(vi.mocked(teamFetch).mock.calls[2][1]?.headers).toEqual({ 'Last-Event-ID': 'home:2' })
 })
 
-it.each([false, true])('deduplicates typed reviews across canonical, camel and legacy rows (legacy first: %s)', legacyFirst => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  const canonical = wire('bot_review', { kind: 'proposal', review_id: 'same-id' }, 'review-turn')
-  const legacy: BotTranscript = { ID: 'tool-row', InvocationID: 'model-turn', Content: { parts: [{ functionResponse: { name: 'bot_propose', response: { proposal_id: 'same-id' } } }] } }
-  const rows = legacyFirst ? [legacy, canonical] : [canonical, legacy]
-  rows.push(wire('bot_review', { kind: 'proposal', reviewId: 'same-id' }, 'camel-turn'))
-  rows.push(wire('tool_result', { name: 'bot_propose', result: { proposal_id: 'same-id' } }, 'wire-tool-turn'))
-  rows.push(wire('approval', { approval_id: 'same-id' }, 'approval-turn', 'approval-row'))
-  rows.push(wire('bot_review', { kind: 'approval', review_id: 'same-id' }, 'approval-reference-turn'))
-  for (const row of rows) dispatchBotTranscript(row, emit, mapper)
-  expect(emit.mock.calls.filter(([type]) => type === 'bot_review')).toEqual([
-    ['bot_review', { kind: 'proposal', reviewId: 'same-id', eventId: legacyFirst ? 'tool-row' : 'review-row', invocationId: legacyFirst ? 'model-turn' : 'review-turn' }],
-    ['bot_review', { kind: 'approval', reviewId: 'same-id', eventId: 'approval-row', invocationId: 'approval-turn' }],
-  ])
-  expect(emit.mock.calls.filter(([type]) => type === 'tool_result')).toHaveLength(2)
+it('hidden cursor controls update only the cursor; optional zero provenance is allowed', async () => {
+  const stream = source(frame('cursor', { _projection: { session_id: 'home', run_id: '00000000-0000-0000-0000-000000000000', cursor: 'home:2' } }, 'home:2'))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(stream.body))
+  const result = connect()
+  await flush()
+  expect(result.onState).toHaveBeenLastCalledWith('live', 'home:2')
+  expect(result.onEvent).not.toHaveBeenCalled()
+  expect(result.onDone).not.toHaveBeenCalled()
+  expect(result.onReplayComplete).not.toHaveBeenCalled()
 })
 
-it.each(['bot_review', 'approval', 'plan_approval', 'chat_question', 'auto_approved', 'status'])('keeps later ADK narrative after scoped and unscoped %s control metadata', type => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  dispatchBotTranscript(wire(type, { kind: 'proposal', review_id: 'p1' }), emit, mapper)
-  dispatchBotTranscript(wire(type, { kind: 'proposal', review_id: 'p2' }, 'model-turn'), emit, mapper)
-  for (const turn of ['model-turn', 'next-turn', 'next-turn']) {
-    dispatchBotTranscript({ InvocationID: turn, Author: 'agent', Content: { parts: [{ text: 'Still discussing.' }] } }, emit, mapper)
-  }
-  expect(emit.mock.calls.filter(([event]) => event === 'text').map(([, payload]) => payload.text)).toEqual(['Still discussing.', 'Still discussing.', 'Still discussing.'])
+it('separates chunked catch-up, durable turn done and finite persisted completion', async () => {
+  const stream = source(canonical('done', { sessionId: 'home', invocationId: 'turn' }))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(stream.body))
+  const result = connect()
+  await flush()
+  expect(result.onEvent.mock.calls).toEqual([['done', { sessionId: 'home', invocationId: 'turn' }]])
+  expect(result.onDone).not.toHaveBeenCalled()
+  stream.push('id: home:1\nevent: replay_com')
+  await flush()
+  expect(result.onReplayComplete).not.toHaveBeenCalled()
+  stream.push('plete\ndata: {"persisted":true}\n\n')
+  await flush()
+  expect(result.onReplayComplete).toHaveBeenCalledTimes(1)
+  expect(result.onDone).not.toHaveBeenCalled()
+  stream.push(frame('done', { persisted: true }))
+  await flush()
+  expect(result.onDone).toHaveBeenCalledTimes(1)
+  expect(result.onEvent).toHaveBeenCalledTimes(1)
+  expect(stream.cancel).toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(20000)
+  expect(teamFetch).toHaveBeenCalledTimes(1)
 })
 
-it.each(['session', 'text', 'tool_call', 'tool_result'])('selects %s runtime projection only for a correlated turn', type => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  dispatchBotTranscript(wire(type, { text: 'wire' }, 'runtime-turn'), emit, mapper)
-  emit.mockClear()
-  dispatchBotTranscript({ InvocationID: 'runtime-turn', Author: 'agent', Content: { parts: [{ text: 'duplicate' }] } }, emit, mapper)
-  dispatchBotTranscript({ InvocationID: 'legacy-turn', Author: 'agent', Content: { parts: [{ text: 'legacy' }] } }, emit, mapper)
-  expect(emit.mock.calls.filter(([event]) => event === 'text').map(([, payload]) => payload.text)).toEqual(['legacy'])
+it.each([
+  ['non-object', null], ['array', []], ['missing projection', { text: 'bad' }],
+  ...Object.entries({ session_id: 'elsewhere', cursor: 'home:3', event_id: '', run_id: 42, turn_id: [], sequence: -1 })
+    .map(([key, value]): [string, unknown] => [key, { text: 'bad', _projection: { ...metadata('home:2'), [key]: value } }]),
+  ['fractional sequence', { _projection: { ...metadata('home:2'), sequence: 1.5 } }],
+  ['foreign identity', { _projection: metadata('home:2', 'elsewhere/row/0') }],
+  ['identity missing stored row', { _projection: metadata('home:2', 'home//0') }],
+])('does not commit malformed durable data (%s) or any subsequent frame', async (_name, invalid) => {
+  const first = source(canonical('text', { text: 'valid' }) + frame('text', invalid, 'home:2') + canonical('text', { text: 'skipped' }, 'home:3', 'home/later/0'))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(source().body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(result.onEvent.mock.calls).toEqual([['text', { text: 'valid' }]])
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:1' })
 })
 
-it('does not apply an uncorrelated runtime projection to future turns', () => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  dispatchBotTranscript(wire('session', {}), emit, mapper)
-  dispatchBotTranscript({ InvocationID: 'later', Content: { parts: [{ text: 'visible' }] } }, emit, mapper)
-  expect(emit).toHaveBeenCalledWith('text', { text: 'visible', invocationId: 'later', eventId: '' })
+it.each(['other:2', 'home:-1', 'home:1.2', 'home:02', 'home:9223372036854775808', 'home:0', ''])('rejects invalid or regressive cursor %s before updating dedup state', async cursor => {
+  const first = source(canonical('text', { text: 'valid' }) + canonical('text', { text: 'bad' }, cursor, 'home/bad/0'))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(source().body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(result.onEvent.mock.calls).toEqual([['text', { text: 'valid' }]])
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:1' })
 })
 
-it.each([{ kind: 'other', review_id: 'p' }, { kind: 'proposal', review_id: '' }, { kind: 'approval', review_id: 42 }])('rejects invalid review references: %j', payload => {
-  const emit = vi.fn()
-  dispatchBotTranscript(wire('bot_review', payload), emit)
-  expect(emit).not.toHaveBeenCalled()
+it.each([
+  ['replay_complete', { persisted: false }, 'home:2'],
+  ['replay_complete', { persisted: true }, 'foreign:2'],
+  ['cursor', { _projection: { ...metadata('home:2'), session_id: 'foreign' } }, 'home:2'],
+  ['text', { text: 'duplicate', _projection: { ...metadata('home:2'), sequence: 'invalid' } }, 'home:2'],
+] as [string, unknown, string][])('validates %s controls and duplicates before cursor advancement', async (type, payload, id) => {
+  const first = source(canonical('text', { text: 'valid' }) + frame(type, payload, id))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(source().body))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(result.onEvent.mock.calls).toEqual([['text', { text: 'valid' }]])
+  expect(result.onReplayComplete).not.toHaveBeenCalled()
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': 'home:1' })
 })
 
-it('preserves equal semantic text chunks with distinct wire sequences and transport provenance', () => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  for (const sequence of [1, 2, 2]) {
-    dispatchBotTranscript({ InvocationID: 't', Actions: { StateDelta: { bot_runtime_event: { type: 'text', sequence, payload: { text: 'again' } } } } }, emit, mapper, `home:${sequence}`)
-  }
-  expect(emit.mock.calls).toEqual([
-    ['text', { text: 'again', invocationId: 't', eventId: 'home:1' }],
-    ['text', { text: 'again', invocationId: 't', eventId: 'home:2' }],
-  ])
+it('retains exact int64 cursor values beyond JavaScript safe integers', async () => {
+  const cursor = 'home:9223372036854775807'
+  const first = source(canonical('text', { text: 'valid' }, cursor))
+  first.close()
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(source().body))
+  connect()
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({ 'Last-Event-ID': cursor })
 })
 
-it('suppresses raw ADK only for the correlated runtime turn and keeps users', () => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  dispatchBotTranscript({ InvocationID: 'a', Actions: { StateDelta: { bot_runtime_event: { type: 'session', turn_id: 'a', sequence: 1, payload: {} } } } }, emit, mapper)
-  dispatchBotTranscript({ InvocationID: 'a', Author: 'agent', Content: { parts: [{ text: 'duplicate' }] } }, emit, mapper)
-  dispatchBotTranscript({ InvocationID: 'a', Author: 'user', Content: { parts: [{ text: 'input' }] } }, emit, mapper)
-  dispatchBotTranscript({ InvocationID: 'b', Author: 'agent', Content: { parts: [{ text: 'legacy' }] } }, emit, mapper)
-  expect(emit.mock.calls.filter(([type]) => type !== 'turn_complete').map(([type, p]) => [type, p.text])).toEqual([['user_message', 'input'], ['text', 'legacy']])
+it('does not mark a failed application as seen or advance past it', async () => {
+  const text = canonical('text', { text: 'retry me' })
+  const first = source(text), second = source(text)
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(first.body)).mockResolvedValueOnce(new Response(second.body))
+  const onEvent = vi.fn().mockImplementationOnce(() => { throw new Error('apply failed') })
+  connect({ onEvent })
+  await vi.advanceTimersByTimeAsync(1100)
+  expect(vi.mocked(teamFetch).mock.calls[1][1]?.headers).toEqual({})
+  expect(onEvent).toHaveBeenCalledTimes(2)
 })
-it('maps lower camel ADK JSON and deduplicates wire sequences across replay', () => {
-  const mapper = createBotTranscriptMapper(), emit = vi.fn()
-  const event = { invocationId: 't', actions: { stateDelta: { bot_runtime_event: { type: 'text', turn_id: 't', sequence: 2, payload: { text: 'answer' } } } } } as unknown as BotTranscript
-  dispatchBotTranscript(event, emit, mapper, 'home:2'); dispatchBotTranscript(event, emit, mapper, 'home:3')
-  expect(emit).toHaveBeenCalledTimes(1)
-  expect(emit).toHaveBeenCalledWith('text', { text: 'answer', eventId: 'home:2', invocationId: 't' })
+
+it('rejects legacy transcript rows instead of providing a compatibility mapper', async () => {
+  vi.mocked(teamFetch).mockResolvedValue(new Response(source(frame('transcript', { Content: { parts: [{ text: 'legacy' }] } })).body))
+  const result = connect()
+  await flush()
+  expect(result.onEvent).not.toHaveBeenCalled()
+  expect(result.onState).toHaveBeenLastCalledWith('reconnecting', '')
 })
-it('does not turn replayed legacy approval prose into authority', () => {
-  const emit = vi.fn()
-  dispatchBotTranscript({ Actions: { StateDelta: { bot_runtime_event: { type: 'approval', payload: { name: 'shell' } } } } }, emit)
-  expect(emit).not.toHaveBeenCalled()
+
+it('cancels pending reads, drops unfinished frames and never treats cancellation as done', async () => {
+  const stream = source(canonical('text', { text: 'incomplete' }).slice(0, -2))
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response(stream.body))
+  const result = connect()
+  await flush()
+  result.controller.abort()
+  await flush()
+  expect(stream.cancel).toHaveBeenCalledTimes(1)
+  expect(stream.body.locked).toBe(false)
+  expect(result.onEvent).not.toHaveBeenCalled()
+  expect(result.onDone).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(20000)
+  expect(teamFetch).toHaveBeenCalledTimes(1)
+})
+
+it('cancels a scheduled reconnect without any resubmission', async () => {
+  vi.mocked(teamFetch).mockRejectedValueOnce(new Error('network failed'))
+  const result = connect()
+  await flush()
+  result.controller.abort()
+  await vi.advanceTimersByTimeAsync(20000)
+  expect(teamFetch).toHaveBeenCalledTimes(1)
+  expect(result.onDone).not.toHaveBeenCalled()
+})
+
+it.each([400, 401, 403, 404, 410])('uses scoped teamFetch and stops after terminal HTTP %s', async status => {
+  vi.mocked(teamFetch).mockResolvedValueOnce(new Response('denied', { status }))
+  const result = connect({ botId: 'bot/id', sessionId: 'session/id', scope: 'team' })
+  await vi.advanceTimersByTimeAsync(20000)
+  expect(teamFetch).toHaveBeenCalledTimes(1)
+  expect(vi.mocked(teamFetch).mock.calls[0][0]).toContain('/bot%2Fid/sessions/session%2Fid/events?scope=team')
+  expect(result.onError).toHaveBeenCalledWith(expect.objectContaining({ status }))
+  expect(result.onState).toHaveBeenLastCalledWith('error', '')
+})
+
+it('bounds retries for unavailable connections', async () => {
+  vi.mocked(teamFetch).mockRejectedValue(new Error('offline'))
+  const result = connect()
+  await vi.advanceTimersByTimeAsync(20000)
+  expect(teamFetch).toHaveBeenCalledTimes(4)
+  expect(result.onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'offline' }))
 })

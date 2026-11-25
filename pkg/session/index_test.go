@@ -1,12 +1,19 @@
 package session
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestIndex_LoadEmpty(t *testing.T) {
@@ -376,5 +383,228 @@ func TestIndex_RemoveCascadesChildren(t *testing.T) {
 	_, err := idx.Get("unrelated")
 	if err != nil {
 		t.Errorf("Get(unrelated) error = %v, want nil (should survive cascade)", err)
+	}
+}
+
+func TestIndex_IndependentInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "index.json")
+	idx := NewSessionIndex(path)
+	if err := idx.Add(SessionMeta{ID: "counter"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			other := NewSessionIndex(path)
+			for j := 0; j < 10; j++ {
+				if err := other.Add(SessionMeta{ID: fmt.Sprintf("%d-%d", i, j)}); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := other.Update("counter", func(m *SessionMeta) { m.MessageCount++ }); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	data, err := idx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Sessions) != 81 || data.Sessions["counter"].MessageCount != 80 {
+		t.Fatalf("lost mutations: %d sessions, counter %d", len(data.Sessions), data.Sessions["counter"].MessageCount)
+	}
+}
+
+func TestIndex_SubprocessWrites(t *testing.T) {
+	if path := os.Getenv("ASTONISH_INDEX_TEST_PATH"); path != "" {
+		fmt.Println("ready")
+		if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+		idx := NewSessionIndex(path)
+		prefix := os.Getenv("ASTONISH_INDEX_TEST_WORKER")
+		for i := 0; i < 30; i++ {
+			id := fmt.Sprintf("%s-%d", prefix, i)
+			if err := idx.Add(SessionMeta{ID: id}); err != nil {
+				t.Fatal(err)
+			}
+			if err := idx.Update("counter", func(m *SessionMeta) {
+				time.Sleep(time.Millisecond) // expose unlocked read/modify/write races
+				m.MessageCount++
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if i%2 == 0 {
+				if err := idx.Remove(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	idx := NewSessionIndex(path)
+	if err := idx.Add(SessionMeta{ID: "counter"}); err != nil {
+		t.Fatal(err)
+	}
+	lockInfo, err := os.Stat(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	type worker struct {
+		cmd   *exec.Cmd
+		start func()
+	}
+	var workers []worker
+	for i := 0; i < 4; i++ {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestIndex_SubprocessWrites$")
+		cmd.Env = append(os.Environ(), "ASTONISH_INDEX_TEST_PATH="+path, fmt.Sprintf("ASTONISH_INDEX_TEST_WORKER=%d", i))
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		reader := bufio.NewReader(stdout)
+		if line, err := reader.ReadString('\n'); err != nil || line != "ready\n" {
+			t.Fatalf("worker ready: %q, %v", line, err)
+		}
+		go func() { _, _ = io.Copy(io.Discard, reader) }()
+		workers = append(workers, worker{cmd: cmd, start: func() {
+			_, _ = fmt.Fprintln(stdin, "start")
+			_ = stdin.Close()
+		}})
+	}
+	for _, w := range workers {
+		w.start()
+	}
+	for _, w := range workers {
+		if err := w.cmd.Wait(); err != nil {
+			t.Fatalf("worker failed: %v", err)
+		}
+	}
+	data, err := idx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Sessions) != 61 || data.Sessions["counter"].MessageCount != 120 {
+		t.Fatalf("lost subprocess mutations: %d sessions, counter %d", len(data.Sessions), data.Sessions["counter"].MessageCount)
+	}
+	newInfo, err := os.Stat(path + ".lock")
+	if err != nil || !os.SameFile(lockInfo, newInfo) {
+		t.Fatalf("sidecar lock inode was replaced: %v", err)
+	}
+}
+
+func TestIndex_RemoveSelectedPreservesNewSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	idx := NewSessionIndex(path)
+	for _, meta := range []SessionMeta{{ID: "parent"}, {ID: "child", ParentID: "parent"}} {
+		if err := idx.Add(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := NewSessionIndex(path)
+	for _, meta := range []SessionMeta{{ID: "new"}, {ID: "new-child", ParentID: "parent"}} {
+		if err := other.Add(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := idx.RemoveSelected([]string{"parent", "child", "missing", "parent"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := other.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Sessions) != 2 || data.Sessions["new"].ID != "new" || data.Sessions["new-child"].ID != "new-child" {
+		t.Fatalf("unconfirmed sessions removed: %+v", data.Sessions)
+	}
+}
+
+func TestIndex_SaveLockedReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	idx := NewSessionIndex(path)
+	if err := idx.Add(SessionMeta{ID: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	lock := flock.New(path+".lock", flock.SetFlag(os.O_CREATE|os.O_RDWR))
+	if err := lock.Lock(); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Unlock()
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		done <- idx.Save(&IndexData{Version: 1, Sessions: map[string]SessionMeta{"replacement": {ID: "replacement"}}})
+	}()
+	<-started
+	select {
+	case err := <-done:
+		t.Fatalf("Save returned while another instance held the lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	data, err := idx.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Sessions) != 1 || data.Sessions["replacement"].ID != "replacement" {
+		t.Fatalf("Save must replace, not merge: %+v", data.Sessions)
+	}
+}
+
+func TestIndex_LockFailureDoesNotWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	idx := NewSessionIndex(path)
+	if err := idx.Add(SessionMeta{ID: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".lock", 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func() error{
+		"add":      func() error { return idx.Add(SessionMeta{ID: "new"}) },
+		"update":   func() error { return idx.Update("keep", func(m *SessionMeta) { m.Title = "changed" }) },
+		"remove":   func() error { return idx.Remove("keep") },
+		"selected": func() error { return idx.RemoveSelected([]string{"keep"}) },
+		"save":     func() error { return idx.Save(&IndexData{Version: 1, Sessions: map[string]SessionMeta{}}) },
+	} {
+		if err := mutate(); err == nil {
+			t.Errorf("%s unexpectedly succeeded without a lock", name)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("index changed despite lock failure")
 	}
 }

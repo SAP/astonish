@@ -2,14 +2,18 @@ package api_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,6 +25,7 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
@@ -29,6 +34,8 @@ import (
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/creack/pty"
 	"github.com/go-rod/rod"
 	browserlauncher "github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
@@ -45,14 +52,20 @@ type employeeBrowserModel struct {
 	t              *testing.T
 	payload        map[string]any
 	captured       chan struct{}
+	captureOnce    sync.Once
 	release        chan struct{}
 	sourceReturned *atomic.Bool
 }
 
 func (*employeeBrowserModel) Name() string { return "interactive-http" }
 func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if req.Config != nil && req.Config.SystemInstruction != nil && len(req.Config.SystemInstruction.Parts) > 0 && strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_EMPLOYEE_MESSAGE") {
+		// Auxiliary narration is not another execution turn. Exercise the real
+		// typed fallback, without claiming a model-generated delivery.
+		return func(yield func(*model.LLMResponse, error) bool) { yield(nil, store.ErrBotUnsupported) }
+	}
 	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
-		return w.Candidate.Text == "Your request has been recorded." || w.Candidate.Text == "Later report: local status is healthy."
+		return w.Candidate.Text == "Your request has been recorded." || (strings.Contains(w.Candidate.Text, "Routine operation ") && strings.Contains(w.Candidate.Text, "is durably queued and pending, not applied.") && len(w.Candidate.Observations) > 0) || (strings.HasPrefix(w.Candidate.Text, "Schedule operation ") && strings.Contains(w.Candidate.Text, "is durably queued and pending. No schedule change is verified by this turn.") && len(w.Candidate.Observations) > 0) || w.Candidate.Text == "Later report: local status is healthy."
 	}); ok {
 		return response
 	}
@@ -69,9 +82,16 @@ func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.L
 			assessment.Verdict = store.BotCriterionUnverified
 			deferred.Criteria = append(deferred.Criteria, assessment)
 		}
-		raw, _ := json.Marshal(map[string]any{"current_turn": current, "deferred_application": deferred})
+		currentRaw, _ := json.Marshal(current)
+		currentResponse := &model.LLMResponse{Content: genai.NewContentFromText(string(currentRaw), "model")}
+		fixtureHTTPContentCoverage(req, currentResponse)
+		var coveredCurrent map[string]any
+		_ = json.Unmarshal([]byte(currentResponse.Content.Parts[0].Text), &coveredCurrent)
+		raw, _ := json.Marshal(map[string]any{"current_turn": coveredCurrent, "deferred_application": deferred})
 		return func(yield func(*model.LLMResponse, error) bool) {
-			yield(&model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, nil)
+			response := &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}
+			fixtureHTTPContentCoverage(req, response)
+			yield(response, nil)
 		}
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -101,13 +121,25 @@ func (m *employeeBrowserModel) GenerateContent(ctx context.Context, req *model.L
 				}
 			}
 		}
-		close(m.captured)
+		m.captureOnce.Do(func() { close(m.captured) })
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.release:
 		}
-		yield(&model.LLMResponse{Content: genai.NewContentFromText("Your request has been recorded.", "model"), TurnComplete: true}, nil)
+		text := "Your request has been recorded."
+		if m.payload["operation"] == store.BotControlScheduleCreate || m.payload["operation"] == store.BotControlResponsibility {
+			for _, content := range req.Contents {
+				for _, part := range content.Parts {
+					if part.FunctionResponse != nil {
+						if receipt, ok := part.FunctionResponse.Response["message"].(string); ok && (strings.HasPrefix(receipt, "Routine operation ") || strings.HasPrefix(receipt, "Schedule operation ")) && strings.Contains(receipt, "durably queued and pending") {
+							text = receipt
+						}
+					}
+				}
+			}
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(text, "model"), TurnComplete: true}, nil)
 		m.sourceReturned.Store(true)
 	}
 }
@@ -145,6 +177,14 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 				prompt := req.Config.SystemInstruction.Parts[0].Text
 				var result any
 				switch {
+				case strings.HasPrefix(prompt, "BOT_SKILL_ORIENT_V1"):
+					result = map[string]any{"kind": store.BotSkillNoSkillNeeded, "skill_id": "", "title": "", "responsibility": "", "method": []string{}, "expectations": []string{}, "reason": "Controlled receipt quality fixture"}
+				case strings.HasPrefix(prompt, "BOT_EMPLOYEE_REPAIR_V1"):
+					text := "Corrected: the receipt says isolated receipt."
+					if mode == "limitations" {
+						text = "Defective: the receipt says imaginary."
+					}
+					result = map[string]any{"text": text}
 				case strings.HasPrefix(prompt, "BOT_WORK_PREPARE_V1"):
 					result = map[string]any{"criteria": []store.BotWorkCriterion{{ID: "receipt", SourceIDs: []string{"assignment", "charter"}, Text: "Return the supplied exact receipt"}}}
 				case strings.HasPrefix(prompt, "BOT_WORK_REVIEW_V1"):
@@ -161,7 +201,9 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 					return nil, false
 				}
 				raw, _ := json.Marshal(result)
-				return &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}, true
+				response := &model.LLMResponse{Content: genai.NewContentFromText(string(raw), "model")}
+				fixtureHTTPContentCoverage(req, response)
+				return response, true
 			}
 			if mode == "blocked" {
 				owner := f.b.OwnerID.String()
@@ -174,14 +216,12 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 				}
 				llm := &blockedPublicationModel{t: t}
 				worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{
-					Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+					Backend: f.db, Sandbox: f.workerConfig.Sandbox, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 					ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 1000, SupportsOutputLimit: true},
 					ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 						return llm, nil
 					},
-					Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-						return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
-					},
+					Prepare: f.workerConfig.Prepare,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -315,7 +355,7 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 			}
 			instructions := "Report the supplied text: isolated receipt."
 			if mode == "blocked" {
-				instructions = "Add email delivery to my recurring report."
+				instructions = blockedPublicationAssignment
 			}
 			for i := 0; i < count; i++ {
 				f.model.productions = 0
@@ -323,6 +363,9 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 				if err = json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":%q,"idempotency_key":"browser-quality-%d"}`, f.b.Version, instructions, i), 202), &receipt); err != nil {
 					t.Fatal(err)
 				}
+				// These assertions deliberately exercise the historical assessor's
+				// repair/quality DTO contract, not the agent-led default work mode.
+				pinLegacyHTTPAttempt(t, f, receipt.Run)
 				if err = f.worker.Poll(f.ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -365,8 +408,8 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 				}
 				history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
 				for _, id := range ids {
-					if strings.Count(history, id) != 1 {
-						t.Fatalf("canonical report identity %s count=%d", id, strings.Count(history, id))
+					if count := canonicalHTTPReportCount(t, history, id); count != 1 {
+						t.Fatalf("canonical report identity %s count=%d", id, count)
 					}
 				}
 				if mode != "checked" && page.MustEval(`() => document.querySelectorAll('[aria-label="Bot workspace"] [data-testid="agent-message-bubble"]').length`).Int() != 1 {
@@ -392,6 +435,7 @@ func runEmployeeQualityBrowser(t *testing.T, modes []string) {
 			page.MustElementR("button", "^Details$").MustClick()
 			page.MustElementR("summary", "Runs & activity").MustClick()
 			page.MustElementR(`[aria-label="Quality assessment"] summary`, want).MustVisible()
+			page.MustWait(`(want, count) => [...document.querySelectorAll('[aria-label="Quality assessment"] summary')].filter(e => e.innerText.includes(want)).length === count + 1`, want, count)
 			for _, tc := range []struct {
 				state int32
 				want  string
@@ -486,7 +530,8 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		return store.BotMandatePolicy{Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{"task"}}, {Action: execution.CapabilityToolExecute, Resources: resources}}, ExceptionConstraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{entstore.RoutineControlResource(store.BotControlGoalCreate)}}}, Limits: execution.BotMandateLimits(config.DefaultBotMandateConfig()), TTL: ttl}, nil
 	}
 	m := &employeeBrowserModel{sourceReturned: &sourceReturned, t: t, payload: payload, captured: make(chan struct{}), release: make(chan struct{})}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, MandatePolicy: policy, TurnRegistry: f.registry, Sandbox: journeyHomeBackend{}, Pool: f.pool, WorkerID: "employee-browser", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, _ execution.Principal, _ store.BotScope, _, _ string) (model.LLM, error) {
+	files := newComposedHTTPFiles(t, f.dataDir, f.repo, f.b, nil)
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, MandatePolicy: policy, TurnRegistry: f.registry, Sandbox: composedBrowserBackend{synthesisHTTPBackend{files: files.disk}}, Pool: f.pool, WorkerID: "employee-browser", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(ctx context.Context, _ execution.Principal, _ store.BotScope, _, _ string) (model.LLM, error) {
 		// Candidate readiness runs after CommitRun; a model return or policy callback
 		// alone is not evidence of a committed source outcome.
 		if scenario == "routine" && sourceReturned.Load() {
@@ -504,7 +549,8 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 			}
 		}
 		return m, nil
-	}, Prepare: func(_ context.Context, q bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+	}, Prepare: func(c context.Context, q bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		files.install(c, q, scope)
 		workflow, e := launcher.BotWorkflowTools(q, scope)
 		if e != nil {
 			return nil, e
@@ -763,7 +809,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
 		page.MustElement(`[data-testid="thinking-indicator"]`).MustVisible()
 		assertNoSchedulePending()
-		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);window.scheduleStream.addEventListener('transcript',e=>window.scheduleEvents.push(JSON.parse(e.data)));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
+		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);for(const type of ['bot_operation','text'])window.scheduleStream.addEventListener(type,e=>window.scheduleEvents.push({type,data:JSON.parse(e.data)}));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
 		page.MustWait(`()=>window.scheduleReplay`)
 	}
 	release()
@@ -802,7 +848,7 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		assertNoSchedulePending()
 		// Observe the same production SSE endpoint as Studio, without intercepting
 		// or replacing fetch. Keep it open across the actual worker application.
-		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);window.scheduleStream.addEventListener('transcript',e=>window.scheduleEvents.push(JSON.parse(e.data)));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
+		page.MustEval(`url=>{window.scheduleEvents=[];window.scheduleReplay=false;window.scheduleStream=new EventSource(url);for(const type of ['bot_operation','text'])window.scheduleStream.addEventListener(type,e=>window.scheduleEvents.push({type,data:JSON.parse(e.data)}));window.scheduleStream.addEventListener('replay_complete',()=>window.scheduleReplay=true)}`, f.path+"/sessions/"+f.b.HomeSessionID.String()+"/events?scope="+string(scope))
 		page.MustWait(`()=>window.scheduleReplay`)
 		t.Logf("pure acknowledgment committed status=%s; pending snapshot retains operation=%s/source=%s; live and reload show working with zero pending cards/prose", source.Status, pending.Operations[0].OperationID, source.ID)
 		unblockApply()
@@ -1040,8 +1086,8 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 				t.Fatalf("schedule SSE wait: %v; diagnostic=%v diagnosticError=%v", err, diagnostic, diagnosticErr)
 			}
 		}
-		waitScheduleSSE(`()=>window.scheduleEvents.some(e=>e.Actions?.StateDelta?.bot_operation?.presentation==='conversation')`)
-		if !page.MustEval(`(id, source)=>{const rows=window.scheduleEvents;const ops=rows.map(e=>e.Actions?.StateDelta?.bot_operation).filter(Boolean);return ops.some(o=>o.operation_id===id && o.presentation==='internal' && o.source_run_id===source) && ops.filter(o=>o.operation_id===id && o.presentation==='conversation' && o.status==='applied').length===1 && !rows.some(e=>e.Content?.parts?.some(p=>/durably queued|Your request has been recorded/.test(p.text||'')))}`, ops[0].ID.String(), runs[0].ID.String()).Bool() {
+		waitScheduleSSE(`()=>window.scheduleEvents.some(e=>e.type==='bot_operation' && e.data.presentation==='conversation')`)
+		if !page.MustEval(`(id, source)=>{const rows=window.scheduleEvents;const ops=rows.filter(e=>e.type==='bot_operation').map(e=>e.data);return ops.some(o=>o.operation_id===id && o.presentation==='internal' && o.source_run_id===source) && ops.filter(o=>o.operation_id===id && o.presentation==='conversation' && o.status==='applied').length===1 && !rows.some(e=>e.type==='text' && /durably queued|Your request has been recorded/.test(e.data.text||''))}`, ops[0].ID.String(), runs[0].ID.String()).Bool() {
 			t.Fatalf("SSE lost internal heads, duplicated confirmation, or published pending prose: %s", page.MustEval(`()=>JSON.stringify(window.scheduleEvents)`).Str())
 		}
 		page.MustEval(`()=>window.scheduleStream.close()`)
@@ -1073,7 +1119,8 @@ func runEmployeeBrowser(t *testing.T, scenario string) {
 		}
 	}
 	if revisionProbe {
-		probe.check(t, page, f.repo, auth, f.b)
+		m.laterReport.Store(true)
+		probe.check(t, page, f.repo, auth, f.b, func() error { return worker.Poll(auth) })
 		return
 	}
 	before := m.calls.Load()
@@ -1226,8 +1273,711 @@ func (g employeeBrowserGuard) Authorize(ctx context.Context, a execution.ActionD
 	return d, nil
 }
 
-// Controlled built-SPA work and Details inspection. Publication correctness is
-// covered separately by worker acceptance; fixtures never call a provider.
+// TestBotEmployeeObjectiveBrowser uses the production scoped worker and configured
+// search route. Browser reads never synthesize the employee transcript.
+func TestBotEmployeeObjectiveBrowser(t *testing.T) { runBotEmployeeObjectiveSurface(t, false) }
+
+// This uses the same physical Studio/shared Chat journey, with database-only
+// runtime records and the Stock Market News clarification used in acceptance.
+func TestBotDatabaseEmployeeBrowser(t *testing.T) {
+	runBotEmployeeObjectiveSurface(t, false, true)
+}
+
+// Invoked by the cmd package's native PTY acceptance with its Execute test binary.
+// All Bot HTTP/history/model/search/worker setup is identical to the browser journey.
+func TestBotEmployeeObjectivePTYFixture(t *testing.T) {
+	if os.Getenv("ASTONISH_EMPLOYEE_PTY_BINARY") == "" {
+		t.Skip("owned CLI subprocess required; run TestBotEmployeeObjectivePTY")
+	}
+	runBotEmployeeObjectiveSurface(t, true)
+}
+
+// Database acceptance is strict: a missing native CLI harness is a failure.
+func TestBotDatabaseEmployeePTYFixture(t *testing.T) {
+	if os.Getenv("ASTONISH_EMPLOYEE_PTY_BINARY") == "" {
+		t.Fatal("ASTONISH_EMPLOYEE_PTY_BINARY is required; run TestBotDatabaseEmployeePTY")
+	}
+	runBotEmployeeObjectiveSurface(t, true, true)
+}
+
+func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode ...bool) {
+	database := len(databaseMode) > 0 && databaseMode[0]
+	if !nativePTY && os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
+		t.Fatal("ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 and built Studio required")
+	}
+	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
+	if !nativePTY && bin == "" {
+		t.Fatal("explicit physical browser required")
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	raw, err := os.ReadFile("../../web/package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(raw, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	dist, err := filepath.Abs(filepath.Join("../../web/dist", pkg.Version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nativePTY {
+		if _, err = os.Stat(filepath.Join(dist, "index.html")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			f := newInteractiveHTTPFixture(t, "ask_user", nil, []string{"chat", "tool:execute"}, scope)
+			defer f.worker.Stop()
+			p, _ := execution.PrincipalFromContext(f.ctx)
+			p.Authentication = execution.AuthMethodPlatformJWT
+			auth, err := execution.WithPrincipal(f.ctx, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth, err = execution.WithAuthenticationEvidence(auth, execution.AuthenticationEvidence{Method: p.Authentication, ExpiresAt: time.Now().Add(time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			org, err := f.db.ForOrg(p.OrgSlug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			team := org.ForTeam(p.TeamSlug)
+			if err = f.db.PlatformSettings().Save(auth, &store.PlatformSettings{PerplexityWebSearch: &store.PerplexityWebSearchSettings{Provider: "selected-search", Model: "sonar"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err = team.Settings().Save(auth, &store.TeamSettings{WebSearchTool: "perplexity:perplexity_web_search", Providers: map[string]store.ProviderConfig{"selected-search": {"api_key": "owned-fixture-only"}}}); err != nil {
+				t.Fatal(err)
+			}
+			ss := org.ForUser(p.Subject).Sessions()
+			if scope == store.BotScopeTeam {
+				ss = team.Sessions()
+			}
+			route, err := launcher.BotEffectiveConfiguredSearchRoute(auth, &store.Services{PlatformSettings: f.db.PlatformSettings(), OrgSettings: f.db.OrgSettings(p.OrgSlug), Settings: team.Settings()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := func(_ context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
+				return store.BotMandatePolicy{Scopes: []string{"chat", "tool:execute"}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityChat, Resources: []string{ref.BotID.String()}}, {Action: execution.CapabilityToolExecute, Resources: []string{"ask_user", launcher.BotConfiguredSearchToolName}}}, PublicResearch: &execution.BotPublicResearchScope{Version: 1, Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview, execution.BotResearchRecent, execution.BotResearchPrimary, execution.BotResearchContradictions}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 12}, Limits: execution.BotMandateLimits(config.DefaultBotMandateConfig()), TTL: time.Hour}, nil
+			}
+			svc := &store.Services{TenantRouter: f.db, Bots: f.repo, PersonalBots: f.repo, Sessions: ss, PersonalSessions: ss, BotMandatePolicy: policy, BotInteractiveReady: true}
+			router := mux.NewRouter()
+			root := "/api/studio/bots"
+			for _, r := range []struct {
+				path, method string
+				h            http.HandlerFunc
+			}{
+				{root, "POST", api.BotCreateHandler}, {root, "GET", api.BotListHandler}, {root + "/{botID}", "GET", api.BotGetHandler}, {root + "/{botID}/snapshot", "GET", api.BotSnapshotHandler}, {root + "/{botID}/activity", "GET", api.BotActivityHandler}, {root + "/{botID}/read", "GET", api.BotReadCursorHandler}, {root + "/{botID}/read", "POST", api.BotMarkReadHandler}, {root + "/{botID}/runs", "GET", api.BotRunsHandler}, {root + "/{botID}/goals", "GET", api.BotGoalsHandler}, {root + "/{botID}/versions/{version}", "GET", api.BotGetVersionHandler}, {root + "/{botID}/approvals", "GET", api.BotApprovalsHandler}, {root + "/{botID}/proposals", "GET", api.BotControlProposalsHandler}, {root + "/{botID}/approvals/{approvalID}/approve-and-continue", "POST", api.BotApproveContinueHandler}, {root + "/{botID}/sessions/{sessionID}/stream", "GET", api.BotHistoryStreamHandler}, {root + "/{botID}/sessions/{sessionID}/events", "GET", api.BotEventsHandler},
+			} {
+				router.HandleFunc(r.path, r.h).Methods(r.method)
+			}
+			var watches atomic.Int32
+			var watchMu sync.Mutex
+			watchCancels := make(map[int32]context.CancelFunc)
+			disconnectWatches := func() {
+				watchMu.Lock()
+				defer watchMu.Unlock()
+				for _, cancel := range watchCancels {
+					cancel()
+				}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, root) {
+					ctx, cancel := context.WithCancel(auth)
+					defer cancel()
+					if strings.HasSuffix(r.URL.Path, "/events") {
+						watchID := watches.Add(1)
+						watchMu.Lock()
+						watchCancels[watchID] = cancel
+						watchMu.Unlock()
+						defer func() {
+							watchMu.Lock()
+							delete(watchCancels, watchID)
+							watchMu.Unlock()
+						}()
+					}
+					stop := context.AfterFunc(r.Context(), cancel)
+					defer stop()
+					router.ServeHTTP(w, r.WithContext(store.WithServices(ctx, svc)))
+					return
+				}
+				var value any
+				switch r.URL.Path {
+				case "/api/auth/setup-status":
+					value = map[string]any{"initialized": true, "auth_mode": "builtin"}
+				case "/api/auth/me":
+					value = map[string]any{"user": map[string]any{"id": p.Subject, "email": "employee@example.test", "display_name": "Owner", "role": "owner", "platform_role": "user"}, "org": map[string]any{"slug": p.OrgSlug}, "team": p.TeamSlug}
+				case "/api/orgs":
+					value = map[string]any{"orgs": []any{}, "active_org": p.OrgSlug}
+				case "/api/teams":
+					value = []any{map[string]any{"slug": p.TeamSlug, "name": "Team"}}
+				case "/api/settings/status":
+					value = map[string]any{"setupRequired": false}
+				case "/api/version":
+					value = map[string]any{"version": "dev"}
+				case "/api/agents", "/api/tools":
+					value = []any{}
+				case "/api/settings/config":
+					value = map[string]any{}
+				case "/api/settings/providers/effective":
+					value = map[string]any{"providers": map[string]any{}}
+				}
+				if value != nil {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(value)
+					return
+				}
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					http.NotFound(w, r)
+					return
+				}
+				http.FileServer(http.Dir(dist)).ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			request := func(method, path, body string, status int) []byte {
+				t.Helper()
+				q, e := http.NewRequest(method, server.URL+path+"?scope="+string(scope), strings.NewReader(body))
+				if e != nil {
+					t.Fatal(e)
+				}
+				q.Header.Set("Content-Type", "application/json")
+				res, e := server.Client().Do(q)
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer res.Body.Close()
+				b, _ := io.ReadAll(res.Body)
+				if res.StatusCode != status {
+					t.Fatalf("%s %s: %d %s", method, path, res.StatusCode, b)
+				}
+				return b
+			}
+			var created titleHTTPReceipt
+			title := "Apple News"
+			refinement := "Apple Inc. product launches and material market developments."
+			acknowledgement := "I'll investigate Apple Inc. launches and market developments."
+			final := "Apple Inc. launched a new device and market revenue rose 5%. Sources: https://fixture.test/product and https://fixture.test/market."
+			questionPrompt := "Which Apple news?"
+			if database {
+				title = "Stock Market News"
+				refinement = "U.S. markets and major indexes"
+				acknowledgement = "I'll investigate U.S. markets and major indexes."
+				questionPrompt = "Which stock markets and indexes should I cover?"
+				final = "U.S. markets: S&P 500, Nasdaq Composite and Dow Jones major indexes were checked. Source: https://fixture.test/market."
+			}
+			createBody, _ := json.Marshal(map[string]any{"name": title, "start_from_title": true, "idempotency_key": "employee-browser-objective"})
+			if err = json.Unmarshal(request("POST", root, string(createBody), 201), &created); err != nil || created.InitialTurn == nil {
+				t.Fatal("create", err)
+			}
+			f.b = created.Bot
+			f.request("PATCH", "/api/studio/sessions/"+f.b.HomeSessionID.String()+"/model", `{"provider":"controlled","model":"interactive-http"}`, 200)
+			f.registry.Close()
+			var runtimeBefore map[string]string
+			if database {
+				runtimeBefore = databaseRuntimeFileSnapshot(t, f.dataDir)
+			}
+			var confirmed atomic.Bool
+			var queries atomic.Int32
+			started, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(release) })
+			mdl := &interactiveHTTPModel{t: t, principal: execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}}
+			mdl.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+				if response, ok := f.model.assessment(req); ok {
+					t.Error("unexpected mandatory review")
+					return response, true
+				}
+				call := func(name string, args map[string]any) *model.LLMResponse {
+					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}}}}
+				}
+				if !confirmed.Load() {
+					return call("ask_user", map[string]any{"kind": "select", "prompt": questionPrompt, "allow_custom_answer": true, "options": []map[string]any{{"id": "company", "label": refinement}, {"id": "fruit", "label": "Fruit harvests"}, {"id": "services", "label": "Apple services"}}}), true
+				}
+				var evidence strings.Builder
+				for _, c := range req.Contents {
+					for _, part := range c.Parts {
+						if part.FunctionResponse != nil {
+							b, _ := json.Marshal(part.FunctionResponse.Response)
+							evidence.Write(b)
+						}
+					}
+				}
+				seen := evidence.String()
+				if database {
+					if !strings.Contains(fmt.Sprint(req.Contents), refinement) {
+						raw, _ := json.Marshal(req.Contents)
+						if !strings.Contains(string(raw), refinement) {
+							t.Error("shared producer lost original accepted market answer")
+						}
+					}
+					if strings.Contains(seen, "major indexes were checked") {
+						return &model.LLMResponse{Content: genai.NewContentFromText(final, "model")}, true
+					}
+					response := call("perplexity_web_search", map[string]any{"query": refinement, "max_results": 5, "recency": "week"})
+					response.Content.Parts = append([]*genai.Part{{Text: acknowledgement}}, response.Content.Parts...)
+					return response, true
+				}
+				query := "Apple News"
+				switch {
+				case strings.Contains(seen, "market revenue rose 5%"):
+					return &model.LLMResponse{Content: genai.NewContentFromText(final, "model")}, true
+				case strings.Contains(seen, "Market developments not covered"):
+					query = "Apple Inc. material market revenue developments"
+				case strings.Contains(seen, "fruit harvest"):
+					query = "Apple Inc. product launches"
+				}
+				response := call("perplexity_web_search", map[string]any{"query": query, "max_results": 5, "recency": "week"})
+				if query == "Apple News" {
+					response.Content.Parts = append([]*genai.Part{{Text: acknowledgement}}, response.Content.Parts...)
+				}
+				return response, true
+			}
+			search := &employeeConfiguredSearchFixture{run: func(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				raw, _ := json.Marshal(req.Contents)
+				text := string(raw)
+				answer := "Apple fruit harvest increases. Source: https://fixture.test/fruit"
+				n := queries.Add(1)
+				if n == 1 {
+					close(started)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				if strings.Contains(text, "Apple Inc. material market revenue developments") {
+					answer = "Apple Inc. market revenue rose 5%. Source: https://fixture.test/market"
+				} else if strings.Contains(text, "Apple Inc. product launches") {
+					answer = "Apple Inc. launched a new device. Market developments not covered. Source: https://fixture.test/product"
+				}
+				if database {
+					answer = final
+				}
+				return &model.LLMResponse{Content: genai.NewContentFromText(answer, "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil
+			}}
+			files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.pool.dir}, repo: f.repo, id: f.b.ID, scope: scope}
+			worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+				return mdl, nil
+			}, Prepare: func(c context.Context, r bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				runFiles := *files
+				runFiles.id = r.Bot.ID
+				runFiles.install(c, r, s)
+				local, e := launcher.BotScopedChatConfig(c, s)
+				if e != nil {
+					return nil, e
+				}
+				episode, e := launcher.NewBotResearchEpisode(r.Run.ID, r.Run.SessionID.String(), launcher.BotResearchOpenWeb, nil)
+				if e != nil {
+					return nil, e
+				}
+				return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: local, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, Research: episode, ProviderFactory: func(c context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {
+					if !provider.IsConfinedProviderSecrets(c) || p != "selected-search" || m != "sonar" || cfg.Providers[p]["api_key"] != "owned-fixture-only" {
+						t.Error("lost scoped selected search")
+					}
+					return search, nil
+				}, PolicyRuntime: agent.BotPolicyRuntime{Mandate: r.Mandate, Guard: restartMandateGuard{r, f.repo}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				once.Do(func() { close(release) })
+				worker.Stop()
+			}()
+			if err = worker.Poll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			registerHome := func() {
+				t.Helper()
+				current, e := f.repo.Get(auth, f.b.ID)
+				if e != nil {
+					t.Fatal(e)
+				}
+				internal, e := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = entstore.RegisterBotHomeBinding(internal, f.repo, entstore.BotHomeRegistration{BotID: f.b.ID, ExpectedRevision: current.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: f.b.ID, Scope: scope, Backend: "controlled", StorageKey: "journey-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if nativePTY {
+				runEmployeeNativePTY(t, server, scope, f.b.ID, questionPrompt, refinement, acknowledgement, final, &watches, disconnectWatches, func() []byte {
+					return request("GET", root+"/"+f.b.ID.String()+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200)
+				}, func() {
+					registerHome()
+					confirmed.Store(true)
+					go func() {
+						if e := worker.Poll(context.Background()); e != nil {
+							t.Error(e)
+						}
+					}()
+					select {
+					case <-started:
+					case <-time.After(20 * time.Second):
+						t.Fatal("native PTY search did not start")
+					}
+				}, func() { once.Do(func() { close(release) }) })
+				wantQueries := int32(3)
+				if database {
+					wantQueries = 1
+					if after := databaseRuntimeFileSnapshot(t, f.dataDir); !reflect.DeepEqual(runtimeBefore, after) {
+						t.Fatal("native conversation operations wrote runtime content files")
+					}
+					assertDatabaseRuntimeComplete(t, f)
+				}
+				run, e := f.repo.GetRun(auth, f.b.ID, created.InitialTurn.Run.ID)
+				if e != nil || run.Status != store.RunSucceeded || queries.Load() != wantQueries || mdl.reviews != 0 || len(run.Report.Artifacts) != 0 || run.Report.EmployeeMessage == nil || run.Report.EmployeeMessage.Text != final {
+					t.Fatalf("native shared-worker result: %+v searches=%d reviews=%d err=%v", run, queries.Load(), mdl.reviews, e)
+				}
+				return
+			}
+			launch := browserlauncher.New().Bin(bin).UserDataDir(t.TempDir()).Headless(true).Leakless(false)
+			control, err := launch.Launch()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer launch.Cleanup()
+			browser := rod.New().ControlURL(control).MustConnect()
+			defer browser.Close()
+			page := browser.MustPage(server.URL + "/#/chat/bots/" + string(scope) + "/" + f.b.ID.String()).Timeout(30 * time.Second)
+			page = page.WithPanic(func(v any) {
+				text, _ := page.CancelTimeout().Eval(`()=>document.body.innerText`)
+				t.Fatalf("employee browser: %v\n%v", v, text)
+			})
+			finalNeedle := "market revenue rose 5%"
+			finalBody := "Apple Inc. launched a new device and market revenue rose 5%."
+			wantQueries := int32(3)
+			if database {
+				finalNeedle, finalBody, wantQueries = "major indexes were checked", final, 1
+			}
+			page.MustElementR(`[role="radio"]`, refinement).MustClick()
+			page.MustWait(`() => !document.querySelector('[role="radio"]')`)
+			page.MustWait(`want=>document.querySelector('[data-testid="message-area"]').innerText.includes(want)`, refinement)
+			current, err := f.repo.Get(auth, f.b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			internal, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = entstore.RegisterBotHomeBinding(internal, f.repo, entstore.BotHomeRegistration{BotID: f.b.ID, ExpectedRevision: current.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: f.b.ID, Scope: scope, Backend: "controlled", StorageKey: "journey-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			confirmed.Store(true)
+			done := make(chan error, 1)
+			go func() { done <- worker.Poll(context.Background()) }()
+			select {
+			case <-started:
+			case err = <-done:
+				t.Fatal("search did not start", err)
+			case <-time.After(20 * time.Second):
+				t.Fatal("search timeout")
+			}
+			page.MustWait(`want=>document.querySelector('[data-testid="message-area"]').innerText.includes(want)`, acknowledgement)
+			before := watches.Load()
+			server.CloseClientConnections()
+			deadline := time.Now().Add(15 * time.Second)
+			for watches.Load() <= before && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if watches.Load() <= before {
+				t.Fatal("browser did not reconnect before source completion")
+			}
+			once.Do(func() { close(release) })
+			if err = <-done; err != nil {
+				t.Fatal(err)
+			}
+			page.MustWait(`want=>document.querySelector('[data-testid="message-area"]').innerText.includes(want)`, finalNeedle)
+			assertAnswer := func(mode string) {
+				t.Helper()
+				text := page.MustElement(`[data-testid="message-area"]`).MustText()
+				if !page.MustEval(`want => Array.from(document.querySelectorAll('.chat-bubble-user')).filter(n => n.innerText === want).length === 1`, refinement).Bool() {
+					t.Fatalf("%s expected one accepted owner bubble: %s", mode, text)
+				}
+				for _, s := range []string{acknowledgement, finalBody} {
+					if strings.Count(text, s) != 1 {
+						t.Fatalf("%s expected once %q: %s", mode, s, text)
+					}
+				}
+				if strings.Index(text, refinement) >= strings.Index(text, acknowledgement) || strings.Index(text, acknowledgement) >= strings.Index(text, finalBody) {
+					t.Fatalf("%s reordered committed owner/acknowledgement/final: %s", mode, text)
+				}
+				for _, s := range []string{"Review candidate", "Approve work", "Download", "Open in Files panel"} {
+					if strings.Contains(text, s) {
+						t.Fatalf("needless workflow %q: %s", s, text)
+					}
+				}
+				for _, source := range []string{"https://fixture.test/product", "https://fixture.test/market"} {
+					if database && strings.HasSuffix(source, "/product") {
+						continue
+					}
+					if !strings.Contains(text, source) {
+						t.Fatalf("missing source %s: %s", source, text)
+					}
+				}
+			}
+			assertAnswer("live/reconnect")
+			homePath := root + "/" + f.b.ID.String() + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
+			committedHistory := request("GET", homePath, "", 200)
+			page.MustReload()
+			page.MustWait(`want=>document.querySelector('[data-testid="message-area"]')?.innerText.includes(want)`, finalNeedle)
+			assertAnswer("reload")
+			if restored := request("GET", homePath, "", 200); !reflect.DeepEqual(committedHistory, restored) {
+				t.Fatal("reload changed ordered durable SSE IDs or bodies")
+			}
+			if database {
+				if after := databaseRuntimeFileSnapshot(t, f.dataDir); !reflect.DeepEqual(runtimeBefore, after) {
+					t.Fatalf("conversation operations wrote runtime content files: before=%v after=%v", runtimeBefore, after)
+				}
+				assertDatabaseRuntimeComplete(t, f)
+			}
+			run, err := f.repo.GetRun(auth, f.b.ID, created.InitialTurn.Run.ID)
+			if err != nil || run.Status != store.RunSucceeded || queries.Load() != wantQueries || mdl.reviews != 0 || len(run.Report.Artifacts) != 0 || run.Report.EmployeeMessage == nil || run.Report.EmployeeMessage.Text != final {
+				t.Fatalf("configured loop: %+v searches=%d reviews=%d err=%v", run, queries.Load(), mdl.reviews, err)
+			}
+			if watches.Load() <= before {
+				t.Fatal("no physical reconnect/reload watch")
+			}
+			t.Logf("built Studio %s live/reconnect/reload actual scoped configured search=%d reviewer=0 artifact=0 database=%t", scope, wantQueries, database)
+		})
+	}
+}
+
+func runEmployeeNativePTY(t *testing.T, server *httptest.Server, scope store.BotScope, id uuid.UUID, questionPrompt, refinement, acknowledgement, final string, watches *atomic.Int32, disconnect func(), history func() []byte, startWork, release func()) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("SUDO_USER", "")
+	if err := os.MkdirAll(filepath.Join(home, "astonish"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SaveRemoteConfig(&client.RemoteConfig{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := client.NewTokenStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tokens.Save(&client.Tokens{AccessToken: "owned-employee-token"}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Getenv("ASTONISH_EMPLOYEE_PTY_BINARY"), "-test.run=^TestBotCLIProcess$", "--", "chat", "--bot", id.String(), "--bot-scope", string(scope))
+	cmd.Env = append(os.Environ(), "ASTONISH_BOT_CLI_CHILD=1", "TERM=xterm-256color", "NO_COLOR=1")
+	pt, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 60, Cols: 180})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pt.Close()
+	defer func() { _ = cmd.Process.Kill() }()
+	var mu sync.Mutex
+	var output strings.Builder
+	go func() {
+		var pending string
+		queries := []struct{ request, response string }{{"\x1b]10;?\x1b\\", "\x1b]10;rgb:ffff/ffff/ffff\x1b\\"}, {"\x1b]11;?\x1b\\", "\x1b]11;rgb:0000/0000/0000\x1b\\"}, {"\x1b]10;?\a", "\x1b]10;rgb:ffff/ffff/ffff\a"}, {"\x1b]11;?\a", "\x1b]11;rgb:0000/0000/0000\a"}, {"\x1b[6n", "\x1b[1;1R"}, {"\x1b[c", "\x1b[?1;2c"}, {"\x1b[0c", "\x1b[?1;2c"}}
+		buf := make([]byte, 8192)
+		for {
+			n, e := pt.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				output.Write(buf[:n])
+				mu.Unlock()
+				pending += string(buf[:n])
+				for len(pending) > 0 {
+					matched, partial := false, false
+					for _, q := range queries {
+						if strings.HasPrefix(pending, q.request) {
+							_, _ = io.WriteString(pt, q.response)
+							pending = pending[len(q.request):]
+							matched = true
+							break
+						}
+						partial = partial || strings.HasPrefix(q.request, pending)
+					}
+					if matched {
+						continue
+					}
+					if partial {
+						break
+					}
+					pending = pending[1:]
+				}
+			}
+			if e != nil {
+				return
+			}
+		}
+	}()
+	read := func() string { mu.Lock(); defer mu.Unlock(); return ansi.Strip(output.String()) }
+	wait := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(read(), want) {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("native PTY missing %q: %s", want, read())
+	}
+	send := func(s string) {
+		t.Helper()
+		if _, e := io.WriteString(pt, s); e != nil {
+			t.Fatal(e)
+		}
+		time.Sleep(180 * time.Millisecond)
+	}
+	// Decode the complete stream at fixed dimensions. A resize repaint contains
+	// terminal deltas, not an independently decodable conversation snapshot.
+	frame := func() (string, error) {
+		t.Helper()
+		mu.Lock()
+		raw := []byte(output.String())
+		mu.Unlock()
+		return employeePTYScreen(raw)
+	}
+	waitScreen := func(want string, after int) string {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		var text string
+		var decodeErr error
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			changed := output.Len() > after
+			mu.Unlock()
+			if changed {
+				// A read may end midway through a UTF-8 glyph or escape. Require
+				// a complete valid screen before asserting; persistent decoder
+				// errors still fail at the deadline, never via ANSI stripping.
+				text, decodeErr = frame()
+				if decodeErr == nil && strings.Contains(text, want) {
+					return text
+				}
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		t.Fatalf("native PTY screen missing %q: %s; decode error: %v", want, text, decodeErr)
+		return ""
+	}
+	wait("Waiting for answer or review")
+	send("/bots approvals\r")
+	wait("Question: " + questionPrompt)
+	send("y")
+	wait("Enter reviews")
+	send("\r")
+	wait(`Confirm answer "company"`)
+	send("\r")
+	waitScreen("[approved]", 0)
+	send("\x1b")
+	startWork()
+	wait(acknowledgement)
+	before := watches.Load()
+	disconnect()
+	deadline := time.Now().Add(15 * time.Second)
+	for watches.Load() <= before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if watches.Load() <= before {
+		t.Fatal("native PTY did not reconnect while source held")
+	}
+	release()
+	finalBody := strings.TrimSuffix(strings.Split(final, " Source")[0], " Sources:")
+	wait(finalBody)
+	assert := func(text string) {
+		t.Helper()
+		ownerLines := 0
+		for _, line := range strings.Split(text, "\n") {
+			if strings.Trim(strings.TrimSpace(line), "│ ") == refinement {
+				ownerLines++
+			}
+		}
+		if ownerLines != 1 {
+			t.Fatalf("native PTY expected one exact accepted owner row: %s", text)
+		}
+		for _, want := range []string{acknowledgement, finalBody, "https://fixture.test/market"} {
+			if strings.Count(text, want) != 1 {
+				t.Fatalf("native PTY want once %q: %s", want, text)
+			}
+		}
+		if strings.Index(text, refinement) >= strings.Index(text, acknowledgement) || strings.Index(text, acknowledgement) >= strings.Index(text, finalBody) {
+			t.Fatal("native PTY chronology reordered")
+		}
+		for _, forbidden := range []string{"Review candidate", "Approve work", "Open in Files panel"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("needless workflow: %s", text)
+			}
+		}
+	}
+	assert(waitScreen(finalBody, 0))
+	committedHistory := history()
+	mu.Lock()
+	restoreOffset := output.Len()
+	mu.Unlock()
+	send("/bots home\r")
+	assert(waitScreen(finalBody, restoreOffset))
+	if restored := history(); !reflect.DeepEqual(committedHistory, restored) {
+		t.Fatal("native reload changed ordered durable SSE IDs or bodies")
+	}
+	send("/bots detach\r")
+	send("/exit\r")
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("native PTY did not exit")
+	}
+	t.Logf("native PTY %s live/reconnect/restore actual shared-worker reviewer=0 artifact=0", scope)
+}
+
+func employeePTYScreen(raw []byte) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", "-B", "-c", `import base64,re,sys,unicodedata
+sys.path.insert(0, '../../tests/e2eboot')
+from agent_terminal_contract import screen
+raw=sys.stdin.buffer.read()
+# Existing decoder admits only single-cell glyphs. The native queued badge
+# uses a two-cell hourglass; map only that non-content glyph to two cells.
+# Preserve all control sequences and every conversation byte unchanged.
+raw=raw.replace('⏳'.encode(),b'..')
+try:
+ print(screen({'encoding':'base64','data':base64.b64encode(raw).decode(),'rows':60,'cols':180}))
+except RuntimeError:
+ print('Observed controls:', sorted(set(re.findall(rb'\x1b(?:\[[^A-Za-z]*[A-Za-z]|[^[])',raw)),key=repr),file=sys.stderr)
+ print('Unsupported glyphs:', [(repr(c),hex(ord(c)),unicodedata.name(c,'unknown')) for c in set(raw.decode('utf-8','replace')) if (not c.isprintable() and c not in '\x1b\r\n\t\b\a') or unicodedata.combining(c) or unicodedata.east_asian_width(c) in ('W','F')],file=sys.stderr)
+ raise`)
+	cmd.Stdin = strings.NewReader(string(raw))
+	text, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("terminal decoder: %w: %s", err, text)
+	}
+	return string(text), nil
+}
+
+func TestBotEmployeePTYScreenQueuedBadgeKeepsColumns(t *testing.T) {
+	text, err := employeePTYScreen([]byte("\x1b[2J\x1b[H⏳ Queued\x1b[2;1HU.S. markets and major indexes"))
+	if err != nil || !strings.Contains(text, ".. Queued") || strings.Count(text, "U.S. markets and major indexes") != 1 {
+		t.Fatalf("queued badge changed conversation columns: %q, %v", text, err)
+	}
+}
+
+func TestBotEmployeePTYScreenRetainsBodyAcrossDelta(t *testing.T) {
+	text, err := employeePTYScreen([]byte("\x1b[2J\x1b[HApple Inc. answer\x1b[2;1HRunning\x1b[2;1H\x1b[2KCompleted"))
+	if err != nil || strings.Count(text, "Apple Inc. answer") != 1 || !strings.Contains(text, "Completed") || strings.Contains(text, "Running") {
+		t.Fatalf("current terminal screen did not retain unchanged body: %q, %v", text, err)
+	}
+}
+
 func TestBotDetailsWithoutSkillsBrowserAcceptance(t *testing.T) { runBotAgentWorkBrowser(t) }
 
 func TestBotAgentWorkBrowserAcceptance(t *testing.T) { runBotAgentWorkBrowser(t) }
@@ -1447,6 +2197,97 @@ func runBotAgentWorkBrowser(t *testing.T) {
 	t.Log("SKILL_SURFACE browser/no-skill-fetch PASS")
 	t.Log("SKILL_SURFACE browser/home-readonly PASS")
 	t.Log("AGENT_SURFACE browser/restore-composer PASS")
+}
+
+// databaseRuntimeFileSnapshot observes only the test-owned internal repository.
+// Workspace standing documents remain permitted file IO. Runtime evidence and
+// checkpoint objects must not appear or change during shared Chat execution.
+func databaseRuntimeFileSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	objects := map[string]string{}
+	err := filepath.WalkDir(filepath.Join(dir, "bot-content"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !strings.HasPrefix(entry.Name(), "evidence-") && !strings.HasPrefix(entry.Name(), "checkpoint-") {
+			return nil
+		}
+		//nolint:gosec // G122: test-only walk over a t.TempDir() tree; no untrusted symlinks.
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		// Knowledge-extraction inputs belong to memory's unchanged file lifecycle,
+		// not conversation/session/activity/approval/run runtime representation.
+		var extraction struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(raw, &extraction) == nil && len(extraction.Input) > 0 {
+			return nil
+		}
+		objects[path] = fmt.Sprintf("%x", sha256.Sum256(raw))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return objects
+}
+
+// Inspect only this disposable tenant's SQLite representation using read-only SQL.
+// This is test evidence, never an authorization or production persistence path.
+func assertDatabaseRuntimeComplete(t *testing.T, f *interactiveHTTPFixture) {
+	t.Helper()
+	path := filepath.Join(f.dataDir, "orgs", "interactive", "personal", f.b.OwnerID.String()+".db")
+	if f.scope == store.BotScopeTeam {
+		path = filepath.Join(f.dataDir, "orgs", "interactive", "teams", "team.db")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, family := range []struct{ name, query string }{
+		{"session_event", `SELECT event_data FROM session_events WHERE session_id IN (SELECT id FROM sessions WHERE bot_id = ?)`},
+		{"run", `SELECT data FROM bot_runs WHERE bot_id = ?`},
+		{"approval", `SELECT data FROM bot_approvals WHERE bot_id = ?`},
+		{"activity", `SELECT payload FROM bot_outbox WHERE bot_id = ?`},
+	} {
+		rows, err := db.QueryContext(f.ctx, family.query, f.b.ID.String())
+		if err != nil {
+			t.Fatal(family.name, err)
+		}
+		count := 0
+		for rows.Next() {
+			var raw string
+			if err = rows.Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]any
+			if err = json.Unmarshal([]byte(raw), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if record, ok := envelope["bot_record_v2"].(string); ok {
+				var header struct {
+					Format int `json:"format"`
+				}
+				if json.Unmarshal([]byte(record), &header) != nil || header.Format != 3 {
+					t.Fatalf("%s non-database runtime envelope", family.name)
+				}
+				count++
+			}
+		}
+		if err = rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		if count == 0 {
+			t.Fatalf("%s had no proven format-3 records", family.name)
+		}
+	}
 }
 
 type employeeReadCloser struct{ *strings.Reader }

@@ -249,8 +249,14 @@ func TestBotControlProposalMemorySourceAndReadinessRace(t *testing.T) {
 		for _, op := range []store.BotControlOperation{store.BotControlMemoryCorrect, store.BotControlMemoryForget} {
 			t.Run(string(scope)+"/source/"+string(op), func(t *testing.T) {
 				r, ctx, p := remainingProposal(t, scope, op, store.BotActive)
-				row, _ := r.db.ReadCorrectionMemory(ctx, p.Payload.Memory.MemoryID)
-				if err := r.db.ApplyCorrectionMemory(ctx, uuid.MustParse(row.ID), uuid.MustParse(row.SessionID), row.Snippet, "changed outside proposal", true); err != nil {
+				row, readErr := r.db.ReadCorrectionMemory(ctx, p.Payload.Memory.MemoryID)
+				if readErr != nil || row == nil {
+					t.Fatalf("reviewed source: %+v %v", row, readErr)
+				}
+				if err := changeBotDiskMemory(ctx, r.db, p.BotID, *row, func(entry *botDiskMemoryEntry) error {
+					entry.Row.Snippet = "changed outside proposal"
+					return nil
+				}); err != nil {
 					t.Fatal(err)
 				}
 				_, err := r.ConfirmControlProposal(ctx, store.BotControlProposalDecision{BotID: p.BotID, ProposalID: p.ID, Digest: p.Digest})

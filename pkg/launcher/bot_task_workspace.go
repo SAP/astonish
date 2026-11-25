@@ -2,7 +2,10 @@ package launcher
 
 import (
 	"context"
-	"reflect"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -50,6 +53,14 @@ func (w *BotTaskWorkspace) binding(c context.Context, b store.BotID) (*sandbox.B
 	binding := &sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.String()}, Backend: sandbox.BackendKind(h.Backend), Ref: h.StorageKey}
 	if binding.Validate() != nil {
 		return nil, store.ErrBotConflict
+	}
+	if binder, ok := w.Backend.(sandbox.BotHomeSessionBinder); ok {
+		if bot.HomeSessionID == uuid.Nil {
+			return nil, store.ErrBotConflict
+		}
+		if err := binder.BindBotHomeSession(binding, bot.HomeSessionID.String()); err != nil {
+			return nil, err
+		}
 	}
 	return binding, nil
 }
@@ -121,6 +132,20 @@ func (w *BotTaskWorkspace) Read(c context.Context, b store.BotID, p string, n in
 	// Canonical executable reads follow the registry-selected revision, not a
 	// backend head left ahead by a crash before the database commit.
 	parts := strings.Split(p, "/")
+	if sandbox.ValidateBotHomeArtifactPath(p) != nil {
+		return nil, store.ErrBotInvalid
+	}
+	for _, part := range parts {
+		if strings.HasPrefix(part, ".") {
+			return nil, store.ErrBotForbidden
+		}
+	}
+	// Knowledge and skill working files live in ordinary retained Home, not the
+	// private task receipt/authority root. They are untrusted content; reading
+	// them cannot select a runnable revision or authorize a script.
+	if len(parts) >= 2 && (parts[0] == "skills" || parts[0] == "knowledge" || parts[0] == "goals") {
+		return w.readWorkingFile(c, h, p, n)
+	}
 	if len(parts) >= 3 && parts[0] == "tasks" && parts[2] != "state" && parts[2] != "outputs" && parts[2] != "drafts" {
 		if w.Tasks == nil || parts[2] == ".revisions" || strings.HasPrefix(parts[2], ".") {
 			return nil, store.ErrBotForbidden
@@ -133,24 +158,67 @@ func (w *BotTaskWorkspace) Read(c context.Context, b store.BotID, p string, n in
 		if err != nil {
 			return nil, err
 		}
-		if task.Head == nil {
+		if task == nil || task.BotID != b || task.ID != id || task.Head == nil {
 			return nil, store.ErrBotNotFound
 		}
-		revision, err := w.Load(c, b, *task.Head)
+		if n < 1 || task.Head.Validate() != nil {
+			return nil, store.ErrBotInvalid
+		}
+		revision, err := w.Tasks.GetTaskRevision(c, b, *task.Head)
 		if err != nil {
 			return nil, err
 		}
-		data, ok := revision.Bundle[strings.Join(parts[2:], "/")]
-		if !ok {
-			return nil, store.ErrBotNotFound
+		if revision == nil || revision.ID == uuid.Nil || revision.BotID != b || revision.Ref != *task.Head {
+			return nil, store.ErrBotConflict
 		}
-		if n < 1 || int64(len(data)) > n {
-			return nil, store.ErrBotInvalid
+		// An explicit read fetches only the requested retained asset; execution
+		// still verifies the complete snapshot and never a writable working copy.
+		path := strings.Join(parts[2:], "/")
+		for _, asset := range revision.Manifest.Assets {
+			if asset.Path == path {
+				if asset.SizeBytes > n {
+					return nil, store.ErrBotInvalid
+				}
+				return w.readAsset(c, h, revision, asset)
+			}
 		}
-		return data, nil
+		return nil, store.ErrBotNotFound
+	}
+	if len(parts) < 4 || parts[0] != "tasks" || (parts[2] != "state" && parts[2] != "outputs" && parts[2] != "drafts") {
+		return nil, store.ErrBotForbidden
 	}
 	return w.Backend.ReadBotHomeWorkspace(c, h, p, n)
 }
+func (w *BotTaskWorkspace) readWorkingFile(c context.Context, h *sandbox.BotHomeBinding, path string, n int64) ([]byte, error) {
+	if n < 1 || n > sandbox.MaxBotHomeWorkspaceAssetBytes || sandbox.ValidateBotHomeArtifactPath(path) != nil {
+		return nil, store.ErrBotInvalid
+	}
+	for _, part := range strings.Split(path, "/") {
+		if strings.HasPrefix(part, ".") {
+			return nil, store.ErrBotForbidden
+		}
+	}
+	files, ok := w.Backend.(sandbox.BotHomeFilesBackend)
+	if !ok {
+		return nil, store.ErrBotUnsupported
+	}
+	stream, err := files.OpenBotHomeFile(c, h, path, store.BotFileRange{})
+	if err != nil {
+		return nil, err
+	}
+	if stream == nil || stream.ReadCloser == nil {
+		return nil, store.ErrBotConflict
+	}
+	data, readErr := io.ReadAll(io.LimitReader(stream, n+1))
+	if err := errors.Join(readErr, stream.Close()); err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > n {
+		return nil, store.ErrBotInvalid
+	}
+	return data, nil
+}
+
 func (w *BotTaskWorkspace) Write(c context.Context, m store.BotTaskMutation, f sandbox.BotHomeWorkspaceFile) error {
 	h, e := w.authorize(c, m)
 	if e != nil {
@@ -306,20 +374,57 @@ func (w *BotTaskWorkspace) Load(c context.Context, b store.BotID, ref store.BotT
 	if e != nil {
 		return nil, e
 	}
+	if ref.Validate() != nil {
+		return nil, store.ErrBotInvalid
+	}
 	r, e := w.Tasks.GetTaskRevision(c, b, ref)
 	if e != nil {
 		return nil, e
 	}
-	bundle := map[string][]byte{}
+	if r == nil || r.ID == uuid.Nil || r.BotID != b || r.Ref != ref {
+		return nil, store.ErrBotConflict
+	}
+	if len(r.Manifest.Assets) > store.BotTaskMaxAssets {
+		return nil, store.ErrBotConflict
+	}
+	// The registry selects the immutable revision and its asset metadata. Bundle
+	// is a transient hydration, not a second content authority: reconstruct it
+	// exclusively from retained bytes and verify each declared digest and size.
+	bundle := make(map[string][]byte, len(r.Manifest.Assets))
+	var size int64
 	for _, a := range r.Manifest.Assets {
-		data, err := w.Backend.ReadBotHomeWorkspace(c, h, "tasks/"+ref.TaskID.String()+"/.revisions/"+r.ID.String()+"/"+a.Path, sandbox.MaxBotHomeWorkspaceAssetBytes)
+		if store.ValidateBotTaskAssetPath(a.Path) != nil || a.SizeBytes < 0 || a.SizeBytes > sandbox.MaxBotHomeWorkspaceAssetBytes {
+			return nil, store.ErrBotConflict
+		}
+		if _, duplicate := bundle[a.Path]; duplicate {
+			return nil, store.ErrBotConflict
+		}
+		size += a.SizeBytes
+		if size > sandbox.MaxBotHomeWorkspaceBundleBytes {
+			return nil, store.ErrBotConflict
+		}
+		data, err := w.readAsset(c, h, r, a)
 		if err != nil {
 			return nil, err
 		}
 		bundle[a.Path] = data
 	}
-	if !reflect.DeepEqual(bundle, r.Bundle) {
+	out := *r
+	out.Bundle = bundle
+	return &out, nil
+}
+
+func (w *BotTaskWorkspace) readAsset(c context.Context, h *sandbox.BotHomeBinding, r *store.BotTaskRevision, a store.BotTaskAsset) ([]byte, error) {
+	if store.ValidateBotTaskAssetPath(a.Path) != nil || a.SizeBytes < 0 || a.SizeBytes > sandbox.MaxBotHomeWorkspaceAssetBytes {
 		return nil, store.ErrBotConflict
 	}
-	return r, nil
+	data, err := w.Backend.ReadBotHomeWorkspace(c, h, "tasks/"+r.Ref.TaskID.String()+"/.revisions/"+r.ID.String()+"/"+a.Path, sandbox.MaxBotHomeWorkspaceAssetBytes)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(data)
+	if int64(len(data)) != a.SizeBytes || hex.EncodeToString(sum[:]) != a.Digest {
+		return nil, store.ErrBotConflict
+	}
+	return data, nil
 }

@@ -27,12 +27,12 @@ func scheduledFixture(t *testing.T, scope store.BotScope, kind store.TriggerKind
 	var activate func(uuid.UUID) error
 	if scope == store.BotScopeTeam {
 		c := newTeamClient(t)
-		db = teamBotDB{client: c}
+		db = teamBotDB{client: c, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}
 		jobs = &teamSchedulerStore{client: c}
 		activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus("active").Exec(ctx) }
 	} else {
 		_, c := setupPersonalStore(t)
-		db = personalBotDB{client: c}
+		db = personalBotDB{client: c, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}
 		jobs = &personalSchedulerStore{client: c}
 		activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus("active").Exec(ctx) }
 	}

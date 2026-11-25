@@ -53,9 +53,12 @@ func (s *botCleanupDeleteFailureStore) Delete(ctx context.Context, id string) er
 }
 
 func TestBotHomeCleanupExactOwnershipAndRetry(t *testing.T) {
-	for _, mode := range []string{"owned", "missing-container", "foreign-owner", "foreign-label", "foreign-name", "foreign-mount", "revoked", "overlay-failure", "registry-failure", "registry-committed-crash", "unregistered"} {
+	for _, mode := range []string{"owned", "owned-private", "owned-restored-private", "foreign-private", "wrong-generation-private", "bind-private", "readonly-private", "duplicate-private", "unexpected-mount", "unexpected-private-mount", "missing-container", "foreign-owner", "foreign-label", "foreign-name", "foreign-mount", "revoked", "overlay-failure", "registry-failure", "registry-committed-crash", "unregistered"} {
 		t.Run(mode, func(t *testing.T) {
 			b := testBotHome()
+			if mode == "owned-restored-private" || mode == "wrong-generation-private" {
+				b.Ref += "-restore-" + uuid.NewString()
+			}
 			id := uuid.NewString()
 			root := t.TempDir()
 			log := filepath.Join(root, "calls")
@@ -99,12 +102,32 @@ func TestBotHomeCleanupExactOwnershipAndRetry(t *testing.T) {
 			if mode == "foreign-name" {
 				name = "/foreign-forged-session-label"
 			}
-			raw, err := json.Marshal(map[string]any{"ID": "immutable-id", "Name": name, "Config": map[string]any{"Labels": map[string]string{"astonish.session_id": id, botHomeScopeLabel: label, "astonish.org": b.Scope.OrgID, "astonish.team": b.Scope.TeamID}}, "Mounts": []any{
+			mounts := []any{
 				map[string]any{"Type": "volume", "Name": homeRef, "Destination": botHomeMount, "RW": true},
 				map[string]any{"Type": "volume", "Name": overlayVolumeName(id), "Destination": mountOverlay, "RW": true},
 				map[string]any{"Type": "bind", "Source": db.upperPath(id), "Destination": mountUppers, "RW": true},
 				map[string]any{"Type": "bind", "Source": db.cfg.LayersDir, "Destination": mountLayers, "RW": false},
-			}})
+			}
+			if strings.Contains(mode, "private") {
+				private := map[string]any{"Type": "volume", "Name": workspaceVolume(b), "Destination": botPrivateMount, "RW": true}
+				switch mode {
+				case "foreign-private":
+					private["Name"] = "foreign"
+				case "wrong-generation-private":
+					private["Name"] = "astonish-bot-workspace-" + b.Scope.Key()
+				case "bind-private":
+					private["Type"] = "bind"
+				case "readonly-private":
+					private["RW"] = false
+				case "duplicate-private":
+					mounts = append(mounts, private)
+				}
+				mounts = append(mounts, private)
+			}
+			if mode == "unexpected-mount" || mode == "unexpected-private-mount" {
+				mounts = append(mounts, map[string]any{"Type": "bind", "Source": "/foreign", "Destination": "/external", "RW": true})
+			}
+			raw, err := json.Marshal(map[string]any{"ID": "immutable-id", "Name": name, "Config": map[string]any{"Labels": map[string]string{"astonish.session_id": id, botHomeScopeLabel: label, "astonish.org": b.Scope.OrgID, "astonish.team": b.Scope.TeamID}}, "Mounts": mounts})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +159,8 @@ esac`
 				return nil
 			}
 			err = db.ReconcileBotHomeSessions(t.Context(), b, authorize)
-			success := mode == "owned" || mode == "missing-container"
+			owned := mode == "owned" || mode == "owned-private" || mode == "owned-restored-private"
+			success := owned || mode == "missing-container"
 			if (err == nil) != success {
 				t.Fatalf("reconcile %v", err)
 			}
@@ -145,7 +169,7 @@ esac`
 				t.Fatal(e)
 			}
 			removed := strings.Contains(string(data), "rm -f -v immutable-id")
-			if removed != (mode == "owned" || mode == "overlay-failure" || registryFailure) {
+			if removed != (owned || mode == "overlay-failure" || registryFailure) {
 				t.Fatalf("unsafe/missing destruction: %s", data)
 			}
 			if strings.Contains(string(data), "volume rm -f") {

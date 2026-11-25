@@ -39,10 +39,15 @@ func SetBotEventSubscriber(source BotEventSubscriber) {
 	botEventSource.source = source
 }
 
-// marshalBotTranscriptEvent validates known state metadata without translating it
-// into generic Chat events. Unknown schema versions remain raw, forward-compatible
-// transcript rows, which clients must ignore for state rendering.
+// marshalBotTranscriptEvent validates public state schemas and serializes only
+// presentation fields. Unknown versions retain identity, never opaque private data.
 func marshalBotTranscriptEvent(event *session.Event, botID, sessionID uuid.UUID) ([]byte, error) {
+	if event == nil {
+		return nil, store.ErrBotInvalid
+	}
+	if value, ok := event.Actions.StateDelta[store.BotFilePublicationKey]; ok {
+		return marshalBotFilePublication(event, value, botID, sessionID)
+	}
 	if value, ok := event.Actions.StateDelta[store.BotOperationKey]; ok {
 		raw, err := json.Marshal(value)
 		if err != nil {
@@ -56,7 +61,7 @@ func marshalBotTranscriptEvent(event *session.Event, botID, sessionID uuid.UUID)
 			return nil, store.ErrBotInvalid
 		}
 		// Re-encode the public allowlist: never forward unknown authority fields.
-		clean := *event
+		clean := publicBotTranscript(event)
 		clean.Actions = session.EventActions{StateDelta: map[string]any{store.BotOperationKey: view}}
 		return json.Marshal(&clean)
 	}
@@ -84,16 +89,17 @@ func marshalBotTranscriptEvent(event *session.Event, botID, sessionID uuid.UUID)
 			default:
 				return nil, store.ErrBotInvalid
 			}
-			clean := *event
+			clean := publicBotTranscript(event)
 			clean.Actions = session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: state}}
 			return json.Marshal(&clean)
 		}
 	}
-	return json.Marshal(event)
+	return json.Marshal(publicBotTranscript(event))
 }
 
 const botReplayComplete = "replay_complete"
 const botEventPageSize = 100
+const botReconnectWarmRows = 8
 
 func botEventCursor(sid uuid.UUID, cursor int64) string {
 	return sid.String() + ":" + strconv.FormatInt(cursor, 10)
@@ -191,23 +197,35 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bot session not found", 404)
 		return
 	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(w)
+	// A reconnect cursor already proves the client has a durable presentation
+	// boundary. Attach the socket before hydrating file-backed deltas so retained
+	// history cannot delay HTTP/SSE headers. Initial replay keeps fail-before-header
+	// semantics for storage errors and revocation.
+	if cursor > 0 {
+		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if controller.Flush() != nil {
+			return
+		}
+	}
 	rows, err := reader.ReadBotTranscript(r.Context(), sid, cursor, botEventPageSize)
 	if err != nil {
 		http.Error(w, "Bot transcript unavailable", 500)
 		return
 	}
 	if !allowed() {
-		http.Error(w, "Bot session not found", 404)
+		if cursor == 0 {
+			http.Error(w, "Bot session not found", 404)
+		}
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	controller := http.NewResponseController(w)
 	write := func(event string, payload []byte, position int64) bool {
-		if !allowed() {
-			return false
-		}
+		// Authorization is checked around each bounded durable read batch, not for
+		// every projected frame. This preserves revocation boundaries without
+		// multiplying retained-store reads by the number of public SSE frames.
 		// A slow socket is disconnected, not buffered; its next request catches up.
 		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", botEventCursor(sid, position), event, payload); err != nil {
@@ -218,8 +236,62 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	initial := true
+	projector := &SessionEventProjector{BotID: id, HomeSessionID: b.HomeSessionID, SessionID: sid, Repository: repo}
+	// Rebuild presentation-only call correlation before the reconnect boundary.
+	// A response can arrive after disconnect while its call was already delivered;
+	// replaying prior rows into the projector must not re-emit them to the client.
+	if cursor > 0 {
+		approvals, err := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 8})
+		if err != nil {
+			return
+		}
+		if tail, ok := ss.(store.BotTranscriptTailReader); ok {
+			prior, err := tail.ReadBotTranscriptTail(r.Context(), sid, cursor, botReconnectWarmRows)
+			if err != nil {
+				return
+			}
+			for _, row := range prior {
+				if row.Cursor > cursor {
+					return
+				}
+				if _, err := projector.ProjectBot(r.Context(), row, approvals); err != nil {
+					return
+				}
+			}
+		} else {
+			var priorCursor int64
+			for priorCursor < cursor {
+				if !allowed() {
+					return
+				}
+				prior, err := reader.ReadBotTranscript(r.Context(), sid, priorCursor, botEventPageSize)
+				if err != nil {
+					return
+				}
+				if len(prior) == 0 {
+					break
+				}
+				for _, row := range prior {
+					if row.Cursor > cursor {
+						priorCursor = cursor
+						break
+					}
+					if row.Cursor <= priorCursor {
+						return
+					}
+					if _, err := projector.ProjectBot(r.Context(), row, approvals); err != nil {
+						return
+					}
+					priorCursor = row.Cursor
+				}
+				if len(prior) < botEventPageSize {
+					break
+				}
+			}
+		}
+	}
 	for {
-		approvals, reviewErr := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 200})
+		approvals, reviewErr := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 8})
 		if reviewErr != nil {
 			return
 		}
@@ -227,9 +299,18 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 			if row.Cursor <= cursor || row.Event == nil {
 				return
 			}
-			payload, err := marshalBotTranscriptEvent(projectBotHomeNarrative(projectBotReviewQuestion(projectBotQuestionTranscript(row.Event, approvals), approvals, id, sid), b.HomeSessionID, sid), id, sid)
-			if err != nil || !write(botTranscriptEvent, payload, row.Cursor) {
+			projection, err := projector.ProjectBot(r.Context(), row, approvals)
+			if err != nil {
 				return
+			}
+			frames, err := projection.BotFrames(cursor)
+			if err != nil {
+				return
+			}
+			for _, frame := range frames {
+				if !write(frame.Type, frame.Data, frame.Cursor) {
+					return
+				}
 			}
 			cursor = row.Cursor
 		}
@@ -260,6 +341,9 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err = reader.ReadBotTranscript(r.Context(), sid, cursor, botEventPageSize)
 		if err != nil {
+			return
+		}
+		if !allowed() {
 			return
 		}
 	}

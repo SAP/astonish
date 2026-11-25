@@ -87,7 +87,16 @@ func TestBotApprovalRequeueCurrentAuthority(t *testing.T) {
 }
 
 func TestBotApprovalConcurrentConsumption(t *testing.T) {
-	repo, ctx, worker, run, a, now := waitingApprovalFixture(t, store.BotScopePersonal)
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			testBotApprovalConcurrentConsumption(t, scope)
+		})
+	}
+}
+
+func testBotApprovalConcurrentConsumption(t *testing.T, scope store.BotScope) {
+	t.Helper()
+	repo, ctx, worker, run, a, now := waitingApprovalFixture(t, scope)
 	b, _ := repo.Get(ctx, run.BotID)
 	if _, err := repo.DecideApproval(ctx, store.BotApprovalDecision{BotID: b.ID, ApprovalID: a.ID, ActorID: b.OwnerID, ActionDigest: a.ActionDigest, Status: store.ApprovalApproved}); err != nil {
 		t.Fatal(err)

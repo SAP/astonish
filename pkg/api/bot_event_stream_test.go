@@ -14,12 +14,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 type botReplayFixture struct {
@@ -29,6 +32,89 @@ type botReplayFixture struct {
 
 func (s *botReplayFixture) ReadBotTranscript(context.Context, uuid.UUID, int64, int) ([]store.BotTranscriptEvent, error) {
 	return s.read()
+}
+
+type delayedReconnectRows struct {
+	*botSessionMetaFixture
+	rows    []store.BotTranscriptEvent
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *delayedReconnectRows) ReadBotTranscript(ctx context.Context, _ uuid.UUID, after int64, _ int) ([]store.BotTranscriptEvent, error) {
+	if after > 0 {
+		select {
+		case s.started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	var out []store.BotTranscriptEvent
+	for _, row := range s.rows {
+		if row.Cursor > after {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func TestBotEventsReconnectFlushesBeforeRetainedDeltaHydration(t *testing.T) {
+	owner, bid, sid := uuid.New(), uuid.New(), uuid.New()
+	repo := &botSessionFixtureStore{b: store.Bot{ID: bid, OwnerID: owner, Scope: store.BotScopePersonal, HomeSessionID: sid}}
+	ss := &delayedReconnectRows{botSessionMetaFixture: &botSessionMetaFixture{meta: &store.SessionMeta{ID: sid.String(), UserID: owner.String(), BotID: bid.String(), Purpose: store.SessionPurposeBotHome, Retention: store.SessionRetentionBot}}, started: make(chan struct{}, 1), release: make(chan struct{})}
+	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: owner.String(), OrgSlug: "org", TeamSlug: "team"})
+	ctx = store.WithServices(ctx, &store.Services{PersonalBots: repo, PersonalSessions: ss})
+	router := mux.NewRouter()
+	registerBotRoutes(router)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bound, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(r.Context(), cancel)
+		defer stop()
+		defer cancel()
+		router.ServeHTTP(w, r.WithContext(bound))
+	}))
+	defer server.Close()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	req, _ := http.NewRequestWithContext(requestCtx, "GET", server.URL+"/api/studio/bots/"+bid.String()+"/sessions/"+sid.String()+"/events?scope=personal", nil)
+	req.Header.Set("Last-Event-ID", botEventCursor(sid, 42))
+	response := make(chan *http.Response, 1)
+	fail := make(chan error, 1)
+	go func() {
+		res, requestErr := server.Client().Do(req)
+		if requestErr != nil {
+			fail <- requestErr
+			return
+		}
+		response <- res
+	}()
+	select {
+	case <-ss.started:
+	case <-time.After(time.Second):
+		t.Fatal("retained delta read did not start")
+	}
+	select {
+	case err := <-fail:
+		t.Fatal(err)
+	case res := <-response:
+		if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "text/event-stream" {
+			res.Body.Close()
+			t.Fatalf("reconnect did not attach: %s %v", res.Status, res.Header)
+		}
+		cancelRequest()
+		res.Body.Close()
+	case <-time.After(time.Second):
+		t.Fatal("SSE headers waited for retained delta hydration")
+	}
+	close(ss.release)
 }
 
 // Revocation after a persisted read must be checked before any payload is sent.
@@ -63,6 +149,113 @@ func TestBotEventsReplayRevocationAndStorageFailure(t *testing.T) {
 				t.Fatalf("unsafe replay response: %d %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+type canonicalPresentationRows struct {
+	*botSessionMetaFixture
+	rows []store.BotTranscriptEvent
+}
+
+func (s *canonicalPresentationRows) ReadBotTranscript(_ context.Context, _ uuid.UUID, after int64, _ int) ([]store.BotTranscriptEvent, error) {
+	var rows []store.BotTranscriptEvent
+	for _, row := range s.rows {
+		if row.Cursor > after {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func TestBotCanonicalPresentationHTTPFields(t *testing.T) {
+	owner, bid, sid, home, run, turn := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	repo := &botSessionFixtureStore{b: store.Bot{ID: bid, OwnerID: owner, Scope: store.BotScopePersonal, HomeSessionID: home}, run: store.BotRun{ID: run, BotID: bid, SessionID: sid}}
+	ss := &canonicalPresentationRows{botSessionMetaFixture: &botSessionMetaFixture{meta: &store.SessionMeta{ID: sid.String(), UserID: owner.String(), BotID: bid.String(), BotRunID: run.String(), Purpose: store.SessionPurposeBotRun, Retention: store.SessionRetentionBot}}}
+	payloads := []struct {
+		kind string
+		data map[string]any
+	}{
+		{"artifact", map[string]any{"path": "/report.md", "fileName": "report.md", "fileType": "Markdown", "toolName": "write_file", "isReport": true, "reportTitle": "Findings"}},
+		{"report_marker", map[string]any{"path": "/report.md", "title": "Findings"}},
+		{"subtask_progress", map[string]any{"event_type": "delegation_start", "batch_id": "batch", "task_name": "Research"}},
+	}
+	for i, p := range payloads {
+		raw, _ := json.Marshal(p.data)
+		ss.rows = append(ss.rows, store.BotTranscriptEvent{Cursor: int64(i + 1), Event: &adksession.Event{ID: fmt.Sprint("row-", i), Author: "bot_runtime", Actions: adksession.EventActions{StateDelta: map[string]any{"bot_runtime_event": bot.RuntimeEvent{SessionID: sid, RunID: run, TurnID: turn, Sequence: int64(i + 1), Type: p.kind, Payload: raw}}}}})
+	}
+	ctx, err := execution.WithPrincipal(t.Context(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: owner.String(), OrgSlug: "org", TeamSlug: "team"})
+	ctx = store.WithServices(ctx, &store.Services{PersonalBots: repo, PersonalSessions: ss})
+	router := mux.NewRouter()
+	registerBotRoutes(router)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bound, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(r.Context(), cancel)
+		defer stop()
+		defer cancel()
+		router.ServeHTTP(w, r.WithContext(bound))
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 5 * time.Second
+	res, err := client.Get(server.URL + "/api/studio/bots/" + bid.String() + "/sessions/" + sid.String() + "/stream?scope=personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatal(res.Status)
+	}
+	readPresentation := func(rd *bufio.Reader, start int) []botSSEFrame {
+		t.Helper()
+		var frames []botSSEFrame
+		for i := start; i < len(payloads); i++ {
+			p := payloads[i]
+			frame := readBotSSE(t, rd)
+			var data map[string]any
+			if json.Unmarshal([]byte(frame.data), &data) != nil || frame.event != p.kind || frame.id != botEventCursor(sid, int64(i+1)) {
+				t.Fatalf("unexpected frame %+v", frame)
+			}
+			for k, v := range p.data {
+				if data[k] != v {
+					t.Fatalf("lost %s/%s: %+v", p.kind, k, data)
+				}
+			}
+			frames = append(frames, frame)
+		}
+		return frames
+	}
+	rd := bufio.NewReader(res.Body)
+	history := readPresentation(rd, 0)
+	if frame := readBotSSE(t, rd); frame.event != "done" {
+		t.Fatal(frame)
+	}
+	// Live replay and reconnect must deliver the same payloads and identities,
+	// including renderer metadata that used to be stripped by the allowlist.
+	for _, start := range []int{0, 1} {
+		req, err := http.NewRequest("GET", server.URL+"/api/studio/bots/"+bid.String()+"/sessions/"+sid.String()+"/events?scope=personal", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Last-Event-ID", botEventCursor(sid, int64(start)))
+		live, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := bufio.NewReader(live.Body)
+		frames := readPresentation(reader, start)
+		for i, frame := range frames {
+			if frame != history[start+i] {
+				t.Fatalf("live/history diverged: %+v != %+v", frame, history[start+i])
+			}
+		}
+		if frame := readBotSSE(t, reader); frame.event != botReplayComplete || frame.id != botEventCursor(sid, int64(len(payloads))) {
+			t.Fatal(frame)
+		}
+		live.Body.Close()
 	}
 }
 
@@ -187,10 +380,12 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent := func(id string) {
 				t.Helper()
-				e := &adksession.Event{ID: id, Author: "execution-owner", Timestamp: time.Now()}
+				e := &adksession.Event{ID: id, Author: "execution-owner", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(id, "model")}}
+				e.Actions.StateDelta = map[string]any{"private_checkpoint": "PRIVATE_CHECKPOINT_SECRET"}
 				if id == "first" {
 					e.Author = "bot_runtime"
-					e.Actions.StateDelta = map[string]any{"bot_runtime_event": map[string]any{"type": "tool_call", "payload": map[string]any{"name": "web_fetch", "args": map[string]any{"url": "HISTORICAL_PRIVATE_URL"}}}}
+					e.Content = nil
+					e.Actions.StateDelta = map[string]any{"bot_runtime_event": map[string]any{"type": "tool_call", "payload": map[string]any{"name": "web_fetch", "private_checkpoint": "HISTORICAL_PRIVATE_CHECKPOINT", "args": map[string]any{"url": "https://historical.example.invalid/public"}}}}
 				}
 				if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), e); err != nil {
 					t.Fatal(err)
@@ -205,7 +400,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent("first")
 			first := readBotSSE(t, rd)
-			if first.event != botTranscriptEvent || !strings.Contains(first.data, "first") || strings.Contains(first.data, "HISTORICAL_PRIVATE_URL") || strings.Contains(first.data, "web_fetch") {
+			if first.event != "tool_call" || first.id != botEventCursor(b.HomeSessionID, 1) || !strings.Contains(first.data, "https://historical.example.invalid/public") || !strings.Contains(first.data, "web_fetch") || strings.Contains(first.data, "HISTORICAL_PRIVATE_CHECKPOINT") {
 				t.Fatalf("live: %+v", first)
 			}
 			live.Body.Close()
@@ -214,7 +409,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			defer resumed.Body.Close()
 			rr := bufio.NewReader(resumed.Body)
 			second := readBotSSE(t, rr)
-			if second.id == first.id || !strings.Contains(second.data, "second") {
+			if second.id == first.id || !strings.Contains(second.data, "second") || strings.Contains(second.data, "PRIVATE_CHECKPOINT_SECRET") {
 				t.Fatalf("resume: %+v", second)
 			}
 			if f := readBotSSE(t, rr); f.event != botReplayComplete {
@@ -257,10 +452,21 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			// A full snapshot uses the same ordered source and IDs as live delivery.
 			full := request("GET", path, owner, "", "", 200)
 			fr := bufio.NewReader(full.Body)
-			if f := readBotSSE(t, fr); f.id != first.id || !strings.Contains(f.data, "first") || strings.Contains(f.data, "HISTORICAL_PRIVATE_URL") || strings.Contains(f.data, "web_fetch") {
+			if f := readBotSSE(t, fr); f.id != first.id || f.event != "tool_call" || f.data != first.data {
 				t.Fatal("snapshot differs", f)
 			}
 			full.Body.Close()
+
+			// Finite restore carries identical sanitized rows; only transport IDs differ.
+			history := request("GET", strings.Replace(path, "/events?", "/stream?", 1), owner, "", "", 200)
+			hr := bufio.NewReader(history.Body)
+			if restored := readBotSSE(t, hr); restored.data != first.data {
+				t.Fatalf("first history/live mismatch: %s != %s", restored.data, first.data)
+			}
+			if restored := readBotSSE(t, hr); restored.data != second.data || strings.Contains(restored.data, "PRIVATE_CHECKPOINT_SECRET") {
+				t.Fatalf("reconnected history/live mismatch: %s != %s", restored.data, second.data)
+			}
+			history.Body.Close()
 
 			// Replay crosses a storage page without changing event identity/order.
 			for i := 0; i < botEventPageSize+2; i++ {
@@ -283,7 +489,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 					}
 					break
 				}
-				if frame.event != botTranscriptEvent || position <= previous {
+				if (frame.event != "text" && frame.event != "tool_call" && frame.event != botCursorEvent) || position <= previous {
 					t.Fatalf("unordered replay: %+v after %d", frame, previous)
 				}
 				previous = position
@@ -307,6 +513,62 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 				t.Fatal("header cursor did not take precedence", f)
 			}
 			headerReplay.Body.Close()
+
+			// A complete model row fans out atomically, including its completion.
+			answer := &adksession.Event{ID: "owner-answer", Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(`{"type":"bot_owner_answer","display":{"answer":"Use the reviewed option"},"response":{"private":"not display"}}`, "user")}}
+			complete := &adksession.Event{ID: "multipart", Author: "assistant", InvocationID: "turn-multipart", LLMResponse: model.LLMResponse{TurnComplete: true, Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "repeat"}, {Text: "repeat"}}}}}
+			for _, event := range []*adksession.Event{answer, complete} {
+				if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			multi := request("GET", path, owner, "", botEventCursor(b.HomeSessionID, previous), 200)
+			mr := bufio.NewReader(multi.Body)
+			var expected []botSSEFrame
+			for i, kind := range []string{"user_message", "text", "text", "turn_complete"} {
+				frame := readBotSSE(t, mr)
+				wantCursor := previous + 1
+				if i == 3 {
+					wantCursor++
+				}
+				if frame.event != kind || frame.id != botEventCursor(b.HomeSessionID, wantCursor) {
+					t.Fatalf("non-atomic multipart: %+v", frame)
+				}
+				if i == 0 && (!strings.Contains(frame.data, "Use the reviewed option") || strings.Contains(frame.data, "not display") || strings.Contains(frame.data, "bot_owner_answer")) {
+					t.Fatalf("raw owner envelope: %s", frame.data)
+				}
+				expected = append(expected, frame)
+			}
+			if expected[1].data == expected[2].data || expected[2].data == expected[3].data {
+				t.Fatal("multipart display identity collapsed")
+			}
+			if f := readBotSSE(t, mr); f.event != botReplayComplete {
+				t.Fatalf("live completion was not catch-up: %+v", f)
+			}
+			multi.Body.Close()
+			// Disconnect after either text: final part has not committed the row.
+			replay := request("GET", path, owner, "", expected[1].id, 200)
+			replayReader := bufio.NewReader(replay.Body)
+			for _, want := range expected[1:] {
+				if got := readBotSSE(t, replayReader); got != want {
+					t.Fatalf("unstable multipart reconnect: %+v != %+v", got, want)
+				}
+			}
+			replay.Body.Close()
+			restored := request("GET", strings.Replace(path, "/events?", "/stream?", 1), owner, "", "", 200)
+			restoredReader := bufio.NewReader(restored.Body)
+			for i := int64(0); i < previous; i++ {
+				readBotSSE(t, restoredReader)
+			}
+			for _, want := range expected {
+				if got := readBotSSE(t, restoredReader); got != want {
+					t.Fatalf("history/live contract mismatch: %+v != %+v", got, want)
+				}
+			}
+			if f := readBotSSE(t, restoredReader); f.event != botTranscriptDone || !strings.Contains(f.data, `"persisted":true`) {
+				t.Fatalf("finite history missing persisted completion: %+v", f)
+			}
+			restored.Body.Close()
 		})
 	}
 }

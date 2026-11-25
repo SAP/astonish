@@ -175,7 +175,7 @@ func TestBotHomePurgeFilesystem(t *testing.T) {
 	for _, mode := range []string{"success", "owner-mismatch", "missing-owner", "data-link", "resume", "nested-mount"} {
 		t.Run(mode, func(t *testing.T) {
 			if mode == "nested-mount" && os.Getenv("ASTONISH_BOT_HOME_PURGE_MOUNT_TEST") != "1" {
-				t.Skip("requires explicit privileged mount-test opt-in")
+				t.Skip("requires explicit disposable nested mount-test opt-in")
 			}
 			setup := `set -eu
 mkdir -p /mnt/astonish-bot-home/data/nested /outside
@@ -194,7 +194,22 @@ ln -s /outside /mnt/astonish-bot-home/data/link
 			case "resume":
 				setup += "rm -r /mnt/astonish-bot-home/data; printf 'operation\\n' >/mnt/astonish-bot-home/.purging\n"
 			case "nested-mount":
-				setup += "mount --bind /outside /mnt/astonish-bot-home/data/nested\n"
+				// Docker installs this tmpfs before dropping all container capabilities.
+				// No mount syscall, privileged container, host path or socket is needed.
+				// First prove ordinary compiled reads work, then demand a forbidden
+				// response for crossing the real mount, not an unrelated CLI failure.
+				setup += `mountpoint -q /mnt/astonish-bot-home/data/nested
+owner="k8s-home-v1:$(printf '%064d' 0)"
+printf '%s\n' "$owner" >/mnt/astonish-bot-home/.owner
+printf 'allowed' >/mnt/astonish-bot-home/data/good
+printf '{"op":"open","path":"good"}\n' >/request
+sh -c 'exec 9</mnt/astonish-bot-home; exec /usr/local/bin/astonish-host node --internal-scoped-home-files "$1" public read' home-files "$owner" </request >/response
+[ "$(tail -c 7 /response)" = allowed ]
+printf '{"op":"open","path":"nested/file"}\n' >/request
+if sh -c 'exec 9</mnt/astonish-bot-home; exec /usr/local/bin/astonish-host node --internal-scoped-home-files "$1" public read' home-files "$owner" </request >/response; then exit 92; fi
+[ "$(cat /response)" = '{"error":{"code":"forbidden"}}' ]
+printf 'owner\n' >/mnt/astonish-bot-home/.owner
+`
 			}
 			setup += "printf '%s' '" + strings.ReplaceAll(botHomePurgeScript, "'", "'\\''") + "' >/purge.sh\n"
 			if mode == "success" || mode == "resume" {
@@ -203,9 +218,12 @@ ln -s /outside /mnt/astonish-bot-home/data/link
 				setup += "if sh /purge.sh owner operation; then exit 91; fi\n"
 			}
 			setup += "[ \"$(cat /outside/file)\" = keep ]\n"
-			args := []string{"container", "run", "--rm", "--network=none"}
 			if mode == "nested-mount" {
-				args = append(args, "--cap-add=SYS_ADMIN")
+				setup += "mountpoint -q /mnt/astonish-bot-home/data/nested\n[ \"$(cat /mnt/astonish-bot-home/data/nested/file)\" = delete ]\n[ ! -e /mnt/astonish-bot-home/.purged ]\n"
+			}
+			args := []string{"container", "run", "--rm", "--pull=never", "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges"}
+			if mode == "nested-mount" {
+				args = append(args, "--tmpfs=/mnt/astonish-bot-home/data/nested:rw,nosuid,nodev,noexec,size=1m")
 			}
 			args = append(args, "--entrypoint=/bin/sh", image, "-c", setup)
 			out, err := exec.Command("docker", args...).CombinedOutput()

@@ -71,19 +71,13 @@ func TestBotFactoryRoutineScheduleConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer constructed.Cleanup()
-	foundTool := false
-	for _, candidate := range constructed.Agent.Tools {
-		if candidate.Name() != "schedule_job" {
-			continue
-		}
-		foundTool = true
-		for _, want := range []string{"explicit owner request", "current bounded mandate", "do not ask for redundant frequency confirmation", "minimum interval and budgets", "pending receipt"} {
-			if !strings.Contains(candidate.Description(), want) {
-				t.Errorf("schedule description missing %q", want)
-			}
-		}
-	}
-	if !foundTool {
+	entry := constructed.Agent.ToolIndex.GetToolEntry("schedule_job")
+	if entry == nil {
 		t.Fatal("schedule_job missing")
+	}
+	for _, want := range []string{"explicit owner request", "current bounded mandate", "do not ask for redundant frequency confirmation", "minimum interval and budgets", "pending receipt"} {
+		if !strings.Contains(entry.Tool.Description(), want) {
+			t.Errorf("schedule description missing %q", want)
+		}
 	}
 }

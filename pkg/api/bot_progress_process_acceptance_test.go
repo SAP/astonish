@@ -73,7 +73,9 @@ func TestBotProgressProcessRestartAcceptance(t *testing.T) {
 			}))
 			defer sink.Close()
 			evidenceFile := filepath.Join(t.TempDir(), "evidence.json")
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			// The production worker lease is five minutes. In-flight recovery must
+			// observe real expiry rather than shorten it or edit persisted timestamps.
+			ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, exe, "-test.run=^TestBotProgressProcessRestartAcceptance$", "-test.count=1")
 			cmd.Env = append(os.Environ(), "ASTONISH_PROGRESS_PROCESS_STAGE="+mode, "ASTONISH_PROGRESS_PROCESS_EVIDENCE="+evidenceFile, "ASTONISH_PROGRESS_PROCESS_SINK="+sink.URL)
@@ -88,6 +90,7 @@ func TestBotProgressProcessRestartAcceptance(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = cmd.Process.Kill() })
 			ready := make(chan bool, 1)
+			var childOutput strings.Builder
 			go func() {
 				scanner := bufio.NewScanner(pipe)
 				for scanner.Scan() {
@@ -95,6 +98,8 @@ func TestBotProgressProcessRestartAcceptance(t *testing.T) {
 						ready <- true
 						return
 					}
+					childOutput.WriteString(scanner.Text())
+					childOutput.WriteByte('\n')
 				}
 				ready <- false
 			}()
@@ -102,7 +107,7 @@ func TestBotProgressProcessRestartAcceptance(t *testing.T) {
 			case ok := <-ready:
 				if !ok {
 					_ = cmd.Wait()
-					t.Fatalf("child failed before barrier: %s", stderr.String())
+					t.Fatalf("child failed before barrier: %s\n%s", stderr.String(), childOutput.String())
 				}
 			case <-ctx.Done():
 				t.Fatal("child barrier timeout")
@@ -162,6 +167,8 @@ func progressProcessChild(t *testing.T, stage string) {
 		if stage != "in-flight" && stage != "settled-write" {
 			t.Fatal("unknown process mode")
 		}
+		// Exercise an actual external write through the node transport. write_file
+		// now denotes a confined local Home edit and must not stand in for HTTP.
 		receipts := &progressReceiptModel{LLM: f.model}
 		f.workerConfig.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 			return receipts, nil
@@ -177,10 +184,10 @@ func progressProcessChild(t *testing.T, stage string) {
 				}()
 				time.Sleep(50 * time.Millisecond)
 			}
-			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "owned-write", Name: "write_file", Args: map[string]any{"path": "/isolated/effect.txt", "content": "owned effect"}}}}}}, true
+			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "owned-write", Name: "http_request", Args: map[string]any{"url": os.Getenv("ASTONISH_PROGRESS_PROCESS_SINK"), "method": "POST", "body": "owned effect"}}}}}}, true
 		}
 		f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
-			if name != "write_file" {
+			if name != "http_request" || args["method"] != "POST" || args["url"] != os.Getenv("ASTONISH_PROGRESS_PROCESS_SINK") {
 				return nil, fmt.Errorf("unexpected replay %s", name)
 			}
 			resp, err := http.Post(os.Getenv("ASTONISH_PROGRESS_PROCESS_SINK"), "text/plain", strings.NewReader("owned effect"))
@@ -276,9 +283,13 @@ func progressProcessChild(t *testing.T, stage string) {
 		}
 		return &model.LLMResponse{Content: genai.NewContentFromText("The source says isolated receipt.", "model")}, true
 	}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: journeyHomeBackend{}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+	files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: evidence.Dir}, repo: repo, id: evidence.Bot.ID, scope: evidence.Scope, fetch: func(name string, args map[string]interface{}) (json.RawMessage, error) {
+		return pool.Call("", name, args)
+	}}
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 		return mdl, nil
-	}, Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		files.install(c, q, s)
 		return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 	}})
 	if err != nil {

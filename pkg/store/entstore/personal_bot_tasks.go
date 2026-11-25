@@ -3,6 +3,9 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"time"
+	"unicode/utf8"
 
 	ent "github.com/SAP/astonish/ent/personal"
 	"github.com/SAP/astonish/ent/personal/bottask"
@@ -10,6 +13,81 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+// botTaskPublicationRecord contains coordination fields only. Candidate is a
+// typed disk-reference envelope, never a hydrated revision or replay bundle.
+// Keep this separate from taskPublicationEnvelope, which is an in-memory API.
+type botTaskPublicationRecord struct {
+	Format                 int                   `json:"format"`
+	ID                     uuid.UUID             `json:"id"`
+	BotID                  store.BotID           `json:"bot_id"`
+	TaskID                 uuid.UUID             `json:"task_id"`
+	ExpectedHead           *store.BotTaskRef     `json:"expected_head"`
+	Candidate              map[string]any        `json:"candidate"`
+	AuthorityConstraintRef string                `json:"authority_constraint_ref"`
+	Mutation               store.BotTaskMutation `json:"mutation"`
+	TaskKey                string                `json:"task_key"`
+	TaskTitle              string                `json:"task_title"`
+	TaskStatus             store.BotTaskStatus   `json:"task_status"`
+	TaskRevision           int64                 `json:"task_revision"`
+	TaskHead               *store.BotTaskRef     `json:"task_head"`
+	TaskHomePath           string                `json:"task_home_path"`
+	TaskCreatedAt          time.Time             `json:"task_created_at"`
+	TaskUpdatedAt          time.Time             `json:"task_updated_at"`
+}
+
+func encodeTaskPublication(ctx context.Context, codec *botContentCodec, v taskPublicationEnvelope) (map[string]any, error) {
+	p, task := v.Publication, v.Task
+	if p.ID != p.Candidate.ID || p.BotID != p.Candidate.BotID || p.TaskID != p.Candidate.Ref.TaskID ||
+		task.ID != p.TaskID || task.BotID != p.BotID || v.Mutation.BotID != p.BotID ||
+		len(task.Title) > 256 || !utf8.ValidString(task.Title) ||
+		!reflect.DeepEqual(p.ExpectedHead, p.Candidate.Parent) || p.AuthorityConstraintRef != v.Mutation.AuthorityConstraintRef {
+		return nil, store.ErrBotInvalid
+	}
+	candidate, err := codec.encodeTaskRevision(ctx, p.Candidate)
+	if err != nil {
+		return nil, err
+	}
+	record := botTaskPublicationRecord{Format: botDiskRecordFormat, ID: p.ID, BotID: p.BotID, TaskID: p.TaskID,
+		ExpectedHead: p.ExpectedHead, Candidate: candidate, AuthorityConstraintRef: p.AuthorityConstraintRef,
+		Mutation: v.Mutation, TaskKey: task.Key, TaskTitle: task.Title, TaskStatus: task.Status,
+		TaskRevision: task.Revision, TaskHead: task.Head, TaskHomePath: task.HomePath,
+		TaskCreatedAt: task.CreatedAt, TaskUpdatedAt: task.UpdatedAt}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"bot_record_v2": string(raw)}, nil
+}
+
+func decodeTaskPublication(ctx context.Context, codec *botContentCodec, botID store.BotID, data map[string]any) (*taskPublicationEnvelope, error) {
+	var record botTaskPublicationRecord
+	if err := decodeBotRecord(data, &record); err != nil {
+		return nil, err
+	}
+	if record.Format != botDiskRecordFormat || record.BotID != botID || record.Mutation.BotID != botID ||
+		record.ID == uuid.Nil || record.TaskID == uuid.Nil || len(record.TaskTitle) > 256 || !utf8.ValidString(record.TaskTitle) ||
+		record.TaskKey != record.TaskID.String() || record.TaskHomePath != "tasks/"+record.TaskKey ||
+		record.AuthorityConstraintRef != record.Mutation.AuthorityConstraintRef {
+		return nil, store.ErrBotInvalid
+	}
+	candidate, err := codec.decodeTaskRevision(ctx, botID, record.Candidate)
+	if err != nil {
+		return nil, err
+	}
+	if candidate.ID != record.ID || candidate.Ref.TaskID != record.TaskID ||
+		!reflect.DeepEqual(candidate.Parent, record.ExpectedHead) || candidate.Validate(record.TaskStatus) != nil {
+		return nil, store.ErrBotInvalid
+	}
+	return &taskPublicationEnvelope{
+		Publication: store.BotTaskPublication{ID: record.ID, BotID: botID, TaskID: record.TaskID,
+			ExpectedHead: record.ExpectedHead, Candidate: *candidate, AuthorityConstraintRef: record.AuthorityConstraintRef},
+		Mutation: record.Mutation,
+		Task: store.BotTask{ID: record.TaskID, BotID: botID, Key: record.TaskKey, Title: record.TaskTitle,
+			Status: record.TaskStatus, Revision: record.TaskRevision, Head: record.TaskHead,
+			HomePath: record.TaskHomePath, CreatedAt: record.TaskCreatedAt, UpdatedAt: record.TaskUpdatedAt},
+	}, nil
+}
 
 var _ store.BotTaskStore = (*personalBotStore)(nil)
 var _ store.BotTaskRecoveryStore = (*personalBotStore)(nil)
@@ -101,8 +179,8 @@ func (d personalBotDB) readTaskPublication(c context.Context, b, id uuid.UUID) (
 	if e != nil {
 		return nil, personalBotError(e)
 	}
-	var v taskPublicationEnvelope
-	if e = botDecode(row.Data, &v); e != nil {
+	v, e := decodeTaskPublication(c, d.contentCodec(), b, row.Data)
+	if e != nil {
 		return nil, e
 	}
 	p := &v.Publication
@@ -111,7 +189,7 @@ func (d personalBotDB) readTaskPublication(c context.Context, b, id uuid.UUID) (
 	}
 	p.State = store.BotTaskPublicationState(row.PublicationState)
 	p.WorkspaceReceiptRef = row.WorkspaceReceiptRef
-	return &v, nil
+	return v, nil
 }
 func (d personalBotDB) readTaskPublications(c context.Context, b uuid.UUID) ([]taskPublicationEnvelope, error) {
 	rows, e := d.client.BotTaskRevision.Query().Where(bottaskrevision.BotIDEQ(b)).Order(ent.Asc(bottaskrevision.FieldID)).Limit(1001).All(c)
@@ -132,7 +210,7 @@ func (d personalBotDB) readTaskPublications(c context.Context, b uuid.UUID) ([]t
 	return out, nil
 }
 func (d personalBotDB) insertTaskPublication(c context.Context, v taskPublicationEnvelope) error {
-	data, e := botJSONMap(v)
+	data, e := encodeTaskPublication(c, d.contentCodec(), v)
 	if e != nil {
 		return e
 	}

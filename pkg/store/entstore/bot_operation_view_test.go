@@ -45,9 +45,9 @@ func TestBotOperationViewSnapshotReplay(t *testing.T) {
 			var reader store.BotTranscriptReader
 			switch db := r.db.(type) {
 			case personalBotDB:
-				reader = &personalSessionStore{client: db.client}
+				reader = &personalSessionStore{client: db.client, content: db.content}
 			case teamBotDB:
-				reader = &teamSessionStore{client: db.client}
+				reader = &teamSessionStore{client: db.client, content: db.content}
 			}
 			rows, err := reader.ReadBotTranscript(owner, snapshot.Bot.HomeSessionID, 0, 200)
 			if err != nil {

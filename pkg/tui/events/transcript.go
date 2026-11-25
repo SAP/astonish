@@ -40,12 +40,13 @@ type ToolStep struct {
 
 // Item is one visual block in the transcript.
 type Item struct {
-	PlanSnapshot   *agent.PlanSnapshot
-	InvocationID   string // canonical publication boundary, when present
-	EventID        string // stable persisted publication row
-	BotOperationID string
-	Kind           ItemKind
-	Content        string
+	BotFilePublication *store.BotFilePublication
+	PlanSnapshot       *agent.PlanSnapshot
+	InvocationID       string // canonical publication boundary, when present
+	EventID            string // stable persisted publication row
+	BotOperationID     string
+	Kind               ItemKind
+	Content            string
 
 	// Activity fold fields (ItemActivity).
 	Steps   []ToolStep

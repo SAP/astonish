@@ -128,6 +128,15 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Control-only runs still read retained critical documents; supplying
+			// this file fixture must not provision external execution tools.
+			files := &confinedTestFiles{root: t.TempDir(), snapshots: map[string][]byte{}}
+			for name, content := range map[string]string{"SOUL.md": v.Persona.Soul, "IDENTITY.md": v.Persona.Identity, "USER.md": v.Persona.User, "CHARTER.md": v.Charter, "MEMORY.md": "# Memory\n"} {
+				if _, err := files.Write(ctx, b.ID, store.BotFileWrite{Path: name, Body: strings.NewReader(content), SizeBytes: int64(len(content)), CreateOnly: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return files, nil }
 			router := mux.NewRouter()
 			router.HandleFunc("/bots/{botID}/sessions/{sessionID}/stream", api.BotHistoryStreamHandler).Methods("GET")
 			router.HandleFunc("/bots/{botID}/proposals", api.BotControlProposalsHandler).Methods("GET")
@@ -294,11 +303,21 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			if !persistedReference {
 				t.Fatal("canonical proposal reference missing from durable transcript")
 			}
+			var reviewReplay string
 			for replay := 0; replay < 2; replay++ {
 				raw := request("GET", "/bots/"+b.ID.String()+"/sessions/"+b.HomeSessionID.String()+"/stream"+suffix, owner, "", 200)
-				if strings.Count(string(raw), `"type":"bot_review"`) != 3 || !strings.Contains(string(raw), `"review_id":"`+proposal.ID.String()+`"`) {
+				if strings.Count(string(raw), "event: bot_review\n") != 3 || !strings.Contains(string(raw), `"reviewId":"`+proposal.ID.String()+`"`) || strings.Contains(string(raw), "event: transcript\n") {
 					t.Fatalf("HTTP review replay: %s", raw)
 				}
+				for id := range reviews {
+					if strings.Count(string(raw), `"reviewId":"`+id+`"`) != 1 {
+						t.Fatalf("review %s missing or duplicated: %s", id, raw)
+					}
+				}
+				if replay > 0 && string(raw) != reviewReplay {
+					t.Fatal("HTTP review replay changed event identities or ordering")
+				}
+				reviewReplay = string(raw)
 			}
 			if err = repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report}); err != nil {
 				t.Fatal(err)

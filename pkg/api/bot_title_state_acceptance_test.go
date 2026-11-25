@@ -15,7 +15,6 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
 )
 
 type titleHTTPReceipt struct {
@@ -28,25 +27,25 @@ func titleStates(t *testing.T, f *interactiveHTTPFixture, b store.Bot) ([]store.
 	raw := f.request("GET", "/api/studio/bots/"+b.ID.String()+"/sessions/"+b.HomeSessionID.String()+"/stream", "", 200)
 	var states []store.BotRunState
 	users := 0
+	kind := ""
 	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			kind = strings.TrimPrefix(line, "event: ")
+		}
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		var e session.Event
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &e); err != nil {
-			t.Fatal(err)
-		}
-		if e.Author == "user" && e.Content != nil {
+		payload := []byte(strings.TrimPrefix(line, "data: "))
+		if kind == "user_message" {
 			users++
 		}
-		if value, ok := e.Actions.StateDelta[store.BotRunStateKey]; ok {
-			payload, _ := json.Marshal(value)
+		if kind == store.BotRunStateKey {
 			var state store.BotRunState
 			if err := json.Unmarshal(payload, &state); err != nil {
 				t.Fatal(err)
 			}
-			if e.Content != nil || state.SchemaVersion != 1 || state.BotID != b.ID || state.HomeSessionID != b.HomeSessionID {
-				t.Fatalf("invalid state envelope: %+v", e)
+			if state.SchemaVersion != 1 || state.BotID != b.ID || state.HomeSessionID != b.HomeSessionID {
+				t.Fatalf("invalid state envelope: %s", payload)
 			}
 			if len(states) > 0 && state.StateSequence <= states[len(states)-1].StateSequence {
 				t.Fatal("non-monotonic state")
@@ -204,16 +203,15 @@ func TestBotTitleConfirmationStateHTTPAcceptance(t *testing.T) {
 					if !strings.HasPrefix(line, "data: ") {
 						continue
 					}
-					var event session.Event
+					var event struct {
+						InvocationID string `json:"invocationId"`
+						Text         string `json:"text"`
+					}
 					if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
 						t.Fatal(err)
 					}
-					if event.InvocationID == "bot-report:"+run.ID.String() && event.Content != nil {
-						for _, part := range event.Content.Parts {
-							if part != nil && completed.Report.EmployeeMessage != nil && part.Text == completed.Report.EmployeeMessage.Text {
-								publications++
-							}
-						}
+					if event.InvocationID == "bot-report:"+run.ID.String() && completed.Report.EmployeeMessage != nil && event.Text == completed.Report.EmployeeMessage.Text {
+						publications++
 					}
 				}
 				if publications != 1 {
@@ -243,7 +241,8 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 					}
 				}
 				if !reflect.DeepEqual(got, want) {
-					t.Fatalf("states=%v want=%v", got, want)
+					projection, _ := json.Marshal(states)
+					t.Fatalf("states=%v want=%v projections=%s", got, want, projection)
 				}
 				// Repeated reload must not append or initialize anything.
 				reloaded, _ := titleStates(t, f, f.b)
@@ -262,7 +261,14 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 			if err := f.worker.Poll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval})
+			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunRunning, store.RunWaitingApproval})
+			// Claim commits seq=3 without Work; SaveWork commits seq=5 with
+			// agent-led working revision 2 before approval commits seq=6.
+			// These are distinct durable projections, not duplicate delivery.
+			states, _ := titleStates(t, f, f.b)
+			if states[1].StateSequence != 3 || states[1].Work != nil || states[2].StateSequence != 5 || states[2].Work == nil || states[2].Work.Protocol != store.BotWorkProtocolAgentLedV1 || states[2].Work.WorkRevision != 2 || states[3].StateSequence != 6 {
+				t.Fatalf("claim/work/approval projection mismatch: %+v", states)
+			}
 			approvals, err := f.repo.ListApprovals(f.ctx, f.b.ID, store.BotPage{})
 			if err != nil || len(approvals) != 1 || approvals[0].Interaction == nil {
 				t.Fatalf("approval: %v %v", approvals, err)
@@ -270,11 +276,11 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 			a := approvals[0]
 			body, _ := json.Marshal(map[string]any{"action_digest": a.ActionDigest, "response": map[string]any{"question_id": a.Interaction.QuestionID, "answer": "Quarterly report"}})
 			f.request("POST", f.path+"/approvals/"+a.ID.String()+"/approve-and-continue", string(body), 202)
-			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunQueued})
+			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunRunning, store.RunWaitingApproval, store.RunQueued})
 			if err = f.worker.Poll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunQueued, store.RunRunning, store.RunRunning, store.RunRunning, store.RunRunning, store.RunSucceeded})
+			assertStates([]store.RunStatus{store.RunQueued, store.RunRunning, store.RunRunning, store.RunWaitingApproval, store.RunQueued, store.RunRunning, store.RunRunning, store.RunRunning, store.RunRunning, store.RunSucceeded})
 			// The resumable live endpoint sends precisely persisted rows, then no
 			// rows after reconnecting from its final session-qualified cursor.
 			path := f.server.URL + f.path + "/sessions/" + f.b.HomeSessionID.String() + "/events?scope=" + string(f.scope)
@@ -320,16 +326,20 @@ func TestBotRunStateHTTPAcceptance(t *testing.T) {
 					if event == "replay_complete" {
 						break
 					}
-					if event != "transcript" {
-						t.Fatalf("unexpected protocol %s", event)
+					if strings.Contains(data, `"stateDelta"`) || event == "transcript" {
+						t.Fatalf("legacy protocol %s: %s", event, data)
 					}
-					if strings.Contains(data, store.BotRunStateKey) {
+					if event == store.BotRunStateKey {
+						var state store.BotRunState
+						if err := json.Unmarshal([]byte(data), &state); err != nil || state.BotID != f.b.ID || state.RunID != receipt.Run.ID {
+							t.Fatalf("invalid canonical state: %s (%v)", data, err)
+						}
 						count++
 					}
 				}
 				res.Body.Close()
 				cancel()
-				want := 9 // includes the committed work projection before terminal status
+				want := 10 // claim, committed work projection, approval/requeue, resumed work and terminal status
 				if pass == 1 {
 					want = 0
 				}

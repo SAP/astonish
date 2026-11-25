@@ -820,7 +820,7 @@ func TestBotTemplatePublishForkIsolation(t *testing.T) {
 	}
 	role := "member"
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return role, nil }}
-	templates := &teamBotTemplateStore{client: c, auth: auth}
+	templates := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: c, auth: auth}
 	def := store.BotTemplateDefinition{SchemaVersion: store.BotSchemaVersion, Name: "Fare watch", Charter: "Observe fares, never book", SuggestedGoals: []store.BotGoalDefinition{{Title: "Find fare", CompletionCriteria: "Verified fare below threshold"}}, SuggestedSchedules: []store.BotScheduleSuggestion{{Cron: "0 9 * * *", Timezone: "America/New_York", Instructions: "Check fares"}}}
 	if _, err := templates.Publish(ctx, def, 0); !errors.Is(err, store.ErrBotForbidden) {
 		t.Fatalf("member published: %v", err)
@@ -839,7 +839,7 @@ func TestBotTemplatePublishForkIsolation(t *testing.T) {
 	if n, err := c.TeamAuditLog.Query().Count(ctx); err != nil || n != 1 {
 		t.Fatalf("publication audit: %d %v", n, err)
 	}
-	destination := &personalBotStore{client: private, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return "member", nil }}}
+	destination := &personalBotStore{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: private, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	role = "member"
 	req := store.BotTemplateForkRequest{TemplateID: published.ID, TemplateRevision: 1, Name: "My fares", IdempotencyKey: "fork"}
 	fork, err := templates.ForkToPersonal(ctx, destination, req)
@@ -890,7 +890,7 @@ func TestBotTemplateValidationAndScope(t *testing.T) {
 	c := newTeamClient(t)
 	actor := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	s := &teamBotTemplateStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
+	s := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
 	good := store.BotTemplateDefinition{SchemaVersion: 1, Name: "Watch", Charter: "Observe"}
 	invalid := []store.BotTemplateDefinition{{SchemaVersion: 99, Name: "Watch", Charter: "Observe"}, {SchemaVersion: 1, Name: "", Charter: "Observe"}, {SchemaVersion: 1, Name: "Watch", Charter: ""}, {SchemaVersion: 1, Name: "Watch", Charter: "Observe", SuggestedSchedules: []store.BotScheduleSuggestion{{Cron: "bad", Timezone: "UTC", Instructions: "check"}}}, {SchemaVersion: 1, Name: "Watch", Charter: "Observe", SuggestedSchedules: []store.BotScheduleSuggestion{{Cron: "0 9 * * *", Timezone: "Not/AZone", Instructions: "check"}}}}
 	for i, def := range invalid {
@@ -914,7 +914,7 @@ func TestBotTemplateAuditFailureRollsBack(t *testing.T) {
 	c := newTeamClient(t)
 	actor := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	s := &teamBotTemplateStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
+	s := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
 	def := store.BotTemplateDefinition{SchemaVersion: 1, Name: "Watch", Charter: "Observe"}
 	// Ent mutation hook injects audit failure without changing table permissions.
 	c.TeamAuditLog.Use(func(next teament.Mutator) teament.Mutator {
@@ -934,12 +934,12 @@ func TestBotTemplateRejectsUnexpectedPersistedFields(t *testing.T) {
 	c := newTeamClient(t)
 	actor := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	s := &teamBotTemplateStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
+	s := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
 	row, err := c.BotTemplate.Create().SetName("Unsafe shape").SetPublishedBy(actor).SetDefinition(map[string]any{"schema_version": 1, "name": "Unsafe shape", "charter": "Observe", "credentials": map[string]any{"mail": "private-reference"}}).Save(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Get(ctx, row.ID); !errors.Is(err, store.ErrBotInvalid) {
+	if _, err := s.Get(ctx, row.ID); !errors.Is(err, store.ErrBotUnsupported) {
 		t.Fatalf("unexpected private fields accepted: %v", err)
 	}
 }
@@ -948,7 +948,7 @@ func TestBotTemplateConcurrentPublicationCAS(t *testing.T) {
 	c := newTeamClient(t)
 	actor := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	s := &teamBotTemplateStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
+	s := &teamBotTemplateStore{content: newBotTemplateContent(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "admin", nil }}}
 	def := store.BotTemplateDefinition{SchemaVersion: 1, Name: "Watch", Charter: "Observe"}
 	initial, err := s.Publish(ctx, def, 0)
 	if err != nil {
@@ -1234,7 +1234,7 @@ func TestBotRepositoryDraftAtomicityAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := &teamBotStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
+	repo := &teamBotStore{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe fares without booking"
 	req := store.BotCreateRequest{Name: "Fare watch", OwnerID: owner, Version: v, IdempotencyKey: "create-1"}
@@ -1291,7 +1291,7 @@ func TestBotRepositoryPersonalVersionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	role := "member"
-	repo := &personalBotStore{client: c, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return role, nil }}}
+	repo := &personalBotStore{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return role, nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Keep a private goal"
 	v.Autonomy.Level = execution.AutonomyScoped
@@ -1346,7 +1346,7 @@ func TestBotRepositoryGoalOwnershipAndOrderedActivity(t *testing.T) {
 	c := newTeamClient(t)
 	owner := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	repo := &teamBotStore{client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
+	repo := &teamBotStore{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Track a delivery"
 	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Delivery", OwnerID: owner, Version: v, IdempotencyKey: "one"})
@@ -1408,7 +1408,7 @@ func TestBotRepositoryDraftRollsBackOnSessionFailure(t *testing.T) {
 	c := newTeamClient(t)
 	owner := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	repo := &botRepository{auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, db: failingBotDraftTransaction{teamBotDB{client: c}}}
+	repo := &botRepository{auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, db: failingBotDraftTransaction{teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe only"
 	if _, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Atomic", OwnerID: owner, Version: v, IdempotencyKey: "rollback"}); err == nil {
@@ -1429,7 +1429,7 @@ func TestBotRepositoryStaleVersionCannotOverwriteActivitySequence(t *testing.T) 
 	c := newTeamClient(t)
 	ctx := context.Background()
 	b := createBotSchemaFixture(t, c)
-	d := teamBotDB{client: c}
+	d := teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}
 	if err := d.AdvanceSequence(ctx, b.ID, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -1453,7 +1453,7 @@ func TestBotRunAdmissionAndLeaseFencing(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	repo := &botRepository{db: teamBotDB{client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
+	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Check once"
 	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Lease test", OwnerID: owner, Version: v, IdempotencyKey: "lease"})
@@ -1530,7 +1530,7 @@ func TestBotConcurrentClaimsAndPersonalQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := &botRepository{db: personalBotDB{client: c}, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
+	repo := &botRepository{db: personalBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: store.BotScopePersonal, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe"
 	cap := int64(1)
@@ -1606,7 +1606,7 @@ func TestBotRunAdmissionRollback(t *testing.T) {
 	c := newTeamClient(t)
 	owner := uuid.New()
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	repo := &botRepository{db: teamBotDB{client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
+	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe"
 	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Rollback", OwnerID: owner, Version: v, IdempotencyKey: "rollback-run"})
@@ -1637,7 +1637,7 @@ func TestBotDurableApprovalSingleConsumption(t *testing.T) {
 	owner := uuid.New()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	ctx, _ := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
-	repo := &botRepository{db: teamBotDB{client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
+	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Prepare message; ask before sending"
 	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Approval", OwnerID: owner, Version: v, IdempotencyKey: "approval"})
@@ -1774,11 +1774,11 @@ func botRunFixture(t *testing.T, scope store.BotScope) (*botRepository, context.
 	var activate func(uuid.UUID) error
 	if scope == store.BotScopeTeam {
 		c := newTeamClient(t)
-		db = teamBotDB{client: c}
+		db = teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}
 		activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus(bot.StatusActive).Exec(ctx) }
 	} else {
 		_, c := setupPersonalStore(t)
-		db = personalBotDB{client: c}
+		db = personalBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}
 		activate = func(id uuid.UUID) error { return c.Bot.UpdateOneID(id).SetStatus("active").Exec(ctx) }
 	}
 	repo := &botRepository{auth: auth, db: db, now: func() time.Time { return now }}
@@ -2307,14 +2307,52 @@ func TestBotConcurrentLifecycleOnlyOneMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reports := 0
+	reports, cleanupResults := 0, 0
 	for _, e := range events {
-		if e.Kind == store.BotActivityReport {
+		switch e.Kind {
+		case store.BotActivityReport:
 			reports++
+			var result struct {
+				RunID  store.RunID         `json:"run_id"`
+				Status store.RunStatus     `json:"status"`
+				Intent store.BotOutboxKind `json:"intent"`
+				Report struct {
+					Summary string `json:"summary"`
+				} `json:"report"`
+			}
+			if err := json.Unmarshal(e.Payload, &result); err != nil {
+				t.Fatal(err)
+			}
+			if e.RunID == nil || *e.RunID != run.ID || result.RunID != run.ID || result.Status != store.RunInterrupted || result.Intent != store.BotOutboxPublish || result.Report.Summary == "" {
+				t.Fatalf("invalid interruption report: %+v", result)
+			}
+		case store.BotActivityLifecycle:
+			var result botCleanupRecord
+			if err := json.Unmarshal(e.Payload, &result); err != nil {
+				t.Fatal(err)
+			}
+			if state := result.RunState; state != nil {
+				cleanupResults++
+				if state.BotID != b.ID || state.RunID != run.ID || state.SessionID != run.SessionID || state.HomeSessionID != b.HomeSessionID || state.Status != store.RunInterrupted || state.Sequence != e.Sequence || !state.At.Equal(e.CreatedAt) {
+					t.Fatalf("invalid cleanup interruption state: %+v", state)
+				}
+			}
 		}
 	}
-	if reports != 1 {
-		t.Fatalf("duplicate interruption reports: %d", reports)
+	// Delete must remain independent of report files: it commits a closed cleanup
+	// run-state event instead of publishing a report. Pause still publishes one
+	// hydrated interruption report. Neither winner may emit the other's outcome.
+	switch saved.Status {
+	case store.BotPaused:
+		if reports != 1 || cleanupResults != 0 {
+			t.Fatalf("pause outcomes: reports=%d cleanup=%d", reports, cleanupResults)
+		}
+	case store.BotDeleted:
+		if reports != 0 || cleanupResults != 1 {
+			t.Fatalf("delete outcomes: reports=%d cleanup=%d", reports, cleanupResults)
+		}
+	default:
+		t.Fatalf("unexpected lifecycle winner status: %s", saved.Status)
 	}
 }
 

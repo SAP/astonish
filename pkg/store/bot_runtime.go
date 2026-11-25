@@ -44,6 +44,7 @@ type BotScheduledRunStore interface {
 // BotRunInput is durable input for one already admitted run. Instructions must
 // come from the saved request, never from the worker's dispatch payload.
 type BotRunInput struct {
+	PlanMode bool              // persisted owner choice, scoped to this admitted run only
 	Progress *BotProgressState // private detached checkpoint, never approval input
 	Task     *BotTaskRevision
 	Work     *BotWorkState
@@ -419,16 +420,34 @@ type BotWorkCallReceipt struct {
 	Check         bool   `json:"check,omitempty"`
 }
 
+// BotDeliveryIntent is the employee's explicit interpretation of the assignment,
+// never inferred from prose length, filenames, or tool output.
+type BotDeliveryIntent string
+
+const (
+	BotDeliveryChatOnly        BotDeliveryIntent = "chat_only"
+	BotDeliveryFileDeliverable BotDeliveryIntent = "file_deliverable"
+)
+
+type BotDeliverableFormat string
+
+const (
+	BotDeliverableMarkdown BotDeliverableFormat = "markdown"
+	BotDeliverableBinary   BotDeliverableFormat = "binary"
+)
+
 type BotAgentWork struct {
-	Calls         []BotWorkCallReceipt       `json:"calls,omitempty"`
-	SchemaVersion int                        `json:"schema_version"`
-	Notes         string                     `json:"notes,omitempty"`
-	Items         []BotWorkItem              `json:"items,omitempty"`
-	Remaining     []BotWorkObligation        `json:"remaining,omitempty"`
-	Checks        []BotWorkCheckReceipt      `json:"checks,omitempty"`
-	Evidence      []BotWorkEvidenceReference `json:"evidence,omitempty"`
-	SourceAccess  []BotSourceAccessFact      `json:"source_access,omitempty"`
-	Disposition   AgentWorkDisposition       `json:"disposition,omitempty"`
+	DeliveryIntent    BotDeliveryIntent          `json:"delivery_intent,omitempty"`
+	DeliverableFormat BotDeliverableFormat       `json:"deliverable_format,omitempty"`
+	Calls             []BotWorkCallReceipt       `json:"calls,omitempty"`
+	SchemaVersion     int                        `json:"schema_version"`
+	Notes             string                     `json:"notes,omitempty"`
+	Items             []BotWorkItem              `json:"items,omitempty"`
+	Remaining         []BotWorkObligation        `json:"remaining,omitempty"`
+	Checks            []BotWorkCheckReceipt      `json:"checks,omitempty"`
+	Evidence          []BotWorkEvidenceReference `json:"evidence,omitempty"`
+	SourceAccess      []BotSourceAccessFact      `json:"source_access,omitempty"`
+	Disposition       AgentWorkDisposition       `json:"disposition,omitempty"`
 }
 
 // BotWorkProjection excludes raw evidence and private notes. Transport callers
@@ -500,7 +519,27 @@ func validAgentWorkPhase(phase BotWorkPhase) bool {
 	return phase == BotWorkWorking || phase == BotWorkFinished || phase == BotWorkBlocked || phase == BotWorkInterrupted
 }
 
+func (a *BotAgentWork) SetDelivery(intent BotDeliveryIntent, format BotDeliverableFormat) error {
+	if a == nil || intent != BotDeliveryChatOnly && intent != BotDeliveryFileDeliverable {
+		return ErrBotInvalid
+	}
+	if intent == BotDeliveryChatOnly && format != "" || intent == BotDeliveryFileDeliverable && format != BotDeliverableMarkdown && format != BotDeliverableBinary {
+		return ErrBotInvalid
+	}
+	if a.DeliveryIntent == BotDeliveryFileDeliverable && (intent != a.DeliveryIntent || format != a.DeliverableFormat) {
+		return ErrBotConflict
+	}
+	a.DeliveryIntent, a.DeliverableFormat = intent, format
+	return nil
+}
+
 func (a *BotAgentWork) validate(runID RunID, refs map[string]bool, bindRefs bool) error {
+	if a != nil && (a.DeliveryIntent != "" || a.DeliverableFormat != "") {
+		copy := *a
+		if err := copy.SetDelivery(a.DeliveryIntent, a.DeliverableFormat); err != nil {
+			return err
+		}
+	}
 	if a == nil || a.SchemaVersion != BotAgentWorkSchemaVersion || len(a.Notes) > BotAgentWorkMaxNotesBytes || len(a.Items) > BotAgentWorkMaxItems || len(a.Remaining) > BotAgentWorkMaxObligations || len(a.Checks) > BotAgentWorkMaxChecks {
 		return ErrBotInvalid
 	}
@@ -661,6 +700,19 @@ func NewBotWorkState(contract BotWorkContract) *BotWorkState {
 }
 
 func (w *BotWorkState) Validate() error {
+	if w != nil && w.Phase == BotWorkFinished && w.AgentWork != nil && w.AgentWork.DeliveryIntent == BotDeliveryFileDeliverable {
+		found := false
+		if w.Candidate != nil {
+			for _, a := range w.Candidate.Artifacts {
+				if a.ContentRef != nil && a.ContentRef.Validate() == nil && a.ContentRef.Kind == BotContentArtifact && a.ContentRef.Scope.BotID == w.Contract.BotID && a.SHA256 == a.ContentRef.SHA256 && a.SizeBytes == a.ContentRef.SizeBytes {
+					found = true
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: required deliverable lacks a saved file receipt", ErrBotInvalid)
+		}
+	}
 	if w != nil {
 		if w.EmployeeReviewAttempts < 0 || w.EmployeeReviewAttempts > BotWorkMaxRepairs+1 || (w.EmployeeReviewPolicy == "" && (w.EmployeeReviewAttempts != 0 || w.EmployeeReviewPending || w.EmployeeRepairPending)) || (w.EmployeeReviewPending && (w.Candidate == nil || w.Review != nil || w.EmployeeRepairPending)) || (w.EmployeeRepairPending && (w.Candidate == nil || w.Review != nil || w.Repairs == 0)) {
 			return ErrBotInvalid
@@ -775,6 +827,12 @@ func (w *BotWorkState) Validate() error {
 			return ErrBotInvalid
 		}
 		for _, a := range c.Artifacts {
+			if a.ContentRef != nil {
+				if a.ContentRef.Validate() != nil || a.ContentRef.Kind != BotContentArtifact || a.ContentRef.Scope.BotID != w.Contract.BotID || a.SHA256 != a.ContentRef.SHA256 || a.SizeBytes != a.ContentRef.SizeBytes || a.ID == (RunID{}) || a.HomeID == (RunID{}) {
+					return ErrBotInvalid
+				}
+				continue
+			}
 			body, ok := c.Bodies[a.ID.String()]
 			d := sha256.Sum256([]byte(body))
 			if !ok || a.ID == (RunID{}) || a.HomeID == (RunID{}) || a.SHA256 != hex.EncodeToString(d[:]) {

@@ -80,6 +80,32 @@ func TestBotHTTPBoundary(t *testing.T) {
 	}
 }
 
+func TestBotRunStateNotifierComposition(t *testing.T) {
+	actor := uuid.NewString()
+	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: actor, OrgSlug: "org", TeamSlug: "team", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: actor, OrgSlug: "org", TeamSlug: "team"})
+	var calls []string
+	ctx = store.WithBotRunStateNotifier(ctx, func(context.Context, store.BotRunState) { calls = append(calls, "existing") })
+	ctx = store.WithServices(ctx, &store.Services{PersonalBots: &botBoundaryStore{}, BotRunStateNotify: func(context.Context, store.BotRunState) { calls = append(calls, "worker") }})
+	r := httptest.NewRequest(http.MethodGet, "/api/studio/bots", nil).WithContext(ctx)
+	for i := 0; i < 2; i++ {
+		if _, _, ok := botRequestStore(httptest.NewRecorder(), r); !ok {
+			t.Fatal("authorized request failed")
+		}
+	}
+	store.BotRunStateNotifierFromContext(r.Context())(r.Context(), store.BotRunState{})
+	if strings.Join(calls, ",") != "existing,worker" {
+		t.Fatalf("repeated lookup duplicated or replaced notifier: %v", calls)
+	}
+	store.BotRunStateNotifierFromContext(ctx)(ctx, store.BotRunState{})
+	if strings.Join(calls, ",") != "existing,worker,existing" {
+		t.Fatal("request composition mutated parent context")
+	}
+}
+
 // TestBotStorageHTTPAcceptance (formerly TestBotDraftHTTPAcceptance) uses real
 // HTTP, production routes/middleware and scoped SQLite repositories.
 // Authentication is a controlled fixture; no worker or LLM is installed.
@@ -118,6 +144,23 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		if err := ods.Teams().AddMember(ctx, &store.TeamMembership{UserID: id, TeamID: team.ID, Role: "member"}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	memoryContext, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryContext = store.WithTenantContext(memoryContext, &store.TenantContext{OrgSlug: org.Slug, TeamSlug: team.Slug, UserID: owner})
+	botMemory := func(id store.BotID, scope store.BotScope) *store.BotMemoryService {
+		t.Helper()
+		repo, generic := ods.ForUser(owner).Bots(), ods.ForUser(owner).Memories()
+		if scope == store.BotScopeTeam {
+			repo, generic = ods.ForTeam(team.Slug).Bots(), ods.ForTeam(team.Slug).Memories()
+		}
+		memory, err := store.NewBotMemoryService(repo, generic, id, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return memory
 	}
 	registryStore, err := sandbox.NewLocalSessionStore(t.TempDir())
 	if err != nil {
@@ -226,8 +269,8 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	artifactPath := "/reports/shared-bot.md"
 	sharedSession := ods.ForTeam(team.Slug).Sessions()
 	for _, event := range []*adksession.Event{
-		{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "bot-report", Name: "write_file", Args: map[string]any{"path": artifactPath, "content": "# Retained Bot report\nVerified source."}}}}}}},
-		{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "bot-report", Name: "write_file", Response: map[string]any{"success": true}}}}}}},
+		{ID: uuid.NewString(), Author: "assistant", Timestamp: time.Now().UTC(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "bot-report", Name: "write_file", Args: map[string]any{"path": artifactPath, "content": "# Retained Bot report\nVerified source."}}}}}}},
+		{ID: uuid.NewString(), Author: "assistant", Timestamp: time.Now().UTC(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "bot-report", Name: "write_file", Response: map[string]any{"success": true}}}}}}},
 	} {
 		if err := sharedSession.AppendFleetEvent(ctx, shared.HomeSessionID.String(), event); err != nil {
 			t.Fatal(err)
@@ -237,11 +280,21 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifactQuery := "?session=" + shared.HomeSessionID.String() + "&path=" + url.QueryEscape(artifactPath)
+	// A write_file transcript is not a published file receipt. Home reads must
+	// not reconstruct deliverables from those bytes after compute eviction.
 	for _, endpoint := range []string{"/api/studio/artifacts", "/api/studio/artifacts/content"} {
-		data := request("GET", endpoint+artifactQuery, member, "", 200)
-		if string(data) != "# Retained Bot report\nVerified source." {
-			t.Fatalf("artifact content: %s", data)
+		request("GET", endpoint+artifactQuery, member, "", 404)
+	}
+	files := &fileDeliveryFiles{data: map[string][]byte{"reports/shared-bot.md": []byte("# Retained Bot report\nVerified source.")}}
+	base.BotFilesFactory = func(_ context.Context, _ *store.Services, scope store.BotScope) (store.BotFiles, error) {
+		if scope != store.BotScopeTeam {
+			return nil, store.ErrBotForbidden
 		}
+		return files, nil
+	}
+	data := request("GET", sharedPath+"/files/download?scope=team&path=reports/shared-bot.md", member, "", 200)
+	if string(data) != "# Retained Bot report\nVerified source." {
+		t.Fatalf("artifact content: %s", data)
 	}
 	request("GET", "/api/studio/artifacts/pdf"+artifactQuery, member, "", 503)
 	request("GET", sharedPath+"?scope=team", member, "", 200)
@@ -352,14 +405,11 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		if err := json.Unmarshal(request("GET", tc.path+tc.scope, owner, "", 200), &current); err != nil {
 			t.Fatal(err)
 		}
-		memories := ods.ForUser(owner).Memories()
-		if tc.scope != "" {
-			memories = ods.ForTeam(team.Slug).Memories()
-		}
-		if err := memories.Add(ctx, store.MemoryEntry{Content: "Thursday", Category: "delivery", SessionID: current.HomeSessionID.String(), CreatedBy: owner}); err != nil {
+		memories := botMemory(current.ID, current.Scope)
+		if err := memories.Add(memoryContext, store.MemoryEntry{Content: "Thursday", Category: "delivery", SessionID: current.HomeSessionID.String(), CreatedBy: owner}); err != nil {
 			t.Fatal(err)
 		}
-		rows, err := memories.ListBySession(ctx, current.HomeSessionID.String())
+		rows, err := memories.ListBySession(memoryContext, current.HomeSessionID.String())
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("seed memory: %+v %v", rows, err)
 		}
@@ -379,7 +429,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 			request("POST", reconcilePath+tc.scope, owner, fmt.Sprintf(`{%q:"forged"}`, field), 400)
 		}
 		request("POST", tc.path+"/corrections/"+uuid.NewString()+"/reconcile"+tc.scope, owner, "", 404)
-		pending, err := memories.Get(ctx, memoryID)
+		pending, err := memories.Get(memoryContext, memoryID)
 		if err != nil || pending.Snippet != "Thursday" {
 			t.Fatalf("intent or denied request changed memory: %+v %v", pending, err)
 		}
@@ -396,7 +446,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		// A recorded intent cannot authorize changing memory attributed to another Bot.
 		request("POST", foreignPath+"/corrections/"+foreignCorrectionID+"/reconcile"+tc.scope, owner, "", 403)
 		request("POST", foreignPath+"/corrections"+tc.scope, owner, foreignCorrection, 202)
-		pending, err = memories.Get(ctx, memoryID)
+		pending, err = memories.Get(memoryContext, memoryID)
 		if err != nil || pending.Snippet != "Thursday" {
 			t.Fatalf("foreign intent changed memory: %+v %v", pending, err)
 		}
@@ -409,23 +459,35 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 				t.Fatalf("receipt: %+v %v", receipt, err)
 			}
 		}
-		applied, err := memories.Get(ctx, memoryID)
-		if err != nil || applied.Snippet != "Friday, not Thursday" || applied.SessionID != current.HomeSessionID.String() || applied.Category != "delivery" {
+		original, err := memories.Get(memoryContext, memoryID)
+		if err != nil || original == nil || original.Snippet != "Thursday" || original.Attribution == nil || original.Attribution.SupersededBy != "superseded:correction:"+correctionID {
+			t.Fatalf("correction did not preserve and supersede source: %+v %v", original, err)
+		}
+		replacementID := uuid.NewSHA1(uuid.MustParse(correctionID), []byte("memory")).String()
+		applied, err := memories.Get(memoryContext, replacementID)
+		if err != nil || applied == nil || applied.Snippet != "Friday, not Thursday" || applied.SessionID != current.HomeSessionID.String() || applied.Category != "delivery" || applied.Attribution == nil || applied.Attribution.Status != store.MemoryKnowledgeVerified || applied.Attribution.Source != "correction:"+correctionID {
 			t.Fatalf("corrected memory: %+v %v", applied, err)
 		}
-		results, err := memories.Search(ctx, "Friday", 10, 0)
-		if err != nil || len(results) != 1 || results[0].ID != memoryID || results[0].Snippet != applied.Snippet {
+		results, err := memories.Search(memoryContext, "Friday", 10, 0)
+		if err != nil || len(results) != 1 || results[0].ID != replacementID || results[0].Snippet != applied.Snippet {
 			t.Fatalf("corrected retrieval: %+v %v", results, err)
 		}
-		if err := memories.Update(ctx, memoryID, "Saturday", "delivery"); err != nil {
+		// A newer observed fact needs its own correction, not an in-place edit
+		// that would carry the Friday evidence onto unobserved Saturday text.
+		if err := json.Unmarshal(request("GET", tc.path+tc.scope, owner, "", 200), &current); err != nil {
 			t.Fatal(err)
 		}
+		newerCorrectionID := uuid.New()
+		newerCorrection := fmt.Sprintf(`{"id":%q,"expected_revision":%d,"superseded_source":%q,"replacement":"Saturday","evidence":%s}`, newerCorrectionID, current.Revision, "memory:"+replacementID, evidence)
+		request("POST", tc.path+"/corrections"+tc.scope, owner, newerCorrection, 202)
+		request("POST", tc.path+"/corrections/"+newerCorrectionID.String()+"/reconcile"+tc.scope, owner, "", 200)
 		request("POST", reconcilePath+tc.scope, owner, "", 200)
-		newer, err := memories.Get(ctx, memoryID)
-		if err != nil || newer.Snippet != "Saturday" {
+		newerID := uuid.NewSHA1(newerCorrectionID, []byte("memory")).String()
+		newer, err := memories.Get(memoryContext, newerID)
+		if err != nil || newer == nil || newer.Snippet != "Saturday" {
 			t.Fatalf("retry overwrote newer memory: %+v %v", newer, err)
 		}
-		reconciliationRetries = append(reconciliationRetries, struct{ path, scope, memoryID, sessionID string }{reconcilePath, tc.scope, memoryID, current.HomeSessionID.String()})
+		reconciliationRetries = append(reconciliationRetries, struct{ path, scope, memoryID, sessionID string }{reconcilePath, tc.scope, newerID, current.HomeSessionID.String()})
 		var events struct {
 			Activity []store.BotActivity `json:"activity"`
 		}
@@ -451,11 +513,11 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 				count++
 			}
 		}
-		if appliedCount != 1 {
-			t.Fatalf("duplicate applied receipts: %d", appliedCount)
+		if appliedCount != 2 {
+			t.Fatalf("expected exactly one applied receipt per correction: %d", appliedCount)
 		}
-		if count != 1 {
-			t.Fatalf("duplicate reconciliation intents: %d", count)
+		if count != 2 {
+			t.Fatalf("expected exactly one reconciliation intent per correction: %d", count)
 		}
 		separator := "?"
 		if tc.scope != "" {
@@ -605,19 +667,17 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	}
 	for _, retry := range reconciliationRetries {
 		request("POST", retry.path+retry.scope, owner, "", 200)
-		memories := ods.ForUser(owner).Memories()
+		memories := botMemory(b.ID, b.Scope)
 		if retry.scope != "" {
-			memories = ods.ForTeam(team.Slug).Memories()
+			memories = botMemory(shared.ID, shared.Scope)
 			request("POST", retry.path+retry.scope, member, "", 403)
 		}
-		row, err := memories.Get(ctx, retry.memoryID)
+		row, err := memories.Get(memoryContext, retry.memoryID)
 		if err != nil || row.Snippet != "Saturday" || row.SessionID != retry.sessionID {
 			t.Fatalf("reopened receipt replay: %+v %v", row, err)
 		}
 	}
-	if data := request("GET", "/api/studio/artifacts/content"+artifactQuery, owner, "", 200); string(data) != "# Retained Bot report\nVerified source." {
-		t.Fatalf("artifact after reopen: %s", data)
-	}
+	request("GET", "/api/studio/artifacts/content"+artifactQuery, owner, "", 404)
 	var restoredTemplate store.BotTemplate
 	if err := json.Unmarshal(request("GET", tp+"?scope=team", owner, "", 200), &restoredTemplate); err != nil {
 		t.Fatal(err)
@@ -643,7 +703,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		}
 	}
 	_ = json.Unmarshal(request("GET", path, owner, "", 200), &b)
-	if b.Revision != 3 || b.Version != 2 || b.Status != store.BotDraft {
+	if b.Revision != 4 || b.Version != 2 || b.Status != store.BotDraft {
 		t.Fatalf("reopen: %+v", b)
 	}
 	_ = json.Unmarshal(request("GET", path+"/versions/2", owner, "", 200), &v)

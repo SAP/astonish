@@ -23,7 +23,6 @@ import (
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/scheduler"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
@@ -78,7 +77,8 @@ func (m *skillScheduleModel) agentContent() iter.Seq2[*model.LLMResponse, error]
 			}
 		}
 	}
-	if m.interactive && name != "" && name != "execute_tool" {
+	// Every turn uses the shared Chat catalog, including scheduled turns.
+	if name != "" && name != "execute_tool" {
 		name, args = "execute_tool", map[string]any{"name": name, "arguments": args}
 	}
 	id := fmt.Sprintf("agent-schedule-%d", m.stage)
@@ -156,6 +156,42 @@ func (m *skillScheduleModel) GenerateContent(ctx context.Context, req *model.LLM
 		}
 	}
 	return m.workerTestModel.GenerateContent(ctx, req, stream)
+}
+
+func TestSkillScheduleAgentToolsUseSharedCatalog(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, skill, want string
+			stage             int
+			feedback          bool
+		}{
+			{name: "read", want: "bot_work_read"},
+			{name: "select-skill", skill: uuid.NewString(), want: "bot_skill_use"},
+			{name: "fetch", stage: 1, want: "web_fetch"},
+			{name: "save-skill", stage: 2, want: "bot_skill_save"},
+			{name: "feedback", feedback: true, skill: uuid.NewString(), want: "bot_skill_save"},
+		} {
+			t.Run(fmt.Sprintf("interactive=%t/%s", interactive, tc.name), func(t *testing.T) {
+				m := &skillScheduleModel{t: t, interactive: interactive, skill: tc.skill, stage: tc.stage, feedback: tc.feedback, work: func() *store.BotWorkState {
+					return &store.BotWorkState{Protocol: store.BotWorkProtocolAgentLedV1, Revision: 7}
+				}}
+				count := 0
+				for response, err := range m.agentContent() {
+					if err != nil {
+						t.Fatal(err)
+					}
+					count++
+					call := response.Content.Parts[0].FunctionCall
+					if call == nil || call.Name != "execute_tool" || call.Args["name"] != tc.want {
+						t.Fatalf("script bypassed shared catalog: %+v", call)
+					}
+				}
+				if count != 1 || m.stage != tc.stage+1 {
+					t.Fatalf("script advanced incorrectly: responses=%d stage=%d", count, m.stage)
+				}
+			})
+		}
+	}
 }
 
 // Automatic employee review must not consume a producer turn or invent a
@@ -245,9 +281,13 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			registry := execution.NewBotTurnAuthorizationRegistry(32)
 			defer registry.Close()
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
-			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: lifecycleHTTPBackend{}, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			homeBackend := testRetainedContentBackend(t, backend)
+			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return mdl, nil
-			}, Prepare: func(c context.Context, q bot.RunRequest, _ *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+					return productionBotFiles(c, homeBackend, svc, scope)
+				}
 				if q.Work == nil || q.Work.Protocol != store.BotWorkProtocolAgentLedV1 || bot.BotWorkServicesFromContext(c) == nil {
 					t.Fatalf("missing agent capability before prepare: work=%+v services=%v", q.Work, bot.BotWorkServicesFromContext(c))
 				}
@@ -278,14 +318,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			internal, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "skill-schedule", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = entstore.RegisterBotHomeBinding(internal, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "registered-home", Revision: 1}}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-				t.Fatal(err)
-			}
-			b, err = repo.Get(auth, b.ID)
+			b, err = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -492,7 +525,8 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 				head := readHead()
 				run := wake(scheduleID, true)
 				if run.Status != store.RunSucceeded || run.Report.Skill == nil || run.Report.Skill.SkillID.String() != mdl.skill || run.Report.Skill.UsedRevision != head.Revision {
-					t.Fatalf("scheduled pin: %+v skill=%+v pins=%+v", run, run.Report.Skill, mdl.pins)
+					raw, _ := json.Marshal(run)
+					t.Fatalf("scheduled pin: %s skill=%+v pins=%+v", raw, run.Report.Skill, mdl.pins)
 				}
 			})
 			t.Run("feedback-latest", func(t *testing.T) {
@@ -566,7 +600,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 				}
 				// The source-specific catalog excludes scheduler mutation tools from
 				// recurring task mandates. Rejection precedes executable-tool usage.
-				if run.Status != store.RunFailed || run.Usage.ToolCalls != 0 || len(run.Report.Unverified) == 0 {
+				if run.Status != store.RunFailed || run.Usage.ToolCalls != 0 || run.Report.Failure == nil || len(run.Report.Unverified) != 0 || len(run.Report.Changed) != 0 || len(run.Report.NeedsApproval) != 0 {
 					t.Fatalf("denied tool must fail closed before dispatch: %+v", run)
 				}
 				if run.Report.Skill == nil {

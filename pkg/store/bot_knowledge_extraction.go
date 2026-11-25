@@ -213,9 +213,18 @@ func (d BotKnowledgeExtractionDecision) Validate() error {
 	return nil
 }
 func (d BotKnowledgeExtractionDecision) Clone() BotKnowledgeExtractionDecision {
-	d.Proposals = append([]BotKnowledgeProposal(nil), d.Proposals...)
+	// Nil and empty slices have different JSON digests; preserve both shapes.
+	if d.Proposals != nil {
+		proposals := make([]BotKnowledgeProposal, len(d.Proposals))
+		copy(proposals, d.Proposals)
+		d.Proposals = proposals
+	}
 	for n := range d.Proposals {
-		d.Proposals[n].EvidenceIDs = append([]string(nil), d.Proposals[n].EvidenceIDs...)
+		if d.Proposals[n].EvidenceIDs != nil {
+			ids := make([]string, len(d.Proposals[n].EvidenceIDs))
+			copy(ids, d.Proposals[n].EvidenceIDs)
+			d.Proposals[n].EvidenceIDs = ids
+		}
 	}
 	return d
 }

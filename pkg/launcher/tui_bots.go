@@ -2,21 +2,17 @@ package launcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tui/backend"
 	"github.com/SAP/astonish/pkg/tui/events"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
 )
 
 // botPlatformBackend adds observation to remote chat, not a third runtime.
@@ -368,71 +364,4 @@ func (b *botPlatformBackend) BotStudioURL() string {
 		return b.client.BaseURL() + "/#/chat"
 	}
 	return b.client.BaseURL() + "/#/chat/bots/" + url.PathEscape(string(b.bots.Scope)) + "/" + bot.ID.String()
-}
-
-// ADK persisted content is normalized into the same transcript events used by
-// chat. Durable approvals are fetched separately, never inferred from text or
-// replayed legacy tool-approval deltas.
-func botTranscriptEvents(frame client.SSEEvent) ([]events.Event, error) {
-	var e adksession.Event
-	if err := json.Unmarshal([]byte(frame.Data), &e); err != nil {
-		return nil, fmt.Errorf("decode Bot transcript: %w", err)
-	}
-	if botHiddenTurnContext(&e) {
-		return nil, nil
-	}
-	if raw, ok := e.Actions.StateDelta[botRuntimeStateKey]; ok {
-		return mapBotRuntimeEnvelope(raw)
-	}
-	if events.IsBotReportInvocation(e.InvocationID) && e.Author != "user" && e.Content != nil && e.Content.Role == "model" {
-		// Publications are complete immutable rows, not tool-loop text chunks.
-		// Join parts before emitting so replay dedup applies to the entire row.
-		var text strings.Builder
-		for _, part := range e.Content.Parts {
-			if part != nil && !part.Thought {
-				text.WriteString(part.Text)
-			}
-		}
-		if text.Len() == 0 {
-			return nil, nil
-		}
-		return []events.Event{events.NewBotReport(e.InvocationID, e.ID, text.String())}, nil
-	}
-	out := []events.Event{}
-	if e.Content != nil {
-		for _, p := range e.Content.Parts {
-			if p == nil {
-				continue
-			}
-			if p.Text != "" {
-				switch {
-				case e.Author == "user" || e.Content.Role == "user":
-					out = append(out, events.NewUser(botOwnerAnswerText(p.Text)))
-				case p.Thought:
-					out = append(out, events.Event{Kind: events.KindThinking, Text: p.Text})
-				default:
-					out = append(out, events.NewText(p.Text))
-				}
-			}
-			if fc := p.FunctionCall; fc != nil {
-				out = append(out, events.NewToolCall(fc.Name, fc.ID, fc.Args))
-			}
-			if fr := p.FunctionResponse; fr != nil {
-				out = append(out, events.NewToolResult(fr.Name, fr.ID, fr.Response))
-			}
-		}
-	}
-	for path := range e.Actions.ArtifactDelta {
-		out = append(out, events.Event{Kind: events.KindArtifact, Artifact: &events.Artifact{Path: path, FileName: filepath.Base(path)}})
-	}
-	if e.UsageMetadata != nil {
-		input, output := bot.ModelUsageTokens(e.UsageMetadata)
-		out = append(out, events.Event{Kind: events.KindUsage, Usage: &events.Usage{Input: input, Output: output, Total: input + output}})
-	}
-	// Metadata-only ADK rows are not text boundaries. Runtime envelopes above
-	// carry their own explicit done event.
-	if !e.Partial && len(out) > 0 {
-		out = append(out, events.Event{Kind: events.KindDone})
-	}
-	return out, nil
 }

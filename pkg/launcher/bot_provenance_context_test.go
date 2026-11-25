@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +72,9 @@ func (r *provenanceRunRepo) GetRun(ctx context.Context, id store.BotID, runID st
 	return r.botFactoryTestRepo.GetRun(ctx, id, runID)
 }
 
-// Execute a real tool, retain its call/result events, then inspect the next
-// employee's production-factory system prompt. No model/provider call is needed.
+// Execute a real tool and retain its call/result events, then verify that the
+// next employee's bootstrap does not hydrate them. Historical evidence requires
+// explicit retrieval; the prompt must not infer a method from a summary or URL.
 func TestBotPriorRetrievalProvenanceFollowup(t *testing.T) {
 	for _, interactive := range []bool{false, true} {
 		t.Run(map[bool]string{false: "autonomous", true: "interactive"}[interactive], func(t *testing.T) {
@@ -116,18 +118,18 @@ func TestBotPriorRetrievalProvenanceFollowup(t *testing.T) {
 			defer resources.Cleanup()
 			data, _ := json.Marshal(resources.Agent.SystemPrompt.Build())
 			prompt := string(data)
-			for _, want := range []string{"web_fetch", "2026-11-13", "failure", "https://news.example/story", "sha256", previous.ID.String()} {
+			for _, want := range []string{"MEMORY.md", "Read referenced files explicitly", "Do not infer a research tool"} {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("missing %q in employee prompt", want)
 				}
 			}
-			for _, secret := range []string{"secret-query", "secret-header", "secret-result", "private source body", "password", "api_key"} {
+			for _, secret := range []string{previous.ID.String(), "2026-11-13", "https://news.example/story", "secret-query", "secret-header", "secret-result", "private source body", "password", "api_key"} {
 				if strings.Contains(prompt, secret) {
 					t.Errorf("leaked %q", secret)
 				}
 			}
-			if reader.reads == 0 {
-				t.Error("prior transcript never read")
+			if reader.reads != 0 {
+				t.Error("bootstrap hydrated prior transcript")
 			}
 		})
 	}
@@ -157,19 +159,13 @@ func TestBotPriorProvenanceScopeAndBounds(t *testing.T) {
 				reader.events = []store.BotTranscriptEvent{provenanceEvent(1, previous.CreatedAt, &genai.Part{Text: "https://news.example/story web_fetch"})}
 			}
 			resources, err := f.construct(t)
-			if mode == "foreign-run" || mode == "foreign-list" {
-				if err == nil || reader.reads != 0 {
-					t.Fatalf("foreign run read: err=%v reads=%d", err, reader.reads)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
 			prompt := resources.Agent.SystemPrompt.Build()
 			switch mode {
-			case "home":
+			case "home", "foreign-run", "foreign-list", "bounded":
 				if reader.reads != 0 {
 					t.Fatal("read Home as run transcript")
 				}
@@ -177,25 +173,16 @@ func TestBotPriorProvenanceScopeAndBounds(t *testing.T) {
 				if strings.Contains(prompt, "Recorded prior Bot tool provenance") {
 					t.Fatal("inferred tool from text URL")
 				}
-			case "bounded":
-				if !strings.Contains(prompt, "History is incomplete") || strings.Count(prompt, "payload_sha256") > 40 || reader.reads > 3 {
-					t.Fatalf("unbounded provenance: reads=%d records=%d", reader.reads, strings.Count(prompt, "payload_sha256"))
-				}
 			case "revoked":
-				var binding *botFactoryBinding
-				for _, candidate := range resources.Agent.Tools {
-					if wrapped, ok := candidate.(*botBoundTool); ok {
-						binding = wrapped.binding
-						break
-					}
-				}
-				if binding == nil {
-					t.Fatal("no bound tool")
+				entry := resources.Agent.ToolIndex.GetToolEntry("read_file")
+				if entry == nil {
+					t.Fatal("no shared read_file tool")
 				}
 				f.req.Run.Lease.Fence++
 				before := reader.reads
-				if _, err := binding.priorRetrievalContext(f.ctx); err == nil || reader.reads != before {
-					t.Fatal("revoked lease read history")
+				ctx := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+				if _, err := entry.Tool.(botRunnableTool).Run(ctx, map[string]any{"path": "outputs/report.md"}); !errors.Is(err, store.ErrBotConflict) || reader.reads != before {
+					t.Fatalf("revoked lease read history: err=%v reads=%d before=%d", err, reader.reads, before)
 				}
 			}
 		})

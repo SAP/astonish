@@ -15,27 +15,79 @@ import (
 	"testing"
 	"time"
 
-	botruntime "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/client"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
-	adksession "google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // This is a real Execute subprocess, not a model/reducer test. The fixture
 // admits work separately from publishing durable chronology so optimistic
 // echoes and duplicate watch replay can be detected in a forced terminal frame.
+func TestBotEmployeeObjectivePTY(t *testing.T) {
+	// The API package owns the disposable production worker and configured search
+	// fixture. It drives this package's real Execute child on a native PTY; no
+	// synthetic SSE transcript is involved.
+	cmd := exec.Command("go", "test", "./pkg/api", "-run", "^TestBotEmployeeObjectivePTYFixture$", "-count=1", "-timeout=6m", "-v")
+	cmd.Dir = "../.."
+	cmd.Env = append(os.Environ(), "ASTONISH_EMPLOYEE_PTY_BINARY="+os.Args[0])
+	var evidence strings.Builder
+	cmd.Stdout = io.MultiWriter(os.Stdout, &evidence)
+	cmd.Stderr = cmd.Stdout
+	err := cmd.Run()
+	out := evidence.String()
+	if err != nil {
+		t.Fatalf("shared-worker native PTY: %v", err)
+	}
+	if !strings.Contains(string(out), "native PTY personal live/reconnect/restore") || !strings.Contains(string(out), "native PTY team live/reconnect/restore") {
+		t.Fatal("physical personal/team journey did not execute")
+	}
+}
+
+// The API-owned fixture must prove format-3 database writes as well as the
+// physical personal/team dispatcher journey. Checking its evidence prevents a
+// misspelled -run expression ("no tests to run") from passing this acceptance.
+func TestBotDatabaseEmployeePTY(t *testing.T) {
+	cmd := exec.Command("go", "test", "./pkg/api", "-run", "^TestBotDatabaseEmployeePTYFixture$", "-count=1", "-timeout=4m", "-v")
+	cmd.Dir = "../.."
+	cmd.Env = append(os.Environ(), "ASTONISH_EMPLOYEE_PTY_BINARY="+os.Args[0])
+	var evidence strings.Builder
+	cmd.Stdout = io.MultiWriter(os.Stdout, &evidence)
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("database shared-worker native PTY: %v", err)
+	}
+	out := evidence.String()
+	for _, required := range []string{
+		"--- PASS: TestBotDatabaseEmployeePTYFixture",
+		"native PTY personal live/reconnect/restore",
+		"native PTY team live/reconnect/restore",
+	} {
+		if !strings.Contains(out, required) {
+			t.Fatalf("database PTY evidence missing %q: %s", required, out)
+		}
+	}
+	if strings.Contains(out, "--- SKIP:") {
+		t.Fatal("database PTY acceptance must execute without skips")
+	}
+}
+
 func TestBotParityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, false) }
 
 func TestBotWorkQualityPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, true) }
 
 func TestBotAgentWorkPTYAcceptance(t *testing.T) { runBotParityPTYAcceptance(t, false, true) }
 
+// Public mixed presentation frames must use the real remote terminal renderer,
+// including replay after leaving a read-only run trace and returning Home.
+func TestBotConversationPresentationPTYAcceptance(t *testing.T) {
+	runBotParityPTYAcceptance(t, false, false, true)
+}
+
 func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 	agentWork := len(agentMode) > 0 && agentMode[0]
+	mixed := len(agentMode) > 1 && agentMode[1]
 	for _, status := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused} {
 		t.Run(string(status), func(t *testing.T) {
 			home := t.TempDir()
@@ -56,6 +108,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			var posts, closed, watches atomic.Int32
 			var panelState, reject, headerState atomic.Int32
 			var reviewMode, proposalPosts, approvalPosts atomic.Int32
+			var accessDenied atomic.Bool
 			responsibility := "Reviewed responsibility"
 			proposal := store.BotControlProposal{ID: uuid.New(), BotID: id, Version: 7, ExpectedRevision: 9, Digest: "saved-proposal-digest", Status: store.BotControlProposed, ExpiresAt: time.Now().Add(time.Hour), Payload: store.BotControlPayload{Operation: store.BotControlResponsibility, Reason: "Owner requested change", Responsibility: &responsibility}}
 			approval := store.BotApproval{ID: uuid.New(), BotID: id, RunID: rid, Version: 7, ActionDigest: "saved-action-digest", Status: store.ApprovalPending, ExpiresAt: time.Now().Add(time.Hour)}
@@ -88,8 +141,14 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 						write(bot)
 						return
 					case base + "/snapshot":
+						if accessDenied.Load() {
+							http.Error(w, "forbidden", http.StatusForbidden)
+							return
+						}
 						if panelState.Load() == 2 {
-							http.Error(w, "forbidden", 403)
+							// Retryable outage, not revoked access: 5d892dc5 intentionally
+							// clears protected state on 403 (exercised separately below).
+							http.Error(w, "snapshot temporarily unavailable", http.StatusServiceUnavailable)
 							return
 						}
 						snap := store.BotSnapshot{Bot: bot}
@@ -173,34 +232,63 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 							feed = trace
 							text = "Read-only parity trace"
 						}
+						wire := func(seq int, kind string, payload any) {
+							writeBotCanonicalPTYFrame(t, w, feed, rid, seq, fmt.Sprintf("%s:%d", feed, seq), kind, payload)
+						}
 						emit := func(seq int, author, text string) {
-							e := adksession.Event{Author: author}
-							e.Content = &genai.Content{Role: author, Parts: []*genai.Part{{Text: text}}}
-							raw, _ := json.Marshal(e)
-							fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", feed, seq, raw)
-							w.(http.Flusher).Flush()
+							kind := "text"
+							if author == "user" {
+								kind = "user_message"
+							}
+							wire(seq, kind, map[string]any{"text": text})
 						}
 						emit(1, "model", text)
 						fmt.Fprintf(w, "id: %s:1\nevent: replay_complete\ndata: {}\n\n", feed)
 						w.(http.Flusher).Flush()
-						wire := func(seq int, kind string, payload any) {
-							data, _ := json.Marshal(payload)
-							e := botruntime.RuntimeEvent{SessionID: feed, TurnID: rid, Sequence: int64(seq), Type: kind, Payload: data}
-							row := adksession.Event{Author: "bot_runtime", Actions: adksession.EventActions{StateDelta: map[string]any{"bot_runtime_event": e}}}
-							raw, _ := json.Marshal(row)
-							fmt.Fprintf(w, "id: %s:%d\nevent: transcript\ndata: %s\n\n", feed, seq, raw)
-							w.(http.Flusher).Flush()
-						}
 						select {
 						case <-release:
 							emit(2, "user", "parity-message")
 							emit(2, "user", "parity-message")
 							wire(3, "session", map[string]any{"sessionId": feed.String()})
-							emit(4, "model", "Durable parity answer") // paired raw ADK row must be suppressed
-							wire(5, "text", map[string]any{"text": "Durable parity answer"})
-							wire(6, "turn_complete", map[string]any{})
+							// One durable row projects to multiple Chat frames. Replay repeats
+							// identities; only the last part acknowledges the row for reconnect.
+							for replay := 0; replay < 2; replay++ {
+								for part, text := range []string{"Durable parity ", "answer"} {
+									cursor := fmt.Sprintf("%s:%d", feed, 3+part)
+									data, err := json.Marshal(map[string]any{
+										"text": text,
+										"_projection": map[string]any{
+											"event_id":   fmt.Sprintf("%s:4:%d", feed, part),
+											"session_id": feed.String(), "run_id": rid.String(), "turn_id": rid.String(),
+											"sequence": 4, "cursor": cursor,
+										},
+									})
+									if err != nil {
+										t.Error(err)
+										return
+									}
+									fmt.Fprintf(w, "id: %s\nevent: text\ndata: %s\n\n", cursor, data)
+									w.(http.Flusher).Flush()
+								}
+							}
+							wire(5, "turn_complete", map[string]any{})
+							if mixed {
+								wire(7, "tool_call", map[string]any{"id": "mixed-read", "name": "read_file", "args": map[string]any{"path": "/workspace/public-receipt.txt"}})
+								wire(8, "tool_result", map[string]any{"id": "mixed-read", "name": "read_file", "result": map[string]any{"content": "Public mixed receipt"}})
+								wire(9, "subtask_progress", map[string]any{"event_type": "delegation_start", "batch_id": "mixed-batch", "tasks": []any{map[string]any{"task_id": "research", "name": "Mixed research", "description": "Compare public evidence"}}})
+								wire(10, "subtask_progress", map[string]any{"event_type": "task_start", "batch_id": "mixed-batch", "task_id": "research", "task_name": "Mixed research"})
+								wire(11, "subtask_progress", map[string]any{"event_type": "task_complete", "batch_id": "mixed-batch", "task_id": "research", "task_name": "Mixed research", "status": "success", "summary": "Public evidence compared"})
+								wire(12, "subtask_progress", map[string]any{"event_type": "plan_snapshot", "snapshot": map[string]any{"plan_id": "mixed-plan", "goal": "Mixed verification plan", "revision": 1, "sequence": 1, "document": map[string]any{"lifecycle": "approved"}, "steps": []any{map[string]any{"name": "check", "description": "Verify public receipt", "status": "complete"}}}})
+								wire(13, "error", map[string]any{"message": "Public mixed recoverable error"})
+								emit(14, "model", "Mixed presentation complete")
+								wire(15, "turn_complete", map[string]any{})
+							}
 							if isTrace {
-								wire(7, "artifact", map[string]any{"path": "/workspace/parity-report.md", "fileName": "parity-report.md", "fileType": "text/markdown", "isReport": true, "reportTitle": "Runtime parity findings"})
+								artifactSequence := 6
+								if mixed {
+									artifactSequence = 16
+								}
+								wire(artifactSequence, "artifact", map[string]any{"path": "/workspace/parity-report.md", "fileName": "parity-report.md", "fileType": "text/markdown", "isReport": true, "reportTitle": "Runtime parity findings"})
 							}
 						case <-r.Context().Done():
 							return
@@ -417,7 +505,22 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			}
 			close(release)
 			wait("Durable parity answer")
+			if mixed {
+				wait("Mixed presentation complete")
+			}
 			after := frame(142)
+			assertMixed := func(rendered string) {
+				t.Helper()
+				if !mixed {
+					return
+				}
+				for _, marker := range []string{"Read file /workspace/public-receipt.txt", "Mixed research", "Mixed verification plan", "I can’t confirm the latest outcome right now.", "Mixed presentation complete"} {
+					if !strings.Contains(rendered, marker) {
+						t.Errorf("mixed PTY presentation missing %q: %s", marker, rendered)
+					}
+				}
+			}
+			assertMixed(after)
 			if strings.Count(after, "parity-message") != 1 || strings.Count(after, "Durable parity answer") != 1 {
 				t.Fatalf("home must show single durable prompt/reply: %s", after)
 			}
@@ -450,8 +553,14 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			for _, command := range []string{"goals", "schedule"} {
 				send("/bots " + command + "\r")
 				wait("Work details unavailable. Press r to retry.")
-				if strings.Contains(read(), "server error (403)") {
+				if strings.Contains(read(), "server error (") || strings.Contains(read(), "snapshot temporarily unavailable") {
 					t.Fatal("overview exposed raw transport error")
+				}
+				// An unavailable review must never execute a stale decision.
+				send("y\r")
+				settle()
+				if posts.Load() != 1 || proposalPosts.Load() != 0 || approvalPosts.Load() != 0 {
+					t.Fatal("unavailable overview mutated work")
 				}
 				escape()
 			}
@@ -475,6 +584,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			send("\x15/bots home\r")
 			wait("Durable parity home")
 			homeFrame := frame(144)
+			assertMixed(homeFrame)
 			if strings.Count(homeFrame, "parity-message") != 1 || strings.Count(homeFrame, "Durable parity answer") != 1 || strings.Contains(homeFrame, "Runtime parity findings") {
 				t.Fatalf("restored home chronology mismatch: %s", homeFrame)
 			}
@@ -565,9 +675,24 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			headerState.Store(2)
 			waitHeader("Decisions 2", "deleted")
 			panelState.Store(2)
-			waitHeader("status unavailable", "Decisions unavailable")
+			waitHeader("deleted · Updates unavailable", "Decisions unavailable", "Durable parity answer")
 			if posts.Load() != 3 {
 				t.Fatalf("header refresh mutated work: %d", posts.Load())
+			}
+			// Unlike the 503 outage, revoked access must clear the protected
+			// conversation and selection, not retain an actionable stale Bot.
+			accessDenied.Store(true)
+			waitHeader("Bot access unavailable. Select again after access is restored.")
+			cleared := frame(152)
+			for _, protected := range []string{"Durable parity answer", "Durable parity home", "Bot: Parity", "Decisions 2"} {
+				if strings.Contains(cleared, protected) {
+					t.Fatalf("revoked access retained %q: %s", protected, cleared)
+				}
+			}
+			send("/bots approvals\r")
+			wait("Select a Bot first with /bots.")
+			if posts.Load() != 3 || proposalPosts.Load() != 1 || approvalPosts.Load() != 1 {
+				t.Fatal("revoked access mutated work")
 			}
 			send("/bots detach\r")
 			wait("Bot work continues")

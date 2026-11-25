@@ -10,6 +10,9 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 func TestInteractiveContinuationExpiredQuestion(t *testing.T) {
@@ -50,6 +53,21 @@ func TestInteractiveContinuationExpiredQuestion(t *testing.T) {
 				a, err := repo.RequestApproval(ctx, lease, store.BotApproval{BotID: b.ID, RunID: run.ID, Version: run.Version, Action: action, ActionDigest: digest, Interaction: &store.BotInteraction{Kind: store.BotInteractionQuestion, QuestionID: "q", Payload: payload}, ExpiresAt: time.Now().Add(24 * time.Hour)})
 				if err != nil {
 					t.Fatal(err)
+				}
+				// The accepted-answer gate binds consent to the actual durable
+				// ask_user call/response, not only an approval checkpoint.
+				var questionArgs map[string]any
+				if err := json.Unmarshal(payload, &questionArgs); err != nil {
+					t.Fatal(err)
+				}
+				questionResponse := map[string]any{"questionId": "q", "kind": "yesno", "prompt": "Continue?", "status": "ok"}
+				for _, event := range []*session.Event{
+					{ID: "question-call", Author: "agent", InvocationID: "question-turn", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "question-tool", Name: "ask_user", Args: questionArgs}}}}}},
+					{ID: "question-response", Author: "agent", InvocationID: "question-turn", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "question-tool", Name: "ask_user", Response: questionResponse}}}}}},
+				} {
+					if err := repo.appendBotRunEvent(ctx, lease, run.SessionID, event); err != nil {
+						t.Fatal(err)
+					}
 				}
 				checkpoint, _ := json.Marshal(botdomain.ApprovalCheckpoint{Format: botdomain.InteractionCheckpointFormat, ApprovalID: a.ID, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, Version: run.Version, ActionDigest: digest, Fence: lease.Fence})
 				work, err := repo.LoadWork(ctx, lease)

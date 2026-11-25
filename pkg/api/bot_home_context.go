@@ -60,7 +60,7 @@ func projectBotHomeHistory(prior []*session.Event) []*session.Event {
 // This reuses Chat's truncateResult excerpt contract rather than forcing whole
 // history compaction (which would summarize away authored instructions).
 func projectBotHomeReadResponse(fr *genai.FunctionResponse) map[string]any {
-	if fr.Name != "web_fetch" || fr.Response == nil || fr.Response["error"] != nil || fr.Response["_home_history_excerpt"] != nil {
+	if fr == nil || (fr.Name != "web_fetch" && fr.Name != "read_file") || fr.Response == nil || fr.Response["error"] != nil || fr.Response["_home_history_excerpt"] != nil {
 		return nil
 	}
 	// ADK functiontool wraps typed results under output; persisted/legacy events
@@ -81,6 +81,30 @@ func projectBotHomeReadResponse(fr *genai.FunctionResponse) map[string]any {
 	}
 	if body["error"] != nil {
 		return nil
+	}
+	// Confined file reads retain their path/digest receipt, never a historical
+	// deliverable body. The active run is excluded by the caller before projection.
+	if fr.Name == "read_file" {
+		if _, ok := body["content"].(string); !ok {
+			return nil
+		}
+		raw, err := json.Marshal(body["entry"])
+		var entry struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		}
+		if err != nil || json.Unmarshal(raw, &entry) != nil || entry.Path == "" || len(entry.SHA256) != 64 {
+			return nil
+		}
+		copyBody := maps.Clone(body)
+		delete(copyBody, "content")
+		copyBody["_file_history_reference"] = "Read the retained file explicitly when its content is needed."
+		if wrapped {
+			result := maps.Clone(root)
+			result["output"] = copyBody
+			return result
+		}
+		return copyBody
 	}
 	// An explicit successful HTTP status is required; absent/unknown/error
 	// results stay verbatim, including their bodies and diagnostic evidence.

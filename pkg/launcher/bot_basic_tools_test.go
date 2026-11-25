@@ -23,7 +23,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -32,10 +31,14 @@ type basicToolContext struct {
 	state session.State
 }
 
+func (c basicToolContext) AppName() string        { return "astonish" }
 func (c basicToolContext) State() session.State   { return c.state }
 func (c basicToolContext) FunctionCallID() string { return "controlled-call" }
 func (c basicToolContext) AgentName() string      { return "bot" }
-func (c basicToolContext) UserID() string         { return "owner" }
+func (c basicToolContext) UserID() string {
+	p, _ := execution.PrincipalFromContext(c)
+	return p.Subject
+}
 
 func basicFactory(t *testing.T, f *botFactoryFixture, names ...string) (*api.BotChatResources, basicToolContext) {
 	t.Helper()
@@ -55,13 +58,16 @@ func basicFactory(t *testing.T, f *botFactoryFixture, names ...string) (*api.Bot
 	}
 	ctx := execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity())
 	ctx = execution.WithRunPolicy(ctx, f.req.Policy)
+	if resources.PolicyRuntime != nil {
+		ctx = agent.WithBotPolicyRuntime(ctx, *resources.PolicyRuntime)
+	}
 	return resources, basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}, state: s.Session.State()}
 }
 func basicCall(t *testing.T, r *api.BotChatResources, c tool.Context, name string, args any) map[string]any {
 	t.Helper()
 	for _, entry := range r.Agent.Tools {
-		if entry.Name() == name {
-			out, err := entry.(botRunnableTool).Run(c, args)
+		if entry.Name() == "execute_tool" {
+			out, err := entry.(botRunnableTool).Run(c, map[string]any{"name": name, "arguments": args})
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -77,28 +83,45 @@ func TestBotBasicPlanLifecycle(t *testing.T) {
 	verifies, writes := 0, 0
 	exit := 1
 	var markdown string
-	shell, _ := functiontool.New(functiontool.Config{Name: "shell_command", Description: "Controlled sandbox verifier"}, func(_ tool.Context, a map[string]any) (map[string]any, error) {
-		verifies++
-		if a["command"] != "printf verified" || a["working_dir"] != "/isolated" {
-			t.Errorf("wrong verify args: %v", a)
+	guard := &planExactGrantGuard{grants: map[string]execution.ScopedGrant{}, calls: map[string]int{}}
+	write := basicPlanWrite(t)
+	node := &basicPlanNode{call: func(name string, a map[string]any) (json.RawMessage, error) {
+		switch name {
+		case "shell_command":
+			verifies++
+			if a["command"] != "printf verified" || a["working_dir"] != "/isolated" {
+				t.Errorf("wrong verify args: %v", a)
+			}
+			return json.Marshal(map[string]any{"exit_code": exit, "stdout": "verified"})
+		case "write_file":
+			writes++
+			markdown, _ = a["content"].(string)
+			if a["path"] != "/isolated/PLAN.md" {
+				t.Errorf("host path: %v", a)
+			}
+			return write(name, a)
+		default:
+			t.Fatalf("unexpected node dispatch: %s", name)
+			return nil, nil
 		}
-		return map[string]any{"exit_code": exit, "stdout": "verified"}, nil
-	})
-	write, _ := functiontool.New(functiontool.Config{Name: "write_file", Description: "Controlled sandbox file writer"}, func(_ tool.Context, a map[string]any) (map[string]any, error) {
-		writes++
-		markdown, _ = a["content"].(string)
-		if a["path"] != "/isolated/PLAN.md" {
-			t.Errorf("host path: %v", a)
-		}
-		return map[string]any{"ok": true}, nil
-	})
+	}}
 	prepare := f.cfg.Prepare
 	f.cfg.Prepare = func(c context.Context, q bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 		r, e := prepare(c, q, s)
-		r.Tools = []tool.Tool{shell, write}
+		if e != nil {
+			return nil, e
+		}
+		r.Catalog.Pool = &basicPlanPool{client: node}
+		r.PolicyRuntime.Guard = basicPlanGuard{exact: guard}
 		return r, e
 	}
-	r, c := basicFactory(t, f, "announce_plan", "update_plan", "announce_completion", "shell_command", "write_file")
+	allowed := []string{"announce_plan", "update_plan", "announce_completion", "shell_command", "write_file"}
+	r, c := basicFactory(t, f, allowed...)
+	plan := r.Agent.ToolIndex.GetToolEntry("write_file").Tool.(*chatRuntimeTool).binding.plan
+	basicApprovePlanMirrors(t, plan, guard, nil, allowed)
+	// Explicit fixture owner consent also approves the plan lifecycle; this does
+	// not authorize its independently guarded file writes.
+	r.Agent.AutoApprove = true
 	args := map[string]any{"goal": "Controlled plan", "context": "Controlled context", "what_not_to_do": "No host calls", "verification": "Observe controlled verifier", "steps": []any{map[string]any{"name": "verify", "description": "Verify scope", "details": "Run controlled sandbox verifier", "summary": "Prove scoped verification", "outcome": "Verified", "files": []any{map[string]any{"path": "evidence.txt", "kind": "new"}}, "verify": "printf verified", "verify_kind": "behavior"}}}
 	out := basicCall(t, r, c, "announce_plan", args)
 	if out["status"] != "ok" {
@@ -127,19 +150,20 @@ func TestBotBasicPlanLifecycle(t *testing.T) {
 	if out["status"] != "ok" {
 		t.Fatalf("complete: %v", out)
 	}
-	saved, err := c.State().Get(botPlanStateKey)
-	if err != nil || saved != markdown || !strings.Contains(markdown, "## Results") || verifies != 2 || writes == 0 {
-		t.Fatalf("persistence: %v %v verifies=%d writes=%d", saved, err, verifies, writes)
+	saved, err := sForBasicRestore(t, f).State().Get(agent.PlanSnapshotStateKey)
+	raw, _ := json.Marshal(saved)
+	var snapshot agent.PlanSnapshot
+	if err != nil || json.Unmarshal(raw, &snapshot) != nil || agent.NewPlanState(snapshot.Goal, snapshot.Document, snapshot.Steps).RenderMarkdown() != markdown || !strings.Contains(markdown, "## Results") || verifies != 2 || writes == 0 || guard.calls["write_file"] != writes {
+		t.Fatalf("persistence: %v %v verifies=%d writes=%d grants=%v", saved, err, verifies, writes, guard.calls)
 	}
-	if err := f.sessions.AppendEvent(c, sForBasicRestore(t, f), &session.Event{LLMResponse: model.LLMResponse{}, Actions: session.EventActions{StateDelta: map[string]any{botPlanStateKey: markdown}}}); err != nil {
-		t.Fatal(err)
+	restored, restoredContext := basicFactory(t, f, allowed...)
+	out = basicCall(t, restored, restoredContext, "update_plan", map[string]any{"step": "verify", "status": "running"})
+	if out["status"] != agent.PlanRuntimeCompleted {
+		t.Fatalf("completed plan not restored: %v", out)
 	}
-	restored := agent.NewChatAgent(r.Agent.LLM, nil, nil, f.sessions, nil, false, false)
-	if err := restoreBotPlan(c, restored, &BotChatScope{Sessions: f.sessions}, f.req.Run.SessionID.String(), f.req.Bot.OwnerID.String()); err != nil {
-		t.Fatal(err)
-	}
-	if restored.GetActivePlan() == nil || !strings.Contains(restored.GetActivePlan().RenderMarkdown(), "Scoped plan verified") {
-		t.Fatal("plan not restored")
+	restoredPlan := restored.Agent.ToolIndex.GetToolEntry("write_file").Tool.(*chatRuntimeTool).binding.plan
+	if restoredPlan.runtime == nil || !strings.Contains(restoredPlan.runtime.Snapshot().Document.Results, "Scoped plan verified") {
+		t.Fatal("plan results not restored")
 	}
 }
 
@@ -178,10 +202,16 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 			if err := ods.Teams().AddMember(f.ctx, &store.TeamMembership{UserID: p.Subject, TeamID: team.ID, Role: "member"}); err != nil {
 				t.Fatal(err)
 			}
+			fileFactory := f.services.BotFilesFactory
 			f.services, err = BotChatServicesForOwner(ods, p, scope)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Retain live authority dependencies for the real SQLite memberships.
+			f.services.Platform, f.services.TenantRouter = db, db
+			// Owner-scoped stores do not provision a filesystem. Keep the explicit
+			// confined file fixture required by the production factory.
+			f.services.BotFilesFactory = fileFactory
 			repo := f.services.Bots
 			dbPath := filepath.Join(dir, "orgs", p.OrgSlug, "teams", p.TeamSlug+".db")
 			if scope == store.BotScopePersonal {
@@ -269,34 +299,26 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 				t.Fatalf("agent save lost server-bound inferred attribution: %+v", attribution)
 			}
 			// Attributed text cannot inherit the old claim's provenance through overwrite.
-			for _, entry := range r.Agent.Tools {
-				if entry.Name() == "memory_save" {
-					out, e := entry.(botRunnableTool).Run(c, map[string]any{"category": "facts", "content": "quasar replacement", "overwrite": true})
-					if !errors.Is(e, store.ErrBotConflict) || !strings.Contains(e.Error(), "owner correction") || out["saved"] == true {
-						t.Fatalf("attributed overwrite needs actionable correction, not false success: %v %v", out, e)
-					}
-				}
+			entry := r.Agent.ToolIndex.GetToolEntry("memory_save")
+			if entry == nil {
+				t.Fatal("memory_save missing from shared catalog")
 			}
-			unchanged, err := f.services.Memory.Get(f.ctx, results.Results[0].ID)
-			if err != nil || unchanged.Snippet != "quasar source evidence" || !reflect.DeepEqual(unchanged.Attribution, attribution) {
-				t.Fatalf("rejected overwrite altered historical provenance: %+v %v", unchanged, err)
+			out, e := entry.Tool.(botRunnableTool).Run(c, map[string]any{"category": "facts", "content": "quasar replacement", "overwrite": true})
+			if !errors.Is(e, store.ErrBotConflict) || !strings.Contains(e.Error(), "owner correction") || out["saved"] == true {
+				t.Fatalf("attributed overwrite needs actionable correction, not false success: %v %v", out, e)
 			}
-			// Explicit legacy fixture: unattributed, current-run rows retain the old
-			// overwrite contract. Newly saved agent facts must never take this path.
-			if err := f.services.Memory.Add(f.ctx, store.MemoryEntry{Content: "legacy original", Category: "legacy", SessionID: run.SessionID.String(), CreatedBy: p.Subject}); err != nil {
-				t.Fatal(err)
-			}
-			basicCall(t, r, c, "memory_save", map[string]any{"category": "legacy", "content": "quasar replacement", "overwrite": true})
-			legacy, err := f.services.Memory.ListBySession(f.ctx, run.SessionID.String())
+			memory, err := repo.(store.BotMemoryStoreProvider).BotMemoryStore(b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			legacyUpdated := false
-			for _, row := range legacy {
-				legacyUpdated = legacyUpdated || row.Category == "legacy" && row.Snippet == "quasar replacement" && row.Attribution == nil
+			unchanged, err := memory.Get(f.ctx, results.Results[0].ID)
+			if err != nil || unchanged == nil || unchanged.Snippet != "quasar source evidence" || !reflect.DeepEqual(unchanged.Attribution, attribution) {
+				t.Fatalf("rejected overwrite altered historical provenance: %+v %v", unchanged, err)
 			}
-			if !legacyUpdated {
-				t.Fatal("legacy overwrite lost compatibility")
+			// Generic memory is not a Bot content store after cutover.
+			generic, err := f.services.Memory.ListBySession(f.ctx, run.SessionID.String())
+			if err != nil || len(generic) != 0 {
+				t.Fatalf("Bot facts leaked into generic SQL memory: %+v %v", generic, err)
 			}
 			testBotForgottenMemoryProvider(t, f, r, c, run.SessionID.String())
 		})
@@ -305,23 +327,33 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 
 func TestBotBasicPlanVerifierCannotBypassPolicy(t *testing.T) {
 	f := newBotFactoryFixture(t)
-	calls := 0
-	shell, _ := functiontool.New(functiontool.Config{Name: "shell_command", Description: "Must not execute"}, func(tool.Context, map[string]any) (map[string]any, error) {
-		calls++
-		return map[string]any{"exit_code": 0}, nil
-	})
+	writes := 0
+	write := basicPlanWrite(t)
+	client := &basicPlanNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
+		writes++
+		return write(name, args)
+	}}
+	guard := &planExactGrantGuard{grants: map[string]execution.ScopedGrant{}, calls: map[string]int{}}
 	prepare := f.cfg.Prepare
 	f.cfg.Prepare = func(c context.Context, q bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 		r, e := prepare(c, q, s)
-		r.Tools = []tool.Tool{shell}
+		r.Catalog.Pool = &basicPlanPool{client: client}
+		r.PolicyRuntime.Guard = basicPlanGuard{exact: guard}
 		return r, e
 	}
-	r, c := basicFactory(t, f, "update_plan")
-	r.Agent.SetActivePlan(agent.NewPlanState("Guarded", agent.PlanDocumentInfo{}, []agent.PlanStepInfo{{Name: "verify", Verify: "printf prohibited", VerifyKind: "behavior"}}))
-	r.Agent.MarkActivePlanApproved()
+	allowed := []string{"update_plan", "write_file"}
+	r, c := basicFactory(t, f, allowed...)
+	// Shared Chat restores the authoritative snapshot, not the old mutable
+	// Agent.ActivePlan pointer. Seed an approved running phase to exercise its verifier.
+	snapshot := agent.PlanSnapshot{PlanID: uuid.NewString(), Revision: 1, Sequence: 1, Goal: "Guarded", Document: agent.PlanDocumentInfo{Lifecycle: agent.PlanLifecycleApproved}, Steps: []agent.PlanStepInfo{{Name: "verify", Status: "running", Verify: "printf prohibited", VerifyKind: "behavior"}}}
+	if err := f.sessions.AppendEvent(c, sForBasicRestore(t, f), &session.Event{Actions: session.EventActions{StateDelta: map[string]any{agent.PlanSnapshotStateKey: snapshot}}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := r.Agent.ToolIndex.GetToolEntry("write_file").Tool.(*chatRuntimeTool).binding.plan
+	basicApprovePlanMirrors(t, plan, guard, &snapshot, allowed)
 	out := basicCall(t, r, c, "update_plan", map[string]any{"step": "verify", "status": "complete"})
-	if out["status"] != agent.PlanStepVerifyFailed || calls != 0 {
-		t.Fatalf("verify bypass: %v calls=%d", out, calls)
+	if out["status"] != agent.PlanStepVerifyFailed || writes != guard.calls["write_file"] || writes == 0 {
+		t.Fatalf("verify bypass: %v calls=%d", out, writes)
 	}
 }
 

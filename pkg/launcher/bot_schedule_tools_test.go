@@ -70,10 +70,17 @@ func scheduleFixture(t *testing.T, scope store.BotScope) (*botFactoryFixture, st
 	if err := ods.Teams().AddMember(f.ctx, &store.TeamMembership{UserID: p.Subject, TeamID: team.ID, Role: "admin"}); err != nil {
 		t.Fatal(err)
 	}
+	fileFactory := f.services.BotFilesFactory
 	f.services, err = BotChatServicesForOwner(ods, p, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Supply the same live authority dependencies as production tenant loading.
+	// The users and memberships above must be checked at model/tool boundaries.
+	f.services.Platform, f.services.TenantRouter = db, db
+	// Store scoping does not provision retained Home files. Preserve the explicit
+	// file capability and critical documents seeded by newBotFactoryFixture.
+	f.services.BotFilesFactory = fileFactory
 	if f.services.Scheduler == nil {
 		t.Fatal("owner-scoped services omitted the team scheduler")
 	}
@@ -226,7 +233,7 @@ func TestBotScheduleToolsReviewedLifecycle(t *testing.T) {
 				}
 			}
 			r, c = scheduleFactory(t, f, repo)
-			for _, entry := range r.Agent.Tools {
+			for _, entry := range factoryCatalogTools(t, r) {
 				if entry.Name() == "update_scheduled_job" {
 					_, err := entry.(botRunnableTool).Run(c, map[string]any{"job_id": proposal.JobID, "schedule": "0 10 * * *", "enabled": true})
 					if !errors.Is(err, store.ErrBotInvalid) {
@@ -286,7 +293,7 @@ func TestBotScheduleToolsForeignAndUnsafeRequests(t *testing.T) {
 		{"schedule_job", map[string]any{"name": "bad", "mode": "adaptive", "schedule": "0 9 * * *", "instructions": "test", "delivery_mode": "team"}, store.ErrBotUnsupported},
 	} {
 		t.Run(tc.name+"/"+tc.want.Error(), func(t *testing.T) {
-			for _, entry := range r.Agent.Tools {
+			for _, entry := range factoryCatalogTools(t, r) {
 				if entry.Name() == tc.name {
 					_, err := entry.(botRunnableTool).Run(c, tc.args)
 					if !errors.Is(err, tc.want) && !(tc.want == store.ErrBotUnsupported && err != nil && strings.Contains(err.Error(), "validating")) {
@@ -311,7 +318,7 @@ func TestBotScheduleToolsSchemaParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range ordinary {
-		for _, got := range r.Agent.Tools {
+		for _, got := range factoryCatalogTools(t, r) {
 			if want.Name() != got.Name() {
 				continue
 			}
@@ -379,7 +386,7 @@ func TestBotScheduleToolsEffectiveBinding(t *testing.T) {
 	if err := f.services.PersonalScheduler.Update(f.ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range r.Agent.Tools {
+	for _, entry := range factoryCatalogTools(t, r) {
 		if entry.Name() == "list_scheduled_jobs" {
 			if _, err := entry.(botRunnableTool).Run(c, map[string]any{}); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("foreign binding exposed %v", err)
@@ -535,7 +542,7 @@ func TestBotScheduleToolsRequireBackendAndExactApproval(t *testing.T) {
 		return r, err
 	}
 	r, c := scheduleFactory(t, f, repo)
-	for _, entry := range r.Agent.Tools {
+	for _, entry := range factoryCatalogTools(t, r) {
 		if entry.Name() != "schedule_job" {
 			continue
 		}

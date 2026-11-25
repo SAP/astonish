@@ -96,15 +96,16 @@ func TestBotHomeManifestIsolationAndNilCompatibility(t *testing.T) {
 	for _, c := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 		for _, m := range c.VolumeMounts {
 			if m.Name == volumeBotHome {
-				if m.SubPath == "" || !strings.HasPrefix(m.SubPath, h.Scope.Key()) || m.MountPath != mountBotHome {
+				if m.SubPath == "" || !strings.HasPrefix(m.SubPath, h.Scope.Key()) || (m.MountPath != mountBotHome && m.MountPath != mountBotHomeScope) {
 					t.Fatalf("unsafe mount: %+v", m)
 				}
 			}
 		}
 	}
-	m := pod.Spec.Containers[0].VolumeMounts[len(pod.Spec.Containers[0].VolumeMounts)-1]
-	if m.SubPath != h.Scope.Key()+"/data" {
-		t.Fatal("workload exposes ownership metadata")
+	mounts := pod.Spec.Containers[0].VolumeMounts
+	data, scope := mounts[len(mounts)-2], mounts[len(mounts)-1]
+	if data.SubPath != h.Scope.Key()+"/data" || data.MountPath != mountBotHome || scope.SubPath != h.Scope.Key() || scope.MountPath != mountBotHomeScope {
+		t.Fatal("incorrect data or outer compiled-storage scope mount")
 	}
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
 		t.Fatal("workload can access control-plane metadata")

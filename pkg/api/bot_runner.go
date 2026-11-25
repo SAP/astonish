@@ -14,7 +14,9 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/question"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -26,6 +28,14 @@ import (
 // must belong to this request. SessionService is the existing scoped store; the
 // adapter never creates/replaces sessions or changes their execution owner.
 type BotChatResources struct {
+	// RecoverFileDelivery saves existing complete text once, without model or tools.
+	RecoverFileDelivery func(context.Context, string) ([]store.BotArtifact, error)
+	// RepairFileDelivery creates a new immutable Markdown revision under the same grant.
+	RepairFileDelivery func(context.Context, string, int) ([]store.BotArtifact, error)
+	// PublishedFiles reads trusted run-local snapshot receipts, never model JSON.
+	// ArtifactBody opens only an exact trusted run-local immutable receipt.
+	ArtifactBody   func(context.Context, store.BotArtifact) ([]byte, error)
+	PublishedFiles func() []store.BotArtifact
 	// ProgressDispatch attests that the factory wired this exact capability to
 	// all models and executable tool views; nil keeps progress fail-closed.
 	ProgressDispatch bot.ProgressDispatch
@@ -120,6 +130,16 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		status = store.RunInterrupted
 		report.Failure.Kind = store.BotReportFailureInterrupted
 	}
+	var existing *bot.RunError
+	if errors.As(cause, &existing) && existing != nil && existing.UncertainEffect {
+		// Preserve the no-replay outcome and diagnostic wrappers without mutating
+		// the caller's error, even when its cause is cancellation or a budget stop.
+		preserved := *existing
+		preserved.Cause = cause
+		failure = &preserved
+		status = store.RunPartial
+		report.EffectState = store.BotReportEffectsUncertain
+	}
 	message := bot.EmployeeMessageFallback(status, report, cause)
 	report.EmployeeMessage = &message
 	return bot.RunResult{Status: status, Failure: failure, Report: report}, failure
@@ -211,6 +231,26 @@ func (a *BotChatRuntimeAdapter) Start(ctx context.Context, req bot.RunRequest, s
 }
 
 func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest, sink bot.EventSink, resume bool) (result bot.RunResult, err error) {
+	startup := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageStartup)
+	defer func() { startup(err) }()
+	ownerSetup := entstore.ObserveBotExecutionStageSince(ctx, entstore.BotStageOwnerSetup, req.Run.CreatedAt)
+	defer func() {
+		if err != nil {
+			ownerSetup(err)
+		} else {
+			ownerSetup(store.ErrBotConflict)
+		}
+	}() // a successful run with no committed text is not an acknowledgment
+	originalSink := sink
+	if sink != nil {
+		sink = func(c context.Context, event bot.RuntimeEvent) error {
+			err := originalSink(c, event)
+			if err == nil && event.Type == "text" {
+				ownerSetup(nil) // only after durable transcript sink acknowledgment
+			}
+			return err
+		}
+	}
 	if req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion {
 		req.Work = nil // clarification has no producer, journal or Task publication
 	}
@@ -227,6 +267,8 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		ctx = execution.WithBotTurnAuthorizer(ctx, req.Authorization)
 	}
 	ctx = context.WithValue(ctx, botChatBudgetKey{}, req.Budget)
+	ctx = entstore.WithImmutableReadWindow(ctx)
+	defer entstore.EndImmutableReadWindow(ctx)
 	ctx, _ = bot.WithToolOutcomes(ctx)
 	ctx = store.WithSessionID(ctx, req.Run.SessionID.String())
 	ctx = store.WithUserID(ctx, req.Bot.OwnerID.String())
@@ -272,8 +314,9 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		ctx = bot.WithProgressController(ctx, &bot.ProgressController{Boundary: progress.Boundary})
 	}
 	interaction, _ := ctx.Value(botResumeInteractionKey{}).(*store.BotApproval)
+	preparedResume, _ := ctx.Value(botPreparedPlanResumeKey{}).(*store.BotPreparedPlan)
 	var capture *botApprovalCapture
-	if !resume || interaction != nil || ordinaryResume {
+	if !resume || interaction != nil || ordinaryResume || preparedResume != nil {
 		if s := bot.ApprovalStoreFromContext(ctx); s != nil {
 			capture = &botApprovalCapture{store: s, req: req}
 			ctx = bot.WithInteractionOwner(ctx)
@@ -281,6 +324,9 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 			runtime.Approvals = capture
 			ctx = agent.WithBotPolicyRuntime(ctx, runtime)
 		}
+	}
+	if plans, ok := bot.ApprovalStoreFromContext(ctx).(store.BotPreparedPlanStore); ok {
+		ctx = context.WithValue(ctx, botPreparedPlanSessionKey{}, &BotPreparedPlanSession{Request: req, Store: plans, Resume: preparedResume, capture: capture})
 	}
 	var workService *botAgentWorkService
 	if req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 && (!resume || interaction != nil || ordinaryResume) {
@@ -295,7 +341,20 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	}
 	setupTimer := time.AfterFunc(setupTimeout, cancel)
 	defer setupTimer.Stop()
+	overrides := agent.NewBotPromptOverrides(agent.PromptOverridesFromContext(ctx), req)
+	overrides.PlanMode = req.PlanMode
+	overrides.GraphPlanMode, overrides.AskMode = false, false
+	overrides.ApprovedPlanExecution, overrides.ApprovedPlanExecutionExplicit = false, false
+	if interaction != nil && interaction.Interaction != nil && interaction.Interaction.Kind == store.BotInteractionPlanDefinition {
+		overrides.ApprovedPlanExecution, overrides.ApprovedPlanExecutionExplicit = true, true
+	}
+	if req.PlanMode {
+		overrides.SessionContext += "\n" + agent.PlanModeSystemContext
+	}
+	ctx = agent.WithPromptOverrides(ctx, overrides)
+	factoryTiming := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageFactory)
 	resources, err := a.factory(ctx, req)
+	factoryTiming(err)
 	if setupTimer != nil {
 		setupTimer.Stop()
 	}
@@ -325,8 +384,11 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	if resources.Agent.SessionService != resources.SessionService {
 		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
 	}
-	if req.Run.Intent != store.BotIntentRegular || req.Run.Presentation == store.BotRunPresentationHomeInteractive {
+	if interaction != nil || req.Run.Intent != store.BotIntentRegular || req.Run.Presentation == store.BotRunPresentationHomeInteractive {
 		transcript := resources.Transcript
+		if transcript == nil && interaction != nil && capture != nil {
+			transcript, _ = capture.store.(store.BotTranscriptStore)
+		}
 		if transcript == nil {
 			return botChatFailure(bot.ErrorPermission, store.ErrBotUnsupported)
 		}
@@ -347,8 +409,12 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	if existing == nil || existing.Session == nil || existing.Session.ID() != req.Run.SessionID.String() || existing.Session.UserID() != req.Bot.OwnerID.String() || existing.Session.AppName() != resources.AppName {
 		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
 	}
+	if preparedResume != nil {
+		startup(nil)
+		return executePreparedPlan(ctx, req, resources, capture, existing.Session.State(), preparedResume)
+	}
 	if progress != nil {
-		ctx, err = progress.compose(ctx, resources)
+		ctx, err = progress.compose(ctx, resources, existing.Session)
 		if err != nil {
 			return botChatFailure(bot.ErrorBlocked, err)
 		}
@@ -368,7 +434,8 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		if !ok {
 			return botChatFailure(bot.ErrorBlocked, store.ErrBotUnsupported)
 		}
-		resources.Agent.LLM = &botResumeModel{LLM: resources.Agent.LLM, action: action}
+		guard, _ := agent.BotPolicyRuntimeFromContext(ctx).Guard.(*botResumeGuard)
+		resources.Agent.LLM = &botResumeModel{LLM: resources.Agent.LLM, action: action, prepared: preparedResume != nil, guard: guard}
 	}
 	var sequence int64
 	if resources.ResearchFactory != nil {
@@ -406,6 +473,7 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 			return BotEmployeeResearchResult{Result: result, Completion: completion}, err
 		})
 	}
+	startup(nil)
 	produce := func(attemptReq bot.RunRequest, attemptInteraction *store.BotApproval, completion *ChatCompletion) (bot.RunResult, error) {
 		return runBotChatAttempt(ctx, attemptReq, resources, sink, capture, existing, attemptInteraction, resume, &sequence, completion)
 	}
@@ -425,6 +493,14 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	}
 	result, runErr := runBotWork(ctx, req, resources, auxiliary, resume && interaction == nil && !ordinaryResume, func(attemptReq bot.RunRequest, completion *ChatCompletion) (bot.RunResult, error) {
 		result, err := produce(attemptReq, interaction, completion)
+		if err != nil {
+			return result, fmt.Errorf("produce interaction=%t capture=%t work_revision=%d: %w", interaction != nil, capture != nil, func() int64 {
+				if attemptReq.Work != nil {
+					return attemptReq.Work.Revision
+				}
+				return 0
+			}(), err)
+		}
 		interaction = nil // an owner answer is consumed only once
 		if conversation, ok := resources.SessionService.(botConversationSessions); ok {
 			conversation.internalInput = true
@@ -436,6 +512,8 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	// Auxiliary employee assessment calls also reserve durable dispatches. Their
 	// returned iterators have drained now; settle them before the supervisor's
 	// final commit, not only at the last producer/tool boundary.
+	completionTiming := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageCompletion)
+	defer func() { completionTiming(err) }()
 	if result.ProgressCheckpoint == nil {
 		if controller := bot.ProgressControllerFromContext(ctx); controller != nil && controller.Boundary != nil {
 			runErr = errors.Join(runErr, controller.Boundary(ctx))
@@ -518,7 +596,40 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	if interaction != nil {
 		message, err = botInteractionAnswerMessage(existing.Session.Events(), interaction)
 		if err != nil {
-			return botChatFailure(bot.ErrorBlocked, err)
+			if transcript, ok := capture.store.(store.BotTranscriptReader); ok {
+				if rows, readErr := transcript.ReadBotTranscript(ctx, req.Run.SessionID, 0, 200); readErr == nil {
+					events := make([]*session.Event, 0, len(rows))
+					for _, row := range rows {
+						if row.Event != nil {
+							events = append(events, row.Event)
+						}
+					}
+					message, err = store.BotInteractionAnswerMessage(events, interaction)
+				}
+			}
+			if err != nil && req.Run.TitleConfirmation != nil && req.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed && req.Run.TitleConfirmation.ApprovalID == interaction.ID {
+				// Initial title confirmation may be resumed after Home provisioning
+				// moved the source transcript to retained storage. Its confirmed
+				// assignment and approval binding are already repository-validated;
+				// construct the same typed owner event without weakening later-question
+				// call/response correlation.
+				var q question.Question
+				if json.Unmarshal(interaction.Interaction.Payload, &q) == nil {
+					label := interaction.Response.Answer
+					for _, option := range q.Options {
+						if option.ID == label && option.Label != "" {
+							label = option.Label
+						}
+					}
+					raw, marshalErr := json.Marshal(map[string]any{"type": "bot_owner_answer", "approval_id": interaction.ID, "tool": "ask_user", "response": interaction.Response, "display": map[string]string{"prompt": q.Prompt, "answer": label}})
+					if marshalErr == nil {
+						message, err = genai.NewContentFromText(string(raw), "user"), nil
+					}
+				}
+			}
+			if err != nil {
+				return botChatFailure(bot.ErrorBlocked, fmt.Errorf("build owner answer message: %w", err))
+			}
 		}
 		if err := req.Budget.Check(ctx); err != nil {
 			return botChatFailure(bot.ErrorBudget, err)
@@ -529,12 +640,15 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 			return botChatFailure(bot.ErrorBlocked, store.ErrBotUnsupported)
 		}
 		if err := capture.store.ConsumeApproval(ctx, store.BotApprovalConsumption{Lease: req.Run.Lease, ApprovalID: interaction.ID, Version: req.Run.Version, ActionDigest: interaction.ActionDigest}); err != nil {
-			return botChatFailure(bot.ErrorBlocked, err)
+			return botChatFailure(bot.ErrorBlocked, fmt.Errorf("consume owner answer: %w", err))
 		}
 	}
 	// No title model call and no interactive auto-approval in Bot mode.
 	cr.Run(resources.Agent, resources.SessionService, resources.Agent.LLM, nil, message, req.Instructions, false, "", nil, false)
 	completion := cr.Completion()
+	if completion.Err != nil {
+		completion.Err = fmt.Errorf("chat runner: %w", completion.Err)
+	}
 	if journal, ok := ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal); ok {
 		completion.Report.EffectState = journal.effectState()
 	}
@@ -582,6 +696,9 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 		if state != nil && state.Phase == store.BotProgressSuspended {
 			return bot.RunResult{Status: store.RunQueued, ProgressCheckpoint: state, Usage: state.Checkpoint.Usage}, nil
 		}
+	}
+	if resources.PublishedFiles != nil {
+		completion.Report.Artifacts = append(completion.Report.Artifacts, resources.PublishedFiles()...)
 	}
 	*completed = completion
 	// Preserve observed accounting on every exit, including blocked/failed runs.
@@ -710,7 +827,16 @@ type botConversationSessions struct {
 // retains its own identity/state and writes; no history is copied or re-persisted.
 func (s botConversationSessions) Get(ctx context.Context, q *session.GetRequest) (*session.GetResponse, error) {
 	result, err := s.Service.Get(ctx, q)
+	if err == nil && result != nil && result.Session != nil && s.answerEventID != "" {
+		// ADK appends the submitted input before composing its model request.
+		// Hide only this already-durable input in the producer view, so ADK
+		// reuses it once instead of seeing both restored and submitted copies.
+		result.Session = botAnswerInputSession{Session: result.Session, answerID: s.answerEventID}
+	}
 	if err != nil || s.home == uuid.Nil || q.SessionID != s.id.String() {
+		if err == nil && s.answerEventID != "" && result != nil && result.Session != nil {
+			result.Session = &botConversationSession{Session: result.Session}
+		}
 		return result, err
 	}
 	homeRequest := *q
@@ -725,6 +851,9 @@ func (s botConversationSessions) Get(ctx context.Context, q *session.GetRequest)
 	// The home contains mirrored current-run events too. Exclude their IDs so
 	// each event reaches the model once, with prior history preceding this run.
 	current := map[string]bool{}
+	if s.answerEventID != "" {
+		current[s.answerEventID] = true
+	}
 	for e := range result.Session.Events().All() {
 		current[e.ID] = true
 	}
@@ -754,17 +883,50 @@ type botConversationSession struct {
 	session.Session
 	prior    []*session.Event
 	appended []*session.Event
+	eventIDs map[string]struct{} // built once for idempotent canonical transcript appends
 }
 
 func (s botConversationSession) Events() session.Events {
-	prior := append([]*session.Event(nil), s.prior...)
+	var current session.Events
 	if s.Session != nil {
-		for e := range s.Session.Events().All() {
-			prior = append(prior, e)
+		current = s.Session.Events()
+	}
+	// Compose indexed views rather than copying every old event on each call.
+	// Progress can now advance its cursor without rescanning irrelevant history.
+	return botConversationEvents{prior: s.prior, current: botConversationAppendEvents{current: current, appended: s.appended}}
+}
+
+type botConversationAppendEvents struct {
+	current  session.Events
+	appended []*session.Event
+}
+
+func (e botConversationAppendEvents) Len() int {
+	if e.current == nil {
+		return len(e.appended)
+	}
+	return e.current.Len() + len(e.appended)
+}
+func (e botConversationAppendEvents) At(i int) *session.Event {
+	if i < 0 || i >= e.Len() {
+		return nil
+	}
+	if e.current != nil {
+		if i < e.current.Len() {
+			return e.current.At(i)
+		}
+		i -= e.current.Len()
+	}
+	return e.appended[i]
+}
+func (e botConversationAppendEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {
+		for i := 0; i < e.Len(); i++ {
+			if !yield(e.At(i)) {
+				return
+			}
 		}
 	}
-	prior = append(prior, s.appended...)
-	return botConversationEvents{prior: prior}
 }
 
 type botConversationEvents struct {
@@ -779,6 +941,9 @@ func (e botConversationEvents) Len() int {
 	return len(e.prior) + e.current.Len()
 }
 func (e botConversationEvents) At(i int) *session.Event {
+	if i < 0 || i >= e.Len() {
+		return nil
+	}
 	if i < len(e.prior) {
 		return e.prior[i]
 	}
@@ -802,9 +967,36 @@ func (e botConversationEvents) All() iter.Seq[*session.Event] {
 	}
 }
 
+func (s *botConversationSession) appendCanonical(e *session.Event) {
+	if s.eventIDs == nil {
+		s.eventIDs = make(map[string]struct{})
+		for existing := range s.Events().All() {
+			if existing != nil {
+				s.eventIDs[existing.ID] = struct{}{}
+			}
+		}
+	}
+	if _, exists := s.eventIDs[e.ID]; exists {
+		return
+	}
+	s.eventIDs[e.ID] = struct{}{}
+	s.appended = append(s.appended, e)
+}
+
 func (s botConversationSessions) AppendEvent(ctx context.Context, sess session.Session, e *session.Event) error {
+	// Synthetic Chat failures are trusted source-run diagnostics, not Home
+	// narration. Home receives the committed employee report exactly once.
+	if isSyntheticRunError(e) {
+		if wrapped, ok := sess.(*botConversationSession); ok {
+			sess = wrapped.Session
+		}
+		if answer, ok := sess.(botAnswerInputSession); ok {
+			sess = answer.Session
+		}
+		return s.Service.AppendEvent(ctx, sess, e)
+	}
 	if wrapped, ok := sess.(*botConversationSession); ok {
-		if s.userEventID != "" && !e.Partial && e.Content != nil {
+		if (s.userEventID != "" || s.answerEventID != "") && !e.Partial && e.Content != nil {
 			copy := *e
 			if e.Author == "user" && !s.internalInput && e.Actions.StateDelta["_astonish_turn_context"] != true {
 				copy.ID = s.userEventID
@@ -818,15 +1010,15 @@ func (s botConversationSessions) AppendEvent(ctx context.Context, sess session.S
 			// Orientation may already have pinned this canonical owner event in
 			// the run. The transcript write is idempotent; mirror that property
 			// in the in-memory view so the producer sees the admission once.
-			for existing := range wrapped.Events().All() {
-				if existing.ID == copy.ID {
-					return nil
-				}
-			}
-			wrapped.appended = append(wrapped.appended, &copy)
+			wrapped.appendCanonical(&copy)
 			return nil
 		}
 		sess = wrapped.Session
+	}
+	// Read-only producer projections must never reach a concrete session store;
+	// state-only events still update the original native session.
+	if answer, ok := sess.(botAnswerInputSession); ok {
+		sess = answer.Session
 	}
 	if e.Content != nil && !e.Partial {
 		if err := s.transcript.AppendBotRunEvent(ctx, s.lease, s.id, e); err != nil {

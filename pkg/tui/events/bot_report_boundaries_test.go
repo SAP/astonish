@@ -71,6 +71,55 @@ func TestBotScheduledReportsKeepDistinctCompletedBodies(t *testing.T) {
 	}
 }
 
+// Committed useful partial and known-denied results must survive both layouts
+// verbatim. The consumer must not replace them with a generic failure warning.
+func TestBotEmployeeCanonicalReportLiveReplay(t *testing.T) {
+	for _, linear := range []bool{false, true} {
+		for _, body := range []string{
+			"Apple Inc. launched a new device. Source: https://fixture.test/product.",
+			"Apple Inc. launched a new device. Market coverage is unavailable; this is a partial result.",
+			"Search was denied by the saved scope before dispatch. No source was retrieved.",
+			"The write outcome is unconfirmed. Do not repeat the action until its result is reconciled.",
+		} {
+			t.Run(fmt.Sprintf("linear=%t/%s", linear, body), func(t *testing.T) {
+				journal := []Event{
+					NewUser("Apple Inc. launches and market developments"),
+					NewText("I'll investigate launches and market developments."),
+					NewToolCall("perplexity_web_search", "search-employee", map[string]any{"query": "Apple Inc."}),
+					NewToolResult("perplexity_web_search", "search-employee", "source response"),
+					NewBotReport("bot-report:11111111-1111-4111-8111-111111111111", "employee-final", body),
+					NewDone(),
+				}
+				live, restored := NewTranscript(), NewTranscript()
+				live.LinearThread, restored.LinearThread = linear, linear
+				for _, ev := range journal {
+					live.Apply(ev)
+				}
+				for _, ev := range journal {
+					restored.Apply(ev)
+				}
+				if !reflect.DeepEqual(live.Items, restored.Items) {
+					t.Fatal("employee live/replay chronology differs")
+				}
+				for _, tr := range []*Transcript{live, restored} {
+					count := 0
+					for _, item := range tr.Items {
+						if item.Kind == ItemAgent && item.Content == body {
+							count++
+							if item.Provisional {
+								t.Fatal("committed employee body became provisional")
+							}
+						}
+					}
+					if count != 1 || tr.Streaming {
+						t.Fatalf("employee body count=%d streaming=%t", count, tr.Streaming)
+					}
+				}
+			})
+		}
+	}
+}
+
 func assertCompletedBotBodies(t *testing.T, tr *Transcript, want []string, stage string) {
 	t.Helper()
 	var got []string

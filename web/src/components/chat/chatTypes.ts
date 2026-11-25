@@ -178,6 +178,15 @@ export interface FleetEvent {
   [key: string]: unknown
 }
 
+export interface FileAccessAdapter {
+  identity: string
+  freshness: string
+  preview: boolean
+  readPreview(signal: AbortSignal): Promise<{ content: string; truncated: boolean }>
+  download(signal: AbortSignal): Promise<void>
+}
+export interface BotFilePublicationMessage { type: 'bot_file_publication'; publication: import('@/api/botFiles').BotFilePublication }
+
 export interface ArtifactMessage {
   type: 'artifact'
   path: string
@@ -481,6 +490,7 @@ export interface BotOperationMessage { type: 'bot_operation'; operationId: strin
 export interface BotReviewMessage { type: 'bot_review'; kind: 'proposal' | 'approval'; reviewId: string; eventId: string; question?: import('@/api/questions').Question }
 
 export type ChatMsg = InvocationScopedMessage & (
+  | BotFilePublicationMessage
   | BotOperationMessage
   | BotReviewMessage
   | FleetMessageItem

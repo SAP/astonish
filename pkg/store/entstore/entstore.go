@@ -41,6 +41,7 @@ const (
 // Store is the top-level unified store implementation.
 // It satisfies store.PlatformBackend.
 type Store struct {
+	botContentHome         botContentHomeRuntime
 	botActivationMu        sync.RWMutex
 	botActivationReadiness store.BotActivationReadiness
 	dialect                Dialect

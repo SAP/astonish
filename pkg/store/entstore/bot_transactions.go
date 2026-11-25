@@ -76,15 +76,17 @@ type botStoredRecord struct {
 }
 
 type botStoredRun struct {
-	ProgressOwnerContinuation *botProgressOwnerContinuation `json:"progress_owner_continuation,omitempty"`
-	CoalescedOccurrences      int64                         `json:"coalesced_occurrences,omitempty"`
-	Progress                  *store.BotProgressState       `json:"progress,omitempty"`
-	ProgressCursor            int64                         `json:"progress_cursor,omitempty"`
-	ProgressPending           int64                         `json:"progress_pending,omitempty"`
-	ProgressUncertain         bool                          `json:"progress_uncertain,omitempty"`
-	ProgressAccountedAt       time.Time                     `json:"progress_accounted_at,omitempty"`
-	ProgressQuota             *mandateRunUsage              `json:"progress_quota,omitempty"`
-	Task                      *store.BotTaskRevision        `json:"task,omitempty"`
+	PlanMode                  bool                             `json:"plan_mode,omitempty"`
+	PreparedPlans             map[string]store.BotPreparedPlan `json:"prepared_plans,omitempty"`
+	ProgressOwnerContinuation *botProgressOwnerContinuation    `json:"progress_owner_continuation,omitempty"`
+	CoalescedOccurrences      int64                            `json:"coalesced_occurrences,omitempty"`
+	Progress                  *store.BotProgressState          `json:"progress,omitempty"`
+	ProgressCursor            int64                            `json:"progress_cursor,omitempty"`
+	ProgressPending           int64                            `json:"progress_pending,omitempty"`
+	ProgressUncertain         bool                             `json:"progress_uncertain,omitempty"`
+	ProgressAccountedAt       time.Time                        `json:"progress_accounted_at,omitempty"`
+	ProgressQuota             *mandateRunUsage                 `json:"progress_quota,omitempty"`
+	Task                      *store.BotTaskRevision           `json:"task,omitempty"`
 	// SkillAdmissionOwner is set only by authenticated, original manual RequestRun.
 	// It is not copied from tool input or inferred from a user-shaped transcript.
 	SkillAdmissionOwner        *uuid.UUID                `json:"skill_admission_owner,omitempty"`
@@ -207,6 +209,54 @@ func (r *botRepository) clock() time.Time {
 	return time.Now().UTC()
 }
 
+func (s *personalBotStore) WithBotFileCommit(ctx context.Context, home store.BotHomeBinding, lease store.BotLease, commit func() error) error {
+	return s.repository().withBotFileCommit(ctx, home, lease, commit)
+}
+func (s *teamBotStore) WithBotFileCommit(ctx context.Context, home store.BotHomeBinding, lease store.BotLease, commit func() error) error {
+	return s.repository().withBotFileCommit(ctx, home, lease, commit)
+}
+
+// withBotFileCommit uses the transcript/root fence so cancellation, Home rebinds,
+// and file commits share the same serialization point. No content is written to SQL.
+func (r *botRepository) withBotFileCommit(ctx context.Context, home store.BotHomeBinding, lease store.BotLease, commit func() error) error {
+	if commit == nil || home.ID == uuid.Nil || home.BotID != lease.BotID || home.Scope != r.auth.scope || home.Revision < 1 {
+		return store.ErrBotInvalid
+	}
+	if _, err := r.auth.authorize(ctx, uuid.Nil, true); err != nil {
+		return err
+	}
+	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+		fence, ok := tx.(botTranscriptDB)
+		if !ok {
+			return store.ErrBotUnsupported
+		}
+		if err := fence.fenceTranscript(ctx, lease, r.clock()); err != nil {
+			return err
+		}
+		if _, err := r.checkLease(ctx, tx, lease, r.clock()); err != nil {
+			return err
+		}
+		rec, err := tx.GetBot(ctx, home.BotID)
+		if err != nil {
+			return err
+		}
+		actor, err := r.auth.authorize(ctx, rec.Bot.OwnerID, true)
+		if err != nil {
+			return err
+		}
+		if actor != rec.Bot.OwnerID {
+			return store.ErrBotForbidden
+		}
+		if rec.Bot.Home != home {
+			return store.ErrBotConflict
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return commit()
+	})
+}
+
 func (r *botRepository) RequestRun(ctx context.Context, req store.BotRunRequest) (*store.BotRun, error) {
 	return r.requestRun(ctx, req, nil)
 }
@@ -215,6 +265,12 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
 	if err != nil {
 		return nil, err
+	}
+	if req.ApprovedPlanExecution || req.PlanExecution != nil {
+		return nil, store.ErrBotInvalid
+	}
+	if req.PlanMode != nil && (occurrence != nil || req.Trigger != store.TriggerManual) {
+		return nil, store.ErrBotInvalid
 	}
 	if err := store.ValidateSkillSelection(req.SkillID, req.Invocation); err != nil {
 		return nil, err
@@ -232,6 +288,20 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 	// bindings and scheduling transaction are installed. Never accept a forged cron.
 	if occurrence == nil && req.Trigger != store.TriggerManual {
 		return nil, store.ErrBotUnsupported
+	}
+	// Regular/manual and scheduled admissions also hydrate retained content.
+	// Prepare their authorized session before acquiring SQL locks.
+	if req.Intent == store.BotIntentRegular {
+		b, e := r.Get(ctx, req.BotID)
+		if e != nil {
+			return nil, e
+		}
+		if _, e = r.auth.authorize(ctx, b.OwnerID, false); e != nil {
+			return nil, e
+		}
+		if _, e = r.db.ReadVersion(ctx, req.BotID, b.Version); e != nil {
+			return nil, e
+		}
 	}
 	// Check external readiness without holding a scoped DB transaction. The
 	// revision and sequence CAS below reject concurrent lifecycle/configuration edits.
@@ -455,13 +525,16 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 				return err
 			}
 		}
+		if req.PlanMode != nil && actor != rec.Bot.OwnerID {
+			return store.ErrBotForbidden
+		}
 		var admissionOwner *uuid.UUID
 		_, workerAdmission := execution.BotRunIdentityFromContext(ctx)
 		if occurrence == nil && !workerAdmission && actor == rec.Bot.OwnerID {
 			owner := actor
 			admissionOwner = &owner
 		}
-		if err := tx.InsertRun(ctx, botStoredRun{Task: pinnedTask.Clone(), SkillAdmissionOwner: admissionOwner, Run: run, ExternalAdmissionValidated: occurrence != nil && occurrence.external != nil, RequestHash: hash, Instructions: req.Instructions, Attachments: req.Attachments, OccurrenceAt: req.OccurrenceAt}, rec.Bot.OwnerID); err != nil {
+		if err := tx.InsertRun(ctx, botStoredRun{PlanMode: req.PlanMode != nil && *req.PlanMode, Task: pinnedTask.Clone(), SkillAdmissionOwner: admissionOwner, Run: run, ExternalAdmissionValidated: occurrence != nil && occurrence.external != nil, RequestHash: hash, Instructions: req.Instructions, Attachments: req.Attachments, OccurrenceAt: req.OccurrenceAt}, rec.Bot.OwnerID); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status, "intent": store.BotOutboxDispatch, "actor_id": actor})
@@ -521,7 +594,9 @@ func (r *botRepository) authorizeWorker(ctx context.Context, id, runID uuid.UUID
 	}
 	return nil
 }
-func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest) (store.BotLease, error) {
+func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest) (out store.BotLease, outErr error) {
+	finish := ObserveBotExecutionStage(ctx, BotStageClaim)
+	defer func() { finish(outErr) }()
 	if _, err := r.auth.authorize(ctx, uuid.Nil, true); err != nil {
 		return store.BotLease{}, err
 	}
@@ -545,6 +620,11 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 		if !interactiveStatus(run.Run, rec.Bot.Status) || rec.Bot.Version != run.Run.Version || rec.ActiveRunID != nil || run.Run.Status != store.RunQueued {
 			return store.ErrBotConflict
 		}
+		queuedAt := run.Run.StateCommittedAt
+		if queuedAt.IsZero() {
+			queuedAt = run.Run.CreatedAt
+		}
+		ObserveBotExecutionStageSince(ctx, BotStageQueue, queuedAt)(nil)
 		if run.Run.Presentation != store.BotRunPresentationHomeInteractive || run.Run.Trigger == store.TriggerCron {
 			// Enforce priority inside the claim CAS transaction as well as in
 			// worker ordering: another scheduler must not slip past a queued owner.
@@ -616,17 +696,27 @@ func (r *botRepository) checkLease(ctx context.Context, tx botDraftDB, lease sto
 	if err != nil {
 		return nil, err
 	}
-	run, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
-	if err != nil {
+	var run store.BotRun
+	if reader, ok := tx.(botRunSQLControl); ok {
+		control, err := reader.readRunSQLControl(ctx, lease.BotID, lease.RunID)
+		if err != nil {
+			return nil, err
+		}
+		run = control.run()
+	} else {
+		saved, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
+		if err != nil {
+			return nil, err
+		}
+		run = saved.Run
+	}
+	if err := r.authorizeWorker(ctx, lease.BotID, lease.RunID, run.Version, rec.Bot.OwnerID); err != nil {
 		return nil, err
 	}
-	if err := r.authorizeWorker(ctx, lease.BotID, lease.RunID, run.Run.Version, rec.Bot.OwnerID); err != nil {
-		return nil, err
-	}
-	if !interactiveStatus(run.Run, rec.Bot.Status) || rec.Bot.Version != run.Run.Version || rec.ActiveRunID == nil || *rec.ActiveRunID != lease.RunID || rec.Fence != lease.Fence || run.Run.Status != store.RunRunning || run.Run.Lease.WorkerID != lease.WorkerID || run.Run.Lease.Fence != lease.Fence {
+	if !interactiveStatus(run, rec.Bot.Status) || rec.Bot.Version != run.Version || rec.ActiveRunID == nil || *rec.ActiveRunID != lease.RunID || rec.Fence != lease.Fence || run.Status != store.RunRunning || run.Lease.WorkerID != lease.WorkerID || run.Lease.Fence != lease.Fence {
 		return nil, store.ErrBotConflict
 	}
-	if rec.LeaseExpiresAt == nil || !now.Before(*rec.LeaseExpiresAt) || !now.Before(run.Run.Lease.ExpiresAt) {
+	if rec.LeaseExpiresAt == nil || !now.Before(*rec.LeaseExpiresAt) || !now.Before(run.Lease.ExpiresAt) {
 		return nil, store.ErrBotExpired
 	}
 	return rec, nil
@@ -647,6 +737,15 @@ func (r *botRepository) RenewLease(ctx context.Context, lease store.BotLease, ex
 		}
 		if _, err := r.checkLease(ctx, tx, lease, now); err != nil {
 			return err
+		}
+		if reader, ok := tx.(botRunSQLControl); ok {
+			control, err := reader.readRunSQLControl(ctx, lease.BotID, lease.RunID)
+			if err != nil {
+				return err
+			}
+			if !control.ProgressSet && control.ProgressCursor == 0 {
+				return tx.RenewRunLease(ctx, lease, now, expires.UTC())
+			}
 		}
 		saved, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
 		if err != nil {
@@ -704,7 +803,9 @@ func (r *botRepository) ListApprovals(ctx context.Context, id store.BotID, p sto
 	}
 	return r.db.ReadApprovals(ctx, id, limit, after)
 }
-func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a store.BotApproval) (*store.BotApproval, error) {
+func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a store.BotApproval) (out *store.BotApproval, outErr error) {
+	finish := ObserveBotExecutionStage(ctx, BotStageApproval)
+	defer func() { finish(outErr) }()
 	// SQLite compares stored timestamps lexically in CAS predicates. Normalize
 	// caller clocks so a live approval is not mistaken for expired by its offset.
 	a.ExpiresAt = a.ExpiresAt.UTC()
@@ -716,11 +817,14 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 		return nil, store.ErrBotInvalid
 	}
 	if a.BotID != l.BotID || a.RunID != l.RunID || a.ActionDigest != digest || a.Version < 1 {
-		return nil, store.ErrBotInvalid
+		return nil, fmt.Errorf("%w: approval identity, digest, or version mismatch", store.ErrBotInvalid)
 	}
 	if a.Interaction != nil {
-		if a.Interaction.Validate() != nil || a.Action.Tool != "ask_user" || !bytes.Equal(a.Action.Arguments, a.Interaction.Payload) {
-			return nil, store.ErrBotInvalid
+		if a.Interaction.Validate() != nil {
+			return nil, fmt.Errorf("%w: interaction payload invalid", store.ErrBotInvalid)
+		}
+		if a.Action.Tool != "ask_user" || !bytes.Equal(a.Action.Arguments, a.Interaction.Payload) {
+			return nil, fmt.Errorf("%w: interaction action does not match payload", store.ErrBotInvalid)
 		}
 	}
 	if a.Response != nil {
@@ -741,14 +845,17 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 			return store.ErrBotForbidden
 		}
 		if a.Version != rec.Bot.Version {
-			return store.ErrBotConflict
+			return fmt.Errorf("%w: approval version is not current", store.ErrBotConflict)
 		}
 		if !a.ExpiresAt.After(now) {
-			return store.ErrBotExpired
+			return fmt.Errorf("%w: approval expiry is not in the future", store.ErrBotExpired)
 		}
 		if c := saved.Run.TitleConfirmation; c != nil && c.State != store.BotTitleConfirmationConfirmed {
-			if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil || a.Action.Tool != "ask_user" || a.Action.Effect != execution.EffectRead || store.ValidateBotTitleQuestion(a.Interaction) != nil {
-				return store.ErrBotInvalid
+			if c.ValidateBinding(saved.Run, rec.Bot.OwnerID) != nil {
+				return fmt.Errorf("%w: title confirmation binding invalid", store.ErrBotInvalid)
+			}
+			if a.Action.Tool != "ask_user" || a.Action.Effect != execution.EffectRead || store.ValidateBotTitleQuestion(a.Interaction) != nil {
+				return fmt.Errorf("%w: title question shape invalid", store.ErrBotInvalid)
 			}
 			if c.State == store.BotTitleConfirmationWaiting {
 				old, err := tx.ReadApproval(ctx, l.BotID, c.ApprovalID)
@@ -788,14 +895,14 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 			}
 			saved.Run.TitleConfirmation = next
 			if err := persistTitleQuestion(ctx, tx, saved); err != nil {
-				return err
+				return fmt.Errorf("persist title question: %w", err)
 			}
 		}
 		if err := tx.InsertApproval(ctx, a); err != nil {
-			return err
+			return fmt.Errorf("insert approval: %w", err)
 		}
 		if err := botApprovalActivity(ctx, tx, a, rec.LastSequence+1, now); err != nil {
-			return err
+			return fmt.Errorf("append approval activity: %w", err)
 		}
 		result = &a
 		return nil
@@ -806,6 +913,9 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 	return result, nil
 }
 func botApprovalActivity(ctx context.Context, tx botDraftDB, a store.BotApproval, seq int64, now time.Time) error {
+	if err := appendAcceptedBotAnswer(ctx, tx, a); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(map[string]any{"approval_id": a.ID, "status": a.Status, "action_digest": a.ActionDigest})
 	if err != nil {
 		return err
@@ -813,7 +923,9 @@ func botApprovalActivity(ctx context.Context, tx botDraftDB, a store.BotApproval
 	if err = tx.InsertActivity(ctx, store.BotActivity{BotID: a.BotID, RunID: &a.RunID, Sequence: seq, Kind: store.BotActivityApproval, Payload: payload, CreatedAt: now}, "approval:"+a.ID.String()+":"+string(a.Status)); err != nil {
 		return err
 	}
-	if a.Status != store.ApprovalPending {
+	if a.Status != store.ApprovalPending || a.Interaction != nil {
+		// Questions are rendered from their canonical chat_question event. A
+		// permission-review card is both redundant and semantically wrong.
 		return nil
 	}
 	rec, err := tx.GetBot(ctx, a.BotID)
@@ -951,7 +1063,9 @@ func WithBotKnowledgeCommitSource(ctx context.Context, build func(context.Contex
 
 type botKnowledgeCommitSourceKey struct{}
 
-func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) error {
+func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) (outErr error) {
+	finish := ObserveBotExecutionStage(ctx, BotStageCommit)
+	defer func() { finish(outErr) }()
 	if q.ModelSelection != nil && (strings.TrimSpace(q.ModelSelection.Provider) == "" || strings.TrimSpace(q.ModelSelection.Model) == "") {
 		return store.ErrBotInvalid
 	}
@@ -969,7 +1083,7 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 	if !q.Status.Terminal() && q.Status != store.RunWaitingApproval && q.Status != store.RunInterrupted {
 		return store.ErrBotInvalid
 	}
-	if strings.TrimSpace(q.Report.Summary) == "" || q.Usage.ToolCalls < 0 || q.Usage.InputTokens < 0 || q.Usage.OutputTokens < 0 || q.Usage.CostMicros != nil && *q.Usage.CostMicros < 0 {
+	if strings.TrimSpace(q.Report.Summary) == "" || q.Usage.RuntimeNanos < 0 || q.Usage.ToolCalls < 0 || q.Usage.InputTokens < 0 || q.Usage.OutputTokens < 0 || q.Usage.CostMicros != nil && *q.Usage.CostMicros < 0 {
 		return store.ErrBotInvalid
 	}
 	// Arbitrary activity/outbox payloads cannot smuggle notification or dispatch
@@ -1053,14 +1167,17 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		// Progress usage is a logical-run total, not this attempt's meter. Keep
 		// commit replay keyed to the original request but never erase durable holds.
 		if saved.Progress != nil || saved.ProgressCursor != 0 {
+			// A final heartbeat can charge elapsed time after the adapter snapshots
+			// its usage. Merge only repository-owned runtime; tokens, tools and cost
+			// must still cover every durable charge in the original request.
+			progressAccount(saved, now)
+			q.Usage.RuntimeNanos = max(q.Usage.RuntimeNanos, saved.Run.Usage.RuntimeNanos)
 			if !progressUsageAtLeast(q.Usage, saved.Run.Usage) {
-				return store.ErrBotConflict
+				return fmt.Errorf("%w: progress commit usage below durable totals (runtime %d/%d tools %d/%d input %d/%d output %d/%d)", store.ErrBotConflict, q.Usage.RuntimeNanos, saved.Run.Usage.RuntimeNanos, q.Usage.ToolCalls, saved.Run.Usage.ToolCalls, q.Usage.InputTokens, saved.Run.Usage.InputTokens, q.Usage.OutputTokens, saved.Run.Usage.OutputTokens)
 			}
 			if (q.Status == store.RunSucceeded || q.Status == store.RunPartial || q.Status == store.RunWaitingApproval) && (saved.ProgressPending != 0 || saved.ProgressUncertain) {
 				return store.ErrBotConflict
 			}
-			progressAccount(saved, now)
-			q.Usage.RuntimeNanos = max(q.Usage.RuntimeNanos, saved.Run.Usage.RuntimeNanos)
 			if saved.ProgressCursor > 0 && saved.Run.Usage.CostMicros == nil {
 				q.Usage.CostMicros = nil
 			}
@@ -1072,12 +1189,21 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 		if err := q.Report.ValidateEmployeeMessage(q.Status, saved.Work); err != nil {
 			return err
 		}
+		validatedReport, validatedWork := q.Report, saved.Work.Clone()
 		for _, id := range q.Report.NeedsApproval {
 			a, err := tx.ReadApproval(ctx, q.Lease.BotID, id)
 			if err != nil {
 				return err
 			}
-			if a.RunID != q.Lease.RunID || a.Version != saved.Run.Version || a.Status != store.ApprovalPending || !now.Before(a.ExpiresAt) {
+			// Only the exact original, unused checkpoint can preserve an approved
+			// grant after a pre-dispatch denial. Current authority and lease were
+			// checked above; this cannot admit replacement bytes or consumed grants.
+			statusAllowed := a.Status == store.ApprovalPending
+			if a.Status == store.ApprovalApproved && q.Status == store.RunWaitingApproval && len(q.Report.NeedsApproval) == 1 && q.Report.Failure == nil && len(q.Report.Artifacts) == 0 && len(q.Report.Changed) == 0 && q.Report.EffectState == "" && bytes.Equal(q.Checkpoint, saved.Run.Checkpoint) {
+				checkpoint, checkpointErr := botdomain.DecodeApprovalCheckpoint(q.Checkpoint, saved.Run)
+				statusAllowed = checkpointErr == nil && checkpoint.Matches(*a) && checkpoint.Fence < q.Lease.Fence
+			}
+			if a.RunID != q.Lease.RunID || a.Version != saved.Run.Version || !statusAllowed || !now.Before(a.ExpiresAt) {
 				return store.ErrBotConflict
 			}
 		}
@@ -1086,6 +1212,11 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 				return store.ErrBotUnsupported
 			}
 			for _, artifact := range q.Report.Artifacts {
+				if ref := artifact.ContentRef; ref != nil {
+					if ref.Validate() != nil || ref.Kind != store.BotContentArtifact || ref.Scope.BotID != rec.Bot.ID || ref.Scope.OwnerID != rec.Bot.OwnerID.String() || ref.SHA256 != artifact.SHA256 || ref.SizeBytes != artifact.SizeBytes {
+						return store.ErrBotInvalid
+					}
+				}
 				if artifact.ID == uuid.Nil || artifact.HomeID != rec.Bot.Home.ID || !validBotArtifactPath(artifact.RelativePath) {
 					return store.ErrBotInvalid
 				}
@@ -1096,6 +1227,9 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) err
 			return err
 		}
 		if err := r.commitBotSkill(ctx, tx, saved, &q); err != nil {
+			return err
+		}
+		if err := rebindBotSkillReport(&q, validatedReport, validatedWork, saved.Work); err != nil {
 			return err
 		}
 		q.Report.FinalizeEmployeeMessage(q.Status, saved.Work)
@@ -1307,6 +1441,19 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 				saved.Progress.Reason = store.BotProgressReasonUncertainEffect
 			}
 		}
+		// Exact-action continuation consumes its grant durably before dispatch.
+		// A dead worker cannot tell us whether the external effect committed; the
+		// consumed grant is intent evidence, never a receipt or permission to retry.
+		if checkpoint, err := botdomain.DecodeApprovalCheckpoint(saved.Run.Checkpoint, saved.Run); err == nil && checkpoint.Format == botdomain.ApprovalCheckpointFormat && checkpoint.Fence < lease.Fence {
+			approval, err := tx.ReadApproval(ctx, lease.BotID, checkpoint.ApprovalID)
+			if err != nil {
+				return err
+			}
+			if checkpoint.Matches(*approval) && approval.Status == store.ApprovalConsumed {
+				saved.Run.Report.EffectState = store.BotReportEffectsUncertain
+				saved.Run.Report.Unverified = append(saved.Run.Report.Unverified, "Approved action may have taken effect; independently reconcile its outcome and never replay it.")
+			}
+		}
 		interruptBotWork(saved.Work, "Run interrupted; verify prior effects before any authorized continuation.")
 		syncBotWorkProjection(saved)
 		saved.Run.Status = store.RunInterrupted
@@ -1398,6 +1545,9 @@ func (r *botRepository) enableBot(ctx context.Context, q store.BotLifecycleReque
 		if actor != q.ActorID {
 			return store.ErrBotForbidden
 		}
+		if rec.Metadata["restore_reconciliation_required"] == true {
+			return store.ErrBotUnsupported
+		}
 		if rec.Bot.Revision != q.ExpectedRevision || rec.Bot.Version != v.Version || rec.ActiveRunID != nil {
 			return store.ErrBotConflict
 		}
@@ -1460,6 +1610,9 @@ func (r *botRepository) changeLifecycleIntent(ctx context.Context, q store.BotLi
 	}
 	var result *store.Bot
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+		if event == botdomain.LifecycleDelete {
+			tx = botDeleteDB(tx)
+		}
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -1549,6 +1702,12 @@ func (r *botRepository) changeLifecycleIntent(ctx context.Context, q store.BotLi
 					return err
 				}
 				seq++
+				if event == botdomain.LifecycleDelete {
+					if err := appendCleanupRunState(ctx, tx, next, run, seq, now); err != nil {
+						return err
+					}
+					continue
+				}
 				kind := store.BotActivityReport
 				payload := map[string]any{"run_id": run.ID, "status": run.Status, "report": run.Report, "intent": store.BotOutboxPublish}
 				if !stop && run.Progress != nil {
@@ -2009,36 +2168,24 @@ func (r *botRepository) ReconcileCorrection(ctx context.Context, botID store.Bot
 	if botID == uuid.Nil || correctionID == uuid.Nil {
 		return store.ErrBotInvalid
 	}
-	// Accept only the actual router store sharing this database client. Metadata,
-	// source paths, creator IDs and a caller-supplied store cannot establish scope.
-	var sqlite bool
-	var invalidate func(string)
+	// The Bot-specific view is selected by the scoped owner, never by source text.
+	m, ok := memories.(*botDiskMemoryStore)
+	if !ok || m.id != botID {
+		return store.ErrBotForbidden
+	}
 	switch db := r.db.(type) {
-	case teamBotDB:
-		m, ok := memories.(*teamMemoryStore)
-		if !ok || m == nil || m.client != db.client || r.auth.scope != store.BotScopeTeam {
-			return store.ErrBotForbidden
-		}
-		sqlite = m.dialect == DialectSQLite
-		invalidate = func(id string) {
-			if m.vecIndex != nil {
-				m.vecIndex.remove(id)
-			}
-		}
 	case personalBotDB:
-		m, ok := memories.(*personalMemoryStore)
-		if !ok || m == nil || m.client != db.client || r.auth.scope != store.BotScopePersonal {
+		if m.owner != db.client {
 			return store.ErrBotForbidden
 		}
-		sqlite = m.dialect == DialectSQLite
-		invalidate = func(id string) {
-			if m.vecIndex != nil {
-				m.vecIndex.remove(id)
-			}
+	case teamBotDB:
+		if m.owner != db.client {
+			return store.ErrBotForbidden
 		}
 	default:
 		return store.ErrBotUnsupported
 	}
+	invalidate := func(string) {}
 	var memoryID string
 	invalidateMemory := false
 	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
@@ -2142,19 +2289,18 @@ func (r *botRepository) ReconcileCorrection(ctx context.Context, botID store.Bot
 		if err := validateMemoryAttribution(ctx, tx, row.SessionID, row.Attribution); err != nil {
 			return err
 		}
-		if row.Attribution != nil {
-			annotator, ok := tx.(interface {
-				SupersedeMemoryAttribution(context.Context, uuid.UUID, string) error
-			})
-			if !ok {
-				return store.ErrBotUnsupported
-			}
-			if err := annotator.SupersedeMemoryAttribution(ctx, id, "correction:"+correctionID.String()); err != nil {
-				return err
-			}
+		if row.Attribution != nil && row.Attribution.SupersededBy != "" {
+			return store.ErrBotConflict
 		}
-		invalidateMemory = true
-		if err := tx.ApplyCorrectionMemory(ctx, id, sessionID, row.Snippet, q.Replacement, sqlite); err != nil {
+		replacementID := uuid.NewSHA1(correctionID, []byte("memory"))
+		metadata, err := store.EncodeMemoryAttribution(map[string]any{"source_records": []store.MemorySearchResult{*row}}, &store.MemoryAttribution{BotID: botID, Source: "correction:" + correctionID.String(), ObservedAt: r.clock(), Status: store.MemoryKnowledgeVerified, Evidence: &q.Evidence})
+		if err != nil {
+			return err
+		}
+		if err := insertBotDiskMemory(ctx, tx, replacementID, sessionID, q.Evidence.ActorID, q.Replacement, row.Category, metadata, r.clock()); err != nil {
+			return err
+		}
+		if err := supersedeReviewedSource(ctx, tx, *row, "correction:"+correctionID.String(), r.clock(), botID); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"correction_id": correctionID, "memory_id": id, "memory_applied": true})
@@ -2390,8 +2536,11 @@ func (r *botRepository) ListGoals(ctx context.Context, id store.BotID) ([]store.
 	return r.db.ReadGoals(ctx, id)
 }
 func (r *botRepository) ListActivity(ctx context.Context, id store.BotID, after int64, limit int) ([]store.BotActivity, error) {
-	if _, err := r.Get(ctx, id); err != nil {
-		return nil, err
+	get := store.ObserveBotActivity(ctx, "repository_get_bot", 0)
+	_, getErr := r.Get(ctx, id)
+	get()
+	if getErr != nil {
+		return nil, getErr
 	}
 	if after < 0 {
 		return nil, store.ErrBotInvalid

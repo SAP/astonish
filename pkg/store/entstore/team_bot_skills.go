@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"entgo.io/ent/dialect/sql"
-	"entgo.io/ent/dialect/sql/sqljson"
 	ent "github.com/SAP/astonish/ent/team"
 	"github.com/SAP/astonish/ent/team/bot"
 	"github.com/SAP/astonish/ent/team/botskill"
@@ -62,14 +60,14 @@ func (d teamBotDB) readSkill(ctx context.Context, b, id uuid.UUID) (*botStoredSk
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	var s botStoredSkill
-	if err = botDecode(row.Data, &s); err != nil {
+	s, err := decodeSkillRoot(row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if s.Skill.ID != row.ID || s.Skill.BotID != b || s.Skill.Key != row.Key || s.Skill.Revision != row.Revision || string(s.Skill.Status) != string(row.Status) {
 		return nil, store.ErrBotInvalid
 	}
-	return &s, nil
+	return s, nil
 }
 func (d teamBotDB) readSkills(ctx context.Context, b, after uuid.UUID, limit int, archived bool) ([]store.BotSkill, error) {
 	q := d.client.BotSkill.Query().Where(botskill.BotIDEQ(b), botskill.IDGT(after)).Order(ent.Asc(botskill.FieldID)).Limit(limit)
@@ -91,7 +89,7 @@ func (d teamBotDB) readSkills(ctx context.Context, b, after uuid.UUID, limit int
 	return out, nil
 }
 func (d teamBotDB) writeSkill(ctx context.Context, s botStoredSkill, expected int64) error {
-	data, err := botJSONMap(s)
+	data, err := encodeSkillRoot(s)
 	if err != nil {
 		return err
 	}
@@ -114,8 +112,8 @@ func (d teamBotDB) readSkillRevision(ctx context.Context, b, id uuid.UUID, v int
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	var r store.BotSkillRevision
-	if err = botDecode(row.Data, &r); err != nil {
+	r, err := d.contentCodec().decodeSkillRevision(ctx, b, row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if r.ID != row.ID || r.BotID != b || r.SkillID != id || r.Revision != v || r.Digest != row.Digest {
@@ -124,7 +122,7 @@ func (d teamBotDB) readSkillRevision(ctx context.Context, b, id uuid.UUID, v int
 	if err = r.Validate(); err != nil {
 		return nil, err
 	}
-	return &r, nil
+	return r, nil
 }
 func (d teamBotDB) readSkillRevisions(ctx context.Context, b, id uuid.UUID, after int64, limit int) ([]store.BotSkillRevision, error) {
 	rows, err := d.client.BotSkillRevision.Query().Where(botskillrevision.BotIDEQ(b), botskillrevision.SkillIDEQ(id), botskillrevision.RevisionGT(after)).Order(ent.Asc(botskillrevision.FieldRevision)).Limit(limit).All(ctx)
@@ -142,7 +140,7 @@ func (d teamBotDB) readSkillRevisions(ctx context.Context, b, id uuid.UUID, afte
 	return out, nil
 }
 func (d teamBotDB) insertSkillRevision(ctx context.Context, r store.BotSkillRevision) error {
-	data, err := botJSONMap(r)
+	data, err := d.contentCodec().encodeSkillRevision(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -169,14 +167,44 @@ func (d teamBotDB) skillQuota(ctx context.Context, b uuid.UUID) (int, int64, err
 	return count, size, nil
 }
 func (d teamBotDB) skillSourceEvent(ctx context.Context, session uuid.UUID, id string) (*adksession.Event, error) {
-	rows, err := d.client.SessionEvent.Query().Where(sessionevent.SessionIDEQ(session.String()), func(s *sql.Selector) { s.Where(sqljson.ValueEQ(sessionevent.FieldEventData, id, sqljson.Path("ID"))) }).Limit(2).All(ctx)
+	binding, err := d.client.Session.Get(ctx, session.String())
 	if err != nil {
-		return nil, err
+		return nil, teamBotError(err)
 	}
-	if len(rows) != 1 {
+	if binding.BotID == nil {
 		return nil, store.ErrBotNotFound
 	}
-	return eventDataToADKEvent(rows[0].EventData)
+	if _, legacy := binding.Metadata["state"]; legacy {
+		return nil, errBotDevelopmentContentFormat
+	}
+	var found map[string]any
+	// Scan only bounded metadata pages in SQL order; hydrate the unique exact ID.
+	for after := int64(0); ; {
+		rows, err := d.client.SessionEvent.Query().Where(sessionevent.SessionIDEQ(session.String()), sessionevent.IDGT(after)).Order(sessionevent.ByID()).Limit(128).All(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			eventID, err := botSessionEventID(*binding.BotID, session.String(), row.EventData)
+			if err != nil {
+				return nil, err
+			}
+			if eventID == id {
+				if found != nil {
+					return nil, store.ErrBotNotFound
+				}
+				found = row.EventData
+			}
+			after = row.ID
+		}
+		if len(rows) < 128 {
+			break
+		}
+	}
+	if found == nil {
+		return nil, store.ErrBotNotFound
+	}
+	return d.contentCodec().decodeSessionEvent(ctx, *binding.BotID, session.String(), found)
 }
 func (d teamBotDB) purgeSkills(ctx context.Context, b uuid.UUID) error {
 	if _, err := d.client.BotSkillRevision.Delete().Where(botskillrevision.BotIDEQ(b)).Exec(ctx); err != nil {

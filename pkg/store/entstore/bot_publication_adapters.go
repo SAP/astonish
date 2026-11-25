@@ -19,7 +19,7 @@ func (d personalBotDB) AppendHomeReport(ctx context.Context, b store.Bot, event 
 	if !exists {
 		return store.ErrBotForbidden
 	}
-	return (&personalSessionStore{client: d.client}).appendEventInternal(ctx, b.HomeSessionID.String(), event)
+	return (&personalSessionStore{client: d.client, content: d.content}).appendEventInternal(ctx, b.HomeSessionID.String(), event)
 }
 func (d teamBotDB) AppendHomeReport(ctx context.Context, b store.Bot, event *adksession.Event) error {
 	exists, err := d.client.Session.Query().Where(teamsession.IDEQ(b.HomeSessionID.String()), teamsession.BotIDEQ(b.ID), teamsession.UserIDEQ(b.OwnerID), teamsession.PurposeEQ(teamsession.PurposeBotHome)).Exist(ctx)
@@ -29,5 +29,5 @@ func (d teamBotDB) AppendHomeReport(ctx context.Context, b store.Bot, event *adk
 	if !exists {
 		return store.ErrBotForbidden
 	}
-	return (&teamSessionStore{client: d.client}).appendEventInternal(ctx, b.HomeSessionID.String(), event)
+	return (&teamSessionStore{client: d.client, content: d.content}).appendEventInternal(ctx, b.HomeSessionID.String(), event)
 }

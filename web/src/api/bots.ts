@@ -42,7 +42,7 @@ export interface BotQualityReport {
   outcome: typeof BotQualityOutcome[keyof typeof BotQualityOutcome]
   criteria?: BotCriterionAssessment[] | null; repairs: number; limitations?: string[] | null
 }
-export const BotWorkProtocol = { Agent: 'agent_led_v1' } as const
+export const BotWorkProtocol = { LegacyAssessment: '', Agent: 'agent_led_v1' } as const
 export const WorkPhase = { Working: 'working', Finished: 'finished', Blocked: 'blocked', Interrupted: 'interrupted' } as const
 export const WorkDisposition = { Answered: 'answered', Complete: 'complete', Partial: 'partial', Blocked: 'blocked' } as const
 export const WorkItemStatus = { Pending: 'pending', Working: 'in_progress', Complete: 'completed', Blocked: 'blocked', Cancelled: 'cancelled' } as const
@@ -67,7 +67,30 @@ export function botWorkSummary(work?: BotWorkProjection): string {
   if (work.phase === WorkPhase.Blocked) return 'Blocked'
   return work.phase === WorkPhase.Working ? 'Work in progress' : 'Work details unavailable'
 }
+export const BotEmployeeMessageOrigin = { Assessed: 'assessed', Fallback: 'fallback' } as const
+export const BotEmployeeMessageReason = { ResultNotVerified: 'result_not_verified' } as const
+export const BotRunDetailsKind = { Work: 'work', Quality: 'quality', Unavailable: 'unavailable', Empty: 'empty' } as const
+export type BotRunDetailsSource =
+  | { kind: typeof BotRunDetailsKind.Work; work: BotWorkProjection }
+  | { kind: typeof BotRunDetailsKind.Quality; quality?: BotQualityReport }
+  | { kind: typeof BotRunDetailsKind.Unavailable | typeof BotRunDetailsKind.Empty }
+
+/** Shared latest/list/selected-run presentation selector; never upgrades unknown
+ * or foreign work into a legacy assessment or changes ordered run-state facts. */
+export function botRunDetailsSource(run: BotRun): BotRunDetailsSource {
+  const work = run.work
+  if (work) {
+    if (work.bot_id !== run.bot_id || work.run_id !== run.id || work.schema_version !== 1) return { kind: BotRunDetailsKind.Unavailable }
+    if (work.protocol === BotWorkProtocol.Agent) return { kind: BotRunDetailsKind.Work, work }
+    if (work.protocol !== BotWorkProtocol.LegacyAssessment) return { kind: BotRunDetailsKind.Unavailable }
+    return { kind: BotRunDetailsKind.Quality, quality: run.report?.quality }
+  }
+  const employee = run.report?.employee_message
+  if (run.report?.quality || employee?.origin === BotEmployeeMessageOrigin.Assessed || employee?.origin === BotEmployeeMessageOrigin.Fallback && employee.reason === BotEmployeeMessageReason.ResultNotVerified) return { kind: BotRunDetailsKind.Quality, quality: run.report.quality }
+  return { kind: BotRunDetailsKind.Empty }
+}
 export interface BotReport {
+  employee_message?: { origin: string; reason?: string }
   summary: string; changed: BotEvidence[] | null; unchanged: BotEvidence[] | null; unverified: string[] | null; next_run_at?: string
   quality?: BotQualityReport
   skill?: import('./botSkills').BotSkillReceipt

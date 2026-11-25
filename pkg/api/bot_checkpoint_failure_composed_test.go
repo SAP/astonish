@@ -7,10 +7,8 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/bot"
-	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
-	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -27,7 +25,7 @@ func (m *checkpointHTTPModel) GenerateContent(_ context.Context, req *model.LLMR
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
-		parts := []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: map[string]any{"path": "/isolated/receipt.txt"}}}}
+		parts := []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}
 		if m.calls > 1 {
 			parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "send_email", Args: map[string]any{"body": "must-not-leak"}}})
 		}
@@ -40,17 +38,15 @@ func (m *checkpointHTTPModel) GenerateContent(_ context.Context, req *model.LLMR
 func TestBotCheckpointFailureCommittedHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
+			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"}, scope)
 			llm := &checkpointHTTPModel{}
 			var err error
-			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: f.workerConfig.Sandbox, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 				ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true},
 				ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 					return llm, nil
 				},
-				Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-					return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
-				},
+				Prepare: f.workerConfig.Prepare,
 			})
 			if err != nil {
 				t.Fatal(err)

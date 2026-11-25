@@ -88,9 +88,17 @@ and consume semantics, and `TestBotCatalogueSourceAccessResponseDigest` checks t
 production catalogue wrapper with controlled node responses and one call per
 response. These tests do not claim live-provider or full API persistence coverage.
 
+## Typed nonexecution and recoverable feedback
+
+All trusted rejection producers use `bot.NewToolNonexecutionOutcome` before executable dispatch. The server-only receipt binds full Bot/run identity, original canonical argument digest, concrete target (or explicitly unresolved requested target), and active call ID. `NonexecutionFor`/`ValidFor` reject stale, spoofed, digest-mismatched, duplicate or mixed effect/source receipts. Provider JSON and explanatory `not_executed` text cannot mint receipts.
+
+`ToolFeedbackCorrectCall` and `ToolFeedbackUnresolvedTarget` allow a new agent-chosen corrected call while the run remains live. `ToolFeedbackTerminal` preserves membership, lease, handoff, exact approval, hard budget and cancellation boundaries. Known nonexecution is not read success or task completion. `ChatRunner.observeBotToolOutcome` returns separate source eligibility, nonexecution and recoverability facts; only independently bound repairable failures avoid poisoning `Completion.Err`. Native, lazy and progressive paths retain exact one-use authorization handoffs, uncertain-effect no-replay and current authority checks.
+
+`TestBotToolErrorTrustedCorrection`, `TestBotToolNonexecutionValidationBeforeDispatch` and `TestBotToolNonexecutionUnresolvedTargetBeforeDispatch` cover typed corrections and bridge/executor rejections; concrete report tests retain tampered and contradictory-receipt failures. `TestBotSharedResearchToolErrorCorrection` runs genuine shared discovery → description → bridge rejection → corrected configured provider search → final employee capture, asserting one provider/research reservation and no mandatory review.
+
 ## Synthesis rejection receipts
 
-`launcher.botSynthesisStoppedResult(ctx tool.Context, toolName string)` records
+`launcher.botSynthesisStoppedResult(ctx tool.Context, toolName string, args any)` records
 `bot.ToolOutcome{Verified: true, Nonexecution: ...}` in the bound attempt ledger,
 with the active `FunctionCallID` and exact target tool name. The autonomous and
 interactive wrappers and the final `runSynthesisTool` dispatch boundary invoke it

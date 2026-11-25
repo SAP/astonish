@@ -140,6 +140,9 @@ func (c *ChatAgent) retrievePreProvider(ctx context.Context, lifecycle *lifecycl
 // It is called by the ADK runner for each user message.
 func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		if c.EndModelPreparation != nil {
+			defer c.EndModelPreparation()
+		}
 		lifecycle := lifecycleRecorder(ctx, ctx.InvocationID())
 		defer lifecycle.close()
 		finishRequestPreparation := lifecycle.begin("request_session_preparation")
@@ -151,6 +154,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		thinkFilter := &thinkTagFilter{}
 		origYield := yield
 		yield = func(event *session.Event, err error) bool {
+			if c.EndModelPreparation != nil {
+				c.EndModelPreparation()
+			}
 			filterEventThinkContent(thinkFilter, event)
 			redactEventText(c.Redactor, event)
 			return origYield(event, err)
@@ -1026,6 +1032,9 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		var beforeModelCallbacks []llmagent.BeforeModelCallback
 		if progress := bot.ProgressControllerFromContext(ctx); progress != nil && turnOverrides != nil && turnOverrides.Bot != nil {
 			beforeModelCallbacks = append(beforeModelCallbacks, func(call agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+				if c.EndModelPreparation != nil {
+					c.EndModelPreparation()
+				}
 				decision, err := progress.Check(call)
 				if err != nil {
 					return nil, err
@@ -1140,8 +1149,12 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			Name:  "chat",
 			Model: effectiveLLM,
 			InstructionProvider: func(_ agent.ReadonlyContext) (string, error) {
+				preparation := context.Context(ctx)
+				if c.BeginModelPreparation != nil {
+					preparation = c.BeginModelPreparation(ctx)
+				}
 				if turnOverrides != nil && turnOverrides.Bot != nil && !promptBuilder.CodeMode {
-					return promptBuilder.BuildBotPrompt(ctx, turnOverrides), nil
+					return promptBuilder.BuildBotPrompt(preparation, turnOverrides), nil
 				}
 				return instr, nil
 			},
@@ -1410,13 +1423,7 @@ func (c *ChatAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		}
 
 		// Store the trace keyed by session ID for on-demand /distill
-		c.traceMu.Lock()
-		c.traceHistory[sessionID] = append(c.traceHistory[sessionID], trace)
-		// Prune: keep at most 20 traces per session
-		if len(c.traceHistory[sessionID]) > 20 {
-			c.traceHistory[sessionID] = c.traceHistory[sessionID][len(c.traceHistory[sessionID])-20:]
-		}
-		c.traceMu.Unlock()
+		c.recordConversationTrace(sessionID, trace)
 	}
 }
 

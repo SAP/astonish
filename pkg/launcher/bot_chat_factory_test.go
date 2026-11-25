@@ -109,9 +109,9 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 			}
 			ctx := botFactoryHandoffContext{base: context.Background(), session: f.req.Run.SessionID.String(), functionCallID: "trusted-call"}
 			byName := map[string]botRunnableTool{}
-			for _, candidate := range got.Agent.Tools {
-				if run, ok := candidate.(botRunnableTool); ok {
-					byName[candidate.Name()] = run
+			for _, name := range names {
+				if entry := got.Agent.ToolIndex.GetToolEntry(name); entry != nil {
+					byName[name], _ = entry.Tool.(botRunnableTool)
 				}
 			}
 			for _, name := range names {
@@ -134,6 +134,9 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 			}
 			if out, err := byName[botWorkUpdateTool].Run(ctx, map[string]any{"expected_revision": float64(0), "kind": "upsert_item", "item": map[string]any{"summary": "inspect sources", "status": "pending"}}); err != nil || out["status"] != "ok" || probe.change.Item == nil || probe.change.Item.ID != uuid.Nil {
 				t.Fatalf("new item requires model ID: %v %v", out, err)
+			}
+			if out, err := byName[botWorkUpdateTool].Run(ctx, map[string]any{"expected_revision": float64(0), "kind": "set_delivery", "delivery_intent": "file_deliverable", "deliverable_format": "markdown"}); err != nil || out["status"] != "ok" || probe.change.DeliveryIntent != store.BotDeliveryFileDeliverable || probe.change.DeliverableFormat != store.BotDeliverableMarkdown {
+				t.Fatalf("lost explicit delivery intent: %v %v %+v", out, err, probe.change)
 			}
 			if got.Agent.ToolIndex == got.Agent.SubAgentManager.ToolIndex {
 				t.Fatal("child shares writable discovery index")
@@ -202,6 +205,43 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 				t.Fatal("work tool bypassed authority")
 			}
 		})
+	}
+}
+
+func TestBotTitleUsesSharedChatRuntime(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	f.ctx = bot.WithInteractionOwner(f.ctx)
+	f.req.Instructions = "AI news"
+	f.req.Run.ExecutionMode = execution.BotExecutionModeChatInteractive
+	f.req.Run.CallerCeiling = &execution.BotCallerCeiling{Principal: f.req.Principal, ExpiresAt: time.Now().Add(time.Hour)}
+	f.req.Authorization = interactiveFactoryAuthorization{}
+	f.req.Policy = nil
+	f.req.Run.UserEventID = "title-event"
+	f.req.Run.TitleConfirmation = &store.BotTitleConfirmation{
+		Version: store.BotTitleConfirmationVersion, State: store.BotTitleConfirmationNeedsQuestion,
+		BotID: f.req.Bot.ID, RunID: f.req.Run.ID, OwnerID: f.req.Bot.OwnerID,
+		OriginalTitle: "AI news", UserEventID: "title-event",
+	}
+	repo := &titleJourneyStore{clarificationStore: clarificationStore{botFactoryTestRepo: botFactoryTestRepo{fixture: f}}}
+	f.services.Bots, f.services.PersonalBots = repo, repo
+	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
+		t.Fatal("title clarification provisioned execution resources")
+		return nil, nil
+	}
+	got, err := f.construct(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Cleanup()
+	if got.Agent.FlowDistiller == nil || got.Agent.ToolIndex == nil || got.Agent.PendingSecrets == nil {
+		t.Fatal("title skipped shared Chat composition")
+	}
+	if len(got.Agent.Tools) != 1 || got.Agent.Tools[0].Name() != "ask_user" || len(got.Agent.Toolsets) != 0 {
+		t.Fatal("title exposed more than the question capability")
+	}
+	got.Cleanup()
+	if f.scopeCleaned != 1 || f.safeCleaned != 0 || f.resolver.model.calls != 0 {
+		t.Fatalf("title lifetime leaked or started work: scope=%d compute=%d model=%d", f.scopeCleaned, f.safeCleaned, f.resolver.model.calls)
 	}
 }
 
@@ -281,6 +321,7 @@ type botFactoryFixture struct {
 	req                                bot.RunRequest
 	cfg                                BotChatFactoryConfig
 	services                           *store.Services
+	files                              *confinedTestFiles
 	sessions                           session.Service
 	resolver                           *botFactoryTestResolver
 	scopeCleaned, safeCleaned, wrapped int
@@ -311,6 +352,13 @@ func newBotFactoryFixture(t *testing.T) *botFactoryFixture {
 		t.Fatal(err)
 	}
 	f.services = &store.Services{Bots: botFactoryTestRepo{fixture: f}, PersonalBots: botFactoryTestRepo{fixture: f}}
+	f.files = &confinedTestFiles{root: t.TempDir(), snapshots: map[string][]byte{}}
+	for name, content := range map[string]string{"SOUL.md": v.Persona.Soul, "IDENTITY.md": v.Persona.Identity, "USER.md": v.Persona.User, "CHARTER.md": v.Charter, "MEMORY.md": "# Memory\n"} {
+		if _, err := f.files.Write(f.ctx, f.req.Bot.ID, store.BotFileWrite{Path: name, Body: strings.NewReader(content), SizeBytes: int64(len(content)), CreateOnly: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
 	f.resolver = &botFactoryTestResolver{model: &botFactoryTestModel{}}
 	f.cfg = BotChatFactoryConfig{
 		ContextWindow: 8192,
@@ -331,7 +379,7 @@ func newBotFactoryFixture(t *testing.T) *botFactoryFixture {
 			return llm, nil
 		},
 		Prepare: func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
-			return &BotChatSafeResources{WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() { f.safeCleaned++ }}, nil
+			return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &sharedBotDispatchPool{client: &sourceAccessCatalogueClient{response: json.RawMessage(`{"content":"fixture"}`)}}}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() { f.safeCleaned++ }}, nil
 		},
 	}
 	return f
@@ -499,57 +547,8 @@ func TestBotAgentFactoryPreviousWork(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
-			if resources.PreviousWork == nil {
-				t.Fatal("previous-work callback missing")
-			}
-			// Later viewer context must not replace the captured owner or store.
-			viewer := f.req.Principal
-			viewer.Subject = uuid.New().String()
-			viewer.OrgSlug, viewer.TeamSlug = "foreign-org", "foreign-team"
-			ctx, err := execution.WithPrincipal(context.Background(), viewer)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx = store.WithUserID(ctx, viewer.Subject)
-			if got, err := resources.PreviousWork(ctx); err != nil || got != nil {
-				t.Fatalf("empty history: %+v %v", got, err)
-			}
-			makeRun := func(finished time.Time) store.BotRun {
-				id := uuid.New()
-				return store.BotRun{ID: id, BotID: f.req.Bot.ID, FinishedAt: &finished, Report: store.BotReport{Work: &store.BotWorkProjection{BotID: f.req.Bot.ID, RunID: id}}}
-			}
-			admitted := f.req.Run.CreatedAt
-			older := makeRun(admitted.Add(-2 * time.Hour))
-			latest := makeRun(admitted.Add(-time.Minute))
-			foreign := makeRun(admitted.Add(-time.Second))
-			foreign.BotID = uuid.New()
-			foreign.ID = uuid.Nil // filtered out before the first page
-			current := makeRun(admitted.Add(-time.Second))
-			current.ID = f.req.Run.ID
-			unfinished := makeRun(admitted.Add(-time.Second))
-			unfinished.FinishedAt = nil
-			legacy := makeRun(admitted.Add(-time.Second))
-			legacy.Report.Work = nil
-			// Deliberately unordered: choose latest finish, not list position;
-			// a report finishing at or after admission is not previous context.
-			repo.runs = []store.BotRun{foreign, current, unfinished, legacy, makeRun(admitted), makeRun(admitted.Add(time.Second)), older}
-			for len(repo.runs) < 101 { // foreign Bot row is filtered by the scoped store
-				repo.runs = append(repo.runs, makeRun(admitted.Add(-3*time.Hour)))
-			}
-			latest.ID = uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
-			repo.runs = append(repo.runs, latest)
-			repo.runPages = nil
-			got, err := resources.PreviousWork(ctx)
-			if err != nil || got != latest.Report.Work {
-				t.Fatalf("latest pre-admission outcome: %+v %v, want %+v", got, err, latest.Report.Work)
-			}
-			if len(repo.runPages) != 2 || repo.runPages[1].After != repo.runs[100].ID.String() {
-				t.Fatalf("history pagination: %+v", repo.runPages)
-			}
-			sentinel := errors.New("history store unavailable")
-			repo.readErr = sentinel
-			if got, err := resources.PreviousWork(ctx); got != nil || !errors.Is(err, sentinel) {
-				t.Fatalf("history error swallowed: %+v %v", got, err)
+			if resources.PreviousWork != nil || len(repo.runPages) != 0 {
+				t.Fatal("historical work must be retrieved explicitly, not bootstrapped")
 			}
 		})
 	}
@@ -655,113 +654,75 @@ func TestBotAgentFactoryWorkContinuation(t *testing.T) {
 }
 
 func TestBotAgentFactoryWorkHistoryBounds(t *testing.T) {
-	for _, previous := range []bool{true, false} {
-		name := "approvals"
-		if previous {
-			name = "previous work"
+	for _, count := range []int{botWorkHistoryMaxPages*botWorkHistoryPageSize - 1, botWorkHistoryMaxPages * botWorkHistoryPageSize, botWorkHistoryMaxPages*botWorkHistoryPageSize + 1} {
+		f, repo := newBotFactoryCallbackFixture(t, store.BotScopePersonal)
+		resources, err := f.construct(t)
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Run(name, func(t *testing.T) {
-			for _, count := range []int{botWorkHistoryMaxPages*botWorkHistoryPageSize - 1, botWorkHistoryMaxPages * botWorkHistoryPageSize, botWorkHistoryMaxPages*botWorkHistoryPageSize + 1} {
-				f, repo := newBotFactoryCallbackFixture(t, store.BotScopePersonal)
-				resources, err := f.construct(t)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(resources.Cleanup)
-				finished := f.req.Run.CreatedAt.Add(-time.Minute)
-				for i := 0; i < count; i++ {
-					repo.runs = append(repo.runs, store.BotRun{ID: uuid.New(), BotID: f.req.Bot.ID, FinishedAt: &finished, Report: store.BotReport{Work: &store.BotWorkProjection{}}})
-					repo.approvals = append(repo.approvals, store.BotApproval{ID: uuid.New(), BotID: f.req.Bot.ID})
-				}
-				var got *store.BotWorkProjection
-				var pages []store.BotPage
-				if previous {
-					got, err = resources.PreviousWork(context.Background())
-					pages = repo.runPages
-				} else {
-					err = resources.ValidateWorkContinuation(context.Background(), store.BotWorkContinueExistingApproval, uuid.New())
-					pages = repo.approvalPages
-				}
-				if len(pages) != botWorkHistoryMaxPages {
-					t.Fatalf("count %d: pages=%d", count, len(pages))
-				}
-				if count >= botWorkHistoryMaxPages*botWorkHistoryPageSize {
-					if !errors.Is(err, errBotWorkHistoryExhausted) || got != nil {
-						t.Fatalf("incomplete lookup returned absence or partial result: %v %v", got, err)
-					}
-				} else if previous {
-					if err != nil || got == nil {
-						t.Fatalf("complete history: %v %v", got, err)
-					}
-				} else if !errors.Is(err, store.ErrBotForbidden) {
-					t.Fatalf("complete absence: %v", err)
-				}
-			}
-		})
+		t.Cleanup(resources.Cleanup)
+		for i := 0; i < count; i++ {
+			repo.approvals = append(repo.approvals, store.BotApproval{ID: uuid.New(), BotID: f.req.Bot.ID})
+		}
+		err = resources.ValidateWorkContinuation(context.Background(), store.BotWorkContinueExistingApproval, uuid.New())
+		if len(repo.approvalPages) != botWorkHistoryMaxPages {
+			t.Fatalf("count %d: pages=%d", count, len(repo.approvalPages))
+		}
+		want := error(store.ErrBotForbidden)
+		if count >= botWorkHistoryMaxPages*botWorkHistoryPageSize {
+			want = errBotWorkHistoryExhausted
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("count %d: %v, want %v", count, err, want)
+		}
 	}
 }
 
 func TestBotAgentFactoryWorkHistoryCancellation(t *testing.T) {
-	for _, previous := range []bool{true, false} {
-		for _, mode := range []string{"cancelled", "cancel during read", "caller deadline", "lookup timeout"} {
-			name := "approval/" + mode
-			if previous {
-				name = "previous/" + mode
+	for _, mode := range []string{"cancelled", "cancel during read", "caller deadline", "lookup timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			f, repo := newBotFactoryCallbackFixture(t, store.BotScopePersonal)
+			resources, err := f.construct(t)
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Run(name, func(t *testing.T) {
-				t.Parallel()
-				f, repo := newBotFactoryCallbackFixture(t, store.BotScopePersonal)
-				resources, err := f.construct(t)
-				if err != nil {
-					t.Fatal(err)
+			defer resources.Cleanup()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			want := error(context.Canceled)
+			if mode == "cancelled" {
+				cancel()
+			}
+			if mode == "caller deadline" {
+				var stop context.CancelFunc
+				ctx, stop = context.WithTimeout(ctx, 25*time.Millisecond)
+				defer stop()
+			}
+			if mode == "caller deadline" || mode == "lookup timeout" {
+				want = context.DeadlineExceeded
+			}
+			repo.beforeRead = func(bound context.Context) {
+				deadline, ok := bound.Deadline()
+				if !ok || time.Until(deadline) > botWorkHistoryTimeout {
+					t.Fatalf("missing lookup deadline: %v %v", deadline, ok)
 				}
-				defer resources.Cleanup()
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				want := error(context.Canceled)
-				if mode == "cancelled" {
+				if callerDeadline, ok := ctx.Deadline(); ok && deadline.After(callerDeadline) {
+					t.Fatal("caller deadline extended")
+				}
+				if mode == "cancel during read" {
 					cancel()
 				}
-				if mode == "caller deadline" {
-					var stop context.CancelFunc
-					ctx, stop = context.WithTimeout(ctx, 25*time.Millisecond)
-					defer stop()
-				}
-				if mode == "caller deadline" || mode == "lookup timeout" {
-					want = context.DeadlineExceeded
-				}
-				repo.beforeRead = func(bound context.Context) {
-					deadline, ok := bound.Deadline()
-					if !ok || time.Until(deadline) > botWorkHistoryTimeout {
-						t.Fatalf("missing lookup deadline: %v %v", deadline, ok)
-					}
-					if callerDeadline, ok := ctx.Deadline(); ok && deadline.After(callerDeadline) {
-						t.Fatal("caller deadline extended")
-					}
-					if mode == "cancel during read" {
-						cancel()
-					}
-					<-bound.Done()
-					// Deliberately return a successful empty page after cancellation;
-					// the callback must not mistake it for complete absence.
-				}
-				if previous {
-					var got *store.BotWorkProjection
-					got, err = resources.PreviousWork(ctx)
-					if got != nil {
-						t.Fatal("cancelled lookup returned work")
-					}
-				} else {
-					err = resources.ValidateWorkContinuation(ctx, store.BotWorkContinueExistingApproval, uuid.New())
-				}
-				if !errors.Is(err, want) {
-					t.Fatalf("error=%v, want %v", err, want)
-				}
-				if mode == "cancelled" && (len(repo.runPages) != 0 || len(repo.approvalPages) != 0) {
-					t.Fatal("cancelled callback read history")
-				}
-			})
-		}
+				<-bound.Done()
+			}
+			err = resources.ValidateWorkContinuation(ctx, store.BotWorkContinueExistingApproval, uuid.New())
+			if !errors.Is(err, want) {
+				t.Fatalf("error=%v, want %v", err, want)
+			}
+			if mode == "cancelled" && len(repo.approvalPages) != 0 {
+				t.Fatal("cancelled callback read history")
+			}
+		})
 	}
 }
 
@@ -798,9 +759,6 @@ func TestBotAgentFactoryWorkHistoryInvalidPages(t *testing.T) {
 				repo.runs = append(repo.runs, store.BotRun{ID: id, BotID: f.req.Bot.ID})
 				repo.approvals = append(repo.approvals, store.BotApproval{ID: id, BotID: f.req.Bot.ID})
 			}
-			if got, err := resources.PreviousWork(context.Background()); got != nil || !errors.Is(err, store.ErrBotInvalid) {
-				t.Fatalf("invalid run page: %v %v", got, err)
-			}
 			if err := resources.ValidateWorkContinuation(context.Background(), store.BotWorkContinueExistingApproval, uuid.New()); !errors.Is(err, store.ErrBotInvalid) {
 				t.Fatalf("invalid approval page: %v", err)
 			}
@@ -808,7 +766,7 @@ func TestBotAgentFactoryWorkHistoryInvalidPages(t *testing.T) {
 			if mode == "repeated page" {
 				wantPages = 2
 			}
-			if len(repo.runPages) != wantPages || len(repo.approvalPages) != wantPages {
+			if len(repo.runPages) != 0 || len(repo.approvalPages) != wantPages {
 				t.Fatalf("invalid cursor was retried: %d %d", len(repo.runPages), len(repo.approvalPages))
 			}
 		})
@@ -838,9 +796,6 @@ func TestBotAgentFactoryWorkCallbacksRecheckAuthority(t *testing.T) {
 			}
 			defer resources.Cleanup()
 			tc.change(f, repo)
-			if got, err := resources.PreviousWork(context.Background()); got != nil || !errors.Is(err, tc.want) {
-				t.Fatalf("history bypassed authority: %+v %v", got, err)
-			}
 			for _, kind := range []store.BotWorkContinuationKind{store.BotWorkContinueExistingSchedule, store.BotWorkContinueExistingApproval} {
 				if err := resources.ValidateWorkContinuation(context.Background(), kind, uuid.New()); !errors.Is(err, tc.want) {
 					t.Fatalf("%s bypassed authority: %v", kind, err)
@@ -1002,15 +957,15 @@ func TestBotChatFactoryScope(t *testing.T) {
 				}
 			}
 			observed := f.resolver.model.contexts[0]
-			merged, ok := store.CredentialStoreFromContext(observed).(*store.MergedCredentialStore)
-			if !ok || merged.Team != team {
-				t.Fatal("team credentials lost")
-			}
-			if scope == store.BotScopePersonal && merged.Personal != personal {
-				t.Fatal("owner credentials lost")
-			}
-			if scope == store.BotScopeTeam && merged.Personal != nil {
-				t.Fatal("team Bot inherited personal credentials")
+			if scope == store.BotScopeTeam {
+				if store.CredentialStoreFromContext(observed) != team {
+					t.Fatal("team credentials lost or personal scope inherited")
+				}
+			} else {
+				merged, ok := store.CredentialStoreFromContext(observed).(*store.MergedCredentialStore)
+				if !ok || merged.Team != team || merged.Personal != personal {
+					t.Fatal("owner credentials lost")
+				}
 			}
 			if store.UserIDFromContext(observed) != f.req.Bot.OwnerID.String() {
 				t.Fatal("owner context lost")
@@ -1133,16 +1088,16 @@ func TestBotChatFactoryToolRegistrationStaysWrapped(t *testing.T) {
 	}
 	// The always-installed delegate is a function tool whose ProcessRequest
 	// normally stores the underlying function-tool receiver in req.Tools.
-	wired := res.Agent.LLM.(*botFactoryLLM)
-	in := &botWiredInjection{scope: &BotChatScope{Services: f.services, Sessions: f.sessions}, safe: &BotChatSafeResources{WorkspaceDir: "/isolated"}, binding: wired.binding, llm: wired, contextWindow: 8192}
-	result, err := newBotWiredChatAgent(f.ctx, &ChatFactoryConfig{}, in)
+	wired := botFactoryModelForTest(t, res.Agent.LLM)
+	in := &botChatDependencies{scope: &BotChatScope{Services: f.services, Sessions: f.sessions}, safe: &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated"}, binding: wired.binding, llm: wired, contextWindow: 8192}
+	result, err := newBotScopedChatRuntime(f.ctx, &ChatFactoryConfig{}, in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer result.Cleanup()
 	request := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
-	wrapped := result.InternalTools[len(result.InternalTools)-1].(*botBoundTool)
-	ctx := botFactoryToolContext{base: f.ctx}
+	wrapped := result.ChatAgent.ToolIndex.GetToolEntry("delegate_tasks").Tool.(*chatRuntimeTool)
+	ctx := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
 	if err := wrapped.ProcessRequest(ctx, request); err != nil {
 		t.Fatal(err)
 	}

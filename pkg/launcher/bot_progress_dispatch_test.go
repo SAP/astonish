@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,30 +120,51 @@ func TestBotProgressDispatchInteractiveNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
-	var target *interactiveBotTool
+	var target *chatRuntimeTool
 	for _, candidate := range resources.Agent.Tools {
 		if candidate.Name() == "read_file" {
-			target = candidate.(*interactiveBotTool)
+			target = candidate.(*chatRuntimeTool)
 		}
 	}
 	if target == nil {
 		t.Fatal("missing native read")
 	}
 	p := &progressDispatchProbe{}
-	target.binding.req.Version.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
-	target.binding.owner = bot.WithProgressDispatch(target.binding.owner, p)
-	target.binding.installProgressBridge()
-	ctx := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: target.binding.owner, session: f.req.Run.SessionID.String()}}
-	// Missing file still proves the pinned read completed, not an uncertain write.
-	_, _ = target.Run(ctx, map[string]any{"path": "/nonexistent/progress-read"})
+	binding := target.binding.hooks.Dispatch.(botSharedDispatch).b
+	binding.req.Version.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
+	binding.owner = bot.WithProgressDispatch(binding.owner, p)
+	binding.installProgressBridge()
+	ctx := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: binding.owner, session: f.req.Run.SessionID.String()}}
+	// Missing file still proves the shared native read completed, not an uncertain write.
+	_, err = target.Run(ctx, map[string]any{"path": filepath.Join(t.TempDir(), "nonexistent-progress-read")})
+	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("expected native missing-file error: %v", err)
+	}
 	if p.began != 1 || p.settled != 0 {
 		t.Fatalf("premature/unrecorded dispatch: %+v", p)
 	}
-	if err := target.binding.progress.boundary(target.binding.owner); err != nil {
+	if err := binding.progress.boundary(binding.owner); err != nil {
 		t.Fatal(err)
 	}
 	if p.settled != 1 || p.outcome != store.BotProgressDispatchSettled {
 		t.Fatalf("read classified as uncertain write: %+v", p)
+	}
+}
+
+func TestBotProgressPinnedConfinedReads(t *testing.T) {
+	r, scope, _, _ := confinedFixture(t)
+	ts, err := BotFileTools(r, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range ts {
+		want := candidate.Name() == "read_file" || candidate.Name() == "find_files" || candidate.Name() == "file_tree"
+		if got := botProgressPinnedRead(candidate.(botRunnableTool), nil); got != want {
+			t.Fatalf("%s pinned read=%v want=%v", candidate.Name(), got, want)
+		}
+		if botProgressPinnedRead(progressNamedTool{name: candidate.Name()}, nil) {
+			t.Fatalf("untrusted name %s acquired read semantics", candidate.Name())
+		}
 	}
 }
 

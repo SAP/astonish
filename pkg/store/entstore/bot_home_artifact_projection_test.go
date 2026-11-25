@@ -72,9 +72,9 @@ func testBotHomeArtifactProjection(t *testing.T, workEnabled bool) {
 			var reader store.BotTranscriptReader
 			switch d := repo.db.(type) {
 			case personalBotDB:
-				reader = &personalSessionStore{client: d.client}
+				reader = &personalSessionStore{client: d.client, content: d.content}
 			case teamBotDB:
-				reader = &teamSessionStore{client: d.client}
+				reader = &teamSessionStore{client: d.client, content: d.content}
 			}
 			before, err := reader.ReadBotTranscript(ctx, b.HomeSessionID, 0, 200)
 			if err != nil {

@@ -64,7 +64,12 @@ func committedPublicationReport(ctx context.Context, db botDraftDB, bot, run uui
 		after = sequence - 1
 	}
 	for {
-		activities, err := db.ReadActivity(ctx, bot, after, 200)
+		limit := 200
+		if sequence > 0 {
+			// Do not hydrate unrelated later evidence for an exact report replay.
+			limit = 1
+		}
+		activities, err := db.ReadActivity(ctx, bot, after, limit)
 		if err != nil {
 			return selected, 0, err
 		}
@@ -94,7 +99,7 @@ func committedPublicationReport(ctx context.Context, db botDraftDB, bot, run uui
 				return selected, selectedSequence, nil
 			}
 		}
-		if len(activities) < 200 {
+		if sequence > 0 || len(activities) < limit {
 			break
 		}
 	}
@@ -212,7 +217,7 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		if err := saved.Run.Report.ValidateEmployeeMessageIntegrity(saved.Run.Status); err != nil {
 			return err
 		}
-		p := &store.BotPublication{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: saved.Run.Report.EmployeeMessage.Text, PublishedAt: now}
+		p := &store.BotPublication{Artifacts: append([]store.BotArtifact(nil), saved.Run.Report.Artifacts...), ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: saved.Run.Report.EmployeeMessage.Text, PublishedAt: now}
 		questionOnly, err := questionOnlyWaitingPublication(ctx, tx, saved.Run)
 		if err != nil {
 			return err
@@ -265,7 +270,7 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			return err
 		}
 		var reply *adksession.Event
-		if stored.Work == nil && !scheduleReceipt && saved.Run.UsesHomeHistory() && saved.Run.Status == store.RunSucceeded {
+		if stored.Work == nil && len(p.Artifacts) == 0 && !scheduleReceipt && saved.Run.UsesHomeHistory() && saved.Run.Status == store.RunSucceeded {
 			reply, err = persistedConversationReply(ctx, tx, rec.Bot, saved.Run)
 			if err != nil {
 				return err
@@ -293,6 +298,16 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			p.Notifications = append(p.Notifications, store.BotNotification{ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Target: binding, State: state, Decision: evaluation.Decision, Reason: evaluation.Reason, AvailableAt: evaluation.AvailableAt, Text: p.Text})
 		}
 		event := &adksession.Event{ID: p.EventID, InvocationID: "bot-report:" + q.RunID.String(), Author: "assistant", Timestamp: now, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: p.Text}}}}}
+		envelope, err := p.FilePublication()
+		if err != nil {
+			return err
+		}
+		if envelope != nil {
+			if envelope.HomeID != rec.Bot.Home.ID {
+				return store.ErrBotInvalid
+			}
+			event.Actions.StateDelta = map[string]any{store.BotFilePublicationKey: envelope}
+		}
 		if reply == nil && canonicalOperationEvent == "" {
 			if err := adapter.AppendHomeReport(ctx, rec.Bot, event); err != nil {
 				return err
@@ -336,9 +351,9 @@ func persistedConversationReply(ctx context.Context, db botDraftDB, b store.Bot,
 	var reader store.BotTranscriptReader
 	switch d := db.(type) {
 	case personalBotDB:
-		reader = &personalSessionStore{client: d.client}
+		reader = &personalSessionStore{client: d.client, content: d.content}
 	case teamBotDB:
-		reader = &teamSessionStore{client: d.client}
+		reader = &teamSessionStore{client: d.client, content: d.content}
 	default:
 		return nil, store.ErrBotUnsupported
 	}

@@ -17,6 +17,17 @@ type BotPublicationStore interface {
 	FinishNotification(context.Context, BotNotificationFinish) error
 }
 
+// BotCommittedArtifactStore resolves an exact committed report, never the mutable
+// run.Report. Callers still authorize Home/file reads through their scoped backend.
+// A positive report sequence and artifact ID are required; there is no latest fallback.
+type BotCommittedArtifactStore interface {
+	ReadCommittedArtifact(context.Context, BotID, int64, uuid.UUID) (*BotArtifact, error)
+}
+
+type BotFilePublicationStore interface {
+	ReadFilePublication(context.Context, BotID, RunID, int64) (*BotFilePublication, error)
+}
+
 type BotPublicationRequest struct {
 	ReportSequence int64 `json:"report_sequence,omitempty"`
 	BotID          BotID
@@ -35,6 +46,7 @@ const (
 )
 
 type BotPublication struct {
+	Artifacts      []BotArtifact     `json:"artifacts,omitempty"`
 	Suppressed     bool              `json:"suppressed,omitempty"`
 	ReportSequence int64             `json:"report_sequence,omitempty"`
 	BotID          BotID             `json:"bot_id"`

@@ -34,6 +34,12 @@ type backendSlot struct {
 // other slot, restores its state (lazy-opening the backend on first visit), and
 // swaps the accent theme so the UI color changes instantly.
 func (m model) switchBackend() (tea.Model, tea.Cmd) {
+	if m.workspacePicker.loading {
+		m.workspacePicker.notice = "Operation in progress"
+		return m, nil
+	}
+	m.workspacePicker.open = false
+	m.workspaceGeneration++
 	m.detachBotWatch()
 	m.bots = botsState{}
 	if cap := m.botCap(); cap != nil {

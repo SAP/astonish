@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,11 +27,7 @@ func TestBotTaskWorkspaceDockerIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			dir := t.TempDir()
-			backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(dir, "layers"), UppersDir: filepath.Join(dir, "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
-			if err != nil {
-				t.Fatal(err)
-			}
+			backend := newTaskWorkspaceDockerBackend(t)
 			p := f.req.Principal
 			h, err := backend.EnsureBotHome(f.ctx, sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()})
 			if err != nil {
@@ -51,6 +48,11 @@ func TestBotTaskWorkspaceDockerIntegration(t *testing.T) {
 			if err = entstore.RegisterBotHomeBinding(service, repo, reg, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
+			b, err = repo.Get(f.ctx, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepareTaskWorkspaceDockerSession(t, f.ctx, backend, h, b.HomeSessionID.String())
 			tasks := repo.(store.BotTaskStore)
 			w := &BotTaskWorkspace{Backend: backend, Bots: repo, Tasks: tasks}
 			if err = w.Install(); err != nil {
@@ -157,6 +159,58 @@ func TestBotTaskWorkspaceDockerIntegration(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// Physical fixtures select their recipe explicitly; Home registration is not
+// launch authority, and file codecs must never invent or resume compute.
+func newTaskWorkspaceDockerBackend(t *testing.T) *docker.DockerBackend {
+	t.Helper()
+	layers, image := os.Getenv("ASTONISH_BOT_HOME_TEST_LAYERS"), os.Getenv("ASTONISH_SANDBOX_IMAGE")
+	if !filepath.IsAbs(layers) || image == "" {
+		t.Fatal("test-owned image and absolute retained layer path required")
+	}
+	// Ambient macOS TMPDIR is not Docker-visible. Own only this fresh root
+	// beside the explicitly shared layers; never remove the retained layers.
+	uppers, err := os.MkdirTemp(filepath.Dir(layers), "task-workspace-uppers-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(uppers); err != nil {
+			t.Error(err)
+		}
+	})
+	sessions, err := sandbox.NewLocalSessionStore(filepath.Join(t.TempDir(), "sandbox-registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(sessions), LayersDir: layers, UppersDir: uppers, SandboxImage: image, OverlayMode: "fuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backend
+}
+
+func prepareTaskWorkspaceDockerSession(t *testing.T, ctx context.Context, backend *docker.DockerBackend, home *sandbox.BotHomeBinding, id string) {
+	t.Helper()
+	if err := backend.PrepareBotHomeSession(ctx, home, id); err == nil || !strings.Contains(err.Error(), "missing or mismatched authorized Bot session recipe") {
+		t.Fatalf("unconfigured Home must fail closed: %v", err)
+	}
+	// This is fixture-authorized configuration, not a production default.
+	// No Bot activation, model call, or overlay Python is required.
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := backend.DestroySession(c, id); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := backend.CreateSession(ctx, sandbox.SessionSpec{SessionID: id, Type: sandbox.SessionTypeChat, UserID: home.Scope.UserID, BotHome: home.Clone(), TemplateID: sandbox.BaseTemplateID, LayerChain: []string{sandbox.BaseTemplateID}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.WaitForSessionReady(ctx, id); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -651,6 +651,21 @@ func (env *memoryHTTPAcceptance) open(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Personal Chat exposes team stores too. Seed real execution membership;
+	// transport superadmin claims cannot substitute for the live directory.
+	team, err := orgStore.Teams().GetTeamBySlug(ctx, env.TeamSlug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if team == nil {
+		team = &store.Team{ID: "c71035a3-9f1b-460c-b02a-fcfba15d82a1", Slug: env.TeamSlug, Name: "Scoped Chat acceptance", SchemaName: "team_general"}
+		if err := orgStore.Teams().CreateTeam(ctx, team); err != nil {
+			t.Fatal(err)
+		}
+		if err := orgStore.Teams().AddMember(ctx, &store.TeamMembership{UserID: env.UserID, TeamID: team.ID, Role: "member"}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	env.Services.PersonalSessions = orgStore.ForUser(env.UserID).Sessions()
 	env.Services.Sessions = orgStore.ForTeam(env.TeamSlug).Sessions()
 	env.ChatAgent = agent.NewChatAgent(env.LLM, env.tools, nil, env.Services.PersonalSessions, &agent.SystemPromptBuilder{}, false, true)
@@ -1038,13 +1053,7 @@ func TestMemoryHTTPAcceptance_LegacyAndPrepared(t *testing.T) {
 func TestMemoryHTTPAcceptance_TeamDebugScope(t *testing.T) {
 	env := setupMemoryHTTPAcceptance(t, NewMockLLM(), nil)
 	ctx := context.Background()
-	org, err := env.Store.ForOrg(env.OrgSlug)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := org.Teams().CreateTeam(ctx, &store.Team{Name: "General", Slug: env.TeamSlug, SchemaName: "team_general"}); err != nil {
-		t.Fatal(err)
-	}
+	// The common fixture already provisions this team and its membership.
 	created, err := env.Services.Sessions.Create(ctx, &session.CreateRequest{AppName: studioChatAppName, UserID: env.UserID})
 	if err != nil {
 		t.Fatal(err)

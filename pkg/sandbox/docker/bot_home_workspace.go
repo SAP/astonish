@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/SAP/astonish/pkg/sandbox"
-	"github.com/google/uuid"
 )
 
 // BotWorkspaceHelperImage is a digest-pinned Python/SQLite userland, separate
@@ -27,6 +26,11 @@ var botWorkspaceProgram = `import os,sys,json,base64,hashlib,stat,fcntl,uuid
 q=json.loads(sys.stdin.readline()); root=os.open('/mnt/astonish-bot-home',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 ` + strings.Replace(sandbox.BotHomeWorkspaceProgram, "if op=='publish':", sandbox.BotKnowledgeWorkspaceProgram+"\nif op in ('knowledge-snapshot','knowledge-publish','knowledge-verify'): result=knowledgeoperation()\nelif op=='publish':", 1)
 
+func (db *DockerBackend) botCompiledWorkspaceCommand(ctx context.Context, target string) *exec.Cmd {
+	script := fmt.Sprintf("exec 8<%s; exec 9<%s; exec /usr/local/bin/astonish-host node --internal-home-workspace", botPrivateMount, botHomeMount)
+	return db.botSessionExecCommand(ctx, target, []string{"exec", "--interactive", target, "/bin/sh", "-ec", script})
+}
+
 func (db *DockerBackend) workspace(ctx context.Context, b *sandbox.BotHomeBinding, q map[string]any, out any) (err error) {
 	if err = validateBotHomeReference(b); err != nil {
 		return err
@@ -36,7 +40,7 @@ func (db *DockerBackend) workspace(ctx context.Context, b *sandbox.BotHomeBindin
 	if err = db.validateBotHome(ctx, b); err != nil {
 		return err
 	}
-	volume, e := db.ensureWorkspaceVolume(ctx, b)
+	id, e := db.botFileSession(ctx, b)
 	if e != nil {
 		return e
 	}
@@ -45,44 +49,15 @@ func (db *DockerBackend) workspace(ctx context.Context, b *sandbox.BotHomeBindin
 	if e != nil {
 		return e
 	}
-	name := "astonish-home-workspace-" + uuid.NewString()
-	defer func() {
-		c, stop := context.WithTimeout(context.Background(), 15*time.Second)
-		defer stop()
-		labels, e := runDocker(c, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{json .Config.Labels}}", name)
-		if e != nil {
-			if !isDockerNotFoundError(e) {
-				err = errors.Join(err, e)
-			}
-			return
+	program := strings.Replace(botWorkspaceProgram, "root=os.open('/mnt/astonish-bot-home',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)", "root=os.dup(8)", 1)
+	cmd := db.botSessionCommand(ctx, id, program)
+	if sandbox.IsCompiledWorkspaceOperation(q["op"]) {
+		target, resolveErr := db.resolveBotFileTarget(ctx, id, b)
+		if resolveErr != nil {
+			return resolveErr
 		}
-		var v map[string]string
-		if json.Unmarshal(labels, &v) != nil || v[botHomeReaderLabel] != name || v[botHomeScopeLabel] != b.Scope.Key() {
-			err = errors.Join(err, errors.New("workspace cleanup ownership mismatch"))
-			return
-		}
-		_, e = runDocker(c, db.cfg.ContainerRuntimePath, "rm", "-fv", name)
-		err = errors.Join(err, e)
-	}()
-	_, err = runDocker(ctx, db.cfg.ContainerRuntimePath, "container", "create", "--interactive", "--name="+name, "--label="+botHomeReaderLabel+"="+name, "--label="+botHomeScopeLabel+"="+b.Scope.Key(), "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=16", "--memory=256m", "--cpus=0.5", "--user=0:0", "--log-driver=none", "--mount=type=volume,source="+volume+",target="+botHomeMount+",volume-nocopy", "--entrypoint=python3", BotWorkspaceHelperImage, "-I", "-c", botWorkspaceProgram)
-	if err != nil {
-		return err
+		cmd = db.botCompiledWorkspaceCommand(ctx, target)
 	}
-	if err = db.validateBotHome(ctx, b); err != nil {
-		return err
-	}
-	mounts, e := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{json .Mounts}}", name)
-	if e != nil {
-		return e
-	}
-	var ms []struct {
-		Type, Name, Destination string
-		RW                      bool
-	}
-	if json.Unmarshal(mounts, &ms) != nil || len(ms) != 1 || ms[0].Type != "volume" || ms[0].Name != volume || ms[0].Destination != botHomeMount || !ms[0].RW {
-		return errors.New("workspace mount mismatch")
-	}
-	cmd := exec.CommandContext(ctx, db.cfg.ContainerRuntimePath, "start", "--attach", "--interactive", name)
 	input, approval, pipeErr := os.Pipe()
 	if pipeErr != nil {
 		return pipeErr
@@ -90,20 +65,19 @@ func (db *DockerBackend) workspace(ctx context.Context, b *sandbox.BotHomeBindin
 	defer input.Close()
 	defer approval.Close()
 	cmd.Stdin = input
-	go func() { _, _ = approval.Write(append(raw, '\n')) }()
+	requestWritten := make(chan error, 1)
+	go func() { _, e := approval.Write(append(raw, '\n')); requestWritten <- e }()
+	defer func() {
+		_ = input.Close()
+		_ = approval.Close()
+		err = errors.Join(err, <-requestWritten)
+	}()
 	stdout := &artifactBuffer{remaining: 24 << 20}
 	stderr := &artifactBuffer{remaining: 4096}
 	control := &sandbox.WorkspaceCommitStream{Context: ctx, Output: stdout, Approve: approval, RunScript: func(input []byte) ([]byte, error) { return db.runWorkspaceScratch(ctx, b, input) }}
 	cmd.Stdout, cmd.Stderr = control, stderr
 	if e = cmd.Run(); e != nil {
 		return fmt.Errorf("workspace: %w: %s", e, stderr.String())
-	}
-	code, e := runDocker(ctx, db.cfg.ContainerRuntimePath, "inspect", "--format", "{{.State.ExitCode}}", name)
-	if e != nil {
-		return e
-	}
-	if strings.TrimSpace(string(code)) != "0" {
-		return fmt.Errorf("workspace confined operation failed: %s", stderr.String())
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()

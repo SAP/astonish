@@ -36,6 +36,9 @@ func readMandateOperation(ctx context.Context, tx botDraftDB, rec *botStoredReco
 	if a.Kind != mandateRecordKind || json.Unmarshal(a.Payload, &o) != nil || o.ID != id || o.MandateRef != ref || o.Revision != rev || o.Validate() != nil {
 		return nil, store.ErrBotInvalid
 	}
+	if err := applyOperationCleanup(rec, &o); err != nil {
+		return nil, err
+	}
 	return &o, nil
 }
 func (s *botMandateRuntime) ReadBotOperation(ctx context.Context, ref store.BotMandateRef, id uuid.UUID) (*store.BotOperation, error) {

@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"strings"
+	"time"
+
+	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/store"
 
 	"github.com/SAP/astonish/pkg/agent"
 	adksession "google.golang.org/adk/session"
@@ -182,6 +187,9 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 
 	// Execute all tasks via the SubAgentManager
 	results := manager.RunTasks(ctx, tasks)
+	// Attest only the server-observed successful join, never child prose or
+	// its claimed effects. Actual file/effect receipts remain independently checked.
+	recordDelegateJoinOutcome(ctx, tasks, results)
 
 	// Stash sub-agent execution traces for the parent's afterToolCallback.
 	// The callback retrieves these via PopLastTraces() and attaches them to
@@ -258,6 +266,31 @@ func delegateTasksWithManager(ctx tool.Context, args DelegateTasksArgs, manager 
 		Results: resultItems,
 		Summary: strings.Join(summaryParts, "\n"),
 	}, nil
+}
+
+// recordDelegateJoinOutcome accepts only manager-returned task identities from
+// this invocation. It observes termination/join, not the truth of model output.
+func recordDelegateJoinOutcome(ctx tool.Context, tasks []agent.SubAgentTask, results []agent.TaskResult) {
+	if ctx == nil || ctx.Err() != nil || ctx.FunctionCallID() == "" || len(tasks) == 0 || len(results) != len(tasks) {
+		return
+	}
+	identity, ok := execution.BotRunIdentityFromContext(ctx)
+	if !ok || identity.Validate() != nil {
+		return
+	}
+	actor, err := uuid.Parse(identity.ActorID)
+	if err != nil {
+		return
+	}
+	observations := make([]store.BotEvidence, 0, len(tasks))
+	for i := 0; i < len(results) && i < len(tasks); i++ {
+		r, t := results[i], tasks[i]
+		if r.Status != "success" || r.Error != "" || t.BatchID != ctx.FunctionCallID() || t.ParentID != ctx.SessionID() || t.TaskID == "" || t.ChildSessionID == "" || !r.MatchesJoinedTask(t) {
+			return
+		}
+		observations = append(observations, store.BotEvidence{Kind: store.BotEvidenceObservation, Summary: "Delegated child execution completed and was joined by the server; child output remains untrusted", Source: "session://" + r.ChildSessionID, ActorID: actor, ObservedAt: time.Now().UTC()})
+	}
+	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, Unchanged: observations})
 }
 
 const delegateTasksDescription = `Delegate tasks to parallel sub-agents with isolated sessions. Each sub-agent starts with the tool groups or individual tools you specify as preferences (e.g., ["core"], ["browser"], ["core", "web"]). Omitted, null, or empty tools request automatic initial selection based on the task description. These preferences are not an allow-list: when needed, the child can discover, describe, and execute additional tools within the parent's permissions and child restrictions. Use this for specialized tasks like browser automation, web fetching, email, API calls, or any task requiring tools not on the main thread. Each sub-agent has read-only memory, a search_tools capability, and a 10-minute timeout (automatically retried once if making progress). Max 10 tasks per call.

@@ -188,7 +188,8 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 			text.WriteString(part.Text)
 		}
 		if part.FunctionResponse != nil {
-			recoverableReadFailure := cr.observeBotToolOutcome(content.Role, part.FunctionResponse)
+			observation := cr.observeBotToolOutcome(content.Role, part.FunctionResponse)
+			recoverableReadFailure := observation.Recoverable
 			result := part.FunctionResponse.Response
 			var state agent.ProgressiveResultState
 			switch value := result["state"].(type) {
@@ -199,7 +200,7 @@ func (cr *ChatRunner) observeCompletion(event *session.Event) {
 			}
 			// Native errors include policy, cancellation and shared-budget stops.
 			// Never turn those into source feedback, even with an access receipt.
-			if _, nativeError := result["error"].(error); nativeError || (state != "" && state != agent.ProgressiveStateExecutionError) {
+			if _, nativeError := result["error"].(error); (nativeError && !observation.KnownNonexecution) || (state != "" && state != agent.ProgressiveStateExecutionError) {
 				recoverableReadFailure = false
 			}
 			switch state {
@@ -1129,10 +1130,14 @@ runLoop:
 			_, botRun := execution.BotRunIdentityFromContext(cr.ctx)
 			_, budgetFailure := bot.BudgetFailureMessage(runErr)
 			_, checkpointFailure := bot.CheckpointFailureMessage(runErr)
-			// Native Bot stops are published once, from the committed report.
-			// Ordinary Chat and text-only lookalikes retain normal error handling.
+			// Native typed stops are published once from the committed report.
+			// Text lookalikes retain ordinary sanitized Chat error signaling.
 			if !botRun || (!budgetFailure && !checkpointFailure) {
-				cr.emitEvent("error", map[string]any{"error": runErr.Error()})
+				text := runErr.Error()
+				if shouldRetryTruncatedStream(runErr, hasContent) && cr.ctx.Err() == nil {
+					text = publicChatTruncatedStream
+				}
+				cr.emitEvent("error", map[string]any{"error": text})
 				persistRunError(cr.ctx, sessionService, cr.UserID, cr.SessionID, "", runErr)
 			}
 			break
@@ -1161,7 +1166,11 @@ runLoop:
 						hasContent = true
 					}
 					if !suppressAggregateText {
-						cr.emitEvent("text", map[string]any{"text": part.Text, "invocationId": event.InvocationID})
+						data := map[string]any{"text": part.Text, "invocationId": event.InvocationID}
+						if _, botRun := execution.BotRunIdentityFromContext(cr.ctx); botRun && !event.Partial {
+							data["sourceEventId"] = event.ID
+						}
+						cr.emitEvent("text", data)
 					}
 				}
 				if part.FunctionCall != nil {
@@ -2294,6 +2303,7 @@ func (cr *ChatRunner) emitEvent(eventType string, data map[string]any) {
 		cr.completion.Blocked = true
 		cr.completionMu.Unlock()
 	}
+	data = publicChatErrorData(eventType, data)
 	if cr.sinkErr != nil {
 		return
 	}

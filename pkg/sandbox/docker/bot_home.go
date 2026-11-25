@@ -38,7 +38,7 @@ func validateBotHomeReference(b *sandbox.BotHomeBinding) error {
 	if err := b.Validate(); err != nil {
 		return err
 	}
-	if b.Backend != sandbox.BackendKindDocker || b.Ref != botHomeVolume(b.Scope) {
+	if b.Backend != sandbox.BackendKindDocker || !validBotHomeVolume(b) {
 		return errors.New("sandbox/docker: invalid bot home binding")
 	}
 	return nil
@@ -305,11 +305,19 @@ func (db *DockerBackend) validateBotCleanupSession(ctx context.Context, b *sandb
 	if c.Name != "/"+containerName(id) || labels["astonish.session_id"] != id || labels[botHomeScopeLabel] != b.Scope.Key() || labels["astonish.org"] != b.Scope.OrgID || labels["astonish.team"] != b.Scope.TeamID {
 		return "", errors.New("sandbox/docker: cleanup container identity mismatch; retained")
 	}
-	home, overlay, upper, layers := false, false, false, false
+	home, overlay, upper, layers, private := false, false, false, false, false
 	for _, mount := range c.Mounts {
 		switch mount.Destination {
 		case botHomeMount:
 			home = mount.Type == "volume" && mount.Name == b.Ref && mount.RW
+		case botPrivateMount:
+			// Older sessions have four mounts. New sessions additionally mount
+			// only the exact private workspace for this Home (including restore
+			// generation); its path alone is never cleanup authority.
+			if private || mount.Type != "volume" || mount.Name != workspaceVolume(b) || !mount.RW {
+				return "", errors.New("sandbox/docker: cleanup private mount mismatch; retained")
+			}
+			private = true
 		case mountOverlay:
 			overlay = mount.Type == "volume" && mount.Name == overlayVolumeName(id) && mount.RW
 		case mountUppers:
@@ -320,7 +328,11 @@ func (db *DockerBackend) validateBotCleanupSession(ctx context.Context, b *sandb
 			return "", errors.New("sandbox/docker: unexpected cleanup mount; retained")
 		}
 	}
-	if !home || !overlay || !upper || !layers || len(c.Mounts) != 4 {
+	expectedMounts := 4
+	if private {
+		expectedMounts++
+	}
+	if !home || !overlay || !upper || !layers || len(c.Mounts) != expectedMounts {
 		return "", errors.New("sandbox/docker: cleanup mount mismatch; retained")
 	}
 	return c.ID, nil
@@ -478,7 +490,7 @@ func (db *DockerBackend) validateBotHome(ctx context.Context, binding *sandbox.B
 	if err := binding.Validate(); err != nil {
 		return err
 	}
-	if binding.Backend != sandbox.BackendKindDocker || binding.Ref != botHomeVolume(binding.Scope) {
+	if binding.Backend != sandbox.BackendKindDocker || !validBotHomeVolume(binding) {
 		return fmt.Errorf("sandbox/docker: invalid bot home binding")
 	}
 	raw, err := runDocker(ctx, db.cfg.ContainerRuntimePath, "volume", "inspect", binding.Ref)

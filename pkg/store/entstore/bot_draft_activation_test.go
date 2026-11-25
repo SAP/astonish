@@ -26,10 +26,10 @@ func draftActivationFixture(t *testing.T, scope store.BotScope) (*botRepository,
 	var db botDraftDB
 	if scope == store.BotScopeTeam {
 		auth.teamSlug = "team"
-		db = teamBotDB{client: newTeamClient(t)}
+		db = teamBotDB{client: newTeamClient(t), content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}
 	} else {
 		_, client := setupPersonalStore(t)
-		db = personalBotDB{client: client}
+		db = personalBotDB{client: client, content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}
 	}
 	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
 	r := &botRepository{auth: auth, db: db, now: func() time.Time { return now }}

@@ -44,10 +44,16 @@ func TestInteractiveBotCatalogNoAutonomyTools(t *testing.T) {
 		t.Fatalf("scoped dry run failed: %+v %v", result, err)
 	}
 	names := map[string]bool{}
-	for _, candidate := range got.Agent.Tools {
+	for _, name := range []string{"read_file", "web_fetch", "ask_user", "run_flow", "distill_flow", "email_send", "browser_navigate"} {
+		entry := got.Agent.ToolIndex.GetToolEntry(name)
+		if entry == nil {
+			continue
+		}
+		candidate := entry.Tool
 		names[candidate.Name()] = true
 		if candidate.Name() == "read_file" || candidate.Name() == "web_fetch" {
-			if _, ok := candidate.(*interactiveBotTool); !ok {
+			wrapped, ok := candidate.(*chatRuntimeTool)
+			if !ok || wrapped.binding == nil || wrapped.binding.hooks.Dispatch == nil {
 				t.Fatalf("unguarded %s", candidate.Name())
 			}
 		}

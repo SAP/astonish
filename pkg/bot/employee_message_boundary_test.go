@@ -534,6 +534,49 @@ func TestBotAgentEmployeeFallbackSafeFacts(t *testing.T) {
 	}
 }
 
+func TestBotEmployeeUsefulPartialReadOnlyMessage(t *testing.T) {
+	for _, mode := range []string{"useful", "unknown", "uncertain", "revoked", "pending-review", "changed", "limitation-drift"} {
+		t.Run(mode, func(t *testing.T) {
+			w, report, status := agentEmployeeFixture(t, store.AgentWorkPartial)
+			w.EmployeeReviewPolicy = store.BotEmployeeReviewEvidenceBoundV1
+			w.Unresolved = []string{"Current-quarter data unavailable."}
+			w.Candidate.Text = "Prior-quarter revenue rose 5%. Current-quarter data unavailable."
+			w.Candidate.ReadOnlyResult = true
+			w.Candidate.Digest = w.Candidate.ContentDigest()
+			report.Summary = w.Candidate.Text
+			report.EffectState = store.BotReportEffectsReadOnly
+			report.Unverified = append([]string(nil), w.Unresolved...)
+			var cause error
+			switch mode {
+			case "unknown":
+				report.EffectState = store.BotReportEffectsUnknown
+			case "uncertain":
+				report.EffectState = store.BotReportEffectsUncertain
+			case "revoked":
+				cause = store.ErrBotForbidden
+			case "pending-review":
+				w.EmployeeReviewPending = true
+			case "changed":
+				report.Changed = []store.BotEvidence{{Summary: "write"}}
+			case "limitation-drift":
+				report.Unverified = []string{"different gap"}
+			}
+			report.Work = store.BuildBotWorkProjection(w)
+			m := &employeeNarrator{t: t, mode: "error"}
+			message := ComposeEmployeeMessage(context.Background(), status, report, cause, EmployeeMessageOptions{Work: w, LLM: m, Boundary: func(context.Context) error { t.Fatal("partial consumed narration capacity"); return nil }})
+			if (message.Origin == store.BotEmployeeMessageAgent) != (mode == "useful") || m.calls != 0 {
+				t.Fatalf("mode=%s message=%+v calls=%d", mode, message, m.calls)
+			}
+			if mode == "useful" && message.Text != w.Candidate.Text {
+				t.Fatal("useful final replaced")
+			}
+			if mode == "revoked" && !strings.Contains(message.Text, "authorization") {
+				t.Fatal(message.Text)
+			}
+		})
+	}
+}
+
 func TestEmployeeMessageFallbackTypedFailures(t *testing.T) {
 	for _, cause := range []error{ErrBudgetExceeded, ErrBudgetUnknownCost, &BudgetLimitError{Dimension: BudgetTokens, Scope: BudgetRun, Reason: BudgetInputDoesNotFit}, &CheckpointResponseError{Reason: CheckpointResponseMultipleCalls}, context.Canceled} {
 		message := EmployeeMessageFallback(store.RunFailed, store.BotReport{}, cause)

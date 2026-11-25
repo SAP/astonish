@@ -101,11 +101,20 @@ func NewPlatformServices(ctx context.Context, cfg Config) (*store.Services, *Sto
 		}
 	}
 
+	// File-first content requires explicit durable configuration. Do not create
+	// storage from a read or silently use New's default host directory.
+	if cfg.DataDir != "" {
+		if err := prepareBotContentDirectory(cfg.DataDir); err != nil {
+			s.Close()
+			return nil, nil, fmt.Errorf("prepare Bot content storage: %w", err)
+		}
+	}
 	svc := &store.Services{
-		Mode:             store.ModePlatform,
-		Platform:         s,
-		TenantRouter:     s,
-		PlatformSettings: s.PlatformSettings(),
+		Mode:                     store.ModePlatform,
+		Platform:                 s,
+		TenantRouter:             s,
+		PlatformSettings:         s.PlatformSettings(),
+		BotContentStagingFactory: s.BotContentStaging,
 	}
 
 	return svc, s, nil
@@ -158,10 +167,13 @@ func TenantMiddleware(s *Store) func(http.Handler) http.Handler {
 
 			// Create a request-scoped clone with tenant-specific stores
 			reqSvc := &store.Services{
+				BotContentStagingFactory:      baseSvc.BotContentStagingFactory,
+				BotFilesFactory:               baseSvc.BotFilesFactory,
 				BotAuthorizedOperationFactory: baseSvc.BotAuthorizedOperationFactory,
 				BotHomeSetup:                  baseSvc.BotHomeSetup,
 				BotInteractiveReady:           baseSvc.BotInteractiveReady,
 				BotMandatePolicy:              baseSvc.BotMandatePolicy,
+				BotRunStateNotify:             baseSvc.BotRunStateNotify,
 				BotTurnRegistry:               baseSvc.BotTurnRegistry,
 				Mode:                          store.ModePlatform,
 				Platform:                      baseSvc.Platform,

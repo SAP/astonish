@@ -29,6 +29,25 @@ func (s botPromptWorkReader) Read(ctx context.Context, q bot.BotWorkReadRequest)
 	return s.read(ctx, q)
 }
 
+func TestBotPromptInlineDefaultAndExplicitFiles(t *testing.T) {
+	for _, run := range []store.BotRun{{ExecutionMode: execution.BotExecutionModeChatInteractive}, {Trigger: store.TriggerCron}} {
+		b := &SystemPromptBuilder{}
+		b.applyBotPrompt(NewBotPromptOverrides(nil, bot.RunRequest{Run: run, Bot: store.Bot{Name: "employee"}}))
+		for _, want := range []string{"Deliver ordinary information requests directly in chat", "explicitly requests a file", "Do not require a plan, work-update, check, reviewer or file", "inspect actual results for relevance"} {
+			if !strings.Contains(b.SchedulerHints, want) {
+				t.Errorf("missing employee contract %q", want)
+			}
+		}
+		if strings.Contains(b.SchedulerHints, "not the full report body pasted into chat") {
+			t.Error("unconditional file-only delivery remains")
+		}
+	}
+	b := &SystemPromptBuilder{CodeMode: true}
+	if b.applyBotPrompt(NewBotPromptOverrides(nil, bot.RunRequest{})) {
+		t.Fatal("Bot delivery changed Code mode")
+	}
+}
+
 func TestBotTitleConfirmationPrompt(t *testing.T) {
 	req := bot.RunRequest{Run: store.BotRun{TitleConfirmation: &store.BotTitleConfirmation{State: store.BotTitleConfirmationNeedsQuestion}}, Instructions: "AI news"}
 	b := &SystemPromptBuilder{}
@@ -103,8 +122,8 @@ func TestBotPromptRehydratesDurableWork(t *testing.T) {
 	previous := store.NewBotAgentWorkState(store.BotWorkContract{BotID: req.Bot.ID, RunID: uuid.New(), Version: 1, Instructions: "prior work"})
 	latest := &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work), Previous: store.BuildBotWorkProjection(previous), NextCursor: "20"}
 	ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(ctx context.Context, q bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
-		if q.Cursor != "" || q.Limit != 20 {
-			t.Fatal("refresh must use a bounded first page")
+		if q.Cursor != "" || q.Limit != 20 || !q.PromptSnapshot {
+			t.Fatal("refresh must request a bounded current-session snapshot")
 		}
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("unbounded store read")

@@ -107,12 +107,14 @@ func TestBotPermanentDeleteAttachedDockerAcceptance(t *testing.T) {
 	if err := ods.Teams().AddMember(ctx, &store.TeamMembership{UserID: owner, TeamID: group.ID, Role: "member"}); err != nil {
 		t.Fatal(err)
 	}
-	ownerCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodLocalOS, Surface: execution.SurfaceCode, Subject: owner, OrgSlug: org, TeamSlug: team, Authenticated: true})
+	ownerCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org, TeamSlug: team, Authenticated: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	repo := ods.ForUser(owner).Bots()
-	w := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, WorkerID: "delete-integrated"}}
+	pool := sandbox.NewBackendPool(backend, sandbox.ResourceLimits{})
+	t.Cleanup(pool.Cleanup)
+	w := &BotWorker{config: BotWorkerConfig{Backend: db, Sandbox: backend, Pool: pool, WorkerID: "delete-integrated"}}
 	svc.BotHomeSetup = w.provisionHome
 	router := mux.NewRouter()
 	api.RegisterRoutes(router, svc, db, entstore.TenantMiddleware(db))
@@ -166,7 +168,7 @@ func TestBotPermanentDeleteAttachedDockerAcceptance(t *testing.T) {
 	execSQL(`INSERT INTO bot_task_revisions(id,bot_id,task_id,revision,digest,size_bytes,authority_constraint_ref,data) VALUES (?,?,?,1,'proof',5,'fixture','{}')`, uuid.NewString(), b.ID.String(), task)
 	execSQL(`INSERT INTO session_events(session_id,event_data) VALUES (?,?)`, b.HomeSessionID.String(), `{"content":"owned history"}`)
 	private := "astonish-bot-workspace-" + scope.Key()
-	id := uuid.NewString()
+	id := b.HomeSessionID.String()
 	foreignName := "astonish-delete-foreign-" + uuid.NewString()
 	var container, overlay, foreign, network string
 	// Only remove names/IDs allocated by this fixture. No pruning or production
@@ -197,7 +199,7 @@ func TestBotPermanentDeleteAttachedDockerAcceptance(t *testing.T) {
 	})
 	// Use a small explicit benchmark-range subnet: Docker Desktop may have
 	// exhausted its default /16 pools. Never prune or reuse an existing network.
-	network = command("network", "create", "--internal", "--subnet="+fmt.Sprintf("198.19.%d.0/28", uuid.New()[0]), "--label=astonish.org="+org, "astonish-org-"+org)
+	network = command("network", "inspect", "--format", "{{.Id}}", "astonish-org-"+org)
 	command("volume", "create", "--driver=local", "--label=astonish.bot-home.scope="+scope.Key(), "--label=astonish.bot-home.version=workspace-1", private)
 	session, err := backend.CreateSession(ctx, sandbox.SessionSpec{SessionID: id, Type: sandbox.SessionTypeChat, UserID: scope.UserID, OrgSlug: org, TeamSlug: team, TemplateID: sandbox.BaseTemplateID, BotHome: home})
 	if err != nil {

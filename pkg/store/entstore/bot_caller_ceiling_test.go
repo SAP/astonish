@@ -63,15 +63,16 @@ func TestBotTitleConfirmationEnvelope(t *testing.T) {
 
 func TestBotCallerCeilingRoundTrip(t *testing.T) {
 	run := store.BotRun{ID: uuid.New(), BotID: uuid.New(), SessionID: uuid.New(), Version: 1, ExecutionMode: execution.BotExecutionModeChatInteractive, CallerCeiling: &execution.BotCallerCeiling{Principal: execution.Principal{Subject: "private-caller", Scopes: []string{"tool:execute"}}, ExpiresAt: time.Now().UTC()}}
-	data, err := botJSONMap(botStoredRun{Run: run})
+	codec := newBotContentCodec(t.TempDir(), store.BotContentScope{OwnerID: uuid.NewString()})
+	data, err := codec.encodeRun(t.Context(), botStoredRun{Run: run})
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := decodePersonalBotRun(&personalent.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data})
+	p, err := decodePersonalBotRun(t.Context(), codec, &personalent.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
-	team, err := decodeTeamBotRun(&teament.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data})
+	team, err := decodeTeamBotRun(t.Context(), codec, &teament.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +91,15 @@ func TestBotCallerCeilingRoundTrip(t *testing.T) {
 }
 func TestBotCallerCeilingUnknownModeRejected(t *testing.T) {
 	run := store.BotRun{ID: uuid.New(), BotID: uuid.New(), SessionID: uuid.New(), Version: 1, ExecutionMode: "future"}
-	data, err := botJSONMap(botStoredRun{Run: run})
+	codec := newBotContentCodec(t.TempDir(), store.BotContentScope{OwnerID: uuid.NewString()})
+	data, err := codec.encodeRun(t.Context(), botStoredRun{Run: run})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decodePersonalBotRun(&personalent.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data}); err == nil {
+	if _, err := decodePersonalBotRun(t.Context(), codec, &personalent.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data}); err == nil {
 		t.Fatal("personal accepted unknown mode")
 	}
-	if _, err := decodeTeamBotRun(&teament.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data}); err == nil {
+	if _, err := decodeTeamBotRun(t.Context(), codec, &teament.BotRun{ID: run.ID, BotID: run.BotID, Version: 1, SessionID: run.SessionID.String(), Data: data}); err == nil {
 		t.Fatal("team accepted unknown mode")
 	}
 }

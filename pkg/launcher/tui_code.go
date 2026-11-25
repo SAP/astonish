@@ -116,7 +116,10 @@ type CodeConfig struct {
 	// DebugMode surfaces extra diagnostics in the TUI.
 	DebugMode bool
 	// SessionID resumes an existing in-process session (within a run).
-	SessionID string
+	SessionID     string
+	Workspace     backend.WorkspaceMode
+	WorkspaceBase string
+	WorkspaceCopy backend.WorkspaceCopyMode
 }
 
 // RunCodeTUI launches the fullscreen terminal coding app fully in-process.
@@ -130,191 +133,21 @@ func RunCodeTUI(ctx context.Context, cfg *CodeConfig) error {
 	if cfg == nil {
 		cfg = &CodeConfig{}
 	}
-
 	if _, err := tui.ResolveCodeTheme(cfg.ThemeID); err != nil {
 		return err
 	}
-
-	// The TUI owns the terminal (bubbletea alt-screen). Any writes to the
-	// standard logger or slog's default handler would corrupt the display —
-	// notably ADK's runner, which uses log.Printf to warn "Event from an
-	// unknown agent" for every event whose author differs from the root agent
-	// name. Redirect both away from the terminal for the lifetime of the TUI.
-	// In debug mode, send them to a log file so diagnostics are preserved.
 	restoreLogs := redirectLogsForTUI(cfg.DebugMode)
 	defer restoreLogs()
-
-	appConfig, err := config.LoadAppConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Force host execution: code mode runs tools directly on the user's
-	// machine in the CWD. Disabling the sandbox makes every filesystem/shell
-	// tool resolve against the process working directory (Claude-Code
-	// semantics). This is the single most important line in code mode.
-	// Preserve the original sandbox.enabled value before overriding — it must
-	// be restored when saving config to disk so the platform daemon (which
-	// reads the same config.yaml) does not see sandbox as disabled.
-	originalSandboxEnabled := appConfig.Sandbox.Enabled
-	forceHostExecution(appConfig)
-
-	// Ensure ripgrep is available for the code-search tools. ripgrep is far
-	// superior to the pure-Go fallback (gitignore-aware, faster, richer
-	// filters), so code mode provisions it: prefer a system rg, else download
-	// the pinned build once and cache it. Done in the background so startup and
-	// the first search are not blocked; ResolvePath memoizes the result.
-	go func() {
-		if _, rgErr := ripgrep.ResolvePath(); rgErr != nil {
-			slog.Debug("ripgrep provisioning failed; grep_search will use the Go fallback", "error", rgErr)
-		}
-	}()
-
-	// Resolve the LLM. Explicit CLI flags win; otherwise fall back to the
-	// configured cascade default (general.default_provider / default_model in
-	// ~/.config/astonish/config.yaml, written by `astonish setup` or the
-	// in-TUI `/model` picker). Code mode may start with no provider at all —
-	// the user can configure one from inside the app via `/model`.
-	providerName := strings.TrimSpace(cfg.Provider)
-	if providerName == "" {
-		providerName = appConfig.General.DefaultProvider
-	}
-	modelName := strings.TrimSpace(cfg.Model)
-	if modelName == "" {
-		modelName = appConfig.General.DefaultModel
-	}
-
-	// When the persisted model is "auto", bootstrap the factory with the strong
-	// model so GetProvider succeeds. The RoutingLLM will be swapped in after
-	// backend construction via the auto routing restore block.
-	isAutoRestore := config.IsAutoModel(modelName) && appConfig.ModelRouting.IsConfigured()
-	if isAutoRestore {
-		appConfig.ModelRouting.Migrate()
-		providerName = appConfig.ModelRouting.StrongProvider
-		modelName = appConfig.ModelRouting.StrongModel
-	}
-
-	workingDir := strings.TrimSpace(cfg.WorkingDir)
-	if workingDir == "" {
-		wd, wdErr := os.Getwd()
-		if wdErr != nil {
-			return fmt.Errorf("failed to resolve working directory: %w", wdErr)
-		}
-		workingDir = wd
-	} else {
-		abs, absErr := filepath.Abs(workingDir)
-		if absErr != nil {
-			return fmt.Errorf("invalid working directory %q: %w", workingDir, absErr)
-		}
-		workingDir = abs
-	}
-	if info, statErr := os.Stat(workingDir); statErr != nil || !info.IsDir() {
-		return fmt.Errorf("working directory does not exist or is not a directory: %s", workingDir)
-	}
-	// Change the process CWD so tools that default to os.Getwd() (grep_search,
-	// find_files, shell_command) operate in the requested directory.
-	if err := os.Chdir(workingDir); err != nil {
-		return fmt.Errorf("failed to enter working directory %s: %w", workingDir, err)
-	}
-
-	// Create a persistent, on-disk session store for code mode. Sessions
-	// survive process restarts and are scoped per working directory (via the
-	// derived userID below), so `/sessions` in one project never lists another
-	// project's history. This store is code-mode-specific (rooted in a "code"
-	// subdirectory) so it never mixes with Studio/chat sessions. We pass it into
-	// the factory via SessionService, overriding the factory's in-memory default.
-	sessionsDir, err := codeSessionsDir(appConfig)
-	if err != nil {
-		return fmt.Errorf("failed to resolve code sessions directory: %w", err)
-	}
-	fileStore, err := persistentsession.NewFileStore(sessionsDir)
-	if err != nil {
-		return fmt.Errorf("failed to create code session store: %w", err)
-	}
-
-	// Checkpoint store: snapshots files before each turn writes/edits them so
-	// /rollback can restore the working directory. Rooted next to the session
-	// store so code-mode state stays self-contained.
-	checkpointStore, err := persistentsession.NewCheckpointStore(sessionsDir)
-	if err != nil {
-		return fmt.Errorf("failed to create code checkpoint store: %w", err)
-	}
-
-	// Per-directory session scope: sessions created in this working directory
-	// are stored under this userID and only listed here.
-	scopedUserID := codeUserIDForDir(workingDir)
-	ctx, err = localExecutionContext(ctx, scopedUserID)
+	b, err := buildCodeBackend(ctx, cfg)
 	if err != nil {
 		return err
 	}
-
-	result, err := NewWiredChatAgent(ctx, &ChatFactoryConfig{
-		AppConfig:            appConfig,
-		ProviderName:         providerName,
-		ModelName:            modelName,
-		DebugMode:            cfg.DebugMode,
-		AutoApprove:          cfg.AutoApprove,
-		WorkspaceDir:         workingDir,
-		PlatformMode:         false,
-		CodeMode:             true,
-		AllowMissingProvider: true,
-		LoadProjectContext:   true,
-		SessionService:       fileStore,
-	})
-	if err != nil {
-		return err
-	}
-
-	b := &localAgentBackend{
-		result:                 result,
-		sessionSvc:             common.NewAutoInitService(result.SessionService),
-		fileStore:              fileStore,
-		checkpoints:            checkpointStore,
-		userID:                 scopedUserID,
-		appConfig:              appConfig,
-		originalSandboxEnabled: originalSandboxEnabled,
-		sessionID:              cfg.SessionID,
-		autoApprove:            cfg.AutoApprove,
-		debug:                  cfg.DebugMode,
-		workingDir:             workingDir,
-		gitBranch:              gitutil.DetectBranch(workingDir),
-		provider:               result.ProviderName,
-		model:                  result.ModelName,
-		configured:             result.ProviderConfigured,
-		resumed:                cfg.SessionID != "",
-		notices:                result.StartupNotices,
-		filesystemSkills:       append([]skills.Skill(nil), result.FilesystemSkills...),
-		sessionNotes:           persistentsession.NewSessionNotes(),
-		subAgentAuthReqCh:      make(chan agent.SubAgentAuthRequest, 1),
-		subAgentAuthRespCh:     make(chan agent.SubAgentAuthResponse, 1),
-	}
-
-	// Restore Auto routing from config if previously configured.
-	if isAutoRestore {
-		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
-	}
-
-	// If resuming an existing session, load the persisted title so the header
-	// shows it immediately.
-	if cfg.SessionID != "" && fileStore != nil {
-		if t, err := fileStore.GetSessionTitle(ctx, cfg.SessionID); err == nil && t != "" {
-			b.title = t
-		}
-	}
-
-	// Attempt to provide the platform backend as an alt panel (Ctrl+Tab). This
-	// is best-effort: if the user isn't logged in, altBackend is nil and the TUI
-	// operates in single-backend mode with Ctrl+Tab as a no-op.
-	var altBackend backend.Backend
+	defer b.Close() // also covers errors before tui.Run opens the backend
+	var alt backend.Backend
 	if pb := newPlatformBackend(); pb != nil {
-		altBackend = pb
+		alt = pb
 	}
-
-	err = tui.Run(ctx, tui.Config{Backend: b, AltBackend: altBackend, ThemeID: cfg.ThemeID})
-	if result.Cleanup != nil {
-		result.Cleanup()
-	}
-	return err
+	return tui.Run(ctx, tui.Config{Backend: b, AltBackend: alt, ThemeID: cfg.ThemeID})
 }
 
 // codeSessionsDir returns the on-disk directory for code-mode session storage.
@@ -335,15 +168,37 @@ func codeSessionsDir(appConfig *config.AppConfig) (string, error) {
 // buildCodeBackend constructs a fully-wired localAgentBackend for code mode.
 // This is the core setup shared between RunCodeTUI (primary launch) and the
 // lazyCodeBackend (alt backend from chat mode via Ctrl+\).
-func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, error) {
+func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (_ backend.Backend, startupErr error) {
 	if cfg == nil {
 		cfg = &CodeConfig{}
+	}
+	workspace, resolveErr := resolveCodeWorkspace(ctx, cfg)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	ready := false
+	defer func() {
+		if !ready {
+			if workspace != nil && workspace.record != nil {
+				lastError := "Code startup did not finish"
+				if startupErr != nil {
+					lastError = startupErr.Error()
+					startupErr = fmt.Errorf("workspace retained at %s; recover with astonish code --dir %q: %w", cfg.WorkingDir, cfg.WorkingDir, startupErr)
+				}
+				_ = workspace.manager.SetState(context.Background(), workspace.project, workspace.record.ID, gitutil.WorkspaceRetained, lastError)
+			}
+			workspace.close()
+		}
+	}()
+	if err := os.Chdir(cfg.WorkingDir); err != nil {
+		return nil, err
 	}
 
 	appConfig, err := config.LoadAppConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
+	go func() { _, _ = ripgrep.ResolvePath() }()
 	originalSandboxEnabled := appConfig.Sandbox.Enabled
 	forceHostExecution(appConfig)
 
@@ -400,6 +255,9 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	}
 
 	scopedUserID := codeUserIDForDir(workingDir)
+	if workspace != nil {
+		scopedUserID = workspace.owner
+	}
 	ctx, err = localExecutionContext(ctx, scopedUserID)
 	if err != nil {
 		return nil, err
@@ -423,6 +281,8 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 	}
 
 	b := &localAgentBackend{
+		workspacePrompt: cfg.Workspace == backend.WorkspaceAsk,
+		workspace:       workspace, sessionID: cfg.SessionID, resumed: cfg.SessionID != "",
 		result:                 result,
 		sessionSvc:             common.NewAutoInitService(result.SessionService),
 		fileStore:              fileStore,
@@ -449,6 +309,13 @@ func buildCodeBackend(ctx context.Context, cfg *CodeConfig) (backend.Backend, er
 		b.restoreAutoRouting(ctx, appConfig, result.SwappableLLM)
 	}
 
+	if cfg.SessionID != "" {
+		if _, err := b.ResumeSession(ctx, cfg.SessionID); err != nil {
+			_ = b.Close()
+			return nil, err
+		}
+	}
+	ready = true
 	return b, nil
 }
 
@@ -537,6 +404,9 @@ func redirectLogsForTUI(debug bool) func() {
 // mapSSEToEvents translator, so the TUI renders identically to platform mode
 // with no new mapping code.
 type localAgentBackend struct {
+	runtimeMu                sync.Mutex // serializes turns and runtime replacement
+	workspace                *codeWorkspaceContext
+	workspacePrompt          bool
 	folderPermissionMu       sync.Mutex
 	folderPermissionPolicies map[string]*agent.SessionAuthPolicy
 	// Sessions whose FileStore state cache predates a local rollback. Guarded by mu.
@@ -598,10 +468,14 @@ type localAgentBackend struct {
 	// lastCtxEstimate throttles the mid-turn context re-estimation so a turn
 	// with many tool calls does not reload+re-scan the whole session on every
 	// step. See maybeEmitEstimatedContext.
-	lastCtxEstimate time.Time
-	resumed         bool
-	closed          bool
-	title           string
+	lastCtxEstimate   time.Time
+	resumed           bool
+	closed            bool
+	closeDone         chan struct{}
+	closeErr          error
+	ownedWork         map[chan struct{}]context.CancelFunc
+	sessionGeneration uint64
+	title             string
 	// needsRebuild is set when web search configuration changes. The next
 	// NewSession() call will rebuild the agent so new tools are loaded.
 	needsRebuild bool
@@ -697,6 +571,7 @@ func (b *localAgentBackend) Info() backend.Info {
 	cwResult := provider.ResolveContextWindowCachedFull(context.Background(), b.provider, b.model, b.appConfig)
 
 	info := backend.Info{
+		WorkspacePrompt:       b.workspacePrompt,
 		SessionID:             b.sessionID,
 		Provider:              b.provider,
 		Model:                 b.model,
@@ -719,6 +594,17 @@ func (b *localAgentBackend) Info() backend.Info {
 			desc = shortModelName(b.autoRoutingCfg.StrongModel) + "|" + shortModelName(b.autoRoutingCfg.MediumModel) + "|" + shortModelName(b.autoRoutingCfg.WeakModel)
 		}
 		info.Model = desc
+	}
+	if w := b.workspace; w != nil {
+		info.ProjectRoot = w.project.OriginalRoot
+		info.WorkspaceMode = backend.WorkspaceCurrent
+		if w.record != nil {
+			info.WorkspaceID = w.record.ID
+			info.WorkspacePath = w.record.InvocationDir
+			info.WorkspaceMode = backend.WorkspaceIndependent
+			info.WorkspaceActive = w.lease != nil
+			info.WorkspaceRetained = w.record.State == gitutil.WorkspaceRetained
+		}
 	}
 	return info
 }
@@ -945,21 +831,96 @@ func (b *localAgentBackend) Open(ctx context.Context) error {
 	return b.hydrateCodeFolders(ctx, id)
 }
 
+const codeShutdownTimeout = 5 * time.Second
+
+// ownCodeWork admits work atomically with Close, including synchronous turn setup.
+func (b *localAgentBackend) ownCodeWork(ctx context.Context) (context.Context, func(), error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, nil, fmt.Errorf("backend closed")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	if b.ownedWork == nil {
+		b.ownedWork = make(map[chan struct{}]context.CancelFunc)
+	}
+	b.ownedWork[done] = cancel
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			cancel()
+			b.mu.Lock()
+			delete(b.ownedWork, done)
+			close(done)
+			b.mu.Unlock()
+		})
+	}, nil
+}
+
 func (b *localAgentBackend) Close() error {
 	b.mu.Lock()
+	if b.closed {
+		done := b.closeDone
+		b.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.closeErr
+	}
 	b.closed = true
-	closeClassifier := b.closeClassifier
-	b.closeClassifier = nil
-	pricingCancel := b.pricingCancel
-	b.pricingCancel = nil
+	b.closeDone = make(chan struct{})
+	work := make([]chan struct{}, 0, len(b.ownedWork))
+	for done, cancel := range b.ownedWork {
+		cancel()
+		work = append(work, done)
+	}
 	b.mu.Unlock()
-	if closeClassifier != nil {
-		closeClassifier()
+	finish := func(err error) error {
+		b.mu.Lock()
+		b.closeErr = err
+		close(b.closeDone)
+		b.mu.Unlock()
+		return err
 	}
-	if pricingCancel != nil {
-		pricingCancel()
+	timer := time.NewTimer(codeShutdownTimeout)
+	defer timer.Stop()
+	for _, done := range work {
+		select {
+		case <-done:
+		case <-timer.C:
+			return finish(fmt.Errorf("Code shutdown did not quiesce; workspace writer lease retained"))
+		}
 	}
-	return nil
+	b.mu.Lock()
+	closeClassifier, pricingCancel, result := b.closeClassifier, b.pricingCancel, b.result
+	b.closeClassifier, b.pricingCancel = nil, nil
+	b.mu.Unlock()
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		if pricingCancel != nil {
+			pricingCancel()
+		}
+		if result != nil && result.Cleanup != nil {
+			result.Cleanup()
+		}
+		if closeClassifier != nil {
+			closeClassifier()
+		}
+	}()
+	select {
+	case <-cleanupDone:
+	case <-timer.C:
+		return finish(fmt.Errorf("Code resource cleanup timed out; workspace writer lease retained"))
+	}
+	if b.workspace != nil && b.workspace.record != nil {
+		_ = b.workspace.manager.SetState(context.Background(), b.workspace.project, b.workspace.record.ID, gitutil.WorkspaceRetained, "")
+	}
+	b.workspace.close()
+	return finish(nil)
 }
 
 // ensureClassifier lazily initialises the MLP classifier (Hugot embedder +
@@ -1380,6 +1341,9 @@ func (b *localAgentBackend) ensureSession(ctx context.Context) (string, bool, er
 		return "", false, fmt.Errorf("failed to create session: %w", err)
 	}
 	newID := resp.Session.ID()
+	if err := b.bindCodeWorkspaceSession(ctx, newID); err != nil {
+		return "", false, err
+	}
 	b.mu.Lock()
 	b.sessionID = newID
 	b.mu.Unlock()
@@ -1425,13 +1389,27 @@ func isLocalPlanSystemContext(text string) bool {
 // awaiting_approval it emits an approval event and ends the turn; the TUI
 // calls RunTurn again with the user's Yes/No as the next message.
 func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts backend.TurnOptions) (<-chan events.Event, error) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return nil, fmt.Errorf("backend closed")
+	var err error
+	ctx, finishWork, err := b.ownCodeWork(ctx)
+	if err != nil {
+		return nil, err
 	}
+	if !b.runtimeMu.TryLock() {
+		finishWork()
+		return nil, fmt.Errorf("Code runtime busy")
+	}
+	ownedFinish := finishWork
+	finishWork = func() { b.runtimeMu.Unlock(); ownedFinish() }
+	transferred := false
+	defer func() {
+		if !transferred {
+			finishWork()
+		}
+	}()
+	b.mu.Lock()
 	autoApprove := b.autoApprove
 	configured := b.configured
+	generation := b.sessionGeneration
 	b.mu.Unlock()
 
 	// No provider yet: don't attempt a turn (the placeholder LLM would only
@@ -1762,7 +1740,9 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		}
 	}
 
+	transferred = true
 	go func() {
+		defer finishWork()
 		defer func() {
 			outClosed.Store(true)
 			close(out)
@@ -1823,12 +1803,19 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			}
 			// Best-effort LLM title refinement (non-blocking).
 			if b.result != nil && b.result.LLM != nil {
-				go generateCodeSessionTitle(b.result.LLM, b.fileStore, sessionID, message, provisional, func(title string) {
-					b.mu.Lock()
-					b.title = title
-					b.mu.Unlock()
-					emit("session_title", map[string]any{"title": title, "sessionId": sessionID})
-				})
+				titleCtx, titleDone, titleErr := b.ownCodeWork(context.WithoutCancel(ctx))
+				if titleErr == nil {
+					llm := b.result.LLM
+					go func() {
+						defer titleDone()
+						generateCodeSessionTitleContext(titleCtx, llm, b.fileStore, sessionID, message, provisional, func(title string) {
+							if !b.acceptCodeTitle(sessionID, generation, title) {
+								return
+							}
+							emit("session_title", map[string]any{"title": title, "sessionId": sessionID})
+						})
+					}()
+				}
 			}
 		}
 
@@ -1837,7 +1824,10 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 		// fast no-op when the index already exists (single os.Stat). On first
 		// run it indexes the project and shows progress in the status line.
 		if notice := EnsureCodegraph(ctx, b.workingDir, func(msg string) {
-			out <- events.NewStatus(msg)
+			select {
+			case out <- events.NewStatus(msg):
+			case <-ctx.Done():
+			}
 		}); notice != "" {
 			emit("system", map[string]any{"content": notice})
 		}
@@ -1858,7 +1848,11 @@ func (b *localAgentBackend) RunTurn(ctx context.Context, message string, opts ba
 			b.checkpoints.BeginTurn(effectiveID, turnIndex)
 		}
 
-		out <- events.NewStatus("Thinking…")
+		select {
+		case out <- events.NewStatus("Thinking…"):
+		case <-ctx.Done():
+			return
+		}
 
 		doneEmitted := b.driveTurn(ctx, rnr, chatAgent, effectiveID, turnIndex, userMsg, emit, routingLLM)
 
@@ -2061,7 +2055,11 @@ func (b *localAgentBackend) compactToChild(ctx context.Context, sessionID string
 
 	// Preferred: archive full history + rewrite active session in place.
 	if b.fileStore != nil {
-		if _, aErr := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), sessionID, newEvents); aErr != nil {
+		archiveID, aErr := b.fileStore.ArchiveAndReplaceEvents(codeAppName, b.effectiveUserID(), sessionID, newEvents)
+		if aErr == nil {
+			aErr = b.bindCodeWorkspaceSession(ctx, archiveID)
+		}
+		if aErr != nil {
 			slog.Warn("persistent compaction archive failed", "session_id", sessionID, "error", aErr)
 			return out
 		}
@@ -2181,14 +2179,28 @@ func deriveSessionTitle(message string) string {
 // generateStudioSessionTitle) but is self-contained for code mode. On success,
 // it persists the refined title and invokes onTitle so the TUI can emit an event.
 // On any failure the provisional title already in the store is left unchanged.
+func (b *localAgentBackend) acceptCodeTitle(sessionID string, generation uint64, title string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.sessionID != sessionID || b.sessionGeneration != generation {
+		return false
+	}
+	b.title = title
+	return true
+}
+
 func generateCodeSessionTitle(llm adkmodel.LLM, store *persistentsession.FileStore, sessionID, userMessage, provisionalTitle string, onTitle func(string)) {
+	generateCodeSessionTitleContext(context.Background(), llm, store, sessionID, userMessage, provisionalTitle, onTitle)
+}
+
+func generateCodeSessionTitleContext(parent context.Context, llm adkmodel.LLM, store *persistentsession.FileStore, sessionID, userMessage, provisionalTitle string, onTitle func(string)) {
 	if llm == nil || store == nil || userMessage == "" {
 		return
 	}
 	// Use WithStatsOnlyRouting so that if the LLM is a RoutingLLM, the title
 	// call increments Stats (counts toward the summary) but does NOT append to
 	// turnTiers (no badge shift — the title has no visible chat bubble).
-	baseCtx := routing.WithStatsOnlyRouting(context.Background())
+	baseCtx := routing.WithStatsOnlyRouting(parent)
 	ctx, cancel := context.WithTimeout(baseCtx, 25*time.Second)
 	defer cancel()
 
@@ -2228,7 +2240,10 @@ func generateCodeSessionTitle(llm adkmodel.LLM, store *persistentsession.FileSto
 	if title == "" || title == provisionalTitle {
 		return
 	}
-	setCtx, setCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx.Err() != nil {
+		return
+	}
+	setCtx, setCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer setCancel()
 	if err := store.SetSessionTitle(setCtx, sessionID, title); err != nil {
 		slog.Debug("failed to set refined code session title", "session_id", sessionID, "error", err)
@@ -2841,7 +2856,7 @@ func (b *localAgentBackend) ListSessions(ctx context.Context) ([]backend.Session
 		return []backend.SessionSummary{{ID: id, Title: "(current)"}}, nil
 	}
 
-	metas, err := b.fileStore.ListSessionMetas(codeAppName, b.effectiveUserID())
+	metas, err := b.projectSessionMetas(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list code sessions: %w", err)
 	}
@@ -2882,12 +2897,12 @@ func (b *localAgentBackend) ListSessions(ctx context.Context) ([]backend.Session
 		if !e.effectiveT.IsZero() {
 			updated = e.effectiveT.Format("2006-01-02 15:04")
 		}
-		out = append(out, backend.SessionSummary{
+		out = append(out, b.enrichWorkspaceSession(ctx, backend.SessionSummary{
 			ID:           e.meta.ID,
 			Title:        title,
 			UpdatedAt:    updated,
 			MessageCount: e.meta.MessageCount,
-		})
+		}))
 	}
 	return out, nil
 }
@@ -3263,6 +3278,32 @@ func (b *localAgentBackend) LoadHistory(ctx context.Context) ([]backend.HistoryE
 }
 
 func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string) ([]backend.HistoryEntry, error) {
+	if b.workspace != nil && b.fileStore != nil {
+		meta, e := b.fileStore.GetSessionMeta(sessionID)
+		if e != nil {
+			return nil, e
+		}
+		if meta == nil || meta.AppName != codeAppName {
+			return nil, fmt.Errorf("saved Code session not found")
+		}
+		if meta.UserID != b.effectiveUserID() {
+			req, e := b.PrepareWorkspaceLaunch(ctx, backend.WorkspaceLaunchRequest{SessionID: sessionID})
+			if e != nil {
+				return nil, e
+			}
+			return nil, &backend.WorkspaceHandoffError{Request: req}
+		}
+	}
+	if w := b.workspace; w != nil {
+		r, _, err := w.manager.FindSession(ctx, w.project, sessionID)
+		if err == nil && (w.record == nil || r.ID != w.record.ID) {
+			req, e := b.PrepareWorkspaceLaunch(ctx, backend.WorkspaceLaunchRequest{SessionID: sessionID})
+			if e != nil {
+				return nil, e
+			}
+			return nil, &backend.WorkspaceHandoffError{Request: req}
+		}
+	}
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id required")
 	}
@@ -3272,6 +3313,15 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	activeID := sessionID
 	if b.fileStore != nil {
 		activeID = b.fileStore.LatestDescendant(sessionID)
+		if activeID != sessionID {
+			meta, err := b.fileStore.GetSessionMeta(activeID)
+			if err != nil {
+				return nil, err
+			}
+			if meta == nil || meta.AppName != codeAppName || meta.UserID != b.effectiveUserID() {
+				return nil, fmt.Errorf("compacted Code session ownership mismatch")
+			}
+		}
 	}
 	if err := b.hydrateCodeFolders(ctx, activeID); err != nil {
 		return nil, err
@@ -3279,6 +3329,9 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	hist, err := b.loadHistory(ctx, activeID)
 	if err != nil {
 		return nil, err
+	}
+	if err := b.bindCodeWorkspaceSession(ctx, activeID); err != nil {
+		return nil, fmt.Errorf("record resumed workspace session: %w", err)
 	}
 	// Estimate the resumed session's context occupancy so the header shows real
 	// utilization immediately, instead of "Context 0" until the next turn.
@@ -3295,6 +3348,7 @@ func (b *localAgentBackend) ResumeSession(ctx context.Context, sessionID string)
 	}
 
 	b.mu.Lock()
+	b.sessionGeneration++
 	b.sessionID = activeID
 	b.resumed = true
 	b.contextTokens = ctxTokens
@@ -3912,7 +3966,9 @@ func (b *localAgentBackend) DeleteSession(ctx context.Context, sessionID string)
 
 func (b *localAgentBackend) NewSession() {
 	b.mu.Lock()
+	b.sessionGeneration++
 	b.sessionID = ""
+	b.title = ""
 	b.usage = nil
 	b.resumed = false
 	rebuild := b.needsRebuild
@@ -3931,7 +3987,21 @@ func (b *localAgentBackend) NewSession() {
 // so that tools configured after process start (e.g. web search via /websearch)
 // are loaded into the agent. Called from NewSession() when needsRebuild is set.
 func (b *localAgentBackend) rebuildAgent() {
-	ctx := context.Background()
+	ctx, finish, err := b.ownCodeWork(context.Background())
+	if err != nil {
+		return
+	}
+	defer finish()
+	if !b.runtimeMu.TryLock() {
+		return
+	}
+	defer b.runtimeMu.Unlock()
+	b.mu.Lock()
+	busy := len(b.ownedWork) > 1
+	b.mu.Unlock()
+	if busy {
+		return
+	}
 
 	b.mu.Lock()
 	appCfg := b.appConfig

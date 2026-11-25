@@ -2,6 +2,8 @@ package entstore
 
 import (
 	"context"
+	"errors"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +29,7 @@ import (
 )
 
 type teamBotStore struct {
+	content      *botContentCodec
 	taskVerifier func(context.Context, store.BotTaskPublication, string) error
 	credentials  store.CredentialStore
 	client       *teament.Client
@@ -34,7 +37,7 @@ type teamBotStore struct {
 }
 
 func (s *teamBotStore) repository() *botRepository {
-	return &botRepository{auth: s.auth, db: teamBotDB{client: s.client}}
+	return &botRepository{auth: s.auth, db: teamBotDB{client: s.client, content: s.content}}
 }
 func (s *teamBotStore) CreateDraft(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
 	return s.repository().CreateDraft(ctx, r)
@@ -68,14 +71,14 @@ func (d teamBotDB) ReadGoals(ctx context.Context, id uuid.UUID) ([]store.BotGoal
 	}
 	result := make([]store.BotGoal, 0, len(rows))
 	for _, row := range rows {
-		var g store.BotGoal
-		if err := botDecode(row.Data, &g); err != nil {
+		g, err := d.contentCodec().decodeGoal(ctx, id, row.Data)
+		if err != nil {
 			return nil, err
 		}
-		if g.ID != row.ID || g.BotID != id {
+		if g.ID != row.ID || g.BotID != id || g.Revision != row.Revision {
 			return nil, store.ErrBotInvalid
 		}
-		result = append(result, g)
+		result = append(result, *g)
 	}
 	return result, nil
 }
@@ -84,17 +87,17 @@ func (d teamBotDB) ReadGoal(ctx context.Context, id, goalID uuid.UUID) (*store.B
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	var g store.BotGoal
-	if err := botDecode(row.Data, &g); err != nil {
+	g, err := d.contentCodec().decodeGoal(ctx, id, row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if g.ID != goalID || g.BotID != id || g.Revision != row.Revision {
 		return nil, store.ErrBotInvalid
 	}
-	return &g, nil
+	return g, nil
 }
 func (d teamBotDB) UpdateGoal(ctx context.Context, g store.BotGoal, revision int64) error {
-	data, err := botJSONMap(g)
+	data, err := d.contentCodec().encodeGoal(ctx, g)
 	if err != nil {
 		return err
 	}
@@ -124,20 +127,21 @@ func (d teamBotDB) AdvanceSequence(ctx context.Context, id uuid.UUID, seq int64)
 	return nil
 }
 func (d teamBotDB) ReadActivity(ctx context.Context, id uuid.UUID, after int64, limit int) ([]store.BotActivity, error) {
+	// Inline/cleanup records require no files; legacy bodies use the instrumented runtime reader.
+	store.MarkBotRuntimeIOProfileCovered(ctx)
+	query := store.ObserveBotActivity(ctx, "sql_activity_query", 0)
 	rows, err := d.client.BotOutbox.Query().Where(botoutbox.BotIDEQ(id), botoutbox.SequenceGT(after)).Order(teament.Asc(botoutbox.FieldSequence)).Limit(limit).All(ctx)
+	query()
 	if err != nil {
 		return nil, err
 	}
 	result := make([]store.BotActivity, 0, len(rows))
 	for _, row := range rows {
-		var a store.BotActivity
-		if err := botDecode(row.Payload, &a); err != nil {
+		a, err := d.contentCodec().decodeActivity(ctx, id, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
+		if err != nil {
 			return nil, err
 		}
-		if a.BotID != id || a.Sequence != row.Sequence {
-			return nil, store.ErrBotInvalid
-		}
-		result = append(result, a)
+		result = append(result, *a)
 	}
 	return result, nil
 }
@@ -160,9 +164,9 @@ func (s *teamBotStore) RenewLease(ctx context.Context, l store.BotLease, expires
 func (s *teamBotStore) AppendActivity(ctx context.Context, l store.BotLease, a store.BotActivity) (store.BotActivity, error) {
 	return s.repository().AppendActivity(ctx, l, a)
 }
-func decodeTeamBotRun(row *teament.BotRun) (*botStoredRun, error) {
-	var saved botStoredRun
-	if err := botDecode(row.Data, &saved); err != nil {
+func decodeTeamBotRun(ctx context.Context, codec *botContentCodec, row *teament.BotRun) (*botStoredRun, error) {
+	saved, err := codec.decodeRun(ctx, row.BotID, row.Data)
+	if err != nil {
 		return nil, err
 	}
 	if !saved.Run.ExecutionMode.Valid() || saved.Run.ID != row.ID || saved.Run.BotID != row.BotID || saved.Run.Version != row.Version || saved.Run.SessionID.String() != row.SessionID {
@@ -174,22 +178,22 @@ func decodeTeamBotRun(row *teament.BotRun) (*botStoredRun, error) {
 	if row.LeaseExpiresAt != nil {
 		saved.Run.Lease.ExpiresAt = *row.LeaseExpiresAt
 	}
-	saved.Run.Progress = progressProjection(&saved)
-	return &saved, nil
+	saved.Run.Progress = progressProjection(saved)
+	return saved, nil
 }
 func (d teamBotDB) FindRun(ctx context.Context, id uuid.UUID, key string) (*botStoredRun, error) {
 	row, err := d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.IdempotencyKeyEQ(key)).Only(ctx)
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	return decodeTeamBotRun(row)
+	return decodeTeamBotRun(ctx, d.contentCodec(), row)
 }
 func (d teamBotDB) ReadRun(ctx context.Context, id, rid uuid.UUID) (*botStoredRun, error) {
 	row, err := d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.IDEQ(rid)).Only(ctx)
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	return decodeTeamBotRun(row)
+	return decodeTeamBotRun(ctx, d.contentCodec(), row)
 }
 func (d teamBotDB) ReadRuns(ctx context.Context, id uuid.UUID, limit int, after uuid.UUID) ([]store.BotRun, error) {
 	q := d.client.BotRun.Query().Where(botrun.BotIDEQ(id)).Order(teament.Asc(botrun.FieldID)).Limit(limit)
@@ -202,7 +206,7 @@ func (d teamBotDB) ReadRuns(ctx context.Context, id uuid.UUID, limit int, after 
 	}
 	out := make([]store.BotRun, 0, len(rows))
 	for _, row := range rows {
-		r, err := decodeTeamBotRun(row)
+		r, err := decodeTeamBotRun(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
@@ -214,7 +218,7 @@ func (d teamBotDB) CountRunsSince(ctx context.Context, id uuid.UUID, since time.
 	return d.client.BotRun.Query().Where(botrun.BotIDEQ(id), botrun.CreatedAtGTE(since)).Count(ctx)
 }
 func (d teamBotDB) InsertRun(ctx context.Context, saved botStoredRun, owner uuid.UUID) error {
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -234,7 +238,7 @@ func (d teamBotDB) ClaimLease(ctx context.Context, b botStoredRecord, saved botS
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -248,15 +252,15 @@ func (d teamBotDB) ClaimLease(ctx context.Context, b botStoredRecord, saved botS
 	return nil
 }
 func (d teamBotDB) RenewRunLease(ctx context.Context, l store.BotLease, now, expires time.Time) error {
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	control, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if control.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(teamInteractiveRunStatuses(saved.Run)...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LeaseExpiresAtGT(now), bot.LeaseExpiresAtLTE(expires)).SetLeaseExpiresAt(expires).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(teamInteractiveRunStatuses(control.run())...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LeaseExpiresAtGT(now), bot.LeaseExpiresAtLTE(expires)).SetLeaseExpiresAt(expires).Save(ctx)
 	if err != nil {
 		return teamBotError(err)
 	}
@@ -274,15 +278,15 @@ func (d teamBotDB) RenewRunLease(ctx context.Context, l store.BotLease, now, exp
 }
 
 func (d teamBotDB) AdvanceLeaseSequence(ctx context.Context, l store.BotLease, seq int64, now time.Time) error {
-	saved, err := d.ReadRun(ctx, l.BotID, l.RunID)
+	control, err := d.readRunSQLControl(ctx, l.BotID, l.RunID)
 	if err != nil {
 		return err
 	}
-	if saved.Run.Intent.RequiredStatus() == "" {
+	if control.Intent.RequiredStatus() == "" {
 		return store.ErrBotForbidden
 	}
 
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(teamInteractiveRunStatuses(saved.Run)...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LastSeqEQ(seq), bot.LeaseExpiresAtGT(now)).AddLastSeq(1).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(l.BotID), bot.StatusIn(teamInteractiveRunStatuses(control.run())...), bot.ActiveRunIDEQ(l.RunID), bot.FenceEQ(l.Fence), bot.LastSeqEQ(seq), bot.LeaseExpiresAtGT(now)).AddLastSeq(1).Save(ctx)
 	if err != nil {
 		return teamBotError(err)
 	}
@@ -304,32 +308,32 @@ func (s *teamBotStore) DecideApproval(ctx context.Context, q store.BotApprovalDe
 func (s *teamBotStore) ConsumeApproval(ctx context.Context, q store.BotApprovalConsumption) error {
 	return s.repository().ConsumeApproval(ctx, q)
 }
-func decodeTeamBotApproval(row *teament.BotApproval) (*store.BotApproval, error) {
-	var a store.BotApproval
-	if err := botDecode(row.Data, &a); err != nil {
+func decodeTeamBotApproval(ctx context.Context, c *botContentCodec, row *teament.BotApproval) (*store.BotApproval, error) {
+	a, err := c.decodeApproval(ctx, row.BotID, row.Data)
+	if err != nil {
 		return nil, err
 	}
-	digest, err := a.Action.Digest()
-	if err != nil || digest != row.ActionDigest || a.ID != row.ID || a.BotID != row.BotID || a.RunID != row.RunID || a.Version != row.Version {
+	if a.ActionDigest != row.ActionDigest || a.ID != row.ID || a.BotID != row.BotID || a.RunID != row.RunID || a.Version != row.Version {
 		return nil, store.ErrBotInvalid
 	}
 	a.Status = store.ApprovalStatus(row.Status)
 	a.ExpiresAt = row.ExpiresAt
-	return &a, nil
+	a.CreatedAt = row.CreatedAt
+	return a, nil
 }
 func (d teamBotDB) FindApproval(ctx context.Context, id, rid uuid.UUID, digest string) (*store.BotApproval, error) {
 	row, err := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id), botapproval.RunIDEQ(rid), botapproval.ActionDigestEQ(digest)).Only(ctx)
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	return decodeTeamBotApproval(row)
+	return decodeTeamBotApproval(ctx, d.contentCodec(), row)
 }
 func (d teamBotDB) ReadApproval(ctx context.Context, id, aid uuid.UUID) (*store.BotApproval, error) {
 	row, err := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id), botapproval.IDEQ(aid)).Only(ctx)
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	return decodeTeamBotApproval(row)
+	return decodeTeamBotApproval(ctx, d.contentCodec(), row)
 }
 func (d teamBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit int, after uuid.UUID) ([]store.BotApproval, error) {
 	q := d.client.BotApproval.Query().Where(botapproval.BotIDEQ(id)).Order(teament.Asc(botapproval.FieldID)).Limit(limit)
@@ -342,7 +346,7 @@ func (d teamBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit int, a
 	}
 	out := make([]store.BotApproval, 0, len(rows))
 	for _, row := range rows {
-		a, err := decodeTeamBotApproval(row)
+		a, err := decodeTeamBotApproval(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
@@ -351,7 +355,7 @@ func (d teamBotDB) ReadApprovals(ctx context.Context, id uuid.UUID, limit int, a
 	return out, nil
 }
 func (d teamBotDB) InsertApproval(ctx context.Context, a store.BotApproval) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeApproval(ctx, a)
 	if err != nil {
 		return err
 	}
@@ -359,7 +363,7 @@ func (d teamBotDB) InsertApproval(ctx context.Context, a store.BotApproval) erro
 	return teamBotError(err)
 }
 func (d teamBotDB) UpdateApproval(ctx context.Context, a store.BotApproval, from store.ApprovalStatus, now time.Time) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeApproval(ctx, a)
 	if err != nil {
 		return err
 	}
@@ -396,7 +400,7 @@ func (d teamBotDB) FinishRun(ctx context.Context, b botStoredRecord, saved botSt
 	if n != 1 {
 		return store.ErrBotConflict
 	}
-	data, err := botJSONMap(saved)
+	data, err := d.contentCodec().encodeRun(ctx, saved)
 	if err != nil {
 		return err
 	}
@@ -460,12 +464,12 @@ func (d teamBotDB) QuiesceBotRuns(ctx context.Context, id uuid.UUID, stop bool, 
 	}
 	out := make([]store.BotRun, 0, len(rows))
 	for _, row := range rows {
-		saved, err := decodeTeamBotRun(row)
+		saved, err := decodeTeamBotRun(ctx, d.contentCodec(), row)
 		if err != nil {
 			return nil, err
 		}
 		next := quiescedBotRun(*saved, stop, now)
-		data, err := botJSONMap(next)
+		data, err := d.contentCodec().encodeRun(ctx, next)
 		if err != nil {
 			return nil, err
 		}
@@ -537,21 +541,29 @@ func (d teamBotDB) ReadTrackedItems(ctx context.Context, goalID uuid.UUID) ([]st
 	if err != nil {
 		return nil, err
 	}
+	goal, err := d.client.BotGoal.Get(ctx, goalID)
+	if err != nil {
+		return nil, teamBotError(err)
+	}
 	out := make([]store.BotTrackedItem, 0, len(rows))
 	for _, row := range rows {
-		var item store.BotTrackedItem
-		if err := botDecode(row.Data, &item); err != nil {
+		item, err := d.contentCodec().decodeTracked(ctx, goal.BotID, row.Revision, row.Data)
+		if err != nil {
 			return nil, err
 		}
 		if item.ID != row.ID || item.GoalID != goalID || string(item.Status) != string(row.Status) {
 			return nil, store.ErrBotInvalid
 		}
-		out = append(out, item)
+		out = append(out, *item)
 	}
 	return out, nil
 }
 func (d teamBotDB) WriteTrackedItem(ctx context.Context, item store.BotTrackedItem, revision int64) error {
-	data, err := botJSONMap(item)
+	goal, err := d.client.BotGoal.Get(ctx, item.GoalID)
+	if err != nil {
+		return teamBotError(err)
+	}
+	data, err := d.contentCodec().encodeTracked(ctx, goal.BotID, item, revision)
 	if err != nil {
 		return err
 	}
@@ -624,10 +636,18 @@ func (s *teamBotStore) Correct(ctx context.Context, q store.BotCorrection) error
 var _ store.BotCorrectionReconciler = (*teamBotStore)(nil)
 
 func (s *teamBotStore) ReconcileCorrection(ctx context.Context, id store.BotID, correctionID uuid.UUID, memories store.MemoryStore) error {
-	return s.repository().ReconcileCorrection(ctx, id, correctionID, memories)
+	m, ok := memories.(*botDiskMemoryStore)
+	if !ok || m == nil || m.repo == nil || m.id != id || m.owner != s.client {
+		return store.ErrBotForbidden
+	}
+	db, ok := m.repo.db.(teamBotDB)
+	if !ok || db.client != s.client || db.content != s.content {
+		return store.ErrBotForbidden
+	}
+	return s.repository().ReconcileCorrection(ctx, id, correctionID, m)
 }
 func (d teamBotDB) ReadCorrectionMemory(ctx context.Context, id string) (*store.MemorySearchResult, error) {
-	return (&teamMemoryStore{client: d.client}).Get(ctx, id)
+	return findBotDiskMemory(ctx, d, id)
 }
 func (d teamBotDB) CorrectionSessionBot(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	row, err := d.client.Session.Get(ctx, id.String())
@@ -640,18 +660,7 @@ func (d teamBotDB) CorrectionSessionBot(ctx context.Context, id uuid.UUID) (uuid
 	return *row.BotID, nil
 }
 func (d teamBotDB) ApplyCorrectionMemory(ctx context.Context, id, sessionID uuid.UUID, previous, replacement string, sqlite bool) error {
-	u := d.client.Memory.Update().Where(memory.IDEQ(id), memory.SessionIDEQ(sessionID), memory.ChunkTextEQ(previous)).SetChunkText(replacement).ClearEmbedding()
-	if sqlite {
-		u.SetTsv(replacement)
-	}
-	n, err := u.Save(ctx)
-	if err != nil {
-		return teamBotError(err)
-	}
-	if n != 1 {
-		return store.ErrBotConflict
-	}
-	return nil
+	return store.ErrBotUnsupported
 }
 
 func (d teamBotDB) FindActivity(ctx context.Context, id uuid.UUID, key string) (*store.BotActivity, error) {
@@ -659,14 +668,7 @@ func (d teamBotDB) FindActivity(ctx context.Context, id uuid.UUID, key string) (
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	var a store.BotActivity
-	if err := botDecode(row.Payload, &a); err != nil {
-		return nil, err
-	}
-	if a.BotID != id || a.Sequence != row.Sequence || string(a.Kind) != row.Kind {
-		return nil, store.ErrBotInvalid
-	}
-	return &a, nil
+	return d.contentCodec().decodeActivity(ctx, id, row.Sequence, store.BotActivityKind(row.Kind), row.CreatedAt, row.Payload)
 }
 func (d teamBotDB) AdvanceCorrection(ctx context.Context, rec botStoredRecord, now time.Time) error {
 	n, err := d.client.Bot.Update().Where(bot.IDEQ(rec.Bot.ID), bot.RevisionEQ(rec.Bot.Revision), bot.LastSeqEQ(rec.LastSequence), bot.StatusNEQ(bot.StatusDeleted)).AddRevision(1).AddLastSeq(1).SetUpdatedAt(now).Save(ctx)
@@ -829,10 +831,17 @@ func (d teamBotDB) PurgeBot(ctx context.Context, rec botStoredRecord, cutoff tim
 	if _, err := d.client.BotOutbox.Delete().Where(botoutbox.BotIDEQ(id)).Exec(ctx); err != nil {
 		return err
 	}
+	// All ownership and physical-cleanup checks passed under the root lock.
+	// Delete staging before SQL forgets its owner; rollback leaves a retryable
+	// irreversible tombstone, never a successful purge with leftover bytes.
+	if err := d.contentCodec().purgeStaging(ctx, rec); err != nil {
+		return err
+	}
 	return teamBotError(d.client.Bot.DeleteOneID(id).Exec(ctx))
 }
 
 type teamBotDB struct {
+	content     *botContentCodec
 	client      *teament.Client
 	policyOuter *teament.Client
 	afterCommit *[]func()
@@ -853,8 +862,11 @@ func (d teamBotDB) Transaction(ctx context.Context, fn func(botDraftDB) error) e
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	operation, end := sandbox.WithBotHomeFileOperation(ctx)
+	defer end()
 	var callbacks []func()
-	if err := fn(teamBotDB{client: tx.Client(), policyOuter: d.client, afterCommit: &callbacks}); err != nil {
+	callbackErr := fn(teamBotDB{client: tx.Client(), content: transactionBotContentCodec(d.content, operation), policyOuter: d.client, afterCommit: &callbacks})
+	if err := errors.Join(callbackErr, end()); err != nil {
 		return err
 	}
 	if err := teamBotError(tx.Commit()); err != nil {
@@ -939,21 +951,14 @@ func (d teamBotDB) ReadVersion(ctx context.Context, id uuid.UUID, version int64)
 	if err != nil {
 		return nil, teamBotError(err)
 	}
-	var v store.BotVersion
-	if err := botDecode(row.Definition, &v); err != nil {
-		return nil, err
-	}
-	if v.BotID != id || v.Version != version || v.SchemaVersion != store.BotSchemaVersion {
-		return nil, store.ErrBotInvalid
-	}
-	return &v, nil
+	return d.contentCodec().decodeVersion(ctx, id, version, row.Definition)
 }
 func (d teamBotDB) InsertVersion(ctx context.Context, v store.BotVersion, hash string) error {
-	data, err := botJSONMap(v)
+	data, err := d.contentCodec().encodeVersion(ctx, v)
 	if err != nil {
 		return err
 	}
-	_, err = d.client.BotVersion.Create().SetBotID(v.BotID).SetVersion(v.Version).SetSchemaVersion(v.SchemaVersion).SetDefinition(data).SetContentHash(hash).SetCreatedBy(v.CreatedBy).SetChangeReason(v.ChangeReason).SetCreatedAt(v.CreatedAt).Save(ctx)
+	_, err = d.client.BotVersion.Create().SetBotID(v.BotID).SetVersion(v.Version).SetSchemaVersion(v.SchemaVersion).SetDefinition(data).SetContentHash(hash).SetCreatedBy(v.CreatedBy).SetCreatedAt(v.CreatedAt).Save(ctx)
 	return teamBotError(err)
 }
 func (d teamBotDB) InsertHomeSession(ctx context.Context, b store.Bot) error {
@@ -961,7 +966,7 @@ func (d teamBotDB) InsertHomeSession(ctx context.Context, b store.Bot) error {
 	return teamBotError(err)
 }
 func (d teamBotDB) InsertGoal(ctx context.Context, g store.BotGoal) error {
-	data, err := botJSONMap(g)
+	data, err := d.contentCodec().encodeGoal(ctx, g)
 	if err != nil {
 		return err
 	}
@@ -969,7 +974,7 @@ func (d teamBotDB) InsertGoal(ctx context.Context, g store.BotGoal) error {
 	return teamBotError(err)
 }
 func (d teamBotDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
-	data, err := botJSONMap(a)
+	data, err := d.contentCodec().encodeActivity(ctx, a)
 	if err != nil {
 		return err
 	}

@@ -1,3 +1,5 @@
+import * as filesApi from '@/api/botFiles'
+vi.mock('@/api/botFiles', async original => ({ ...await original<typeof filesApi>(), listBotFiles: vi.fn().mockResolvedValue({ entries: [] }) }))
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import BotWorkspace, { BotQualityDetails, BotWorkDetails, BotRunWorkDetails } from '../BotWorkspace'
@@ -21,6 +23,16 @@ vi.mock('@/api/botConfiguration', async original => ({ ...await original<typeof 
 import { cancelBotRun } from '@/api/botRunControls'
 vi.mock('@/api/botRunControls', async original => ({ ...await original<typeof import('@/api/botRunControls')>(), cancelBotRun: vi.fn() }))
 
+it('separates Files, safe Configuration and Activity for a team viewer', async () => {
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope: 'team', status: 'stopped' })
+  render(<BotWorkspace route={{ botId: bot.id, scope: 'team' }} theme="light" userId="viewer" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+  expect(await screen.findByRole('region', { name: 'Bot files' })).toBeVisible()
+  expect(screen.getByRole('region', { name: 'Database-backed Configuration' })).toBeVisible()
+  expect(screen.getByRole('region', { name: 'Activity' })).toBeVisible()
+  expect(screen.getByRole('textbox', { name: 'Shared composer' })).toBeDisabled()
+  expect(screen.getByRole('dialog')).not.toHaveTextContent('retained-volume')
+})
 it('shows agent work, partial obligations and feedback without certifying success', () => {
   const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 2, phase: 'finished', disposition: 'partial', items: [], remaining: [{ id: 'o', source_run_id: 'r', summary: 'Compare missing source', reason: 'Source unavailable', continuation: 'owner_request' }], checks: [{ id: 'c', call_id: 'call', kind: 'model_feedback', status: 'returned', judgment: 'needs_work', summary: 'Narrow the conclusion', draft_digest: 'digest', observed_at: 'now' }] }
   const view = render(<BotWorkDetails work={work} />)
@@ -53,6 +65,40 @@ it('only presents scoped work and committed learning, and keeps legacy assessmen
   expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
 })
 
+it.each(['checked', 'limitations', 'absent', 'unknown'] as const)('selects legacy %s assessment with and without a legacy work projection', mode => {
+  const q: api.BotQualityReport = { schema_version: mode === 'unknown' ? 99 : 1, work_revision: 2, requirements_digest: 'digest', outcome: api.BotQualityOutcome.Accepted, repairs: 1, criteria: [{ criterion_id: 'receipt', verdict: api.BotCriterionVerdict.Satisfied, method: api.BotAssessmentMethod.Model, evidence_refs: ['candidate:digest'], explanation: 'Checked receipt' }], limitations: mode === 'limitations' ? ['Missing source'] : [] }
+  const run = { id: 'r', bot_id: 'b', report: { employee_message: { origin: 'assessed' }, quality: mode === 'absent' ? undefined : q } } as unknown as api.BotRun
+  const want = mode === 'checked' ? /Requirements checked/ : mode === 'limitations' ? /Requirements remain unmet or unverified/ : mode === 'absent' ? /Not assessed/ : /Assessment unavailable/
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText(want)).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: { schema_version: 1, protocol: '', bot_id: 'b', run_id: 'r', work_revision: 2, phase: 'blocked' } }} />)
+  expect(screen.getByText(want)).toBeInTheDocument()
+  expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
+})
+
+it('recognizes only the typed unverified-result fallback as a legacy assessment', () => {
+  const run = { id: 'r', bot_id: 'b', report: { employee_message: { origin: api.BotEmployeeMessageOrigin.Fallback, reason: api.BotEmployeeMessageReason.ResultNotVerified } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText(/Not assessed/)).toBeInTheDocument()
+  view.rerender(<BotRunWorkDetails run={{ ...run, report: { ...run.report, employee_message: { origin: api.BotEmployeeMessageOrigin.Fallback, reason: 'transport_unavailable' } } }} />)
+  expect(screen.getByText('No work result yet')).toBeInTheDocument()
+})
+
+it('does not let quality mask agent work or untrusted work projections', () => {
+  const work: api.BotWorkProjection = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: 'b', run_id: 'r', work_revision: 1, phase: 'blocked' }
+  const run = { id: 'r', bot_id: 'b', work, report: { quality: { schema_version: 1, outcome: 'accepted' } } } as api.BotRun
+  const view = render(<BotRunWorkDetails run={run} />)
+  expect(screen.getByText('Blocked')).toBeInTheDocument()
+  for (const invalid of [{ ...work, protocol: 'future' }, { ...work, schema_version: 99 }, { ...work, run_id: 'other', protocol: '' }]) {
+    view.rerender(<BotRunWorkDetails run={{ ...run, work: invalid }} />)
+    expect(screen.getByText('Work details unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/Quality assessment:/)).not.toBeInTheDocument()
+  }
+  view.rerender(<BotRunWorkDetails run={{ ...run, work: undefined, report: {} as api.BotReport }} />)
+  expect(screen.getByText('No work result yet')).toBeInTheDocument()
+})
+
+const reconciledBot = vi.hoisted(() => ({ current: null as api.Bot | null }))
 // Panel tests retain resource fixtures; the real shared snapshot hook has its own suite.
 vi.mock('../useBotSnapshot', async () => {
   const { useWorkspaceResource } = await import('../workspaceResource')
@@ -65,7 +111,7 @@ vi.mock('../useBotSnapshot', async () => {
       const approvals = await api.listBotApprovals(id, scope, signal)
       return { bot, read_cursor: { bot_id: id, viewer_id: viewer || '', sequence: 0 }, latest_sequence: 0, unread_count: 0, pending_approvals: approvals.approvals, run_states: continuationStates.value }
     }, `${viewer}/${scope}/${id}`, revision)
-    return { ...root, activity: [], markRead: async () => {}, syncOperations: async () => root.data!.bot }
+    return { ...root, activity: [], markRead: async () => {}, syncOperations: async () => reconciledBot.current || root.data!.bot }
   } }
 })
 
@@ -79,12 +125,13 @@ vi.mock('@/api/bots', async original => ({ ...await original<typeof api>(),
 }))
 vi.mock('../BotHomeModel', () => ({ default: ({ sessionId }: { sessionId: string }) => <p>Home model: {sessionId}</p> }))
 // Real StudioChat reuse/transport is covered separately and by the built-SPA test.
-const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; onSend: (text: string) => Promise<void> } }))
+const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; pendingApprovalIds?: string[]; onSend: (text: string, attachments?: import('@/api/studioChat').AttachmentPayload[]) => Promise<void> } }))
 vi.mock('../../StudioChat', () => ({ default: ({ botThread }: { botThread: NonNullable<typeof chatProps.current> }) => { chatProps.current = botThread; return <textarea aria-label="Shared composer" disabled={botThread.readOnly} /> } }))
 const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'Watcher', status: 'draft', revision: 1, version: 1, home_session_id: 'home', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'bot', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
 const version: api.BotVersion = { bot_id: 'bot', version: 1, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, autonomy: { level: 'supervised', can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'important', preferences: '', bindings: [] }, triggers: [] }
 beforeEach(() => {
   vi.clearAllMocks()
+  reconciledBot.current = null
   vi.mocked(skillsApi.listBotSkills).mockResolvedValue({ skills: [] })
   continuationStates.value = []
   vi.mocked(reviewsApi.listControlProposals).mockResolvedValue({ proposals: [] })
@@ -101,6 +148,31 @@ beforeEach(() => {
   vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [] })
   vi.mocked(api.listBots).mockResolvedValue({ bots: [bot] })
 })
+it.each(['empty', 'waiting_approval', 'queued', 'running', 'failed', 'partial', 'succeeded'] as const)('keeps database runtime %s projection scoped and read-only on reload', async state => {
+  // The persisted format version is deliberately absent from public DTOs.
+  // Work schema_version stays 1 even when its storage envelope is format 3.
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Active })
+  const run = { id: 'saved', bot_id: bot.id, session_id: 'trace', status: state === 'partial' ? 'succeeded' : state, trigger: 'manual', report: {}, usage: {} } as api.BotRun
+  if (state === 'partial' || state === 'succeeded') run.work = { schema_version: 1, protocol: api.BotWorkProtocol.Agent, bot_id: bot.id, run_id: run.id, work_revision: 3, phase: 'finished', disposition: state === 'partial' ? 'partial' : 'answered', remaining: state === 'partial' ? [{ id: 'missing-source', source_run_id: run.id, summary: 'Missing market source', reason: 'Source unavailable', continuation: 'owner_request' }] : [] }
+  vi.mocked(api.listBotRuns).mockResolvedValue({ runs: state === 'empty' ? [] : [run] })
+  if (state === 'waiting_approval') vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [{ id: 'saved-question', run_id: run.id, version: 1, status: 'pending', action_digest: 'digest', action: {}, expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Which markets?' } } }] })
+  for (const mode of ['initial', 'reload']) {
+    const view = render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="dark" userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    expect(chatProps.current?.pendingApprovalIds).toEqual(state === 'waiting_approval' ? ['saved-question'] : [])
+    await openDetails('Runs')
+    if (state !== 'empty') expect(await screen.findByRole('link', { name: `${run.status} · manual` })).toHaveAttribute('href', '#/chat/bots/personal/bot/runs/saved')
+    if (state === 'empty') expect(await screen.findByText('No runs yet.')).toBeInTheDocument()
+    if (state === 'partial') expect(await screen.findByText('Partial answer')).toBeInTheDocument()
+    if (state === 'succeeded') expect(await screen.findByText('Answer provided')).toBeInTheDocument()
+    expect(reviewsApi.sendBotMessage, mode).not.toHaveBeenCalled()
+    expect(reviewsApi.continueInteractive, mode).not.toHaveBeenCalled()
+    expect(api.requestBotRun, mode).not.toHaveBeenCalled()
+    expect(cancelBotRun, mode).not.toHaveBeenCalled()
+    view.unmount()
+  }
+})
+
 async function openDetails(panel: string) {
   if (!screen.queryByRole('dialog')) fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
   await screen.findByRole('dialog')
@@ -140,7 +212,7 @@ describe('Bot workspace', () => {
   })
   it.each((['personal', 'team'] as const).flatMap(scope =>
     (['draft', 'active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
-      ['owner', 'other'].map(userId => ({ scope, status, userId })))))('omits Skills and file navigation in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
+      ['owner', 'other'].map(userId => ({ scope, status, userId })))))('keeps Files separate from control panels in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
     render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId={userId} />)
     await openDetails('Runs')
@@ -243,7 +315,7 @@ describe('Bot workspace', () => {
     window.location.hash = botPath('bot', scope)
     render(<BotWorkspace route={{ botId: 'bot', scope }} theme="dark" userId="owner" />)
     expect(await screen.findByLabelText('Shared composer')).toBeEnabled()
-    expect(chatProps.current?.toolFree).toBe(false)
+    expect(chatProps.current?.toolFree).toBe(true)
     await act(async () => { await expect(chatProps.current!.onSend('Hello')).rejects.toThrow('Unknown') })
     await act(async () => { await chatProps.current!.onSend('Hello') })
     expect(vi.mocked(reviewsApi.sendBotMessage).mock.calls[0]).toEqual(vi.mocked(reviewsApi.sendBotMessage).mock.calls[1])
@@ -259,6 +331,35 @@ describe('Bot workspace', () => {
     expect(await screen.findByLabelText('Shared composer')).toBeDisabled()
     await expect(chatProps.current!.onSend('Hello')).rejects.toThrow('read-only')
     expect(api.requestBotConversation).not.toHaveBeenCalled()
+  })
+  it.each((['personal', 'team'] as const).flatMap(scope =>
+    ([api.BotStatus.Draft, api.BotStatus.Active, api.BotStatus.Paused, api.BotStatus.Stopped, api.BotStatus.Deleted] as const).flatMap(status =>
+      ['owner', 'other', undefined].map(userId => ({ scope, status, userId })))))('derives attachment and conversation permissions independently for $scope / $status / $userId', async ({ scope, status, userId }) => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
+    render(<BotWorkspace route={{ botId: 'bot', scope }} theme="dark" userId={userId} />)
+    const composer = await screen.findByLabelText('Shared composer')
+    const unavailable = status === api.BotStatus.Stopped || status === api.BotStatus.Deleted || !userId ||
+      ((status === api.BotStatus.Draft || status === api.BotStatus.Paused || scope === 'personal') && userId !== 'owner')
+    expect(composer).toHaveProperty('disabled', unavailable)
+    expect(chatProps.current?.toolFree).toBe(status === api.BotStatus.Draft || status === api.BotStatus.Paused)
+    const attachments = [{ filename: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }]
+    if (unavailable || status === api.BotStatus.Draft || status === api.BotStatus.Paused) {
+      await expect(chatProps.current!.onSend('Discuss setup', attachments)).rejects.toThrow(unavailable ? 'read-only' : 'Attachments are unavailable')
+      expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+    } else {
+      await act(async () => { await chatProps.current!.onSend('Work', attachments) })
+      expect(reviewsApi.sendBotMessage).toHaveBeenCalledWith(expect.objectContaining({ scope, status }), 'Work', expect.any(String), attachments)
+    }
+  })
+  it('rejects attachments when authoritative reconciliation changes active to paused without disabling owner control text', async () => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: api.BotStatus.Active })
+    render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await screen.findByLabelText('Shared composer')
+    reconciledBot.current = { ...bot, status: api.BotStatus.Paused }
+    await act(async () => { await expect(chatProps.current!.onSend('Work', [{ filename: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }])).rejects.toThrow('Attachments are unavailable') })
+    expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+    await act(async () => { await chatProps.current!.onSend('Discuss setup') })
+    expect(reviewsApi.sendBotMessage).toHaveBeenCalledWith(expect.objectContaining({ status: api.BotStatus.Paused }), 'Discuss setup', expect.any(String), undefined)
   })
   it('keeps ordinary active send on runs', async () => {
     window.location.hash = botPath('bot', 'personal')
@@ -364,6 +465,7 @@ describe('Bot workspace', () => {
       { ...approval, id: 'first', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q1', payload: { kind: 'yesno', prompt: 'First decision' } } },
     ] })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
+    await waitFor(() => expect(chatProps.current?.pendingApprovalIds).toEqual(['first', 'later']))
     await openDetails('Review inbox')
     const inbox = screen.getByText('Review inbox', { selector: 'summary' }).parentElement!
     expect(inbox.textContent!.indexOf('First decision')).toBeLessThan(inbox.textContent!.indexOf('Later decision'))
@@ -498,7 +600,7 @@ describe('Bot workspace', () => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="owner" />)
     const composer = await screen.findByLabelText('Shared composer')
-    if (status === 'paused' || status === 'draft') { expect(composer).toBeEnabled(); expect(chatProps.current?.toolFree).toBe(false) }
+    if (status === 'paused' || status === 'draft') { expect(composer).toBeEnabled(); expect(chatProps.current?.toolFree).toBe(true) }
     else expect(composer).toBeDisabled()
   })
   it('does not grant nonowner controls', async () => {
@@ -570,4 +672,16 @@ it('offers standalone continuation from interrupted snapshot without fabricating
   fireEvent.click(await screen.findByRole('button',{name:'Continue interactive'}))
   await waitFor(() => expect(reviewsApi.continueInteractive).toHaveBeenCalledWith(bot,'interrupted',expect.any(String)))
   expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
+})
+
+it('loads Home files only after opening force-mounted Details', async () => {
+  render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="light" userId="owner" />)
+  await screen.findByLabelText('Shared composer')
+  expect(filesApi.listBotFiles).not.toHaveBeenCalled()
+  await openDetails('Runs')
+  await waitFor(() => expect(filesApi.listBotFiles).toHaveBeenCalledTimes(1))
+  expect(screen.getByRole('heading', { name: 'Database-backed Configuration' })).toBeVisible()
+  const signal = vi.mocked(filesApi.listBotFiles).mock.calls[0][1]!
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(signal.aborted).toBe(true)
 })

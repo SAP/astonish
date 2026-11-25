@@ -27,13 +27,51 @@ configuration change can invalidate the research measurement, so the final-input
 allowance must cover its cold estimate rather than assume the cheaper research
 estimate applies twice. Arithmetic must remain overflow-safe.
 
-Once final mode begins, it is sticky: no further research, delegation, or tool
-execution is allowed. All model calls still use the original budget's
-reservation and settlement checks. Progress dispatch, generation health checks,
+Once final mode begins, it is sticky: no further research, delegation, or producer
+tool execution is allowed. The separate, deterministic file-completion IO described
+below is not a return to the producer tool loop. All model calls still use the
+original budget's reservation and settlement checks. Progress dispatch, generation health checks,
 live authorization, and final-answer validation remain in the call path. A
 reserve cannot promise completion after arbitrary external spending, enormous
 new evidence, or provider failure; normal admission must still fail closed when
 the remaining budget cannot cover the request.
+
+## File-deliverable completion
+
+The employee can select `set_delivery` using `bot_work_update`: `chat_only`, or
+`file_deliverable` with `markdown` or `binary` format. This is explicit assignment
+interpretation, not a length/extension heuristic or permission grant. Once selected,
+file delivery and its format cannot be downgraded within the run. Finished work
+with required file delivery must carry an immutable saved-file reference.
+
+After a complete accepted answer, a missing Markdown delivery permits one local
+completion recovery. The production factory saves the entire accepted answer to
+`outputs/<run>-report.md`, reads back and hashes the actual bytes, then snapshots
+through the scoped `BotFiles` service. It returns trusted run-local receipts, not
+model-supplied JSON. The operation has a ten-second ceiling, spends the existing
+tool budget, and rechecks live lease/authorization and the original budget. Autonomous
+recovery also requires both `write_file` and `publish_file` to be already allowed by
+the reviewed run policy; it cannot request or consume an exact-action approval. It does
+not invoke a model, research tool, shell, or external action. Oversize content is
+rejected rather than truncated. Cancelled, incomplete, uncertain-effect, and binary
+results cannot use this text recovery. A binary request needs an actual generated
+file, never text renamed to a binary extension. Failed recovery never claims success.
+Canonical publication still commits the accepted artifact envelope separately.
+
+`recoverBotFileDelivery` checks the captured final-event identity, no completion
+error or pending controls, and the current work boundary before invoking recovery.
+The factory callback shares a single attempt flag across its consumers: even a
+failed attempt cannot become an unbounded retry loop. It uses create-only output,
+reserves `save_file_delivery` from the existing tool ledger, validates write size
+and digest, then reopens the file and verifies read/close success before snapshot.
+The resulting receipt must match this run's `runs/<run>/` namespace, Bot/owner,
+Home, artifact content kind, digest and size. Saving alone does not emit a card;
+only [canonical postcommit publication](bot-home-assessment-publication.md#canonical-file-publication)
+delivers it. These checks do not certify factual quality or external effects.
+
+Agent-led Bot summaries are no longer expanded from report bodies. Ordinary Chat
+report resolution is unchanged. Recovery replaces only its own full-source chat
+answer with a short, accurate saved-source summary.
 
 ## Trust boundary
 
@@ -58,6 +96,14 @@ Overflow must fail rather than replace a larger measured count with a smaller
 byte count.
 
 ## Regression coverage
+
+`BotChatSafeResources.SynthesisNow` is an optional trusted composition clock for
+only the soft stopping policy (nil uses real time). It cannot change the run
+budget, lease, authorization, or operation deadlines. The HTTP receipt regression
+advances this clock after the real research read and before the rejected Task
+update, rather than sleeping near the hard deadline. It retains the reviewed
+10-second hard limit, three model calls, one actual tool dispatch, and exactly-one
+final publication checks for both personal and team Bots.
 
 `TestBotSynthesisFactoryMeasuredPromptContinues` uses the factory model chain,
 a real restored `RunBudget`, a metered deterministic provider, and the existing

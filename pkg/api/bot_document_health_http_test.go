@@ -50,15 +50,17 @@ func checkReviewedMemoryHTTP(t *testing.T, request func(*testing.T, string, stri
 	if replay := request(t, "POST", ingest, owner, encode(), 200); string(first) != string(replay) {
 		t.Fatal("receipt replay changed")
 	}
-	var projection botdomain.DocumentProjection
-	if err := json.Unmarshal(request(t, "GET", path+"/documents"+suffix, owner, "", 200), &projection); err != nil {
+	// Review fingerprints come from the scoped disk-memory API, not from
+	// synthetic record mappings attached to working Markdown files.
+	var listed struct {
+		Memories []store.MemorySearchResult `json:"memories"`
+	}
+	if err := json.Unmarshal(request(t, "GET", path+"/memory"+suffix, owner, "", 200), &listed); err != nil {
 		t.Fatal(err)
 	}
 	var mappings []store.BotMemoryReviewSource
-	for _, doc := range projection.Documents {
-		if doc.Name == botdomain.DocumentPeople {
-			mappings = doc.RecordMappings
-		}
+	for _, row := range listed.Memories {
+		mappings = append(mappings, store.BotMemoryReviewSource{ID: row.ID, SessionID: row.SessionID, ExpectedFingerprint: store.MemoryContentFingerprint(row)})
 	}
 	if len(mappings) != 2 {
 		t.Fatal("missing ingest mappings")
@@ -156,8 +158,8 @@ func checkBotDocumentHealthHTTP(t *testing.T, request func(*testing.T, string, s
 		}
 		request(t, "PUT", path+"/documents/"+string(name)+suffix, owner, `{"expected_revision":1,"content":"replace","reason":"reviewed","confirmed":true}`, 503)
 	}
-	if !strings.Contains(docs[botdomain.DocumentMemory].Content, row.ID) || !strings.Contains(docs[botdomain.DocumentMemory].Content, owner) {
-		t.Fatal("missing source attribution")
+	if docs[botdomain.DocumentMemory].Content != "# Memory\nRetained index; use explicit memory review for evidence." || len(docs[botdomain.DocumentMemory].RecordMappings) != 0 {
+		t.Fatal("working MEMORY.md was synthesized from memory records")
 	}
 	healthPath := path + "/memory-health"
 	request(t, "GET", healthPath+suffix, "", "", 401)

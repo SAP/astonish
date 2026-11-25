@@ -18,12 +18,11 @@ import (
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/channels"
+	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/launcher"
 	"github.com/SAP/astonish/pkg/provider"
-	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
@@ -52,12 +51,6 @@ func (m *triggerExecutionModel) GenerateContent(_ context.Context, r *model.LLMR
 		}
 		yield(nil, errTriggerControlledModel)
 	}
-}
-
-type triggerWorkerBackend struct{ sandbox.Backend }
-
-func (triggerWorkerBackend) EnsureBotHome(_ context.Context, scope sandbox.BotHomeScope) (*sandbox.BotHomeBinding, error) {
-	return &sandbox.BotHomeBinding{Scope: scope, Backend: "controlled", Ref: "home"}, nil
 }
 
 func TestChannelBotServices(t *testing.T) {
@@ -92,6 +85,7 @@ func TestChannelBotServices(t *testing.T) {
 // a successful report does not claim independent verification of external effects.
 func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 	backend, owner := setupChannelResolverFixture(t, "triggers", "team", "telegram", "linked")
+	homeBackend := testRetainedContentBackend(t, backend)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resolver := &channelPlatformResolver{backend: backend}
@@ -125,15 +119,8 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 	backend.(interface {
 		SetBotActivationReadiness(store.BotActivationReadiness)
 	}).SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-	registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: "triggers", TeamSlug: "team", Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: b.Scope, Backend: "controlled", StorageKey: "home", Revision: 1}
-	if err := entstore.RegisterBotHomeBinding(registry, repo, entstore.BotHomeRegistration{BotID: b.ID, ExpectedRevision: b.Revision, Home: home}, func(context.Context, entstore.BotHomeRegistration) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	b, err = repo.Get(auth, b.ID)
+	setup := &BotWorker{config: BotWorkerConfig{Backend: backend, Sandbox: homeBackend, Pool: workerTestPool{}}}
+	b, err = setup.provisionHome(auth, repo, b.ID, b.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,13 +132,17 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := &triggerExecutionModel{}
-	worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, Sandbox: triggerWorkerBackend{}, Pool: workerTestPool{}, WorkerID: "external-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, scope store.BotScope, _, _ string) (model.LLM, error) {
+	pool := &titleSkillPool{}
+	worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, Sandbox: homeBackend, Pool: pool, WorkerID: "external-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, scope store.BotScope, _, _ string) (model.LLM, error) {
 		if p.Subject != owner || scope != store.BotScopePersonal {
 			t.Errorf("wrong worker principal/scope: %+v %s", p, scope)
 		}
 		return llm, nil
-	}, Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-		return &launcher.BotChatSafeResources{WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+	}, Prepare: func(_ context.Context, _ bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
+			return productionBotFiles(c, homeBackend, svc, scope)
+		}
+		return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: workerTestGuard{}, Classifier: botUnknownClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

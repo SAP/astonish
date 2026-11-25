@@ -141,34 +141,31 @@ func (r *botRepository) ReadControlProposal(ctx context.Context, bot store.BotID
 }
 func listControlProposals(ctx context.Context, db botDraftDB, bot store.BotID) ([]store.BotControlProposal, error) {
 	result := []store.BotControlProposal{}
-	indices := map[uuid.UUID]int{}
+	seen := map[uuid.UUID]bool{}
 	for after := int64(0); ; {
-		page, err := db.ReadActivity(ctx, bot, after, 200)
+		keys, next, err := controlProposalKeys(ctx, db, bot, after)
 		if err != nil {
 			return nil, err
 		}
-		for _, a := range page {
-			after = a.Sequence
-			if a.Kind != store.BotActivityLifecycle {
+		for _, key := range keys {
+			id, err := uuid.Parse(strings.TrimSuffix(strings.TrimPrefix(key, "control-proposal:"), ":decision"))
+			if err != nil || id == uuid.Nil {
+				return nil, store.ErrBotInvalid
+			}
+			if seen[id] {
 				continue
 			}
-			var e controlProposalEnvelope
-			if err = json.Unmarshal(a.Payload, &e); err != nil {
+			proposal, err := readControlProposal(ctx, db, bot, id)
+			if err != nil {
 				return nil, err
 			}
-			if e.Record != controlProposalRecord {
-				continue
-			}
-			if i, ok := indices[e.Proposal.ID]; ok {
-				result[i] = e.Proposal
-			} else {
-				indices[e.Proposal.ID] = len(result)
-				result = append(result, e.Proposal)
-			}
+			seen[id] = true
+			result = append(result, *proposal)
 		}
-		if len(page) < 200 {
+		if len(keys) < 200 {
 			break
 		}
+		after = next
 	}
 	return result, nil
 }

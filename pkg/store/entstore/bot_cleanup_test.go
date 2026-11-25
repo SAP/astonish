@@ -205,9 +205,9 @@ func TestBotCleanupRejectsUntrustedAndStale(t *testing.T) {
 			var capability store.BotCleanupStore
 			switch db := repo.db.(type) {
 			case teamBotDB:
-				capability = &teamBotStore{client: db.client, auth: repo.auth}
+				capability = &teamBotStore{client: db.client, content: db.content, auth: repo.auth}
 			case personalBotDB:
-				capability = &personalBotStore{client: db.client, auth: repo.auth}
+				capability = &personalBotStore{client: db.client, content: db.content, auth: repo.auth}
 			}
 			if err := capability.ConfirmCleanup(runtime, q); err != nil {
 				t.Fatal(err)

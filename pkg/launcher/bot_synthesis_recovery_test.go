@@ -48,7 +48,7 @@ func TestBotSynthesisOutputLimitRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			llm := got.Agent.LLM.(*botFactoryLLM)
+			llm := botFactoryModelForTest(t, got.Agent.LLM)
 			llm.binding.synthesisReserve.final = true
 			raw := &synthesisRecoveryModel{}
 			drained := 0
@@ -195,7 +195,7 @@ func TestBotSynthesisRecoveryEvidencePrivacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer got.Cleanup()
-	llm := got.Agent.LLM.(*botFactoryLLM)
+	llm := botFactoryModelForTest(t, got.Agent.LLM)
 	llm.binding.synthesisReserve.final = true
 	llm.LLM = &synthesisRecoveryModel{generate: func(_ int, yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{Content: genai.NewContentFromText("SECRET_TEXT", "model"), ErrorCode: "SECRET_CODE", FinishReason: "SECRET_FINISH"}, errors.New("SECRET_ERROR"))
@@ -234,7 +234,7 @@ func TestBotSynthesisRecoveryTrailingTypedFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer got.Cleanup()
-	llm := got.Agent.LLM.(*botFactoryLLM)
+	llm := botFactoryModelForTest(t, got.Agent.LLM)
 	llm.binding.synthesisReserve.final = true
 	raw := &synthesisRecoveryModel{generate: func(_ int, yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{FinishReason: genai.FinishReasonMaxTokens}, &provider.EmptyCompletionError{FinishReason: genai.FinishReasonMaxTokens})

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/execution"
 
 	adkagent "google.golang.org/adk/agent"
@@ -58,8 +60,13 @@ func botNativeCallbacks(callbacks []llmagent.BeforeToolCallback, resolve botCall
 				return nil, err
 			}
 		}
+		if err := common.ValidateToolArguments(target, input); err != nil {
+			botRejectedInvocation(ctx, identity, input, bot.ToolFeedbackCorrectCall)
+			return nil, err
+		}
 		var authorizedAction execution.ActionDescriptor
 		if err := authorizeBotTool(ctx, identity, input, &authorizedAction); err != nil {
+			botRejectedCause(ctx, identity, input, err)
 			return nil, err
 		}
 		for _, cb := range callbacks {

@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
@@ -58,6 +59,9 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 	}
 	resolved, group, err := e.Resolver.resolve(ctx, name)
 	if err != nil {
+		if _, missing := err.(*unresolvedToolTargetError); missing {
+			botRejectedInvocation(ctx, name, args, bot.ToolFeedbackUnresolvedTarget)
+		}
 		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Error: err.Error()}
 	}
 	if isToolDisabled(ctx, resolved.Name()) {
@@ -76,8 +80,13 @@ func (e *ProgressiveToolExecutor) Execute(ctx tool.Context, name string, args ma
 		args = map[string]any{}
 	}
 
+	if err := common.ValidateToolArguments(resolved, args); err != nil {
+		botRejectedInvocation(ctx, BotToolIdentity(group, resolved.Name()), args, bot.ToolFeedbackCorrectCall)
+		return ProgressiveToolResult{State: ProgressiveStateExecutionError, Tool: resolved.Name(), Error: err.Error()}
+	}
 	var authorizedAction execution.ActionDescriptor
 	if err := authorizeBotTool(ctx, BotToolIdentity(group, resolved.Name()), args, &authorizedAction); err != nil {
+		botRejectedCause(ctx, BotToolIdentity(group, resolved.Name()), args, err)
 		return botPolicyProgressiveResult(resolved.Name(), err)
 	}
 

@@ -25,6 +25,19 @@ beforeEach(() => {
   vi.mocked(snapshots.readBotActivityPage).mockImplementation(async (_id, _scope, _team, after) => ({ activity: Array.from({ length: Math.min(50, 121-after) }, (_, i) => ({ sequence: after+i+1, kind: 'report', created_at: '', payload: {} })) }))
   vi.mocked(snapshots.writeBotReadCursor).mockImplementation(async () => { vi.mocked(snapshots.getBotSnapshot).mockResolvedValue(makeSnapshot(121)) })
 })
+it.each(['checked', 'limitations', 'absent', 'unknown'] as const)('keeps latest and listed legacy %s assessment identical', async mode => {
+  const quality: bots.BotQualityReport = { schema_version: mode === 'unknown' ? 99 : 1, work_revision: 2, requirements_digest: 'digest', outcome: bots.BotQualityOutcome.Accepted, repairs: 1, criteria: [{ criterion_id: 'receipt', verdict: bots.BotCriterionVerdict.Satisfied, method: bots.BotAssessmentMethod.Model, evidence_refs: ['candidate:digest'], explanation: 'Checked receipt' }], limitations: mode === 'limitations' ? ['Missing source'] : [] }
+  const run = { id: 'latest', bot_id: bot.id, status: 'succeeded', trigger: 'manual', report: { summary: 'Receipt result', employee_message: { origin: bots.BotEmployeeMessageOrigin.Assessed }, quality: mode === 'absent' ? undefined : quality }, usage: { tool_calls: 0 } } as bots.BotRun
+  vi.mocked(snapshots.getBotSnapshot).mockResolvedValue({ ...makeSnapshot(0), latest_outcome: { ...run, work: { schema_version: 1, protocol: bots.BotWorkProtocol.LegacyAssessment, bot_id: bot.id, run_id: run.id, work_revision: 2, phase: 'blocked' } } })
+  vi.mocked(bots.listBotRuns).mockResolvedValue({ runs: [run] })
+  render(<BotWorkspace route={{ botId: bot.id, scope: bot.scope }} theme="dark" userId="owner" />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+  fireEvent.click(screen.getByText('Runs & activity', { selector: 'summary' }))
+  const want = mode === 'checked' ? /Requirements checked/ : mode === 'limitations' ? /Requirements remain unmet or unverified/ : mode === 'absent' ? /Not assessed/ : /Assessment unavailable/
+  await waitFor(() => expect(screen.getAllByText(want)).toHaveLength(2))
+  expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
+})
+
 it.each([false, true])('keeps sidebar name-only while workspace details own unread activity (collapsed=%s)', async collapsed => {
   const { rerender } = render(<BotSidebar collapsed={collapsed} />)
   const link = await screen.findByRole('link', { name: 'Watcher' })

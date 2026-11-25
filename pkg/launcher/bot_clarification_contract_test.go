@@ -32,7 +32,7 @@ func (*clarificationContractModel) Name() string { return "clarification-contrac
 func (m *clarificationContractModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
-		if m.calls > 1 {
+		if m.calls > 2 {
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("Waiting for your answer.", "model"), TurnComplete: true}, nil)
 			return
 		}
@@ -45,20 +45,23 @@ func (m *clarificationContractModel) GenerateContent(_ context.Context, req *mod
 				m.t.Fatalf("effective provider prompt missing %q", want)
 			}
 		}
-		var declaration *genai.FunctionDeclaration
-		for _, tools := range req.Config.Tools {
-			for _, d := range tools.FunctionDeclarations {
-				if d.Name == "ask_user" {
-					declaration = d
+		if req.Tools["describe_tools"] == nil || req.Tools["execute_tool"] == nil {
+			m.t.Fatal("provider has no progressive tool discovery/dispatch")
+		}
+		if m.calls == 1 {
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-schema", Name: "describe_tools", Args: map[string]any{"names": []any{"ask_user"}}}}}}, TurnComplete: true}, nil)
+			return
+		}
+		var raw []byte
+		for _, content := range req.Contents {
+			for _, part := range content.Parts {
+				if response := part.FunctionResponse; response != nil && response.ID == "clarification-schema" {
+					raw, _ = json.Marshal(response.Response)
 				}
 			}
 		}
-		if declaration == nil {
-			m.t.Fatal("provider has no actual ask_user declaration")
-		}
-		raw, err := json.Marshal(declaration)
-		if err != nil {
-			m.t.Fatal(err)
+		if !strings.Contains(string(raw), `"name":"ask_user"`) {
+			m.t.Fatalf("provider did not discover actual ask_user schema: %s", raw)
 		}
 		for _, want := range []string{"text", "select", "yesno", "allow_custom_answer", "prompt", "options"} {
 			if !strings.Contains(string(raw), want) {
@@ -70,7 +73,7 @@ func (m *clarificationContractModel) GenerateContent(_ context.Context, req *mod
 			args["allow_custom_answer"] = true
 			args["options"] = []any{map[string]any{"id": "trip", "label": "Upcoming trip"}, map[string]any{"id": "home", "label": "Home"}}
 		}
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-call", Name: "ask_user", Args: args}}}}, TurnComplete: true}, nil)
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-call", Name: "execute_tool", Args: map[string]any{"name": "ask_user", "arguments": args}}}}}, TurnComplete: true}, nil)
 	}
 }
 
@@ -302,7 +305,7 @@ func TestBotTitleConfirmationFactoryJourney(t *testing.T) {
 						if request.Instructions != request.Run.TitleConfirmation.ConfirmedAssignment {
 							t.Fatal("mandated Prepare did not receive confirmed assignment")
 						}
-						return &BotChatSafeResources{WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+						return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 					}
 					factory, err = NewBotChatAgentFactory(f.cfg)
 					if err != nil {

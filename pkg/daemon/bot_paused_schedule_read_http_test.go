@@ -27,8 +27,8 @@ type pausedScheduleReadModel struct {
 
 func (m *pausedScheduleReadModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		if r.Tools["list_scheduled_jobs"] == nil {
-			m.t.Error("paused factory omitted authorized native listing")
+		if r.Tools["list_scheduled_jobs"] == nil && r.Tools["execute_tool"] == nil {
+			m.t.Error("paused factory omitted authorized listing and shared Chat dispatch")
 		}
 		for _, name := range []string{"shell_command", "http_request", "web_fetch", "schedule_job", "update_scheduled_job", "remove_scheduled_job", "list_scheduled_jobs_future"} {
 			if r.Tools[name] != nil {
@@ -112,7 +112,7 @@ func (m *pausedScheduleReadModel) GenerateContent(_ context.Context, r *model.LL
 			yield(nil, fmt.Errorf("unexpected paused schedule retry"))
 			return
 		}
-		if m.bridge && call.Name == "list_scheduled_jobs" {
+		if call.Name == "list_scheduled_jobs" && (m.bridge || r.Tools[call.Name] == nil) {
 			call = &genai.FunctionCall{ID: call.ID, Name: "execute_tool", Args: map[string]any{"name": call.Name, "arguments": call.Args}}
 		}
 		m.step++

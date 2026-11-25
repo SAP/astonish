@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
@@ -53,6 +54,55 @@ func newProgressiveValidationSpy(t *testing.T, name string) *progressiveValidati
 		t.Fatal(err)
 	}
 	return &progressiveValidationSpy{Tool: base, output: map[string]any{"success": true}}
+}
+
+type receiptValidationContext struct{ *contextToolContext }
+
+func (*receiptValidationContext) FunctionCallID() string { return "invalid-call" }
+
+func TestBotToolNonexecutionValidationBeforeDispatch(t *testing.T) {
+	spy := newProgressiveValidationSpy(t, "read_file")
+	idx := syncTestToolIndex(t, &ToolGroup{Name: "core", Tools: []tool.Tool{spy}})
+	bridge, err := NewProgressiveToolBridge(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := execution.WithBotRunIdentity(context.Background(), execution.BotRunIdentity{})
+	base, _ = bot.WithToolOutcomes(base)
+	ctx := &receiptValidationContext{&contextToolContext{minimalReadonlyContext{Context: base}}}
+	args := map[string]any{}
+	_, err = bridge[1].(runnableDeferredTool).Run(ctx, map[string]any{"name": "read_file", "arguments": args})
+	out, ok := bot.TakeToolOutcome(ctx, ctx.FunctionCallID())
+	if err == nil || !ok || !out.NonexecutionFor(ctx, ctx.FunctionCallID(), "read_file", args) || out.Nonexecution.Disposition != bot.ToolFeedbackCorrectCall || spy.calls != 0 {
+		t.Fatalf("missing exact correctable pre-dispatch receipt: err=%v out=%+v calls=%d", err, out, spy.calls)
+	}
+}
+
+func TestBotToolNonexecutionUnresolvedTargetBeforeDispatch(t *testing.T) {
+	for _, surface := range []string{"bridge", "executor"} {
+		t.Run(surface, func(t *testing.T) {
+			idx := syncTestToolIndex(t, &ToolGroup{Name: "core", Tools: []tool.Tool{newProgressiveValidationSpy(t, "read_file")}})
+			base := execution.WithBotRunIdentity(context.Background(), execution.BotRunIdentity{})
+			base, _ = bot.WithToolOutcomes(base)
+			ctx := &receiptValidationContext{&contextToolContext{minimalReadonlyContext{Context: base}}}
+			args := map[string]any{"path": "source"}
+			if surface == "bridge" {
+				bridge, err := NewProgressiveToolBridge(idx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := bridge[1].(runnableDeferredTool).Run(ctx, map[string]any{"name": "missing_source", "arguments": args}); err == nil {
+					t.Fatal("missing target resolved")
+				}
+			} else if result := NewProgressiveToolExecutor(&ChatAgent{ToolIndex: idx}).Execute(ctx, "missing_source", args); result.State != ProgressiveStateExecutionError {
+				t.Fatal(result)
+			}
+			out, ok := bot.TakeToolOutcome(ctx, ctx.FunctionCallID())
+			if !ok || !out.NonexecutionFor(ctx, ctx.FunctionCallID(), "missing_source", args) || out.Nonexecution.Disposition != bot.ToolFeedbackUnresolvedTarget {
+				t.Fatalf("unresolved target receipt: %+v", out)
+			}
+		})
+	}
 }
 
 func TestProgressiveValidationRejectsMissingPathBeforeRunner(t *testing.T) {

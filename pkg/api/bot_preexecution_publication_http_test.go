@@ -48,14 +48,17 @@ func TestBotPreexecutionPublicationHTTP(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "read_file", nil, []string{"chat", "tool:execute"}, scope)
 			llm := &preexecutionPublicationModel{t: t}
+			files := newComposedHTTPFiles(t, f.dataDir, f.repo, f.b, nil)
+			f.worker.Stop()
 			var err error
 			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{
-				Backend: f.db, Sandbox: journeyHomeBackend{}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
+				Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 1000000,
 				ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 1000, SupportsOutputLimit: true},
 				ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 					return llm, nil
 				},
-				Prepare: func(context.Context, bot.RunRequest, *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+				Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+					files.install(c, q, s)
 					return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 				},
 			})

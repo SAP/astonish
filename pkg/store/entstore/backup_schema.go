@@ -27,7 +27,7 @@ func backupScopeKey(scope backup.Scope) string {
 	}
 }
 
-func schemaVersionForScope(ctx context.Context, backend string, db *sql.DB, scope backup.Scope) (backup.SchemaVersion, error) {
+func schemaVersionForScope(ctx context.Context, backend string, db backupSQLQuery, scope backup.Scope) (backup.SchemaVersion, error) {
 	dialect := Dialect(backend)
 	schema := ""
 	if dialect == DialectPostgres {
@@ -44,14 +44,14 @@ func schemaVersionForScope(ctx context.Context, backend string, db *sql.DB, scop
 	}, nil
 }
 
-func schemaHash(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (string, error) {
+func schemaHash(ctx context.Context, db backupSQLQuery, dialect Dialect, schema string) (string, error) {
 	if dialect == DialectSQLite {
 		return sqliteSchemaHash(ctx, db)
 	}
 	return logicalSchemaHash(ctx, db, dialect, schema)
 }
 
-func sqliteSchemaHash(ctx context.Context, db *sql.DB) (string, error) {
+func sqliteSchemaHash(ctx context.Context, db backupSQLQuery) (string, error) {
 	tables, err := sqliteUserTables(ctx, db)
 	if err != nil {
 		return "", err
@@ -72,7 +72,7 @@ func sqliteSchemaHash(ctx context.Context, db *sql.DB) (string, error) {
 // sqlitePreBotSchemaHash reconstructs only the known additive Bot v1 delta.
 // It retains every other table, column type, nullability, primary key and order;
 // this is not a general subset-schema compatibility check.
-func sqlitePreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope) (string, error) {
+func sqlitePreBotSchemaHash(ctx context.Context, db backupSQLQuery, scope backup.Scope) (string, error) {
 	tables, err := sqliteUserTables(ctx, db)
 	if err != nil {
 		return "", err
@@ -140,7 +140,7 @@ func sqlitePreBotBackupCompatible(ctx context.Context, db *sql.DB, manifest back
 // postgresPreBotSchemaHash uses the existing PostgreSQL archive representation
 // (table names and ordered column names), removing the known Bot additions.
 // It is deliberately not a subset-schema compatibility check.
-func postgresPreBotSchemaHash(ctx context.Context, db *sql.DB, scope backup.Scope) (string, error) {
+func postgresPreBotSchemaHash(ctx context.Context, db backupSQLQuery, scope backup.Scope) (string, error) {
 	schema := postgresSchemaForScope(scope)
 	tables, err := userTables(ctx, db, DialectPostgres, schema)
 	if err != nil {
@@ -206,7 +206,7 @@ func preSkillBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, 
 
 // includeSkills reconstructs v1 rather than v2; each path compares an exact hash
 // and rejects archive entries for every table it excludes.
-func preTaskBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion, includeSkills bool) (bool, error) {
+func preTaskBackupCompatible(ctx context.Context, db backupSQLQuery, dialect Dialect, manifest backup.Manifest, scope backup.Scope, archive backup.SchemaVersion, includeSkills bool) (bool, error) {
 	excluded := func(table string) bool {
 		return table == "bot_knowledge_extractions" || table == "bot_knowledge_file_heads" || table == "bot_tasks" || table == "bot_task_revisions" || includeSkills && (table == "bot_skills" || table == "bot_skill_revisions")
 	}
@@ -244,7 +244,7 @@ func preTaskBackupCompatible(ctx context.Context, db *sql.DB, dialect Dialect, m
 	return hex.EncodeToString(sum[:]) == archive.Hash, nil
 }
 
-func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string, error) {
+func sqliteTableSchema(ctx context.Context, db backupSQLQuery, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quoteSQLiteIdent(table)+")")
 	if err != nil {
 		return nil, err
@@ -269,7 +269,7 @@ func sqliteTableSchema(ctx context.Context, db *sql.DB, table string) ([]string,
 	return columns, nil
 }
 
-func logicalSchemaHash(ctx context.Context, db *sql.DB, dialect Dialect, schema string) (string, error) {
+func logicalSchemaHash(ctx context.Context, db backupSQLQuery, dialect Dialect, schema string) (string, error) {
 	tables, err := userTables(ctx, db, dialect, schema)
 	if err != nil {
 		return "", err

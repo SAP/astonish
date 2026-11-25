@@ -29,13 +29,17 @@ function fileTypeBadgeStyle(fileType: string) {
 // Embedded file viewer for a single artifact — renders the file content inline
 // with a header bar (filename, type badge, download dropdown, fullscreen button).
 // Used inside agent message bubbles for markdown reports and last-turn media.
-export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel, fillHeight = false }: {
+export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel, fillHeight = false, fileAccess }: {
   artifact: SessionArtifact
   sessionId?: string | null
   onOpenInPanel?: (path: string) => void
   /** When true, fill the parent height instead of capping content at 500px (harness panel). */
+  fileAccess?: import('./chatTypes').FileAccessAdapter
   fillHeight?: boolean
 }) {
+  const [truncated, setTruncated] = useState(false)
+  const downloadAbort = useRef<AbortController | null>(null)
+  useEffect(() => () => downloadAbort.current?.abort(), [fileAccess?.identity])
   const [content, setContent] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -47,7 +51,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const isMarkdown = artifact.fileType === 'Markdown'
-  const mediaKind = artifactMediaKind(artifact.fileType, artifact.fileName)
+  const mediaKind = fileAccess ? null : artifactMediaKind(artifact.fileType, artifact.fileName)
   const isEdit = artifact.toolName === 'edit_file'
   const downloadLabel = downloadLabelForArtifact(artifact.fileType, artifact.fileName)
 
@@ -60,14 +64,17 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
       return
     }
     let cancelled = false
+    const controller = new AbortController()
+    setContent(''); setTruncated(false)
+    if (fileAccess && !fileAccess.preview) { setLoading(false); setError(null); return }
     setLoading(true)
     setError(null)
-    fetchArtifactContent(artifact.path, sessionId || undefined)
-      .then(text => { if (!cancelled) setContent(text) })
+    const read = fileAccess ? fileAccess.readPreview(controller.signal) : fetchArtifactContent(artifact.path, sessionId || undefined).then(content => ({ content, truncated: false }))
+    read.then(result => { if (!cancelled) { setContent(result.content); setTruncated(result.truncated) } })
       .catch(err => { if (!cancelled) setError(err.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [artifact.path, artifact.revision, sessionId, mediaKind])
+    return () => { cancelled = true; controller.abort() }
+  }, [artifact.path, artifact.revision, sessionId, mediaKind, fileAccess])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -87,15 +94,22 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
     setDownloadError(null)
     setExporting('file')
     try {
+      if (fileAccess) {
+        downloadAbort.current?.abort()
+        downloadAbort.current = new AbortController()
+        await fileAccess.download(downloadAbort.current.signal)
+        return
+      }
       const blob = await fetchArtifactBlob(artifact.path, sessionId || undefined)
       const { saveAs } = await import('file-saver')
       saveAs(blob, artifact.fileName)
     } catch (err) {
+      if (fileAccess) { setContent(''); setTruncated(false); setError('File access unavailable. Close and reopen to retry.') }
       setDownloadError(err instanceof Error ? err.message : String(err))
     } finally {
       setExporting(null)
     }
-  }, [artifact.path, artifact.fileName, sessionId])
+  }, [artifact.path, artifact.fileName, sessionId, fileAccess])
 
   const handleExportPDF = useCallback(async () => {
     setDownloadOpen(false)
@@ -243,7 +257,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
               >
                 {downloadLabel}
               </button>
-              {isMarkdown && (
+              {isMarkdown && !fileAccess && (
                 <>
                   <button
                     onClick={handleExportDOCX}
@@ -278,6 +292,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
         )}
       </div>
 
+      {truncated && <p role="status">Preview truncated. Download for the complete file.</p>}
       {downloadError && <div role="alert" className="text-xs p-3 text-destructive">Download failed: {downloadError}</div>}
       {/* File content */}
       <div
@@ -326,7 +341,7 @@ export default function EmbeddedFileViewer({ artifact, sessionId, onOpenInPanel,
             )}
             {!loading && !error && !content && (
               <div className="text-xs text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                File is empty
+                {fileAccess && !fileAccess.preview ? 'Preview unavailable. Download this file.' : 'File is empty'}
               </div>
             )}
           </>

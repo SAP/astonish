@@ -127,37 +127,63 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := cfg.Backend.Open(ctx); err != nil {
 		return err
 	}
-	defer cfg.Backend.Close()
-
 	m := newModel(ctx, cfg)
 	p := tea.NewProgram(m)
-	_, err := p.Run()
-
-	// Close alt backend if it was opened during the session.
-	if cfg.AltBackend != nil && m.backends[1].opened {
-		cfg.AltBackend.Close()
+	final, err := p.Run()
+	if n, ok := final.(model); ok {
+		m = n
 	}
 
+	// Cleanup the returned model: alternate open state lives in that value,
+	// not the initial model passed to Bubble Tea. A cleanup error forbids handoff.
+	err = errors.Join(err, m.closeBackends())
+
+	if err == nil && m.workspaceHandoff != nil {
+		return m.workspaceHandoff
+	}
 	return err
+}
+
+func (m *model) closeBackends() error {
+	if m.turnCancel != nil {
+		m.turnCancel()
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	var errs []error
+	for i := range m.backends {
+		slot := &m.backends[i]
+		if slot.opened && slot.backend != nil {
+			if err := slot.backend.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			slot.opened = false
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // model is the root bubbletea model.
 type model struct {
-	verification planVerificationState
-	ctx          context.Context
-	cancel       context.CancelFunc
-	backend      backend.Backend
-	info         backend.Info
-	theme        Theme
-	tr           *events.Transcript
-	vp           viewport.Model
-	ta           textarea.Model
-	spin         spinner.Model
-	width        int
-	height       int
-	ready        bool
-	err          string
-	quitting     bool
+	workspacePicker     workspacePickerState
+	workspaceGeneration uint64
+	workspaceHandoff    *backend.WorkspaceHandoffError
+	verification        planVerificationState
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	backend             backend.Backend
+	info                backend.Info
+	theme               Theme
+	tr                  *events.Transcript
+	vp                  viewport.Model
+	ta                  textarea.Model
+	spin                spinner.Model
+	width               int
+	height              int
+	ready               bool
+	err                 string
+	quitting            bool
 	// history of sent prompts for Up/Down.
 	history    []string
 	historyIdx int // -1 = not browsing
@@ -486,8 +512,26 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 			n.themePicker.open = false
 			n.themeGeneration++
 		}
+		if n.workspacePicker.open && (n.workspacePicker.slot != n.activeBackendIdx || n.workspacePicker.backend != n.backend || n.workspacePicker.owner != n.tr || n.workspacePicker.session != n.tr.SessionID) {
+			n.workspacePicker.open = false
+			n.workspaceGeneration++
+		}
 		next = n
 	}()
+	if msg, ok := msg.(workspaceResultMsg); ok {
+		return m.applyWorkspaceResult(msg)
+	}
+	if m.workspacePicker.open {
+		switch key := msg.(type) {
+		case tea.KeyPressMsg:
+			return m.handleWorkspaceKey(key)
+		case tea.MouseMsg, tea.PasteMsg:
+			return m, nil
+		}
+		if _, ok := textareaPasteMsg(msg); ok {
+			return m, nil
+		}
+	}
 	m.syncCodePermissions()
 	if m.permissions.open {
 		switch key := msg.(type) {
@@ -584,6 +628,8 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 		return m.startBotWatch()
 	case botWatchMsg:
 		return m.applyBotWatch(msg)
+	case botFilesMsg:
+		return m.applyBotFiles(msg)
 	case botSkillsLoadedMsg:
 		return m.applyBotSkills(msg)
 	case botsLoadedMsg:
@@ -1261,6 +1307,9 @@ func (m *model) syncSlashCompletion() {
 		return
 	}
 	var extra []slashCommand
+	if m.workspaceCap() != nil {
+		extra = append(extra, workspacesSlashCommand)
+	}
 	if m.codeThemePreferencesCap() != nil {
 		extra = append(extra, themesSlashCommand)
 	}
@@ -2419,6 +2468,9 @@ func (m model) collectSubmitAttachments(composerValue string) []backend.Attachme
 }
 
 func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
+	if text == "/workspaces" {
+		return m.openWorkspacePicker(true)
+	}
 	if text == "/themes" {
 		return m.openThemePicker()
 	}
@@ -2430,6 +2482,9 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case text == "/bots" || strings.HasPrefix(text, "/bots "):
 		return m.botCommand(text)
 	case text == "/help" || text == "/?":
+		if m.workspaceCap() != nil {
+			m.tr.Apply(events.NewSystem("/workspaces — browse, review, apply and retain independent Code workspaces"))
+		}
 		if m.codeThemePreferencesCap() != nil {
 			m.tr.Apply(events.NewSystem("/themes — choose and save a Code color palette"))
 		}
@@ -2452,7 +2507,6 @@ func (m model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Quit
 	case text == "/new":
-		m.planMode = false
 		return m.startNewSession()
 	case text == "/sessions" || text == "/session":
 		return m.openSessionsPicker()
@@ -4496,6 +4550,9 @@ func (m model) View() tea.View {
 }
 
 func (m model) viewContent() string {
+	if m.workspacePicker.open {
+		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderWorkspacePicker(), lipgloss.WithWhitespaceStyle(m.theme.Background)))
+	}
 	if m.permissions.open {
 		return m.paintBackground(lipgloss.Place(m.width, m.screenHeight(), lipgloss.Center, lipgloss.Center, m.renderCodePermissions()))
 	}
@@ -5779,6 +5836,9 @@ func (m model) renderFooterMeta() string {
 	}
 	left := modelFooterText(provider, modelName)
 	folder := footerWorkDirText(m.info.WorkingDir, m.info.GitBranch)
+	if m.info.Mode == "code" && m.info.WorkspaceMode != "" {
+		folder += " · " + string(m.info.WorkspaceMode)
+	}
 	right := ""
 	if m.info.AutoApprove && m.info.Mode != "code" {
 		right = "auto-approve"

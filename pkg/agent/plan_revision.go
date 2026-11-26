@@ -22,6 +22,20 @@ type PlanStepDefinition struct {
 	ParallelGroup string           `json:"parallel_group,omitempty"`
 }
 
+// PlanStepPatch updates only supplied definition fields of an existing named
+// phase. It cannot rename, insert, remove or reorder phases.
+type PlanStepPatch struct {
+	Name          string            `json:"name"`
+	Description   *string           `json:"description,omitempty"`
+	Details       *string           `json:"details,omitempty"`
+	Summary       *string           `json:"summary,omitempty"`
+	Files         *[]PlanFileChange `json:"files,omitempty"`
+	Outcome       *string           `json:"outcome,omitempty"`
+	Verify        *string           `json:"verify,omitempty"`
+	VerifyKind    *string           `json:"verify_kind,omitempty"`
+	ParallelGroup *string           `json:"parallel_group,omitempty"`
+}
+
 type PlanDocumentDefinition struct {
 	Context      string `json:"context"`
 	WhatNotToDo  string `json:"what_not_to_do"`
@@ -42,7 +56,8 @@ type PlanRevisionRequest struct {
 	RequiresApproval bool                    `json:"requires_approval,omitempty"`
 	Goal             *string                 `json:"goal,omitempty"`
 	Document         *PlanDocumentDefinition `json:"document,omitempty"`
-	Steps            []PlanStepDefinition    `json:"steps"`
+	Steps            []PlanStepDefinition    `json:"steps,omitempty"`
+	StepPatches      []PlanStepPatch         `json:"step_patches,omitempty"`
 }
 
 type PlanRevisionDiff struct {
@@ -196,6 +211,55 @@ func canonicalRevisionStep(s PlanStepDefinition, workspace string) (PlanStepDefi
 	return s, nil
 }
 
+// applyPlanStepPatches returns independent definitions in their original order.
+// Validate every target before applying any fields; contract validation remains
+// the candidate builder's responsibility, including explicitly empty values.
+func applyPlanStepPatches(base []PlanStepDefinition, patches []PlanStepPatch) ([]PlanStepDefinition, error) {
+	indexes := make(map[string]int, len(base))
+	for i, s := range base {
+		indexes[s.Name] = i
+	}
+	seen := make(map[string]bool, len(patches))
+	for _, p := range patches {
+		if _, ok := indexes[p.Name]; !ok {
+			return nil, fmt.Errorf("unknown phase patch target: %q", p.Name)
+		}
+		if seen[p.Name] {
+			return nil, fmt.Errorf("duplicate phase patch target: %q", p.Name)
+		}
+		seen[p.Name] = true
+	}
+	next := (PlanDefinition{Steps: base}).Clone().Steps
+	for _, p := range patches {
+		s := &next[indexes[p.Name]]
+		if p.Description != nil {
+			s.Description = *p.Description
+		}
+		if p.Details != nil {
+			s.Details = *p.Details
+		}
+		if p.Summary != nil {
+			s.Summary = *p.Summary
+		}
+		if p.Files != nil {
+			s.Files = slices.Clone(*p.Files)
+		}
+		if p.Outcome != nil {
+			s.Outcome = *p.Outcome
+		}
+		if p.Verify != nil {
+			s.Verify = *p.Verify
+		}
+		if p.VerifyKind != nil {
+			s.VerifyKind = *p.VerifyKind
+		}
+		if p.ParallelGroup != nil {
+			s.ParallelGroup = *p.ParallelGroup
+		}
+	}
+	return next, nil
+}
+
 // BuildPlanRevisionCandidate validates and classifies without mutating current,
 // assigning identities, executing verification, or accepting a proposal.
 // Historical graph acceptance is enforced at initial announcement, not revisions.
@@ -212,11 +276,18 @@ func BuildPlanRevisionCandidate(current PlanSnapshot, req PlanRevisionRequest, w
 	if strings.TrimSpace(req.Reason) == "" {
 		return fail("reason is required")
 	}
-	if len(req.Steps) == 0 {
-		return fail("full replacement steps are required")
+	if (len(req.Steps) == 0) == (len(req.StepPatches) == 0) {
+		return fail("exactly one of nonempty steps or step_patches is required")
 	}
 	base := current.Definition()
 	next := PlanDefinition{Goal: base.Goal, Document: base.Document, Steps: slices.Clone(req.Steps)}
+	if len(req.StepPatches) != 0 {
+		patched, err := applyPlanStepPatches(base.Steps, req.StepPatches)
+		if err != nil {
+			return fail(err.Error())
+		}
+		next.Steps = patched
+	}
 	if req.Goal != nil {
 		next.Goal = *req.Goal
 	}

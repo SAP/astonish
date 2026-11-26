@@ -217,6 +217,9 @@ Completeness and design quality:
 Before calling announce_plan, verify you have covered: (1) both frontend and backend if the change crosses the boundary, (2) terminal TUI if you changed Studio Chat rendering, (3) docs/architecture/ if the subsystem has documentation, (4) tests for every file you modify, (5) any breaking changes surfaced explicitly.
 For UI changes, specify behavior per mode and per state (empty, error, populated). For state machines, define every transition. Use typed constants over string comparisons.
 
+Validation budget:
+Choose scoped commands that prove the required outcome within a practical runtime budget. Reserve broad regressions for risk-appropriate final checks; do not widen scope to repair unrelated baseline failures. Keep the acceptance bar and required running-surface behavior proof intact. The runtime owns each phase's verify gate. Do not manually repeat the same command immediately before marking the phase complete, or rerun unchanged phases with valid recorded evidence without a concrete reason (changed implementation, changed contract, or suspect evidence).
+
 Tracking progress:
 - For work you do yourself on the main thread (edit_file, shell_command, etc.), call update_plan to mark each phase 'running' when you start it and 'complete' when you are ready for the runtime to run that phase's verify. complete is rejected unless verify exits 0.
 - For delegated work, set the plan_step field on each delegate_tasks task; those phases stay running until verify passes. Sub-agent finish is not completion.
@@ -240,7 +243,7 @@ type UpdatePlanArgs struct {
 	Action   UpdatePlanAction           `json:"action,omitempty" jsonschema:"status (default) updates progress; revise applies a definition-only revision immediately in Normal, Plan or Graph-Optimized Plan mode."`
 	Step     string                     `json:"step,omitempty" jsonschema:"Exact phase name for action=status."`
 	Status   string                     `json:"status,omitempty" jsonschema:"running, complete, or failed for action=status."`
-	Revision *agent.PlanRevisionRequest `json:"revision,omitempty" jsonschema:"Definition-only revision request for action=revise. Mutually exclusive with step and status."`
+	Revision *agent.PlanRevisionRequest `json:"revision,omitempty" jsonschema:"Definition-only revision request for action=revise. Mutually exclusive with step and status. Use step_patches for field-only changes to existing named phases; omitted fields and phases stay unchanged. Use steps for full replacement (adding, removing, renaming or reordering phases). steps and step_patches are mutually exclusive."`
 }
 
 // UpdatePlanResult is the output of the update_plan tool.
@@ -376,6 +379,6 @@ func NewAnnounceCompletionTool() (tool.Tool, error) {
 func NewUpdatePlanTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "update_plan",
-		Description: `Update the active plan. action=status (default) preserves existing step/status progress calls. action=revise applies a definition-only revision immediately in Normal, Plan or Graph-Optimized Plan mode, including scope, goal, files, phase order, outcomes and verification changes; it does not execute verification. Normal-mode revisions need no new approval; successful Plan/Graph-Optimized Plan revisions are re-presented with the normal plan approval choices and wait for execution approval. Use the returned snapshot's identity, revision and phase states. In Plan and Graph-Optimized Plan modes only action=revise is allowed; status changes and completion must wait for Normal mode. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
+		Description: `Update the active plan. action=status (default) preserves existing step/status progress calls. action=revise applies a definition-only revision immediately in Normal, Plan or Graph-Optimized Plan mode, including scope, goal, files, phase order, outcomes and verification changes; it does not execute verification. Prefer revision.step_patches for field-only changes to existing named phases: send only changed definition fields, leaving omitted fields and phases unchanged. Use revision.steps for full replacement when adding, removing, renaming or reordering phases; steps and step_patches are mutually exclusive. Normal-mode revisions need no new approval; successful Plan/Graph-Optimized Plan revisions are re-presented with the normal plan approval choices and wait for execution approval. Use the returned snapshot's identity, revision and phase states. In Plan and Graph-Optimized Plan modes only action=revise is allowed; status changes and completion must wait for Normal mode. Mark a phase 'running' when you start it. Mark 'complete' only when you are ready for the runtime to run that phase's verify command — complete is rejected unless verify exits 0. Mark 'failed' if you cannot finish. Delegated work does not complete the phase; verify still has to pass.`,
 	}, updatePlan)
 }

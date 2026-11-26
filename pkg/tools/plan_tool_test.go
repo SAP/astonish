@@ -7,7 +7,100 @@ import (
 	"testing"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"google.golang.org/genai"
 )
+
+// planToolSchema mirrors only the schema structure needed by these contract tests.
+type planToolSchema struct {
+	Properties  map[string]planToolSchema `json:"properties"`
+	Items       *planToolSchema           `json:"items"`
+	Required    []string                  `json:"required"`
+	Description string                    `json:"description"`
+}
+
+func TestUpdatePlanStepPatchSchema(t *testing.T) {
+	got, err := NewUpdatePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared, ok := got.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		t.Fatal("update_plan is missing its declaration")
+	}
+	decl := declared.Declaration()
+	if decl == nil || decl.ParametersJsonSchema == nil {
+		t.Fatal("missing input schema")
+	}
+	raw, err := json.Marshal(decl.ParametersJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema planToolSchema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	revision := schema.Properties["revision"]
+	for _, required := range revision.Required {
+		if required == "steps" || required == "step_patches" {
+			t.Fatalf("revision requires %s: %s", required, raw)
+		}
+	}
+	patches, ok := revision.Properties["step_patches"]
+	if !ok || patches.Items == nil {
+		t.Fatalf("missing step_patches array: %s", raw)
+	}
+	patch := *patches.Items
+	if len(patch.Required) != 1 || patch.Required[0] != "name" {
+		t.Fatalf("patch requires more than its target: %+v", patch.Required)
+	}
+	for _, field := range []string{"name", "description", "details", "summary", "files", "outcome", "verify", "verify_kind", "parallel_group"} {
+		if _, ok := patch.Properties[field]; !ok {
+			t.Errorf("patch missing definition field %s", field)
+		}
+	}
+	for _, forbidden := range []string{"status", "evidence", "results", "lifecycle", "plan_id", "revision", "sequence", "pending_revision"} {
+		if _, ok := patch.Properties[forbidden]; ok {
+			t.Errorf("patch admits runtime field %s", forbidden)
+		}
+	}
+	for _, guidance := range []string{revision.Description, got.Description()} {
+		for _, phrase := range []string{"step_patches", "steps", "mutually exclusive", "omitted"} {
+			if !strings.Contains(guidance, phrase) {
+				t.Errorf("guidance missing %q: %s", phrase, guidance)
+			}
+		}
+	}
+	var args UpdatePlanArgs
+	if err := json.Unmarshal([]byte(`{"action":"revise","revision":{"plan_id":"owned","base_revision":1,"step_patches":[{"name":"final","verify":"printf revised","status":"complete","evidence":"forged"}]}}`), &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.Revision == nil || args.Revision.Steps != nil || len(args.Revision.StepPatches) != 1 || args.Revision.StepPatches[0].Verify == nil {
+		t.Fatalf("patch decoding: %+v", args)
+	}
+	raw, err = json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"status"`, `"evidence"`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("decoded patch admitted %s: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestUpdatePlanAnnounceValidationBudgetGuidance(t *testing.T) {
+	got, err := NewAnnouncePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{"scoped commands", "runtime budget", "broad regressions", "Do not manually repeat", "not only go test/go build", "complete is rejected unless verify exits 0"} {
+		if !strings.Contains(got.Description(), phrase) {
+			t.Errorf("announce_plan guidance missing %q", phrase)
+		}
+	}
+}
 
 func TestUpdatePlanRevisionModesAndArguments(t *testing.T) {
 	for _, tc := range []struct {

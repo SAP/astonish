@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,257 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestPlanRevisionStepPatchPreservesEvidence(t *testing.T) {
+	s := runtimeFixture()
+	for i := range s.Steps {
+		s.Steps[i].Status, s.Steps[i].Evidence = "pending", ""
+	}
+	third := s.Steps[1]
+	third.Name, third.Description = "three", "third"
+	third.Files = []PlanFileChange{{Path: "pkg/lib/c.go", Kind: "modify"}}
+	third.Verify = "go test ./pkg/lib -run Three"
+	s.Steps = append(s.Steps, third)
+	calls := map[string]int{}
+	r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{Verify: func(cmd string) (int, string, error) {
+		calls[cmd]++
+		return 0, "verified " + cmd, nil
+	}})
+	if got := r.UpdateStep("one", "complete"); got.Code != PlanStepOK {
+		t.Fatal(got)
+	}
+	before := r.Snapshot()
+	// Decode a real additive request so failing-first evidence exercises the
+	// existing runtime rather than depending on a not-yet-defined Go type.
+	var req PlanRevisionRequest
+	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"plan_id":%q,"base_revision":%d,"reason":"focus final check","step_patches":[{"name":"three","verify":"go test ./pkg/lib -run FocusedThree"}]}`, before.PlanID, before.Revision)), &req); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Revise(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != PlanRevisionResultApplied || got.Snapshot.Revision != before.Revision+1 {
+		t.Fatalf("revision not advanced: %+v", got)
+	}
+	if !reflect.DeepEqual(got.Snapshot.Steps[:2], before.Steps[:2]) {
+		t.Fatal("patch changed omitted phases or early evidence")
+	}
+	want := before.Steps[2]
+	want.Verify = "go test ./pkg/lib -run FocusedThree"
+	if !reflect.DeepEqual(got.Snapshot.Steps[2], want) {
+		t.Fatalf("patch changed omitted fields: %+v", got.Snapshot.Steps[2])
+	}
+	for _, name := range []string{"one", "two", "three", "one"} {
+		if got := r.UpdateStep(name, "complete"); got.Code != PlanStepOK {
+			t.Fatal(got)
+		}
+	}
+	if calls[s.Steps[0].Verify] != 1 || calls[s.Steps[1].Verify] != 1 || calls[want.Verify] != 1 || calls[s.Steps[2].Verify] != 0 {
+		t.Fatalf("unexpected verifier calls: %v", calls)
+	}
+	if got := r.Complete("requested behavior works", ""); got.Code != PlanStepOK {
+		t.Fatal(got)
+	}
+}
+
+func TestPlanRevisionStepPatchValidation(t *testing.T) {
+	decode := func(t *testing.T, raw string) PlanRevisionRequest {
+		t.Helper()
+		var req PlanRevisionRequest
+		if err := json.Unmarshal([]byte(raw), &req); err != nil {
+			t.Fatal(err)
+		}
+		req.PlanID, req.BaseRevision, req.Reason = "plan-1", 3, "focused correction"
+		return req
+	}
+	for _, tt := range []struct {
+		name, raw string
+	}{
+		{"empty", `{}`},
+		{"empty arrays", `{"steps":[],"step_patches":[]}`},
+		{"unknown", `{"step_patches":[{"name":"missing","verify":"check"}]}`},
+		{"empty target", `{"step_patches":[{"name":""}]}`},
+		{"not exact", `{"step_patches":[{"name":" one "}]}`},
+		{"duplicate", `{"step_patches":[{"name":"one"},{"name":"one","description":"clearer"}]}`},
+		{"empty description", `{"step_patches":[{"name":"one","description":""}]}`},
+		{"empty details", `{"step_patches":[{"name":"one","details":""}]}`},
+		{"empty summary", `{"step_patches":[{"name":"one","summary":""}]}`},
+		{"empty outcome", `{"step_patches":[{"name":"one","outcome":""}]}`},
+		{"empty verify", `{"step_patches":[{"name":"one","verify":""}]}`},
+		{"empty files", `{"step_patches":[{"name":"one","files":[]}]}`},
+		{"bad verify kind", `{"step_patches":[{"name":"one","verify_kind":"invalid"}]}`},
+		{"parallel conflict", `{"step_patches":[{"name":"one","parallel_group":"wave"},{"name":"two","parallel_group":"wave","files":[{"path":"pkg/lib/a.go","kind":"modify"}]}]}`},
+		{"serial verify conflict", `{"step_patches":[{"name":"two","verify":"go test ./pkg/lib -run One"}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtimeFixture()
+			commits := 0
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CommitSnapshot: func(PlanSnapshot) error { commits++; return nil }})
+			before := r.Snapshot()
+			if _, err := r.Revise(decode(t, tt.raw)); PlanRuntimeErrorCode(err) != PlanRuntimeInvalid {
+				t.Fatalf("expected invalid patch: %v", err)
+			}
+			if commits != 0 || !reflect.DeepEqual(before, r.Snapshot()) {
+				t.Fatal("invalid patch changed durable state")
+			}
+		})
+	}
+	t.Run("mixed", func(t *testing.T) {
+		s := runtimeFixture()
+		req := decode(t, `{"step_patches":[{"name":"one"}]}`)
+		req.Steps = s.Definition().Steps
+		if _, err := BuildPlanRevisionCandidate(s, req, "/workspace", ""); err == nil {
+			t.Fatal("accepted mixed replacement and patch")
+		}
+	})
+	t.Run("all fields and slice isolation", func(t *testing.T) {
+		s := runtimeFixture()
+		s.Steps[0].ParallelGroup = "wave"
+		base := s.Definition().Steps
+		req := decode(t, `{"step_patches":[{"name":"one","description":"clearer","details":"new implementation","summary":"new summary","files":[{"path":"pkg/lib/new.go","kind":"new"}],"outcome":"new outcome","verify":"go test ./pkg/lib -run New","verify_kind":"behavior","parallel_group":""}]}`)
+		got, err := applyPlanStepPatches(base, req.StepPatches)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := PlanStepDefinition{Name: "one", Description: "clearer", Details: "new implementation", Summary: "new summary", Files: []PlanFileChange{{Path: "pkg/lib/new.go", Kind: "new"}}, Outcome: "new outcome", Verify: "go test ./pkg/lib -run New", VerifyKind: VerifyKindBehavior}
+		if !reflect.DeepEqual(got[0], want) || !reflect.DeepEqual(got[1], base[1]) {
+			t.Fatalf("fields or order lost: %+v", got)
+		}
+		candidate, err := BuildPlanRevisionCandidate(s, req, "/workspace", "")
+		if err != nil || !candidate.Diff.StructureChanged || candidate.Classification != PlanRevisionImmediate {
+			t.Fatalf("clear grouping: %+v %v", candidate, err)
+		}
+		got[0].Files[0].Path = "mutated-patch"
+		got[1].Files[0].Path = "mutated-base"
+		if (*req.StepPatches[0].Files)[0].Path != want.Files[0].Path || base[1].Files[0].Path != "pkg/lib/b.go" {
+			t.Fatal("patched definitions alias source file slices")
+		}
+	})
+	for _, raw := range []string{
+		`{"step_patches":[{"name":"one"}]}`,
+		`{"step_patches":[{"name":"one","files":[{"path":"/workspace/pkg/lib/./a.go","kind":""}]}]}`,
+	} {
+		t.Run("canonical noop "+raw, func(t *testing.T) {
+			s := runtimeFixture()
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{Workspace: "/workspace", CommitSnapshot: func(PlanSnapshot) error { t.Fatal("noop persisted"); return nil }})
+			before := r.Snapshot()
+			got, err := r.Revise(decode(t, raw))
+			if err != nil || got.Kind != PlanRevisionResultNoop || !reflect.DeepEqual(before, r.Snapshot()) {
+				t.Fatalf("noop changed state: %+v %v", got, err)
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name string
+		code string
+	}{
+		{"stale", PlanRuntimeStale},
+		{"running", PlanRuntimeBusy},
+		{"delegate", PlanRuntimeBusy},
+		{"persist", PlanRuntimePersistFailed},
+		{"completed", PlanRuntimeCompleted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtimeFixture()
+			if tt.name == "running" {
+				s.Steps[0].Status = "running"
+			}
+			if tt.name == "completed" {
+				s.Document.Results = "done"
+			}
+			commits := 0
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{CommitSnapshot: func(PlanSnapshot) error { commits++; return errors.New("disk full") }})
+			if tt.name == "delegate" {
+				r.plan.mu.Lock()
+				r.plan.taskRegistry["one"] = map[string]bool{"worker": true}
+				r.plan.mu.Unlock()
+			}
+			req := decode(t, `{"step_patches":[{"name":"one","details":"changed contract"}]}`)
+			if tt.name == "stale" {
+				req.BaseRevision--
+			}
+			before := r.Snapshot()
+			if _, err := r.Revise(req); PlanRuntimeErrorCode(err) != tt.code {
+				t.Fatalf("expected %s: %v", tt.code, err)
+			}
+			wantCommits := 0
+			if tt.name == "persist" {
+				wantCommits = 1
+			}
+			if commits != wantCommits || !reflect.DeepEqual(before, r.Snapshot()) {
+				t.Fatal("rejected patch changed durable state")
+			}
+		})
+	}
+}
+
+func TestPlanRevisionStepPatchChangedContractInvalidates(t *testing.T) {
+	for _, field := range []string{"details", "verify"} {
+		t.Run(field, func(t *testing.T) {
+			s := runtimeFixture()
+			s.Steps[0].ParallelGroup, s.Steps[1].ParallelGroup = "wave-1", "wave-1"
+			third := s.Steps[1]
+			third.Name, third.ParallelGroup = "three", "wave-2"
+			third.Files = []PlanFileChange{{Path: "pkg/lib/c.go", Kind: "modify"}}
+			third.Verify = "go test ./pkg/lib -run Three"
+			s.Steps = append(s.Steps, third)
+			r := NewPlanRuntimeFromSnapshot(s, PlanRuntimeOptions{})
+			before := r.Snapshot()
+			var req PlanRevisionRequest
+			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"plan_id":"plan-1","base_revision":3,"reason":"contract changed","step_patches":[{"name":"one",%q:"go test ./pkg/lib -run Changed"}]}`, field)), &req); err != nil {
+				t.Fatal(err)
+			}
+			got, err := r.Revise(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, i := range []int{0, 2} {
+				if got.Snapshot.Steps[i].Status != "pending" || got.Snapshot.Steps[i].Evidence != "" {
+					t.Fatalf("changed contract retained dependent evidence: %+v", got.Snapshot.Steps)
+				}
+			}
+			if !reflect.DeepEqual(before.Steps[1], got.Snapshot.Steps[1]) {
+				t.Fatal("independent sibling evidence invalidated")
+			}
+		})
+	}
+}
+
+func TestPlanRevisionStepPatchRestore(t *testing.T) {
+	s := runtimeFixture()
+	s.Steps[1].Status, s.Steps[1].Evidence = "pending", ""
+	calls := map[string]int{}
+	opts := PlanRuntimeOptions{Verify: func(cmd string) (int, string, error) { calls[cmd]++; return 0, "verified", nil }}
+	r := NewPlanRuntimeFromSnapshot(s, opts)
+	before := r.Snapshot()
+	verify := "go test ./pkg/lib -run FocusedTwo"
+	got, err := r.Revise(PlanRevisionRequest{PlanID: s.PlanID, BaseRevision: s.Revision, Reason: "narrow check", StepPatches: []PlanStepPatch{{Name: "two", Verify: &verify}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the existing durable markdown format, not only in-memory cloning.
+	md := RenderPlanFromInfoWithDoc(got.Snapshot.Goal, got.Snapshot.Document, got.Snapshot.Steps)
+	doc, goal, steps, err := ParsePlanDocument(md)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := NewPlanRuntimeFromSnapshot(PlanSnapshot{PlanID: doc.PlanID, Revision: doc.Revision, Sequence: doc.Sequence, Goal: goal, Document: doc, Steps: steps}, opts)
+	if !reflect.DeepEqual(got.Snapshot, restored.Snapshot()) || !reflect.DeepEqual(before.Steps[0], restored.Snapshot().Steps[0]) {
+		t.Fatal("restore lost revision or earlier evidence")
+	}
+	for _, name := range []string{"one", "two", "one", "two"} {
+		if got := restored.UpdateStep(name, "complete"); got.Code != PlanStepOK {
+			t.Fatal(got)
+		}
+	}
+	if calls[verify] != 1 || calls[s.Steps[0].Verify] != 0 || calls[s.Steps[1].Verify] != 0 {
+		t.Fatalf("restore reran unchanged evidence: %v", calls)
+	}
+	if got := restored.Complete("works after restart", ""); got.Code != PlanStepOK {
+		t.Fatal(got)
+	}
+}
 
 func revisionFixture() PlanSnapshot {
 	return PlanSnapshot{PlanID: "plan-1", Revision: 3, Sequence: 8, Goal: "Deliver capability", Document: PlanDocumentInfo{Context: "design", WhatNotToDo: "boundaries", Verification: "acceptance"}, Steps: []PlanStepInfo{

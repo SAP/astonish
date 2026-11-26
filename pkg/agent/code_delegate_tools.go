@@ -115,5 +115,10 @@ func codeDelegateGuidance(scope *ChildToolScope) string {
 	b.WriteString("- Reserve grep_search for narrow literal/string/configuration gaps, not symbol discovery or broad repository exploration.\n")
 	b.WriteString("- Source returned by codegraph counts as already read. Do not re-read those same regions; read only identified missing source or non-code configuration.\n")
 	b.WriteString("- Stop exploring once the implementation scope, affected callers, and verification are clear; carry out the assigned task rather than repeating discovery.\n")
+	b.WriteString("\n## Task Focus and Validation\n")
+	b.WriteString("- Stay within the assigned task and frozen phase boundaries. Keep a stable acceptance bar: address unmet user requirements or demonstrable defects, not optional robustness, style, or coverage preferences. Obtain user authorization for new scope; plan edits must not silently drop requirements.\n")
+	b.WriteString("- During editing use the smallest relevant tests; risk-appropriate broader testing normally once near task completion, not repeated full suites solely for confidence. Distinguish task regressions from unrelated baseline failures and report the latter; use a focused baseline check only when needed, not a second whole-repository campaign.\n")
+	b.WriteString("- Use current tool evidence, including authoritative recorded phase evidence when verified inputs and contract are unchanged across continuation or compaction. Old logs or model summaries alone do not establish freshness. Run fresh focused checks after edits affecting verified behavior. Preserve failing-first regression tests and running-surface live process or drill proof.\n")
+	b.WriteString("- The runtime owns authoritative phase verification. Child iteration checks are permitted; return captured evidence and unverified limitations. Parents audit captured evidence, not manually rerun the same expensive phase command immediately before update_plan(complete). Child finish is not phase completion; every phase must pass runtime verify before Results.\n")
 	return b.String()
 }

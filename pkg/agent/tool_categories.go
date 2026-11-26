@@ -191,12 +191,13 @@ Produce a COMPLETE plan — cover every dependency the change reaches, order pha
 // NormalModePlanRevisionGuidance is shared by Code and approved execution prompts.
 // The name is retained for callers; definition revisions also work while planning.
 const NormalModePlanRevisionGuidance = `Plan definition revisions (Normal and Plan modes):
-- Use update_plan(action="revise", revision={...}) to revise the active plan in Normal, Plan or Graph-Optimized Plan mode. Planning permits definition revisions only, not status changes, verification or announce_completion; wait for Normal mode before execution. This is an optional action; existing step/status progress calls are unchanged. The revision payload contains plan_id, base_revision, reason, and steps (definition-only phase definitions). Never submit status, evidence, or Results as revision definitions.
-- The returned snapshot is authoritative. Use the exact plan identity, revision, and step names from the current returned snapshot or PLAN.md, not conversation history or guessed names. Do not manually edit PLAN.md; announce_plan remains Plan-mode-only, not a revision workaround.
-- All valid revisions apply immediately, including changes to goals, scope, boundaries, outcomes, files, phase membership/order, parallel groups, and verify_kind. Continue using the returned snapshot without presenting a proposal, requesting revision approval, or stopping to await a decision. Initial Plan-mode approval and tool/folder authorization remain unchanged. This continuation rule applies in Normal mode. In Plan/Graph-Optimized Plan mode, the applied definition is re-presented for ordinary plan approval and execution waits for that approval; do not call announce_plan a second time.
-- If busy, do not force or retry a mutation of active work: revisions cannot change running phases. Wait for their execution/verification to settle. If stale, reload the current snapshot or PLAN.md and rebase the revision using its exact identity/version before retrying.
+- Use update_plan(action="revise", revision={...}) in Normal, Plan or Graph-Optimized Plan mode. This is an optional action; existing step/status progress calls are unchanged. Payload: plan_id, base_revision, reason; definition-only changes. Never submit status, evidence, or Results.
+- Prefer step_patches for existing-phase edits using exact phase names. step_patches and steps are mutually exclusive. Omitted fields and phases stay unchanged. Use legacy steps for full structural replacement (phase membership/order). Plan edits must not silently drop requirements.
+- The returned snapshot is authoritative. Use the exact plan identity, revision, and step names from the current returned snapshot or PLAN.md, not history or guesses. Do not manually edit PLAN.md; announce_plan remains Plan-mode-only.
+- All valid revisions apply immediately. In Normal mode continue without presenting a proposal, requesting revision approval, or stopping to await a decision. Initial Plan-mode approval and tool/folder authorization remain unchanged. In Plan/Graph-Optimized Plan mode revisions are re-presented for ordinary plan approval; wait for Normal mode before status, verification or announce_completion. Do not re-announce.
+- If busy, wait: revisions cannot change running phases. If stale, reload the snapshot or PLAN.md and rebase its exact identity/version.
 - Current approvals does not grant full access. Only explicit Full access for this plan consent bypasses tool/folder prompts; expires on completion, replacement, planning revision or revocation; not restored after process restart. Session folders are independent durable folder consent, never an all-tools grant; mode restrictions, disabled tools and required user questions still apply.
-- Follow the returned phase states after an applied revision. Changes may produce invalidated evidence: reverify affected phases through update_plan(complete), never copy old evidence back. Revision does not add a new completion gate: every phase must still complete with its verify evidence, then announce_completion writes Results from that recorded evidence without running new commands.
+- Follow returned phase states and invalidated evidence: reverify affected phases through update_plan(complete), never copy old evidence back. Revision does not add a new completion gate: every phase must complete with verify evidence, then announce_completion writes Results from recorded evidence without running new commands.
 `
 
 // PlanExecutionSystemContext is injected as the per-turn SystemContext when the
@@ -227,7 +228,7 @@ EXECUTION RULES:
    repository discovery. Codegraph/search remain runtime-capped (1 codegraph/code-intelligence
    call and 2 search/list calls per turn) for a concrete unexpected gap only. Source reads are
    not capped. If a verify command failed this turn, investigate that failure — research caps
-   are lifted. If the current phase's outcome is a running surface, you MAY inspect the live
+   are lifted, but failure investigation stays scoped to the requested outcome. If the current phase's outcome is a running surface, you MAY inspect the live
    process/overlay/session (shell, docker, browser_navigate, run_drill) even when PLAN.md
    already named the files. That is verification, not rediscovery.
 3. ALLOWED READS: (a) a file you are about to edit/create (read it once immediately before
@@ -243,12 +244,21 @@ EXECUTION RULES:
    Normal-mode revision workflow below; do not silently change approved scope.
 7. Start implementing. When you finish a phase, call update_plan(complete) so the runtime can run
    that phase's verify — do not declare success in prose first. Delegated work finishing is not
-   completion.
+   completion. The runtime owns authoritative phase verification. Child iteration checks are
+   permitted; audit captured evidence instead of manually rerunning the same expensive phase
+   command immediately before update_plan(complete).
 8. After every phase is complete, call announce_completion with the proven user-visible outcome and
    anything you did NOT verify. It records the plan as done and writes ## Results from the verify
    evidence each phase already produced — it does not run new commands. Execution mode ends only
    when that tool writes ## Results.
-9. If verify fails, investigate the failure. Do not mark the phase complete.
+9. If verify fails, investigate the failure. Do not mark the phase complete. Distinguish task
+   regressions from unrelated baseline failures and report the latter; use a focused baseline check only when needed,
+   not a second whole-repository campaign. Obtain user authorization for new scope; do not silently drop requirements.
+10. Across continuation or compaction, authoritative recorded phase evidence remains usable when
+    verified inputs and contract are unchanged; old logs or model summaries alone are not proof.
+    After edits affecting previously verified behavior, run fresh focused checks. During editing,
+    use the smallest relevant tests; risk-appropriate broader testing normally once near completion,
+    not repeated full suites solely for confidence. Keep the user's acceptance bar stable.
 
 ` + NormalModePlanRevisionGuidance
 

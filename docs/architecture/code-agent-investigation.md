@@ -4,7 +4,7 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 
 ## Three layers
 
-1. **Always-on Work Policy + Live Evidence** in the code-mode system prompt (`pkg/agent/code_system_prompt_builder.go`, shared `LiveEvidenceSection` in `pkg/agent/live_evidence.go`): short bullets — keep every explicit requirement in view, user restatements are spec, drop a contradicted hypothesis, claim done only when this turn's tool output supports it, two kinds of proof (library test vs live observation/drill), CloakBrowser is not `chromium` on PATH, one ordered source of truth, `git log`/`blame`/`show` before more production edits on **code** regressions. Stop-exploring still applies to code edits; running surfaces are the exception.
+1. **Always-on Work Policy + Live Evidence** in the code-mode system prompt (`pkg/agent/code_system_prompt_builder.go`, shared `LiveEvidenceSection` in `pkg/agent/live_evidence.go`): short bullets — keep every explicit requirement in view, user restatements are spec, drop a contradicted hypothesis, claim done only with current tool evidence (including authoritative recorded phase evidence when verified inputs and contracts are unchanged across continuation/compaction), two kinds of proof (library test vs live observation/drill), CloakBrowser is not `chromium` on PATH, one ordered source of truth, `git log`/`blame`/`show` before more production edits on **code** regressions. Stop-exploring still applies to code edits; running surfaces are the exception.
 2. **Builtin skills**:
    - `debug-regression` — git archaeology, failing-test-first, for code/UI logic regressions.
    - `inspect-live-surface` — live session/sandbox/browser. Product path then overlay/process then `browser_navigate`. Not a PATH probe.
@@ -13,6 +13,12 @@ Astonish Code already finds the right files quickly (codegraph, grep, definition
 3. **Follow-up injector** (`pkg/agent/followup_investigation.go`): live-surface needles inject `inspect-live-surface` in **Studio and Code** (the chromium PATH miss was Studio, which has no Work Policy of its own). Code-regression needles still inject `debug-regression` in Code. Live keywords win when both match. Plan-mode context is preserved and prepended.
 
 Studio chat emits the same Live Evidence block from `SystemPromptBuilder` (no codegraph / stop-exploring language). Detailed browser/process how-tos stay in vector `memory/guidance/*.md`.
+
+## Focused validation and stable scope
+
+Use the smallest relevant tests during edits. Risk-appropriate broad validation normally runs once near completion, not repeatedly solely for confidence. Fresh focused checks are required after edits that affect verified behavior; failing-first regression tests and real running-surface proof remain required. The runtime owns each approved phase's `verify`: do not manually duplicate it immediately before `update_plan(complete)`. Reviewers inspect authoritative recorded evidence instead of repeating an expensive command without a concrete defect, changed input or acceptance reason.
+
+Acceptance remains the user's requested behavior. Unmet requirements and demonstrable defects warrant recovery; optional robustness, style and coverage preferences do not automatically expand scope. Diagnose a failed check with a focused baseline comparison only when needed. Report unrelated baseline failures separately, obtain authorization for new scope, and do not turn recovery into another repository-wide campaign. Revisions may repair invalid verification or ordering but must never silently drop requirements or falsify success.
 
 ## Code delegate investigation defaults
 
@@ -25,6 +31,8 @@ For eligible tasks, `ChildToolScope.addCodeDelegateTools` promotes the permitted
 - Use codegraph first for implementation, definitions, callers and tests; do not begin with repository-wide grep or directory traversal.
 - Use permitted structural tools next for gaps, then narrow file reads. Reserve `grep_search` for literal/string/configuration gaps, not symbol discovery.
 - Treat source returned by codegraph as already read; do not read the same regions again. Stop exploring when implementation scope, affected callers and verification are clear.
+
+- Keep validation scoped to the assigned capability. The parent/runtime owns phase verification; a child finish is not phase completion. Prefer authoritative unchanged phase evidence over redundant reruns and report unrelated failures rather than expanding scope.
 
 Missing, denied or unresolved codegraph is not fatal: resolution failure produces a warning and the guidance explicitly says graph tools are unavailable, directing the child to permitted structural tools and narrow reads without claiming graph coverage. If structural tools are also absent, use only permitted discovery and narrowly scoped file tools. This targeted guidance is separate from handoff context: prior findings and task-specific constraints still require explicit instructions; it is not full parent-prompt inheritance.
 
@@ -44,6 +52,22 @@ The fixed safety timeout remains **25 seconds**. The search context now derives 
 
 - `{ "step": "phase-name", "status": "running" }` preserves the status protocol (`action: "status"` is optional; statuses are `running`, `complete`, `failed`). Unknown names return `step_not_found` and exact active names.
 - `{ "action": "revise", "revision": { "plan_id": "…", "base_revision": 1, "reason": "…", "steps": […] } }` supplies full replacement **definitions**. Optional `goal` and `document` (`context`, `what_not_to_do`, `verification`) belong inside `revision`; `step`/`status` are forbidden. Steps contain announcement definition fields, never runtime status, evidence, Results, lifecycle or nested proposals. `requires_approval` is deprecated and ignored, including when true. Revisions are allowed in Normal, Plan and Graph-Optimized Plan modes (in every graph phase), including deferred wrappers. Ask revisions remain blocked and bot revisions unsupported. Planning permits only definition changes: status updates and `announce_completion` return `blocked_plan_execution` before callbacks or verification run. A revision never starts work. In Plan/Graph-Plan, `ReviseForPlanning` clears execution approval atomically with the changed definition, and the local launcher presents that snapshot with the normal plan approval choices and ends the turn. No second announce_plan call or legacy revision proposal is needed; noops and failures do not re-present approval.
+
+For an existing phase, `revision.step_patches` offers a definition-only field patch instead of restating all definitions:
+
+```json
+{
+  "action": "revise",
+  "revision": {
+    "plan_id": "active-plan-id",
+    "base_revision": 1,
+    "reason": "Use the focused final acceptance check",
+    "step_patches": [{"name": "final-check", "verify": "go test ./cmd/astonish -run '^TestCodePlanNarrowRevisionPTYAcceptance$' -count=1"}]
+  }
+}
+```
+
+Each patch names an existing phase exactly and supplies only changed definition fields. Omitted fields and phases remain untouched; explicit empty values still undergo normal contract validation. Patches cannot add, remove, reorder or rename phases, include runtime status/evidence, or coexist with `steps`. Empty/duplicate/unknown-name or malformed patches fail without durable changes. Use legacy full `steps` replacement for structural changes. Optional `goal`/`document` edits remain supported with their existing global invalidation semantics; narrow patches do not bypass stale/busy, persistence or mode gates. Normal-mode patches apply immediately without a new approval, while Plan/Graph-Plan revisions retain the existing approval workflow. The same conservative invalidation still applies to real changed contracts and dependent waves; this is not an evidence freshness cache.
 
 `BuildPlanRevisionCandidate` (`pkg/agent/plan_revision.go`) validates changed/new phases against the plan contract. Initial graph-plan announcements must cover the recorded acceptance; a Normal-mode revision may replace that acceptance along with the verification narrative, without retaining obsolete instructions. Unchanged legacy definitions can be retained. Identical definitions are `noop`; **all valid Normal-mode changes apply immediately**, including goals, documents, phase membership/order, outcomes, file declarations/kinds, verification kinds and parallel groups. There is no revision approval screen or approval/rejection/request-changes decision.
 
@@ -81,7 +105,7 @@ Authorized detail readers expose the saved attempt record separately from execut
 
 ## Plan completion (evidence)
 
-Checkboxes are not proof. `update_plan(complete)` runs phase verification; failure records a failed phase. `announce_completion` requires an approved plan, no unfinished verification/delegates, and every phase complete with a verify command and current passing evidence. It writes `## Results` from those records without new commands; definition revision is not evidence. Execution acceptance requires all phases complete and Results (`IsFullyAccepted()`), never prose or an end-of-turn sweep. Running-surface acceptance belongs in a behavior phase, not a separate completion exam. The Incus→Docker session (2026-09-06) remains the regression story: checked phases did not mean a container existed.
+Checkboxes are not proof. `update_plan(complete)` runs phase verification; failure records a failed phase. `announce_completion` requires an approved plan, no unfinished verification/delegates, and every phase complete with a verify command and current passing evidence. It writes `## Results` from those records without new commands; definition revision is not evidence. Execution acceptance requires all phases complete and Results (`IsFullyAccepted()`), never prose or an end-of-turn sweep. Running-surface acceptance belongs in a behavior phase, not a separate completion exam. Unchanged runtime-recorded evidence remains valid across continuation, compaction and restore; neither a review preference nor model narration creates a fresh-evidence requirement. The Incus→Docker session (2026-09-06) remains the regression story: checked phases did not mean a container existed.
 
 Execution mode may inspect a **running surface** (shell, docker, `browser_navigate`, `run_drill`) even when PLAN.md already named the files. That is verification, not rediscovery. GRAPH phase stays codegraph/`find_files` only.
 
@@ -106,6 +130,8 @@ Phase controls are recoverable model feedback. The agent must finish incomplete 
 Review mode serializes phases even within the same parallel group; parallel workers within one phase remain permitted. Phase verification stores `CodeReviewPending` and emits the outcome/evidence checkpoint. The runner returns before starting the next phase. A review turn can answer questions, revise/correct the reviewed phase and reverify it without authorizing later phases. Explicit continuation (`continue`, `proceed`, `next`, or `continue to the next phase`) clears the checkpoint. The last phase proceeds to `announce_completion`, which records existing evidence without separate Code tool consent. Consent for file/shell actions and other protected tools remains unchanged.
 
 `go test ./pkg/agent ./pkg/tools ./pkg/launcher -run '^TestCodePlan' -count=1` covers admission, retries, persistence, serial review, deferred input, real local RunTurn recovery/revision, review corrections and compaction/restart. `go test ./cmd/astonish -run '^TestCodePlan(Approval|Execution)PTYAcceptance$' -count=1` uses the real Code CLI with temporary sessions and a scripted loopback provider, checking keyboard repaint, persisted approval, five premature final responses, actual phase verification, review pause/continue, and durable Results. These tests establish runtime mechanics, not arbitrary live-model acceptance judgments.
+
+`go test ./cmd/astonish -run '^TestCodePlanNarrowRevisionPTYAcceptance$' -count=1` exercises a real Code CLI with temporary HOME/config/workdir and a scripted loopback provider in both cadences. It completes phase one, patches only phase three's verifier, checks the live completed sidebar and unchanged durable evidence without new approval, explicitly resumes the process, completes the remaining real checks and records Results. Counter artifacts prove phase one and the revised final check each ran exactly once. A changed-earlier-contract subcase still invalidates dependent evidence and never claims completion. Captured generated Code requests establish focused-guidance wiring. Together with the ordinary planning-revision PTY, this proves runtime mechanics and prompt wiring, **not** autonomous model judgment or a measured wall-time/performance improvement. There is no freshness cache, live-model benchmark or automatic test-selection mechanism.
 
 ## Verification
 

@@ -2,9 +2,13 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
+	"testing"
+
 	"github.com/SAP/astonish/pkg/agent"
 	"google.golang.org/adk/tool"
-	"testing"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 type scopedBasicContext struct {
@@ -94,6 +98,195 @@ func TestScopedTaskResults(t *testing.T) {
 		if err != nil || out.Error == "" || out.Content != "" {
 			t.Fatalf("leaked: %+v %v", out, err)
 		}
+	}
+}
+
+type scopedPlanRunContext struct{ tool.Context }
+
+func (scopedPlanRunContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+
+// runScopedPlanJSON exercises the provider-facing tool decoder, not updatePlan directly.
+func runScopedPlanJSON(t *testing.T, ctx tool.Context, input map[string]any) UpdatePlanResult {
+	t.Helper()
+	got, err := NewUpdatePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, ok := got.(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	})
+	if !ok {
+		t.Fatalf("update_plan %T is not runnable", got)
+	}
+	out, err := runner.Run(scopedPlanRunContext{Context: ctx}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result UpdatePlanResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func scopedStepPatchFixture() agent.PlanSnapshot {
+	return agent.PlanSnapshot{
+		PlanID: "owned", Revision: 1, Sequence: 1, Goal: "Scoped patch",
+		Document: agent.PlanDocumentInfo{Lifecycle: agent.PlanLifecycleApproved, Context: "design", WhatNotToDo: "boundaries", Verification: "required outcome"},
+		Steps: []agent.PlanStepInfo{
+			{Name: "first", Description: "first phase", Details: "implement first", Summary: "first outcome", Outcome: "first works", Files: []agent.PlanFileChange{{Path: "pkg/widget/first.go", Kind: "modify"}}, Verify: "printf first", VerifyKind: agent.VerifyKindUnit, Status: "pending", ParallelGroup: "wave-1"},
+			{Name: "final", Description: "final phase", Details: "implement final", Summary: "final outcome", Outcome: "final works", Files: []agent.PlanFileChange{{Path: "pkg/widget/final.go", Kind: "modify"}}, Verify: "printf final", VerifyKind: agent.VerifyKindUnit, Status: "pending", ParallelGroup: "wave-2"},
+		},
+	}
+}
+
+func TestScopedPlanStepPatchPreservesEvidence(t *testing.T) {
+	verifies, commits := 0, 0
+	var durable agent.PlanSnapshot
+	runtime := agent.NewPlanRuntimeFromSnapshot(scopedStepPatchFixture(), agent.PlanRuntimeOptions{
+		Verify:         func(cmd string) (int, string, error) { verifies++; return 0, cmd, nil },
+		CommitSnapshot: func(s agent.PlanSnapshot) error { commits++; durable = s.Clone(); return nil },
+	})
+	base := WithPlanCallbacks(context.Background(), PlanCallbacks{Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+		t.Fatal("bound runtime fell back to callback")
+		return agent.PlanRevisionResult{}, nil
+	}})
+	ctx := scopedBasicContext{base: agent.WithPlanRuntime(base, runtime)}
+	completed := runScopedPlanJSON(t, ctx, map[string]any{"step": "first", "status": "complete"})
+	if completed.Status != "ok" || completed.Snapshot == nil || completed.Snapshot.Steps[0].Evidence == "" || verifies != 1 {
+		t.Fatalf("completion: %+v verifies=%d", completed, verifies)
+	}
+	before := runtime.Snapshot()
+	result := runScopedPlanJSON(t, ctx, map[string]any{"action": "revise", "revision": map[string]any{
+		"plan_id": before.PlanID, "base_revision": before.Revision, "reason": "focused final command",
+		"step_patches": []any{map[string]any{"name": "final", "verify": "printf revised"}},
+	}})
+	if result.Status != "applied" || result.Snapshot == nil {
+		t.Fatalf("revision: %+v", result)
+	}
+	after := *result.Snapshot
+	if after.Revision != before.Revision+1 || after.Document.Lifecycle != agent.PlanLifecycleApproved || verifies != 1 {
+		t.Fatalf("unexpected revision/approval/verification: %+v verifies=%d", after, verifies)
+	}
+	if !reflect.DeepEqual(after.Steps[0], before.Steps[0]) {
+		t.Fatalf("earlier evidence or definition changed: %+v", after.Steps[0])
+	}
+	wantFinal := before.Steps[1]
+	wantFinal.Verify = "printf revised"
+	if !reflect.DeepEqual(after.Steps[1], wantFinal) || !reflect.DeepEqual(after.Definition().Document, before.Definition().Document) || after.Goal != before.Goal {
+		t.Fatalf("omitted data changed: %+v", after)
+	}
+	if !reflect.DeepEqual(durable, after) {
+		t.Fatal("returned snapshot differs from committed snapshot")
+	}
+	// The public decoder rejects runtime fields before dispatch.
+	got, err := NewUpdatePlanTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := got.(interface {
+		Run(tool.Context, any) (map[string]any, error)
+	})
+	for _, field := range []string{"status", "evidence"} {
+		_, err := runner.Run(scopedPlanRunContext{Context: ctx}, map[string]any{"action": "revise", "revision": map[string]any{
+			"plan_id": after.PlanID, "base_revision": after.Revision, "reason": "forged runtime field",
+			"step_patches": []any{map[string]any{"name": "final", "verify": "printf forged", field: "forged"}},
+		}})
+		if err == nil || !reflect.DeepEqual(runtime.Snapshot(), after) || !reflect.DeepEqual(durable, after) {
+			t.Fatalf("runtime field %s admitted: %v", field, err)
+		}
+	}
+	// An invalid full replacement + patch request must not commit or execute.
+	committed := commits
+	result = runScopedPlanJSON(t, ctx, map[string]any{"action": "revise", "revision": map[string]any{
+		"plan_id": after.PlanID, "base_revision": after.Revision, "reason": "invalid mixed forms",
+		"steps": after.Definition().Steps, "step_patches": []any{map[string]any{"name": "final", "verify": "printf invalid"}},
+	}})
+	if result.Status == "applied" || result.Status == "no_op" || result.Message == "" || result.Snapshot == nil {
+		t.Fatalf("mixed forms accepted: %+v", result)
+	}
+	if commits != committed || verifies != 1 || !reflect.DeepEqual(runtime.Snapshot(), after) || !reflect.DeepEqual(durable, after) || !reflect.DeepEqual(*result.Snapshot, after) {
+		t.Fatal("invalid mixed revision mutated state")
+	}
+}
+
+func TestScopedPlanStepPatchModeBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		po       *agent.PromptOverrides
+		want     string
+		planning bool
+	}{
+		{"normal", &agent.PromptOverrides{}, "applied", false},
+		{"plan", &agent.PromptOverrides{PlanMode: true}, "applied", true},
+		{"graph", &agent.PromptOverrides{GraphPlanMode: true}, "applied", true},
+		{"ask", &agent.PromptOverrides{AskMode: true}, "blocked_revision_mode", false},
+		{"bot", &agent.PromptOverrides{Bot: &agent.BotPromptContext{}}, "unsupported_bot_revision", false},
+		{"nil", &agent.PromptOverrides{}, "no_active_plan", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commits, verifies := 0, 0
+			runtime := agent.NewPlanRuntimeFromSnapshot(scopedStepPatchFixture(), agent.PlanRuntimeOptions{
+				Verify:         func(string) (int, string, error) { verifies++; return 0, "passed", nil },
+				CommitSnapshot: func(agent.PlanSnapshot) error { commits++; return nil },
+			})
+			before := runtime.Snapshot()
+			bound := runtime
+			if tc.name == "nil" {
+				bound = nil
+			}
+			base := WithPlanCallbacks(context.Background(), PlanCallbacks{Revise: func(agent.PlanRevisionRequest) (agent.PlanRevisionResult, error) {
+				t.Fatal("callback fallback")
+				return agent.PlanRevisionResult{}, nil
+			}})
+			ctx := scopedBasicContext{base: agent.WithPromptOverrides(agent.WithPlanRuntime(base, bound), tc.po)}
+			result := runScopedPlanJSON(t, ctx, map[string]any{"action": "revise", "revision": map[string]any{"plan_id": before.PlanID, "base_revision": before.Revision, "reason": "focused command", "step_patches": []any{map[string]any{"name": "final", "verify": "printf revised"}}}})
+			if result.Status != tc.want || verifies != 0 {
+				t.Fatalf("%+v verifies=%d", result, verifies)
+			}
+			if tc.want != "applied" {
+				if commits != 0 || !reflect.DeepEqual(runtime.Snapshot(), before) {
+					t.Fatal("blocked patch mutated state")
+				}
+				if tc.name == "nil" && result.Snapshot != nil {
+					t.Fatal("nil binding leaked a snapshot")
+				}
+				return
+			}
+			if commits != 1 || result.Snapshot == nil || result.Snapshot.Revision != 2 {
+				t.Fatalf("revision not committed once: %+v commits=%d", result, commits)
+			}
+			if !tc.planning {
+				if result.Snapshot.Document.Lifecycle != agent.PlanLifecycleApproved {
+					t.Fatal("normal revision withdrew approval")
+				}
+				return
+			}
+			if result.Snapshot.Document.Lifecycle == agent.PlanLifecycleApproved {
+				t.Fatal("planning revision retained execution approval")
+			}
+			blocked := runScopedPlanJSON(t, ctx, map[string]any{"step": "first", "status": "complete"})
+			if blocked.Status != "blocked_plan_execution" || commits != 1 || verifies != 0 {
+				t.Fatalf("planning executed: %+v", blocked)
+			}
+			// Switching to Normal alone does not authorize execution: ordinary approval is still required.
+			normal := scopedBasicContext{base: agent.WithPlanRuntime(context.Background(), runtime)}
+			blocked = runScopedPlanJSON(t, normal, map[string]any{"step": "first", "status": "complete"})
+			if blocked.Status != agent.PlanRuntimeUnapproved || verifies != 0 {
+				t.Fatalf("approval bypassed: %+v", blocked)
+			}
+			if err := runtime.SetApproved(); err != nil {
+				t.Fatal(err)
+			}
+			approved := runScopedPlanJSON(t, normal, map[string]any{"step": "first", "status": "complete"})
+			if approved.Status != "ok" || verifies != 1 {
+				t.Fatalf("approved execution: %+v verifies=%d", approved, verifies)
+			}
+		})
 	}
 }
 

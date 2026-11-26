@@ -170,6 +170,19 @@ func TestApprovedPlanExecutionResearch_AllowsReadsCapsDiscovery(t *testing.T) {
 	}
 }
 
+func TestPlanExecutionSystemContext_FocusedValidationPolicy(t *testing.T) {
+	ctx := BuildPlanExecutionSystemContext("")
+	for _, want := range []string{
+		"failure investigation stays scoped", "unrelated baseline failures", "focused baseline check only when needed",
+		"runtime owns authoritative phase verification", "audit captured evidence", "immediately before update_plan(complete)",
+		"continuation or compaction", "authoritative recorded phase evidence", "verified inputs and contract are unchanged",
+		"fresh focused checks", "user authorization for new scope", "Do not mark the phase complete",
+		"does not run new commands", "research caps", "are lifted", "run_drill",
+	} {
+		assertContains(t, ctx, want, "execution focus must retain verification gates")
+	}
+}
+
 func TestPlanExecutionSystemContext_ForbidsReannouncement(t *testing.T) {
 	dir := t.TempDir()
 	planPath := dir + "/session.PLAN.md"

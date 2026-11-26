@@ -92,7 +92,7 @@ func TestCodeDelegateInitialModelRequestAndHandoff(t *testing.T) {
 					seen[name] = true
 				}
 				text := handoffRequestText(req)
-				for _, fragment := range []string{"## Code Investigation", "Use codegraph FIRST", "structural tools next", "Reserve grep_search for narrow", "counts as already read", "Stop exploring once", "Immutable Delegation Handoff", "prior findings: use exact path"} {
+				for _, fragment := range []string{"## Code Investigation", "Use codegraph FIRST", "structural tools next", "Reserve grep_search for narrow", "counts as already read", "Stop exploring once", "## Task Focus and Validation", "assigned task", "smallest relevant tests", "authoritative recorded phase evidence", "verified inputs and contract are unchanged", "Old logs or model summaries alone", "runtime owns authoritative phase verification", "audit captured evidence", "stable acceptance bar", "unrelated baseline failures", "user authorization for new scope", "failing-first regression", "live process or drill", "Immutable Delegation Handoff", "prior findings: use exact path"} {
 					if !strings.Contains(text, fragment) {
 						t.Errorf("request missing guidance %q", fragment)
 					}
@@ -135,8 +135,11 @@ func TestCodeDelegateBoundaries(t *testing.T) {
 			if graph.calls.Load() != 0 || unrelated.calls.Load() != 0 {
 				t.Fatal("ambient toolsets initialized")
 			}
-			if strings.Contains(m.buildChildPromptWithScope(context.Background(), task, scope), "## Code Investigation") {
-				t.Fatal("code guidance leaked")
+			prompt := m.buildChildPromptWithScope(context.Background(), task, scope)
+			for _, fragment := range []string{"## Code Investigation", "## Task Focus and Validation", "stable acceptance bar", "runtime owns authoritative phase verification"} {
+				if strings.Contains(prompt, fragment) {
+					t.Fatalf("code guidance leaked: %q", fragment)
+				}
 			}
 			if kind == "strict" || strings.HasPrefix(kind, "override") {
 				if _, _, err := scope.resolve(&minimalReadonlyContext{Context: context.Background()}, "mcp:codegraph/codegraph_explore"); err == nil {

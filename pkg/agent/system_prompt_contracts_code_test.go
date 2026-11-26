@@ -196,6 +196,24 @@ func TestCodeSystemPromptContracts_CodeNavigationRule(t *testing.T) {
 	assertContains(t, prompt, "Stop exploring when the scope is clear", "stop-exploring discipline always present in code mode")
 }
 
+func TestCodeSystemPromptBuilder_FocusedValidationPolicy(t *testing.T) {
+	prompt := maximalCodeBuilder().Build()
+	for _, want := range []string{
+		"current tool evidence", "authoritative recorded phase evidence", "verified inputs and contract are unchanged",
+		"Old logs or model summaries alone", "smallest relevant tests", "normally once near task completion",
+		"not repeat a full suite solely for confidence", "fresh focused checks", "runtime owns authoritative phase verification",
+		"audit captured evidence", "immediately before update_plan(complete)", "stable acceptance bar",
+		"unmet user requirements or demonstrable defects", "optional robustness, style, or coverage preferences",
+		"unrelated baseline failures", "focused baseline check only when needed", "user authorization for new scope",
+		"Plan edits must not silently drop requirements", "failed before the change and passes after", "observe the live process or run a drill",
+		"step_patches", "mutually exclusive", "Omitted fields and phases stay unchanged", "structural replacement",
+	} {
+		assertContains(t, prompt, want, "focused validation preserves required proof and scope")
+	}
+	assertNotContains(t, prompt, "only when this turn's tool output supports the claim", "unchanged recorded evidence remains usable")
+	assertNotContains(t, maximalBuilder().Build(), "stable acceptance bar", "Code policy must not leak into chat")
+}
+
 func TestCodeSystemPromptContracts_InvestigationWorkPolicy(t *testing.T) {
 	prompt := maximalCodeBuilder().Build()
 	for _, want := range []string{

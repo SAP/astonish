@@ -15,6 +15,10 @@ func RunCodeWorkspaceHandoff(ctx context.Context, cfg *CodeConfig, request backe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := finishCodeSessionDeletion(ctx, request); err != nil {
+		return err
+	}
+	request.DeleteSessionID = ""
 	args, err := codeWorkspaceHandoffArgs(cfg, request)
 	if err != nil {
 		return err

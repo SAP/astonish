@@ -38,6 +38,7 @@ const (
 	WorkspaceReady          WorkspaceState = "ready"
 	WorkspaceRetained       WorkspaceState = "retained"
 	WorkspaceCleanupBlocked WorkspaceState = "cleanup-blocked"
+	WorkspaceDeleting       WorkspaceState = "deleting"
 	WorkspaceRemoved        WorkspaceState = "removed"
 )
 
@@ -340,7 +341,13 @@ func (m *CodeWorkspaceManager) AcquireLease(ctx context.Context, p ProjectIdenti
 	if !ok {
 		return nil, ErrWorkspaceBusy
 	}
-	if e = m.Validate(ctx, *r); e != nil {
+	// Reload after locking: cleanup may have persisted deleting while this
+	// caller was checking the old ready record.
+	r, e = m.Get(ctx, p, id)
+	if e == nil {
+		e = m.Validate(ctx, *r)
+	}
+	if e != nil {
 		_ = l.Unlock()
 		return nil, e
 	}

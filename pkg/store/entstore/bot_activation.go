@@ -26,9 +26,9 @@ func (s *Store) checkBotActivation(ctx context.Context, b store.Bot, v store.Bot
 }
 
 // Every enabled trigger must retain its exact scoped durable binding, checked
-// again inside the CAS. Draft schedules are inert until activation consent;
+// again inside the CAS. Disabled projections remain valid for an Active Bot;
 // paused/stopped schedules stay inert on resume (not recurrence consent).
-func validateActivationTriggers(ctx context.Context, db botDraftDB, b store.Bot, v store.BotVersion) error {
+func validateActivationTriggers(ctx context.Context, db botDB, b store.Bot, v store.BotVersion) error {
 	for _, tr := range v.Triggers {
 		// A reviewed disabled cron has a server-assigned schedule identity;
 		// legacy/raw version triggers are not a reviewed recurrence binding.
@@ -55,45 +55,12 @@ func validateActivationTriggers(ctx context.Context, db botDraftDB, b store.Bot,
 		if job == nil {
 			return store.ErrBotConflict
 		}
-		lifecycleDisabled := (b.Status == store.BotDraft || b.Status == store.BotPaused || b.Status == store.BotStopped) && !job.Enabled && job.NextRun == nil
-		if b.Status == store.BotDraft && !lifecycleDisabled {
+		lifecycleDisabled := !job.Enabled && job.NextRun == nil
+		if (b.Status == store.BotPaused || b.Status == store.BotStopped) && !lifecycleDisabled {
 			return store.ErrBotConflict
 		}
 		if (!lifecycleDisabled && (!job.Enabled || job.NextRun == nil)) || job.Mode != "bot_trigger" || job.Scope != string(b.Scope) || job.OwnerID != b.OwnerID.String() || job.Payload.BotID != b.ID.String() || job.Payload.BotVersion != v.Version || job.Payload.BotTriggerID != tr.ID.String() || job.Payload.Flow != "" || job.Payload.Instructions != "" || len(job.Payload.Params) != 0 || job.Schedule.Cron != tr.Cron || job.Schedule.Timezone != tr.Timezone {
 			return store.ErrBotConflict
-		}
-	}
-	return nil
-}
-
-// Only first activation consumes the reviewed draft recurrence intent. Resume and
-// activation from stopped must not re-enable lifecycle-disabled schedules. The
-// caller has validated bindings inside this transaction; update existing enabled
-// cron bindings only, without creating jobs or rewriting immutable versions.
-func (r *botRepository) enableDraftActivationSchedules(ctx context.Context, tx botDraftDB, before, after store.Bot, v store.BotVersion) error {
-	if before.Status != store.BotDraft || after.Status != store.BotActive {
-		return nil
-	}
-	for _, tr := range v.Triggers {
-		if !tr.Enabled {
-			continue
-		}
-		db, ok := tx.(botTriggerDB)
-		if !ok {
-			return store.ErrBotUnsupported
-		}
-		jobs := db.triggerScheduler()
-		job := jobs.Get(ctx, tr.ScheduleID.String())
-		if job == nil {
-			return store.ErrBotConflict
-		}
-		next, err := triggerNext(tr, r.clock())
-		if err != nil {
-			return err
-		}
-		job.Enabled, job.NextRun = true, &next
-		if err := jobs.Update(ctx, job); err != nil {
-			return err
 		}
 	}
 	return nil

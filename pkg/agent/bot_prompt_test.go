@@ -72,7 +72,7 @@ func TestBotPromptProactiveInteractionContracts(t *testing.T) {
 	}{
 		{"chat", store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}, true},
 		{"home", store.BotRun{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive}, true},
-		{"control", store.BotRun{Intent: store.BotIntentDraftConversation}, true},
+		{"control", store.BotRun{Intent: store.BotIntentConversation}, true},
 		{"scheduled", store.BotRun{Trigger: store.TriggerCron}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -431,7 +431,7 @@ func TestBotPromptAdaptiveQualityContinuity(t *testing.T) {
 	}{
 		{"chat", store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}},
 		{"home", store.BotRun{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive}},
-		{"control", store.BotRun{Intent: store.BotIntentDraftConversation}},
+		{"control", store.BotRun{Intent: store.BotIntentConversation}},
 		{"scheduled", store.BotRun{Trigger: store.TriggerCron}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,7 +522,7 @@ func TestBotPromptFreshPerInvocation(t *testing.T) {
 
 func TestBotPromptContinuousConversationMode(t *testing.T) {
 	for _, run := range []store.BotRun{
-		{Intent: store.BotIntentDraftConversation, Presentation: store.BotRunPresentationHomeInteractive},
+		{Intent: store.BotIntentConversation, Presentation: store.BotRunPresentationHomeInteractive},
 		{Intent: store.BotIntentConversation},
 		{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive},
 	} {

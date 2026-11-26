@@ -78,7 +78,7 @@ func TestEmployeePeerDeleteParserBrowser(t *testing.T) {
 	bots := personal.Bots()
 	v := store.DefaultBotVersion()
 	v.Charter = "Inert controlled deletion target"
-	original, err := bots.CreateDraft(ownerCtx, store.BotCreateRequest{Name: "Parser deletion target", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "original"})
+	original, err := bots.Create(ownerCtx, store.BotCreateRequest{Name: "Parser deletion target", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "original"})
 	must(err)
 	registry := execution.NewBotTurnAuthorizationRegistry(32)
 	defer registry.Close()

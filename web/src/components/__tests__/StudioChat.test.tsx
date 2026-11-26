@@ -477,15 +477,11 @@ describe('StudioChat', () => {
     expect(screen.getByRole('heading', { name: 'Create schedule · Applied' })).toBeInTheDocument()
   })
 
-  it.each(['draft', 'paused', 'active'] as const)('uses accurate %s Bot conversation copy without changing attachment restrictions', async status => {
+  it.each(['paused', 'active'] as const)('uses accurate %s Bot conversation copy without changing attachment restrictions', async status => {
     const toolFree = status !== 'active'
     render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', status, readOnly: false, toolFree, onSend: vi.fn() }} />)
     await act(async () => { vi.mocked(connectBotEvents).mock.calls.at(-1)![0].onState?.('live', 'bot-home:1') })
-    if (status === 'draft') {
-      expect(screen.getByText(/Draft · ready to discuss/)).toBeVisible()
-      expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', 'Discuss this draft Bot’s setup…')
-      expect(screen.queryByText(/paused/i)).not.toBeInTheDocument()
-    } else if (status === 'paused') {
+    if (status === 'paused') {
       expect(screen.getByText(/Autonomous work paused/)).toBeVisible()
       expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', 'Discuss this Bot’s setup while autonomous work is paused…')
     } else {
@@ -497,10 +493,10 @@ describe('StudioChat', () => {
     else expect(attach).not.toBeDisabled()
   })
 
-  it.each(['draft', undefined] as const)('does not infer paused state from tool-free restrictions before a home exists (%s)', async status => {
+  it.each([undefined] as const)('does not infer paused state from tool-free restrictions before a home exists (%s)', async status => {
     await act(async () => { render(<StudioChat theme="dark" hideSidebar botThread={{ botId: 'bot', scope: 'personal', status, readOnly: false, toolFree: true, onSend: vi.fn() }} />) })
     expect(screen.queryByText(/paused/i)).not.toBeInTheDocument()
-    expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', status === 'draft' ? 'Discuss this draft Bot’s setup…' : 'Discuss this Bot’s setup…')
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('placeholder', 'Discuss this Bot’s setup…')
     expect(screen.getByText(/No external tools or scheduled execution. Attachments are unavailable./)).toBeVisible()
     expect(screen.getByTitle('Attach files (images, PDFs, text files)')).toBeDisabled()
   })
@@ -637,7 +633,7 @@ describe('StudioChat', () => {
     expect(screen.queryByTestId('user-message')).not.toBeInTheDocument()
   })
 
-  it.each(['draft', 'paused'] as const)('blocks native, paste and dropped attachments in %s while retaining owner text', async status => {
+  it.each(['paused'] as const)('blocks native, paste and dropped attachments in %s while retaining owner text', async status => {
     const onSend = vi.fn().mockResolvedValue(undefined)
     const { container } = render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', status, readOnly: false, toolFree: true, onSend }} />)
     await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())

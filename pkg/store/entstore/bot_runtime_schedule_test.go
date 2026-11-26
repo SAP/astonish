@@ -22,7 +22,7 @@ func scheduledFixture(t *testing.T, scope store.BotScope, kind store.TriggerKind
 		t.Fatal(err)
 	}
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}
-	var db botDraftDB
+	var db botDB
 	var jobs store.SchedulerStore
 	var activate func(uuid.UUID) error
 	if scope == store.BotScopeTeam {
@@ -49,7 +49,7 @@ func scheduledFixture(t *testing.T, scope store.BotScope, kind store.TriggerKind
 		goals = []store.BotGoal{{ID: goalID, Title: "Due goal", Status: store.BotGoalActive, DueAt: &due}}
 	}
 	v.Triggers = nil
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Scheduled", OwnerID: owner, Version: v, IdempotencyKey: "scheduled"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Scheduled", OwnerID: owner, Version: v, IdempotencyKey: "scheduled"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func scheduledFixture(t *testing.T, scope store.BotScope, kind store.TriggerKind
 	if err := activate(b.ID); err != nil {
 		t.Fatal(err)
 	}
-	job := &store.ScheduledJob{ID: jobID.String(), Name: "Scheduled", Mode: string(scheduler.ModeBotTrigger), OwnerID: owner.String(), Enabled: true, NextRun: &due, Schedule: store.JobSchedule{Cron: trigger.Cron, Timezone: trigger.Timezone}, Payload: store.JobPayload{BotID: b.ID.String(), BotVersion: b.Version, BotTriggerID: triggerID.String()}}
+	job := &store.ScheduledJob{ID: jobID.String(), Name: "Scheduled", TeamSlug: "team", Mode: string(scheduler.ModeBotTrigger), OwnerID: owner.String(), Enabled: true, NextRun: &due, Schedule: store.JobSchedule{Cron: trigger.Cron, Timezone: trigger.Timezone}, Payload: store.JobPayload{BotID: b.ID.String(), BotVersion: b.Version, BotTriggerID: triggerID.String()}}
 	if err := jobs.Add(ctx, job); err != nil {
 		t.Fatal(err)
 	}

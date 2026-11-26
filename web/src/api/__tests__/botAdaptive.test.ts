@@ -6,7 +6,7 @@ vi.mock('../teamContext', () => ({ teamFetch: vi.fn(), getActiveTeam: () => 'sel
 beforeEach(() => vi.clearAllMocks())
 it('reviews the authorized source without mutation and sends the exact CAS token on conversion', async () => {
   const review = { source_job_id: 'source/id', updated_at: '2026-11-05T22:00:00.123456789Z', schedule: { cron: '0 9 * * *', timezone: 'UTC' }, instructions: 'Observe' }
-  vi.mocked(teamFetch).mockResolvedValueOnce(Response.json(review)).mockResolvedValueOnce(Response.json({ id: 'new', status: 'draft' }))
+  vi.mocked(teamFetch).mockResolvedValueOnce(Response.json(review)).mockResolvedValueOnce(Response.json({ id: 'new', status: 'active' }))
   expect(await reviewAdaptiveJob('source/id', 'team')).toEqual(review)
   expect(teamFetch).toHaveBeenNthCalledWith(1, '/api/studio/bots/convert-adaptive/source%2Fid?scope=team', expect.objectContaining({ method: 'GET' }), 'selected-team')
   const body = { name: 'Watcher', charter: 'Observe', expected_updated_at: review.updated_at, idempotency_key: 'stable', reviewed: true, reviewed_for_team: true }

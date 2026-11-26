@@ -20,11 +20,11 @@ import (
 )
 
 // Real SQLite + independently reopenable content storage, with scoped adapters.
-func trackedRootDB(t *testing.T, scope store.BotScope) (botDraftDB, *sql.DB, store.BotID, uuid.UUID, func() botDraftDB) {
+func trackedRootDB(t *testing.T, scope store.BotScope) (botDB, *sql.DB, store.BotID, uuid.UUID, func() botDB) {
 	t.Helper()
 	path, dir := filepath.Join(t.TempDir(), "content.db"), t.TempDir()
 	var sqlDB *sql.DB
-	open := func() botDraftDB {
+	open := func() botDB {
 		var err error
 		sqlDB, err = sql.Open("sqlite", path)
 		if err != nil {
@@ -52,7 +52,7 @@ func trackedRootDB(t *testing.T, scope store.BotScope) (botDraftDB, *sql.DB, sto
 	db := open()
 	t.Cleanup(func() { sqlDB.Close() })
 	b, g, owner := uuid.New(), uuid.New(), uuid.New()
-	err := db.Transaction(t.Context(), func(tx botDraftDB) error {
+	err := db.Transaction(t.Context(), func(tx botDB) error {
 		switch d := tx.(type) {
 		case personalBotDB:
 			if _, err := d.client.Bot.Create().SetID(b).SetOwnerID(owner).SetName("fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(t.Context()); err != nil {
@@ -72,7 +72,7 @@ func trackedRootDB(t *testing.T, scope store.BotScope) (botDraftDB, *sql.DB, sto
 	if err != nil {
 		t.Fatal(err)
 	}
-	return db, sqlDB, b, g, func() botDraftDB {
+	return db, sqlDB, b, g, func() botDB {
 		if err := sqlDB.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +96,7 @@ func TestBotContentTrackedPersistence(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			db, sqlDB, _, g, reopen := trackedRootDB(t, scope)
 			item := store.BotTrackedItem{ID: uuid.New(), GoalID: g, Title: "Tracked", Status: store.BotTrackedOpen, Reason: "SENTINEL-tracked-body-\"prose\"", Evidence: []store.BotEvidence{{Summary: "SENTINEL-tracked-evidence", Source: "SENTINEL-tracked-source"}}}
-			if err := db.Transaction(t.Context(), func(tx botDraftDB) error { return tx.WriteTrackedItem(t.Context(), item, 1) }); err != nil {
+			if err := db.Transaction(t.Context(), func(tx botDB) error { return tx.WriteTrackedItem(t.Context(), item, 1) }); err != nil {
 				t.Fatal(err)
 			}
 			var raw []byte
@@ -120,7 +120,7 @@ func TestBotContentTrackedPersistence(t *testing.T) {
 			rollback := errors.New("rollback")
 			changed := item
 			changed.Reason = "not committed"
-			if err = db.Transaction(t.Context(), func(tx botDraftDB) error {
+			if err = db.Transaction(t.Context(), func(tx botDB) error {
 				if err := tx.WriteTrackedItem(t.Context(), changed, 2); err != nil {
 					return err
 				}

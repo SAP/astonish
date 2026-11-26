@@ -2357,7 +2357,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		}
-		if b.Status != store.BotActive && b.Status != store.BotPaused && b.Status != store.BotDraft {
+		if b.Status != store.BotActive && b.Status != store.BotPaused {
 			m.tr.Apply(events.NewSystem("This Bot cannot converse in its current state."))
 			m.refreshViewport()
 			return m, nil

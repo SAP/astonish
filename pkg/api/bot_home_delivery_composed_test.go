@@ -204,8 +204,9 @@ func TestBotHomeDeliveryComposedHTTPAcceptance(t *testing.T) {
 		handler      http.HandlerFunc
 	}{
 		{root, "POST", api.BotCreateHandler}, {root + "/{botID}", "GET", api.BotGetHandler},
-		{root + "/{botID}/messages", "POST", api.BotMessageHandler}, {root + "/{botID}/activate", "POST", api.BotActivateHandler},
+		{root + "/{botID}/messages", "POST", api.BotMessageHandler}, {root + "/{botID}/resume", "POST", api.BotResumeHandler},
 		{root + "/{botID}/configuration", "PUT", api.BotConfigurationHandler},
+		{root + "/{botID}/pause", "POST", api.BotPauseHandler},
 		{root + "/{botID}/triggers/{triggerID}", "PUT", api.BotTriggerSaveHandler},
 		{root + "/{botID}/sessions/{sessionID}/stream", "GET", api.BotHistoryStreamHandler},
 		{"/api/studio/sessions/{id}/model", "PATCH", api.PatchSessionModelHandler},
@@ -348,11 +349,11 @@ func TestBotHomeDeliveryComposedHTTPAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Triggers) != 0 || len(v.Delivery.Bindings) != 0 || b.Status != store.BotDraft {
+	if len(v.Triggers) != 0 || len(v.Delivery.Bindings) != 0 || b.Status != store.BotActive {
 		t.Fatalf("schedule silently applied or activated: %+v %+v", b, v)
 	}
 	// Apply the exact adapter review over HTTP, then separately grant read-only
-	// autonomous capability, activate, and enable recurrence with owner authorization.
+	// autonomous capability while paused, resume, and explicitly enable recurrence.
 	if err = json.Unmarshal(request(result.Review.Method, result.Review.Path, result.Review.Body, 200), &b); err != nil {
 		t.Fatal(err)
 	}
@@ -363,12 +364,15 @@ func TestBotHomeDeliveryComposedHTTPAcceptance(t *testing.T) {
 	if len(v.Triggers) != 1 || v.Triggers[0].Enabled || len(v.Delivery.Bindings) != 0 {
 		t.Fatalf("save not disabled Home default: %+v", v)
 	}
+	if err = json.Unmarshal(request("POST", path+"/pause", map[string]any{"expected_revision": b.Revision, "reason": "Pause for reviewed weather capability"}, 200), &b); err != nil {
+		t.Fatal(err)
+	}
 	v.Autonomy.AllowedTools = []string{"read_file"}
 	configuration := store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "Explicit owner read-only weather capability", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery}
 	if err = json.Unmarshal(request("PUT", path+"/configuration", configuration, 200), &b); err != nil {
 		t.Fatal(err)
 	}
-	if err = json.Unmarshal(request("POST", path+"/activate", map[string]any{"expected_revision": b.Revision, "reason": "Explicit activation after review"}, 200), &b); err != nil {
+	if err = json.Unmarshal(request("POST", path+"/resume", map[string]any{"expected_revision": b.Revision, "reason": "Explicit activation after review"}, 200), &b); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := repo.(store.BotTriggerStore).ChangeTrigger(ownerCtx, store.BotTriggerChange{BotID: b.ID, TriggerID: tr.ID, ExpectedRevision: b.Revision, Action: store.BotTriggerEnable, Reason: "Explicit owner enable after saved review"})

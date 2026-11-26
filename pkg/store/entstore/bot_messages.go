@@ -61,7 +61,7 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 	var receipt *store.BotMessageReceipt
 	admission, interactive := store.BotMessageAdmissionFromContext(ctx)
 	var registered *execution.BotRunIdentity
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -88,8 +88,6 @@ func (r *botRepository) AdmitMessage(ctx context.Context, q store.BotMessageRequ
 		}
 		var intent store.BotExecutionIntent
 		switch rec.Bot.Status {
-		case store.BotDraft:
-			intent = store.BotIntentDraftConversation
 		case store.BotPaused:
 			intent = store.BotIntentConversation
 		case store.BotActive:

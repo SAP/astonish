@@ -36,18 +36,21 @@ func TestBotRuntimePolicyHTTPAcceptance(t *testing.T) {
 			if v.Budget.RuntimePolicy.EffectiveMode() != execution.BotRuntimeModeProgressV1 || v.Budget.RuntimePolicy.MaxActiveSeconds != nil {
 				t.Fatal("new Bot did not select progress default")
 			}
+			if err := json.Unmarshal(f.request("POST", path+"/pause"+suffix, map[string]any{"expected_revision": b.Revision, "reason": "Review runtime limits"}, 200), &b); err != nil {
+				t.Fatal(err)
+			}
 			q := store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "explicit legacy duration", Autonomy: v.Autonomy, Budget: store.BudgetSpec{MaxRuntimeSeconds: 300}, Delivery: v.Delivery}
 			f.request("PUT", path+"/configuration"+suffix, q, 200)
 			if old := read("2"); old.Budget.RuntimePolicy != nil || old.Budget.MaxRuntimeSeconds != 300 {
 				t.Fatal("legacy 300 rewritten")
 			}
-			q.ExpectedRevision, q.ExpectedVersion = 2, 2
+			q.ExpectedRevision, q.ExpectedVersion = 3, 2
 			q.Budget.MaxRuntimeSeconds = 900
 			f.request("PUT", path+"/configuration"+suffix, q, 200)
 			if old := read("3"); old.Budget.RuntimePolicy != nil || old.Budget.MaxRuntimeSeconds != 900 {
 				t.Fatal("legacy 900 rewritten")
 			}
-			q.ExpectedRevision, q.ExpectedVersion = 3, 3
+			q.ExpectedRevision, q.ExpectedVersion = 4, 3
 			q.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
 			q.Reviewed = false
 			f.request("PUT", path+"/configuration"+suffix, q, 403)

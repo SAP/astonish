@@ -71,7 +71,7 @@ func mutateBotDiskMemory(ctx context.Context, r *botRepository, id store.BotID, 
 	if err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(db botDraftDB) error {
+	return r.db.Transaction(ctx, func(db botDB) error {
 		_, sid, err := guardBotMemory(ctx, r, db, id, q)
 		if err != nil {
 			return err

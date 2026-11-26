@@ -175,7 +175,7 @@ func TestBotContentApprovalSQLiteReopen(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "approvals.db")
 			contentDir := t.TempDir()
 			var sqlDB *sql.DB
-			var db botDraftDB
+			var db botDB
 			open := func() {
 				var err error
 				sqlDB, err = sql.Open("sqlite", path)
@@ -210,7 +210,7 @@ func TestBotContentApprovalSQLiteReopen(t *testing.T) {
 			a.DecidedBy = nil
 			a.Response = nil
 			owner := uuid.New()
-			err := db.Transaction(ctx, func(tx botDraftDB) error {
+			err := db.Transaction(ctx, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					if _, err := d.client.Bot.Create().SetID(a.BotID).SetOwnerID(owner).SetName("Approval fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(ctx); err != nil {

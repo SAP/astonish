@@ -151,7 +151,7 @@ func TestBotGenerationHealthBrowser(t *testing.T) {
 			if p == nil || p.GenerationHealth == nil || p.ModelCallTimeoutSeconds != 0 || p.GenerationHealth.IdleTimeoutSeconds != 120 || p.GenerationHealth.CheckIntervalSeconds != 10 {
 				t.Fatalf("incorrect persisted health policy: %+v", p)
 			}
-			if current.Status != store.BotDraft || f.model.productions != 0 || f.pool.calls != 0 {
+			if current.Status != store.BotActive || f.model.productions != 0 || f.pool.calls != 0 {
 				t.Fatal("configuration save activated or ran the Bot")
 			}
 			t.Logf("scope=%s built Studio: saved 37s elapsed policy preserved; explicit health 120s/10s + model timeout 0 reviewed/saved/restored; no activation or generation", scope)

@@ -31,7 +31,7 @@ func AuthorizeBotModelConfiguration(ctx context.Context, bots store.BotStore, id
 		return nil, err
 	}
 	switch rec.Bot.Status {
-	case store.BotDraft, store.BotPaused, store.BotStopped:
+	case store.BotActive, store.BotPaused, store.BotStopped:
 	default:
 		return nil, store.ErrBotConflict
 	}

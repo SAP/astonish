@@ -8,7 +8,7 @@ import { botPath } from './botRoute'
 export default function NewBotDialog({ onClose, onSources }: { onClose: () => void; onSources: () => void }) {
   const [name, setName] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
   const request = useRef<{ name: string; key: string } | null>(null)
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent><DialogTitle>New Bot</DialogTitle><DialogDescription>Start a private conversation. Execution and ongoing responsibilities require separate review.</DialogDescription><form className="space-y-3" onSubmit={async e => {
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent><DialogTitle>New Bot</DialogTitle><DialogDescription>Create an Active private Bot and request one initial conversation from its title. Tools follow the displayed server policy; recurring work requires separate consent.</DialogDescription><form className="space-y-3" onSubmit={async e => {
     e.preventDefault(); if (!name.trim() || busy) return
     setBusy(true); setError('')
     if (request.current?.name !== name.trim()) request.current = { name: name.trim(), key: crypto.randomUUID() }

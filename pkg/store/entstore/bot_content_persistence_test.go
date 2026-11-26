@@ -84,7 +84,7 @@ func TestBotContentPersistenceVersionGoal(t *testing.T) {
 		version.Persona.User = sentinel + " user"
 		version.Delivery.Preferences = sentinel + " preferences"
 		version.ChangeReason = sentinel + " change"
-		b, err := bots.CreateDraft(ownerCtx, store.BotCreateRequest{Name: "Disk content", OwnerID: owner, Version: version, IdempotencyKey: "disk-content"})
+		b, err := bots.Create(ownerCtx, store.BotCreateRequest{Name: "Disk content", OwnerID: owner, Version: version, IdempotencyKey: "disk-content"})
 		if err != nil {
 			t.Fatal(scope, err)
 		}
@@ -214,7 +214,7 @@ func TestBotContentPersistenceRollbackAndMissing(t *testing.T) {
 			}
 			version.Version = 2
 			injected := errors.New("rollback after staging")
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = repo.db.Transaction(ctx, func(tx botDB) error {
 				if err := tx.InsertVersion(ctx, *version, "staged-hash"); err != nil {
 					return err
 				}
@@ -275,7 +275,7 @@ func TestBotContentPersistenceRequiresExplicitCodec(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, run, _, _ := botRunFixture(t, scope)
-			var unconfigured botDraftDB
+			var unconfigured botDB
 			switch d := repo.db.(type) {
 			case teamBotDB:
 				d.content = nil

@@ -15,19 +15,19 @@ import (
 var _ store.BotTitleStartStore = (*personalBotStore)(nil)
 var _ store.BotTitleStartStore = (*teamBotStore)(nil)
 
-func (s *personalBotStore) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
-	return s.repository().CreateDraftAndStart(ctx, q)
+func (s *personalBotStore) CreateAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
+	return s.repository().CreateAndStart(ctx, q)
 }
-func (s *teamBotStore) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
-	return s.repository().CreateDraftAndStart(ctx, q)
+func (s *teamBotStore) CreateAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
+	return s.repository().CreateAndStart(ctx, q)
 }
 
 // Already inside the scoped SQL transaction: nested repository operations share
 // exactly this transaction, including their CAS, audit and dispatch writes.
-type botAdmissionTx struct{ botDraftDB }
+type botAdmissionTx struct{ botDB }
 
-func (t botAdmissionTx) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return fn(t.botDraftDB)
+func (t botAdmissionTx) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return fn(t.botDB)
 }
 
 type titleMandateAdmissionKey struct{}
@@ -51,7 +51,7 @@ func (a *titleAdmission) Register(ctx context.Context, id execution.BotRunIdenti
 	return value, err
 }
 
-func persistTitleQuestion(ctx context.Context, tx botDraftDB, saved *botStoredRun) error {
+func persistTitleQuestion(ctx context.Context, tx botDB, saved *botStoredRun) error {
 	data, err := encodeBotRunData(ctx, tx, *saved)
 	if err != nil {
 		return err
@@ -75,7 +75,7 @@ func persistTitleQuestion(ctx context.Context, tx botDraftDB, saved *botStoredRu
 }
 
 // confirmTitleAssignment is transaction-local: authority and assignment queue together.
-func (r *botRepository) confirmTitleAssignment(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun, a store.BotApproval) error {
+func (r *botRepository) confirmTitleAssignment(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, a store.BotApproval) error {
 	c := saved.Run.TitleConfirmation
 	if c == nil || c.State == store.BotTitleConfirmationConfirmed {
 		return nil
@@ -146,7 +146,7 @@ func titleAnswerReplay(saved *botStoredRun, a *store.BotApproval, response *stor
 	return c != nil && c.State == store.BotTitleConfirmationConfirmed && c.ApprovalID == a.ID && reflect.DeepEqual(a.Response, response)
 }
 
-func (r *botRepository) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
+func (r *botRepository) CreateAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
 	admission, ok := store.BotMessageAdmissionFromContext(ctx)
 	if !ok {
 		return nil, store.ErrBotForbidden
@@ -154,26 +154,26 @@ func (r *botRepository) CreateDraftAndStart(ctx context.Context, q store.BotCrea
 	tracked := &titleAdmission{BotMessageAdmission: admission}
 	ctx = context.WithValue(store.WithBotMessageAdmission(ctx, tracked), titleMandateAdmissionKey{}, titleMandateAdmission{Kind: store.BotInitiationKindTitle, Subject: q.Name})
 	var result *store.BotTitleStartReceipt
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		scoped := *r
 		scoped.db = botAdmissionTx{tx}
 		actor, err := r.auth.authorize(ctx, uuid.Nil, true)
 		if err != nil {
 			return err
 		}
-		prepared, _, _, err := prepareBotDraft(q, actor, r.auth.scope, r.clock())
+		prepared, _, _, err := prepareBotCreate(q, actor, r.auth.scope, r.clock())
 		if err != nil {
 			return err
 		}
 		if old, lookupErr := tx.FindCreate(ctx, prepared.CreateKey); lookupErr == nil {
-			// A legacy CreateDraft with this key is not a title-start replay.
+			// A legacy Create with this key is not a title-start replay.
 			if _, err := tx.FindRun(ctx, old.Bot.ID, "title-start"); err != nil {
 				return store.ErrBotConflict
 			}
 		} else if lookupErr != store.ErrBotNotFound {
 			return lookupErr
 		}
-		b, err := scoped.CreateDraft(ctx, q)
+		b, err := scoped.Create(ctx, q)
 		if err != nil {
 			return err
 		}

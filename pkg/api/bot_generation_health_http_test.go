@@ -64,6 +64,9 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 	*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 		return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
 	}
+	if err := json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"pause for reviewed generation health policy"}`, f.b.Revision), 200), &f.b); err != nil {
+		t.Fatal(err)
+	}
 	v, err := f.repo.GetVersion(f.ctx, f.b.ID, f.b.Version)
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +81,9 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 	}
 	body, _ := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Isolated real HTTP generation health acceptance", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 	if err := json.Unmarshal(f.request("PUT", f.path+"/configuration", string(body), 200), &f.b); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"resume reviewed generation health policy"}`, f.b.Revision), 200), &f.b); err != nil {
 		t.Fatal(err)
 	}
 	*f.policy = nil // Same explicitly reviewed caller-bound authority as employee HTTP acceptance.

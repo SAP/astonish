@@ -342,7 +342,7 @@ func TestBotInteractiveAutoHomeHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.Home.ID == uuid.Nil || current.HomeSessionID != created.HomeSessionID || current.Status != store.BotDraft || current.Version != 1 || current.Revision != 2 || runtime.calls != 1 {
+			if current.Home.ID == uuid.Nil || current.HomeSessionID != created.HomeSessionID || current.Status != store.BotActive || current.Version != 1 || current.Revision != 2 || runtime.calls != 1 {
 				t.Fatalf("not safely provisioned: %+v calls=%d", current, runtime.calls)
 			}
 			retained := backend.documentsRoot

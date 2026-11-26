@@ -220,7 +220,7 @@ func TestBotContentReadOperationLifetime(t *testing.T) {
 			op, end := WithBotContentReadOperation(ctx)
 			defer end()
 			read := func(c context.Context) error {
-				return r.db.Transaction(c, func(tx botDraftDB) error {
+				return r.db.Transaction(c, func(tx botDB) error {
 					for range 2 {
 						if _, err := tx.ReadVersion(c, b.ID, 1); err != nil {
 							return err

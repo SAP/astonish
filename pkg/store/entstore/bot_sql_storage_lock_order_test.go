@@ -86,7 +86,7 @@ func TestBotSQLiteSQLStorageLockOrderNoSessionReentry(t *testing.T) {
 			}()
 			first := make(chan error, 1)
 			go func() {
-				first <- r.db.Transaction(ctx, func(tx botDraftDB) error {
+				first <- r.db.Transaction(ctx, func(tx botDB) error {
 					// Acquire the actual SQLite writer lock before requesting storage.
 					if err := tx.AdvanceSequence(ctx, bot.ID, sequence); err != nil {
 						return fmt.Errorf("acquire SQL writer sequence %d: %w", sequence, err)
@@ -121,7 +121,7 @@ func TestBotSQLiteSQLStorageLockOrderNoSessionReentry(t *testing.T) {
 			acquired := make(chan struct{})
 			go func() {
 				close(started)
-				second <- r.db.Transaction(ctx, func(tx botDraftDB) error {
+				second <- r.db.Transaction(ctx, func(tx botDB) error {
 					close(acquired)
 					return tx.AdvanceSequence(ctx, bot.ID, sequence+1)
 				})

@@ -65,7 +65,7 @@ func (s *botAuthorizedOperationRuntime) ListAuthorizedOperations(ctx context.Con
 	}
 	return out, nil
 }
-func (s *botAuthorizedOperationRuntime) source(ctx context.Context, tx botDraftDB, ref store.BotMandateRef, payload store.BotControlPayload) (*store.BotMandateRecord, *botStoredRecord, *botStoredRun, store.BotOperationProvenance, error) {
+func (s *botAuthorizedOperationRuntime) source(ctx context.Context, tx botDB, ref store.BotMandateRef, payload store.BotControlPayload) (*store.BotMandateRecord, *botStoredRecord, *botStoredRun, store.BotOperationProvenance, error) {
 	record, err := readMandate(ctx, tx, ref)
 	if err != nil {
 		return nil, nil, nil, store.BotOperationProvenance{}, err
@@ -122,7 +122,7 @@ func (s *botAuthorizedOperationRuntime) EnqueueAuthorizedOperation(ctx context.C
 	}
 	id := uuid.NewSHA1(q.Lease.RunID, []byte("authorized-schedule:"+q.IdempotencyKey))
 	var result *store.BotOperation
-	err = s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = s.repo.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := s.repo.checkLease(ctx, tx, q.Lease, s.repo.clock()); err != nil {
 			return err
 		}
@@ -164,7 +164,7 @@ func (s *botAuthorizedOperationRuntime) EnqueueAuthorizedOperation(ctx context.C
 	})
 	return result, err
 }
-func saveAuthorizedOperation(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o store.BotOperation, s *botAuthorizedOperationRuntime) error {
+func saveAuthorizedOperation(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation, s *botAuthorizedOperationRuntime) error {
 	if err := appendMandateRecord(ctx, tx, rec, operationKey(o.ID, o.Revision), o, s.repo.clock()); err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func saveAuthorizedOperation(ctx context.Context, tx botDraftDB, rec *botStoredR
 	}
 	return saveMandateMetadata(ctx, tx, rec)
 }
-func verifyAuthorizedGrant(ctx context.Context, tx botDraftDB, o store.BotOperation) error {
+func verifyAuthorizedGrant(ctx context.Context, tx botDB, o store.BotOperation) error {
 	if o.Provenance == nil || !scheduleOperation(o.Payload.Operation) || o.Provenance.Purpose != execution.BotMandatePurposeSchedule {
 		return store.ErrBotForbidden
 	}

@@ -149,7 +149,7 @@ func TestBotAgentProgressProjectionAtomic(t *testing.T) {
 			// A failure after the projection write must roll back the projection,
 			// sequence, transcript and after-commit notification together.
 			original := repo.db
-			repo.db = botProgressFailDB{botDraftDB: original}
+			repo.db = botProgressFailDB{botDB: original}
 			next = saved.Clone()
 			next.AgentWork.Notes = "This update must roll back"
 			_, err = repo.SaveWork(worker, store.BotWorkUpdate{Lease: lease, ExpectedRevision: saved.Revision, State: *next})
@@ -171,19 +171,19 @@ func TestBotAgentProgressProjectionAtomic(t *testing.T) {
 
 var errBotProgressFixture = errors.New("injected progress event failure")
 
-type botProgressFailDB struct{ botDraftDB }
+type botProgressFailDB struct{ botDB }
 
-func (d botProgressFailDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(botProgressFailDB{tx}) })
+func (d botProgressFailDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(botProgressFailDB{tx}) })
 }
 func (d botProgressFailDB) fenceTranscript(ctx context.Context, lease store.BotLease, now time.Time) error {
-	return d.botDraftDB.(botTranscriptDB).fenceTranscript(ctx, lease, now)
+	return d.botDB.(botTranscriptDB).fenceTranscript(ctx, lease, now)
 }
 func (d botProgressFailDB) appendRunTranscript(ctx context.Context, b store.Bot, run store.BotRun, event *adksession.Event) error {
-	return d.botDraftDB.(botTranscriptDB).appendRunTranscript(ctx, b, run, event)
+	return d.botDB.(botTranscriptDB).appendRunTranscript(ctx, b, run, event)
 }
 func (d botProgressFailDB) updateWorkRun(ctx context.Context, run botStoredRun, lease store.BotLease, now time.Time) error {
-	return d.botDraftDB.(botWorkDB).updateWorkRun(ctx, run, lease, now)
+	return d.botDB.(botWorkDB).updateWorkRun(ctx, run, lease, now)
 }
 func (d botProgressFailDB) InsertActivity(context.Context, store.BotActivity, string) error {
 	return errBotProgressFixture
@@ -256,7 +256,7 @@ func TestBotRunStateNotifyRollbackAndRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			sentinel := errors.New("abort after metadata")
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = repo.db.Transaction(ctx, func(tx botDB) error {
 				if err := appendBotRunStateTx(ctx, tx, *b, *run, 999, *now); err != nil {
 					return err
 				}
@@ -357,11 +357,11 @@ func TestBotRunStateNestedTitleNotifications(t *testing.T) {
 			version := store.DefaultBotVersion()
 			version.Charter = "Discuss the title"
 			q := store.BotCreateRequest{Name: "Nested title", OwnerID: b.OwnerID, Version: version, IdempotencyKey: "nested-title"}
-			receipt, err := repo.CreateDraftAndStart(ctx, q)
+			receipt, err := repo.CreateAndStart(ctx, q)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := repo.CreateDraftAndStart(ctx, q); err != nil {
+			if _, err := repo.CreateAndStart(ctx, q); err != nil {
 				t.Fatal(err)
 			}
 			if calls != 1 {

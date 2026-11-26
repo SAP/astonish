@@ -130,18 +130,18 @@ func (b Bots) Resolve(ctx context.Context, ref string) (*store.Bot, error) {
 	return found, nil
 }
 
-type BotDraft struct {
-	StartFromTitle bool               `json:"start_from_title,omitempty"`
-	Name           string             `json:"name"`
-	IdempotencyKey string             `json:"idempotency_key"`
-	Definition     BotDraftDefinition `json:"definition"`
+type BotCreate struct {
+	StartFromTitle bool                `json:"start_from_title,omitempty"`
+	Name           string              `json:"name"`
+	IdempotencyKey string              `json:"idempotency_key"`
+	Definition     BotCreateDefinition `json:"definition"`
 }
-type BotDraftDefinition struct {
+type BotCreateDefinition struct {
 	Charter string            `json:"charter"`
 	Persona *store.BotPersona `json:"persona,omitempty"`
 }
 
-func (b Bots) Create(ctx context.Context, q BotDraft) (*store.Bot, error) {
+func (b Bots) Create(ctx context.Context, q BotCreate) (*store.Bot, error) {
 	var v store.Bot
 	err := b.request(ctx, "POST", b.path(""), q, &v)
 	return &v, err
@@ -151,7 +151,7 @@ type BotLifecycle string
 
 const (
 	BotPause   BotLifecycle = "pause"
-	BotResume  BotLifecycle = "activate"
+	BotResume  BotLifecycle = "resume"
 	BotStop    BotLifecycle = "stop"
 	BotDelete  BotLifecycle = "delete"
 	BotRestore BotLifecycle = "restore"
@@ -181,7 +181,7 @@ func (b Bots) Run(ctx context.Context, id string, version int64, key, instructio
 	return b.submitRun(ctx, id, "runs", version, key, instructions)
 }
 
-// TestRun explicitly queues one reviewed draft test without activating the Bot.
+// TestRun explicitly queues one reviewed Active run without enabling recurrence.
 func (b Bots) TestRun(ctx context.Context, id string, version int64, key, instructions string) (*store.BotRun, error) {
 	return b.submitRun(ctx, id, "test-run", version, key, instructions)
 }

@@ -167,12 +167,9 @@ func TestBotTitleConfirmationFactoryJourney(t *testing.T) {
 			t.Run(string(scope)+"/"+mode, func(t *testing.T) {
 				f := newBotFactoryFixture(t)
 				f.req.Bot.Scope = scope
-				// Title admission persists a draft conversation, not the fixture's
-				// regular execution intent. Exercise the legacy control-only guard.
-				if mode != "autonomous" {
-					f.req.Bot.Status = store.BotDraft
-					f.req.Run.Intent = store.BotIntentDraftConversation
-				}
+				// Fresh title turns use interactive admission on an Active Bot;
+				// the tool-free paused conversation intent is a separate contract.
+				f.req.Run.Intent = store.BotIntentRegular
 				f.req.Run.ExecutionMode = execution.BotExecutionModeChatInteractive
 				f.req.Run.CallerCeiling = &execution.BotCallerCeiling{Principal: f.req.Principal, ExpiresAt: time.Now().Add(time.Hour)}
 				f.req.Authorization = interactiveFactoryAuthorization{}

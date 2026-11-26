@@ -42,7 +42,7 @@ func TestBotSourceIntakeAdaptiveHTTP(t *testing.T) {
 			}
 			var b store.Bot
 			json.Unmarshal(f.request("GET", "/api/studio/bots/"+applied.BotID.String()+suffix, nil, 200), &b)
-			if b.Status != store.BotDraft {
+			if b.Status != store.BotActive {
 				t.Fatal("activated")
 			}
 		})

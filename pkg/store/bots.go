@@ -205,7 +205,6 @@ const (
 type BotStatus string
 
 const (
-	BotDraft   BotStatus = "draft"
 	BotActive  BotStatus = "active"
 	BotPaused  BotStatus = "paused"
 	BotStopped BotStatus = "stopped"
@@ -773,12 +772,12 @@ type BotPage struct {
 // Decide/ConsumeApproval use CAS and exact digest/expiry/version checks. No method
 // implies a transaction spanning separate personal/team databases or external IO.
 type BotStore interface {
-	CreateDraft(context.Context, BotCreateRequest) (*Bot, error)
+	Create(context.Context, BotCreateRequest) (*Bot, error)
 	Get(context.Context, BotID) (*Bot, error)
 	List(context.Context, BotPage) ([]Bot, error)
 	GetVersion(context.Context, BotID, int64) (*BotVersion, error)
 	ApplyVersion(context.Context, BotVersionRequest) (*Bot, error)
-	Activate(context.Context, BotLifecycleRequest) (*Bot, error)
+	Resume(context.Context, BotLifecycleRequest) (*Bot, error)
 	Pause(context.Context, BotLifecycleRequest) (*Bot, error)
 	Stop(context.Context, BotLifecycleRequest) (*Bot, error)
 	RequestRun(context.Context, BotRunRequest) (*BotRun, error)

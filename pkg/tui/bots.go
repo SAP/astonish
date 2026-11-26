@@ -194,7 +194,7 @@ func (m model) startBotWatch() (tea.Model, tea.Cmd) {
 	m.tr.Title = m.info.Title
 	m.tr.SessionID = m.info.SessionID
 	m.tr.BotID = m.botCap().SelectedBot().ID.String()
-	guidance := "Send a message here. Draft and paused conversations do not activate work."
+	guidance := "Send a message here. Active messages can work; paused conversations use no tools."
 	if bot := m.botCap().SelectedBot(); m.info.SessionID != "" && m.info.SessionID != bot.HomeSessionID.String() {
 		guidance = "This run trace is read-only; /bots home returns to the conversation."
 	}
@@ -442,7 +442,7 @@ func (m model) renderBotsOverlay() string {
 	case m.bots.runs && len(m.bots.runItems) == 0:
 		s.WriteString("No runs.")
 	case !m.bots.runs && !m.bots.approvals && len(m.bots.items) == 0:
-		s.WriteString("No Bots. Create a draft with astonish bots create draft.")
+		s.WriteString("No Bots. Create one with astonish bots create NAME.")
 	}
 	start := max(0, m.bots.cursor-3)
 	if m.bots.runs {

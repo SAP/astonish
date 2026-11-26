@@ -45,7 +45,7 @@ func TestBotEmployeeObjectivePTY(t *testing.T) {
 	}
 }
 
-// The API-owned fixture must prove format-3 database writes as well as the
+// The API-owned fixture must prove integrity-checked inline database writes as well as the
 // physical personal/team dispatcher journey. Checking its evidence prevents a
 // misspelled -run expression ("no tests to run") from passing this acceptance.
 func TestBotDatabaseEmployeePTY(t *testing.T) {
@@ -88,7 +88,7 @@ func TestBotConversationPresentationPTYAcceptance(t *testing.T) {
 func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 	agentWork := len(agentMode) > 0 && agentMode[0]
 	mixed := len(agentMode) > 1 && agentMode[1]
-	for _, status := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused} {
+	for _, status := range []store.BotStatus{store.BotActive, store.BotPaused} {
 		t.Run(string(status), func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)

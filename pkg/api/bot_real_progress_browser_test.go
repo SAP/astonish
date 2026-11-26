@@ -44,9 +44,9 @@ type liveProgressTitleStore struct {
 	policy *execution.BotRuntimePolicy
 }
 
-func (s liveProgressTitleStore) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
+func (s liveProgressTitleStore) CreateAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
 	q.Version.Budget.RuntimePolicy = s.policy.Clone()
-	return s.BotStore.(store.BotTitleStartStore).CreateDraftAndStart(ctx, q)
+	return s.BotStore.(store.BotTitleStartStore).CreateAndStart(ctx, q)
 }
 
 // This test-only composition uses the production routine-read policy and route

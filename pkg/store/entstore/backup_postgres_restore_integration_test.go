@@ -232,11 +232,11 @@ func TestIntegrationBotPostgresBackupRecovery(t *testing.T) {
 		repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
 		v := store.DefaultBotVersion()
 		v.Charter = "Preserve evidence without replaying effects"
-		b, err := repo.CreateDraft(principal, store.BotCreateRequest{Name: "Recovery", OwnerID: owner, Version: v, IdempotencyKey: "recovery"})
+		b, err := repo.Create(principal, store.BotCreateRequest{Name: "Recovery", OwnerID: owner, Version: v, IdempotencyKey: "recovery"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err = repo.Activate(principal, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Reviewed test activation"})
+		b, err = repo.Resume(principal, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Reviewed test activation"})
 		if err != nil {
 			t.Fatal(err)
 		}

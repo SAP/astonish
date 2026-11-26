@@ -211,10 +211,6 @@ func (f *skillStorageHTTPFixture) bot(scope store.BotScope) *store.Bot {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	updated, err = repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: updated.Revision, Reason: "controlled storage test"})
-	if err != nil {
-		f.t.Fatal(err)
-	}
 	return updated
 }
 

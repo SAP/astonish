@@ -10,7 +10,7 @@ import (
 // MemoryStore. Its mutation and operation receipt share the caller's transaction;
 // there is no external reconciliation intent to complete speculatively.
 // Observe the exact replacement and supersession before the caller records Applied.
-func verifyControlMemoryMutation(ctx context.Context, db botDraftDB, p store.BotControlProposal) error {
+func verifyControlMemoryMutation(ctx context.Context, db botDB, p store.BotControlProposal) error {
 	key := controlProposalKey(p.ID)
 	if routine, _ := ctx.Value(routineMutationKey{}).(bool); routine {
 		key = "routine-operation:" + p.ID.String()

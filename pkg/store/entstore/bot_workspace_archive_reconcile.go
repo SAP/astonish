@@ -27,7 +27,7 @@ func ReconcileRestoredBotWorkspaceHome(ctx context.Context, bots store.BotStore,
 	default:
 		return store.ErrBotUnsupported
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		if err := tx.(botSkillDB).lockSkills(ctx, a.BotID); err != nil {
 			return err
 		}

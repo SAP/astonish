@@ -40,7 +40,7 @@ func (r *botRepository) SaveProgressContext(ctx context.Context, m store.BotProg
 	data = append([]byte(nil), data...)
 	digest := store.BotProgressContextDigest(data)
 	ref := progressContextKey(m, digest)
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, run, err := r.progressMutation(ctx, tx, m)
 		if err != nil {
 			return err
@@ -67,7 +67,7 @@ func (r *botRepository) LoadProgressContext(ctx context.Context, m store.BotProg
 		return nil, store.ErrBotInvalid
 	}
 	var data []byte
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		_, run, err := r.progressMutation(ctx, tx, m)
 		if err != nil {
 			return err

@@ -41,9 +41,9 @@ type sessionTemplateTitleStore struct {
 	template string
 }
 
-func (s *sessionTemplateTitleStore) CreateDraftAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
+func (s *sessionTemplateTitleStore) CreateAndStart(ctx context.Context, q store.BotCreateRequest) (*store.BotTitleStartReceipt, error) {
 	q.Version.SandboxTemplate = s.template
-	return s.BotTitleStartStore.CreateDraftAndStart(ctx, q)
+	return s.BotTitleStartStore.CreateAndStart(ctx, q)
 }
 
 const betweenCallStage continuationStage = "read-return-to-next-producer"
@@ -630,7 +630,7 @@ func runBotNewMessageDockerReproduction(t *testing.T, noPython bool, scope store
 	router.HandleFunc("/", api.BotCreateHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/configuration", api.BotConfigurationHandler).Methods("PUT")
-	router.HandleFunc("/bots/{botID}/activate", api.BotActivateHandler).Methods("POST")
+	router.HandleFunc("/bots/{botID}/resume", api.BotResumeHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/pause", api.BotPauseHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/files", api.BotFilesHandler).Methods("GET")

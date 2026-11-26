@@ -122,7 +122,7 @@ func decodeCleanupActivity(id store.BotID, sequence int64, kind store.BotActivit
 	return &store.BotActivity{BotID: id, Sequence: sequence, Kind: kind, CreatedAt: created, Payload: json.RawMessage(raw)}, nil
 }
 
-func insertCleanupActivity(ctx context.Context, db botDraftDB, a store.BotActivity, key string) error {
+func insertCleanupActivity(ctx context.Context, db botDB, a store.BotActivity, key string) error {
 	data, err := cleanupRecordData(a)
 	if err != nil {
 		return err
@@ -148,7 +148,7 @@ func (d personalBotDeleteDB) InsertActivity(ctx context.Context, a store.BotActi
 func (d teamBotDeleteDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
 	return insertCleanupActivity(ctx, d.teamBotDB, a, key)
 }
-func botDeleteDB(db botDraftDB) botDraftDB {
+func botDeleteDB(db botDB) botDB {
 	switch d := db.(type) {
 	case personalBotDB:
 		return personalBotDeleteDB{d}
@@ -158,7 +158,7 @@ func botDeleteDB(db botDraftDB) botDraftDB {
 		return db
 	}
 }
-func cleanupBaseDB(db botDraftDB) botDraftDB {
+func cleanupBaseDB(db botDB) botDB {
 	switch d := db.(type) {
 	case personalBotDeleteDB:
 		return d.personalBotDB
@@ -286,7 +286,7 @@ func cleanupRunMarker(data map[string]any) (string, error) {
 	}
 	return "", nil
 }
-func readCleanupRun(ctx context.Context, db botDraftDB, id, rid uuid.UUID) (*botStoredRun, error) {
+func readCleanupRun(ctx context.Context, db botDB, id, rid uuid.UUID) (*botStoredRun, error) {
 	var sid, marker string
 	var status store.RunStatus
 	var fence int64
@@ -324,7 +324,7 @@ type cleanupAuthorityRow struct {
 	Authority *botCleanupAuthority
 }
 
-func readCleanupAuthorities(ctx context.Context, db botDraftDB, id uuid.UUID, after int64) ([]cleanupAuthorityRow, int64, error) {
+func readCleanupAuthorities(ctx context.Context, db botDB, id uuid.UUID, after int64) ([]cleanupAuthorityRow, int64, error) {
 	var result []cleanupAuthorityRow
 	consume := func(key string, seq int64, data map[string]any) error {
 		after = seq
@@ -398,7 +398,7 @@ func readCleanupAuthorities(ctx context.Context, db botDraftDB, id uuid.UUID, af
 	return result, after, nil
 }
 
-func cleanupRevokedExists(ctx context.Context, db botDraftDB, ref store.BotMandateRef) (bool, error) {
+func cleanupRevokedExists(ctx context.Context, db botDB, ref store.BotMandateRef) (bool, error) {
 	switch d := cleanupBaseDB(db).(type) {
 	case personalBotDB:
 		return d.client.BotOutbox.Query().Where(po.BotIDEQ(ref.BotID), po.DeduplicationKeyEQ(mandateRevokedKey(ref))).Exist(ctx)
@@ -410,7 +410,7 @@ func cleanupRevokedExists(ctx context.Context, db botDraftDB, ref store.BotManda
 }
 
 // Exact recovery/cancellation evidence can be checked without its report body.
-func readCleanupRunActivity(ctx context.Context, db botDraftDB, id uuid.UUID, key string) (*store.BotActivity, error) {
+func readCleanupRunActivity(ctx context.Context, db botDB, id uuid.UUID, key string) (*store.BotActivity, error) {
 	var data map[string]any
 	var sequence int64
 	var kind store.BotActivityKind
@@ -489,7 +489,7 @@ func decodeCleanupRunEvent(id store.BotID, sessionID string, data map[string]any
 	}
 	return store.NewBotRunStateEvent(store.Bot{ID: id, HomeSessionID: s.HomeSessionID}, store.BotRun{ID: s.RunID, BotID: id, SessionID: s.SessionID, Status: s.Status, Presentation: s.Presentation}, s.Sequence, s.At)
 }
-func appendCleanupRunState(ctx context.Context, db botDraftDB, b store.Bot, run store.BotRun, seq int64, at time.Time) error {
+func appendCleanupRunState(ctx context.Context, db botDB, b store.Bot, run store.BotRun, seq int64, at time.Time) error {
 	s := botCleanupRunState{BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: b.HomeSessionID, Status: run.Status, Sequence: seq, At: at, Presentation: run.Presentation}
 	raw, err := json.Marshal(s)
 	if err != nil {

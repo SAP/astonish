@@ -84,7 +84,7 @@ func TestBotResumeDisabledScheduleApproval(t *testing.T) {
 
 func TestBotResumeDisabledScheduleRejectsCorruption(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, scenario := range []string{"owner", "version", "bot", "trigger", "cron", "timezone", "payload", "next-run", "missing", "active"} {
+		for _, scenario := range []string{"owner", "version", "bot", "trigger", "cron", "timezone", "payload", "next-run", "missing"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
 				repo, ctx, jobs, occurrence := scheduledFixture(t, scope, store.TriggerCron, 20)
 				b, _ := repo.Get(ctx, occurrence.BotID)
@@ -112,9 +112,6 @@ func TestBotResumeDisabledScheduleRejectsCorruption(t *testing.T) {
 				case "next-run":
 					now := time.Now()
 					job.NextRun = &now
-				case "active":
-					// Only inert lifecycle states may carry disabled projections.
-					b.Status = store.BotActive
 				}
 				if scenario == "missing" {
 					if err := jobs.Remove(ctx, job.ID); err != nil {

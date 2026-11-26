@@ -124,7 +124,7 @@ func testBotHomeArtifactProjection(t *testing.T, workEnabled bool) {
 			}
 			otherVersion := store.DefaultBotVersion()
 			otherVersion.Charter = "Unrelated Bot"
-			other, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Other Bot", OwnerID: b.OwnerID, Version: otherVersion, IdempotencyKey: "other-artifact-bot"})
+			other, err := repo.Create(ctx, store.BotCreateRequest{Name: "Other Bot", OwnerID: b.OwnerID, Version: otherVersion, IdempotencyKey: "other-artifact-bot"})
 			if err != nil {
 				t.Fatal(err)
 			}

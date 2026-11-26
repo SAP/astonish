@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func appendBotRunStateTx(ctx context.Context, tx botDraftDB, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
+func appendBotRunStateTx(ctx context.Context, tx botDB, b store.Bot, run store.BotRun, sequence int64, at time.Time) error {
 	return tx.AppendRunState(ctx, b, run, sequence, at)
 }
 
@@ -74,7 +74,7 @@ func queueBotRunStateNotification(ctx context.Context, callbacks *[]func(), stat
 }
 
 // The caller already saved state but AppendRunState still verifies SQL itself.
-func insertSavedBotRunStateActivity(ctx context.Context, tx botDraftDB, b store.Bot, run store.BotRun, a store.BotActivity, key string) error {
+func insertSavedBotRunStateActivity(ctx context.Context, tx botDB, b store.Bot, run store.BotRun, a store.BotActivity, key string) error {
 	if a.RunID == nil || *a.RunID != run.ID || a.BotID != b.ID || run.BotID != b.ID {
 		return store.ErrBotInvalid
 	}
@@ -84,7 +84,7 @@ func insertSavedBotRunStateActivity(ctx context.Context, tx botDraftDB, b store.
 	return appendBotRunStateTx(ctx, tx, b, run, a.Sequence, a.CreatedAt)
 }
 
-func insertBotRunStateActivity(ctx context.Context, tx botDraftDB, a store.BotActivity, key string) error {
+func insertBotRunStateActivity(ctx context.Context, tx botDB, a store.BotActivity, key string) error {
 	if err := tx.InsertActivity(ctx, a, key); err != nil {
 		return err
 	}

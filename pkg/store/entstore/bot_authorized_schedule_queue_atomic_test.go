@@ -15,21 +15,21 @@ import (
 
 // Forward only the additional capability required by reconciliation. The parent
 // failure fixture still fails later, at receipt/mandate metadata persistence.
-type queuedScheduleFailDB struct{ botDraftDB }
+type queuedScheduleFailDB struct{ botDB }
 type queuedScheduleFailTx struct{ authorizedFailTx }
 
-func (d queuedScheduleFailDB) Transaction(ctx context.Context, f func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return f(queuedScheduleFailTx{authorizedFailTx{tx}}) })
+func (d queuedScheduleFailDB) Transaction(ctx context.Context, f func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return f(queuedScheduleFailTx{authorizedFailTx{tx}}) })
 }
 func (d queuedScheduleFailTx) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
 	if strings.HasPrefix(key, "schedule-reconcile:") {
 		return errors.New("injected receipt persistence failure")
 	}
-	return d.botDraftDB.InsertActivity(ctx, a, key)
+	return d.botDB.InsertActivity(ctx, a, key)
 }
 
 func (d queuedScheduleFailTx) saveScheduledQueueRun(ctx context.Context, run botStoredRun, version int64) error {
-	return d.botDraftDB.(botScheduledQueueDB).saveScheduledQueueRun(ctx, run, version)
+	return d.botDB.(botScheduledQueueDB).saveScheduledQueueRun(ctx, run, version)
 }
 
 func applyQueuedScheduleWithBarriers(t *testing.T, r *botRepository, s *botAuthorizedOperationRuntime, owner context.Context, id uuid.UUID, operation store.BotControlOperation, tr store.TriggerSpec, applyHooks ...func(func() error) error) {

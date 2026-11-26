@@ -246,6 +246,26 @@ uses controlled sources/model responses, not a live provider latency guarantee.
 
 ## Trusted read transport failures
 
+Ordinary Bot catalogue `web_fetch` now dispatches a first-party
+`_bot_public_fetch` node operation rather than inferring safety from the public
+name or native error text. The concrete handler preserves URL/mode/SSRF checks;
+only HTTP exchange/body-read failures return a bounded failed-read envelope.
+Validation, credential-bearing URLs, cancellation and transport-to-node errors
+remain native. The pinned catalogue adapter unwraps this envelope and records an
+out-of-band `ToolSourceReadReceipt` bound to the Bot/run identity, concrete public
+capability, active call ID, original argument digest and scoped-redacted response
+digest. Completion validates that exact exclusive receipt against its pending
+invocation before settling read-only accounting. Mixed effects, receipt conflicts,
+duplicates and drift remain uncertain. This is post-execution evidence only:
+`BotCatalogueClassifier` still classifies ordinary fetch as `EffectUnknown` and
+cannot acquire mandated-read execution authority. Failed source captures stay
+visible without claiming that source content was retrieved successfully.
+
+Named deterministic tests cover actual first-party HTTP connection failure then
+successful fetch, and failed `execute_tool` fetch → successful fetch → exact final
+capture, plus receipt drift and terminal-error gates. They do not establish a live
+daemon/node deployment or paid-provider acceptance.
+
 `routineReadRequest` marks failures from the constrained HTTP exchange/body read
 with a first-party typed error. Validation, origin/redirect/IP policy denials and
 cancellation keep native error identity and never receive that marker. The concrete

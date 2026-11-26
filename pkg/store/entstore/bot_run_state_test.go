@@ -59,7 +59,7 @@ func TestBotRunStatePersistenceSnapshotRollback(t *testing.T) {
 				t.Fatalf("snapshot=%+v", snapshot)
 			}
 			sentinel := errors.New("rollback")
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = repo.db.Transaction(ctx, func(tx botDB) error {
 				if e := appendBotRunStateTx(ctx, tx, *b, receipt.Run, snapshot.LatestSequence+1, repo.clock()); e != nil {
 					return e
 				}

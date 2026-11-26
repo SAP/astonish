@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/SAP/astonish/pkg/execution"
 	"strings"
@@ -27,6 +29,8 @@ type ToolOutcome struct {
 	NextRunAt  *time.Time
 	// SourceAccess records transport facts, never source usefulness or truth.
 	SourceAccess []store.BotSourceAccessFact
+	// SourceRead binds actual first-party read execution, never admission authority.
+	SourceRead *ToolSourceReadReceipt
 	// ScheduleCapture attests only durable enqueue, never a scheduler mutation.
 	ScheduleCapture *ScheduleCapture
 	RoutineCapture  *RoutineCapture
@@ -35,6 +39,34 @@ type ToolOutcome struct {
 	Nonexecution *ToolNonexecutionReceipt
 	// ReceiptConflict prevents duplicate ledger records from erasing uncertainty.
 	ReceiptConflict bool
+}
+
+// ToolSourceReadReceipt is out-of-band and minted only by a pinned read adapter.
+type ToolSourceReadReceipt struct {
+	CallID, ToolName, ArgumentDigest, ResponseDigest string
+	Identity                                         execution.BotRunIdentity
+}
+
+func NewToolSourceReadReceipt(ctx context.Context, callID, target string, args any, response map[string]any) *ToolSourceReadReceipt {
+	binding := NewToolNonexecutionOutcome(ctx, callID, target, args, ToolFeedbackTerminal).Nonexecution
+	raw, err := json.Marshal(response)
+	if binding == nil || err != nil || response == nil {
+		return nil
+	}
+	sum := sha256.Sum256(raw)
+	return &ToolSourceReadReceipt{CallID: callID, ToolName: target, Identity: binding.Identity, ArgumentDigest: binding.ArgumentDigest, ResponseDigest: hex.EncodeToString(sum[:])}
+}
+
+func (r *ToolSourceReadReceipt) ValidFor(identity execution.BotRunIdentity, callID, target, digest string, response map[string]any) bool {
+	if r == nil || callID == "" || target == "" || digest == "" || r.Identity != identity || r.CallID != callID || r.ToolName != target || r.ArgumentDigest != digest || response == nil {
+		return false
+	}
+	raw, err := json.Marshal(response)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(raw)
+	return r.ResponseDigest == hex.EncodeToString(sum[:])
 }
 
 // ToolNonexecutionReceipt binds a trusted rejection to its exact invocation.
@@ -85,7 +117,7 @@ func (r *ToolNonexecutionReceipt) ValidFor(identity execution.BotRunIdentity, ca
 // Mixed effect/source records and duplicate receipts never establish nonexecution.
 func (o ToolOutcome) NonexecutionFor(ctx context.Context, callID, target string, args any) bool {
 	want := NewToolNonexecutionOutcome(ctx, callID, target, args, ToolFeedbackTerminal).Nonexecution
-	return want != nil && o.Nonexecution.ValidFor(want.Identity, callID, target, want.ArgumentDigest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.Artifacts) == 0 && len(o.SourceAccess) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+	return want != nil && o.Nonexecution.ValidFor(want.Identity, callID, target, want.ArgumentDigest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.Artifacts) == 0 && len(o.SourceAccess) == 0 && o.SourceRead == nil && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
 }
 
 // ToolArgumentError is minted only by trusted pre-dispatch argument validation.
@@ -156,6 +188,10 @@ func RecordToolOutcome(ctx context.Context, callID string, outcome ToolOutcome) 
 	if outcome.RoutineCapture != nil {
 		capture := *outcome.RoutineCapture
 		outcome.RoutineCapture = &capture
+	}
+	if outcome.SourceRead != nil {
+		receipt := *outcome.SourceRead
+		outcome.SourceRead = &receipt
 	}
 	if outcome.Nonexecution != nil {
 		receipt := *outcome.Nonexecution

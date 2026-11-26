@@ -69,7 +69,7 @@ func TestBotOperationViewSnapshotReplay(t *testing.T) {
 			}
 			// An outer rollback discards both the durable envelope and queued wakeup.
 			rollback := errors.New("rollback")
-			err = r.db.Transaction(worker, func(tx botDraftDB) error {
+			err = r.db.Transaction(worker, func(tx botDB) error {
 				rec, e := tx.GetBot(worker, q.MandateRef.BotID)
 				if e != nil {
 					return e

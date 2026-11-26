@@ -279,7 +279,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 		v := store.DefaultBotVersion()
 		v.Charter = task
 		v.Autonomy.AllowedTools = []string{policyName, "bot_work_update", "filter_json"}
-		b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Configured service " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
+		b, e := repo.Create(auth, store.BotCreateRequest{Name: "Configured service " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
 		if e != nil {
 			t.Fatal(e)
 		}

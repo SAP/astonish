@@ -71,13 +71,16 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Require explicit reviewed activation"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Activation", OwnerID: owner, Version: v, IdempotencyKey: "activation"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Activation", OwnerID: owner, Version: v, IdempotencyKey: "activation"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			q := store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "Review"}
-			if _, err := repo.Activate(auth, q); !errors.Is(err, store.ErrBotUnsupported) {
-				t.Fatalf("missing worker: %v", err)
+			versionForReadiness, err := repo.GetVersion(auth, b.ID, b.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Status != store.BotActive {
+				t.Fatal("creation must be Active without worker")
 			}
 			llm := &workerTestModel{}
 			w, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: activationHomeBackend{}, Pool: workerTestPool{}, WorkerID: "activation-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, p execution.Principal, s store.BotScope, n, m string) (model.LLM, error) {
@@ -93,7 +96,7 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer w.Stop()
-			if _, err := repo.Activate(auth, q); !errors.Is(err, store.ErrBotUnsupported) {
+			if err := w.activationReady(auth, *b, *versionForReadiness); !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("missing home: %v", err)
 			}
 			registry, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
@@ -108,8 +111,8 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			q.ExpectedRevision = b.Revision
-			if _, err := repo.Activate(auth, q); !errors.Is(err, store.ErrBotUnsupported) {
+
+			if err := w.activationReady(auth, *b, *versionForReadiness); !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("missing pin: %v", err)
 			}
 			// Activation and execution must inherit the same owner-scoped defaults
@@ -117,7 +120,7 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 			if err := db.PlatformSettings().Save(auth, &store.PlatformSettings{DefaultProvider: "controlled", DefaultModel: "model"}); err != nil {
 				t.Fatal(err)
 			}
-			versionForReadiness, err := repo.GetVersion(auth, b.ID, b.Version)
+			versionForReadiness, err = repo.GetVersion(auth, b.ID, b.Version)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -135,19 +138,13 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 				t.Fatalf("inherited worker model: %+v %v", selected, err)
 			}
 			current, err := repo.Get(auth, b.ID)
-			if err != nil || current.Status != store.BotDraft {
+			if err != nil || current.Status != store.BotActive {
 				t.Fatalf("readiness activated draft: %+v %v", current, err)
 			}
 			if err := pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := repo.RequestRun(auth, store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, Instructions: "draft must not start", IdempotencyKey: "draft"}); !errors.Is(err, store.ErrBotForbidden) {
-				t.Fatalf("draft request: %v", err)
-			}
-			active, err := repo.Activate(auth, q)
-			if err != nil || active.Status != store.BotActive {
-				t.Fatalf("activation: %+v %v", active, err)
-			}
+			active := b
 			if llm.calls != 0 {
 				t.Fatal("activation called model")
 			}

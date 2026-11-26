@@ -20,11 +20,35 @@ import (
 	"google.golang.org/genai"
 )
 
+// Progress policy is reviewed while paused; creation itself is already Active.
+// Keep the HTTP revision returned by each transition rather than bypassing CAS.
+func newProgressHTTPFixture(t *testing.T, scope store.BotScope) *interactiveHTTPFixture {
+	t.Helper()
+	f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+	if f.b.Status != store.BotActive {
+		t.Fatalf("fresh Bot status = %s, want Active", f.b.Status)
+	}
+	if err := json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"Review isolated progress policy"}`, f.b.Revision), 200), &f.b); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func progressResumeFixture(t *testing.T, f *interactiveHTTPFixture) {
+	t.Helper()
+	// This owned fixture has registered its controlled Home and model. No
+	// external backend is exercised; production readiness remains unchanged.
+	f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
+	if err := json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Resume isolated ready backend"}`, f.b.Revision), 200), &f.b); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Each case uses HTTP admission and the production worker against owned SQLite.
 // Draining at the first settled read leaves a real durable context and ledger.
 func progressControlFixture(t *testing.T, scope store.BotScope) (*interactiveHTTPFixture, store.BotRun) {
 	t.Helper()
-	f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+	f := newProgressHTTPFixture(t, scope)
 	*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 		return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
 	}
@@ -38,10 +62,7 @@ func progressControlFixture(t *testing.T, scope store.BotScope) (*interactiveHTT
 		t.Fatal(err)
 	}
 	*f.policy = nil
-	f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-	if err = json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"Isolated explicit activation"}`, f.b.Revision), 200), &f.b); err != nil {
-		t.Fatal(err)
-	}
+	progressResumeFixture(t, f)
 	drained := make(chan error, 1)
 	calls := 0
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

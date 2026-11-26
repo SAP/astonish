@@ -23,7 +23,7 @@ func TestBotTaskWorkspaceDockerIntegration(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			f, repo := scheduleFixture(t, scope)
-			b, err := repo.CreateDraft(f.ctx, store.BotCreateRequest{Name: "Workspace integration", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "workspace-integration"})
+			b, err := repo.Create(f.ctx, store.BotCreateRequest{Name: "Workspace integration", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "workspace-integration"})
 			if err != nil {
 				t.Fatal(err)
 			}

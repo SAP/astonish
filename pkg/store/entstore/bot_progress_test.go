@@ -27,7 +27,7 @@ func progressFixture(t *testing.T, scope store.BotScope, reopen ...*func()) (*bo
 		t.Fatal(err)
 	}
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}
-	var db botDraftDB
+	var db botDB
 	var activate func(uuid.UUID) error
 	var closeDB func() error
 	path := filepath.Join(t.TempDir(), "progress.db")
@@ -73,7 +73,7 @@ func progressFixture(t *testing.T, scope store.BotScope, reopen ...*func()) (*bo
 	v := store.DefaultBotVersion()
 	v.Charter = "Durable work"
 	v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Progress", OwnerID: owner, Version: v, IdempotencyKey: "progress"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Progress", OwnerID: owner, Version: v, IdempotencyKey: "progress"})
 	if err != nil {
 		t.Fatal(err)
 	}

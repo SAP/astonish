@@ -37,7 +37,7 @@ func TestBotMemoryForgetDuringRankingFailsClosed(t *testing.T) {
 				t.Fatalf("seed: %+v %v", rows, err)
 			}
 			original := rows[0]
-			var db botDraftDB
+			var db botDB
 			switch s := bots.(type) {
 			case *personalBotStore:
 				db = personalBotDB{client: s.client, content: s.content}
@@ -64,7 +64,7 @@ func TestBotMemoryForgetDuringRankingFailsClosed(t *testing.T) {
 					}
 					fired = true
 					c = context.WithValue(c, routineMutationKey{}, true)
-					if err := db.Transaction(c, func(tx botDraftDB) error {
+					if err := db.Transaction(c, func(tx botDB) error {
 						return mutateControlMemory(c, tx, op, b.HomeSessionID, b.OwnerID, time.Now())
 					}); err != nil {
 						t.Fatal(err)

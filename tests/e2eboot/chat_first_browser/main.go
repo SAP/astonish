@@ -184,8 +184,8 @@ func main() {
 	botJSON := api("GET", botPath+"?scope=personal", nil)
 	var bot map[string]any
 	must(json.Unmarshal([]byte(botJSON), &bot))
-	if bot["status"] != "draft" {
-		panic("minimal Bot not draft")
+	if bot["status"] != "active" {
+		panic("minimal Bot not active")
 	}
 	if page.MustEval(`() => !!document.querySelector('[aria-label="Bot details"]')`).Bool() {
 		panic("dashboard opened at creation")

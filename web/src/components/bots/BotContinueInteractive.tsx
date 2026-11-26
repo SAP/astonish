@@ -26,7 +26,7 @@ function Continuation({ bot, runId, checkpointRevision, disabled, onChange }: Pr
     finally { lock.current = false; if (alive.current) setPending(false) }
   }
   return <section aria-label={`Continue run ${runId}`} className="border-b border-border px-4 py-3 text-sm">
-    <BotEmployeeMessage>{checkpointRevision ? `Continue saved progress at checkpoint ${checkpointRevision}. This does not activate the Bot or its schedule.` : botEmployeeFeedback({ kind: 'continuation_authorization_required' })}</BotEmployeeMessage>
+    <BotEmployeeMessage>{checkpointRevision ? `Continue saved progress at checkpoint ${checkpointRevision}. This does not change lifecycle or enable schedules.` : botEmployeeFeedback({ kind: 'continuation_authorization_required' })}</BotEmployeeMessage>
     <Button disabled={disabled || pending || accepted} onClick={() => { void resume() }}>{accepted ? 'Continuation requested' : pending ? 'Continuing…' : checkpointRevision ? 'Continue saved progress' : 'Continue interactive'}</Button>
     {error && <BotEmployeeMessage role="alert">{error}</BotEmployeeMessage>}
   </section>

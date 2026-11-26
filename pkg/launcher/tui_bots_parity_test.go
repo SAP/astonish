@@ -165,7 +165,7 @@ func TestBotSelectionCannotResurrectAfterDetach(t *testing.T) {
 }
 
 func TestBotOwnerTurnIntentAndSingleChronology(t *testing.T) {
-	for _, status := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused} {
+	for _, status := range []store.BotStatus{store.BotActive, store.BotActive, store.BotPaused} {
 		t.Run(string(status), func(t *testing.T) {
 			id, runID, sessionID := uuid.New(), uuid.New(), uuid.New()
 			calls := 0

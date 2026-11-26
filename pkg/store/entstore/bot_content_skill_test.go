@@ -191,7 +191,7 @@ func TestBotContentSkillPersistence(t *testing.T) {
 			contentDir := t.TempDir()
 			owner := uuid.New()
 			var sqlDB *sql.DB
-			var db botDraftDB
+			var db botDB
 			open := func() {
 				var err error
 				sqlDB, err = sql.Open("sqlite", path)
@@ -221,7 +221,7 @@ func TestBotContentSkillPersistence(t *testing.T) {
 			open()
 			t.Cleanup(func() { _ = sqlDB.Close() })
 			v := botContentSkillFixture()
-			err := db.Transaction(ctx, func(tx botDraftDB) error {
+			err := db.Transaction(ctx, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					if _, err := d.client.Bot.Create().SetID(v.BotID).SetOwnerID(owner).SetName("Skill fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(ctx); err != nil {
@@ -270,7 +270,7 @@ func TestBotContentSkillPersistence(t *testing.T) {
 			next.ParentDigest = v.Digest
 			next.Digest = next.ContentDigest()
 			rollback := errors.New("rollback")
-			if err := db.Transaction(ctx, func(tx botDraftDB) error {
+			if err := db.Transaction(ctx, func(tx botDB) error {
 				if err := tx.(botSkillDB).insertSkillRevision(ctx, next); err != nil {
 					return err
 				}

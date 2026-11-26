@@ -110,12 +110,12 @@ func TestRoutinePauseAlreadyPausedConversation(t *testing.T) {
 
 func TestRoutinePriorityPauseLifecycleMatrix(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, status := range []store.BotStatus{store.BotActive, store.BotDraft, store.BotPaused, store.BotStopped, store.BotDeleted} {
+		for _, status := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotStopped, store.BotDeleted} {
 			t.Run(string(scope)+"/"+string(status), func(t *testing.T) {
 				r, s, owner, _, q := authorizedScheduleFixture(t, scope)
 				// Exercise the transition primitive against each lifecycle; run admission is
 				// tested separately and is never inferred from model intent or reason prose.
-				err := r.db.Transaction(owner, func(tx botDraftDB) error {
+				err := r.db.Transaction(owner, func(tx botDB) error {
 					rec, err := tx.GetBot(owner, q.Lease.BotID)
 					if err != nil {
 						return err
@@ -133,7 +133,7 @@ func TestRoutinePriorityPauseLifecycleMatrix(t *testing.T) {
 				}
 				before, _ := r.db.GetBot(owner, q.Lease.BotID)
 				op := store.BotOperation{ID: uuid.New(), IdempotencyKey: "matrix", MandateRef: q.MandateRef, Payload: store.BotControlPayload{Operation: store.BotControlPriorityPause, Reason: "pause"}, Status: store.BotOperationPending, Decision: store.BotOperationExecute, Revision: 1}
-				err = r.db.Transaction(owner, func(tx botDraftDB) error {
+				err = r.db.Transaction(owner, func(tx botDB) error {
 					rec, err := tx.GetBot(owner, q.Lease.BotID)
 					if err != nil {
 						return err

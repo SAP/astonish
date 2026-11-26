@@ -39,7 +39,7 @@ func testBotTitleChatPTYAnswer(t *testing.T, mode string) {
 	if err := os.MkdirAll(home+"/astonish", 0700); err != nil {
 		t.Fatal(err)
 	}
-	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Title draft", Scope: store.BotScopePersonal, Status: store.BotDraft, Version: 1, Revision: 1}
+	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Title draft", Scope: store.BotScopePersonal, Status: store.BotActive, Version: 1, Revision: 1}
 	base := "/api/studio/bots/" + bot.ID.String()
 	state := store.BotRunState{SchemaVersion: 1, BotID: bot.ID, RunID: uuid.New(), HomeSessionID: bot.HomeSessionID, SessionID: uuid.New(), Presentation: store.BotRunPresentationHomeInteractive, Status: store.RunWaitingApproval, StateSequence: 3}
 	answers := make(chan struct{}, 2)

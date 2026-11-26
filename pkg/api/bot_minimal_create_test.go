@@ -17,9 +17,9 @@ type minimalBotCreateStore struct {
 	request store.BotCreateRequest
 }
 
-func (s *minimalBotCreateStore) CreateDraft(_ context.Context, q store.BotCreateRequest) (*store.Bot, error) {
+func (s *minimalBotCreateStore) Create(_ context.Context, q store.BotCreateRequest) (*store.Bot, error) {
 	s.request = q
-	return &store.Bot{ID: uuid.New(), Status: store.BotDraft}, nil
+	return &store.Bot{ID: uuid.New(), Status: store.BotActive}, nil
 }
 func TestBotMinimalCreateDefaults(t *testing.T) {
 	for _, test := range []struct{ name, body, charter string }{

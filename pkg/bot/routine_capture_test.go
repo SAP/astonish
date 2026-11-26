@@ -38,7 +38,7 @@ func TestRoutineCaptureLedgerSnapshot(t *testing.T) {
 			case "revision":
 				invalid.Revision = 0
 			case "operation":
-				invalid.Operation = store.BotControlActivate
+				invalid.Operation = store.BotControlResume
 			case "applied":
 				invalid.Status = store.BotOperationApplied
 			}

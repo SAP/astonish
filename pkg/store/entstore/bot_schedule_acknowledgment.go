@@ -16,7 +16,7 @@ import (
 // scheduleAcknowledgment also binds the closed routine metadata set. Candidate
 // bodies are evidence, never authority. This runs under the source lease before
 // application; its immutable marker is independent of publication order.
-func scheduleAcknowledgment(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run store.BotRun, work *store.BotWorkState, q store.BotRunCommit) (*store.BotReportAcknowledgment, error) {
+func scheduleAcknowledgment(ctx context.Context, tx botDB, rec *botStoredRecord, run store.BotRun, work *store.BotWorkState, q store.BotRunCommit) (*store.BotReportAcknowledgment, error) {
 	if q.Status != store.RunSucceeded || q.Report.Failure != nil || len(q.Report.Changed) != 0 || len(q.Report.Unverified) != 0 || len(q.Report.Artifacts) != 0 || len(q.Report.NeedsApproval) != 0 || q.Report.NextRunAt != nil || work == nil || work.Candidate == nil || run.MandateRef == nil {
 		return nil, nil
 	}

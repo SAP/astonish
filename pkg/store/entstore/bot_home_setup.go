@@ -31,7 +31,7 @@ func AuthorizeBotHomeSetup(ctx context.Context, bots store.BotStore, id store.Bo
 	if _, err = r.auth.authorize(ctx, rec.Bot.OwnerID, true); err != nil {
 		return nil, err
 	}
-	if rec.Bot.Status != store.BotDraft || rec.ActiveRunID != nil || rec.LeaseExpiresAt != nil {
+	if (rec.Bot.Status != store.BotActive && rec.Bot.Status != store.BotPaused) || rec.ActiveRunID != nil || rec.LeaseExpiresAt != nil {
 		return nil, store.ErrBotConflict
 	}
 	// Exactly one revision may have been consumed by a successful lost reply.

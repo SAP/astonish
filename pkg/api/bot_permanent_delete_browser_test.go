@@ -255,7 +255,7 @@ func TestBotPermanentDeleteBrowserAcceptance(t *testing.T) {
 		return *got
 	}
 	target, other = provision(target), provision(other)
-	_, err = repo.RequestRun(ownerCtx, store.BotRunRequest{BotID: target.ID, Version: target.Version, Intent: store.BotIntentDraftConversation, Trigger: store.TriggerManual, Instructions: "disposable queued run", IdempotencyKey: "delete-proof-run"})
+	_, err = repo.RequestRun(ownerCtx, store.BotRunRequest{BotID: target.ID, Version: target.Version, Intent: store.BotIntentConversation, Trigger: store.TriggerManual, Instructions: "disposable queued run", IdempotencyKey: "delete-proof-run"})
 	must(err)
 	proof, err := backend.command(ctx, "run", "--rm", "--pull=never", "--network=none", "--label", "astonish.delete-proof="+backend.token, "-v", target.Home.StorageKey+":/home/astonish:ro", "alpine:latest", "cat", "/home/astonish/candidate.txt")
 	must(err)

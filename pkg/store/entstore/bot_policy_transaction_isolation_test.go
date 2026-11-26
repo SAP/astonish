@@ -16,7 +16,7 @@ func TestBotPolicyTransactionDoesNotCrossClients(t *testing.T) {
 	if err := other.Save(ctx, &store.NetworkPolicyRule{Host: "other-team.test", Action: store.NetworkPolicyAllow}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.db.Transaction(ctx, func(tx botDraftDB) error {
+	if err := first.db.Transaction(ctx, func(tx botDB) error {
 		rules, err := other.List(botPolicyContext(ctx, tx))
 		if err != nil {
 			return err

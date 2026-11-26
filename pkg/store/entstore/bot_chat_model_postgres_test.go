@@ -32,21 +32,21 @@ func TestIntegrationPostgresBotChatModel(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Research an arbitrary title"
 			q := store.BotCreateRequest{Name: v.Charter, OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "pg-chat-model"}
-			first, err := f.repo.CreateDraftAndStart(ctx, q)
+			first, err := f.repo.CreateAndStart(ctx, q)
 			if err != nil {
 				t.Fatal(err)
 			}
 			run := first.Run
-			if first.Status != store.BotDraft || !run.IsInteractiveChat() || run.CallerCeiling == nil {
+			if first.Status != store.BotActive || !run.IsInteractiveChat() || run.CallerCeiling == nil {
 				t.Fatal("title did not start bounded interactive draft")
 			}
 			f.reopenReviewed(t)
-			again, err := f.repo.CreateDraftAndStart(ctx, q)
+			again, err := f.repo.CreateAndStart(ctx, q)
 			if err != nil || again.ID != first.ID || again.Run.ID != run.ID || again.UserEventID != first.UserEventID {
 				t.Fatalf("reopen replay: %+v %v", again, err)
 			}
 			q.Name += " changed"
-			if _, err := f.repo.CreateDraftAndStart(ctx, q); err != store.ErrBotConflict {
+			if _, err := f.repo.CreateAndStart(ctx, q); err != store.ErrBotConflict {
 				t.Fatalf("changed replay: %v", err)
 			}
 			saved, err := f.repo.db.ReadRun(ctx, first.ID, run.ID)
@@ -128,7 +128,7 @@ func TestIntegrationPostgresBotChatModel(t *testing.T) {
 				t.Fatalf("exactly one durable turn: %+v %v", runs, err)
 			}
 			current, err := f.repo.Get(ctx, first.ID)
-			if err != nil || current.Status != store.BotDraft {
+			if err != nil || current.Status != store.BotActive {
 				t.Fatal("interactive continuation activated autonomous work")
 			}
 		})

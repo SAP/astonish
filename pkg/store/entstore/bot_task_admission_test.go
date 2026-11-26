@@ -22,7 +22,7 @@ func TestBotTaskAdmissionPin(t *testing.T) {
 			}
 			pin := func(botID uuid.UUID, id *uuid.UUID) (*store.BotTaskRevision, error) {
 				var result *store.BotTaskRevision
-				err := repo.db.Transaction(owner, func(tx botDraftDB) error {
+				err := repo.db.Transaction(owner, func(tx botDB) error {
 					var e error
 					result, e = pinTaskHead(owner, tx, botID, id)
 					return e

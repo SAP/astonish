@@ -144,7 +144,7 @@ func TestBotAgentClaimInitializesUnstartedWork(t *testing.T) {
 // test setup only: production SaveWork must never switch an in-flight protocol.
 func pinLegacyWorkFixture(t *testing.T, repo *botRepository, ctx context.Context, lease store.BotLease) {
 	t.Helper()
-	err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := repo.db.Transaction(ctx, func(tx botDB) error {
 		run, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
 		if err != nil {
 			return err
@@ -186,18 +186,18 @@ func finishedAgentWorkReport(t *testing.T, repo *botRepository, ctx context.Cont
 // priorAttemptClaimDB supplies persisted historical input at the claim read seam.
 // ClaimLease still runs against the real scoped database and persists the result.
 type priorAttemptClaimDB struct {
-	botDraftDB
+	botDB
 	runID store.RunID
 	kind  string
 }
 
-func (d priorAttemptClaimDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
-		return fn(priorAttemptClaimDB{botDraftDB: tx, runID: d.runID, kind: d.kind})
+func (d priorAttemptClaimDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
+		return fn(priorAttemptClaimDB{botDB: tx, runID: d.runID, kind: d.kind})
 	})
 }
 func (d priorAttemptClaimDB) ReadRun(ctx context.Context, botID store.BotID, runID store.RunID) (*botStoredRun, error) {
-	run, err := d.botDraftDB.ReadRun(ctx, botID, runID)
+	run, err := d.botDB.ReadRun(ctx, botID, runID)
 	if err != nil || runID != d.runID || run.Run.Status != store.RunQueued {
 		return run, err
 	}
@@ -229,7 +229,7 @@ func TestBotAgentClaimPreservesPriorAttempts(t *testing.T) {
 				identity.RunID = run.ID
 				worker = execution.WithBotRunIdentity(owner, identity)
 				originalDB := repo.db
-				repo.db = priorAttemptClaimDB{botDraftDB: originalDB, runID: run.ID, kind: kind}
+				repo.db = priorAttemptClaimDB{botDB: originalDB, runID: run.ID, kind: kind}
 				lease, err = repo.ClaimRun(worker, store.BotClaimRequest{BotID: run.BotID, RunID: run.ID, WorkerID: "prior", ExpiresAt: now.Add(time.Minute)})
 				repo.db = originalDB
 				if err != nil {
@@ -393,7 +393,7 @@ func runtimeFixture(t *testing.T, scope store.BotScope) (*botRepository, store.B
 	owner, _ := execution.PrincipalFromContext(ctx)
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe saved input"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Runtime", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: initial.ID.String()})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Runtime", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: initial.ID.String()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func runtimeFixture(t *testing.T, scope store.BotScope) (*botRepository, store.B
 		t.Fatal(err)
 	}
 	repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
-	b, err = repo.Activate(ctx, store.BotLifecycleRequest{Reason: "Controlled runtime test", BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision})
+	err = repo.activationCheck(ctx, *b, v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 			var closeDB func() error
 			var repo *botRepository
 			open := func() {
-				var db botDraftDB
+				var db botDB
 				connection, err := sql.Open("sqlite", dsn)
 				if err != nil {
 					t.Fatal(err)
@@ -614,7 +614,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 			t.Cleanup(func() { _ = closeDB() })
 			v := store.DefaultBotVersion()
 			v.Charter = "Daily factual report"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Work", OwnerID: owner, Version: v, Goals: []store.BotGoal{{Title: "Report", CompletionCriteria: "Include dated sources"}}, IdempotencyKey: "work"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Work", OwnerID: owner, Version: v, Goals: []store.BotGoal{{Title: "Report", CompletionCriteria: "Include dated sources"}}, IdempotencyKey: "work"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -645,7 +645,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 				t.Fatalf("criteria not pinned: %+v", work)
 			}
 			goal := work.Contract.Goals[0]
-			if err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(ctx, func(tx botDB) error {
 				goal.Revision++
 				goal.CompletionCriteria = "New criteria"
 				return tx.UpdateGoal(ctx, goal, goal.Revision-1)
@@ -685,7 +685,7 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 			// An actual DB error rolls back the attempted next transition.
 			fail := fmt.Errorf("injected work persistence failure")
 			originalDB := repo.db
-			repo.db = botWorkFailDB{botDraftDB: originalDB, failure: fail}
+			repo.db = botWorkFailDB{botDB: originalDB, failure: fail}
 			blocked := saved.Clone()
 			blocked.Phase = store.BotWorkBlocked
 			blocked.Unresolved = []string{"missing source"}
@@ -732,18 +732,18 @@ func TestBotWorkSQLiteReopenAndClaim(t *testing.T) {
 }
 
 type botWorkFailDB struct {
-	botDraftDB
+	botDB
 	failure error
 }
 
-func (d botWorkFailDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(botWorkFailDB{botDraftDB: tx, failure: d.failure}) })
+func (d botWorkFailDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(botWorkFailDB{botDB: tx, failure: d.failure}) })
 }
 func (d botWorkFailDB) fenceTranscript(ctx context.Context, l store.BotLease, now time.Time) error {
-	return d.botDraftDB.(botTranscriptDB).fenceTranscript(ctx, l, now)
+	return d.botDB.(botTranscriptDB).fenceTranscript(ctx, l, now)
 }
 func (d botWorkFailDB) appendRunTranscript(ctx context.Context, b store.Bot, r store.BotRun, e *adksession.Event) error {
-	return d.botDraftDB.(botTranscriptDB).appendRunTranscript(ctx, b, r, e)
+	return d.botDB.(botTranscriptDB).appendRunTranscript(ctx, b, r, e)
 }
 func (d botWorkFailDB) updateWorkRun(context.Context, botStoredRun, store.BotLease, time.Time) error {
 	return d.failure

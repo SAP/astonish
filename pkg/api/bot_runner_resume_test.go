@@ -71,7 +71,7 @@ func (resumeTestGuard) Authorize(ctx context.Context, a execution.ActionDescript
 }
 
 func TestBotChatExactApprovalContinuation(t *testing.T) {
-	for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentDraftTest} {
+	for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentRegular} {
 		t.Run(string(intent), func(t *testing.T) {
 			testBotChatExactApprovalContinuation(t, intent)
 		})

@@ -19,7 +19,7 @@ func TestBotSnapshotPagesAndViewerReadState(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+				if err := repo.db.Transaction(ctx, func(tx botDB) error {
 					if err := tx.AdvanceSequence(ctx, run.BotID, rec.LastSequence); err != nil {
 						return err
 					}

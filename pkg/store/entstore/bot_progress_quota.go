@@ -29,7 +29,7 @@ func progressQuotaUsage(rec *botStoredRecord) (mandateUsage, error) {
 
 // Caller owns the root fence. The logical ledger moves to this run's private
 // envelope, not a growing root suspended-run map. Lifetime/daily totals stay put.
-func suspendProgressQuota(ctx context.Context, tx botDraftDB, rec *botStoredRecord, s *botStoredRun) error {
+func suspendProgressQuota(ctx context.Context, tx botDB, rec *botStoredRecord, s *botStoredRun) error {
 	if s.Run.MandateRef == nil {
 		return nil
 	}
@@ -65,7 +65,7 @@ func (s *botMandateRuntime) progressOccupancy(ctx context.Context, q store.BotMa
 	if err := q.Validate(s.repo.clock()); err != nil {
 		return err
 	}
-	return s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	return s.repo.db.Transaction(ctx, func(tx botDB) error {
 		rec, run, err := s.repo.progressMutation(ctx, tx, q.Mutation)
 		if err != nil {
 			return err

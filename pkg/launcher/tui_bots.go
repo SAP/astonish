@@ -214,7 +214,7 @@ func (b *botPlatformBackend) RunTurn(ctx context.Context, text string, opts back
 		if err != nil {
 			return nil, err
 		}
-		if bot.Status != store.BotDraft && bot.Status != store.BotPaused && bot.Status != store.BotActive {
+		if bot.Status != store.BotActive && bot.Status != store.BotPaused {
 			return nil, fmt.Errorf("Bot %s cannot converse", bot.Status)
 		}
 		_, err = b.bots.SendMessage(ctx, bot.ID.String(), bot.Version, uuid.NewString(), text)

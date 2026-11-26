@@ -30,7 +30,7 @@ func (r *botRepository) BeginPermanentDelete(ctx context.Context, q store.BotPer
 }
 
 func (r *botRepository) PurgeDeleted(ctx context.Context, id store.BotID, revision int64) error {
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err

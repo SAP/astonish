@@ -17,7 +17,7 @@ func TestBotPlanningDurableOwnerMode(t *testing.T) {
 			p, _ := execution.PrincipalFromContext(ctx)
 			v := store.DefaultBotVersion()
 			v.Charter = "Plan changes safely"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Planning", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "planning"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Planning", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "planning"})
 			if err != nil {
 				t.Fatal(err)
 			}

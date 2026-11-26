@@ -35,8 +35,13 @@ func TestBotScopedSearchClassifierMarksBoundSearchReadOnly(t *testing.T) {
 	classifier := botScopedSearchClassifier{services: f.services, config: cfg, fallback: scopedSearchFallback{}}
 	for _, name := range []string{"perplexity_web_search", "configured_search/perplexity_web_search"} {
 		action, err := classifier.DescribeAction(f.ctx, name, raw)
-		if err != nil || action.Tool != name || action.Effect != execution.EffectRead || !action.ConstraintsVerified || action.TargetFingerprint == "" {
-			t.Fatalf("configured search not bound read: %+v err=%v", action, err)
+		qualified := name == "configured_search/perplexity_web_search"
+		wantEffect := execution.EffectUnknown
+		if qualified {
+			wantEffect = execution.EffectRead
+		}
+		if err != nil || action.Tool != name || action.Effect != wantEffect || action.ConstraintsVerified != qualified || action.TargetFingerprint == "" {
+			t.Fatalf("configured search distinction lost: %+v err=%v", action, err)
 		}
 	}
 	rejecting := botScopedSearchClassifier{services: f.services, config: cfg, fallback: scopedSearchRejectFallback{}}

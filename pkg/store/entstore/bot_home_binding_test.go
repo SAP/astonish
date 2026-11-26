@@ -69,7 +69,7 @@ func TestBotHomeBindingPersistence(t *testing.T) {
 			defer func() { _ = closeDB() }()
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe only"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Registry", OwnerID: owner, Version: v, IdempotencyKey: "binding"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Registry", OwnerID: owner, Version: v, IdempotencyKey: "binding"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +166,7 @@ func TestBotHomeBindingPersistence(t *testing.T) {
 				})
 			}
 			// A callback racing a revision change must never commit its old binding.
-			raceBot, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Race", OwnerID: owner, Version: v, IdempotencyKey: "race"})
+			raceBot, err := repo.Create(ctx, store.BotCreateRequest{Name: "Race", OwnerID: owner, Version: v, IdempotencyKey: "race"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -242,7 +242,7 @@ func TestBotHomeBindingPersistence(t *testing.T) {
 				open()
 			}
 			got, err := public.Get(ctx, b.ID)
-			if err != nil || got.Home != q.Home || got.Revision != b.Revision+1 || got.Status != store.BotDraft {
+			if err != nil || got.Home != q.Home || got.Revision != b.Revision+1 || got.Status != store.BotActive {
 				t.Fatalf("binding reopen: %+v %v", got, err)
 			}
 			runs, err := public.ListRuns(ctx, b.ID, store.BotPage{})

@@ -174,7 +174,7 @@ func (r *botRepository) pollScheduledHook(ctx context.Context, q store.BotSchedu
 	}
 	return false, nil, nil
 }
-func (r *botRepository) validateHookOccurrence(ctx context.Context, tx botDraftDB, rec *botStoredRecord, tr store.TriggerSpec, q store.BotScheduledOccurrence) error {
+func (r *botRepository) validateHookOccurrence(ctx context.Context, tx botDB, rec *botStoredRecord, tr store.TriggerSpec, q store.BotScheduledOccurrence) error {
 	if rec.Bot.Status != store.BotActive || rec.Bot.Version != q.Version || !tr.Enabled || tr.HookStatus != store.HookEnabled || tr.Fingerprint != triggerCredentialFingerprint(ctx, tr) || tr.ScheduleID == nil || tr.ScheduleID.String() != q.JobID || q.OccurrenceAt.IsZero() || q.OccurrenceAt.After(r.clock()) {
 		return store.ErrBotConflict
 	}

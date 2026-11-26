@@ -29,7 +29,7 @@ func (s *teamBotStore) ReadCursor(ctx context.Context, id store.BotID) (*store.B
 	return s.repository().ReadCursor(ctx, id)
 }
 
-func (r *botRepository) viewerRecord(ctx context.Context, db botDraftDB, id store.BotID) (*botStoredRecord, *store.BotReadCursor, error) {
+func (r *botRepository) viewerRecord(ctx context.Context, db botDB, id store.BotID) (*botStoredRecord, *store.BotReadCursor, error) {
 	actor, err := r.auth.authorize(ctx, uuid.Nil, false)
 	if err != nil {
 		return nil, nil, err
@@ -71,7 +71,7 @@ func (r *botRepository) ReadCursor(ctx context.Context, id store.BotID) (*store.
 // not sufficient to count decisions or locate the latest finished run.
 func (r *botRepository) Snapshot(ctx context.Context, id store.BotID) (*store.BotSnapshot, error) {
 	var result *store.BotSnapshot
-	err := r.db.Transaction(ctx, func(db botDraftDB) error {
+	err := r.db.Transaction(ctx, func(db botDB) error {
 		rec, cursor, err := r.viewerRecord(ctx, db, id)
 		if err != nil {
 			return err

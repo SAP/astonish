@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
@@ -132,6 +133,38 @@ func TestBotSharedSearchFailsClosed(t *testing.T) {
 
 // This is real tool/provider HTTP execution with a controlled local model, not
 // live-provider, scheduler-trigger, or physical sandbox evidence.
+// scopedSearchGrants binds exact approvals to the configured provider target,
+// matching the production classifier rather than the unbound catalog fallback.
+func scopedSearchGrants(t *testing.T, f *botFactoryFixture, cfg *config.AppConfig, actions map[string][]map[string]any) {
+	t.Helper()
+	classifier := botScopedSearchClassifier{services: f.services, config: cfg, fallback: BotCatalogueClassifier{}}
+	var names []string
+	var grants []execution.ScopedGrant
+	for name, calls := range actions {
+		names = append(names, name)
+		for _, args := range calls {
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			action, err := classifier.DescribeAction(f.ctx, name, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, err := action.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			grants = append(grants, execution.ScopedGrant{ID: uuid.New(), Identity: f.req.Policy.Identity(), ActionDigest: digest, ExpiresAt: time.Now().Add(time.Hour)})
+		}
+	}
+	var err error
+	f.req.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: names, Grants: grants})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChatRuntimeConfiguredSearchProviderParity(t *testing.T) {
 	const name = "perplexity_web_search"
 	for _, scope := range []chatruntime.ResourceScope{chatruntime.ResourceScopePersonal, chatruntime.ResourceScopeTeam} {
@@ -152,9 +185,6 @@ func TestChatRuntimeConfiguredSearchProviderParity(t *testing.T) {
 				guard := &drillGuard{consumed: map[uuid.UUID]bool{}}
 				if mode == "interactive-bot" {
 					setBotSharedInteractive(f)
-				}
-				if mode == "autonomous-bot" {
-					drillGrants(t, f, map[string][]map[string]any{name: {args}})
 				}
 				var calls atomic.Int32
 				key := "selected-" + string(scope) + "-search-secret"
@@ -189,6 +219,9 @@ func TestChatRuntimeConfiguredSearchProviderParity(t *testing.T) {
 				f.services.PlatformSettings = botKnowledgePlatformSettings{row: &store.PlatformSettings{WebSearchTool: cfg.General.WebSearchTool, PerplexityWebSearch: &store.PerplexityWebSearchSettings{Provider: "scoped-search", Model: "sonar-fixture"}, Providers: map[string]store.ProviderConfig{"scoped-search": {"type": "litellm", "api_key": key, "base_url": server.URL}}}}
 				f.services.OrgSettings = botKnowledgeOrgSettings{row: &store.OrgSettings{}}
 				f.services.Settings = botKnowledgeTeamSettings{row: &store.TeamSettings{}}
+				if mode == "autonomous-bot" {
+					scopedSearchGrants(t, f, cfg, map[string][]map[string]any{name: {args}})
+				}
 				var factoryCalls int
 				factory := func(ctx context.Context, p, m string, selected *config.AppConfig) (model.LLM, error) {
 					factoryCalls++

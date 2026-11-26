@@ -47,6 +47,7 @@ func TestBotSharedResearchToolErrorCorrection(t *testing.T) {
 			safe.Catalog = &ChatCatalogResources{Pool: &sharedBotDispatchPool{client: &sourceAccessCatalogueClient{response: []byte(`{"content":"fixture"}`)}}}
 			safe.Research = episode
 			safe.PolicyRuntime.Classifier = BotCatalogueClassifier{}
+			safe.PolicyRuntime.Mandate = req.Mandate
 			safe.ProviderFactory = func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
 				factoryCalls++
 				return search, nil

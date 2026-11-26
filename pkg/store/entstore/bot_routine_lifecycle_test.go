@@ -25,7 +25,7 @@ func TestEmployeeRoutineResumeTargets(t *testing.T) {
 			}
 			scheduleID := o.Receipt.Schedule.ScheduleID
 			pause := store.BotOperation{IdempotencyKey: "pause-test", ID: uuid.New(), MandateRef: q.MandateRef, Payload: store.BotControlPayload{Operation: store.BotControlPriorityPause, Reason: "stop"}, Decision: store.BotOperationExecute, Status: store.BotOperationApplying, Revision: 1}
-			err = r.db.Transaction(owner, func(tx botDraftDB) error {
+			err = r.db.Transaction(owner, func(tx botDB) error {
 				rec, e := tx.GetBot(owner, q.MandateRef.BotID)
 				if e != nil {
 					return e
@@ -41,7 +41,7 @@ func TestEmployeeRoutineResumeTargets(t *testing.T) {
 			}
 			resume := store.BotOperation{ID: uuid.New(), Payload: store.BotControlPayload{Operation: store.BotControlResumeTasks, Reason: "resume only task", ResumeTargets: &store.BotControlResumeTargets{ScheduleIDs: []uuid.UUID{uuid.New()}}}}
 			apply := func() error {
-				return r.db.Transaction(owner, func(tx botDraftDB) error {
+				return r.db.Transaction(owner, func(tx botDB) error {
 					rec, e := tx.GetBot(owner, q.MandateRef.BotID)
 					if e != nil {
 						return e
@@ -62,7 +62,7 @@ func TestEmployeeRoutineResumeTargets(t *testing.T) {
 			}
 			// Pause again, then expire the original task grant. No refresh on resume.
 			pause.ID = uuid.New()
-			err = r.db.Transaction(owner, func(tx botDraftDB) error {
+			err = r.db.Transaction(owner, func(tx botDB) error {
 				rec, e := tx.GetBot(owner, q.MandateRef.BotID)
 				if e != nil {
 					return e

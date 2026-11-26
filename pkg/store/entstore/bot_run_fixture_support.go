@@ -29,7 +29,7 @@ func PinBotAssessmentRunFixture(t testing.TB, ctx context.Context, scoped store.
 	if _, err := repo.auth.authorize(ctx, uuid.Nil, true); err != nil {
 		return err
 	}
-	return repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	return repo.db.Transaction(ctx, func(tx botDB) error {
 		b, err := tx.GetBot(ctx, botID)
 		if err != nil {
 			return err

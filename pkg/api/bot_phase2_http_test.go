@@ -336,7 +336,7 @@ func TestBotPhase2HTTPAcceptance(t *testing.T) {
 			if err := json.Unmarshal(request(t, "GET", path+suffix, owner, "", 200), &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Status != store.BotDraft {
+			if saved.Status != store.BotActive {
 				t.Fatal("document editing activated Bot")
 			}
 			request(t, "DELETE", entry+suffix, owner, "", 204)

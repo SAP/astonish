@@ -19,7 +19,7 @@ func TestBotMemoryCorrectionIsolation(t *testing.T) {
 			b, _ := repo.Get(ctx, run.BotID)
 			v := store.DefaultBotVersion()
 			v.Charter = "Other Bot"
-			other, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "other"})
+			other, err := repo.Create(ctx, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "other"})
 			if err != nil {
 				t.Fatal(err)
 			}

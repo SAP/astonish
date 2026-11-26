@@ -51,7 +51,7 @@ func (r *documentRepository) ApplyVersion(_ context.Context, req store.BotVersio
 	if r.conflict || req.ExpectedRevision != r.bot.Revision {
 		return nil, store.ErrBotConflict
 	}
-	if r.bot.Status != store.BotDraft {
+	if r.bot.Status != store.BotActive {
 		return nil, store.ErrBotUnsupported
 	}
 	r.applied++
@@ -71,7 +71,7 @@ func documentFixture(scope store.BotScope) (*Documents, *documentRepository) {
 	v.Persona.Identity = "Assistant"
 	v.Persona.User = "Owner preferences"
 	v.Autonomy.AllowedTools = []string{"read_file"}
-	r := &documentRepository{bot: store.Bot{ID: id, Scope: scope, Version: 1, Revision: 1, Status: store.BotDraft}, versions: map[int64]store.BotVersion{1: v}}
+	r := &documentRepository{bot: store.Bot{ID: id, Scope: scope, Version: 1, Revision: 1, Status: store.BotActive}, versions: map[int64]store.BotVersion{1: v}}
 	d, _ := NewDocuments(r, &documentFiles{id: id, data: map[string]string{"SOUL.md": "Disk soul", "IDENTITY.md": "Disk identity", "USER.md": "Disk user", "CHARTER.md": "Disk charter", "MEMORY.md": "# Memory\nRemember reports/result.md"}})
 	return d, r
 }
@@ -215,7 +215,7 @@ func TestDocumentsEditDenials(t *testing.T) {
 		{"revoked", func(_ *DocumentEdit, r *documentRepository) { r.revoked = true }, store.ErrBotForbidden},
 		{"foreign", func(q *DocumentEdit, _ *documentRepository) { q.BotID = uuid.New() }, store.ErrBotForbidden},
 		{"concurrent edit", func(_ *DocumentEdit, r *documentRepository) { r.conflict = true }, store.ErrBotConflict},
-		{"active", func(_ *DocumentEdit, r *documentRepository) { r.bot.Status = store.BotActive }, store.ErrBotUnsupported},
+		{"deleted", func(_ *DocumentEdit, r *documentRepository) { r.bot.Status = store.BotDeleted }, store.ErrBotUnsupported},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

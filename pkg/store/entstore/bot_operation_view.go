@@ -11,7 +11,7 @@ import (
 )
 
 // Uses the reserved head index and direct activity-key reads, never journal scans.
-func snapshotBotOperations(ctx context.Context, db botDraftDB, rec *botStoredRecord) ([]store.BotOperationView, error) {
+func snapshotBotOperations(ctx context.Context, db botDB, rec *botStoredRecord) ([]store.BotOperationView, error) {
 	out := []store.BotOperationView{}
 	keys := []string{}
 	for key := range rec.Metadata {
@@ -51,7 +51,7 @@ func snapshotBotOperations(ctx context.Context, db botDraftDB, rec *botStoredRec
 	return out, nil
 }
 
-func appendBotOperationViewTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o store.BotOperation, at time.Time) error {
+func appendBotOperationViewTx(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation, at time.Time) error {
 	v, err := store.ProjectBotOperation(rec.Bot, o, rec.LastSequence)
 	if err != nil {
 		return err

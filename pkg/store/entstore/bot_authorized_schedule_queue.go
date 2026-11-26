@@ -18,7 +18,7 @@ type botScheduledQueueDB interface {
 	saveScheduledQueueRun(context.Context, botStoredRun, int64) error
 }
 
-func (r *botRepository) reconcileScheduledQueueTx(ctx context.Context, tx botDraftDB, old, next store.BotVersion) error {
+func (r *botRepository) reconcileScheduledQueueTx(ctx context.Context, tx botDB, old, next store.BotVersion) error {
 	after := uuid.Nil
 	for {
 		runs, err := tx.ReadRuns(ctx, next.BotID, 200, after)

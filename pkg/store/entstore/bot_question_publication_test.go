@@ -10,7 +10,7 @@ import (
 )
 
 type questionPublicationDB struct {
-	botDraftDB
+	botDB
 	approvals map[uuid.UUID]*store.BotApproval
 }
 

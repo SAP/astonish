@@ -336,14 +336,14 @@ func coherentWorkflow(page *rod.Page, api func(string, string, any) string, stat
 	}
 	stage("minimal-conversation", func() string {
 		v := bot()
-		if v.Status != store.BotDraft || len(runs()) != 0 {
-			panic("not fresh minimal draft")
+		if v.Status != store.BotActive || len(runs()) != 0 {
+			panic("not fresh minimal Active Bot")
 		}
 		if page.MustEval(`()=>!!document.querySelector('[aria-label="Bot details"]')`).Bool() {
 			panic("details opened automatically")
 		}
 		captureModes("minimal-conversation")
-		return "draft; zero runs; four actual-theme viewport screenshots; no default tabs; conversation Home " + v.HomeSessionID.String()
+		return "Active; zero runs; four actual-theme viewport screenshots; no default tabs; conversation Home " + v.HomeSessionID.String()
 	})
 	stage("details-no-reconnect", func() string {
 		page.MustEval(`()=>{window.__composer=document.querySelector('[data-testid="chat-input"]');window.__streams=0;window.__oldFetch=window.fetch;window.fetch=function(...args){if(String(args[0]).includes('/stream'))window.__streams++;return window.__oldFetch.apply(this,args)}}`)
@@ -356,7 +356,7 @@ func coherentWorkflow(page *rod.Page, api func(string, string, any) string, stat
 		return "same composer; zero new stream fetches"
 	})
 	stage("responsibility-confirmed", func() string {
-		p := propose("responsibility", store.BotControlResponsibility, "Responsibility exactly: Maintain a local smoke-test note only. No network, external publishing or contacting people. Do not activate.")
+		p := propose("responsibility", store.BotControlResponsibility, "Responsibility exactly: Maintain a local smoke-test note only. No network, external publishing or contacting people. Do not start work or enable schedules.")
 		if p.Payload.Responsibility == nil || !strings.Contains(*p.Payload.Responsibility, "local smoke-test note") {
 			panic("wrong responsibility")
 		}
@@ -365,7 +365,7 @@ func coherentWorkflow(page *rod.Page, api func(string, string, any) string, stat
 	})
 	// Configuration is a prerequisite, never disguised as one of the nine outcomes.
 	if cp.IDs["configured"] == "" {
-		p := propose("configuration", store.BotControlConfigurationOperation, "Configure supervised autonomy; allowed_tools exactly write_file and load_file; allowed_paths exactly /root/chat-first-proof.txt (the retained Docker Home is /root, not /workspace). No allowed_hosts, contact or external publishing; zero spend; budget max_runtime_seconds 900; delivery notify on_change. Preserve Draft and disabled schedules.")
+		p := propose("configuration", store.BotControlConfigurationOperation, "Configure supervised autonomy; allowed_tools exactly write_file and load_file; allowed_paths exactly /root/chat-first-proof.txt (the retained Docker Home is /root, not /workspace). No allowed_hosts, contact or external publishing; zero spend; budget max_runtime_seconds 900; delivery notify on_change. Preserve Active status and disabled schedules.")
 		if !exactGrant(p) {
 			panic("configuration scope mismatch")
 		}
@@ -519,7 +519,7 @@ func coherentWorkflow(page *rod.Page, api func(string, string, any) string, stat
 		return "correction=" + p.ID.String() + " answer=" + answer.ID.String()
 	})
 	stage("scheduled-tick-return", func() string {
-		p := propose("schedule", store.BotControlScheduleCreate, "Create one reviewed cron schedule: * * * * * UTC, enabled true, catch_up_once false; instructions: Reply exactly RETAINED_HOME_TICK, no tools or actions. Keep Bot Draft until a separate activation review.")
+		p := propose("schedule", store.BotControlScheduleCreate, "Create one reviewed cron schedule: * * * * * UTC, enabled true, catch_up_once false; instructions: Reply exactly RETAINED_HOME_TICK, no tools or actions. Keep the Bot Active; enable only this separately reviewed schedule, without an immediate task or replaying prior tools.")
 		if p.Payload.Schedule == nil {
 			panic("missing schedule")
 		}
@@ -536,8 +536,9 @@ func coherentWorkflow(page *rod.Page, api func(string, string, any) string, stat
 		must(resolveErr)
 		cp.IDs["trigger"] = t.ID.String()
 		persist()
-		a := propose("activation", store.BotControlActivate, "Propose activation of this Draft Bot and its sole reviewed every-minute schedule. No immediate task and never replay prior tools.")
-		confirm(a)
+		if current.Status != store.BotActive {
+			panic("schedule consent changed Active lifecycle")
+		}
 		assertScheduler(t.ID.String(), true)
 		var tick store.BotRun
 		boundedWait("real scheduler tick", 180*time.Second, func() bool {

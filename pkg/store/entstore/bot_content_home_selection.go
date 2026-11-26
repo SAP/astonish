@@ -105,7 +105,7 @@ func (r *botRepository) selectHomeConfiguration(ctx context.Context, exact sandb
 	// bytes, but neither the root fence nor the binding lookup is cached.
 	ctx, endContentReads := WithBotContentReadOperation(ctx)
 	defer endContentReads()
-	return r.db.Transaction(ctx, func(tx botDraftDB) (resultErr error) {
+	return r.db.Transaction(ctx, func(tx botDB) (resultErr error) {
 		db, ok := tx.(botHomeConfigurationDB)
 		if !ok {
 			return store.ErrBotUnsupported

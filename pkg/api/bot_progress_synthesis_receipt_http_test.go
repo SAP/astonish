@@ -31,7 +31,7 @@ type synthesisReceiptUnusedWorkspace struct{ bot.TaskWorkspace }
 func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			f := newProgressHTTPFixture(t, scope)
 			f.worker.Stop()
 			// Enable the genuine Task tools through the production composition seam.
 			files := newComposedHTTPFiles(t, f.dataDir, f.repo, f.b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
@@ -66,6 +66,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			if err := json.Unmarshal(f.request("PUT", f.path+"/configuration", string(body), 200), &f.b); err != nil {
 				t.Fatal(err)
 			}
+			progressResumeFixture(t, f)
 			const final = "The research file contains: isolated receipt. The optional Task update was not executed."
 			step := 0
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

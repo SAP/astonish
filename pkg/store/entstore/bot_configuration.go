@@ -41,7 +41,7 @@ func (r *botRepository) ConfigureReviewed(ctx context.Context, q store.BotConfig
 		seen[b.ID] = true
 	}
 	var result *store.Bot
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		var err error
 		result, err = r.configureReviewedTx(ctx, tx, q)
 		return err
@@ -50,7 +50,7 @@ func (r *botRepository) ConfigureReviewed(ctx context.Context, q store.BotConfig
 }
 
 // configureReviewedTx shares the reviewed policy transaction with durable proposal receipts.
-func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDraftDB, q store.BotConfigurationRequest) (*store.Bot, error) {
+func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDB, q store.BotConfigurationRequest) (*store.Bot, error) {
 	var result *store.Bot
 	err := func() error {
 		rec, err := tx.GetBot(ctx, q.BotID)
@@ -65,7 +65,7 @@ func (r *botRepository) configureReviewedTx(ctx context.Context, tx botDraftDB, 
 			return store.ErrBotConflict
 		}
 		switch rec.Bot.Status {
-		case store.BotDraft, store.BotPaused, store.BotStopped:
+		case store.BotPaused, store.BotStopped:
 		default:
 			return store.ErrBotConflict
 		}

@@ -32,7 +32,7 @@ func TestBotContentLegacyExplicitDelete(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				err = r.db.Transaction(owner, func(tx botDraftDB) error {
+				err = r.db.Transaction(owner, func(tx botDB) error {
 					rec, err := tx.GetBot(owner, q.MandateRef.BotID)
 					if err != nil {
 						return err
@@ -51,7 +51,7 @@ func TestBotContentLegacyExplicitDelete(t *testing.T) {
 				}
 				historical.Mandate.Ref.ID = uuid.New()
 				historicalRef := historical.Mandate.Ref
-				if err = r.db.Transaction(owner, func(tx botDraftDB) error {
+				if err = r.db.Transaction(owner, func(tx botDB) error {
 					rec, err := tx.GetBot(owner, q.MandateRef.BotID)
 					if err != nil {
 						return err
@@ -239,7 +239,7 @@ func TestBotContentDeleteRejectsMalformedAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = r.db.Transaction(owner, func(tx botDraftDB) error {
+			err = r.db.Transaction(owner, func(tx botDB) error {
 				rec, err := tx.GetBot(owner, b.ID)
 				if err != nil {
 					return err

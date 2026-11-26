@@ -20,7 +20,10 @@ func TestBotExecutionIntentRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: actor, OrgSlug: "org", TeamSlug: "team"})
-	for _, tc := range []struct{ route, intent string }{{"test-run", "draft_test"}, {"conversation", "conversation"}} {
+	for _, tc := range []struct {
+		route  string
+		intent store.BotExecutionIntent
+	}{{"test-run", store.BotIntentRegular}, {"conversation", store.BotIntentConversation}} {
 		t.Run(tc.route, func(t *testing.T) {
 			repo := &botAttachmentStore{}
 			router := mux.NewRouter()
@@ -37,11 +40,21 @@ func TestBotExecutionIntentRoutes(t *testing.T) {
 			if response.StatusCode != 202 {
 				t.Fatalf("route status = %d, want 202", response.StatusCode)
 			}
-			raw, _ := json.Marshal(repo.request)
-			var q map[string]any
-			_ = json.Unmarshal(raw, &q)
-			if q["Intent"] != tc.intent {
-				t.Fatalf("server-selected intent absent: %s", raw)
+			if repo.request.Intent != tc.intent {
+				t.Fatalf("server-selected intent = %q, want %q", repo.request.Intent, tc.intent)
+			}
+			// Regular is the default intent and is intentionally omitted on the
+			// wire. Decoding must still recover the exact server-selected intent.
+			raw, err := json.Marshal(repo.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded store.BotRunRequest
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Intent != tc.intent {
+				t.Fatalf("serialized intent = %q, want %q: %s", decoded.Intent, tc.intent, raw)
 			}
 		})
 	}

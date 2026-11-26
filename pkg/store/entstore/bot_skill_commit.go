@@ -15,7 +15,7 @@ import (
 // commitBotSkill runs inside CommitRun's lease-fenced transaction. Semantic
 // conflicts produce a durable receipt, never discard an accepted deliverable.
 // Database errors still roll the entire publication back.
-func (r *botRepository) commitBotSkill(ctx context.Context, tx botDraftDB, saved *botStoredRun, q *store.BotRunCommit) error {
+func (r *botRepository) commitBotSkill(ctx context.Context, tx botDB, saved *botStoredRun, q *store.BotRunCommit) error {
 	w := saved.Work
 	if w == nil {
 		return nil

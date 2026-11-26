@@ -19,7 +19,7 @@ func TestBotStagingGCTypedNestedClosure(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, _, _, _ := botRunFixture(t, scope)
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "GC nested", OwnerID: uuid.MustParse(repo.auth.userID), Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "GC nested", OwnerID: uuid.MustParse(repo.auth.userID), Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestBotStagingGCTypedNestedClosure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = repo.db.Transaction(ctx, func(tx botDB) error {
 				row, err := tx.GetBot(ctx, draft.ID)
 				if err != nil {
 					return err

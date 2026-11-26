@@ -51,7 +51,7 @@ func TestBotTransactionContentReuse(t *testing.T) {
 				d.content = wrap(d.content)
 				r.db = d
 			}
-			read := func(tx botDraftDB) error {
+			read := func(tx botDB) error {
 				for range 5 {
 					v, err := tx.ReadVersion(ctx, b.ID, 1)
 					if err != nil {

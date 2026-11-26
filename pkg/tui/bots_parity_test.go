@@ -79,7 +79,7 @@ func TestBotComposerSingleChronologyAndFailure(t *testing.T) {
 }
 func TestBotComposerReadOnlyTraceGuidance(t *testing.T) {
 	const guidance = "selected run trace is read-only; /bots home to converse"
-	for _, status := range []store.BotStatus{store.BotDraft, store.BotPaused, store.BotActive} {
+	for _, status := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotActive} {
 		for _, selection := range []string{"trace", "home", "unspecified"} {
 			t.Run(string(status)+"/"+selection, func(t *testing.T) {
 				home := uuid.New()

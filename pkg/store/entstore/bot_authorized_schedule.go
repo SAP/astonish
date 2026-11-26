@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (s *botAuthorizedOperationRuntime) scheduleCandidate(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o store.BotOperation, limits store.BotMandateLimits) (*store.BotVersion, store.TriggerSpec, error) {
+func (s *botAuthorizedOperationRuntime) scheduleCandidate(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation, limits store.BotMandateLimits) (*store.BotVersion, store.TriggerSpec, error) {
 	v, err := tx.ReadVersion(ctx, rec.Bot.ID, rec.Bot.Version)
 	if err != nil {
 		return nil, store.TriggerSpec{}, err
@@ -180,7 +180,7 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 		return op, err
 	}
 	var result *store.BotOperation
-	err = s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = s.repo.db.Transaction(ctx, func(tx botDB) error {
 		current, rec, run, prov, err := s.source(ctx, tx, ref, op.Payload)
 		if err != nil {
 			return err
@@ -259,7 +259,7 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 	return result, err
 }
 
-func (s *botAuthorizedOperationRuntime) applyAuthorizedScheduleTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o store.BotOperation, v store.BotVersion, target store.TriggerSpec) error {
+func (s *botAuthorizedOperationRuntime) applyAuthorizedScheduleTx(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation, v store.BotVersion, target store.TriggerSpec) error {
 	schedules, ok := tx.(botTriggerDB)
 	if !ok {
 		return store.ErrBotUnsupported
@@ -317,7 +317,7 @@ func (s *botAuthorizedOperationRuntime) applyAuthorizedScheduleTx(ctx context.Co
 		job.Payload = store.JobPayload{BotID: rec.Bot.ID.String(), BotVersion: v.Version, BotTriggerID: target.ID.String()}
 		job.Schedule = store.JobSchedule{Cron: target.Cron, Timezone: target.Timezone}
 		// A draft may activate only for this explicitly authorized enabled target.
-		active := rec.Bot.Status == store.BotActive || rec.Bot.Status == store.BotDraft
+		active := rec.Bot.Status == store.BotActive
 		job.Enabled = target.Enabled && active
 		job.NextRun = nil
 		if job.Enabled {
@@ -346,22 +346,6 @@ func (s *botAuthorizedOperationRuntime) applyAuthorizedScheduleTx(ctx context.Co
 	}
 	if err = tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: data, CreatedAt: s.repo.clock()}, "authorized-schedule-version:"+o.ID.String()); err != nil {
 		return err
-	}
-	if rec.Bot.Status == store.BotDraft && target.Enabled && o.Payload.Operation != store.BotControlScheduleRemove {
-		updated, err := tx.GetBot(ctx, rec.Bot.ID)
-		if err != nil {
-			return err
-		}
-		next := updated.Bot
-		next.Status = store.BotActive
-		next.Revision++
-		next.UpdatedAt = s.repo.clock()
-		if err = tx.SetLifecycle(ctx, *updated, next); err != nil {
-			return err
-		}
-		if err = tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: updated.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: data, CreatedAt: s.repo.clock()}, "authorized-schedule-activation:"+o.ID.String()); err != nil {
-			return err
-		}
 	}
 	if err = s.repo.reconcileScheduledQueueTx(ctx, tx, *old, v); err != nil {
 		return err

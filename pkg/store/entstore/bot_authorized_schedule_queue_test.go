@@ -68,7 +68,7 @@ func exerciseQueuedScheduleReconciliation(t *testing.T, r *botRepository, s *bot
 	}
 	// Read back the driver's timestamp before constructing the exact occurrence.
 	due = *jobs.Get(owner, job.ID).NextRun
-	occurrence := draftActivationOccurrence(b, tr, due)
+	occurrence := scheduleOccurrence(b, tr, due)
 	admitted, err := r.AdmitScheduledRun(owner, occurrence)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func exerciseQueuedScheduleReconciliation(t *testing.T, r *botRepository, s *bot
 	// Neither the old scheduler replay nor a current-version duplicate can create
 	// another run for the admitted occurrence; reconciliation never redispatches.
 	_, _ = r.AdmitScheduledRun(owner, occurrence)
-	rebound := draftActivationOccurrence(current, v.Triggers[0], due)
+	rebound := scheduleOccurrence(current, v.Triggers[0], due)
 	_, _ = r.AdmitScheduledRun(owner, rebound)
 	runs, err := r.ListRuns(owner, id, store.BotPage{})
 	if err != nil {

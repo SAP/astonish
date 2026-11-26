@@ -17,7 +17,7 @@ func TestBotRoutineScheduleConsentPrompt(t *testing.T) {
 	}{
 		{"interactive-chat", store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}, true},
 		{"home-owner-turn", store.BotRun{Intent: store.BotIntentRegular, Presentation: store.BotRunPresentationHomeInteractive}, true},
-		{"control-only", store.BotRun{Intent: store.BotIntentDraftConversation}, false},
+		{"control-only", store.BotRun{Intent: store.BotIntentConversation}, false},
 		{"background", store.BotRun{Trigger: store.TriggerCron}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

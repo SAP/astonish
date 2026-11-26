@@ -288,7 +288,7 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 					v := store.DefaultBotVersion()
 					v.Charter = configuredProtocolTask
 					v.Autonomy.AllowedTools = []string{"mcp:configured-fixture/echo", "perplexity_web_search", "list_sandbox_templates", "bot_work_update"}
-					b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Configured protocol " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
+					b, e := repo.Create(auth, store.BotCreateRequest{Name: "Configured protocol " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
 					if e != nil {
 						t.Fatal(e)
 					}

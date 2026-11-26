@@ -113,7 +113,7 @@ func (r *botRepository) GetTaskRevision(c context.Context, b store.BotID, ref st
 	}
 	return nil, store.ErrBotNotFound
 }
-func (r *botRepository) taskMutation(c context.Context, tx botDraftDB, m store.BotTaskMutation) (*botStoredRecord, error) {
+func (r *botRepository) taskMutation(c context.Context, tx botDB, m store.BotTaskMutation) (*botStoredRecord, error) {
 	rec, e := r.skillMutation(c, tx, store.BotSkillMutation{BotID: m.BotID, Lease: m.Lease, ActorID: m.ActorID, IdempotencyKey: m.IdempotencyKey}, m.Lease.RunID != uuid.Nil)
 	if e != nil {
 		return nil, e
@@ -130,7 +130,7 @@ func (r *botRepository) PrepareTaskPublication(c context.Context, q store.BotTas
 		return nil, store.ErrBotInvalid
 	}
 	var out *store.BotTaskPublication
-	e := r.db.Transaction(c, func(tx botDraftDB) error {
+	e := r.db.Transaction(c, func(tx botDB) error {
 		rec, e := r.taskMutation(c, tx, q.Mutation)
 		if e != nil {
 			return e
@@ -240,7 +240,7 @@ func (r *botRepository) CommitTaskPublication(c context.Context, q store.BotTask
 		return nil, e
 	}
 	var out *store.BotTask
-	e = r.db.Transaction(c, func(tx botDraftDB) error {
+	e = r.db.Transaction(c, func(tx botDB) error {
 		if _, e := r.taskMutation(c, tx, q.Mutation); e != nil {
 			return e
 		}
@@ -294,7 +294,7 @@ func (r *botRepository) CommitTaskPublication(c context.Context, q store.BotTask
 }
 func (r *botRepository) ChangeTaskLifecycle(c context.Context, q store.BotTaskLifecycleRequest) (*store.BotTask, error) {
 	var out *store.BotTask
-	e := r.db.Transaction(c, func(tx botDraftDB) error {
+	e := r.db.Transaction(c, func(tx botDB) error {
 		if _, e := r.taskMutation(c, tx, q.Mutation); e != nil {
 			return e
 		}
@@ -348,7 +348,7 @@ func (r *botRepository) ListPendingTaskPublications(c context.Context, b store.B
 	return out, nil
 }
 func (r *botRepository) HoldTaskPublications(c context.Context, b store.BotID, reason string) error {
-	return r.db.Transaction(c, func(tx botDraftDB) error {
+	return r.db.Transaction(c, func(tx botDB) error {
 		rec, e := tx.GetBot(c, b)
 		if e != nil {
 			return e
@@ -379,7 +379,7 @@ func (r *botRepository) HoldTaskPublications(c context.Context, b store.BotID, r
 	})
 }
 func (r *botRepository) AbortTaskPublication(c context.Context, m store.BotTaskMutation, id uuid.UUID, reason string) error {
-	return r.db.Transaction(c, func(tx botDraftDB) error {
+	return r.db.Transaction(c, func(tx botDB) error {
 		if _, e := r.taskMutation(c, tx, m); e != nil {
 			return e
 		}

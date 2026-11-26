@@ -219,7 +219,7 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 			if err = os.WriteFile(artifact, []byte("bot-owned artifact"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			source, e := repo.RequestRun(ownerCtx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentDraftConversation, Trigger: store.TriggerManual, Instructions: "temporary run", IdempotencyKey: "delete-source"})
+			source, e := repo.RequestRun(ownerCtx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentRegular, Trigger: store.TriggerManual, Instructions: "temporary run", IdempotencyKey: "delete-source"})
 			if e != nil {
 				t.Fatal(e)
 			}

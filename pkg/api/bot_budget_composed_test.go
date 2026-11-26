@@ -40,6 +40,11 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 						f.model.principal.Authentication = execution.AuthMethod("daemon_owner")
 						f.model.principal.Surface = execution.Surface("daemon")
 					}
+					paused, err := f.repo.Pause(f.ctx, store.BotLifecycleRequest{BotID: f.b.ID, ActorID: f.b.OwnerID, ExpectedRevision: f.b.Revision, Reason: "Review lower token cap"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					f.b = *paused
 					configured, err := f.repo.(store.BotConfigurationStore).ConfigureReviewed(f.ctx, store.BotConfigurationRequest{BotID: f.b.ID, ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Explicit lower token cap", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 					if err != nil {
 						t.Fatal(err)
@@ -72,7 +77,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 							t.Fatal(e)
 						}
 						f.b = *saved
-						if e = json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit activation"}`, f.b.Revision), 200), &f.b); e != nil {
+						if e = json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit activation"}`, f.b.Revision), 200), &f.b); e != nil {
 							t.Fatal(e)
 						}
 						saved, e = f.repo.(store.BotTriggerStore).ChangeTrigger(f.ctx, store.BotTriggerChange{BotID: f.b.ID, TriggerID: triggerID, ExpectedRevision: f.b.Revision, Action: store.BotTriggerEnable, Reason: "Explicit enable"})
@@ -128,10 +133,19 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 							t.Fatal("scheduled run became interactive")
 						}
 					} else {
+						if err = json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Resume reviewed budget"}`, f.b.Revision), 200), &f.b); err != nil {
+							t.Fatal(err)
+						}
 						run = f.turn()
 						if run.Presentation != store.BotRunPresentationHomeInteractive {
 							t.Fatalf("not Home interactive: %+v", run)
 						}
+					}
+					// A read may advance persisted work before the next model request
+					// hits the budget. The terminal report must project that exact work,
+					// otherwise CommitRun rejects it and leaves the lease running.
+					if run.Work == nil || run.Report.Work == nil || !reflect.DeepEqual(run.Report.Work, run.Work) {
+						t.Fatalf("budget stop projected stale work: work=%+v report=%+v", run.Work, run.Report.Work)
 					}
 					if run.Status != store.RunFailed || run.Report.Failure == nil || run.Report.Failure.Kind != store.BotReportFailureBudget {
 						t.Fatalf("not typed failed budget: %+v", run)

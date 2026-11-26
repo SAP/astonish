@@ -105,7 +105,7 @@ func TestBotCallerCeilingUnknownModeRejected(t *testing.T) {
 }
 
 func TestBotCallerCeilingLegacyControlOnly(t *testing.T) {
-	for _, intent := range []store.BotExecutionIntent{store.BotIntentDraftConversation, store.BotIntentConversation} {
+	for _, intent := range []store.BotExecutionIntent{store.BotIntentConversation} {
 		if !(store.BotRun{Intent: intent}).ControlOnly() {
 			t.Fatal("legacy widened")
 		}

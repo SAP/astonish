@@ -38,7 +38,7 @@ func (r *botRepository) ReserveHomeCleanup(ctx context.Context, home store.BotHo
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotHomeCleanupClaim
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		db, ok := tx.(botHomeCleanupDB)
 		if !ok {
 			return store.ErrBotUnsupported

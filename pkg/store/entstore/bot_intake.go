@@ -42,7 +42,7 @@ func (r *botRepository) ReviewAdaptiveJob(ctx context.Context, id uuid.UUID) (*s
 		return nil, err
 	}
 	var out *store.BotAdaptiveReview
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		var updated time.Time
 		switch d := tx.(type) {
 		case personalBotDB:
@@ -164,7 +164,7 @@ func (d teamBotDB) pauseAdaptive(ctx context.Context, id uuid.UUID, expected tim
 
 // insertIntakeDraft runs wholly in its caller's scoped transaction. Intake hash
 // includes the reviewed request, so idempotency cannot silently change carryover.
-func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, v store.BotVersion, goals []store.BotGoal, carry store.BotCarryover, operation string, source uuid.UUID, seeds ...*store.BotSkillSeed) (*store.Bot, error) {
+func insertIntakeDraft(ctx context.Context, tx botDB, rec botStoredRecord, v store.BotVersion, goals []store.BotGoal, carry store.BotCarryover, operation string, source uuid.UUID, seeds ...*store.BotSkillSeed) (*store.Bot, error) {
 	if err := tx.InsertBot(ctx, rec); err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func insertIntakeDraft(ctx context.Context, tx botDraftDB, rec botStoredRecord, 
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: rec.Bot.CreatedAt}, "draft-created"); err != nil {
+	if err := tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: rec.Bot.CreatedAt}, "active-created"); err != nil {
 		return nil, err
 	}
 	return &rec.Bot, nil
@@ -242,7 +242,7 @@ func validateIntakeSkillSeed(seed *store.BotSkillSeed) error {
 // The explicit adopter supplies OwnerExpectation. Store it as a fresh local goal
 // so normal source validation can resolve it, without fabricating a model run,
 // owner message, successful observation, or authority grant.
-func insertIntakeSkillSeed(ctx context.Context, tx botDraftDB, b store.Bot, seed *store.BotSkillSeed) (uuid.UUID, error) {
+func insertIntakeSkillSeed(ctx context.Context, tx botDB, b store.Bot, seed *store.BotSkillSeed) (uuid.UUID, error) {
 	if err := validateIntakeSkillSeed(seed); err != nil {
 		return uuid.Nil, err
 	}
@@ -317,7 +317,7 @@ func (r *botRepository) PromoteChat(ctx context.Context, q store.BotPromotionReq
 			return nil, store.ErrBotInvalid
 		}
 	}
-	rec, v, goals, err := prepareBotDraft(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v, Goals: goals}, actor, r.auth.scope, r.clock())
+	rec, v, goals, err := prepareBotCreate(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v, Goals: goals}, actor, r.auth.scope, r.clock())
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +326,7 @@ func (r *botRepository) PromoteChat(ctx context.Context, q store.BotPromotionReq
 		return nil, err
 	}
 	var result *store.Bot
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		db, ok := tx.(botIntakeDB)
 		if !ok {
 			return store.ErrBotUnsupported
@@ -365,7 +365,7 @@ func (r *botRepository) ConvertAdaptiveJob(ctx context.Context, q store.BotConve
 		return nil, err
 	}
 	var result *store.Bot
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		db, ok := tx.(botIntakeDB)
 		if !ok {
 			return store.ErrBotUnsupported
@@ -405,7 +405,7 @@ func (r *botRepository) ConvertAdaptiveJob(ctx context.Context, q store.BotConve
 			return store.ErrBotInvalid
 		}
 		v.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Cron: job.Schedule.Cron, Timezone: job.Schedule.Timezone, Instructions: job.Payload.Instructions}}
-		rec, v, goals, err := prepareBotDraft(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v}, actor, r.auth.scope, r.clock())
+		rec, v, goals, err := prepareBotCreate(store.BotCreateRequest{Name: q.Name, OwnerID: actor, IdempotencyKey: q.IdempotencyKey, Version: v}, actor, r.auth.scope, r.clock())
 		if err != nil {
 			return err
 		}

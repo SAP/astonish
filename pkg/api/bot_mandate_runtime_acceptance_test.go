@@ -67,7 +67,7 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := &store.Services{Bots: f.repo, BotMandatePolicy: policy}
+	svc := &store.Services{Bots: f.repo, BotMandatePolicy: policy, BotInteractiveReady: true}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		api.BotCreateHandler(w, r.WithContext(store.WithServices(auth, svc)))
 	}))

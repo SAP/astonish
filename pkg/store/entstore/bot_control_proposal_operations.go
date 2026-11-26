@@ -12,7 +12,7 @@ import (
 )
 
 // All helpers consume the caller's scoped transaction; none opens another one.
-func (r *botRepository) saveControlVersionTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, v store.BotVersion, actor uuid.UUID) error {
+func (r *botRepository) saveControlVersionTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, v store.BotVersion, actor uuid.UUID) error {
 	old, err := tx.ReadVersion(ctx, p.BotID, p.Version)
 	if err != nil {
 		return err
@@ -104,7 +104,7 @@ func (r *botRepository) validateControlScheduleBindings(ctx context.Context, job
 	return nil
 }
 
-func (r *botRepository) applyControlScheduleTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlScheduleTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	q := p.Payload.Schedule
 	if q == nil || q.ExpectedRevision != rec.Bot.Revision {
 		return store.ErrBotConflict
@@ -184,7 +184,7 @@ func (r *botRepository) applyControlScheduleTx(ctx context.Context, tx botDraftD
 	return r.saveControlVersionTx(ctx, tx, rec, p, *v, actor)
 }
 
-func (r *botRepository) applyControlGoalTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlGoalTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	q := p.Payload.Goal
 	if q == nil {
 		return store.ErrBotInvalid

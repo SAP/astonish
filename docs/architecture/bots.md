@@ -1,5 +1,17 @@
 # Bots inside Chat
 
+## Current unreleased lifecycle
+
+Created Bots are Active immediately: ordinary, source, template and promotion
+creation does not queue work or enable schedules. Explicit title-first creation
+admits exactly one requested turn. There is no Draft status/banner, activation
+onboarding or obsolete lifecycle migration. Active, Paused, Stopped and Deleted
+retain scoped authorization; physical Home is prepared lazily when authorized work
+requires it. Resume never revives disabled recurrence. Unrelated schedule edits
+preserve exact enabled/next-run state. Answered question cards remain at their
+original chronological position live and after reload. See
+[Active lifecycle and recurrence](bot-draft-activation.md).
+
 ## Objective-owned employee loop
 
 The immutable `BotWorkContract` records what the owner asked to achieve;

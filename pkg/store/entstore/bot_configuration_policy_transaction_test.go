@@ -22,7 +22,11 @@ func TestBotConfigurationPolicyTransaction(t *testing.T) {
 			owner, _ := execution.PrincipalFromContext(ctx)
 			v := store.DefaultBotVersion()
 			v.Charter = "Reviewed policy"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Policy", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: uuid.NewString()})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Policy", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: uuid.NewString()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Review sensitive policy"})
 			if err != nil {
 				t.Fatal(err)
 			}

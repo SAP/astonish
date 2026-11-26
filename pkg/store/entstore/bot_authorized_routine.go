@@ -45,7 +45,7 @@ func routineAllowed(m store.BotMandate, op store.BotControlOperation) bool {
 	return false
 }
 func routineGrantKey(id uuid.UUID) string { return "authorized-routine-grant:" + id.String() }
-func verifyRoutineGrant(ctx context.Context, tx botDraftDB, o store.BotOperation) error {
+func verifyRoutineGrant(ctx context.Context, tx botDB, o store.BotOperation) error {
 	if o.Provenance == nil || !routineOperation(o.Payload.Operation) || (o.Provenance.Purpose != execution.BotMandatePurposeTask && o.Provenance.Purpose != execution.BotMandatePurposeOperation) {
 		return store.ErrBotForbidden
 	}
@@ -98,7 +98,7 @@ func (s *botAuthorizedOperationRuntime) enqueueRoutineOperation(ctx context.Cont
 	}
 	id := uuid.NewSHA1(q.Lease.RunID, []byte("authorized-routine:"+q.IdempotencyKey))
 	var result *store.BotOperation
-	err = s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = s.repo.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := s.repo.checkLease(ctx, tx, q.Lease, s.repo.clock()); err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func (s *botAuthorizedOperationRuntime) enqueueRoutineOperation(ctx context.Cont
 }
 func (s *botAuthorizedOperationRuntime) applyRoutineOperation(ctx context.Context, ref store.BotMandateRef, id uuid.UUID) (*store.BotOperation, error) {
 	var result *store.BotOperation
-	err := s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := s.repo.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := s.repo.mandateScope(ctx, tx, ref)
 		if err != nil {
 			return err

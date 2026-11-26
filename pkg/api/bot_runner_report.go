@@ -202,7 +202,20 @@ func (j *botAgentReadJournal) take(response *genai.FunctionResponse, receipts ..
 	if len(receipts) == 1 {
 		o := receipts[0]
 		r := o.Nonexecution
-		noEffect = ok && entry.name == response.Name && response.ID != "" && r.ValidFor(entry.identity, response.ID, entry.concrete, entry.digest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		noEffect = ok && entry.name == response.Name && response.ID != "" && r.ValidFor(entry.identity, response.ID, entry.concrete, entry.digest) && o.Verified && !o.ReceiptConflict && len(o.Changed) == 0 && len(o.Unchanged) == 0 && len(o.Unverified) == 0 && len(o.SourceAccess) == 0 && o.SourceRead == nil && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		boundSourceRead := ok && entry.name == response.Name && o.SourceRead.ValidFor(entry.identity, response.ID, entry.concrete, entry.digest, response.Response) && !o.ReceiptConflict && r == nil && len(o.SourceAccess) == 1 && len(o.Changed) == 0 && len(o.Unverified) == 0 && len(o.Artifacts) == 0 && o.RoutineCapture == nil && o.ScheduleCapture == nil && o.NextRunAt == nil
+		if boundSourceRead {
+			fact := o.SourceAccess[0]
+			boundSourceRead = fact.CallID == response.ID && fact.EvidenceRef == "capture:"+response.ID && fact.BodyDigest == o.SourceRead.ResponseDigest && !fact.ObservedAt.IsZero() && strings.TrimSpace(fact.OriginalURL) != "" && (fact.Status == store.BotSourceAccessFailed || fact.Status == store.BotSourceAccessReturned)
+			for _, observation := range o.Unchanged {
+				boundSourceRead = boundSourceRead && bot.ValidObservation(observation)
+			}
+		}
+		if boundSourceRead {
+			read = true
+		} else if o.SourceRead != nil {
+			j.uncertain = true
+		}
 		// A bare Verified flag is not positive effect evidence. Internal Task
 		// bookkeeping supplies actual independently observed Home facts; require
 		// every observation to validate before it can complete a non-read call.
@@ -372,13 +385,13 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 	}
 	read, source := journal.take(response, outcome)
 	observation.SourceEligible = source
-	if boundInvocation && invocation.name == response.Name && outcome.Nonexecution.ValidFor(invocation.identity, response.ID, invocation.concrete, invocation.digest) && outcome.Verified && !outcome.ReceiptConflict && len(outcome.Changed) == 0 && len(outcome.Unchanged) == 0 && len(outcome.Unverified) == 0 && len(outcome.Artifacts) == 0 && len(outcome.SourceAccess) == 0 && outcome.RoutineCapture == nil && outcome.ScheduleCapture == nil && outcome.NextRunAt == nil {
+	if boundInvocation && invocation.name == response.Name && outcome.Nonexecution.ValidFor(invocation.identity, response.ID, invocation.concrete, invocation.digest) && outcome.Verified && !outcome.ReceiptConflict && len(outcome.Changed) == 0 && len(outcome.Unchanged) == 0 && len(outcome.Unverified) == 0 && len(outcome.Artifacts) == 0 && len(outcome.SourceAccess) == 0 && outcome.SourceRead == nil && outcome.RoutineCapture == nil && outcome.ScheduleCapture == nil && outcome.NextRunAt == nil {
 		observation.KnownNonexecution = true
 		observation.Recoverable = cr.ctx.Err() == nil && (outcome.Nonexecution.Disposition == bot.ToolFeedbackCorrectCall || outcome.Nonexecution.Disposition == bot.ToolFeedbackUnresolvedTarget)
 	}
 	journal.observeEffect(outcome, ok)
 	cr.completion.Report.EffectState = journal.effectState()
-	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && source && (!ok || (len(outcome.SourceAccess) == 0 && outcome.Nonexecution == nil)) {
+	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && source && (!ok || (len(outcome.SourceAccess) == 0 && outcome.SourceRead == nil && outcome.Nonexecution == nil)) {
 		service.captureReadReference(response.ID) // bind even when a local read has no HTTP facts
 	}
 	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {
@@ -529,6 +542,12 @@ func botOnlyRecoverableToolFeedback(err error) bool {
 			}
 		}
 		return true
+	}
+	// Diagnostic context (for example "chat runner: %w") must not erase the
+	// typed feedback boundary. Still require every joined cause to qualify;
+	// native, policy, budget, persistence and cancellation errors fail closed.
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return botOnlyRecoverableToolFeedback(wrapped.Unwrap())
 	}
 	return false
 }

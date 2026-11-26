@@ -39,7 +39,7 @@ func TestBotPermanentDraftPurgesStaging(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, _, _, _ := botRunFixture(t, scope)
 			owner := uuid.MustParse(repo.auth.userID)
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: owner, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: owner, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -9,22 +9,22 @@ import (
 	"time"
 )
 
-type authorizedFailDB struct{ botDraftDB }
+type authorizedFailDB struct{ botDB }
 
-func (d authorizedFailDB) Transaction(ctx context.Context, f func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return f(authorizedFailTx{tx}) })
+func (d authorizedFailDB) Transaction(ctx context.Context, f func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return f(authorizedFailTx{tx}) })
 }
 
-type authorizedFailTx struct{ botDraftDB }
+type authorizedFailTx struct{ botDB }
 
 func (d authorizedFailTx) triggerScheduler() store.SchedulerStore {
-	return d.botDraftDB.(botTriggerDB).triggerScheduler()
+	return d.botDB.(botTriggerDB).triggerScheduler()
 }
 func (d authorizedFailTx) saveTriggerVersion(c context.Context, r botStoredRecord, v int64, n time.Time) error {
-	return d.botDraftDB.(botTriggerDB).saveTriggerVersion(c, r, v, n)
+	return d.botDB.(botTriggerDB).saveTriggerVersion(c, r, v, n)
 }
 func (d authorizedFailTx) updateControlVersion(c context.Context, r botStoredRecord, v int64, n time.Time) error {
-	return d.botDraftDB.(botControlVersionDB).updateControlVersion(c, r, v, n)
+	return d.botDB.(botControlVersionDB).updateControlVersion(c, r, v, n)
 }
 func (d authorizedFailTx) saveMandateMetadata(context.Context, *botStoredRecord) error {
 	return errors.New("injected receipt persistence failure")
@@ -72,10 +72,10 @@ func TestBotAuthorizedScheduleAtomicRollbackAndSourceDigest(t *testing.T) {
 	}
 }
 
-type authorizedTamperDB struct{ botDraftDB }
+type authorizedTamperDB struct{ botDB }
 
 func (d authorizedTamperDB) ReadRun(c context.Context, b, r uuid.UUID) (*botStoredRun, error) {
-	run, err := d.botDraftDB.ReadRun(c, b, r)
+	run, err := d.botDB.ReadRun(c, b, r)
 	if err == nil {
 		run.Instructions = "untrusted replacement"
 	}

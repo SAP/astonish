@@ -87,14 +87,14 @@ func TestBotLifecycleTransitions(t *testing.T) {
 		want  store.BotStatus
 		allow bool
 	}{
-		{store.BotDraft, LifecycleActivate, store.BotActive, true},
+		{store.BotStopped, LifecycleResume, store.BotActive, true},
 		{store.BotActive, LifecyclePause, store.BotPaused, true},
 		{store.BotActive, LifecycleStop, store.BotStopped, true},
 		{store.BotPaused, LifecycleResume, store.BotActive, true},
 		{store.BotStopped, LifecycleResume, store.BotActive, true},
 		{store.BotDeleted, LifecycleRestore, store.BotPaused, true},
-		{store.BotDraft, LifecycleResume, "", false},
-		{store.BotPaused, LifecycleActivate, "", false},
+		{store.BotActive, LifecycleResume, "", false},
+		{store.BotPaused, LifecycleResume, store.BotActive, true},
 		{store.BotDeleted, LifecycleResume, "", false},
 		{store.BotActive, LifecycleRestore, "", false},
 	}
@@ -106,7 +106,7 @@ func TestBotLifecycleTransitions(t *testing.T) {
 			}
 		})
 	}
-	for _, s := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused, store.BotStopped} {
+	for _, s := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotStopped} {
 		if got, err := NextBotStatus(s, LifecycleDelete, now, time.Time{}); err != nil || got != store.BotDeleted {
 			t.Fatalf("delete %s: %s %v", s, got, err)
 		}

@@ -86,7 +86,7 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 	if run == uuid.Nil || tools < 0 || tokens < 0 || spend < 0 {
 		return store.ErrBotInvalid
 	}
-	return s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	return s.repo.db.Transaction(ctx, func(tx botDB) error {
 		// Only this composition-root runtime may release an exact persisted
 		// reservation after membership revocation. No caller context bypass exists.
 		var rec *botStoredRecord

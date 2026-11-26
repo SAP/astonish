@@ -25,11 +25,11 @@ import { RunStatus, canContinueBotProgress } from '@/api/botRunState'
 import { BotReviewCard } from './BotReviewCard'
 import type { BotOperationView } from '@/api/botOperationResult'
 
-const conversationToolFree = (bot: api.Bot) => bot.status === api.BotStatus.Draft || bot.status === api.BotStatus.Paused
+const conversationToolFree = (bot: api.Bot) => bot.status === api.BotStatus.Paused
 
 const conversationReadOnly = (bot: api.Bot, userId?: string) => {
   const readOnly = !userId || bot.owner_id !== userId
-  return bot.status === api.BotStatus.Deleted || bot.status === api.BotStatus.Stopped || ((bot.status === api.BotStatus.Draft || bot.status === api.BotStatus.Paused) ? readOnly : !userId || (bot.scope === 'personal' && readOnly))
+  return bot.status === api.BotStatus.Deleted || bot.status === api.BotStatus.Stopped || ((bot.status === api.BotStatus.Paused) ? readOnly : !userId || (bot.scope === 'personal' && readOnly))
 }
 
 export default function BotWorkspace({ route, theme, userId }: { route: BotRoute; theme: string; userId?: string }) {

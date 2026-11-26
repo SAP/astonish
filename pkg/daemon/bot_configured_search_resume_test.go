@@ -225,7 +225,7 @@ func TestBotConfiguredSearchOwnerResumeHTTP(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = configuredProtocolTask
 			v.Autonomy.AllowedTools = []string{"perplexity_web_search", "bot_work_update"}
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Scheduled configured search", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "search-resume"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Scheduled configured search", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "search-resume"})
 			if err != nil {
 				t.Fatal(err)
 			}

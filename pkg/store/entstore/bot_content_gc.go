@@ -60,7 +60,7 @@ func (r *botRepository) collectStagingOrphans(ctx context.Context, id store.BotI
 		return nil, err
 	}
 	var report *BotStagingGCReport
-	err := r.db.Transaction(ctx, func(tx botDraftDB) (resultErr error) {
+	err := r.db.Transaction(ctx, func(tx botDB) (resultErr error) {
 		db, ok := tx.(botHomeConfigurationDB)
 		if !ok {
 			return store.ErrBotUnsupported

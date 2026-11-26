@@ -1243,12 +1243,10 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	if result.ProgressCheckpoint != nil {
 		return
 	}
-	if err != nil {
-		result, err = stop(fmt.Errorf("agent producer status=%s completion_error=%t blocked=%t final=%t: %w", result.Status, completion.Err != nil, completion.Blocked, strings.TrimSpace(completion.FinalText) != "", err))
-		return
-	}
-	// Optional tools may have advanced work while the producer was running.
-	// Final capture must extend that exact state, never overwrite it with preflight.
+	// Optional tools may have advanced work even when production failed (for
+	// example, a successful read followed by a denied model budget request).
+	// Reload before projecting either completion or failure so CommitRun sees
+	// authoritative evidence and revision under the original lease/CAS fences.
 	if service, ok := bot.BotWorkServicesFromContext(ctx).(*botAgentWorkService); ok {
 		service.mu.Lock()
 		current, loadErr := service.load(ctx)
@@ -1265,6 +1263,10 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 		w, saved = current, current
 	} else if err == nil {
 		result, err = stop(fmt.Errorf("agent work store reload after producer: %w", loadErr))
+		return
+	}
+	if err != nil {
+		result, err = stop(fmt.Errorf("agent producer status=%s completion_error=%t blocked=%t final=%t: %w", result.Status, completion.Err != nil, completion.Blocked, strings.TrimSpace(completion.FinalText) != "", err))
 		return
 	}
 	result.Report.Changed = append(append([]store.BotEvidence(nil), req.Run.Report.Changed...), result.Report.Changed...)

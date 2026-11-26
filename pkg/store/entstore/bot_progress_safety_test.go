@@ -33,7 +33,7 @@ func TestBotProgressQuotaSuspension(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe"
 			v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
-			created, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Progress", OwnerID: uuid.MustParse(principal.Subject), Version: v, IdempotencyKey: "progress-quota"})
+			created, err := repo.Create(ctx, store.BotCreateRequest{Name: "Progress", OwnerID: uuid.MustParse(principal.Subject), Version: v, IdempotencyKey: "progress-quota"})
 			if err != nil {
 				t.Fatal(err)
 			}

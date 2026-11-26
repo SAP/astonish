@@ -76,7 +76,7 @@ func memoryAttributionResult(metadata map[string]any) *store.MemoryAttribution {
 	return a
 }
 
-func validateMemoryAttribution(ctx context.Context, db botDraftDB, session string, a *store.MemoryAttribution) error {
+func validateMemoryAttribution(ctx context.Context, db botDB, session string, a *store.MemoryAttribution) error {
 	if a == nil {
 		return nil
 	}
@@ -139,14 +139,14 @@ func (m *teamMemoryStore) guardGenericMemorySession(ctx context.Context, session
 	return nil
 }
 
-func prepareMemoryAttribution(ctx context.Context, db botDraftDB, entry store.MemoryEntry) (map[string]any, error) {
+func prepareMemoryAttribution(ctx context.Context, db botDB, entry store.MemoryEntry) (map[string]any, error) {
 	if err := validateMemoryAttribution(ctx, db, entry.SessionID, entry.Attribution); err != nil {
 		return nil, err
 	}
 	return store.EncodeMemoryAttribution(entry.Metadata, entry.Attribution)
 }
 
-func guardMemoryAttribution(ctx context.Context, db botDraftDB, botID store.BotID, q store.BotMemoryMutation) error {
+func guardMemoryAttribution(ctx context.Context, db botDB, botID store.BotID, q store.BotMemoryMutation) error {
 	if q.Kind == store.BotMemoryAdd {
 		if q.Entry.Attribution != nil && q.Entry.Attribution.BotID != botID {
 			return store.ErrBotForbidden
@@ -175,7 +175,7 @@ func (d personalBotDB) SupersedeMemoryAttribution(ctx context.Context, id uuid.U
 func (d teamBotDB) SupersedeMemoryAttribution(ctx context.Context, id uuid.UUID, source string) error {
 	return supersedeDiskMemoryAttribution(ctx, d, id, source)
 }
-func supersedeDiskMemoryAttribution(ctx context.Context, db botDraftDB, id uuid.UUID, source string) error {
+func supersedeDiskMemoryAttribution(ctx context.Context, db botDB, id uuid.UUID, source string) error {
 	row, err := db.ReadCorrectionMemory(ctx, id.String())
 	if err != nil {
 		return err
@@ -257,7 +257,7 @@ func (m *teamMemoryStore) SearchAttributed(ctx context.Context, sessions []strin
 // existing persisted index supplies scores; no index or memory permission exists
 // here. Enumeration can later move to equivalent JSON predicates, never a
 // bounded/global search followed by filtering.
-func searchAttributedCandidates(ctx context.Context, repo botDraftDB, db *sql.DB, dialect Dialect, table, fts string, embed store.EmbedFunc, sessions []uuid.UUID, candidates []store.MemorySearchResult, filter store.MemoryAttributionFilter, query string, limit int, minScore float64, category string) ([]store.MemorySearchResult, error) {
+func searchAttributedCandidates(ctx context.Context, repo botDB, db *sql.DB, dialect Dialect, table, fts string, embed store.EmbedFunc, sessions []uuid.UUID, candidates []store.MemorySearchResult, filter store.MemoryAttributionFilter, query string, limit int, minScore float64, category string) ([]store.MemorySearchResult, error) {
 	if filter.GoalID != uuid.Nil {
 		if goal, err := repo.ReadGoal(ctx, filter.BotID, filter.GoalID); err != nil || goal == nil || goal.BotID != filter.BotID {
 			return nil, store.ErrBotForbidden

@@ -141,11 +141,11 @@ func (s *botStoredRun) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// botDraftDB is implemented only with a scope's generated Ent client. Each
+// botDB is implemented only with a scope's generated Ent client. Each
 // transaction returns the same interface bound to the same scope and transaction.
 // There is no raw SQL application-data path and no cross-scope transaction.
-type botDraftDB interface {
-	Transaction(context.Context, func(botDraftDB) error) error
+type botDB interface {
+	Transaction(context.Context, func(botDB) error) error
 	GetBot(context.Context, uuid.UUID) (*botStoredRecord, error)
 	FindCreate(context.Context, string) (*botStoredRecord, error)
 	ListBots(context.Context, int, uuid.UUID) ([]botStoredRecord, error)
@@ -195,7 +195,7 @@ type botDraftDB interface {
 }
 type botRepository struct {
 	auth botRepositoryAuth
-	db   botDraftDB
+	db   botDB
 	now  func() time.Time
 	// Installed by the runtime composition, never accepted from a request.
 	activationCheck func(context.Context, store.Bot, store.BotVersion) error
@@ -225,7 +225,7 @@ func (r *botRepository) withBotFileCommit(ctx context.Context, home store.BotHom
 	if _, err := r.auth.authorize(ctx, uuid.Nil, true); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		fence, ok := tx.(botTranscriptDB)
 		if !ok {
 			return store.ErrBotUnsupported
@@ -362,7 +362,7 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 		return nil, err
 	}
 	var result *store.BotRun
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, req.BotID)
 		if err != nil {
 			return err
@@ -605,7 +605,7 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 		return store.BotLease{}, store.ErrBotInvalid
 	}
 	var lease store.BotLease
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, req.BotID)
 		if err != nil {
 			return err
@@ -691,7 +691,7 @@ func (r *botRepository) ClaimRun(ctx context.Context, req store.BotClaimRequest)
 	}
 	return lease, nil
 }
-func (r *botRepository) checkLease(ctx context.Context, tx botDraftDB, lease store.BotLease, now time.Time) (*botStoredRecord, error) {
+func (r *botRepository) checkLease(ctx context.Context, tx botDB, lease store.BotLease, now time.Time) (*botStoredRecord, error) {
 	rec, err := tx.GetBot(ctx, lease.BotID)
 	if err != nil {
 		return nil, err
@@ -729,7 +729,7 @@ func (r *botRepository) RenewLease(ctx context.Context, lease store.BotLease, ex
 	if !expires.After(now) || expires.Sub(now) > 5*time.Minute {
 		return store.BotLease{}, store.ErrBotInvalid
 	}
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		if locker, ok := tx.(botTranscriptDB); ok {
 			if err := locker.fenceTranscript(ctx, lease, now); err != nil {
 				return err
@@ -772,7 +772,7 @@ func (r *botRepository) AppendActivity(ctx context.Context, lease store.BotLease
 	if a.BotID != lease.BotID || a.RunID == nil || *a.RunID != lease.RunID || a.Kind != store.BotActivityRun || !json.Valid(a.Payload) {
 		return store.BotActivity{}, store.ErrBotInvalid
 	}
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		now := r.clock()
 		rec, err := r.checkLease(ctx, tx, lease, now)
 		if err != nil {
@@ -831,7 +831,7 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotApproval
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		now := r.clock()
 		rec, err := r.checkLease(ctx, tx, l, now)
 		if err != nil {
@@ -912,7 +912,7 @@ func (r *botRepository) RequestApproval(ctx context.Context, l store.BotLease, a
 	}
 	return result, nil
 }
-func botApprovalActivity(ctx context.Context, tx botDraftDB, a store.BotApproval, seq int64, now time.Time) error {
+func botApprovalActivity(ctx context.Context, tx botDB, a store.BotApproval, seq int64, now time.Time) error {
 	if err := appendAcceptedBotAnswer(ctx, tx, a); err != nil {
 		return err
 	}
@@ -942,7 +942,7 @@ func (r *botRepository) DecideApproval(ctx context.Context, q store.BotApprovalD
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotApproval
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -1023,7 +1023,7 @@ func (r *botRepository) ConsumeApproval(ctx context.Context, q store.BotApproval
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		now := r.clock()
 		rec, err := r.checkLease(ctx, tx, q.Lease, now)
 		if err != nil {
@@ -1123,7 +1123,7 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) (ou
 		}
 		extraction = &input
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		now := r.clock()
 		rec, err := tx.GetBot(ctx, q.Lease.BotID)
 		if err != nil {
@@ -1393,7 +1393,7 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, lease.BotID)
 		if err != nil {
 			return err
@@ -1483,9 +1483,6 @@ func (r *botRepository) RecoverRun(ctx context.Context, lease store.BotLease) er
 	})
 }
 
-func (r *botRepository) Activate(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
-	return r.enableBot(ctx, q, botdomain.LifecycleActivate)
-}
 func (r *botRepository) Resume(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
 	return r.enableBot(ctx, q, botdomain.LifecycleResume)
 }
@@ -1533,7 +1530,7 @@ func (r *botRepository) enableBot(ctx context.Context, q store.BotLifecycleReque
 		return nil, err
 	}
 	var result *store.Bot
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -1565,9 +1562,6 @@ func (r *botRepository) enableBot(ctx context.Context, q store.BotLifecycleReque
 		next.UpdatedAt = now
 		next.Scope = r.auth.scope
 		if err := tx.SetLifecycle(ctx, *rec, next); err != nil {
-			return err
-		}
-		if err := r.enableDraftActivationSchedules(ctx, tx, rec.Bot, next, *v); err != nil {
 			return err
 		}
 		payload, err := json.Marshal(map[string]any{"event": event, "status": status, "actor_id": actor, "revision": next.Revision, "version": next.Version, "reason": q.Reason})
@@ -1609,7 +1603,7 @@ func (r *botRepository) changeLifecycleIntent(ctx context.Context, q store.BotLi
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.Bot
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		if event == botdomain.LifecycleDelete {
 			tx = botDeleteDB(tx)
 		}
@@ -1835,7 +1829,7 @@ func (r *botRepository) PurgeDue(ctx context.Context, cutoff time.Time, limit in
 		if _, err := r.auth.authorize(ctx, candidate.Bot.OwnerID, true); err != nil {
 			return count, err
 		}
-		err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+		err := r.db.Transaction(ctx, func(tx botDB) error {
 			rec, err := tx.GetBot(ctx, candidate.Bot.ID)
 			if err != nil {
 				return err
@@ -1867,7 +1861,7 @@ func (r *botRepository) MarkRead(ctx context.Context, cursor store.BotReadCursor
 	if cursor.Sequence < 0 {
 		return store.ErrBotInvalid
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, cursor.BotID)
 		if err != nil {
 			return err
@@ -1946,7 +1940,7 @@ func (r *botRepository) SaveTrackedItem(ctx context.Context, id store.BotID, ite
 	default:
 		return store.ErrBotInvalid
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err
@@ -2001,7 +1995,7 @@ func (r *botRepository) CompleteGoal(ctx context.Context, q store.BotGoalComplet
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotGoal
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -2094,7 +2088,7 @@ func (r *botRepository) Correct(ctx context.Context, q store.BotCorrection) erro
 		return err
 	}
 	key := "correction:" + q.ID.String()
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -2188,7 +2182,7 @@ func (r *botRepository) ReconcileCorrection(ctx context.Context, botID store.Bot
 	invalidate := func(string) {}
 	var memoryID string
 	invalidateMemory := false
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, botID)
 		if err != nil {
 			return err
@@ -2413,7 +2407,7 @@ func (r *botRepository) GetVersion(ctx context.Context, id store.BotID, version 
 	return r.db.ReadVersion(ctx, id, version)
 }
 
-func prepareBotDraft(req store.BotCreateRequest, actor uuid.UUID, scope store.BotScope, now time.Time) (botStoredRecord, store.BotVersion, []store.BotGoal, error) {
+func prepareBotCreate(req store.BotCreateRequest, actor uuid.UUID, scope store.BotScope, now time.Time) (botStoredRecord, store.BotVersion, []store.BotGoal, error) {
 	if req.OwnerID != actor || strings.TrimSpace(req.Name) == "" || len(req.Name) > 200 || strings.TrimSpace(req.IdempotencyKey) == "" || len(req.IdempotencyKey) > 200 {
 		return botStoredRecord{}, store.BotVersion{}, nil, store.ErrBotInvalid
 	}
@@ -2469,20 +2463,20 @@ func prepareBotDraft(req store.BotCreateRequest, actor uuid.UUID, scope store.Bo
 		goals[i].Evidence = nil
 		goals[i].WorkspacePath = "goals/" + goals[i].ID.String()
 	}
-	rec := botStoredRecord{Bot: store.Bot{ID: id, OwnerID: actor, Scope: scope, Name: input.Name, Status: store.BotDraft, Revision: 1, Version: 1, HomeSessionID: uuid.New(), CreatedAt: now, UpdatedAt: now}, CreateKey: key, CreateHash: hash, LastSequence: 1}
+	rec := botStoredRecord{Bot: store.Bot{ID: id, OwnerID: actor, Scope: scope, Name: input.Name, Status: store.BotActive, Revision: 1, Version: 1, HomeSessionID: uuid.New(), CreatedAt: now, UpdatedAt: now}, CreateKey: key, CreateHash: hash, LastSequence: 1}
 	return rec, v, goals, nil
 }
-func (r *botRepository) CreateDraft(ctx context.Context, req store.BotCreateRequest) (*store.Bot, error) {
+func (r *botRepository) Create(ctx context.Context, req store.BotCreateRequest) (*store.Bot, error) {
 	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
 	if err != nil {
 		return nil, err
 	}
-	rec, v, goals, err := prepareBotDraft(req, actor, r.auth.scope, time.Now().UTC())
+	rec, v, goals, err := prepareBotCreate(req, actor, r.auth.scope, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
 	var result *store.Bot
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		old, err := tx.FindCreate(ctx, rec.CreateKey)
 		if err == nil {
 			if old.CreateHash != rec.CreateHash {
@@ -2513,11 +2507,11 @@ func (r *botRepository) CreateDraft(ctx context.Context, req store.BotCreateRequ
 				return err
 			}
 		}
-		payload, err := json.Marshal(map[string]any{"status": store.BotDraft, "version": 1, "actor_id": actor})
+		payload, err := json.Marshal(map[string]any{"status": store.BotActive, "version": 1, "actor_id": actor})
 		if err != nil {
 			return err
 		}
-		if err := tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: rec.Bot.CreatedAt}, "draft-created"); err != nil {
+		if err := tx.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, Sequence: 1, Kind: store.BotActivityLifecycle, Payload: payload, CreatedAt: rec.Bot.CreatedAt}, "active-created"); err != nil {
 			return err
 		}
 		result = &rec.Bot
@@ -2560,7 +2554,7 @@ func (r *botRepository) SaveGoal(ctx context.Context, req store.BotGoalUpdate) (
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotGoal
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, req.BotID)
 		if err != nil {
 			return err
@@ -2624,9 +2618,9 @@ func (r *botRepository) SaveGoal(ctx context.Context, req store.BotGoalUpdate) (
 	return result, nil
 }
 
-// ApplyVersion accepts draft edits and inert persona/charter corrections while
-// paused or stopped. Active-policy changes require the supervisor's lifecycle
-// transaction; an inactive prose edit neither changes policy nor resumes work.
+// ApplyVersion accepts inert persona/charter corrections while idle Active,
+// paused or stopped. Policy changes require the reviewed configuration
+// transaction; a prose edit neither changes policy nor resumes work.
 func (r *botRepository) ApplyVersion(ctx context.Context, req store.BotVersionRequest) (*store.Bot, error) {
 	if req.ExpectedRevision < 1 {
 		return nil, store.ErrBotInvalid
@@ -2635,7 +2629,7 @@ func (r *botRepository) ApplyVersion(ctx context.Context, req store.BotVersionRe
 		return nil, err
 	}
 	var result *store.Bot
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, req.BotID)
 		if err != nil {
 			return err
@@ -2645,11 +2639,13 @@ func (r *botRepository) ApplyVersion(ctx context.Context, req store.BotVersionRe
 			return err
 		}
 		switch rec.Bot.Status {
-		case store.BotDraft, store.BotPaused, store.BotStopped:
+		case store.BotActive, store.BotPaused, store.BotStopped:
 		default:
 			return store.ErrBotUnsupported
 		}
-		if rec.Bot.Revision != req.ExpectedRevision {
+		// Idle Active prose edits must not race executing work. Paused/stopped
+		// edits retain their shutdown barrier and fence until cancellation settles.
+		if rec.Bot.Revision != req.ExpectedRevision || (rec.Bot.Status == store.BotActive && (rec.ActiveRunID != nil || rec.LeaseExpiresAt != nil)) {
 			return store.ErrBotConflict
 		}
 		v := req.Version
@@ -2694,7 +2690,7 @@ func (r *botRepository) ApplyVersion(ctx context.Context, req store.BotVersionRe
 		if err := tx.InsertVersion(ctx, v, hash); err != nil {
 			return err
 		}
-		if rec.Bot.Status != store.BotDraft {
+		{
 			// Pause retains pending requests, but they reference the old version
 			// and must not remain actionable after a configuration correction.
 			if err := tx.RevokeBotApprovals(ctx, req.BotID, true); err != nil {

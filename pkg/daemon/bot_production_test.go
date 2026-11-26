@@ -53,18 +53,18 @@ func (r workerDraftRepo) List(context.Context, store.BotPage) ([]store.Bot, erro
 	return r.bots, nil
 }
 func (workerDraftRepo) ListRuns(_ context.Context, id store.BotID, _ store.BotPage) ([]store.BotRun, error) {
-	// Drafts are inspected for explicit test consent, but a legacy/ordinary
-	// queued row must never activate or execute merely because it is queued.
+	// Paused Bots allow tool-free conversation only; a queued regular run
+	// must never resume or execute merely because it is queued.
 	return []store.BotRun{{ID: uuid.New(), BotID: id, Status: store.RunQueued, Intent: store.BotIntentRegular}}, nil
 }
-func TestBotWorkerPollNeverActivatesDraft(t *testing.T) {
+func TestBotWorkerPollRejectsPausedRegularRun(t *testing.T) {
 	owner := uuid.New()
 	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := &BotWorker{}
-	if err := w.pollStore(ctx, workerDraftRepo{bots: []store.Bot{{ID: uuid.New(), OwnerID: owner, Status: store.BotDraft}}}, nil); err != nil && !errors.Is(err, store.ErrBotUnsupported) {
+	if err := w.pollStore(ctx, workerDraftRepo{bots: []store.Bot{{ID: uuid.New(), OwnerID: owner, Status: store.BotPaused}}}, nil); err != nil && !errors.Is(err, store.ErrBotUnsupported) {
 		// The deliberately minimal repository has no publication/retention
 		// adapter. Execution would panic on its missing runtime methods.
 		t.Fatal(err)

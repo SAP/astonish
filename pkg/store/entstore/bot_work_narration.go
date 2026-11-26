@@ -40,7 +40,7 @@ func botWorkProgressEvent(r store.BotRun, work *store.BotWorkState, e *adksessio
 // The answer is not public merely because a model supplied a user-role row or a
 // JSON type marker. Require the deterministic owner-answer ID and the consumed,
 // version-bound approval with the exact persisted typed answer.
-func botWorkAnswerEvent(ctx context.Context, tx botDraftDB, r store.BotRun, e *adksession.Event) (bool, error) {
+func botWorkAnswerEvent(ctx context.Context, tx botDB, r store.BotRun, e *adksession.Event) (bool, error) {
 	if e.Partial || e.Author != "user" || e.Content == nil || e.Content.Role != "user" || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil || e.Actions.StateDelta["_astonish_turn_context"] == true || !strings.HasPrefix(e.ID, "bot-owner-answer:") {
 		return false, nil
 	}

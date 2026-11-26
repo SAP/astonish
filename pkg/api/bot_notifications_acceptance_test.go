@@ -104,7 +104,11 @@ func testBotNotifications(t *testing.T, reopen bool) {
 				version := store.DefaultBotVersion()
 				version.Charter = "Observe and report"
 				version.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerManual}}
-				b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Notification acceptance", OwnerID: owner, Version: version, IdempotencyKey: "fixture"})
+				b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Notification acceptance", OwnerID: owner, Version: version, IdempotencyKey: "fixture"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "Review notification authority"})
 				if err != nil {
 					t.Fatal(err)
 				}

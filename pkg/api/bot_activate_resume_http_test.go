@@ -113,7 +113,7 @@ func TestBotActivateResumeHTTP(t *testing.T) {
 				t.Helper()
 				return request(t, "POST", path+"/"+action+suffix, actor, fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit reviewed lifecycle"}`, rev), status)
 			}
-			for _, from := range []store.BotStatus{store.BotDraft, store.BotPaused, store.BotStopped} {
+			for _, from := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotStopped} {
 				t.Logf("explicit lifecycle from %s", from)
 				func() {
 					if from == store.BotPaused {
@@ -127,32 +127,38 @@ func TestBotActivateResumeHTTP(t *testing.T) {
 					}
 					rev := b.Revision
 					versionBeforeResume := b.Version
-					lifecycle("activate", rev, "", 401)
+					lifecycle("resume", rev, "", 401)
 					denied := 403
 					if scope == "personal" {
 						denied = 404
 					}
-					lifecycle("activate", rev, reader, denied)
+					lifecycle("resume", rev, reader, denied)
 					wrong := "personal"
 					if scope == "personal" {
 						wrong = "team"
 					}
-					request(t, "POST", path+"/activate?scope="+wrong, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit"}`, rev), 404)
+					request(t, "POST", path+"/resume?scope="+wrong, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit"}`, rev), 404)
 					if rev > 1 {
-						lifecycle("activate", rev-1, owner, 409)
+						lifecycle("resume", rev-1, owner, 409)
 					}
-					decode(lifecycle("activate", rev, owner, 200))
-					if b.Status != store.BotActive || b.Revision != rev+1 || b.Version != versionBeforeResume {
+					expectedRevision := rev
+					if from == store.BotActive {
+						lifecycle("resume", rev, owner, 409)
+					} else {
+						decode(lifecycle("resume", rev, owner, 200))
+						expectedRevision++
+					}
+					if b.Status != store.BotActive || b.Revision != expectedRevision || b.Version != versionBeforeResume {
 						t.Fatalf("activation=%+v", b)
 					}
 					// Replaying stale consent or re-activating an active Bot never adds an event.
-					lifecycle("activate", rev, owner, 409)
-					lifecycle("activate", b.Revision, owner, 409)
+					lifecycle("resume", rev, owner, 409)
+					lifecycle("resume", b.Revision, owner, 409)
 					decode(request(t, "GET", path+suffix, owner, "", 200))
-					if b.Status != store.BotActive || b.Revision != rev+1 || b.Version != versionBeforeResume {
+					if b.Status != store.BotActive || b.Revision != expectedRevision || b.Version != versionBeforeResume {
 						t.Fatalf("duplicate mutated state: %+v", b)
 					}
-					if from == store.BotDraft {
+					if from == store.BotActive {
 						tid := uuid.New()
 						decode(request(t, "PUT", path+"/triggers/"+tid.String()+suffix, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed cron","definition":{"kind":"cron","cron":"* * * * *","timezone":"UTC","instructions":"Observe only"}}`, b.Revision), 200))
 						decode(request(t, "POST", path+"/triggers/"+tid.String()+"/enable"+suffix, owner, fmt.Sprintf(`{"expected_revision":%d,"reason":"Explicit recurrence"}`, b.Revision), 200))
@@ -176,7 +182,7 @@ func TestBotActivateResumeHTTP(t *testing.T) {
 			}
 			decode(lifecycle("pause", b.Revision, owner, 200))
 			db.SetBotActivationReadiness(nil)
-			lifecycle("activate", b.Revision, owner, 503)
+			lifecycle("resume", b.Revision, owner, 503)
 			decode(request(t, "GET", path+suffix, owner, "", 200))
 			if b.Status != store.BotPaused {
 				t.Fatal("readiness failure resumed Bot")
@@ -189,7 +195,7 @@ func TestBotActivateResumeHTTP(t *testing.T) {
 				decode(lifecycle("stop", reviewedRevision, owner, 200))
 				return nil
 			})
-			lifecycle("activate", reviewedRevision, owner, 409)
+			lifecycle("resume", reviewedRevision, owner, 409)
 			decode(request(t, "GET", path+suffix, owner, "", 200))
 			if b.Status != store.BotStopped || b.Revision != reviewedRevision+1 {
 				t.Fatalf("concurrent stop overwritten: %+v", b)

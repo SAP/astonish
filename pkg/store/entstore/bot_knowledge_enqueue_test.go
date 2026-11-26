@@ -12,7 +12,7 @@ func TestBotKnowledgeExtractionAtomicEnqueueHook(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			r, c, input, _ := knowledgeStorageFixture(t, scope)
 			rollback := errors.New("result transaction aborted")
-			err := r.db.Transaction(c, func(tx botDraftDB) error {
+			err := r.db.Transaction(c, func(tx botDB) error {
 				if _, err := r.enqueueBotKnowledgeExtractionTx(c, tx, input); err != nil {
 					return err
 				}
@@ -24,7 +24,7 @@ func TestBotKnowledgeExtractionAtomicEnqueueHook(t *testing.T) {
 			if _, err := r.ReadBotKnowledgeExtraction(c, input.Source); !errors.Is(err, store.ErrBotNotFound) {
 				t.Fatalf("orphan queue after rollback: %v", err)
 			}
-			err = r.db.Transaction(c, func(tx botDraftDB) error {
+			err = r.db.Transaction(c, func(tx botDB) error {
 				_, err := r.enqueueBotKnowledgeExtractionTx(c, tx, input)
 				return err
 			})

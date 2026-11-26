@@ -124,12 +124,15 @@ func TestBotEmployeeExplicitFileHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if err := json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"Review requested file capability"}`, f.b.Revision), 200), &f.b); err != nil {
+				t.Fatal(err)
+			}
 			v.Autonomy.AllowedTools = []string{actionName}
 			configuration, _ := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Authorize requested artifact creation", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 			if err := json.Unmarshal(f.request("PUT", f.path+"/configuration", string(configuration), 200), &f.b); err != nil {
 				t.Fatal(err)
 			}
-			if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"requested file"}`, f.b.Revision), 200), &f.b); err != nil {
+			if err := json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"requested file"}`, f.b.Revision), 200), &f.b); err != nil {
 				t.Fatal(err)
 			}
 			var admitted store.BotRun
@@ -565,7 +568,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	root := "/api/studio/bots"
 	router.HandleFunc(root, api.BotCreateHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}", api.BotGetHandler).Methods("GET")
-	router.HandleFunc(root+"/{botID}/activate", api.BotActivateHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/resume", api.BotResumeHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/configuration", api.BotConfigurationHandler).Methods("PUT")
 	router.HandleFunc(root+"/{botID}/runs", api.BotRequestRunHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/runs", api.BotRunsHandler).Methods("GET")
@@ -610,15 +613,19 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := root + "/" + b.ID.String()
-	// Without a configured worker, activation remains explicitly unavailable.
-	if raw := request("POST", path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed runtime journey"}`, b.Revision), http.StatusServiceUnavailable); strings.TrimSpace(string(raw)) != "Bot operation unavailable" {
+	// Creation is Active; pause explicitly before testing unavailable resume.
+	if err := json.Unmarshal(request("POST", path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"Verify worker readiness"}`, b.Revision), http.StatusOK), &b); err != nil {
+		t.Fatal(err)
+	}
+	// Without a configured worker, resume remains explicitly unavailable.
+	if raw := request("POST", path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed runtime journey"}`, b.Revision), http.StatusServiceUnavailable); strings.TrimSpace(string(raw)) != "Bot operation unavailable" {
 		t.Fatalf("activation readiness contract: %s", raw)
 	}
 	var draft store.Bot
 	if err := json.Unmarshal(request("GET", path, "", http.StatusOK), &draft); err != nil {
 		t.Fatal(err)
 	}
-	if draft.Status != store.BotDraft || draft.Revision != b.Revision {
+	if draft.Status != store.BotPaused || draft.Revision != b.Revision {
 		t.Fatalf("failed activation mutated draft: %+v", draft)
 	}
 	personal := ods.ForUser(owner)
@@ -646,8 +653,8 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("PUT", path+"/configuration", string(configuration), http.StatusOK), &b); err != nil {
 		t.Fatal(err)
 	}
-	if b.Status != store.BotDraft {
-		t.Fatal("reviewed configuration activated the draft")
+	if b.Status != store.BotPaused {
+		t.Fatal("reviewed configuration resumed the paused Bot")
 	}
 	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: store.BotScopePersonal, Backend: "controlled", StorageKey: "journey-home", Revision: 1}
 	registryCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "journey-registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, Actor: "journey-registry", OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
@@ -790,17 +797,22 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("GET", path, "", http.StatusOK), &draft); err != nil {
 		t.Fatal(err)
 	}
-	if draft.Status != store.BotDraft {
+	if draft.Status != store.BotPaused {
 		t.Fatal("runtime construction activated a draft")
 	}
 	request("POST", path+"/runs", fmt.Sprintf(`{"version":%d,"instructions":"must remain draft","idempotency_key":"draft"}`, b.Version), http.StatusForbidden)
-	if err := json.Unmarshal(request("POST", path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed runtime journey"}`, b.Revision), http.StatusOK), &b); err != nil {
+	if err := json.Unmarshal(request("POST", path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed runtime journey"}`, b.Revision), http.StatusOK), &b); err != nil {
 		t.Fatal(err)
 	}
 	if b.Status != store.BotActive {
 		t.Fatalf("HTTP activation did not activate: %+v", b)
 	}
-	request("PATCH", "/api/studio/sessions/"+b.HomeSessionID.String()+"/model", `{"provider":"other","model":"changed"}`, http.StatusConflict)
+	// An idle Active Home remains editable; no run has pinned this model yet.
+	request("PATCH", "/api/studio/sessions/"+b.HomeSessionID.String()+"/model", `{"provider":"other","model":"changed"}`, http.StatusOK)
+	request("PATCH", "/api/studio/sessions/"+b.HomeSessionID.String()+"/model", `{"provider":"controlled","model":"journey-model"}`, http.StatusOK)
+	if err := json.Unmarshal(request("GET", path, "", http.StatusOK), &b); err != nil {
+		t.Fatal(err)
+	}
 	if modelCalls.Load() != 0 || effects.Load() != 0 {
 		t.Fatal("activation executed model or tool work")
 	}
@@ -1177,8 +1189,15 @@ func TestBotChatFirstConversationHTTPAcceptance(t *testing.T) {
 	}
 	var b store.Bot
 	request(root, `{"name":"Chat first","idempotency_key":"create"}`, 201, &b)
-	// Drafting opens existing retained files without provisioning compute or
-	// invoking the execution preparation callback.
+	if b.Status != store.BotActive {
+		t.Fatal("creation must be Active")
+	}
+	bPaused, err := ods.ForUser(owner).Bots().Pause(auth(ctx), store.BotLifecycleRequest{BotID: b.ID, ActorID: uuid.MustParse(owner), ExpectedRevision: b.Revision, Reason: "Tool-free conversation fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = *bPaused
+	// Paused conversation opens existing retained files without compute preparation.
 	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: store.BotScopePersonal, Backend: "controlled", StorageKey: "journey-home", Revision: 1}
 	serviceCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "chat-first-registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, Actor: "chat-first-registry", OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
 	if err != nil {
@@ -1271,7 +1290,7 @@ func TestBotChatFirstConversationHTTPAcceptance(t *testing.T) {
 		t.Fatalf("canonical user events: %v", counts)
 	}
 	current, err := repo.Get(auth(ctx), b.ID)
-	if err != nil || current.Status != store.BotDraft || current.Home != home {
+	if err != nil || current.Status != store.BotPaused || current.Home != home {
 		t.Fatalf("conversation changed lifecycle/home: %+v %v", current, err)
 	}
 }

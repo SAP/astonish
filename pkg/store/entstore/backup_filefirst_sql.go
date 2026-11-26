@@ -128,7 +128,9 @@ func (i *fileFirstSQLInventory) finish() error {
 			return store.ErrBotForbidden
 		}
 		i.bots[id] = fileFirstBot{Bot: b, Selection: selection, Stage: stage}
-		scopes = append(scopes, stage, store.BotContentScope{OrgID: binding.Scope.OrgID, TeamID: binding.Scope.TeamID, OwnerID: owner.String(), BotID: id})
+		// Database runtime scopes pin owner/Bot identity, independently of the
+		// workspace's staging/retained org and team namespaces.
+		scopes = append(scopes, store.BotContentScope{OwnerID: owner.String(), BotID: id}, stage, store.BotContentScope{OrgID: binding.Scope.OrgID, TeamID: binding.Scope.TeamID, OwnerID: owner.String(), BotID: id})
 	}
 	for _, r := range i.rows {
 		switch r.table {
@@ -366,7 +368,7 @@ func validateFileFirstRootMetadata(metadata map[string]any) error {
 			// Strict typed decoders below validate these reference-only records.
 		case "previous_status":
 			v, ok := value.(string)
-			if !ok || (v != "" && v != string(store.BotActive) && v != string(store.BotPaused) && v != string(store.BotStopped) && v != string(store.BotDraft)) {
+			if !ok || (v != "" && v != string(store.BotActive) && v != string(store.BotPaused) && v != string(store.BotStopped)) {
 				return store.ErrBotInvalid
 			}
 		case "permanent_delete":

@@ -8,12 +8,12 @@ import type { BotSnapshot } from '@/api/botSnapshot'
 vi.mock('@/api/botSnapshot', () => ({ getBotSnapshot: vi.fn(), readBotActivityPage: vi.fn(), writeBotReadCursor: vi.fn() }))
 vi.mock('@/api/auth', () => ({ getMe: async () => ({ user: { id: 'owner' } }) }))
 vi.mock('@/api/botIntake', () => ({ currentIntakeNamespace: async () => 'fixture', readIntakePointer: () => null }))
-vi.mock('../BotDraftDialog', () => ({ default: () => null }))
+vi.mock('../BotCreateDialog', () => ({ default: () => null }))
 vi.mock('../BotPanels', () => ({ BotGoals: () => null, BotMemoryCharterPanel: () => null, BotSchedule: () => null, BotTemplatePublication: () => null }))
 vi.mock('../BotControls', () => ({ BotDecisionInbox: () => null, BotLifecycleControls: () => null, BotPolicySummary: () => null }))
 vi.mock('../../StudioChat', () => ({ default: () => <div>Shared transcript</div> }))
 vi.mock('@/api/bots', async original => ({ ...await original<typeof bots>(), listBots: vi.fn(), getBotVersion: vi.fn(), listBotRuns: vi.fn(), listBotGoals: vi.fn() }))
-const bot: bots.Bot = { id: 'fixture', scope: 'personal', owner_id: 'owner', name: 'Watcher', status: 'draft', version: 1, revision: 1, home_session_id: '', home: null, created_at: '', updated_at: '' }
+const bot: bots.Bot = { id: 'fixture', scope: 'personal', owner_id: 'owner', name: 'Watcher', status: 'active', version: 1, revision: 1, home_session_id: '', home: null, created_at: '', updated_at: '' }
 const makeSnapshot = (read: number): BotSnapshot => ({ bot, read_cursor: { bot_id: bot.id, viewer_id: 'owner', sequence: read }, latest_sequence: 121, unread_count: 121-read, pending_approvals: [], latest_outcome: { id: 'latest', status: 'succeeded', report: { summary: 'Finished background check' } } as bots.BotRun })
 beforeEach(() => {
   vi.clearAllMocks()

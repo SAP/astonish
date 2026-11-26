@@ -49,7 +49,7 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 	var result *store.BotApproveContinueResult
 	var registered *execution.BotRunIdentity
 	var continuation store.BotContinuationAdmission
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -182,7 +182,7 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 	return result, nil
 }
 
-func resumeApproval(ctx context.Context, tx botDraftDB, run store.BotRun) (*store.BotApproval, error) {
+func resumeApproval(ctx context.Context, tx botDB, run store.BotRun) (*store.BotApproval, error) {
 	c, err := botdomain.DecodeApprovalCheckpoint(run.Checkpoint, run)
 	if err != nil {
 		return nil, err
@@ -200,7 +200,7 @@ func (r *botRepository) RequeueApprovedRun(ctx context.Context, id, runID, appro
 	if _, err := r.auth.authorize(ctx, uuid.Nil, true); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err
@@ -252,7 +252,7 @@ func (r *botRepository) RequeueApprovedRun(ctx context.Context, id, runID, appro
 }
 
 // queueApprovedCheckpoint runs inside the caller's decision transaction.
-func (r *botRepository) queueApprovedCheckpoint(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun, fence int64, approvalID uuid.UUID) error {
+func (r *botRepository) queueApprovedCheckpoint(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, fence int64, approvalID uuid.UUID) error {
 	id, runID := saved.Run.BotID, saved.Run.ID
 	if err := tx.AdvanceSequence(ctx, id, rec.LastSequence); err != nil {
 		return err
@@ -286,7 +286,7 @@ func (r *botRepository) LoadResumeApproval(ctx context.Context, l store.BotLease
 		return nil, err
 	}
 	var a *store.BotApproval
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := r.checkLease(ctx, tx, l, r.clock()); err != nil {
 			return err
 		}

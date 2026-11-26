@@ -113,6 +113,7 @@ func TestBotSharedResearchAdvertisedSchema(t *testing.T) {
 					safe.ProviderFactory = factory
 					safe.Research = episode
 					safe.PolicyRuntime.Classifier = BotCatalogueClassifier{}
+					safe.PolicyRuntime.Mandate = req.Mandate
 				}
 				return safe, err
 			}

@@ -61,7 +61,7 @@ func TestBotWorkNarrationProjectionBoundary(t *testing.T) {
 }
 
 type narrationApprovalDB struct {
-	botDraftDB
+	botDB
 	approval store.BotApproval
 }
 

@@ -53,7 +53,7 @@ func TestBotSourceIntakeProposalHTTPAcceptance(t *testing.T) {
 			}
 			var bot store.Bot
 			json.Unmarshal(f.request("GET", "/api/studio/bots/"+applied["bot_id"].(string)+suffix, nil, 200), &bot)
-			if bot.Status != store.BotDraft {
+			if bot.Status != store.BotActive {
 				t.Fatal("promotion activated")
 			}
 			var retry map[string]any
@@ -63,8 +63,8 @@ func TestBotSourceIntakeProposalHTTPAcceptance(t *testing.T) {
 			}
 			f.request("GET", path+"/"+p["id"].(string)+suffix, nil, 200)
 			f.request("GET", "/api/studio/bots/intake/"+p["id"].(string)+suffix, nil, 409)
-			f.request("PUT", "/api/studio/bots/intake/"+p["id"].(string)+suffix, store.BotUnfinishedPut{ExpectedRevision:1,IdempotencyKey:"overwrite",Content:store.BotUnfinishedContent{Mode:store.BotIntakeBlank,Name:"Overwrite"}},409)
-			f.request("DELETE", "/api/studio/bots/intake/"+p["id"].(string)+suffix, store.BotUnfinishedDelete{ExpectedRevision:1,IdempotencyKey:"discard"},409)
+			f.request("PUT", "/api/studio/bots/intake/"+p["id"].(string)+suffix, store.BotUnfinishedPut{ExpectedRevision: 1, IdempotencyKey: "overwrite", Content: store.BotUnfinishedContent{Mode: store.BotIntakeBlank, Name: "Overwrite"}}, 409)
+			f.request("DELETE", "/api/studio/bots/intake/"+p["id"].(string)+suffix, store.BotUnfinishedDelete{ExpectedRevision: 1, IdempotencyKey: "discard"}, 409)
 			body["charter"] = "different"
 			f.request("POST", path+suffix, body, 409)
 			body["idempotency_key"] = uuid.NewString()

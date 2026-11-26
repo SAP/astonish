@@ -147,19 +147,19 @@ func NewScopedRetainedHomeBotRuntime(t *testing.T, ctx context.Context, h *Harne
 }
 
 // Create provisions storage before the registry attestation, then performs reviewed
-// configuration and production worker readiness/CAS activation. No SQL status seed.
+// configuration. Creation is Active; no lifecycle activation is required. No SQL status seed.
 func (r *RetainedHomeBotRuntime) Create(t *testing.T, name string) (*store.Bot, *sandbox.BotHomeBinding) {
 	t.Helper()
 	v := store.DefaultBotVersion()
 	v.Charter = "Verify isolated retained home across leased physical sessions"
-	b, err := r.Bots.CreateDraft(r.Context, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(r.Principal.Subject), Version: v, IdempotencyKey: uuid.NewString()})
+	b, err := r.Bots.Create(r.Context, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(r.Principal.Subject), Version: v, IdempotencyKey: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return r.RegisterAndActivate(t, b, v)
+	return r.RegisterAndConfigure(t, b, v)
 }
 
-func (r *RetainedHomeBotRuntime) RegisterAndActivate(t *testing.T, b *store.Bot, v store.BotVersion) (*store.Bot, *sandbox.BotHomeBinding) {
+func (r *RetainedHomeBotRuntime) RegisterAndConfigure(t *testing.T, b *store.Bot, v store.BotVersion) (*store.Bot, *sandbox.BotHomeBinding) {
 	t.Helper()
 	scope := sandbox.BotHomeScope{OrgID: r.Principal.OrgSlug, TeamID: r.Principal.TeamSlug, UserID: r.Principal.Subject, BotID: b.ID.String()}
 	home, err := r.Manager.Backend.EnsureBotHome(r.Context, scope)
@@ -193,9 +193,8 @@ func (r *RetainedHomeBotRuntime) RegisterAndActivate(t *testing.T, b *store.Bot,
 	if err := r.pin(r.Context, b.HomeSessionID.String(), "retained-home", "no-generation"); err != nil {
 		t.Fatal(err)
 	}
-	b, err = r.Bots.Activate(r.Context, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: b.OwnerID, Reason: "Reviewed retained-home readiness"})
-	if err != nil || b == nil || b.Status != store.BotActive {
-		t.Fatalf("reviewed activation: %+v %v", b, err)
+	if b == nil || b.Status != store.BotActive {
+		t.Fatalf("created Bot not Active: %+v", b)
 	}
 	return b, home
 }
@@ -381,7 +380,7 @@ func NewRetainedHomeLifecycle(t *testing.T, scope store.BotScope) *RetainedHomeL
 		}
 		return f.model, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
-		if f.Bot == nil || q.Bot.ID != f.Bot.ID || (f.Home == nil && q.Bot.Status != store.BotDraft) {
+		if f.Bot == nil || q.Bot.ID != f.Bot.ID || (f.Home == nil && q.Bot.Status != store.BotActive) {
 			return nil, store.ErrBotConflict
 		}
 		id := q.Bot.HomeSessionID.String()
@@ -414,7 +413,7 @@ func NewRetainedHomeLifecycle(t *testing.T, scope store.BotScope) *RetainedHomeL
 	}
 	f.Worker = worker
 	t.Cleanup(worker.Stop)
-	// Install the public scheduler bridge so real activation readiness sees it.
+	// Install the public scheduler bridge so real scheduling readiness sees it.
 	daemon.ConfigureBotScheduler(&scheduler.Executor{}, nil, worker.SchedulerCallbacks())
 	svc, err := launcher.BotChatServicesForOwner(r.Org, r.Principal, scope)
 	if err != nil {
@@ -594,9 +593,9 @@ func (f *RetainedHomeLifecycle) Run(t *testing.T, noPython bool) {
 	v.Autonomy.AllowedTools = []string{"read_file", "ask_user", "delegate_tasks"}
 	v.Autonomy.AllowedPaths = []string{"outputs"}
 	var err error
-	f.Bot, f.Home = r.RegisterAndActivate(t, f.Bot, v)
+	f.Bot, f.Home = r.RegisterAndConfigure(t, f.Bot, v)
 	if f.Bot == nil {
-		t.Fatal("retained lifecycle activation returned no Bot")
+		t.Fatal("retained lifecycle configuration returned no Bot")
 	}
 	// Seed via the real retained backend outside SQL, never fabricate a tool result.
 	files := f.Backend.(sandbox.BotHomeFilesBackend)

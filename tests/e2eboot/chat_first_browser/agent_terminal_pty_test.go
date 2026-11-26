@@ -46,7 +46,7 @@ func TestAgentTerminalRealPTYDecoder(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, "astonish"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Decoder regression", Scope: store.BotScopePersonal, Status: store.BotDraft, Version: 1, Revision: 1}
+	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Decoder regression", Scope: store.BotScopePersonal, Status: store.BotActive, Version: 1, Revision: 1}
 	base := "/api/studio/bots/" + bot.ID.String()
 	publish := make(chan struct{})
 	replayed := make(chan struct{})

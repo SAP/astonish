@@ -12,22 +12,22 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
-// Draft DTOs intentionally omit ownership, grants, active triggers and storage
+// Definition DTOs intentionally omit ownership, grants, active triggers and storage
 // bindings. Those need independent reviewed service operations, not mass assignment.
-type botDraftDefinition struct {
+type botDefinitionDTO struct {
 	Charter string            `json:"charter"`
 	Persona *store.BotPersona `json:"persona,omitempty"`
 }
 type botCreateDTO struct {
-	Name           string             `json:"name"`
-	IdempotencyKey string             `json:"idempotency_key"`
-	Definition     botDraftDefinition `json:"definition"`
-	StartFromTitle bool               `json:"start_from_title"`
+	Name           string           `json:"name"`
+	IdempotencyKey string           `json:"idempotency_key"`
+	Definition     botDefinitionDTO `json:"definition"`
+	StartFromTitle bool             `json:"start_from_title"`
 }
 type botVersionDTO struct {
-	ExpectedRevision int64              `json:"expected_revision"`
-	ChangeReason     string             `json:"change_reason"`
-	Definition       botDraftDefinition `json:"definition"`
+	ExpectedRevision int64            `json:"expected_revision"`
+	ChangeReason     string           `json:"change_reason"`
+	Definition       botDefinitionDTO `json:"definition"`
 }
 
 func registerBotRoutes(router *mux.Router) {
@@ -172,7 +172,7 @@ func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 			botHTTPError(w, err)
 			return
 		}
-		receipt, err := titles.CreateDraftAndStart(ctx, request)
+		receipt, err := titles.CreateAndStart(ctx, request)
 		if err != nil {
 			botHTTPError(w, err)
 			return
@@ -183,7 +183,7 @@ func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 		}{receipt.Bot, &store.BotMessageReceipt{Run: receipt.Run, HomeSessionID: receipt.HomeSessionID, UserEventID: receipt.UserEventID, HistoryCursor: receipt.HistoryCursor}})
 		return
 	}
-	b, err := repo.CreateDraft(r.Context(), request)
+	b, err := repo.Create(r.Context(), request)
 	if err != nil {
 		botHTTPError(w, err)
 		return

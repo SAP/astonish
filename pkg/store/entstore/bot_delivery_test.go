@@ -80,7 +80,11 @@ func TestBotNotificationsScopedConfigurationAndRevokedDeferredSend(t *testing.T)
 				}
 				v := store.DefaultBotVersion()
 				v.Charter = "Observe"
-				b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "A", OwnerID: owner, Version: v, IdempotencyKey: "a"})
+				b, err := repo.Create(ctx, store.BotCreateRequest{Name: "A", OwnerID: owner, Version: v, IdempotencyKey: "a"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Review delivery policy"})
 				if err != nil {
 					t.Fatal(err)
 				}

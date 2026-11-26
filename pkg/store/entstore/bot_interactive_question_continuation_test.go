@@ -17,13 +17,13 @@ import (
 
 func TestInteractiveContinuationExpiredQuestion(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, status := range []store.BotStatus{store.BotDraft, store.BotPaused} {
+		for _, status := range []store.BotStatus{store.BotActive, store.BotPaused} {
 			t.Run(string(scope)+"/"+string(status), func(t *testing.T) {
 				repo, _, ctx, _, _ := runtimeFixture(t, scope)
 				p, _ := execution.PrincipalFromContext(ctx)
 				v := store.DefaultBotVersion()
 				v.Charter = "Answer safely"
-				b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Question", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "question"})
+				b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Question", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "question"})
 				if err != nil {
 					t.Fatal(err)
 				}

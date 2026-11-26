@@ -86,7 +86,7 @@ func TestBotSkillsBrowserAcceptance(t *testing.T) {
 	}
 	version := store.DefaultBotVersion()
 	version.Charter = "Read official release notes"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Skill browser", OwnerID: uuid.MustParse(env.UserID), Version: version, IdempotencyKey: uuid.NewString()})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Skill browser", OwnerID: uuid.MustParse(env.UserID), Version: version, IdempotencyKey: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}

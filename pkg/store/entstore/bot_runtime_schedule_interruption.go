@@ -61,7 +61,7 @@ func (d teamBotDB) scheduledInterruptionRecords(ctx context.Context, bot, run uu
 	return records, nil
 }
 
-func scheduledInterruptionAllowsNewOccurrence(ctx context.Context, tx botDraftDB, saved *botStoredRun, occurrence time.Time) (bool, error) {
+func scheduledInterruptionAllowsNewOccurrence(ctx context.Context, tx botDB, saved *botStoredRun, occurrence time.Time) (bool, error) {
 	db, ok := tx.(botScheduledInterruptionDB)
 	if !ok || saved.Run.Status != store.RunInterrupted || saved.ProgressCursor < 1 || saved.ProgressCursor > botScheduledInterruptionEvidenceLimit || saved.ProgressPending < 0 || saved.Run.Lease.Fence < 1 {
 		return false, nil

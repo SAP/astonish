@@ -15,7 +15,7 @@ func sameSkillID(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
-func validateRunSkillSelection(ctx context.Context, tx botDraftDB, botID uuid.UUID, id *uuid.UUID, intent string) error {
+func validateRunSkillSelection(ctx context.Context, tx botDB, botID uuid.UUID, id *uuid.UUID, intent string) error {
 	if err := store.ValidateSkillSelection(id, intent); err != nil {
 		return err
 	}

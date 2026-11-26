@@ -188,14 +188,14 @@ func TestReviewedBotMemoryEvidenceAndContentCAS(t *testing.T) {
 			// Seed an observed record via persistence, not the interactive proposal API.
 			mutate := func(text string, seed bool) {
 				t.Helper()
-				var db botDraftDB
+				var db botDB
 				switch s := bots.(type) {
 				case *personalBotStore:
 					db = s.repository().db
 				case *teamBotStore:
 					db = s.repository().db
 				}
-				err = db.Transaction(ctx, func(tx botDraftDB) error {
+				err = db.Transaction(ctx, func(tx botDB) error {
 					row, err := tx.ReadCorrectionMemory(ctx, id.String())
 					if err != nil {
 						return err
@@ -255,7 +255,7 @@ func TestReviewedBotMemoryEvidenceAndContentCAS(t *testing.T) {
 			}
 			// Verify both independent durable copies, not only the in-memory receipt.
 			var originalMetadata, replacementMetadata map[string]any
-			var db botDraftDB
+			var db botDB
 			switch s := bots.(type) {
 			case *personalBotStore:
 				db = s.repository().db

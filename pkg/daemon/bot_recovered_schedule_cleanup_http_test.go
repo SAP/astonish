@@ -46,7 +46,7 @@ func TestBotRecoveredScheduleCleanupHTTP(t *testing.T) {
 				v := store.DefaultBotVersion()
 				v.Charter = "Observe without replay"
 				v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
-				b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Recovered", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "recovery"})
+				b, err := repo.Create(auth, store.BotCreateRequest{Name: "Recovered", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "recovery"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -56,7 +56,7 @@ func TestBotRecoveredScheduleCleanupHTTP(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed"})
+				b, err = repo.Get(auth, b.ID)
 				if err != nil {
 					t.Fatal(err)
 				}

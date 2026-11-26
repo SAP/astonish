@@ -17,7 +17,7 @@ func TestBotMessageAdmissionDurable(t *testing.T) {
 			p, _ := execution.PrincipalFromContext(ctx)
 			v := store.DefaultBotVersion()
 			v.Charter = "Discuss a draft safely"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Chat", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "chat"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Chat", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "chat"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -30,7 +30,7 @@ func TestBotMessageAdmissionDurable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if receipt.Run.Intent != store.BotIntentDraftConversation || receipt.Run.Presentation != store.BotRunPresentationHomeInteractive || receipt.HomeSessionID != b.HomeSessionID || receipt.UserEventID == "" || receipt.HistoryCursor <= 0 {
+			if receipt.Run.Intent != store.BotIntentRegular || receipt.Run.Presentation != store.BotRunPresentationHomeInteractive || receipt.HomeSessionID != b.HomeSessionID || receipt.UserEventID == "" || receipt.HistoryCursor <= 0 {
 				t.Fatalf("invalid receipt: %+v", receipt)
 			}
 			again, err := repo.AdmitMessage(ctx, q)
@@ -42,7 +42,7 @@ func TestBotMessageAdmissionDurable(t *testing.T) {
 				t.Fatalf("collision: %v", err)
 			}
 			after, err := repo.Get(ctx, b.ID)
-			if err != nil || after.Status != store.BotDraft || after.Version != b.Version {
+			if err != nil || after.Status != store.BotActive || after.Version != b.Version {
 				t.Fatal("message changed lifecycle", err)
 			}
 		})

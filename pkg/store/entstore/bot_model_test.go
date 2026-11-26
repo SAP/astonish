@@ -27,7 +27,7 @@ func TestAuthorizeBotModelConfiguration(t *testing.T) {
 			owner := uuid.MustParse(r.auth.userID)
 			v := store.DefaultBotVersion()
 			v.Charter = "Review the model"
-			draft, err := bots.CreateDraft(ctx, store.BotCreateRequest{Name: "Model review", OwnerID: owner, Version: v, IdempotencyKey: "model-review"})
+			draft, err := bots.Create(ctx, store.BotCreateRequest{Name: "Model review", OwnerID: owner, Version: v, IdempotencyKey: "model-review"})
 			if err != nil {
 				t.Fatal(err)
 			}

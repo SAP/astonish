@@ -16,6 +16,50 @@ driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(driver)
 
 
+class ActiveBotAcceptanceTests(unittest.TestCase):
+    def test_manifest_has_exact_scopes_and_no_migration(self):
+        self.assertEqual(set(driver.ACTIVE_BOT_GATES), {'creation', 'http', 'schedules', 'resume', 'cli-pty', 'browser'})
+        for _, names in driver.ACTIVE_BOT_GATES.values():
+            self.assertTrue(names)
+            self.assertFalse(any('Migration' in n or 'Draft' in n for n in names))
+            for name in names:
+                if name in driver.ACTIVE_BOT_SCOPED:
+                    for scope in ('personal', 'team'):
+                        self.assertIn(name + '/' + scope, driver.active_bot_required(names))
+
+    def test_partial_flags_rejected(self):
+        for flag in ('--local-only', '--preflight', '--real-provider', '--postgres', '--defer-kubernetes-postgresql'):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                driver.main(['--stage', 'active-bot-status', flag])
+        with patch.object(driver, 'active_bot_status', return_value=17) as check:
+            self.assertEqual(driver.main(['--stage', 'active-bot-status', '--checks-only']), 17)
+            self.assertTrue(check.call_args.args[0].checks_only)
+
+    def test_missing_browser_blocks_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'report.json'
+            with patch.dict(os.environ, {}, clear=True), patch.object(driver, 'run') as run:
+                self.assertEqual(driver.main(['--stage', 'active-bot-status', '--report', str(path)]), 2)
+                run.assert_not_called()
+            self.assertEqual(json.loads(path.read_text())['status'], 'BLOCKED')
+
+    def test_unknown_skip_wrong_package_missing_child_malformed_rejected(self):
+        pkg = 'github.com/SAP/astonish/pkg/api'
+        required = ['TestActive', 'TestActive/personal', 'TestActive/team']
+        for mode in ('valid', 'skip', 'foreign', 'missing', 'malformed'):
+            with self.subTest(mode=mode):
+                evidence = driver.ConsolidationEvidence(required, io.StringIO(), {})
+                for name in required:
+                    if mode == 'missing' and name.endswith('/team'): continue
+                    package = 'foreign' if mode == 'foreign' else pkg
+                    evidence.feed(json.dumps(dict(Package=package, Test=name, Action='run')))
+                    evidence.feed(json.dumps(dict(Package=package, Test=name, Action='pass')))
+                evidence.feed(json.dumps(dict(Package=pkg, Action='pass')))
+                if mode == 'skip': evidence.feed(json.dumps(dict(Package=pkg, Test='TestActive/unknown', Action='skip')))
+                if mode == 'malformed': evidence.feed('not-json')
+                self.assertEqual(bool(driver.consolidation_exact_errors(evidence, './pkg/api', required)), mode != 'valid')
+
+
 class EmployeeCompletedEvidenceTests(unittest.TestCase):
     def fixture(self, root):
         source = {'fixture.go': 'source-hash'}
@@ -1309,27 +1353,25 @@ class AcceptanceDriverTests(unittest.TestCase):
     def test_service_capture_closure_stays_finite_and_full_service_not_suppressed(self):
         ids = set(driver.CONSOLIDATION_REMAINING['runtime']) | set(driver.CONSOLIDATION_REMAINING['controller'])
         self.assertEqual(len(ids), 8)
-        for filename in ('docs/bot-runtime-evidence.md',):
+        for filename in ('docs/architecture/bot-runtime-evidence.md',):
             text = (driver.ROOT / filename).read_text()
             for key in ids:
                 self.assertIn('`' + key + '`', text)
-            for marker in ('TestPersonalSettingsBotEmailRoundTripScopeAndClear', 'bot_email',
-                           'schema/Ent', 'required full service', 'BLOCKED', 'no production migration'):
-                self.assertIn(marker, text)
+            for marker in ('nonzero commands', 'UNVERIFIED, NOT PASS', 'historical evidence',
+                           'never recapture or rewrite history'):
+                self.assertIn(marker, ' '.join(text.split()))
+            self.assertIn('TestPersonalSettingsBotEmailRoundTripScopeAndClear',
+                          driver.CONSOLIDATION_CONTROLLER['controller-personal-mailbox'][1])
 
     def test_admitted_browser_prepared_http_documentation_keeps_consent_and_storage_blockers(self):
-        text = (driver.ROOT / 'docs/bot-runtime-evidence.md').read_text()
-        for marker in ('TestBotConfiguredBrowserAdmissionHTTP', 'TestBotPreparedPlanAdmissionHTTP',
-                       'oauth_capability_deny', 'local_evidence', '34/34', '18/18',
-                       'prepared mirror HTTP recovery, NOT full plan selection consent/lifecycle',
-                       'not pointlessly rerun', 'CONSOLIDATION_REMAINING', 'BLOCKED',
-                       'schema/Ent', 'live Kubernetes'):
+        text = (driver.ROOT / 'docs/architecture/bot-runtime-evidence.md').read_text()
+        for marker in ('Controlled models establish wiring', 'safety, not autonomous paid-model quality',
+                       'missing prerequisites', 'skips', 'source drift', 'UNVERIFIED, NOT PASS'):
             self.assertIn(marker, ' '.join(text.split()))
-        table = text.split('<!-- service-phase4-fixed-closure-start -->')[1].split('<!-- service-phase4-fixed-closure-end -->')[0]
-        self.assertIn('browser seven exact-download rows', table)
-        self.assertIn('prepared mirror HTTP personal/team resume', table)
-        self.assertIn('full admitted HTTP plan-selection consent', table)
-        self.assertEqual(table.count('| BLOCKED |'), 8)
+        # Source inventory and exact evidence rejection are tested separately;
+        # dated receipt counts and superseded closure tables are not contracts.
+        for name in ('TestBotConfiguredBrowserAdmissionHTTP', 'TestBotPreparedPlanAdmissionHTTP'):
+            self.assertIn(name, driver.CONSOLIDATION_CONTROLLER['controller-daemon'][1])
 
     @staticmethod
     def process_admission_inventory():
@@ -1391,15 +1433,12 @@ class AcceptanceDriverTests(unittest.TestCase):
                       driver.consolidation_exact_errors(evidence, './pkg/daemon', required))
 
     def test_process_admission_documentation_finite_closure_and_boundaries(self):
-        text = (driver.ROOT / 'docs/bot-runtime-evidence.md').read_text()
-        for marker in ('TestBotConfiguredProcessAdmissionHTTP', '28 actual rows', '29/29',
-                       'astonish-process-admission-final-normal.log', 'astonish-process-admission-final-race.log',
-                       'not continuous scheduled lifecycle', 'same-session', 'physical browser UI'):
+        text = (driver.ROOT / 'docs/architecture/bot-runtime-evidence.md').read_text()
+        for marker in ('owned disposable test fixtures', 'not completed evidence',
+                       'UNVERIFIED, NOT PASS', 'never recapture or rewrite history'):
             self.assertIn(marker, ' '.join(text.split()))
-        table = text.split('<!-- service-phase4-fixed-closure-start -->')[1].split('<!-- service-phase4-fixed-closure-end -->')[0]
-        self.assertEqual(table.count('| BLOCKED |'), 8)
-        self.assertIn('process 28 actual rows', table)
-        self.assertNotIn('remaining process/team ordinary cases', table)
+        self.assertIn('not continuous scheduled lifecycle', driver.CONSOLIDATION_BOUNDARIES['controller-daemon'])
+        self.assertEqual(len(self.process_admission_inventory()), 29)
 
     @staticmethod
     def production_template_inventory():
@@ -1496,8 +1535,8 @@ class AcceptanceDriverTests(unittest.TestCase):
                     for mode in ('queued', 'paused', 'expired', 'wrong-digest', 'revoked', 'rollback',
                         'requeue-failure', 'stopped', 'deleted', 'changed-version', 'stale-checkpoint',
                         'wrong-actor', 'changed-action', 'denied')],
-                'TestBotContentApprovalCodec': ['format', 'bot', 'approval', 'run', 'version', 'digest',
-                    'tool', 'effect', 'target', 'spend', 'kind', 'revision', 'size', 'owner', 'team', 'org'],
+                'TestBotContentApprovalCodec': ['bot', 'approval', 'run', 'version', 'digest',
+                    'tool', 'effect', 'target', 'spend', 'size', 'bodydigest'],
                 'TestBotContentApprovalCorruptMissing': [],
                 'TestBotContentApprovalSQLiteReopen': ['personal', 'team'],
             },
@@ -1861,19 +1900,14 @@ class AcceptanceDriverTests(unittest.TestCase):
                                      omitted is not None or failure == 'package-missing')
 
     def test_kubernetes_scenario_documentation_retains_finite_blocked_closure(self):
-        text = (driver.ROOT / 'docs/bot-runtime-evidence.md').read_text()
-        section = text.split('<!-- kubernetes-scenario-gate-start -->')[1].split('<!-- kubernetes-scenario-gate-end -->')[0]
+        text = (driver.ROOT / 'docs/architecture/bot-runtime-evidence.md').read_text()
+        for marker in ('Kubernetes adapter/helper fixtures are **mocked, NONPHYSICAL**',
+                       '**user-requested DEFERRED, NOT PASS**',
+                       'explicit local-deferred profile', 'rollout remain unverified/unapproved'):
+            self.assertIn(marker, ' '.join(text.split()))
+        names = driver.CONSOLIDATION_CONTROLLER['controller-kubernetes-home'][1]
         for name in self.kubernetes_scenario_inventory():
-            self.assertIn(name, section)
-        for key in ('runtime-lazy-session-lifecycle', 'controller-all-mode-no-python',
-                    'controller-team-physical', 'controller-cold-cross-backend'):
-            self.assertIn('`' + key + '`', section)
-        for marker in ('9 exact', 'NONPHYSICAL', 'backend-neutral', 'owned',
-                       'no probe', 'twelve', 'source present', 'physical unexercised'):
-            self.assertIn(marker, section)
-        table = text.split('<!-- service-phase4-fixed-closure-start -->')[1].split('<!-- service-phase4-fixed-closure-end -->')[0]
-        self.assertEqual(table.count('| BLOCKED |'), 8)
-        self.assertIn('cold importer', table)
+            self.assertIn(name, names)
 
     def test_kubernetes_no_model_gate_blocks_before_ambient_execution(self):
         tier = 'controller-kubernetes-home'
@@ -2113,15 +2147,14 @@ class AcceptanceDriverTests(unittest.TestCase):
             'TestBotResumeDisabledScheduleRejectsCorruption': ('bot_resume_schedule_test.go', [scope + '/' + scenario
                 for scope in ('personal', 'team') for scenario in ('owner', 'version', 'bot', 'trigger',
                     'cron', 'timezone', 'payload', 'next-run', 'missing', 'active')]),
-            'TestBotDraftScheduledActivationConsent': ('bot_draft_activation_test.go', [scope + '/' + path
-                for scope in ('personal', 'team') for path in ('proposal-create-enabled', 'proposal-edit-enabled',
-                    'legacy-create-enabled', 'legacy-edit-enabled', 'proposal-disabled', 'legacy-disabled')]),
-            'TestBotDraftScheduledActivationRejectsCorruption': ('bot_draft_activation_test.go', [scope + '/' + scenario
+            'TestBotIndependentScheduleConsent': ('bot_draft_activation_test.go', ['personal', 'team']),
+            'TestBotScheduleTargetOnlyEnablement': ('bot_draft_activation_test.go', ['personal', 'team']),
+            'TestBotResumeScheduleRejectsCorruption': ('bot_draft_activation_test.go', [scope + '/' + scenario
                 for scope in ('personal', 'team') for scenario in ('digest', 'owner', 'bot', 'trigger', 'version',
                     'cron', 'timezone', 'payload', 'missing', 'enabled', 'enabled-next', 'next-run',
                     'wrong-scope', 'readiness', 'transaction-binding')]),
-            'TestBotDraftScheduledActivationRollback': ('bot_draft_activation_safety_test.go', ['personal', 'team']),
-            'TestBotDraftScheduledActivationLegacyReadinessCAS': ('bot_draft_activation_safety_test.go', [scope + '/' + mode
+            'TestBotResumeScheduleRollback': ('bot_draft_activation_safety_test.go', ['personal', 'team']),
+            'TestBotResumeScheduleLegacyReadinessCAS': ('bot_draft_activation_safety_test.go', [scope + '/' + mode
                 for scope in ('personal', 'team') for mode in ('missing-readiness', 'readiness-failed',
                     'binding-changed', 'revision-changed')]),
             'TestBotAuthorizedScheduleQueuedReconciliation': ('bot_authorized_schedule_queue_test.go', [scope + '/' + op
@@ -2172,8 +2205,12 @@ class AcceptanceDriverTests(unittest.TestCase):
         for marker in ('manager-private', 'not serialized', 'not verified child text',
                        'no broader grants', '33', 'runtime-delegate-receipts'):
             self.assertIn(marker, text)
-        for name in list(self.delegate_receipt_inventory()) + list(self.activation_resume_inventory()):
+        for name in self.delegate_receipt_inventory():
             self.assertIn(name, text)
+        # Lifecycle inventory is validated against current executable sources,
+        # not the superseded Draft-activation discussion in this delegate doc.
+        lifecycle = (driver.ROOT / 'docs/architecture/bot-draft-activation.md').read_text()
+        self.assertIn('does not enable disabled schedules', lifecycle)
 
     @staticmethod
     def budget_preflight_inventory():
@@ -2475,7 +2512,7 @@ class AcceptanceDriverTests(unittest.TestCase):
                 'TestBotPolicyTeamMCPTransaction': ('bot_configuration_policy_transaction_test.go', []),
                 'TestBotReviewedConfigurationRevokesOldGrants': ('bot_configuration_test.go', ['personal', 'team']),
                 'TestBotAdaptiveConversionRollback': ('bot_configuration_test.go', ['personal', 'team']),
-                'TestBotReviewedDraftRejectsUnreviewedPolicyReplacement': ('bot_configuration_test.go', ['personal', 'team']),
+                'TestBotPausedPolicyRejectsUnreviewedPolicyReplacement': ('bot_configuration_test.go', ['personal', 'team']),
                 'TestReviewedConfigurationRejectsStaleScheduleBinding': ('bot_configuration_resume_test.go', [
                     scope + '/' + mutation for scope in ('personal', 'team') for mutation in (
                         'missing', 'mode', 'version', 'owner', 'bot', 'trigger', 'cron', 'timezone',
@@ -3201,21 +3238,14 @@ class AcceptanceDriverTests(unittest.TestCase):
                         self.assertIn(omitted, str(gate['errors']))
 
     def test_allmode_evidence_doc_distinguishes_receipt_inventory_and_blockers(self):
-        text = (driver.ROOT / 'docs/bot-runtime-evidence.md').read_text()
-        for marker in ('controller-docker-allmode', '692.49', '10682', '165 bytes',
-                       'NONPHYSICAL', '-timeout=15m', 'controller-docker-delegate',
-                       '6127', 'DELEGATE_FINAL_QUESTION_PENDING', 'post-reset zero-session',
-                       'd710df54', '67d938b0', 'TestCodePlanCompletedNormalFollowupAcceptance',
-                       'controller-cold-cross-backend', 'live Kubernetes',
-                       'No parent-plan phase was marked complete'):
-            self.assertIn(marker, text)
-
+        text = (driver.ROOT / 'docs/architecture/bot-runtime-evidence.md').read_text()
+        for marker in ('Physical Docker timing and Studio/native PTY restoration are distinct',
+                       'UNVERIFIED, NOT PASS', 'historical and do not certify',
+                       'not completed evidence', 'No rollout or existing Bot replay occurred'):
+            self.assertIn(marker, ' '.join(text.split()))
         for phase in ('runtime', 'controller'):
             for obligation in driver.CONSOLIDATION_REMAINING[phase]:
                 self.assertIn('`' + obligation + '`', text)
-        self.assertNotIn('was pending at handoff', text)
-        self.assertIn('remains unverified by this audit', text)
-        self.assertIn('do not yet prove continuous three-mode configured execution', text)
 
     def test_allmode_regression_inventory_requires_real_source_parents(self):
         expected = {
@@ -3276,12 +3306,12 @@ class AcceptanceDriverTests(unittest.TestCase):
                 'TestBotProgressQueuedAuthorityLoss',
                 'TestBotConfigurationPolicyTransaction', 'TestBotPolicyTeamMCPTransaction',
                 'TestBotReviewedConfigurationRevokesOldGrants', 'TestBotAdaptiveConversionRollback',
-                'TestBotReviewedDraftRejectsUnreviewedPolicyReplacement',
+                'TestBotPausedPolicyRejectsUnreviewedPolicyReplacement',
                 'TestReviewedConfigurationRejectsStaleScheduleBinding',
                 'TestReviewedConfigurationResumeKeepsSchedulesDisabled', 'TestBotPausedStoppedConfiguration',
                 'TestBotResumeDisabledScheduleApproval', 'TestBotResumeDisabledScheduleRejectsCorruption',
-                'TestBotDraftScheduledActivationConsent', 'TestBotDraftScheduledActivationRejectsCorruption',
-                'TestBotDraftScheduledActivationRollback', 'TestBotDraftScheduledActivationLegacyReadinessCAS',
+                'TestBotIndependentScheduleConsent', 'TestBotScheduleTargetOnlyEnablement', 'TestBotResumeScheduleRejectsCorruption',
+                'TestBotResumeScheduleRollback', 'TestBotResumeScheduleLegacyReadinessCAS',
                 'TestBotAuthorizedScheduleQueuedReconciliation', 'TestBackupFileFirstRestoreGuards',
                 'TestBackupFileFirstRestoreFilesBeforeSQL', 'TestBackupFileFirstRestore', 'TestBackupFileFirstMappingRunAuthorityAndOpaqueContent',
                 'TestBackupFileFirstMappingIndependentOwnership', 'TestBackupFileFirstReconciliationPreservesQuiescence'}),
@@ -4005,13 +4035,14 @@ class AcceptanceDriverTests(unittest.TestCase):
         self.assertEqual(driver.RELEASE_SCENARIOS, {f"BOTS-{n:03d}" for n in range(1, 11)})
         self.assertEqual(driver.clean_env({"ASTONISH_PG_ACTIVATION_DISPOSABLE": "1"}),
                          {"ASTONISH_PG_ACTIVATION_DISPOSABLE": "1"})
-        for name in ("bots", "bot-chat-first", "bot-release-checklist", "bot-home-setup",
-                     "testing", "studio-ui-system"):
+        for name in ("bots", "bot-chat-first", "bot-home-setup"):
             text = (driver.ROOT / "docs/architecture" / (name + ".md")).read_text()
-            self.assertIn("pending", text, name)
-            self.assertRegex(text, r"historical|Historical", name)
-        activation = (driver.ROOT / "docs/architecture/bot-draft-activation.md").read_text()
-        self.assertIn("not consent to recurring work", activation)
+            self.assertIn("Active", text, name)
+        lifecycle = (driver.ROOT / "docs/architecture/bot-draft-activation.md").read_text()
+        self.assertIn("unreleased", lifecycle.lower())
+        for marker in ("Active, Paused, Stopped, Deleted", "separately authorized exact schedule operation",
+                       "does not enable disabled schedules", "No Draft upgrade/data conversion"):
+            self.assertIn(marker, lifecycle)
 
     # Scope deliberately excludes provider docs, README and the public website.
     NEUTRAL_DOCS = (

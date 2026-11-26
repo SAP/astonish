@@ -68,7 +68,7 @@ func TestChannelBotServices(t *testing.T) {
 		repo := store.BotStoreFromContext(ctx, scope)
 		v := store.DefaultBotVersion()
 		v.Charter = "Scoped channel bot"
-		b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: string(scope), OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: string(scope)})
+		b, err := repo.Create(ctx, store.BotCreateRequest{Name: string(scope), OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: string(scope)})
 		if err != nil || b.Scope != scope {
 			t.Fatalf("scoped create %+v %v", b, err)
 		}
@@ -112,7 +112,7 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 	}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe only reviewed trigger instructions"
-	b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "External execution", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "external"})
+	b, err := repo.Create(auth, store.BotCreateRequest{Name: "External execution", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "external"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestBotExternalTriggersHTTPWorkerExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "controlled readiness"})
+	b, err = repo.Get(auth, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

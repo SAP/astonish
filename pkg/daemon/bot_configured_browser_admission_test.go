@@ -378,7 +378,7 @@ func runConfiguredBrowserAdmission(t *testing.T, scope store.BotScope, mode stri
 		v := store.DefaultBotVersion()
 		v.Charter = configuredBrowserTask
 		v.Autonomy.AllowedTools = []string{"browser_pdf", "bot_work_update"}
-		b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Configured browser " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
+		b, e := repo.Create(auth, store.BotCreateRequest{Name: "Configured browser " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
 		if e != nil {
 			t.Fatal(e)
 		}

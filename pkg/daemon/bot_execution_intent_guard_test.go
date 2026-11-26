@@ -24,7 +24,7 @@ func TestBotIntentLiveGuardNeverElevatesConversation(t *testing.T) {
 	if err := guard.check(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, status := range []store.BotStatus{store.BotPaused, store.BotActive, store.BotStopped, store.BotDraft} {
+	for _, status := range []store.BotStatus{store.BotPaused, store.BotActive, store.BotStopped, store.BotActive} {
 		repo.b.Status = status
 		for _, name := range []string{"read_file", "run_flow", "delegate_tasks", "unknown_tool", "ask_user"} {
 			decision, err := guard.Authorize(ctx, execution.ActionDescriptor{Tool: name})

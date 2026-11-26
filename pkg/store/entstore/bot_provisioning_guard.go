@@ -29,7 +29,7 @@ func BeginBotHomeProvisioning(ctx context.Context, bots store.BotStore, id store
 	default:
 		return store.ErrBotUnsupported
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err
@@ -37,7 +37,7 @@ func BeginBotHomeProvisioning(ctx context.Context, bots store.BotStore, id store
 		if _, err = r.auth.authorize(ctx, rec.Bot.OwnerID, true); err != nil {
 			return err
 		}
-		if rec.Bot.Status != store.BotDraft || rec.Bot.PermanentDelete || (rec.Bot.Revision != revision && !(rec.Bot.Home.ID != uuid.Nil && rec.Bot.Revision == revision+1)) {
+		if (rec.Bot.Status != store.BotActive && rec.Bot.Status != store.BotPaused) || rec.Bot.PermanentDelete || (rec.Bot.Revision != revision && !(rec.Bot.Home.ID != uuid.Nil && rec.Bot.Revision == revision+1)) {
 			return store.ErrBotConflict
 		}
 		db, ok := tx.(botProvisioningDB)
@@ -56,7 +56,7 @@ func provisioningMetadata(rec botStoredRecord) map[string]any {
 	return data
 }
 func (d personalBotDB) markProvisioning(ctx context.Context, rec botStoredRecord) error {
-	n, err := d.client.Bot.Update().Where(personalbot.IDEQ(rec.Bot.ID), personalbot.RevisionEQ(rec.Bot.Revision), personalbot.LastSeqEQ(rec.LastSequence), personalbot.StatusEQ(personalbot.StatusDraft)).SetData(provisioningMetadata(rec)).AddLastSeq(1).Save(ctx)
+	n, err := d.client.Bot.Update().Where(personalbot.IDEQ(rec.Bot.ID), personalbot.RevisionEQ(rec.Bot.Revision), personalbot.LastSeqEQ(rec.LastSequence), personalbot.StatusEQ(personalbot.Status(rec.Bot.Status))).SetData(provisioningMetadata(rec)).AddLastSeq(1).Save(ctx)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func (d personalBotDB) markProvisioning(ctx context.Context, rec botStoredRecord
 	return nil
 }
 func (d teamBotDB) markProvisioning(ctx context.Context, rec botStoredRecord) error {
-	n, err := d.client.Bot.Update().Where(teambot.IDEQ(rec.Bot.ID), teambot.RevisionEQ(rec.Bot.Revision), teambot.LastSeqEQ(rec.LastSequence), teambot.StatusEQ(teambot.StatusDraft)).SetData(provisioningMetadata(rec)).AddLastSeq(1).Save(ctx)
+	n, err := d.client.Bot.Update().Where(teambot.IDEQ(rec.Bot.ID), teambot.RevisionEQ(rec.Bot.Revision), teambot.LastSeqEQ(rec.LastSequence), teambot.StatusEQ(teambot.Status(rec.Bot.Status))).SetData(provisioningMetadata(rec)).AddLastSeq(1).Save(ctx)
 	if err != nil {
 		return err
 	}

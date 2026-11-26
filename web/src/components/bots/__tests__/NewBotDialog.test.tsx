@@ -3,18 +3,19 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import NewBotDialog from '../NewBotDialog'
 
 beforeEach(() => { localStorage.clear(); window.location.hash = '#/chat' })
-it('creates a private conversation with server defaults, stable retries and no execution request', async () => {
+it('creates a private conversation with server defaults, stable retries and exactly one title conversation request', async () => {
   let fail = true
   const requests: Record<string, unknown>[] = []
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     expect(url).toBe('/api/studio/bots?scope=personal')
     expect(init?.method).toBe('POST')
     requests.push(JSON.parse(String(init?.body)))
-    return fail ? new Response('Offline', { status: 503 }) : Response.json({ id: 'new', scope: 'personal' })
+    return fail ? new Response('Offline', { status: 503 }) : Response.json({ id: 'new', scope: 'personal', status: 'active' })
   }))
   const close = vi.fn()
   render(<NewBotDialog onClose={close} onSources={vi.fn()} />)
   expect(screen.getAllByRole('textbox')).toHaveLength(1)
+  expect(screen.getByText(/request one initial conversation from its title/)).toBeVisible()
   expect(screen.getByRole('button', { name: 'Start conversation' })).toBeDisabled()
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: '  Watcher  ' } })
   fireEvent.click(screen.getByRole('button', { name: 'Start conversation' }))

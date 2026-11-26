@@ -184,7 +184,7 @@ func TestBotWorkerWiredRuntimeDurableEventsAndOwnerPin(t *testing.T) {
 	storedRepo := ods.ForTeam(team.Slug).Bots()
 	storedVersion := store.DefaultBotVersion()
 	storedVersion.Charter = "Report the controlled observation."
-	storedBot, err := storedRepo.CreateDraft(auth, store.BotCreateRequest{Name: "Event fixture", OwnerID: owner, Version: storedVersion, IdempotencyKey: "events"})
+	storedBot, err := storedRepo.Create(auth, store.BotCreateRequest{Name: "Event fixture", OwnerID: owner, Version: storedVersion, IdempotencyKey: "events"})
 	if err != nil {
 		t.Fatal(err)
 	}

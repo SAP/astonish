@@ -37,8 +37,8 @@ type personalBotStore struct {
 func (s *personalBotStore) repository() *botRepository {
 	return &botRepository{auth: s.auth, db: personalBotDB{client: s.client, content: s.content}}
 }
-func (s *personalBotStore) CreateDraft(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
-	return s.repository().CreateDraft(ctx, r)
+func (s *personalBotStore) Create(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
+	return s.repository().Create(ctx, r)
 }
 func (s *personalBotStore) Get(ctx context.Context, id store.BotID) (*store.Bot, error) {
 	return s.repository().Get(ctx, id)
@@ -620,9 +620,6 @@ func (d personalBotDB) DisableGoalSchedules(ctx context.Context, id, goalID uuid
 	return nil
 }
 
-func (s *personalBotStore) Activate(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
-	return s.repository().Activate(ctx, q)
-}
 func (s *personalBotStore) Resume(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
 	return s.repository().Resume(ctx, q)
 }
@@ -836,7 +833,7 @@ func personalBotError(err error) error {
 	}
 	return err
 }
-func (d personalBotDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
+func (d personalBotDB) Transaction(ctx context.Context, fn func(botDB) error) error {
 	tx, err := d.client.Tx(ctx)
 	if err != nil {
 		return err
@@ -917,7 +914,7 @@ func (d personalBotDB) InsertBot(ctx context.Context, r botStoredRecord) error {
 	return personalBotError(err)
 }
 func (d personalBotDB) UpdateVersion(ctx context.Context, id uuid.UUID, revision, version, seq int64, now time.Time) error {
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(id), bot.RevisionEQ(revision), bot.LastSeqEQ(seq-1), bot.StatusIn(bot.StatusDraft, bot.StatusPaused, bot.StatusStopped)).AddRevision(1).SetVersion(version).SetLastSeq(seq).SetUpdatedAt(now).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(id), bot.RevisionEQ(revision), bot.LastSeqEQ(seq-1), bot.StatusIn(bot.StatusActive, bot.StatusPaused, bot.StatusStopped)).AddRevision(1).SetVersion(version).SetLastSeq(seq).SetUpdatedAt(now).Save(ctx)
 	if err != nil {
 		return personalBotError(err)
 	}

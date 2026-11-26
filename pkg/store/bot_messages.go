@@ -46,7 +46,7 @@ func (r BotRun) ControlOnly() bool {
 	if !r.ExecutionMode.Valid() {
 		return true
 	}
-	return r.Intent == BotIntentDraftConversation || r.Intent == BotIntentConversation
+	return r.Intent == BotIntentConversation
 }
 func (r BotRun) UsesHomeHistory() bool {
 	return r.Presentation == BotRunPresentationHomeInteractive || r.Intent == BotIntentConversation

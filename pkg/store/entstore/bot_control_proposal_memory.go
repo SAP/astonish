@@ -10,7 +10,7 @@ import (
 )
 
 // Bind the source contents to the saved review, not the later confirmation.
-func prepareControlMemory(ctx context.Context, db botDraftDB, rec *botStoredRecord, payload *store.BotControlPayload) error {
+func prepareControlMemory(ctx context.Context, db botDB, rec *botStoredRecord, payload *store.BotControlPayload) error {
 	q := payload.Memory
 	if q == nil {
 		return nil
@@ -71,7 +71,7 @@ func (d personalBotDB) controlMemoryMutation(ctx context.Context, p store.BotCon
 func (d teamBotDB) controlMemoryMutation(ctx context.Context, p store.BotControlProposal, session, actor uuid.UUID, now time.Time) error {
 	return mutateControlMemory(ctx, d, p, session, actor, now)
 }
-func mutateControlMemory(ctx context.Context, db botDraftDB, p store.BotControlProposal, session, actor uuid.UUID, now time.Time) error {
+func mutateControlMemory(ctx context.Context, db botDB, p store.BotControlProposal, session, actor uuid.UUID, now time.Time) error {
 	q := p.Payload.Memory
 	if err := lockReviewedSession(ctx, db, p.BotID, session.String()); err != nil {
 		return err
@@ -127,11 +127,11 @@ func mutateControlMemory(ctx context.Context, db botDraftDB, p store.BotControlP
 	}
 	return nil
 }
-func insertControlMemory(ctx context.Context, db botDraftDB, id, session, actor uuid.UUID, content, category string, metadata map[string]any, now time.Time) error {
+func insertControlMemory(ctx context.Context, db botDB, id, session, actor uuid.UUID, content, category string, metadata map[string]any, now time.Time) error {
 	return insertBotDiskMemory(ctx, db, id, session, actor, content, category, metadata, now)
 }
 
-func (r *botRepository) applyControlMemoryTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlMemoryTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	q := p.Payload.Memory
 	if q == nil || q.ExpectedRevision != rec.Bot.Revision {
 		return store.ErrBotConflict

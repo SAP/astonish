@@ -17,7 +17,7 @@ import (
 func testIntakeSkillSeed() *store.BotSkillSeed {
 	return &store.BotSkillSeed{Title: "Weekly research", Responsibility: "Research public updates", OwnerExpectation: "Report changes with source links", Method: []string{"Read public sources", "Summarize changes"}}
 }
-func seedTestDB(b store.BotStore) botDraftDB {
+func seedTestDB(b store.BotStore) botDB {
 	switch b := b.(type) {
 	case *personalBotStore:
 		return personalBotDB{client: b.client, content: b.content}
@@ -38,7 +38,7 @@ func assertIntakeSeed(t *testing.T, ctx context.Context, bots store.BotStore, b 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Status != store.BotDraft || s.Status != store.BotSkillDraft || s.BotID != b.ID || s.Legacy != nil || v.ParentRevision != 0 || v.ParentDigest != "" || v.RevertsRevision != nil {
+	if b.Status != store.BotActive || s.Status != store.BotSkillDraft || s.BotID != b.ID || s.Legacy != nil || v.ParentRevision != 0 || v.ParentDigest != "" || v.RevertsRevision != nil {
 		t.Fatalf("not fresh draft: %+v %+v", s, v)
 	}
 	if err := validateSkillRevisionSources(ctx, seedTestDB(bots), *v); err != nil {
@@ -157,7 +157,7 @@ func TestBotAdaptiveSkillSeedAtomicIsolation(t *testing.T) {
 				}
 				otherVersion := store.DefaultBotVersion()
 				otherVersion.Charter = "Unrelated"
-				other, err := bots.CreateDraft(ctx, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, IdempotencyKey: "other", Version: otherVersion})
+				other, err := bots.Create(ctx, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, IdempotencyKey: "other", Version: otherVersion})
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -37,7 +37,7 @@ func (r *botRepository) LoadWork(ctx context.Context, l store.BotLease) (*store.
 		return nil, err
 	}
 	var result *store.BotWorkState
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := r.checkLease(ctx, tx, l, r.clock()); err != nil {
 			return err
 		}
@@ -63,8 +63,8 @@ type botWorkDB interface {
 }
 
 // encodeBotRunData keeps transaction-local content lookup optional without
-// widening botDraftDB or dropping capabilities from its concrete adapters.
-func encodeBotRunData(ctx context.Context, tx botDraftDB, saved botStoredRun) (map[string]any, error) {
+// widening botDB or dropping capabilities from its concrete adapters.
+func encodeBotRunData(ctx context.Context, tx botDB, saved botStoredRun) (map[string]any, error) {
 	d, ok := tx.(interface{ contentCodec() *botContentCodec })
 	if !ok {
 		return nil, store.ErrBotUnsupported
@@ -110,7 +110,7 @@ func (r *botRepository) SaveWork(ctx context.Context, q store.BotWorkUpdate) (*s
 	}
 	next := q.State.Clone()
 	var result *store.BotWorkState
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		locker, ok := tx.(botTranscriptDB)
 		if !ok {
 			return store.ErrBotUnsupported
@@ -193,7 +193,7 @@ func (r *botRepository) LoadRunInput(ctx context.Context, id store.BotID, runID 
 		return nil, err
 	}
 	var input store.BotRunInput
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err

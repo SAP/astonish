@@ -99,12 +99,56 @@ func (t *botSandboxTool) Run(ctx tool.Context, args any) (map[string]any, error)
 	if ctx == nil {
 		return nil, store.ErrBotForbidden
 	}
-	return sandbox.RunNodeTool(ctx, t.Tool, t.client, t.sessionID, t.sessionID, args, func(values, result map[string]any, err error) {
+	client := t.client
+	var readExecuted bool
+	if t.Name() == "web_fetch" {
+		client = &botPublicFetchClient{ToolNodeClient: client, executed: &readExecuted}
+	}
+	return sandbox.RunNodeTool(ctx, t.Tool, client, t.sessionID, t.sessionID, args, func(values, result map[string]any, err error) {
 		if err != nil {
 			result = map[string]any{"error": err.Error()}
 		}
-		recordBuiltinToolObservation(ctx, t.sessionID, t.Name(), values, result)
+		recordBuiltinToolObservationWithRead(ctx, t.sessionID, t.Name(), values, result, readExecuted && err == nil, args)
 	})
+}
+
+type botPublicFetchClient struct {
+	sandbox.ToolNodeClient
+	executed *bool
+}
+
+func (c *botPublicFetchClient) Call(session, name string, args map[string]any) (json.RawMessage, error) {
+	return c.CallContext(context.Background(), session, name, args)
+}
+func (c *botPublicFetchClient) CallContext(ctx context.Context, session, _ string, args map[string]any) (json.RawMessage, error) {
+	var raw json.RawMessage
+	var err error
+	if client, ok := c.ToolNodeClient.(sandbox.ContextCallingToolClient); ok {
+		raw, err = client.CallContext(ctx, session, tools.BotPublicFetchOperation, args)
+	} else {
+		raw, err = c.ToolNodeClient.Call(session, tools.BotPublicFetchOperation, args)
+	}
+	if err != nil {
+		return raw, err
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return raw, nil
+	}
+	marker, marked := envelope["read_executed"]
+	if !marked {
+		return raw, nil
+	} // no execution attestation
+	var executed bool
+	var response map[string]any
+	if len(envelope) != 2 || json.Unmarshal(marker, &executed) != nil || !executed || json.Unmarshal(envelope["response"], &response) != nil || response == nil {
+		return nil, fmt.Errorf("invalid first-party fetch execution envelope")
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	*c.executed = true
+	return envelope["response"], nil
 }
 
 // No name or model-provided argument is proof that an external effect is safe.

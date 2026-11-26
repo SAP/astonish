@@ -50,7 +50,7 @@ func TestBotSourceIntakeTemplateReceiptRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Bot.Status != store.BotDraft {
+	if created.Bot.Status != store.BotActive {
 		t.Fatal("fork activated")
 	}
 	if _, err := source.DecideSourceIntake(ctx, p.ID, store.BotSourceIntakeDecision{Digest: p.Digest, Decision: "reject"}, templates, destination); !errors.Is(err, store.ErrBotConflict) {

@@ -76,7 +76,7 @@ func ApprovalScopeReopenFixture(t *testing.T, scope store.BotScope, protocols ..
 	t.Cleanup(closeDB)
 	version := store.DefaultBotVersion()
 	version.Charter = "Read once, send exact approved action once, report."
-	b, err := scoped.CreateDraft(ctx, store.BotCreateRequest{Name: "Resume", OwnerID: owner, Version: version, IdempotencyKey: "resume"})
+	b, err := scoped.Create(ctx, store.BotCreateRequest{Name: "Resume", OwnerID: owner, Version: version, IdempotencyKey: "resume"})
 	if err != nil {
 		t.Fatal(err)
 	}

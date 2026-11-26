@@ -34,7 +34,7 @@ type botCoalescedOccurrence struct {
 
 // Bounded pages, no lifetime-sized root index. Root sequence CAS makes the
 // search plus occurrence receipt atomic with competing admissions and claims.
-func findProgressAssignment(ctx context.Context, tx botDraftDB, bot, trigger uuid.UUID, occurrence time.Time) (*store.BotRun, error) {
+func findProgressAssignment(ctx context.Context, tx botDB, bot, trigger uuid.UUID, occurrence time.Time) (*store.BotRun, error) {
 	after := uuid.Nil
 	for {
 		runs, err := tx.ReadRuns(ctx, bot, 100, after)
@@ -216,7 +216,7 @@ func (d teamBotDB) acknowledgeScheduledOccurrence(ctx context.Context, q store.B
 	return nil
 }
 
-func (r *botRepository) acknowledgeScheduledRequest(ctx context.Context, tx botDraftDB, req store.BotRunRequest, occurrence *botScheduledRequest, now time.Time) error {
+func (r *botRepository) acknowledgeScheduledRequest(ctx context.Context, tx botDB, req store.BotRunRequest, occurrence *botScheduledRequest, now time.Time) error {
 	if occurrence == nil || occurrence.external != nil {
 		return nil
 	}
@@ -254,7 +254,7 @@ func (r *botRepository) acknowledgeScheduledRequest(ctx context.Context, tx botD
 	return tx.(botScheduledDB).acknowledgeScheduledOccurrence(ctx, q, now, next)
 }
 
-func (r *botRepository) resolveScheduledRequest(ctx context.Context, tx botDraftDB, rec *botStoredRecord, trusted *botScheduledRequest, req *store.BotRunRequest) error {
+func (r *botRepository) resolveScheduledRequest(ctx context.Context, tx botDB, rec *botStoredRecord, trusted *botScheduledRequest, req *store.BotRunRequest) error {
 	if trusted.external != nil {
 		return r.resolveExternalRequest(ctx, tx, rec, *trusted.external, req)
 	}

@@ -13,7 +13,7 @@ import (
 func (r *botRepository) ReadOperationForViewer(ctx context.Context, botID, operationID uuid.UUID) (*store.BotOperation, *store.BotOperationView, error) {
 	var operation *store.BotOperation
 	var view *store.BotOperationView
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, botID)
 		if err != nil {
 			return err

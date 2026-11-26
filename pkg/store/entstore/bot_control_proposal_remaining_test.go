@@ -20,7 +20,7 @@ func remainingProposal(t *testing.T, scope store.BotScope, op store.BotControlOp
 		t.Fatal(err)
 	}
 	if status != store.BotActive {
-		err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+		err := r.db.Transaction(ctx, func(tx botDB) error {
 			rec, e := tx.GetBot(ctx, run.BotID)
 			if e != nil {
 				return e
@@ -44,8 +44,8 @@ func remainingProposal(t *testing.T, scope store.BotScope, op store.BotControlOp
 	}
 	r.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
 	intent := store.BotIntentRegular
-	if status == store.BotDraft {
-		intent = store.BotIntentDraftTest
+	if status == store.BotActive {
+		intent = store.BotIntentRegular
 	}
 	if status == store.BotPaused {
 		intent = store.BotIntentConversation
@@ -88,9 +88,6 @@ func remainingProposal(t *testing.T, scope store.BotScope, op store.BotControlOp
 }
 
 func remainingStatus(op store.BotControlOperation) store.BotStatus {
-	if op == store.BotControlActivate {
-		return store.BotDraft
-	}
 	if op == store.BotControlResume {
 		return store.BotPaused
 	}
@@ -114,7 +111,7 @@ func assertRemainingOutcome(t *testing.T, r *botRepository, ctx context.Context,
 		if row.Snippet != p.Payload.Memory.Content || row.Category != p.Payload.Memory.Category || row.Attribution == nil || row.Attribution.Source != controlProposalKey(p.ID) {
 			t.Fatalf("memory: %+v", row)
 		}
-	case store.BotControlActivate, store.BotControlResume:
+	case store.BotControlResume:
 		if b.Status != store.BotActive {
 			t.Fatal("not active")
 		}
@@ -124,8 +121,8 @@ func assertRemainingOutcome(t *testing.T, r *botRepository, ctx context.Context,
 			t.Fatal(e)
 		}
 		expected := store.BotIntentRegular
-		if b.Status == store.BotDraft {
-			expected = store.BotIntentDraftTest
+		if b.Status == store.BotActive {
+			expected = store.BotIntentRegular
 		}
 		if run.Instructions != p.Payload.TaskOnce.Instructions || run.Run.Intent != expected || run.Run.Status != store.RunQueued {
 			t.Fatalf("run: %+v", run)
@@ -142,7 +139,7 @@ func assertRemainingOutcome(t *testing.T, r *botRepository, ctx context.Context,
 	}
 }
 func TestBotControlProposalRemainingOperations(t *testing.T) {
-	ops := []store.BotControlOperation{store.BotControlMemoryRemember, store.BotControlMemoryCorrect, store.BotControlMemoryForget, store.BotControlTaskOnceOperation, store.BotControlActivate, store.BotControlResume}
+	ops := []store.BotControlOperation{store.BotControlMemoryRemember, store.BotControlMemoryCorrect, store.BotControlMemoryForget, store.BotControlTaskOnceOperation, store.BotControlResume}
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, op := range ops {
 			for _, mode := range []string{"apply-replay", "stale", "revoked", "concurrent", "rollback"} {
@@ -150,7 +147,7 @@ func TestBotControlProposalRemainingOperations(t *testing.T) {
 					r, ctx, p := remainingProposal(t, scope, op, remainingStatus(op))
 					d := store.BotControlProposalDecision{BotID: p.BotID, ProposalID: p.ID, Digest: p.Digest}
 					if mode == "stale" {
-						err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+						err := r.db.Transaction(ctx, func(tx botDB) error {
 							rec, e := tx.GetBot(ctx, p.BotID)
 							if e != nil {
 								return e
@@ -269,12 +266,12 @@ func TestBotControlProposalMemorySourceAndReadinessRace(t *testing.T) {
 				}
 			})
 		}
-		for _, op := range []store.BotControlOperation{store.BotControlActivate, store.BotControlResume, store.BotControlTaskOnceOperation} {
+		for _, op := range []store.BotControlOperation{store.BotControlResume, store.BotControlTaskOnceOperation} {
 			t.Run(string(scope)+"/readiness-race/"+string(op), func(t *testing.T) {
 				r, ctx, p := remainingProposal(t, scope, op, remainingStatus(op))
 				r.activationCheck = func(ctx context.Context, b store.Bot, v store.BotVersion) error {
 					// A transaction here proves readiness is outside the decision transaction.
-					return r.db.Transaction(ctx, func(tx botDraftDB) error {
+					return r.db.Transaction(ctx, func(tx botDB) error {
 						rec, e := tx.GetBot(ctx, b.ID)
 						if e != nil {
 							return e
@@ -299,7 +296,7 @@ func TestBotControlProposalMemorySourceAndReadinessRace(t *testing.T) {
 
 func TestBotControlProposalTaskStatesAndReadiness(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, status := range []store.BotStatus{store.BotDraft, store.BotPaused} {
+		for _, status := range []store.BotStatus{store.BotActive, store.BotPaused} {
 			t.Run(string(scope)+"/"+string(status), func(t *testing.T) {
 				r, ctx, p := remainingProposal(t, scope, store.BotControlTaskOnceOperation, status)
 				d := store.BotControlProposalDecision{BotID: p.BotID, ProposalID: p.ID, Digest: p.Digest}
@@ -320,7 +317,7 @@ func TestBotControlProposalTaskStatesAndReadiness(t *testing.T) {
 				}
 			})
 		}
-		for _, op := range []store.BotControlOperation{store.BotControlTaskOnceOperation, store.BotControlActivate, store.BotControlResume} {
+		for _, op := range []store.BotControlOperation{store.BotControlTaskOnceOperation, store.BotControlResume} {
 			t.Run(string(scope)+"/readiness/"+string(op), func(t *testing.T) {
 				r, ctx, p := remainingProposal(t, scope, op, remainingStatus(op))
 				r.activationCheck = nil

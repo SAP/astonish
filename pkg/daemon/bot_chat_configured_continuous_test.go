@@ -29,7 +29,7 @@ func admitConfiguredContinuousSchedule(t *testing.T, ctx context.Context, worker
 	t.Helper()
 	worker.schedulerReady.Store(true)
 	var err error
-	b, err = repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed read-only fixture"})
+	b, err = repo.Get(ctx, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

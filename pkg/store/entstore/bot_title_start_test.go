@@ -24,16 +24,16 @@ func TestBotTitleStartAtomicReplay(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Discuss title"
 			q := store.BotCreateRequest{Name: "Research the project", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "title"}
-			first, err := repo.CreateDraftAndStart(ctx, q)
+			first, err := repo.CreateAndStart(ctx, q)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.Status != store.BotDraft || !first.Run.IsInteractiveChat() || first.UserEventID == "" || first.HistoryCursor == 0 {
+			if first.Status != store.BotActive || !first.Run.IsInteractiveChat() || first.UserEventID == "" || first.HistoryCursor == 0 {
 				t.Fatalf("receipt: %+v", first)
 			}
 			assertReplay := func() {
 				t.Helper()
-				again, err := repo.CreateDraftAndStart(ctx, q)
+				again, err := repo.CreateAndStart(ctx, q)
 				if err != nil {
 					t.Fatalf("replay: %v", err)
 				}
@@ -44,7 +44,7 @@ func TestBotTitleStartAtomicReplay(t *testing.T) {
 			assertReplay()
 			conflicting := q
 			conflicting.Name = "Different"
-			if receipt, err := repo.CreateDraftAndStart(ctx, conflicting); !errors.Is(err, store.ErrBotConflict) || receipt != nil {
+			if receipt, err := repo.CreateAndStart(ctx, conflicting); !errors.Is(err, store.ErrBotConflict) || receipt != nil {
 				t.Fatalf("mismatch: receipt=%+v err=%v", receipt, err)
 			}
 			assertReplay()
@@ -63,7 +63,7 @@ func TestBotTitleStartAdmissionRollback(t *testing.T) {
 			// Missing authentication evidence makes live registry registration fail after
 			// draft/home writes have begun; the outer transaction must roll everything back.
 			ctx = store.WithBotMessageAdmission(ctx, execution.NewBotTurnAuthorizationRegistry(1))
-			if _, err := repo.CreateDraftAndStart(ctx, q); err == nil {
+			if _, err := repo.CreateAndStart(ctx, q); err == nil {
 				t.Fatal("missing authority accepted")
 			}
 			bots, err := repo.List(ctx, store.BotPage{Limit: 100})

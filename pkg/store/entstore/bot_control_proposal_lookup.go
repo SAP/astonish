@@ -13,7 +13,7 @@ import (
 // controlProposalKeys selects only committed control records. It never opens
 // transcript/content files. Consumers still hydrate the selected record through
 // FindActivity, which checks its digest and SQL authority before exposing bytes.
-func controlProposalKeys(ctx context.Context, db botDraftDB, bot store.BotID, after int64) ([]string, int64, error) {
+func controlProposalKeys(ctx context.Context, db botDB, bot store.BotID, after int64) ([]string, int64, error) {
 	var keys []string
 	switch d := db.(type) {
 	case personalBotDB:

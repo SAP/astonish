@@ -120,14 +120,14 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 				write(map[string]any{"bots": []store.Bot{bot}})
 			}
 		case r.URL.Path == "/api/studio/bots" && r.Method == "POST":
-			var q client.BotDraft
+			var q client.BotCreate
 			if json.NewDecoder(r.Body).Decode(&q) != nil || q.Definition.Charter == "" || q.IdempotencyKey == "" {
 				http.Error(w, "bad draft", 400)
 				return
 			}
 			draft := bot
 			draft.Name = q.Name
-			draft.Status = store.BotDraft
+			draft.Status = store.BotActive
 			write(draft)
 		case r.URL.Path == "/api/studio/bots/"+id.String()+"/snapshot" && r.Method == "GET":
 			snap := store.BotSnapshot{Bot: bot}
@@ -173,7 +173,7 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 				return
 			}
 			write(store.BotRun{ID: rid, BotID: id, SessionID: sid, Status: store.RunQueued})
-		case strings.HasSuffix(r.URL.Path, "/resume"):
+		case strings.Contains(r.URL.Path, "/runs/") && strings.HasSuffix(r.URL.Path, "/resume"):
 			var q map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&q)
 			if q["approval_id"] != aid.String() {
@@ -195,7 +195,7 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/pause"):
 				bot.Status = store.BotPaused
-			case strings.HasSuffix(r.URL.Path, "/activate"):
+			case strings.HasSuffix(r.URL.Path, "/resume"):
 				bot.Status = store.BotActive
 			case strings.HasSuffix(r.URL.Path, "/stop"):
 				bot.Status = store.BotStopped
@@ -243,7 +243,7 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 		}
 	}
 	run("Monitor", "bots", "list", "--json")
-	run("draft", "bots", "create", "draft", "Draft", "--charter", "Observe only", "--json")
+	run("active", "bots", "create", "Watcher", "--charter", "Observe only", "--json")
 	run(id.String(), "bots", "show", "Monitor", "--json")
 	run("queued", "bots", "run", "Monitor", "--json")
 	run("pending", "bots", "approvals", "Monitor", "--json")

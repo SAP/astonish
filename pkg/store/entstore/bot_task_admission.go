@@ -8,7 +8,7 @@ import (
 
 // pinTaskHead runs inside admission's transaction. Detached snapshots are recovery
 // evidence only; the runtime subsequently verifies this exact bundle against Home.
-func pinTaskHead(ctx context.Context, tx botDraftDB, botID uuid.UUID, taskID *uuid.UUID) (*store.BotTaskRevision, error) {
+func pinTaskHead(ctx context.Context, tx botDB, botID uuid.UUID, taskID *uuid.UUID) (*store.BotTaskRevision, error) {
 	if taskID == nil {
 		return nil, nil
 	}

@@ -21,18 +21,17 @@ import (
 type LifecycleEvent string
 
 const (
-	LifecycleActivate LifecycleEvent = "activate"
-	LifecyclePause    LifecycleEvent = "pause"
-	LifecycleStop     LifecycleEvent = "stop"
-	LifecycleResume   LifecycleEvent = "resume"
-	LifecycleDelete   LifecycleEvent = "delete"
-	LifecycleRestore  LifecycleEvent = "restore"
+	LifecyclePause   LifecycleEvent = "pause"
+	LifecycleStop    LifecycleEvent = "stop"
+	LifecycleResume  LifecycleEvent = "resume"
+	LifecycleDelete  LifecycleEvent = "delete"
+	LifecycleRestore LifecycleEvent = "restore"
 )
 
 // NextBotStatus validates state shape only. The repository must authenticate the
 // event, check expected revision, revoke/fence work and commit related intent.
 func NextBotStatus(from store.BotStatus, event LifecycleEvent, now, restoreUntil time.Time) (store.BotStatus, error) {
-	valid := from == store.BotDraft || from == store.BotActive || from == store.BotPaused || from == store.BotStopped || from == store.BotDeleted
+	valid := from == store.BotActive || from == store.BotPaused || from == store.BotStopped || from == store.BotDeleted
 	if !valid {
 		return "", fmt.Errorf("%w: unknown lifecycle state", store.ErrBotInvalid)
 	}
@@ -40,10 +39,6 @@ func NextBotStatus(from store.BotStatus, event LifecycleEvent, now, restoreUntil
 	case LifecycleDelete:
 		if from != store.BotDeleted {
 			return store.BotDeleted, nil
-		}
-	case LifecycleActivate:
-		if from == store.BotDraft {
-			return store.BotActive, nil
 		}
 	case LifecyclePause:
 		if from == store.BotActive {

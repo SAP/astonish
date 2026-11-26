@@ -81,7 +81,7 @@ func testBotAgentContinuityRestartHTTP(t *testing.T, cancel bool) {
 	router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler)
 	router.HandleFunc("/bots/{botID}/runs/{runID}/cancel", api.BotCancelRunHandler)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		router.ServeHTTP(w, r.WithContext(store.WithServices(ctx, &store.Services{Bots: f.repo, BotMandatePolicy: policy})))
+		router.ServeHTTP(w, r.WithContext(store.WithServices(ctx, &store.Services{Bots: f.repo, BotMandatePolicy: policy, BotInteractiveReady: true})))
 	}))
 	response, err := http.Post(server.URL+"/bots/"+f.b.ID.String()+"/messages?scope=team", "application/json", strings.NewReader(fmt.Sprintf(`{"version":%d,"instructions":"Read %s","idempotency_key":"restart"}`, f.b.Version, upstream.URL)))
 	if err != nil {

@@ -124,7 +124,11 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Proposal", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Proposal", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Control-only proposal conversation"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -175,7 +179,7 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			path := "/bots/" + b.ID.String() + "/proposals"
 			request("GET", path+suffix, "", "", 401)
 			request("GET", path+suffix, owner, "", 200)
-			run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentDraftConversation, Trigger: store.TriggerManual, IdempotencyKey: "conversation", Instructions: "Change your responsibility to track reviewed notices"})
+			run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentConversation, Trigger: store.TriggerManual, IdempotencyKey: "conversation", Instructions: "Change your responsibility to track reviewed notices"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -195,6 +199,10 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			ss := session.InMemoryService()
+			_, err = ss.Create(ctx, &session.CreateRequest{AppName: "astonish", UserID: owner, SessionID: b.HomeSessionID.String(), State: map[string]any{"execution_owner": "bot"}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			_, err = ss.Create(ctx, &session.CreateRequest{AppName: "astonish", UserID: owner, SessionID: run.SessionID.String(), State: map[string]any{"execution_owner": "bot"}})
 			if err != nil {
 				t.Fatal(err)
@@ -365,7 +373,7 @@ func TestBotConversationalControlHTTPAcceptance(t *testing.T) {
 			}
 			current, _ := repo.Get(ctx, b.ID)
 			saved, _ := repo.GetVersion(ctx, b.ID, current.Version)
-			if saved.Charter != "Track reviewed notices" || current.Status != store.BotDraft {
+			if saved.Charter != "Track reviewed notices" || current.Status != store.BotPaused {
 				t.Fatalf("unexpected applied state: %+v %+v", current, saved)
 			}
 		})

@@ -14,7 +14,7 @@ func (s *teamBotStore) MutateBotRunMemory(ctx context.Context, m store.MemorySto
 func (s *personalBotStore) MutateBotRunMemory(ctx context.Context, m store.MemoryStore, lease store.BotLease, q store.BotMemoryMutation) error {
 	return s.MutateBotMemory(context.WithValue(ctx, botMemoryLeaseKey{}, lease), m, lease.BotID, q)
 }
-func guardBotRunMemory(ctx context.Context, r *botRepository, tx botDraftDB, id store.BotID, q store.BotMemoryMutation, lease store.BotLease) (uuid.UUID, uuid.UUID, error) {
+func guardBotRunMemory(ctx context.Context, r *botRepository, tx botDB, id store.BotID, q store.BotMemoryMutation, lease store.BotLease) (uuid.UUID, uuid.UUID, error) {
 	if lease.BotID != id {
 		return uuid.Nil, uuid.Nil, store.ErrBotForbidden
 	}

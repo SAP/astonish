@@ -17,19 +17,19 @@ import (
 // Pause after ClaimRun has read and authorized the old version, immediately
 // before its actual PostgreSQL root CAS. No production hooks or fake CAS result.
 type queuedClaimBarrierDB struct {
-	botDraftDB
+	botDB
 	ready   chan<- struct{}
 	release <-chan struct{}
 }
 
 type queuedClaimBarrierTx struct {
-	botDraftDB
+	botDB
 	ready   chan<- struct{}
 	release <-chan struct{}
 }
 
-func (d queuedClaimBarrierDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d queuedClaimBarrierDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		return fn(queuedClaimBarrierTx{tx, d.ready, d.release})
 	})
 }
@@ -38,7 +38,7 @@ func (d queuedClaimBarrierTx) ClaimLease(ctx context.Context, rec botStoredRecor
 	close(d.ready)
 	select {
 	case <-d.release:
-		return d.botDraftDB.ClaimLease(ctx, rec, run, lease)
+		return d.botDB.ClaimLease(ctx, rec, run, lease)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

@@ -23,7 +23,7 @@ import (
 func TestBotProgressRecoveryHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			f := newProgressHTTPFixture(t, scope)
 			runtimeBefore := databaseRuntimeFileSnapshot(t, f.dataDir)
 			*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
@@ -38,6 +38,7 @@ func TestBotProgressRecoveryHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			*f.policy = nil
+			progressResumeFixture(t, f)
 			drain := make(chan error, 1)
 			calls := 0
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

@@ -11,7 +11,7 @@ import (
 // appendAcceptedBotAnswer runs inside the owner decision's root-row CAS. It
 // needs no worker lease, model, sandbox or new turn authority. The approval and
 // both ordered transcript rows either commit together or all roll back.
-func appendAcceptedBotAnswer(ctx context.Context, tx botDraftDB, a store.BotApproval) error {
+func appendAcceptedBotAnswer(ctx context.Context, tx botDB, a store.BotApproval) error {
 	if a.Status != store.ApprovalApproved || a.Interaction == nil || a.Interaction.Kind != store.BotInteractionQuestion {
 		return nil
 	}

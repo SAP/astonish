@@ -235,7 +235,7 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 				svc.PersonalSessions = ss

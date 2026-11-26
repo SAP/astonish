@@ -216,7 +216,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 				actor = admin
 			}
 			provisioned := request("POST", path+suffix, actor, `{"expected_revision":1}`, 200)
-			if provisioned.Status != store.BotDraft || provisioned.Revision != 2 || provisioned.Home.ID == uuid.Nil || provisioned.Version != b.Version {
+			if provisioned.Status != store.BotActive || provisioned.Revision != 2 || provisioned.Home.ID == uuid.Nil || provisioned.Version != b.Version {
 				t.Fatalf("unsafe setup: %+v", provisioned)
 			}
 			probeURL := "/test-retained-files?scope=" + scope + "&bot=" + b.ID.String()
@@ -322,26 +322,26 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			}
 			// Only explicit execution controls may prepare a missing home. Mere
 			// messages, forbidden requests and stale activation do not provision.
-			for _, action := range []string{"test-run", "activate"} {
+			for _, action := range []string{"test-run"} {
 				auto := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Automatic home","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+action), 201)
 				autoPath := "/api/studio/bots/" + auto.ID.String()
 				before := backend.calls
 				request("POST", autoPath+"/messages"+suffix, reader, `{"version":1,"instructions":"hello","idempotency_key":"denied"}`, denied)
-				request("POST", autoPath+"/activate"+suffix, owner, `{"expected_revision":99,"reason":"stale"}`, 409)
+				request("POST", autoPath+"/resume"+suffix, owner, `{"expected_revision":99,"reason":"stale"}`, 409)
 				if backend.calls != before {
 					t.Fatal("non-execution or stale request provisioned home")
 				}
 				body := `{"version":1,"instructions":"Explicit test","idempotency_key":"test"}`
 				status := 202
 				db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-				if action == "activate" {
+				if action == "resume" {
 					body = `{"expected_revision":1,"reason":"Explicit activation"}`
 					status = 200
 				}
 				request("POST", autoPath+"/"+action+suffix, owner, body, status)
 				after := request("GET", autoPath+suffix, owner, "", 200)
-				want := store.BotDraft
-				if action == "activate" {
+				want := store.BotActive
+				if action == "resume" {
 					want = store.BotActive
 				}
 				if backend.calls != before+1 || after.Home.ID == uuid.Nil || after.Status != want {
@@ -349,7 +349,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 				}
 				db.SetBotActivationReadiness(nil)
 			}
-			for _, op := range []store.BotControlOperation{store.BotControlTaskOnceOperation, store.BotControlActivate} {
+			for _, op := range []store.BotControlOperation{store.BotControlTaskOnceOperation} {
 				t.Run("proposal-"+string(op), func(t *testing.T) {
 					auto := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Proposal home","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+"-proposal-"+string(op)), 201)
 					db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
@@ -361,7 +361,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 					if scope == "personal" {
 						repo = ods.ForUser(owner).Bots()
 					}
-					source, e := repo.RequestRun(pctx, store.BotRunRequest{BotID: auto.ID, Version: auto.Version, Intent: store.BotIntentDraftConversation, Trigger: store.TriggerManual, Instructions: "propose only", IdempotencyKey: "source"})
+					source, e := repo.RequestRun(pctx, store.BotRunRequest{BotID: auto.ID, Version: auto.Version, Intent: store.BotIntentRegular, Trigger: store.TriggerManual, Instructions: "propose only", IdempotencyKey: "source"})
 					if e != nil {
 						t.Fatal(e)
 					}
@@ -454,7 +454,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if op == store.BotControlTaskOnceOperation && (b.Status != store.BotDraft || len(runs) != 2) {
+					if op == store.BotControlTaskOnceOperation && (b.Status != store.BotActive || len(runs) != 2) {
 						t.Fatalf("one-time admission: %+v %+v", b, runs)
 					}
 					db.SetBotActivationReadiness(nil)

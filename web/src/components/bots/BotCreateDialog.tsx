@@ -17,7 +17,7 @@ import { botPath } from './botRoute'
 const Step = { Edit: 'edit', Review: 'review' } as const
 const emptyCarryover = (): BotCarryover => ({ summary: '', memories: [], goals: [], artifacts: [] })
 const emptyPersona = (): BotPersona => ({ language: '', timezone: 'UTC', soul: '', identity: '', user: '' })
-export default function BotDraftDialog({ open, onClose, sourceSession: initialSource, resumeId, scope = 'personal', inline = false }: { open: boolean; onClose: () => void; sourceSession?: string | null; resumeId?: string; scope?: BotScope; inline?: boolean }) {
+export default function BotCreateDialog({ open, onClose, sourceSession: initialSource, resumeId, scope = 'personal', inline = false }: { open: boolean; onClose: () => void; sourceSession?: string | null; resumeId?: string; scope?: BotScope; inline?: boolean }) {
   const [sourceSession, setSourceSession] = useState(initialSource)
   const [resumeMode, setResumeMode] = useState<BotIntakeContent['mode']>(IntakeMode.Blank)
   const [adaptiveSource, setAdaptiveSource] = useState('')
@@ -126,7 +126,7 @@ export default function BotDraftDialog({ open, onClose, sourceSession: initialSo
   }
   const finishCreation = async (bot: { id: string; scope: BotScope }) => {
     try { if (writer.current) await writer.current.discard() }
-    catch (e) { setError(`Bot draft created; intake cleanup failed. Retry cleanup, not creation. ${e instanceof Error ? e.message : String(e)}`); return }
+    catch (e) { setError(`Bot created; intake cleanup failed. Retry cleanup, not creation. ${e instanceof Error ? e.message : String(e)}`); return }
     reset(); setCreated(null)
     window.dispatchEvent(new Event('astonish:bots-updated'))
     window.location.hash = botPath(bot.id, bot.scope)
@@ -182,13 +182,13 @@ export default function BotDraftDialog({ open, onClose, sourceSession: initialSo
       if (adaptive && e instanceof BotAPIError && e.status === 409) {
         setAdaptiveReview(null); setReviewed(false); setStep(Step.Edit)
         setError('Source changed. Fetch a fresh source preview and review again; your edits are retained.')
-      } else setError(`${adaptive ? 'Conversion did not return a confirmed result. No separate pause or activation was requested. Retry this request safely. ' : ''}${e instanceof Error ? e.message : String(e)}`)
+      } else setError(`${adaptive ? 'Conversion did not return a confirmed result. No separate pause or resume was requested. Retry this request safely. ' : ''}${e instanceof Error ? e.message : String(e)}`)
     } finally { setBusy(false) }
   }
-  const title = sourceSession ? 'Review Chat promotion' : 'Create a Bot draft'
-  const description = 'Private, supervised, no contact or spending. Saving never activates a Bot. Only reviewed text is copied; source Chat history and credentials stay behind.'
+  const title = sourceSession ? 'Review Chat promotion' : 'Create a Bot'
+  const description = 'Private, supervised, no contact or spending. Creation makes the Bot Active without starting work or enabling schedules. Only reviewed text is copied; source Chat history and credentials stay behind.'
   const fields = <>
-    <p className="text-sm text-muted-foreground">{step === Step.Edit ? '1. Prepare content' : '2. Review exact draft'} · Back preserves your edits. Close or Escape saves unfinished intake privately for Resume intake after reload; it never creates or activates a Bot.</p>
+    <p className="text-sm text-muted-foreground">{step === Step.Edit ? '1. Prepare content' : '2. Review exact Bot'} · Back preserves your edits. Close or Escape saves unfinished intake privately for Resume intake after reload; it never creates a Bot or starts work.</p>
     <fieldset disabled={busy || restoring || !!created} className="contents">
     {confirmDiscard && <section aria-label="Discard confirmation" className="space-y-2 rounded-md border p-3">
       <p>Discard this unfinished intake, including its saved copy? This cannot be undone.</p>
@@ -207,30 +207,30 @@ export default function BotDraftDialog({ open, onClose, sourceSession: initialSo
       </fieldset>}
       {sourceSession && <BotCarryoverFields value={carryover} onChange={setCarryover} />}
       {!sourceSession && !selected && !adaptive && <Button variant="outline" disabled={loading} onClick={() => { setResumeMode(IntakeMode.Adaptive); setTemplates(null); setTemplateBlocked(false); restoredSource.current = {}; setReviewed(false) }}>Convert adaptive schedule</Button>}
-      {adaptive && <Button variant="outline" onClick={() => { setResumeMode(IntakeMode.Blank); setAdaptiveSource(''); setAdaptiveReview(null); restoredSource.current = {}; setReviewed(false) }}>Use blank draft instead</Button>}
+      {adaptive && <Button variant="outline" onClick={() => { setResumeMode(IntakeMode.Blank); setAdaptiveSource(''); setAdaptiveReview(null); restoredSource.current = {}; setReviewed(false) }}>Use blank intake instead</Button>}
       {!sourceSession && !adaptive && <><Button variant="outline" disabled={loading} onClick={() => void loadTemplates()}>Browse team templates</Button>
         {loading && <p role="status">Loading templates…</p>}
-        {templates?.length === 0 && <p>No team templates available. You can create a blank draft.</p>}
+        {templates?.length === 0 && <p>No team templates available. You can create a Bot from blank intake.</p>}
         {templates?.map(t => <Button key={t.id} disabled={loading} variant={selected?.id === t.id ? 'secondary' : 'ghost'} onClick={() => void loadTemplates(t.id)}>{t.definition.name} · revision {t.revision}</Button>)}
-        {(selected || templateBlocked) && <Button variant="outline" disabled={loading} onClick={() => { setSelected(null); setTemplateBlocked(false); setResumeMode(IntakeMode.Blank); restoredSource.current = {} }}>Use blank draft instead</Button>}
+        {(selected || templateBlocked) && <Button variant="outline" disabled={loading} onClick={() => { setSelected(null); setTemplateBlocked(false); setResumeMode(IntakeMode.Blank); restoredSource.current = {} }}>Use blank intake instead</Button>}
       </>}
     </> : <section className="space-y-2 whitespace-pre-wrap break-words"><h3 className="font-semibold">{name}</h3><p>{selected?.definition.charter ?? charter}</p>
       {!sourceSession && !selected && !adaptive && <section aria-label="Persona review"><h4>Persona</h4>
         <p>Language: {persona.language || 'Default'} · Timezone: {persona.timezone || 'UTC'}</p>
         <p>{persona.identity || 'No custom identity.'}</p><p>{persona.soul || 'No custom working style.'}</p><p>{persona.user || 'No owner preferences.'}</p>
       </section>}
-      <p>No contact, publishing or spending permission. Supervised autonomy; no active schedules. Runtime policy and schedule changes require separate review after saving. Saving neither tests nor activates the Bot.</p>
+      <p>No contact, publishing or spending permission. Supervised autonomy; no active schedules. Runtime policy and schedule changes require separate review after saving. Creation makes the Bot Active without starting work.</p>
       {sourceSession && <><p>Source Chat: {sourceSession} (unchanged)</p><BotCarryoverFields value={carryover} onChange={setCarryover} review /></>}
     </section>}
     {adaptive && <BotAdaptiveConversion sourceId={adaptiveSource} scope={scope} value={adaptiveReview} onSourceChange={setAdaptiveSource} onReview={value => { setAdaptiveReview(value); setReviewed(false) }} reviewOnly={step === Step.Review} />}
     {selected && <section aria-label="Template review" className="space-y-2 text-sm whitespace-pre-wrap break-words"><h3 className="font-semibold">{selected.definition.name} · revision {selected.revision}</h3>
-      <p>Language: {selected.definition.language || 'Default'}. Fork creates a separate private draft; all suggested schedules remain disabled.</p>
+      <p>Language: {selected.definition.language || 'Default'}. Fork creates a separate private Active Bot; all suggested schedules remain disabled.</p>
       {selected.definition.suggested_goals?.map((g, i) => <article key={i}><h4>{g.title}</h4><p>{g.description}</p><p>Completion: {g.completion_criteria}</p></article>)}
       {!selected.definition.suggested_goals?.length && <p>No suggested goals.</p>}
       {selected.definition.suggested_schedules?.map((s, i) => <article key={i}><p>{s.cron} · {s.timezone} · disabled</p><p>{s.instructions}</p></article>)}
       {!selected.definition.suggested_schedules?.length && <p>No suggested schedules.</p>}
     </section>}
-    {step === Step.Review && <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={reviewed} onChange={e => setReviewed(e.target.checked)} />{adaptive ? `I reviewed this conversion${scope === 'team' ? ' for the team' : ''} and consent to pausing the original only after commit. This does not activate the Bot.` : 'I reviewed this content for the new private Bot.'}</label>}
+    {step === Step.Review && <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={reviewed} onChange={e => setReviewed(e.target.checked)} />{adaptive ? `I reviewed this conversion${scope === 'team' ? ' for the team' : ''} and consent to pausing the original only after commit. This does not start work or enable schedules.` : 'I reviewed this content for the new private Bot.'}</label>}
     </fieldset>
     {restoring && <p role="status">Restoring unfinished intake…</p>}
     {conflict && <section aria-label="Saved intake comparison" className="space-y-2"><p>Your edits are unchanged above. Saved server copy:</p><pre className="whitespace-pre-wrap">{JSON.stringify(conflict, null, 2)}</pre><Button onClick={() => { void applyContent(conflict).catch(e => setError(String(e))); setConflict(null) }}>Replace local text with saved copy</Button><Button onClick={() => { setConflict(null); setError(''); setReviewed(false); setStep(Step.Edit) }}>Keep local text for next save</Button></section>}
@@ -252,9 +252,9 @@ export default function BotDraftDialog({ open, onClose, sourceSession: initialSo
             proposalAttempt.current = { snapshot, proposal: p }; setSourceProposal(p); setStep(Step.Review)
           } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
         } else setStep(Step.Review)
-      }}>Review draft</Button> : <>
+      }}>Review Bot</Button> : <>
         <Button variant="outline" disabled={busy} onClick={() => { setReviewed(false); setStep(Step.Edit) }}>Back</Button>
-        <Button onClick={submit} disabled={busy || !reviewed || !valid}>{busy ? 'Saving…' : 'Save reviewed draft'}</Button>
+        <Button onClick={submit} disabled={busy || !reviewed || !valid}>{busy ? 'Saving…' : 'Create reviewed Bot'}</Button>
       </>}
     </div></>}
   </>

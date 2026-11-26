@@ -49,7 +49,7 @@ func TestBotRecoveredCleanupFencesRaces(t *testing.T) {
 					return nil
 				})
 				if scenario == "audit" {
-					r.db = cleanupFailAuditTransaction{botDraftDB: original, botCleanupDB: original.(botCleanupDB)}
+					r.db = cleanupFailAuditTransaction{botDB: original, botCleanupDB: original.(botCleanupDB)}
 				}
 				err = r.ConfirmCleanup(runtime, q)
 				r.db = original

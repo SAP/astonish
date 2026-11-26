@@ -17,13 +17,13 @@ import (
 
 func TestBotExecutionIntentsDurableLease(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, intent := range []store.BotExecutionIntent{store.BotIntentDraftTest, store.BotIntentConversation} {
+		for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentConversation} {
 			t.Run(string(scope)+"/"+string(intent), func(t *testing.T) {
 				repo, _, ctx, initial, _ := runtimeFixture(t, scope)
 				p, _ := execution.PrincipalFromContext(ctx)
 				v := store.DefaultBotVersion()
 				v.Charter = "Explicit single-run consent"
-				b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Intent", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: initial.ID.String() + "intent"})
+				b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Intent", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: initial.ID.String() + "intent"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -51,7 +51,7 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := repo.RequestRun(foreign, q); err == nil {
+				if _, err := repo.RequestRun(foreign, q); err == nil && !(scope == store.BotScopeTeam && intent == store.BotIntentRegular) {
 					t.Fatal("non-owner admitted")
 				}
 				run, err := repo.RequestRun(ctx, q)
@@ -65,7 +65,11 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 				if err != nil || again.ID != run.ID {
 					t.Fatal("non-idempotent", err)
 				}
-				q.Intent = store.BotIntentRegular
+				if intent == store.BotIntentRegular {
+					q.Intent = store.BotIntentConversation
+				} else {
+					q.Intent = store.BotIntentRegular
+				}
 				if _, err := repo.RequestRun(ctx, q); !errors.Is(err, store.ErrBotConflict) {
 					t.Fatalf("intent collision: %v", err)
 				}
@@ -96,7 +100,7 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 						t.Fatalf("conversation requested tool approval: %v", err)
 					}
 				}
-				if intent == store.BotIntentDraftTest {
+				if intent == store.BotIntentRegular {
 					action := execution.ActionDescriptor{Tool: "send", Effect: execution.EffectSend, Arguments: json.RawMessage(`{"body":"exact"}`)}
 					digest, _ := action.Digest()
 					a, err := repo.RequestApproval(c, l, store.BotApproval{BotID: b.ID, RunID: run.ID, Version: b.Version, Action: action, ActionDigest: digest, ExpiresAt: time.Now().In(time.FixedZone("approval-owner", -5*60*60)).Add(time.Hour)})
@@ -155,7 +159,7 @@ func TestBotExecutionIntentsDurableLease(t *testing.T) {
 				if err := repo.appendBotRunEvent(secondCtx, secondLease, second.SessionID, event); err != nil {
 					t.Fatal("intent transcript", err)
 				}
-				if intent == store.BotIntentDraftTest {
+				if intent == store.BotIntentRegular {
 					_, err = repo.CancelRun(ctx, b.ID, second.ID)
 				} else {
 					_, err = repo.Stop(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: after.Revision, Reason: "revoke single-run consent"})

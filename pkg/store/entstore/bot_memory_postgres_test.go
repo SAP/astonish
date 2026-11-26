@@ -98,7 +98,7 @@ func TestIntegrationPostgresBotMemoryPrefilterBeforeTopK(t *testing.T) {
 				}
 				v := store.DefaultBotVersion()
 				v.Charter = "Unrelated Bot must not consume another Bot's top-K"
-				b, err := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Distractor", OwnerID: a.OwnerID, Version: v, IdempotencyKey: "memory-distractor"})
+				b, err := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Distractor", OwnerID: a.OwnerID, Version: v, IdempotencyKey: "memory-distractor"})
 				if err != nil {
 					t.Fatal(err)
 				}

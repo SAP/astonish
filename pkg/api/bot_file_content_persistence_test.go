@@ -58,10 +58,7 @@ func TestBotFileContentPersistenceHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			active, err := repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: current.Revision, Reason: "disposable HTTP storage acceptance"})
-			if err != nil {
-				t.Fatal(err)
-			}
+			active := current
 			b = *active
 			run := skillDecode[store.BotRun](t, f.request("POST", skillPath(&b, "/runs"), f.owner, encode(map[string]any{"version": b.Version, "idempotency_key": "content-run", "instructions": markers["instructions"], "attachments": []map[string]any{{"filename": "input.txt", "mimeType": "text/plain", "data": base64.StdEncoding.EncodeToString([]byte(markers["attachment"]))}}}), 202))
 			worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: f.owner, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug})
@@ -132,8 +129,11 @@ func TestBotFileContentPersistenceHTTP(t *testing.T) {
 					if !strings.HasPrefix(identity, run.SessionID.String()+"/"+event.ID+"/") {
 						continue
 					}
-					if strings.Contains(frame.data, "private_state") {
-						t.Fatal("HTTP leaked private state")
+					for _, private := range []string{"private_state", "bot_record_v2", "runtime_scope", "inline", markers["state"], markers["checkpoint"]} {
+						encoded, _ := json.Marshal(private)
+						if strings.Contains(frame.data, string(encoded[1:len(encoded)-1])) {
+							t.Fatalf("HTTP public projection leaked private database field %q", private)
+						}
 					}
 					found[frame.event] = true
 					switch frame.event {
@@ -281,6 +281,12 @@ func botContentHTTPAssertSQL(t *testing.T, f *skillStorageHTTPFixture, scope sto
 	}
 	rows.Close()
 	counts := map[string]int{}
+	// Only these typed runtime envelopes may contain database-inline bodies.
+	// Workspace definition/goal registries remain file-based; immutable run
+	// snapshots legitimately include those bodies inside bot_runs.data.
+	runtimeColumns := map[string]bool{"bot_runs.data": true, "bot_outbox.payload": true, "session_events.event_data": true, "sessions.metadata": true}
+	runtimeMarkers := map[string]bool{"instructions": true, "attachment": true, "transcript": true, "tool_input": true, "tool_output": true, "state": true, "checkpoint": true, "report": true}
+	found := map[string]bool{}
 	var inspect func(string, string, int)
 	inspect = func(where, value string, depth int) {
 		if depth > 12 {
@@ -290,7 +296,10 @@ func botContentHTTPAssertSQL(t *testing.T, f *skillStorageHTTPFixture, scope sto
 			escaped, _ := json.Marshal(marker)
 			for _, needle := range []string{marker, string(escaped[1 : len(escaped)-1]), base64.StdEncoding.EncodeToString([]byte(marker))} {
 				if strings.Contains(value, needle) {
-					t.Fatalf("%s content leaked in SQL %s", category, where)
+					if !runtimeColumns[where] || (!runtimeMarkers[category] && where != "bot_runs.data") {
+						t.Fatalf("%s content leaked outside database runtime in SQL %s", category, where)
+					}
+					found[category] = true
 				}
 			}
 		}
@@ -363,6 +372,11 @@ func botContentHTTPAssertSQL(t *testing.T, f *skillStorageHTTPFixture, scope sto
 	for _, table := range []string{"bots", "bot_versions", "bot_goals", "bot_runs", "sessions", "session_events"} {
 		if counts[table] == 0 {
 			t.Fatalf("SQL absence claim invalid: %s has no exercised rows", table)
+		}
+	}
+	for category := range runtimeMarkers {
+		if !found[category] {
+			t.Fatalf("database-inline runtime contract not exercised: %s missing", category)
 		}
 	}
 	t.Logf("%s raw SQL nonempty-row evidence: %s", scope, fmt.Sprint(counts))

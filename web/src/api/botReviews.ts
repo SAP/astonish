@@ -12,7 +12,7 @@ export type ControlPayload = { reason: string } & (
   | { operation: 'memory_remember' | 'memory_correct' | 'memory_forget'; memory: { expected_fingerprint?: string; memory_id?: string; content?: string; category?: string; expected_revision: number } }
   | { operation: 'schedule_create' | 'schedule_edit' | 'schedule_pause' | 'schedule_remove'; schedule: { trigger: BotTrigger; expected_revision: number } }
   | { operation: 'task_once'; task_once: { instructions: string } }
-  | { operation: 'activate' | 'resume' }
+  | { operation: 'resume' }
 )
 export interface BotControlProposal {
   id: string; bot_id: string; source_run_id: string; source_user_id: string; version: number; expected_revision: number

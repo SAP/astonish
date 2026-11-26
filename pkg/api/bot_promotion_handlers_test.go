@@ -41,7 +41,7 @@ func TestBotReviewedPromotionHTTP(t *testing.T) {
 			if err := json.Unmarshal(f.request("POST", path, q, 201), &b); err != nil {
 				t.Fatal(err)
 			}
-			if b.HomeSessionID == sid || b.Status != store.BotDraft {
+			if b.HomeSessionID == sid || b.Status != store.BotActive {
 				t.Fatalf("source replaced or activated: %+v", b)
 			}
 			var replay store.Bot
@@ -138,7 +138,7 @@ func TestBotReviewedAdaptiveConversionHTTP(t *testing.T) {
 			if err := json.Unmarshal(f.request("POST", path, q, 201), &b); err != nil {
 				t.Fatal(err)
 			}
-			if b.Status != store.BotDraft || jobs.Get(ctx, job.ID).Enabled {
+			if b.Status != store.BotActive || jobs.Get(ctx, job.ID).Enabled {
 				t.Fatal("conversion not inert/atomic")
 			}
 			var replay store.Bot

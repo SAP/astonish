@@ -28,7 +28,7 @@ func safeInteractiveQueue(saved botStoredRun) bool {
 // Running work and active-run barriers must be recovered through normal fencing.
 func (r *botRepository) RequireInteractiveContinuation(ctx context.Context, id store.BotID, rid store.RunID) (*store.BotRun, error) {
 	var result *store.BotRun
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err

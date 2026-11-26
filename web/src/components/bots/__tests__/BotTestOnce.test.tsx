@@ -3,16 +3,16 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import BotTestOnce from '../BotTestOnce'
 import { requestBotTestRun, botLifecycle, type Bot } from '@/api/bots'
 vi.mock('@/api/bots', async original => ({ ...await original<typeof import('@/api/bots')>(), requestBotTestRun: vi.fn(), botLifecycle: vi.fn() }))
-const bot = { id: 'bot', version: 3, status: 'draft', scope: 'personal' } as Bot
+const bot = { id: 'bot', version: 3, status: 'active', scope: 'personal' } as Bot
 beforeEach(() => vi.clearAllMocks())
-it('requires reviewed consent, cancel does nothing, and accepts a test without activation', async () => {
+it('requires reviewed consent, cancel does nothing, and accepts a test without lifecycle changes', async () => {
   const onRun = vi.fn()
   vi.mocked(requestBotTestRun).mockResolvedValue({ id: 'test' } as never)
   render(<BotTestOnce bot={bot} disabled={false} onRun={onRun} />)
   fireEvent.click(screen.getByRole('button', { name: 'Test once' }))
   fireEvent.change(screen.getByLabelText('Test instructions'), { target: { value: 'Check once' } })
   expect(screen.getByRole('button', { name: 'Confirm test once' })).toBeDisabled()
-  expect(screen.getByRole('region', { name: 'Review test once' })).toHaveTextContent('schedules stay disabled')
+  expect(screen.getByRole('region', { name: 'Review test once' })).toHaveTextContent('schedule consent and enabled states remain unchanged')
   fireEvent.click(screen.getByRole('button', { name: 'Cancel test' }))
   expect(requestBotTestRun).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'Test once' }))
@@ -22,7 +22,7 @@ it('requires reviewed consent, cancel does nothing, and accepts a test without a
   await waitFor(() => expect(onRun).toHaveBeenCalledWith({ id: 'test' }))
   expect(requestBotTestRun).toHaveBeenCalledWith(bot, 'Check once', expect.any(String))
   expect(botLifecycle).not.toHaveBeenCalled()
-  expect(bot.status).toBe('draft')
+  expect(bot.status).toBe('active')
 })
 it('retains instructions and retry identity after unknown failure; changed text needs new consent', async () => {
   vi.mocked(requestBotTestRun).mockRejectedValue(new Error('Outcome unknown'))
@@ -54,7 +54,7 @@ it('locks a pending test and invalidates consent when the policy version changes
   fireEvent.click(screen.getByRole('button', { name: 'Confirm test once' }))
   expect(requestBotTestRun).toHaveBeenCalledTimes(1)
 })
-it('disables test for non-owners or missing policy and never enables non-drafts', () => {
+it('disables test for non-owners or missing policy and never enables non-Active Bots', () => {
   const view = render(<BotTestOnce bot={bot} disabled onRun={vi.fn()} />)
   expect(screen.getByRole('button', { name: 'Test once' })).toBeDisabled()
   view.rerender(<BotTestOnce bot={{ ...bot, status: 'paused' }} disabled={false} onRun={vi.fn()} />)

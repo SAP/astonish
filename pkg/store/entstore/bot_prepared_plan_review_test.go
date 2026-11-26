@@ -64,7 +64,7 @@ func TestBotPreparedPlanInitialStateAndObsolete(t *testing.T) {
 				base.Sequence++
 				event.ID = "new-base"
 				event.Actions.StateDelta[botPlanSnapshotKey] = base
-				err = repo.withPreparedPlan(worker, lease, func(_ botDraftDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
+				err = repo.withPreparedPlan(worker, lease, func(_ botDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
 					return transcript.appendRunTranscript(worker, rec.Bot, saved.Run, event)
 				})
 				if err != nil {
@@ -118,7 +118,7 @@ func TestBotPreparedPlanPublicationCollisionAndRollback(t *testing.T) {
 				original := repo.db
 				if collision {
 					e := &session.Event{ID: p.EventID, Author: "system", Actions: session.EventActions{StateDelta: map[string]any{"conflicting_payload": true}}}
-					err = repo.withPreparedPlan(worker, lease, func(_ botDraftDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
+					err = repo.withPreparedPlan(worker, lease, func(_ botDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
 						return transcript.appendRunTranscript(worker, rec.Bot, saved.Run, e)
 					})
 					if err != nil {

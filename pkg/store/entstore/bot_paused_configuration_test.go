@@ -100,8 +100,8 @@ func exerciseBotInactiveConfiguration(t *testing.T, repo *botRepository, ctx, wo
 		t.Fatal(err)
 	}
 	edit := botdomain.DocumentEdit{BotID: b.ID, ExpectedRevision: b.Revision, Name: botdomain.DocumentCharter, Content: "Corrected charter while inactive", Reason: "Owner correction", Confirmed: true}
-	if _, err := docs.Edit(ctx, edit); !errors.Is(err, store.ErrBotUnsupported) {
-		t.Fatalf("active edit: %v", err)
+	if _, err := docs.Edit(ctx, edit); !errors.Is(err, store.ErrBotConflict) {
+		t.Fatalf("executing Bot edit bypassed run barrier: %v", err)
 	}
 	action := execution.ActionDescriptor{Tool: "send", Effect: execution.EffectSend, Recipient: "alice", Arguments: []byte(`{"body":"review"}`)}
 	digest, err := action.Digest()

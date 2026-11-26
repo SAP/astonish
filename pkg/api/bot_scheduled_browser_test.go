@@ -199,7 +199,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		{root + "/{botID}/read", "POST", api.BotMarkReadHandler},
 		{root + "/{botID}/versions/{version}", "GET", api.BotGetVersionHandler},
 		{root + "/{botID}/configuration", "PUT", api.BotConfigurationHandler},
-		{root + "/{botID}/activate", "POST", api.BotActivateHandler},
+		{root + "/{botID}/resume", "POST", api.BotResumeHandler},
 		{root + "/{botID}/pause", "POST", api.BotPauseHandler},
 		{root + "/{botID}/runs", "GET", api.BotRunsHandler},
 		{root + "/{botID}/runs", "POST", api.BotRequestRunHandler},
@@ -334,16 +334,16 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	} else {
 		t.Log("scheduled fixture: waiting for initial Studio shell")
 		page.MustElementR("button", "^New Bot$").MustVisible()
-		// Legacy scheduled journeys need an inert draft: title-first creation is
-		// independently exercised above, without intercepting any HTTP response.
+		// Ordinary creation is Active without admitting work. Pause explicitly
+		// before installing the reviewed capability for this controlled journey.
 		if err = json.Unmarshal(request("POST", root, `{"name":"Scheduled browser watcher","idempotency_key":"scheduled-fixture"}`, 201), &b); err != nil {
 			t.Fatal(err)
 		}
 		page.MustNavigate(server.URL + "/#/chat/bots/personal/" + b.ID.String())
 		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
 	}
-	if b.Status != store.BotDraft {
-		t.Fatal("minimal creation activated Bot")
+	if b.Status != store.BotActive {
+		t.Fatal("minimal creation did not produce an Active Bot")
 	}
 	path := root + "/" + b.ID.String()
 	v, err := repo.GetVersion(ownerCtx, b.ID, b.Version)
@@ -362,6 +362,14 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		}
 		runTitleBrowserAssertions(t, ctx, page, repo, ownerCtx, db, registry, b, journey)
 		return
+	}
+	// Sensitive configuration requires an explicitly Paused Bot and the new
+	// lifecycle revision; creation itself must not be a configuration bypass.
+	if err = json.Unmarshal(request("POST", path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"Pause for reviewed isolated capability"}`, b.Revision), 200), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != store.BotPaused {
+		t.Fatal("configuration fixture did not pause Bot")
 	}
 	v.Autonomy.AllowedTools = []string{"journey_exact_action"}
 	configuration, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "Reviewed isolated local capability", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
@@ -502,6 +510,26 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	// HTTP approval retains the very same live turn registry as that worker.
 	svc.BotInteractiveReady = true
 	defer func() { worker.Stop() }()
+	// Resume only after the real worker installs readiness. This must neither
+	// admit work nor enable the separately reviewed (but still disabled) schedule.
+	if err = json.Unmarshal(request("POST", path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Resume reviewed conversation fixture"}`, b.Revision), 200), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != store.BotActive || calls.Load() != 0 || effects.Load() != 0 {
+		t.Fatal("fixture resume performed work or did not become Active")
+	}
+	resumedVersion, err := repo.GetVersion(ownerCtx, b.ID, b.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, trigger := range resumedVersion.Triggers {
+		if trigger.Enabled {
+			t.Fatal("fixture resume enabled an unauthorized schedule")
+		}
+		if job := personal.ScheduledJobs().Get(ownerCtx, trigger.ScheduleID.String()); job != nil && job.Enabled {
+			t.Fatal("fixture resume enabled an unauthorized scheduled job")
+		}
+	}
 	homeURL := server.URL + "/#/chat/bots/personal/" + b.ID.String()
 	page.MustReload()
 	page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
@@ -580,13 +608,13 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 		}
 		b = *updated
 		confirmed, e := repo.GetVersion(ownerCtx, b.ID, b.Version)
-		if e != nil || confirmed.Charter != "Track reviewed browser notices" || b.Status != store.BotDraft {
+		if e != nil || confirmed.Charter != "Track reviewed browser notices" || b.Status != store.BotActive {
 			t.Fatalf("confirmed responsibility not saved safely: %+v %v", confirmed, e)
 		}
 		if calls.Load() != before || effects.Load() != 0 {
 			t.Fatal("confirmation/reload executed model or tool")
 		}
-		t.Log("minimal UI draft -> real worker proposal -> ordered canonical review and following narrative -> Details preserves mounted composer -> reload once -> exact confirm persisted")
+		t.Log("minimal Active creation -> explicit pause/configure/resume without schedule revival -> real worker proposal -> ordered canonical review and following narrative -> Details preserves mounted composer -> reload once -> exact confirm persisted")
 		if journey == "ordered" {
 			return
 		}
@@ -626,7 +654,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			testRun = &runs[i]
 		}
 	}
-	if err != nil || len(runs) != len(baselineRuns)+1 || testRun == nil || testRun.Intent != store.BotIntentDraftTest || testRun.Status != store.RunSucceeded {
+	if err != nil || len(runs) != len(baselineRuns)+1 || testRun == nil || testRun.Intent != store.BotIntentRegular || testRun.Status != store.RunSucceeded {
 		t.Fatalf("draft test: %+v %v", runs, err)
 	}
 	page.MustReload()
@@ -707,7 +735,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			t.Fatal(e)
 		}
 		for _, trigger := range version.Triggers {
-			if status == store.BotDraft && trigger.Enabled {
+			if status == store.BotActive && trigger.Enabled {
 				t.Fatal("draft intent enabled trigger")
 			}
 			if job := personal.ScheduledJobs().Get(ownerCtx, trigger.ScheduleID.String()); job != nil && job.Enabled {
@@ -715,7 +743,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 			}
 		}
 	}
-	assertDisabled(store.BotDraft)
+	assertDisabled(store.BotActive)
 	if effects.Load() != 0 {
 		t.Fatal("text-only draft test invoked tool")
 	}
@@ -723,7 +751,7 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	calls.Store(0) // Preserve original activation/scheduled journey counters.
 	textOnly.Store(false)
 	// Activation uses readiness installed by the real production worker.
-	if err = json.Unmarshal(request("POST", path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed scheduled acceptance"}`, b.Revision), 200), &b); err != nil {
+	if err = json.Unmarshal(request("POST", path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"Reviewed scheduled acceptance"}`, b.Revision), 200), &b); err != nil {
 		t.Fatal(err)
 	}
 	if b.Status != store.BotActive || calls.Load() != 0 || effects.Load() != 0 {

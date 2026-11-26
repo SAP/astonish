@@ -24,6 +24,75 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+func TestBotActiveCreationContract(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			r, ctx, b := activeBotFixture(t, scope)
+			if b.Status != store.BotActive || b.Home.ID != uuid.Nil || b.Revision != 1 {
+				t.Fatalf("creation must be active without provisioning: %+v", b)
+			}
+			runs, err := r.ListRuns(ctx, b.ID, store.BotPage{})
+			if err != nil || len(runs) != 0 {
+				t.Fatalf("unsolicited runs: %+v %v", runs, err)
+			}
+			v := store.DefaultBotVersion()
+			v.Charter = "Imported authority must remain inert"
+			v.Autonomy.CanPublish, v.Autonomy.CanContactPeople = true, true
+			v.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Enabled: true, Cron: "* * * * *", Timezone: "UTC"}}
+			q := store.BotCreateRequest{Name: "Imported", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "active-contract"}
+			created, err := r.Create(ctx, q)
+			if err != nil || created.Status != store.BotActive {
+				t.Fatalf("active import: %+v %v", created, err)
+			}
+			stored, err := r.GetVersion(ctx, created.ID, created.Version)
+			if err != nil || stored.Autonomy.CanPublish || stored.Autonomy.CanContactPeople || stored.Triggers[0].Enabled || stored.Triggers[0].ScheduleID != nil {
+				t.Fatalf("import gained authority: %+v %v", stored, err)
+			}
+			again, err := r.Create(ctx, q)
+			if err != nil || again.ID != created.ID || again.HomeSessionID != created.HomeSessionID {
+				t.Fatalf("creation replay: %+v %v", again, err)
+			}
+			runs, err = r.ListRuns(ctx, created.ID, store.BotPage{})
+			if err != nil || len(runs) != 0 {
+				t.Fatalf("import started work: %+v %v", runs, err)
+			}
+			current := *stored
+			current.Charter = "Idle Active prose correction"
+			updated, err := r.ApplyVersion(ctx, store.BotVersionRequest{BotID: created.ID, ExpectedRevision: created.Revision, Version: current})
+			if err != nil || updated.Status != store.BotActive {
+				t.Fatalf("idle active prose: %+v %v", updated, err)
+			}
+			policy := store.BotConfigurationRequest{BotID: updated.ID, ExpectedRevision: updated.Revision, ExpectedVersion: updated.Version, Reviewed: true, Reason: "Sensitive policy", Autonomy: current.Autonomy, Budget: current.Budget, Delivery: current.Delivery}
+			if _, err := r.ConfigureReviewed(ctx, policy); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("active sensitive policy accepted: %v", err)
+			}
+			ctx, err = execution.WithAuthenticationEvidence(ctx, execution.AuthenticationEvidence{Method: execution.AuthMethodPlatformJWT, ExpiresAt: time.Now().Add(time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx = store.WithBotMessageAdmission(ctx, execution.NewBotTurnAuthorizationRegistry(1))
+			titleRequest := store.BotCreateRequest{Name: "Explicit title turn", OwnerID: b.OwnerID, Version: store.DefaultBotVersion(), IdempotencyKey: "active-title-contract"}
+			titleRequest.Version.Charter = "Respond to the explicitly requested title"
+			title, err := r.CreateAndStart(ctx, titleRequest)
+			if err != nil || title.Status != store.BotActive || title.Run.Intent != store.BotIntentRegular {
+				t.Fatalf("title admission: %+v %v", title, err)
+			}
+			replay, err := r.CreateAndStart(ctx, titleRequest)
+			if err != nil || replay.Run.ID != title.Run.ID {
+				t.Fatalf("title replay: %+v %v", replay, err)
+			}
+			runs, err = r.ListRuns(ctx, title.Bot.ID, store.BotPage{})
+			if err != nil || len(runs) != 1 {
+				t.Fatalf("title must admit exactly one turn: %+v %v", runs, err)
+			}
+			jobs := r.db.(botTriggerDB).triggerScheduler().List(ctx)
+			if len(jobs) != 0 {
+				t.Fatalf("unsolicited schedules: %+v", jobs)
+			}
+		})
+	}
+}
+
 func TestBotSessionMetadataImmutableLinkage(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
@@ -161,12 +230,12 @@ func TestBotTenantRoutingAndLiveMembership(t *testing.T) {
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe only"
 	req := store.BotCreateRequest{Name: "Shared", OwnerID: owner, Version: v, IdempotencyKey: "create"}
-	b, err := shared.CreateDraft(ownerCtx, req)
+	b, err := shared.Create(ownerCtx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Name = "Private"
-	p, err := private.CreateDraft(ownerCtx, req)
+	p, err := private.Create(ownerCtx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,12 +379,12 @@ var _ store.BotStore = (*teamBotStore)(nil)
 var _ store.BotStore = (*personalBotStore)(nil)
 
 type botPurgeInventoryRace struct {
-	botDraftDB
+	botDB
 	afterList func()
 }
 
 func (d botPurgeInventoryRace) ListPurgeable(ctx context.Context, cutoff time.Time, limit int) ([]botStoredRecord, error) {
-	rows, err := d.botDraftDB.ListPurgeable(ctx, cutoff, limit)
+	rows, err := d.botDB.ListPurgeable(ctx, cutoff, limit)
 	if err == nil {
 		d.afterList()
 	}
@@ -336,7 +405,7 @@ func TestBotRetentionRechecksCleanupAfterInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	*now = *deleted.RestoreUntil
-	repo.db = botPurgeInventoryRace{botDraftDB: db, afterList: func() {
+	repo.db = botPurgeInventoryRace{botDB: db, afterList: func() {
 		if err := db.client.Bot.UpdateOneID(b.ID).SetCleanupComplete(false).Exec(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -679,7 +748,7 @@ func TestBotCorrectionConcurrentCAS(t *testing.T) {
 	}
 }
 
-func TestBotActivationRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing.T) {
+func TestBotResumeRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, run, _, _ := botRunFixture(t, scope)
@@ -689,20 +758,24 @@ func TestBotActivationRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe"
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Review", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "review"})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Review", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "review"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			draft, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: draft.ID, ActorID: draft.OwnerID, ExpectedRevision: draft.Revision, Reason: "Pause before resume"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			role := "member"
 			repo.auth.check = func(context.Context, string) (string, error) { return role, nil }
 			repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { role = ""; return nil }
-			q := store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: 1, ActorID: b.OwnerID, Reason: "Activate"}
-			if _, err := repo.Activate(ctx, q); !errors.Is(err, store.ErrBotForbidden) {
+			q := store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: draft.Revision, ActorID: b.OwnerID, Reason: "Activate"}
+			if _, err := repo.Resume(ctx, q); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("revoked during readiness: %v", err)
 			}
 			role = "member"
 			saved, err := repo.Get(ctx, draft.ID)
-			if err != nil || saved.Revision != 1 || saved.Status != store.BotDraft {
+			if err != nil || saved.Revision != draft.Revision || saved.Status != store.BotPaused {
 				t.Fatalf("revocation changed draft: %+v %v", saved, err)
 			}
 			repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error {
@@ -711,11 +784,11 @@ func TestBotActivationRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing
 			}
 			v.BotID = draft.ID
 			v.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Cron: "0 9 * * *"}}
-			if _, err := repo.ApplyVersion(ctx, store.BotVersionRequest{BotID: draft.ID, ExpectedRevision: 1, Version: v}); !errors.Is(err, store.ErrBotForbidden) {
+			if _, err := repo.ApplyVersion(ctx, store.BotVersionRequest{BotID: draft.ID, ExpectedRevision: draft.Revision, Version: v}); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("unreviewed recurrence entered through prose edit: %v", err)
 			}
 			saved, err = repo.Get(ctx, draft.ID)
-			if err != nil || saved.Revision != 1 || saved.Version != draft.Version || saved.Status != store.BotDraft {
+			if err != nil || saved.Revision != draft.Revision || saved.Version != draft.Version || saved.Status != store.BotPaused {
 				t.Fatalf("rejected recurrence changed draft: %+v %v", saved, err)
 			}
 			// Simulate a legacy/raw persisted version: today's prose API correctly
@@ -726,7 +799,7 @@ func TestBotActivationRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(ctx, func(tx botDB) error {
 				rec, err := tx.GetBot(ctx, draft.ID)
 				if err != nil {
 					return err
@@ -739,7 +812,7 @@ func TestBotActivationRejectsRevokedMembershipAndUnreviewedRecurrence(t *testing
 				t.Fatal(err)
 			}
 			q.ExpectedRevision = draft.Revision + 1
-			if _, err := repo.Activate(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
+			if _, err := repo.Resume(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("unreviewed recurrence: %v", err)
 			}
 		})
@@ -846,7 +919,7 @@ func TestBotTemplatePublishForkIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fork.Status != store.BotDraft || fork.Scope != store.BotScopePersonal {
+	if fork.Status != store.BotActive || fork.Scope != store.BotScopePersonal {
 		t.Fatalf("unsafe fork: %+v", fork)
 	}
 	repeated, err := templates.ForkToPersonal(ctx, destination, req)
@@ -1039,16 +1112,16 @@ func TestBotGoalCompletionRequiresWholeOutcome(t *testing.T) {
 	}
 }
 
-type failedGoalScheduleDB struct{ botDraftDB }
+type failedGoalScheduleDB struct{ botDB }
 
 func (d failedGoalScheduleDB) DisableGoalSchedules(context.Context, uuid.UUID, uuid.UUID) error {
 	return errors.New("schedule update failed")
 }
 
-type failedGoalScheduleTransaction struct{ botDraftDB }
+type failedGoalScheduleTransaction struct{ botDB }
 
-func (d failedGoalScheduleTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failedGoalScheduleDB{tx}) })
+func (d failedGoalScheduleTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failedGoalScheduleDB{tx}) })
 }
 func TestBotGoalCompletionStopsOnlyOwnedFollowups(t *testing.T) {
 	repo, ctx, _, run, _, now := botRunFixture(t, store.BotScopeTeam)
@@ -1125,7 +1198,7 @@ func TestBotTrackedItemCannotMoveBetweenGoals(t *testing.T) {
 	}
 }
 
-func TestBotActivationRequiresReadinessAndExplicitRevision(t *testing.T) {
+func TestBotResumeRequiresReadinessAndExplicitRevision(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopeTeam, store.BotScopePersonal} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, worker, run, lease, _ := botRunFixture(t, scope)
@@ -1136,21 +1209,25 @@ func TestBotActivationRequiresReadinessAndExplicitRevision(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe only"
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Activate", OwnerID: owner, Version: v, IdempotencyKey: "activate"})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Activate", OwnerID: owner, Version: v, IdempotencyKey: "activate"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			q := store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: 1, ActorID: owner, Reason: "Enable manual runs"}
-			if _, err := repo.Activate(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
+			draft, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: draft.ID, ActorID: draft.OwnerID, ExpectedRevision: draft.Revision, Reason: "Pause before resume"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: draft.Revision, ActorID: owner, Reason: "Enable manual runs"}
+			if _, err := repo.Resume(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("activation without runtime: %v", err)
 			}
 			unavailable := errors.New("durable home unavailable")
 			repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return unavailable }
-			if _, err := repo.Activate(ctx, q); !errors.Is(err, unavailable) {
+			if _, err := repo.Resume(ctx, q); !errors.Is(err, unavailable) {
 				t.Fatalf("readiness ignored: %v", err)
 			}
 			saved, err := repo.Get(ctx, draft.ID)
-			if err != nil || saved.Status != store.BotDraft || saved.Revision != 1 {
+			if err != nil || saved.Status != store.BotPaused || saved.Revision != draft.Revision {
 				t.Fatalf("failed activation changed draft: %+v %v", saved, err)
 			}
 			checks := 0
@@ -1161,11 +1238,11 @@ func TestBotActivationRequiresReadinessAndExplicitRevision(t *testing.T) {
 				}
 				return nil
 			}
-			active, err := repo.Activate(ctx, q)
-			if err != nil || active.Status != store.BotActive || active.Revision != 2 || checks != 1 {
+			active, err := repo.Resume(ctx, q)
+			if err != nil || active.Status != store.BotActive || active.Revision != draft.Revision+1 || checks != 1 {
 				t.Fatalf("activation: %+v %v checks=%d", active, err, checks)
 			}
-			if _, err := repo.Activate(ctx, q); !errors.Is(err, store.ErrBotConflict) {
+			if _, err := repo.Resume(ctx, q); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("stale activation: %v", err)
 			}
 			q.ExpectedRevision = active.Revision
@@ -1203,13 +1280,17 @@ func TestBotActivationRequiresReadinessAndExplicitRevision(t *testing.T) {
 	}
 }
 
-func TestBotActivationRechecksStateAfterReadiness(t *testing.T) {
+func TestBotResumeRechecksStateAfterReadiness(t *testing.T) {
 	repo, ctx, _, _, _, _ := botRunFixture(t, store.BotScopeTeam)
 	principal, _ := execution.PrincipalFromContext(ctx)
 	owner, _ := uuid.Parse(principal.Subject)
 	v := store.DefaultBotVersion()
 	v.Charter = "Review version"
-	draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Raced", OwnerID: owner, Version: v, IdempotencyKey: "raced"})
+	draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Raced", OwnerID: owner, Version: v, IdempotencyKey: "raced"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: draft.ID, ActorID: draft.OwnerID, ExpectedRevision: draft.Revision, Reason: "Pause before resume"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1218,16 +1299,16 @@ func TestBotActivationRechecksStateAfterReadiness(t *testing.T) {
 		_, err := repo.ApplyVersion(ctx, store.BotVersionRequest{BotID: b.ID, ExpectedRevision: b.Revision, Version: v})
 		return err
 	}
-	if _, err := repo.Activate(ctx, store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: 1, ActorID: owner, Reason: "Activate reviewed charter"}); !errors.Is(err, store.ErrBotConflict) {
+	if _, err := repo.Resume(ctx, store.BotLifecycleRequest{BotID: draft.ID, ExpectedRevision: draft.Revision, ActorID: owner, Reason: "Activate reviewed charter"}); !errors.Is(err, store.ErrBotConflict) {
 		t.Fatalf("unreviewed version activated: %v", err)
 	}
 	saved, err := repo.Get(ctx, draft.ID)
-	if err != nil || saved.Status != store.BotDraft || saved.Version != 2 {
+	if err != nil || saved.Status != store.BotPaused || saved.Version != 2 {
 		t.Fatalf("race outcome: %+v %v", saved, err)
 	}
 }
 
-func TestBotRepositoryDraftAtomicityAndScope(t *testing.T) {
+func TestBotRepositoryCreateAtomicityAndScope(t *testing.T) {
 	c := newTeamClient(t)
 	owner := uuid.New()
 	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
@@ -1238,20 +1319,20 @@ func TestBotRepositoryDraftAtomicityAndScope(t *testing.T) {
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe fares without booking"
 	req := store.BotCreateRequest{Name: "Fare watch", OwnerID: owner, Version: v, IdempotencyKey: "create-1"}
-	b, err := repo.CreateDraft(ctx, req)
+	b, err := repo.Create(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Status != store.BotDraft || b.Scope != store.BotScopeTeam {
+	if b.Status != store.BotActive || b.Scope != store.BotScopeTeam {
 		t.Fatalf("bad draft: %+v", b)
 	}
-	again, err := repo.CreateDraft(ctx, req)
+	again, err := repo.Create(ctx, req)
 	if err != nil || again.ID != b.ID {
 		t.Fatalf("idempotency: %+v %v", again, err)
 	}
 	changed := req
 	changed.Name = "different"
-	if _, err := repo.CreateDraft(ctx, changed); !errors.Is(err, store.ErrBotConflict) {
+	if _, err := repo.Create(ctx, changed); !errors.Is(err, store.ErrBotConflict) {
 		t.Fatalf("different request reused key: %v", err)
 	}
 	sess, err := c.Session.Get(ctx, b.HomeSessionID.String())
@@ -1275,7 +1356,7 @@ func TestBotRepositoryDraftAtomicityAndScope(t *testing.T) {
 	invalid := req
 	invalid.IdempotencyKey = "bad-goal"
 	invalid.Goals = []store.BotGoal{{Title: ""}}
-	if _, err := repo.CreateDraft(ctx, invalid); err == nil {
+	if _, err := repo.Create(ctx, invalid); err == nil {
 		t.Fatal("invalid goal accepted")
 	}
 	if n, err := c.Bot.Query().Count(ctx); err != nil || n != 1 {
@@ -1298,7 +1379,7 @@ func TestBotRepositoryPersonalVersionIsolation(t *testing.T) {
 	v.Autonomy.CanPublish = true
 	v.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Enabled: true, Cron: "0 9 * * *"}}
 	req := store.BotCreateRequest{Name: "Private", OwnerID: owner, Version: v, IdempotencyKey: "private-create"}
-	b, err := repo.CreateDraft(ctx, req)
+	b, err := repo.Create(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,11 +1430,11 @@ func TestBotRepositoryGoalOwnershipAndOrderedActivity(t *testing.T) {
 	repo := &teamBotStore{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Track a delivery"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Delivery", OwnerID: owner, Version: v, IdempotencyKey: "one"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Delivery", OwnerID: owner, Version: v, IdempotencyKey: "one"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Other", OwnerID: owner, Version: v, IdempotencyKey: "two"})
+	other, err := repo.Create(ctx, store.BotCreateRequest{Name: "Other", OwnerID: owner, Version: v, IdempotencyKey: "two"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1393,16 +1474,16 @@ func TestBotRepositoryGoalOwnershipAndOrderedActivity(t *testing.T) {
 	}
 }
 
-type failingBotDraftDB struct{ botDraftDB }
+type failingBotDraftDB struct{ botDB }
 
 func (d failingBotDraftDB) InsertHomeSession(context.Context, store.Bot) error {
 	return errors.New("injected home-session failure")
 }
 
-type failingBotDraftTransaction struct{ botDraftDB }
+type failingBotDraftTransaction struct{ botDB }
 
-func (d failingBotDraftTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failingBotDraftDB{tx}) })
+func (d failingBotDraftTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failingBotDraftDB{tx}) })
 }
 func TestBotRepositoryDraftRollsBackOnSessionFailure(t *testing.T) {
 	c := newTeamClient(t)
@@ -1411,7 +1492,7 @@ func TestBotRepositoryDraftRollsBackOnSessionFailure(t *testing.T) {
 	repo := &botRepository{auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, db: failingBotDraftTransaction{teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe only"
-	if _, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Atomic", OwnerID: owner, Version: v, IdempotencyKey: "rollback"}); err == nil {
+	if _, err := repo.Create(ctx, store.BotCreateRequest{Name: "Atomic", OwnerID: owner, Version: v, IdempotencyKey: "rollback"}); err == nil {
 		t.Fatal("expected injected error")
 	}
 	if n, err := c.Bot.Query().Count(ctx); err != nil || n != 0 {
@@ -1456,16 +1537,24 @@ func TestBotRunAdmissionAndLeaseFencing(t *testing.T) {
 	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Check once"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Lease test", OwnerID: owner, Version: v, IdempotencyKey: "lease"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Lease test", OwnerID: owner, Version: v, IdempotencyKey: "lease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != store.BotActive {
+		t.Fatalf("fresh Bot status: %s", b.Status)
+	}
+	b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Check paused admission"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := store.BotRunRequest{BotID: b.ID, Version: 1, Trigger: store.TriggerManual, IdempotencyKey: "run-1", Instructions: "Check once"}
 	if _, err := repo.RequestRun(ctx, req); !errors.Is(err, store.ErrBotForbidden) {
-		t.Fatalf("draft ran: %v", err)
+		t.Fatalf("paused Bot ran: %v", err)
 	}
-	// Seed activation only: production activation remains a separate reviewed path.
-	if err := c.Bot.UpdateOneID(b.ID).SetStatus(bot.StatusActive).Exec(ctx); err != nil {
+	// Readiness is independently covered; resume must restore manual admission.
+	repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
+	if _, err := repo.Resume(ctx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: b.Revision, ActorID: owner, Reason: "Allow manual runs"}); err != nil {
 		t.Fatal(err)
 	}
 	run, err := repo.RequestRun(ctx, req)
@@ -1535,7 +1624,7 @@ func TestBotConcurrentClaimsAndPersonalQuota(t *testing.T) {
 	v.Charter = "Observe"
 	cap := int64(1)
 	v.Budget.MaxRunsPerDay = &cap
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Quota", OwnerID: owner, Version: v, IdempotencyKey: "quota"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Quota", OwnerID: owner, Version: v, IdempotencyKey: "quota"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1591,16 +1680,16 @@ func TestBotConcurrentClaimsAndPersonalQuota(t *testing.T) {
 	}
 }
 
-type failedBotRunDB struct{ botDraftDB }
+type failedBotRunDB struct{ botDB }
 
 func (d failedBotRunDB) InsertRun(context.Context, botStoredRun, uuid.UUID) error {
 	return errors.New("injected run insert failure")
 }
 
-type failedBotRunTransaction struct{ botDraftDB }
+type failedBotRunTransaction struct{ botDB }
 
-func (d failedBotRunTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failedBotRunDB{tx}) })
+func (d failedBotRunTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failedBotRunDB{tx}) })
 }
 func TestBotRunAdmissionRollback(t *testing.T) {
 	c := newTeamClient(t)
@@ -1609,7 +1698,7 @@ func TestBotRunAdmissionRollback(t *testing.T) {
 	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Rollback", OwnerID: owner, Version: v, IdempotencyKey: "rollback-run"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Rollback", OwnerID: owner, Version: v, IdempotencyKey: "rollback-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1640,7 +1729,7 @@ func TestBotDurableApprovalSingleConsumption(t *testing.T) {
 	repo := &botRepository{db: teamBotDB{content: newScopedBotContentCodec(t.TempDir(), "org", "team"), client: c}, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", scope: store.BotScopeTeam, check: func(context.Context, string) (string, error) { return "member", nil }}, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Prepare message; ask before sending"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Approval", OwnerID: owner, Version: v, IdempotencyKey: "approval"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Approval", OwnerID: owner, Version: v, IdempotencyKey: "approval"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1770,7 +1859,7 @@ func botRunFixture(t *testing.T, scope store.BotScope) (*botRepository, context.
 		t.Fatal(err)
 	}
 	auth := botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}
-	var db botDraftDB
+	var db botDB
 	var activate func(uuid.UUID) error
 	if scope == store.BotScopeTeam {
 		c := newTeamClient(t)
@@ -1784,7 +1873,7 @@ func botRunFixture(t *testing.T, scope store.BotScope) (*botRepository, context.
 	repo := &botRepository{auth: auth, db: db, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe source and report"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Completion", OwnerID: owner, Version: v, IdempotencyKey: "fixture"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Completion", OwnerID: owner, Version: v, IdempotencyKey: "fixture"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1803,19 +1892,19 @@ func botRunFixture(t *testing.T, scope store.BotScope) (*botRepository, context.
 	return repo, ctx, worker, run, lease, &now
 }
 
-type failBotResultDB struct{ botDraftDB }
+type failBotResultDB struct{ botDB }
 
 func (d failBotResultDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
 	if a.Kind == store.BotActivityReport {
 		return errors.New("injected result publication failure")
 	}
-	return d.botDraftDB.InsertActivity(ctx, a, key)
+	return d.botDB.InsertActivity(ctx, a, key)
 }
 
-type failBotResultTransaction struct{ botDraftDB }
+type failBotResultTransaction struct{ botDB }
 
-func (d failBotResultTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failBotResultDB{tx}) })
+func (d failBotResultTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failBotResultDB{tx}) })
 }
 
 func TestBotCommitRollbackAndExpiredRecovery(t *testing.T) {
@@ -2079,16 +2168,16 @@ func TestBotLifecycleRetentionAndWorkerRevocation(t *testing.T) {
 	}
 }
 
-type failBotLifecycleDB struct{ botDraftDB }
+type failBotLifecycleDB struct{ botDB }
 
 func (d failBotLifecycleDB) DisableBotSchedules(context.Context, uuid.UUID) error {
 	return errors.New("injected scheduler failure")
 }
 
-type failBotLifecycleTransaction struct{ botDraftDB }
+type failBotLifecycleTransaction struct{ botDB }
 
-func (d failBotLifecycleTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failBotLifecycleDB{tx}) })
+func (d failBotLifecycleTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failBotLifecycleDB{tx}) })
 }
 
 func TestBotLifecycleScheduleScopeAndRollback(t *testing.T) {
@@ -2429,7 +2518,7 @@ func TestBotSchemaDefaultsAndForeignKeys(t *testing.T) {
 	c := newTeamClient(t)
 	ctx := context.Background()
 	b := createBotSchemaFixture(t, c)
-	if b.Status != bot.StatusDraft || b.Revision != 1 || b.Version != 1 || b.Fence != 0 || b.ActiveRunID != nil || b.CleanupComplete {
+	if b.Status != bot.StatusActive || b.Revision != 1 || b.Version != 1 || b.Fence != 0 || b.ActiveRunID != nil || b.CleanupComplete {
 		t.Fatalf("unsafe initial state: %+v", b)
 	}
 	createVersion := func(id uuid.UUID) error {

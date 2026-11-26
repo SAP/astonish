@@ -157,16 +157,16 @@ func TestBotMandateSourceAndCurrentPolicy(t *testing.T) {
 	}
 }
 
-type mandateFailDB struct{ botDraftDB }
+type mandateFailDB struct{ botDB }
 
-func (d mandateFailDB) Transaction(ctx context.Context, f func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return f(mandateFailTx{tx}) })
+func (d mandateFailDB) Transaction(ctx context.Context, f func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return f(mandateFailTx{tx}) })
 }
 
-type mandateFailTx struct{ botDraftDB }
+type mandateFailTx struct{ botDB }
 
 func (d mandateFailTx) appendAdmittedMessage(ctx context.Context, b store.Bot, e *session.Event) (int64, error) {
-	return d.botDraftDB.(botMessageDB).appendAdmittedMessage(ctx, b, e)
+	return d.botDB.(botMessageDB).appendAdmittedMessage(ctx, b, e)
 }
 func (d mandateFailTx) saveMandateMetadata(context.Context, *botStoredRecord) error {
 	return errors.New("injected metadata failure")

@@ -41,6 +41,6 @@ export default function BotAdaptiveConversion({ sourceId, scope, value, onSource
       <p>Replacement schedule: disabled. Only this schedule and its instructions are copied; credentials, delivery settings, parameters and execution history stay behind.</p>
     </section>}
     <p>The original job is retained, not deleted. Its schedule is paused only when conversion commits. If the transaction fails, rollback retains the original unchanged.</p>
-    <p>The new Bot remains a supervised draft. Enabling its schedule and activating the Bot require separate review and consent after creation.</p>
+    <p>The new Bot is Active with supervised autonomy. Its schedule remains disabled until separate review and consent after creation.</p>
   </section>
 }

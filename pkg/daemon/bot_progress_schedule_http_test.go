@@ -44,7 +44,7 @@ func TestBotProgressScheduledAdmissionHTTP(t *testing.T) {
 			v.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
 			one := int64(1)
 			v.Budget.MaxRunsPerDay = &one
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Progress", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "progress"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Progress", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "progress"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,7 +60,7 @@ func TestBotProgressScheduledAdmissionHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

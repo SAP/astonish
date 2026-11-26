@@ -10,7 +10,7 @@ import (
 // the operation, before writing its grant or pending/blocked record. This is a
 // read-only identity check, not permission to resume: application still rechecks
 // current bindings, source, revision, ownership and the original task grant.
-func (s *botAuthorizedOperationRuntime) validateResumeCaptureTargets(ctx context.Context, tx botDraftDB, rec *botStoredRecord, targets *store.BotControlResumeTargets) error {
+func (s *botAuthorizedOperationRuntime) validateResumeCaptureTargets(ctx context.Context, tx botDB, rec *botStoredRecord, targets *store.BotControlResumeTargets) error {
 	if targets == nil {
 		return store.ErrBotInvalid
 	}

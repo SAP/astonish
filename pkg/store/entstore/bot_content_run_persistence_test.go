@@ -17,7 +17,7 @@ func TestBotContentRunPersistenceStateCoalescesAuthoritativeMatch(t *testing.T) 
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, _, worker, run, lease, now := botRunFixture(t, scope)
-			if err := repo.db.Transaction(worker, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(worker, func(tx botDB) error {
 				if err := tx.(botTranscriptDB).fenceTranscript(worker, lease, *now); err != nil {
 					return err
 				}
@@ -57,7 +57,7 @@ func TestBotContentRunPersistenceStateCoalescesAuthoritativeMatch(t *testing.T) 
 	}
 }
 
-func botRunPersistenceData(t *testing.T, ctx context.Context, db botDraftDB, run *store.BotRun) (map[string]any, *botContentCodec) {
+func botRunPersistenceData(t *testing.T, ctx context.Context, db botDB, run *store.BotRun) (map[string]any, *botContentCodec) {
 	t.Helper()
 	switch d := db.(type) {
 	case personalBotDB:
@@ -124,7 +124,7 @@ func TestBotContentLeaseControlDoesNotHydrateCheckpoint(t *testing.T) {
 			if _, err := repo.checkLease(worker, repo.db, lease, *now); err != nil {
 				t.Fatalf("SQL lease check hydrated checkpoint: %v", err)
 			}
-			if err := repo.db.Transaction(worker, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(worker, func(tx botDB) error {
 				if err := tx.(botTranscriptDB).fenceTranscript(worker, lease, *now); err != nil {
 					return err
 				}
@@ -144,7 +144,7 @@ func TestBotContentLeaseControlDoesNotHydrateCheckpoint(t *testing.T) {
 			if _, err := repo.RenewLease(worker, lease, lease.ExpiresAt.Add(time.Minute)); err != nil {
 				t.Fatalf("non-progress renewal hydrated checkpoint: %v", err)
 			}
-			if err := repo.db.Transaction(worker, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(worker, func(tx botDB) error {
 				rec, err := tx.GetBot(worker, lease.BotID)
 				if err != nil {
 					return err
@@ -218,7 +218,7 @@ func TestBotContentRunPersistence(t *testing.T) {
 			saved.Attachments = []store.ChatFile{{Filename: "input.txt", MimeType: "text/plain", Data: []byte("RUN_DISK_SENTINEL_attachment")}}
 			saved.Run.Report.Summary = "RUN_DISK_SENTINEL_report"
 			saved.Run.Checkpoint = json.RawMessage(`{ "text": "RUN_DISK_SENTINEL_checkpoint", "counter": 1152921504606847013 }`)
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error { return tx.(botWorkDB).updateWorkRun(ctx, *saved, lease, *now) })
+			err = repo.db.Transaction(ctx, func(tx botDB) error { return tx.(botWorkDB).updateWorkRun(ctx, *saved, lease, *now) })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -230,7 +230,7 @@ func TestBotContentRunPersistence(t *testing.T) {
 			}
 			// Lease columns remain authoritative even though immutable body has the old expiry.
 			expires := lease.ExpiresAt.Add(time.Minute)
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error { return tx.RenewRunLease(ctx, lease, *now, expires) })
+			err = repo.db.Transaction(ctx, func(tx botDB) error { return tx.RenewRunLease(ctx, lease, *now, expires) })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestBotContentRunPersistenceReopen(t *testing.T) {
 			}
 			saved.Instructions = "RUN_DISK_SENTINEL_reopen"
 			saved.Run.Report.Summary = "RUN_DISK_SENTINEL_report"
-			if err := repo.db.Transaction(ctx, func(tx botDraftDB) error { return saveProgressEnvelope(ctx, tx, saved) }); err != nil {
+			if err := repo.db.Transaction(ctx, func(tx botDB) error { return saveProgressEnvelope(ctx, tx, saved) }); err != nil {
 				t.Fatal(err)
 			}
 			scoped, _ = reopen() // All connections close; fresh adapters hydrate selected refs.
@@ -294,7 +294,7 @@ func TestBotContentRunPersistenceDirectWriters(t *testing.T) {
 		for _, writer := range []string{"title", "progress", "finish", "quiesce"} {
 			t.Run(string(scope)+"/"+writer, func(t *testing.T) {
 				repo, ctx, _, run, lease, now := botRunFixture(t, scope)
-				err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+				err := repo.db.Transaction(ctx, func(tx botDB) error {
 					saved, err := tx.ReadRun(ctx, run.BotID, run.ID)
 					if err != nil {
 						return err
@@ -345,7 +345,7 @@ func TestBotContentRunPersistenceRollbackMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 			injected := errors.New("rollback staged run")
-			err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = repo.db.Transaction(ctx, func(tx botDB) error {
 				next := *original
 				next.Instructions = "RUN_DISK_SENTINEL_rollback"
 				if err := tx.(botWorkDB).updateWorkRun(ctx, next, lease, *now); err != nil {

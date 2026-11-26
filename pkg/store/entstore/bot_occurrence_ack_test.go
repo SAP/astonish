@@ -10,16 +10,16 @@ import (
 )
 
 // forcedOccurrenceAckFailure injects a failure after run/outbox insertion.
-type forcedOccurrenceAckFailure struct{ botDraftDB }
+type forcedOccurrenceAckFailure struct{ botDB }
 
-func (d forcedOccurrenceAckFailure) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(forcedOccurrenceAckFailure{tx}) })
+func (d forcedOccurrenceAckFailure) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(forcedOccurrenceAckFailure{tx}) })
 }
 func (d forcedOccurrenceAckFailure) advanceScheduledAdmission(ctx context.Context, rec botStoredRecord) error {
-	return d.botDraftDB.(botScheduledDB).advanceScheduledAdmission(ctx, rec)
+	return d.botDB.(botScheduledDB).advanceScheduledAdmission(ctx, rec)
 }
 func (d forcedOccurrenceAckFailure) readBotSchedule(ctx context.Context, id store.BotID) (*store.ScheduledJob, error) {
-	return d.botDraftDB.(botScheduledDB).readBotSchedule(ctx, id)
+	return d.botDB.(botScheduledDB).readBotSchedule(ctx, id)
 }
 func (d forcedOccurrenceAckFailure) acknowledgeScheduledOccurrence(context.Context, store.BotScheduledOccurrence, time.Time, *time.Time) error {
 	return store.ErrBotConflict

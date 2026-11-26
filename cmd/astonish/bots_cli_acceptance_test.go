@@ -74,7 +74,7 @@ func TestBotCLIExplicitIntentSubprocessAcceptance(t *testing.T) {
 		command, endpoint string
 		status            store.BotStatus
 	}{
-		{"test-once", "test-run", store.BotDraft},
+		{"test-once", "test-run", store.BotActive},
 		{"conversation", "conversation", store.BotPaused},
 	} {
 		for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -100,7 +100,7 @@ func TestBotCLIExplicitIntentSubprocessAcceptance(t *testing.T) {
 					{name: "missing-confirm", version: "7", wantExit: 1, want: "scoped confirmation"},
 					{name: "wrong-scope-confirm", version: "7", confirm: string(otherScope) + ":" + id.String(), wantExit: 1, want: "scoped confirmation"},
 					{name: "wrong-bot-confirm", version: "7", confirm: string(scope) + ":" + uuid.NewString(), wantExit: 1, want: "scoped confirmation"},
-					{name: "active-does-not-activate", version: "7", confirm: string(scope) + ":" + id.String(), status: store.BotActive, wantExit: 1, want: "no activation was performed"},
+					{name: "stopped-cannot-execute", version: "7", confirm: string(scope) + ":" + id.String(), status: store.BotStopped, wantExit: 1, want: "no activation was performed"},
 					{name: "server-forbidden", version: "7", confirm: string(scope) + ":" + id.String(), responseStatus: 403, wantPosts: 1, wantExit: 1, want: "403"},
 					{name: "server-conflict", version: "7", confirm: string(scope) + ":" + id.String(), responseStatus: 409, wantPosts: 1, wantExit: 1, want: "409"},
 					{name: "server-error", version: "7", confirm: string(scope) + ":" + id.String(), responseStatus: 500, wantPosts: 1, wantExit: 1, want: "500"},
@@ -203,7 +203,7 @@ func TestBotCLIIntentAmbiguousNameSubprocessAcceptance(t *testing.T) {
 	for _, command := range []string{"test-once", "conversation"} {
 		t.Run(command, func(t *testing.T) {
 			bots := []store.Bot{
-				{ID: uuid.New(), Name: "Monitor", Scope: store.BotScopeTeam, Status: store.BotDraft},
+				{ID: uuid.New(), Name: "Monitor", Scope: store.BotScopeTeam, Status: store.BotActive},
 				{ID: uuid.New(), Name: "Monitor", Scope: store.BotScopeTeam, Status: store.BotPaused},
 			}
 			var mu sync.Mutex
@@ -223,7 +223,7 @@ func TestBotCLIIntentAmbiguousNameSubprocessAcceptance(t *testing.T) {
 			defer server.Close()
 			configureBotIntentCLIProcess(t, server.URL, "acceptance-token")
 			out := runBotIntentCLIProcess(t, 1, "bots", command, "Monitor", "--scope", "team", "--version", "7", "--confirm", "team:"+bots[0].ID.String())
-			for _, want := range []string{"ambiguous", bots[0].ID.String(), bots[1].ID.String(), "team", string(store.BotDraft), string(store.BotPaused)} {
+			for _, want := range []string{"ambiguous", bots[0].ID.String(), bots[1].ID.String(), "team", string(store.BotActive), string(store.BotPaused)} {
 				if !strings.Contains(out, want) {
 					t.Errorf("candidate detail %q missing: %s", want, out)
 				}

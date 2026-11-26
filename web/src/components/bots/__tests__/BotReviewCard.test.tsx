@@ -48,7 +48,7 @@ it('keeps genuine pending permissions reviewable and actionable', () => {
 
 beforeEach(() => vi.clearAllMocks())
 it.each([false, true])('ordinary answer uses existing authority; expired=%s needs an explicit second click', async expired => {
-  const activeBot = { ...bot, status: 'draft' as const }
+  const activeBot = { ...bot, status: 'active' as const }
   const question = { ...approval, interaction: { kind: 'chat_question' as const, question_id: 'exact-q', payload: { kind: 'text' as const, prompt: 'Specific question' } } }
   if (expired) vi.mocked(approveAndContinue).mockRejectedValue(new BotAPIError(403, 'Authority expired'))
   else vi.mocked(approveAndContinue).mockResolvedValue({ approval: { ...question, status: 'consumed', response: { question_id: 'exact-q', answer: 'Exact custom answer' } }, run_id: 'r', continuation: 'queued' })
@@ -123,7 +123,7 @@ const titleQuestion: BotApproval = {
 }
 
 it.each(['personal', 'team'] as const)('restores the same initial-title review in %s without answering on navigation', async scope => {
-  const scopedBot = { ...bot, status: 'draft' as const, scope }
+  const scopedBot = { ...bot, status: 'active' as const, scope }
   const onChange = vi.fn()
   const props = { bot: scopedBot, approval: titleQuestion, readOnly: false, onChange }
   const view = render(<BotReviewCard {...props} />)

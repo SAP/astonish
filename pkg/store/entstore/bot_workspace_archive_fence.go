@@ -20,7 +20,7 @@ func WithBotWorkspaceArchiveFence(ctx context.Context, bots store.BotStore, expo
 	default:
 		return store.ErrBotUnsupported
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		after := uuid.Nil
 		for {
 			rows, err := tx.ListBots(ctx, 100, after)

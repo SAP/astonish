@@ -11,7 +11,7 @@ import (
 type botPolicyTransactionKey struct{}
 type botPolicyTransaction struct{ outer, current *teament.Client }
 
-func botPolicyContext(ctx context.Context, db botDraftDB) context.Context {
+func botPolicyContext(ctx context.Context, db botDB) context.Context {
 	if d, ok := db.(teamBotDB); ok && d.policyOuter != nil {
 		return context.WithValue(ctx, botPolicyTransactionKey{}, botPolicyTransaction{d.policyOuter, d.client})
 	}

@@ -52,7 +52,7 @@ func notificationKey(run, binding uuid.UUID, sequence int64, state string) strin
 // committedPublicationReport selects only committed outcome intents, never the
 // publication receipts that share the report activity kind. Explicit sequences
 // allow replay of earlier outcomes after the mutable run has resumed.
-func committedPublicationReport(ctx context.Context, db botDraftDB, bot, run uuid.UUID, sequence int64) (store.BotRun, int64, error) {
+func committedPublicationReport(ctx context.Context, db botDB, bot, run uuid.UUID, sequence int64) (store.BotRun, int64, error) {
 	saved, err := db.ReadRun(ctx, bot, run)
 	if err != nil {
 		return store.BotRun{}, 0, err
@@ -109,7 +109,7 @@ func committedPublicationReport(ctx context.Context, db botDraftDB, bot, run uui
 	return selected, selectedSequence, nil
 }
 
-func (r *botRepository) publicationOwner(ctx context.Context, db botDraftDB, id uuid.UUID) (*botStoredRecord, error) {
+func (r *botRepository) publicationOwner(ctx context.Context, db botDB, id uuid.UUID) (*botStoredRecord, error) {
 	if _, err := r.auth.authorize(ctx, uuid.Nil, true); err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func publicationTime(now time.Time, r *botRepository) time.Time {
 	}
 	return now.UTC()
 }
-func insertPublicationActivity(ctx context.Context, db botDraftDB, rec *botStoredRecord, run uuid.UUID, kind store.BotActivityKind, key string, payload any, now time.Time) error {
+func insertPublicationActivity(ctx context.Context, db botDB, rec *botStoredRecord, run uuid.UUID, kind store.BotActivityKind, key string, payload any, now time.Time) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -143,7 +143,7 @@ func insertPublicationActivity(ctx context.Context, db botDraftDB, rec *botStore
 	rec.LastSequence++
 	return db.InsertActivity(ctx, store.BotActivity{BotID: rec.Bot.ID, RunID: &run, Sequence: rec.LastSequence, Kind: kind, Payload: data, CreatedAt: now}, key)
 }
-func readPublication(ctx context.Context, db botDraftDB, bot, run uuid.UUID, sequence int64) (*store.BotPublication, error) {
+func readPublication(ctx context.Context, db botDB, bot, run uuid.UUID, sequence int64) (*store.BotPublication, error) {
 	if sequence == 0 {
 		_, latest, err := committedPublicationReport(ctx, db, bot, run, 0)
 		if err != nil {
@@ -166,7 +166,7 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotPublication
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := r.publicationOwner(ctx, tx, q.BotID)
 		if err != nil {
 			return err
@@ -324,7 +324,7 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 
 // questionOnlyWaitingPublication uses committed approval identities, never prose
 // or the mutable run's current status, so replay after an answer stays silent.
-func questionOnlyWaitingPublication(ctx context.Context, db botDraftDB, run store.BotRun) (bool, error) {
+func questionOnlyWaitingPublication(ctx context.Context, db botDB, run store.BotRun) (bool, error) {
 	r := run.Report
 	if run.Status != store.RunWaitingApproval || len(r.NeedsApproval) == 0 || r.Failure != nil || len(r.Changed) != 0 || len(r.Artifacts) != 0 || len(r.Unverified) != 0 || r.EmployeeMessage == nil || r.EmployeeMessage.Origin != store.BotEmployeeMessageFallback {
 		return false, nil
@@ -347,7 +347,7 @@ func questionOnlyWaitingPublication(ctx context.Context, db botDraftDB, run stor
 // persistedConversationReply requires the same actual model event in this run
 // and its home. Older turns, user text, thoughts and partial chunks cannot hide
 // a missing reply. Read through transaction-bound scoped stores, never UI state.
-func persistedConversationReply(ctx context.Context, db botDraftDB, b store.Bot, run store.BotRun) (*adksession.Event, error) {
+func persistedConversationReply(ctx context.Context, db botDB, b store.Bot, run store.BotRun) (*adksession.Event, error) {
 	var reader store.BotTranscriptReader
 	switch d := db.(type) {
 	case personalBotDB:
@@ -395,7 +395,7 @@ func persistedConversationReply(ctx context.Context, db botDraftDB, b store.Bot,
 	return reply, nil
 }
 
-func readNotification(ctx context.Context, db botDraftDB, p *store.BotPublication, binding uuid.UUID) (*store.BotNotification, error) {
+func readNotification(ctx context.Context, db botDB, p *store.BotPublication, binding uuid.UUID) (*store.BotNotification, error) {
 	var original *store.BotNotification
 	for i := range p.Notifications {
 		if p.Notifications[i].Target.ID == binding {
@@ -427,7 +427,7 @@ func readNotification(ctx context.Context, db botDraftDB, p *store.BotPublicatio
 func (r *botRepository) ClaimNotification(ctx context.Context, q store.BotNotificationClaim) (*store.BotNotification, bool, error) {
 	var result *store.BotNotification
 	send := false
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := r.publicationOwner(ctx, tx, q.BotID)
 		if err != nil {
 			return err
@@ -521,7 +521,7 @@ func (r *botRepository) FinishNotification(ctx context.Context, q store.BotNotif
 	if q.AttemptID == uuid.Nil || q.Delivered && strings.TrimSpace(q.Receipt) == "" {
 		return store.ErrBotInvalid
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := r.publicationOwner(ctx, tx, q.BotID)
 		if err != nil {
 			return err

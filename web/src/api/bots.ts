@@ -3,7 +3,7 @@ import type { AttachmentPayload } from './studioChat'
 import { teamFetch } from './teamContext'
 
 export type BotScope = 'personal' | 'team'
-export const BotStatus = { Draft: 'draft', Active: 'active', Paused: 'paused', Stopped: 'stopped', Deleted: 'deleted' } as const
+export const BotStatus = { Active: 'active', Paused: 'paused', Stopped: 'stopped', Deleted: 'deleted' } as const
 export type BotStatusValue = typeof BotStatus[keyof typeof BotStatus]
 export interface BotHomeBinding {
   id: string; bot_id: string; scope: BotScope; backend: string; storage_key: string; revision: number
@@ -120,7 +120,7 @@ export interface BotGoal { id: string; revision: number; title: string; descript
 export interface BotMemory { id?: string; snippet: string; path: string; category?: string; session_id?: string; created_at?: string }
 export interface BotActivity { sequence: number; kind: string; run_id?: string; created_at: string; payload: unknown }
 export interface BotTemplate { id: string; revision: number; definition: { schema_version: number; name: string; charter: string; language: string; suggested_goals: { title: string; description: string; completion_criteria: string }[] | null; suggested_schedules: { cron: string; timezone: string; instructions: string }[] | null } }
-export interface BotDraft { name: string; start_from_title?: boolean; idempotency_key: string; definition?: { charter: string; persona?: BotPersona } }
+export interface BotCreate { name: string; start_from_title?: boolean; idempotency_key: string; definition?: { charter: string; persona?: BotPersona } }
 export interface BotCarryover { summary: string; memories: { content: string; category: string }[]; goals: { title: string; completion_criteria: string }[]; artifacts: { title: string; content: string }[] }
 export interface BotPromotion { name: string; charter: string; idempotency_key: string; reviewed: boolean; reviewed_for_team: boolean; carryover: BotCarryover }
 export const BotErrorCode = { DeletionPending: 'deletion_pending' } as const
@@ -151,7 +151,7 @@ export const getBot = (id: string, scope: BotScope, signal?: AbortSignal) => req
 export const getBotVersion = (id: string, version: number, scope: BotScope, signal?: AbortSignal) => request<BotVersion>(`/${segment(id)}/versions/${version}`, scope, 'GET', undefined, signal)
 export interface BotHomeSetupRequest { expected_revision: number }
 export const setupBotHome = (bot: Bot): Promise<Bot> => request<Bot>(`/${segment(bot.id)}/home`, bot.scope, 'POST', { expected_revision: bot.revision } satisfies BotHomeSetupRequest)
-export const createBot = (draft: BotDraft) => request<Bot>('', 'personal', 'POST', draft)
+export const createBot = (input: BotCreate) => request<Bot>('', 'personal', 'POST', input)
 export const promoteChatToBot = (session: string, draft: BotPromotion) => request<Bot>(`/promote-chat/${segment(session)}`, 'personal', 'POST', draft)
 export const getBotTemplate = (id: string, signal?: AbortSignal) => request<BotTemplate>(`/templates/${segment(id)}`, 'team', 'GET', undefined, signal)
 export const listBotTemplates = (signal?: AbortSignal) => request<{ templates: BotTemplate[] }>('/templates', 'team', 'GET', undefined, signal)
@@ -167,7 +167,7 @@ export async function permanentDeleteBot(bot: Bot, signal?: AbortSignal): Promis
   if (response.status !== 202 || result.status !== 'pending' || result.bot?.id !== bot.id || result.bot?.scope !== bot.scope) throw new BotAPIError(response.status, 'Unexpected deletion response; completion has not been confirmed')
   return result
 }
-export const botLifecycle = (bot: Bot, action: 'activate' | 'pause' | 'stop' | 'restore' | 'delete', reason: string) => request<Bot>(`/${segment(bot.id)}${action === 'delete' ? '' : `/${action}`}`, bot.scope, action === 'delete' ? 'DELETE' : 'POST', { expected_revision: bot.revision, reason })
+export const botLifecycle = (bot: Bot, action: 'resume' | 'pause' | 'stop' | 'restore' | 'delete', reason: string) => request<Bot>(`/${segment(bot.id)}${action === 'delete' ? '' : `/${action}`}`, bot.scope, action === 'delete' ? 'DELETE' : 'POST', { expected_revision: bot.revision, reason })
 export const requestBotRun = (bot: Bot, instructions: string, key: string, attachments?: AttachmentPayload[]) => request<BotRun>(`/${segment(bot.id)}/runs`, bot.scope, 'POST', { version: bot.version, instructions, idempotency_key: key, ...(attachments?.length ? { attachments } : {}) })
 export interface BotIntentRequest { version: number; instructions: string; idempotency_key: string }
 export interface BotConversationRequest extends BotIntentRequest { attachments?: AttachmentPayload[] }

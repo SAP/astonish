@@ -368,22 +368,22 @@ func (publicationFinishFailure) FinishNotification(context.Context, store.BotNot
 	return errors.New("crash after send before receipt commit")
 }
 
-type publicationFailReceiptDB struct{ botDraftDB }
+type publicationFailReceiptDB struct{ botDB }
 
 func (d publicationFailReceiptDB) AppendHomeReport(ctx context.Context, b store.Bot, e *adksession.Event) error {
-	return d.botDraftDB.(botPublicationDB).AppendHomeReport(ctx, b, e)
+	return d.botDB.(botPublicationDB).AppendHomeReport(ctx, b, e)
 }
 func (d publicationFailReceiptDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
 	if strings.HasPrefix(key, "home-report:") {
 		return errors.New("receipt write failed")
 	}
-	return d.botDraftDB.InsertActivity(ctx, a, key)
+	return d.botDB.InsertActivity(ctx, a, key)
 }
 
-type publicationFailReceiptTransaction struct{ botDraftDB }
+type publicationFailReceiptTransaction struct{ botDB }
 
-func (d publicationFailReceiptTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(publicationFailReceiptDB{tx}) })
+func (d publicationFailReceiptTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(publicationFailReceiptDB{tx}) })
 }
 func TestBotNotificationsDeferredRevalidate(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {

@@ -33,7 +33,7 @@ func (m *progressClockModel) GenerateContent(ctx context.Context, req *model.LLM
 func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			f := newProgressHTTPFixture(t, scope)
 			*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
 			}
@@ -47,6 +47,7 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			*f.policy = nil
+			progressResumeFixture(t, f)
 			start := time.Now()
 			clock := &progressClockModel{LLM: f.model, now: start}
 			cfg := f.workerConfig

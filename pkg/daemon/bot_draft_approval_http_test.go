@@ -157,7 +157,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			version.Autonomy.AllowedTools = []string{"fixture_send"}
 			version.Triggers = []store.TriggerSpec{{ID: uuid.New(), Kind: store.TriggerCron, Cron: "0 * * * *", Timezone: "UTC", Instructions: "Remain disabled during one-time test", Enabled: false}}
 			version.Charter = "Perform one owner-approved exact action"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Draft approval", OwnerID: owner, Version: version, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Draft approval", OwnerID: owner, Version: version, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,9 +248,17 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				}
 				return result.Approvals
 			}
-			assertState(store.BotDraft)
+			assertState(store.BotActive)
 			payload := fmt.Sprintf(`{"version":%d,"idempotency_key":"draft-exact","instructions":"Test exact action once"}`, b.Version)
+			// Active permits ordinary runs, but retained credentials cannot admit
+			// work after authoritative membership is revoked.
+			if err := db.Organizations().RemoveMember(ctx, owner.String(), org.ID); err != nil {
+				t.Fatal(err)
+			}
 			request("POST", "runs", payload, 403)
+			if err := db.Organizations().AddMember(ctx, owner.String(), org.ID, "member"); err != nil {
+				t.Fatal(err)
+			}
 			var run store.BotRun
 			if err := json.Unmarshal(request("POST", "test-run", payload, 202), &run); err != nil {
 				t.Fatal(err)
@@ -268,11 +276,11 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			if err := db.Organizations().AddMember(ctx, owner.String(), org.ID, "member"); err != nil {
 				t.Fatal(err)
 			}
-			assertState(store.BotDraft)
+			assertState(store.BotActive)
 			poll()
-			assertState(store.BotDraft)
+			assertState(store.BotActive)
 			saved := getRun(run.ID)
-			if saved.Status != store.RunWaitingApproval || saved.Intent != store.BotIntentDraftTest || effects.Load() != 0 {
+			if saved.Status != store.RunWaitingApproval || saved.Intent != store.BotIntentRegular || effects.Load() != 0 {
 				t.Fatalf("checkpoint run=%+v effects=%d", saved, effects.Load())
 			}
 			all := approvals()
@@ -302,20 +310,20 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 					if err := json.Unmarshal(request("POST", continuePath, continueBody, 202), &result); err != nil || result.RunID != run.ID || result.Continuation != store.BotContinuationQueued || result.Approval.ActionDigest != approval.ActionDigest {
 						t.Fatalf("combined response %+v: %v", result, err)
 					}
-					assertState(store.BotDraft)
+					assertState(store.BotActive)
 				}
 			} else {
 				for i := 0; i < 2; i++ {
 					request("POST", decisionPath, decision, 200)
 					poll()
-					assertState(store.BotDraft)
+					assertState(store.BotActive)
 				}
 				if getRun(run.ID).Status != store.RunWaitingApproval || effects.Load() != 0 || llm.calls != 1 {
 					t.Fatal("decision alone resumed execution")
 				}
 				for i := 0; i < 2; i++ {
 					request("POST", resumePath, resume, 202)
-					assertState(store.BotDraft)
+					assertState(store.BotActive)
 				}
 			}
 			// Approval is still not authority after membership is revoked. Keep
@@ -336,11 +344,11 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				t.Fatalf("denied worker claim consumed approval: %+v", pendingConsumption)
 			}
 			poll()
-			assertState(store.BotDraft)
+			assertState(store.BotActive)
 			saved = getRun(run.ID)
 			// The fixture independently observes the exact resumed effect. The
 			// earlier blocked invocation is not an executed uncertain action.
-			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || saved.Report.Work.Disposition != store.AgentWorkAnswered || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentDraftTest || effects.Load() != 1 || llm.calls != 2 {
+			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || saved.Report.Work.Disposition != store.AgentWorkAnswered || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentRegular || effects.Load() != 1 || llm.calls != 2 {
 				t.Fatalf("resume run=%+v effects=%d calls=%d", saved, effects.Load(), llm.calls)
 			}
 			all = approvals()
@@ -355,7 +363,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			request("POST", "test-run", payload, 202)
 			poll()
 			poll()
-			assertState(store.BotDraft)
+			assertState(store.BotActive)
 			if effects.Load() != 1 || llm.calls != 2 {
 				t.Fatal("repeated approval/admission/poll executed twice")
 			}
@@ -373,7 +381,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "separate ordinary run"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

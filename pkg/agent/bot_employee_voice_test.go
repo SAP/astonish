@@ -23,7 +23,7 @@ func TestBotEmployeeVoiceModes(t *testing.T) {
 		{name: "interactive-request", req: bot.RunRequest{Interactive: true}, followUp: true},
 		{name: "scheduled", req: bot.RunRequest{Run: store.BotRun{Trigger: store.TriggerCron}}, background: true},
 		{name: "autonomous", background: true},
-		{name: "control-only", req: bot.RunRequest{Run: store.BotRun{Intent: store.BotIntentDraftConversation}}, control: true},
+		{name: "control-only", req: bot.RunRequest{Run: store.BotRun{Intent: store.BotIntentConversation}}, control: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			po := NewBotPromptOverrides(nil, tc.req)

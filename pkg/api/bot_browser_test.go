@@ -288,7 +288,7 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	startupCount := 0
 	for _, candidate := range runs {
 		switch candidate.Intent {
-		case store.BotIntentDraftConversation:
+		case store.BotIntentConversation:
 			startupCount++
 		case store.BotIntentRegular:
 			executionRun = &candidate
@@ -301,7 +301,7 @@ func TestBotWorkspaceBrowserAcceptance(t *testing.T) {
 	// that interactive owner-priority request without inventing a confirmation,
 	// so it cannot block the later autonomous claim. Keep its durable identity.
 	for _, startup := range runs {
-		if startup.Intent != store.BotIntentDraftConversation {
+		if startup.Intent != store.BotIntentConversation {
 			continue
 		}
 		startupWorker := execution.WithBotRunIdentity(owner, execution.BotRunIdentity{BotID: stored.ID, RunID: startup.ID, Version: startup.Version, ActorID: env.UserID, OrgSlug: env.OrgSlug, TeamSlug: env.TeamSlug})

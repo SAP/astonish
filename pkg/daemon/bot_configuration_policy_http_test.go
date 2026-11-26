@@ -78,7 +78,11 @@ func TestBotConfigurationProductionPolicyHTTP(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Reviewed configuration"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Policy", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Policy", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.Pause(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "Review sensitive configuration"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,7 +141,7 @@ func TestBotConfigurationProductionPolicyHTTP(t *testing.T) {
 			if err := json.Unmarshal(raw, &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Version != b.Version+1 || saved.Status != store.BotDraft {
+			if saved.Version != b.Version+1 || saved.Status != store.BotPaused {
 				t.Fatalf("configuration activated or failed to version: %+v", saved)
 			}
 			q.ExpectedRevision, q.ExpectedVersion = saved.Revision, saved.Version

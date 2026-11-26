@@ -41,7 +41,7 @@ func (r *botRepository) getSourceIntake(ctx context.Context, id uuid.UUID) (*sto
 	p, _, e := sourceProposalRead(ctx, r.db, id, actor)
 	return p, e
 }
-func sourceChatStamp(ctx context.Context, tx botDraftDB, id, actor uuid.UUID) (string, time.Time, error) {
+func sourceChatStamp(ctx context.Context, tx botDB, id, actor uuid.UUID) (string, time.Time, error) {
 	if e := tx.(botIntakeDB).reviewChat(ctx, id, actor); e != nil {
 		return "", time.Time{}, e
 	}
@@ -73,7 +73,7 @@ func sourceChatStamp(ctx context.Context, tx botDraftDB, id, actor uuid.UUID) (s
 	h, e := botHash([]any{id, updated, count, eventIDs})
 	return h, updated, e
 }
-func (r *botRepository) sourceSnapshot(ctx context.Context, tx botDraftDB, p *store.BotSourceIntakeProposal, templates store.BotTemplateStore) error {
+func (r *botRepository) sourceSnapshot(ctx context.Context, tx botDB, p *store.BotSourceIntakeProposal, templates store.BotTemplateStore) error {
 	q := p.Request
 	switch q.Mode {
 	case store.BotIntakeChat:
@@ -157,7 +157,7 @@ func (r *botRepository) proposeSourceIntake(ctx context.Context, q store.BotSour
 	}
 	id := uuid.NewSHA1(actor, []byte("source-intake:"+q.IdempotencyKey))
 	var out *store.BotSourceIntakeProposal
-	e = sourceIntakeTransaction(ctx, r.db, func(tx botDraftDB) error {
+	e = sourceIntakeTransaction(ctx, r.db, func(tx botDB) error {
 		old, _, err := sourceProposalRead(ctx, tx, id, actor)
 		if err == nil {
 			a, _ := botHash(old.Request)
@@ -192,7 +192,7 @@ func (r *botRepository) proposeSourceIntake(ctx context.Context, q store.BotSour
 // SQLite already serializes writers; PostgreSQL must not use statement-by-statement
 // READ COMMITTED snapshots for a source-bound decision. Serialization failures are
 // safe to retry with the same proposal ID and digest.
-func sourceIntakeTransaction(ctx context.Context, db botDraftDB, fn func(botDraftDB) error) error {
+func sourceIntakeTransaction(ctx context.Context, db botDB, fn func(botDB) error) error {
 	switch d := db.(type) {
 	case personalBotDB:
 		tx, err := d.client.BeginTx(ctx, &stdsql.TxOptions{Isolation: stdsql.LevelSerializable})
@@ -222,7 +222,7 @@ func sourceIntakeTransaction(ctx context.Context, db botDraftDB, fn func(botDraf
 func sourceDraftKey(p *store.BotSourceIntakeProposal) string {
 	return "source-intake:" + p.ID.String() + ":" + p.Digest
 }
-func (r *botRepository) applySourceIntake(ctx context.Context, tx botDraftDB, p *store.BotSourceIntakeProposal) (*store.Bot, error) {
+func (r *botRepository) applySourceIntake(ctx context.Context, tx botDB, p *store.BotSourceIntakeProposal) (*store.Bot, error) {
 	q := p.Request
 	v, policyErr := store.NewBotVersionForCreation(ctx, p.OwnerID)
 	if policyErr != nil {
@@ -242,7 +242,7 @@ func (r *botRepository) applySourceIntake(ctx context.Context, tx botDraftDB, p 
 		a := p.Adaptive
 		v.Triggers = []store.TriggerSpec{{ID: uuid.NewSHA1(p.ID, []byte("schedule")), Kind: store.TriggerCron, Cron: a.Schedule.Cron, Timezone: a.Schedule.Timezone, Instructions: a.Instructions}}
 	}
-	rec, v, goals, e := prepareBotDraft(store.BotCreateRequest{Name: q.Name, OwnerID: p.OwnerID, IdempotencyKey: sourceDraftKey(p), Version: v, Goals: goals}, p.OwnerID, r.auth.scope, r.clock())
+	rec, v, goals, e := prepareBotCreate(store.BotCreateRequest{Name: q.Name, OwnerID: p.OwnerID, IdempotencyKey: sourceDraftKey(p), Version: v, Goals: goals}, p.OwnerID, r.auth.scope, r.clock())
 	if e != nil {
 		return nil, e
 	}
@@ -315,7 +315,7 @@ func (r *botRepository) decideSourceIntake(ctx context.Context, id uuid.UUID, q 
 		return nil, err
 	}
 	if peek.Request.Mode == store.BotIntakeTemplate && q.Decision == "confirm" {
-		e = sourceIntakeTransaction(ctx, r.db, func(tx botDraftDB) error {
+		e = sourceIntakeTransaction(ctx, r.db, func(tx botDB) error {
 			p, rev, err := sourceProposalRead(ctx, tx, id, actor)
 			if err != nil {
 				return err
@@ -346,7 +346,7 @@ func (r *botRepository) decideSourceIntake(ctx context.Context, id uuid.UUID, q 
 		}
 	}
 	var out *store.BotSourceIntakeProposal
-	e = sourceIntakeTransaction(ctx, r.db, func(tx botDraftDB) error {
+	e = sourceIntakeTransaction(ctx, r.db, func(tx botDB) error {
 		p, rev, err := sourceProposalRead(ctx, tx, id, actor)
 		if err != nil {
 			return err

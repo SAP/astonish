@@ -1192,6 +1192,13 @@ func ExecuteTool(ctx context.Context, name string, args map[string]interface{}, 
 		}
 		return codeintel.CodeReferences(nil, toolArgs)
 
+	case BotPublicFetchOperation:
+		var toolArgs WebFetchArgs
+		if err := toStruct(args, &toolArgs); err != nil {
+			return nil, err
+		}
+		return botPublicFetch(ctx, toolArgs)
+
 	case "web_fetch":
 		var toolArgs WebFetchArgs
 		if err := toStruct(args, &toolArgs); err != nil {

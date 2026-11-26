@@ -29,7 +29,7 @@ func TestBotContentTaskPersistence(t *testing.T) {
 			path := filepath.Join(dir, "tasks.db")
 			contentDir := t.TempDir()
 			var sqlDB *sql.DB
-			var db botDraftDB
+			var db botDB
 			open := func() {
 				var err error
 				sqlDB, err = sql.Open("sqlite", path)
@@ -77,7 +77,7 @@ func TestBotContentTaskPersistence(t *testing.T) {
 			candidate.Ref.Digest = candidate.ContentDigest()
 			task := store.BotTask{ID: candidate.Ref.TaskID, BotID: candidate.BotID, Key: candidate.Ref.TaskID.String(), HomePath: "tasks/" + candidate.Ref.TaskID.String(), Title: "Task index", Status: store.BotTaskReady, Revision: 1}
 			env := taskPublicationEnvelope{Publication: store.BotTaskPublication{ID: candidate.ID, BotID: candidate.BotID, TaskID: task.ID, State: store.BotTaskPublicationPrepared, Candidate: candidate, AuthorityConstraintRef: "original"}, Task: task, Mutation: store.BotTaskMutation{BotID: candidate.BotID, ActorID: owner, IdempotencyKey: "once", AuthorityConstraintRef: "original"}}
-			err := repository.db.Transaction(ctx, func(tx botDraftDB) error {
+			err := repository.db.Transaction(ctx, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					_, err := d.client.Bot.Create().SetID(candidate.BotID).SetOwnerID(owner).SetName("Task fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(ctx)
@@ -138,7 +138,7 @@ func TestBotContentTaskPersistence(t *testing.T) {
 			next.Publication.Candidate.ID = next.Publication.ID
 			next.Publication.Candidate.Ref.Revision++
 			next.Publication.Candidate.Ref.Digest = next.Publication.Candidate.ContentDigest()
-			err = db.Transaction(ctx, func(tx botDraftDB) error {
+			err = db.Transaction(ctx, func(tx botDB) error {
 				if err := tx.(botTaskDB).insertTaskPublication(ctx, next); err != nil {
 					return err
 				}

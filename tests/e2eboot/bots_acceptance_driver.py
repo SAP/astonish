@@ -939,12 +939,12 @@ CONSOLIDATION_CONTROLLER = {
         'TestBotProgressQueuedAuthorityLoss',
         'TestBotConfigurationPolicyTransaction', 'TestBotPolicyTeamMCPTransaction',
         'TestBotReviewedConfigurationRevokesOldGrants', 'TestBotAdaptiveConversionRollback',
-        'TestBotReviewedDraftRejectsUnreviewedPolicyReplacement',
+        'TestBotPausedPolicyRejectsUnreviewedPolicyReplacement',
         'TestReviewedConfigurationRejectsStaleScheduleBinding',
         'TestReviewedConfigurationResumeKeepsSchedulesDisabled', 'TestBotPausedStoppedConfiguration',
         'TestBotResumeDisabledScheduleApproval', 'TestBotResumeDisabledScheduleRejectsCorruption',
-        'TestBotDraftScheduledActivationConsent', 'TestBotDraftScheduledActivationRejectsCorruption',
-        'TestBotDraftScheduledActivationRollback', 'TestBotDraftScheduledActivationLegacyReadinessCAS',
+        'TestBotIndependentScheduleConsent', 'TestBotScheduleTargetOnlyEnablement', 'TestBotResumeScheduleRejectsCorruption',
+        'TestBotResumeScheduleRollback', 'TestBotResumeScheduleLegacyReadinessCAS',
         'TestBotAuthorizedScheduleQueuedReconciliation', 'TestBackupFileFirstRestoreGuards',
         'TestBackupFileFirstRestoreFilesBeforeSQL', 'TestBackupFileFirstRestore', 'TestBackupFileFirstMappingRunAuthorityAndOpaqueContent',
         'TestBackupFileFirstMappingIndependentOwnership', 'TestBackupFileFirstReconciliationPreservesQuiescence',
@@ -1075,21 +1075,20 @@ CONSOLIDATION_CONTROLLER_SUBTESTS = {
         'TestBotResumeDisabledScheduleRejectsCorruption': [scope + '/' + scenario
             for scope in ('personal', 'team') for scenario in ('owner', 'version', 'bot', 'trigger',
                 'cron', 'timezone', 'payload', 'next-run', 'missing', 'active')],
-        'TestBotDraftScheduledActivationConsent': [scope + '/' + path
-            for scope in ('personal', 'team') for path in ('proposal-create-enabled', 'proposal-edit-enabled',
-                'legacy-create-enabled', 'legacy-edit-enabled', 'proposal-disabled', 'legacy-disabled')],
-        'TestBotDraftScheduledActivationRejectsCorruption': [scope + '/' + scenario
+        'TestBotIndependentScheduleConsent': ['personal', 'team'],
+        'TestBotScheduleTargetOnlyEnablement': ['personal', 'team'],
+        'TestBotResumeScheduleRejectsCorruption': [scope + '/' + scenario
             for scope in ('personal', 'team') for scenario in ('digest', 'owner', 'bot', 'trigger', 'version',
                 'cron', 'timezone', 'payload', 'missing', 'enabled', 'enabled-next', 'next-run',
                 'wrong-scope', 'readiness', 'transaction-binding')],
-        'TestBotDraftScheduledActivationRollback': ['personal', 'team'],
-        'TestBotDraftScheduledActivationLegacyReadinessCAS': [scope + '/' + mode
+        'TestBotResumeScheduleRollback': ['personal', 'team'],
+        'TestBotResumeScheduleLegacyReadinessCAS': [scope + '/' + mode
             for scope in ('personal', 'team') for mode in ('missing-readiness', 'readiness-failed',
                 'binding-changed', 'revision-changed')],
         'TestBotConfigurationPolicyTransaction': ['personal', 'team'],
         'TestBotReviewedConfigurationRevokesOldGrants': ['personal', 'team'],
         'TestBotAdaptiveConversionRollback': ['personal', 'team'],
-        'TestBotReviewedDraftRejectsUnreviewedPolicyReplacement': ['personal', 'team'],
+        'TestBotPausedPolicyRejectsUnreviewedPolicyReplacement': ['personal', 'team'],
         'TestReviewedConfigurationRejectsStaleScheduleBinding': [scope + '/' + mutation
             for scope in ('personal', 'team') for mutation in ('missing', 'mode', 'version',
                 'owner', 'bot', 'trigger', 'cron', 'timezone', 'flow', 'instructions', 'params')],
@@ -1104,8 +1103,8 @@ CONSOLIDATION_CONTROLLER_SUBTESTS = {
             for scenario in ('queued', 'paused', 'expired', 'wrong-digest', 'revoked', 'rollback',
                 'requeue-failure', 'stopped', 'deleted', 'changed-version', 'stale-checkpoint',
                 'wrong-actor', 'changed-action', 'denied')],
-        'TestBotContentApprovalCodec': ['format', 'bot', 'approval', 'run', 'version', 'digest',
-            'tool', 'effect', 'target', 'spend', 'kind', 'revision', 'size', 'owner', 'team', 'org'],
+        'TestBotContentApprovalCodec': ['bot', 'approval', 'run', 'version', 'digest',
+            'tool', 'effect', 'target', 'spend', 'size', 'bodydigest'],
         'TestBotContentApprovalSQLiteReopen': ['personal', 'team'],
         'TestBotApprovalResumeFenced': ['personal', 'team'],
         'TestBotApprovalConcurrentConsumption': ['personal', 'team'],
@@ -3363,6 +3362,82 @@ def employee_digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+ACTIVE_BOT_GATES = {
+    'creation': ('./pkg/store/entstore', ['TestBotActiveCreationContract']),
+    'http': ('./pkg/api', ['TestBotActiveCreateHTTPAcceptance', 'TestBotChatFirstConversationHTTPAcceptance',
+                           'TestBotProposalRoutesStrictHTTP', 'TestBotSourceIntakeProposalHTTPAcceptance',
+                           'TestBotSourceIntakeAdaptiveHTTP', 'TestBotSourceIntakeTemplateHTTP']),
+    'schedules': ('./pkg/daemon', ['TestBotAuthorizedScheduleHTTPAcceptance']),
+    'resume': ('./pkg/store/entstore', ['TestReviewedConfigurationResumeKeepsSchedulesDisabled',
+                                      'TestRoutineResumeAfterPausedResponsibilityUpdate']),
+    'cli-pty': ('./cmd/astonish', ['TestBotCLIExplicitIntentSubprocessAcceptance',
+                                 'TestBotCLIAndPTYAcceptance', 'TestBotTitleChatPTYAcceptance']),
+    'browser': ('./pkg/api', ['TestBotActiveCreationBrowserAcceptance',
+                             'TestBotChatFirstOrderedConversationBrowserAcceptance']),
+}
+ACTIVE_BOT_SCOPED = {'TestBotActiveCreationContract', 'TestBotActiveCreateHTTPAcceptance',
+                     'TestBotAuthorizedScheduleHTTPAcceptance', 'TestBotActiveCreationBrowserAcceptance'}
+
+
+def active_bot_required(names):
+    return names + [name + '/' + scope for name in names if name in ACTIVE_BOT_SCOPED
+                    for scope in ('personal', 'team')]
+
+
+def active_bot_status(args):
+    """Fresh local contract/client evidence; no upgrade tier or paid provider."""
+    if args.checks_only:
+        suite = ['python3', '-B', '-m', 'unittest', 'discover', '-s', 'tests/e2eboot',
+                 '-p', 'bots_acceptance_driver_test.py', '-k', 'ActiveBotAcceptanceTests']
+        ok = run(suite, file_first_env(os.environ))
+        print('CHECKS ONLY; no Active Bot behavior or browser journey executed')
+        return 0 if ok else 1
+    env = file_first_env(os.environ)
+    browser = env.get('ASTONISH_BOT_BROWSER_PATH', '')
+    report = dict(schema_version=1, stage='active-bot-status', status='BLOCKED', gates=[],
+                  unverified=['deployed sandbox and real-provider quality', 'PostgreSQL fresh schema'])
+    path = args.report
+    if path is None:
+        fd, name = tempfile.mkstemp(prefix='astonish-active-bot-', suffix='.json')
+        os.close(fd)
+        path = Path(name)
+    try:
+        if not browser or not Path(browser).is_absolute() or not Path(browser).is_file() or not os.access(browser, os.X_OK):
+            report['errors'] = ['ASTONISH_BOT_BROWSER_PATH must name an actual absolute executable Chrome path']
+            return 2
+        with tempfile.TemporaryDirectory(prefix='astonish-active-bot-home-') as home:
+            env.update(XDG_CONFIG_HOME=home + '/config', XDG_DATA_HOME=home + '/data',
+                       ASTONISH_BOT_BROWSER_ACCEPTANCE='1', ASTONISH_MEMORY_BROWSER_ACCEPTANCE='1',
+                       ASTONISH_MEMORY_BROWSER_PATH=browser)
+            if not run(['npm', '--prefix', 'web', 'run', 'build'], env):
+                report['status'] = 'FAIL'
+                report['errors'] = ['current Studio build failed']
+                return 1
+            for tier, (package, names) in ACTIVE_BOT_GATES.items():
+                required = active_bot_required(names)
+                evidence = ConsolidationEvidence(required, io.StringIO(), env)
+                command = go_command(package, names)
+                ok = run(command, env, evidence)
+                errors = consolidation_exact_errors(evidence, package, required)
+                report['gates'].append(dict(tier=tier, package=package, required=required,
+                    command=command, status='PASS' if ok and not errors else 'FAIL', errors=errors,
+                    exit_code=getattr(evidence, 'exit_code', None),
+                    passed=sorted(name for pkg, name in evidence.qualified_passes
+                                  if pkg == 'github.com/SAP/astonish/' + package.removeprefix('./'))))
+                if not ok or errors:
+                    report['status'] = 'FAIL'
+                    return 1
+            report['status'] = 'PASS'
+            return 0
+    except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as error:
+        report['errors'] = [str(error)]
+        return 2
+    finally:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+        print('ACTIVE_BOT_REPORT', path, report['status'])
+
+
 def main(argv=None):
     arguments = sys.argv[1:] if argv is None else argv
     if arguments and arguments[0] == '--completed-evidence':
@@ -3371,7 +3446,7 @@ def main(argv=None):
     parser.add_argument("--preflight", action="store_true", help="check prerequisites only; not acceptance")
     parser.add_argument("--local-only", action="store_true", help="partial local evidence; always non-release exit 3")
     stages = parser.add_mutually_exclusive_group()
-    stages.add_argument('--stage', choices=('title-confirmation-contract', 'title-confirmation', 'durable-progress', 'file-first', 'chat-consolidation', 'employee'), help='strict scoped acceptance stage')
+    stages.add_argument('--stage', choices=('active-bot-status', 'title-confirmation-contract', 'title-confirmation', 'durable-progress', 'file-first', 'chat-consolidation', 'employee'), help='strict scoped acceptance stage')
     parser.add_argument('--employee-phase', choices=EMPLOYEE_PHASES, help='required for employee only')
     parser.add_argument('--phase', choices=CONSOLIDATION_PHASES, help='required for chat-consolidation only')
     stages.add_argument('--skills-stage', choices=('all', 'recovery', 'postgres'), help='strict skills acceptance (separate from full Bot release)')
@@ -3383,7 +3458,14 @@ def main(argv=None):
     parser.add_argument('--postgres', action='store_true', help='request dedicated durable-progress PostgreSQL tier')
     parser.add_argument('--defer-kubernetes-postgresql', action='store_true',
                         help='user-requested local profile: report live Kubernetes/PostgreSQL DEFERRED, never PASS; only file-first/chat-consolidation')
+    parser.add_argument('--checks-only', action='store_true', help='active-bot-status driver self-checks only; NOT behavior acceptance')
     args = parser.parse_args(argv)
+    if args.stage == 'active-bot-status':
+        if args.employee_phase or args.phase or args.preflight or args.local_only or args.config or args.soak or args.real_provider or args.postgres or args.defer_kubernetes_postgresql:
+            parser.error('active-bot-status forbids partial/config/provider/deployment flags')
+        return active_bot_status(args)
+    if args.checks_only:
+        parser.error('--checks-only requires --stage active-bot-status')
     if args.stage == 'employee':
         if not args.employee_phase or args.phase or args.preflight or args.local_only or args.config or args.soak or args.real_provider or args.postgres or args.defer_kubernetes_postgresql:
             parser.error('employee requires --employee-phase and forbids partial/config/provider/deployment flags')

@@ -8,7 +8,7 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
-// Provision is explicit draft setup, separate from Ensure's registered-only
+// Provision is explicit idle Active/Paused setup, separate from Ensure's registered-only
 // runtime contract. Trusted composition must authorize the requesting editor
 // before establishing this live owner context and attest the returned binding.
 func (m *BotHomeManager) Provision(ctx context.Context, b store.Bot) (*sandbox.BotHomeBinding, error) {
@@ -23,7 +23,7 @@ func (m *BotHomeManager) Provision(ctx context.Context, b store.Bot) (*sandbox.B
 	if err != nil {
 		return nil, err
 	}
-	if current == nil || current.Revision != b.Revision || current.Status != store.BotDraft || current.OwnerID != b.OwnerID || current.Scope != b.Scope {
+	if current == nil || current.Revision != b.Revision || (current.Status != store.BotActive && current.Status != store.BotPaused) || current.OwnerID != b.OwnerID || current.Scope != b.Scope {
 		return nil, store.ErrBotConflict
 	}
 	scope := sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()}

@@ -16,11 +16,11 @@ import (
 )
 
 const botsUsage = `usage: astonish bots <command> [flags] [Bot UUID or unique name]
-Commands: list, create draft, show, run, stop-run, test-once, conversation,
+Commands: list, create, show, run, stop-run, test-once, conversation,
           pause, resume, stop, delete, restore, logs, approvals, approval approve|deny
 Flags may precede or follow positional arguments:
   --scope personal|team  --json
-  create draft NAME [--charter TEXT] [--start-from-title] [--key IDEMPOTENCY_KEY]
+  create NAME [--charter TEXT] [--start-from-title] [--key IDEMPOTENCY_KEY]
   run BOT [--version N] [--instructions TEXT] [--key IDEMPOTENCY_KEY]
   test-once|conversation BOT --version N --confirm SCOPE:BOT_UUID [--instructions TEXT] [--key KEY]
   pause|resume|stop|delete|restore BOT --revision N --reason TEXT
@@ -28,9 +28,9 @@ Flags may precede or follow positional arguments:
   stop-run BOT --run RUN_UUID --confirm SCOPE:BOT_UUID:RUN_UUID
   logs BOT [--session UUID] [--follow] [--after SESSION_UUID:CURSOR]
   approval approve|deny BOT APPROVAL_UUID --digest EXACT_DIGEST [--response JSON]
-Test-once requires Draft and leaves it Draft; conversation requires Paused and uses no tools.
+Test-once requires Active and queues one explicit run without recurrence; conversation requires Paused and uses no tools.
 Neither command activates a Bot. --confirm binds the selected scope and exact Bot UUID.
-Resume activates a reviewed draft/paused Bot; --run resumes an approved checkpoint.
+Resume resumes a reviewed paused/stopped Bot; --run resumes an approved checkpoint.
 Detach from logs or chat never stops a Bot. Decisions never auto-resume work.`
 
 func handleBotsCommand(args []string) error {
@@ -61,12 +61,6 @@ func runBotsCommand(ctx context.Context, c *client.Client, args []string, out io
 	}
 	args = args[1:]
 	decision := ""
-	if command == "create" {
-		if len(args) == 0 || args[0] != "draft" {
-			return fmt.Errorf("use: bots create draft NAME --charter TEXT")
-		}
-		args = args[1:]
-	}
 	if command == "approval" {
 		if len(args) == 0 || (args[0] != "approve" && args[0] != "deny") {
 			return fmt.Errorf("use: bots approval approve|deny BOT APPROVAL_UUID --digest DIGEST")
@@ -79,7 +73,7 @@ func runBotsCommand(ctx context.Context, c *client.Client, args []string, out io
 	scope := fs.String("scope", "personal", "Bot scope")
 	asJSON := fs.Bool("json", false, "JSON output")
 	startFromTitle := fs.Bool("start-from-title", false, "explicitly start an interactive conversation from the title")
-	charter := fs.String("charter", "", "draft charter")
+	charter := fs.String("charter", "", "Bot charter")
 	key := fs.String("key", "", "idempotency key")
 	revision := fs.Int64("revision", 0, "reviewed revision")
 	version := fs.Int64("version", 0, "reviewed version")
@@ -142,12 +136,12 @@ func runBotsCommand(ctx context.Context, c *client.Client, args []string, out io
 	}
 	if command == "create" {
 		if len(pos) != 1 || (!*startFromTitle && strings.TrimSpace(*charter) == "") {
-			return fmt.Errorf("draft name and --charter required")
+			return fmt.Errorf("Bot name and --charter required")
 		}
 		if *key == "" {
 			*key = uuid.NewString()
 		}
-		v, err := b.Create(ctx, client.BotDraft{StartFromTitle: *startFromTitle, Name: pos[0], IdempotencyKey: *key, Definition: client.BotDraftDefinition{Charter: *charter}})
+		v, err := b.Create(ctx, client.BotCreate{StartFromTitle: *startFromTitle, Name: pos[0], IdempotencyKey: *key, Definition: client.BotCreateDefinition{Charter: *charter}})
 		if err != nil {
 			return err
 		}
@@ -201,7 +195,7 @@ func runBotsCommand(ctx context.Context, c *client.Client, args []string, out io
 			return fmt.Errorf("%s requires scoped confirmation --confirm %s", command, expected)
 		}
 		call := b.TestRun
-		want := store.BotDraft
+		want := store.BotActive
 		if command == "conversation" {
 			call, want = b.Conversation, store.BotPaused
 		}

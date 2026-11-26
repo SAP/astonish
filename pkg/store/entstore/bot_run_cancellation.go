@@ -35,7 +35,7 @@ func (r *botRepository) CancelRun(ctx context.Context, id store.BotID, rid store
 		return nil, err
 	}
 	var result *store.BotRun
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, id)
 		if err != nil {
 			return err
@@ -61,7 +61,7 @@ func (r *botRepository) CancelRun(ctx context.Context, id store.BotID, rid store
 
 // QuiesceSingleAutonomousRun preserves the active barrier until verified teardown.
 // The caller must authenticate the owner and use the admission transaction.
-func (r *botRepository) QuiesceSingleAutonomousRun(ctx context.Context, tx botDraftDB, rec *botStoredRecord) error {
+func (r *botRepository) QuiesceSingleAutonomousRun(ctx context.Context, tx botDB, rec *botStoredRecord) error {
 	if rec.ActiveRunID == nil {
 		return nil
 	}
@@ -80,7 +80,7 @@ func (r *botRepository) QuiesceSingleAutonomousRun(ctx context.Context, tx botDr
 	return nil
 }
 
-func (r *botRepository) cancelRunTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun) error {
+func (r *botRepository) cancelRunTx(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun) error {
 	id, rid := rec.Bot.ID, saved.Run.ID
 	previous := saved.Run.Status
 	if (previous.Terminal() || previous == store.RunInterrupted) && !(previous == store.RunInterrupted && saved.Progress != nil && saved.Run.ContinuationReason == store.BotContinuationRequired) {

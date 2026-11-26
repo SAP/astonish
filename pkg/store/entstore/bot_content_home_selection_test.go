@@ -57,7 +57,7 @@ func selectionFixture(t *testing.T, scope store.BotScope) (*botRepository, conte
 	if err = platform.InstallBotContentHomeBackend(backend); !errors.Is(err, store.ErrBotConflict) {
 		t.Fatal(err)
 	}
-	var db botDraftDB
+	var db botDB
 	if scope == store.BotScopePersonal {
 		_, client := setupPersonalStore(t)
 		db = personalBotDB{client: client, content: codec}
@@ -67,7 +67,7 @@ func selectionFixture(t *testing.T, scope store.BotScope) (*botRepository, conte
 	r := &botRepository{db: db, auth: botRepositoryAuth{orgSlug: "org", teamSlug: "team", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}}
 	version := store.DefaultBotVersion()
 	version.Charter = "retained instructions sentinel"
-	b, err := r.CreateDraft(ctx, store.BotCreateRequest{Name: "Config", OwnerID: owner, Version: version, IdempotencyKey: "config"})
+	b, err := r.Create(ctx, store.BotCreateRequest{Name: "Config", OwnerID: owner, Version: version, IdempotencyKey: "config"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestBotContentHomeConfigurationSQL(t *testing.T) {
 				t.Fatal("retry changed references")
 			}
 			// A new write routes through the exact transaction-bound codec to Home.
-			if err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+			if err = r.db.Transaction(ctx, func(tx botDB) error {
 				v.Version = 2
 				return tx.InsertVersion(ctx, *v, "unchanged-logical-hash")
 			}); err != nil {
@@ -213,7 +213,7 @@ func TestBotContentHomeConfigurationSQL(t *testing.T) {
 }
 
 type failHomeSelectionDB struct {
-	botDraftDB
+	botDB
 	botHomeConfigurationDB
 }
 
@@ -227,10 +227,10 @@ func (d failHomeSelectionDB) selectHomeConfigurationRecords(ctx context.Context,
 	return nil
 }
 
-type failHomeSelectionTransaction struct{ botDraftDB }
+type failHomeSelectionTransaction struct{ botDB }
 
-func (d failHomeSelectionTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failHomeSelectionDB{tx, tx.(botHomeConfigurationDB)}) })
+func (d failHomeSelectionTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failHomeSelectionDB{tx, tx.(botHomeConfigurationDB)}) })
 }
 func TestBotContentHomeConfigurationRollback(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {

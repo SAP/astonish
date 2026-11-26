@@ -40,13 +40,13 @@ func (c proposalTestContext) SessionID() string      { return c.sid }
 func (c proposalTestContext) FunctionCallID() string { return "call-id" }
 func TestBotProposalCapabilityStrictBoundAndCapped(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentDraftConversation} {
+		for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentConversation} {
 			t.Run(string(scope)+string(intent), func(t *testing.T) {
 				f := newBotFactoryFixture(t)
 				f.req.Bot.Scope = scope
 				f.req.Run.Intent = intent
-				if intent == store.BotIntentDraftConversation {
-					f.req.Bot.Status = store.BotDraft
+				if intent == store.BotIntentConversation {
+					f.req.Bot.Status = store.BotPaused
 				}
 				repo := &proposalTestRepo{botFactoryTestRepo: botFactoryTestRepo{fixture: f}}
 				f.services.Bots, f.services.PersonalBots = repo, repo

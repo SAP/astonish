@@ -301,7 +301,7 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 	router.HandleFunc(root+"/{botID}/runs/{runID}", api.BotRunHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}/messages", api.BotMessageHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/configuration", api.BotConfigurationHandler).Methods("PUT")
-	router.HandleFunc(root+"/{botID}/activate", api.BotActivateHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/resume", api.BotResumeHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/pause", api.BotPauseHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/runs/{runID}/continue-interactive", api.BotContinueInteractiveHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/runs/{runID}/cancel", api.BotCancelRunHandler).Methods("POST")
@@ -440,6 +440,12 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Model selection updates the Bot revision; return the current CAS token.
+	updated, err = repo.Get(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = *updated
 	return &interactiveHTTPFixture{workerConfig: workerConfig, policy: &policy, db: db, dataDir: dir, server: server, scope: scope, t: t, ctx: ctx, request: request, worker: worker, repo: repo, b: b, path: root + "/" + b.ID.String(), pool: pool, registry: registry, model: mdl}
 }
 func (f *interactiveHTTPFixture) turn() *store.BotRun {
@@ -489,6 +495,9 @@ func (f *interactiveHTTPFixture) capabilityTurn(mode capabilityHTTPMode, tools [
 	if err != nil {
 		f.t.Fatal(err)
 	}
+	if err = json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"pause for reviewed capability change"}`, f.b.Revision), 200), &f.b); err != nil {
+		f.t.Fatal(err)
+	}
 	v.Autonomy.AllowedTools = tools
 	body, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Isolated acceptance owner-reviewed capabilities", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 	if err != nil {
@@ -497,7 +506,7 @@ func (f *interactiveHTTPFixture) capabilityTurn(mode capabilityHTTPMode, tools [
 	if err = json.Unmarshal(f.request("PUT", f.path+"/configuration", string(body), 200), &f.b); err != nil {
 		f.t.Fatal(err)
 	}
-	if err = json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"isolated capability acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
+	if err = json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"resume reviewed capability change"}`, f.b.Revision), 200), &f.b); err != nil {
 		f.t.Fatal(err)
 	}
 	var admitted store.BotRun
@@ -835,9 +844,6 @@ func TestBotAgentWorkHTTPAcceptance(t *testing.T) {
 					var receipt store.BotMessageReceipt
 					body := fmt.Sprintf(`{"version":%d,"instructions":"Stock Market News","idempotency_key":"agent-work"}`, f.b.Version)
 					if mode == "autonomous" {
-						if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"isolated autonomous acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
-							t.Fatal(err)
-						}
 						if err := json.Unmarshal(f.request("POST", f.path+"/runs", body, 202), &receipt.Run); err != nil {
 							t.Fatal(err)
 						}
@@ -879,9 +885,6 @@ func TestBotInteractiveChatHTTPAcceptance(t *testing.T) {
 		t.Run(fmt.Sprint("paused=", paused), func(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "receipt.txt"}, []string{"chat", "tool:execute"})
 			if paused {
-				if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"explicit setup"}`, f.b.Revision), 200), &f.b); err != nil {
-					t.Fatal(err)
-				}
 				if err := json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"pause before chat"}`, f.b.Revision), 200), &f.b); err != nil {
 					t.Fatal(err)
 				}

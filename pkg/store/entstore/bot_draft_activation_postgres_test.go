@@ -38,7 +38,7 @@ func newDraftActivationPostgres(t *testing.T, scope store.BotScope) (*postgresBo
 	requireDraftActivationPostgres(t)
 	f := newPostgresBotServicesFixture(t, scope, 100, 100)
 	// Reuse routing/provisioning, not its active test Bot. Finish that unrelated
-	// fixture run and create the actual test subject through CreateDraft only.
+	// fixture run and create the actual test subject through Create only.
 	if err := f.repo.CommitRun(f.worker, store.BotRunCommit{Lease: f.lease, Status: store.RunSucceeded, Report: acceptedWorkReport(t, f.repo, f.worker, f.lease, "Fixture provisioning complete")}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +47,8 @@ func newDraftActivationPostgres(t *testing.T, scope store.BotScope) (*postgresBo
 	p, _ := execution.PrincipalFromContext(f.owner)
 	v := store.DefaultBotVersion()
 	v.Charter = "Save only the separately reviewed scheduled report"
-	b, err := f.repo.CreateDraft(f.owner, store.BotCreateRequest{Name: "New scheduled draft", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "pg-new-draft"})
-	if err != nil || b.Status != store.BotDraft || b.Version != 1 {
+	b, err := f.repo.Create(f.owner, store.BotCreateRequest{Name: "New scheduled draft", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "pg-new-draft"})
+	if err != nil || b.Status != store.BotActive || b.Version != 1 {
 		t.Fatalf("fresh draft: %+v %v", b, err)
 	}
 	return f, b
@@ -124,11 +124,11 @@ func TestIntegrationPostgresBotDraftScheduledActivationConsent(t *testing.T) {
 				t.Run(method+"/"+mode, func(t *testing.T) {
 					f, b := newDraftActivationPostgres(t, scope)
 					b, tr := postgresDraftSchedule(t, f, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Write reviewed report", Enabled: mode == "create-enabled"})
-					assertDraftRecurrenceInert(t, f.repo, f.owner, b, tr)
+					assertRecurrenceInert(t, f.repo, f.owner, b, tr)
 					if mode == "edit-enabled" {
 						tr.Enabled = true
 						b, tr = postgresDraftSchedule(t, f, b, store.BotControlScheduleEdit, tr)
-						assertDraftRecurrenceInert(t, f.repo, f.owner, b, tr)
+						assertRecurrenceInert(t, f.repo, f.owner, b, tr)
 					}
 					before, err := f.repo.GetVersion(f.owner, b.ID, b.Version)
 					if err != nil {
@@ -137,7 +137,7 @@ func TestIntegrationPostgresBotDraftScheduledActivationConsent(t *testing.T) {
 					calls := 0
 					f.repo.activationCheck = func(_ context.Context, got store.Bot, v store.BotVersion) error {
 						calls++
-						if got.Status != store.BotDraft || got.ID != b.ID || got.Scope != scope || !reflect.DeepEqual(v, *before) {
+						if got.Status != store.BotActive || got.ID != b.ID || got.Scope != scope || !reflect.DeepEqual(v, *before) {
 							t.Fatal("wrong readiness snapshot")
 						}
 						return nil
@@ -145,17 +145,17 @@ func TestIntegrationPostgresBotDraftScheduledActivationConsent(t *testing.T) {
 					var decision *store.BotControlProposalDecision
 					var applied *store.BotControlProposal
 					if method == "proposal" {
-						p := postgresDraftProposal(t, f, b, store.BotControlPayload{Operation: store.BotControlActivate, Reason: "Activate reviewed recurrence"})
+						p := postgresDraftProposal(t, f, b, store.BotControlPayload{Operation: store.BotControlResume, Reason: "Activate reviewed recurrence"})
 						decision = &store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}
 						// Pending consent survives closing every router connection.
 						reopenDraftActivationPostgres(t, f)
-						assertDraftRecurrenceInert(t, f.repo, f.owner, b, tr)
+						assertRecurrenceInert(t, f.repo, f.owner, b, tr)
 						applied, err = f.repo.ConfirmControlProposal(f.owner, *decision)
 						if err != nil || applied.Status != store.BotControlApplied {
 							t.Fatalf("activation confirmation: %+v %v", applied, err)
 						}
 					} else {
-						_, err = f.repo.Activate(f.owner, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Activate reviewed recurrence"})
+						_, err = f.repo.Resume(f.owner, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Activate reviewed recurrence"})
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -187,7 +187,7 @@ func TestIntegrationPostgresBotDraftScheduledActivationConsent(t *testing.T) {
 						}
 						due := *job.NextRun
 						f.repo.now = func() time.Time { return due }
-						receipt, e := f.repo.AdmitScheduledRun(f.owner, draftActivationOccurrence(active, tr, due))
+						receipt, e := f.repo.AdmitScheduledRun(f.owner, scheduleOccurrence(active, tr, due))
 						if e != nil || receipt.Run.Status != store.RunQueued {
 							t.Fatalf("consented due admission: %+v %v", receipt, e)
 						}
@@ -203,7 +203,7 @@ func TestIntegrationPostgresBotDraftScheduledActivationRollback(t *testing.T) {
 	eachSpendScope(t, func(t *testing.T, scope store.BotScope) {
 		f, b := newDraftActivationPostgres(t, scope)
 		b, tr := postgresDraftSchedule(t, f, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Reviewed report", Enabled: true})
-		p := postgresDraftProposal(t, f, b, store.BotControlPayload{Operation: store.BotControlActivate, Reason: "Activate"})
+		p := postgresDraftProposal(t, f, b, store.BotControlPayload{Operation: store.BotControlResume, Reason: "Activate"})
 		f.repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
 		before, err := f.repo.db.GetBot(f.owner, b.ID)
 		if err != nil {
@@ -211,7 +211,7 @@ func TestIntegrationPostgresBotDraftScheduledActivationRollback(t *testing.T) {
 		}
 		jobBefore := f.repo.db.(botTriggerDB).triggerScheduler().Get(f.owner, tr.ScheduleID.String())
 		original := f.repo.db
-		f.repo.db = draftActivationReceiptFailTransaction{original, original.(botScheduledDB)}
+		f.repo.db = resumeReceiptFailTransaction{original, original.(botScheduledDB)}
 		d := store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}
 		_, err = f.repo.ConfirmControlProposal(f.owner, d)
 		f.repo.db = original
@@ -226,7 +226,7 @@ func TestIntegrationPostgresBotDraftScheduledActivationRollback(t *testing.T) {
 		if !reflect.DeepEqual(jobBefore, f.repo.db.(botTriggerDB).triggerScheduler().Get(f.owner, tr.ScheduleID.String())) {
 			t.Fatal("schedule escaped rollback")
 		}
-		assertDraftRecurrenceInert(t, f.repo, f.owner, b, tr)
+		assertRecurrenceInert(t, f.repo, f.owner, b, tr)
 		saved, err := f.repo.ReadControlProposal(f.owner, b.ID, p.ID)
 		if err != nil || saved.Status != store.BotControlProposed {
 			t.Fatalf("receipt escaped rollback: %+v %v", saved, err)
@@ -253,7 +253,7 @@ func TestIntegrationPostgresBotDraftActivationPauseRestartSchedulesDisabled(t *t
 				f, b := newDraftActivationPostgres(t, scope)
 				b, tr := postgresDraftSchedule(t, f, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Reviewed report", Enabled: true})
 				f.repo.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
-				b, err := f.repo.Activate(f.owner, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Activate"})
+				b, err := f.repo.Resume(f.owner, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Activate"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -291,7 +291,7 @@ func TestIntegrationPostgresBotDraftActivationPauseRestartSchedulesDisabled(t *t
 				if err != nil || !reflect.DeepEqual(versionBefore, versionAfter) || persisted.Revision != q.ExpectedRevision+1 {
 					t.Fatalf("resume changed immutable version/revision: %+v %v", versionAfter, err)
 				}
-				if _, err := f.repo.AdmitScheduledRun(f.owner, draftActivationOccurrence(b, tr, f.repo.clock().Add(time.Minute))); err == nil {
+				if _, err := f.repo.AdmitScheduledRun(f.owner, scheduleOccurrence(b, tr, f.repo.clock().Add(time.Minute))); err == nil {
 					t.Fatal("resume admitted disabled recurrence")
 				}
 				assertPostgresActivationNoRun(t, f, b)

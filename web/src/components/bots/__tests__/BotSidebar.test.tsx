@@ -9,7 +9,7 @@ import type { BotSnapshot } from '@/api/botSnapshot'
 vi.mock('@/api/botSnapshot', () => ({ getBotSnapshot: vi.fn(), readBotActivityPage: vi.fn(), writeBotReadCursor: vi.fn() }))
 vi.mock('@/api/auth', () => ({ getMe: async () => ({ user: { id: 'sidebar-owner' } }) }))
 vi.mock('@/api/botIntake', () => ({ currentIntakeNamespace: async () => 'fixture', readIntakePointer: () => null }))
-vi.mock('../BotDraftDialog', () => ({ default: () => null }))
+vi.mock('../BotCreateDialog', () => ({ default: () => null }))
 vi.mock('@/api/bots', async original => ({ ...await original<typeof bots>(), listBots: vi.fn(), permanentDeleteBot: vi.fn() }))
 const bot: bots.Bot = { id: 'ordinary-uuid', scope: 'personal', owner_id: 'sidebar-owner', name: 'Watcher', status: 'active', version: 2, revision: 1, home_session_id: '', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'ordinary-uuid', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
 const snapshot = (scope: bots.BotScope = 'personal'): BotSnapshot => ({ bot: { ...bot, scope }, read_cursor: { bot_id: bot.id, viewer_id: 'sidebar-owner', sequence: 2 }, latest_sequence: 5, unread_count: 3, pending_approvals: [{ id: 'decision' } as bots.BotApproval] })
@@ -49,7 +49,7 @@ it('deletes the selected last Bot and opens Chat', async () => {
   render(<BotSidebar activeId={bot.id} activeScope="personal" />)
   fireEvent.click(await screen.findByRole('button', { name: 'Delete Watcher' }))
   fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
-  expect(await screen.findByText('No Bots yet. Create a reviewed draft.')).toBeInTheDocument()
+  expect(await screen.findByText('No Bots yet. Create a Bot.')).toBeInTheDocument()
   expect(window.location.hash).toBe('#/chat')
 })
 it('keeps collapsed Bots reachable by name with exact selected identity', async () => {
@@ -102,7 +102,7 @@ it('removes a newly soft-deleted row on refresh and shows the empty state', asyn
   await screen.findByRole('link', { name: 'Watcher' })
   vi.mocked(bots.listBots).mockResolvedValue({ bots: [{ ...bot, status: bots.BotStatus.Deleted }] })
   fireEvent(window, new Event('astonish:bots-updated'))
-  expect(await screen.findByText('No Bots yet. Create a reviewed draft.')).toBeInTheDocument()
+  expect(await screen.findByText('No Bots yet. Create a Bot.')).toBeInTheDocument()
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
 })
 it.each([false, true])('shows accessible empty, loading and retry states (collapsed=%s)', async collapsed => {
@@ -110,7 +110,7 @@ it.each([false, true])('shows accessible empty, loading and retry states (collap
   const { unmount } = render(<BotSidebar collapsed={collapsed} />)
   expect(screen.getByRole('button', { name: collapsed ? 'Show Bots' : 'New Bot' })).toBeInTheDocument()
   expect(screen.getByRole('status')).toHaveTextContent('Loading Bots')
-  expect(await screen.findByText('No Bots yet. Create a reviewed draft.')).toBeInTheDocument()
+  expect(await screen.findByText('No Bots yet. Create a Bot.')).toBeInTheDocument()
   unmount()
   vi.mocked(bots.listBots).mockRejectedValue(new Error('Offline'))
   render(<BotSidebar collapsed={collapsed} />)

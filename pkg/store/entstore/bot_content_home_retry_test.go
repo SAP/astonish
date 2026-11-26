@@ -28,7 +28,7 @@ func TestBotContentHomeSelectionRetryDoesNotReadHistory(t *testing.T) {
 			backend.corrupt = false
 			// Even with an attestation, a staged reference must still be selected
 			// and verified; it cannot take the metadata-only retry path.
-			if err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+			if err := r.db.Transaction(ctx, func(tx botDB) error {
 				row, err := tx.GetBot(ctx, b.ID)
 				if err != nil {
 					return err

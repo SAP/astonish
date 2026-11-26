@@ -265,7 +265,7 @@ func TestBotTaskContinuityHTTPAcceptance(t *testing.T) {
 			db, repo, auth, backend := taskContinuityOpen(t, q)
 			v := store.DefaultBotVersion()
 			v.Charter = "Retain continuity files"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Continuity", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Continuity", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}

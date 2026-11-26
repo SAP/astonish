@@ -104,13 +104,13 @@ func TestBotPolicyTransactionAdmission(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "New title"
 			rejectedKey := uuid.NewString()
-			if _, err = r.CreateDraftAndStart(rejectCtx, store.BotCreateRequest{Name: "Rejected title", OwnerID: b.OwnerID, Version: v, IdempotencyKey: rejectedKey}); !errors.Is(err, store.ErrBotForbidden) {
+			if _, err = r.CreateAndStart(rejectCtx, store.BotCreateRequest{Name: "Rejected title", OwnerID: b.OwnerID, Version: v, IdempotencyKey: rejectedKey}); !errors.Is(err, store.ErrBotForbidden) {
 				t.Fatalf("title reject: %v", err)
 			}
 			if _, err = r.db.FindCreate(ctx, rejectedKey); !errors.Is(err, store.ErrBotNotFound) {
 				t.Fatalf("rejected title persisted: %v", err)
 			}
-			if _, err = r.CreateDraftAndStart(ctx, store.BotCreateRequest{Name: "New title", OwnerID: b.OwnerID, Version: v, IdempotencyKey: uuid.NewString()}); err != nil {
+			if _, err = r.CreateAndStart(ctx, store.BotCreateRequest{Name: "New title", OwnerID: b.OwnerID, Version: v, IdempotencyKey: uuid.NewString()}); err != nil {
 				t.Fatal(err)
 			}
 		})

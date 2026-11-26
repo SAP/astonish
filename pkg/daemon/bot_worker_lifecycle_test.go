@@ -198,7 +198,7 @@ func testBotWorkerRecoveryAfterReopen(t *testing.T, paused bool) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Recover without repeating uncertain work"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Recovery", OwnerID: owner, Version: v, IdempotencyKey: "recovery"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Recovery", OwnerID: owner, Version: v, IdempotencyKey: "recovery"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +210,7 @@ func testBotWorkerRecoveryAfterReopen(t *testing.T, paused bool) {
 				t.Fatal(err)
 			}
 			home := b.Home
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "test"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -453,7 +453,7 @@ func TestBotPromptDispatchMaintenanceBlocked(t *testing.T) {
 				v := store.DefaultBotVersion()
 				v.Charter = "Report observations"
 				v.Budget.MaxTokens = nil
-				b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: name})
+				b, e := repo.Create(auth, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: name})
 				if e != nil {
 					t.Fatal(e)
 				}
@@ -468,7 +468,7 @@ func TestBotPromptDispatchMaintenanceBlocked(t *testing.T) {
 			}
 			background := create("background")
 			backgroundID = background.ID
-			background, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: background.ID, ActorID: background.OwnerID, ExpectedRevision: background.Revision, Reason: "fixture"})
+			background, err = repo.Get(auth, background.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

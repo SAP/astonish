@@ -143,7 +143,7 @@ func TestBotTitleSchedulingFollowupLatestInputHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	ss := org.ForUser(p.Subject).Sessions()
-	svc := &store.Services{TenantRouter: f.db, Bots: f.repo, PersonalBots: f.repo, Sessions: ss, PersonalSessions: ss, BotMandatePolicy: policy}
+	svc := &store.Services{TenantRouter: f.db, Bots: f.repo, PersonalBots: f.repo, Sessions: ss, PersonalSessions: ss, BotMandatePolicy: policy, BotInteractiveReady: true}
 	router := mux.NewRouter()
 	router.HandleFunc("/api/studio/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

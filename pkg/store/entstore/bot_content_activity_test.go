@@ -58,7 +58,7 @@ func TestBotDatabaseRuntimeIOProfile(t *testing.T) {
 					t.Fatal(err)
 				}
 				driver := entsql.OpenDB(dialect.SQLite, sqlDB)
-				var db botDraftDB
+				var db botDB
 				if scope == store.BotScopePersonal {
 					c := personalent.NewClient(personalent.Driver(driver))
 					if err := c.Schema.Create(ctx); err != nil {
@@ -204,7 +204,7 @@ func TestBotContentActivityPersistence(t *testing.T) {
 			owner := uuid.New()
 			a := activityContentFixture()
 			var sqlDB *sql.DB
-			var db botDraftDB
+			var db botDB
 			open := func() {
 				var err error
 				sqlDB, err = sql.Open("sqlite", path)
@@ -233,7 +233,7 @@ func TestBotContentActivityPersistence(t *testing.T) {
 			}
 			open()
 			t.Cleanup(func() { sqlDB.Close() })
-			err := db.Transaction(ctx, func(tx botDraftDB) error {
+			err := db.Transaction(ctx, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					_, err := d.client.Bot.Create().SetID(a.BotID).SetOwnerID(owner).SetName("Activity fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(ctx)
@@ -276,7 +276,7 @@ func TestBotContentActivityPersistence(t *testing.T) {
 }
 
 type activityPublicationReadProbe struct {
-	botDraftDB
+	botDB
 	activity store.BotActivity
 	limit    int
 }

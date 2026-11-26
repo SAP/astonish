@@ -55,7 +55,7 @@ func TestRoutineDeniedFreshOwnerException(t *testing.T) {
 				}
 				if legacy {
 					// Simulate the prior persisted representation, leaving receipts intact.
-					if err = r.db.Transaction(owner, func(tx botDraftDB) error {
+					if err = r.db.Transaction(owner, func(tx botDB) error {
 						rec, e := tx.GetBot(owner, b.ID)
 						if e != nil {
 							return e

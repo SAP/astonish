@@ -19,7 +19,7 @@ type controlProposalEnvelope struct {
 }
 
 func controlProposalKey(id uuid.UUID) string { return "control-proposal:" + id.String() }
-func readControlProposal(ctx context.Context, db botDraftDB, bot, id uuid.UUID) (*store.BotControlProposal, error) {
+func readControlProposal(ctx context.Context, db botDB, bot, id uuid.UUID) (*store.BotControlProposal, error) {
 	a, err := db.FindActivity(ctx, bot, controlProposalKey(id)+":decision")
 	if errors.Is(err, store.ErrBotNotFound) {
 		a, err = db.FindActivity(ctx, bot, controlProposalKey(id))
@@ -68,7 +68,7 @@ func (r *botRepository) ProposeControl(ctx context.Context, q store.BotControlPr
 	}
 	id := uuid.NewSHA1(q.Lease.RunID, []byte("control:"+q.IdempotencyKey))
 	var result *store.BotControlProposal
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := r.checkLease(ctx, tx, q.Lease, r.clock())
 		if err != nil {
 			return err
@@ -139,7 +139,7 @@ func (r *botRepository) ReadControlProposal(ctx context.Context, bot store.BotID
 	}
 	return readControlProposal(ctx, r.db, bot, id)
 }
-func listControlProposals(ctx context.Context, db botDraftDB, bot store.BotID) ([]store.BotControlProposal, error) {
+func listControlProposals(ctx context.Context, db botDB, bot store.BotID) ([]store.BotControlProposal, error) {
 	result := []store.BotControlProposal{}
 	seen := map[uuid.UUID]bool{}
 	for after := int64(0); ; {
@@ -198,7 +198,7 @@ func (r *botRepository) decideControlProposal(ctx context.Context, q store.BotCo
 		}
 	}
 	var result *store.BotControlProposal
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -277,13 +277,13 @@ func (r *botRepository) decideControlProposal(ctx context.Context, q store.BotCo
 	})
 	return result, err
 }
-func (r *botRepository) applyControlProposal(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlProposal(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	switch p.Payload.Operation {
 	case store.BotControlMemoryRemember, store.BotControlMemoryCorrect, store.BotControlMemoryForget:
 		return r.applyControlMemoryTx(ctx, tx, rec, p, actor)
 	case store.BotControlTaskOnceOperation:
 		return r.applyControlTaskTx(ctx, tx, rec, p, actor)
-	case store.BotControlActivate, store.BotControlResume:
+	case store.BotControlResume:
 		return r.applyControlLifecycleTx(ctx, tx, rec, p, actor)
 	case store.BotControlConfigurationOperation:
 		return r.applyControlConfigurationTx(ctx, tx, rec, p, actor)

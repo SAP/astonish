@@ -141,7 +141,7 @@ func TestBotSkillPostgresRecovery(t *testing.T) {
 			next.ChangeReason = "Owner clarification"
 			next.Digest = next.ContentDigest()
 			rollback := errors.New("injected skill transaction failure")
-			err = r.db.Transaction(f.owner, func(tx botDraftDB) error {
+			err = r.db.Transaction(f.owner, func(tx botDB) error {
 				db := tx.(botSkillDB)
 				root, err := db.readSkill(f.owner, v.BotID, v.SkillID)
 				if err != nil {

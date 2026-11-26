@@ -50,7 +50,7 @@ func TestBotTransactionHelperCleanupRollsBack(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+			err = r.db.Transaction(ctx, func(tx botDB) error {
 				if _, err := tx.ReadVersion(ctx, b.ID, 1); err != nil {
 					return err
 				}

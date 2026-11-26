@@ -226,7 +226,7 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Research public sources"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Retained researcher", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Retained researcher", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,11 +274,11 @@ func TestBotTaskScheduleHTTPAcceptance(t *testing.T) {
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "owned execution acceptance"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 				svc.PersonalSessions = ss

@@ -26,7 +26,15 @@ func recordBuiltinToolObservation(ctx tool.Context, sessionID, name string, args
 
 // observation is the trusted transport's decoded metadata; capture is the full
 // ADK response journaled for this call. They differ for typed result envelopes.
+func recordBuiltinToolObservationWithRead(ctx tool.Context, sessionID, name string, args, result map[string]any, executed bool, original any) {
+	recordBuiltinToolObservationReceipt(ctx, sessionID, name, args, result, result, executed, original)
+}
+
 func recordBuiltinToolObservationWithCapture(ctx tool.Context, sessionID, name string, args, result, capture map[string]any) {
+	recordBuiltinToolObservationReceipt(ctx, sessionID, name, args, result, capture, false, args)
+}
+
+func recordBuiltinToolObservationReceipt(ctx tool.Context, sessionID, name string, args, result, capture map[string]any, executed bool, original any) {
 	if ctx == nil || result == nil {
 		return
 	}
@@ -50,6 +58,9 @@ func recordBuiltinToolObservationWithCapture(ctx tool.Context, sessionID, name s
 		sourceCapture = redactor.RedactMap(capture)
 	}
 	outcome := bot.ToolOutcome{SourceAccess: builtinSourceAccessFacts(ctx.FunctionCallID(), name, args, sourceResult, sourceCapture, observedAt)}
+	if executed && name == "web_fetch" && len(outcome.SourceAccess) == 1 {
+		outcome.SourceRead = bot.NewToolSourceReadReceipt(ctx, ctx.FunctionCallID(), name, original, sourceCapture)
+	}
 	defer func() {
 		if outcome.Verified || len(outcome.SourceAccess) != 0 {
 			bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), outcome)

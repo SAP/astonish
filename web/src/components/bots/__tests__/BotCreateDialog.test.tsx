@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import BotDraftDialog from '../BotDraftDialog'
+import BotCreateDialog from '../BotCreateDialog'
 import * as api from '@/api/bots'
 import { sourceBackend } from './sourceBackend'
 let backend: ReturnType<typeof sourceBackend>
@@ -19,11 +19,11 @@ it('restores persisted promotion when SQLite returns null for empty carryover ar
       carryover: { summary: 'Selected summary', memories: [{ content: 'Selected fact', category: 'fact' }], goals: null, artifacts: null },
     } })
   }))
-  render(<BotDraftDialog open resumeId="saved" onClose={vi.fn()} />)
+  render(<BotCreateDialog open resumeId="saved" onClose={vi.fn()} />)
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Partial promotion'))
   expect(screen.getByLabelText('Carryover summary')).toHaveValue('Selected summary')
   expect(screen.getByLabelText('Memory content 1')).toHaveValue('Selected fact')
-  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Review Bot' })).toBeDisabled()
   expect(api.createBot).not.toHaveBeenCalled()
   expect(api.promoteChatToBot).not.toHaveBeenCalled()
 })
@@ -32,14 +32,14 @@ function fill() {
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Watcher' } })
   fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
 }
-async function review() { fireEvent.click(screen.getByRole('button', { name: 'Review draft' })); await screen.findByRole('button', { name: 'Save reviewed draft' }) }
+async function review() { fireEvent.click(screen.getByRole('button', { name: 'Review Bot' })); await screen.findByRole('button', { name: 'Create reviewed Bot' }) }
 function save() {
   fireEvent.click(screen.getByRole('checkbox'))
-  fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create reviewed Bot' }))
 }
-it('reviews selected text copies, preserves edits on Back, and never activates or changes source on failure', async () => {
+it('reviews selected text copies, preserves edits on Back, and never changes lifecycle or changes source on failure', async () => {
   backend.failDecision('Try again')
-  render(<BotDraftDialog open sourceSession="source" onClose={vi.fn()} />)
+  render(<BotCreateDialog open sourceSession="source" onClose={vi.fn()} />)
   fill()
   fireEvent.change(screen.getByLabelText('Carryover summary'), { target: { value: 'Redacted summary' } })
   fireEvent.click(screen.getByRole('button', { name: 'Add memory' }))
@@ -57,7 +57,7 @@ it('reviews selected text copies, preserves edits on Back, and never activates o
   await review(); save()
   expect(await screen.findByRole('alert')).toHaveTextContent('Try again')
   expect(window.location.hash).toBe('#/chat/source')
-  fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create reviewed Bot' }))
   await waitFor(() => expect(backend.decisions).toHaveLength(2))
   const request = backend.proposals[0].request
   expect(request.carryover).toEqual({ summary: 'Redacted summary', memories: [{ content: 'Selected fact', category: 'fact' }], goals: [{ title: 'Verify', completion_criteria: 'Official source' }], artifacts: [{ title: 'Report', content: 'Reviewed excerpt' }] })
@@ -65,12 +65,12 @@ it('reviews selected text copies, preserves edits on Back, and never activates o
   expect(backend.proposals).toHaveLength(1)
   expect(api.botLifecycle).not.toHaveBeenCalled()
 })
-it('reviews template details and forks the selected revision to a private draft', async () => {
+it('reviews template details and forks the selected revision to a private Active Bot', async () => {
   const template: api.BotTemplate = { id: 'tpl', revision: 7, definition: { schema_version: 1, name: 'Template', charter: 'Observe', language: 'en', suggested_goals: [{ title: 'Watch release', description: 'Official releases', completion_criteria: 'Published release' }], suggested_schedules: [{ cron: '0 9 * * *', timezone: 'UTC', instructions: 'Check releases' }] } }
   vi.mocked(api.listBotTemplates).mockResolvedValue({ templates: [template] })
   vi.mocked(api.getBotTemplate).mockResolvedValue(template)
   vi.mocked(api.forkBotTemplate).mockResolvedValue(bot)
-  render(<BotDraftDialog inline open onClose={vi.fn()} />)
+  render(<BotCreateDialog inline open onClose={vi.fn()} />)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Browse team templates' }))
   fireEvent.click(await screen.findByRole('button', { name: 'Template · revision 7' }))
@@ -85,10 +85,10 @@ it('reviews template details and forks the selected revision to a private draft'
 })
 it('requires complete carryover rows, permits removal, and renews consent and key after edits', async () => {
   backend.failDecision('Try again')
-  render(<BotDraftDialog open sourceSession="source" onClose={vi.fn()} />)
+  render(<BotCreateDialog open sourceSession="source" onClose={vi.fn()} />)
   fill()
   fireEvent.click(screen.getByRole('button', { name: 'Add memory' }))
-  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Review Bot' })).toBeDisabled()
   fireEvent.click(screen.getByRole('button', { name: 'Remove memory 1' }))
   await review(); save()
   await screen.findByRole('alert')
@@ -97,14 +97,14 @@ it('requires complete carryover rows, permits removal, and renews consent and ke
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Edited' } })
   await review()
   expect(screen.getByRole('checkbox')).not.toBeChecked()
-  expect(screen.getByRole('button', { name: 'Save reviewed draft' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Create reviewed Bot' })).toBeDisabled()
   save()
   await waitFor(() => expect(backend.decisions).toHaveLength(2))
   expect(backend.proposals[1].request.idempotency_key).not.toBe(key)
 })
 it('shows template failure and empty states, and permits returning to a blank draft', async () => {
   vi.mocked(api.listBotTemplates).mockRejectedValueOnce(new Error('Templates unavailable')).mockResolvedValueOnce({ templates: [] })
-  render(<BotDraftDialog open onClose={vi.fn()} />)
+  render(<BotCreateDialog open onClose={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Browse team templates' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Templates unavailable')
   fireEvent.click(screen.getByRole('button', { name: 'Browse team templates' }))
@@ -115,19 +115,19 @@ it('shows template failure and empty states, and permits returning to a blank dr
 })
 it('retains mounted intake when hidden/reopened but isolates a changed source', () => {
   const close = vi.fn()
-  const { rerender } = render(<BotDraftDialog open sourceSession="source" onClose={close} />)
+  const { rerender } = render(<BotCreateDialog open sourceSession="source" onClose={close} />)
   fill()
-  rerender(<BotDraftDialog open={false} sourceSession="source" onClose={close} />)
-  rerender(<BotDraftDialog open sourceSession="source" onClose={close} />)
+  rerender(<BotCreateDialog open={false} sourceSession="source" onClose={close} />)
+  rerender(<BotCreateDialog open sourceSession="source" onClose={close} />)
   expect(screen.getByLabelText('Bot name')).toHaveValue('Watcher')
   fill()
-  rerender(<BotDraftDialog open sourceSession="other" onClose={close} />)
+  rerender(<BotCreateDialog open sourceSession="other" onClose={close} />)
   expect(screen.getByLabelText('Bot name')).toHaveValue('')
   expect(api.promoteChatToBot).not.toHaveBeenCalled()
 })
 it('requires explicit discard for dirty cancellation without creating a Bot', async () => {
   const close = vi.fn()
-  const { rerender } = render(<BotDraftDialog open sourceSession="source" onClose={close} />)
+  const { rerender } = render(<BotCreateDialog open sourceSession="source" onClose={close} />)
   fill(); await review()
   fireEvent.click(screen.getByRole('button', { name: 'Cancel intake' }))
   expect(close).not.toHaveBeenCalled()
@@ -138,8 +138,8 @@ it('requires explicit discard for dirty cancellation without creating a Bot', as
   await waitFor(() => expect(close).toHaveBeenCalledOnce())
   expect(api.promoteChatToBot).not.toHaveBeenCalled()
   expect(window.location.hash).toBe('#/chat/source')
-  rerender(<BotDraftDialog open={false} sourceSession="source" onClose={close} />)
-  rerender(<BotDraftDialog open sourceSession="source" onClose={close} />)
+  rerender(<BotCreateDialog open={false} sourceSession="source" onClose={close} />)
+  rerender(<BotCreateDialog open sourceSession="source" onClose={close} />)
   expect(screen.getByLabelText('Bot name')).toHaveValue('')
   const event = new Event('beforeunload', { cancelable: true })
   window.dispatchEvent(event)
@@ -150,7 +150,7 @@ it('retains dirty intake and reload warning when Escape persistence fails', asyn
   const close = vi.fn()
   backend.failSave('Intake unavailable')
   const storage = vi.spyOn(Storage.prototype, 'setItem')
-  render(<BotDraftDialog open onClose={close} />)
+  render(<BotCreateDialog open onClose={close} />)
   fill()
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
   expect(close).not.toHaveBeenCalled()
@@ -164,7 +164,7 @@ it('retains dirty intake and reload warning when Escape persistence fails', asyn
 
 it('closes empty intake without confirmation and removes the reload guard on unmount', () => {
   const close = vi.fn()
-  const { unmount } = render(<BotDraftDialog open onClose={close} />)
+  const { unmount } = render(<BotCreateDialog open onClose={close} />)
   fireEvent.click(screen.getByRole('button', { name: 'Cancel intake' }))
   expect(close).toHaveBeenCalledOnce()
   unmount()
@@ -175,7 +175,7 @@ it('closes empty intake without confirmation and removes the reload guard on unm
 
 it('reviews and saves blank-draft persona using the existing creation contract only', async () => {
   vi.mocked(api.createBot).mockResolvedValue(bot)
-  render(<BotDraftDialog open onClose={vi.fn()} />)
+  render(<BotCreateDialog open onClose={vi.fn()} />)
   fill()
   fireEvent.change(screen.getByLabelText('Bot language'), { target: { value: 'de' } })
   fireEvent.change(screen.getByLabelText('Bot timezone'), { target: { value: 'Europe/Berlin' } })
@@ -203,7 +203,7 @@ it('blocks Escape and cancellation during reviewed save, preserving a failed req
   let rejectSave!: (error: Error) => void
   vi.mocked(api.createBot).mockImplementationOnce(() => new Promise((_, reject) => { rejectSave = reject }))
   const close = vi.fn()
-  render(<BotDraftDialog open onClose={close} />)
+  render(<BotCreateDialog open onClose={close} />)
   fill(); await review(); save()
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
   fireEvent.click(screen.getByRole('button', { name: 'Close' }))

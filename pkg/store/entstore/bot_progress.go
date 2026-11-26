@@ -67,7 +67,7 @@ func progressRevision(s *botStoredRun) int64 {
 func progressSafe(s *botStoredRun) bool {
 	return s.Progress != nil && s.Progress.Validate() == nil && s.ProgressPending == 0 && !s.ProgressUncertain && s.Progress.Checkpoint.DispatchLedgerCursor == s.ProgressCursor && s.Progress.Checkpoint.Binding.Matches(progressBinding(s))
 }
-func (r *botRepository) progressMutation(ctx context.Context, tx botDraftDB, m store.BotProgressMutation) (*botStoredRecord, *botStoredRun, error) {
+func (r *botRepository) progressMutation(ctx context.Context, tx botDB, m store.BotProgressMutation) (*botStoredRecord, *botStoredRun, error) {
 	now := r.clock()
 	if err := m.Validate(now); err != nil {
 		return nil, nil, err
@@ -142,7 +142,7 @@ func progressKey(run, id uuid.UUID, settlement bool) string {
 	}
 	return "progress-dispatch:" + run.String() + ":" + id.String() + ":" + suffix
 }
-func progressRead(ctx context.Context, tx botDraftDB, bot uuid.UUID, key string, v any) error {
+func progressRead(ctx context.Context, tx botDB, bot uuid.UUID, key string, v any) error {
 	a, err := tx.FindActivity(ctx, bot, key)
 	if err != nil {
 		return err
@@ -152,7 +152,7 @@ func progressRead(ctx context.Context, tx botDraftDB, bot uuid.UUID, key string,
 	}
 	return json.Unmarshal(a.Payload, v)
 }
-func (r *botRepository) progressWrite(ctx context.Context, tx botDraftDB, rec *botStoredRecord, s *botStoredRun, m store.BotProgressMutation, key string, value any) error {
+func (r *botRepository) progressWrite(ctx context.Context, tx botDB, rec *botStoredRecord, s *botStoredRun, m store.BotProgressMutation, key string, value any) error {
 	if err := tx.AdvanceLeaseSequence(ctx, m.Lease, rec.LastSequence, r.clock()); err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (r *botRepository) CheckpointProgress(ctx context.Context, q store.BotProgr
 		return nil, err
 	}
 	var result *store.BotProgressState
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, s, err := r.progressMutation(ctx, tx, q.Mutation)
 		if err != nil {
 			return err
@@ -237,7 +237,7 @@ func (r *botRepository) BeginProgressDispatch(ctx context.Context, q store.BotPr
 		return nil, err
 	}
 	var result *store.BotProgressDispatchReceipt
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, s, err := r.progressMutation(ctx, tx, q.Mutation)
 		if err != nil {
 			return err
@@ -273,7 +273,7 @@ func (r *botRepository) SettleProgressDispatch(ctx context.Context, q store.BotP
 		return nil, err
 	}
 	var result *store.BotProgressDispatchReceipt
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, s, err := r.progressMutation(ctx, tx, q.Mutation)
 		if err != nil {
 			return err
@@ -337,7 +337,7 @@ func (r *botRepository) ContinueProgress(ctx context.Context, q store.BotProgres
 		return nil, err
 	}
 	var result *store.BotProgressState
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, s, err := r.progressMutation(ctx, tx, q.Mutation)
 		if err != nil {
 			return err

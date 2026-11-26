@@ -13,7 +13,7 @@ import (
 )
 
 type publicationMutableRunDB struct {
-	botDraftDB
+	botDB
 	run *botStoredRun
 }
 
@@ -92,7 +92,7 @@ func TestBotFilePublicationCommittedArtifact(t *testing.T) {
 			}
 			saved.Run.Report = store.BotReport{Summary: "A later mutable outcome"}
 			originalDB := repo.db
-			repo.db = publicationMutableRunDB{botDraftDB: originalDB, run: saved}
+			repo.db = publicationMutableRunDB{botDB: originalDB, run: saved}
 			defer func() { repo.db = originalDB }()
 			if got, err := repo.ReadCommittedArtifact(ctx, b.ID, pub.ReportSequence, artifact.ID); err != nil || got.SHA256 != artifact.SHA256 {
 				t.Fatal("mutable run selected", err)

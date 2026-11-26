@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
@@ -57,11 +58,19 @@ func (c botScopedSearchClassifier) DescribeAction(ctx context.Context, name stri
 		return execution.ActionDescriptor{}, store.ErrBotConflict
 	}
 	action.TargetFingerprint = snapshot.Fingerprint
-	// The exact scoped provider/model/endpoint/credential fingerprint is now
-	// freshly bound and the configured search implementation is read-only. This
-	// classification lets completion consume the bridge response as source
-	// evidence; policy and saved search grants still authorize dispatch.
-	action.Effect = execution.EffectRead
-	action.ConstraintsVerified = true
+	// Shared Chat exposes the configured executable under its bare name. Treat
+	// that alias as the verified read only when this run has the matching saved
+	// public-research route; a generic scheduled search has no such authority.
+	verifiedRead := name == qualified
+	if name == "perplexity_web_search" {
+		if mandate, ok := agent.BotPolicyRuntimeFromContext(ctx).Mandate.(*bot.MandateExecution); ok && mandate != nil {
+			grant := mandate.Authorization.Snapshot().PublicResearch
+			verifiedRead = grant != nil && grant.Route.Engine == snapshot.Engine && grant.Route.Fingerprint == snapshot.Fingerprint && grant.Route.Tool == BotConfiguredSearchToolName
+		}
+	}
+	if verifiedRead {
+		action.Effect = execution.EffectRead
+		action.ConstraintsVerified = true
+	}
 	return action, nil
 }

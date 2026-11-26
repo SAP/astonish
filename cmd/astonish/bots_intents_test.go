@@ -19,7 +19,7 @@ func TestBotsCLIExplicitIntents(t *testing.T) {
 	for _, tc := range []struct {
 		command, endpoint string
 		status            store.BotStatus
-	}{{"test-once", "test-run", store.BotDraft}, {"conversation", "conversation", store.BotPaused}} {
+	}{{"test-once", "test-run", store.BotActive}, {"conversation", "conversation", store.BotPaused}} {
 		t.Run(tc.command, func(t *testing.T) {
 			posts := 0
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +65,7 @@ func TestBotsCLIExplicitIntents(t *testing.T) {
 func TestBotsCLIIntentStateAndServerErrors(t *testing.T) {
 	id := uuid.New()
 	for _, command := range []string{"test-once", "conversation"} {
-		for _, status := range []store.BotStatus{store.BotActive, store.BotDraft, store.BotPaused} {
+		for _, status := range []store.BotStatus{store.BotActive, store.BotPaused} {
 			t.Run(command+"/"+string(status), func(t *testing.T) {
 				posts := 0
 				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +78,7 @@ func TestBotsCLIIntentStateAndServerErrors(t *testing.T) {
 				}))
 				defer s.Close()
 				err := runBotsCommand(context.Background(), client.NewWithConfig(s.URL), []string{command, id.String(), "--version", "3", "--confirm", "personal:" + id.String()}, io.Discard)
-				allowed := command == "test-once" && status == store.BotDraft || command == "conversation" && status == store.BotPaused
+				allowed := command == "test-once" && status == store.BotActive || command == "conversation" && status == store.BotPaused
 				if err == nil {
 					t.Fatal("expected state/server error")
 				}

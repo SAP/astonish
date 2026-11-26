@@ -62,14 +62,14 @@ func TestBotReviewedConfigurationRevokesOldGrants(t *testing.T) {
 	}
 }
 
-type failingConversionDB struct{ botDraftDB }
+type failingConversionDB struct{ botDB }
 type failingConversionTx struct {
-	botDraftDB
+	botDB
 	botIntakeDB
 }
 
-func (d failingConversionDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(failingConversionTx{tx, tx.(botIntakeDB)}) })
+func (d failingConversionDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(failingConversionTx{tx, tx.(botIntakeDB)}) })
 }
 func (d failingConversionTx) pauseAdaptive(ctx context.Context, id uuid.UUID, expected time.Time) error {
 	if err := d.botIntakeDB.pauseAdaptive(ctx, id, expected); err != nil {
@@ -139,14 +139,14 @@ func TestBotAdaptiveConversionRollback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if active() || saved.Status != store.BotDraft {
+			if active() || saved.Status != store.BotActive {
 				t.Fatal("retry failed")
 			}
 		})
 	}
 }
 
-func TestBotReviewedDraftRejectsUnreviewedPolicyReplacement(t *testing.T) {
+func TestBotPausedPolicyRejectsUnreviewedPolicyReplacement(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, run, _, _ := botRunFixture(t, scope)
@@ -156,7 +156,11 @@ func TestBotReviewedDraftRejectsUnreviewedPolicyReplacement(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe"
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Draft policy", OwnerID: active.OwnerID, IdempotencyKey: "reviewed-draft-policy", Version: v})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Draft policy", OwnerID: active.OwnerID, IdempotencyKey: "reviewed-draft-policy", Version: v})
+			if err != nil {
+				t.Fatal(err)
+			}
+			draft, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: draft.ID, ActorID: draft.OwnerID, ExpectedRevision: draft.Revision, Reason: "Review sensitive policy"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -182,7 +186,7 @@ func TestBotReviewedDraftRejectsUnreviewedPolicyReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if updated.Status != store.BotDraft {
+			if updated.Status != store.BotPaused {
 				t.Fatal("prose activated draft")
 			}
 		})

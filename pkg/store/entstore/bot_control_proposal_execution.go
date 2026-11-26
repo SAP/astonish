@@ -31,7 +31,7 @@ func (r *botRepository) prepareControlExecution(ctx context.Context, q store.Bot
 		return nil, nil
 	}
 	op := p.Payload.Operation
-	if op != store.BotControlActivate && op != store.BotControlResume && op != store.BotControlTaskOnceOperation {
+	if op != store.BotControlResume && op != store.BotControlTaskOnceOperation {
 		return nil, nil
 	}
 	source, err := r.db.ReadRun(ctx, p.BotID, p.SourceRunID)
@@ -49,12 +49,12 @@ func (r *botRepository) prepareControlExecution(ctx context.Context, q store.Bot
 		return nil, err
 	}
 	if op == store.BotControlTaskOnceOperation {
-		if rec.Bot.Status != store.BotDraft && rec.Bot.Status != store.BotActive {
+		if rec.Bot.Status != store.BotActive {
 			return nil, store.ErrBotForbidden
 		}
 		v.Triggers = nil
 	} else {
-		event := botdomain.LifecycleActivate
+		event := botdomain.LifecycleResume
 		if op == store.BotControlResume {
 			event = botdomain.LifecycleResume
 		}
@@ -74,7 +74,7 @@ func (r *botRepository) prepareControlExecution(ctx context.Context, q store.Bot
 	}
 	// Only explicit, validated consent may allocate. Use the trusted composition
 	// callback, never model-supplied registration authority or home coordinates.
-	if svc := store.FromContext(ctx); rec.Bot.Status == store.BotDraft && rec.Bot.Home.ID == uuid.Nil && svc != nil && svc.BotHomeSetup != nil {
+	if svc := store.FromContext(ctx); (rec.Bot.Status == store.BotActive || rec.Bot.Status == store.BotPaused) && rec.Bot.Home.ID == uuid.Nil && svc != nil && svc.BotHomeSetup != nil {
 		repo := svc.Bots
 		if rec.Bot.Scope == store.BotScopePersonal {
 			repo = svc.PersonalBots
@@ -107,7 +107,7 @@ func (r *botRepository) prepareControlExecution(ctx context.Context, q store.Bot
 	}
 	return &rec.Bot, nil
 }
-func (r *botRepository) applyControlLifecycleTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlLifecycleTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	v, err := tx.ReadVersion(ctx, p.BotID, p.Version)
 	if err != nil {
 		return err
@@ -115,7 +115,7 @@ func (r *botRepository) applyControlLifecycleTx(ctx context.Context, tx botDraft
 	if err = validateActivationTriggers(ctx, tx, rec.Bot, *v); err != nil {
 		return err
 	}
-	event := botdomain.LifecycleActivate
+	event := botdomain.LifecycleResume
 	if p.Payload.Operation == store.BotControlResume {
 		event = botdomain.LifecycleResume
 	}
@@ -130,20 +130,15 @@ func (r *botRepository) applyControlLifecycleTx(ctx context.Context, tx botDraft
 	if err = tx.SetLifecycle(ctx, *rec, next); err != nil {
 		return err
 	}
-	if err = r.enableDraftActivationSchedules(ctx, tx, rec.Bot, next, *v); err != nil {
-		return err
-	}
 	data, err := json.Marshal(map[string]any{"event": event, "status": status, "actor_id": actor, "proposal_id": p.ID})
 	if err != nil {
 		return err
 	}
 	return tx.InsertActivity(ctx, store.BotActivity{BotID: p.BotID, Sequence: rec.LastSequence + 1, Kind: store.BotActivityLifecycle, Payload: data, CreatedAt: r.clock()}, "control-lifecycle:"+p.ID.String())
 }
-func (r *botRepository) applyControlTaskTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlTaskTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	intent := store.BotIntentRegular
 	switch rec.Bot.Status {
-	case store.BotDraft:
-		intent = store.BotIntentDraftTest
 	case store.BotActive:
 	default:
 		return store.ErrBotForbidden

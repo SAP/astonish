@@ -477,7 +477,7 @@ func runConfiguredProcessAdmission(t *testing.T, scope store.BotScope, mode, lea
 		v := store.DefaultBotVersion()
 		v.Charter = task
 		v.Autonomy.AllowedTools = []string{"shell_command", "process_read", "process_write", "process_kill", "bot_work_update"}
-		b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Configured process " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
+		b, e := repo.Create(auth, store.BotCreateRequest{Name: "Configured process " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -650,7 +650,7 @@ func admitConfiguredProcessSchedule(t *testing.T, ctx context.Context, worker *B
 	t.Helper()
 	worker.schedulerReady.Store(true)
 	var err error
-	b, err = repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed exact process fixture"})
+	b, err = repo.Get(ctx, b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

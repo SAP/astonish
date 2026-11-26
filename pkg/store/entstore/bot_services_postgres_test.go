@@ -89,7 +89,7 @@ func newPostgresBotServicesFixture(t *testing.T, scope store.BotScope, runCap, m
 	}
 	v := store.DefaultBotVersion()
 	v.Charter = "Verify durable service accounting"
-	b, err := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Services", OwnerID: owner, Version: v, IdempotencyKey: "services"})
+	b, err := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Services", OwnerID: owner, Version: v, IdempotencyKey: "services"})
 	if err != nil {
 		t.Fatal(err)
 	}

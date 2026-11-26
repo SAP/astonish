@@ -194,7 +194,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			version := store.DefaultBotVersion()
 			version.Charter = "Report delivery facts and track receipt."
 			version.Autonomy.AllowedTools = []string{"memory_search", "memory_get"}
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Delivery", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "correction"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Delivery", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "correction"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -205,7 +205,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

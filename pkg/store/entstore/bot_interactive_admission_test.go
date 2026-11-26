@@ -15,7 +15,7 @@ func TestBotInteractiveAdmissionReplayNeverRenews(t *testing.T) {
 			p, _ := execution.PrincipalFromContext(ctx)
 			v := store.DefaultBotVersion()
 			v.Charter = "Interactive admission"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Chat", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "interactive"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Chat", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "interactive"})
 			if err != nil {
 				t.Fatal(err)
 			}

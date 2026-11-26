@@ -58,7 +58,7 @@ func TestBotApproveContinueAtomic(t *testing.T) {
 						db.client.BotRun.Use(failQueue)
 					}
 				case "stopped", "deleted", "changed-version", "stale-checkpoint", "changed-action":
-					err = repo.db.Transaction(ctx, func(tx botDraftDB) error {
+					err = repo.db.Transaction(ctx, func(tx botDB) error {
 						if scenario == "changed-action" {
 							// Seed corruption below the validating writer: retain the original
 							// authority digest but point at a different, valid disk action.
@@ -208,10 +208,10 @@ func TestBotApproveContinueAtomic(t *testing.T) {
 	}
 }
 
-type failApproveContinueTransaction struct{ botDraftDB }
+type failApproveContinueTransaction struct{ botDB }
 
-func (d failApproveContinueTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d failApproveContinueTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		if err := fn(tx); err != nil {
 			return err
 		}

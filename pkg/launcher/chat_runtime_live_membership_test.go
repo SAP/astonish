@@ -89,7 +89,7 @@ func newLiveMembershipFixture(t *testing.T, r *servicesParityRuntime, scope chat
 	if scope == chatruntime.ResourceScopeTeam {
 		repo = scoped.Bots
 	}
-	draft, err := repo.CreateDraft(f.ctx, store.BotCreateRequest{Name: "Live membership probe", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "membership"})
+	draft, err := repo.Create(f.ctx, store.BotCreateRequest{Name: "Live membership probe", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "membership"})
 	must(err)
 	probe := &liveMembershipRepository{BotStore: repo, fixture: f, probe: draft.ID}
 	f.services.PersonalBots, f.services.Bots = probe, probe

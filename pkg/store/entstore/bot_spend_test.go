@@ -89,7 +89,7 @@ func newSpendFixture(t *testing.T, scope store.BotScope, runCap, monthCap int64)
 	if monthCap < 0 {
 		createVersion.Autonomy.MaxSpendPerMonthMinor = 0
 	}
-	b, err := f.repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Spend", OwnerID: owner, Version: createVersion, IdempotencyKey: "fixture"})
+	b, err := f.repo.Create(ctx, store.BotCreateRequest{Name: "Spend", OwnerID: owner, Version: createVersion, IdempotencyKey: "fixture"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,10 +545,10 @@ func TestBotSpendMonthlyAcrossRunsAndIsolation(t *testing.T) {
 	})
 }
 
-type spendRollbackDB struct{ botDraftDB }
+type spendRollbackDB struct{ botDB }
 
-func (d spendRollbackDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d spendRollbackDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		if err := fn(tx); err != nil {
 			return err
 		}

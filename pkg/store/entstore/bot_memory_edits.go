@@ -39,7 +39,7 @@ func applyReviewedDiskMemory(ctx context.Context, r *botRepository, id store.Bot
 	}
 	var result *store.BotMemoryReviewReceipt
 	var applied bool
-	err = r.db.Transaction(ctx, func(db botDraftDB) error {
+	err = r.db.Transaction(ctx, func(db botDB) error {
 		var err error
 		result, err = applyReviewedMemory(ctx, r, db, id, q, embeddings, DialectSQLite, nil, &applied)
 		return err
@@ -68,7 +68,7 @@ func prepareReviewedMemory(ctx context.Context, r *botRepository, id store.BotID
 
 // One transaction binds current authority, Bot revision, session linkage, source
 // contents, replacement rows and receipt. No source content/evidence is deleted.
-func applyReviewedMemory(ctx context.Context, r *botRepository, db botDraftDB, id store.BotID, q store.BotMemoryReview, embeddings [][]float32, dialect Dialect, exec botMemorySQLExec, applied *bool) (*store.BotMemoryReviewReceipt, error) {
+func applyReviewedMemory(ctx context.Context, r *botRepository, db botDB, id store.BotID, q store.BotMemoryReview, embeddings [][]float32, dialect Dialect, exec botMemorySQLExec, applied *bool) (*store.BotMemoryReviewReceipt, error) {
 	rec, err := db.GetBot(ctx, id)
 	if err != nil {
 		return nil, err
@@ -172,7 +172,7 @@ func applyReviewedMemory(ctx context.Context, r *botRepository, db botDraftDB, i
 	*applied = true
 	return receipt, nil
 }
-func lockReviewedSession(ctx context.Context, db botDraftDB, id uuid.UUID, session string) error {
+func lockReviewedSession(ctx context.Context, db botDB, id uuid.UUID, session string) error {
 	sid, err := uuid.Parse(session)
 	if err != nil {
 		return store.ErrBotInvalid
@@ -192,7 +192,7 @@ func lockReviewedSession(ctx context.Context, db botDraftDB, id uuid.UUID, sessi
 	}
 	return nil
 }
-func lockReviewedSource(ctx context.Context, db botDraftDB, s store.BotMemoryReviewSource) (*store.MemorySearchResult, error) {
+func lockReviewedSource(ctx context.Context, db botDB, s store.BotMemoryReviewSource) (*store.MemorySearchResult, error) {
 	row, err := db.ReadCorrectionMemory(ctx, s.ID)
 	if err != nil {
 		return nil, err
@@ -205,10 +205,10 @@ func lockReviewedSource(ctx context.Context, db botDraftDB, s store.BotMemoryRev
 	}
 	return row, nil
 }
-func insertReviewedMemory(ctx context.Context, db botDraftDB, id, sid, actor uuid.UUID, e store.BotMemoryReviewEdit, metadata map[string]any, embedding []float32, d Dialect, exec botMemorySQLExec, createdAt time.Time) error {
+func insertReviewedMemory(ctx context.Context, db botDB, id, sid, actor uuid.UUID, e store.BotMemoryReviewEdit, metadata map[string]any, embedding []float32, d Dialect, exec botMemorySQLExec, createdAt time.Time) error {
 	return insertBotDiskMemory(ctx, db, id, sid, actor, e.Content, e.Category, metadata, createdAt)
 }
-func supersedeReviewedSource(ctx context.Context, db botDraftDB, row store.MemorySearchResult, key string, now time.Time, botID uuid.UUID) error {
+func supersedeReviewedSource(ctx context.Context, db botDB, row store.MemorySearchResult, key string, now time.Time, botID uuid.UUID) error {
 	// Disk corrections preserve the old row rather than replacing it in place.
 	// Do not reuse the legacy correction: marker, which means current to older
 	// recall consumers because that protocol rewrote the source row itself.

@@ -14,8 +14,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Use real scoped SQLite stores, without forcing the draft through an active state.
-func draftActivationFixture(t *testing.T, scope store.BotScope) (*botRepository, context.Context, *store.Bot) {
+// Use real scoped SQLite stores, with Active creation and independently authorized recurrence.
+func activeBotFixture(t *testing.T, scope store.BotScope) (*botRepository, context.Context, *store.Bot) {
 	t.Helper()
 	owner := uuid.New()
 	ctx, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
@@ -23,7 +23,7 @@ func draftActivationFixture(t *testing.T, scope store.BotScope) (*botRepository,
 		t.Fatal(err)
 	}
 	auth := botRepositoryAuth{orgSlug: "org", userID: owner.String(), scope: scope, check: func(context.Context, string) (string, error) { return "member", nil }}
-	var db botDraftDB
+	var db botDB
 	if scope == store.BotScopeTeam {
 		auth.teamSlug = "team"
 		db = teamBotDB{client: newTeamClient(t), content: newBotContentCodec(t.TempDir(), store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String()})}
@@ -34,15 +34,15 @@ func draftActivationFixture(t *testing.T, scope store.BotScope) (*botRepository,
 	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
 	r := &botRepository{auth: auth, db: db, now: func() time.Time { return now }}
 	v := store.DefaultBotVersion()
-	v.Charter = "Save a text-only scheduled report after separate schedule and activation consent"
-	b, err := r.CreateDraft(ctx, store.BotCreateRequest{Name: "Scheduled draft", OwnerID: owner, Version: v, IdempotencyKey: "draft-activation"})
+	v.Charter = "Save a text-only scheduled report after separate schedule consent"
+	b, err := r.Create(ctx, store.BotCreateRequest{Name: "Scheduled Bot", OwnerID: owner, Version: v, IdempotencyKey: "schedule-consent"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, ctx, b
 }
 
-func draftActivationProposal(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, payload store.BotControlPayload) *store.BotControlProposal {
+func scheduleConsentProposal(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, payload store.BotControlPayload) *store.BotControlProposal {
 	t.Helper()
 	message, err := r.AdmitMessage(ctx, store.BotMessageRequest{BotID: b.ID, Version: b.Version, Instructions: "Review exact change", IdempotencyKey: uuid.NewString()})
 	if err != nil {
@@ -64,9 +64,9 @@ func draftActivationProposal(t *testing.T, r *botRepository, ctx context.Context
 	return p
 }
 
-func confirmDraftSchedule(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, op store.BotControlOperation, tr store.TriggerSpec) (*store.Bot, store.TriggerSpec) {
+func confirmScheduleConsent(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, op store.BotControlOperation, tr store.TriggerSpec) (*store.Bot, store.TriggerSpec) {
 	t.Helper()
-	p := draftActivationProposal(t, r, ctx, b, store.BotControlPayload{Operation: op, Reason: "Review recurrence without activation", Schedule: &store.BotControlSchedule{ExpectedRevision: b.Revision, Trigger: tr}})
+	p := scheduleConsentProposal(t, r, ctx, b, store.BotControlPayload{Operation: op, Reason: "Review recurrence without activation", Schedule: &store.BotControlSchedule{ExpectedRevision: b.Revision, Trigger: tr}})
 	got, err := r.ConfirmControlProposal(ctx, store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest})
 	if err != nil || got.Status != store.BotControlApplied {
 		t.Fatalf("schedule confirmation: %+v %v", got, err)
@@ -76,23 +76,28 @@ func confirmDraftSchedule(t *testing.T, r *botRepository, ctx context.Context, b
 		t.Fatal(err)
 	}
 	v, err := r.GetVersion(ctx, b.ID, b.Version)
-	if err != nil || len(v.Triggers) != 1 {
+	if err != nil || len(v.Triggers) == 0 {
 		t.Fatalf("version: %+v %v", v, err)
 	}
-	return b, v.Triggers[0]
+	for _, saved := range v.Triggers {
+		if saved.ID == tr.ID {
+			return b, saved
+		}
+	}
+	return b, v.Triggers[len(v.Triggers)-1]
 }
 
-func assertDraftRecurrenceInert(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, tr store.TriggerSpec) {
+func assertRecurrenceInert(t *testing.T, r *botRepository, ctx context.Context, b *store.Bot, tr store.TriggerSpec) {
 	t.Helper()
 	current, err := r.Get(ctx, b.ID)
-	if err != nil || current.Status != store.BotDraft {
+	if err != nil || (current.Status != store.BotActive && current.Status != store.BotPaused) {
 		t.Fatalf("draft: %+v %v", current, err)
 	}
 	job := r.db.(botTriggerDB).triggerScheduler().Get(ctx, tr.ScheduleID.String())
 	if job == nil || job.Enabled || job.NextRun != nil || job.Payload.BotVersion != b.Version {
 		t.Fatalf("draft job not inert: %+v", job)
 	}
-	q := draftActivationOccurrence(b, tr, r.clock())
+	q := scheduleOccurrence(b, tr, r.clock())
 	if _, err := r.AdmitScheduledRun(ctx, q); err == nil {
 		t.Fatal("recurrence admitted before activation consent")
 	}
@@ -101,104 +106,70 @@ func assertDraftRecurrenceInert(t *testing.T, r *botRepository, ctx context.Cont
 		t.Fatal(err)
 	}
 	for _, run := range runs {
-		if run.Trigger != store.TriggerManual || run.Intent != store.BotIntentDraftConversation || !run.Status.Terminal() {
+		if run.Trigger != store.TriggerManual || (run.Intent != store.BotIntentRegular && run.Intent != store.BotIntentConversation) || !run.Status.Terminal() {
 			t.Fatalf("unconsented work: %+v", run)
 		}
 	}
 }
 
-func draftActivationOccurrence(b *store.Bot, tr store.TriggerSpec, due time.Time) store.BotScheduledOccurrence {
+func scheduleOccurrence(b *store.Bot, tr store.TriggerSpec, due time.Time) store.BotScheduledOccurrence {
 	identity := fmt.Sprintf("%s/%d/%s/%s", b.ID, b.Version, tr.ID, due.UTC().Format(time.RFC3339Nano))
 	return store.BotScheduledOccurrence{JobID: tr.ScheduleID.String(), BotID: b.ID, Version: b.Version, TriggerID: tr.ID, OccurrenceAt: due, IdempotencyKey: fmt.Sprintf("bot-schedule-v1:%x", sha256.Sum256([]byte(identity)))}
 }
 
-func TestBotDraftScheduledActivationConsent(t *testing.T) {
+func TestBotIndependentScheduleConsent(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, path := range []string{"proposal-create-enabled", "proposal-edit-enabled", "legacy-create-enabled", "legacy-edit-enabled", "proposal-disabled", "legacy-disabled"} {
-			t.Run(string(scope)+"/"+path, func(t *testing.T) {
-				r, ctx, b := draftActivationFixture(t, scope)
-				enabled := path == "proposal-create-enabled" || path == "legacy-create-enabled"
-				b, tr := confirmDraftSchedule(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Write the reviewed report", Enabled: enabled})
-				assertDraftRecurrenceInert(t, r, ctx, b, tr)
-				if path == "proposal-edit-enabled" || path == "legacy-edit-enabled" {
-					tr.Enabled = true
-					b, tr = confirmDraftSchedule(t, r, ctx, b, store.BotControlScheduleEdit, tr)
-					assertDraftRecurrenceInert(t, r, ctx, b, tr)
-				}
-				before, err := r.GetVersion(ctx, b.ID, b.Version)
-				if err != nil {
-					t.Fatal(err)
-				}
-				calls := 0
-				r.activationCheck = func(_ context.Context, got store.Bot, v store.BotVersion) error {
-					calls++
-					if got.ID != b.ID || got.Status != store.BotDraft || got.Scope != scope || !reflect.DeepEqual(v, *before) {
-						t.Fatal("wrong readiness snapshot")
-					}
-					return nil
-				}
-				var active *store.Bot
-				if path == "legacy-create-enabled" || path == "legacy-edit-enabled" || path == "legacy-disabled" {
-					active, err = r.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Activate reviewed schedule"})
-				} else {
-					p := draftActivationProposal(t, r, ctx, b, store.BotControlPayload{Operation: store.BotControlActivate, Reason: "Activate reviewed schedule"})
-					assertDraftRecurrenceInert(t, r, ctx, b, tr)
-					d := store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}
-					applied, e := r.ConfirmControlProposal(ctx, d)
-					if e != nil || applied.Status != store.BotControlApplied {
-						t.Fatalf("exact activation confirmation: %+v %v", applied, e)
-					}
-					job := r.db.(botTriggerDB).triggerScheduler().Get(ctx, tr.ScheduleID.String())
-					replay, e := r.ConfirmControlProposal(ctx, d)
-					if e != nil || !reflect.DeepEqual(applied, replay) || !reflect.DeepEqual(job, r.db.(botTriggerDB).triggerScheduler().Get(ctx, tr.ScheduleID.String())) {
-						t.Fatalf("activation replay changed receipt/schedule: %+v %v", replay, e)
-					}
-					active, err = r.Get(ctx, b.ID)
-				}
-				if err != nil || active.Status != store.BotActive || active.Revision != b.Revision+1 || active.Version != b.Version || calls != 1 {
-					t.Fatalf("activation: %+v readiness=%d %v", active, calls, err)
-				}
-				after, err := r.GetVersion(ctx, b.ID, b.Version)
-				if err != nil || !reflect.DeepEqual(before, after) {
-					t.Fatalf("immutable version changed: %+v %v", after, err)
-				}
-				runs, err := r.ListRuns(ctx, b.ID, store.BotPage{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, run := range runs {
-					if run.Trigger != store.TriggerManual || !run.Status.Terminal() {
-						t.Fatalf("activation queued immediate work: %+v", run)
-					}
-				}
-				job := r.db.(botTriggerDB).triggerScheduler().Get(ctx, tr.ScheduleID.String())
-				if job.Enabled != tr.Enabled || (job.NextRun != nil) != tr.Enabled {
-					t.Fatalf("activation schedule projection: %+v", job)
-				}
-				if !tr.Enabled {
-					return
-				}
-				if !job.NextRun.Equal(r.clock().Add(time.Minute)) {
-					t.Fatalf("wrong next run: %v", job.NextRun)
-				}
-				due := *job.NextRun
-				r.now = func() time.Time { return due }
-				receipt, err := r.AdmitScheduledRun(ctx, draftActivationOccurrence(active, tr, due))
-				if err != nil || receipt.Run.Status != store.RunQueued {
-					t.Fatalf("consented recurrence admission: %+v %v", receipt, err)
-				}
-			})
-		}
+		t.Run(string(scope), func(t *testing.T) {
+			r, ctx, b := activeBotFixture(t, scope)
+			b, tr := confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Reviewed report", Enabled: false})
+			assertRecurrenceInert(t, r, ctx, b, tr)
+			tr.Enabled = true
+			b, tr = confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleEdit, tr)
+			jobs := r.db.(botTriggerDB).triggerScheduler()
+			job := jobs.Get(ctx, tr.ScheduleID.String())
+			if job == nil || !job.Enabled || job.NextRun == nil {
+				t.Fatalf("explicit consent did not enable target: %+v", job)
+			}
+			b, err := r.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Pause"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
+			before, err := r.GetVersion(ctx, b.ID, b.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = r.Resume(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Resume without recurrence"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			job = jobs.Get(ctx, tr.ScheduleID.String())
+			if job.Enabled || job.NextRun != nil {
+				t.Fatal("resume revived disabled recurrence")
+			}
+			after, err := r.GetVersion(ctx, b.ID, b.Version)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatal("resume rewrote immutable trigger consent")
+			}
+			if _, err = r.Resume(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "No first activation"}); !errors.Is(err, store.ErrBotConflict) {
+				t.Fatalf("active activation: %v", err)
+			}
+		})
 	}
 }
 
-func TestBotDraftScheduledActivationRejectsCorruption(t *testing.T) {
+func TestBotResumeScheduleRejectsCorruption(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, scenario := range []string{"digest", "owner", "bot", "trigger", "version", "cron", "timezone", "payload", "missing", "enabled", "enabled-next", "next-run", "wrong-scope", "readiness", "transaction-binding"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
-				r, ctx, b := draftActivationFixture(t, scope)
-				b, tr := confirmDraftSchedule(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Reviewed report", Enabled: true})
-				p := draftActivationProposal(t, r, ctx, b, store.BotControlPayload{Operation: store.BotControlActivate, Reason: "Activate"})
+				r, ctx, b := activeBotFixture(t, scope)
+				b, tr := confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "Etc/UTC", Instructions: "Reviewed report", Enabled: true})
+				var err error
+				b, err = r.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Resume review"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				p := scheduleConsentProposal(t, r, ctx, b, store.BotControlPayload{Operation: store.BotControlResume, Reason: "Resume"})
 				d := store.BotControlProposalDecision{BotID: b.ID, ProposalID: p.ID, Digest: p.Digest}
 				jobs := r.db.(botTriggerDB).triggerScheduler()
 				job := jobs.Get(ctx, tr.ScheduleID.String())
@@ -284,7 +255,7 @@ func TestBotDraftScheduledActivationRejectsCorruption(t *testing.T) {
 					t.Fatalf("readiness never reached: %d", calls)
 				}
 				after, err := r.Get(ctx, b.ID)
-				if err != nil || after.Status != store.BotDraft || after.Revision != b.Revision || after.Version != b.Version {
+				if err != nil || after.Status != store.BotPaused || after.Revision != b.Revision || after.Version != b.Version {
 					t.Fatalf("failed activation changed draft: %+v %v", after, err)
 				}
 				saved, err := r.ReadControlProposal(ctx, b.ID, p.ID)
@@ -293,5 +264,39 @@ func TestBotDraftScheduledActivationRejectsCorruption(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBotScheduleTargetOnlyEnablement(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			r, ctx, b := activeBotFixture(t, scope)
+			b, first := confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "* * * * *", Timezone: "UTC", Instructions: "First report", Enabled: true})
+			b, second := confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleCreate, store.TriggerSpec{Kind: store.TriggerCron, Cron: "*/5 * * * *", Timezone: "UTC", Instructions: "Second report", Enabled: false})
+			jobs := r.db.(botTriggerDB).triggerScheduler()
+			before := jobs.Get(ctx, first.ScheduleID.String())
+			second.Enabled = true
+			b, second = confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleEdit, second)
+			after := jobs.Get(ctx, first.ScheduleID.String())
+			if !after.Enabled || !reflect.DeepEqual(before.NextRun, after.NextRun) || after.Payload.BotVersion != b.Version {
+				t.Fatalf("unrelated enabled timing changed: before=%+v after=%+v", before, after)
+			}
+			b, err := r.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Pause recurrence"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
+			b, err = r.Resume(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Resume without recurrence"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second.Instructions = "Explicitly revise second report"
+			b, second = confirmScheduleConsent(t, r, ctx, b, store.BotControlScheduleEdit, second)
+			inert := jobs.Get(ctx, first.ScheduleID.String())
+			target := jobs.Get(ctx, second.ScheduleID.String())
+			if inert.Enabled || inert.NextRun != nil || inert.Payload.BotVersion != b.Version || !target.Enabled || target.NextRun == nil {
+				t.Fatalf("unrelated recurrence revived: inert=%+v target=%+v", inert, target)
+			}
+		})
 	}
 }

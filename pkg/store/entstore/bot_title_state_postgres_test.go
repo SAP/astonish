@@ -28,11 +28,11 @@ func TestIntegrationPostgresBotTitleStartState(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Research the title"
 			q := store.BotCreateRequest{Name: "Research the title", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "pg-title-state"}
-			first, err := f.repo.CreateDraftAndStart(ctx, q)
+			first, err := f.repo.CreateAndStart(ctx, q)
 			if err != nil {
 				t.Fatal(err)
 			}
-			again, err := f.repo.CreateDraftAndStart(ctx, q)
+			again, err := f.repo.CreateAndStart(ctx, q)
 			if err != nil || first.ID != again.ID || first.Run.ID != again.Run.ID || first.UserEventID != again.UserEventID {
 				t.Fatalf("replay: %+v %v", again, err)
 			}

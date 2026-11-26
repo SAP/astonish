@@ -176,7 +176,7 @@ func (m model) botExternalAction(command string) (tea.Model, tea.Cmd) {
 	if bot == nil {
 		m.tr.Apply(events.NewError("Select a Bot first with /bots."))
 	} else if command == "/bots test-once" {
-		m.tr.Apply(events.NewSystem(fmt.Sprintf("Explicit one-time draft test (does not activate): review the current version in Studio, then run in another terminal:\nastonish bots test-once %s --scope %s --version %d --confirm %s:%s --key %s --instructions 'YOUR REVIEWED INSTRUCTIONS'\nOnly Draft Bots accept tests. Re-review on conflict; never auto-confirm a newer version.", bot.ID, bot.Scope, bot.Version, bot.Scope, bot.ID, uuid.NewString())))
+		m.tr.Apply(events.NewSystem(fmt.Sprintf("Explicit one-time Active test (does not enable recurrence): review the current version in Studio, then run in another terminal:\nastonish bots test-once %s --scope %s --version %d --confirm %s:%s --key %s --instructions 'YOUR REVIEWED INSTRUCTIONS'\nOnly Active Bots accept tests. Re-review on conflict; never auto-confirm a newer version.", bot.ID, bot.Scope, bot.Version, bot.Scope, bot.ID, uuid.NewString())))
 	} else if cap, ok := m.backend.(backend.BotOverviewBackend); ok {
 		m.tr.Apply(events.NewSystem("Review Bot configuration, schedules and lifecycle in Studio: " + cap.BotStudioURL()))
 	}

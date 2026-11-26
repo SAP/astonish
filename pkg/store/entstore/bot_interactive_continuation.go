@@ -20,7 +20,7 @@ func (s *teamBotStore) ContinueInteractive(ctx context.Context, q store.BotConti
 
 func interactiveStatus(run store.BotRun, status store.BotStatus) bool {
 	if run.IsInteractiveChat() {
-		return status == store.BotDraft || status == store.BotPaused || status == store.BotActive
+		return status == store.BotPaused || status == store.BotActive
 	}
 	return run.Intent.AllowsStatus(status)
 }
@@ -70,7 +70,7 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 	var result *store.BotRun
 	var holdErr error
 	hash, _ := botHash(q)
-	err := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -234,8 +234,6 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 				switch rec.Bot.Status {
 				case store.BotPaused:
 					run.Intent = store.BotIntentConversation
-				case store.BotDraft:
-					run.Intent = store.BotIntentDraftConversation
 				case store.BotActive:
 					run.Intent = store.BotIntentRegular
 				}

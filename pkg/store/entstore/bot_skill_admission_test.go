@@ -11,12 +11,12 @@ import (
 )
 
 type skillAdmissionRunDB struct {
-	botDraftDB
+	botDB
 	mutate func(*botStoredRun)
 }
 
 func (d skillAdmissionRunDB) ReadRun(ctx context.Context, b, id uuid.UUID) (*botStoredRun, error) {
-	run, err := d.botDraftDB.ReadRun(ctx, b, id)
+	run, err := d.botDB.ReadRun(ctx, b, id)
 	if err == nil {
 		d.mutate(run)
 	}

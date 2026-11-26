@@ -13,10 +13,10 @@ import (
 
 // Force a transaction rollback after the concrete SQL and disk purge both ran.
 // The durable delete intent must remain sufficient for a metadata-only retry.
-type rollbackPurgeDB struct{ botDraftDB }
+type rollbackPurgeDB struct{ botDB }
 
-func (d rollbackPurgeDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d rollbackPurgeDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		if err := fn(tx); err != nil {
 			return err
 		}
@@ -29,7 +29,7 @@ func TestBotStagingPurgeFailureRetry(t *testing.T) {
 		t.Run(string(scope), func(t *testing.T) {
 			repo, ctx, _, _, _, _ := botRunFixture(t, scope)
 			owner := uuid.MustParse(repo.auth.userID)
-			draft, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: owner, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
+			draft, err := repo.Create(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: owner, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
 			if err != nil {
 				t.Fatal(err)
 			}

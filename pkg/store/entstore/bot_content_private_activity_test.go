@@ -26,7 +26,7 @@ func TestBotContentProgressControlPersistence(t *testing.T) {
 			path, contentDir := filepath.Join(t.TempDir(), "private.db"), t.TempDir()
 			owner, botID, runID := uuid.New(), uuid.New(), uuid.New()
 			var sqlDB *sql.DB
-			var db botDraftDB
+			var db botDB
 			var codec *botContentCodec
 			contentOpens := 0
 			open := func() {
@@ -74,7 +74,7 @@ func TestBotContentProgressControlPersistence(t *testing.T) {
 			values := []any{contextRecord, controlProposalEnvelope{Record: controlProposalRecord, Proposal: proposal, RequestHash: store.BotProgressContextDigest([]byte("request"))}, controlProposalEnvelope{Record: controlProposalRecord, Proposal: decision}}
 			keys := []string{"context", controlProposalKey(proposal.ID), controlProposalKey(proposal.ID) + ":decision"}
 			activities := make([]store.BotActivity, len(values))
-			err := db.Transaction(ctx, func(tx botDraftDB) error {
+			err := db.Transaction(ctx, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					if _, err := d.client.Bot.Create().SetID(botID).SetOwnerID(owner).SetName("private fixture").SetHomeSessionID(uuid.NewString()).SetCreateKey(uuid.NewString()).Save(ctx); err != nil {

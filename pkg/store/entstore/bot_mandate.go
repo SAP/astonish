@@ -50,7 +50,7 @@ func mandateKey(ref store.BotMandateRef) string {
 func mandateRevokedKey(ref store.BotMandateRef) string {
 	return fmt.Sprintf("mandate-revoked:%s:%d", ref.ID, ref.Revision)
 }
-func readMandate(ctx context.Context, db botDraftDB, ref store.BotMandateRef) (*store.BotMandateRecord, error) {
+func readMandate(ctx context.Context, db botDB, ref store.BotMandateRef) (*store.BotMandateRecord, error) {
 	a, err := db.FindActivity(ctx, ref.BotID, mandateKey(ref))
 	if err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func readMandate(ctx context.Context, db botDraftDB, ref store.BotMandateRef) (*
 	}
 	return &m, nil
 }
-func (r *botRepository) mandateScope(ctx context.Context, db botDraftDB, ref store.BotMandateRef) (*botStoredRecord, error) {
+func (r *botRepository) mandateScope(ctx context.Context, db botDB, ref store.BotMandateRef) (*botStoredRecord, error) {
 	if ctx == nil || ctx.Err() != nil {
 		return nil, store.ErrBotForbidden
 	}
@@ -129,7 +129,7 @@ func checkMandatePolicy(m store.BotMandate, p store.BotMandatePolicy) error {
 	}
 	return nil
 }
-func (s *botMandateRuntime) verify(ctx context.Context, db botDraftDB, ref store.BotMandateRef, purpose store.BotMandatePurpose) (*store.BotMandateRecord, *botStoredRecord, error) {
+func (s *botMandateRuntime) verify(ctx context.Context, db botDB, ref store.BotMandateRef, purpose store.BotMandatePurpose) (*store.BotMandateRecord, *botStoredRecord, error) {
 	rec, err := s.repo.mandateScope(ctx, db, ref)
 	if err != nil {
 		return nil, nil, err
@@ -226,7 +226,7 @@ func (*botMandateRuntime) CreateBotMandate(context.Context, store.BotMandateReco
 	return store.ErrBotForbidden
 }
 func (s *botMandateRuntime) RevokeBotMandate(ctx context.Context, ref store.BotMandateRef) error {
-	return s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	return s.repo.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := s.repo.mandateScope(ctx, tx, ref)
 		if err != nil {
 			return err
@@ -255,7 +255,7 @@ func verifiedMandateOwner(ctx context.Context, owner string, now time.Time) bool
 	e, present := execution.AuthenticationEvidenceFromContext(ctx)
 	return ok && present && p.Validate() == nil && p.Kind == execution.PrincipalKindUser && p.Subject == owner && e.Validate(now) == nil && (e.Method == execution.AuthMethodPlatformJWT || (e.Method == execution.AuthMethodLocalOS && e.LocalLoopback))
 }
-func appendMandateRecord(ctx context.Context, tx botDraftDB, rec *botStoredRecord, key string, value any, now time.Time) error {
+func appendMandateRecord(ctx context.Context, tx botDB, rec *botStoredRecord, key string, value any, now time.Time) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -277,7 +277,7 @@ func appendMandateRecord(ctx context.Context, tx botDraftDB, rec *botStoredRecor
 	}
 	return nil
 }
-func saveMandateMetadata(ctx context.Context, tx botDraftDB, rec *botStoredRecord) error {
+func saveMandateMetadata(ctx context.Context, tx botDB, rec *botStoredRecord) error {
 	d, ok := tx.(botMandateMetadataDB)
 	if !ok {
 		return store.ErrBotUnsupported
@@ -287,7 +287,7 @@ func saveMandateMetadata(ctx context.Context, tx botDraftDB, rec *botStoredRecor
 
 // issueMessageMandate runs only after the actual user event has been appended.
 // Its record, private pin and head commit together with admission or not at all.
-func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run *store.BotRun, q store.BotMessageRequest) error {
+func (r *botRepository) issueMessageMandate(ctx context.Context, tx botDB, rec *botStoredRecord, run *store.BotRun, q store.BotMessageRequest) error {
 	resolve, enabled := store.BotMandateAdmissionFromContext(ctx)
 	if !enabled {
 		return nil

@@ -34,7 +34,7 @@ func TestBotTitleStartOptIn(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(store.Bot{Name: "Title only"})
 			}))
 			defer s.Close()
-			args := []string{"create", "draft", "Title only", "--json"}
+			args := []string{"create", "Title only", "--json"}
 			if optIn {
 				args = append(args, "--start-from-title")
 			} else {

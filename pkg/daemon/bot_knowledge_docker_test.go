@@ -95,7 +95,7 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Retain owner formatting preferences"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Owned knowledge", OwnerID: owner, Version: v, IdempotencyKey: "create"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Owned knowledge", OwnerID: owner, Version: v, IdempotencyKey: "create"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,7 +142,7 @@ func TestBotKnowledgeDockerEveryTurn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "owned test"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -35,7 +35,7 @@ func (r *botRepository) withTaskWorkspaceCommit(c context.Context, m store.BotTa
 }
 
 func (r *botRepository) withTaskWorkspaceCommitGuard(c context.Context, m store.BotTaskMutation, commit func(func(context.Context) error) error) error {
-	return r.db.Transaction(c, func(tx botDraftDB) error {
+	return r.db.Transaction(c, func(tx botDB) error {
 		_, e := r.taskMutation(c, tx, m)
 		if e != nil {
 			return e

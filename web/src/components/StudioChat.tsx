@@ -65,7 +65,7 @@ import SessionModelPicker from './chat/SessionModelPicker'
 import PreChatModelPicker from './chat/PreChatModelPicker'
 import { connectBotEvents } from '../api/botEvents'
 import BotWorkspace from './bots/BotWorkspace'
-import BotDraftDialog from './bots/BotDraftDialog'
+import BotCreateDialog from './bots/BotCreateDialog'
 import { fileTypeFromFileName } from '../utils/artifactMedia'
 
 function normalizeBlueprintScenes(raw: unknown): TutorialBlueprintPreviewMessage['scenes'] {
@@ -2721,14 +2721,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         theme={theme}
       />}
 
-      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotDraftDialog inline open scope={sourceIntake.scope} resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
+      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotCreateDialog inline open scope={sourceIntake.scope} resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
       {botRoute && <div className={sourceIntake ? 'hidden' : 'contents'}><BotWorkspace key={`${botRoute.scope}/${botRoute.botId}`} route={botRoute} theme={theme} userId={userId} /></div>}
       {/* Keep ordinary Chat mounted and hidden: unsent text and attachments survive Bot navigation. */}
       <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>
       {/* Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {!botThread && !botRoute && activeSessionId && <Button variant="ghost" size="sm" onClick={() => setPromoteOpen(true)}>Promote Chat to Bot draft</Button>}
-        {promoteOpen && <BotDraftDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
+        {!botThread && !botRoute && activeSessionId && <Button variant="ghost" size="sm" onClick={() => setPromoteOpen(true)}>Promote Chat to Bot</Button>}
+        {promoteOpen && <BotCreateDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
         {/* Toolbar bar — always visible */}
         <div
           className={botThread ? 'hidden' : 'flex shrink-0 items-center justify-between border-b border-border bg-transparent px-3 py-1.5'}
@@ -2933,7 +2933,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               <Loader size={24} className="animate-spin text-primary" />
             </div>
           ) : messages.length === 0 ? (
-            botThread ? <p className="text-muted-foreground">No Bot messages yet. Execution requires explicit activation.</p> : <HomePage
+            botThread ? <p className="text-muted-foreground">No Bot messages yet. Send instructions to start a conversation.</p> : <HomePage
               userDisplayName={userDisplayName || undefined}
               onSuggestionClick={(text) => { setInput(text); inputRef.current?.focus() }}
             />
@@ -3490,7 +3490,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
-          {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Draft ? 'Draft · ready to discuss setup.' : botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
+          {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
           {(botSendError || botStreamError) && <div role="alert">{renderAgentMessage({ type: 'agent', content: botSendError || botStreamError }, messages.length, 'activity')}</div>}
           {/* Drag overlay */}
           {isDragOver && (
@@ -3648,7 +3648,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               // this DOM node makes focus() a no-op during plan revisions.
               disabled={botSubmitting || !!botThread?.readOnly}
               placeholder={
-                botThread ? (botThread.readOnly ? 'Read-only Bot thread' : botThread.toolFree ? (botThread.status === BotStatus.Draft ? 'Discuss this draft Bot’s setup…' : botThread.status === BotStatus.Paused ? 'Discuss this Bot’s setup while autonomous work is paused…' : 'Discuss this Bot’s setup…') : 'Send instructions to request a Bot run…') :
+                botThread ? (botThread.readOnly ? 'Read-only Bot thread' : botThread.toolFree ? (botThread.status === BotStatus.Paused ? 'Discuss this Bot’s setup while autonomous work is paused…' : 'Discuss this Bot’s setup…') : 'Send instructions to request a Bot run…') :
                 isFleetMode
                   ? fleetState?.state === 'waiting_for_customer'
                     ? `${fleetState.active_agent || 'An agent'} is waiting for your response...`

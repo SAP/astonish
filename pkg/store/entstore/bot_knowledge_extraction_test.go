@@ -85,7 +85,7 @@ func TestBotKnowledgeExtractionStorage(t *testing.T) {
 			}
 			duplicate := *envelope
 			duplicate.Record.ID = uuid.New()
-			if e = r.db.Transaction(c, func(tx botDraftDB) error {
+			if e = r.db.Transaction(c, func(tx botDB) error {
 				return tx.(botKnowledgeDB).saveKnowledge(c, duplicate, 0)
 			}); !errors.Is(e, store.ErrBotConflict) {
 				t.Fatalf("database source uniqueness missing: %v", e)
@@ -223,7 +223,7 @@ func TestBotKnowledgeExtractionPublicationCAS(t *testing.T) {
 			if e != nil || committed.State != store.BotKnowledgeExtractionCommitted {
 				t.Fatalf("commit %+v %v", committed, e)
 			}
-			if e = r.db.Transaction(c, func(tx botDraftDB) error { return tx.(botKnowledgeDB).commitKnowledgeHeads(c, *prepared) }); !errors.Is(e, store.ErrBotConflict) {
+			if e = r.db.Transaction(c, func(tx botDB) error { return tx.(botKnowledgeDB).commitKnowledgeHeads(c, *prepared) }); !errors.Is(e, store.ErrBotConflict) {
 				t.Fatalf("overwrite without expected head %v", e)
 			}
 		})
@@ -252,7 +252,7 @@ func TestBotKnowledgeExtractionAuthorityCancellationPurge(t *testing.T) {
 			if _, _, e = r.BeginBotKnowledgeExtraction(cancelled, l, record.Revision); !errors.Is(e, context.Canceled) {
 				t.Fatalf("cancelled %v", e)
 			}
-			if e = r.db.Transaction(c, func(tx botDraftDB) error {
+			if e = r.db.Transaction(c, func(tx botDB) error {
 				switch d := tx.(type) {
 				case personalBotDB:
 					return d.purgeKnowledge(c, input.Source.BotID)

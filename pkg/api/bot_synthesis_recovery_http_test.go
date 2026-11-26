@@ -132,6 +132,10 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				pauseBody, _ := json.Marshal(map[string]any{"expected_revision": f.b.Revision, "reason": "Review synthesis budget"})
+				if err := json.Unmarshal(f.request("POST", f.path+"/pause", string(pauseBody), 200), &f.b); err != nil {
+					t.Fatal(err)
+				}
 				// A genuinely small, owner-reviewed run budget enters synthesis
 				// after the first real tool read, without sleeps or a fake clock.
 				limit := int64(2000)
@@ -166,6 +170,10 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer worker.Stop()
+				resumeBody, _ := json.Marshal(map[string]any{"expected_revision": f.b.Revision, "reason": "Run reviewed synthesis budget"})
+				if err := json.Unmarshal(f.request("POST", f.path+"/resume", string(resumeBody), 200), &f.b); err != nil {
+					t.Fatal(err)
+				}
 				const draft = "UNPUBLISHED_TRUNCATED_DRAFT: the receipt indicates"
 				const thought = "PRIVATE_SYNTHESIS_REASONING"
 				const final = "The source says isolated receipt."

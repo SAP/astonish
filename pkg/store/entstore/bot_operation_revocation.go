@@ -11,7 +11,7 @@ import (
 // Delete revokes historical and scheduled authority without opening content.
 // SQL tombstones survive restore. Applying operations retain their exact head,
 // pending marker and receipt; deletion is not evidence of an absent effect.
-func (r *botRepository) revokeOperationStateTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord) error {
+func (r *botRepository) revokeOperationStateTx(ctx context.Context, tx botDB, rec *botStoredRecord) error {
 	refs := map[store.BotMandateRef]bool{}
 	operations := map[uuid.UUID]botCleanupAuthority{}
 	for after := int64(0); after >= 0; {
@@ -109,7 +109,7 @@ func (r *botRepository) revokeOperationStateTx(ctx context.Context, tx botDraftD
 
 // Explicit single-mandate revocation still uses validated current content. This
 // path is not the legacy deletion boundary.
-func (r *botRepository) cancelMandateOperationsTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, ref store.BotMandateRef) error {
+func (r *botRepository) cancelMandateOperationsTx(ctx context.Context, tx botDB, rec *botStoredRecord, ref store.BotMandateRef) error {
 	rt := &botAuthorizedOperationRuntime{botMandateRuntime: &botMandateRuntime{repo: r}}
 	for key, value := range rec.Metadata {
 		if !strings.HasPrefix(key, "authorized-pending:") {

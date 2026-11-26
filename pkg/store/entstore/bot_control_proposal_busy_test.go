@@ -10,20 +10,20 @@ import (
 )
 
 type controlBusyBarrierDB struct {
-	botDraftDB
+	botDB
 	active store.RunID
 }
 
 func (d controlBusyBarrierDB) GetBot(ctx context.Context, id store.BotID) (*botStoredRecord, error) {
-	rec, err := d.botDraftDB.GetBot(ctx, id)
+	rec, err := d.botDB.GetBot(ctx, id)
 	if err == nil {
 		rec.ActiveRunID = &d.active
 	}
 	return rec, err
 }
 
-func (d controlBusyBarrierDB) Transaction(ctx context.Context, work func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return work(controlBusyBarrierDB{botDraftDB: tx, active: d.active}) })
+func (d controlBusyBarrierDB) Transaction(ctx context.Context, work func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return work(controlBusyBarrierDB{botDB: tx, active: d.active}) })
 }
 
 func TestBotControlProposalBusyRetry(t *testing.T) {
@@ -60,7 +60,7 @@ func TestBotControlProposalBusyRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				original := r.db
-				r.db = controlBusyBarrierDB{botDraftDB: original, active: run.ID}
+				r.db = controlBusyBarrierDB{botDB: original, active: run.ID}
 				if _, err = r.ConfirmControlProposal(ctx, d); !errors.Is(err, store.ErrBotBusy) {
 					t.Fatalf("terminal source with retained writer/teardown barrier: %v", err)
 				}

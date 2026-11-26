@@ -25,7 +25,7 @@ func TestIntegrationPostgresBotLatestForgottenRecall(t *testing.T) {
 				}
 				v := store.DefaultBotVersion()
 				v.Charter = "Unrelated memories"
-				peer, err := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Peer", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "peer"})
+				peer, err := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Peer", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "peer"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -73,7 +73,7 @@ func TestIntegrationPostgresBotLatestForgottenRecall(t *testing.T) {
 					setEmbed(func(ctx context.Context, _ string) ([]float32, error) {
 						calls++
 						ctx = context.WithValue(ctx, routineMutationKey{}, true)
-						e := f.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+						e := f.repo.db.Transaction(ctx, func(tx botDB) error {
 							if e := mutateControlMemory(ctx, tx, op, b.HomeSessionID, b.OwnerID, time.Now()); e != nil {
 								return e
 							}

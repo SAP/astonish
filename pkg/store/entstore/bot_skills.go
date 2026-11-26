@@ -181,7 +181,7 @@ func (r *botRepository) ListSkillRuns(ctx context.Context, b store.BotID, id uui
 func skillSHA(text string) string { d := sha256.Sum256([]byte(text)); return hex.EncodeToString(d[:]) }
 
 // resolveSkillSource never treats an author role or a model-provided UUID as owner authority.
-func resolveSkillSource(ctx context.Context, tx botDraftDB, p store.BotSkillProvenance, b uuid.UUID) error {
+func resolveSkillSource(ctx context.Context, tx botDB, p store.BotSkillProvenance, b uuid.UUID) error {
 	if err := p.Validate(b); err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func resolveSkillSource(ctx context.Context, tx botDraftDB, p store.BotSkillProv
 	}
 	return nil
 }
-func validateSkillRevisionSources(ctx context.Context, tx botDraftDB, v store.BotSkillRevision) error {
+func validateSkillRevisionSources(ctx context.Context, tx botDB, v store.BotSkillRevision) error {
 	if err := v.Validate(); err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func validateSkillRevisionSources(ctx context.Context, tx botDraftDB, v store.Bo
 	}
 	return nil
 }
-func (r *botRepository) skillMutation(ctx context.Context, tx botDraftDB, m store.BotSkillMutation, worker bool) (*botStoredRecord, error) {
+func (r *botRepository) skillMutation(ctx context.Context, tx botDB, m store.BotSkillMutation, worker bool) (*botStoredRecord, error) {
 	if _, isWorker := execution.BotRunIdentityFromContext(ctx); isWorker && !worker {
 		return nil, store.ErrBotForbidden
 	}
@@ -406,7 +406,7 @@ func (r *botRepository) OrientSkill(ctx context.Context, q store.BotSkillOrienta
 		return nil, err
 	}
 	var out *store.BotSkillOrientationResult
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := r.skillMutation(ctx, tx, q.Mutation, true); err != nil {
 			return err
 		}
@@ -585,7 +585,7 @@ func (r *botRepository) StageSkillLearning(ctx context.Context, q store.BotSkill
 		return nil, err
 	}
 	var out *store.BotWorkState
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		if _, err := r.skillMutation(ctx, tx, q.Mutation, true); err != nil {
 			return err
 		}
@@ -736,7 +736,7 @@ func (r *botRepository) ChangeSkillLifecycle(ctx context.Context, q store.BotSki
 		return nil, err
 	}
 	var out *store.BotSkill
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		worker := q.Mutation.Lease.RunID != uuid.Nil
 		if _, err := r.skillMutation(ctx, tx, q.Mutation, worker); err != nil {
 			return err

@@ -503,11 +503,11 @@ func botMemorySearchFixture(t *testing.T, scope store.BotScope, mode string) (*s
 	}
 	v := store.DefaultBotVersion()
 	v.Charter = "Observe"
-	a, err := bots.CreateDraft(ctx, store.BotCreateRequest{Name: "A", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "a"})
+	a, err := bots.Create(ctx, store.BotCreateRequest{Name: "A", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := bots.CreateDraft(ctx, store.BotCreateRequest{Name: "B", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "b"})
+	b, err := bots.Create(ctx, store.BotCreateRequest{Name: "B", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}

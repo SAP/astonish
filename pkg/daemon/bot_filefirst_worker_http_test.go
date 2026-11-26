@@ -413,7 +413,7 @@ func TestBotFileFirstWorkerHTTP(t *testing.T) {
 			v.Charter = "Create retained report and editable source files"
 			v.Persona.Soul = "CRITICAL_FILE_INSTRUCTION"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "File first", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "File first", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}

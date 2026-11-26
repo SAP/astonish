@@ -32,7 +32,7 @@ type botDiskMemoryCatalogue struct {
 	Entries []botDiskMemoryEntry `json:"entries"`
 }
 
-func memoryBackendIdentity(db botDraftDB) *botContentCodec {
+func memoryBackendIdentity(db botDB) *botContentCodec {
 	switch d := db.(type) {
 	case personalBotDB:
 		return d.content
@@ -42,7 +42,7 @@ func memoryBackendIdentity(db botDraftDB) *botContentCodec {
 	return nil
 }
 
-func memoryCodec(db botDraftDB) *botContentCodec {
+func memoryCodec(db botDB) *botContentCodec {
 	switch d := db.(type) {
 	case personalBotDB:
 		return d.contentCodec()
@@ -51,7 +51,7 @@ func memoryCodec(db botDraftDB) *botContentCodec {
 	}
 	return nil
 }
-func readBotDiskMemory(ctx context.Context, db botDraftDB, id store.BotID) (*botDiskMemoryCatalogue, error) {
+func readBotDiskMemory(ctx context.Context, db botDB, id store.BotID) (*botDiskMemoryCatalogue, error) {
 	rec, err := db.GetBot(ctx, id)
 	if err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ func readBotDiskMemory(ctx context.Context, db botDraftDB, id store.BotID) (*bot
 	}
 	return &cat, nil
 }
-func writeBotDiskMemory(ctx context.Context, db botDraftDB, cat *botDiskMemoryCatalogue) error {
+func writeBotDiskMemory(ctx context.Context, db botDB, cat *botDiskMemoryCatalogue) error {
 	ref, err := stageBotDiskMemory(ctx, db, cat)
 	if err != nil {
 		return err
@@ -119,7 +119,7 @@ func writeBotDiskMemory(ctx context.Context, db botDraftDB, cat *botDiskMemoryCa
 
 // Stage immutable bytes before entering the mutation transaction. No SQL head
 // becomes visible until fresh authority and the previous catalogue pass CAS.
-func stageBotDiskMemory(ctx context.Context, db botDraftDB, cat *botDiskMemoryCatalogue) (*store.BotContentRef, error) {
+func stageBotDiskMemory(ctx context.Context, db botDB, cat *botDiskMemoryCatalogue) (*store.BotContentRef, error) {
 	rec, err := db.GetBot(ctx, cat.BotID)
 	if err != nil {
 		return nil, err
@@ -146,7 +146,7 @@ func stageBotDiskMemory(ctx context.Context, db botDraftDB, cat *botDiskMemoryCa
 	return ref, nil
 }
 
-func commitBotDiskMemory(ctx context.Context, db botDraftDB, id store.BotID, ref *store.BotContentRef) error {
+func commitBotDiskMemory(ctx context.Context, db botDB, id store.BotID, ref *store.BotContentRef) error {
 	rec, err := db.GetBot(ctx, id)
 	if err != nil {
 		return err
@@ -173,7 +173,7 @@ func commitBotDiskMemory(ctx context.Context, db botDraftDB, id store.BotID, ref
 	}
 	return nil
 }
-func findBotDiskMemory(ctx context.Context, db botDraftDB, key string) (*store.MemorySearchResult, error) {
+func findBotDiskMemory(ctx context.Context, db botDB, key string) (*store.MemorySearchResult, error) {
 	if _, err := uuid.Parse(key); err != nil {
 		return nil, store.ErrBotInvalid
 	}
@@ -201,7 +201,7 @@ func findBotDiskMemory(ctx context.Context, db botDraftDB, key string) (*store.M
 		after = bots[len(bots)-1].Bot.ID
 	}
 }
-func insertBotDiskMemory(ctx context.Context, db botDraftDB, id, sid, actor uuid.UUID, content, category string, metadata map[string]any, now time.Time) error {
+func insertBotDiskMemory(ctx context.Context, db botDB, id, sid, actor uuid.UUID, content, category string, metadata map[string]any, now time.Time) error {
 	botID, err := db.CorrectionSessionBot(ctx, sid)
 	if err != nil {
 		return err
@@ -229,7 +229,7 @@ func insertBotDiskMemory(ctx context.Context, db botDraftDB, id, sid, actor uuid
 	cat.Entries = append(cat.Entries, botDiskMemoryEntry{Row: row, Metadata: metadata})
 	return writeBotDiskMemory(ctx, db, cat)
 }
-func changeBotDiskMemory(ctx context.Context, db botDraftDB, botID uuid.UUID, previous store.MemorySearchResult, change func(*botDiskMemoryEntry) error) error {
+func changeBotDiskMemory(ctx context.Context, db botDB, botID uuid.UUID, previous store.MemorySearchResult, change func(*botDiskMemoryEntry) error) error {
 	cat, err := readBotDiskMemory(ctx, db, botID)
 	if err != nil {
 		return err

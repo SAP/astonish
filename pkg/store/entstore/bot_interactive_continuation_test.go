@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-type continuationFailedCommitDB struct{ botDraftDB }
+type continuationFailedCommitDB struct{ botDB }
 
-func (d continuationFailedCommitDB) Transaction(ctx context.Context, f func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d continuationFailedCommitDB) Transaction(ctx context.Context, f func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		if err := f(tx); err != nil {
 			return err
 		}
@@ -28,7 +28,7 @@ func TestInteractiveContinuationQueuedRestartAndReplay(t *testing.T) {
 			p, _ := execution.PrincipalFromContext(ctx)
 			v := store.DefaultBotVersion()
 			v.Charter = "Continue safely"
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Continue", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "continue"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Continue", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "continue"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,7 +86,7 @@ func TestInteractiveContinuationQueuedRestartAndReplay(t *testing.T) {
 				t.Fatal("duplicate renewed authority")
 			}
 			current, err := repo.Get(ctx, b.ID)
-			if err != nil || current.Status != store.BotDraft {
+			if err != nil || current.Status != store.BotActive {
 				t.Fatalf("activated: %v %v", current, err)
 			}
 		})

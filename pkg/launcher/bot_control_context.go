@@ -308,7 +308,7 @@ func validControlReceipt(p store.BotControlProposal) bool {
 		return false
 	}
 	switch p.Payload.Operation {
-	case store.BotControlResponsibility, store.BotControlPersona, store.BotControlConfigurationOperation, store.BotControlGoalCreate, store.BotControlGoalEdit, store.BotControlMemoryRemember, store.BotControlMemoryCorrect, store.BotControlMemoryForget, store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlSchedulePause, store.BotControlScheduleRemove, store.BotControlTaskOnceOperation, store.BotControlActivate, store.BotControlResume:
+	case store.BotControlResponsibility, store.BotControlPersona, store.BotControlConfigurationOperation, store.BotControlGoalCreate, store.BotControlGoalEdit, store.BotControlMemoryRemember, store.BotControlMemoryCorrect, store.BotControlMemoryForget, store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlSchedulePause, store.BotControlScheduleRemove, store.BotControlTaskOnceOperation, store.BotControlResume:
 	default:
 		return false
 	}

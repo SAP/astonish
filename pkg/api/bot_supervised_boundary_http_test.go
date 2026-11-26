@@ -20,6 +20,9 @@ func TestBotSupervisedPurposeHTTPFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()
+			if err := json.Unmarshal(f.request("POST", path+"/pause"+suffix, map[string]any{"expected_revision": b.Revision, "reason": "Supervised boundary"}, 200), &b); err != nil {
+				t.Fatal(err)
+			}
 			f.request("POST", path+"/runs"+suffix, `{"version":1,"idempotency_key":"manual","instructions":"Test once"}`, 403)
 			for _, field := range []string{`"purpose":"test_once"`, `"purpose":"owner_conversation"`, `"reviewed":true`, `"consent":true`, `"trigger":"cron"`} {
 				f.request("POST", path+"/runs"+suffix, `{"version":1,"idempotency_key":"forged","instructions":"Test once",`+field+`}`, 400)
@@ -28,7 +31,7 @@ func TestBotSupervisedPurposeHTTPFailClosed(t *testing.T) {
 			if err := json.Unmarshal(f.request("GET", path+suffix, nil, 200), &after); err != nil {
 				t.Fatal(err)
 			}
-			if after.Status != store.BotDraft || after.Version != b.Version || after.Revision != b.Revision {
+			if after.Status != store.BotPaused || after.Version != b.Version || after.Revision != b.Revision {
 				t.Fatalf("request activated or mutated Bot: %+v", after)
 			}
 			var runs struct {

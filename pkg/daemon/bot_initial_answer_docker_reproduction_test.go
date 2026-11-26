@@ -302,7 +302,7 @@ func TestContinuationDatabaseRuntimeIOGuard(t *testing.T) {
 
 func TestBotDatabaseContinuationDocker(t *testing.T) {
 	if os.Getenv("ASTONISH_TEST_DOCKER") != "1" {
-		t.Fatal("database continuation acceptance requires real Docker; skips are not evidence")
+		t.Skip("set ASTONISH_TEST_DOCKER=1 for real Docker database continuation acceptance; skip is not acceptance evidence")
 	}
 	runBotInitialAnswerDockerContinuation(t, true)
 }

@@ -314,7 +314,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Report the controlled result"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Skill reporter", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "create"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Skill reporter", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "create"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -325,7 +325,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 				svc.PersonalSessions = ss
@@ -674,7 +674,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			t.Run("foreign-import", func(t *testing.T) {
 				foreignVersion := store.DefaultBotVersion()
 				foreignVersion.Charter = "Separate report responsibility"
-				foreign, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, Version: foreignVersion, IdempotencyKey: "foreign"})
+				foreign, e := repo.Create(auth, store.BotCreateRequest{Name: "Other", OwnerID: b.OwnerID, Version: foreignVersion, IdempotencyKey: "foreign"})
 				if e != nil {
 					t.Fatal(e)
 				}

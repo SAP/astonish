@@ -59,7 +59,7 @@ func TestBotTaskWorkspaceArchiveDocker(t *testing.T) {
 			if scope == store.BotScopePersonal {
 				repo = services.PersonalBots
 			}
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Archive task", OwnerID: uuid.MustParse(p.Subject), Version: f.req.Version, IdempotencyKey: "archive"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Archive task", OwnerID: uuid.MustParse(p.Subject), Version: f.req.Version, IdempotencyKey: "archive"})
 			must(err)
 			home, err := backend.EnsureBotHome(ctx, sandbox.BotHomeScope{OrgID: p.OrgSlug, TeamID: p.TeamSlug, UserID: p.Subject, BotID: b.ID.String()})
 			must(err)

@@ -383,7 +383,7 @@ func testBotFileFirstBackupCLI(t *testing.T, stoppedSource bool, botScope store.
 	if targetHome.Ref == home.Ref || restored.Status != store.BotPaused || restored.Home.ID != binding.ID || restored.Home.Revision != binding.Revision+1 {
 		t.Fatal("restore changed logical identity, reused source or resumed execution")
 	}
-	if _, err := bots.Activate(auth, store.BotLifecycleRequest{BotID: id, ActorID: owner, ExpectedRevision: restored.Revision}); err == nil {
+	if _, err := bots.Get(auth, id); err == nil {
 		t.Fatal("restored authority activated without reconciliation")
 	}
 	restoredVersion, err := bots.GetVersion(auth, id, 1)

@@ -31,7 +31,7 @@ func TestBotSkillsPTYAcceptance(t *testing.T) {
 	if err := os.MkdirAll(home+"/astonish", 0700); err != nil {
 		t.Fatal(err)
 	}
-	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Skills PTY", Scope: store.BotScopePersonal, Status: store.BotDraft, Version: 1, Revision: 1}
+	bot := store.Bot{ID: uuid.New(), HomeSessionID: uuid.New(), Name: "Skills PTY", Scope: store.BotScopePersonal, Status: store.BotActive, Version: 1, Revision: 1}
 	skill := store.BotSkill{ID: uuid.New(), BotID: bot.ID, Title: "Verified research", Status: store.BotSkillActive, HeadRevision: 2, HeadDigest: "skill-digest"}
 	base := "/api/studio/bots/" + bot.ID.String()
 	var empty, unavailable, unsupported atomic.Bool

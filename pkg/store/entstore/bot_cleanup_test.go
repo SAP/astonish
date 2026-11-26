@@ -218,7 +218,7 @@ func TestBotCleanupRejectsUntrustedAndStale(t *testing.T) {
 
 // Force the receipt/root mutation to roll back if its audit event cannot commit.
 type cleanupFailAuditDB struct {
-	botDraftDB
+	botDB
 	botCleanupDB
 }
 
@@ -227,13 +227,13 @@ func (d cleanupFailAuditDB) InsertActivity(context.Context, store.BotActivity, s
 }
 
 type cleanupFailAuditTransaction struct {
-	botDraftDB
+	botDB
 	botCleanupDB
 }
 
-func (d cleanupFailAuditTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
-		return fn(cleanupFailAuditDB{botDraftDB: tx, botCleanupDB: tx.(botCleanupDB)})
+func (d cleanupFailAuditTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
+		return fn(cleanupFailAuditDB{botDB: tx, botCleanupDB: tx.(botCleanupDB)})
 	})
 }
 
@@ -244,7 +244,7 @@ func TestBotCleanupAuditRollbackAndBusyRuns(t *testing.T) {
 			deleted, q := cleanupDeleteFixture(t, repo, owner, run, lease)
 			original := repo.db
 			runtime := cleanupRuntimeContext(t, func(context.Context, store.BotCleanupRequest) error { return nil })
-			repo.db = cleanupFailAuditTransaction{botDraftDB: original, botCleanupDB: original.(botCleanupDB)}
+			repo.db = cleanupFailAuditTransaction{botDB: original, botCleanupDB: original.(botCleanupDB)}
 			if err := repo.ConfirmCleanup(runtime, q); err == nil {
 				t.Fatal("audit failure not returned")
 			}

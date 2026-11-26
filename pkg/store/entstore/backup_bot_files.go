@@ -398,7 +398,7 @@ func (i *botBackupInventory) children(o botBackupObject, r io.Reader) error {
 // not acquire a fence itself: the export options' Collect callback must invoke it
 // inside the same writer/attachment fence as export. Independent template/intake
 // roots are added separately, since they have no Bot aggregate ownership.
-func collectBotBackupRoots(ctx context.Context, db botDraftDB, botID store.BotID, inv *botBackupInventory) error {
+func collectBotBackupRoots(ctx context.Context, db botDB, botID store.BotID, inv *botBackupInventory) error {
 	adapter, ok := db.(botHomeConfigurationDB)
 	if !ok {
 		return store.ErrBotUnsupported

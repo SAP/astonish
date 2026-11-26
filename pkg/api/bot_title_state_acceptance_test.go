@@ -65,7 +65,7 @@ func TestBotTitleStartHTTPAcceptance(t *testing.T) {
 			if err := json.Unmarshal(f.request("POST", "/api/studio/bots", body, 201), &first); err != nil {
 				t.Fatal(err)
 			}
-			if first.InitialTurn == nil || first.InitialTurn.Run.Status != store.RunQueued || !first.InitialTurn.Run.IsInteractiveChat() || first.Status != store.BotDraft {
+			if first.InitialTurn == nil || first.InitialTurn.Run.Status != store.RunQueued || !first.InitialTurn.Run.IsInteractiveChat() || first.Status != store.BotActive {
 				t.Fatalf("not atomically queued: %+v", first)
 			}
 			if first.InitialTurn.UserEventID == "" || first.InitialTurn.HistoryCursor < 1 || first.HomeSessionID != first.InitialTurn.HomeSessionID {
@@ -141,7 +141,9 @@ func TestBotTitleConfirmationStateHTTPAcceptance(t *testing.T) {
 				}
 				a := approvals[0]
 				states, users := titleStates(t, f, f.b)
-				if users != 1 || len(states) != 3 || states[2].Status != store.RunWaitingApproval {
+				// History contains the admitted title and the persisted worker input;
+				// neither projection is a second admitted run or owner answer.
+				if users != 2 || len(states) != 3 || states[2].Status != store.RunWaitingApproval {
 					t.Fatalf("question-first states: %+v users=%d", states, users)
 				}
 				for reload := 0; reload < 2; reload++ {

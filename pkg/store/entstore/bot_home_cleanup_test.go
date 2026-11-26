@@ -61,7 +61,7 @@ func TestBotHomeCleanupReservation(t *testing.T) {
 			next.Revision++
 			next.RestoreUntil = nil
 			next.DeletedAt = nil
-			if err := repo.db.Transaction(owner, func(tx botDraftDB) error { return tx.SetLifecycle(owner, *before, next) }); !errors.Is(err, store.ErrBotConflict) {
+			if err := repo.db.Transaction(owner, func(tx botDB) error { return tx.SetLifecycle(owner, *before, next) }); !errors.Is(err, store.ErrBotConflict) {
 				t.Fatalf("stale restore CAS: %v", err)
 			}
 			// Clock rollback cannot reopen a claimed home.
@@ -117,7 +117,7 @@ func TestBotHomeCleanupLegacyReadRevision(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Reproduce the old viewer write below the new repository guard.
-			if err := repo.db.Transaction(owner, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(owner, func(tx botDB) error {
 				current, err := tx.GetBot(owner, deleted.ID)
 				if err != nil {
 					return err

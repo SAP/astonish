@@ -109,7 +109,7 @@ func (s *botAuthorizedOperationRuntime) ReconcileAuthorizedOperations(ctx contex
 	return errors.Join(failures...)
 }
 func (s *botAuthorizedOperationRuntime) pendingState(ctx context.Context, ref store.BotMandateRef, id uuid.UUID, state store.BotOperationStatus, reason string, retry time.Time) error {
-	return s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	return s.repo.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := s.repo.mandateScope(ctx, tx, ref)
 		if err != nil {
 			return err

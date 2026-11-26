@@ -14,7 +14,7 @@ export default function BotHomeModel({ sessionId }: { sessionId: string }) {
     return () => { alive = false }
   }, [sessionId, retry])
   return <section aria-label="Retained home model" className="space-y-2">
-    <p className="text-sm">Retained home prepared. Choose and save a model pin for this Bot before Test once or activation. Model selection does not start execution.</p>
+    <p className="text-sm">Retained home prepared. Choose and save a model pin for this Bot before requesting tool execution. Model selection does not start execution.</p>
     {status ? <SessionModelPicker sessionId={sessionId} modelStatus={status} onUpdate={setStatus} /> : !error && <p role="status">Loading retained home model…</p>}
     {error && <p role="alert">Could not load retained home model: {error} <Button variant="outline" onClick={() => setRetry(v => v + 1)}>Retry home model</Button></p>}
   </section>

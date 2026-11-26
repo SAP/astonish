@@ -39,8 +39,8 @@ type teamBotStore struct {
 func (s *teamBotStore) repository() *botRepository {
 	return &botRepository{auth: s.auth, db: teamBotDB{client: s.client, content: s.content}}
 }
-func (s *teamBotStore) CreateDraft(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
-	return s.repository().CreateDraft(ctx, r)
+func (s *teamBotStore) Create(ctx context.Context, r store.BotCreateRequest) (*store.Bot, error) {
+	return s.repository().Create(ctx, r)
 }
 func (s *teamBotStore) Get(ctx context.Context, id store.BotID) (*store.Bot, error) {
 	return s.repository().Get(ctx, id)
@@ -623,9 +623,6 @@ func (d teamBotDB) DisableGoalSchedules(ctx context.Context, id, goalID uuid.UUI
 	return nil
 }
 
-func (s *teamBotStore) Activate(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
-	return s.repository().Activate(ctx, q)
-}
 func (s *teamBotStore) Resume(ctx context.Context, q store.BotLifecycleRequest) (*store.Bot, error) {
 	return s.repository().Resume(ctx, q)
 }
@@ -856,7 +853,7 @@ func teamBotError(err error) error {
 	}
 	return err
 }
-func (d teamBotDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
+func (d teamBotDB) Transaction(ctx context.Context, fn func(botDB) error) error {
 	tx, err := d.client.Tx(ctx)
 	if err != nil {
 		return err
@@ -937,7 +934,7 @@ func (d teamBotDB) InsertBot(ctx context.Context, r botStoredRecord) error {
 	return teamBotError(err)
 }
 func (d teamBotDB) UpdateVersion(ctx context.Context, id uuid.UUID, revision, version, seq int64, now time.Time) error {
-	n, err := d.client.Bot.Update().Where(bot.IDEQ(id), bot.RevisionEQ(revision), bot.LastSeqEQ(seq-1), bot.StatusIn(bot.StatusDraft, bot.StatusPaused, bot.StatusStopped)).AddRevision(1).SetVersion(version).SetLastSeq(seq).SetUpdatedAt(now).Save(ctx)
+	n, err := d.client.Bot.Update().Where(bot.IDEQ(id), bot.RevisionEQ(revision), bot.LastSeqEQ(seq-1), bot.StatusIn(bot.StatusActive, bot.StatusPaused, bot.StatusStopped)).AddRevision(1).SetVersion(version).SetLastSeq(seq).SetUpdatedAt(now).Save(ctx)
 	if err != nil {
 		return teamBotError(err)
 	}

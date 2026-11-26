@@ -51,7 +51,7 @@ func TestBotRepositoryReopen(t *testing.T) {
 	v := store.DefaultBotVersion()
 	v.Charter = "Preserve this responsibility"
 	req := store.BotCreateRequest{Name: "Persistent", OwnerID: owner, Version: v, IdempotencyKey: "reopen", Goals: []store.BotGoal{{Title: "Receipt", CompletionCriteria: "Confirmed receipt"}}}
-	b, err := r.CreateDraft(ctx, req)
+	b, err := r.Create(ctx, req)
 	if err != nil {
 		_ = c.Close()
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestBotRepositoryReopen(t *testing.T) {
 	if err != nil || restored.HomeSessionID != b.HomeSessionID {
 		t.Fatalf("restored bot: %+v %v", restored, err)
 	}
-	again, err := r.CreateDraft(ctx, req)
+	again, err := r.Create(ctx, req)
 	if err != nil || again.ID != b.ID {
 		t.Fatalf("reopen deduplication: %+v %v", again, err)
 	}
@@ -81,9 +81,7 @@ func TestBotRepositoryReopen(t *testing.T) {
 	if err := r.Correct(ctx, correction); err != nil {
 		t.Fatal(err)
 	}
-	internal := r.repository()
-	internal.activationCheck = func(context.Context, store.Bot, store.BotVersion) error { return nil }
-	active, err := internal.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: restored.Revision + 1, ActorID: owner, Reason: "Enable manual runs"})
+	paused, err := r.repository().Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ExpectedRevision: restored.Revision + 1, ActorID: owner, Reason: "Hold manual runs"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,12 +94,12 @@ func TestBotRepositoryReopen(t *testing.T) {
 		t.Fatalf("correction retry after reopen: %v", err)
 	}
 	restored, err = r.Get(ctx, b.ID)
-	if err != nil || restored.Status != store.BotActive || restored.Revision != active.Revision {
-		t.Fatalf("activation/correction lost: %+v %v", restored, err)
+	if err != nil || restored.Status != store.BotPaused || restored.Revision != paused.Revision {
+		t.Fatalf("pause/correction lost: %+v %v", restored, err)
 	}
 	activity, err = r.ListActivity(ctx, b.ID, 1, 50)
 	if err != nil || len(activity) != 2 || activity[0].Kind != store.BotActivityCorrection || activity[1].Kind != store.BotActivityLifecycle {
-		t.Fatalf("restored correction/activation: %+v %v", activity, err)
+		t.Fatalf("restored correction/pause: %+v %v", activity, err)
 	}
 	var intent struct {
 		Correction store.BotCorrection `json:"correction"`
@@ -142,7 +140,7 @@ func TestBotCommittedResultSurvivesReopen(t *testing.T) {
 	c, r := open()
 	v := store.DefaultBotVersion()
 	v.Charter = "Preserve final outcome"
-	b, err := r.CreateDraft(ctx, store.BotCreateRequest{Name: "Result", OwnerID: owner, Version: v, IdempotencyKey: "result"})
+	b, err := r.Create(ctx, store.BotCreateRequest{Name: "Result", OwnerID: owner, Version: v, IdempotencyKey: "result"})
 	if err != nil {
 		_ = c.Close()
 		t.Fatal(err)

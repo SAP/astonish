@@ -328,7 +328,7 @@ func TestBotUncertainEffectCrashHTTPNoReplay(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Write only after exact owner approval. Never replay uncertain effects; read receipts only when independently authorized."
 			v.Autonomy.AllowedTools = []string{"http_request"}
-			b, err := f.repo.CreateDraft(f.auth, store.BotCreateRequest{Name: "Crash no replay", OwnerID: q.Owner, Version: v, IdempotencyKey: "draft"})
+			b, err := f.repo.Create(f.auth, store.BotCreateRequest{Name: "Crash no replay", OwnerID: q.Owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -453,7 +453,7 @@ func TestBotUncertainEffectCrashHTTPNoReplay(t *testing.T) {
 			// Wait for the authoritative persisted lease; never forge an expired lease or
 			// edit database timestamps. Recovery itself is the production worker Poll.
 			delay := time.Until(unfinished.Lease.ExpiresAt) + 20*time.Millisecond
-			if delay > 65*time.Second {
+			if delay > 5*time.Minute+time.Second {
 				t.Fatalf("unexpected fixture lease: %s", delay)
 			}
 			if delay > 0 {

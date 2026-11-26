@@ -154,7 +154,7 @@ func TestBotSkillStorageFencingAndLifecycle(t *testing.T) {
 			if _, err = r.ChangeSkillLifecycle(owner, lifecycle); err != nil {
 				t.Fatal(err)
 			}
-			err = r.db.Transaction(owner, func(tx botDraftDB) error { return tx.(botSkillDB).purgeSkills(owner, run.BotID) })
+			err = r.db.Transaction(owner, func(tx botDB) error { return tx.(botSkillDB).purgeSkills(owner, run.BotID) })
 			if err != nil {
 				t.Fatal(err)
 			}

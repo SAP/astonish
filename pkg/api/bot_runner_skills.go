@@ -458,14 +458,21 @@ func orientBotSkill(ctx context.Context, req bot.RunRequest, resources *BotChatR
 			}
 		}
 		if id == nil && req.Run.Trigger != store.TriggerManual {
-			list, err := resources.Skills.ListSkills(ctx, req.Bot.ID, store.BotSkillPage{Limit:store.BotSkillMaxSkills})
-			if err != nil { return w, err }
+			list, err := resources.Skills.ListSkills(ctx, req.Bot.ID, store.BotSkillPage{Limit: store.BotSkillMaxSkills})
+			if err != nil {
+				return w, err
+			}
 			for _, skill := range list.Skills {
-				if skill.Legacy == nil || skill.Legacy.TriggerID != req.Run.TriggerID || skill.Legacy.Version > req.Run.Version { continue }
+				if skill.Legacy == nil || skill.Legacy.TriggerID != req.Run.TriggerID || skill.Legacy.Version > req.Run.Version {
+					continue
+				}
 				for _, trigger := range req.Version.Triggers {
 					if trigger.ID == req.Run.TriggerID && botSkillHash(trigger.Instructions) == skill.Legacy.InstructionsDigest {
-						if id != nil && *id != skill.ID { return w, store.ErrBotConflict }
-						selected := skill.ID; id = &selected
+						if id != nil && *id != skill.ID {
+							return w, store.ErrBotConflict
+						}
+						selected := skill.ID
+						id = &selected
 					}
 				}
 			}

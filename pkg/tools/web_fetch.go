@@ -209,7 +209,7 @@ func fetchURL(rawURL string) (body, finalURL, contentType string, statusCode int
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", "", 0, err
+		return "", "", "", 0, &publicFetchTransportFailure{error: err}
 	}
 	defer resp.Body.Close()
 
@@ -217,7 +217,7 @@ func fetchURL(rawURL string) (body, finalURL, contentType string, statusCode int
 	limitedReader := io.LimitReader(resp.Body, webFetchMaxResponseBytes)
 	bodyBytes, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return "", "", "", resp.StatusCode, fmt.Errorf("failed to read response body: %w", err)
+		return "", "", "", resp.StatusCode, &publicFetchTransportFailure{error: fmt.Errorf("failed to read response body: %w", err)}
 	}
 
 	ct := resp.Header.Get("Content-Type")

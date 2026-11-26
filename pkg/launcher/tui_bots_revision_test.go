@@ -61,7 +61,7 @@ func TestBotComposerOperationRevision(t *testing.T) {
 				fresh.Status = store.BotPaused
 			}
 			if mode == "draft" {
-				fresh.Status = store.BotDraft
+				fresh.Status = store.BotActive
 			}
 			var reads, posts atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

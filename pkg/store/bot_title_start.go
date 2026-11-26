@@ -13,10 +13,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// BotTitleStartStore is optional: legacy CreateDraft and imports never start work.
+// BotTitleStartStore is optional: legacy Create and imports never start work.
 // Implementations commit the draft, home, title message, run and dispatch together.
 type BotTitleStartStore interface {
-	CreateDraftAndStart(context.Context, BotCreateRequest) (*BotTitleStartReceipt, error)
+	CreateAndStart(context.Context, BotCreateRequest) (*BotTitleStartReceipt, error)
 }
 
 type BotTitleStartReceipt struct {

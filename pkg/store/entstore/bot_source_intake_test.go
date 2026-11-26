@@ -118,7 +118,7 @@ func TestBotSourceIntakeDurabilityAndReceiptRollback(t *testing.T) {
 			if !jobs.Get(ctx, job.ID).Enabled {
 				t.Fatal("original paused after rollback")
 			}
-			var db botDraftDB
+			var db botDB
 			switch b := bots.(type) {
 			case *personalBotStore:
 				db = personalBotDB{client: b.client, content: b.content}

@@ -171,7 +171,7 @@ func botTitleConfirmationRestartProcess(t *testing.T, stage, dir string, scope s
 	if stage == "wait" {
 		version := store.DefaultBotVersion()
 		version.Charter = "Clarify the AI News assignment"
-		first, err := repo.CreateDraftAndStart(ctx, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(evidence.Owner), Version: version, IdempotencyKey: "restart-title"})
+		first, err := repo.CreateAndStart(ctx, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(evidence.Owner), Version: version, IdempotencyKey: "restart-title"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -367,7 +367,7 @@ func TestBotTitlePublicResearchAdmission(t *testing.T) {
 			version := store.DefaultBotVersion()
 			version.Charter = "Private charter must never become query text"
 			request := store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(principal.Subject), Version: version, IdempotencyKey: "ordinary-title"}
-			first, err := repo.CreateDraftAndStart(ctx, request)
+			first, err := repo.CreateAndStart(ctx, request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -378,7 +378,7 @@ func TestBotTitlePublicResearchAdmission(t *testing.T) {
 			if record.Provenance.InitiationKind != store.BotInitiationKindTitle || record.Mandate.PublicResearch != nil || first.Run.TitleConfirmation == nil {
 				t.Fatalf("ordinary title lost bounded research intent: %+v", record)
 			}
-			replay, err := repo.CreateDraftAndStart(ctx, request)
+			replay, err := repo.CreateAndStart(ctx, request)
 			if err != nil || replay.Run.ID != first.Run.ID || *replay.Run.MandateRef != *first.Run.MandateRef {
 				t.Fatalf("replay changed authority: %+v %v", replay, err)
 			}

@@ -276,7 +276,7 @@ func TestBotUncertainEffectRestartHTTPNoReplay(t *testing.T) {
 			version := store.DefaultBotVersion()
 			version.Charter = "Perform one exact owner-approved write; never replay an uncertain write. Reconciliation requires a separate owner-requested read."
 			version.Autonomy.AllowedTools = []string{"http_request"}
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Uncertain restart", OwnerID: owner, Version: version, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Uncertain restart", OwnerID: owner, Version: version, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}

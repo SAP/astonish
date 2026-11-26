@@ -16,7 +16,7 @@ type routineTaskBinding struct {
 
 // A task reuses its parent's finite ceiling and aggregate quota, never a new
 // lifetime. Only this immutable binding can attach a second run to that mandate.
-func verifyRoutineTaskRun(ctx context.Context, tx botDraftDB, rec *botStoredRecord, m *store.BotMandateRecord, run *botStoredRun) error {
+func verifyRoutineTaskRun(ctx context.Context, tx botDB, rec *botStoredRecord, m *store.BotMandateRecord, run *botStoredRun) error {
 	if run.Run.ID.String() == m.Provenance.RunID {
 		return nil
 	}

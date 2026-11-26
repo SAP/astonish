@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { botURL, permanentDeleteBot, setupBotHome, createBot, promoteChatToBot, getBotTemplate, forkBotTemplate, botLifecycle, decideBotApproval, type Bot, type BotApproval, type BotTemplate } from '../bots'
+import { botURL, permanentDeleteBot, setupBotHome, createBot, promoteChatToBot, getBotTemplate, forkBotTemplate, botLifecycle, decideBotApproval, BotStatus, type Bot, type BotApproval, type BotTemplate } from '../bots'
 import { connectBotEvents } from '../botEvents'
 import { teamFetch } from '../teamContext'
 vi.mock('../teamContext', () => ({ teamFetch: vi.fn() }))
@@ -38,9 +38,11 @@ describe('scoped Bot transport', () => {
   it('always carries explicit scope and encodes query values', () => {
     expect(botURL('/x', 'team', { q: 'a & b' })).toBe('/api/studio/bots/x?q=a+%26+b&scope=team')
   })
-  it('creates only a conservative private draft', async () => {
-    fetchMock.mockResolvedValue(new Response('{"id":"bot"}', { status: 201 }))
-    await createBot({ name: 'Monitor', idempotency_key: 'key', definition: { charter: 'Observe' } })
+  it('creates an Active private Bot without requesting work or schedules', async () => {
+    fetchMock.mockResolvedValue(new Response('{"id":"bot","status":"active"}', { status: 201 }))
+    await expect(createBot({ name: 'Monitor', idempotency_key: 'key', definition: { charter: 'Observe' } })).resolves.toEqual({ id: 'bot', status: BotStatus.Active })
+    expect(Object.values(BotStatus)).toEqual(['active', 'paused', 'stopped', 'deleted'])
+    expect(fetchMock).toHaveBeenCalledOnce()
     expect(fetchMock).toHaveBeenCalledWith('/api/studio/bots?scope=personal', expect.objectContaining({ method: 'POST', body: '{"name":"Monitor","idempotency_key":"key","definition":{"charter":"Observe"}}' }))
   })
   it('posts only reviewed carryover to the encoded private promotion endpoint', async () => {
@@ -64,8 +66,8 @@ describe('scoped Bot transport', () => {
   })
   it('uses revision and digest, never owner authority, and surfaces conflicts', async () => {
     fetchMock.mockResolvedValueOnce(new Response('revision conflict', { status: 409 }))
-    await expect(botLifecycle({ id: 'a/b', scope: 'team', revision: 4 } as Bot, 'activate', 'reviewed')).rejects.toThrow('revision conflict')
-    expect(fetchMock.mock.calls[0][0]).toContain('/a%2Fb/activate?scope=team')
+    await expect(botLifecycle({ id: 'a/b', scope: 'team', revision: 4 } as Bot, 'resume', 'reviewed')).rejects.toThrow('revision conflict')
+    expect(fetchMock.mock.calls[0][0]).toContain('/a%2Fb/resume?scope=team')
     fetchMock.mockResolvedValue(new Response('{}'))
     await decideBotApproval({ id: 'a', scope: 'personal' } as Bot, { id: 'p', action_digest: 'digest' } as BotApproval, 'denied')
     expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string)).toEqual({ action_digest: 'digest', status: 'denied' })

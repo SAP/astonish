@@ -5,20 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/store"
-	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 // pinLegacyHTTPAttempt restores only the protocol pin of a historical queued
-// attempt in this fixture's owned disk content and SQLite reference, before the worker starts.
+// attempt in this fixture's owned SQLite runtime bytes before the worker starts.
 // Admission, authority, execution, assessment and publication still use production
 // stores and factories. No candidate or verdict is seeded, and production cannot
 // downgrade a run through SaveWork.
@@ -55,18 +53,20 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	if err := json.Unmarshal([]byte(storage["bot_record_v2"]), &record); err != nil {
 		t.Fatal(err)
 	}
-	var ref store.BotContentRef
-	if err := json.Unmarshal(record["content"], &ref); err != nil {
+	var contentBytes []byte
+	if err := json.Unmarshal(record["inline"], &contentBytes); err != nil {
+		t.Fatalf("queued fixture runtime bytes: %v", err)
+	}
+	var size int64
+	var digest string
+	if err := json.Unmarshal(record["size_bytes"], &size); err != nil {
 		t.Fatal(err)
 	}
-	scopeJSON, _ := json.Marshal(ref.Scope)
-	root := filepath.Join(f.dataDir, "bot-content", fmt.Sprintf("%x", sha256.Sum256(scopeJSON)))
-	if !strings.HasPrefix(ref.Key, "staged-v1/") || filepath.Base(ref.Key) != strings.TrimPrefix(ref.Key, "staged-v1/") {
-		t.Fatal("fixture requires its own staged content")
-	}
-	contentBytes, err := os.ReadFile(filepath.Join(root, filepath.Base(ref.Key)))
-	if err != nil {
+	if err := json.Unmarshal(record["sha256"], &digest); err != nil {
 		t.Fatal(err)
+	}
+	if size != int64(len(contentBytes)) || digest != fmt.Sprintf("%x", sha256.Sum256(contentBytes)) {
+		t.Fatal("queued fixture runtime integrity mismatch")
 	}
 	var content map[string]json.RawMessage
 	if err := json.Unmarshal(contentBytes, &content); err != nil {
@@ -168,12 +168,9 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref.Key = fmt.Sprintf("staged-v1/%s-%d-%s", ref.Kind, ref.Revision, uuid.NewString())
-	ref.SizeBytes, ref.SHA256 = int64(len(updated)), fmt.Sprintf("%x", sha256.Sum256(updated))
-	if err := os.WriteFile(filepath.Join(root, filepath.Base(ref.Key)), updated, 0600); err != nil {
-		t.Fatal(err)
-	}
-	record["content"], _ = json.Marshal(ref)
+	record["inline"], _ = json.Marshal(updated)
+	record["size_bytes"], _ = json.Marshal(int64(len(updated)))
+	record["sha256"], _ = json.Marshal(fmt.Sprintf("%x", sha256.Sum256(updated)))
 	updated, err = json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
@@ -190,13 +187,13 @@ func pinHTTPWorkAttempt(t *testing.T, f *interactiveHTTPFixture, run store.BotRu
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
 		t.Fatalf("legacy fixture pin: rows=%d err=%v", n, err)
 	}
-	// The production decoder must authenticate the new reference immediately;
+	// The production decoder must authenticate the updated runtime bytes immediately;
 	// don't let a malformed test pin masquerade as a worker failure later.
 	if _, err := f.repo.GetRun(f.ctx, run.BotID, run.ID); err != nil {
 		t.Fatalf("queued fixture readback: %v", err)
 	}
-	if strings.Contains(string(updated), instructions) || strings.Contains(string(updated), `"bot_document"`) {
-		t.Fatal("protocol fixture leaked content into SQL")
+	if strings.Contains(string(updated), `"bot_document"`) {
+		t.Fatal("protocol fixture introduced a workspace document into runtime SQL")
 	}
 }
 

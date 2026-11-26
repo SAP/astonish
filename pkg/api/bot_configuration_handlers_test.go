@@ -144,15 +144,21 @@ func TestBotReviewedConfigurationHTTP(t *testing.T) {
 			q.Reviewed = false
 			f.request("PUT", path+"/configuration"+suffix, q, 403)
 			q.Reviewed = true
+			// Sensitive grants cannot be changed while an Active Bot may run.
+			f.request("PUT", path+"/configuration"+suffix, q, 409)
+			if err := json.Unmarshal(f.request("POST", path+"/pause"+suffix, map[string]any{"expected_revision": b.Revision, "reason": "Review sensitive policy"}, 200), &b); err != nil {
+				t.Fatal(err)
+			}
+			q.ExpectedRevision = b.Revision
 			var saved store.Bot
 			if err := json.Unmarshal(f.request("PUT", path+"/configuration"+suffix, q, 200), &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Status != store.BotDraft || saved.Revision != 2 || saved.Version != 2 || saved.OwnerID.String() != f.owner {
+			if saved.Status != store.BotPaused || saved.Revision != 3 || saved.Version != 2 || saved.OwnerID.String() != f.owner {
 				t.Fatalf("configuration activated or changed owner: %+v", saved)
 			}
 			f.request("PUT", path+"/configuration"+suffix, q, 409)
-			q.ExpectedRevision = 2
+			q.ExpectedRevision = saved.Revision
 			f.request("PUT", path+"/configuration"+suffix, q, 409)
 			var version store.BotVersion
 			if err := json.Unmarshal(f.request("GET", path+"/versions/2"+suffix, nil, 200), &version); err != nil {
@@ -161,7 +167,7 @@ func TestBotReviewedConfigurationHTTP(t *testing.T) {
 			if !version.Autonomy.CanPublish || version.Budget.MaxRuntimeSeconds != 45 || len(version.Delivery.Bindings) != 1 || version.CreatedBy.String() != f.owner {
 				t.Fatalf("policy not stored: %+v", version)
 			}
-			f.request("POST", path+"/versions"+suffix, `{"expected_revision":2,"change_reason":"prose cannot change policy","definition":{"charter":"new","autonomy":{"can_publish":false}}}`, 400)
+			f.request("POST", path+"/versions"+suffix, `{"expected_revision":3,"change_reason":"prose cannot change policy","definition":{"charter":"new","autonomy":{"can_publish":false}}}`, 400)
 		})
 	}
 }
@@ -178,8 +184,13 @@ func TestBotReviewedProsePreservesPolicyHTTP(t *testing.T) {
 			path := "/api/studio/bots/" + b.ID.String()
 			q := store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "Explicit grants", Autonomy: store.DefaultBotVersion().Autonomy, Budget: store.BudgetSpec{MaxRuntimeSeconds: 45}, Delivery: store.DeliveryPolicy{Notify: store.NotifyAlways, Bindings: []store.BotChannelBinding{f.binding}}}
 			q.Autonomy.CanPublish = true
+			f.request("PUT", path+"/configuration"+suffix, q, 409)
+			if err := json.Unmarshal(f.request("POST", path+"/pause"+suffix, map[string]any{"expected_revision": b.Revision, "reason": "Review sensitive policy"}, 200), &b); err != nil {
+				t.Fatal(err)
+			}
+			q.ExpectedRevision = b.Revision
 			f.request("PUT", path+"/configuration"+suffix, q, 200)
-			f.request("POST", path+"/versions"+suffix, `{"expected_revision":2,"change_reason":"Prose only","definition":{"charter":"Revised observation charter"}}`, 200)
+			f.request("POST", path+"/versions"+suffix, `{"expected_revision":3,"change_reason":"Prose only","definition":{"charter":"Revised observation charter"}}`, 200)
 			var v store.BotVersion
 			if err := json.Unmarshal(f.request("GET", path+"/versions/3"+suffix, nil, 200), &v); err != nil {
 				t.Fatal(err)
@@ -191,7 +202,7 @@ func TestBotReviewedProsePreservesPolicyHTTP(t *testing.T) {
 			if err := json.Unmarshal(f.request("GET", path+suffix, nil, 200), &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Status != store.BotDraft {
+			if saved.Status != store.BotPaused {
 				t.Fatalf("prose edit activated Bot: %+v", saved)
 			}
 		})

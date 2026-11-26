@@ -445,7 +445,7 @@ func TestBotClientStatesSharedVisualBrowserAcceptance(t *testing.T) {
 				t.Fatalf("view/catchup/Escape admitted work: %+v %v", runs, err)
 			}
 			current, err := f.repo.Get(f.ctx, f.b.ID)
-			if err != nil || current.Status != store.BotDraft {
+			if err != nil || current.Status != store.BotActive {
 				t.Fatalf("read-only client activity mutated lifecycle: %+v %v", current, err)
 			}
 			if gate.mutations.Load() != 0 {
@@ -478,7 +478,6 @@ func TestBotClientStatesSharedVisualBrowserAcceptance(t *testing.T) {
 					}
 					return b
 				}
-				transition(f.repo.Activate)
 				transition(f.repo.Pause)
 				page.MustNavigate(server.URL + "/#/chat/bots/" + string(scope) + "/" + f.b.ID.String())
 				page.MustElementR("p", "^paused ·").MustVisible()

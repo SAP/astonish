@@ -70,7 +70,7 @@ func (r *botRepository) ConfirmCleanup(ctx context.Context, q store.BotCleanupRe
 	if err := verify(ctx, q); err != nil {
 		return fmt.Errorf("verify bot cleanup: %w", err)
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -104,7 +104,7 @@ func botCleanupReceiptKey(kind store.BotCleanupKind) string {
 	return "cleanup_receipt_" + string(kind)
 }
 
-func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec botStoredRecord, q store.BotCleanupRequest) (bool, error) {
+func (r *botRepository) checkCleanup(ctx context.Context, db botDB, rec botStoredRecord, q store.BotCleanupRequest) (bool, error) {
 	cleanup, ok := db.(botCleanupDB)
 	if !ok {
 		return false, store.ErrBotUnsupported
@@ -141,7 +141,7 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 	}
 	switch rec.Bot.Status {
 	case store.BotPaused, store.BotStopped, store.BotDeleted:
-	case store.BotActive, store.BotDraft:
+	case store.BotActive:
 		// An active Bot may attest its exact recovered attempt or release an
 		// exact cancellation barrier; it can never retire its home.
 		if q.Kind != store.BotCleanupRunTeardown || q.Fence != q.RunFence+1 {
@@ -191,7 +191,7 @@ func (r *botRepository) checkCleanup(ctx context.Context, db botDraftDB, rec bot
 	// Queued/waiting work cannot own physical compute, including a paused
 	// conversation. The exact active-run CAS above is the admission barrier.
 	// Stopped/deleted cleanup and home retirement retain their busy-work gates.
-	if q.Kind == store.BotCleanupRunTeardown && (rec.Bot.Status == store.BotActive || rec.Bot.Status == store.BotDraft || rec.Bot.Status == store.BotPaused) {
+	if q.Kind == store.BotCleanupRunTeardown && (rec.Bot.Status == store.BotActive || rec.Bot.Status == store.BotPaused) {
 		return false, nil
 	}
 	busy, err := cleanup.CleanupHasBusyRuns(ctx, q.BotID)

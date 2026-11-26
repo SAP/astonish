@@ -140,7 +140,7 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Inspect optional saved methods"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Optional skills", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Optional skills", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 			if err = pin(ctx, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots, svc.PersonalSessions = repo, ss
 			}

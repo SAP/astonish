@@ -10,12 +10,12 @@ import (
 )
 
 type authorizedCASRejectDB struct {
-	botDraftDB
+	botDB
 	writes *int
 }
 
-func (d authorizedCASRejectDB) Transaction(ctx context.Context, f func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error {
+func (d authorizedCASRejectDB) Transaction(ctx context.Context, f func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error {
 		return f(authorizedCASRejectTx{authorizedFailTx{tx}, d.writes})
 	})
 }

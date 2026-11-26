@@ -22,7 +22,7 @@ var _ store.BotMemoryMutationStore = (*personalBotStore)(nil)
 
 // guardBotMemory checks fresh membership and immutable session linkage in the
 // transaction. A no-op Bot/session CAS below locks those records through commit.
-func guardBotMemory(ctx context.Context, r *botRepository, tx botDraftDB, id store.BotID, q store.BotMemoryMutation) (uuid.UUID, uuid.UUID, error) {
+func guardBotMemory(ctx context.Context, r *botRepository, tx botDB, id store.BotID, q store.BotMemoryMutation) (uuid.UUID, uuid.UUID, error) {
 	if lease, ok := ctx.Value(botMemoryLeaseKey{}).(store.BotLease); ok {
 		return guardBotRunMemory(ctx, r, tx, id, q, lease)
 	}

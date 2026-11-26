@@ -5,14 +5,14 @@ import * as policy from '@/api/botConfiguration'
 import * as bots from '@/api/bots'
 vi.mock('@/api/botConfiguration', async original => ({ ...await original<typeof policy>(), configureBot: vi.fn(), getBotConfigurationVersion: vi.fn() }))
 vi.mock('@/api/bots', async original => ({ ...await original<typeof bots>(), getBot: vi.fn(), botLifecycle: vi.fn() }))
-const bot = { id: 'bot', scope: 'personal', revision: 7, version: 2, status: 'draft' } as bots.Bot
+const bot = { id: 'bot', scope: 'personal', revision: 7, version: 2, status: 'paused' } as bots.Bot
 const version = { bot_id: 'bot', version: 2, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, triggers: [], autonomy: { level: 'supervised', allowed_tools: [], denied_tools: [], allowed_paths: [], allowed_hosts: [], can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'on_change', preferences: '', bindings: [] } } as policy.BotConfigurationVersion
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(policy.getBotConfigurationVersion).mockResolvedValue(version); vi.mocked(bots.getBot).mockResolvedValue(bot); vi.mocked(policy.configureBot).mockResolvedValue({ ...bot, version: 3, revision: 8 }) })
 async function review() {
   fireEvent.change(await screen.findByLabelText('Review reason'), { target: { value: 'Reviewed operating limits' } })
   fireEvent.click(screen.getByRole('button', { name: 'Review configuration' }))
 }
-it('requires separate review and rights consent, sends pinned versions, and never activates', async () => {
+it('requires separate review and rights consent, sends pinned versions, and never changes lifecycle', async () => {
   render(<BotConfigurationPanel bot={bot} onChange={vi.fn()} />)
   expect(await screen.findByLabelText('Autonomy level')).toBeInTheDocument()
   expect(screen.getByLabelText('Autonomy level').querySelectorAll('option')).toHaveLength(4)

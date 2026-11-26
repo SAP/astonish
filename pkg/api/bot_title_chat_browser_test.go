@@ -40,6 +40,33 @@ func TestBotTitleTeamOptionBrowserAcceptance(t *testing.T) { runBotBrowserJourne
 func TestBotTitleTeamCustomBrowserAcceptance(t *testing.T) {
 	runBotBrowserJourney(t, "title-team-question")
 }
+
+// TestBotActiveCreationBrowserAcceptance runs the production HTTP/SSE and built
+// SPA against disposable personal/team SQLite stores and a scripted provider.
+// The opt-in tier never downloads or silently discovers a browser executable.
+func TestBotActiveCreationBrowserAcceptance(t *testing.T) {
+	if os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
+		t.Skip("set ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 after building Studio")
+	}
+	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
+	if bin == "" || !filepath.IsAbs(bin) {
+		t.Fatal("set ASTONISH_BOT_BROWSER_PATH to an explicit absolute browser executable")
+	}
+	info, err := os.Stat(bin)
+	if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+		t.Fatalf("browser executable prerequisite: %s: %v", bin, err)
+	}
+	for _, scope := range []string{"personal", "team"} {
+		t.Run(scope, func(t *testing.T) {
+			journey := "title-active"
+			if scope == "team" {
+				journey = "title-team-active"
+			}
+			runBotBrowserJourney(t, journey)
+		})
+	}
+}
+
 func TestBotTitleChatBrowserAcceptance(t *testing.T) { runBotBrowserJourney(t, "title") }
 func TestBotAmbiguousTitleQuestionBrowserAcceptance(t *testing.T) {
 	runBotBrowserJourney(t, "title-question")
@@ -210,6 +237,50 @@ func titlePhysicalHomeProbe(t *testing.T, ctx, ownerCtx context.Context, b store
 
 func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page, repo store.BotStore, ownerCtx context.Context, db store.PlatformBackend, registry *execution.BotTurnAuthorizationRegistry, b store.Bot, journey string) {
 	t.Helper()
+	activeAcceptance := strings.HasSuffix(journey, "-active")
+	assertActiveSurface := func() {
+		t.Helper()
+		page.MustWait(`() => /active/i.test(document.querySelector('[aria-label="Bot workspace"]')?.innerText || '')`)
+		if page.MustEval(`() => /\bdraft\b|activate bot|first activation/i.test(document.querySelector('[aria-label="Bot workspace"]')?.innerText || '')`).Bool() {
+			t.Fatal("created Active Bot showed Draft or first-activation UI")
+		}
+	}
+	if activeAcceptance {
+		if b.Status != store.BotActive {
+			t.Fatalf("title creation status=%s, want Active", b.Status)
+		}
+		assertActiveSurface()
+		runs, err := repo.ListRuns(ownerCtx, b.ID, store.BotPage{})
+		if err != nil || len(runs) != 1 || runs[0].Status != store.RunQueued {
+			t.Fatalf("optional title must queue exactly one requested turn: %+v %v", runs, err)
+		}
+		titleURL := page.MustEval(`() => location.href`).Str()
+		// Team intake is not exposed by NewBotDialog; this uses the real HTTP
+		// admission from the SPA origin, never mocked fetch results.
+		raw := page.MustEval(`async scope => {
+			const r = await fetch('/api/studio/bots?scope=' + scope, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Ordinary Active browser Bot', idempotency_key:'ordinary-active-browser'})});
+			const body = await r.text(); if(r.status !== 201) throw new Error(body); return body;
+		}`, string(b.Scope)).Str()
+		var ordinary store.Bot
+		if err := json.Unmarshal([]byte(raw), &ordinary); err != nil || ordinary.Status != store.BotActive || ordinary.Scope != b.Scope {
+			t.Fatalf("ordinary creation: %s error=%v", raw, err)
+		}
+		ordinaryRuns, err := repo.ListRuns(ownerCtx, ordinary.ID, store.BotPage{})
+		if err != nil || len(ordinaryRuns) != 0 {
+			t.Fatalf("ordinary creation started work: %+v %v", ordinaryRuns, err)
+		}
+		version, err := repo.GetVersion(ownerCtx, ordinary.ID, ordinary.Version)
+		if err != nil || len(version.Triggers) != 0 || ordinary.Home.ID != uuid.Nil {
+			t.Fatalf("ordinary creation prepared resources or recurrence: %+v %v", version, err)
+		}
+		page.MustNavigate(page.MustEval(`() => location.origin`).Str() + "/#/chat/bots/" + string(ordinary.Scope) + "/" + ordinary.ID.String())
+		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+		assertActiveSurface()
+		page.MustReload()
+		assertActiveSurface()
+		page.MustNavigate(titleURL)
+		page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+	}
 	pool := &interactiveHTTPPool{dir: t.TempDir()}
 	readEntered, releaseRead := make(chan struct{}), make(chan struct{})
 	defer func() {
@@ -407,6 +478,18 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 			}
 		}
 	}
+	assertChronologicalAnswer := func() {
+		t.Helper()
+		if !page.MustEval(`ack => {
+			const text = document.querySelector('[aria-label="Bot workspace"]').innerText;
+			const answer = text.indexOf('Your answer: ');
+			const acknowledgement = text.indexOf(ack);
+			const final = text.indexOf('Title task understood.');
+			return answer >= 0 && acknowledgement > answer && final > acknowledgement;
+		}`, m.acknowledgement()).Bool() {
+			t.Fatal("lost answered-question / actual acknowledgement / final chronological order")
+		}
+	}
 	assertAnswered()
 	assertNoAuthorizationError()
 	if page.MustEval(`text => document.querySelector('[aria-label="Bot workspace"]').innerText.includes(text)`, m.acknowledgement()).Bool() {
@@ -445,6 +528,7 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 	}
 	page.MustElementR("p", "Title task understood").MustVisible()
 	assertAnswered()
+	assertChronologicalAnswer()
 	assertNoAuthorizationError()
 	page.MustWait(`() => !document.querySelector('[data-testid="thinking-indicator"]')`)
 	consumed, err := repo.ListApprovals(ownerCtx, b.ID, store.BotPage{})
@@ -462,12 +546,7 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 	page.MustReload()
 	page.MustElementR("p", "Title task understood").MustVisible()
 	assertAnswered()
-	if !page.MustEval(`ack => {
-		const text = document.querySelector('[aria-label="Bot workspace"]').innerText;
-		return text.indexOf(ack) > text.indexOf('Your answer: ') && text.indexOf(ack) < text.indexOf('Title task understood.');
-	}`, m.acknowledgement()).Bool() {
-		t.Fatal("reload lost answered-question / actual acknowledgement / final order")
-	}
+	assertChronologicalAnswer()
 	assertNoAuthorizationError()
 	if got := page.MustEval(`() => document.querySelector('[aria-label="Bot workspace"]').innerText.split('Title task understood.').length-1`).Int(); got != 1 {
 		t.Fatalf("final published %d times", got)
@@ -497,12 +576,38 @@ func runTitleBrowserAssertions(t *testing.T, ctx context.Context, page *rod.Page
 		t.Fatalf("execution replay or non-success: %+v %v", runs, err)
 	}
 	current, err = repo.Get(ownerCtx, b.ID)
-	if err != nil || current.Status != store.BotDraft {
+	if err != nil || current.Status != store.BotActive {
 		t.Fatal("title changed lifecycle", err)
 	}
 	v, err := repo.GetVersion(ownerCtx, b.ID, current.Version)
 	if err != nil || len(v.Triggers) != 0 {
 		t.Fatal("title created recurrence", err)
+	}
+	if activeAcceptance {
+		assertActiveSurface()
+		triggerStore := repo.(store.BotTriggerStore)
+		triggerID := uuid.New()
+		saved, err := triggerStore.ChangeTrigger(ownerCtx, store.BotTriggerChange{BotID: b.ID, TriggerID: triggerID, ExpectedRevision: current.Revision, Action: store.BotTriggerSave, Reason: "Review a separate schedule without enabling it", Definition: store.TriggerSpec{Kind: store.TriggerCron, Cron: "0 9 * * *", Timezone: "UTC", Instructions: "Summarize local release notes"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		version, err := repo.GetVersion(ownerCtx, b.ID, saved.Version)
+		if err != nil || len(version.Triggers) != 1 || version.Triggers[0].Enabled {
+			t.Fatalf("saving a schedule enabled recurrence without consent: %+v %v", version, err)
+		}
+		enabled, err := triggerStore.ChangeTrigger(ownerCtx, store.BotTriggerChange{BotID: b.ID, TriggerID: triggerID, ExpectedRevision: saved.Revision, Action: store.BotTriggerEnable, Reason: "Explicit owner consent for this exact schedule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		version, err = repo.GetVersion(ownerCtx, b.ID, enabled.Version)
+		if err != nil || len(version.Triggers) != 1 || !version.Triggers[0].Enabled {
+			t.Fatalf("separate schedule consent not retained: %+v %v", version, err)
+		}
+		runs, err := repo.ListRuns(ownerCtx, b.ID, store.BotPage{})
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("schedule consent started unsolicited work: %+v %v", runs, err)
+		}
+		t.Log("Active personal/team creation and ordinary idle creation verified; only explicit title turn ran; schedule save remained disabled until separate exact owner enable consent")
 	}
 	t.Log("built Studio: title -> three choices/custom -> waiting reload and worker replacement -> compact answered prompt/label before worker and after consumption/reload -> actual model acknowledgement while read_file is blocked -> one final; no queue receipt, expanded controls or raw private result. Zero controlled Home/Prepare/tool calls and no Task before answer. Registry-backed browser; mandate-backed HTTP and physical Docker are separate evidence.")
 }

@@ -31,7 +31,7 @@ func TestBotSchedulerSQLiteTrustedTeamAdmission(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Observe only"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Scheduled", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "schedule"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Scheduled", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "schedule"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestBotSchedulerSQLiteTrustedTeamAdmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "reviewed"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,24 +72,6 @@ func TestBotSchedulerSQLiteTrustedTeamAdmission(t *testing.T) {
 			if scope == store.BotScopePersonal {
 				if job.TeamSlug != "exact-team" {
 					t.Fatalf("new schedule lost authenticated team: %q", job.TeamSlug)
-				}
-				// An old row is repaired only by an explicit owner-authorized
-				// trigger mutation, not by guessing a team during a daemon tick.
-				job.TeamSlug = ""
-				if err := jobs.Update(ctx, job); err != nil {
-					t.Fatal(err)
-				}
-				b, err = triggers.ChangeTrigger(auth, store.BotTriggerChange{BotID: b.ID, TriggerID: tid, ExpectedRevision: b.Revision, Action: store.BotTriggerDisable, Reason: "repair legacy routing"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				b, err = triggers.ChangeTrigger(auth, store.BotTriggerChange{BotID: b.ID, TriggerID: tid, ExpectedRevision: b.Revision, Action: store.BotTriggerEnable, Reason: "reviewed"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				job = jobs.Get(ctx, job.ID)
-				if job.TeamSlug != "exact-team" {
-					t.Fatalf("legacy schedule not repaired: %q", job.TeamSlug)
 				}
 			}
 			// Make the persisted occurrence due without replacing any routing fields.

@@ -138,7 +138,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Reply to owner"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Intent", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Intent", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,10 +156,10 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 			router.HandleFunc("/bots/{botID}/runs", api.BotRequestRunHandler)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { router.ServeHTTP(w, r.WithContext(httpCtx)) }))
 			defer server.Close()
-			for _, intent := range []store.BotExecutionIntent{store.BotIntentDraftTest, store.BotIntentConversation} {
+			for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentConversation} {
 				route := "test-run"
 				if intent == store.BotIntentConversation {
-					b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "review"})
+					b, err = repo.Get(auth, b.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -177,10 +177,12 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 					}
 					return response
 				}
-				denied := post("runs")
-				denied.Body.Close()
-				if denied.StatusCode != 403 {
-					t.Fatalf("ordinary inactive admission: %d", denied.StatusCode)
+				if intent == store.BotIntentConversation {
+					denied := post("runs")
+					denied.Body.Close()
+					if denied.StatusCode != 403 {
+						t.Fatalf("ordinary paused admission: %d", denied.StatusCode)
+					}
 				}
 				response := post(route)
 				raw, _ := io.ReadAll(response.Body)
@@ -236,7 +238,10 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 						}
 					}
 				}
-				if !user || !assistant {
+				// Regular autonomous work publishes only its report; a conversation
+				// also persists the owner turn, never the autonomous execution prompt.
+				wantUser := intent == store.BotIntentConversation
+				if user != wantUser || !assistant {
 					t.Fatalf("home missing conversation user=%v assistant=%v events=%+v", user, assistant, events)
 				}
 				calls := llm.calls
@@ -274,7 +279,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 							}
 						}
 					}
-					if priorUsers != 2 || priorModels != 2 {
+					if priorUsers != 1 || priorModels != 2 {
 						t.Fatalf("model history users=%d models=%d", priorUsers, priorModels)
 					}
 					events, err = ss.ReadTranscriptEvents(auth, "astonish", owner.String(), b.HomeSessionID.String())
@@ -301,7 +306,7 @@ func TestBotIntentHTTPWorkerConversation(t *testing.T) {
 							}
 						}
 					}
-					if oldUsers != 2 || followUsers != 1 || models != 3 {
+					if oldUsers != 1 || followUsers != 1 || models != 3 {
 						t.Fatalf("duplicate/missing persisted turn old=%d follow=%d models=%d", oldUsers, followUsers, models)
 					}
 					for _, name := range []string{"read_file", "run_flow", "delegate_tasks", "unknown_tool", "ask_user"} {

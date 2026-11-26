@@ -15,7 +15,7 @@ func routineSourceSuppressionKey(payload store.BotControlPayload, mandate store.
 	return routineSuppressionKey(payload, mandate, policy) + ":source:" + sourceDigest
 }
 
-func routineSourceSuppressed(ctx context.Context, tx botDraftDB, rec *botStoredRecord, payload store.BotControlPayload, mandate store.BotMandate, policy store.BotMandatePolicy, sourceDigest string) (bool, error) {
+func routineSourceSuppressed(ctx context.Context, tx botDB, rec *botStoredRecord, payload store.BotControlPayload, mandate store.BotMandate, policy store.BotMandatePolicy, sourceDigest string) (bool, error) {
 	if sourceDigest == "" {
 		return true, store.ErrBotForbidden
 	}

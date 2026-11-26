@@ -12,7 +12,6 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
-	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
@@ -26,6 +25,7 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 	for _, turn := range []string{"initial-mandated", "followup", "authentication-failure", "deployment-failure", "transient-deployment-timeout"} {
 		t.Run(turn, func(t *testing.T) {
 			f, runtime, episode := researchFixture(t)
+			f.req.Run.IdempotencyKey = "owner-initial"
 			if turn == "followup" {
 				f.req.Run.IdempotencyKey = "owner-followup"
 			}
@@ -130,15 +130,15 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 			if failureReason != "" && (chatErr == nil || !strings.Contains(chatErr.Error(), failureReason)) {
 				t.Fatalf("ordinary Chat lost initialization diagnostic: %v", chatErr)
 			}
+			if episode.AllowDetail(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String(), "https://example.com/decisive") == nil {
+				t.Fatal("detail allowed before search")
+			}
 			search, err := BotConfiguredResearchTool(f.ctx, f.req, knowledgeScope(f), provider.GetProvider, nil, episode)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if episode.AllowDetail(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String(), "https://example.com/decisive") == nil {
-				t.Fatal("detail allowed before search")
-			}
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{search}}}}, Research: episode, Tools: []tool.Tool{search}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ProviderFactory: provider.GetProvider, ChatConfig: cfg, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured_search": {Name: "configured_search", Tools: []tool.Tool{search}}}}, Research: episode, Tools: []tool.Tool{search}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}, Mandate: f.req.Mandate}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			resources, err := f.construct(t)
 			if err != nil {
@@ -150,6 +150,13 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 			if entry == nil {
 				t.Fatal("shared catalog missing configured search")
 			}
+			// The shared catalog owns configured_search, so retain its scoped wrapper
+			// but exercise the standalone adapter (including its SAP diagnostics).
+			shared, ok := entry.Tool.(*chatRuntimeTool)
+			if !ok || entry.GroupName != "configured_search" {
+				t.Fatalf("configured search is not owned by the shared scoped catalog: %+v", entry)
+			}
+			shared.chatRuntimeRunnable = search.(chatRuntimeRunnable)
 			result, err := entry.Tool.(botRunnableTool).Run(tc, map[string]any{"facet": "overview"})
 			if failureReason != "" {
 				if err == nil || !strings.Contains(err.Error(), failureReason) {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -135,7 +136,7 @@ func (r *botRepository) ChangeTrigger(ctx context.Context, q store.BotTriggerCha
 		}
 	}
 	var result *store.Bot
-	e := r.db.Transaction(ctx, func(tx botDraftDB) error {
+	e := r.db.Transaction(ctx, func(tx botDB) error {
 		rec, e := tx.GetBot(ctx, q.BotID)
 		if e != nil {
 			return e
@@ -151,7 +152,7 @@ func (r *botRepository) ChangeTrigger(ctx context.Context, q store.BotTriggerCha
 			return store.ErrBotConflict
 		}
 		switch rec.Bot.Status {
-		case store.BotDraft, store.BotActive, store.BotPaused, store.BotStopped:
+		case store.BotActive, store.BotPaused, store.BotStopped:
 		default:
 			return store.ErrBotForbidden
 		}
@@ -338,7 +339,7 @@ func (r *botRepository) ChangeTrigger(ctx context.Context, q store.BotTriggerCha
 	return result, e
 }
 
-func (r *botRepository) syncTriggerSchedules(ctx context.Context, tx botDraftDB, jobs store.SchedulerStore, b store.Bot, v store.BotVersion, old []store.TriggerSpec) error {
+func (r *botRepository) syncTriggerSchedules(ctx context.Context, tx botDB, jobs store.SchedulerStore, b store.Bot, v store.BotVersion, old []store.TriggerSpec) error {
 	retained := map[uuid.UUID]bool{}
 	for _, t := range v.Triggers {
 		if t.ScheduleID == nil {
@@ -349,6 +350,35 @@ func (r *botRepository) syncTriggerSchedules(ctx context.Context, tx botDraftDB,
 			continue
 		}
 		job := jobs.Get(ctx, t.ScheduleID.String())
+		unchanged := false
+		for _, previous := range old {
+			if previous.ID != t.ID {
+				continue
+			}
+			unchanged = reflect.DeepEqual(previous, t)
+			if previous.ScheduleID != nil {
+				// An explicit edit may change recurrence consent, but may not repair
+				// missing or foreign bindings by silently manufacturing a new job.
+				if *previous.ScheduleID != *t.ScheduleID || job == nil || job.Mode != "bot_trigger" || job.Scope != string(b.Scope) || job.OwnerID != b.OwnerID.String() || job.TeamSlug == "" || job.Payload.BotID != b.ID.String() || job.Payload.BotTriggerID != previous.ID.String() || job.Payload.BotVersion != b.Version || job.Payload.Flow != "" || job.Payload.Instructions != "" || len(job.Payload.Params) != 0 {
+					return store.ErrBotConflict
+				}
+				if previous.Kind == store.TriggerGoalDeadline {
+					if job.Schedule.Cron != store.BotDeadlineSchedule {
+						return store.ErrBotConflict
+					}
+				} else if job.Schedule.Cron != previous.Cron || job.Schedule.Timezone != previous.Timezone {
+					return store.ErrBotConflict
+				}
+			}
+			break
+		}
+		if unchanged {
+			job.Payload.BotVersion = v.Version
+			if err := jobs.Update(ctx, job); err != nil {
+				return err
+			}
+			continue
+		}
 		exists := job != nil
 		if !exists {
 			job = &store.ScheduledJob{ID: t.ScheduleID.String(), Name: "bot-" + b.ID.String() + "-" + t.ID.String(), Mode: "bot_trigger", OwnerID: b.OwnerID.String()}
@@ -538,7 +568,7 @@ func (r *botRepository) AdmitExternalRun(ctx context.Context, q store.BotExterna
 	trusted := &botScheduledRequest{external: &q}
 	return r.requestRun(ctx, store.BotRunRequest{BotID: q.BotID, Version: q.Version, TriggerID: q.TriggerID, IdempotencyKey: key}, trusted)
 }
-func (r *botRepository) resolveExternalRequest(ctx context.Context, tx botDraftDB, rec *botStoredRecord, q store.BotExternalEvent, req *store.BotRunRequest) error {
+func (r *botRepository) resolveExternalRequest(ctx context.Context, tx botDB, rec *botStoredRecord, q store.BotExternalEvent, req *store.BotRunRequest) error {
 	if rec.Bot.Status != store.BotActive || rec.Bot.Version != q.Version || rec.Bot.Scope != r.auth.scope {
 		return store.ErrBotConflict
 	}

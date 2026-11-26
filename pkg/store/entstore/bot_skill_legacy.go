@@ -25,7 +25,7 @@ func (r *botRepository) convertLegacySkill(ctx context.Context, q store.BotSkill
 		return nil, err
 	}
 	var out *store.BotSkill
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := r.skillMutation(ctx, tx, q.Mutation, false)
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func legacySkillSafeText(text string) bool {
 	return true
 }
 
-func resolveImportedSkillSource(ctx context.Context, tx botDraftDB, p store.BotSkillProvenance, b uuid.UUID) error {
+func resolveImportedSkillSource(ctx context.Context, tx botDB, p store.BotSkillProvenance, b uuid.UUID) error {
 	if p.Legacy == nil {
 		return store.ErrBotInvalid
 	}

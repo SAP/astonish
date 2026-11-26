@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import BotDraftDialog from '../BotDraftDialog'
+import BotCreateDialog from '../BotCreateDialog'
 import BotSidebar from '../BotSidebar'
 import { BotIntakeWriter, intakeNamespace, readIntakePointer, type BotIntakeContent } from '@/api/botIntake'
 
@@ -30,9 +30,9 @@ beforeEach(() => {
     stored = null; return new Response(null, { status: 204 })
   }))
 })
-it('saves on Escape, resumes after remount through Sidebar pointer, renews consent and never activates', async () => {
+it('saves on Escape, resumes after remount through Sidebar pointer, renews consent and never changes lifecycle', async () => {
   const close = vi.fn()
-  const first = render(<BotDraftDialog open onClose={close} />)
+  const first = render(<BotCreateDialog open onClose={close} />)
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Secret name' } })
   fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
   fireEvent.change(screen.getByLabelText('Bot identity'), { target: { value: 'Observer' } })
@@ -50,17 +50,17 @@ it('saves on Escape, resumes after remount through Sidebar pointer, renews conse
   expect(open).toHaveBeenCalledOnce()
   expect((open.mock.calls[0][0] as CustomEvent).detail).toEqual({ scope: 'personal', resumeId: pointer.id })
   window.removeEventListener('astonish:source-intake', open)
-  render(<BotDraftDialog inline open scope="personal" resumeId={pointer.id} onClose={vi.fn()} />)
+  render(<BotCreateDialog inline open scope="personal" resumeId={pointer.id} onClose={vi.fn()} />)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name'))
   expect(screen.getByLabelText('Bot identity')).toHaveValue('Observer')
-  fireEvent.click(screen.getByRole('button', { name: 'Review draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Review Bot' }))
   expect(screen.getByRole('checkbox')).not.toBeChecked()
   expect(posts).toBe(0)
 })
 it('preserves local text on CAS conflict and explicitly compares and reloads server text', async () => {
   stored = { id, owner_id: 'owner', scope: 'personal', revision: 2, content }
-  render(<BotDraftDialog open resumeId={id} onClose={vi.fn()} />)
+  render(<BotCreateDialog open resumeId={id} onClose={vi.fn()} />)
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name'))
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Local edit' } })
   failPut = true
@@ -76,7 +76,7 @@ it('preserves local text on CAS conflict and explicitly compares and reloads ser
 it('retains intake on failed discard and retries cleanup without duplicate reviewed creation', async () => {
   stored = { id, owner_id: 'owner', scope: 'personal', revision: 2, content }
   const close = vi.fn()
-  render(<BotDraftDialog open resumeId={id} onClose={close} />)
+  render(<BotCreateDialog open resumeId={id} onClose={close} />)
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name'))
   failDelete = true
   fireEvent.click(screen.getByRole('button', { name: 'Cancel intake' }))
@@ -84,9 +84,9 @@ it('retains intake on failed discard and retries cleanup without duplicate revie
   expect(await screen.findByRole('alert')).toHaveTextContent('Intake retained')
   expect(close).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Review draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Review Bot' }))
   fireEvent.click(screen.getByRole('checkbox'))
-  fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create reviewed Bot' }))
   await screen.findByRole('button', { name: 'Retry intake cleanup' })
   expect(posts).toBe(1)
   failDelete = false
@@ -131,13 +131,13 @@ it('waits for an in-flight PUT before DELETE and uses the resulting revision', a
 
 it('resumes Chat carryover and preserves adaptive mode across saves', async () => {
   stored = { id, owner_id: 'owner', scope: 'personal', revision: 1, content: { ...content, mode: 'chat', source_id: id, carryover: { ...content.carryover, summary: 'Selected summary', memories: [{ content: 'Fact', category: 'fact' }] } } }
-  const first = render(<BotDraftDialog open resumeId={id} onClose={vi.fn()} />)
+  const first = render(<BotCreateDialog open resumeId={id} onClose={vi.fn()} />)
   await waitFor(() => expect(screen.getByLabelText('Carryover summary')).toHaveValue('Selected summary'))
   expect(screen.getByLabelText('Memory content 1')).toHaveValue('Fact')
   expect(posts).toBe(0)
   first.unmount()
   stored.content = { ...content, mode: 'adaptive', source_id: id }
-  render(<BotDraftDialog open resumeId={id} onClose={vi.fn()} />)
+  render(<BotCreateDialog open resumeId={id} onClose={vi.fn()} />)
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name'))
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Adaptive edit' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save intake and close' }))
@@ -151,7 +151,7 @@ it('does not offer another owner, team or scope pointer in Sidebar', async () =>
   localStorage.setItem(intakeNamespace('owner', 'another-team', 'personal'), JSON.stringify({ id, scope: 'personal' }))
   localStorage.setItem(intakeNamespace('owner', null, 'team'), JSON.stringify({ id, scope: 'team' }))
   render(<BotSidebar />)
-  await screen.findByText('No Bots yet. Create a reviewed draft.')
+  await screen.findByText('No Bots yet. Create a Bot.')
   expect(screen.queryByRole('button', { name: 'Resume intake' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Team' }))
   expect(await screen.findByRole('button', { name: 'Resume intake' })).toBeInTheDocument()
@@ -162,10 +162,10 @@ it('blocks silently changing a resumed template revision and retains its source 
   const realFetch = globalThis.fetch
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.includes('/templates/')
     ? Response.json({ id, revision: 4, definition: { name: 'Changed', charter: 'Changed charter' } }) : realFetch(url, init)))
-  render(<BotDraftDialog open resumeId={id} onClose={vi.fn()} />)
+  render(<BotCreateDialog open resumeId={id} onClose={vi.fn()} />)
   expect(await screen.findByRole('alert')).toHaveTextContent('Template changed')
   expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name')
-  expect(screen.getByRole('button', { name: 'Review draft' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Review Bot' })).toBeDisabled()
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Preserved' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save intake and close' }))
   await waitFor(() => expect(stored?.content.name).toBe('Preserved'))

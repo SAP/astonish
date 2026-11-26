@@ -25,7 +25,6 @@ const (
 	BotControlTaskOnceOperation      BotControlOperation = "task_once"
 	BotControlPriorityPause          BotControlOperation = "priority_pause"
 	BotControlResumeTasks            BotControlOperation = "resume_tasks"
-	BotControlActivate               BotControlOperation = "activate"
 	BotControlResume                 BotControlOperation = "resume"
 )
 
@@ -138,7 +137,7 @@ func (p BotControlPayload) Validate() error {
 			seen[id] = true
 		}
 		valid = true
-	case BotControlPriorityPause, BotControlActivate, BotControlResume:
+	case BotControlPriorityPause, BotControlResume:
 		if n == 0 {
 			return nil
 		}

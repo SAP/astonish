@@ -11,8 +11,8 @@ import (
 // The transition fences every active/queued lease, including the source. Once
 // paused, autonomous admission is blocked; repeating pause must not cancel an
 // explicitly admitted conversation. Exact-run cancel and Stop still revoke it.
-func (s *botAuthorizedOperationRuntime) pauseRoutineTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o *store.BotOperation) error {
-	if rec.Bot.Status != store.BotActive && rec.Bot.Status != store.BotDraft && rec.Bot.Status != store.BotPaused {
+func (s *botAuthorizedOperationRuntime) pauseRoutineTx(ctx context.Context, tx botDB, rec *botStoredRecord, o *store.BotOperation) error {
+	if rec.Bot.Status != store.BotActive && rec.Bot.Status != store.BotPaused {
 		return store.ErrBotForbidden
 	}
 	if rec.Bot.Status == store.BotPaused {
@@ -72,7 +72,7 @@ func (s *botAuthorizedOperationRuntime) pauseRoutineTx(ctx context.Context, tx b
 
 // Resume only the explicitly listed, current-version cron jobs. Never call the
 // generic activation helper, which can enable unrelated historical schedules.
-func (s *botAuthorizedOperationRuntime) resumeRoutineTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, o store.BotOperation) error {
+func (s *botAuthorizedOperationRuntime) resumeRoutineTx(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation) error {
 	if rec.Bot.Status != store.BotPaused || o.Payload.ResumeTargets == nil {
 		return store.ErrBotForbidden
 	}

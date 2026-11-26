@@ -218,7 +218,7 @@ func TestBotBasicMemoryFactorySQLite(t *testing.T) {
 				repo = f.services.PersonalBots
 				dbPath = filepath.Join(dir, "orgs", p.OrgSlug, "personal", p.Subject+".db")
 			}
-			b, err := repo.CreateDraft(f.ctx, store.BotCreateRequest{Name: "Memory", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "memory"})
+			b, err := repo.Create(f.ctx, store.BotCreateRequest{Name: "Memory", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "memory"})
 			if err != nil {
 				t.Fatal(err)
 			}

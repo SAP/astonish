@@ -18,7 +18,11 @@ func TestBotActivationScopedReadiness(t *testing.T) {
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Review explicit activation"
-			b, err := r.CreateDraft(ctx, store.BotCreateRequest{Name: "Activation", OwnerID: owner.OwnerID, Version: v, IdempotencyKey: "activation-scoped"})
+			b, err := r.Create(ctx, store.BotCreateRequest{Name: "Activation", OwnerID: owner.OwnerID, Version: v, IdempotencyKey: "activation-scoped"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = r.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Pause before resume"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -26,7 +30,7 @@ func TestBotActivationScopedReadiness(t *testing.T) {
 			r.activationCheck = nil
 			r.auth.readiness = backend.checkBotActivation
 			q := store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Reviewed"}
-			if _, err := r.Activate(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
+			if _, err := r.Resume(ctx, q); !errors.Is(err, store.ErrBotUnsupported) {
 				t.Fatalf("missing readiness: %v", err)
 			}
 			calls := 0
@@ -43,7 +47,7 @@ func TestBotActivationScopedReadiness(t *testing.T) {
 			if calls != 0 {
 				t.Fatal("draft request invoked readiness")
 			}
-			active, err := r.Activate(ctx, q)
+			active, err := r.Resume(ctx, q)
 			if err != nil || active.Status != store.BotActive || active.Revision != b.Revision+1 || calls != 1 {
 				t.Fatalf("activation=%+v calls=%d err=%v", active, calls, err)
 			}
@@ -63,7 +67,11 @@ func TestBotActivationReadinessCAS(t *testing.T) {
 	}
 	v := store.DefaultBotVersion()
 	v.Charter = "Review"
-	b, err := r.CreateDraft(ctx, store.BotCreateRequest{Name: "CAS", OwnerID: owner.OwnerID, Version: v, IdempotencyKey: "activation-cas"})
+	b, err := r.Create(ctx, store.BotCreateRequest{Name: "CAS", OwnerID: owner.OwnerID, Version: v, IdempotencyKey: "activation-cas"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = r.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Pause before resume"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,11 +82,11 @@ func TestBotActivationReadinessCAS(t *testing.T) {
 		_, err := r.ApplyVersion(c, store.BotVersionRequest{BotID: snapshot.ID, ExpectedRevision: snapshot.Revision, Version: version})
 		return err
 	}
-	if _, err := r.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Review"}); !errors.Is(err, store.ErrBotConflict) {
+	if _, err := r.Resume(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Review"}); !errors.Is(err, store.ErrBotConflict) {
 		t.Fatalf("stale readiness accepted: %v", err)
 	}
 	got, err := r.Get(ctx, b.ID)
-	if err != nil || got.Status != store.BotDraft {
+	if err != nil || got.Status != store.BotPaused {
 		t.Fatalf("draft mutated: %+v %v", got, err)
 	}
 }

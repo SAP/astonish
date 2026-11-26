@@ -60,7 +60,7 @@ Application waits for `source.Run.Status.Terminal()` and the root ActiveRun barr
 
 Occurrence acknowledgement preserves its exact persisted due-time CAS and changes only runtime fields. Its typed Ent update either sets the next occurrence or clears it, never both (PostgreSQL rejects duplicate assignments).
 
-The transaction writes the immutable version, target scheduler state, optional target-only draft activation, receipt revision and publication intent. Unrelated jobs receive only version rebinding: their effective Enabled and NextRun are retained exactly, including disabled jobs with retained due dates. Paused/stopped roots are never resumed. Readiness or mutation failures leave the queued operation unapplied; retries cannot produce duplicate job identities or receipt intents.
+The transaction writes the immutable version, target scheduler state, receipt revision and publication intent. Unrelated jobs receive only version rebinding: their effective Enabled and NextRun are retained exactly, including disabled jobs with retained due dates. Paused/stopped roots are never resumed. Readiness or mutation failures leave the queued operation unapplied; retries cannot produce duplicate job identities or receipt intents.
 
 Finite count, minimum recurrence interval and daily frequency bounds are checked over a year-plus-day horizon (including DST); runtime dispatch quota is separately enforced by mandate admission/reservation. Schedule operations cannot smuggle hook credentials, goal bindings, external delivery or configuration changes.
 

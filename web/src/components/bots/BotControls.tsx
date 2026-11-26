@@ -20,7 +20,7 @@ export function BotLifecycleControls({ bot, onChange, readOnly }: { bot: Bot; on
   return <div className="space-y-2">
     <div className="flex flex-wrap gap-2">
       {bot.status !== BotStatus.Deleted && <>
-        {bot.status !== BotStatus.Active && <Button size="sm" onClick={() => setAction('activate')}>Review activation</Button>}
+        {bot.status !== BotStatus.Active && <Button size="sm" onClick={() => setAction('resume')}>Review resume</Button>}
         {bot.status === BotStatus.Active && <Button size="sm" variant="outline" onClick={() => setAction('pause')}>Pause</Button>}
         <Button size="sm" variant="outline" onClick={() => setAction('stop')}>Stop</Button>
       </>}
@@ -28,7 +28,7 @@ export function BotLifecycleControls({ bot, onChange, readOnly }: { bot: Bot; on
       {bot.status === BotStatus.Deleted && !bot.permanent_delete && bot.restore_until && <Button size="sm" onClick={() => setAction('restore')}>Restore retained Bot</Button>}
     </div>
     {deleteOpen && <BotDeleteDialog key={`${bot.scope}/${bot.id}`} bot={bot} onClose={() => setDeleteOpen(false)} />}
-    {action && <div className="rounded border border-border p-3 space-y-2"><p>Confirm {action} of revision {bot.revision}. {action === 'activate' ? 'This enables execution under the policy displayed above.' : action === 'restore' ? 'Restore does not activate the Bot.' : 'Already committed external effects cannot be undone.'}</p><Input aria-label="Lifecycle reason" placeholder="Reason for this action" value={reason} onChange={e => setReason(e.target.value)} /><Button disabled={busy || !reason.trim()} onClick={apply}>Confirm {action}</Button><Button variant="ghost" disabled={busy} onClick={() => setAction(null)}>Cancel</Button></div>}
+    {action && <div className="rounded border border-border p-3 space-y-2"><p>Confirm {action} of revision {bot.revision}. {action === 'resume' ? 'This resumes execution under the displayed policy. Disabled schedules remain disabled.' : action === 'restore' ? 'Restore keeps the Bot paused.' : 'Already committed external effects cannot be undone.'}</p><Input aria-label="Lifecycle reason" placeholder="Reason for this action" value={reason} onChange={e => setReason(e.target.value)} /><Button disabled={busy || !reason.trim()} onClick={apply}>Confirm {action}</Button><Button variant="ghost" disabled={busy} onClick={() => setAction(null)}>Cancel</Button></div>}
     {error && <p role="alert" className="text-destructive">{error} Refresh to review the latest revision before retrying.</p>}
   </div>
 }

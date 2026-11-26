@@ -15,7 +15,7 @@ func TestBotControlProposalTerminalReceipts(t *testing.T) {
 				text := "review"
 				payload := store.BotControlPayload{Operation: store.BotControlResponsibility, Reason: "review", Responsibility: &text}
 				if kind == "invalid_transition" {
-					payload = store.BotControlPayload{Operation: store.BotControlActivate, Reason: "activate"}
+					payload = store.BotControlPayload{Operation: store.BotControlResume, Reason: "activate"}
 				}
 				p, err := r.ProposeControl(worker, store.BotControlProposalRequest{Lease: lease, IdempotencyKey: "status", ExpiresAt: now.Add(time.Hour), Payload: payload})
 				if err != nil {

@@ -1,5 +1,9 @@
 # Unfinished Bot intake
 
+Unfinished intake is an editable form, not a persisted Bot lifecycle state. Final
+creation returns Active with no unsolicited work or enabled schedules; legitimate
+form, skill and task drafts remain separate from the Active-only Bot lifecycle.
+
 `GET`, `PUT`, `DELETE /api/studio/bots/intake/{id}?scope=personal|team` use the authenticated scoped services. Scope defaults to personal. UUIDs are client-generated and must not be recycled after discard. Intake content is private to its exact owner even in team scope (including against team admins). Membership is rechecked by the routed repository on every request. Missing or non-owned reads/deletes return 404; conflicting writes return 409 without exposing content.
 
 ## Wire contract

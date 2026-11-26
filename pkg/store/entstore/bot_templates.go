@@ -229,7 +229,7 @@ func (s *teamBotTemplateStore) ForkToPersonal(ctx context.Context, dest *persona
 	v.Charter = source.Definition.Charter
 	v.Persona.Language = source.Definition.Language
 	for i, suggestion := range source.Definition.SuggestedSchedules {
-		// Deterministic IDs make retry inputs byte-identical before CreateDraft hashes.
+		// Deterministic IDs make retry inputs byte-identical before Create hashes.
 		id := uuid.NewSHA1(source.ID, []byte(fmt.Sprintf("schedule:%d:%d", source.Revision, i)))
 		v.Triggers = append(v.Triggers, store.TriggerSpec{ID: id, Kind: store.TriggerCron, Cron: suggestion.Cron, Timezone: suggestion.Timezone, Instructions: suggestion.Instructions, HookStatus: store.HookDisabled})
 	}
@@ -251,14 +251,14 @@ func createSeededTemplateDraft(ctx context.Context, dest *personalBotStore, req 
 		hasSeed = hasSeed || schedule.SkillSeed != nil
 	}
 	if !hasSeed {
-		return dest.CreateDraft(ctx, req)
+		return dest.Create(ctx, req)
 	}
 	r := dest.repository()
 	actor, err := r.auth.authorize(ctx, req.OwnerID, true)
 	if err != nil {
 		return nil, err
 	}
-	rec, v, goals, err := prepareBotDraft(req, actor, r.auth.scope, r.clock())
+	rec, v, goals, err := prepareBotCreate(req, actor, r.auth.scope, r.clock())
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +267,7 @@ func createSeededTemplateDraft(ctx context.Context, dest *personalBotStore, req 
 		return nil, err
 	}
 	var result *store.Bot
-	err = r.db.Transaction(ctx, func(tx botDraftDB) error {
+	err = r.db.Transaction(ctx, func(tx botDB) error {
 		old, e := tx.FindCreate(ctx, rec.CreateKey)
 		if e == nil {
 			if old.CreateHash != rec.CreateHash {

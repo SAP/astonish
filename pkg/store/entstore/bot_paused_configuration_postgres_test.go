@@ -20,7 +20,7 @@ func TestIntegrationPostgresBotHomeBindingRegistration(t *testing.T) {
 		}
 		v := store.DefaultBotVersion()
 		v.Charter = "Binding persistence"
-		b, err := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Binding", OwnerID: active.OwnerID, Version: v, IdempotencyKey: "pg-binding"})
+		b, err := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Binding", OwnerID: active.OwnerID, Version: v, IdempotencyKey: "pg-binding"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +52,7 @@ func TestIntegrationPostgresBotHomeBindingRegistration(t *testing.T) {
 			fresh = &personalBotStore{client: d.client, content: d.content, auth: f.repo.auth}
 		}
 		got, err := fresh.Get(f.owner, b.ID)
-		if err != nil || got.Home != q.Home || got.Revision != b.Revision+1 || got.Status != store.BotDraft {
+		if err != nil || got.Home != q.Home || got.Revision != b.Revision+1 || got.Status != store.BotActive {
 			t.Fatalf("fresh adapter binding: %+v %v", got, err)
 		}
 		q.Home.ID = uuid.New()

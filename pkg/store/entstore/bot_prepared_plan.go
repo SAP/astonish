@@ -50,11 +50,11 @@ func (s *teamBotStore) AdvanceBotPlan(c context.Context, l store.BotLease, q sto
 }
 
 // The root write lock precedes all reads, exactly as in appendBotRunEvent.
-func (r *botRepository) withPreparedPlan(ctx context.Context, l store.BotLease, fn func(botDraftDB, botTranscriptDB, *botStoredRecord, *botStoredRun) error) error {
+func (r *botRepository) withPreparedPlan(ctx context.Context, l store.BotLease, fn func(botDB, botTranscriptDB, *botStoredRecord, *botStoredRun) error) error {
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		transcript, ok := tx.(botTranscriptDB)
 		if !ok {
 			return store.ErrBotUnsupported
@@ -74,7 +74,7 @@ func (r *botRepository) withPreparedPlan(ctx context.Context, l store.BotLease, 
 	})
 }
 
-func preparedPlanEvents(ctx context.Context, tx botDraftDB, run store.BotRun) ([]*session.Event, error) {
+func preparedPlanEvents(ctx context.Context, tx botDB, run store.BotRun) ([]*session.Event, error) {
 	var events []*session.Event
 	// Restored sessions start with authenticated initial state before replaying
 	// event deltas. Use that same base inside the transaction fence.
@@ -166,7 +166,7 @@ func (r *botRepository) PrepareBotPlan(ctx context.Context, l store.BotLease, p 
 		return nil, store.ErrBotInvalid
 	}
 	p.Revision, p.Stage = 1, store.BotPlanPrepared
-	err = r.withPreparedPlan(ctx, l, func(tx botDraftDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
+	err = r.withPreparedPlan(ctx, l, func(tx botDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
 		if p.SessionID != saved.Run.SessionID || p.Version != saved.Run.Version {
 			return store.ErrBotConflict
 		}
@@ -213,7 +213,7 @@ func (r *botRepository) PrepareBotPlan(ctx context.Context, l store.BotLease, p 
 }
 func (r *botRepository) LoadBotPlan(ctx context.Context, l store.BotLease, id uuid.UUID) (*store.BotPreparedPlan, error) {
 	var p store.BotPreparedPlan
-	err := r.withPreparedPlan(ctx, l, func(_ botDraftDB, _ botTranscriptDB, _ *botStoredRecord, s *botStoredRun) error {
+	err := r.withPreparedPlan(ctx, l, func(_ botDB, _ botTranscriptDB, _ *botStoredRecord, s *botStoredRun) error {
 		var ok bool
 		p, ok = s.PreparedPlans[id.String()]
 		if !ok {
@@ -234,7 +234,7 @@ func (r *botRepository) LoadBotPlanByApproval(ctx context.Context, l store.BotLe
 		return nil, store.ErrBotInvalid
 	}
 	var found *store.BotPreparedPlan
-	err := r.withPreparedPlan(ctx, l, func(tx botDraftDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
+	err := r.withPreparedPlan(ctx, l, func(tx botDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
 		a, err := tx.ReadApproval(ctx, l.BotID, id)
 		if err != nil {
 			return err
@@ -282,7 +282,7 @@ func (r *botRepository) AdvanceBotPlan(ctx context.Context, l store.BotLease, q 
 		return nil, store.ErrBotInvalid
 	}
 	var p store.BotPreparedPlan
-	err = r.withPreparedPlan(ctx, l, func(tx botDraftDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
+	err = r.withPreparedPlan(ctx, l, func(tx botDB, _ botTranscriptDB, _ *botStoredRecord, saved *botStoredRun) error {
 		var ok bool
 		p, ok = saved.PreparedPlans[q.OperationID.String()]
 		if !ok {
@@ -336,7 +336,7 @@ func preparedPlanIDUsed(plans map[string]store.BotPreparedPlan, approval, dispat
 
 func (r *botRepository) ChangeBotPlan(ctx context.Context, l store.BotLease, q store.BotPreparedPlanChange) (*store.BotPreparedPlan, error) {
 	var p store.BotPreparedPlan
-	err := r.withPreparedPlan(ctx, l, func(tx botDraftDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
+	err := r.withPreparedPlan(ctx, l, func(tx botDB, transcript botTranscriptDB, rec *botStoredRecord, saved *botStoredRun) error {
 		var ok bool
 		p, ok = saved.PreparedPlans[q.OperationID.String()]
 		if !ok {

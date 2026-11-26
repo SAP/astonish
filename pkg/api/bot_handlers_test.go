@@ -222,7 +222,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("POST", root, owner, body, 201), &b); err != nil {
 		t.Fatal(err)
 	}
-	if b.Status != store.BotDraft || b.Scope != store.BotScopePersonal || b.OwnerID.String() != owner {
+	if b.Status != store.BotActive || b.Scope != store.BotScopePersonal || b.OwnerID.String() != owner {
 		t.Fatalf("unsafe draft: %+v", b)
 	}
 	var retry store.Bot
@@ -552,7 +552,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	request("GET", path+"/activity?limit=201", owner, "", 400)
 	request("POST", path+"/goals/bad/complete", owner, `{}`, 400)
 	lifecyclePaths := []string{}
-	// Lifecycle operations on separate drafts must not enable execution.
+	// Lifecycle operations on separate Active Bots must preserve CAS and safe restore.
 	for _, scope := range []string{"", "?scope=team"} {
 		var lifecycle store.Bot
 		decodeBot := func(data []byte) {
@@ -567,8 +567,8 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		lifecyclePaths = append(lifecyclePaths, lp+scope)
 		request("POST", lp+"/read"+scope, owner, `{}`, 400)
 		request("POST", lp+"/restore"+scope, "", `broken`, 401)
-		request("POST", lp+"/pause"+scope, owner, `{"expected_revision":1,"reason":"Pause draft"}`, 409)
-		request("POST", lp+"/stop"+scope, owner, `{"expected_revision":1,"reason":"Stop draft"}`, 409)
+		request("POST", lp+"/pause"+scope, owner, `{"expected_revision":99,"reason":"Stale pause"}`, 409)
+		request("POST", lp+"/stop"+scope, owner, `{"expected_revision":99,"reason":"Stale stop"}`, 409)
 		request("DELETE", lp+scope, owner, `{"expected_revision":1,"reason":"Delete","actor_id":"forged"}`, 400)
 		request("DELETE", lp+scope, owner, `{"expected_revision":1,"reason":"Delete","now":"2099-01-01T00:00:00Z"}`, 400)
 		request("DELETE", lp+scope, member, `{"expected_revision":1,"reason":"Not mine"}`, map[bool]int{true: 403, false: 404}[scope != ""])
@@ -624,7 +624,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("POST", tp+"/fork?scope=team", member, forkBody, 201), &again); err != nil {
 		t.Fatal(err)
 	}
-	if fork.ID != again.ID || fork.Scope != store.BotScopePersonal || fork.Status != store.BotDraft || fork.OwnerID.String() != member {
+	if fork.ID != again.ID || fork.Scope != store.BotScopePersonal || fork.Status != store.BotActive || fork.OwnerID.String() != member {
 		t.Fatalf("unsafe fork: %+v %+v", fork, again)
 	}
 	forkPath := root + "/" + fork.ID.String()
@@ -689,7 +689,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("GET", forkPath, member, "", 200), &restoredFork); err != nil {
 		t.Fatal(err)
 	}
-	if restoredFork.Status != store.BotDraft || restoredFork.Version != 1 {
+	if restoredFork.Status != store.BotActive || restoredFork.Version != 1 {
 		t.Fatalf("fork reopened active: %+v", restoredFork)
 	}
 	request("GET", forkPath+"/goals", member, "", 200)
@@ -703,7 +703,7 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		}
 	}
 	_ = json.Unmarshal(request("GET", path, owner, "", 200), &b)
-	if b.Revision != 4 || b.Version != 2 || b.Status != store.BotDraft {
+	if b.Revision != 4 || b.Version != 2 || b.Status != store.BotActive {
 		t.Fatalf("reopen: %+v", b)
 	}
 	_ = json.Unmarshal(request("GET", path+"/versions/2", owner, "", 200), &v)

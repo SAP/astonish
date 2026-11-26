@@ -25,7 +25,7 @@ func TestIntegrationPostgresMemoryAttribution(t *testing.T) {
 				}
 				v := store.DefaultBotVersion()
 				v.Charter = "Other Bot"
-				b, err := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Other", OwnerID: a.OwnerID, Version: v, IdempotencyKey: "attribution-other"})
+				b, err := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Other", OwnerID: a.OwnerID, Version: v, IdempotencyKey: "attribution-other"})
 				if err != nil {
 					t.Fatal(err)
 				}

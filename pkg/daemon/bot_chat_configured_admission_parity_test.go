@@ -408,7 +408,7 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 						if continuous {
 							v.Autonomy.AllowedTools = []string{"read_file", "find_files", "file_tree", "bot_work_update"}
 						}
-						b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Configured admission " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
+						b, e := repo.Create(auth, store.BotCreateRequest{Name: "Configured admission " + mode, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: mode})
 						if e != nil {
 							t.Fatal(e)
 						}
@@ -523,6 +523,9 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 										t.Fatalf("foreign approved-action resume: %d %s", code, raw)
 									}
 									mustPost(resumePath, resume, 202)
+									continue
+								}
+								if saved.Status == store.RunQueued || saved.Status == store.RunRunning {
 									continue
 								}
 								if mode == "interactive-mandate" {

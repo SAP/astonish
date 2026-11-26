@@ -19,7 +19,7 @@ func TestBotPromptHomeDeliveryModes(t *testing.T) {
 		{"autonomous", bot.RunRequest{}, true},
 		{"interactive", bot.RunRequest{Run: store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive}}, false},
 		{"home_conversation", bot.RunRequest{Run: store.BotRun{Intent: store.BotIntentConversation}}, false},
-		{"control_only", bot.RunRequest{Run: store.BotRun{Intent: store.BotIntentDraftConversation}}, false},
+		{"control_only", bot.RunRequest{Run: store.BotRun{Intent: store.BotIntentConversation}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &SystemPromptBuilder{}

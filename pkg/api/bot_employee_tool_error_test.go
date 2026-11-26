@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,34 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
+
+func TestBotRecoverableToolFeedbackDiagnosticWrappers(t *testing.T) {
+	native := errors.New("native callback failed")
+	feedback := &botToolFeedbackError{cause: native, recoverable: true}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"diagnostic", fmt.Errorf("chat runner: %w", feedback), true},
+		{"nested-join", fmt.Errorf("producer: %w", errors.Join(feedback, fmt.Errorf("tool: %w", feedback))), true},
+		{"native", fmt.Errorf("chat runner: %w", native), false},
+		{"terminal-feedback", fmt.Errorf("chat runner: %w", &botToolFeedbackError{cause: native}), false},
+		{"mixed-native", fmt.Errorf("chat runner: %w", errors.Join(feedback, native)), false},
+		{"mixed-cancel", fmt.Errorf("chat runner: %w", errors.Join(feedback, context.Canceled)), false},
+		{"mixed-budget", fmt.Errorf("chat runner: %w", errors.Join(feedback, bot.ErrBudgetExceeded)), false},
+		{"mixed-policy", fmt.Errorf("chat runner: %w", errors.Join(feedback, &agent.BotPolicyError{Decision: execution.PolicyDecision{Kind: execution.PolicyDeny}})), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := botOnlyRecoverableToolFeedback(tc.err); got != tc.want {
+				t.Fatalf("recoverable=%t want=%t error=%v", got, tc.want, tc.err)
+			}
+			if !errors.Is(tc.err, native) && tc.name != "mixed-cancel" && tc.name != "mixed-budget" && tc.name != "mixed-policy" {
+				t.Fatal("diagnostic wrapper lost native identity")
+			}
+		})
+	}
+}
 
 // Recovery eligibility does not clear Completion.Err or its native identity.
 func TestBotToolErrorTrustedCorrection(t *testing.T) {

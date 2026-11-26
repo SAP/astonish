@@ -156,13 +156,13 @@ func testBotPreparedPlanAdmissionHTTP(t *testing.T, interactive bool) {
 			v.Charter = "Announce a plan only; request exact owner approval before writing it"
 			v.Autonomy.AllowedTools = []string{"announce_plan", "update_plan", "announce_completion", "write_file", "shell_command"}
 			v.Budget.MaxTokens = nil
-			b, e := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Prepared HTTP", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "prepared-http"})
+			b, e := repo.Create(auth, store.BotCreateRequest{Name: "Prepared HTTP", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "prepared-http"})
 			must(e)
 			b, e = worker.provisionHome(auth, repo, b.ID, b.Revision)
 			must(e)
 			must(pin(auth, b.HomeSessionID.String(), "controlled", "model"))
 			if interactive {
-				b, e = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "test-owned owner plan execution"})
+				b, e = repo.Get(auth, b.ID)
 				must(e)
 			}
 			must(pin(auth, b.HomeSessionID.String(), "controlled", "model"))

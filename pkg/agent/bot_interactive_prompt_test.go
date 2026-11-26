@@ -9,7 +9,7 @@ import (
 )
 
 func TestBotInteractivePromptUsesCurrentChatWork(t *testing.T) {
-	po := NewBotPromptOverrides(nil, bot.RunRequest{Bot: store.Bot{Name: "Orbit"}, Run: store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive, Intent: store.BotIntentDraftConversation}})
+	po := NewBotPromptOverrides(nil, bot.RunRequest{Bot: store.Bot{Name: "Orbit"}, Run: store.BotRun{ExecutionMode: execution.BotExecutionModeChatInteractive, Intent: store.BotIntentConversation}})
 	builder := &SystemPromptBuilder{}
 	if !builder.applyBotPrompt(po) {
 		t.Fatal("missing bot prompt")

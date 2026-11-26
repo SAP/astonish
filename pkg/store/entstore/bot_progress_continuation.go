@@ -15,7 +15,7 @@ type botProgressOwnerContinuation struct {
 	CheckpointRevision int64 `json:"checkpoint_revision"`
 }
 
-func (r *botRepository) authorizeMandateProgressContinuation(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun) error {
+func (r *botRepository) authorizeMandateProgressContinuation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun) error {
 	if !verifiedMandateOwner(ctx, rec.Bot.OwnerID.String(), r.clock()) {
 		return store.ErrBotForbidden
 	}
@@ -49,7 +49,7 @@ func (r *botRepository) authorizeMandateProgressContinuation(ctx context.Context
 
 // Called only after full mandate verification. The private checkpoint quota is
 // restored atomically, not replaced with a new daily/per-run reservation.
-func restoreProgressOccupancy(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun, limits execution.BotMandateLimits) error {
+func restoreProgressOccupancy(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, limits execution.BotMandateLimits) error {
 	u, err := progressQuotaUsage(rec)
 	if err != nil {
 		return err
@@ -96,7 +96,7 @@ func restoreProgressOccupancy(ctx context.Context, tx botDraftDB, rec *botStored
 	return nil
 }
 
-func (r *botRepository) holdProgressContinuation(ctx context.Context, tx botDraftDB, rec *botStoredRecord, saved *botStoredRun, cause error) error {
+func (r *botRepository) holdProgressContinuation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, cause error) error {
 	phase, reason := store.BotProgressWaitingAuthorization, store.BotProgressReasonAuthorization
 	var quota *store.BotMandateQuotaError
 	if errors.As(cause, &quota) {
@@ -116,7 +116,7 @@ func (r *botRepository) holdProgressContinuation(ctx context.Context, tx botDraf
 	return appendBotRunStateTx(ctx, tx, rec.Bot, saved.Run, rec.LastSequence+1, r.clock())
 }
 
-func mandateProgressWhilePaused(ctx context.Context, tx botDraftDB, rec *botStoredRecord, ref store.BotMandateRef) bool {
+func mandateProgressWhilePaused(ctx context.Context, tx botDB, rec *botStoredRecord, ref store.BotMandateRef) bool {
 	id, ok := execution.BotRunIdentityFromContext(ctx)
 	if !ok || id.BotID != ref.BotID || id.ActorID != ref.OwnerID || id.OrgSlug != ref.OrgSlug || id.TeamSlug != ref.TeamSlug {
 		return false

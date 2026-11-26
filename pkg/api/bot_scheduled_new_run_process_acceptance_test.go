@@ -55,9 +55,6 @@ func TestBotDatabaseScheduledOccurrenceHTTP(t *testing.T) {
 			defer f.worker.Stop()
 			before := databaseRuntimeFileSnapshot(t, f.dataDir)
 			f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-			if err := json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"owned SQL scheduled acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
-				t.Fatal(err)
-			}
 			triggers := f.repo.(store.BotTriggerStore)
 			tid := uuid.New()
 			b, err := triggers.ChangeTrigger(f.ctx, store.BotTriggerChange{BotID: f.b.ID, TriggerID: tid, ExpectedRevision: f.b.Revision, Action: store.BotTriggerSave, Reason: "owned occurrence", Definition: store.TriggerSpec{Kind: store.TriggerCron, Instructions: "Report major indexes once.", Cron: "* * * * *", Timezone: "UTC"}})
@@ -377,7 +374,7 @@ func newRunProcessChild(t *testing.T, stage string) {
 		}
 		*f.policy = nil
 		f.db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-		if err = json.Unmarshal(f.request("POST", f.path+"/activate", fmt.Sprintf(`{"expected_revision":%d,"reason":"owned acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
+		if err = json.Unmarshal(f.request("POST", f.path+"/resume", fmt.Sprintf(`{"expected_revision":%d,"reason":"owned acceptance"}`, f.b.Revision), 200), &f.b); err != nil {
 			t.Fatal(err)
 		}
 		triggers := f.repo.(store.BotTriggerStore)

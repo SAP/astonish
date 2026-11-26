@@ -96,9 +96,6 @@ func TestChatRuntimeCumulativeBudgetContinuity(t *testing.T) {
 				shell := oldModel.shell
 				unusedShell := map[string]any{"command": shell["command"], "working_dir": shell["working_dir"], "background": false}
 				unusedSearch := map[string]any{"query": "unused cumulative evidence"}
-				if mode == "autonomous-bot" {
-					drillGrants(t, r.f, map[string][]map[string]any{"perplexity_web_search": {searchArgs, unusedSearch}, "delegate_tasks": {delegateArgs}, "read_file": nil, "shell_command": {shell, unusedShell}})
-				}
 				var searches atomic.Int32
 				key := "cumulative-" + string(scope) + "-fixture"
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -121,6 +118,12 @@ func TestChatRuntimeCumulativeBudgetContinuity(t *testing.T) {
 				cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"scoped-search": {"type": "litellm", "api_key": key, "base_url": server.URL}}}
 				cfg.General.WebSearchTool = "perplexity:perplexity_web_search"
 				cfg.PerplexityWebSearch.Provider, cfg.PerplexityWebSearch.Model = "scoped-search", "sonar-fixture"
+				r.f.services.PlatformSettings = botKnowledgePlatformSettings{row: &store.PlatformSettings{WebSearchTool: cfg.General.WebSearchTool, PerplexityWebSearch: &store.PerplexityWebSearchSettings{Provider: "scoped-search", Model: "sonar-fixture"}, Providers: map[string]store.ProviderConfig{"scoped-search": {"type": "litellm", "api_key": key, "base_url": server.URL}}}}
+				r.f.services.OrgSettings = botKnowledgeOrgSettings{row: &store.OrgSettings{}}
+				r.f.services.Settings = botKnowledgeTeamSettings{row: &store.TeamSettings{}}
+				if mode == "autonomous-bot" {
+					scopedSearchGrants(t, r.f, cfg, map[string][]map[string]any{"perplexity_web_search": {searchArgs, unusedSearch}, "delegate_tasks": {delegateArgs}, "read_file": nil, "shell_command": {shell, unusedShell}})
+				}
 				resources := ChatCatalogResources{Pool: pool, Backend: pool.node.backend}
 				factory := func(ctx context.Context, p, name string, selected *config.AppConfig) (model.LLM, error) {
 					owner, ok := execution.PrincipalFromContext(ctx)

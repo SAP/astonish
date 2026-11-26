@@ -37,7 +37,7 @@ func TestBotPublicationMemorySettledInterruptions(t *testing.T) {
 			}
 			version := store.DefaultBotVersion()
 			version.Charter = "Finish the design"
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Interrupted memory", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Interrupted memory", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestBotPublicationMemorySettledInterruptions(t *testing.T) {
 			db.(interface {
 				SetBotActivationReadiness(store.BotActivationReadiness)
 			}).SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: uuid.MustParse(owner), ExpectedRevision: b.Revision, Reason: "test"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

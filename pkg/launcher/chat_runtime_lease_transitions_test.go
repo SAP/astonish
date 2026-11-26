@@ -79,7 +79,7 @@ func leaseTransitionCase(t *testing.T, scope chatruntime.ResourceScope, mode, tr
 	db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
 	b, err := repo.Get(f.ctx, m.repo.probe)
 	must(err)
-	b, err = repo.Activate(f.ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "Controlled lease acceptance"})
+	b, err = repo.Get(f.ctx, b.ID)
 	must(err)
 	f.req.Bot = *b
 	v, err := repo.GetVersion(f.ctx, b.ID, b.Version)

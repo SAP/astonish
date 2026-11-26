@@ -22,7 +22,7 @@ type scheduledTaskBinding struct {
 
 func scheduledTaskKey(id uuid.UUID) string  { return "scheduled-task:" + id.String() }
 func scheduledTaskHead(id uuid.UUID) string { return "scheduled-task-head:" + id.String() }
-func (s *botAuthorizedOperationRuntime) issueScheduledTask(ctx context.Context, tx botDraftDB, rec *botStoredRecord, op store.BotOperation, tr store.TriggerSpec, parent store.BotMandateRecord) error {
+func (s *botAuthorizedOperationRuntime) issueScheduledTask(ctx context.Context, tx botDB, rec *botStoredRecord, op store.BotOperation, tr store.TriggerSpec, parent store.BotMandateRecord) error {
 	if op.Payload.Operation != store.BotControlScheduleCreate && op.Payload.Operation != store.BotControlScheduleEdit {
 		return nil
 	}
@@ -67,7 +67,7 @@ func (s *botAuthorizedOperationRuntime) issueScheduledTask(ctx context.Context, 
 	rec.Metadata[scheduledTaskHead(tr.ID)] = m.Ref
 	return saveMandateMetadata(ctx, tx, rec)
 }
-func readScheduledTask(ctx context.Context, tx botDraftDB, ref store.BotMandateRef) (*scheduledTaskBinding, error) {
+func readScheduledTask(ctx context.Context, tx botDB, ref store.BotMandateRef) (*scheduledTaskBinding, error) {
 	a, err := tx.FindActivity(ctx, ref.BotID, scheduledTaskKey(ref.ID))
 	if err != nil {
 		return nil, err
@@ -78,7 +78,7 @@ func readScheduledTask(ctx context.Context, tx botDraftDB, ref store.BotMandateR
 	}
 	return &b, nil
 }
-func (s *botMandateRuntime) verifyScheduledTask(ctx context.Context, tx botDraftDB, rec *botStoredRecord, m *store.BotMandateRecord, b *scheduledTaskBinding) error {
+func (s *botMandateRuntime) verifyScheduledTask(ctx context.Context, tx botDB, rec *botStoredRecord, m *store.BotMandateRecord, b *scheduledTaskBinding) error {
 	parent, _, err := s.verify(ctx, tx, b.Parent, execution.BotMandatePurposeTask)
 	if err != nil {
 		return err
@@ -98,7 +98,7 @@ func (s *botMandateRuntime) verifyScheduledTask(ctx context.Context, tx botDraft
 	}
 	return verifyAuthorizedGrant(ctx, tx, *op)
 }
-func (r *botRepository) attachScheduledTask(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run *store.BotRun, req store.BotRunRequest) error {
+func (r *botRepository) attachScheduledTask(ctx context.Context, tx botDB, rec *botStoredRecord, run *store.BotRun, req store.BotRunRequest) error {
 	raw, exists := rec.Metadata[scheduledTaskHead(req.TriggerID)]
 	if !exists {
 		return nil

@@ -1,5 +1,14 @@
 # Migration Management
 
+## Unreleased Active Bot lifecycle (no migration)
+
+Bots create as Active with independent disabled-by-default recurrence. This is the
+current unreleased design, not a released Draft-to-Active upgrade. No lifecycle
+data conversion, historical intent adapters or marker-6 bump is required. DDL
+marker 5 and unrelated reconciliation infrastructure remain unchanged. Current
+format backups retain safe paused restore; experimental development Bots may be
+removed only through scoped Bot deletion, never shared DB or ordinary Chat removal.
+
 ## Employee-operation persistence acceptance — 2026-11-08
 
 `TestIntegrationPostgresBotEmployeeOperations` uses the production router with actual PostgreSQL personal/team schemas, never SQLite under a PostgreSQL label. It requires the existing fail-closed disposable guard: loopback-only nondefault port, `postgres` database, `astonish_activation_final` bootstrap role, no TLS/fallback hosts, and explicit disposable consent. Run only against a newly owned temporary pgvector server; never use a production DSN or reset a user database. The suite exercises operation/occurrence transaction rollback, concurrent retries, router reopen, mandate revocation and deletion cleanup. Current concurrent schedule insertion failures are acceptance blockers, not a reason to regenerate schemas or remove constraints. No schema migration changes are made by this test addition.
@@ -166,9 +175,9 @@ This change adds no DDL, generated Ent changes, or Bot schema-version bump.
 Existing transcript JSON carries `bot_run_state` schema_version=1 state-only
 envelopes. Old clients ignore unknown metadata; new clients ignore unknown
 versions for rendering but advance replay cursors. Ordinary Chat remains unchanged.
-No startup or GET backfills historical state or initializes legacy drafts.
+No startup or GET backfills historical state or upgrades experimental Bot lifecycle data.
 `start_from_title:true` is explicit create-only admission, not a migration of old
-create keys. Imports and default CreateDraft stay inert. Snapshot fields
+create keys. Imports and default Create return Active without starting work. Snapshot fields
 `run_states` and `history_cursor` are additive read-only projections. PostgreSQL
 requires a separate disposable-database run; SQLite proof is not PostgreSQL proof.
 

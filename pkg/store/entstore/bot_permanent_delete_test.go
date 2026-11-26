@@ -31,7 +31,7 @@ func testBotPermanentVerifiedPurge(t *testing.T) {
 				t.Fatalf("missing work before purge: %v", err)
 			}
 			reservedKeys := []string{"mandate-revoked:test:1", "mandate-reservation:test", "mandate-quota:test:1"}
-			if err := repo.db.Transaction(owner, func(tx botDraftDB) error {
+			if err := repo.db.Transaction(owner, func(tx botDB) error {
 				rec, err := tx.GetBot(owner, run.BotID)
 				if err != nil {
 					return err
@@ -46,7 +46,7 @@ func testBotPermanentVerifiedPurge(t *testing.T) {
 				t.Fatal(err)
 			}
 			soft, teardown := cleanupDeleteFixture(t, repo, owner, run, lease)
-			other, err := repo.CreateDraft(owner, store.BotCreateRequest{Name: "Unrelated", OwnerID: soft.OwnerID, Version: permanentTestVersion(), IdempotencyKey: "other"})
+			other, err := repo.Create(owner, store.BotCreateRequest{Name: "Unrelated", OwnerID: soft.OwnerID, Version: permanentTestVersion(), IdempotencyKey: "other"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -299,12 +299,12 @@ func TestBotPermanentUnprovisioned(t *testing.T) {
 			repo, owner, _, _, _, _ := botRunFixture(t, scope)
 			ownerID := uuid.MustParse(repo.auth.userID)
 			for _, attempted := range []bool{false, true} {
-				b, err := repo.CreateDraft(owner, store.BotCreateRequest{Name: "Draft", OwnerID: ownerID, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
+				b, err := repo.Create(owner, store.BotCreateRequest{Name: "Draft", OwnerID: ownerID, Version: permanentTestVersion(), IdempotencyKey: uuid.NewString()})
 				if err != nil {
 					t.Fatal(err)
 				}
 				if attempted {
-					err = repo.db.Transaction(owner, func(tx botDraftDB) error {
+					err = repo.db.Transaction(owner, func(tx botDB) error {
 						rec, e := tx.GetBot(owner, b.ID)
 						if e != nil {
 							return e

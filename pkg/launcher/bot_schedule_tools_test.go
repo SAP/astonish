@@ -96,7 +96,7 @@ func scheduleFixture(t *testing.T, scope store.BotScope) (*botFactoryFixture, st
 		repo = f.services.PersonalBots
 		dbPath = filepath.Join(dir, "orgs", p.OrgSlug, "personal", p.Subject+".db")
 	}
-	b, err := repo.CreateDraft(f.ctx, store.BotCreateRequest{Name: "Schedules", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "schedule"})
+	b, err := repo.Create(f.ctx, store.BotCreateRequest{Name: "Schedules", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "schedule"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestBotScheduleToolsReviewedLifecycle(t *testing.T) {
 
 func TestBotScheduleToolsForeignAndUnsafeRequests(t *testing.T) {
 	f, repo := scheduleFixture(t, store.BotScopePersonal)
-	foreign, err := repo.CreateDraft(f.ctx, store.BotCreateRequest{Name: "Other Bot", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "foreign"})
+	foreign, err := repo.Create(f.ctx, store.BotCreateRequest{Name: "Other Bot", OwnerID: f.req.Bot.OwnerID, Version: f.req.Version, IdempotencyKey: "foreign"})
 	if err != nil {
 		t.Fatal(err)
 	}

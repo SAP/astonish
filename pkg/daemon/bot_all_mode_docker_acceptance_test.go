@@ -264,7 +264,7 @@ func runAllModeDocker(f *allModeDockerFixture) {
 // run after its complete owner answer has been accepted into the database.
 func TestBotDatabaseContinuationDenialsDocker(t *testing.T) {
 	if os.Getenv("ASTONISH_TEST_DOCKER") != "1" {
-		t.Fatal("database denial acceptance requires real Docker; skips are not evidence")
+		t.Skip("set ASTONISH_TEST_DOCKER=1 for real Docker database denial acceptance; skip is not acceptance evidence")
 	}
 	if os.Getenv("ASTONISH_BOT_HOME_TEST_TEMPLATE") != "" {
 		t.Fatal("denial acceptance requires unchanged default template")
@@ -333,7 +333,7 @@ func runAllModeDockerWithDenial(f *allModeDockerFixture, denial string) {
 	if err := f.worker.activationReady(ctx, *current, *version); err != nil {
 		t.Fatalf("activation readiness: %v", err)
 	}
-	raw := f.post(base+"/activate"+suffix, map[string]any{"expected_revision": current.Revision, "reason": "Owner authorizes the disposable read-only scheduled lifecycle"}, 200)
+	raw := f.post(base+"/resume"+suffix, map[string]any{"expected_revision": current.Revision, "reason": "Owner authorizes the disposable read-only scheduled lifecycle"}, 200)
 	if err = json.Unmarshal(raw, &current); err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func runAllModeDelegate(f *allModeDockerFixture, mdl *allModeDockerModel, select
 	// are control-only and must not acquire file or delegate authority.
 	f.worker.config.ModelOptions.MaxOutputTokens = 4096
 	t.Logf("DELEGATE_ACTIVATION scope=%s status=%s revision=%d version=%d", f.scope, current.Status, current.Revision, current.Version)
-	raw := f.post(base+"/activate"+suffix, map[string]any{"expected_revision": current.Revision, "reason": "Owner resumes active interactive delegated reads without enabling recurrence"}, http.StatusOK)
+	raw := f.post(base+"/resume"+suffix, map[string]any{"expected_revision": current.Revision, "reason": "Owner resumes active interactive delegated reads without enabling recurrence"}, http.StatusOK)
 	if err = json.Unmarshal(raw, &current); err != nil {
 		t.Fatal(err)
 	}

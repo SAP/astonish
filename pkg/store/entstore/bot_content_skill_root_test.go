@@ -19,7 +19,7 @@ func TestBotContentSkillRootPersistence(t *testing.T) {
 			now := time.Now().UTC()
 			skill := store.BotSkill{ID: uuid.New(), BotID: b, Key: "root", Title: "Root", Status: store.BotSkillDraft, Revision: 1, HeadRevision: 1, HeadDigest: strings.Repeat("a", 64), CreatedAt: now, UpdatedAt: now}
 			saved := botStoredSkill{Skill: skill, Requests: map[string]botSkillReplay{"create": {Hash: strings.Repeat("b", 64), Skill: &skill}}}
-			if err := db.Transaction(t.Context(), func(tx botDraftDB) error { return tx.(botSkillDB).writeSkill(t.Context(), saved, 0) }); err != nil {
+			if err := db.Transaction(t.Context(), func(tx botDB) error { return tx.(botSkillDB).writeSkill(t.Context(), saved, 0) }); err != nil {
 				t.Fatal(err)
 			}
 			sentinel := "SENTINEL-replay-work-prose"

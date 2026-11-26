@@ -9,7 +9,7 @@ import (
 )
 
 // Configuration consent includes pausing an active Bot. Never implicitly resume.
-func (r *botRepository) applyControlConfigurationTx(ctx context.Context, tx botDraftDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
+func (r *botRepository) applyControlConfigurationTx(ctx context.Context, tx botDB, rec *botStoredRecord, p store.BotControlProposal, actor uuid.UUID) error {
 	c := p.Payload.Configuration
 	if c == nil {
 		return store.ErrBotInvalid
@@ -72,7 +72,7 @@ func (r *botRepository) applyControlConfigurationTx(ctx context.Context, tx botD
 		}
 	}
 	switch rec.Bot.Status {
-	case store.BotDraft, store.BotPaused, store.BotStopped:
+	case store.BotPaused, store.BotStopped:
 	default:
 		return store.ErrBotConflict
 	}

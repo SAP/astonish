@@ -60,32 +60,32 @@ func TestBotControlProposalReopen(t *testing.T) {
 
 // Preserve the transaction-local extension interfaces while injecting a failure
 // at the final receipt, after mutation and scheduler work have succeeded.
-type controlReceiptFailDB struct{ botDraftDB }
+type controlReceiptFailDB struct{ botDB }
 
 func (d controlReceiptFailDB) controlMemoryMutation(ctx context.Context, p store.BotControlProposal, session, actor uuid.UUID, now time.Time) error {
-	return d.botDraftDB.(botControlMemoryDB).controlMemoryMutation(ctx, p, session, actor, now)
+	return d.botDB.(botControlMemoryDB).controlMemoryMutation(ctx, p, session, actor, now)
 }
 
 func (d controlReceiptFailDB) updateControlVersion(ctx context.Context, r botStoredRecord, v int64, now time.Time) error {
-	return d.botDraftDB.(botControlVersionDB).updateControlVersion(ctx, r, v, now)
+	return d.botDB.(botControlVersionDB).updateControlVersion(ctx, r, v, now)
 }
 func (d controlReceiptFailDB) saveTriggerVersion(ctx context.Context, r botStoredRecord, v int64, now time.Time) error {
-	return d.botDraftDB.(botTriggerDB).saveTriggerVersion(ctx, r, v, now)
+	return d.botDB.(botTriggerDB).saveTriggerVersion(ctx, r, v, now)
 }
 func (d controlReceiptFailDB) triggerScheduler() store.SchedulerStore {
-	return d.botDraftDB.(botTriggerDB).triggerScheduler()
+	return d.botDB.(botTriggerDB).triggerScheduler()
 }
 func (d controlReceiptFailDB) InsertActivity(ctx context.Context, a store.BotActivity, key string) error {
 	if strings.HasSuffix(key, ":decision") {
 		return errors.New("injected receipt failure")
 	}
-	return d.botDraftDB.InsertActivity(ctx, a, key)
+	return d.botDB.InsertActivity(ctx, a, key)
 }
 
-type controlReceiptFailTransaction struct{ botDraftDB }
+type controlReceiptFailTransaction struct{ botDB }
 
-func (d controlReceiptFailTransaction) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(controlReceiptFailDB{tx}) })
+func (d controlReceiptFailTransaction) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(controlReceiptFailDB{tx}) })
 }
 
 func TestBotControlProposalReceiptRollback(t *testing.T) {

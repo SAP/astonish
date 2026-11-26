@@ -41,6 +41,9 @@ func TestRegistrationBootstrapHTTP(t *testing.T) {
 			// Use actual auth and tenant middleware, not a manufactured principal.
 			router.HandleFunc("/api/studio/bots", api.BotCreateHandler).Methods("POST")
 			svc.BotMandatePolicy = newProductionBotMandatePolicy(db, &config.AppConfig{})
+			// This admission-only fixture has no executor; title creation still
+			// requires the composed interactive-service readiness signal.
+			svc.BotInteractiveReady = true
 			handler := api.PlatformAuthMiddleware(pa, entstore.TenantMiddleware(db)(router))
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handler.ServeHTTP(w, r.WithContext(store.WithServices(r.Context(), svc)))

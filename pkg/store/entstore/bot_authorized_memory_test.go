@@ -27,7 +27,7 @@ func TestRoutineMemorySearchCorrectionAndForget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var db botDraftDB
+			var db botDB
 			switch s := bots.(type) {
 			case *personalBotStore:
 				db = personalBotDB{client: s.client, content: s.content}
@@ -60,7 +60,7 @@ func TestRoutineMemorySearchCorrectionAndForget(t *testing.T) {
 				if op == store.BotControlMemoryForget {
 					p.Payload.Memory.Category = ""
 				}
-				if err := db.Transaction(ctx, func(tx botDraftDB) error {
+				if err := db.Transaction(ctx, func(tx botDB) error {
 					if err := mutateControlMemory(ctx, tx, p, b.HomeSessionID, b.OwnerID, time.Now()); err != nil {
 						return err
 					}

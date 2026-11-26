@@ -307,7 +307,7 @@ func TestBotConversationPresentationBrowserAcceptance(t *testing.T) {
 				t.Fatalf("view/reload admitted work: %+v %v", rows, err)
 			}
 			current, err := f.repo.Get(f.ctx, f.b.ID)
-			if err != nil || current.Status != store.BotDraft {
+			if err != nil || current.Status != store.BotActive {
 				t.Fatalf("view/reload changed lifecycle: %+v %v", current, err)
 			}
 			t.Logf("built Studio scope=%s endpoint=%s isolated_profile=true live/restore mixed public frames; no run admission", scope, server.URL)

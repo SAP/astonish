@@ -184,7 +184,7 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		adapter, ok := tx.(botTranscriptDB)
 		if !ok {
 			return store.ErrBotUnsupported

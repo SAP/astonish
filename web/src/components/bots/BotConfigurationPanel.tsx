@@ -46,7 +46,7 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
   const [error, setError] = useState(''), [message, setMessage] = useState('')
   const [busy, setBusy] = useState(true), [conflict, setConflict] = useState(false)
   const alive = useRef(true), initialBot = useRef(bot)
-  const editableStatus = bot.status === BotStatus.Draft || bot.status === BotStatus.Paused || bot.status === BotStatus.Stopped
+  const editableStatus = bot.status === BotStatus.Paused || bot.status === BotStatus.Stopped
   const unavailable = readOnly || !editableStatus
   const resetReview = () => { setReview(undefined); setReviewed(false); setRights(false); setMessage('') }
   useEffect(() => {
@@ -78,7 +78,7 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
       const saved = await configureBot(bot.id, bot.scope, review)
       if (!alive.current) return
       setBaseline({ bot: saved, policy: review }); setDraft(clean(review)); resetReview(); setReason('')
-      setMessage('Configuration saved. Activation and runs are separate actions.'); onChange()
+      setMessage('Configuration saved. Resuming and requesting runs are separate actions.'); onChange()
     } catch (e) {
       if (!alive.current) return
       setError((e as Error).message); setReviewed(false); setRights(false)
@@ -90,7 +90,7 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
   const newer = baseline && (bot.revision !== baseline.bot.revision || bot.version !== baseline.bot.version)
   return <section aria-label="Runtime configuration" className="space-y-3 rounded-lg border border-border bg-card p-4 text-card-foreground">
     <h2 className="font-semibold">Autonomy, budgets & delivery</h2>
-    <p className="text-sm text-muted-foreground">Policy changes require explicit review. Editing charter or prose does not grant rights. Saving does not activate this Bot or start a run.</p>
+    <p className="text-sm text-muted-foreground">Policy changes require explicit review. Editing charter or prose does not grant rights. Saving does not resume this Bot, start a run or enable schedules.</p>
     {unavailable && <p>Configuration is read-only. Pause or stop an active Bot explicitly before changing runtime policy.</p>}
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {message && <p role="status">{message}</p>}

@@ -34,7 +34,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 	}{{false, 0}, {true, 0}, {true, 2000}} {
 		mandated := scenario.mandated
 		t.Run(fmt.Sprintf("mandated=%t/ledger=%d", mandated, scenario.ledgerRows), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, store.BotScopePersonal)
+			f := newProgressHTTPFixture(t, store.BotScopePersonal)
 			payload := strings.Repeat("Independent observation of measured revenue and costs. ", 300)
 			var calls atomic.Int64
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); fmt.Fprint(w, payload) }))
@@ -57,6 +57,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			*f.policy = nil
+			progressResumeFixture(t, f)
 			steps := 0
 			prior := time.Now()
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

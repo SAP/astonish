@@ -21,7 +21,7 @@ func TestBotContentSourceIntakeSQL(t *testing.T) {
 			ctx := context.Background()
 			codec := newScopedBotContentCodec(t.TempDir(), "org", "team")
 			p := &store.BotSourceIntakeProposal{ID: uuid.New(), OwnerID: uuid.New(), Scope: scope, Digest: strings.Repeat("a", 64), Status: store.BotSourceIntakeProposed, CreatedAt: time.Now().UTC(), Request: store.BotSourceIntakeRequest{Mode: store.BotIntakeChat, Charter: "source-prose-sentinel", Carryover: store.BotCarryover{Summary: "source-carryover-sentinel"}}}
-			var db botDraftDB
+			var db botDB
 			var raw func() []byte
 			if scope == store.BotScopePersonal {
 				_, c := setupPersonalStore(t)

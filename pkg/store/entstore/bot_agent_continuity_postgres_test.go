@@ -63,7 +63,7 @@ func TestBotAgentPostgresContinuityCASProjection(t *testing.T) {
 				notifications = append(notifications, state)
 			})
 			original := r.db
-			r.db = botProgressFailDB{botDraftDB: original}
+			r.db = botProgressFailDB{botDB: original}
 			next := before.Clone()
 			next.AgentWork.Notes = "Must never become visible"
 			_, err = r.SaveWork(worker, store.BotWorkUpdate{Lease: f.lease, ExpectedRevision: before.Revision, State: *next})

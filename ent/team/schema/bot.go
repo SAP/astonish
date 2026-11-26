@@ -21,7 +21,7 @@ func (Bot) Fields() []ent.Field {
 		field.UUID("id", uuid.UUID{}).Default(uuid.New),
 		field.UUID("owner_id", uuid.UUID{}).Immutable(),
 		field.String("name").NotEmpty(),
-		field.Enum("status").Values("draft", "active", "paused", "stopped", "deleted").Default("draft"),
+		field.Enum("status").Values("active", "paused", "stopped", "deleted").Default("active"),
 		field.Int64("revision").Default(1),
 		field.Int64("version").Default(1),
 		field.Int("schema_version").Default(1),

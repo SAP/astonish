@@ -22,7 +22,7 @@ type botSourceIntakeRecord struct {
 	BotID   *uuid.UUID                  `json:"bot_id,omitempty"`
 }
 
-func sourceProposalContent(ctx context.Context, tx botDraftDB, id, owner uuid.UUID) (*botIndependentContent, error) {
+func sourceProposalContent(ctx context.Context, tx botDB, id, owner uuid.UUID) (*botIndependentContent, error) {
 	b := &store.BotUnfinishedIntake{ID: id, OwnerID: owner}
 	switch d := tx.(type) {
 	case personalBotDB:
@@ -36,7 +36,7 @@ func sourceProposalContent(ctx context.Context, tx botDraftDB, id, owner uuid.UU
 	}
 }
 
-func sourceProposalRead(ctx context.Context, tx botDraftDB, id, owner uuid.UUID) (*store.BotSourceIntakeProposal, int64, error) {
+func sourceProposalRead(ctx context.Context, tx botDB, id, owner uuid.UUID) (*store.BotSourceIntakeProposal, int64, error) {
 	var raw []byte
 	var hash string
 	var revision int64
@@ -83,7 +83,7 @@ func sourceProposalRead(ctx context.Context, tx botDraftDB, id, owner uuid.UUID)
 	}
 	return &p, revision, nil
 }
-func sourceProposalWrite(ctx context.Context, tx botDraftDB, p *store.BotSourceIntakeProposal, revision int64) error {
+func sourceProposalWrite(ctx context.Context, tx botDB, p *store.BotSourceIntakeProposal, revision int64) error {
 	content, e := sourceProposalContent(ctx, tx, p.ID, p.OwnerID)
 	if e != nil {
 		return e

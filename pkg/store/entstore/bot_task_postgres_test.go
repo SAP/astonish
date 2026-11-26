@@ -51,7 +51,7 @@ func TestBotTaskPostgresContinuity(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = r.db.Transaction(f.owner, func(tx botDraftDB) error {
+				if err = r.db.Transaction(f.owner, func(tx botDB) error {
 					pin, e := pinTaskHead(f.owner, tx, f.run.BotID, &task.ID)
 					if e != nil {
 						return e

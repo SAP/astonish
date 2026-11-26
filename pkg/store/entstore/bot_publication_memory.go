@@ -51,7 +51,7 @@ func (r *botRepository) publicationFileCommit(ctx context.Context, h store.BotHo
 	if _, err := r.auth.authorize(ctx, [16]byte{}, true); err != nil {
 		return err
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		var n int
 		var err error
 		switch d := tx.(type) {

@@ -15,7 +15,7 @@ func operationKey(id uuid.UUID, revision int64) string {
 	return fmt.Sprintf("mandate-operation:%s:%d", id, revision)
 }
 func operationHeadKey(id uuid.UUID) string { return "mandate_operation_head:" + id.String() }
-func readMandateOperation(ctx context.Context, tx botDraftDB, rec *botStoredRecord, ref store.BotMandateRef, id uuid.UUID) (*store.BotOperation, error) {
+func readMandateOperation(ctx context.Context, tx botDB, rec *botStoredRecord, ref store.BotMandateRef, id uuid.UUID) (*store.BotOperation, error) {
 	raw, ok := rec.Metadata[operationHeadKey(id)]
 	if !ok {
 		return nil, store.ErrBotNotFound
@@ -56,7 +56,7 @@ func (s *botMandateRuntime) CreateBotOperation(ctx context.Context, o store.BotO
 		return nil, store.ErrBotInvalid
 	}
 	var result *store.BotOperation
-	err := s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := s.repo.db.Transaction(ctx, func(tx botDB) error {
 		m, err := readMandate(ctx, tx, o.MandateRef)
 		if err != nil {
 			return err
@@ -112,7 +112,7 @@ func (s *botMandateRuntime) CreateBotOperation(ctx context.Context, o store.BotO
 }
 func (s *botMandateRuntime) TransitionBotOperation(ctx context.Context, ref store.BotMandateRef, id uuid.UUID, revision int64, next store.BotOperationStatus, receipt store.BotOperationReceipt) (*store.BotOperation, error) {
 	var result *store.BotOperation
-	err := s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := s.repo.db.Transaction(ctx, func(tx botDB) error {
 		m, err := readMandate(ctx, tx, ref)
 		if err != nil {
 			return err

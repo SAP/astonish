@@ -68,7 +68,7 @@ func assertProgressReportText(t *testing.T, history, invocationID, wantText stri
 func TestBotProgressEmployeeHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
-			f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+			f := newProgressHTTPFixture(t, scope)
 			*f.policy = func(context.Context, store.BotMandateRef) (store.BotMandatePolicy, error) {
 				return store.BotMandatePolicy{RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, nil
 			}
@@ -85,6 +85,7 @@ func TestBotProgressEmployeeHTTP(t *testing.T) {
 			// This fixture exercises caller-bound interactive authority, not durable
 			// mandate issuance. The resolver above authorizes the reviewed policy.
 			*f.policy = nil
+			progressResumeFixture(t, f)
 			evaluations, steps := 0, 0
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
 				text := ""

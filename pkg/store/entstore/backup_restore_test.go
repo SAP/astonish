@@ -106,7 +106,7 @@ func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformResto
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Retain this responsibility"
-			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Backup Bot", OwnerID: owner, Version: v, IdempotencyKey: "backup-bot", Goals: []store.BotGoal{{Title: "Delivery", CompletionCriteria: "Received"}}})
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "Backup Bot", OwnerID: owner, Version: v, IdempotencyKey: "backup-bot", Goals: []store.BotGoal{{Title: "Delivery", CompletionCriteria: "Received"}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,7 +133,7 @@ func testRestorePlatformBackupSQLiteFreshTarget(t *testing.T, opts PlatformResto
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "Retained deletion"
-			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "Deleted Bot", OwnerID: owner, Version: v, IdempotencyKey: "deleted"})
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "Deleted Bot", OwnerID: owner, Version: v, IdempotencyKey: "deleted"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,7 +314,7 @@ func testRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T, includeBots b
 			}
 			v := store.DefaultBotVersion()
 			v.Charter = "oldorg"
-			b, err := repo.CreateDraft(botCtx, store.BotCreateRequest{Name: "ops", OwnerID: uuid.MustParse(userID), Version: v, IdempotencyKey: "mapped", Goals: []store.BotGoal{{Title: "oldorg", CompletionCriteria: userID}}})
+			b, err := repo.Create(botCtx, store.BotCreateRequest{Name: "ops", OwnerID: uuid.MustParse(userID), Version: v, IdempotencyKey: "mapped", Goals: []store.BotGoal{{Title: "oldorg", CompletionCriteria: userID}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,7 +333,7 @@ func testRestorePlatformBackupSQLiteMappedOrgAndTeam(t *testing.T, includeBots b
 				repo = orgStore.ForUser(userID).Bots()
 			}
 			b, err := repo.Get(botCtx, id)
-			if err != nil || b.Name != "ops" || b.OwnerID.String() != userID || b.Status != store.BotDraft {
+			if err != nil || b.Name != "ops" || b.OwnerID.String() != userID || b.Status != store.BotActive {
 				t.Fatalf("failed export changed source ownership: %+v %v", b, err)
 			}
 			v, err := repo.GetVersion(botCtx, id, 1)
@@ -803,7 +803,7 @@ func TestBotRestoreApprovalEnvelope(t *testing.T) {
 
 func TestBotRestoreQuiescenceDocuments(t *testing.T) {
 	for _, textJSON := range []bool{false, true} {
-		for _, state := range []store.BotStatus{store.BotDraft, store.BotActive, store.BotPaused, store.BotStopped, store.BotDeleted} {
+		for _, state := range []store.BotStatus{store.BotActive, store.BotActive, store.BotPaused, store.BotStopped, store.BotDeleted} {
 			doc := any(map[string]any{"create_hash": "keep", "read_cursors": map[string]any{"viewer": json.Number("9007199254740993")}})
 			if textJSON {
 				data, _ := json.Marshal(doc)

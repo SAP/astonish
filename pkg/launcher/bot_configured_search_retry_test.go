@@ -15,7 +15,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
-"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"google.golang.org/adk/model"
@@ -70,8 +70,11 @@ func TestBotConfiguredSearchInitializationRetry(t *testing.T) {
 				deadline = b.Deadline()
 			}
 			if mode == "progress" {
-				b, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds:300, RuntimePolicy:execution.NewBotProgressRuntimePolicy()},time.Now().Add(-6*time.Hour))
-				if err != nil { t.Fatal(err) }; f.req.Budget=b
+				b, err := bot.NewRunBudget(store.BudgetSpec{MaxRuntimeSeconds: 300, RuntimePolicy: execution.NewBotProgressRuntimePolicy()}, time.Now().Add(-6*time.Hour))
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.req.Budget = b
 			}
 			calls := 0
 			factory := func(ctx context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {

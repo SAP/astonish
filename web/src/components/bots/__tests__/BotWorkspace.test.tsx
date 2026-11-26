@@ -3,7 +3,7 @@ vi.mock('@/api/botFiles', async original => ({ ...await original<typeof filesApi
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import BotWorkspace, { BotQualityDetails, BotWorkDetails, BotRunWorkDetails } from '../BotWorkspace'
-import BotDraftDialog from '../BotDraftDialog'
+import BotCreateDialog from '../BotCreateDialog'
 import BotSidebar from '../BotSidebar'
 import { BotGoals, BotSchedule } from '../BotPanels'
 import { BotDecisionInbox } from '../BotControls'
@@ -127,7 +127,7 @@ vi.mock('../BotHomeModel', () => ({ default: ({ sessionId }: { sessionId: string
 // Real StudioChat reuse/transport is covered separately and by the built-SPA test.
 const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; onSend: (text: string, attachments?: import('@/api/studioChat').AttachmentPayload[]) => Promise<void> } }))
 vi.mock('../../StudioChat', () => ({ default: ({ botThread }: { botThread: NonNullable<typeof chatProps.current> }) => { chatProps.current = botThread; return <textarea aria-label="Shared composer" disabled={botThread.readOnly} /> } }))
-const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'Watcher', status: 'draft', revision: 1, version: 1, home_session_id: 'home', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'bot', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
+const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'Watcher', status: 'active', revision: 1, version: 1, home_session_id: 'home', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'bot', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
 const version: api.BotVersion = { bot_id: 'bot', version: 1, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, autonomy: { level: 'supervised', can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'important', preferences: '', bindings: [] }, triggers: [] }
 beforeEach(() => {
   vi.clearAllMocks()
@@ -223,7 +223,7 @@ describe('Bot workspace', () => {
     expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument()
   })
   it.each((['personal', 'team'] as const).flatMap(scope =>
-    (['draft', 'active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
+    (['active', 'paused', 'stopped', 'deleted'] as const).flatMap(status =>
       ['owner', 'other'].map(userId => ({ scope, status, userId })))))('keeps Files separate from control panels in $scope / $status / $userId Details', async ({ scope, status, userId }) => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
     render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId={userId} />)
@@ -281,14 +281,14 @@ describe('Bot workspace', () => {
     expect(api.requestBotRun).not.toHaveBeenCalled()
     expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
   })
-  it('prepares a draft with an existing conversation but no physical home and retains the acknowledged revision', async () => {
+  it('prepares an Active Bot with an existing conversation but no physical home and retains the acknowledged revision', async () => {
     const empty = { ...bot, home_session_id: '82c09d23-63e1-42d8-8baa-5f540fabc645', home: null }
     vi.mocked(api.getBot).mockResolvedValue(empty)
     vi.mocked(api.setupBotHome).mockResolvedValue({ ...empty, revision: 2, home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: bot.id, scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 } })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
     await openDetails('Execution setup')
     expect(await screen.findByText(`Home model: ${empty.home_session_id}`)).toBeInTheDocument()
-    await screen.findByRole('button', { name: 'Review activation' })
+    expect(screen.queryByRole('button', { name: 'Review resume' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Test once' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Test once' }))
     expect(screen.queryByLabelText('Test instructions')).not.toBeInTheDocument()
@@ -303,7 +303,7 @@ describe('Bot workspace', () => {
     expect(api.requestBotRun).not.toHaveBeenCalled()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Test once' })).toBeEnabled())
   })
-  it('routes a reviewed draft test to the normal read-only run trace without activating', async () => {
+  it('routes a reviewed Active test to the normal read-only run trace without lifecycle changes', async () => {
     vi.mocked(api.requestBotTestRun).mockResolvedValue({ id: 'test' } as api.BotRun)
     const view = render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
     await openDetails('Execution setup')
@@ -345,17 +345,17 @@ describe('Bot workspace', () => {
     expect(api.requestBotConversation).not.toHaveBeenCalled()
   })
   it.each((['personal', 'team'] as const).flatMap(scope =>
-    ([api.BotStatus.Draft, api.BotStatus.Active, api.BotStatus.Paused, api.BotStatus.Stopped, api.BotStatus.Deleted] as const).flatMap(status =>
+    ([api.BotStatus.Active, api.BotStatus.Paused, api.BotStatus.Stopped, api.BotStatus.Deleted] as const).flatMap(status =>
       ['owner', 'other', undefined].map(userId => ({ scope, status, userId })))))('derives attachment and conversation permissions independently for $scope / $status / $userId', async ({ scope, status, userId }) => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope, status })
     render(<BotWorkspace route={{ botId: 'bot', scope }} theme="dark" userId={userId} />)
     const composer = await screen.findByLabelText('Shared composer')
     const unavailable = status === api.BotStatus.Stopped || status === api.BotStatus.Deleted || !userId ||
-      ((status === api.BotStatus.Draft || status === api.BotStatus.Paused || scope === 'personal') && userId !== 'owner')
+      ((status === api.BotStatus.Paused || scope === 'personal') && userId !== 'owner')
     expect(composer).toHaveProperty('disabled', unavailable)
-    expect(chatProps.current?.toolFree).toBe(status === api.BotStatus.Draft || status === api.BotStatus.Paused)
+    expect(chatProps.current?.toolFree).toBe(status === api.BotStatus.Paused)
     const attachments = [{ filename: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }]
-    if (unavailable || status === api.BotStatus.Draft || status === api.BotStatus.Paused) {
+    if (unavailable || status === api.BotStatus.Paused) {
       await expect(chatProps.current!.onSend('Discuss setup', attachments)).rejects.toThrow(unavailable ? 'read-only' : 'Attachments are unavailable')
       expect(reviewsApi.sendBotMessage).not.toHaveBeenCalled()
     } else {
@@ -385,6 +385,7 @@ describe('Bot workspace', () => {
     expect(window.location.hash).toBe(`#${botPath('bot', 'personal')}`)
   })
   it('exposes runtime configuration and keeps its reviewed draft mounted across tabs and refresh', async () => {
+    vi.mocked(api.getBot).mockResolvedValue({ ...bot, status: 'paused' })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
     await openDetails('Memory & charter')
     expect(screen.getByRole('region', { name: 'Runtime configuration' })).toBeVisible()
@@ -408,12 +409,12 @@ describe('Bot workspace', () => {
     fireEvent.click(screen.getByLabelText('I explicitly authorize the rights, spending and delivery destinations shown above'))
     vi.mocked(policyApi.configureBot).mockResolvedValue({ ...bot, revision: 2, version: 2 })
     fireEvent.click(screen.getByRole('button', { name: 'Save reviewed configuration' }))
-    await screen.findByText('Configuration saved. Activation and runs are separate actions.')
+    await screen.findByText('Configuration saved. Resuming and requesting runs are separate actions.')
     await waitFor(() => expect(api.getBot).toHaveBeenCalledTimes(3))
     expect(policyApi.configureBot).toHaveBeenCalledWith('bot', 'personal', expect.objectContaining({ expected_revision: 1, expected_version: 1, reason: 'Reviewed hosts' }))
     expect(api.botLifecycle).not.toHaveBeenCalled()
   })
-  it.each([{ userId: 'other', status: 'draft' }, { userId: undefined, status: 'draft' }, { userId: 'owner', status: 'deleted' }] as const)('keeps runtime configuration read-only for $userId / $status', async ({ userId, status }) => {
+  it.each([{ userId: 'other', status: 'active' }, { userId: undefined, status: 'active' }, { userId: 'owner', status: 'deleted' }] as const)('keeps runtime configuration read-only for $userId / $status', async ({ userId, status }) => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId={userId} />)
     await openDetails('Memory & charter')
@@ -591,44 +592,46 @@ describe('Bot workspace', () => {
   it('round trips explicit Bot/run routes without treating them as Chat sessions', () => {
     expect(parseHash(`#${botPath('a b', 'team', 'run')}`)).toEqual({ view: 'chat', params: { botId: 'a b', botScope: 'team', runId: 'run' } })
   })
-  it('keeps panel errors independent and requires explicit activation review', async () => {
+  it('keeps panel errors independent and requires explicit resume review', async () => {
+    const paused = { ...bot, status: 'paused' as const }
+    vi.mocked(api.getBot).mockResolvedValue(paused)
     vi.mocked(memoryApi.getBotMemoryHealth).mockRejectedValue(new Error('Memory unavailable'))
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="dark" userId="owner" />)
     expect(await screen.findByRole('heading', { name: 'Watcher' })).toBeInTheDocument()
     expect(screen.getByLabelText('Shared composer')).toBeEnabled()
     await openDetails('Memory & charter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Review activation' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Review resume' }))
     expect(api.botLifecycle).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: 'Confirm activate' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Confirm resume' })).toBeDisabled()
     fireEvent.change(screen.getByLabelText('Lifecycle reason'), { target: { value: 'Reviewed' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm activate' }))
-    await waitFor(() => expect(api.botLifecycle).toHaveBeenCalledWith(bot, 'activate', 'Reviewed'))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm resume' }))
+    await waitFor(() => expect(api.botLifecycle).toHaveBeenCalledWith(paused, 'resume', 'Reviewed'))
     await openDetails('Memory & charter')
     expect(await screen.findByText('Memory unavailable')).toBeInTheDocument()
     await openDetails('Runs')
     expect(screen.getByText(/No runs yet/)).toBeInTheDocument()
   })
-  it.each(['draft', 'paused', 'stopped', 'deleted'] as const)('enforces %s composer availability', async status => {
+  it.each(['paused', 'stopped', 'deleted'] as const)('enforces %s composer availability', async status => {
     vi.mocked(api.getBot).mockResolvedValue({ ...bot, status })
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="owner" />)
     const composer = await screen.findByLabelText('Shared composer')
-    if (status === 'paused' || status === 'draft') { expect(composer).toBeEnabled(); expect(chatProps.current?.toolFree).toBe(true) }
+    if (status === 'paused') { expect(composer).toBeEnabled(); expect(chatProps.current?.toolFree).toBe(true) }
     else expect(composer).toBeDisabled()
   })
   it('does not grant nonowner controls', async () => {
     render(<BotWorkspace route={{ botId: 'bot', scope: 'personal' }} theme="light" userId="other" />)
     expect(await screen.findByLabelText('Shared composer')).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'Review activation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review resume' })).not.toBeInTheDocument()
   })
-  it('saves only after content review, without activation', async () => {
+  it('saves only after content review, without lifecycle changes', async () => {
     vi.mocked(api.createBot).mockResolvedValue(bot)
-    render(<BotDraftDialog open onClose={vi.fn()} />)
+    render(<BotCreateDialog open onClose={vi.fn()} />)
     fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Watcher' } })
     fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }))
-    expect(screen.getByRole('button', { name: 'Save reviewed draft' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Review Bot' }))
+    expect(screen.getByRole('button', { name: 'Create reviewed Bot' })).toBeDisabled()
     fireEvent.click(screen.getByRole('checkbox'))
-    fireEvent.click(screen.getByRole('button', { name: 'Save reviewed draft' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create reviewed Bot' }))
     await waitFor(() => expect(api.createBot).toHaveBeenCalledWith({ name: 'Watcher', definition: { charter: 'Observe' }, idempotency_key: expect.any(String) }))
     expect(api.botLifecycle).not.toHaveBeenCalled()
   })

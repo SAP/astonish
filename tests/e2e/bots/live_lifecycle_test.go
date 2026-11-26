@@ -28,8 +28,8 @@ func TestBotsLiveLifecycle(t *testing.T) {
 	const suffix = "?scope=personal"
 	var b store.Bot
 	liveBotJSON(t, c.Post(t, "/api/studio/bots"+suffix, map[string]any{"name": "Live lifecycle", "idempotency_key": uuid.NewString(), "definition": map[string]string{"charter": "Respond concisely to the owner's lifecycle verification request. Do not call tools."}}), http.StatusCreated, &b)
-	if b.Status != store.BotDraft || b.ID == uuid.Nil || b.HomeSessionID == uuid.Nil || b.Home.ID != uuid.Nil {
-		t.Fatalf("new draft is not inactive/unprovisioned: %+v", b)
+	if b.Status != store.BotActive || b.ID == uuid.Nil || b.HomeSessionID == uuid.Nil || b.Home.ID != uuid.Nil {
+		t.Fatalf("new Active Bot is not unprovisioned: %+v", b)
 	}
 	root := "/api/studio/bots/" + b.ID.String()
 	request := func() map[string]any {
@@ -43,8 +43,8 @@ func TestBotsLiveLifecycle(t *testing.T) {
 	v.Budget.MaxTokens = &tokens
 	v.Delivery.Notify = store.NotifyNever
 	liveBotJSON(t, c.Put(t, root+"/configuration"+suffix, store.BotConfigurationRequest{ExpectedRevision: b.Revision, ExpectedVersion: b.Version, Reviewed: true, Reason: "Reviewed bounded toolless live lifecycle", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery}), http.StatusOK, &b)
-	if b.Status != store.BotDraft {
-		t.Fatalf("configuration activated draft: %s", b.Status)
+	if b.Status != store.BotActive {
+		t.Fatalf("configuration changed Active status: %s", b.Status)
 	}
 	r.PinModel(t, b)
 	lifecycle := func(method, action string, want store.BotStatus) {

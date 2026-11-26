@@ -98,7 +98,7 @@ func TestBotTaskWorkspaceHTTPAcceptance(t *testing.T) {
 			if err := backend.WaitForSessionReady(ctx, sessionID); err != nil {
 				t.Fatal(err)
 			}
-			b, e = repo.Activate(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "owned workspace acceptance"})
+			b, e = repo.Get(ctx, b.ID)
 			if e != nil {
 				t.Fatal(e)
 			}

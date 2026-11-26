@@ -28,7 +28,7 @@ func messageReviewReader(repo *botRepository) store.BotTranscriptReader {
 func messageReviewDraft(t *testing.T, scope store.BotScope, statuses ...store.BotStatus) (*botRepository, context.Context, *store.Bot) {
 	t.Helper()
 	repo, _, ctx, initial, _ := runtimeFixture(t, scope)
-	if len(statuses) > 0 && statuses[0] != store.BotDraft {
+	if len(statuses) > 0 && statuses[0] != store.BotActive {
 		b, err := repo.Get(ctx, initial.BotID)
 		if err != nil {
 			t.Fatal(err)
@@ -44,7 +44,7 @@ func messageReviewDraft(t *testing.T, scope store.BotScope, statuses ...store.Bo
 	p, _ := execution.PrincipalFromContext(ctx)
 	v := store.DefaultBotVersion()
 	v.Charter = "Review durable chat"
-	b, err := repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Review", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "message-review"})
+	b, err := repo.Create(ctx, store.BotCreateRequest{Name: "Review", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "message-review"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func messageReviewDraft(t *testing.T, scope store.BotScope, statuses ...store.Bo
 
 func TestBotMessageReviewProjectionAndPublication(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, status := range []store.BotStatus{store.BotDraft, store.BotPaused, store.BotActive} {
+		for _, status := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotActive} {
 			t.Run(string(scope)+"/"+string(status), func(t *testing.T) {
 				repo, ctx, b := messageReviewDraft(t, scope, status)
 				reader := messageReviewReader(repo)
@@ -216,14 +216,14 @@ func TestBotMessageReviewConcurrentAdmission(t *testing.T) {
 
 var errMessageReviewRollback = errors.New("injected run insertion failure")
 
-type messageReviewFailDB struct{ botDraftDB }
+type messageReviewFailDB struct{ botDB }
 type messageReviewFailTx struct {
-	botDraftDB
+	botDB
 	botMessageDB
 }
 
-func (d messageReviewFailDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(messageReviewFailTx{tx, tx.(botMessageDB)}) })
+func (d messageReviewFailDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(messageReviewFailTx{tx, tx.(botMessageDB)}) })
 }
 func (d messageReviewFailTx) InsertRun(context.Context, botStoredRun, uuid.UUID) error {
 	return errMessageReviewRollback

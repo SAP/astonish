@@ -42,7 +42,7 @@ func ReadBotKnowledgeTurnInput(c context.Context, s store.BotStore, lease store.
 		return nil, err
 	}
 	var out store.BotRunInput
-	err = r.db.Transaction(c, func(tx botDraftDB) error {
+	err = r.db.Transaction(c, func(tx botDB) error {
 		root, err := tx.GetBot(c, lease.BotID)
 		if err != nil {
 			return err
@@ -77,7 +77,7 @@ func PublishBotKnowledgeExtraction(c context.Context, s store.BotStore, l store.
 	if publish == nil || verify == nil {
 		return store.ErrBotUnsupported
 	}
-	return r.db.Transaction(c, func(tx botDraftDB) error {
+	return r.db.Transaction(c, func(tx botDB) error {
 		v, err := r.knowledgeLease(c, tx, l)
 		if err != nil {
 			return err
@@ -139,7 +139,7 @@ func RecordBotKnowledgeUsage(c context.Context, s store.BotStore, source store.B
 	if err != nil {
 		return err
 	}
-	return r.db.Transaction(c, func(tx botDraftDB) error {
+	return r.db.Transaction(c, func(tx botDB) error {
 		v, err := r.knowledgeLease(c, tx, lease)
 		if err != nil {
 			return err
@@ -249,7 +249,7 @@ func WithBotKnowledgeSourceVerifier(ctx context.Context, verify func(context.Con
 	return context.WithValue(ctx, knowledgeSourceVerifierKey{}, verify)
 }
 
-func (r *botRepository) knowledgeAuthority(c context.Context, tx botDraftDB, b uuid.UUID) (*botStoredRecord, uuid.UUID, error) {
+func (r *botRepository) knowledgeAuthority(c context.Context, tx botDB, b uuid.UUID) (*botStoredRecord, uuid.UUID, error) {
 	if err := c.Err(); err != nil {
 		return nil, uuid.Nil, err
 	}
@@ -273,7 +273,7 @@ func (r *botRepository) knowledgeAuthority(c context.Context, tx botDraftDB, b u
 	}
 	// Draft Bots can execute owner-admitted interactive turns. Learning those
 	// turns does not activate the Bot or authorize scheduled work.
-	if root.Bot.Status != store.BotActive && root.Bot.Status != store.BotPaused && root.Bot.Status != store.BotDraft {
+	if root.Bot.Status != store.BotActive && root.Bot.Status != store.BotPaused {
 		return nil, uuid.Nil, store.ErrBotConflict
 	}
 	return root, actor, nil
@@ -282,7 +282,7 @@ func (r *botRepository) knowledgeAuthority(c context.Context, tx botDraftDB, b u
 // enqueueBotKnowledgeExtractionTx is the atomic CommitRun hook. Call after the
 // canonical result activity has been inserted, using the redacted complete turn.
 // It never claims a run lease or calls a model.
-func (r *botRepository) enqueueBotKnowledgeExtractionTx(c context.Context, tx botDraftDB, input store.BotKnowledgeExtractionInput) (*store.BotKnowledgeExtraction, error) {
+func (r *botRepository) enqueueBotKnowledgeExtractionTx(c context.Context, tx botDB, input store.BotKnowledgeExtractionInput) (*store.BotKnowledgeExtraction, error) {
 	if input.Source.Validate() != nil {
 		return nil, store.ErrBotInvalid
 	}
@@ -358,7 +358,7 @@ func (r *botRepository) enqueueBotKnowledgeExtractionTx(c context.Context, tx bo
 	return &out, nil
 }
 func (r *botRepository) EnqueueBotKnowledgeExtraction(c context.Context, input store.BotKnowledgeExtractionInput) (out *store.BotKnowledgeExtraction, err error) {
-	err = r.db.Transaction(c, func(tx botDraftDB) error {
+	err = r.db.Transaction(c, func(tx botDB) error {
 		var e error
 		out, e = r.enqueueBotKnowledgeExtractionTx(c, tx, input)
 		return e
@@ -388,7 +388,7 @@ func (r *botRepository) ClaimBotKnowledgeExtraction(c context.Context, s store.B
 		return lease, store.ErrBotInvalid
 	}
 	uncertain := false
-	err = r.db.Transaction(c, func(tx botDraftDB) error {
+	err = r.db.Transaction(c, func(tx botDB) error {
 		root, actor, e := r.knowledgeAuthority(c, tx, s.BotID)
 		if e != nil {
 			return e
@@ -432,7 +432,7 @@ func (r *botRepository) ClaimBotKnowledgeExtraction(c context.Context, s store.B
 	}
 	return
 }
-func (r *botRepository) knowledgeLease(c context.Context, tx botDraftDB, l store.BotKnowledgeExtractionLease) (*knowledgeEnvelope, error) {
+func (r *botRepository) knowledgeLease(c context.Context, tx botDB, l store.BotKnowledgeExtractionLease) (*knowledgeEnvelope, error) {
 	root, actor, e := r.knowledgeAuthority(c, tx, l.BotID)
 	if e != nil {
 		return nil, e
@@ -453,7 +453,7 @@ func (r *botRepository) knowledgeLease(c context.Context, tx botDraftDB, l store
 	return v, nil
 }
 func (r *botRepository) BeginBotKnowledgeExtraction(c context.Context, l store.BotKnowledgeExtractionLease, revision int64) (out *store.BotKnowledgeExtraction, started bool, err error) {
-	err = r.db.Transaction(c, func(tx botDraftDB) error {
+	err = r.db.Transaction(c, func(tx botDB) error {
 		v, e := r.knowledgeLease(c, tx, l)
 		if e != nil {
 			return e
@@ -478,7 +478,7 @@ func (r *botRepository) BeginBotKnowledgeExtraction(c context.Context, l store.B
 	return
 }
 func (r *botRepository) TransitionBotKnowledgeExtraction(c context.Context, q store.BotKnowledgeExtractionTransition) (out *store.BotKnowledgeExtraction, err error) {
-	err = r.db.Transaction(c, func(tx botDraftDB) error {
+	err = r.db.Transaction(c, func(tx botDB) error {
 		v, e := r.knowledgeLease(c, tx, q.Lease)
 		if e != nil {
 			return e

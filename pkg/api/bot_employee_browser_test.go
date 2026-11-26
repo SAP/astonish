@@ -1294,6 +1294,9 @@ func TestBotEmployeeObjectivePTYFixture(t *testing.T) {
 
 // Database acceptance is strict: a missing native CLI harness is a failure.
 func TestBotDatabaseEmployeePTYFixture(t *testing.T) {
+	if os.Getenv("ASTONISH_EMPLOYEE_PTY_BINARY") == "" && os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
+		t.Skip("explicit database employee acceptance opt-in required")
+	}
 	if os.Getenv("ASTONISH_EMPLOYEE_PTY_BINARY") == "" {
 		t.Fatal("ASTONISH_EMPLOYEE_PTY_BINARY is required; run TestBotDatabaseEmployeePTY")
 	}
@@ -1303,7 +1306,7 @@ func TestBotDatabaseEmployeePTYFixture(t *testing.T) {
 func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode ...bool) {
 	database := len(databaseMode) > 0 && databaseMode[0]
 	if !nativePTY && os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
-		t.Fatal("ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 and built Studio required")
+		t.Skip("set ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 after building Studio")
 	}
 	bin := os.Getenv("ASTONISH_BOT_BROWSER_PATH")
 	if !nativePTY && bin == "" {
@@ -1474,6 +1477,9 @@ func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode .
 				t.Fatal("create", err)
 			}
 			f.b = created.Bot
+			if f.b.Status != store.BotActive {
+				t.Fatalf("title-created employee must be Active, got %s", f.b.Status)
+			}
 			f.request("PATCH", "/api/studio/sessions/"+f.b.HomeSessionID.String()+"/model", `{"provider":"controlled","model":"interactive-http"}`, 200)
 			f.registry.Close()
 			var runtimeBefore map[string]string
@@ -2022,7 +2028,7 @@ func runBotAgentWorkBrowser(t *testing.T) {
 			skillFetches.Add(1)
 		}
 		visibleBot := b
-		visibleBot.Status = []store.BotStatus{store.BotActive, store.BotDraft, store.BotPaused, store.BotStopped, store.BotDeleted}[lifecycle.Load()]
+		visibleBot.Status = []store.BotStatus{store.BotActive, store.BotActive, store.BotPaused, store.BotStopped, store.BotDeleted}[lifecycle.Load()]
 		if teamScope.Load() {
 			visibleBot.Scope = store.BotScopeTeam
 		}
@@ -2272,10 +2278,18 @@ func assertDatabaseRuntimeComplete(t *testing.T, f *interactiveHTTPFixture) {
 			}
 			if record, ok := envelope["bot_record_v2"].(string); ok {
 				var header struct {
-					Format int `json:"format"`
+					Inline    []byte          `json:"inline"`
+					SizeBytes int64           `json:"size_bytes"`
+					SHA256    string          `json:"sha256"`
+					Content   json.RawMessage `json:"content"`
 				}
-				if json.Unmarshal([]byte(record), &header) != nil || header.Format != 3 {
-					t.Fatalf("%s non-database runtime envelope", family.name)
+				if err := json.Unmarshal([]byte(record), &header); err != nil {
+					t.Fatalf("%s invalid runtime envelope: %v", family.name, err)
+				}
+				// Current unreleased runtime records are inline database bytes;
+				// no obsolete development format marker is part of the contract.
+				if len(header.Inline) == 0 || header.SizeBytes != int64(len(header.Inline)) || header.Content != nil || header.SHA256 != fmt.Sprintf("%x", sha256.Sum256(header.Inline)) || !json.Valid(header.Inline) {
+					t.Fatalf("%s non-database or corrupt runtime envelope", family.name)
 				}
 				count++
 			}
@@ -2285,7 +2299,7 @@ func assertDatabaseRuntimeComplete(t *testing.T, f *interactiveHTTPFixture) {
 		}
 		rows.Close()
 		if count == 0 {
-			t.Fatalf("%s had no proven format-3 records", family.name)
+			t.Fatalf("%s had no proven inline database records", family.name)
 		}
 	}
 }

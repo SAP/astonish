@@ -104,7 +104,7 @@ func validateBotSpendRequest(q store.BotSpendRequest) error {
 	return nil
 }
 
-func (r *botRepository) authorizeSpend(ctx context.Context, tx botDraftDB, rec *botStoredRecord, runID uuid.UUID, version int64, lease *store.BotLease) error {
+func (r *botRepository) authorizeSpend(ctx context.Context, tx botDB, rec *botStoredRecord, runID uuid.UUID, version int64, lease *store.BotLease) error {
 	if lease != nil {
 		if lease.BotID != rec.Bot.ID || lease.RunID != runID {
 			return store.ErrBotForbidden
@@ -141,7 +141,7 @@ func (r *botRepository) ReserveSpend(ctx context.Context, q store.BotSpendReques
 	}
 	var out store.BotSpendReservation
 	err := botSpendRetry(ctx, func() error {
-		return r.db.Transaction(ctx, func(tx botDraftDB) error {
+		return r.db.Transaction(ctx, func(tx botDB) error {
 			rec, err := tx.GetBot(ctx, q.BotID)
 			if err != nil {
 				return err
@@ -248,7 +248,7 @@ func (r *botRepository) ResolveSpend(ctx context.Context, q store.BotSpendResolu
 	}
 	var out store.BotSpendReservation
 	err := botSpendRetry(ctx, func() error {
-		return r.db.Transaction(ctx, func(tx botDraftDB) error {
+		return r.db.Transaction(ctx, func(tx botDB) error {
 			rec, err := tx.GetBot(ctx, q.BotID)
 			if err != nil {
 				return err
@@ -327,7 +327,7 @@ type botSpendWriter interface {
 	writeSpend(context.Context, botStoredRecord, map[string]any) error
 }
 
-func saveBotSpend(ctx context.Context, tx botDraftDB, rec *botStoredRecord, l botSpendLedger) error {
+func saveBotSpend(ctx context.Context, tx botDB, rec *botStoredRecord, l botSpendLedger) error {
 	writer, ok := tx.(botSpendWriter)
 	if !ok {
 		return store.ErrBotUnsupported

@@ -55,7 +55,7 @@ func TestOwnerMessagePriority(t *testing.T) {
 					admissionCtx, _ = execution.WithPrincipal(context.Background(), p)
 				case "rollback":
 					original := repo.db
-					repo.db = priorityFailDB{botDraftDB: original}
+					repo.db = priorityFailDB{botDB: original}
 					defer func() { repo.db = original }()
 				}
 				receipt, err := repo.AdmitMessage(admissionCtx, q)
@@ -120,16 +120,16 @@ func TestOwnerMessagePriority(t *testing.T) {
 	}
 }
 
-type priorityFailDB struct{ botDraftDB }
+type priorityFailDB struct{ botDB }
 
-func (d priorityFailDB) Transaction(ctx context.Context, fn func(botDraftDB) error) error {
-	return d.botDraftDB.Transaction(ctx, func(tx botDraftDB) error { return fn(priorityFailTx{botDraftDB: tx}) })
+func (d priorityFailDB) Transaction(ctx context.Context, fn func(botDB) error) error {
+	return d.botDB.Transaction(ctx, func(tx botDB) error { return fn(priorityFailTx{botDB: tx}) })
 }
 
-type priorityFailTx struct{ botDraftDB }
+type priorityFailTx struct{ botDB }
 
 func (d priorityFailTx) SaveRunCancellation(ctx context.Context, r botStoredRecord, s botStoredRun, p store.RunStatus, n time.Time) error {
-	return d.botDraftDB.(botRunCancellationDB).SaveRunCancellation(ctx, r, s, p, n)
+	return d.botDB.(botRunCancellationDB).SaveRunCancellation(ctx, r, s, p, n)
 }
 
 // Failure after quiescing, before message insertion, must roll the fence back.

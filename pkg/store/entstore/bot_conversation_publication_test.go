@@ -201,7 +201,7 @@ func TestBotWorkDraftPublicationBoundary(t *testing.T) {
 // only. Production never clears a pinned work contract.
 func legacyWorkFixture(t *testing.T, repo *botRepository, ctx context.Context, lease store.BotLease) {
 	t.Helper()
-	if err := repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	if err := repo.db.Transaction(ctx, func(tx botDB) error {
 		run, err := tx.ReadRun(ctx, lease.BotID, lease.RunID)
 		if err != nil {
 			return err
@@ -226,7 +226,7 @@ func TestBotConversationPublication(t *testing.T) {
 			{"no-reply", store.BotIntentConversation, store.RunFailed, false},
 			{"partial-failure", store.BotIntentConversation, store.RunFailed, true},
 			{"regular", store.BotIntentRegular, store.RunSucceeded, true},
-			{"draft-test", store.BotIntentDraftTest, store.RunSucceeded, true},
+			{"draft-test", store.BotIntentRegular, store.RunSucceeded, true},
 		} {
 			t.Run(string(scope)+"/"+tc.name, func(t *testing.T) {
 				repo, _, ctx, initial, _ := runtimeFixture(t, scope)
@@ -238,10 +238,10 @@ func TestBotConversationPublication(t *testing.T) {
 				}
 				if tc.intent == store.BotIntentConversation {
 					b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "owner paused"})
-				} else if tc.intent == store.BotIntentDraftTest {
+				} else if tc.intent == store.BotIntentRegular {
 					v := store.DefaultBotVersion()
 					v.Charter = "Draft test"
-					b, err = repo.CreateDraft(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "draft"})
+					b, err = repo.Create(ctx, store.BotCreateRequest{Name: "Draft", OwnerID: b.OwnerID, Version: v, IdempotencyKey: "draft"})
 				}
 				if err != nil {
 					t.Fatal(err)

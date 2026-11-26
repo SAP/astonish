@@ -47,6 +47,7 @@ func mapFileFirstDescriptor(d fileFirstScopeArchive, opts PlatformRestoreOptions
 		h := &d.Homes[n]
 		b := &h.Bot
 		oldStage := b.Stage
+		oldRuntime := store.BotContentScope{OwnerID: b.Bot.OwnerID.String(), BotID: b.Bot.ID}
 		oldHome := store.BotContentScope{OrgID: b.Selection.Binding.Scope.OrgID, TeamID: b.Selection.Binding.Scope.TeamID, OwnerID: b.Bot.OwnerID.String(), BotID: b.Bot.ID}
 		owner, err := uuid.Parse(fileFirstMappedOwner(d.Scope.OrgSlug, b.Bot.OwnerID.String(), opts))
 		if err != nil {
@@ -69,6 +70,7 @@ func mapFileFirstDescriptor(d fileFirstScopeArchive, opts PlatformRestoreOptions
 		}
 		b.Selection.Binding.Scope = homeScope
 		h.Manifest.Binding = homeScope.Key()
+		mapping.scopes[oldRuntime] = store.BotContentScope{OwnerID: owner.String(), BotID: b.Bot.ID}
 		mapping.scopes[oldStage] = b.Stage
 		mapping.scopes[oldHome] = store.BotContentScope{OrgID: homeScope.OrgID, TeamID: homeScope.TeamID, OwnerID: homeScope.UserID, BotID: b.Bot.ID}
 	}

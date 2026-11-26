@@ -21,7 +21,7 @@ const (
 // A review event is only a durable reference. Snapshot/approval reads and their
 // existing decision guards remain the authority. Called inside creation's
 // transaction, so retries cannot append a second card or expose unsaved input.
-func appendBotReview(ctx context.Context, tx botDraftDB, b store.Bot, runID, id uuid.UUID, kind botReviewKind, now time.Time) error {
+func appendBotReview(ctx context.Context, tx botDB, b store.Bot, runID, id uuid.UUID, kind botReviewKind, now time.Time) error {
 	adapter, ok := tx.(botPublicationDB)
 	if !ok {
 		return store.ErrBotUnsupported

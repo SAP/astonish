@@ -78,7 +78,7 @@ func TestAuthorizeBotOwnerScheduleNaturalLanguagePolicy(t *testing.T) {
 			t.Fatalf("non-owner routine accepted: %v", err)
 		}
 	}
-	for _, operation := range []store.BotControlOperation{store.BotControlConfigurationOperation, store.BotControlActivate, store.BotControlResume, "unknown"} {
+	for _, operation := range []store.BotControlOperation{store.BotControlConfigurationOperation, store.BotControlResume, "unknown"} {
 		bad := a
 		bad.Payload.Operation = operation
 		if err := AuthorizeBotOwnerSchedule(context.Background(), bad); !errors.Is(err, store.ErrBotForbidden) {

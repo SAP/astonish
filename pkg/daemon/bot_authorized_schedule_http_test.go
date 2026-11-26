@@ -315,7 +315,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Read the daily report"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Reporter", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Reporter", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -326,7 +326,7 @@ func TestBotAuthorizedScheduleHTTPAcceptance(t *testing.T) {
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 				svc.PersonalSessions = ss

@@ -160,7 +160,7 @@ func TestBotEmployeeOperationsHTTPAcceptance(t *testing.T) {
 				v := store.DefaultBotVersion()
 				v.Charter = "Prepare reports"
 				v.Budget.MaxTokens = nil
-				b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Reporter", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+				b, err := repo.Create(auth, store.BotCreateRequest{Name: "Reporter", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -193,7 +193,7 @@ func TestBotEmployeeOperationsHTTPAcceptance(t *testing.T) {
 					llm.payload = map[string]any{"operation": store.BotControlMemoryForget, "reason": "Owner requested forget", "memory": map[string]any{"memory_id": memoryBefore.ID, "expected_revision": b.Revision, "expected_fingerprint": store.MemoryContentFingerprint(*memoryBefore)}}
 				}
 				if scenario == "paused_goal" {
-					b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "initial activation"})
+					b, err = repo.Get(auth, b.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -209,7 +209,7 @@ func TestBotEmployeeOperationsHTTPAcceptance(t *testing.T) {
 					jobs = ods.ForUser(owner.String()).ScheduledJobs()
 				}
 				if scenario == "priority_pause" {
-					b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "start autonomous work"})
+					b, err = repo.Get(auth, b.ID)
 					if err != nil {
 						t.Fatal(err)
 					}

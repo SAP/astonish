@@ -68,7 +68,7 @@ func (r *botRepository) registerHomeBinding(ctx context.Context, q BotHomeRegist
 		if rec.Bot.ID != q.BotID || rec.Bot.Scope != q.Home.Scope || r.auth.scope == store.BotScopePersonal && rec.Bot.OwnerID.String() != r.auth.userID {
 			return store.ErrBotForbidden
 		}
-		if rec.Bot.Status != store.BotDraft || rec.ActiveRunID != nil || rec.LeaseExpiresAt != nil {
+		if (rec.Bot.Status != store.BotActive && rec.Bot.Status != store.BotPaused) || rec.ActiveRunID != nil || rec.LeaseExpiresAt != nil {
 			return store.ErrBotConflict
 		}
 		if rec.Bot.Home == q.Home && rec.Bot.Revision == q.ExpectedRevision+1 {
@@ -89,7 +89,7 @@ func (r *botRepository) registerHomeBinding(ctx context.Context, q BotHomeRegist
 	if err := verify(ctx, q); err != nil {
 		return fmt.Errorf("verify bot home registration: %w", err)
 	}
-	return r.db.Transaction(ctx, func(tx botDraftDB) error {
+	return r.db.Transaction(ctx, func(tx botDB) error {
 		rec, err := tx.GetBot(ctx, q.BotID)
 		if err != nil {
 			return err
@@ -122,7 +122,7 @@ func (r *botRepository) registerHomeBinding(ctx context.Context, q BotHomeRegist
 }
 
 func (d teamBotDB) saveHomeBinding(ctx context.Context, rec botStoredRecord, data map[string]any, now time.Time) error {
-	n, err := d.client.Bot.Update().Where(teambot.IDEQ(rec.Bot.ID), teambot.RevisionEQ(rec.Bot.Revision), teambot.StatusEQ(teambot.StatusDraft), teambot.HomeBindingIsNil()).SetHomeBinding(data).AddRevision(1).SetUpdatedAt(now).Save(ctx)
+	n, err := d.client.Bot.Update().Where(teambot.IDEQ(rec.Bot.ID), teambot.RevisionEQ(rec.Bot.Revision), teambot.StatusEQ(teambot.Status(rec.Bot.Status)), teambot.HomeBindingIsNil()).SetHomeBinding(data).AddRevision(1).SetUpdatedAt(now).Save(ctx)
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func (d teamBotDB) saveHomeBinding(ctx context.Context, rec botStoredRecord, dat
 	return nil
 }
 func (d personalBotDB) saveHomeBinding(ctx context.Context, rec botStoredRecord, data map[string]any, now time.Time) error {
-	n, err := d.client.Bot.Update().Where(personalbot.IDEQ(rec.Bot.ID), personalbot.RevisionEQ(rec.Bot.Revision), personalbot.StatusEQ(personalbot.StatusDraft), personalbot.HomeBindingIsNil()).SetHomeBinding(data).AddRevision(1).SetUpdatedAt(now).Save(ctx)
+	n, err := d.client.Bot.Update().Where(personalbot.IDEQ(rec.Bot.ID), personalbot.RevisionEQ(rec.Bot.Revision), personalbot.StatusEQ(personalbot.Status(rec.Bot.Status)), personalbot.HomeBindingIsNil()).SetHomeBinding(data).AddRevision(1).SetUpdatedAt(now).Save(ctx)
 	if err != nil {
 		return err
 	}

@@ -86,18 +86,26 @@ func TestBotAuthorizedSchedulePreservesDisabledAndPaused(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Paused owner turns are control-only, not fresh task/schedule authority.
-			pausedPolicy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy,error) {
-				p,e := authorizedSchedulePolicy(ctx,ref)
-				p.Constraints = append(p.Constraints,execution.BotActionResourceConstraint{Action:execution.CapabilityToolExecute,Resources:[]string{"propose_bot_control"}})
-				return p,e
+			pausedPolicy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
+				p, e := authorizedSchedulePolicy(ctx, ref)
+				p.Constraints = append(p.Constraints, execution.BotActionResourceConstraint{Action: execution.CapabilityToolExecute, Resources: []string{"propose_bot_control"}})
+				return p, e
 			}
-			admitted,e := r.AdmitMessage(store.WithBotMandateAdmission(owner,pausedPolicy),store.BotMessageRequest{BotID:b.ID,Version:b.Version,Instructions:"Review my schedules",IdempotencyKey:uuid.NewString()})
-			if e != nil { t.Fatal(e) }
-			runtime := &botMandateRuntime{repo:r,policy:pausedPolicy}
-			if _,e=runtime.VerifyBotMandate(owner,*admitted.Run.MandateRef,execution.BotMandatePurposeOperation); e != nil { t.Fatal(e) }
-			if _,e=runtime.VerifyBotMandate(owner,*admitted.Run.MandateRef,execution.BotMandatePurposeTask); e == nil { t.Fatal("paused turn granted task purpose") }
+			admitted, e := r.AdmitMessage(store.WithBotMandateAdmission(owner, pausedPolicy), store.BotMessageRequest{BotID: b.ID, Version: b.Version, Instructions: "Review my schedules", IdempotencyKey: uuid.NewString()})
+			if e != nil {
+				t.Fatal(e)
+			}
+			runtime := &botMandateRuntime{repo: r, policy: pausedPolicy}
+			if _, e = runtime.VerifyBotMandate(owner, *admitted.Run.MandateRef, execution.BotMandatePurposeOperation); e != nil {
+				t.Fatal(e)
+			}
+			if _, e = runtime.VerifyBotMandate(owner, *admitted.Run.MandateRef, execution.BotMandatePurposeTask); e == nil {
+				t.Fatal("paused turn granted task purpose")
+			}
 			b, _ = r.Get(owner, b.ID)
-			if b.Status != store.BotPaused { t.Fatal("implicit resume") }
+			if b.Status != store.BotPaused {
+				t.Fatal("implicit resume")
+			}
 		})
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestBotHomeComposerAllConversationalStates(t *testing.T) {
-	for _, status := range []store.BotStatus{store.BotDraft, store.BotPaused, store.BotActive} {
+	for _, status := range []store.BotStatus{store.BotActive, store.BotPaused, store.BotActive} {
 		t.Run(string(status), func(t *testing.T) {
 			b := &parityBotBackend{testBotBackend: testBotBackend{selected: &store.Bot{ID: uuid.New(), Status: status}}}
 			m := newModel(context.Background(), Config{Backend: b})

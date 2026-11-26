@@ -57,7 +57,7 @@ export default function BotSidebar({ activeId, activeScope, collapsed = false, o
     </>}
     {resource.loading && <p role="status" className="text-xs">{collapsed ? '…' : 'Loading Bots…'}<span className={collapsed ? 'sr-only' : 'hidden'}>Loading Bots</span></p>}
     {resource.error && <div role="alert" className="text-xs text-destructive"><span className={collapsed ? 'sr-only' : ''}>{resource.error}</span><Button size="sm" variant="ghost" aria-label="Retry Bots" title={resource.error} onClick={resource.retry}>{collapsed ? '!' : 'Retry Bots'}</Button></div>}
-    {!resource.loading && !resource.error && bots.length === 0 && <p className={collapsed ? 'sr-only' : 'text-xs text-muted-foreground'}>No Bots yet. Create a reviewed draft.</p>}
+    {!resource.loading && !resource.error && bots.length === 0 && <p className={collapsed ? 'sr-only' : 'text-xs text-muted-foreground'}>No Bots yet. Create a Bot.</p>}
     {bots.map(bot => <BotSidebarItem key={`${viewer}/${team}/${bot.scope}/${bot.id}`} bot={bot} activeId={activeId} activeScope={activeScope} collapsed={collapsed} onDelete={viewer === bot.owner_id ? () => setDeleteTarget(bot) : undefined} />)}
     {deleteTarget && <BotDeleteDialog key={`${viewer}/${team}/${deleteTarget.scope}/${deleteTarget.id}`} bot={deleteTarget} onClose={() => setDeleteTarget(null)} />}
     {!collapsed && pointer && <Button size="sm" variant="outline" onClick={() => openIntake(pointer.id)}>Resume intake</Button>}

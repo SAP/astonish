@@ -36,7 +36,7 @@ func TestBotTaskWorkspaceArchivePostgresDocker(t *testing.T) {
 			owner, _ := execution.PrincipalFromContext(f.owner)
 			v := store.DefaultBotVersion()
 			v.Charter = "Retain archive checkpoint"
-			b, e := f.bots.CreateDraft(f.owner, store.BotCreateRequest{Name: "Archive workspace", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: "archive-draft"})
+			b, e := f.bots.Create(f.owner, store.BotCreateRequest{Name: "Archive workspace", OwnerID: uuid.MustParse(owner.Subject), Version: v, IdempotencyKey: "archive-draft"})
 			must(e)
 			backend, e := docker.New(docker.Config{Sessions: sandbox.NewSessionRegistryFromStore(nil), LayersDir: filepath.Join(t.TempDir(), "layers"), UppersDir: filepath.Join(t.TempDir(), "uppers"), SandboxImage: os.Getenv("ASTONISH_SANDBOX_IMAGE")})
 			must(e)

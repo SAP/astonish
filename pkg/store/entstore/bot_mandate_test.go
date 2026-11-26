@@ -28,7 +28,7 @@ func TestBotMandateAdmissionDurable(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Discuss"
 			q := store.BotCreateRequest{Name: "Research", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "mandate-title"}
-			first, err := repo.CreateDraftAndStart(ctx, q)
+			first, err := repo.CreateAndStart(ctx, q)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -49,7 +49,7 @@ func TestBotMandateAdmissionDurable(t *testing.T) {
 			if m.Purpose != execution.BotMandatePurposeTask {
 				t.Fatal("recurrence authority")
 			}
-			replay, err := repo.CreateDraftAndStart(ctx, q)
+			replay, err := repo.CreateAndStart(ctx, q)
 			if err != nil || replay.Run.MandateRef == nil || *replay.Run.MandateRef != ref {
 				t.Fatalf("replay: %v", err)
 			}

@@ -17,7 +17,7 @@ func registerBotRunRoutes(r *mux.Router) {
 	r.HandleFunc("/api/studio/bots/{botID}/messages", BotMessageHandler).Methods(http.MethodPost)
 	r.HandleFunc("/api/studio/bots/{botID}/test-run", BotTestRunHandler).Methods(http.MethodPost)
 	r.HandleFunc("/api/studio/bots/{botID}/conversation", BotConversationHandler).Methods(http.MethodPost)
-	r.HandleFunc("/api/studio/bots/{botID}/activate", BotActivateHandler).Methods(http.MethodPost)
+	r.HandleFunc("/api/studio/bots/{botID}/resume", BotResumeHandler).Methods(http.MethodPost)
 	r.HandleFunc("/api/studio/bots/{botID}/runs", BotRequestRunHandler).Methods(http.MethodPost)
 	r.HandleFunc("/api/studio/bots/{botID}/runs", BotRunsHandler).Methods(http.MethodGet)
 	r.HandleFunc("/api/studio/bots/{botID}/runs/{runID}", BotRunHandler).Methods(http.MethodGet)
@@ -68,7 +68,7 @@ func BotContinueInteractiveHandler(w http.ResponseWriter, r *http.Request) {
 	botWriteJSON(w, http.StatusAccepted, run)
 }
 
-func BotActivateHandler(w http.ResponseWriter, r *http.Request) {
+func BotResumeHandler(w http.ResponseWriter, r *http.Request) {
 	repo, actor, ok := botRequestStore(w, r)
 	if !ok {
 		return
@@ -81,36 +81,14 @@ func BotActivateHandler(w http.ResponseWriter, r *http.Request) {
 	if !botDecodeRequest(w, r, &q) {
 		return
 	}
-	// The public activate action is explicit consent to activate a draft or resume
-	// a paused/stopped Bot. Read through the scoped repository; each mutation
-	// rechecks authority, revision and lifecycle state transactionally.
-	current, err := repo.Get(r.Context(), id)
-	if err != nil {
-		botHTTPError(w, err)
+	resumer, ok := repo.(interface {
+		Resume(context.Context, store.BotLifecycleRequest) (*store.Bot, error)
+	})
+	if !ok {
+		botHTTPError(w, store.ErrBotUnsupported)
 		return
 	}
-	if current.Status == store.BotDraft && current.Home.ID == uuid.Nil && current.Revision == q.ExpectedRevision {
-		current, err = botEnsureExecutionHome(r, repo, current)
-		if err != nil {
-			botHTTPError(w, err)
-			return
-		}
-		q.ExpectedRevision = current.Revision
-	}
-	request := store.BotLifecycleRequest{BotID: id, ActorID: actor, ExpectedRevision: q.ExpectedRevision, Reason: q.Reason}
-	var b *store.Bot
-	if current.Status == store.BotPaused || current.Status == store.BotStopped {
-		resumer, ok := repo.(interface {
-			Resume(context.Context, store.BotLifecycleRequest) (*store.Bot, error)
-		})
-		if !ok {
-			botHTTPError(w, store.ErrBotUnsupported)
-			return
-		}
-		b, err = resumer.Resume(r.Context(), request)
-	} else {
-		b, err = repo.Activate(r.Context(), request)
-	}
+	b, err := resumer.Resume(r.Context(), store.BotLifecycleRequest{BotID: id, ActorID: actor, ExpectedRevision: q.ExpectedRevision, Reason: q.Reason})
 	if err != nil {
 		botHTTPError(w, err)
 		return
@@ -176,7 +154,7 @@ func BotMessageHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func BotTestRunHandler(w http.ResponseWriter, r *http.Request) {
-	botRequestRun(w, r, store.BotIntentDraftTest)
+	botRequestRun(w, r, store.BotIntentRegular)
 }
 func BotConversationHandler(w http.ResponseWriter, r *http.Request) {
 	botRequestRun(w, r, store.BotIntentConversation)
@@ -219,13 +197,13 @@ func botRequestRun(w http.ResponseWriter, r *http.Request, intent store.BotExecu
 	if len(files) > 0 && q.Instructions == "" {
 		q.Instructions = "Please review the attached files."
 	}
-	if intent == store.BotIntentDraftTest {
+	if intent == store.BotIntentRegular {
 		current, err := repo.Get(r.Context(), id)
 		if err != nil {
 			botHTTPError(w, err)
 			return
 		}
-		if current.Status == store.BotDraft && current.Version == q.Version && current.Home.ID == uuid.Nil {
+		if current.Status == store.BotActive && current.Version == q.Version && current.Home.ID == uuid.Nil {
 			if _, err := botEnsureExecutionHome(r, repo, current); err != nil {
 				botHTTPError(w, err)
 				return

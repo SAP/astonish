@@ -93,7 +93,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "owner_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"draft", "active", "paused", "stopped", "deleted"}, Default: "draft"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "paused", "stopped", "deleted"}, Default: "active"},
 		{Name: "revision", Type: field.TypeInt64, Default: 1},
 		{Name: "version", Type: field.TypeInt64, Default: 1},
 		{Name: "schema_version", Type: field.TypeInt, Default: 1},

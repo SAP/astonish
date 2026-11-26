@@ -23,6 +23,7 @@ import (
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/provider"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -36,7 +37,9 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	f.req.Principal = f.req.Mandate.Authorization.Principal(f.req.Principal.Surface)
 	f.ctx, _ = execution.WithPrincipal(context.Background(), f.req.Principal)
 	searchModel := &knowledgeModel{text: "Additional closing sources: https://example.com/breadth"}
-	searchTool, err := BotConfiguredResearchTool(f.ctx, f.req, knowledgeScope(f), func(context.Context, string, string, *config.AppConfig) (model.LLM, error) { return searchModel, nil }, nil, episode)
+	providerFactory := func(context.Context, string, string, *config.AppConfig) (model.LLM, error) { return searchModel, nil }
+	chatConfig := provider.ResolveEffectiveConfig(f.ctx, f.services.PlatformSettings, f.services.OrgSettings, f.services.Settings)
+	searchTool, err := BotConfiguredResearchTool(f.ctx, f.req, knowledgeScope(f), providerFactory, nil, episode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +50,7 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	f.req.Policy = policy
 	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
 		// No external adapter is used in this construction test.
-		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{searchTool}}}}, Research: episode, Tools: []tool.Tool{searchTool}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+		return &BotChatSafeResources{ProviderFactory: providerFactory, ChatConfig: chatConfig, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured_search": {Name: "configured_search", Tools: []tool.Tool{searchTool}}}}, Research: episode, Tools: []tool.Tool{searchTool}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}, Mandate: f.req.Mandate}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
 	resources, err := f.construct(t)
 	if err != nil {
@@ -500,9 +503,10 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			defer server.Close()
 			llm := &guidedHTTPModel{endpoint: server.URL}
 			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
+			var configuredSearch tool.Tool
 			f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
-				search, err := BotConfiguredResearchTool(ctx, req, s, func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
+				providerFactory := func(context.Context, string, string, *config.AppConfig) (model.LLM, error) {
 					searchCalls++
 					order = append(order, "search")
 					url := sourceURL + "/index"
@@ -514,21 +518,63 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 						searchText += " alternate article: " + sourceURL + "/breadth blocked: " + sourceURL + "/blocked thin: " + sourceURL + "/thin"
 					}
 					return &knowledgeModel{text: searchText}, nil
-				}, nil, episode)
+				}
+				chatConfig := provider.ResolveEffectiveConfig(ctx, s.Services.PlatformSettings, s.Services.OrgSettings, s.Services.Settings)
+				search, err := BotConfiguredResearchTool(ctx, req, s, providerFactory, nil, episode)
 				if err != nil {
 					return nil, err
 				}
+				configuredSearch = search
 				reads, err := BotMandatedReadTools(req.Mandate, tools.RoutineReadPolicy{Authorize: func(context.Context, string) error { return nil }, AllowIP: func(context.Context, string, net.IP) error { return nil }})
 				if err != nil {
 					return nil, err
 				}
-				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured-research": {Name: "configured-research", Tools: []tool.Tool{search}}}}, Research: episode, Tools: append([]tool.Tool{search}, reads...), WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{ProviderFactory: providerFactory, ChatConfig: chatConfig, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured_search": {Name: "configured_search", Tools: []tool.Tool{search}}}}, Research: episode, Tools: append([]tool.Tool{search}, reads...), WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: BotCatalogueClassifier{}, Mandate: req.Mandate}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			factory, err := NewBotChatAgentFactory(f.cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapter, err := api.NewBotChatRuntimeAdapter(factory)
+			// Retain the shared catalog's scoped wrapper and exact ownership while
+			// using the standalone episode adapter for this guided source journey.
+			boundFactory := func(ctx context.Context, req bot.RunRequest) (*api.BotChatResources, error) {
+				resources, err := factory(ctx, req)
+				if err != nil {
+					return nil, err
+				}
+				entry := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
+				if entry == nil || entry.GroupName != "configured_search" {
+					resources.Cleanup()
+					return nil, fmt.Errorf("configured search missing shared catalog ownership")
+				}
+				shared, ok := entry.Tool.(*chatRuntimeTool)
+				if !ok || configuredSearch == nil {
+					resources.Cleanup()
+					return nil, fmt.Errorf("configured search missing scoped wrapper")
+				}
+				shared.chatRuntimeRunnable = configuredSearch.(chatRuntimeRunnable)
+				continuation := resources.ResearchFactory
+				resources.ResearchFactory = func(ctx context.Context, request api.BotEmployeeResearchRequest) (*api.BotChatResources, error) {
+					fresh, err := continuation(ctx, request)
+					if err != nil {
+						return nil, err
+					}
+					entry := fresh.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
+					if entry == nil {
+						fresh.Cleanup()
+						return nil, fmt.Errorf("continuation missing configured search")
+					}
+					shared, ok := entry.Tool.(*chatRuntimeTool)
+					if !ok {
+						fresh.Cleanup()
+						return nil, fmt.Errorf("continuation missing scoped search wrapper")
+					}
+					shared.chatRuntimeRunnable = configuredSearch.(chatRuntimeRunnable)
+					return fresh, nil
+				}
+				return resources, nil
+			}
+			adapter, err := api.NewBotChatRuntimeAdapter(boundFactory)
 			if err != nil {
 				t.Fatal(err)
 			}

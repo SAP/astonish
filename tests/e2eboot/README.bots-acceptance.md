@@ -1,5 +1,25 @@
 # Bot release acceptance
 
+## Strict current Active-only acceptance
+
+```sh
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage active-bot-status --checks-only
+ASTONISH_BOT_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+python3 -B tests/e2eboot/bots_acceptance_driver.py --stage active-bot-status
+```
+
+Checks-only runs driver regressions, never behavioral acceptance. The strict stage
+builds current Studio and requires exact creation, HTTP/source intake, independent
+schedule enable/disable, resume preservation, CLI subprocess/PTY and scripted real
+browser tests. Personal/team creation subtests must pass. Any unexpected skip,
+missing child, wrong-package pass, malformed JSON or nonzero command blocks. An
+actual absolute executable Chrome path is mandatory: no discovery/download fallback.
+Creation returns Active without unsolicited ordinary work; title-first admits one
+requested turn. Built browser acceptance exercises scoped tools and anchored
+answered questions live/reload. No Draft migration or marker-6 tier exists for this
+unreleased feature. PostgreSQL fresh-schema and deployed sandbox/paid-provider
+quality are not claimed by the local stage. No live user DB or daemon is touched.
+
 ## Objective-owned employee acceptance
 
 Long full runs must run as owned background jobs watched through actual exit.

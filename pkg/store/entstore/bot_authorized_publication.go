@@ -10,7 +10,7 @@ import (
 
 // Select by reserved durable key and verified operation, not by model-controlled
 // report fields. Ordinary source replies continue to use their original path.
-func authorizedSchedulePublication(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (bool, error) {
+func authorizedSchedulePublication(ctx context.Context, tx botDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (bool, error) {
 	rows, err := tx.ReadActivity(ctx, rec.Bot.ID, sequence-1, 1)
 	if err != nil {
 		return false, err
@@ -79,7 +79,7 @@ func authorizedSchedulePublication(ctx context.Context, tx botDraftDB, rec *botS
 
 // canonicalScheduleOperationEvent suppresses only the exact applied revision
 // named by a reserved, verified receipt. Old receipts keep their fallback.
-func canonicalScheduleOperationEvent(ctx context.Context, tx botDraftDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (string, error) {
+func canonicalScheduleOperationEvent(ctx context.Context, tx botDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (string, error) {
 	rows, err := tx.ReadActivity(ctx, rec.Bot.ID, sequence-1, 1)
 	if err != nil {
 		return "", err

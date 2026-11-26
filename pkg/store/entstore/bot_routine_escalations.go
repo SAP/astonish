@@ -28,7 +28,7 @@ func (s *botAuthorizedOperationRuntime) DecideRoutineException(ctx context.Conte
 		return nil, store.ErrBotForbidden
 	}
 	var result *store.BotOperation
-	err := s.repo.db.Transaction(ctx, func(tx botDraftDB) error {
+	err := s.repo.db.Transaction(ctx, func(tx botDB) error {
 		m, rec, err := s.verify(ctx, tx, q.MandateRef, execution.BotMandatePurposeTask)
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func routineSuppressionKey(payload store.BotControlPayload, mandate store.BotMan
 	return "routine-denied:" + digest
 }
 
-func (s *botAuthorizedOperationRuntime) verifyRoutineException(ctx context.Context, tx botDraftDB, o store.BotOperation) error {
+func (s *botAuthorizedOperationRuntime) verifyRoutineException(ctx context.Context, tx botDB, o store.BotOperation) error {
 	policy, err := s.policy(botPolicyContext(ctx, tx), o.MandateRef)
 	if err != nil {
 		return err

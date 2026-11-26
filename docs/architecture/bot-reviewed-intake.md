@@ -13,7 +13,7 @@ body fields are not authority. Unknown JSON fields are rejected.
 Body: `expected_revision`, `expected_version`, `reviewed: true`, nonempty `reason`,
 `autonomy`, `budget`, and `delivery` (the corresponding BotVersion types).
 This is a complete reviewed replacement of those three policy sections. It is
-accepted only for draft, paused or stopped Bots. A single transaction checks both
+accepted only for Active, Paused or Stopped Bots. A single transaction checks both
 CAS values, saves an immutable version attributed to the authenticated actor,
 revokes pending/approved old action grants, disables runtime schedules and records
 an audit activity. It does not activate, clear a shutdown barrier or change the
@@ -29,8 +29,8 @@ See [mandate runtime policy](bot-mandates.md#explicit-progress-runtime-policy)
 for operation bounds and compatibility. The proposal tool's closed JSON schema
 includes this optional nested policy; model proposals do not supply authority.
 
-Ordinary `POST .../versions` edits remain prose-only, including after a draft has
-reviewed runtime policy. Activation remains a separate readiness-gated API.
+Ordinary `POST .../versions` edits remain prose-only, including after a Bot has
+reviewed runtime policy. Resume remains a separate readiness-gated API; creation already returns Active.
 Delivery binding targets are requests, not authority. Configuration resolves each
 binding ID against the server-verified enabled linked identity owned by the Bot
 owner, and checks live organization/team membership. Claim and transport send
@@ -57,7 +57,7 @@ the UI does not promise enforcement of unsupported money limits.
 Review shows baseline and proposed values, the reason, revision and version.
 Saving requires both configuration review and a separate explicit rights,
 spending and destinations consent. Edits invalidate both consents; no activation,
-run, approval grant or trigger endpoint is called. Active/deleted and non-owner
+run, approval grant or trigger endpoint is called. Deleted and non-owner
 views are read-only. The server remains authoritative for ownership and supported
 delivery identity proofs.
 
@@ -98,18 +98,18 @@ human redaction; this is not a credential detector.
 Records use a typed `source-intake-v1:` envelope in existing owner-private BotIntake
 storage. Ordinary unfinished saves/reads/deletes reject this envelope rather than
 allowing replacement. Proposals create no placeholder Bot, Home or scheduled job.
-Chat/adaptive confirmation atomically creates an inert draft and durable applied
+Chat/adaptive confirmation atomically creates an Active Bot without unsolicited work and durable applied
 receipt; conversion pauses the original only inside that same transaction. Source
 Chat is unchanged. Local source transactions are serializable; contention errors
 are safe to retry with the same ID/digest.
 
 Templates cannot be atomic across team and personal databases. Confirmation first
 persists `applying` intent, then takes a proposal write fence, creates a private
-inert draft using a deterministic proposal/digest key, and records `applied` only
+Active Bot using a deterministic proposal/digest key, and records `applied` only
 after the destination committed. A receipt-write failure leaves `applying`, not a
 false success or a rejectable proposal. Retrying recovers the same destination
 before checking a newer template revision. Rejection after applying intent is a
-conflict. No path autoactivates. Terminal applied/rejected decisions replay their
+conflict. No path enables recurrence or queues unsolicited work. Terminal applied/rejected decisions replay their
 original receipt; changed idempotent creation payloads conflict.
 
 Verification: `go test ./pkg/store/entstore ./pkg/api -run
@@ -133,7 +133,7 @@ Body: `name`, `idempotency_key`, `charter`, `reviewed: true`, optional
 
 The source must be an ordinary Chat owned by the authenticated actor in the same
 scope. Team promotion additionally requires `reviewed_for_team`. There is no
-private-to-team fallback. A new draft and separate Bot Home are created atomically;
+private-to-team fallback. A new Active Bot and separate Bot Home are created atomically;
 the source Chat, transcript and metadata are not changed. Summary/memory copies
 are inserted into the new Home's memory, goals get new identifiers, and text
 artifact snapshots are retained in the creation activity. **Binary files and
@@ -150,11 +150,10 @@ active adaptive job's reviewed `source_job_id`, `updated_at`, `schedule` and
 
 `POST` to the same URL takes `expected_updated_at` from that review, `name`,
 `idempotency_key`, `charter`, `reviewed: true`, and `reviewed_for_team` for team scope.
-It creates an inert replacement draft with a disabled cron trigger carrying only
+It creates an Active replacement Bot with a disabled cron trigger carrying only
 the reviewed schedule and instructions. The original is paused **in the same
 transaction**, after all replacement writes; rollback preserves the original and
-removes all replacement rows. The original is not deleted. Activation and trigger
-enablement remain separate review actions. Non-adaptive jobs are rejected.
+removes all replacement rows. The original is not deleted. Trigger enablement remains a separate authorized action. Non-adaptive jobs are rejected.
 Timestamp CAS uses the persisted microsecond bucket to match SQLite's timestamp
 read precision (PostgreSQL also persists microseconds); the exact read value is
 checked before the conditional update.
@@ -172,7 +171,7 @@ memories, goals with completion criteria, and text artifact snapshots; empty
 added rows must be completed or removed. It never fetches or copies a transcript.
 Template selection fetches the current team template, displays its language,
 goals, criteria and disabled schedule suggestions, and pins that revision when
-forking to a private draft. A stale revision is a visible server error, not a
+forking to a private Active Bot. A stale revision is a visible server error, not a
 silent upgrade.
 
 Back preserves fields and clears consent. Failed saves preserve fields and
@@ -182,13 +181,13 @@ explicit discard when fields are dirty; Keep editing preserves the intake.
 A `beforeunload` guard asks the browser to warn before reload/navigation while
 unsaved content exists (browser support and user interaction requirements apply).
 No sensitive draft text is stored in browser storage. Successful Save uses the
-existing atomic backend creation, navigates to the persisted private draft, and
+existing atomic backend creation, navigates to the persisted private Active Bot, and
 never calls activation. Blank creation additionally reviews optional language,
 timezone, identity, working style and owner preferences via the existing
 `definition.persona` DTO. Promotion and template fork do not accept that DTO, so
 those modes do not offer unsupported persona inputs. Review states the supervised,
 no-contact/no-publishing/no-spend defaults and absence of active schedules.
-Policy configuration, activation and trigger enablement remain separate actions.
+Policy configuration and trigger enablement remain separate actions.
 
 ## Durable unfinished intake backend
 

@@ -27,7 +27,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -45,7 +44,7 @@ func (m *configuredSearchWorkerModel) GenerateContent(ctx context.Context, r *mo
 	if m.step > 2 {
 		return m.workerTestModel.GenerateContent(ctx, r, stream)
 	}
-	name, args := launcher.BotConfiguredSearchToolName, map[string]any{"facet": "overview"}
+	name, args := launcher.BotConfiguredSearchToolName, map[string]any{"query": "Stock Market News overview", "max_results": 5}
 	if m.step == 2 {
 		name, args = "web_fetch", map[string]any{"url": m.url}
 	}
@@ -161,7 +160,7 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			pool := &titleSkillPool{url: detail.URL}
-			worker, err := NewBotWorker(BotWorkerConfig{TurnRegistry: registry, Backend: db, MandatePolicy: policy, Sandbox: backend, Pool: pool, WorkerID: "search-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+			worker, err := NewBotWorker(BotWorkerConfig{TurnRegistry: registry, Backend: db, MandatePolicy: policy, Sandbox: backend, Pool: pool, WorkerID: "search-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return llm, nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
@@ -175,20 +174,24 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				if e != nil {
 					return nil, e
 				}
-				search, e := launcher.BotConfiguredResearchTool(c, q, s, func(c context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {
+				searchFactory := func(c context.Context, p, m string, cfg *config.AppConfig) (model.LLM, error) {
 					if !provider.IsConfinedProviderSecrets(c) || p != "search" || m != "sonar" {
 						return nil, store.ErrBotForbidden
 					}
 					return configuredSearchEngineFixture{calls: &searchCalls, url: detail.URL}, nil
-				}, nil, episode)
+				}
+				search, e := launcher.BotConfiguredResearchTool(c, q, s, searchFactory, nil, episode)
 				if e != nil {
 					return nil, e
 				}
 				reads = append(reads, search)
-				// Only configured research extends Chat's catalog; ordinary web_fetch
-				// stays the shared pool-backed executable. The read adapter supplies
-				// mandate classification, never a replacement builtin.
-				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool, Groups: map[string]*agent.ToolGroup{"bot_research": {Name: "bot_research", Tools: []tool.Tool{search}}}}, Research: episode, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				chatConfig, e := launcher.BotScopedChatConfig(c, s)
+				if e != nil {
+					return nil, e
+				}
+				// Configured search and web_fetch stay shared executables. The read
+				// adapters supply mandate classification, never replacement builtins.
+				return &launcher.BotChatSafeResources{ChatConfig: chatConfig, ProviderFactory: searchFactory, Catalog: &launcher.ChatCatalogResources{Pool: pool}, Research: episode, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Mandate: q.Mandate, Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.WithBotMandatedReadClassifier(launcher.BotCatalogueClassifier{}, reads)}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -197,7 +200,7 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 			v := store.DefaultBotVersion()
 			v.Charter = "Research public sources"
 			v.Budget.MaxTokens = nil
-			b, err := repo.CreateDraft(auth, store.BotCreateRequest{Name: "Search", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
+			b, err := repo.Create(auth, store.BotCreateRequest{Name: "Search", OwnerID: owner, Version: v, IdempotencyKey: "draft"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,11 +211,11 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 			if err = pin(auth, b.HomeSessionID.String(), "controlled", "model"); err != nil {
 				t.Fatal(err)
 			}
-			b, err = repo.Activate(auth, store.BotLifecycleRequest{BotID: b.ID, ActorID: owner, ExpectedRevision: b.Revision, Reason: "owned search acceptance"})
+			b, err = repo.Get(auth, b.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc := &store.Services{Bots: repo, BotMandatePolicy: policy, BotTurnRegistry: registry}
+			svc := &store.Services{Bots: repo, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 			}
@@ -236,7 +239,7 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err = worker.execute(auth, repo, ods.ForTeam(team.Slug).Sessions(), b.ID, receipt.Run.ID); err != nil {
-				t.Fatal(err)
+				t.Fatalf("execute: %v (search=%d detail=%d pool=%d)", err, searchCalls, detailCalls, pool.calls)
 			}
 			saved, err := repo.GetRun(auth, b.ID, receipt.Run.ID)
 			if err != nil || saved.Status != store.RunSucceeded || searchCalls != 1 || detailCalls != 1 || pool.calls != 1 {

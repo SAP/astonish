@@ -28,7 +28,7 @@ func TestMandateWeatherReservationReconciliation(t *testing.T) {
 	ctx = store.WithBotMandateAdmission(ctx, policy)
 	v := store.DefaultBotVersion()
 	v.Charter = "Weather"
-	first, err := repo.CreateDraftAndStart(ctx, store.BotCreateRequest{Name: "Weather", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "weather-budget"})
+	first, err := repo.CreateAndStart(ctx, store.BotCreateRequest{Name: "Weather", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "weather-budget"})
 	if err != nil {
 		t.Fatal(err)
 	}

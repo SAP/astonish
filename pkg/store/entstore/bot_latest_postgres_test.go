@@ -169,7 +169,7 @@ func TestIntegrationPostgresBotLatestSourceBoundDenial(t *testing.T) {
 					t.Fatal(err)
 				}
 				if legacy {
-					if err = f.repo.db.Transaction(f.owner, func(tx botDraftDB) error {
+					if err = f.repo.db.Transaction(f.owner, func(tx botDB) error {
 						rec, e := tx.GetBot(f.owner, b.ID)
 						if e != nil {
 							return e

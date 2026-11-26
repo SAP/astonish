@@ -153,7 +153,7 @@ func TestBotAdmittedMessageDiskSource(t *testing.T) {
 	}
 }
 
-func skillSourceRowForTest(t *testing.T, ctx context.Context, db botDraftDB, id uuid.UUID) (map[string]any, func(map[string]any)) {
+func skillSourceRowForTest(t *testing.T, ctx context.Context, db botDB, id uuid.UUID) (map[string]any, func(map[string]any)) {
 	t.Helper()
 	switch d := db.(type) {
 	case personalBotDB:

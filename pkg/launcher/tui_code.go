@@ -1247,16 +1247,6 @@ func (b *localAgentBackend) copyPlanFile(fromID, toID string) {
 	}
 }
 
-func (b *localAgentBackend) removePlanFile(sessionID string) {
-	path := b.planFilePath(sessionID)
-	if path == "" {
-		return
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Debug("failed to remove PLAN.md sidecar", "component", "localAgentBackend", "path", path, "error", err)
-	}
-}
-
 // ActivePlanFilePath implements backend.PlanBackend. It returns the absolute
 // path of the active session's PLAN.md sidecar, or "" if no session is active
 // or plan-file persistence is not configured.
@@ -3926,42 +3916,9 @@ func stringField(m map[string]any, key string) string {
 }
 
 func (b *localAgentBackend) DeleteSession(ctx context.Context, sessionID string) error {
-	if sessionID == "" {
-		return fmt.Errorf("session id required")
-	}
-	// Collect child session IDs before deletion: sessionSvc.Delete cascades and
-	// removes their index entries, so the per-session PLAN.md sidecars must be
-	// resolved up front to be cleaned up alongside the parent's.
-	var childIDs []string
-	if b.fileStore != nil {
-		if children, cerr := b.fileStore.ListChildren(sessionID); cerr == nil {
-			for _, child := range children {
-				childIDs = append(childIDs, child.ID)
-			}
-		}
-	}
-	err := b.sessionSvc.Delete(ctx, &session.DeleteRequest{
-		AppName:   codeAppName,
-		UserID:    b.effectiveUserID(),
-		SessionID: sessionID,
-	})
-	if b.checkpoints != nil {
-		_ = b.checkpoints.DeleteSession(sessionID)
-	}
-	// Remove the per-session PLAN.md sidecar(s) written in code mode (see
-	// planFilePath). Best-effort: a missing file is not an error.
-	b.removePlanFile(sessionID)
-	for _, childID := range childIDs {
-		b.removePlanFile(childID)
-	}
-	b.mu.Lock()
-	if b.sessionID == sessionID {
-		b.sessionID = ""
-		b.usage = nil
-		b.resumed = false
-	}
-	b.mu.Unlock()
-	return err
+	b.runtimeMu.Lock()
+	defer b.runtimeMu.Unlock()
+	return b.deleteCodeSessionData(ctx, sessionID)
 }
 
 func (b *localAgentBackend) NewSession() {

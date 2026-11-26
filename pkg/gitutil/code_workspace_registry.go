@@ -174,7 +174,7 @@ func (m *CodeWorkspaceManager) BindSession(ctx context.Context, p ProjectIdentit
 		if !ok {
 			return os.ErrNotExist
 		}
-		if r.State == WorkspaceRemoved {
+		if r.State == WorkspaceRemoved || r.State == WorkspaceDeleting {
 			return ErrWorkspaceOwnership
 		}
 		for i, s := range r.Sessions {

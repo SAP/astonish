@@ -11,6 +11,10 @@ import (
 )
 
 func RunCodeWorkspaceHandoff(ctx context.Context, cfg *CodeConfig, r backend.WorkspaceLaunchRequest) error {
+	if e := finishCodeSessionDeletion(ctx, r); e != nil {
+		return e
+	}
+	r.DeleteSessionID = ""
 	args, e := codeWorkspaceHandoffArgs(cfg, r)
 	if e != nil {
 		return e

@@ -29,6 +29,9 @@ type WorkspaceLaunchRequest struct {
 	WorkspaceID string
 	SessionID   string
 	Label       string
+	// DeleteSessionID requests internal post-shutdown cleanup before launching;
+	// it is never forwarded as a CLI flag.
+	DeleteSessionID string
 }
 type WorkspaceSummary struct {
 	ID          string

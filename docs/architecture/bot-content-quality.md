@@ -246,9 +246,12 @@ uses controlled sources/model responses, not a live provider latency guarantee.
 
 ## Trusted read transport failures
 
-Ordinary Bot catalogue `web_fetch` now dispatches a first-party
-`_bot_public_fetch` node operation rather than inferring safety from the public
-name or native error text. The concrete handler preserves URL/mode/SSRF checks;
+Production shared Chat `web_fetch` dispatches a first-party
+`_bot_public_fetch` node operation through the factory-pinned actual catalog
+NodeTool, not an alternate `BotCatalogueTools` construction. The shared dispatch
+hook uses `NodeTool.RunWithTransport` only after normal argument validation,
+readiness/network provisioning, authorization and shared-budget checks. This avoids
+inferring safety from the public name or native error text. The concrete handler preserves URL/mode/SSRF checks;
 only HTTP exchange/body-read failures return a bounded failed-read envelope.
 Validation, credential-bearing URLs, cancellation and transport-to-node errors
 remain native. The pinned catalogue adapter unwraps this envelope and records an

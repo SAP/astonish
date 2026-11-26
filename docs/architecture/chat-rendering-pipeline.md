@@ -24,6 +24,39 @@ known pre-dispatch denied, and genuinely uncertain bodies verbatim in both nativ
 terminal layouts; scheduled-report boundary tests keep autonomous occurrences
 separate even when two committed bodies have identical text.
 
+## Approval paging, file refresh and plan selection
+
+Saved Bot questions are loaded across the entire scoped approval cursor sequence,
+not just the first 200 rows. Server live/history/reconnect enrichment likewise uses
+complete authoritative approval correlation, independently of the eight-row
+transcript warm tail. A consumed question renders its persisted answer once at the
+original anchor before later messages, with no action controls or pending count;
+resolved questions suppress stale waiting-report presentation. Native terminal
+consumes the same public enrichment and retains saved decisions in its existing
+inbox/transcript, not a new optimistic approval state. Empty/error approval reads
+must not fabricate pending questions or saved answers.
+
+`BotFilesPanel` keeps cursor paging only within one current listing identity. Explicit
+Load more appends the next page; repository revision, Refresh, online refresh,
+navigation or close/reopen resets to page one and replaces previous rows. Deleted
+or changed rows cannot survive by concatenating an old page two with a new page one.
+Loading, empty and error states retain their existing presentation; late requests
+cannot cross Bot/team/scope/Home/path/listing identities. Read refresh never submits
+work. Published previews/downloads remain bound to immutable publication identity,
+not the current working-file listing.
+
+Studio plan selection uses the latest valid snapshot for the selected plan and
+preserves current sequence ordering in populated views; absent/malformed data does
+not invent plan authority. Last-plan lookup uses ES2022-compatible iteration rather
+than requiring ES2023 `findLast` declarations. The report last-turn/Markdown/backend
+`isReport` three-signal gate is unchanged in every mode.
+
+`TestBotApprovalReplayBrowserAcceptance` and `TestBotFilePaginationBrowserAcceptance`
+are strict built-Studio personal/team journeys with production HTTP handlers,
+temporary stores and scripted data, without browser state injection or paid calls.
+The gate builds once and rejects missing matches/skips; test names here do not claim
+an unrecorded pass, deployment or corrected-head GitHub CI success.
+
 ## Overview
 
 The Studio Chat (`StudioChat.tsx`) is the primary user interface for Astonish. It orchestrates 17 sub-components, manages 35 state variables, handles 29 SSE event types from the backend, and renders 21 distinct message types. This document is the authoritative reference for how the pipeline works, how to extend it, and what rules must be followed.

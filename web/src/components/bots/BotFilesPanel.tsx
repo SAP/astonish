@@ -28,42 +28,45 @@ export default function BotFilesPanel({ bot, enabled, revision = 0 }: { bot: Pic
   return <Files key={`${getActiveTeam()}/${bot.scope}/${bot.id}/${bot.home?.id || ''}`} bot={bot} enabled={enabled} revision={revision} />
 }
 function Files({ bot, enabled, revision }: { bot: Pick<Bot, 'id' | 'scope' | 'home' | 'status' | 'permanent_delete'>; enabled: boolean; revision: number }) {
-  const [path, setPath] = useState(''), [attempt, setAttempt] = useState(0), [cursor, setCursor] = useState('')
+  const [path, setPath] = useState(''), [attempt, setAttempt] = useState(0)
+  const [pagination, setPagination] = useState<{ identity: string; cursor: string }>()
   const [showHidden, setShowHidden] = useState(false)
   const [page, setPage] = useState<BotFilePage>(), [selection, setSelection] = useState<BotFileEntry>()
   const [error, setError] = useState(''), [loading, setLoading] = useState(false)
   const available = enabled && !!bot.home && !bot.permanent_delete && bot.status !== 'deleted'
+  const identity = JSON.stringify([getActiveTeam(), bot.scope, bot.id, bot.home?.id, path, showHidden, revision, attempt])
+  const cursor = pagination?.identity === identity ? pagination.cursor : ''
   useEffect(() => {
-    if (!available) { setSelection(undefined); setPage(undefined); return }
+    if (!available) { setPagination(undefined); setSelection(undefined); setPage(undefined); setError(''); setLoading(false); return }
     const controller = new AbortController()
     setLoading(true); setError(''); setSelection(undefined)
     listBotFiles({ botId: bot.id, scope: bot.scope, path }, controller.signal, cursor, showHidden).then(value => {
       if (!controller.signal.aborted) setPage(old => cursor ? { ...value, entries: [...(old?.entries || []), ...value.entries] } : value)
     }).catch(e => { if (!controller.signal.aborted) { setError(e instanceof Error ? e.message : String(e)); if (invalidatesBotFiles(e)) setPage(undefined) } }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [available, bot.id, bot.scope, path, attempt, revision, cursor, showHidden])
+  }, [available, bot.id, bot.scope, path, identity, cursor, showHidden])
   useEffect(() => {
     const refresh = (event: Event) => {
       if (event instanceof CustomEvent && event.detail?.botId !== bot.id) return
-      if (available) { setCursor(''); setAttempt(v => v + 1) }
+      if (available) { setPagination(undefined); setAttempt(v => v + 1) }
     }
     window.addEventListener('online', refresh); window.addEventListener('astonish:bot-files-refresh', refresh)
     return () => { window.removeEventListener('online', refresh); window.removeEventListener('astonish:bot-files-refresh', refresh) }
   }, [available, bot.id])
-  const navigate = (next: string) => { setPage(undefined); setSelection(undefined); setCursor(''); setPath(next) }
+  const navigate = (next: string) => { setPage(undefined); setSelection(undefined); setPagination(undefined); setPath(next); setAttempt(v => v + 1) }
   if (!enabled) return null
   return <section aria-label="Bot files" className="space-y-3" onKeyDown={e => { if (e.key === 'Escape' && selection) { e.preventDefault(); e.stopPropagation(); setSelection(undefined) } }}>
     <h2 className="font-semibold">Files</h2><p className="text-sm text-muted-foreground">Actual retained Home files. Instructions, MEMORY.md, knowledge, tasks and skills live here. Published files in Chat are separate immutable snapshots. Protected system files are excluded.</p>
     {!bot.home ? <p role="status">Home is not prepared. Browsing does not create a Home or run the Bot.</p> : !available ? <p role="status">Bot files are unavailable.</p> : <>
       <nav aria-label="File breadcrumbs" className="flex flex-wrap gap-2"><Button variant="link" onClick={() => navigate('')}>Home</Button>{path.split('/').filter(Boolean).map((part, i, parts) => <Button key={i} variant="link" onClick={() => navigate(parts.slice(0, i + 1).join('/'))}>{part}</Button>)}</nav>
-      <div className="flex flex-wrap items-center gap-3"><Button disabled={loading} onClick={() => { setCursor(''); setAttempt(v => v + 1) }}>Refresh files</Button>
+      <div className="flex flex-wrap items-center gap-3"><Button disabled={loading} onClick={() => { setPagination(undefined); setAttempt(v => v + 1) }}>Refresh files</Button>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={showHidden} onChange={e => { setShowHidden(e.target.checked); navigate(''); setAttempt(v => v + 1) }} />Show hidden files</label>
       </div>
       {loading && <p role="status">Loading directory…</p>}
       {error && <p role="alert">{page ? 'Last known listing · ' : ''}{error}<Button onClick={() => setAttempt(v => v + 1)}>Retry files</Button></p>}
       {!loading && !error && !page?.entries.length && <p>Directory is empty.</p>}
       <ul>{page?.entries.map(entry => <li key={entry.path} className="flex flex-wrap items-center gap-2"><Button className="min-w-0 max-w-full h-auto whitespace-normal break-all text-left" variant="link" disabled={!!error || loading} onClick={() => entry.kind === BotFileKind.Directory ? navigate(entry.path) : setSelection(entry)}>{entry.kind === BotFileKind.Directory ? 'Folder: ' : ''}{entry.path.split('/').pop()}</Button><span className="text-xs text-muted-foreground">{entry.kind === BotFileKind.File ? `${entry.size_bytes.toLocaleString()} bytes` : ''}</span></li>)}</ul>
-      {page?.next && <Button disabled={loading || !!error} onClick={() => setCursor(page.next!)}>Load more files</Button>}
+      {page?.next && <Button disabled={loading || !!error} onClick={() => setPagination({ identity, cursor: page.next! })}>Load more files</Button>}
       {selection && <section aria-label="File preview"><Button onClick={() => setSelection(undefined)}>Close preview</Button><BotFileSelection target={{ botId: bot.id, scope: bot.scope, path: selection.path }} entry={selection} /></section>}
     </>}
   </section>

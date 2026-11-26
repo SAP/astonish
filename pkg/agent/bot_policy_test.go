@@ -50,6 +50,20 @@ func botVerifiedRead(_ context.Context, name string, args json.RawMessage) (exec
 	return execution.ActionDescriptor{Tool: name, Arguments: args, Effect: execution.EffectRead, ConstraintsVerified: true}, nil
 }
 
+// Metadata wrappers must preserve the lazy, declaration-only contract without enumeration.
+func TestBotSafeToolsetMetadataWrapperContract(t *testing.T) {
+	ctx := botBoundaryContext(t)
+	lazy := NewLazyMCPToolset("cached", []cache.ToolEntry{{Name: "cached_read"}}, config.MCPServerConfig{Command: "must-not-start"}, false)
+	for _, ts := range []tool.Toolset{lazy, NewSanitizedToolset(lazy, false), &FilteredToolset{underlying: NewSanitizedToolset(lazy, false)}} {
+		if err := botSafeToolset(ctx, ts); err != nil {
+			t.Errorf("metadata wrapper %T rejected: %v", ts, err)
+		}
+	}
+	if lazy.started {
+		t.Fatal("enumeration started server")
+	}
+}
+
 func TestBotPolicyUnknownEffectsRequireReview(t *testing.T) {
 	ctx := botPolicyContext(t, botBoundaryContext(t), []string{"read_file"}, nil)
 	requests, guards := 0, 0

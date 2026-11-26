@@ -257,3 +257,5 @@ func TestBotHistoryStreamHTTPAcceptance(t *testing.T) {
 	request("GET", teamStream, reader, "", 404)
 	request("GET", teamStream, owner, "", 200)
 }
+
+func TestBotHistoryReviewsBeyondFirstPage(t *testing.T) { testPresentationReviewStream(t, true, false) }

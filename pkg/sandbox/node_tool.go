@@ -161,6 +161,11 @@ func (nt *NodeTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) erro
 // On the first call, the LazyNodeClient creates the session container and
 // starts the node. The session ID is extracted from tool.Context.SessionID().
 func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	return nt.RunWithTransport(ctx, args, nil, nil)
+}
+
+// RunWithTransport decorates only the ready, security-provisioned client at the transport boundary.
+func (nt *NodeTool) RunWithTransport(ctx tool.Context, args any, decorate func(ToolNodeClient) ToolNodeClient, observe NodeToolObserver) (map[string]any, error) {
 	// Extract session ID from ADK context for container routing
 	var sessionID string
 	if ctx != nil {
@@ -204,7 +209,10 @@ func (nt *NodeTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		}
 	}
 
-	return RunNodeTool(ctx, nt.Tool, client, sessionID, ctx.AgentName(), argsMap, nil)
+	if decorate != nil {
+		client = decorate(client)
+	}
+	return RunNodeTool(ctx, nt.Tool, client, sessionID, ctx.AgentName(), argsMap, observe)
 }
 
 // ContextCallingToolClient optionally supports cancellation during transport.

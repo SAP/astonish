@@ -38,7 +38,8 @@ export function reducePlanProgress(messages: ChatMsg[], data: Record<string, unk
     }]
   }
   if (data.event_type === PlanEvent.StepUpdate) {
-    const index = messages.findLastIndex(m => m.type === 'plan')
+    let index = messages.length - 1
+    while (index >= 0 && messages[index].type !== 'plan') index--
     const plan = messages[index] as PlanMessage | undefined
     const status = data.step_status as PlanStepInfo['status']
     if (!plan || !['pending', 'running', 'complete', 'failed'].includes(status)) return messages

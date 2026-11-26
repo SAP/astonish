@@ -216,6 +216,11 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 		return nil, e
 	}
 	if !control {
+		if entry := wired.ChatAgent.ToolIndex.GetToolEntry("web_fetch"); entry != nil {
+			if shared, ok := entry.Tool.(*chatRuntimeTool); ok {
+				b.publicFetch, _ = shared.chatRuntimeRunnable.(*sandbox.NodeTool)
+			}
+		}
 		if entry := wired.ChatAgent.ToolIndex.GetToolEntry("perplexity_web_search"); entry != nil {
 			if shared, ok := entry.Tool.(*chatRuntimeTool); ok {
 				b.taskSearch = shared.chatRuntimeRunnable
@@ -363,6 +368,16 @@ func (h botSharedDispatch) Dispatch(ctx tool.Context, t tool.Tool, args any, nex
 	// capabilities while the existing policy wrapper rebinds invocation lifetime.
 	binding := *h.b
 	binding.owner = ctx
+	if binding.publicFetch != nil && target == binding.publicFetch {
+		next = func(c tool.Context, a any) (map[string]any, error) {
+			var readExecuted bool
+			return binding.publicFetch.RunWithTransport(c, a, func(client sandbox.ToolNodeClient) sandbox.ToolNodeClient {
+				return &botPublicFetchClient{ToolNodeClient: client, executed: &readExecuted}
+			}, func(values, result map[string]any, err error) {
+				recordBuiltinToolObservationWithRead(c, c.SessionID(), target.Name(), values, result, readExecuted && err == nil, a)
+			})
+		}
+	}
 	if guard := binding.sharedResearch; guard != nil && target == binding.taskSearch {
 		next = func(c tool.Context, args any) (map[string]any, error) {
 			raw, err := json.Marshal(args)

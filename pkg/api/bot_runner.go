@@ -113,7 +113,7 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		class = bot.ErrorInterrupted
 	}
-	report := store.BotReport{Summary: "I couldn't complete the requested work.", Failure: &store.BotReportFailure{Kind: store.BotReportFailureOperational, TechnicalDetails: cause.Error()}}
+	report := store.BotReport{Summary: "I couldn't complete the requested work.", Failure: &store.BotReportFailure{Kind: store.BotReportFailureOperational, TechnicalDetails: "An operational failure stopped the requested work."}}
 	if message, ok := bot.BudgetFailureMessage(cause); ok && class != bot.ErrorInterrupted {
 		class = bot.ErrorBudget
 		report.Summary = message
@@ -124,7 +124,7 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		report.Summary = message
 		report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureExecutionFormat, TechnicalDetails: bot.CheckpointFailureDetails(cause)}
 	}
-	failure := &bot.RunError{Class: class, Message: cause.Error(), Cause: cause, TerminalForAttempt: true}
+	failure := &bot.RunError{Class: class, Message: report.Summary, Cause: cause, TerminalForAttempt: true}
 	status := store.RunFailed
 	if class == bot.ErrorInterrupted {
 		status = store.RunInterrupted
@@ -136,6 +136,7 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		// the caller's error, even when its cause is cancellation or a budget stop.
 		preserved := *existing
 		preserved.Cause = cause
+		preserved.Message = "I couldn't confirm the outcome of the requested work."
 		failure = &preserved
 		status = store.RunPartial
 		report.EffectState = store.BotReportEffectsUncertain
@@ -154,7 +155,7 @@ func botChatFactoryFailure(ctx context.Context, cause error) (bot.RunResult, err
 		// Preserve the cause for diagnostics without putting endpoint URLs or
 		// credentials from HTTP errors into the report or public error message.
 		failure := &bot.RunError{Class: bot.ErrorPermanent, Message: message, Cause: cause, TerminalForAttempt: true}
-		report := store.BotReport{Summary: message, Failure: &store.BotReportFailure{Kind: store.BotReportFailureSetup, TechnicalDetails: cause.Error()}}
+		report := store.BotReport{Summary: message, Failure: &store.BotReportFailure{Kind: store.BotReportFailureSetup, TechnicalDetails: message}}
 		envelope := bot.EmployeeMessageFallback(store.RunFailed, report, nil)
 		report.EmployeeMessage = &envelope
 		return bot.RunResult{Status: store.RunFailed, Failure: failure, Report: report}, failure

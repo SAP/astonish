@@ -1,11 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { botURL, permanentDeleteBot, setupBotHome, createBot, promoteChatToBot, getBotTemplate, forkBotTemplate, botLifecycle, decideBotApproval, BotStatus, type Bot, type BotApproval, type BotTemplate } from '../bots'
+import { botURL, permanentDeleteBot, setupBotHome, createBot, promoteChatToBot, getBotTemplate, forkBotTemplate, botLifecycle, decideBotApproval, listBotApprovals, BotStatus, type Bot, type BotApproval, type BotTemplate } from '../bots'
 import { connectBotEvents } from '../botEvents'
 import { teamFetch } from '../teamContext'
 vi.mock('../teamContext', () => ({ teamFetch: vi.fn() }))
 const fetchMock = vi.mocked(teamFetch)
 beforeEach(() => fetchMock.mockReset())
 describe('scoped Bot transport', () => {
+  const approvalRows = (count: number, start = 1) => Array.from({ length: count }, (_, i) => ({ id: `00000000-0000-4000-8000-${(start + i).toString(16).padStart(12, '0')}`, status: 'consumed' } as BotApproval))
+  it.each([200, 201, 400])('drains %s approvals in cursor order including exact multiples', async count => {
+    const rows = approvalRows(count)
+    for (let i = 0; i <= count; i += 200) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ approvals: rows.slice(i, i + 200) })))
+    const controller = new AbortController()
+    await expect(listBotApprovals('a/b', 'team', controller.signal)).resolves.toEqual({ approvals: rows })
+    expect(fetchMock).toHaveBeenCalledTimes(Math.floor(count / 200) + 1)
+    fetchMock.mock.calls.forEach(([url, init], i) => {
+      const query = new URL(String(url), 'https://fixture.test').searchParams
+      expect(query.get('limit')).toBe('200'); expect(query.get('scope')).toBe('team')
+      expect(query.get('after')).toBe(i ? rows[i * 200 - 1].id : null)
+      expect(init?.signal).toBe(controller.signal)
+    })
+  })
+  it('rejects cyclic approval pages without returning partial data', async () => {
+    const rows = approvalRows(200)
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ approvals: rows })))
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ approvals: rows })))
+    await expect(listBotApprovals('a', 'personal')).rejects.toThrow(/cursor/i)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+  it('honors approval cancellation between pages even if fetch ignores the signal', async () => {
+    const controller = new AbortController()
+    fetchMock.mockImplementationOnce(async () => { controller.abort(); return new Response(JSON.stringify({ approvals: approvalRows(200) })) })
+    await expect(listBotApprovals('a', 'personal', controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
   it.each(['personal', 'team'] as const)('permanently deletes %s with confirmation but no reason', async scope => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))
     await expect(permanentDeleteBot({ id: 'a/b', scope, revision: 4 } as Bot)).resolves.toBeUndefined()

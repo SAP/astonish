@@ -206,7 +206,12 @@ func botPageRequest(w http.ResponseWriter, r *http.Request) (store.BotPage, bool
 	return p, true
 }
 func botWriteJSON(w http.ResponseWriter, status int, value any) {
+	data, err := botPublicJSON(value)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(append(data, '\n'))
 }

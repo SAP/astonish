@@ -527,6 +527,22 @@ func applyRevisionDefinition(s PlanSnapshot, d PlanDefinition, affected map[stri
 		}
 		s.Steps[i] = step
 	}
+	// Retain review authority only while its owner can still be serviced.
+	// Clearing an impossible checkpoint does not bypass phase ordering.
+	if owner := s.Document.CodeReviewPending; owner != "" {
+		found := false
+		for _, step := range s.Steps {
+			if strings.EqualFold(step.Name, owner) {
+				found = true
+				break
+			}
+		}
+		temp := s
+		temp.Document.CodeReviewPending = ""
+		if !found || codePhaseBlock(temp, owner) != nil {
+			s.Document.CodeReviewPending = ""
+		}
+	}
 	s.Revision++
 	s.PendingRevision = nil
 	return s

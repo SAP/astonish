@@ -19,6 +19,7 @@ import (
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/google/uuid"
@@ -768,6 +769,7 @@ type botFactoryBinding struct {
 	researchOnly     bool
 	tasks            *botTaskServices
 	// Captured from the genuine shared catalog, never a name-only tool lookup at dispatch.
+	publicFetch      *sandbox.NodeTool
 	taskSearch       botRunnableTool
 	taskSearchConfig *config.AppConfig
 	redactTask       func(string) string
@@ -1294,7 +1296,9 @@ func (t *botBoundTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	}
 	result, err := t.binding.progressTool(bound, t.botRunnableTool, args, func(c tool.Context, a any) (map[string]any, error) {
 		result, err := t.binding.runSynthesisTool(c, botDispatchTarget(t.botRunnableTool, t.next), a)
-		recordBotSharedNodeObservation(c, t.botRunnableTool, a, result, err)
+		if t.botRunnableTool != t.binding.publicFetch {
+			recordBotSharedNodeObservation(c, t.botRunnableTool, a, result, err)
+		}
 		return result, err
 	})
 	if t.binding.tasks != nil && substantiveTaskTool(t.botRunnableTool) {

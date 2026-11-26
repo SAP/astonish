@@ -51,7 +51,7 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 		}
 		// Only the shared built-in node transport is eligible; an MCP tool with
 		// the same name or a forged result cannot attest to effects.
-		if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin {
+		if _, builtin := t.botRunnableTool.(*sandbox.NodeTool); builtin && t.botRunnableTool != t.binding.publicFetch {
 			raw, marshalErr := json.Marshal(args)
 			var values map[string]any
 			if marshalErr == nil && json.Unmarshal(raw, &values) == nil {

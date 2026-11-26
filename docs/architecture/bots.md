@@ -45,6 +45,52 @@ historical-envelope provenance, authority and cold-restore evidence bindings.
 These bindings are requirements, not claims that a started integrated run passed.
 
 
+## Durable authority versus product records
+
+The minimal durable execution core is Bot identity/configuration and current scoped
+ownership, immutable admitted assignment/grant pins, run and exact occurrence
+identity/idempotency, lease/fence, cumulative accounting/reservations, exact approved
+actions and effect receipts, immutable publication identity and essential continuation
+state. These records prevent double admission, stale execution, overspend, effect
+replay and publication of a different result; removing them is not merely cleanup.
+
+Not every persisted family is that core. Copied Home/run transcript visibility rows
+are projections of ordered conversation and committed result provenance, not fresh
+authority. Publication and postcommit delivery/outbox records serve distinct duties:
+the immutable result owns bytes/identity; delivery tracks exposing that result under
+its own authorization and deduplication rules. Neither a copied transcript nor
+successful delivery authorizes work replay. The separate Bot memory catalogue/source
+provenance supports retrieval, attribution and correction; its indexes and compact
+`MEMORY.md` view are derived/rebuildable, not grants or a second canonical conversation.
+Rich Work assessments, repair history, skills and learning are product scope for
+selected/historical contracts, not mandatory durability for every read-only answer.
+
+**Shared-memory consolidation is still unmet.** Shared Chat execution does not mean
+the Bot-specific memory catalogue/SQL/FTS/source-record machinery has been eliminated
+or that compact file-backed `MEMORY.md` is now the only memory source. A follow-up
+must decide how Bot-owned attribution, correction/deletion, retrieval scope, index
+rebuild and bounded document projection fit shared memory, then prove cold restore
+and tenant isolation. This repair does not select a replacement backend, migrate
+transcripts/checkpoints/memory, delete historical provenance or add optional Work/
+learning features. Execution and publication authority stay independent of memory.
+
+## Boundary repair evidence scope
+
+Production ordinary Bot construction is `NewBotChatAgentFactory` →
+`newBotScopedChatRuntime` → `NewScopedChatRuntime`, not an alternate helper catalog.
+Public failure projections contain server-authored safe operational text; raw causes
+stay in trusted errors. Published file `ContentRef`s own historical bytes through
+both session URL aliases. Temporary persona-local daily quota exhaustion retries the
+same due occurrence without disabling recurrence or issuing another grant. Approval
+correlation drains every durable cursor page; saved consumed answers remain
+chronological and never become pending actions. File refresh restarts page one.
+
+Named deterministic fixtures and strict built-Studio personal/team approval/file
+journeys are the evidence boundary; a test name or started command is not a pass.
+No new physical Docker/Kubernetes/node rollout, PostgreSQL acceptance, paid-provider
+quality or corrected-head GitHub CI result is claimed. Existing historical receipts
+below remain historical, including their pending/failing status at capture time.
+
 ## Current consolidation boundary — 2026-11-23
 
 Bot remains unreleased. Revision 12 records phase 6 complete at sequence 485,

@@ -129,6 +129,16 @@ Phase controls are recoverable model feedback. The agent must finish incomplete 
 
 Review mode serializes phases even within the same parallel group; parallel workers within one phase remain permitted. Phase verification stores `CodeReviewPending` and emits the outcome/evidence checkpoint. The runner returns before starting the next phase. A review turn can answer questions, revise/correct the reviewed phase and reverify it without authorizing later phases. Explicit continuation (`continue`, `proceed`, `next`, or `continue to the next phase`) clears the checkpoint. The last phase proceeds to `announce_completion`, which records existing evidence without separate Code tool consent. Consent for file/shell actions and other protected tools remains unchanged.
 
+Definition revision reconciles `CodeReviewPending` against the resulting
+`PlanSnapshot` in `applyRevisionDefinition`. A removed/renamed owner or an owner
+blocked by invalidated earlier prerequisites loses that impossible checkpoint.
+A retained, serviceable owner keeps its review authority, including independent
+later-phase patches. Clearing an impossible checkpoint does not authorize later
+phases: the normal ordering/reverification gates still apply. Review cadence,
+execution consent and accepted evidence remain separate. Persistence/restore use
+the reconciled snapshot, not a stale TUI label or editable sidecar. The narrow
+step-patch protocol above retains its existing invalidation and approval semantics.
+
 `go test ./pkg/agent ./pkg/tools ./pkg/launcher -run '^TestCodePlan' -count=1` covers admission, retries, persistence, serial review, deferred input, real local RunTurn recovery/revision, review corrections and compaction/restart. `go test ./cmd/astonish -run '^TestCodePlan(Approval|Execution)PTYAcceptance$' -count=1` uses the real Code CLI with temporary sessions and a scripted loopback provider, checking keyboard repaint, persisted approval, five premature final responses, actual phase verification, review pause/continue, and durable Results. These tests establish runtime mechanics, not arbitrary live-model acceptance judgments.
 
 `go test ./cmd/astonish -run '^TestCodePlanNarrowRevisionPTYAcceptance$' -count=1` exercises a real Code CLI with temporary HOME/config/workdir and a scripted loopback provider in both cadences. It completes phase one, patches only phase three's verifier, checks the live completed sidebar and unchanged durable evidence without new approval, explicitly resumes the process, completes the remaining real checks and records Results. Counter artifacts prove phase one and the revised final check each ran exactly once. A changed-earlier-contract subcase still invalidates dependent evidence and never claims completion. Captured generated Code requests establish focused-guidance wiring. Together with the ordinary planning-revision PTY, this proves runtime mechanics and prompt wiring, **not** autonomous model judgment or a measured wall-time/performance improvement. There is no freshness cache, live-model benchmark or automatic test-selection mechanism.

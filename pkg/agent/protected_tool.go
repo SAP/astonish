@@ -62,6 +62,8 @@ type FilteredToolset struct {
 }
 
 // Name returns the name of the underlying toolset
+func (f *FilteredToolset) BotMetadataOnly() bool { return IsBotMetadataOnlyToolset(f.underlying) }
+
 func (f *FilteredToolset) Name() string {
 	return f.underlying.Name()
 }

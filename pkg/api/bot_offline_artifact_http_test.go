@@ -39,10 +39,15 @@ func (s *offlineArtifactSessions) ReadTranscriptEvents(context.Context, string, 
 
 type offlineArtifactBackend struct {
 	sandbox.Backend
-	want  sandbox.BotHomeBinding
-	data  []byte
-	calls int
-	fail  bool
+	sandbox.BotHomeFilesBackend
+	want                           sandbox.BotHomeBinding
+	immutable                      []byte
+	contentCalls, closes           int
+	ref                            store.BotContentRef
+	readFail, closeFail, nilStream bool
+	data                           []byte
+	calls                          int
+	fail                           bool
 }
 
 func (b *offlineArtifactBackend) ReadBotHomeArtifact(_ context.Context, binding *sandbox.BotHomeBinding, path string, max int64) ([]byte, error) {
@@ -53,9 +58,40 @@ func (b *offlineArtifactBackend) ReadBotHomeArtifact(_ context.Context, binding 
 	return b.data, nil
 }
 
+type offlineArtifactStream struct {
+	io.Reader
+	backend *offlineArtifactBackend
+}
+
+func (s *offlineArtifactStream) Read(p []byte) (int, error) {
+	if s.backend.readFail {
+		return 0, fmt.Errorf("terminal read failure")
+	}
+	return s.Reader.Read(p)
+}
+func (s *offlineArtifactStream) Close() error {
+	s.backend.closes++
+	if s.backend.closeFail {
+		return fmt.Errorf("terminal close failure")
+	}
+	return nil
+}
+func (b *offlineArtifactBackend) OpenBotContent(_ context.Context, binding *sandbox.BotHomeBinding, ref store.BotContentRef, br store.BotFileRange) (*store.BotFileStream, error) {
+	b.contentCalls++
+	if *binding != b.want || ref != b.ref || br != (store.BotFileRange{}) || b.fail {
+		return nil, fmt.Errorf("denied")
+	}
+	if b.nilStream {
+		return nil, nil
+	}
+	return &store.BotFileStream{ReadCloser: &offlineArtifactStream{Reader: bytes.NewReader(b.immutable), backend: b}, Entry: store.BotFileEntry{SizeBytes: ref.SizeBytes, SHA256: ref.SHA256}}, nil
+}
+
 // Real HTTP requests use the production backend factory with an empty (destroyed
 // run) registry. The backend has no compute methods: any recreation/resume panics.
-func TestBotOfflineArtifactHTTP(t *testing.T) {
+func TestBotOfflineArtifactHTTP(t *testing.T)           { testBotOfflineArtifactHTTP(t, false) }
+func TestBotOfflineArtifactContentRefHTTP(t *testing.T) { testBotOfflineArtifactHTTP(t, true) }
+func testBotOfflineArtifactHTTP(t *testing.T, immutable bool) {
 	dir := t.TempDir()
 	for _, key := range []string{"HOME", "XDG_CONFIG_HOME", "APPDATA"} {
 		t.Setenv(key, dir)
@@ -74,6 +110,15 @@ func TestBotOfflineArtifactHTTP(t *testing.T) {
 	ss := &offlineArtifactSessions{meta: &store.SessionMeta{ID: sid.String(), UserID: owner.String(), BotID: bid.String(), BotRunID: rid.String(), Purpose: store.SessionPurposeBotRun, Retention: store.SessionRetentionBot}}
 	svc := &store.Services{Sessions: ss, Bots: repo}
 	backend := &offlineArtifactBackend{data: data, want: sandbox.BotHomeBinding{Scope: sandbox.BotHomeScope{OrgID: "org", TeamID: "team", UserID: owner.String(), BotID: bid.String()}, Backend: sandbox.BackendKindMock, Ref: home.StorageKey}}
+	if immutable {
+		ref := store.BotContentRef{Format: store.BotContentFormatVersion, Scope: store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: owner.String(), BotID: bid}, Kind: store.BotContentArtifact, Key: "published/result.bin", SHA256: artifact.SHA256, SizeBytes: int64(len(data)), Revision: 1}
+		artifact.ContentRef = &ref
+		artifact.SizeBytes = ref.SizeBytes
+		repo.run.Report.Artifacts[0] = artifact
+		backend.ref = ref
+		backend.immutable = append([]byte{}, data...)
+		backend.data = []byte("overwritten working file")
+	}
 	sandbox.RegisterBackendFactory(sandbox.BackendKindMock, func(sandbox.BackendFactoryConfig) (sandbox.Backend, error) { return backend, nil })
 	t.Cleanup(func() {
 		sandbox.RegisterBackendFactory(sandbox.BackendKindMock, func(sandbox.BackendFactoryConfig) (sandbox.Backend, error) { return mock.New(), nil })
@@ -124,7 +169,44 @@ func TestBotOfflineArtifactHTTP(t *testing.T) {
 		get(route, "reports/result.bin", "", 200, data)
 		get(route, "/root/reports/result.bin", "", 200, data)
 	}
-	if backend.calls != 4 {
+	if immutable {
+		if backend.calls != 0 || backend.contentCalls != 4 || backend.closes != 4 {
+			t.Fatalf("immutable read lifecycle: %+v", backend)
+		}
+		backend.data = nil // Deleted working file must not affect either alias.
+		for _, route := range []string{"/download", "/content"} {
+			for _, alias := range []string{artifact.RelativePath, "/root/" + artifact.RelativePath} {
+				get(route, alias, "", 200, data)
+			}
+		}
+		for _, corrupt := range []func(*store.BotContentRef){
+			func(r *store.BotContentRef) { r.Kind = store.BotContentMemory },
+			func(r *store.BotContentRef) { r.Scope.BotID = uuid.New() },
+			func(r *store.BotContentRef) { r.Scope.OwnerID = uuid.NewString() },
+			func(r *store.BotContentRef) { r.Scope.OrgID = "other" },
+			func(r *store.BotContentRef) { r.Scope.TeamID = "other" },
+			func(r *store.BotContentRef) { r.SizeBytes++ },
+			func(r *store.BotContentRef) { r.SizeBytes = sandbox.MaxBotHomeArtifactBytes + 1 },
+			func(r *store.BotContentRef) { r.SHA256 = fmt.Sprintf("%064x", 1) },
+		} {
+			bad := backend.ref
+			corrupt(&bad)
+			repo.run.Report.Artifacts[0].ContentRef = &bad
+			get("/download", artifact.RelativePath, "", 404, nil)
+		}
+		repo.run.Report.Artifacts[0] = artifact
+		for _, flag := range []*bool{&backend.fail, &backend.readFail, &backend.closeFail, &backend.nilStream} {
+			*flag = true
+			get("/download", artifact.RelativePath, "", 404, nil)
+			*flag = false
+		}
+		backend.immutable = []byte("bad snapshot")
+		get("/content", artifact.RelativePath, "", 404, nil)
+		backend.immutable = data
+		if backend.calls != 0 {
+			t.Fatal("immutable reference fell back to Home")
+		}
+	} else if backend.calls != 4 {
 		t.Fatalf("offline backend not used: %d", backend.calls)
 	}
 	get("/download", "/root/secret.bin", "", 404, nil)
@@ -151,8 +233,12 @@ func TestBotOfflineArtifactHTTP(t *testing.T) {
 	// A matching transcript must not mask retained-storage corruption.
 	ss.events = []*adksession.Event{artifactToolCallEvent("inv", "write", "write_file", map[string]any{"path": "/root/reports/result.bin", "content": string(data)}), toolResponseEvent("inv", "write", "write_file", map[string]any{"success": true})}
 	backend.data = []byte("wrong hash")
+	if immutable {
+		backend.immutable = backend.data
+	}
 	get("/download", artifact.RelativePath, "", 404, nil)
 	backend.data = data
+	backend.immutable = data
 	backend.fail = true
 	get("/download", artifact.RelativePath, "", 404, nil)
 	backend.fail = false

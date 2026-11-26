@@ -103,7 +103,7 @@ func BotHistoryStreamHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	approvals, err := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 200})
+	approvals, err := listBotPresentationApprovals(r.Context(), repo, id)
 	if err != nil {
 		http.Error(w, "Bot reviews unavailable", http.StatusInternalServerError)
 		return

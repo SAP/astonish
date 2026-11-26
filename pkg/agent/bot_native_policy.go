@@ -93,18 +93,19 @@ func botNativeCallbacks(callbacks []llmagent.BeforeToolCallback, resolve botCall
 
 // Eager toolsets may start external processes or resolve credentials merely to
 // list declarations. Bots only enumerate the known metadata-only lazy adapter.
+// BotMetadataOnlyToolset attests that declarations do not start executables or resolve secrets.
+type BotMetadataOnlyToolset interface{ BotMetadataOnly() bool }
+
+func IsBotMetadataOnlyToolset(ts tool.Toolset) bool {
+	metadata, ok := ts.(BotMetadataOnlyToolset)
+	return ok && metadata.BotMetadataOnly()
+}
+
 func botSafeToolset(ctx context.Context, ts tool.Toolset) error {
-	if !botExecutionContext(ctx) {
+	if !botExecutionContext(ctx) || IsBotMetadataOnlyToolset(ts) {
 		return nil
 	}
-	switch ts := ts.(type) {
-	case *LazyMCPToolset:
-		return nil
-	case *FilteredToolset:
-		return botSafeToolset(ctx, ts.underlying)
-	default:
-		return botPolicyDenied("eager toolset startup is not authorized")
-	}
+	return botPolicyDenied("eager toolset startup is not authorized")
 }
 
 type botMetadataToolset struct{ tool.Toolset }

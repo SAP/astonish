@@ -12,14 +12,32 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/browser"
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/cdp"
 	"github.com/go-rod/rod/lib/proto"
 	"golang.org/x/net/websocket"
 )
 
+type artifactCDPReply struct {
+	result map[string]any
+	err    map[string]any
+}
+
+type artifactCDPCall struct {
+	params json.RawMessage
+	reply  chan artifactCDPReply
+}
+
+type artifactCDPGates struct {
+	enable chan *artifactCDPCall
+	body   chan *artifactCDPCall
+}
+
 // Protocol fixture only: no Chrome, user's profile, or sandbox is launched.
-func sessionArtifactBrowser(t *testing.T, mode string) (*browser.Manager, func(string) int) {
+func sessionArtifactBrowser(t *testing.T, mode string, gates ...*artifactCDPGates) (*browser.Manager, func(string) int) {
 	t.Helper()
 	var mu sync.Mutex
 	methods := map[string]int{}
@@ -30,11 +48,16 @@ func sessionArtifactBrowser(t *testing.T, mode string) (*browser.Manager, func(s
 		}
 		websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(c *websocket.Conn) {
 			defer c.Close()
+			done := make(chan struct{})
+			defer close(done)
+			var writes sync.Mutex
+			send := func(v any) error { writes.Lock(); defer writes.Unlock(); return websocket.JSON.Send(c, v) }
 			for {
 				var msg struct {
-					ID        int    `json:"id"`
-					Method    string `json:"method"`
-					SessionID string `json:"sessionId"`
+					ID        int             `json:"id"`
+					Method    string          `json:"method"`
+					SessionID string          `json:"sessionId"`
+					Params    json.RawMessage `json:"params"`
 				}
 				if websocket.JSON.Receive(c, &msg) != nil {
 					return
@@ -75,12 +98,50 @@ func sessionArtifactBrowser(t *testing.T, mode string) (*browser.Manager, func(s
 						result = map[string]any{"data": "!", "base64Encoded": true, "eof": true}
 					}
 				}
-				if websocket.JSON.Send(c, map[string]any{"id": msg.ID, "sessionId": msg.SessionID, "result": result}) != nil {
+				var gate chan *artifactCDPCall
+				if len(gates) != 0 {
+					if msg.Method == "Network.enable" {
+						gate = gates[0].enable
+					}
+					if msg.Method == "Network.getResponseBody" {
+						gate = gates[0].body
+					}
+				}
+				if gate != nil {
+					call := &artifactCDPCall{params: msg.Params, reply: make(chan artifactCDPReply, 1)}
+					select {
+					case gate <- call:
+					case <-done:
+						return
+					}
+					go func(id int, session string) {
+						select {
+						case reply := <-call.reply:
+							frame := map[string]any{"id": id, "sessionId": session, "result": reply.result}
+							if reply.err != nil {
+								delete(frame, "result")
+								frame["error"] = reply.err
+							}
+							_ = send(frame)
+						case <-done:
+						}
+					}(msg.ID, msg.SessionID)
+					continue
+				}
+				if send(map[string]any{"id": msg.ID, "sessionId": msg.SessionID, "result": result}) != nil {
 					return
 				}
 				if msg.Method == "Page.navigate" {
-					_ = websocket.JSON.Send(c, map[string]any{"method": "Network.responseReceived", "sessionId": "page-session", "params": map[string]any{"requestId": "request", "type": "Fetch", "response": map[string]any{"url": "https://session.invalid/data", "status": 201, "headers": map[string]string{"X-Session": "owner"}}}})
-					_ = websocket.JSON.Send(c, map[string]any{"method": "Network.loadingFinished", "sessionId": "page-session", "params": map[string]any{"requestId": "request", "encodedDataLength": 23}})
+					url, request := "https://session.invalid/data", "request"
+					if len(gates) != 0 {
+						var params struct {
+							URL string `json:"url"`
+						}
+						_ = json.Unmarshal(msg.Params, &params)
+						url, request = params.URL, params.URL
+					}
+					_ = send(map[string]any{"method": "Network.responseReceived", "sessionId": "page-session", "params": map[string]any{"requestId": request, "type": "Fetch", "response": map[string]any{"url": url, "status": 201, "headers": map[string]string{"X-Session": "owner"}}}})
+					_ = send(map[string]any{"method": "Network.loadingFinished", "sessionId": "page-session", "params": map[string]any{"requestId": request, "encodedDataLength": 23}})
 				}
 			}
 		}}.ServeHTTP(w, r)
@@ -203,6 +264,164 @@ func TestSessionBrowserRecordingStatusRebinds(t *testing.T) {
 	if err != nil || mgr.SessionID() != "new-session" {
 		t.Fatal("status did not bind current session")
 	}
+}
+
+func artifactAwait[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for gated CDP operation")
+	}
+	var zero T
+	return zero
+}
+
+func artifactStart(c *browser.CDPResponseCapture, pg *rod.Page, pattern string) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- c.Start(pg, pattern) }()
+	return done
+}
+
+func TestSessionBrowserResponseCaptureReplacementAcceptance(t *testing.T) {
+	gates := &artifactCDPGates{enable: make(chan *artifactCDPCall, 8)}
+	mgr, calls := sessionArtifactBrowser(t, "response", gates)
+	pg, err := mgr.CurrentPage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mgr.ResponseCaptureFor(pg)
+	old := artifactStart(c, pg, "*old*")
+	first := artifactAwait(t, gates.enable)
+	var limits struct {
+		Total    int `json:"maxTotalBufferSize"`
+		Resource int `json:"maxResourceBufferSize"`
+	}
+	if err := json.Unmarshal(first.params, &limits); err != nil || limits.Total != 8<<20 || limits.Resource != 2<<20 {
+		t.Fatalf("capture buffer limits changed: %s", first.params)
+	}
+	if c.IsActive() {
+		t.Fatal("initializing capture reported active")
+	}
+	latest := artifactStart(c, pg, "*latest*")
+	second := artifactAwait(t, gates.enable)
+	second.reply <- artifactCDPReply{result: map[string]any{}}
+	if err := artifactAwait(t, latest); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifactAwait(t, old); !errors.Is(err, browser.ErrResponseCaptureSuperseded) {
+		t.Fatal("superseded start succeeded")
+	}
+	first.reply <- artifactCDPReply{result: map[string]any{}}
+	if !c.IsActive() || c.Pattern() != "*latest*" {
+		t.Fatal("old setup replaced current capture")
+	}
+	if err := c.Start(pg, ""); err == nil || c.Pattern() != "*latest*" {
+		t.Fatal("invalid pattern replaced listener")
+	}
+	if _, err := (proto.PageNavigate{URL: "https://session.invalid/old"}).Call(pg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (proto.PageNavigate{URL: "https://session.invalid/latest"}).Call(pg); err != nil {
+		t.Fatal(err)
+	}
+	artifactAwait(t, c.WaitChan())
+	responses := c.Responses()
+	if len(responses) != 1 || responses[0].URL != "https://session.invalid/latest" || responses[0].Body != "actual-browser-response" {
+		t.Fatalf("wrong current responses: %+v", responses)
+	}
+	if calls("Fetch.enable") != 0 {
+		t.Fatal("passive capture enabled interception")
+	}
+}
+
+func TestSessionBrowserResponseCaptureStopDuringStart(t *testing.T) {
+	gates := &artifactCDPGates{enable: make(chan *artifactCDPCall, 8)}
+	mgr, _ := sessionArtifactBrowser(t, "response", gates)
+	pg, err := mgr.CurrentPage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mgr.ResponseCaptureFor(pg)
+	start := artifactStart(c, pg, "*")
+	pending := artifactAwait(t, gates.enable)
+	if err := c.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifactAwait(t, start); !errors.Is(err, browser.ErrResponseCaptureSuperseded) {
+		t.Fatal("stopped initialization succeeded")
+	}
+	pending.reply <- artifactCDPReply{result: map[string]any{}}
+	if c.IsActive() || c.Pattern() != "" || len(c.Responses()) != 0 {
+		t.Fatal("stopped setup resurrected capture")
+	}
+	if err := c.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionBrowserResponseCaptureStaleBodyDiscarded(t *testing.T) {
+	gates := &artifactCDPGates{body: make(chan *artifactCDPCall, 8)}
+	mgr, calls := sessionArtifactBrowser(t, "response", gates)
+	pg, err := mgr.CurrentPage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mgr.ResponseCaptureFor(pg)
+	if err := c.Start(pg, "*old*"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (proto.PageNavigate{URL: "https://session.invalid/old"}).Call(pg); err != nil {
+		t.Fatal(err)
+	}
+	old := artifactAwait(t, gates.body)
+	if err := c.Start(pg, "*latest*"); err != nil {
+		t.Fatal(err)
+	}
+	old.reply <- artifactCDPReply{result: map[string]any{"body": "stale-body"}}
+	if _, err := (proto.PageNavigate{URL: "https://session.invalid/latest"}).Call(pg); err != nil {
+		t.Fatal(err)
+	}
+	latest := artifactAwait(t, gates.body)
+	latest.reply <- artifactCDPReply{result: map[string]any{"body": "latest-body"}}
+	artifactAwait(t, c.WaitChan())
+	responses := c.Responses()
+	if len(responses) != 1 || responses[0].Body != "latest-body" || responses[0].URL != "https://session.invalid/latest" {
+		t.Fatalf("stale response retained: %+v", responses)
+	}
+	if calls("Fetch.enable") != 0 {
+		t.Fatal("passive capture enabled interception")
+	}
+}
+
+func TestSessionBrowserResponseCaptureSetupFailure(t *testing.T) {
+	gates := &artifactCDPGates{enable: make(chan *artifactCDPCall, 8)}
+	mgr, _ := sessionArtifactBrowser(t, "response", gates)
+	pg, err := mgr.CurrentPage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mgr.ResponseCaptureFor(pg)
+	start := artifactStart(c, pg, "*")
+	pending := artifactAwait(t, gates.enable)
+	pending.reply <- artifactCDPReply{err: map[string]any{"code": -32000, "message": "network setup failed"}}
+	err = artifactAwait(t, start)
+	var cdpErr *cdp.Error
+	if !errors.As(err, &cdpErr) || cdpErr.Code != -32000 {
+		t.Fatalf("lost CDP error identity: %v", err)
+	}
+	if c.IsActive() || c.Pattern() != "" {
+		t.Fatal("failed setup retained capture")
+	}
+	ctx, cancel := context.WithCancel(pg.GetContext())
+	start = artifactStart(c, pg.Context(ctx), "*")
+	pending = artifactAwait(t, gates.enable)
+	cancel()
+	if err := artifactAwait(t, start); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost context cancellation: %v", err)
+	}
+	pending.reply <- artifactCDPReply{result: map[string]any{}}
 }
 
 func TestSessionBrowserResponseReadCancellation(t *testing.T) {

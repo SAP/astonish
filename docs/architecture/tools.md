@@ -6,7 +6,29 @@ Astonish provides 60+ built-in tools that give the AI agent the ability to inter
 
 ## Bot dispatch boundary
 
-`launcher.BotCatalogueTools` reuses isolated internal/process schemas and request-scoped adapters; `botBoundTool` checks owner scope, live lease/isolation, exact action policy and shared tool budget before dispatch. Native and progressive dispatch retain the wrapper. Sandbox tools pin the run session, never a delegate/viewer sandbox or host fallback. HTTP and MCP synchronize the owner vault and resolve symbolic credentials inside the node; MCP supports uncached discovery and stdio/SSE/streamableHTTP there.
+`launcher.NewBotChatAgentFactory` uses `newBotScopedChatRuntime` →
+`NewScopedChatRuntime` for production ordinary Chat capabilities. The shared
+constructor builds the configured catalog, discovery, children, plans, flows and
+drills; Bot injects owner/run binding, authorization/accounting and scoped
+memory/scheduling/publication hooks. `BotCatalogueTools` is a retained helper path,
+not a second production assembly recipe. `botBoundTool` remains the Bot dispatch
+authority: owner scope, live lease/isolation, exact action policy and shared budget
+precede execution in native and progressive views. Sandbox calls pin the run
+session, never a delegate/viewer sandbox or host fallback. HTTP/MCP credentials
+remain scoped and symbolic until authorized node execution.
+
+The production shared factory pins the concrete catalog `web_fetch` NodeTool and
+decorates its ready transport through `RunWithTransport` with the first-party
+`_bot_public_fetch` adapter. Failed HTTP reads can supply exact server-only source-read
+receipts after execution, not name-based safety exemptions or JSON-created authority.
+Node readiness/network provisioning, cancellation, policy and accounting are not
+bypassed. See [canonical construction](bot-production-adapters.md#canonical-construction-and-repair-boundary).
+
+Metadata enumeration requires `BotMetadataOnlyToolset.BotMetadataOnly()`.
+Sanitizing/filtering/shared runtime wrappers forward the underlying attestation;
+only genuinely metadata-only lazy declarations can be enumerated without process
+or credential startup. Wrapped executable identity and all dispatch checks survive
+core-only child selection, discovery and filtering.
 
 Bot runs now have working scoped `memory_save/search/get/delete`, `announce_plan`, `update_plan`, `announce_completion` and `read_task_result` adapters. Memory reads prefilter to the Bot's sessions; mutations require the current run lease and protect prior-run evidence. Plans persist in session state and project `PLAN.md` through the bound sandbox tool; verify commands pass through guarded `shell_command`, not a daemon-host verifier. Delegated results are request-local. The production classifier recognizes constrained memory save/delete and read effects for memory retrieval, plan bookkeeping, result retrieval, `filter_json` and `git_diff_add_line_numbers`; other tools remain unknown unless a trusted classifier proves their constraints. Discoverability is neither implementation nor permission, and plan authorization never authorizes its verification command's effects.
 

@@ -13,6 +13,26 @@ Both agents are built on top of **Google's Agent Development Kit (ADK)**, specif
 
 `launcher.NewBotChatAgentFactory` reuses ChatAgent/ChatRunner with fresh owner-scoped services, a pinned model and a guarded catalogue; it bypasses ordinary host/global initialization. `botFactoryBinding` rechecks current Bot/version/lease/isolation and preserves narrowed child policy without inheriting viewer credentials or model overrides. Delegates, flow LLMs and parent/child compaction use the same bound budgeted model; consequential grants are not inherited by children. Durable approval resume dispatches the saved exact action once, then runs a report-only turn, rather than replaying the original task. Runtime events persist atomically under the lease before publication. These contracts do not imply all Chat tools or Studio/terminal surfaces are ready: see [runtime status](bots.md) and [exact adapter limits](bot-production-adapters.md).
 
+## Shared execution and durable authority
+
+Production Bot construction is `NewBotChatAgentFactory` → `newBotScopedChatRuntime`
+→ `NewScopedChatRuntime`; shared Chat owns ordinary tool/catalog/delegate/flow/drill
+construction, while Bot injects owner/run policy, budget and scoped product hooks.
+Metadata-only toolset wrappers forward the underlying `BotMetadataOnly()` contract,
+so cached declaration enumeration does not start MCP or resolve credentials; actual
+execution retains the wrapped instance and current permission checks. The exact
+shared fetch NodeTool alone receives first-party failed-read transport decoration.
+Native policy/cancellation/budget errors are never a generic recovery exemption.
+
+The durable authority core is identity/configuration, immutable admission and
+occurrence/run identity, lease/fence, cumulative accounting, exact grants/effect
+receipts, immutable publication and essential continuation. Copied transcript
+visibility, delivery bookkeeping, memory catalogue/provenance/indexes and rich Work
+assessment/repair records have separate roles; they are not interchangeable sources
+of execution authority. Shared-memory consolidation and the derived/rebuildable
+`MEMORY.md` representation require an explicit follow-up decision, not a backend
+redesign or migration in this repair. See [authority versus product records](bots.md#durable-authority-versus-product-records).
+
 ## Key Design Decisions
 
 ### Why Wrap ADK Instead of Using It Directly

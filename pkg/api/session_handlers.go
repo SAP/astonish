@@ -1485,6 +1485,31 @@ func readRetainedBotArtifact(r *http.Request, sessionID string) ([]byte, bool) {
 		if cleanup != nil {
 			defer cleanup()
 		}
+		if artifact.ContentRef != nil {
+			ref := *artifact.ContentRef
+			scope := store.BotContentScope{OrgID: binding.Scope.OrgID, TeamID: binding.Scope.TeamID, OwnerID: binding.Scope.UserID, BotID: b.ID}
+			if err != nil || ref.Validate() != nil || ref.Kind != store.BotContentArtifact || ref.Scope != scope || ref.SHA256 != artifact.SHA256 || ref.SizeBytes != artifact.SizeBytes || ref.SizeBytes > sandbox.MaxBotHomeArtifactBytes {
+				return nil, true
+			}
+			files, ok := backend.(sandbox.BotHomeFilesBackend)
+			if !ok {
+				return nil, true
+			}
+			stream, openErr := files.OpenBotContent(r.Context(), binding, ref, store.BotFileRange{})
+			if stream != nil && stream.ReadCloser != nil {
+				defer botOwnFileStream(r.Context(), stream)()
+			}
+			if openErr != nil || stream == nil || stream.ReadCloser == nil {
+				return nil, true
+			}
+			data, readErr := io.ReadAll(io.LimitReader(stream, ref.SizeBytes+1))
+			closeErr := stream.Close()
+			actual := sha256.Sum256(data)
+			if readErr != nil || closeErr != nil || r.Context().Err() != nil || int64(len(data)) != ref.SizeBytes || stream.Entry.SizeBytes != ref.SizeBytes || stream.Entry.SHA256 != ref.SHA256 || hex.EncodeToString(actual[:]) != ref.SHA256 {
+				return nil, true
+			}
+			return append([]byte{}, data...), true
+		}
 		reader, ok := backend.(sandbox.BotHomeArtifactBackend)
 		if err == nil && ok {
 			data, readErr := reader.ReadBotHomeArtifact(r.Context(), binding, artifact.RelativePath, sandbox.MaxBotHomeArtifactBytes)

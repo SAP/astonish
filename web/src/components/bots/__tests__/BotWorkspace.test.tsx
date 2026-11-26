@@ -125,7 +125,7 @@ vi.mock('@/api/bots', async original => ({ ...await original<typeof api>(),
 }))
 vi.mock('../BotHomeModel', () => ({ default: ({ sessionId }: { sessionId: string }) => <p>Home model: {sessionId}</p> }))
 // Real StudioChat reuse/transport is covered separately and by the built-SPA test.
-const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; onSend: (text: string, attachments?: import('@/api/studioChat').AttachmentPayload[]) => Promise<void> } }))
+const chatProps = vi.hoisted(() => ({ current: null as null | { readOnly: boolean; toolFree?: boolean; pendingApprovalIds?: string[]; questionApprovalIds?: string[]; questionApprovalAnchors?: { reviewId: string; questionId: string }[]; renderReview: (kind: 'proposal' | 'approval', id: string) => import('react').ReactNode; onSend: (text: string, attachments?: import('@/api/studioChat').AttachmentPayload[]) => Promise<void> } }))
 vi.mock('../../StudioChat', () => ({ default: ({ botThread }: { botThread: NonNullable<typeof chatProps.current> }) => { chatProps.current = botThread; return <textarea aria-label="Shared composer" disabled={botThread.readOnly} /> } }))
 const bot: api.Bot = { id: 'bot', owner_id: 'owner', scope: 'personal', name: 'Watcher', status: 'active', revision: 1, version: 1, home_session_id: 'home', home: { id: '24c09d23-63e1-42d8-8baa-5f540fabc645', bot_id: 'bot', scope: 'personal', backend: 'docker', storage_key: 'retained-volume', revision: 1 }, created_at: '', updated_at: '' }
 const version: api.BotVersion = { bot_id: 'bot', version: 1, charter: 'Observe', persona: { language: '', timezone: 'UTC', soul: '', identity: '', user: '' }, autonomy: { level: 'supervised', can_contact_people: false, can_publish: false, max_spend_per_run_minor: 0, max_spend_per_month_minor: 0 }, budget: { max_runtime_seconds: 60 }, delivery: { notify: 'important', preferences: '', bindings: [] }, triggers: [] }
@@ -150,12 +150,16 @@ beforeEach(() => {
 })
 it.each(['personal', 'team'] as const)('keeps consumed %s questions in the display list, not the pending-action list', async scope => {
   vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope })
-  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [{ id: 'answered', run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'consumed', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Which markets?' } }, response: { question_id: 'q', answer: 'U.S. markets' } }] })
+  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [...Array.from({ length: 200 }, (_, i) => ({ id: `old-${i}`, run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'denied' as const, expires_at: '2099-01-01' })), { id: 'answered', run_id: 'r', version: 1, action_digest: 'digest', action: {}, status: 'consumed', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'q', payload: { kind: 'text', prompt: 'Which markets?' } }, response: { question_id: 'q', answer: 'U.S. markets' } }] })
   for (const mode of ['initial', 'reload']) {
     const view = render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId="owner" />)
     await waitFor(() => expect(chatProps.current?.questionApprovalIds, mode).toEqual(['answered']))
     expect(chatProps.current?.questionApprovalAnchors).toEqual([{ reviewId: 'answered', questionId: 'q' }])
     expect(chatProps.current?.pendingApprovalIds).toEqual([])
+    const review = render(<>{chatProps.current!.renderReview('approval', 'answered')}</>)
+    expect(await screen.findByRole('article', { name: 'Answered question' })).toHaveTextContent('Your answer: U.S. markets')
+    expect(screen.getByRole('article', { name: 'Answered question' })).toHaveTextContent('Which markets?')
+    review.unmount()
     view.unmount()
   }
 })

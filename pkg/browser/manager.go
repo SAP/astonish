@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -298,16 +299,20 @@ type Manager struct {
 	demoOverlay *demoOverlayState
 }
 
+// ErrResponseCaptureSuperseded means another Start or Stop owns the capture now.
+var ErrResponseCaptureSuperseded = errors.New("response capture setup superseded")
+
 // CDPResponseCapture observes the page's actual network responses. It never
 // replays requests from the daemon (which would lose browser cookies, TLS and
 // sandbox routing). Cancellation/generation prevents stale listeners publishing
 // into a replacement capture.
 type CDPResponseCapture struct {
 	*ResponseCapture
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	generation uint64
-	pattern    string
+	mu                 sync.Mutex
+	cancel             context.CancelFunc
+	initializingCancel context.CancelFunc
+	generation         uint64
+	pattern            string
 }
 
 func (m *Manager) ResponseCaptureFor(pg *rod.Page) *CDPResponseCapture {
@@ -337,18 +342,27 @@ func (c *CDPResponseCapture) Pattern() string {
 func (c *CDPResponseCapture) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.clearLocked()
+	c.generation++
+	return nil
+}
+
+// clearLocked releases installed and initializing listeners and their retained data.
+func (c *CDPResponseCapture) clearLocked() {
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
 	}
-	c.generation++
+	if c.initializingCancel != nil {
+		c.initializingCancel()
+		c.initializingCancel = nil
+	}
 	c.pattern = ""
 	c.responses.Clear()
 	select {
 	case <-c.notify:
 	default:
 	}
-	return nil
 }
 
 func (c *CDPResponseCapture) Start(pg *rod.Page, pattern string) error {
@@ -359,19 +373,33 @@ func (c *CDPResponseCapture) Start(pg *rod.Page, pattern string) error {
 	if err != nil {
 		return err
 	}
-	_ = c.Stop()
 	ctx, cancel := context.WithCancel(pg.GetContext())
+	c.mu.Lock()
+	c.clearLocked()
+	c.generation++
+	generation := c.generation
+	c.initializingCancel = cancel
+	c.mu.Unlock()
+	// Setup must not hold mu: a replacement or Stop must cancel a blocked CDP call.
+	setupError := func(err error) error {
+		cancel()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.generation != generation {
+			return ErrResponseCaptureSuperseded
+		}
+		c.clearLocked()
+		return err
+	}
 	page := pg.Context(ctx)
 	// Bound retained browser buffers as well as our decoded bodies.
 	maxTotal, maxResource := 8<<20, 2<<20
 	if err := (proto.NetworkEnable{MaxTotalBufferSize: &maxTotal, MaxResourceBufferSize: &maxResource}).Call(page); err != nil {
-		cancel()
-		return err
+		return setupError(err)
 	}
-	c.mu.Lock()
-	c.cancel, c.pattern = cancel, pattern
-	generation := c.generation
-	c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return setupError(err)
+	}
 	pending := make(map[proto.NetworkRequestID]*proto.NetworkResponseReceived)
 	wait := page.EachEvent(func(e *proto.NetworkResponseReceived) {
 		if match.MatchString(e.Response.URL) && len(pending) < 256 {
@@ -410,6 +438,21 @@ func (c *CDPResponseCapture) Start(pg *rod.Page, pattern string) error {
 		}
 		c.AddResponse(CapturedResponse{URL: response.Response.URL, Status: response.Response.Status, Headers: headers, Body: string(data), ResourceType: string(response.Type), Timestamp: time.Now()})
 	})
+	c.mu.Lock()
+	if c.generation != generation || ctx.Err() != nil {
+		c.mu.Unlock()
+		// EachEvent has subscribed already; run its canceled wait to release it.
+		err := ctx.Err()
+		cancel()
+		go wait()
+		if err == nil {
+			err = context.Canceled
+		}
+		return setupError(err)
+	}
+	c.cancel, c.pattern = cancel, pattern
+	c.initializingCancel = nil
+	c.mu.Unlock()
 	go wait()
 	return nil
 }

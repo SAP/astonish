@@ -145,6 +145,8 @@ type LazyMCPToolset struct {
 
 // NewLazyMCPToolset creates a toolset that uses cached metadata for declarations
 // and lazily connects to the MCP server only when a tool is actually invoked.
+func (*LazyMCPToolset) BotMetadataOnly() bool { return true }
+
 func NewLazyMCPToolset(serverName string, entries []cache.ToolEntry,
 	serverCfg config.MCPServerConfig, debugMode bool) *LazyMCPToolset {
 	serverCfg.Args = slices.Clone(serverCfg.Args)

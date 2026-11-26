@@ -20,14 +20,21 @@ func TestBotChatFailurePreservesWrappedUncertainOutcome(t *testing.T) {
 				t.Fatalf("uncertain outcome lost: status=%s effect=%s", result.Status, result.Report.EffectState)
 			}
 			failure := result.Failure
-			if failure == nil || err != failure || failure == original || !failure.UncertainEffect || !failure.TerminalForAttempt || failure.Class != original.Class || failure.Message != original.Message {
+			if failure == nil || err != failure || failure == original || !failure.UncertainEffect || !failure.TerminalForAttempt || failure.Class != original.Class {
 				t.Fatalf("typed failure lost: result=%+v err=%v", failure, err)
 			}
-			if !errors.Is(err, wrapped) || !errors.Is(err, original) || !errors.Is(err, diagnostic) || original.Cause != diagnostic {
-				t.Fatal("diagnostic wrapper lost or original error mutated")
+			if failure.Message != "I couldn't confirm the outcome of the requested work." {
+				t.Fatalf("unsafe public failure message: %q", failure.Message)
 			}
-			if result.Report.Failure == nil || result.Report.Failure.TechnicalDetails != wrapped.Error() {
-				t.Fatal("private report diagnostics lost")
+			var preserved *bot.RunError
+			if failure.Cause != wrapped || !errors.As(failure.Cause, &preserved) || preserved != original || !errors.Is(err, wrapped) || !errors.Is(err, original) || !errors.Is(err, diagnostic) {
+				t.Fatal("diagnostic wrapper or original typed cause lost")
+			}
+			if original.Cause != diagnostic || original.Message != "Outcome requires reconciliation; never replay." || original.Class != bot.ErrorPermanent || !original.TerminalForAttempt || !original.UncertainEffect {
+				t.Fatal("original error mutated")
+			}
+			if result.Report.Summary != "I couldn't complete the requested work." || result.Report.Failure == nil || result.Report.Failure.TechnicalDetails != "An operational failure stopped the requested work." {
+				t.Fatalf("safe report evidence lost: %+v", result.Report)
 			}
 			if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.SourceDigest != bot.EmployeeMessageSourceDigest(result.Status, result.Report) {
 				t.Fatal("employee message not bound to final uncertain facts")

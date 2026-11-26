@@ -108,6 +108,18 @@ optional reader, transcript fallback for a report artifact requires the same
 recorded digest. Ordinary Chat artifact tiers and Bot PDF-render restrictions
 are unchanged; Bot home-session transcript artifacts remain transcript-backed.
 
+For report artifacts carrying `ContentRef`, both existing session content/download
+URL aliases use `readRetainedBotArtifact` and open the immutable content object via
+`BotHomeFilesBackend.OpenBotContent`, never the current workspace `RelativePath`.
+The request path is only a selector. Persisted Bot/run/Home/scope, content kind,
+digest and size must agree; streamed entry metadata, actual byte count/hash, close
+errors and cancellation are checked before returning bytes. Overwriting or deleting
+the working file cannot change historical publication. A bad reference fails closed,
+without mutable-file or transcript fallback. Artifacts without `ContentRef` retain
+the legacy authorized retained-reader path and existing digest validation. Controlled
+HTTP fixtures exercise the aliases and mutation/deletion boundary; they do not prove
+physical backend deployment.
+
 `TestBotOfflineArtifactHTTP` exercises real HTTP content/download requests through
 the production backend factory with an empty destroyed-run registry and a fake
 retained reader. It checks binary bytes unavailable in transcripts, team-member

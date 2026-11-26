@@ -59,7 +59,7 @@ No model/budget is created. Missing model, denied boundary, exhausted/unknown bu
 
 `report.ValidateEmployeeMessage(status, privateWork)` validates source integrity and exact assessed candidate identity without calling any model. Run committers should invoke this before mutating report fields. `report.EmployeeMessageSourceDigest(status)` excludes the envelope itself and binds the other report fields and status. A change to those fields requires a new envelope. Existing candidate acceptance checks must remain in place; communication text is not a replacement for them.
 
-`RenderReport` renders an envelope verbatim, without reviewer or uncertainty appendices. Detailed diagnostics remain separately available in `Failure.TechnicalDetails`, quality limitations, and observed evidence. Legacy reports without an envelope retain their existing rendering behavior.
+`RenderReport` renders an envelope verbatim, without reviewer or uncertainty appendices. Public `Failure.TechnicalDetails` contains only server-authored safe operational text (including typed budget/checkpoint details), never an arbitrary `cause.Error()`. Raw provider/setup/tool diagnostics remain in trusted typed errors and their cause chains; credential redaction alone is not a public-safety boundary. Run/list/activity/snapshot projections must preserve this distinction even for unregistered tokens, internal endpoints and request bodies. Legacy reports without an envelope retain their existing rendering behavior, subject to the public diagnostics boundary.
 
 ## Integration boundaries
 

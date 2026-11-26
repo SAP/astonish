@@ -25,7 +25,7 @@ func (e linkedBotSessionEvents) All() iter.Seq[*session.Event] {
 	}
 }
 func projectLinkedBotSession(ctx context.Context, p *SessionEventProjector, events session.Events) (linkedBotSessionEvents, []ChatEvent, error) {
-	approvals, err := p.Repository.ListApprovals(ctx, p.BotID, store.BotPage{Limit: 200})
+	approvals, err := listBotPresentationApprovals(ctx, p.Repository, p.BotID)
 	if err != nil {
 		return nil, nil, err
 	}

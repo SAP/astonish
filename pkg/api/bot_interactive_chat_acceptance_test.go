@@ -27,6 +27,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
+	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
@@ -702,7 +703,7 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 					defer source.Close()
 					f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
 						url, _ := args["url"].(string)
-						if name != "web_fetch" || (url != source.URL+"/primary" && url != source.URL+"/alternative") {
+						if name != tools.BotPublicFetchOperation || (url != source.URL+"/primary" && url != source.URL+"/alternative") {
 							return nil, fmt.Errorf("unexpected scoped transport request: %s %v", name, args)
 						}
 						resp, err := source.Client().Get(url)
@@ -714,7 +715,7 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						return json.Marshal(map[string]any{"url": url, "final_url": url, "status": resp.StatusCode, "content": string(body), "content_type": "text/plain", "truncated": false})
+						return json.Marshal(map[string]any{"read_executed": true, "response": map[string]any{"url": url, "final_url": url, "status": resp.StatusCode, "content": string(body), "content_type": "text/plain", "truncated": false}})
 					}
 					step, checks := 0, 0
 					f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

@@ -25,7 +25,19 @@ import (
 // verifier and persisted completion. Only the remote model is replaced. In
 // particular, the fixture never calls PlanRuntime or creates the marker files.
 func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
-	for _, mode := range []agent.CodePlanExecutionMode{agent.CodePlanRunToCompletion, agent.CodePlanReviewEachPhase} {
+	testCodePlanExecutionPTY(t, false)
+}
+
+func TestCodePlanRevisionReviewPTYAcceptance(t *testing.T) {
+	testCodePlanExecutionPTY(t, true)
+}
+
+func testCodePlanExecutionPTY(t *testing.T, reviseReview bool) {
+	modes := []agent.CodePlanExecutionMode{agent.CodePlanRunToCompletion, agent.CodePlanReviewEachPhase}
+	if reviseReview {
+		modes = []agent.CodePlanExecutionMode{agent.CodePlanReviewEachPhase}
+	}
+	for _, mode := range modes {
 		t.Run(string(mode), func(t *testing.T) {
 			home := t.TempDir()
 			work := filepath.Join(home, "project")
@@ -36,6 +48,7 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", home)
 			t.Setenv("SUDO_USER", "")
 			var calls atomic.Int32
+			var revisedSteps []agent.PlanStepDefinition
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/models") {
 					w.Header().Set("Content-Type", "application/json")
@@ -75,6 +88,32 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 						name, args = "update_plan", map[string]any{"step": "two", "status": "complete"}
 					case n == 10:
 						name, args = "announce_completion", map[string]any{"outcome_observed": "Both phase marker commands executed successfully", "unverified": ""}
+					}
+					if reviseReview && n >= 8 {
+						switch n {
+						case 8:
+							name, args = "update_plan", map[string]any{"action": "revise", "revision": map[string]any{"plan_id": "execution-plan", "base_revision": 1, "reason": "Rename reviewed owner and insert necessary prerequisite", "steps": revisedSteps}}
+						case 9, 10:
+							status := "running"
+							if n == 10 {
+								status = "complete"
+							}
+							name, args = "update_plan", map[string]any{"step": "prerequisite", "status": status}
+						case 11, 12:
+							status := "running"
+							if n == 12 {
+								status = "complete"
+							}
+							name, args = "update_plan", map[string]any{"step": "replacement", "status": status}
+						case 13, 14:
+							status := "running"
+							if n == 14 {
+								status = "complete"
+							}
+							name, args = "update_plan", map[string]any{"step": "two", "status": status}
+						case 15:
+							name, args = "announce_completion", map[string]any{"outcome_observed": "Revised phases verified with explicit review continuation", "unverified": ""}
+						}
 					}
 				}
 				t.Logf("local provider call=%d tool=%s", n, name)
@@ -121,6 +160,12 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 			for _, name := range []string{"one", "two"} {
 				marker := filepath.Join(work, name+".marker")
 				snapshot.Steps = append(snapshot.Steps, agent.PlanStepInfo{Name: name, Description: "Verify phase " + name, Status: "pending", Outcome: "Phase " + name + " marker exists", Verify: fmt.Sprintf("printf 'verified-%s\\n' > '%s' && test -s '%s'", name, marker, marker), VerifyKind: "behavior"})
+			}
+			if reviseReview {
+				for _, name := range []string{"prerequisite", "replacement", "two"} {
+					marker := filepath.Join(work, name+".marker")
+					revisedSteps = append(revisedSteps, agent.PlanStepDefinition{Name: name, Description: "Verify phase " + name, Details: "Execute isolated marker verifier for " + name, Summary: "Verify " + name, Files: []agent.PlanFileChange{{Path: name + ".marker", Kind: "new"}}, Outcome: "Phase " + name + " marker exists", Verify: fmt.Sprintf("printf 'verified-%s\\n' > '%s' && test -s '%s'", name, marker, marker), VerifyKind: "behavior"})
+				}
 			}
 			raw, err := json.Marshal(snapshot)
 			if err != nil {
@@ -174,10 +219,66 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(work, "two.marker")); !os.IsNotExist(err) {
 					t.Fatalf("second phase ran before review: %v", err)
 				}
-				term.send("continue\r")
+				if reviseReview {
+					// A correction request is deliberately not a continuation token.
+					term.send("correct the reviewed definition\r")
+					for _, checkpoint := range []struct {
+						calls        int32
+						owner, later string
+					}{{10, "prerequisite", "replacement"}, {12, "replacement", "two"}} {
+						deadline := time.Now().Add(20 * time.Second)
+						for calls.Load() < checkpoint.calls && time.Now().Before(deadline) {
+							time.Sleep(20 * time.Millisecond)
+						}
+						term.wait("Paused for review", "Enter send")
+						time.Sleep(300 * time.Millisecond)
+						if calls.Load() != checkpoint.calls {
+							t.Fatalf("revision checkpoint not quiescent: got %d want %d; %s", calls.Load(), checkpoint.calls, term.frame())
+						}
+						assertMarker(checkpoint.owner)
+						if _, err := os.Stat(filepath.Join(work, checkpoint.later+".marker")); !os.IsNotExist(err) {
+							t.Fatalf("later marker ran without explicit continuation: %v", err)
+						}
+						fresh, err := persistentsession.NewFileStore(storePath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						loaded, err := fresh.Get(ctx, &adksession.GetRequest{AppName: "astonish_code", UserID: user, SessionID: created.Session.ID()})
+						if err != nil {
+							t.Fatal(err)
+						}
+						state, err := loaded.Session.State().Get(agent.PlanSnapshotStateKey)
+						if err != nil {
+							t.Fatal(err)
+						}
+						encoded, err := json.Marshal(state)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var durable agent.PlanSnapshot
+						if err := json.Unmarshal(encoded, &durable); err != nil {
+							t.Fatal(err)
+						}
+						if durable.Revision != 2 || durable.Document.CodeExecutionMode != mode || durable.Document.CodeReviewPending != checkpoint.owner || len(durable.Steps) != 3 || durable.Steps[0].Name != "prerequisite" || durable.Steps[1].Name != "replacement" {
+							t.Fatalf("reload lost revised authority: %+v", durable)
+						}
+						for _, step := range durable.Steps {
+							if step.Name == checkpoint.owner && (step.Status != "complete" || !strings.HasPrefix(step.Evidence, "exit 0")) {
+								t.Fatalf("reload lost checkpoint evidence: %+v", step)
+							}
+						}
+						term.send("continue\r")
+					}
+				} else {
+					term.send("continue\r")
+				}
 			}
 			term.wait("Verified cadence execution finished", "Enter send")
 			assertMarker("one")
+			if reviseReview {
+				assertMarker("prerequisite")
+				assertMarker("replacement")
+			}
 			assertMarker("two")
 			term.close()
 			reopened, err := persistentsession.NewFileStore(storePath)
@@ -202,6 +303,9 @@ func TestCodePlanExecutionPTYAcceptance(t *testing.T) {
 			}
 			if durable.Document.CodeExecutionMode != mode || durable.Document.Results == "" {
 				t.Fatalf("missing durable cadence/completion: %+v", durable.Document)
+			}
+			if reviseReview && (durable.Revision != 2 || len(durable.Steps) != 3 || durable.Steps[0].Name != "prerequisite" || durable.Steps[1].Name != "replacement" || durable.Document.CodeReviewPending != "") {
+				t.Fatalf("final reload lost revised definitions or continuation: %+v", durable)
 			}
 			for _, step := range durable.Steps {
 				if step.Status != "complete" || step.Evidence == "" {

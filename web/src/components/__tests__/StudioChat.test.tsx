@@ -146,6 +146,23 @@ describe('StudioChat', () => {
     view.unmount()
   })
 
+  it('selects the latest canonical plan and keeps an empty canonical plan authoritative', async () => {
+    const view = render(<StudioChat theme="dark" initialSessionId="plan-selection" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
+    await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    const publish = (id: string, steps: { name: string; description: string; status: string }[]) => stream.onEvent('subtask_progress', { event_type: 'plan_snapshot', snapshot: { plan_id: id, goal: id, revision: 1, sequence: 1, document: { lifecycle: 'approved' }, steps } })
+    await act(async () => publish('older', [{ name: 'old', description: 'Old phase', status: 'complete' }]))
+    expect(screen.getByTitle('Todo / Plan')).toHaveTextContent('1/1')
+    await act(async () => publish('latest', [{ name: 'new', description: 'New phase', status: 'pending' }]))
+    expect(screen.getByTitle('Todo / Plan')).toHaveTextContent('0/1')
+    await act(async () => {
+      publish('empty', [])
+      stream.onEvent('subtask_progress', { event_type: 'delegation_start', batch_id: 'later-batch', tasks: [{ task_id: 'task', name: 'Later legacy task', description: 'Task' }] })
+    })
+    expect(screen.queryByTitle('Todo / Plan')).toBeNull()
+    view.unmount()
+  })
+
   it.each(['send', 'reconnect', 'bot'] as const)('renders mixed public activity through %s', async mode => {
     vi.mocked(connectChatStream).mockClear()
     vi.mocked(fetchSessionStatus).mockResolvedValueOnce({ sessionId: 'mixed', running: mode === 'reconnect' })

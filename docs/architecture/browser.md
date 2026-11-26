@@ -155,6 +155,21 @@ Invariants:
 
 Recommended order: open app → fullscreen → start recording / segment → highlight → move/click → hold. See `docs/architecture/drill.md` (tutorial recording order).
 
+### Concurrent response-capture generations
+
+`CDPResponseCapture` in `pkg/browser/manager.go` observes actual page network
+responses; it never repeats requests from the daemon. Every Start owns a unique,
+monotonically advancing generation and cancellable initialization. A later Start
+or Stop invalidates prior initialization and listeners before they can install or
+publish. Stale setup returns `ErrResponseCaptureSuperseded`; it cannot replace the
+current listener or repopulate a stopped capture. Stop also invalidates an in-flight
+Start even if no listener has finished installing. Callbacks check their captured
+generation, not reusable response-buffer counters. Only the current generation
+publishes browser-cookie/TLS/session-routed responses. Empty/error captures do not
+invent successful responses. This is distinct from ffmpeg display recording.
+Bounded deterministic CDP Start/Start and Start/Stop fixtures establish this ownership
+boundary, not physical sandbox/browser deployment or website reliability.
+
 ### Screenshot Handling
 
 - Auto-compression for large screenshots: images over 2000px are resized, JPEG quality is reduced progressively until under 5MB.

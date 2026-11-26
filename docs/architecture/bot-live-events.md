@@ -51,9 +51,24 @@ session cursor flushes its SSE response headers before file-backed delta hydrati
 initial no-cursor replay retains fail-before-header HTTP errors. Authorization is
 checked around every bounded durable read batch (before the read and before any
 frames from that batch), not once per projected frame, avoiding multiplicative
-retained-store reads while preserving revocation boundaries. This reconstructs recent
-presentation correlation and the latest eight approval records without hydrating an entire file-backed Home before SSE
-headers. Full zero-cursor replay remains ordered and pageable.
+retained-store reads while preserving revocation boundaries. The eight-row bound
+applies only to transcript warm-up, never to authoritative approval correlation.
+`listBotPresentationApprovals` drains all scoped UUID-ordered cursor pages (200 rows
+per repository read), retaining pending and saved/consumed decisions and rejecting
+nonadvancing, duplicate or foreign rows. Live, history, reconnect and linked-session
+projection use that complete set, including questions older than the warm tail.
+Approval read failure is an error, not an empty successful correlation. Full
+zero-cursor transcript replay remains ordered and pageable.
+
+Studio also drains the public approval listing's complete cursor sequence for saved
+question display, independently of pending counts. A consumed question uses its
+persisted response, stays at its original transcript anchor once and has no action
+controls; resolved questions cannot leave a stale waiting report visible. The
+native terminal receives the same authoritative enrichment and retains saved
+approved answers without turning them into pending inbox actions. These changes
+do not widen tenant access or issue execution authority. The strict built-SPA
+approval acceptance exercises 201 approvals, live/reconnect beyond-tail enrichment
+and reload in personal/team scopes; only recorded passes count as evidence.
 
 ## Employee objective physical acceptance
 

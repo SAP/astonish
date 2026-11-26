@@ -25,6 +25,94 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestBotPresentationApprovalsEmptyPollingDoesNotHydrate(t *testing.T) {
+	repo, ss := presentationReviewFixture(t)
+	ss.rows = nil
+	ctx, err := execution.WithPrincipal(t.Context(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: repo.b.OwnerID.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: repo.b.OwnerID.String(), OrgSlug: "org", TeamSlug: "team"})
+	ctx = store.WithServices(ctx, &store.Services{PersonalBots: repo, PersonalSessions: ss})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := &emptyApprovalReplayWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	r := mux.SetURLVars(httptest.NewRequest("GET", "/?scope=personal", nil).WithContext(ctx), map[string]string{"botID": repo.b.ID.String(), "sessionID": repo.b.HomeSessionID.String()})
+	BotEventsHandler(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "replay_complete") || len(repo.pages) != 0 {
+		t.Fatalf("empty replay hydrated approvals: %d %s pages=%v", w.Code, w.Body.String(), repo.pages)
+	}
+}
+
+type emptyApprovalReplayWriter struct {
+	*httptest.ResponseRecorder
+	cancel context.CancelFunc
+}
+
+func (w *emptyApprovalReplayWriter) Flush() { w.ResponseRecorder.Flush(); w.cancel() }
+
+func TestBotEventsReviewsBeyondFirstEight(t *testing.T) {
+	testPresentationReviewStream(t, false, false)
+}
+func TestBotEventsReconnectReviewsBeyondFirstEight(t *testing.T) {
+	testPresentationReviewStream(t, false, true)
+}
+
+func testPresentationReviewStream(t *testing.T, history, reconnect bool) {
+	t.Helper()
+	repo, ss := presentationReviewFixture(t)
+	ctx, err := execution.WithPrincipal(t.Context(), execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: repo.b.OwnerID.String(), OrgSlug: "org", TeamSlug: "team", Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = store.WithTenantContext(ctx, &store.TenantContext{UserID: repo.b.OwnerID.String(), OrgSlug: "org", TeamSlug: "team"})
+	ctx = store.WithServices(ctx, &store.Services{PersonalBots: repo, PersonalSessions: ss})
+	if reconnect {
+		ss.rows[0].Cursor = 2
+	}
+	router := mux.NewRouter()
+	registerBotRoutes(router)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bound, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(r.Context(), cancel)
+		defer stop()
+		defer cancel()
+		router.ServeHTTP(w, r.WithContext(bound))
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.Timeout = 3 * time.Second
+	endpoint := "events"
+	if history {
+		endpoint = "stream"
+	}
+	req, _ := http.NewRequest("GET", server.URL+"/api/studio/bots/"+repo.b.ID.String()+"/sessions/"+repo.b.HomeSessionID.String()+"/"+endpoint+"?scope=personal", nil)
+	if reconnect {
+		req.Header.Set("Last-Event-ID", botEventCursor(repo.b.HomeSessionID, 1))
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatal(res.Status)
+	}
+	rd := bufio.NewReader(res.Body)
+	frame := readBotSSE(t, rd)
+	if frame.event != "bot_review" || !strings.Contains(frame.data, "Late saved question?") {
+		t.Fatalf("missing late authoritative review: %+v", frame)
+	}
+	frame = readBotSSE(t, rd)
+	want := botReplayComplete
+	if history {
+		want = botTranscriptDone
+	}
+	if frame.event != want {
+		t.Fatalf("missing replay boundary: %+v", frame)
+	}
+}
+
 type botReplayFixture struct {
 	*botSessionMetaFixture
 	read func() ([]store.BotTranscriptEvent, error)

@@ -64,6 +64,18 @@ The transaction writes the immutable version, target scheduler state, receipt re
 
 Finite count, minimum recurrence interval and daily frequency bounds are checked over a year-plus-day horizon (including DST); runtime dispatch quota is separately enforced by mandate admission/reservation. Schedule operations cannot smuggle hook credentials, goal bindings, external delivery or configuration changes.
 
+## Temporary daily admission exhaustion
+
+The scheduled daily dispatch allowance is a retryable admission boundary, not a
+terminal authorization denial. Exhausting it leaves the job enabled and preserves
+its exact due occurrence/`NextRun` for retry. When the Bot persona's local calendar
+day advances, the same occurrence may be admitted once under current authority and
+normal idempotency checks; it does not acquire a new grant, duplicate run or catch-up
+backlog. Permanent expiry/revocation/policy denial retains its terminal handling.
+This change neither enables disabled recurrence nor makes Bot creation schedule work.
+Deterministic personal/team time-advance fixtures exercise admission and recurrence
+state; they are not evidence of a deployed scheduler or timezone-provider behavior.
+
 ## Queued occurrence reconciliation
 
 Authorized schedule application reconciles already-admitted, unclaimed cron and goal-deadline runs inside that same root-CAS transaction. An edit that changes the trigger (including cadence, timezone or instructions), pause, removal, or effective disabled job cancels its obsolete queued occurrence with a terminal timestamp and durable run-state activity. Older stranded versions are cancelled conservatively rather than assigned today's authority.

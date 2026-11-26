@@ -175,7 +175,23 @@ export const requestBotTestRun = (bot: Bot, instructions: string, key: string): 
 export const requestBotConversation = (bot: Bot, instructions: string, key: string, attachments?: AttachmentPayload[]): Promise<BotRun> => request<BotRun>(`/${segment(bot.id)}/conversation`, bot.scope, 'POST', { version: bot.version, instructions, idempotency_key: key, ...(attachments?.length ? { attachments } : {}) } satisfies BotConversationRequest)
 export const listBotRuns = (id: string, scope: BotScope, signal?: AbortSignal) => request<{ runs: BotRun[] }>(`/${segment(id)}/runs`, scope, 'GET', undefined, signal)
 export const getBotRun = (id: string, run: string, scope: BotScope, signal?: AbortSignal) => request<BotRun>(`/${segment(id)}/runs/${segment(run)}`, scope, 'GET', undefined, signal)
-export const listBotApprovals = (id: string, scope: BotScope, signal?: AbortSignal) => request<{ approvals: BotApproval[] }>(`/${segment(id)}/approvals`, scope, 'GET', undefined, signal)
+export const listBotApprovals = async (id: string, scope: BotScope, signal?: AbortSignal): Promise<{ approvals: BotApproval[] }> => {
+  const approvals: BotApproval[] = []
+  let after = ''
+  for (;;) {
+    signal?.throwIfAborted()
+    const page = await request<{ approvals: BotApproval[] }>(`/${segment(id)}/approvals`, scope, 'GET', undefined, signal, { limit: '200', ...(after ? { after } : {}) })
+    signal?.throwIfAborted()
+    if (!Array.isArray(page.approvals) || page.approvals.length > 200) throw new Error('Invalid Bot approval cursor page')
+    for (const approval of page.approvals) {
+      const next = typeof approval?.id === 'string' ? approval.id.toLowerCase() : ''
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(next) || next === '00000000-0000-0000-0000-000000000000' || next <= after) throw new Error('Nonadvancing Bot approval cursor')
+      after = next
+      approvals.push(approval)
+    }
+    if (page.approvals.length < 200) return { approvals }
+  }
+}
 export const decideBotApproval = (bot: Bot, approval: BotApproval, status: 'approved' | 'denied', answer?: string) => request<BotApproval>(`/${segment(bot.id)}/approvals/${segment(approval.id)}/decision`, bot.scope, 'POST', { action_digest: approval.action_digest, status, ...(answer ? { response: { question_id: approval.interaction?.question_id, answer } } : {}) })
 export const resumeBotRun = (bot: Bot, approval: BotApproval) => request<void>(`/${segment(bot.id)}/runs/${segment(approval.run_id)}/resume`, bot.scope, 'POST', { approval_id: approval.id })
 export const listBotGoals = (id: string, scope: BotScope, signal?: AbortSignal) => request<{ goals: BotGoal[] }>(`/${segment(id)}/goals`, scope, 'GET', undefined, signal)

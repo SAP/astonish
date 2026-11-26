@@ -499,6 +499,11 @@ func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest,
 				return err
 			}
 			if int64(count) >= *v.Budget.MaxRunsPerDay {
+				if occurrence != nil && occurrence.external == nil {
+					// A persona-local daily allowance resets at midnight; retain
+					// the exact scheduled occurrence rather than halt recurrence.
+					return &store.BotScheduleRejected{Cause: store.ErrBotForbidden, Outcome: store.BotScheduleRetry}
+				}
 				return store.ErrBotForbidden
 			}
 		}

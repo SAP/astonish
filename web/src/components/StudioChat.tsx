@@ -706,8 +706,10 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   // Latest explicit plan or delegation task list. Both surfaces use this same
   // derived state so the inline tracker and header side panel cannot disagree.
   const latestPlanWithSteps = useMemo(() => {
-    const canonical = messages.findLast(m => m.type === 'plan' && m.snapshot)
-    if (canonical?.type === 'plan') return canonical.steps.length > 0 ? canonical : null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const canonical = messages[i]
+      if (canonical.type === 'plan' && canonical.snapshot) return canonical.steps.length > 0 ? canonical : null
+    }
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.type === 'plan') {

@@ -241,7 +241,7 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 	// A response can arrive after disconnect while its call was already delivered;
 	// replaying prior rows into the projector must not re-emit them to the client.
 	if cursor > 0 {
-		approvals, err := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 8})
+		approvals, err := listBotPresentationApprovals(r.Context(), repo, id)
 		if err != nil {
 			return
 		}
@@ -291,9 +291,13 @@ func BotEventsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for {
-		approvals, reviewErr := repo.ListApprovals(r.Context(), id, store.BotPage{Limit: 8})
-		if reviewErr != nil {
-			return
+		var approvals []store.BotApproval
+		if len(rows) > 0 {
+			var reviewErr error
+			approvals, reviewErr = listBotPresentationApprovals(r.Context(), repo, id)
+			if reviewErr != nil {
+				return
+			}
 		}
 		for _, row := range rows {
 			if row.Cursor <= cursor || row.Event == nil {

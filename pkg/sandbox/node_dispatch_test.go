@@ -68,3 +68,52 @@ func TestRunNodeToolConcurrentCallerIsolation(t *testing.T) {
 		t.Fatal("input mutated")
 	}
 }
+
+func TestNodeToolTransportReadinessBeforeDecoration(t *testing.T) {
+	client := &argumentSpyClient{}
+	pool := &argumentSpyPool{client: client}
+	nt := NewNodeToolWithPool(&argumentTestTool{testTool: testTool{name: "read_file"}, required: "path"}, pool)
+	decorated, observed := false, false
+	decorate := func(c ToolNodeClient) ToolNodeClient {
+		if c != client || !client.ready || client.called {
+			t.Fatal("decorator ran before readiness or after call")
+		}
+		decorated = true
+		return c
+	}
+	observe := func(args, result map[string]any, err error) {
+		observed = true
+		if !client.called || args["path"] != "/a" || result["ok"] != true || err != nil {
+			t.Fatalf("bad observation: %v %v %v", args, result, err)
+		}
+	}
+	ctx := testToolContext{Context: context.Background(), sessionID: "logical"}
+	if _, err := nt.RunWithTransport(ctx, map[string]any{}, decorate, observe); err == nil || decorated || observed || pool.method != "" {
+		t.Fatal("invalid arguments acquired/decorated transport")
+	}
+	if _, err := nt.RunWithTransport(ctx, map[string]any{"file_path": "/a"}, decorate, observe); err != nil || !decorated || !observed {
+		t.Fatalf("transport hooks not called: %v", err)
+	}
+}
+
+type failedReadyTransport struct {
+	stubClient
+	failure error
+}
+
+func (c *failedReadyTransport) EnsureReady(string) error { return c.failure }
+
+type failedReadyTransportPool struct {
+	spyPool
+	client ToolNodeClient
+}
+
+func (p *failedReadyTransportPool) GetOrCreate(string) ToolNodeClient { return p.client }
+func TestNodeToolTransportReadinessFailureNoHooks(t *testing.T) {
+	failure := errors.New("readiness failure")
+	nt := NewNodeToolWithPool(testTool{name: "custom"}, &failedReadyTransportPool{client: &failedReadyTransport{failure: failure}})
+	_, err := nt.RunWithTransport(testToolContext{Context: context.Background(), sessionID: "logical"}, map[string]any{}, func(c ToolNodeClient) ToolNodeClient { t.Fatal("decorated failed readiness"); return c }, func(_, _ map[string]any, _ error) { t.Fatal("observed undispatched call") })
+	if !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+}

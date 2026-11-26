@@ -1,5 +1,41 @@
 # Bot production capability adapters
 
+## Canonical construction and repair boundary
+
+Production `NewBotChatAgentFactory` adapts owner/run dependencies through
+`newBotScopedChatRuntime` (`pkg/launcher/bot_shared_runtime.go`) into
+`NewScopedChatRuntime`. Ordinary executables, discovery, children, plans, flows and
+drills come from shared Chat construction; Bot supplies scoped authority, accounting,
+memory/scheduling and immutable-publication hooks. `BotCatalogueTools` and the
+adapter recipes retained below are historical/helper implementation descriptions,
+not the production assembly recipe or evidence of production capability parity.
+Unused compatibility closures are not removed by these boundary repairs.
+
+The factory pins the actual shared-catalog `*sandbox.NodeTool` for `web_fetch`.
+`botSharedDispatch.Dispatch` decorates only that exact executable's ready transport
+with `botPublicFetchClient`, using `NodeTool.RunWithTransport`. Argument validation,
+client acquisition, readiness, network policy, current authority and the shared
+budget still precede dispatch. The private `_bot_public_fetch` operation records
+HTTP exchange/body-read failures as failed reads; validation, cancellation, policy,
+budget, node-transport and credential-bearing URL failures retain native errors.
+The server-only `ToolSourceReadReceipt` binds run, call, capability and argument/result
+digests. Remote JSON, a matching name or an error string cannot mint it. Exact final
+agent output can reach immutable committed publication after settled read feedback;
+this is not factual certification or transparent retry of an external effect.
+
+`BotMetadataOnlyToolset.BotMetadataOnly()` is an explicit declaration-enumeration
+contract: no process startup or credential resolution. `LazyMCPToolset` attests it;
+`SanitizedToolset`, `FilteredToolset` and `chatRuntimeToolset` forward the underlying
+attestation rather than assuming every wrapper safe. Core-only delegated work may
+enumerate cached metadata without starting MCP, but any actual executable still
+passes the original scoped policy/accounting boundary. Unattested eager toolsets
+fail closed; filtering never reconstructs executable identity from names.
+
+Deterministic shared-factory/API and built-client fixtures prove only their recorded
+sequences. Helper adapter success alone does not prove shared production wiring.
+Physical Docker/Kubernetes/node deployment, PostgreSQL acceptance and corrected-head
+GitHub Build/lint are separate gates, not repaired or passed by this documentation.
+
 Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 `botBoundTool` before dispatch: owner scope, live lease/revocation, exact action
 policy and the shared run budget precede adapter execution. There is no host
@@ -104,14 +140,16 @@ resource discovery. That engine requires separate scoped migration.
 
 Host-only legacy plan/graph-plan and tool-manager global registrations remain in
 `chat_factory.go` for compatibility, after successful construction. They are not
-installed by the scoped constructor. Migrating those consumers and Bot production
-is still separate work; the focused constructor tests are not physical backend,
+installed by the scoped constructor. At this historical constructor checkpoint,
+Bot production migration was still separate work; the current canonical path is
+stated above. Focused constructor tests are not physical backend,
 provider, controller or full acceptance evidence.
 
 ## Shared node dispatch
 
-Ordinary Chat's `NodeTool.Run` and the Bot catalogue's fixed-session adapter both
-use `sandbox.RunNodeTool`: structured/map argument conversion, file-path alias
+Production Bot dispatch uses the shared `NodeTool.Run` pipeline and
+`sandbox.RunNodeTool`; the retained Bot catalogue helper's fixed-session adapter
+also uses that dispatcher. Structured/map argument conversion, file-path alias
 normalization, schema validation, caller metadata copying, node invocation and
 result decoding have one implementation. Bot caller cache identity is the pinned
 run session, never a model-supplied `_caller`; Chat retains its agent identity.

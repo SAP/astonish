@@ -1635,6 +1635,8 @@ type chatRuntimeToolset struct {
 	binding *chatRuntimeBinding
 }
 
+func (s *chatRuntimeToolset) BotMetadataOnly() bool { return agent.IsBotMetadataOnlyToolset(s.Toolset) }
+
 func (s *chatRuntimeToolset) Tools(ctx adkagent.ReadonlyContext) ([]tool.Tool, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("scoped toolset requires discovery context")

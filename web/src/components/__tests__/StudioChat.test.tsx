@@ -1260,16 +1260,22 @@ it('shows employee uncertainty during Bot reconnect and clears it only when live
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
 
-it('renders canonical file deliveries exactly once in server order on replay', async () => {
-  render(<StudioChat theme="dark" initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: true, onSend: vi.fn() }} />)
-  await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
-  const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
-  const publication = { schema_version: 1, bot_id: 'bot', run_id: 'r', home_id: 'h', home_session_id: 'bot-home', report_sequence: 1, event_id: 'publication', summary: 'Your files are ready.', artifacts: ['z', 'a'].map(id => ({ id, home_id: 'h', relative_path: id + '.bin', sha256: 'a'.repeat(64), size_bytes: 18000000, media_type: 'application/octet-stream', title: '', preview: 'download' })) }
-  await act(async () => { stream.onEvent('bot_file_publication', publication); stream.onEvent('bot_file_publication', publication); stream.onReplayComplete?.() })
-  expect(screen.queryByText('Your files are ready.')).not.toBeInTheDocument()
-  expect(screen.queryByTestId('agent-message-bubble')).not.toBeInTheDocument()
-  await act(async () => stream.onEvent('error', { message: 'Fallback unavailable' }))
-  expect(screen.getByRole('alert')).toHaveTextContent('Updates unavailable')
-  expect([...document.querySelectorAll('[data-artifact-id]')].map(e => e.getAttribute('data-artifact-id'))).toEqual(['z', 'a'])
-  expect([...document.querySelectorAll('[data-artifact-id]')].map(e => e.getAttribute('data-artifact-id'))).toEqual(['z', 'a'])
+it.each(['dark', 'light'])('renders trusted mixed speech and canonical file deliveries once live and restored (%s)', async theme => {
+  for (const replay of [false, true]) {
+    const view = render(<StudioChat theme={theme} initialSessionId="bot-home" hideSidebar botThread={{ botId: 'bot', scope: 'personal', readOnly: true, onSend: vi.fn() }} />)
+    await waitFor(() => expect(connectBotEvents).toHaveBeenCalled())
+    const stream = vi.mocked(connectBotEvents).mock.calls.at(-1)![0]
+    const publication = { schema_version: 1, bot_id: 'bot', run_id: 'r', home_id: 'h', home_session_id: 'bot-home', report_sequence: 1, event_id: 'publication', summary: 'Your files are ready.', artifacts: ['z', 'a'].map(id => ({ id, home_id: 'h', relative_path: id + '.bin', sha256: 'a'.repeat(64), size_bytes: 18000000, media_type: 'application/octet-stream', title: '', preview: 'download' })) }
+    await act(async () => { stream.onEvent('user_message', { text: 'Review my attachment' }); stream.onEvent('image', { data: 'dXNlci1pbWFnZQ==', mimeType: 'image/png' }); stream.onEvent('bot_file_publication', publication); stream.onEvent('bot_file_publication', publication); if (replay) stream.onReplayComplete?.() })
+    expect(screen.getAllByRole('img', { name: 'Screenshot' })).toHaveLength(1)
+    expect(screen.getByRole('img', { name: 'Screenshot' })).toHaveAttribute('src', 'data:image/png;base64,dXNlci1pbWFnZQ==')
+    expect(screen.getAllByText('Your files are ready.')).toHaveLength(1)
+    expect(screen.queryByTestId('agent-message-bubble')).not.toBeInTheDocument()
+    await act(async () => stream.onEvent('error', { message: 'Fallback unavailable' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Updates unavailable')
+    expect([...document.querySelectorAll('[data-artifact-id]')].map(e => e.getAttribute('data-artifact-id'))).toEqual(['z', 'a'])
+    await act(async () => { stream.onEvent('bot_file_publication', { ...publication, event_id: 'fallback', summary: '', artifacts: [] }); stream.onReplayComplete?.() })
+    expect(screen.getAllByText('Your files are ready.')).toHaveLength(1)
+    view.unmount()
+  }
 })

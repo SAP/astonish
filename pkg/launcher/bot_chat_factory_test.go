@@ -15,6 +15,7 @@ import (
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
+	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
@@ -197,6 +198,55 @@ func TestEmployeeWorkerFactoryTools(t *testing.T) {
 	}
 	if worker.Agent.SessionService != ss || f.req.Run.SessionID.String() == id {
 		t.Fatal("conversation/execution identities conflated")
+	}
+}
+
+func TestEmployeeWorkerConfiguredLazyMCPIndex(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	setBotSharedInteractive(f)
+	f.req.Principal.Scopes = []string{"chat", "tool:execute"}
+	f.ctx, _ = execution.WithPrincipal(context.Background(), f.req.Principal)
+	f.req.Run.CallerCeiling.Principal = f.req.Principal
+	prepare := f.cfg.Prepare
+	f.cfg.Prepare = func(c context.Context, q bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
+		safe, err := prepare(c, q, s)
+		if safe != nil {
+			safe.Catalog.Pool = sandbox.NewSingleClientPool(&sourceAccessCatalogueClient{}, nil)
+		}
+		return safe, err
+	}
+	f.services.MCPServers = newMemMCPStore(store.MCPServer{Name: "cached-private", Transport: "streamableHTTP", URL: "https://mcp.example.test/", CachedTools: json.RawMessage(`[{"name":"lookup_signal","description":"Look up violet","inputSchema":{"type":"object"}}]`)})
+	got, err := f.construct(t)
+	if err != nil {
+		var failure *bot.RunError
+		if errors.As(err, &failure) {
+			t.Fatalf("construction cause: %v", failure.Cause)
+		}
+		t.Fatal(err)
+	}
+	defer got.Cleanup()
+	ss := session.InMemoryService()
+	id := uuid.NewString()
+	if _, err := ss.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: ss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Cleanup()
+	entry := worker.Agent.ToolIndex.GetToolEntry("lookup_signal")
+	if entry == nil {
+		t.Fatal("configured lazy MCP lost from private worker index")
+	}
+	shared, ok := entry.Tool.(*chatRuntimeTool)
+	if !ok || shared.source == nil || entry.GroupName != "mcp:cached-private" {
+		t.Fatalf("private MCP lost guarded executable/group: %+v", entry)
+	}
+	for _, name := range []string{"ask_user", "employee_chat", botProposalToolName} {
+		if worker.Agent.ToolIndex.GetToolEntry(name) != nil {
+			t.Fatalf("private index reintroduced %s", name)
+		}
 	}
 }
 

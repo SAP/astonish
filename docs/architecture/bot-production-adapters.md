@@ -69,6 +69,19 @@ private dispatch to search, describe and execute `read_file`, return the exact
 controlled source bytes, and deliver a completed result to the Employee. Its
 recorded historical sources do not establish fresh web or physical sandbox access.
 
+The private index also retains eligible MCP `ToolGroup.Toolsets` from the
+already-guarded shared `PromptBuilder.Catalog`, preserving group and wrapper
+identity rather than rebuilding from raw request MCP proxies. Concrete question,
+Employee orchestration and sealed proposal tools stay outside this index.
+`TestEmployeeWorkerConfiguredLazyMCPIndex` fails on the dropped-toolset recipe and
+checks the genuine shared wrapper and MCP group. `TestEmployeePrivateConfiguredMCPHTTP`
+uses the actual daemon worker/factory and loopback personal/team HTTP admission:
+Employee dispatch, cached MCP search/describe/execute, controlled exact-action
+allow/deny (denied calls dispatch zero times), private result return and no Home
+trace leak. Request-context discovery could previously mask the missing index,
+so HTTP success alone is not proof of guarded catalog preservation. These fixtures
+do not establish live remote MCP, physical sandbox or paid-model behavior.
+
 Evidence lookup reads validated private runtime envelopes from the same scoped run
 transcript. It requires a preceding worker dispatch and matching call ID/tool name,
 retains the durable outer event ID and hashes only the actual response bytes.

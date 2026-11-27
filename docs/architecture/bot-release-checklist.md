@@ -1,5 +1,46 @@
 # Bot specification traceability and release checklist
 
+## Open policy and release follow-ups — 2026-11-27
+
+These decisions are **OPEN** and require explicit owner/operator signoff before
+team release; documenting observed behavior is not acceptance on the user's behalf.
+The user expressly removed execution budget gates. Preserve that decision: none
+of these follow-ups authorizes restoring runtime/token/tool/model-cost caps.
+
+- [ ] **Resource policy / owner signoff (OPEN):** finite stored operator/version
+  values validate compatibility but do not bound production execution or cumulative
+  model cost. Decide team operating expectations and accounting visibility without
+  inventing a spend guarantee. Cancellation, concurrency, daily-run/schedule
+  admission, expiry and operational generation health remain distinct controls.
+  See [mandate semantics](../bot-mandates.md).
+- [ ] **Team Home disclosure / owner signoff (OPEN):** authorized team members can
+  browse working Home files without a report publication/review gate. Decide
+  whether unpublished drafts are intended team-visible content; personal scope
+  and private content/authority keys remain separate.
+- [ ] **Raw downloads / owner signoff (OPEN):** downloads preserve exact retained
+  bytes without credential redaction; bounded previews are scoped-redacted. Decide
+  acceptable team disclosure policy; preview redaction does not certify raw file
+  safety. See [file API boundary](api-studio.md#bot-working-files-and-immutable-deliveries).
+- [ ] **Team cancellation / owner signoff (OPEN):** non-viewer team members can
+  cancel another owner's team run. Decide whether cancellation should remain
+  team-wide or be narrowed to owner/admin; this correction does not change it.
+- [ ] **Ticket lifecycle / owner signoff (OPEN):** tickets last at most 90 seconds
+  (shortened when issuing authentication expires earlier), can survive normal
+  logout, and require fresh active-directory membership/object authorization.
+  Decide whether that short post-logout lifetime is acceptable; no durable sharing
+  or immediate logout-revocation guarantee is claimed.
+- [ ] **F5 offline-alias release follow-up (OPEN):** resolve backend dependence
+  for the offline alias; an alias/configuration label alone does not establish
+  backend-independent offline availability. Record the affected backend and fresh
+  evidence before closing F5. This is separate from the memory follow-up below.
+- [ ] **Memory follow-up (OPEN):** retain the separate memory readiness/behavior
+  obligation and its own verification; neither F5 alias resolution nor resource-
+  policy signoff establishes memory acceptance.
+
+No rollout, restored budget enforcement, accepted disclosure policy or completed
+F5/memory verification is implied by this update. Dated evidence below retains
+its original meaning and does not close these decisions.
+
 ## Objective-owned employee gate (controlled local, not deployment)
 
 - Run the exact `--stage employee --employee-phase all` command documented in

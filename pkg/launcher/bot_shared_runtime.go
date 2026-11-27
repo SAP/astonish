@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
@@ -316,7 +317,20 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 				workerTools = append(workerTools, t)
 			}
 		}
-		idx, err := newChatToolIndex(b.owner, workerTools, nil, nil, nil)
+		// Preserve only already-guarded lazy MCP sets from shared construction.
+		// Copying only Toolsets avoids reintroducing questions or sealed capture
+		// through group.Tools, and retains each original executable wrapper.
+		var workerGroups []*agent.ToolGroup
+		for _, group := range wired.PromptBuilder.Catalog {
+			if group == nil || !strings.HasPrefix(group.Name, "mcp:") || len(group.Toolsets) == 0 {
+				continue
+			}
+			copy := *group
+			copy.Tools = nil
+			copy.Toolsets = append([]tool.Toolset(nil), group.Toolsets...)
+			workerGroups = append(workerGroups, &copy)
+		}
+		idx, err := newChatToolIndex(b.owner, workerTools, workerGroups, nil, nil)
 		if err != nil {
 			wired.Cleanup()
 			return nil, err

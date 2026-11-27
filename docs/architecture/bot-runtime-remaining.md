@@ -1,6 +1,6 @@
 # Phase 3 runtime: evidence and remaining acceptance
 
-> Historical continuation record. For the current additive message/proposal/source-intake and compact UI contracts, see [Chat-first contracts](bot-chat-first.md). Older phase status and per-intent composer assumptions below are not current release evidence. Real live smoke and larger deployed specification scenarios remain pending; tool-free default drafting does not authorize external execution.
+> Historical continuation record. Resource-cap enforcement descriptions below are superseded by the current [accounting-only execution contract](../bot-mandates.md#existing-bots-and-pinned-grants): production does not enforce whole-run runtime, tokens, tool-call or model-cost caps, including saved `max_active_seconds`; finite field validation is not enforcement and cumulative cost is not bounded. Cancellation, admission/concurrency, expiry, authority and operational health controls remain distinct. Historical tests and status remain evidence of their captured revision, not current cap guarantees. For the current additive message/proposal/source-intake and compact UI contracts, see [Chat-first contracts](bot-chat-first.md). Older phase status and per-intent composer assumptions below are not current release evidence. Real live smoke and larger deployed specification scenarios remain pending; tool-free default drafting does not authorize external execution.
 
 ## Durable progress contracts — 2026-11-16 (not runtime activation)
 

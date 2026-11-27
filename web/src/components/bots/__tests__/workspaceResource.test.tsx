@@ -32,7 +32,7 @@ describe('workspace resource identity', () => {
 it.each([401, 403])('keeps typed access failure %s safe in workspace resources', async status => {
   const { result } = renderHook(() => useWorkspaceResource(async () => { throw { status, message: 'HTTP secret endpoint' } }, 'bot'))
   await waitFor(() => expect(result.current.loading).toBe(false))
-  expect(result.current.error).toContain('can’t access')
+  expect(result.current.error).toBe('Bot access unavailable with the current authorization. Check access and refresh; the work outcome is unknown.')
   expect(result.current.error).not.toContain('secret')
   expect(result.current.data).toBeUndefined()
 })

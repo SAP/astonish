@@ -85,6 +85,15 @@ func employeeChatServiceReturned(out map[string]any, err error) bool {
 	if err != nil || out == nil {
 		return false
 	}
+	if result, wrapped := out["result"]; wrapped {
+		// functiontool wraps structs containing artifact slices instead of projecting
+		// their fields directly. This is the sealed local service result only.
+		typed, ok := result.(*bot.EmployeeChatResult)
+		if !ok || typed == nil {
+			return false
+		}
+		out = map[string]any{"worker_id": typed.WorkerID, "status": string(typed.Status)}
+	}
 	workerID, ok := out["worker_id"].(string)
 	if !ok {
 		return false

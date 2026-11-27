@@ -1,5 +1,12 @@
 # Durable progress context integration status
 
+> Resource semantics update — 2026-11-27: historical cap/deadline descriptions
+> below do not imply current whole-run enforcement. Production uses accounting-only
+> runtime/token/tool/model-cost settings, including saved `max_active_seconds`.
+> Structural policy validation, pinned operational call deadlines/health monitoring
+> and live authority remain separate; cumulative model cost is not bounded. See
+> [current mandate semantics](../bot-mandates.md#existing-bots-and-pinned-grants).
+
 ## Database continuation fixtures
 
 `TestBotProgressRecoveryHTTP` resumes the same run/session in a fresh shared
@@ -194,9 +201,12 @@ New `execution.NewBotProgressRuntimePolicy()` policies explicitly select
 `generation_health: {idle_timeout_seconds: 120, check_interval_seconds: 10}`
 with no elapsed model-call deadline (`model_call_timeout_seconds` is zero/omitted).
 This is a stall detector policy, not a maximum generation age. A healthy Bot may
-continue for hours; spending, token/tool budgets, cancellation, authority expiry
-and any explicit `max_active_seconds` remain authoritative. Tool-call limits are
-unchanged. Setup and other non-generation work need separate bounded deadlines.
+continue for hours. Production runtime/token/tool/model-cost settings (including
+saved `max_active_seconds`) are compatibility/accounting data, not execution caps;
+there is no bounded cumulative model-cost guarantee. Cancellation, live authority
+expiry/revocation, concurrency and daily-run/schedule admission remain separate
+controls. Setup and individual tool operations retain operational deadlines, not
+a whole-assignment budget. See [current resource semantics](../bot-mandates.md#existing-bots-and-pinned-grants).
 
 The Bot `BudgetLLM` snapshots this policy and owns one monitor per generation,
 including non-streaming evaluator/auxiliary requests. The dispatch wrapper supplies

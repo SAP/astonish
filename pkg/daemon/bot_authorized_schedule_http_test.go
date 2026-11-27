@@ -10,7 +10,9 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -63,11 +65,15 @@ type authorizedScheduleHTTPModel struct {
 	work            func() (*store.BotWorkState, error)
 	synchronous     bool
 	employeeStarted bool
+	employeeRequest string
 	finalCapture    func(*model.LLMRequest)
 	finalText       string
 	modelCalls      int
 	pendingReviews  int
 	denyPending     bool
+	artifactPending bool
+	artifactFixture bool
+	artifactWorker  bool
 }
 
 func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -118,20 +124,48 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 			}
 		}
 	}
+	if m.artifactFixture {
+		if response, ok := workerWorkAssessment(r, func(w *store.BotWorkState) bool {
+			return w.Candidate != nil && strings.Contains(w.Candidate.Text, "pending") && len(w.Candidate.Observations) > 0
+		}); ok {
+			return scheduleArtifactContentReview(r, response)
+		}
+	}
 	if response, ok := workerWorkAssessment(r, nil); ok {
 		return response
+	}
+	if m.artifactPending && m.artifactWorker {
+		if _, employee := r.Tools["employee_chat"]; !employee {
+			m.artifactPending = false
+			return func(yield func(*model.LLMResponse, error) bool) {
+				call := &genai.FunctionCall{ID: "crash-retained-artifact", Name: "publish_file", Args: map[string]any{"path": "outputs/crash-report.md", "title": "Retained report", "purpose": "Crash recovery fixture", "memory_summary": "Retained report at outputs/crash-report.md"}}
+				if _, direct := r.Tools[call.Name]; !direct {
+					call.Name, call.Args = "execute_tool", map[string]any{"name": "publish_file", "arguments": call.Args}
+				}
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
+			}
+		}
 	}
 	if _, employee := r.Tools["employee_chat"]; employee {
 		return func(yield func(*model.LLMResponse, error) bool) {
 			if !m.employeeStarted {
 				m.employeeStarted = true
-				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "employee-schedule-worker", Name: "employee_chat", Args: map[string]any{"message": "Schedule the daily report at 9am using the owner's request."}}}}}}, nil)
+				message := m.employeeRequest
+				if message == "" {
+					message = "Schedule the daily report at 9am using the owner's request."
+				}
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "employee-schedule-worker", Name: "employee_chat", Args: map[string]any{"message": message}}}}}}, nil)
+				return
+			}
+			if m.artifactFixture && !m.artifactWorker {
+				m.artifactWorker = true
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "employee-artifact-worker", Name: "employee_chat", Args: map[string]any{"message": "Publish the existing illustrative outputs/crash-report.md file."}}}}}}, nil)
 				return
 			}
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("The schedule request is pending; application is not yet verified.", "model"), TurnComplete: true}, nil)
 		}
 	}
-	if m.synchronous && r.Config != nil && r.Config.SystemInstruction != nil && strings.Contains(r.Config.SystemInstruction.Parts[0].Text, "BOT_EMPLOYEE_PRESENTATION_V1") {
+	if r.Config != nil && r.Config.SystemInstruction != nil && len(r.Config.SystemInstruction.Parts) > 0 && strings.Contains(r.Config.SystemInstruction.Parts[0].Text, "BOT_EMPLOYEE_PRESENTATION_V1") {
 		return func(yield func(*model.LLMResponse, error) bool) {
 			if len(r.Tools) != 0 {
 				m.t.Fatal("presentation exposes tools")
@@ -140,7 +174,8 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 				m.finalCapture(r)
 			}
 			var facts struct {
-				SourceDigest string `json:"source_digest"`
+				SourceDigest string               `json:"source_digest"`
+				Operations   []store.BotOperation `json:"operations"`
 			}
 			for _, content := range r.Contents {
 				for _, part := range content.Parts {
@@ -150,6 +185,19 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 			finalText := m.finalText
 			if finalText == "" {
 				finalText = "Your daily report is scheduled at 9am."
+				if !m.synchronous {
+					finalText = "No schedule application is verified."
+					for _, operation := range facts.Operations {
+						finalText = fmt.Sprintf("The %s request is %s.", operation.Payload.Operation, operation.Status)
+						if operation.Status == store.BotOperationApplied && operation.Receipt != nil && operation.Receipt.Schedule != nil {
+							receipt := operation.Receipt.Schedule
+							finalText = fmt.Sprintf("The schedule request is applied; verified enabled %t, removed %t.", receipt.Enabled, receipt.Removed)
+							if operation.Payload.Schedule != nil {
+								finalText += " Requested cron: " + operation.Payload.Schedule.Trigger.Cron + "."
+							}
+						}
+					}
+				}
 			}
 			text, _ := json.Marshal(map[string]any{"source_digest": facts.SourceDigest, "text": finalText})
 			yield(&model.LLMResponse{Content: genai.NewContentFromText(string(text), "model"), TurnComplete: true}, nil)
@@ -260,6 +308,40 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 			call.Name, call.Args = "execute_tool", map[string]any{"name": "schedule_job", "arguments": args}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
+	}
+}
+
+// scheduleArtifactContentReview exempts only the exact illustrative file input;
+// all execution and pending-control claims retain the shared evidence reviewer.
+func scheduleArtifactContentReview(r *model.LLMRequest, responses iter.Seq2[*model.LLMResponse, error]) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for response, err := range responses {
+			if err != nil || response == nil {
+				yield(response, err)
+				return
+			}
+			var review map[string]any
+			_ = json.Unmarshal([]byte(response.Content.Parts[0].Text), &review)
+			if _, ok := review["content_assessments"]; ok {
+				var input workerContentInput
+				_ = json.Unmarshal([]byte(r.Contents[0].Parts[0].Text), &input)
+				assessments := []workerContentAssessment{}
+				for _, item := range input.Items {
+					a := workerAssessContent(input, item)
+					if item.Text == "# Retained report" || item.Text == "An illustrative recovery fixture." {
+						a.ClaimType, a.Support = workerClaimNonfactual, store.BotCriterionSatisfied
+						a.Explanation = "Exact controlled illustrative input, no external fact claimed."
+					}
+					assessments = append(assessments, a)
+				}
+				review["content_assessments"] = assessments
+				raw, _ := json.Marshal(review)
+				response.Content = genai.NewContentFromText(string(raw), "model")
+			}
+			if !yield(response, nil) {
+				return
+			}
+		}
 	}
 }
 
@@ -436,7 +518,7 @@ func TestEmployeeSynchronousScheduleHTTPAcceptance(t *testing.T) {
 			testBotAuthorizedScheduleHTTPScenario(t, false, false, true, scenario)
 		})
 	}
-	for _, scenario := range []string{"crash_private_capture", "crash_schedule_committed", "crash_presentation_started"} {
+	for _, scenario := range []string{"crash_private_capture", "crash_before_coordinate", "crash_applied_before_presentation", "crash_schedule_committed", "crash_presentation_started", "crash_presentation_settled"} {
 		t.Run(scenario, func(t *testing.T) {
 			testBotAuthorizedScheduleHTTPScenario(t, false, false, true, scenario)
 		})
@@ -462,7 +544,32 @@ func authorizedScheduleHTTPRequestContext(auth, request context.Context, timeout
 	}
 }
 
+func TestEmployeeScheduleArtifactCrashRecoveryHTTP(t *testing.T) {
+	for _, scenario := range []string{"crash_before_coordinate", "crash_applied_before_presentation", "crash_schedule_committed", "crash_presentation_started", "crash_presentation_settled"} {
+		t.Run(scenario, func(t *testing.T) { testBotAuthorizedScheduleHTTPScenario(t, false, false, true, scenario+"_artifact") })
+	}
+}
+
+func TestEmployeeScheduleArtifactChangedJobExpiryHTTP(t *testing.T) {
+	for _, boundary := range []string{"crash_applied_before_presentation", "crash_schedule_committed"} {
+		for _, mutation := range []string{"next_run_advanced", "owner_disabled_updated"} {
+			t.Run(boundary+"/"+mutation, func(t *testing.T) {
+				testBotAuthorizedScheduleHTTPScenario(t, false, false, true, boundary+"_"+mutation+"_artifact")
+			})
+		}
+	}
+}
+
 func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, synchronous bool, scenario string, realOptions ...*realScheduleHTTPOptions) {
+	artifactFixture := strings.HasSuffix(scenario, "_artifact")
+	scenario = strings.TrimSuffix(scenario, "_artifact")
+	var jobMutation string
+	for _, mutation := range []string{"next_run_advanced", "owner_disabled_updated"} {
+		if strings.HasSuffix(scenario, "_"+mutation) {
+			jobMutation = mutation
+			scenario = strings.TrimSuffix(scenario, "_"+mutation)
+		}
+	}
 	var real *realScheduleHTTPOptions
 	if len(realOptions) > 0 {
 		real = realOptions[0]
@@ -553,9 +660,12 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			}
 			policy := func(ctx context.Context, ref store.BotMandateRef) (store.BotMandatePolicy, error) {
 				resolved, err := newProductionBotMandatePolicy(db, policyConfig)(ctx, ref)
-				if scenario == "original_expiry" {
-					// Authority expiry is independent of execution runtime accounting.
-					resolved.TTL = 2 * time.Second
+				if scenario == "original_expiry" || strings.HasPrefix(scenario, "crash_") {
+					// Isolated fixture's ORIGINAL persisted authority; never renew it.
+					resolved.TTL = 4 * time.Second
+					if scenario == "original_expiry" {
+						resolved.TTL = 2 * time.Second
+					}
 				}
 				return resolved, err
 			}
@@ -607,6 +717,13 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			if scenario == "permission_denied" || scenario == "issuer_denied" || scenario == "original_expiry" || scenario == "crash_private_capture" {
 				// The original claim persists this fixture TTL; no database expiry edits.
 				workerConfig.LeaseTTL = 4 * time.Second
+			}
+			if scenario == "crash_before_coordinate" || scenario == "crash_applied_before_presentation" {
+				workerConfig.ObserveExecution = func(timing entstore.BotExecutionTiming) {
+					if timing.Stage == entstore.BotStageCommit && timing.Result == entstore.BotStageSucceeded {
+						abortBoundary()
+					}
+				}
 			}
 			if real != nil {
 				workerConfig.ContextWindow = 200000
@@ -662,14 +779,31 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				t.Fatal(err)
 			}
 			botIDForClarification = b.ID
+			const crashArtifactBody = "# Retained report\nAn illustrative recovery fixture.\n"
+			if artifactFixture {
+				// Existing Home fixture input; publication still runs through the native
+				// tool, live mandate, lease barrier and immutable snapshot receipt.
+				path := filepath.Join(backend.documentsRoot, b.ID.String(), "outputs", "crash-report.md")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(crashArtifactBody), 0600); err != nil {
+					t.Fatal(err)
+				}
+				llm.artifactPending, llm.artifactFixture, llm.denyPending = true, true, false
+			}
 			svc := &store.Services{Bots: repo, Sessions: ss, BotMandatePolicy: policy, BotTurnRegistry: registry, BotInteractiveReady: true}
 			if scope == store.BotScopePersonal {
 				svc.PersonalBots = repo
 				svc.PersonalSessions = ss
 			}
+			svc.BotFilesFactory = func(c context.Context, services *store.Services, requested store.BotScope) (store.BotFiles, error) {
+				return productionBotFiles(c, backend, services, requested)
+			}
 			httpCtx := store.WithServices(store.WithTenantContext(authParent, &store.TenantContext{UserID: owner.String(), OrgSlug: org.Slug, TeamSlug: team.Slug}), svc)
 			router := mux.NewRouter()
 			router.HandleFunc("/bots/{botID}/runs/{runID}/cancel", api.BotCancelRunHandler)
+			router.HandleFunc("/bots/{botID}/runs/{runID}/reports/{reportSequence}/artifacts/{artifactID}/download", api.BotFileDownloadHandler)
 			router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler)
 			router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler)
 			if real != nil {
@@ -763,6 +897,8 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				defer cancelBoundary()
 				if scenario == "crash_private_capture" {
 					llm.pendingCapture = cancelBoundary
+				} else if scenario == "crash_presentation_settled" {
+					llm.finalCapture = func(*model.LLMRequest) { finalObserved = true; cancelBoundary() }
 				} else if scenario == "crash_presentation_started" {
 					llm.finalCapture = func(*model.LLMRequest) {
 						finalObserved = true
@@ -801,15 +937,19 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					if before.Status != store.RunRunning || operations[0].Status != store.BotOperationPending || operations[0].Receipt != nil {
 						t.Fatalf("not before commit: %+v %+v", before, operations)
 					}
+				} else if scenario == "crash_before_coordinate" || scenario == "crash_applied_before_presentation" {
+					if !before.Status.Terminal() || operations[0].Status != store.BotOperationPending || operations[0].Receipt != nil || len(jobs.List(auth)) != 0 {
+						t.Fatal("not before coordinator", before, operations)
+					}
 				} else if !before.Status.Terminal() || !before.Lease.ExpiresAt.IsZero() || operations[0].Status != store.BotOperationApplied || operations[0].Receipt == nil || operations[0].Receipt.Schedule == nil {
 					t.Fatalf("not after real schedule commit: %+v %+v", before, operations)
 				}
-				if len(jobs.List(auth)) != wantJobs {
+				if scenario != "crash_before_coordinate" && scenario != "crash_applied_before_presentation" && len(jobs.List(auth)) != wantJobs {
 					t.Fatal("wrong jobs at boundary")
 				}
 				claim := store.BotEmployeePresentationRequest{BotID: b.ID, RunID: source.Run.ID, ClaimToken: "employee-final:" + source.Run.ID.String()}
 				var beforePresentation *store.BotEmployeePresentation
-				if wantJobs == 1 {
+				if wantJobs == 1 && scenario != "crash_before_coordinate" && scenario != "crash_applied_before_presentation" {
 					beforePresentation, e = repo.(store.BotEmployeePresentationStore).ReadEmployeePresentation(auth, claim)
 					if e != nil || beforePresentation.ClaimToken != claim.ClaimToken || beforePresentation.RunID != source.Run.ID || len(beforePresentation.Operations) != 1 || beforePresentation.Operations[0].OperationID != operations[0].ID || beforePresentation.Operations[0].Revision != operations[0].Revision {
 						t.Fatalf("exact final claim/receipt binding missing: %+v %v", beforePresentation, e)
@@ -821,8 +961,52 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					if scenario == "crash_presentation_started" && (!finalObserved || len(beforePresentation.Turns) != 1 || beforePresentation.Turns[0].State != store.BotEmployeeModelTurnStarted) {
 						t.Fatalf("missing unsettled paid dispatch: %+v", beforePresentation)
 					}
+					if scenario == "crash_presentation_settled" && (!finalObserved || len(beforePresentation.Turns) != 1 || beforePresentation.Turns[0].State != store.BotEmployeeModelTurnSettled) {
+						t.Fatal("missing settled crash window", beforePresentation)
+					}
 					if scenario == "crash_schedule_committed" && len(beforePresentation.Turns) != 0 {
 						t.Fatal("model ran before pre-presentation boundary")
+					}
+				}
+				if scenario == "crash_applied_before_presentation" {
+					coordinator := runtime.(interface {
+						CoordinateEmployeeSchedules(context.Context, store.BotMandateRef, uuid.UUID) ([]store.BotOperation, error)
+					})
+					ops, err := coordinator.CoordinateEmployeeSchedules(auth, *before.MandateRef, before.ID)
+					if err != nil || len(ops) != 1 || ops[0].Status != store.BotOperationApplied {
+						t.Fatal("applied boundary", ops, err)
+					}
+					if _, err := repo.(store.BotEmployeePresentationStore).ReadEmployeePresentation(auth, claim); err == nil {
+						t.Fatal("presentation existed before boundary")
+					}
+				}
+				var changedJob *store.ScheduledJob
+				if jobMutation != "" {
+					operations, e = runtime.ListAuthorizedOperations(auth, *before.MandateRef)
+					if e != nil || len(operations) != 1 || operations[0].Receipt == nil || operations[0].Receipt.Schedule == nil {
+						t.Fatal("changed-job fixture lacks historical applied receipt", operations, e)
+					}
+					job := jobs.Get(auth, operations[0].Receipt.Schedule.ScheduleID.String())
+					if job == nil || job.NextRun == nil {
+						t.Fatal("changed-job fixture lacks committed scheduler job")
+					}
+					if jobMutation == "next_run_advanced" {
+						next := job.NextRun.Add(24 * time.Hour)
+						job.NextRun = &next
+					} else {
+						job.Enabled = false
+						job.Payload.BotVersion++
+					}
+					if e := jobs.Update(auth, job); e != nil {
+						t.Fatal(e)
+					}
+					changedJob = jobs.Get(auth, job.ID)
+					coordinator := runtime.(interface {
+						CoordinateEmployeeSchedules(context.Context, store.BotMandateRef, uuid.UUID) ([]store.BotOperation, error)
+					})
+					ops, err := coordinator.CoordinateEmployeeSchedules(auth, *before.MandateRef, before.ID)
+					if !errors.Is(err, store.ErrBotConflict) || len(ops) != 0 {
+						t.Fatal("mutable job mismatch must still fail coordinator verification", ops, err)
 					}
 				}
 				mandates, e := entstore.NewBotMandateRuntime(repo, policy)
@@ -856,6 +1040,11 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				if scope == store.BotScopePersonal {
 					repo, ss, jobs = ods.ForUser(owner.String()).Bots(), ods.ForUser(owner.String()).Sessions(), ods.ForUser(owner.String()).ScheduledJobs()
 				}
+				// Route subsequent HTTP reads to the reopened SQL repositories.
+				svc.Bots, svc.Sessions = repo, ss
+				if scope == store.BotScopePersonal {
+					svc.PersonalBots, svc.PersonalSessions = repo, ss
+				}
 				workerConfig.Backend, workerConfig.TurnRegistry = db, nil
 				worker, e = NewBotWorker(workerConfig)
 				if e != nil {
@@ -875,11 +1064,22 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 						t.Fatal(ctx.Err())
 					}
 				}
+				if scenario == "crash_applied_before_presentation" {
+					if wait := time.Until(original.Mandate.ExpiresAt) + 20*time.Millisecond; wait > 0 {
+						time.Sleep(wait)
+					}
+				}
 				if e = worker.Poll(ctx); e != nil {
 					if wantJobs != 1 || !errors.Is(e, store.ErrBotConflict) {
 						t.Fatal(e)
 					}
 					t.Logf("restart publication pending: %v; no automatic final-stage redispatch", e)
+				}
+				if scenario == "crash_before_coordinate" || scenario == "crash_applied_before_presentation" {
+					beforePresentation, e = repo.(store.BotEmployeePresentationStore).ReadEmployeePresentation(auth, claim)
+					if e != nil || len(beforePresentation.Turns) != 0 || len(beforePresentation.Operations) != 1 {
+						t.Fatal("coordinate recovery did not prepare", beforePresentation, e)
+					}
 				}
 				after, e := repo.GetRun(auth, b.ID, source.Run.ID)
 				if e != nil || after.MandateRef == nil || *after.MandateRef != *before.MandateRef || after.Usage != before.Usage || llm.modelCalls != calls || len(jobs.List(auth)) != wantJobs {
@@ -915,6 +1115,85 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 						if llm.modelCalls != calls {
 							t.Fatal("unsettled final redispatched model")
 						}
+					}
+				}
+				if wantJobs == 1 {
+					// Original persisted fixture authority; no replacement lease/grant.
+					if wait := time.Until(original.Mandate.ExpiresAt) + 20*time.Millisecond; wait > 0 {
+						time.Sleep(wait)
+					}
+					if e = worker.Poll(ctx); e != nil && !errors.Is(e, store.ErrBotConflict) {
+						t.Fatalf("expiry Poll: %v source artifacts=%+v work=%+v", e, before.Report.Artifacts, before.Work)
+					}
+					publication, e := repo.(store.BotPublicationReader).ReadBotPublication(auth, b.ID, source.Run.ID, after.StateSequence)
+					if e != nil || publication == nil {
+						t.Fatalf("expired terminal publication missing after Poll: %+v %v", publication, e)
+					}
+					p, e := repo.(store.BotEmployeePresentationStore).ReadEmployeePresentation(auth, claim)
+					if e != nil || p.State != store.BotEmployeePresentationUnavailable || (scenario != "crash_before_coordinate" && scenario != "crash_applied_before_presentation" && !reflect.DeepEqual(p.Turns, beforePresentation.Turns)) || llm.modelCalls != calls {
+						t.Fatalf("expired terminal presentation did not converge without replay: %+v %v", p, e)
+					}
+					if artifactFixture {
+						if publication.EmployeeSpeech || publication.Text != "" || len(publication.Artifacts) != 1 || !reflect.DeepEqual(publication.Artifacts, before.Report.Artifacts) {
+							t.Fatalf("expired recovery lost verified artifact or fabricated speech: %+v source=%+v", publication, before.Report.Artifacts)
+						}
+						artifact := publication.Artifacts[0]
+						if artifact.ContentRef == nil || artifact.ContentRef.Validate() != nil || artifact.ContentRef.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte(crashArtifactBody))) {
+							t.Fatal("artifact lacks actual immutable receipt", artifact)
+						}
+						// Remove the mutable input: download must resolve retained immutable bytes.
+						if e := os.Remove(filepath.Join(backend.documentsRoot, b.ID.String(), artifact.RelativePath)); e != nil {
+							t.Fatal(e)
+						}
+						request, e := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/bots/%s/runs/%s/reports/%d/artifacts/%s/download?scope=%s", server.URL, b.ID, source.Run.ID, publication.ReportSequence, artifact.ID, scope), nil)
+						if e != nil {
+							t.Fatal(e)
+						}
+						response, e := server.Client().Do(request)
+						if e != nil {
+							t.Fatal(e)
+						}
+						body, e := io.ReadAll(response.Body)
+						response.Body.Close()
+						if e != nil || response.StatusCode != http.StatusOK || string(body) != crashArtifactBody {
+							t.Fatalf("retained HTTP download after expiry: status=%d body=%q err=%v", response.StatusCode, body, e)
+						}
+					}
+					if jobMutation != "" {
+						rt, err := worker.AuthorizedOperations(repo)
+						if err != nil {
+							t.Fatal(err)
+						}
+						op, err := rt.ReadAuthorizedOperation(auth, *before.MandateRef, operations[0].ID)
+						if err != nil || !reflect.DeepEqual(*op, operations[0]) || !reflect.DeepEqual(jobs.Get(auth, changedJob.ID), changedJob) {
+							t.Fatal("expiry recovery rewrote historical receipt or reapplied changed job", op, err)
+						}
+						current, err := repo.GetRun(auth, b.ID, source.Run.ID)
+						if err != nil || current.Usage != before.Usage || current.MandateRef == nil || *current.MandateRef != *before.MandateRef {
+							t.Fatal("expiry recovery reset usage or authority", current, err)
+						}
+						r, releases, tools, tokens := quotaActions(auth)
+						if r != reservesBefore || releases != releasesBefore || tools != toolsBefore || tokens != tokensBefore {
+							t.Fatal("expiry recovery reset quota or grants")
+						}
+					}
+					publicationAgain, e := repo.(store.BotPublicationStore).PublishReport(auth, store.BotPublicationRequest{BotID: b.ID, RunID: source.Run.ID})
+					if e != nil || !reflect.DeepEqual(publication, publicationAgain) {
+						t.Fatalf("terminal publication retry changed: %+v %v", publicationAgain, e)
+					}
+					activities, e := repo.ListActivity(auth, b.ID, 0, 200)
+					if e != nil {
+						t.Fatal(e)
+					}
+					published := 0
+					for _, activity := range activities {
+						var receipt store.BotPublication
+						if json.Unmarshal(activity.Payload, &receipt) == nil && receipt.EventID == publication.EventID {
+							published++
+						}
+					}
+					if published != 1 {
+						t.Fatalf("expected one durable terminal publication, got %d", published)
 					}
 				}
 				events, e := ss.ReadTranscriptEvents(auth, "astonish", owner.String(), b.HomeSessionID.String())
@@ -1266,6 +1545,17 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					if !strings.Contains(string(encoded), operations[0].ID.String()) {
 						t.Fatalf("final did not receive exact operation: %s", encoded)
 					}
+					claim := store.BotEmployeePresentationRequest{BotID: b.ID, RunID: terminal.ID, ClaimToken: "employee-final:" + terminal.ID.String()}
+					// A concurrent owner poll and losing direct caller must neither
+					// abandon this live reservation nor replay its model.
+					if e := worker.Poll(ctx); e != nil && !errors.Is(e, store.ErrBotConflict) {
+						t.Fatal(e)
+					}
+					_ = worker.completeEmployeeSchedule(auth, repo, b.ID, terminal.ID)
+					live, e := repo.(store.BotEmployeePresentationStore).ReadEmployeePresentation(auth, claim)
+					if e != nil || live.State != store.BotEmployeePresentationClaimed || len(live.Turns) != 1 || live.Turns[0].State != store.BotEmployeeModelTurnStarted {
+						t.Fatal("poll terminalized live final", live, e)
+					}
 					finalObserved = true
 				}
 			}
@@ -1516,16 +1806,21 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			if clarify {
 				wantBookkeeping = 2 // Each real attempt declares conversational delivery.
 			}
-			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || len(saved.Report.Unchanged) != wantBookkeeping+1 {
-				t.Fatalf("applied receipt must follow terminal source with per-attempt bookkeeping: %+v", saved.Report.Unchanged)
-			}
-			for _, evidence := range saved.Report.Unchanged[:wantBookkeeping] {
-				if !strings.HasSuffix(evidence.Source, "/schedule-chat-delivery") {
-					t.Fatalf("missing real conversational delivery bookkeeping: %+v", evidence)
+			var bookkeeping, pending, serviceReturns int
+			for _, evidence := range saved.Report.Unchanged {
+				switch {
+				case strings.HasSuffix(evidence.Source, "/schedule-chat-delivery"):
+					bookkeeping++
+				case strings.HasPrefix(evidence.Source, "bot-employee-chat://"+saved.ID.String()+"/"):
+					serviceReturns++
+				case strings.HasPrefix(evidence.Source, "bot-operation://") && strings.HasSuffix(evidence.Source, "/"+ops[0].ID.String()):
+					pending++
+				default:
+					t.Fatalf("unexpected source observation: %+v", evidence)
 				}
 			}
-			if !strings.Contains(saved.Report.Unchanged[wantBookkeeping].Source, ops[0].ID.String()) {
-				t.Fatal("source must separately acknowledge its pending operation")
+			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || bookkeeping != wantBookkeeping || pending != 1 || serviceReturns != wantBookkeeping {
+				t.Fatalf("applied receipt must follow terminal source with per-attempt bookkeeping and service returns: %+v", saved.Report.Unchanged)
 			}
 			approvals, err := repo.ListApprovals(auth, b.ID, store.BotPage{})
 			if clarify {
@@ -1583,6 +1878,9 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			// Compose owner controls over real HTTP, without forged operations or pins.
 			ownerTurn := func(text string, payload map[string]any) store.BotOperation {
 				t.Helper()
+				// Script state belongs to this owner turn, not the shared model's lifetime.
+				llm.employeeStarted, llm.deliverySet = false, false
+				llm.employeeRequest = text
 				llm.control = payload
 				nextStage(text)
 				current, e := repo.Get(auth, b.ID)
@@ -1655,10 +1953,10 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			}
 			llm.cadence = nil
 			cadenceRun, err := repo.GetRun(auth, b.ID, cadence.Provenance.SourceRunID)
-			if err != nil || cadenceRun.Status != store.RunSucceeded || cadenceRun.Usage.ToolCalls != 3 || len(cadenceRun.Report.Unverified) != 0 || len(cadenceRun.Report.Changed) != 0 || len(cadenceRun.Report.Unchanged) != 3 || !strings.Contains(cadenceRun.Report.Summary, "pending") || cadenceRun.Report.NextRunAt != nil {
+			if err != nil || cadenceRun.Status != store.RunSucceeded || cadenceRun.Usage.ToolCalls != 3 || len(cadenceRun.Report.Unverified) != 0 || len(cadenceRun.Report.Changed) != 0 || len(cadenceRun.Report.Unchanged) != 4 || !strings.Contains(cadenceRun.Report.Summary, "pending") || cadenceRun.Report.NextRunAt != nil {
 				t.Fatalf("cadence source accounting: %+v %v", cadenceRun, err)
 			}
-			if !strings.HasSuffix(cadenceRun.Report.Unchanged[0].Source, "/schedule-chat-delivery") || !strings.Contains(cadenceRun.Report.Unchanged[1].Source, "cadence-list") || cadence.Receipt.ObservedAt.Before(*cadenceRun.FinishedAt) || cadence.Receipt.Schedule.TriggerID != receipt.TriggerID || cadence.Receipt.Schedule.ScheduleID != receipt.ScheduleID {
+			if cadenceRun.Report.Unchanged[0].Source != "bot-employee-chat://"+cadenceRun.ID.String()+"/employee-schedule-worker" || !strings.HasSuffix(cadenceRun.Report.Unchanged[1].Source, "/schedule-chat-delivery") || !strings.Contains(cadenceRun.Report.Unchanged[2].Source, "cadence-list") || cadenceRun.Report.Unchanged[3].Source != "bot-operation://"+b.ID.String()+"/"+cadence.ID.String() || cadence.Receipt.ObservedAt.Before(*cadenceRun.FinishedAt) || cadence.Receipt.Schedule.TriggerID != receipt.TriggerID || cadence.Receipt.Schedule.ScheduleID != receipt.ScheduleID {
 				t.Fatalf("cadence lost call/target/source ordering: %+v", cadence)
 			}
 			jobAfter := jobs.Get(auth, receipt.ScheduleID.String())
@@ -1707,15 +2005,15 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			}
 			llm.pausedRead = nil
 			readRun, e := repo.GetRun(auth, b.ID, resumed.Provenance.SourceRunID)
-			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 3 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 3 || readRun.Report.NextRunAt != nil {
+			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 3 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 4 || readRun.Report.NextRunAt != nil {
 				t.Fatalf("paused read accounting: %+v %v", readRun, e)
 			}
 			// Both the list and independently verified pending capture are observations,
 			// not mutations. The worker's later receipt establishes application.
-			if !strings.HasSuffix(readRun.Report.Unchanged[0].Source, "/schedule-chat-delivery") {
+			if readRun.Report.Unchanged[0].Source != "bot-employee-chat://"+readRun.ID.String()+"/employee-schedule-worker" || !strings.HasSuffix(readRun.Report.Unchanged[1].Source, "/schedule-chat-delivery") {
 				t.Fatalf("missing exact delivery declaration: %+v", readRun.Report.Unchanged)
 			}
-			listObservation, captureObservation := readRun.Report.Unchanged[1], readRun.Report.Unchanged[2]
+			listObservation, captureObservation := readRun.Report.Unchanged[2], readRun.Report.Unchanged[3]
 			if listObservation.Kind != store.BotEvidenceObservation || !strings.HasSuffix(listObservation.Source, "/"+readRun.ID.String()+"/paused-list") {
 				t.Fatalf("lost exact-call list evidence: %+v", listObservation)
 			}

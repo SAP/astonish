@@ -1215,7 +1215,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
       case 'bot_file_publication':
         if (botThreadRef.current && isBotFilePublication(data) && data.bot_id === botThreadRef.current.botId) {
-          const publication = { ...data, summary: '' }
+          const publication = data
           setMessages(prev => prev.some(m => m.type === 'bot_file_publication' && m.publication.event_id === publication.event_id) ? prev : [...prev, { type: 'bot_file_publication', publication }])
         }
         break

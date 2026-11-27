@@ -47,6 +47,40 @@ Store coordination tests cover personal/team success, denial, duplicate replay a
 exclusion from later activation. The focused HTTP gate also covers readiness,
 cancellation, restart and original-limit scenarios.
 
+### Eventual terminal-stage recovery
+
+Before publication reconciliation, synchronous owner requests and owner-authenticated
+maintenance polls page through terminal Home sources with the exact persisted
+owner/org/team mandate identity. They coordinate only the original source-linked
+schedule operations and prepare/revalidate the existing private presentation. An
+applied operation is independently read back, not replayed; definitive expired
+pending operations cannot activate later. No lease, mandate expiry, provider/model
+pin or execution allowance is renewed.
+
+Recovery deliberately does **not** generate a final or adopt a pending/claimed
+zero-turn presentation: its deterministic claim/dispatch identity does not prove
+exclusive caller ownership. Started and settled-but-uncompleted turns likewise
+never replay the model. Until the original stored `AuthorityExpiresAt` barrier,
+they remain pending publication so a concurrent live final can finish. At that
+barrier, preparation durably marks unfinished presentation unavailable while
+preserving the original reservations, settlement, usage, source digest and
+operation receipts. Completed/unavailable presentations then use the existing
+idempotent publication pipeline; verified artifacts remain independently eligible
+for file-only publication and scoped access. A losing factory/reservation caller
+must not mark a live winner unavailable.
+
+This is delayed convergence, **not immediate crash recovery**: publication requires
+a subsequent authenticated owner poll after original authority expiry (and valid
+current scope access). Long original authority TTLs mean equally long abandonment
+waits. No synthetic assistant fallback is published for an unavailable final.
+`TestEmployeeSynchronousScheduleHTTPAcceptance` exercises actual loopback HTTP
+admission, scoped SQL close/reopen and Poll in both personal/team scopes at commit
+before coordination, applied-before-preparation, zero-turn claimed, started and
+settled-before-completion boundaries, and a poll during a live final. Its isolated
+fixtures persist short TTLs at original issuance and wait for those clocks;
+production authority records are never edited to accelerate recovery.
+
+
 Final presentation separates `operations` (terminal outcomes) from
 `preapplication_context` (the older source report, private workers and history).
 The Employee must use matching verified receipts for the current result, not

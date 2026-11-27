@@ -14,6 +14,62 @@ import (
 	"testing"
 )
 
+func TestBotHomeNarrativeUserAttachmentsLiveRestore(t *testing.T) {
+	home, id := uuid.New(), uuid.New()
+	parts := []*genai.Part{
+		{Text: "Review my attachment"},
+		{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("user-image")}},
+		{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "user-document.pdf"}},
+		nil,
+		{Thought: true, Text: "PRIVATE_THOUGHT", InlineData: &genai.Blob{Data: []byte("PRIVATE_THOUGHT")}},
+		{Text: "PRIVATE_CALL", FunctionCall: &genai.FunctionCall{Name: "private_tool"}},
+		{Text: "PRIVATE_RESPONSE", FunctionResponse: &genai.FunctionResponse{Name: "private_tool"}},
+	}
+	for _, role := range []string{"user", "model"} {
+		e := &session.Event{ID: "attachment-" + role, Author: role, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: role, Parts: parts}}}
+		before, _ := json.Marshal(e)
+		got := projectBotHomeNarrative(e, home, home)
+		if role == "user" {
+			if !reflect.DeepEqual(got.Content.Parts, parts[:3]) {
+				t.Errorf("user attachments lost or unsafe parts retained: %+v", got.Content.Parts)
+			}
+		} else if len(got.Content.Parts) != 0 {
+			t.Fatal("private model attachments restored")
+		}
+		after, _ := json.Marshal(e)
+		if string(before) != string(after) {
+			t.Fatal("source row mutated")
+		}
+		var live SessionEventProjection
+		for mode := 0; mode < 2; mode++ {
+			p := &SessionEventProjector{BotID: id, HomeSessionID: home, SessionID: home}
+			projection, err := p.ProjectBot(t.Context(), store.BotTranscriptEvent{Cursor: 1, Event: e}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(projection.Transcript), "PRIVATE_") {
+				t.Fatal("private content leaked")
+			}
+			if role == "user" {
+				if len(projection.Events) != 2 || projection.Events[0].Type != "user_message" || projection.Events[1].Type != "image" {
+					t.Errorf("user image not serialized once: %+v", projection.Events)
+				}
+				var restored session.Event
+				if json.Unmarshal(projection.Transcript, &restored) != nil || len(restored.Content.Parts) != 3 || restored.Content.Parts[2].FileData == nil {
+					t.Error("user file attachment lost from transcript")
+				}
+			} else if len(projection.Events) != 0 {
+				t.Fatal("private model presentation leaked")
+			}
+			if mode == 0 {
+				live = projection
+			} else if !reflect.DeepEqual(live, projection) {
+				t.Fatal("live/restore attachment projection differs")
+			}
+		}
+	}
+}
+
 func TestBotHomeNarrativeHistoricalTelemetry(t *testing.T) {
 	home, run := uuid.New(), uuid.New()
 	for _, kind := range []string{"text", "tool_call", "tool_result", "thinking", "subtask_progress", "error"} {

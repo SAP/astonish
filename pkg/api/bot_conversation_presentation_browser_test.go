@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -273,7 +274,7 @@ func runEmployeeConversationBrowserAcceptance(t *testing.T, sidebarOnly bool) {
 			runID := uuid.New()
 			publication := store.BotFilePublication{SchemaVersion: 1, BotID: f.b.ID, RunID: runID, HomeSessionID: f.b.HomeSessionID, HomeID: f.b.Home.ID, ReportSequence: 1, EventID: store.BotPublicationEventID(runID, 1), Summary: "Reviewed mixed delivery.", Artifacts: []store.BotPublishedArtifact{{ID: uuid.New(), HomeID: f.b.Home.ID, RelativePath: "mixed-reviewed.md", SHA256: fmt.Sprintf("%x", sha256.Sum256(reviewed)), SizeBytes: int64(len(reviewed)), MediaType: "text/markdown", Preview: store.BotFilePreviewText}}}
 			files.ref = store.BotContentRef{Format: 1, Scope: store.BotContentScope{OrgID: "interactive", TeamID: "team", OwnerID: f.b.OwnerID.String(), BotID: f.b.ID}, Kind: store.BotContentArtifact, Key: "mixed-object", SHA256: publication.Artifacts[0].SHA256, SizeBytes: int64(len(reviewed)), Revision: 1}
-			receipt := store.BotPublication{BotID: f.b.ID, RunID: runID, HomeSessionID: f.b.HomeSessionID, ReportSequence: 1, EventID: publication.EventID, Text: publication.Summary, Artifacts: []store.BotArtifact{{ID: publication.Artifacts[0].ID, HomeID: f.b.Home.ID, RelativePath: "mixed-reviewed.md", SHA256: files.ref.SHA256, SizeBytes: files.ref.SizeBytes, ContentRef: &files.ref}}}
+			receipt := store.BotPublication{BotID: f.b.ID, RunID: runID, HomeSessionID: f.b.HomeSessionID, ReportSequence: 1, EventID: publication.EventID, EmployeeSpeech: true, Text: publication.Summary, Artifacts: []store.BotArtifact{{ID: publication.Artifacts[0].ID, HomeID: f.b.Home.ID, RelativePath: "mixed-reviewed.md", SHA256: files.ref.SHA256, SizeBytes: files.ref.SizeBytes, ContentRef: &files.ref}}}
 			org, err := f.db.ForOrg("interactive")
 			if err != nil {
 				t.Fatal(err)
@@ -531,6 +532,16 @@ func runEmployeeConversationBrowserAcceptance(t *testing.T, sidebarOnly bool) {
 					t.Fatal(err)
 				}
 			}
+			// Persist a legitimate user attachment through the existing projector and
+			// image serializer; no browser fetch/state interception is involved.
+			attachmentPNG, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMioAAAAASUVORK5CYII=")
+			if err != nil {
+				t.Fatal(err)
+			}
+			attachmentRow := &session.Event{ID: "user-attachment", Author: "user", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Review my attached image"}, {InlineData: &genai.Blob{MIMEType: "image/png", Data: attachmentPNG}}}}}}
+			if err := sessions.AppendFleetEvent(f.ctx, f.b.HomeSessionID.String(), attachmentRow); err != nil {
+				t.Fatal(err)
+			}
 			publishedRow := &session.Event{ID: publication.EventID, InvocationID: "bot-report:" + publication.RunID.String(), Author: "assistant", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(publication.Summary, "model")}, Actions: session.EventActions{StateDelta: map[string]any{store.BotFilePublicationKey: publication}}}
 			if err := sessions.AppendFleetEvent(f.ctx, f.b.HomeSessionID.String(), publishedRow); err != nil {
 				t.Fatal(err)
@@ -540,7 +551,7 @@ func runEmployeeConversationBrowserAcceptance(t *testing.T, sidebarOnly bool) {
 			assertMixed := func(mode string) {
 				t.Helper()
 				text := page.MustElement(`[aria-label="Bot workspace"]`).MustText()
-				for _, marker := range []string{"Schedule the daily report at 9am UTC", "Your daily report is scheduled at 9am UTC."} {
+				for _, marker := range []string{"Schedule the daily report at 9am UTC", "Your daily report is scheduled at 9am UTC.", publication.Summary, "Review my attached image"} {
 					if !strings.Contains(text, marker) {
 						t.Errorf("%s missing public presentation %q: %s", mode, marker, text)
 					}
@@ -548,8 +559,19 @@ func runEmployeeConversationBrowserAcceptance(t *testing.T, sidebarOnly bool) {
 				if strings.Contains(text, "PRIVATE_") || strings.Contains(text, "pending; application") || strings.Contains(text, "I can’t confirm") {
 					t.Fatal("private payload leaked")
 				}
-				if strings.Count(text, "Your daily report is scheduled at 9am UTC.") != 1 {
-					t.Errorf("%s duplicated final: %s", mode, text)
+				for _, marker := range []string{"Your daily report is scheduled at 9am UTC.", publication.Summary, "Review my attached image"} {
+					if strings.Count(text, marker) != 1 {
+						t.Errorf("%s missing/duplicated public text %q: %s", mode, marker, text)
+					}
+				}
+				if len(page.MustElements(`[data-artifact-id="`+publication.Artifacts[0].ID.String()+`"]`)) != 1 {
+					t.Errorf("%s reviewed artifact not shown once", mode)
+				}
+				imageSelector := `img[src="data:image/png;base64,` + base64.StdEncoding.EncodeToString(attachmentPNG) + `"]`
+				if len(page.MustElements(imageSelector)) != 1 {
+					t.Errorf("%s user attachment image not shown once", mode)
+				} else {
+					page.MustElement(imageSelector).MustVisible()
 				}
 			}
 			assertMixed("live/reconnect")

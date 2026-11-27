@@ -146,11 +146,6 @@ func (b *localAgentBackend) deleteCodeSessionData(ctx context.Context, id string
 			}
 		}
 	}
-	if w := b.workspace; w != nil {
-		if err := w.manager.ForgetSessions(ctx, w.project, bindings); err != nil {
-			return fmt.Errorf("workspace metadata cleanup failed; conversation retained for retry: %w", err)
-		}
-	}
 	// FileStore historically treats transcript removal as best-effort. Check
 	// removal here before dropping the index entry so failures remain retryable.
 	if b.fileStore != nil {
@@ -167,6 +162,15 @@ func (b *localAgentBackend) deleteCodeSessionData(ctx context.Context, id string
 		meta := metas[i]
 		if err := b.sessionSvc.Delete(ctx, &adksession.DeleteRequest{AppName: meta.AppName, UserID: meta.UserID, SessionID: meta.ID}); err != nil {
 			return fmt.Errorf("delete saved session %s: %w", meta.ID, err)
+		}
+	}
+	// Keep exact bindings (including removed tombstones) through transcript AND
+	// index cleanup: FileStore.Delete can fail while locking/writing its index.
+	// A fresh launch from the original checkout must still discover the session
+	// after either failure, even though its physical workspace is already gone.
+	if w := b.workspace; w != nil {
+		if err := w.manager.ForgetSessions(ctx, w.project, bindings); err != nil {
+			return fmt.Errorf("workspace metadata cleanup failed after saved session deletion: %w", err)
 		}
 	}
 	b.mu.Lock()

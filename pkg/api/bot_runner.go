@@ -1146,7 +1146,7 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 		}
 	}
 	if resources.PublishedFiles != nil {
-		completion.Report.Artifacts = append(completion.Report.Artifacts, resources.PublishedFiles()...)
+		completion.Report.Artifacts = mergeBotArtifacts(completion.Report.Artifacts, resources.PublishedFiles())
 	}
 	*completed = completion
 	// Preserve observed accounting on every exit, including blocked/failed runs.

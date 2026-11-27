@@ -32,10 +32,13 @@ No bearer or secrets are persisted. Snapshots deep-copy all nested slices.
 `AppConfig.BotMandates == nil` selects defaults. An explicitly supplied
 `bot_mandates` object replaces the **entire** default object, not individual
 fields. All nine capacity fields must be positive; zero/negative capacities,
-partial objects and per-run limits exceeding aggregate limits fail closed.
-`ValidateWithin` compares against the current operator config (including
-aggregate and permission limits). Explicit lower or higher operator ceilings
-remain exact, including values equal to historical defaults.
+partial objects and per-run values exceeding aggregate values fail closed at
+configuration/mandate validation. `ValidateWithin` compares against the current
+operator config (including aggregate and permission values). Explicit lower or
+higher operator ceilings remain exact, including historical-default values.
+**Validation is not execution enforcement.** Runtime, token, tool-call and
+model-cost settings are retained for compatibility/accounting, not production
+execution caps. The table describes stored defaults, not a bounded cost guarantee.
 
 | Limit | Default |
 | --- | ---: |
@@ -67,32 +70,44 @@ bot_mandates:
   max_total_tokens: 1440000000
 ```
 
-Omitted spend and authority fields retain zero/false. These operator ceilings
+Omitted spend and authority fields retain zero/false. These operator settings
 are not permission grants and do not change provider context/output limits.
-Integers avoid NaN/infinity and floating spend ambiguity. Aggregate limits are
-independent finite ceilings, not multiplication at admission.
+Integers avoid NaN/infinity and floating spend ambiguity. Aggregate token/tool
+values remain independently validated finite fields, but are not execution gates.
+External action spend is distinct from model operating cost and retains its
+separate authorization/enforcement boundary.
 
 ### Existing Bots and pinned grants
 
 Production issuance (`pkg/store/entstore/bot_mandate.go`) creates a fresh mandate
-with the current effective operator limits for each authenticated owner message,
-including messages to an existing Bot. A Bot version's explicit lower token
-budget remains binding; explicit zero forbids model use rather than selecting
-the default. An absent version token budget is capped by the mandate. No stored
-Bot version or historical failed run is rewritten or retried by a default change.
+with current effective operator settings for each authenticated owner message,
+including messages to an existing Bot. Existing version runtime/token/tool/model-
+cost values, including explicit lower or zero values, are compatibility data:
+production uses `NewRunAccounting` / `RestoreRunAccounting` in `pkg/bot/budget.go`
+and does not reinstate those whole-run caps or `max_active_seconds`. An absent
+version budget is not a promise that execution is bounded by the mandate table.
+No stored Bot version or historical failed run is rewritten or retried.
 
 Already pinned runs, approval resumes and schedule grants retain their stored
-limits, subject to current-policy verification. Raising the default does not
-upgrade those grants; lowering operator ceilings can invalidate an older grant.
-Existing schedule ticks retain their schedule's pinned grant, not a later owner
-message's new grant. Resumes restore cumulative usage rather than reset it.
+settings, subject to current-policy verification. Raising defaults does not
+upgrade grants; lowering operator ceilings can invalidate an older grant at
+verification. Schedule ticks retain their pinned grant, not a later owner-message
+mandate. Resumes restore cumulative usage rather than reset it; neither pinning
+nor structural comparison turns accounting-only values into execution caps.
 
-Aggregate tokens/tool calls are **lifetime cumulative usage on the Bot ledger,
-not daily allowances** (`pkg/store/entstore/bot_mandate_quota.go`). Only daily-run
-counts reset at the day boundary. Neither a fresh owner-message mandate nor a
-higher default clears aggregate usage. There is no blanket stored-record
-migration: a stored 100,000-token cap may be explicit and must not be inferred
-to have come from a default.
+Aggregate tokens/tool calls are **lifetime cumulative accounting on the Bot
+ledger, not daily allowances** (`pkg/store/entstore/bot_mandate_quota.go`). Only
+daily-run counts reset at the day boundary. Fresh mandates/default changes do not
+clear usage. Historical explicit values are not inferred to be defaults or migrated.
+Known model costs and unknown costs remain distinguishable; unknown is not zero.
+There is **no bounded cumulative model-cost guarantee** from these records.
+
+Cancellation, concurrency exclusion, daily-run/schedule admission, mandate expiry,
+revocation, membership and lease/fence checks remain distinct live controls.
+Operational setup/tool/model-call deadlines and generation-health stall detection
+are not whole-assignment runtime or spending caps. The user's removal of execution
+budget gates is preserved; this document does not restore them or declare the
+remaining team resource-policy decisions accepted.
 
 ## Operations and receipts
 

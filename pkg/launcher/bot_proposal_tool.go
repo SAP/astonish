@@ -190,7 +190,6 @@ func (t *botProposalTool) capture(ctx tool.Context, args botProposalArgs) (map[s
 	return map[string]any{"proposal_id": p.ID.String(), "bot_id": p.BotID.String(), "digest": p.Digest, "status": p.Status, "message": "Proposed, not applied. Review the saved proposal and explicitly confirm after this conversation finishes."}, nil
 }
 func (t *botProposalTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	fmt.Printf("PROPOSAL RUN session=%s conversation=%s worker=%t source=%s\n", ctx.SessionID(), t.binding.conversationID, t.binding.workerOnly, t.binding.req.Run.SessionID.String())
 	if ctx == nil || ctx.SessionID() == "" || ctx.FunctionCallID() == "" {
 		return nil, store.ErrBotForbidden
 	}

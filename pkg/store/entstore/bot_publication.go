@@ -228,7 +228,7 @@ func (r *botRepository) presentationSource(ctx context.Context, tx botDB, q stor
 	if p == nil || p.ValidateBinding(saved.Run) != nil || !saved.Run.Status.Terminal() || p.OwnerID != rec.Bot.OwnerID || p.HomeSessionID != rec.Bot.HomeSessionID || p.OrgSlug != r.auth.orgSlug || (r.auth.teamSlug != "" && p.TeamSlug != r.auth.teamSlug) {
 		return nil, nil, store.ErrBotForbidden
 	}
-	if p.State != store.BotEmployeePresentationPending && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
+	if p.ClaimToken != "" && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
 		return nil, nil, store.ErrBotConflict
 	}
 	now := r.clock() // Caller timestamps never extend original authority.
@@ -267,7 +267,7 @@ func (r *botRepository) presentationSource(ctx context.Context, tx botDB, q stor
 			return nil, nil, store.ErrBotConflict
 		}
 	}
-	if p.State != store.BotEmployeePresentationPending && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
+	if p.ClaimToken != "" && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
 		return nil, nil, store.ErrBotConflict
 	}
 	return rec, saved, nil

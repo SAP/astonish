@@ -584,7 +584,7 @@ func TestCompiledHomeFilesProtocol(t *testing.T) {
 	if err != nil || !bytes.Contains(out, []byte(`content-v1/artifact-2-`)) {
 		t.Fatalf("snapshot: %s %v", out, err)
 	}
-	out, err = run(map[string]any{"op": "write", "path": "short", "size": 100, "create_only": true}, "x")
+	_, err = run(map[string]any{"op": "write", "path": "short", "size": 100, "create_only": true}, "x")
 	if err == nil {
 		t.Fatal("short input accepted")
 	}

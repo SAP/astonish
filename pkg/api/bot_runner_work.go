@@ -43,7 +43,7 @@ func mergeBotEmployeeCompletion(dst *ChatCompletion, src ChatCompletion) {
 	dst.toolResponses += src.toolResponses
 	dst.Report.Changed = append(dst.Report.Changed, src.Report.Changed...)
 	dst.Report.Unchanged = append(dst.Report.Unchanged, src.Report.Unchanged...)
-	dst.Report.Artifacts = append(dst.Report.Artifacts, src.Report.Artifacts...)
+	dst.Report.Artifacts = mergeBotArtifacts(dst.Report.Artifacts, src.Report.Artifacts)
 	dst.Report.Unverified = append(dst.Report.Unverified, src.Report.Unverified...)
 	dst.pendingControls = append(dst.pendingControls, src.pendingControls...)
 	if dst.reportBodies == nil {
@@ -65,6 +65,24 @@ func mergeBotEmployeeCompletion(dst *ChatCompletion, src ChatCompletion) {
 			dst.Report.EffectState = store.BotReportEffectsReadOnly
 		}
 	}
+}
+
+// mergeBotArtifacts collapses identical shared run-local receipts, not conflicting
+// revisions or model-selected identities. Publication validation still rejects conflicts.
+func mergeBotArtifacts(dst, src []store.BotArtifact) []store.BotArtifact {
+	for _, artifact := range src {
+		duplicate := false
+		for _, existing := range dst {
+			if reflect.DeepEqual(existing, artifact) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			dst = append(dst, artifact)
+		}
+	}
+	return dst
 }
 
 func botWorkBoundary(ctx context.Context, req bot.RunRequest) error {

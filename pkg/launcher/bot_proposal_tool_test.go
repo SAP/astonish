@@ -197,6 +197,13 @@ func TestMandatedScheduleControlUsesAuthorizedCapture(t *testing.T) {
 		}
 	}
 }
+func TestBotProposalNilContextForbidden(t *testing.T) {
+	capture := &botProposalTool{}
+	if out, err := capture.Run(nil, nil); !errors.Is(err, store.ErrBotForbidden) || out != nil {
+		t.Fatalf("nil context must fail closed: %v %v", out, err)
+	}
+}
+
 func TestBotProposalCapabilityStrictBoundAndCapped(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, intent := range []store.BotExecutionIntent{store.BotIntentRegular, store.BotIntentConversation} {

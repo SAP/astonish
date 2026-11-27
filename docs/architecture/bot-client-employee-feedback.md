@@ -28,7 +28,12 @@ and assistant rendering are unchanged.
 Empty Home remains empty. Working is neutral durable state, not speech. Stopped,
 deleted, paused/tool-free and read-only restrictions remain intact. Verified file
 publication events are handled independently of speech eligibility and remain
-accessible even when Employee presentation is unavailable.
+accessible even when Employee presentation is unavailable. The server clears an
+ineligible summary; Studio preserves a nonempty verified Employee summary and its
+files as one publication object, deduplicated by event ID rather than repeated as
+an assistant text event. User text, InlineData and FileData remain in the Home
+projection for live/reload parity; nil, thought and function call/response parts
+are excluded. Private model/worker attachments never gain that user eligibility.
 
 The terminal uses the same server projection and neutral system state rather than
 runtime/client `ItemAgent` entries. Studio and terminal must never reconcile or

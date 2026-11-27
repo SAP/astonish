@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/gitutil"
@@ -106,6 +108,113 @@ func TestCodeSessionDeletionWorkspace(t *testing.T) {
 			}
 			if workspaceLaunchGit(t, dir, "status", "--porcelain") != "" {
 				t.Fatal("original modified")
+			}
+		})
+	}
+}
+
+func TestCodeSessionDeletionFailureReopenRetry(t *testing.T) {
+	for _, failure := range []string{"transcript", "index"} {
+		t.Run(failure, func(t *testing.T) {
+			dir := workspaceLaunchRepo(t)
+			ctx := context.Background()
+			cfg := &CodeConfig{WorkingDir: dir, Workspace: backend.WorkspaceIndependent}
+			w, err := resolveCodeWorkspace(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.close()
+			b := newFileStoreBackend(t, t.TempDir(), w.owner)
+			b.workspace, b.workingDir = w, cfg.WorkingDir
+			id := seedSession(t, b, "Retry deletion")
+			if err := b.bindCodeWorkspaceSession(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			root, recordID := w.record.Root, w.record.ID
+			// Read the durable binding, not the launch-time record snapshot.
+			records, err := w.manager.List(ctx, w.project)
+			if err != nil || len(records) != 1 {
+				t.Fatalf("saved workspace: %+v %v", records, err)
+			}
+			bindings := append([]gitutil.SessionBinding(nil), records[0].Sessions...)
+			workspaceLaunchGit(t, dir, "branch", "keep-retry")
+			beforeBranches := workspaceLaunchGit(t, dir, "show-ref", "--heads")
+			beforeFiles := workspaceLaunchGit(t, dir, "diff", "HEAD")
+			beforeStatus := workspaceLaunchGit(t, dir, "status", "--porcelain")
+			w.close()
+			current, err := resolveCodeWorkspace(ctx, &CodeConfig{WorkingDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer current.close()
+			b.workspace, b.workingDir, b.userID = current, dir, current.owner
+			transcript := filepath.Join(b.fileStore.BaseDir(), codeAppName, w.owner, id+".jsonl")
+			obstruction := transcript
+			wantError := "remove session transcript"
+			if failure == "index" {
+				obstruction = filepath.Join(b.fileStore.BaseDir(), "index.json.lock")
+				wantError = "delete saved session"
+			}
+			if err := os.Remove(obstruction); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(obstruction, 0700); err != nil {
+				t.Fatal(err)
+			}
+			blocker := filepath.Join(obstruction, "blocker")
+			if err := os.WriteFile(blocker, []byte("prevent removal"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.DeleteSession(ctx, id); err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("expected %s failure, got %v", failure, err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatalf("workspace not removed: %v", err)
+			}
+			current.close()
+			fresh, err := resolveCodeWorkspace(ctx, &CodeConfig{WorkingDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fresh.close()
+			store, err := persistentsession.NewFileStore(b.fileStore.BaseDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened := &localAgentBackend{workspace: fresh, workingDir: dir, userID: fresh.owner, fileStore: store, sessionSvc: store}
+			metas, err := reopened.projectSessionMetas(ctx)
+			if err != nil || len(metas) != 1 || metas[0].ID != id || metas[0].UserID != w.owner {
+				t.Fatalf("failed deletion lost project discovery after reopen: %+v %v", metas, err)
+			}
+			records, err = fresh.manager.List(ctx, fresh.project)
+			if err != nil || len(records) != 1 || records[0].ID != recordID || records[0].State != gitutil.WorkspaceRemoved || !reflect.DeepEqual(records[0].Sessions, bindings) {
+				t.Fatalf("removed tombstone/exact bindings lost: %+v %v; want %+v", records, err, bindings)
+			}
+			if err := os.Remove(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(obstruction); err != nil {
+				t.Fatal(err)
+			}
+			if err := reopened.DeleteSession(ctx, id); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			metas, err = reopened.projectSessionMetas(ctx)
+			if err != nil || len(metas) != 0 {
+				t.Fatalf("session retained after retry: %+v %v", metas, err)
+			}
+			records, err = fresh.manager.List(ctx, fresh.project)
+			if err != nil || len(records) != 0 {
+				t.Fatalf("workspace bindings retained after retry: %+v %v", records, err)
+			}
+			if _, err := os.Stat(transcript); !os.IsNotExist(err) {
+				t.Fatalf("transcript retained: %v", err)
+			}
+			if got := workspaceLaunchGit(t, dir, "show-ref", "--heads"); got != beforeBranches {
+				t.Fatalf("original branches changed: %s -> %s", beforeBranches, got)
+			}
+			if workspaceLaunchGit(t, dir, "diff", "HEAD") != beforeFiles || workspaceLaunchGit(t, dir, "status", "--porcelain") != beforeStatus {
+				t.Fatal("original files/index changed")
 			}
 		})
 	}

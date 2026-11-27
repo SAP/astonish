@@ -762,12 +762,13 @@ func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.S
 }
 
 func (w *BotWorker) reconcilePublications(ctx context.Context, repo store.BotStore, id store.BotID) error {
+	terminalErr := w.reconcileEmployeePresentations(ctx, repo, id)
 	var notifier bot.Notifier
 	if w.config.ChannelManager != nil && w.config.ChannelManager() != nil {
 		authority, _ := repo.(store.BotDeliveryAuthorizer)
 		notifier = botChannelNotifier{getManager: w.config.ChannelManager, authority: authority}
 	}
-	return ReconcileBotPublications(ctx, repo, id, notifier, func(c context.Context, p *store.BotPublication) error { return w.indexPublication(c, repo, p) })
+	return errors.Join(terminalErr, ReconcileBotPublications(ctx, repo, id, notifier, func(c context.Context, p *store.BotPublication) error { return w.indexPublication(c, repo, p) }))
 }
 
 // ChannelManager has no provider-receipt API. Never invent a provider ID from

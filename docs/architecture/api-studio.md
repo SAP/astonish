@@ -44,13 +44,24 @@ workspace. Dot-prefixed path components, traversal, links and special files are
 not public browsing targets. Credentials, authority objects and private content
 keys must remain inaccessible.
 
-Preview returns `{entry, content, truncated:false}` only for known text-source
-extensions, at most 256 KiB, valid UTF-8 without NUL. Oversize previews return 413;
-unknown/binary content returns 415 with download required. HTML/SVG previews are
-JSON source text, never executable document responses. Clients must render source
-safely, not inject it as HTML. Listing/stat never eagerly fetch file bodies.
+Preview returns `{entry, content, truncated}` for known text-source extensions,
+reading at most 256 KiB. Oversized text returns a bounded preview with
+`truncated:true`, not a blanket 413; an incomplete final UTF-8 rune is trimmed.
+Invalid UTF-8/NUL or unknown/binary content returns 415 with download required.
+HTML/SVG previews are JSON source text, never executable document responses.
+Clients must render source safely, not inject it as HTML. Preview redaction uses
+fresh request-scoped credentials (team previews exclude the viewer's personal
+store); unavailable credential hydration fails closed. Listing/stat never eagerly
+fetch file bodies. Redaction is a preview transformation, not a file rewrite.
 
-Downloads stream rather than buffer the former 16 MiB artifact allowance. They
+Authorized team members can browse the team Bot's working Home, including
+unpublished drafts; there is no report-publication/review gate on working-file
+routes. Private content/authority keys remain inaccessible. Whether unpublished
+Home visibility is acceptable team policy remains an explicit owner-signoff
+follow-up in the [release checklist](bot-release-checklist.md).
+
+Downloads return raw exact retained bytes, **without preview credential
+redaction**, and stream rather than buffer the former 16 MiB artifact allowance. They
 set `Content-Length`, safe attachment `Content-Disposition`,
 `Content-Type: application/octet-stream`, `Accept-Ranges: bytes`, `nosniff`,
 `Cache-Control: private, no-store`, and sandboxed `default-src 'none'` CSP. A single
@@ -64,12 +75,17 @@ errors remain explicit failures, not successful empty files.
 Browser clients obtain a ticket through their authenticated team-scoped POST,
 then navigate to its returned `url` for native download. The response also contains
 `expires_at` and sets `astonish_bot_download`: an HttpOnly, SameSite=Strict cookie,
-Secure on TLS, scoped to the download path and valid for 90 seconds. The server
+Secure on TLS, scoped to the download path and valid for **at most** 90 seconds,
+shortened to the issuing authentication evidence's expiry when earlier. The server
 binds it to user, organization, team and the exact path/query (including the Bot
 and selected object). Cross-site ticket requests are rejected. The URL contains
-no bearer secret; no JavaScript blob transfer is required. The ticket supplements,
-never replaces, live authentication and scoped authorization on every download.
-A ticket is not a durable sharing link and does not survive server restart.
+no bearer secret; no JavaScript blob transfer is required. The ticket is itself
+an exact-object GET/HEAD credential: it can survive normal logout until expiry,
+but the middleware freshly checks active user/organization and organization/team
+membership, then the scoped repository authorizes the requested object. It does
+not mint general session authentication or authorize other routes. A ticket is
+not a durable sharing link and does not survive server restart. Immediate logout
+revocation is not guaranteed; that policy remains OPEN for owner signoff.
 
 Canonical delivery metadata is documented in
 [Home publication](bot-home-assessment-publication.md#canonical-file-publication)
@@ -199,7 +215,8 @@ The Studio UI is built with React 19, Vite 7, and Tailwind CSS 4. Key components
 - **Rate limiting**: Applied to API endpoints to prevent abuse.
 - **CSP headers**: Content Security Policy headers prevent XSS while allowing the production font stylesheet from Google Fonts and the client-side GitHub release check.
 - **Device authorization**: Protects Studio access.
-- **Credential redaction**: All API responses pass through the Redactor.
+- **Credential redaction**: Text/JSON surfaces use their scoped redaction paths;
+  raw Bot file downloads deliberately preserve exact bytes and are not redacted.
 
 ### Tools Cache
 
@@ -240,7 +257,8 @@ This avoids installing Node under QEMU on GitHub Actions multi-arch `linux/arm64
 
 - **Agent Engine**: The chat handler runs the ChatAgent via ADK runner and streams events.
 - **Sessions**: Session endpoints read/write to the FileStore.
-- **Credentials**: All API text responses are redacted. Credential endpoints manage the encrypted store.
+- **Credentials**: API text surfaces use scoped redaction; raw Bot file downloads
+  preserve exact retained bytes. Credential endpoints manage the encrypted store.
 - **Sandbox**: Sandbox endpoints trigger initialization, template management, and container proxy.
 - **Fleet**: Fleet endpoints manage sessions, stream agent activity, and handle human messages.
 - **MCP**: MCP endpoints manage server lifecycle and provide an inspector for debugging.

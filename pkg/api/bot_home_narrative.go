@@ -79,13 +79,17 @@ func projectVerifiedBotHomeNarrative(e *session.Event, homeID, sessionID uuid.UU
 		content := *e.Content
 		content.Parts = nil
 		for _, part := range e.Content.Parts {
-			if part == nil || part.Thought {
+			if part == nil || part.Thought || part.FunctionCall != nil || part.FunctionResponse != nil {
 				continue
 			}
-			if e.Content.Role == "user" || e.Actions.StateDelta[store.BotPublicationKey] != nil {
-				if part.Text != "" {
-					content.Parts = append(content.Parts, &genai.Part{Text: part.Text})
+			if e.Content.Role == "user" {
+				// Preserve only user-authored text/attachment fields, never model or
+				// tool metadata attached to an otherwise legitimate user part.
+				if part.Text != "" || part.InlineData != nil || part.FileData != nil {
+					content.Parts = append(content.Parts, &genai.Part{Text: part.Text, InlineData: part.InlineData, FileData: part.FileData})
 				}
+			} else if e.Actions.StateDelta[store.BotPublicationKey] != nil && part.Text != "" {
+				content.Parts = append(content.Parts, &genai.Part{Text: part.Text})
 			}
 		}
 		projected.Content = &content

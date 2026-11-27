@@ -15,6 +15,42 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
+type botEmployeeRecoveryKey struct{}
+
+// reconcileEmployeePresentations traverses exact owner/org/team terminal sources
+// before publication. It never adopts model work: only the ORIGINAL persisted
+// authority expiry lets the repository abandon an unfinished presentation.
+func (w *BotWorker) reconcileEmployeePresentations(ctx context.Context, repo store.BotStore, id store.BotID) error {
+	if w.config.MandatePolicy == nil {
+		return nil
+	}
+	principal, ok := execution.PrincipalFromContext(ctx)
+	if !ok || principal.Validate() != nil {
+		return store.ErrBotForbidden
+	}
+	page := store.BotPage{Limit: 200}
+	var failures []error
+	for {
+		runs, err := repo.ListRuns(ctx, id, page)
+		if err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		for _, run := range runs {
+			ref := run.MandateRef
+			if ref == nil || !run.Status.Terminal() || !run.UsesHomeHistory() || ref.OwnerID != principal.Subject || ref.OrgSlug != principal.OrgSlug || ref.TeamSlug != principal.TeamSlug {
+				continue
+			}
+			if err := w.completeEmployeeSchedule(context.WithValue(ctx, botEmployeeRecoveryKey{}, true), repo, id, run.ID); err != nil && !errors.Is(err, store.ErrBotConflict) && !errors.Is(err, store.ErrBotBusy) {
+				failures = append(failures, err)
+			}
+		}
+		if len(runs) < page.Limit {
+			return errors.Join(failures...)
+		}
+		page.After = runs[len(runs)-1].ID.String()
+	}
+}
+
 // completeEmployeeSchedule settles deferred schedules and authors missing failure
 // feedback only after source commit and lease release, without execution authority.
 func (w *BotWorker) completeEmployeeSchedule(ctx context.Context, repo store.BotStore, id store.BotID, runID store.RunID) error {
@@ -38,8 +74,13 @@ func (w *BotWorker) completeEmployeeSchedule(ctx context.Context, repo store.Bot
 	if !ok {
 		return store.ErrBotUnsupported
 	}
+	recovering, _ := ctx.Value(botEmployeeRecoveryKey{}).(bool)
 	ops, applyErr := coordinator.CoordinateEmployeeSchedules(ctx, *run.MandateRef, runID)
-	if len(ops) == 0 {
+	// Current scheduler readback may conflict after a historically applied job
+	// advances or is edited. Recovery must still let source-bound preparation
+	// observe ORIGINAL authority expiry; it never claims or generates below and
+	// retains the coordinator error rather than relaxing application verification.
+	if len(ops) == 0 && !(recovering && errors.Is(applyErr, store.ErrBotConflict)) {
 		// No deferred schedule is not a reason to leave a committed failure
 		// silent. Keep already useful, source-bound Employee speech intact.
 		if run.Status != store.RunFailed && run.Status != store.RunPartial ||
@@ -65,6 +106,12 @@ func (w *BotWorker) completeEmployeeSchedule(ctx context.Context, repo store.Bot
 	p, err := preparer.PrepareEmployeePresentation(ctx, claim)
 	if err != nil {
 		return errors.Join(applyErr, err)
+	}
+	if recovering {
+		// Preparation rechecks the stored authority clock and preserves turns,
+		// reservations and settlement. Never claim or generate on a scan: pending
+		// or claimed zero-turn work may still belong to a live final caller.
+		return applyErr
 	}
 	if p.State == store.BotEmployeePresentationCompleted || p.State == store.BotEmployeePresentationUnavailable || len(p.Turns) != 0 {
 		return applyErr
@@ -106,8 +153,11 @@ func (w *BotWorker) completeEmployeeSchedule(ctx context.Context, repo store.Bot
 	text, err := factory(ctx, launcher.BotEmployeePresentationRequest{Bot: *b, Source: *run, Claim: claim, Store: presentations, DispatchToken: dispatch, Operations: ops})
 	completion := store.BotEmployeePresentationCompletion{BotEmployeePresentationRequest: claim, DispatchToken: dispatch, Text: text}
 	if err != nil {
-		completion.Text = ""
-		completion.UnavailableReason = store.BotEmployeeReasonUnknown
+		// Claim and dispatch identities are deterministic, not exclusive caller
+		// ownership. A failed factory/reservation may have lost to a live final;
+		// never convert that winner to unavailable. Original authority expiry
+		// provides eventual abandonment without replay or a new execution grant.
+		return errors.Join(applyErr, err)
 	}
 	_, completeErr := presentations.CompleteEmployeePresentation(ctx, completion)
 	return errors.Join(applyErr, err, completeErr)

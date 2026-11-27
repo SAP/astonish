@@ -47,7 +47,10 @@ type BotWorkerConfig struct {
 	ContextWindow int
 	WorkerID      string
 	PollInterval  time.Duration
-	Publish       bot.EventSink
+	// LeaseTTL is trusted composition only; zero preserves the production lease.
+	// A shorter lease also scales heartbeat renewal to remain inside that lease.
+	LeaseTTL time.Duration
+	Publish  bot.EventSink
 	// ChannelManager resolves the live transport after channel reloads. Nil uses
 	// the daemon's synchronized getter; no manager leaves notifications pending.
 	ChannelManager func() *channels.ChannelManager
@@ -92,8 +95,11 @@ func NewBotWorker(c BotWorkerConfig) (*BotWorker, error) {
 	if c.PollInterval == 0 {
 		c.PollInterval = 5 * time.Second
 	}
-	if c.PollInterval < 0 {
+	if c.PollInterval < 0 || c.LeaseTTL < 0 || c.LeaseTTL > botWorkerLeaseDuration || (c.LeaseTTL > 0 && c.LeaseTTL/3 <= 0) {
 		return nil, store.ErrBotInvalid
+	}
+	if c.LeaseTTL == 0 {
+		c.LeaseTTL = botWorkerLeaseDuration
 	}
 	if c.KnowledgeSafety == nil {
 		c.KnowledgeSafety = botKnowledgeSafety
@@ -671,13 +677,12 @@ func (w *BotWorker) scanStore(ctx context.Context, repo store.BotStore, ss store
 	}
 }
 
-// botRunBudget restores previously committed totals. Fresh admissions have no
-// prior lease/checkpoint; a legacy resumed ledger without runtime fails closed
-// against elapsed time rather than granting another full runtime allowance.
+// botRunBudget restores previously committed totals for accounting only. Legacy
+// elapsed time remains usage evidence, never a new local execution deadline.
 func botRunBudget(in store.BotRunInput, now time.Time) (*bot.SharedRunBudget, error) {
 	u := in.Run.Usage
 	if in.Run.Lease.Fence == 0 && in.Run.StartedAt == nil && len(in.Run.Checkpoint) == 0 && u == (store.BotUsage{}) {
-		return bot.NewRunBudget(in.Version.Budget, now)
+		return bot.NewRunAccounting(in.Version.Budget, now)
 	}
 	if u.RuntimeNanos == 0 && !in.Run.RuntimeAccountingRecorded {
 		if in.Run.StartedAt == nil || in.Run.StartedAt.After(now) {
@@ -685,7 +690,7 @@ func botRunBudget(in store.BotRunInput, now time.Time) (*bot.SharedRunBudget, er
 		}
 		u.RuntimeNanos = int64(now.Sub(*in.Run.StartedAt))
 	}
-	return bot.RestoreRunBudget(in.Version.Budget, now, u)
+	return bot.RestoreRunAccounting(in.Version.Budget, now, u)
 }
 
 const (
@@ -710,7 +715,11 @@ func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.S
 	}
 	homeTiming(nil)
 	homes := &launcher.BotHomeManager{Backend: w.config.Sandbox.(sandbox.BotHomeBackend), Pool: w.config.Pool, Bots: repo}
-	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{BeginHeartbeatReads: entstore.WithBotContentReadOperation, ProgressYieldRequested: w.progressDrain.Load, Store: repo, Runtime: botStartupReadRuntime{Runtime: w.runtime, end: endStartupReads}, Homes: homes, WorkerID: w.config.WorkerID, LeaseDuration: botWorkerLeaseDuration, RenewInterval: botWorkerRenewInterval, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
+	renewInterval := botWorkerRenewInterval
+	if renewInterval >= w.config.LeaseTTL {
+		renewInterval = w.config.LeaseTTL / 3
+	}
+	supervisor, err := bot.NewSupervisor(bot.SupervisorConfig{BeginHeartbeatReads: entstore.WithBotContentReadOperation, ProgressYieldRequested: w.progressDrain.Load, Store: repo, Runtime: botStartupReadRuntime{Runtime: w.runtime, end: endStartupReads}, Homes: homes, WorkerID: w.config.WorkerID, LeaseDuration: w.config.LeaseTTL, RenewInterval: renewInterval, Ready: func(c context.Context, in store.BotRunInput) (bot.RunPreparation, error) {
 		identity, _ := execution.BotRunIdentityFromContext(c)
 		if !in.Run.ExecutionMode.Valid() {
 			return bot.RunPreparation{}, store.ErrBotForbidden
@@ -746,10 +755,10 @@ func (w *BotWorker) execute(ctx context.Context, repo store.BotStore, ss store.S
 	if err != nil {
 		return err
 	}
-	_, err = supervisor.Execute(ctx, id, runID)
-	// Execute may commit a failed/waiting outcome and still return an error.
-	// A cancelled context leaves the intent for the next authenticated poll.
-	return errors.Join(err, w.confirmCancelledRun(ctx, repo, id, runID), w.reconcileAuthorizedOperations(ctx, repo, id), w.reconcilePublications(ctx, repo, id))
+	_, err = supervisor.Execute(entstore.WithEmployeeScheduleCoordinator(ctx), id, runID)
+	// Supervisor has joined private dispatch and stopped heartbeat before returning.
+	finalErr := w.completeEmployeeSchedule(ctx, repo, id, runID)
+	return errors.Join(err, finalErr, w.confirmCancelledRun(ctx, repo, id, runID), w.reconcileAuthorizedOperations(ctx, repo, id), w.reconcilePublications(ctx, repo, id))
 }
 
 func (w *BotWorker) reconcilePublications(ctx context.Context, repo store.BotStore, id store.BotID) error {

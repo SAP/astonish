@@ -46,6 +46,9 @@ func botNativeCallbacks(callbacks []llmagent.BeforeToolCallback, resolve botCall
 			}
 			return nil, nil
 		}
+		if employee, ok := called.(*botEmployeeChatTool); ok {
+			return employee.Run(ctx, args)
+		}
 		if discovery, ok := called.(*botDiscoveryTool); ok {
 			return discovery.Run(ctx, args)
 		}

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { BotAPIError, BotStatus, decideBotApproval, listBotApprovals, type Bot, type BotApproval } from '@/api/bots'
+import { BotStatus, decideBotApproval, type Bot, type BotApproval } from '@/api/bots'
 import { QUESTION_KINDS, validTextAnswer } from '@/api/questions'
-import { continueInteractive, approveAndContinue, decideControlProposal, ProposalStatus, type BotControlProposal } from '@/api/botReviews'
+import { approveAndContinue, decideControlProposal, ProposalStatus, type BotControlProposal } from '@/api/botReviews'
 import QuestionCard from '../chat/questions/QuestionCard'
-import BotEmployeeMessage from './BotEmployeeMessage'
 import { botEmployeeFeedback, botLocalFailure, BotFailureKind } from '../chat/botEmployeeFeedback'
 import { useBotClock } from './useBotClock'
 
 const AnsweredStatus = { Approved: 'approved', Consumed: 'consumed' } as const satisfies Record<string, BotApproval['status']>
+const InactiveStatus = { Expired: 'expired', Revoked: 'revoked', Denied: 'denied' } as const satisfies Record<string, BotApproval['status']>
 
 function sameApproval(left?: BotApproval, right?: BotApproval): boolean {
   return !!left && !!right && left.id === right.id && left.run_id === right.run_id && left.action_digest === right.action_digest && left.interaction?.question_id === right.interaction?.question_id
@@ -37,11 +37,8 @@ function capturedActionDetails(action: BotApproval['action']): string {
 }
 
 /** Shared by the canonical transcript card and the optional recovery inbox. */
-export function BotReviewCard({ bot, proposal, approval, question, awaitingApproval = false, readOnly, onChange, requiresContinueInteractive = false }: { bot: Bot; proposal?: BotControlProposal; approval?: BotApproval; question?: import('@/api/questions').Question; awaitingApproval?: boolean; requiresContinueInteractive?: boolean; readOnly: boolean; onChange: () => void }) {
+export function BotReviewCard({ bot, proposal, approval, question, awaitingApproval = false, readOnly, onChange }: { bot: Bot; proposal?: BotControlProposal; approval?: BotApproval; question?: import('@/api/questions').Question; awaitingApproval?: boolean; readOnly: boolean; onChange: () => void }) {
   const now = useBotClock()
-  const [pendingAnswer, setPendingAnswer] = useState<string>()
-  const [needsContinue, setNeedsContinue] = useState(false)
-  const continuationKey = useRef(crypto.randomUUID())
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [receipt, setReceipt] = useState('')
   const [decidedProposal, setDecidedProposal] = useState<BotControlProposal>()
   const [decidedApproval, setDecidedApproval] = useState<BotApproval>()
@@ -53,11 +50,8 @@ export function BotReviewCard({ bot, proposal, approval, question, awaitingAppro
     try { await work(); onChange() } catch (e) { setError(botLocalFailure(e, BotFailureKind.Decision).message); onChange() } finally { setBusy(false) }
   }
   useEffect(() => {
-    setPendingAnswer(undefined)
-    setNeedsContinue(false)
     setReceipt('')
     setError('')
-    continuationKey.current = crypto.randomUUID()
   }, [bot.id, bot.scope, approval?.id, approval?.run_id, approval?.action_digest, approval?.interaction?.question_id])
   const refreshRef = useRef(onChange)
   refreshRef.current = onChange
@@ -71,12 +65,20 @@ export function BotReviewCard({ bot, proposal, approval, question, awaitingAppro
       <dd className="whitespace-pre-wrap break-words"><span className="text-muted-foreground">Your answer: </span>{answerLabel}</dd>
     </dl>
   </article>
+  const expired = Date.parse((p || a)!.expires_at) <= now
+  const inactiveQuestion = a?.interaction && (a.status === InactiveStatus.Expired || a.status === InactiveStatus.Revoked || a.status === InactiveStatus.Denied || (a.status === 'pending' && expired))
+  if (!p && a?.interaction && inactiveQuestion) {
+    const status = a.status === 'pending' ? InactiveStatus.Expired : a.status
+    const explanation = status === InactiveStatus.Expired ? 'This question has expired and can no longer be answered.' : status === InactiveStatus.Revoked ? 'This question was revoked and can no longer be answered.' : 'This question was denied and can no longer be answered.'
+    return <article aria-label="Inactive question" data-review-id={a.id} className="my-3 w-full max-w-2xl rounded-lg border border-border bg-card p-3 text-sm text-card-foreground">
+      <p className="font-medium whitespace-pre-wrap break-words">{a.interaction.payload.prompt}</p>
+      <p>{status}</p><p role="status">{explanation}</p>
+    </article>
+  }
   const saveAnswer = (saved: BotApproval, expected: BotApproval, answer: string) => {
     if (!sameApproval(saved, expected) || saved.response?.answer !== answer || savedAnswerLabel(saved) === undefined) throw new Error('Saved answer not confirmed')
     setDecidedApproval(saved)
-    setNeedsContinue(false)
   }
-  const expired = Date.parse((p || a)!.expires_at) <= now
   const disabled = readOnly || busy || expired || bot.status === BotStatus.Stopped || bot.status === BotStatus.Deleted
   const approve = (answer?: string) => act(async () => {
     const result = await approveAndContinue(bot, a!, answer)
@@ -85,15 +87,14 @@ export function BotReviewCard({ bot, proposal, approval, question, awaitingAppro
   })
   return <article aria-label="Bot review" data-review-id={(p || a)!.id} className={a?.interaction ? 'my-3 w-full max-w-2xl space-y-3 text-sm' : 'my-3 border border-border rounded-lg p-4 space-y-3 text-sm'}>
     {(p || !a?.interaction || a.status !== 'pending') && <h3 className="font-semibold">{p ? `Review ${p.payload.operation.replaceAll('_', ' ')}` : a!.interaction?.payload.prompt || 'Permission to perform this exact action'}</h3>}
-    {p ? <><BotEmployeeMessage>{botEmployeeFeedback({ kind: 'review_required' })}</BotEmployeeMessage><p className="whitespace-pre-wrap break-words">{'task_once' in p.payload ? p.payload.task_once.instructions : 'responsibility' in p.payload ? p.payload.responsibility : 'schedule' in p.payload ? p.payload.schedule.trigger.instructions : 'goal' in p.payload ? p.payload.goal.goal.title : 'memory' in p.payload ? p.payload.memory.content || 'Saved memory change' : 'Saved configuration change'}</p><p>{expired && p.status === ProposalStatus.Proposed ? 'expired' : p.status}{p.reconciliation_pending ? ' · reconciliation pending' : ''}</p>
+    {p ? <><p>{botEmployeeFeedback({ kind: 'review_required' })}</p><p className="whitespace-pre-wrap break-words">{'task_once' in p.payload ? p.payload.task_once.instructions : 'responsibility' in p.payload ? p.payload.responsibility : 'schedule' in p.payload ? p.payload.schedule.trigger.instructions : 'goal' in p.payload ? p.payload.goal.goal.title : 'memory' in p.payload ? p.payload.memory.content || 'Saved memory change' : 'Saved configuration change'}</p><p>{expired && p.status === ProposalStatus.Proposed ? 'expired' : p.status}{p.reconciliation_pending ? ' · reconciliation pending' : ''}</p>
       {p.status === ProposalStatus.Proposed && <div className="flex flex-wrap gap-2"><Button disabled={disabled} onClick={() => act(async () => { setDecidedProposal(await decideControlProposal(bot, p, 'confirm')) })}>Confirm exact change</Button><Button variant="outline" disabled={disabled} onClick={() => act(async () => { setDecidedProposal(await decideControlProposal(bot, p, 'reject')) })}>Reject</Button></div>}
-      {p.reconciliation_pending && <BotEmployeeMessage role="status">{botEmployeeFeedback({ kind: 'reconciliation_pending' })}</BotEmployeeMessage>}
-      {(p.status === ProposalStatus.Stale || p.status === ProposalStatus.Expired || expired) && <BotEmployeeMessage>{botEmployeeFeedback({ kind: 'fresh_proposal_required' })}</BotEmployeeMessage>}
+      {p.reconciliation_pending && <p role="status">{botEmployeeFeedback({ kind: 'reconciliation_pending' })}</p>}
+      {(p.status === ProposalStatus.Stale || p.status === ProposalStatus.Expired || expired) && <p>{botEmployeeFeedback({ kind: 'fresh_proposal_required' })}</p>}
     </> : <>{!a!.interaction && <>{(typeof a!.action.summary === 'string' || typeof a!.action.description === 'string') && <p className="whitespace-pre-wrap break-words">{typeof a!.action.summary === 'string' ? a!.action.summary : a!.action.description as string}</p>}<pre aria-label="Captured action details" tabIndex={0} className="max-h-80 overflow-auto rounded-md border border-border bg-muted p-3 whitespace-pre-wrap break-words text-xs">{capturedActionDetails(a!.action)}</pre></>}{(!a!.interaction || a!.status !== 'pending' || expired) && <p>{expired && a!.status === 'pending' ? 'expired' : a!.status}</p>}
-      {a!.status === 'pending' && <div className={a!.interaction ? 'w-full' : 'flex flex-wrap gap-2'}>{a!.interaction ? <QuestionCard key={`${a!.id}/${a!.interaction.question_id}`} question={{ ...a!.interaction.payload, questionId: a!.interaction.question_id }} disabled={disabled} onAnswer={async ({ answer }) => { setPendingAnswer(answer); if (requiresContinueInteractive) { setNeedsContinue(true); throw new Error(botEmployeeFeedback({ kind: 'answer_authorization_required' })) } try { const result = await approveAndContinue(bot, a!, answer); saveAnswer(result.approval, a!, answer); onChange() } catch (e) { if (e instanceof BotAPIError && e.status === 403) setNeedsContinue(true); throw new Error(botLocalFailure(e, BotFailureKind.Decision).message, { cause: e }) } }} /> : <Button disabled={disabled} onClick={() => approve()}>Approve & continue</Button>}{!a!.interaction && <Button variant="outline" disabled={disabled} onClick={() => act(async () => { setDecidedApproval(await decideBotApproval(bot, a!, 'denied')) })}>Deny</Button>}</div>}
-      {a!.status === 'approved' && !receipt && <><BotEmployeeMessage>{botEmployeeFeedback({ kind: 'approved_checkpoint', paused: bot.status === BotStatus.Paused })}</BotEmployeeMessage><Button disabled={disabled || bot.status === BotStatus.Paused} onClick={() => approve()}>Continue approved action</Button></>}
+      {a!.status === 'pending' && <div className={a!.interaction ? 'w-full' : 'flex flex-wrap gap-2'}>{a!.interaction ? <QuestionCard key={`${a!.id}/${a!.run_id}/${a!.action_digest}/${a!.interaction.question_id}`} question={{ ...a!.interaction.payload, questionId: a!.interaction.question_id }} disabled={disabled} onAnswer={async ({ answer }) => { try { const result = await approveAndContinue(bot, a!, answer); saveAnswer(result.approval, a!, answer); onChange() } catch (e) { throw new Error(botLocalFailure(e, BotFailureKind.Decision).message, { cause: e }) } }} /> : <Button disabled={disabled} onClick={() => approve()}>Approve & continue</Button>}{!a!.interaction && <Button variant="outline" disabled={disabled} onClick={() => act(async () => { setDecidedApproval(await decideBotApproval(bot, a!, 'denied')) })}>Deny</Button>}</div>}
+      {a!.status === 'approved' && !receipt && <><p>{botEmployeeFeedback({ kind: 'approved_checkpoint', paused: bot.status === BotStatus.Paused })}</p><Button disabled={disabled || bot.status === BotStatus.Paused} onClick={() => approve()}>Continue approved action</Button></>}
     </>}
-    {needsContinue && pendingAnswer !== undefined && a?.interaction && <div><BotEmployeeMessage>{botEmployeeFeedback({ kind: 'answer_authorization_required' })}</BotEmployeeMessage><Button disabled={disabled} onClick={() => act(async () => { await continueInteractive(bot, a.run_id, continuationKey.current, { question_id: a.interaction!.question_id, answer: pendingAnswer }); const { approvals } = await listBotApprovals(bot.id, bot.scope); const saved = approvals.find(candidate => sameApproval(candidate, a)); if (!saved) throw new Error('Saved question not found'); saveAnswer(saved, a, pendingAnswer); })}>Continue interactive</Button></div>}
-    {readOnly && <BotEmployeeMessage>{botEmployeeFeedback({ kind: 'read_only' })}</BotEmployeeMessage>}{receipt && <BotEmployeeMessage role="status">{receipt}</BotEmployeeMessage>}{error && <BotEmployeeMessage role="alert">{error}</BotEmployeeMessage>}
+    {readOnly && <p>{botEmployeeFeedback({ kind: 'read_only' })}</p>}{receipt && <p role="status">{receipt}</p>}{error && <p role="alert">{error}</p>}
   </article>
 }

@@ -105,16 +105,16 @@ func TestBotWorkerResumedBudgetExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Check(context.Background()); !errors.Is(err, bot.ErrBudgetExceeded) {
-		t.Fatalf("resume reset tool cap: %v", err)
+	if err := b.ReserveTool(context.Background(), "read"); err != nil || b.Usage().ToolCalls != cap+1 {
+		t.Fatalf("historic tool cap reinstated or ledger reset: %v", err)
 	}
 	in.Run.Usage = store.BotUsage{RuntimeNanos: int64(in.Version.Budget.MaxRuntimeSeconds) * int64(time.Second)}
 	b, err = botRunBudget(in, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Check(context.Background()); !errors.Is(err, bot.ErrBudgetExceeded) {
-		t.Fatalf("resume reset runtime cap: %v", err)
+	if err := b.Check(context.Background()); err != nil || !b.Deadline().IsZero() || b.Usage().RuntimeNanos < in.Run.Usage.RuntimeNanos {
+		t.Fatalf("historic runtime cap reinstated or ledger reset: %v", err)
 	}
 }
 

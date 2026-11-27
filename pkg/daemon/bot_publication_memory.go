@@ -26,6 +26,17 @@ func (w *BotWorker) indexPublication(ctx context.Context, repo store.BotStore, p
 	if err != nil {
 		return err
 	}
+	// A question-only title has a durable conversation, but deliberately no
+	// physical Home. Its waiting receipt cannot be indexed into retained files.
+	if b.Home.ID == (store.RunID{}) && len(p.Artifacts) == 0 {
+		run, readErr := repo.GetRun(ctx, p.BotID, p.RunID)
+		if readErr != nil {
+			return readErr
+		}
+		if run.Status == store.RunWaitingApproval && run.TitleConfirmation != nil && run.TitleConfirmation.State == store.BotTitleConfirmationWaiting && run.TitleConfirmation.ValidateBinding(*run, b.OwnerID) == nil {
+			return nil
+		}
+	}
 	files := &launcher.BotHomeManager{Backend: backend, Bots: repo, Scope: b.Scope}
 	files.AuthorizeFileCommit = func(c context.Context, h store.BotHomeBinding, commit func() error) error {
 		return receipts.WithBotPublicationFileCommit(c, h, p.RunID, p.ReportSequence, commit)

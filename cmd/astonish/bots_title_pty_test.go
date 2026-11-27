@@ -171,11 +171,10 @@ func testBotTitleChatPTYAnswer(t *testing.T, mode string) {
 	if mode == "custom" {
 		_, _ = io.WriteString(pt, "\x1b[B\x1b[B\x1b[B"+wantAnswer)
 	}
-	_, _ = io.WriteString(pt, "\r")
-	wait(fmt.Sprintf("Confirm answer %q", wantAnswer))
+	wait("Enter submits answer")
 	select {
 	case <-answers:
-		t.Fatal("answer posted before confirmation")
+		t.Fatal("answer posted before Enter")
 	default:
 	}
 	_, _ = io.WriteString(pt, "\r")

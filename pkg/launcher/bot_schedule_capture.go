@@ -6,11 +6,35 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"time"
+
+	"github.com/SAP/astonish/pkg/bot"
+	"google.golang.org/adk/tool"
 
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 )
+
+// recordScheduleCapture shares the independently verified, pending-only outcome
+// between native schedule tools and mandated control capture.
+func recordScheduleCapture(ctx tool.Context, runtime store.BotAuthorizedOperationStore, q store.BotAuthorizedOperationRequest, returned *store.BotOperation) (*bot.ScheduleCapture, error) {
+	op, err := verifyScheduleCapture(ctx, runtime, q, returned)
+	if err != nil {
+		return nil, err
+	}
+	payloadJSON, err := json.Marshal(op.Payload)
+	if err != nil {
+		return nil, err
+	}
+	ownerID, err := uuid.Parse(q.MandateRef.OwnerID)
+	if err != nil {
+		return nil, store.ErrBotConflict
+	}
+	capture := bot.ScheduleCapture{PayloadJSON: string(payloadJSON), OperationID: op.ID, BotID: q.MandateRef.BotID, SourceRunID: q.Lease.RunID, OwnerID: ownerID, Operation: op.Payload.Operation, Status: op.Status, Revision: op.Revision, ObservedAt: time.Now().UTC()}
+	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, ScheduleCapture: &capture})
+	return &capture, nil
+}
 
 // verifyScheduleCapture reads the durable record independently of the enqueue
 // return. Neither an operation ID nor a pending-shaped response proves capture.

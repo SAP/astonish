@@ -98,9 +98,7 @@ func (v BotOperationView) Validate() error {
 		}
 		switch v.Presentation {
 		case BotOperationPresentationInternal:
-			if v.Status != BotOperationPending && v.Status != BotOperationApplying {
-				return ErrBotInvalid
-			}
+			// Neutral state may describe terminal outcomes too.
 		case BotOperationPresentationConversation:
 			if v.Status == BotOperationPending || v.Status == BotOperationApplying || (v.Status == BotOperationApplied && isScheduleOperation(v.Operation) && v.VerifiedSchedule == nil) {
 				return ErrBotInvalid
@@ -160,80 +158,45 @@ func ProjectBotOperation(b Bot, o BotOperation, sequence int64) (BotOperationVie
 		}
 		v.Exception = &BotOperationExceptionView{OperationID: e.OperationID, PayloadDigest: e.PayloadDigest, ExpiresAt: e.ExpiresAt, Fields: botOperationFields(o.Payload)}
 	}
-	if isScheduleOperation(o.Payload.Operation) && o.Decision != BotOperationRequireAuthorization {
-		switch o.Status {
-		case BotOperationPending, BotOperationApplying:
-			v.Presentation = BotOperationPresentationInternal
-		case BotOperationApplied:
-			if v.VerifiedSchedule != nil {
-				v.Presentation = BotOperationPresentationConversation
-				v.Summary = scheduleOperationSummary(o.Payload, *v.VerifiedSchedule)
-			}
-		case BotOperationFailed, BotOperationBlocked:
-			v.Presentation = BotOperationPresentationConversation
-			v.Summary = "I couldn't complete the schedule change. No schedule change was verified."
-		case BotOperationCancelled:
-			v.Presentation = BotOperationPresentationConversation
-			v.Summary = "The schedule change was cancelled."
-		}
+	// Operations are product state, never Employee-authored conversation.
+	if isConversationalOperation(o.Payload.Operation) && o.Decision != BotOperationRequireAuthorization {
+		v.Presentation = BotOperationPresentationInternal
 	}
-	if BotControlConversationalMetadata(o.Payload.Operation) && o.Provenance != nil && o.Decision != BotOperationRequireAuthorization {
-		switch o.Status {
-		case BotOperationPending, BotOperationApplying:
-			v.Presentation = BotOperationPresentationInternal
-		case BotOperationApplied:
-			if o.HasVerifiedMetadataReceipt() {
-				v.Presentation = BotOperationPresentationConversation
-				v.Summary = metadataOperationSummary(o.Payload.Operation)
-			}
-		case BotOperationFailed, BotOperationBlocked:
-			v.Presentation = BotOperationPresentationConversation
-			v.Summary = "I couldn't complete the requested update. No change was verified."
-		case BotOperationCancelled:
-			v.Presentation = BotOperationPresentationConversation
-			v.Summary = "The requested update was cancelled."
-		}
-	}
-	report, err := BotOperationEmployeeReport(RunSucceeded, o)
-	if err != nil {
-		return BotOperationView{}, err
-	}
-	v.Summary = report.EmployeeMessage.Text
 	return v, v.Validate()
 }
 
 func metadataOperationSummary(op BotControlOperation) string {
 	switch op {
 	case BotControlResponsibility:
-		return "I've updated my responsibilities."
+		return "Responsibilities updated."
 	case BotControlPersona:
-		return "I've updated my working style."
+		return "Working style updated."
 	case BotControlGoalCreate:
-		return "I've added the goal."
+		return "Goal added."
 	case BotControlGoalEdit:
-		return "I've updated the goal."
+		return "Goal updated."
 	case BotControlMemoryRemember:
-		return "I've saved that to my memory."
+		return "Memory saved."
 	case BotControlMemoryCorrect:
-		return "I've corrected that memory."
+		return "Memory corrected."
 	case BotControlMemoryForget:
-		return "I've removed that from my active memory."
+		return "Memory removed."
 	}
 	return ""
 }
 
 func scheduleOperationSummary(p BotControlPayload, s BotOperationScheduleView) string {
 	if s.Removed {
-		return "I've removed the schedule."
+		return "Schedule removed."
 	}
 	if !s.Enabled {
-		return "I've paused the schedule."
+		return "Schedule paused."
 	}
 	verb := "updated"
 	if p.Operation == BotControlScheduleCreate {
 		verb = "created"
 	}
-	summary := "I've " + verb + " the schedule."
+	summary := "Schedule " + verb + "."
 	if p.Schedule != nil && p.Schedule.Trigger.Cron == "* * * * *" {
 		summary += " It runs every minute."
 	}

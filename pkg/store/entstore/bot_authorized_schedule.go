@@ -3,6 +3,7 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -169,6 +170,9 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 	if before.ActiveRunID != nil || !source.Run.Status.Terminal() {
 		return op, store.ErrBotBusy
 	}
+	if source.EmployeeScheduleCoordinator && (source.Run.Status != store.RunSucceeded && source.Run.Status != store.RunPartial || source.Run.Report.EffectState == store.BotReportEffectsUncertain) {
+		return op, store.ErrBotForbidden
+	}
 	if before.Bot.Version != op.Provenance.Version || before.Bot.Revision != op.Provenance.ExpectedRevision {
 		return op, store.ErrBotConflict
 	}
@@ -201,6 +205,9 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 		}
 		if rec.ActiveRunID != nil || !run.Run.Status.Terminal() {
 			return store.ErrBotBusy
+		}
+		if run.EmployeeScheduleCoordinator && (run.Run.Status != store.RunSucceeded && run.Run.Status != store.RunPartial || run.Run.Report.EffectState == store.BotReportEffectsUncertain) {
+			return store.ErrBotForbidden
 		}
 		next, tr, err := s.scheduleCandidate(ctx, tx, rec, *saved, current.Mandate.Limits)
 		if err != nil {
@@ -250,13 +257,86 @@ func (s *botAuthorizedOperationRuntime) ApplyAuthorizedOperation(ctx context.Con
 		if err != nil {
 			return err
 		}
-		if err = insertPublicationActivity(ctx, tx, rec, run.Run.ID, store.BotActivityReport, "authorized-schedule-receipt:"+id.String(), map[string]any{"run_id": run.Run.ID, "status": run.Run.Status, "report": report, "operation_id": id, "operation_revision": saved.Revision, "intent": store.BotOutboxPublish}, s.repo.clock()); err != nil {
-			return err
+		if !run.EmployeeScheduleCoordinator {
+			if err = insertPublicationActivity(ctx, tx, rec, run.Run.ID, store.BotActivityReport, "authorized-schedule-receipt:"+id.String(), map[string]any{"run_id": run.Run.ID, "status": run.Run.Status, "report": report, "operation_id": id, "operation_revision": saved.Revision, "intent": store.BotOutboxPublish}, s.repo.clock()); err != nil {
+				return err
+			}
 		}
 		result = saved
 		return nil
 	})
 	return result, err
+}
+
+// CoordinateEmployeeSchedules is a direct terminal-source barrier, not a pending drain.
+// Once marked, a source is never adopted by background activation.
+func (s *botAuthorizedOperationRuntime) CoordinateEmployeeSchedules(ctx context.Context, ref store.BotMandateRef, runID uuid.UUID) ([]store.BotOperation, error) {
+	source, err := s.repo.db.ReadRun(ctx, ref.BotID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if !source.EmployeeScheduleCoordinator || !source.Run.Status.Terminal() {
+		return nil, store.ErrBotForbidden
+	}
+	ops, err := s.ListAuthorizedOperations(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	var results []store.BotOperation
+	var failures []error
+	for _, op := range ops {
+		if op.Provenance == nil || op.Provenance.SourceRunID != runID || !scheduleOperation(op.Payload.Operation) {
+			continue
+		}
+		if op.Decision != store.BotOperationExecute {
+			results = append(results, op)
+			continue
+		}
+		if op.Status == store.BotOperationPending {
+			if source.Run.Status == store.RunCancelled || source.Run.Status == store.RunInterrupted || source.Run.Status == store.RunFailed {
+				err = s.pendingState(ctx, ref, op.ID, store.BotOperationCancelled, "source_terminal_failure", time.Time{})
+			} else {
+				_, err = s.ApplyAuthorizedOperation(ctx, ref, op.ID)
+			}
+			// Independent read-back is mandatory even when the transaction returns an error.
+			observed, readErr := s.ReadAuthorizedOperation(ctx, ref, op.ID)
+			if readErr != nil {
+				failures = append(failures, readErr)
+				continue
+			}
+			if err != nil && observed.Status == store.BotOperationPending && (errors.Is(err, store.ErrBotUnsupported) || errors.Is(err, store.ErrBotForbidden) || errors.Is(err, store.ErrBotInvalid) || errors.Is(err, store.ErrBotNotFound)) {
+				// Definitive denial is durable and cannot become a future activation.
+				if e := s.pendingState(ctx, ref, op.ID, store.BotOperationCancelled, "synchronous_application_failed", time.Time{}); e != nil {
+					failures = append(failures, e)
+				}
+				observed, readErr = s.ReadAuthorizedOperation(ctx, ref, op.ID)
+				if readErr != nil {
+					failures = append(failures, readErr)
+					continue
+				}
+			}
+			op = *observed
+			if err != nil && op.Status != store.BotOperationApplied {
+				failures = append(failures, err)
+			}
+		}
+		if op.Status == store.BotOperationApplied {
+			if op.Receipt == nil || op.Receipt.Schedule == nil {
+				return results, store.ErrBotConflict
+			}
+			r := op.Receipt.Schedule
+			job := s.repo.db.(botTriggerDB).triggerScheduler().Get(ctx, r.ScheduleID.String())
+			if r.Removed {
+				if job != nil {
+					return results, store.ErrBotConflict
+				}
+			} else if job == nil || job.Payload.BotVersion != r.Version || job.Enabled != r.Enabled || !reflect.DeepEqual(job.NextRun, r.NextRun) || (op.Payload.Schedule != nil && op.Payload.Schedule.Trigger.Enabled && (!r.Enabled || r.NextRun == nil)) {
+				return results, store.ErrBotConflict
+			}
+		}
+		results = append(results, op)
+	}
+	return results, errors.Join(failures...)
 }
 
 func (s *botAuthorizedOperationRuntime) applyAuthorizedScheduleTx(ctx context.Context, tx botDB, rec *botStoredRecord, o store.BotOperation, v store.BotVersion, target store.TriggerSpec) error {

@@ -43,7 +43,7 @@ func BotPublicationEventID(run RunID, sequence int64) string {
 }
 
 func (p BotFilePublication) Validate() error {
-	if p.SchemaVersion != BotFilePublicationSchemaVersion || p.BotID == uuid.Nil || p.RunID == uuid.Nil || p.HomeSessionID == uuid.Nil || p.HomeID == uuid.Nil || p.ReportSequence < 1 || p.EventID != BotPublicationEventID(p.RunID, p.ReportSequence) || strings.TrimSpace(p.Summary) == "" || len(p.Artifacts) == 0 {
+	if p.SchemaVersion != BotFilePublicationSchemaVersion || p.BotID == uuid.Nil || p.RunID == uuid.Nil || p.HomeSessionID == uuid.Nil || p.HomeID == uuid.Nil || p.ReportSequence < 1 || p.EventID != BotPublicationEventID(p.RunID, p.ReportSequence) || len(p.Artifacts) == 0 {
 		return ErrBotInvalid
 	}
 	seen := map[uuid.UUID]bool{}
@@ -63,7 +63,7 @@ func (p BotFilePublication) Validate() error {
 // FilePublication projects only verified immutable artifacts. A mutable working
 // path or an arbitrary model-supplied artifact cannot become a delivery card.
 func (p BotPublication) FilePublication() (*BotFilePublication, error) {
-	if p.Suppressed || len(p.Artifacts) == 0 {
+	if len(p.Artifacts) == 0 {
 		return nil, nil
 	}
 	result := &BotFilePublication{SchemaVersion: BotFilePublicationSchemaVersion, BotID: p.BotID, RunID: p.RunID, HomeSessionID: p.HomeSessionID, HomeID: p.Artifacts[0].HomeID, ReportSequence: p.ReportSequence, EventID: p.EventID, Summary: p.Text}

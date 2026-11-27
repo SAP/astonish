@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
+	personalevent "github.com/SAP/astonish/ent/personal/sessionevent"
+	teamevent "github.com/SAP/astonish/ent/team/sessionevent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
@@ -12,6 +14,72 @@ import (
 )
 
 type botWorkProgressKey struct{}
+
+func botEmployeeInterimBinding(b store.Bot, r store.BotRun, e *adksession.Event) *store.BotEmployeeInterim {
+	if e == nil || e.ID == "" || e.Author != "bot_runtime" || e.Content != nil || e.Partial {
+		return nil
+	}
+	raw, err := json.Marshal(e.Actions.StateDelta["bot_runtime_event"])
+	var wire bot.RuntimeEvent
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err != nil || json.Unmarshal(raw, &wire) != nil || wire.Type != "text" || wire.RunID != r.ID || wire.SessionID != r.SessionID || wire.TurnID == uuid.Nil || wire.Sequence < 1 || json.Unmarshal(wire.Payload, &payload) != nil || payload.Text == "" {
+		return nil
+	}
+	return &store.BotEmployeeInterim{BotID: b.ID, RunID: r.ID, SourceSessionID: r.SessionID, HomeSessionID: b.HomeSessionID, EventID: e.ID, TurnID: wire.TurnID, Sequence: wire.Sequence, TextDigest: store.BotEmployeeInterimDigest(payload.Text), EnvelopeDigest: store.BotEmployeeInterimDigest(wire)}
+}
+
+func (s *personalBotStore) ReadBotEmployeeInterim(ctx context.Context, b store.BotID, run store.RunID, event string) (*store.BotEmployeeInterim, error) {
+	return s.repository().readBotEmployeeInterim(ctx, b, run, event)
+}
+func (s *teamBotStore) ReadBotEmployeeInterim(ctx context.Context, b store.BotID, run store.RunID, event string) (*store.BotEmployeeInterim, error) {
+	return s.repository().readBotEmployeeInterim(ctx, b, run, event)
+}
+func (r *botRepository) readBotEmployeeInterim(ctx context.Context, id store.BotID, runID store.RunID, eventID string) (*store.BotEmployeeInterim, error) {
+	b, err := r.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	run, err := r.GetRun(ctx, id, runID)
+	if err != nil {
+		return nil, err
+	}
+	var data map[string]any
+	switch d := r.db.(type) {
+	case personalBotDB:
+		row, e := d.client.SessionEvent.Query().Where(personalevent.SessionIDEQ(b.HomeSessionID.String()), personalevent.EventIDEQ(eventID)).Only(ctx)
+		if e != nil {
+			return nil, store.ErrBotNotFound
+		}
+		data = row.EventData
+	case teamBotDB:
+		row, e := d.client.SessionEvent.Query().Where(teamevent.SessionIDEQ(b.HomeSessionID.String()), teamevent.EventIDEQ(eventID)).Only(ctx)
+		if e != nil {
+			return nil, store.ErrBotNotFound
+		}
+		data = row.EventData
+	default:
+		return nil, store.ErrBotUnsupported
+	}
+	var event *adksession.Event
+	switch d := r.db.(type) {
+	case personalBotDB:
+		event, err = d.contentCodec().decodeSessionEvent(ctx, id, b.HomeSessionID.String(), data)
+	case teamBotDB:
+		event, err = d.contentCodec().decodeSessionEvent(ctx, id, b.HomeSessionID.String(), data)
+	}
+	if err != nil {
+		return nil, err
+	}
+	binding := botEmployeeInterimBinding(*b, *run, event)
+	var saved store.BotEmployeeInterim
+	raw, _ := json.Marshal(event.Actions.StateDelta[store.BotEmployeeInterimKey])
+	if binding == nil || json.Unmarshal(raw, &saved) != nil || saved != *binding {
+		return nil, store.ErrBotNotFound
+	}
+	return binding, nil
+}
 
 // Only the runtime's tool-boundary-released wire narration is public progress.
 // Raw producer ADK content, thoughts, source responses and final text stay private.

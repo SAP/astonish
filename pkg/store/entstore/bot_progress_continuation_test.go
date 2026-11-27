@@ -3,7 +3,6 @@ package entstore
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -16,7 +15,7 @@ import (
 
 func TestBotProgressScheduledContinuation(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, scenario := range []string{"continue", "expired", "parent-revoked", "child-revoked", "policy-denied", "owner-expired", "budget", "uncertain"} {
+		for _, scenario := range []string{"continue", "expired", "parent-revoked", "child-revoked", "policy-denied", "owner-expired", "historical-exhausted", "uncertain"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
 				r, s, owner, worker, q := authorizedScheduleFixture(t, scope, true)
 				op, err := s.EnqueueAuthorizedOperation(worker, q)
@@ -53,7 +52,7 @@ func TestBotProgressScheduledContinuation(t *testing.T) {
 					t.Fatal(err)
 				}
 				tokens := int64(7)
-				if scenario == "budget" {
+				if scenario == "historical-exhausted" {
 					tokens = 10
 				}
 				if err = s.ConsumeBotMandateQuota(worker, ref, run.ID, 1, tokens, 0); err != nil {
@@ -179,7 +178,7 @@ func TestBotProgressScheduledContinuation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if scenario == "continue" {
+				if scenario == "continue" || scenario == "historical-exhausted" {
 					usageBefore.Active[run.ID.String()] = *before.ProgressQuota
 				}
 				if !reflect.DeepEqual(usageAfter, usageBefore) {
@@ -189,7 +188,7 @@ func TestBotProgressScheduledContinuation(t *testing.T) {
 					t.Fatal("continuation enabled recurrence")
 				}
 				err = continuationErr
-				if scenario != "continue" {
+				if scenario != "continue" && scenario != "historical-exhausted" {
 					if err == nil {
 						t.Fatal("unsafe continuation accepted")
 					}
@@ -203,12 +202,6 @@ func TestBotProgressScheduledContinuation(t *testing.T) {
 					if scenario == "expired" || scenario == "parent-revoked" || scenario == "child-revoked" || scenario == "policy-denied" {
 						if held.Progress.Phase != store.BotProgressWaitingAuthorization {
 							t.Fatal("missing authority hold")
-						}
-					}
-					if scenario == "budget" {
-						var quota *store.BotMandateQuotaError
-						if !errors.As(err, &quota) || held.Progress.Phase != store.BotProgressWaitingBudget {
-							t.Fatal("missing budget hold", err)
 						}
 					}
 					return
@@ -235,8 +228,8 @@ func TestBotProgressScheduledContinuation(t *testing.T) {
 				if err = s.ReserveBotMandateRun(worker, ref, run.ID); err != nil {
 					t.Fatal("preparation reserve", err)
 				}
-				if err = s.ConsumeBotMandateQuota(worker, ref, run.ID, 0, 4, 0); err == nil {
-					t.Fatal("reset budget")
+				if err = s.ConsumeBotMandateQuota(worker, ref, run.ID, 0, 4, 0); err != nil {
+					t.Fatal("historical token ceiling enforced")
 				}
 				if jobs.Get(owner, job.ID).Enabled {
 					t.Fatal("recurrence enabled")

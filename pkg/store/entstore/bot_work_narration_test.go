@@ -3,7 +3,9 @@ package entstore
 import (
 	"context"
 	"encoding/json"
+	"github.com/SAP/astonish/pkg/execution"
 	"testing"
+	"time"
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
@@ -12,6 +14,75 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+func TestBotEmployeeInterimFencedWriter(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, _, ctx, initial, _ := runtimeFixture(t, scope)
+			b, err := repo.Get(ctx, initial.BotID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err = repo.Pause(ctx, store.BotLifecycleRequest{BotID: b.ID, ActorID: b.OwnerID, ExpectedRevision: b.Revision, Reason: "interim fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := repo.RequestRun(ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Intent: store.BotIntentConversation, Trigger: store.TriggerManual, IdempotencyKey: "interim", Instructions: "Check it"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := execution.WithBotRunIdentity(ctx, execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: b.OwnerID.String(), OrgSlug: "org", TeamSlug: "team"})
+			lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "interim", ExpiresAt: time.Now().Add(time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// This legacy RequestRun fixture predates canonical Home admission;
+			// pin its presentation in stored state, never via an event or caller flag.
+			if err := repo.db.Transaction(worker, func(tx botDB) error {
+				saved, err := tx.ReadRun(worker, b.ID, run.ID)
+				if err != nil {
+					return err
+				}
+				saved.Run.Presentation = store.BotRunPresentationHomeInteractive
+				return tx.(botWorkDB).updateWorkRun(worker, *saved, lease, repo.clock())
+			}); err != nil {
+				t.Fatal(err)
+			}
+			wire := bot.RuntimeEvent{RunID: run.ID, SessionID: run.SessionID, TurnID: uuid.New(), Sequence: 1, Type: "text", Payload: json.RawMessage(`{"text":"I will check that."}`)}
+			for _, kind := range []string{"runtime", "worker", "spoof", "trusted", "copy"} {
+				e := &session.Event{ID: kind, Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{"bot_runtime_event": wire, store.BotEmployeeInterimKey: true}}}
+				c := worker
+				if kind == "worker" {
+					e.Author = "chat"
+				}
+				if kind == "trusted" {
+					c = store.WithBotEmployeeInterimRelease(worker, wire)
+				}
+				if kind == "copy" {
+					binding, err := repo.readBotEmployeeInterim(ctx, b.ID, run.ID, "trusted")
+					if err != nil {
+						t.Fatal(err)
+					}
+					e.Actions.StateDelta[store.BotEmployeeInterimKey] = binding
+				}
+				if err := repo.appendBotRunEvent(c, lease, run.SessionID, e); err != nil {
+					t.Fatal(err)
+				}
+				binding, err := repo.readBotEmployeeInterim(ctx, b.ID, run.ID, kind)
+				if kind == "trusted" {
+					if err != nil || binding == nil || binding.EventID != kind {
+						t.Fatalf("trusted binding lost: %+v %v", binding, err)
+					}
+				} else if err == nil {
+					t.Fatalf("%s acquired speech: %+v", kind, binding)
+				}
+				if e.Actions.StateDelta[store.BotEmployeeInterimKey] == nil {
+					t.Fatal("caller mutated")
+				}
+			}
+		})
+	}
+}
 
 func TestBotWorkNarrationProjectionBoundary(t *testing.T) {
 	run := store.BotRun{ID: uuid.New(), SessionID: uuid.New(), Presentation: store.BotRunPresentationHomeInteractive}

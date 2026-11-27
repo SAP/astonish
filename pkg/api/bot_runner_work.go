@@ -35,6 +35,38 @@ Assess EVERY nonexcluded criterion against the original contract and ACTUAL capt
 
 type botWorkProducer func(bot.RunRequest, *ChatCompletion) (bot.RunResult, error)
 
+// Join actual private execution evidence, never worker prose.
+func mergeBotEmployeeCompletion(dst *ChatCompletion, src ChatCompletion) {
+	dst.Usage.ToolCalls += src.Usage.ToolCalls
+	dst.Usage.InputTokens += src.Usage.InputTokens
+	dst.Usage.OutputTokens += src.Usage.OutputTokens
+	dst.toolResponses += src.toolResponses
+	dst.Report.Changed = append(dst.Report.Changed, src.Report.Changed...)
+	dst.Report.Unchanged = append(dst.Report.Unchanged, src.Report.Unchanged...)
+	dst.Report.Artifacts = append(dst.Report.Artifacts, src.Report.Artifacts...)
+	dst.Report.Unverified = append(dst.Report.Unverified, src.Report.Unverified...)
+	dst.pendingControls = append(dst.pendingControls, src.pendingControls...)
+	if dst.reportBodies == nil {
+		dst.reportBodies = make(map[string]string)
+	}
+	for k, v := range src.reportBodies {
+		// This per-turn limitation is consumed by Send; aggregate execution evidence
+		// has no worker final and must not inherit its final-answer eligibility.
+		if k != botEmployeePrivateDeniedSourceKey {
+			dst.reportBodies[k] = v
+		}
+	}
+	if src.Report.EffectState == store.BotReportEffectsUncertain || src.Usage.ToolCalls > src.toolResponses || ((src.Err != nil || src.reportBodies[botEmployeePrivateDeniedSourceKey] != "") && !botEmployeeWorkerEstablishedFinal(src)) {
+		dst.Report.EffectState = store.BotReportEffectsUncertain
+	} else if dst.Report.EffectState != store.BotReportEffectsUncertain {
+		if src.Report.EffectState == store.BotReportEffectsConfirmed {
+			dst.Report.EffectState = store.BotReportEffectsConfirmed
+		} else if src.Report.EffectState == store.BotReportEffectsReadOnly && dst.Report.EffectState != store.BotReportEffectsConfirmed {
+			dst.Report.EffectState = store.BotReportEffectsReadOnly
+		}
+	}
+}
+
 func botWorkBoundary(ctx context.Context, req bot.RunRequest) error {
 	ctx, end := entstore.WithBotContentReadOperationIfAbsent(ctx)
 	defer end()
@@ -685,6 +717,7 @@ func (s *botAgentWorkService) evidence(ctx context.Context, q bot.BotEvidenceRea
 		return nil, store.ErrBotUnsupported
 	}
 	var cursor int64
+	privateDispatches := make(map[string]*botPrivateEvidenceDispatch)
 	// Prefer the exact persisted current-run response already owned by this adapter.
 	// Missing/older responses still use the scoped durable reader; prior Home
 	// history is never allowed to mint evidence for the current run.
@@ -709,10 +742,19 @@ func (s *botAgentWorkService) evidence(ctx context.Context, q bot.BotEvidenceRea
 			return nil, err
 		}
 		for _, row := range rows {
-			if row.Event == nil || row.Event.Partial || row.Event.Content == nil || row.Event.Content.Role == "model" {
+			if row.Event == nil || row.Event.Partial {
 				continue
 			}
-			for _, part := range row.Event.Content.Parts {
+			content := row.Event.Content
+			if _, private := row.Event.Actions.StateDelta[botEmployeeWorkerTraceKey]; private {
+				// The durable runtime envelope is the evidence identity. Never
+				// promote private inner IDs or unvalidated model-authored traces.
+				content = botPrivateEvidenceContent(row, q.CallID, privateDispatches)
+			}
+			if content == nil || content.Role == "model" {
+				continue
+			}
+			for _, part := range content.Parts {
 				if part == nil || part.FunctionResponse == nil || part.FunctionResponse.ID != q.CallID {
 					continue
 				}
@@ -738,6 +780,77 @@ func (s *botAgentWorkService) evidence(ctx context.Context, q bot.BotEvidenceRea
 	}
 	return nil, fmt.Errorf("%w: evidence scan limit reached; narrow the request", store.ErrBotUnsupported)
 }
+
+// botPrivateEvidenceDispatch tracks call bindings, never private bodies. An empty
+// call filter permits observer indexing; durable evidence reads filter one call.
+// State survives page boundaries or incremental snapshots within the same run.
+type botPrivateEvidenceDispatch struct {
+	id    string
+	calls map[string]string
+}
+
+func botPrivateEvidenceContent(row store.BotTranscriptEvent, callID string, dispatches map[string]*botPrivateEvidenceDispatch) *genai.Content {
+	e := row.Event
+	if e.Author != "bot_runtime" || e.ID == "" || e.Partial || e.Content != nil {
+		return nil
+	}
+	raw, err := json.Marshal(e.Actions.StateDelta[botEmployeeWorkerTraceKey])
+	if err != nil {
+		return nil
+	}
+	var trace botEmployeeWorkerTrace
+	if json.Unmarshal(raw, &trace) != nil || trace.WorkerID == "" || trace.DispatchID == "" {
+		return nil
+	}
+	dispatch := dispatches[trace.WorkerID]
+	switch trace.Phase {
+	case botEmployeeWorkerStarted:
+		if trace.Event != nil || dispatch != nil {
+			// Conflicting starts cannot authorize either dispatch's responses.
+			delete(dispatches, trace.WorkerID)
+			return nil
+		}
+		dispatches[trace.WorkerID] = &botPrivateEvidenceDispatch{id: trace.DispatchID, calls: make(map[string]string)}
+	case botEmployeeWorkerSettled:
+		if dispatch != nil && dispatch.id == trace.DispatchID {
+			delete(dispatches, trace.WorkerID)
+		}
+	case botEmployeeWorkerEvent:
+		inner := trace.Event
+		if dispatch == nil || dispatch.id != trace.DispatchID || inner == nil || inner.Partial || inner.Content == nil {
+			return nil
+		}
+		if inner.Content.Role == "model" {
+			for _, part := range inner.Content.Parts {
+				if part != nil && !part.Thought && part.FunctionCall != nil {
+					call := part.FunctionCall
+					if call.ID != "" && len(call.ID) <= 512 && call.Name != "" && len(call.Name) <= 256 && (callID == "" || call.ID == callID) {
+						dispatch.calls[call.ID] = call.Name
+					}
+				}
+			}
+			return nil
+		}
+		if inner.Author == "model" {
+			return nil
+		}
+		var parts []*genai.Part
+		for _, part := range inner.Content.Parts {
+			if part == nil || part.Thought || part.FunctionResponse == nil {
+				continue
+			}
+			response := part.FunctionResponse
+			if response.ID != "" && response.Name != "" && (callID == "" || response.ID == callID) && response.Name == dispatch.calls[response.ID] {
+				parts = append(parts, part)
+			}
+		}
+		if len(parts) > 0 {
+			return &genai.Content{Role: inner.Content.Role, Parts: parts}
+		}
+	}
+	return nil
+}
+
 func (s *botAgentWorkService) bindEvidence(ctx context.Context, w *store.BotWorkState, refs []string) error {
 	if len(refs) > 25 {
 		return store.ErrBotInvalid
@@ -1376,7 +1489,30 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 		if len(reviewModels) > 0 {
 			auxiliary = reviewModels[0]
 		}
-		updated, saveErr = reviewBotEmployeeResult(ctx, req, resources, auxiliary, w, next, &result)
+		if len(w.Criteria) == 0 && w.EmployeeReviewAttempts == 0 && w.Review == nil && botPrivatePendingScheduleCompletion(completion, req, result.Report) {
+			// Capture completion is a runtime fact, not a secondary content-model
+			// judgment. Permission, payload and identity were independently bound.
+			// The coordinator still must apply and read back before Employee success.
+			candidate.Text = botPendingAcknowledgment(completion.pendingControls)
+			result.Report.Summary = candidate.Text
+			candidate.Digest = candidate.ContentDigest()
+			sources := []string{"assignment", "charter"}
+			for _, goal := range next.Contract.Goals {
+				sources = append(sources, "goal:"+goal.ID.String())
+			}
+			for _, attachment := range next.Contract.Attachments {
+				sources = append(sources, attachment.SourceID)
+			}
+			next.Criteria = []store.BotWorkCriterion{{ID: "runtime-pending-schedule-capture", FulfillmentScope: store.BotWorkCriterionCurrentTurn, SourceIDs: sources, Text: "The current-turn private schedule request was captured under the original execution authority with the complete independently read source-bound payload. This criterion does not assess content quality, mixed deliverables, future standards, or schedule application."}}
+			next.Review = &store.BotWorkReview{CandidateDigest: candidate.Digest, Criteria: []store.BotCriterionAssessment{{CriterionID: "runtime-pending-schedule-capture", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentMechanical, EvidenceRefs: []string{"candidate:" + candidate.Digest}, Explanation: "Runtime observed the complete identity-bound pending schedule capture and retained the authoritative pending acknowledgment. Current-turn enqueue only; content and future application are NOT verified. The coordinator must independently apply and read back the operation."}}}
+			if boundaryErr := botWorkBoundary(ctx, req); boundaryErr != nil {
+				result, err = stop(boundaryErr)
+				return
+			}
+			updated, saveErr = resources.Work.SaveWork(ctx, store.BotWorkUpdate{Lease: req.Run.Lease, ExpectedRevision: w.Revision, State: *next})
+		} else {
+			updated, saveErr = reviewBotEmployeeResult(ctx, req, resources, auxiliary, w, next, &result)
+		}
 	} else {
 		if boundaryErr := botWorkBoundary(ctx, req); boundaryErr != nil {
 			result, err = stop(boundaryErr)

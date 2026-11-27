@@ -8,6 +8,7 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
+	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/chatruntime"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/SAP/astonish/pkg/tools"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
 
 // BotScopedChatConfig resolves the same settings cascade as Chat, reading every
@@ -37,6 +39,9 @@ func BotScopedChatConfig(ctx context.Context, scope *BotChatScope) (*config.AppC
 func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *botChatDependencies) (_ *ChatFactoryResult, err error) {
 	b := in.binding
 	hooks := ChatRuntimeHooks{Context: botSharedBinding{b}, Dispatch: botSharedDispatch{b}, ModelPreparation: botSharedModelPreparation{b}}
+	if b.workerOnly {
+		hooks.ExcludedTools = []string{"ask_user", "employee_chat"}
+	}
 	d := ChatRuntimeDependencies{Config: cfg, LLM: in.llm, Sessions: in.scope.Sessions, SessionID: b.req.Run.SessionID.String(), ContextWindow: in.contextWindow, DrillBudget: b.req.Budget}
 	control := b.req.Run.ControlOnly() && !botFactoryInteractive(b.req) && b.req.Mandate == nil
 	if control {
@@ -109,7 +114,7 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 		// already-authorized dispatch; it does not grant search authority.
 		in.safe.PolicyRuntime.Classifier = botScopedSearchClassifier{services: in.scope.Services, config: local.AppConfig, fallback: in.safe.PolicyRuntime.Classifier}
 		b.owner = agent.WithBotPolicyRuntime(b.owner, in.safe.PolicyRuntime)
-		if !botFactoryInteractive(b.req) {
+		if !botFactoryInteractive(b.req) || b.workerOnly {
 			classifier := botSharedMCPClassifier{owner: b.owner, fallback: in.safe.PolicyRuntime.Classifier, targets: map[string]agent.MCPToolBinding{}}
 			for _, group := range agent.RequestMCPGroupsFromContext(b.owner) {
 				for _, set := range group.Toolsets {
@@ -135,7 +140,7 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 			if e != nil {
 				return nil, e
 			}
-			if !botFactoryInteractive(b.req) {
+			if !botFactoryInteractive(b.req) || b.workerOnly {
 				r.EmailTools = bindBotScopedEmailTools(r.EmailTools, b.req, in.scope.Services)
 				in.safe.PolicyRuntime.Classifier = WithBotEmailClassifier(in.safe.PolicyRuntime.Classifier, r.EmailTools)
 				b.owner = agent.WithBotPolicyRuntime(b.owner, in.safe.PolicyRuntime)
@@ -179,11 +184,11 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 		hooks.AdditionalTools = append(hooks.AdditionalTools, tasks...)
 		if b.tasks != nil {
 			in.safe.PolicyRuntime.Classifier = WithBotTaskClassifier(in.safe.PolicyRuntime.Classifier, tasks)
-			if !botFactoryInteractive(b.req) {
+			if !botFactoryInteractive(b.req) || b.workerOnly {
 				b.owner = agent.WithBotPolicyRuntime(b.owner, in.safe.PolicyRuntime)
 			}
 		}
-		if !botFactoryInteractive(b.req) {
+		if !botFactoryInteractive(b.req) || b.workerOnly {
 			in.safe.PolicyRuntime.Classifier = botCapturedDrillClassifier{owner: b.owner, fallback: in.safe.PolicyRuntime.Classifier}
 			b.owner = agent.WithBotPolicyRuntime(b.owner, in.safe.PolicyRuntime)
 		}
@@ -297,9 +302,86 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 		wired.ChatAgent.Tools = append(wired.ChatAgent.Tools, proposal)
 		wired.InternalTools = append(wired.InternalTools, proposal)
 	}
-	if e = restoreBotPlan(ctx, wired.ChatAgent, in.scope, d.SessionID, b.req.Bot.OwnerID.String()); e != nil {
-		wired.Cleanup()
-		return nil, e
+	if !b.workerOnly {
+		if e = restoreBotPlan(ctx, wired.ChatAgent, in.scope, d.SessionID, b.req.Bot.OwnerID.String()); e != nil {
+			wired.Cleanup()
+			return nil, e
+		}
+	}
+	if b.workerOnly {
+		// Remove question extensions as well as shared catalog tools.
+		var workerTools []tool.Tool
+		for _, t := range wired.InternalTools {
+			if t != proposal && t.Name() != "ask_user" && t.Name() != "employee_chat" {
+				workerTools = append(workerTools, t)
+			}
+		}
+		idx, err := newChatToolIndex(b.owner, workerTools, nil, nil, nil)
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		wired.ChatAgent.ToolIndex = idx
+		// Retain sealed metadata discovery when rebuilding the private catalog;
+		// actual targets still pass their original execution authorization.
+		wired.ChatAgent.Tools, err = botProviderTools(idx, b)
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		wired.ChatAgent.Toolsets = nil
+		// Sealed capture must remain native. It deliberately is not an external
+		// executable and cannot inherit the progressive bridge's policy path.
+		if proposal != nil {
+			wired.ChatAgent.Tools = append(wired.ChatAgent.Tools, proposal)
+		}
+		wired.InternalTools = workerTools
+	} else if !b.researchOnly && bot.EmployeeChatServiceFromContext(b.owner) != nil {
+		var employeeTools []tool.Tool
+		for _, t := range wired.InternalTools {
+			switch t.Name() {
+			case "ask_user", "propose_bot_control", botWorkReadTool, botWorkUpdateTool, botEvidenceReadTool, botCheckWorkTool:
+				employeeTools = append(employeeTools, t)
+			}
+		}
+		orchestrate, err := functiontool.New(functiontool.Config{Name: "employee_chat", Description: "Send a request to private tool-enabled Chat. Empty worker_id starts; exact returned worker_id follows up in the same history. Results are private evidence, not owner speech."}, func(ctx tool.Context, request bot.EmployeeChatRequest) (*bot.EmployeeChatResult, error) {
+			bound := b.bind(ctx)
+			if err := b.check(bound); err != nil {
+				return nil, err
+			}
+			service := bot.EmployeeChatServiceFromContext(bound)
+			if service == nil {
+				return nil, store.ErrBotUnsupported
+			}
+			return service.Send(bound, request)
+		})
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		sealed, err := agent.NewBotEmployeeChatTool(orchestrate, func(ctx tool.Context) (tool.Context, error) {
+			if b.workerOnly || b.researchOnly || b.req.Run.ControlOnly() || b.req.Run.TitleConfirmation != nil && b.req.Run.TitleConfirmation.State == store.BotTitleConfirmationNeedsQuestion || ctx.SessionID() != b.req.Run.SessionID.String() {
+				return nil, store.ErrBotForbidden
+			}
+			bound := b.bind(ctx)
+			if err := b.check(bound); err != nil {
+				return nil, err
+			}
+			return botBoundToolContext{Context: ctx, owner: bound}, nil
+		})
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		employeeTools = append(employeeTools, sealed)
+		idx, err := newChatToolIndex(b.owner, employeeTools, nil, nil, nil)
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		wired.ChatAgent.Tools, wired.ChatAgent.Toolsets, wired.ChatAgent.ToolIndex, wired.ChatAgent.SubAgentManager = employeeTools, nil, idx, nil
+		wired.InternalTools = employeeTools
+		wired.MCPToolsets = nil
 	}
 	return wired, nil
 }
@@ -346,9 +428,25 @@ func (h botSharedBinding) Bind(ctx context.Context) (context.Context, error) {
 	return agent.PreserveBotInvocationHandoff(api.PreserveCapturedDrillOccurrence(bound, ctx), ctx), nil
 }
 
+type botWorkerExecutionContext struct {
+	tool.Context
+	sessionID string
+}
+
+func (c botWorkerExecutionContext) SessionID() string { return c.sessionID }
+
 type botSharedDispatch struct{ b *botFactoryBinding }
 
 func (h botSharedDispatch) Dispatch(ctx tool.Context, t tool.Tool, args any, next func(tool.Context, any) (map[string]any, error)) (result map[string]any, cause error) {
+	if h.b.workerOnly && (t.Name() == "ask_user" || t.Name() == "employee_chat") {
+		return nil, store.ErrBotForbidden
+	}
+	if h.b.workerOnly && ctx.SessionID() != h.b.conversationID {
+		return nil, store.ErrBotForbidden
+	}
+	if h.b.workerOnly {
+		ctx = botWorkerExecutionContext{Context: ctx, sessionID: h.b.req.Run.SessionID.String()}
+	}
 	if c := h.b.req.Run; c.ControlOnly() && !botFactoryInteractive(h.b.req) && h.b.req.Mandate == nil {
 		return nil, store.ErrBotForbidden
 	}

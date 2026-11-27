@@ -3,6 +3,19 @@
 > **Protocol scope:** the bounded writer/reviewer flow below is retained for
 > legacy assessment runs. It is not required or invoked for `agent_led_v1` work.
 
+## Synchronous scheduling presentation
+
+For coordinator-owned captured schedules, daemon execution first returns from the
+supervisor's terminal source commit and heartbeat cleanup. The direct schedule
+coordinator independently reads the actual operation receipt and scheduler job;
+those immutable facts, not private pending prose, are passed to a fresh tools-disabled
+Employee presentation. Preparation and claim retain the source pin, deadline, expiry
+and cumulative quota. Completion precedes Home publication. Separate runtime schedule
+receipt publication is suppressed only for trusted coordinator-marked sources.
+Store coordination tests are not proof of the complete Employee HTTP workflow;
+crash-before-presentation gating and actual private-worker HTTP acceptance must also
+be verified before rollout.
+
 ## Initial title questions
 
 A newly title-created employee first asks one focused, title-specific `ask_user`

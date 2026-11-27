@@ -58,7 +58,7 @@ func newBotProposalTool(b *botFactoryBinding) (tool.Tool, error) {
 		return nil, err
 	}
 	t := &botProposalTool{binding: b, repo: proposals, validateInput: resolved.Validate}
-	f, err := functiontool.New(functiontool.Config{Name: botProposalToolName, InputSchema: schema, Description: "Capture a Bot control. Mandated routine responsibility/persona/goals/memory changes become durable authorized operations; pending is not applied. Out-of-ceiling operations require bounded authorization. Non-mandated controls remain explicit owner-review proposals."}, func(ctx tool.Context, args botProposalArgs) (map[string]any, error) { return t.capture(ctx, args) })
+	f, err := functiontool.New(functiontool.Config{Name: botProposalToolName, InputSchema: schema, Description: "Capture a Bot control. Mandated routine responsibility/persona/goals/memory changes and explicitly owner-requested schedule create/edit/remove become durable authorized pending operations without redundant confirmation; pending is not applied. Schedule capture stays private until the synchronous coordinator commits and independently verifies the exact operation; the Employee then reports the actual outcome. Out-of-ceiling operations require bounded authorization. Non-mandated controls remain explicit owner-review proposals."}, func(ctx tool.Context, args botProposalArgs) (map[string]any, error) { return t.capture(ctx, args) })
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +74,32 @@ func (t *botProposalTool) capture(ctx tool.Context, args botProposalArgs) (map[s
 	}
 	if t.binding.req.Mandate != nil && args.Payload.Operation == store.BotControlResume {
 		return nil, fmt.Errorf("%w: use resume_tasks with resume_targets.schedule_ids from current Bot control state for explicitly requested tasks; legacy resume cannot resume mandated recurrence", store.ErrBotInvalid)
+	}
+	if t.binding.req.Mandate != nil {
+		switch args.Payload.Operation {
+		case store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlScheduleRemove:
+			svc := store.FromContext(t.binding.owner)
+			if svc == nil || svc.BotAuthorizedOperationFactory == nil {
+				return nil, store.ErrBotUnsupported
+			}
+			runtime, err := svc.BotAuthorizedOperationFactory(ctx, svc, t.binding.req.Bot.Scope)
+			if err != nil {
+				return nil, err
+			}
+			if runtime == nil {
+				return nil, store.ErrBotUnsupported
+			}
+			q := store.BotAuthorizedOperationRequest{Lease: t.binding.req.Run.Lease, MandateRef: t.binding.req.Mandate.Authorization.Ref(), IdempotencyKey: ctx.FunctionCallID(), Payload: args.Payload}
+			op, err := runtime.EnqueueAuthorizedOperation(ctx, q)
+			if err != nil {
+				return nil, err
+			}
+			capture, err := recordScheduleCapture(ctx, runtime, q, op)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"operation_id": capture.OperationID.String(), "bot_id": capture.BotID.String(), "digest": op.Provenance.PayloadDigest, "status": string(capture.Status), "decision": op.Decision, "message": botScheduleCaptureMessage(ctx, capture)}, nil
+		}
 	}
 	if t.binding.req.Mandate != nil && entstore.RoutineControlResource(args.Payload.Operation) != "" {
 		// Goal ownership is bound by the concrete capability, never guessed by
@@ -164,12 +190,26 @@ func (t *botProposalTool) capture(ctx tool.Context, args botProposalArgs) (map[s
 	return map[string]any{"proposal_id": p.ID.String(), "bot_id": p.BotID.String(), "digest": p.Digest, "status": p.Status, "message": "Proposed, not applied. Review the saved proposal and explicitly confirm after this conversation finishes."}, nil
 }
 func (t *botProposalTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	if ctx == nil || ctx.SessionID() != t.binding.req.Run.SessionID.String() || ctx.FunctionCallID() == "" {
+	fmt.Printf("PROPOSAL RUN session=%s conversation=%s worker=%t source=%s\n", ctx.SessionID(), t.binding.conversationID, t.binding.workerOnly, t.binding.req.Run.SessionID.String())
+	if ctx == nil || ctx.SessionID() == "" || ctx.FunctionCallID() == "" {
+		return nil, store.ErrBotForbidden
+	}
+	if t.binding.workerOnly {
+		// This sealed capture is invoked directly, outside shared dispatch. Check
+		// the private conversation before restoring the server-owned execution
+		// session; the model never supplies the source session or its authority.
+		if ctx.SessionID() != t.binding.conversationID {
+			return nil, store.ErrBotForbidden
+		}
+	} else if ctx.SessionID() != t.binding.req.Run.SessionID.String() {
 		return nil, store.ErrBotForbidden
 	}
 	bound := botBoundToolContext{Context: ctx, owner: t.binding.bind(ctx)}
 	if err := t.binding.check(bound); err != nil {
 		return nil, err
+	}
+	if t.binding.workerOnly {
+		bound.Context = botWorkerExecutionContext{Context: bound.Context, sessionID: t.binding.req.Run.SessionID.String()}
 	}
 	t.mu.Lock()
 	t.attempts++

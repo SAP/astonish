@@ -24,7 +24,8 @@ func (t *Transcript) applyBotOperation(v *store.BotOperationView) {
 	case store.BotOperationPresentationInternal:
 		return
 	case store.BotOperationPresentationConversation:
-		t.upsertBotOperationItem(id, ItemAgent, v.Summary)
+		// Legacy runtime receipts are neutral product status, not Employee speech.
+		t.upsertBotOperationItem(id, ItemSystem, v.Summary)
 		return
 	}
 	text := fmt.Sprintf("%s — %s", v.Status, v.Summary)

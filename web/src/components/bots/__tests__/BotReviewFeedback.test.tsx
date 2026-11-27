@@ -32,7 +32,7 @@ it.each([401, 403, 409, 500])('keeps exact permission controls and hides diagnos
   render(<BotReviewCard bot={bot} approval={approval} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Approve & continue' }))
   const alert = await screen.findByRole('alert')
-  expect(alert).toHaveClass('markdown-body')
+  expect(alert).not.toHaveClass('markdown-body')
   expect(alert).not.toHaveTextContent(/secret|HTTP|\/api/)
   expect(screen.getByText('Send only this email')).toBeVisible()
   expect(screen.getByRole('button', { name: 'Deny' })).toBeEnabled()

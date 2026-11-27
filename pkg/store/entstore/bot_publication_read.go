@@ -32,5 +32,27 @@ func (r *botRepository) ReadBotPublication(ctx context.Context, bot store.BotID,
 	if pub == nil || pub.BotID != bot || pub.RunID != run || pub.ReportSequence != sequence || pub.HomeSessionID != b.HomeSessionID {
 		return nil, store.ErrBotNotFound
 	}
+	// Never promote an old unbound receipt. The exact immutable source must match.
+	if pub.EmployeeSpeech {
+		source, exact, err := committedPublicationReport(ctx, r.db, bot, run, sequence)
+		if err != nil {
+			return nil, err
+		}
+		stored, err := r.db.ReadRun(ctx, bot, run)
+		if err != nil {
+			return nil, err
+		}
+		var presentation *store.BotEmployeePresentation
+		if p := stored.EmployeePresentation; p != nil && p.ReportSequence == sequence {
+			presentation = p
+		}
+		expected, speech := store.EmployeeSpeech(source, stored.EmployeeOutcomes[sequence].Speech, presentation)
+		if !speech {
+			return nil, store.ErrBotInvalid
+		}
+		if exact != sequence || pub.Version != source.Version || pub.SourceSessionID != source.SessionID || pub.SourceUserEventID != source.UserEventID || pub.ReportDigest != source.Report.EmployeeMessageSourceDigest(source.Status) || pub.EventID != store.BotPublicationEventID(run, sequence) || pub.Text == "" || pub.Text != expected {
+			return nil, store.ErrBotInvalid
+		}
+	}
 	return pub, nil
 }

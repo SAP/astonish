@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -75,18 +76,64 @@ type botStoredRecord struct {
 	Metadata       map[string]any
 }
 
+type botStoredOutcome struct {
+	Run                 store.BotRun
+	Speech              *store.BotEmployeeSpeechProvenance `json:"-"`
+	ScheduleCoordinator bool
+}
+
+// The explicit private codec preserves authority while public BotRun/report JSON
+// contains only data. Each snapshot is minted once, at the report intent sequence.
+func (o botStoredOutcome) MarshalJSON() ([]byte, error) {
+	var speech json.RawMessage
+	var err error
+	if o.Speech != nil {
+		speech, err = o.Speech.MarshalPrivateJSON()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		Run                 store.BotRun
+		Speech              json.RawMessage
+		ScheduleCoordinator bool
+	}{o.Run, speech, o.ScheduleCoordinator})
+}
+func (o *botStoredOutcome) UnmarshalJSON(raw []byte) error {
+	var value struct {
+		Run                 store.BotRun
+		Speech              json.RawMessage
+		ScheduleCoordinator bool
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	*o = botStoredOutcome{Run: value.Run, ScheduleCoordinator: value.ScheduleCoordinator}
+	if len(value.Speech) != 0 && string(value.Speech) != "null" {
+		o.Speech = &store.BotEmployeeSpeechProvenance{}
+		if err := o.Speech.UnmarshalPrivateJSON(value.Speech, o.Run); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type botStoredRun struct {
-	PlanMode                  bool                             `json:"plan_mode,omitempty"`
-	PreparedPlans             map[string]store.BotPreparedPlan `json:"prepared_plans,omitempty"`
-	ProgressOwnerContinuation *botProgressOwnerContinuation    `json:"progress_owner_continuation,omitempty"`
-	CoalescedOccurrences      int64                            `json:"coalesced_occurrences,omitempty"`
-	Progress                  *store.BotProgressState          `json:"progress,omitempty"`
-	ProgressCursor            int64                            `json:"progress_cursor,omitempty"`
-	ProgressPending           int64                            `json:"progress_pending,omitempty"`
-	ProgressUncertain         bool                             `json:"progress_uncertain,omitempty"`
-	ProgressAccountedAt       time.Time                        `json:"progress_accounted_at,omitempty"`
-	ProgressQuota             *mandateRunUsage                 `json:"progress_quota,omitempty"`
-	Task                      *store.BotTaskRevision           `json:"task,omitempty"`
+	EmployeeOutcomes            map[int64]botStoredOutcome         `json:"employee_outcomes,omitempty"`
+	EmployeeScheduleCoordinator bool                               `json:"employee_schedule_coordinator,omitempty"`
+	EmployeePresentation        *store.BotEmployeePresentation     `json:"-"`
+	EmployeeSpeechProvenance    *store.BotEmployeeSpeechProvenance `json:"-"`
+	PlanMode                    bool                               `json:"plan_mode,omitempty"`
+	PreparedPlans               map[string]store.BotPreparedPlan   `json:"prepared_plans,omitempty"`
+	ProgressOwnerContinuation   *botProgressOwnerContinuation      `json:"progress_owner_continuation,omitempty"`
+	CoalescedOccurrences        int64                              `json:"coalesced_occurrences,omitempty"`
+	Progress                    *store.BotProgressState            `json:"progress,omitempty"`
+	ProgressCursor              int64                              `json:"progress_cursor,omitempty"`
+	ProgressPending             int64                              `json:"progress_pending,omitempty"`
+	ProgressUncertain           bool                               `json:"progress_uncertain,omitempty"`
+	ProgressAccountedAt         time.Time                          `json:"progress_accounted_at,omitempty"`
+	ProgressQuota               *mandateRunUsage                   `json:"progress_quota,omitempty"`
+	Task                        *store.BotTaskRevision             `json:"task,omitempty"`
 	// SkillAdmissionOwner is set only by authenticated, original manual RequestRun.
 	// It is not copied from tool input or inferred from a user-shaped transcript.
 	SkillAdmissionOwner        *uuid.UUID                `json:"skill_admission_owner,omitempty"`
@@ -104,19 +151,37 @@ type botStoredRun struct {
 
 // MarshalJSON keeps the ceiling in the private stored envelope, never BotRun JSON.
 func (s botStoredRun) MarshalJSON() ([]byte, error) {
+	var presentation, provenance json.RawMessage
+	var err error
+	if s.EmployeePresentation != nil {
+		presentation, err = s.EmployeePresentation.MarshalPrivateJSON()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.EmployeeSpeechProvenance != nil {
+		provenance, err = s.EmployeeSpeechProvenance.MarshalPrivateJSON()
+		if err != nil {
+			return nil, err
+		}
+	}
 	type stored botStoredRun
 	return json.Marshal(struct {
 		stored
+		EmployeePresentation      json.RawMessage             `json:"employee_presentation,omitempty"`
+		EmployeeSpeechProvenance  json.RawMessage             `json:"employee_speech_provenance,omitempty"`
 		MandateRef                *store.BotMandateRef        `json:"mandate_ref,omitempty"`
 		CallerCeiling             *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
 		TitleConfirmation         *store.BotTitleConfirmation `json:"title_confirmation,omitempty"`
 		RuntimeAccountingRecorded bool                        `json:"runtime_accounting_recorded,omitempty"`
-	}{stored: stored(s), MandateRef: s.Run.MandateRef, CallerCeiling: s.Run.CallerCeiling, TitleConfirmation: s.Run.TitleConfirmation, RuntimeAccountingRecorded: s.Run.RuntimeAccountingRecorded})
+	}{stored: stored(s), EmployeePresentation: presentation, EmployeeSpeechProvenance: provenance, MandateRef: s.Run.MandateRef, CallerCeiling: s.Run.CallerCeiling, TitleConfirmation: s.Run.TitleConfirmation, RuntimeAccountingRecorded: s.Run.RuntimeAccountingRecorded})
 }
 func (s *botStoredRun) UnmarshalJSON(data []byte) error {
 	type stored botStoredRun
 	var value struct {
 		stored
+		EmployeePresentation      json.RawMessage             `json:"employee_presentation,omitempty"`
+		EmployeeSpeechProvenance  json.RawMessage             `json:"employee_speech_provenance,omitempty"`
 		MandateRef                *store.BotMandateRef        `json:"mandate_ref,omitempty"`
 		CallerCeiling             *execution.BotCallerCeiling `json:"caller_ceiling,omitempty"`
 		TitleConfirmation         *store.BotTitleConfirmation `json:"title_confirmation,omitempty"`
@@ -130,7 +195,27 @@ func (s *botStoredRun) UnmarshalJSON(data []byte) error {
 			return store.ErrBotInvalid
 		}
 	}
+	var presentation *store.BotEmployeePresentation
+	var provenance *store.BotEmployeeSpeechProvenance
+	if len(value.EmployeePresentation) != 0 {
+		presentation = &store.BotEmployeePresentation{}
+		if err := presentation.UnmarshalPrivateJSON(value.EmployeePresentation, value.stored.Run); err != nil {
+			return err
+		}
+	}
+	if len(value.EmployeeSpeechProvenance) != 0 {
+		provenance = &store.BotEmployeeSpeechProvenance{}
+		if err := provenance.UnmarshalPrivateJSON(value.EmployeeSpeechProvenance, value.stored.Run); err != nil {
+			return err
+		}
+	}
 	*s = botStoredRun(value.stored)
+	for sequence, outcome := range s.EmployeeOutcomes {
+		if sequence < 1 || outcome.Run.StateSequence != sequence || outcome.Run.BotID != s.Run.BotID || outcome.Run.ID != s.Run.ID || outcome.Run.Version < 1 {
+			return store.ErrBotInvalid
+		}
+	}
+	s.EmployeePresentation, s.EmployeeSpeechProvenance = presentation, provenance
 	s.Run.TitleConfirmation = value.TitleConfirmation.Clone()
 	s.Run.RuntimeAccountingRecorded = value.RuntimeAccountingRecorded
 	s.Run.MandateRef = value.MandateRef
@@ -1067,6 +1152,12 @@ func WithBotKnowledgeCommitSource(ctx context.Context, build func(context.Contex
 }
 
 type botKnowledgeCommitSourceKey struct{}
+type botEmployeeScheduleCoordinatorKey struct{}
+
+// WithEmployeeScheduleCoordinator is trusted daemon composition, never HTTP input.
+func WithEmployeeScheduleCoordinator(ctx context.Context) context.Context {
+	return context.WithValue(ctx, botEmployeeScheduleCoordinatorKey{}, true)
+}
 
 func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) (outErr error) {
 	finish := ObserveBotExecutionStage(ctx, BotStageCommit)
@@ -1237,7 +1328,38 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) (ou
 		if err := rebindBotSkillReport(&q, validatedReport, validatedWork, saved.Work); err != nil {
 			return err
 		}
+		if owned, _ := ctx.Value(botEmployeeScheduleCoordinatorKey{}).(bool); owned && q.Status.Terminal() && saved.Run.MandateRef != nil && saved.Run.UsesHomeHistory() {
+			for key := range rec.Metadata {
+				if !strings.HasPrefix(key, "mandate_operation_head:") {
+					continue
+				}
+				id, e := uuid.Parse(strings.TrimPrefix(key, "mandate_operation_head:"))
+				if e != nil {
+					return e
+				}
+				op, e := readMandateOperation(ctx, tx, rec, *saved.Run.MandateRef, id)
+				if errors.Is(e, store.ErrBotInvalid) {
+					continue
+				}
+				if e != nil {
+					return e
+				}
+				if op.Provenance != nil && op.Provenance.SourceRunID == saved.Run.ID && scheduleOperation(op.Payload.Operation) {
+					saved.EmployeeScheduleCoordinator = true
+				}
+			}
+		}
 		q.Report.FinalizeEmployeeMessage(q.Status, saved.Work)
+		// Additive service-owned receipts can rebind the source digest, not the
+		// reviewed text or review evidence. Carry only that validated attestation.
+		if m := q.Report.EmployeeMessage; m != nil && m.Origin == store.BotEmployeeMessageModel && validatedReport.EmployeeMessage != nil {
+			original := *m
+			original.SourceDigest = validatedReport.EmployeeMessage.SourceDigest
+			if original.HasTrustedReviewAttestation() && q.Report.ValidateEmployeeMessageIntegrity(q.Status) == nil {
+				sealed := store.SealBotEmployeeModelReview(*m)
+				q.Report.EmployeeMessage = &sealed
+			}
+		}
 		saved.Run.Status = q.Status
 		saved.Run.Work = store.BuildBotWorkProjection(saved.Work)
 		saved.Run.Report = q.Report
@@ -1254,6 +1376,34 @@ func (r *botRepository) CommitRun(ctx context.Context, q store.BotRunCommit) (ou
 			saved.Run.FinishedAt = &now
 		}
 		saved.CommitHash = hash
+		sequence := rec.LastSequence + 1
+		if saved.EmployeeOutcomes == nil {
+			saved.EmployeeOutcomes = make(map[int64]botStoredOutcome)
+		}
+		if _, exists := saved.EmployeeOutcomes[sequence]; exists {
+			return store.ErrBotConflict
+		}
+		outcomeRun := saved.Run
+		outcomeRun.StateSequence = sequence
+		// Freeze report data before it can be mutated by later resume/work stages.
+		rawOutcome, err := json.Marshal(outcomeRun)
+		if err != nil {
+			return err
+		}
+		var snapshot store.BotRun
+		if err := json.Unmarshal(rawOutcome, &snapshot); err != nil {
+			return err
+		}
+		// Mint against validated in-process producer/work and finalized report,
+		// never against a public round-trip (which drops model attestation).
+		var speech *store.BotEmployeeSpeechProvenance
+		if m := outcomeRun.Report.EmployeeMessage; m != nil && (m.Origin == store.BotEmployeeMessageAgent || m.Origin == store.BotEmployeeMessageAssessed || m.Origin == store.BotEmployeeMessageModel) {
+			speech, err = store.NewBotEmployeeSpeechProvenance(outcomeRun, saved.Work)
+			if err != nil {
+				return err
+			}
+		}
+		saved.EmployeeOutcomes[sequence] = botStoredOutcome{Run: snapshot, Speech: speech, ScheduleCoordinator: saved.EmployeeScheduleCoordinator}
 		if err := tx.FinishRun(ctx, *rec, *saved, q.Lease, now, false); err != nil {
 			return err
 		}

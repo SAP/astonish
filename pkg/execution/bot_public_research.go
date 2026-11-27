@@ -72,7 +72,7 @@ func (s BotPublicResearchScope) Clone() BotPublicResearchScope {
 	return s
 }
 func (s BotPublicResearchScope) Validate() error {
-	if s.Version != 1 || strings.TrimSpace(s.Subject) != s.Subject || s.Subject == "" || len(s.Subject) > 512 || strings.ContainsAny(s.Subject, "\r\n\x00") || strings.Contains(s.Subject, "{{") || s.SourceEventID == "" || s.MaxQueryBytes < len(s.Subject)+32 || s.MaxQueryBytes > 2048 || s.MaxResults < 1 || s.MaxResults > 20 || s.MaxCalls < 1 || s.MaxCalls > 20 || len(s.Facets) == 0 || len(s.Facets) > 4 {
+	if s.Version != 1 || strings.TrimSpace(s.Subject) != s.Subject || s.Subject == "" || len(s.Subject) > 512 || strings.ContainsAny(s.Subject, "\r\n\x00") || strings.Contains(s.Subject, "{{") || s.SourceEventID == "" || s.MaxQueryBytes < len(s.Subject)+32 || s.MaxQueryBytes > 2048 || s.MaxResults < 1 || s.MaxResults > 20 || s.MaxCalls < 0 || len(s.Facets) == 0 || len(s.Facets) > 4 {
 		return errors.New("invalid bounded public research scope")
 	}
 	for _, f := range s.Facets {
@@ -142,7 +142,7 @@ func (s BotPublicResearchScope) ValidateWithin(c *BotPublicResearchScope) error 
 	}
 	// Current policy can narrow quotas/facets, never replace disclosure provenance.
 	a, b := s.Route, c.Route
-	if s.Subject != c.Subject || s.SourceEventID != c.SourceEventID || a.Engine != b.Engine || a.Provider != b.Provider || a.Model != b.Model || a.Tool != b.Tool || a.Fingerprint != b.Fingerprint || !slices.Equal(a.CredentialHandles, b.CredentialHandles) || s.MaxCalls > c.MaxCalls || s.MaxResults > c.MaxResults || s.MaxQueryBytes > c.MaxQueryBytes {
+	if s.Subject != c.Subject || s.SourceEventID != c.SourceEventID || a.Engine != b.Engine || a.Provider != b.Provider || a.Model != b.Model || a.Tool != b.Tool || a.Fingerprint != b.Fingerprint || !slices.Equal(a.CredentialHandles, b.CredentialHandles) || s.MaxResults > c.MaxResults || s.MaxQueryBytes > c.MaxQueryBytes {
 		return errors.New("public research exceeds current policy")
 	}
 	for _, f := range s.Facets {

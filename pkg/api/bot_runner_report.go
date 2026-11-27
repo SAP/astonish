@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"path"
@@ -28,6 +29,11 @@ import (
 // the trusted runtime with their original arguments before tool execution. This
 // is source journaling, not authority to execute or proof of an external effect.
 // Authorization remains at the existing tool boundary.
+// botEmployeePrivateDeniedSourceKey records an invocation-bound pre-dispatch
+// policy denial, never permission to retry or an external effect receipt.
+const botEmployeePrivateDeniedSourceKey = "employee-private-denied-source"
+const botEmployeePrivateScheduleSourceKey = "employee-private-schedule-source"
+
 type botAgentReadJournalKey struct{}
 type botAgentReadCall struct {
 	identity execution.BotRunIdentity
@@ -388,10 +394,29 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 	if boundInvocation && invocation.name == response.Name && outcome.Nonexecution.ValidFor(invocation.identity, response.ID, invocation.concrete, invocation.digest) && outcome.Verified && !outcome.ReceiptConflict && len(outcome.Changed) == 0 && len(outcome.Unchanged) == 0 && len(outcome.Unverified) == 0 && len(outcome.Artifacts) == 0 && len(outcome.SourceAccess) == 0 && outcome.SourceRead == nil && outcome.RoutineCapture == nil && outcome.ScheduleCapture == nil && outcome.NextRunAt == nil {
 		observation.KnownNonexecution = true
 		observation.Recoverable = cr.ctx.Err() == nil && (outcome.Nonexecution.Disposition == bot.ToolFeedbackCorrectCall || outcome.Nonexecution.Disposition == bot.ToolFeedbackUnresolvedTarget)
+		// A private worker may report a limited answer after a definitive policy
+		// rejection. This receipt proves this invocation never dispatched; it does
+		// not permit retry, grant consumption, or recovery from other native errors.
+		var denied *agent.BotPolicyError
+		cause, native := response.Response["error"].(error)
+		if private, valid := agent.BotPrivateWorkerExecution(cr.ctx); valid && private == invocation.identity && cr.ctx.Err() == nil && ((!native && outcome.Nonexecution.Disposition == bot.ToolFeedbackTerminal) || (native && errors.As(cause, &denied) && botOnlyPolicyDenial(cause))) {
+			// ADK serializes callback errors into response strings; the native
+			// cause is independently retained by ChatRunner's after-tool callback.
+			// The final eligibility gate checks that complete native error chain.
+			observation.Recoverable = native
+			if cr.completion.reportBodies == nil {
+				cr.completion.reportBodies = map[string]string{}
+			}
+			cr.completion.reportBodies[botEmployeePrivateDeniedSourceKey] = invocation.identity.RunID.String()
+		}
 	}
 	journal.observeEffect(outcome, ok)
 	cr.completion.Report.EffectState = journal.effectState()
-	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && source && (!ok || (len(outcome.SourceAccess) == 0 && outcome.SourceRead == nil && outcome.Nonexecution == nil)) {
+	// Pending control captures are already bound to the durable operation, not
+	// a readable source response. Private workers persist responses inside their
+	// server-owned trace; enrolling these in Home evidence would fail lookup and
+	// falsely abort a genuinely captured schedule before synchronous application.
+	if service, enabled := bot.BotWorkServicesFromContext(cr.ctx).(*botAgentWorkService); enabled && source && (!ok || (len(outcome.SourceAccess) == 0 && outcome.SourceRead == nil && outcome.Nonexecution == nil && outcome.ScheduleCapture == nil && outcome.RoutineCapture == nil)) {
 		service.captureReadReference(response.ID) // bind even when a local read has no HTTP facts
 	}
 	if capture, _ := cr.ctx.Value(botApprovalCaptureKey{}).(*botApprovalCapture); capture != nil {
@@ -448,9 +473,14 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 			report.Unverified = append(report.Unverified, "Schedule enqueue receipt did not match the current run and pending tool response.")
 			return
 		}
-		// This observation is of a pending record, not a changed schedule. The
-		// server acknowledgment, not premature model 'Done', owns the summary.
 		cr.completion.pendingControls = append(cr.completion.pendingControls, botWorkPendingControl{OperationID: capture.OperationID.String(), Operation: capture.Operation, Acknowledgment: capture.Acknowledgment(), Payload: json.RawMessage(capture.PayloadJSON)})
+		if private, ok := agent.BotPrivateWorkerExecution(cr.ctx); ok && private == identity {
+			if cr.completion.reportBodies == nil {
+				cr.completion.reportBodies = map[string]string{}
+			}
+			// Runtime-only provenance, never inferred from draft or receipt wording.
+			cr.completion.reportBodies[botEmployeePrivateScheduleSourceKey] = identity.RunID.String()
+		}
 		report.Unchanged = append(report.Unchanged, capture.Observation())
 		if report.Summary != "" {
 			report.Summary += "\n\n"
@@ -527,6 +557,96 @@ type botToolFeedbackError struct {
 func (e *botToolFeedbackError) Error() string { return e.cause.Error() }
 func (e *botToolFeedbackError) Unwrap() error { return e.cause }
 
+// botOnlyPolicyDenial rejects mixed chains (for example denial plus cancellation).
+func botOnlyPolicyDenial(err error) bool {
+	if denied, ok := err.(*agent.BotPolicyError); ok {
+		return denied.Decision.Kind == execution.PolicyDeny
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !botOnlyPolicyDenial(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return botOnlyPolicyDenial(wrapped.Unwrap())
+	}
+	return false
+}
+
+// A worker final remains private input to the Employee. Only fully observed,
+// positively read-only attempts can retain recoverable feedback; missing receipts,
+// mixed native errors and pending effects still fail closed.
+// botEmployeeWorkerEstablishedFinal also admits independently captured pending
+// schedules. Capture is not application: only this runtime marker and valid
+// schedule payloads qualify; mixed errors, absent responses and unknown effects
+// still fail the read-only recovery gate.
+func botEmployeeWorkerEstablishedFinal(c ChatCompletion) bool {
+	if len(c.pendingControls) == 0 {
+		return botEmployeeWorkerReadOnlyFinal(c)
+	}
+	if source := c.reportBodies[botEmployeePrivateScheduleSourceKey]; source == "" || (c.reportBodies[botEmployeePrivateDeniedSourceKey] != "" && c.reportBodies[botEmployeePrivateDeniedSourceKey] != source) {
+		return false
+	}
+	for _, control := range c.pendingControls {
+		var payload store.BotControlPayload
+		if control.OperationID == "" || control.Acknowledgment == "" || json.Unmarshal(control.Payload, &payload) != nil || payload.Validate() != nil || payload.Operation != control.Operation {
+			return false
+		}
+		switch control.Operation {
+		case store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlSchedulePause, store.BotControlScheduleRemove:
+		default:
+			return false
+		}
+	}
+	c.pendingControls = nil
+	if c.Report.EffectState == store.BotReportEffectsConfirmed {
+		// A confirmed pending capture has no applied effect. The strict report
+		// checks below still reject any accompanying writes/artifacts/uncertainty.
+		c.Report.EffectState = store.BotReportEffectsReadOnly
+	}
+	return botEmployeeWorkerReadOnlyFinal(c)
+}
+
+func botEmployeeWorkerReadOnlyFinal(c ChatCompletion) bool {
+	return !c.Blocked && c.Final && c.FinalEventID != "" && strings.TrimSpace(c.FinalText) != "" &&
+		c.Usage.ToolCalls > 0 && c.Usage.ToolCalls == c.toolResponses && len(c.pendingControls) == 0 &&
+		(c.Err == nil || botEmployeeWorkerRecoverableError(c.Err, c.reportBodies[botEmployeePrivateDeniedSourceKey] != "")) && store.BotReportIsReadOnlyResult(c.Report)
+}
+
+// ChatRunner's after-tool callback separately records native policy diagnostics.
+// Admit them only alongside this turn's independently bound denial receipt.
+func botEmployeeWorkerRecoverableError(err error, boundDenial bool) bool {
+	if feedback, ok := err.(*botToolFeedbackError); ok {
+		return feedback.recoverable || (boundDenial && botOnlyPolicyDenial(feedback.cause))
+	}
+	if denied, ok := err.(*agent.BotPolicyError); ok {
+		return boundDenial && denied.Decision.Kind == execution.PolicyDeny
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !botEmployeeWorkerRecoverableError(cause, boundDenial) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return botEmployeeWorkerRecoverableError(wrapped.Unwrap(), boundDenial)
+	}
+	return false
+}
+
 func botOnlyRecoverableToolFeedback(err error) bool {
 	if feedback, ok := err.(*botToolFeedbackError); ok {
 		return feedback.recoverable
@@ -568,6 +688,28 @@ func botCanRetainReadOnlyFinal(c ChatCompletion, req bot.RunRequest, report stor
 		botOnlyRecoverableToolFeedback(c.Err) && store.BotReportIsReadOnlyResult(report)
 }
 
+// botPrivatePendingScheduleCompletion selects a review scope, not an effect or
+// authority exemption. Only exact runtime-bound captures with fully settled tool
+// evidence can use the pending payload contract; mixed/unknown effects stay on
+// the ordinary fail-closed review path.
+func botPrivatePendingScheduleCompletion(c ChatCompletion, req bot.RunRequest, report store.BotReport) bool {
+	if req.Work == nil || req.Work.Protocol != store.BotWorkProtocolAgentLedV1 || req.Work.EmployeeReviewPolicy != store.BotEmployeeReviewEvidenceBoundV1 || !req.Run.UsesHomeHistory() || !req.Run.IsInteractiveChat() || c.reportBodies[botEmployeePrivateScheduleSourceKey] != req.Run.ID.String() || c.Err != nil || c.Blocked || !c.Final || c.FinalEventID == "" || len(c.pendingControls) == 0 || c.Usage.ToolCalls == 0 || c.Usage.ToolCalls != c.toolResponses || (report.EffectState != store.BotReportEffectsConfirmed && report.EffectState != store.BotReportEffectsReadOnly) || len(report.Changed) != 0 || len(report.Unverified) != 0 || len(report.Artifacts) != 0 || len(report.NeedsApproval) != 0 || report.NextRunAt != nil || report.Failure != nil {
+		return false
+	}
+	for _, control := range c.pendingControls {
+		var payload store.BotControlPayload
+		if control.OperationID == "" || control.Acknowledgment == "" || json.Unmarshal(control.Payload, &payload) != nil || payload.Validate() != nil || payload.Operation != control.Operation {
+			return false
+		}
+		switch control.Operation {
+		case store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlScheduleRemove:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func botCompletionReport(completion ChatCompletion, req bot.RunRequest) store.BotReport {
 	report := completion.Report
 	// Do not retain artifacts (or use their bodies) from another durable home.
@@ -586,7 +728,8 @@ func botCompletionReport(completion ChatCompletion, req bot.RunRequest) store.Bo
 		// The final answer and pending-operation receipt are distinct. Do not
 		// replace independently useful work with the enqueue acknowledgment.
 		final := completion.FinalText
-		if len(completion.pendingControls) > 0 {
+		privateSchedule := completion.reportBodies[botEmployeePrivateScheduleSourceKey]
+		if len(completion.pendingControls) > 0 && (privateSchedule == "" || privateSchedule != req.Run.ID.String()) {
 			ack := botPendingAcknowledgment(completion.pendingControls)
 			if strings.TrimSpace(final) == "" || strings.TrimSpace(final) == strings.TrimSpace(ack) {
 				report.Summary = ack

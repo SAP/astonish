@@ -11,7 +11,40 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/adk/session"
 )
+
+func TestEmployeeWorkerDurableApprovalBinding(t *testing.T) {
+	a := store.BotApproval{ID: uuid.New(), ActionDigest: "exact"}
+	event := func(author, worker, dispatch, phase string, approval uuid.UUID, digest string) *session.Event {
+		return &session.Event{Author: author, Actions: session.EventActions{StateDelta: map[string]any{"bot_private_worker_v1": map[string]any{"worker_id": worker, "dispatch_id": dispatch, "phase": phase, "approval_id": approval, "action_digest": digest}}}}
+	}
+	start := event("bot_runtime", "worker", "dispatch", "started", uuid.Nil, "")
+	approval := event("bot_runtime", "worker", "dispatch", "approval", a.ID, a.ActionDigest)
+	for _, test := range []struct {
+		name    string
+		events  []*session.Event
+		allowed bool
+	}{
+		{"exact", []*session.Event{start, approval}, true},
+		{"no-history", nil, false},
+		{"owner-spoof", []*session.Event{start, event("user", "worker", "dispatch", "approval", a.ID, a.ActionDigest)}, false},
+		{"model-spoof", []*session.Event{start, event("model", "worker", "dispatch", "approval", a.ID, a.ActionDigest)}, false},
+		{"foreign-dispatch", []*session.Event{start, event("bot_runtime", "worker", "other", "approval", a.ID, a.ActionDigest)}, false},
+		{"foreign-approval", []*session.Event{start, event("bot_runtime", "worker", "dispatch", "approval", uuid.New(), a.ActionDigest)}, false},
+		{"foreign-action", []*session.Event{start, event("bot_runtime", "worker", "dispatch", "approval", a.ID, "other")}, false},
+		{"uncertain-resuming", []*session.Event{start, approval, event("bot_runtime", "worker", "dispatch", "resuming", a.ID, a.ActionDigest)}, false},
+		{"settled", []*session.Event{start, approval, event("bot_runtime", "worker", "dispatch", "settled", uuid.Nil, "")}, false},
+		{"duplicate-binding", []*session.Event{start, approval, event("bot_runtime", "other", "dispatch2", "started", uuid.Nil, ""), event("bot_runtime", "other", "dispatch2", "approval", a.ID, a.ActionDigest)}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := matchPrivateWorkerApproval(test.events, a)
+			if (err == nil) != test.allowed {
+				t.Fatalf("allowed=%v err=%v", test.allowed, err)
+			}
+		})
+	}
+}
 
 func TestBotApprovalResumePreDispatchDenial(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {

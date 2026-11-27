@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	personalrun "github.com/SAP/astonish/ent/personal/botrun"
 	personalversion "github.com/SAP/astonish/ent/personal/botversion"
 	personalevent "github.com/SAP/astonish/ent/personal/sessionevent"
+	teamrun "github.com/SAP/astonish/ent/team/botrun"
 	teamversion "github.com/SAP/astonish/ent/team/botversion"
 	teamevent "github.com/SAP/astonish/ent/team/sessionevent"
 	botdomain "github.com/SAP/astonish/pkg/bot"
@@ -96,6 +98,33 @@ func publicationTranscriptCount(t *testing.T, repo *botRepository, ctx context.C
 		t.Fatal(err)
 	}
 	return count
+}
+
+func TestEmployeeScheduleCoordinationPublicationCrashWindow(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, rt, owner, worker, q := authorizedScheduleFixture(t, scope)
+			if _, err := rt.EnqueueAuthorizedOperation(worker, q); err != nil {
+				t.Fatal(err)
+			}
+			report := acceptedWorkReport(t, repo, worker, q.Lease, "private draft before synchronous application")
+			if err := repo.CommitRun(WithEmployeeScheduleCoordinator(worker), store.BotRunCommit{Lease: q.Lease, Status: store.RunSucceeded, Report: report}); err != nil {
+				t.Fatal(err)
+			}
+			before := publicationTranscriptCount(t, repo, owner, q.MandateRef.BotID)
+			// Simulate restart between durable source commit and final presentation.
+			if p, err := repo.PublishReport(owner, store.BotPublicationRequest{BotID: q.MandateRef.BotID, RunID: q.Lease.RunID}); !errors.Is(err, store.ErrBotConflict) || p != nil {
+				t.Fatalf("private source published without final envelope: %+v %v", p, err)
+			}
+			if after := publicationTranscriptCount(t, repo, owner, q.MandateRef.BotID); after != before {
+				t.Fatalf("private draft appended: %d -> %d", before, after)
+			}
+			stored, err := repo.db.ReadRun(owner, q.MandateRef.BotID, q.Lease.RunID)
+			if err != nil || stored.Run.Report.Summary != report.Summary {
+				t.Fatalf("private receipt changed: %+v %v", stored, err)
+			}
+		})
+	}
 }
 
 func TestBotPublicationWaitingThenFinal(t *testing.T) {
@@ -194,7 +223,10 @@ func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, wor
 			}
 		}
 	}
-	assertTranscript(first)
+	if first.EmployeeSpeech || first.Text != "" || len(first.Notifications) != 0 {
+		t.Fatalf("waiting diagnostics became conversation or external notification: %+v", first)
+	}
+	assertTranscript()
 	b, err := repo.Get(ctx, run.BotID)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +254,7 @@ func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, wor
 	if final.EventID == first.EventID || final.Text == first.Text {
 		t.Fatalf("final outcome suppressed: first=%+v final=%+v", first, final)
 	}
-	assertTranscript(first, final)
+	assertTranscript(final)
 	if first.ReportSequence == 0 || final.ReportSequence <= first.ReportSequence {
 		t.Fatal("missing committed sequence identity")
 	}
@@ -233,7 +265,7 @@ func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, wor
 	if replayedFinal.EventID != final.EventID || replayedFinal.ReportSequence != final.ReportSequence || replayedFinal.Text != final.Text {
 		t.Fatalf("final replay changed report: %+v", replayedFinal)
 	}
-	assertTranscript(first, final)
+	assertTranscript(final)
 	replayedFirst, err := publisher.PublishOutcome(ctx, run.BotID, run.ID, first.ReportSequence)
 	if err != nil {
 		t.Fatal(err)
@@ -241,9 +273,9 @@ func testPublicationWaitingThenFinal(t *testing.T, repo *botRepository, ctx, wor
 	if replayedFirst.EventID != first.EventID || replayedFirst.ReportSequence != first.ReportSequence || replayedFirst.Text != first.Text {
 		t.Fatalf("waiting replay changed report: %+v", replayedFirst)
 	}
-	assertTranscript(first, final)
-	if len(transport.calls) != 2 {
-		t.Fatalf("want waiting and final sends once, got %d", len(transport.calls))
+	assertTranscript(final)
+	if len(transport.calls) != 1 {
+		t.Fatalf("want only final Employee send once, got %d", len(transport.calls))
 	}
 }
 func TestBotPublicationNoChange(t *testing.T) {
@@ -495,5 +527,70 @@ func TestBotPublicationAtomicReceipt(t *testing.T) {
 				t.Fatal(count)
 			}
 		})
+	}
+}
+
+// Historical report wording is diagnostic unless the trusted producer binding
+// exists. Reads and exact replay must never manufacture a new Employee message.
+func TestEmployeeOnlyPublicationUnboundReport(t *testing.T) {
+	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
+		t.Run(string(scope), func(t *testing.T) {
+			repo, ctx, run, _, _ := publicationFixture(t, scope, store.BotReport{Summary: "I've completed the requested update."}, "")
+			// Recreate a pre-provenance persisted run through the real storage codec.
+			// A current valid CommitRun intentionally mints provenance; its output
+			// cannot stand in for a historical unbound report without removing it.
+			saved, err := repo.db.ReadRun(ctx, run.BotID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved.EmployeeOutcomes = nil
+			saved.EmployeePresentation = nil
+			data, err := encodeBotRunData(ctx, repo.db, *saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch db := repo.db.(type) {
+			case personalBotDB:
+				_, err = db.client.BotRun.Update().Where(personalrun.IDEQ(run.ID), personalrun.BotIDEQ(run.BotID)).SetData(data).Save(ctx)
+			case teamBotDB:
+				_, err = db.client.BotRun.Update().Where(teamrun.IDEQ(run.ID), teamrun.BotIDEQ(run.BotID)).SetData(data).Save(ctx)
+			default:
+				t.Fatal("unsupported fixture database")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo = &botRepository{db: repo.db, auth: repo.auth, now: repo.now}
+			before := publicationTranscriptCount(t, repo, ctx, run.BotID)
+			pub, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pub.EmployeeSpeech || pub.Text != "" || pub.Suppressed {
+				t.Fatalf("private report became speech: %+v", pub)
+			}
+			if publicationTranscriptCount(t, repo, ctx, run.BotID) != before {
+				t.Fatal("runtime fallback appended")
+			}
+			got, err := repo.ReadBotPublication(ctx, run.BotID, run.ID, pub.ReportSequence)
+			if err != nil || got.Text != "" || got.EmployeeSpeech {
+				t.Fatal("read promoted historical report", err)
+			}
+			again, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID, ReportSequence: pub.ReportSequence})
+			if err != nil || again.EventID != pub.EventID || again.Text != "" {
+				t.Fatal("exact replay changed", err)
+			}
+		})
+	}
+}
+
+func TestEmployeeOnlyArtifactsIgnoreSpeechSuppression(t *testing.T) {
+	botID, runID, home := uuid.New(), uuid.New(), uuid.New()
+	digest := strings.Repeat("a", 64)
+	artifact := store.BotArtifact{ID: uuid.New(), HomeID: home, RelativePath: "result.txt", SHA256: digest, SizeBytes: 1, MediaType: "text/plain", ContentRef: &store.BotContentRef{Format: store.BotContentFormatVersion, Scope: store.BotContentScope{OrgID: "org", TeamID: "team", OwnerID: uuid.NewString(), BotID: botID}, Kind: store.BotContentArtifact, Key: "private-key", SHA256: digest, SizeBytes: 1, Revision: 1}}
+	publication := store.BotPublication{BotID: botID, RunID: runID, HomeSessionID: uuid.New(), ReportSequence: 7, EventID: store.BotPublicationEventID(runID, 7), Suppressed: true, Artifacts: []store.BotArtifact{artifact}}
+	file, err := publication.FilePublication()
+	if err != nil || file == nil || len(file.Artifacts) != 1 || file.Summary != "" {
+		t.Fatalf("speech suppression blocked file: %+v %v", file, err)
 	}
 }

@@ -24,8 +24,8 @@ func TestBotRuntimePolicyDefaultsAndExplicitOperatorCaps(t *testing.T) {
 		t.Fatalf("historical operator config upgraded: %+v %v", p, err)
 	}
 	cfg.BotRuntimePolicy = execution.NewBotProgressRuntimePolicy()
-	if _, err := cfg.EffectiveBotRuntimePolicy(); err == nil {
-		t.Fatal("conflicting explicit finite cap ignored")
+	if _, err := cfg.EffectiveBotRuntimePolicy(); err != nil {
+		t.Fatal("historical runtime metadata enforced")
 	}
 	cap := int64(200)
 	cfg.BotRuntimePolicy.MaxActiveSeconds = &cap

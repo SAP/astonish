@@ -36,6 +36,9 @@ func botQuestion(a store.BotApproval) botQuestionCard {
 	return q
 }
 func (m model) handleBotAnswerKey(key string) (tea.Model, tea.Cmd) {
+	if m.bots.loading {
+		return m, nil
+	}
 	a := m.bots.decisions[m.bots.cursor]
 	q := botQuestion(a)
 	if a.Interaction == nil || a.Interaction.Validate() != nil || (len(q.Options) == 0 && q.Kind != question.Text) {
@@ -77,23 +80,19 @@ func (m model) handleBotAnswerKey(key string) (tea.Model, tea.Cmd) {
 			m.bots.err = "Approval changed or expired; reload."
 			return m, nil
 		}
-		if m.bots.response == nil {
-			answer := m.bots.answerText
-			if !editing {
-				answer = q.Options[m.bots.answerCursor].ID
-			}
-			r := &store.BotInteractionResponse{QuestionID: a.Interaction.QuestionID, Answer: answer}
-			if a.Interaction.ValidateResponse(r) != nil {
+		answer := m.bots.answerText
+		if !editing {
+			if m.bots.answerCursor < 0 || m.bots.answerCursor >= len(q.Options) {
+				m.bots.err = "Invalid answer; reload."
 				return m, nil
 			}
-			m.bots.response = r
-			return m, nil
+			answer = q.Options[m.bots.answerCursor].ID
 		}
-		r := *m.bots.response
+		r := store.BotInteractionResponse{QuestionID: a.Interaction.QuestionID, Answer: answer}
 		if a.Interaction.ValidateResponse(&r) != nil {
-			m.bots.err = "Invalid answer; reload."
 			return m, nil
 		}
+		m.bots.response = &r
 		m.bots.loading = true
 		return m, func() tea.Msg { return m.approveBotContinuation(a, &r) }
 	}
@@ -117,10 +116,6 @@ func (m model) renderBotQuestion(s *strings.Builder, a store.BotApproval) {
 		fmt.Fprintf(s, "%sCustom answer: %s\n", mark, m.bots.answerText)
 	}
 	if m.bots.answering {
-		if m.bots.response != nil {
-			fmt.Fprintf(s, "Confirm answer %q: Enter submits durable decision; Esc cancels\n", m.bots.response.Answer)
-		} else {
-			s.WriteString("↑↓ choose answer · Enter reviews · Esc cancels\n")
-		}
+		s.WriteString("↑↓ choose answer · Enter submits answer · Esc cancels\n")
 	}
 }

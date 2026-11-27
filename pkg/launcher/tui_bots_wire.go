@@ -138,6 +138,17 @@ func botTranscriptEvents(frame client.SSEEvent) ([]events.Event, error) {
 			return nil, err
 		}
 		ev := events.NewBotReport("bot-report:"+p.RunID.String(), p.EventID, p.Summary)
+		if p.Summary == "" {
+			// Speech eligibility is resolved by the server's ordered projection.
+			// An artifact-only receipt must remain accessible without an agent bubble.
+			text := "Published files:"
+			for _, a := range p.Artifacts {
+				text += fmt.Sprintf("\nFile: %s (%d bytes) — %s", a.RelativePath, a.SizeBytes, a.Preview)
+			}
+			text += "\n/bots files → p: published files (preview or save)"
+			ev = events.NewSystem(text)
+			ev.EventID = p.EventID
+		}
 		ev.BotFilePublication = &p
 		return []events.Event{ev}, nil
 	default:

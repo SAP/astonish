@@ -31,13 +31,24 @@ type mandateTitleContinuation struct {
 	Checkpoint string
 }
 
+type mandateQuestionContinuation struct {
+	Usage      mandateRunUsage
+	ApprovalID uuid.UUID
+	Checkpoint string
+}
+
 type mandateUsage struct {
+	// Ordinary questions retain accounting only for same-mandate occupancy
+	// reacquisition at the exact completed checkpoint; never for general replay.
+	QuestionContinuations map[string]mandateQuestionContinuation
 	// Only a released, checkpointed initial title question may transfer its
 	// cumulative usage to the owner's fresh confirmed-assignment mandate.
 	TitleContinuations              map[string]mandateTitleContinuation
 	Day                             string
 	DailyRuns, Tools, Tokens, Spend int64
-	Active                          map[string]mandateRunUsage
+	// Released retains cumulative charges without concurrency occupancy or replay.
+	Released map[string]mandateRunUsage
+	Active   map[string]mandateRunUsage
 }
 type mandateQuotaAction uint8
 
@@ -50,6 +61,29 @@ const (
 	mandateResearchReserve
 )
 
+// quotaQuestionApproval binds retained occupancy to a typed ordinary question,
+// never an action/plan grant, and to the completed lease rather than a newer fence.
+func (s *botMandateRuntime) quotaQuestionApproval(ctx context.Context, tx botDB, saved *botStoredRun, rec *botStoredRecord, status store.ApprovalStatus) (*store.BotApproval, error) {
+	run := saved.Run
+	if !run.IsInteractiveChat() || run.Version != rec.Bot.Version || (run.TitleConfirmation != nil && run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed) {
+		return nil, store.ErrBotForbidden
+	}
+	c, err := botdomain.DecodeApprovalCheckpoint(run.Checkpoint, run)
+	if err != nil || c.Format != botdomain.InteractionCheckpointFormat || c.Fence != run.Lease.Fence || rec.ActiveRunID != nil {
+		return nil, store.ErrBotConflict
+	}
+	a, err := tx.ReadApproval(ctx, run.BotID, c.ApprovalID)
+	if err != nil {
+		return nil, err
+	}
+	if !c.Matches(*a) || a.Status != status || a.Interaction == nil || a.Interaction.Kind != store.BotInteractionQuestion || !s.repo.clock().Before(a.ExpiresAt) {
+		return nil, store.ErrBotForbidden
+	}
+	if status == store.ApprovalApproved && (a.DecidedAt == nil || a.DecidedBy == nil || *a.DecidedBy != rec.Bot.OwnerID || a.Interaction.ValidateResponse(a.Response) != nil) {
+		return nil, store.ErrBotForbidden
+	}
+	return a, nil
+}
 func (s *botMandateRuntime) ReserveBotPublicResearch(ctx context.Context, ref store.BotMandateRef, session string) error {
 	id, ok := execution.BotRunIdentityFromContext(ctx)
 	if !ok || id.BotID != ref.BotID || id.RunID == uuid.Nil || session == "" {
@@ -67,6 +101,10 @@ func (s *botMandateRuntime) ConsumeBotMandateQuota(ctx context.Context, ref stor
 func (s *botMandateRuntime) ReleaseBotMandateRun(ctx context.Context, ref store.BotMandateRef, run uuid.UUID) error {
 	return s.quota(ctx, ref, run, mandateRelease, 0, 0, 0)
 }
+func accountingOverflow(used, delta int64) bool {
+	return used < 0 || delta < 0 || delta > math.MaxInt64-used
+}
+
 func exceeds(used, delta, max int64) bool {
 	return used < 0 || delta < 0 || used > max || delta > max-used
 }
@@ -163,6 +201,9 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 		reservationKey := "mandate-reservation:" + id
 		switch action {
 		case mandateReserve:
+			if saved.Run.Status != store.RunQueued && saved.Run.Status != store.RunRunning {
+				return store.ErrBotConflict
+			}
 			if saved.ProgressQuota != nil {
 				return store.ErrBotConflict
 			}
@@ -179,6 +220,27 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 				return nil
 			}
 			if _, err := tx.FindActivity(ctx, ref.BotID, reservationKey); err == nil {
+				if pending, ok := usage.QuestionContinuations[id]; ok {
+					if saved.Run.Status != store.RunQueued || pending.Usage.Ref != ref || pending.Checkpoint != string(saved.Run.Checkpoint) {
+						return store.ErrBotConflict
+					}
+					a, err := s.quotaQuestionApproval(ctx, tx, saved, rec, store.ApprovalApproved)
+					if err != nil || a.ID != pending.ApprovalID {
+						return store.ErrBotForbidden
+					}
+					for _, model := range pending.Usage.Models {
+						if !model.Settled {
+							return store.ErrBotConflict
+						}
+					}
+					if int64(len(usage.Active)) >= l.MaxConcurrentRuns {
+						return store.ErrBotForbidden
+					}
+					usage.Active[id] = pending.Usage
+					delete(usage.QuestionContinuations, id)
+					reservationKey += ":question:" + a.ID.String()
+					break // Already charged: restore occupancy, not a new run.
+				}
 				pending, ok := usage.TitleContinuations[id]
 				if !ok || saved.Run.Status != store.RunQueued || pending.Usage.Ref == ref || m.Provenance.InitiationKind != store.BotInitiationKindTitleConfirmation || pending.Checkpoint != string(saved.Run.Checkpoint) {
 					return store.ErrBotConflict
@@ -220,8 +282,11 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			usage.DailyRuns++
 			usage.Active[id] = mandateRunUsage{Ref: ref}
 		case mandateResearchReserve:
-			if !active || current.Ref != ref || m.Mandate.PublicResearch == nil || current.PublicResearchCalls >= m.Mandate.PublicResearch.MaxCalls {
+			if !active || current.Ref != ref || m.Mandate.PublicResearch == nil {
 				return store.ErrBotForbidden
+			}
+			if accountingOverflow(current.PublicResearchCalls, 1) {
+				return store.ErrBotInvalid
 			}
 			current.PublicResearchCalls++
 			usage.Active[id] = current
@@ -237,13 +302,10 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			if !active || current.Ref != ref {
 				return store.ErrBotForbidden
 			}
-			if exceeds(current.Tokens, tokens, l.MaxTokens) {
-				return &store.BotMandateQuotaError{Dimension: "run_tokens", Used: current.Tokens, Requested: tokens, Limit: l.MaxTokens}
+			if accountingOverflow(current.Tokens, tokens) || accountingOverflow(usage.Tokens, tokens) || accountingOverflow(current.Tools, tools) || accountingOverflow(usage.Tools, tools) {
+				return store.ErrBotInvalid
 			}
-			if exceeds(usage.Tokens, tokens, l.MaxTotalTokens) {
-				return &store.BotMandateQuotaError{Dimension: "total_tokens", Used: usage.Tokens, Requested: tokens, Limit: l.MaxTotalTokens}
-			}
-			if exceeds(current.Tools, tools, l.MaxToolCalls) || exceeds(current.Spend, spend, l.MaxSpendMicros) || exceeds(usage.Tools, tools, l.MaxTotalToolCalls) || exceeds(usage.Spend, spend, l.MaxSpendMicros) {
+			if exceeds(current.Spend, spend, l.MaxSpendMicros) || exceeds(usage.Spend, spend, l.MaxSpendMicros) {
 				return store.ErrBotForbidden
 			}
 			if action == mandateModelReserve {
@@ -270,16 +332,12 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			if charge.Tokens < 0 || current.Tokens < charge.Tokens || usage.Tokens < charge.Tokens {
 				return store.ErrBotInvalid
 			}
-			// Actual usage is never discarded, even if a provider exceeded its
-			// reservation. Saturation fails future admission closed on overflow.
-			add := func(a, b int64) int64 {
-				if b > math.MaxInt64-a {
-					return math.MaxInt64
-				}
-				return a + b
+			// Reconcile actual usage without a token ceiling; refuse corrupt/overflowing accounting.
+			if accountingOverflow(current.Tokens-charge.Tokens, tokens) || accountingOverflow(usage.Tokens-charge.Tokens, tokens) {
+				return store.ErrBotInvalid
 			}
-			current.Tokens = add(current.Tokens-charge.Tokens, tokens)
-			usage.Tokens = add(usage.Tokens-charge.Tokens, tokens)
+			current.Tokens = current.Tokens - charge.Tokens + tokens
+			usage.Tokens = usage.Tokens - charge.Tokens + tokens
 			current.Models[modelID[0].String()] = mandateModelCharge{Tokens: tokens, Settled: true}
 			usage.Active[id] = current
 		case mandateRelease:
@@ -289,8 +347,24 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 			if current.Ref != ref {
 				return store.ErrBotForbidden
 			}
-			// Persist a one-shot handoff only at the real initial-question
-			// checkpoint. Released ordinary/uncertain-effect runs stay spent.
+			// Release never grants replay. Only a genuine pending ordinary question
+			// with all model charges settled may retain its cumulative ledger.
+			delete(usage.QuestionContinuations, id)
+			if saved.Run.Status == store.RunWaitingApproval {
+				if a, e := s.quotaQuestionApproval(ctx, tx, saved, rec, store.ApprovalPending); e == nil {
+					settled := true
+					for _, model := range current.Models {
+						settled = settled && model.Settled
+					}
+					if settled {
+						if usage.QuestionContinuations == nil {
+							usage.QuestionContinuations = map[string]mandateQuestionContinuation{}
+						}
+						usage.QuestionContinuations[id] = mandateQuestionContinuation{Usage: current, ApprovalID: a.ID, Checkpoint: string(saved.Run.Checkpoint)}
+					}
+				}
+			}
+			// Initial title confirmation remains the separate fresh-mandate handoff.
 			c := saved.Run.TitleConfirmation
 			if c != nil && c.State == store.BotTitleConfirmationWaiting && c.ValidateBinding(saved.Run, rec.Bot.OwnerID) == nil && saved.Run.Status == store.RunWaitingApproval && m.Provenance.InitiationKind == store.BotInitiationKindTitle {
 				checkpoint, e := botdomain.DecodeApprovalCheckpoint(saved.Run.Checkpoint, saved.Run)
@@ -304,6 +378,10 @@ func (s *botMandateRuntime) quota(ctx context.Context, ref store.BotMandateRef, 
 					}
 				}
 			}
+			if usage.Released == nil {
+				usage.Released = map[string]mandateRunUsage{}
+			}
+			usage.Released[id] = current
 			delete(usage.Active, id)
 		}
 		key := fmt.Sprintf("mandate-quota:%s:%d", id, rec.LastSequence+1)

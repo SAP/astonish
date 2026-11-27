@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestBotOperationNeutralVoice(t *testing.T) {
+	bot, home := uuid.New(), uuid.New()
+	for _, presentation := range []store.BotOperationPresentation{store.BotOperationPresentationConversation, store.BotOperationPresentationInternal} {
+		tr := Transcript{BotID: bot.String(), SessionID: home.String()}
+		v := store.BotOperationView{SchemaVersion: 1, BotID: bot, HomeSessionID: home, OperationID: uuid.New(), Revision: 1, StateSequence: 1, Status: store.BotOperationApplied, Decision: store.BotOperationExecute, Operation: store.BotControlPersona, Presentation: presentation, Summary: "Operation verified."}
+		tr.Apply(Event{Kind: KindBotOperation, BotOperation: &v})
+		for _, item := range tr.Items {
+			if item.Kind == ItemAgent {
+				t.Fatal("runtime operation impersonated Employee")
+			}
+		}
+		if len(tr.BotOperations) != 1 {
+			t.Fatal("operation authority lost")
+		}
+	}
+}
+
 func TestBotOperationOrdering(t *testing.T) {
 	bot, home := uuid.New(), uuid.New()
 	tr := Transcript{BotID: bot.String(), SessionID: home.String()}

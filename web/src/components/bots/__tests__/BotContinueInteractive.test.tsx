@@ -25,7 +25,7 @@ it.each([401, 403, 409, 500])('renders safe employee feedback for continuation f
   render(<BotContinueInteractive bot={bot} runId="run" disabled={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Continue interactive' }))
   const alert = await screen.findByRole('alert')
-  expect(alert).toHaveClass('markdown-body')
+  expect(alert).not.toHaveClass('markdown-body')
   expect(alert).not.toHaveTextContent(/secret|HTTP|stack|\/api/)
   expect(screen.getByRole('button', { name: 'Continue interactive' })).toBeEnabled()
   expect(continueInteractive).toHaveBeenCalledWith(bot, 'run', expect.any(String))

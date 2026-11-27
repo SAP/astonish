@@ -71,7 +71,19 @@ func projectBotQuestionTranscript(e *session.Event, approvals []store.BotApprova
 		if e.Author == "model" && e.InvocationID == "" && len(e.Content.Parts) == 1 {
 			if p := e.Content.Parts[0]; p != nil {
 				if q := tryParseChatQuestionMessage(p.Text); q != nil && q.QuestionID == a.Interaction.QuestionID {
-					hide = true
+					// Retain this row's exact position as a reference only. The saved
+					// approval, not this old marker, still owns answer authority.
+					payload, _ := json.Marshal(struct {
+						Kind     string    `json:"kind"`
+						ReviewID uuid.UUID `json:"review_id"`
+					}{"approval", a.ID})
+					projected := *e
+					projected.Content = nil
+					projected.Author = "bot_runtime"
+					projected.Actions = session.EventActions{StateDelta: map[string]any{
+						"bot_runtime_event": bot.RuntimeEvent{Type: "bot_review", RunID: a.RunID, Payload: payload},
+					}}
+					return &projected
 				}
 			}
 		}

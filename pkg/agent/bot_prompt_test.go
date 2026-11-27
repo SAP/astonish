@@ -18,6 +18,95 @@ import (
 	"google.golang.org/genai"
 )
 
+// Prompt contracts prove guidance delivery, not live-model research quality.
+func TestBotPromptResearchEvidenceRoles(t *testing.T) {
+	for _, role := range []string{"employee-interactive", "employee-background", "worker"} {
+		t.Run(role, func(t *testing.T) {
+			id, runID := uuid.New(), uuid.New()
+			req := bot.RunRequest{Bot: store.Bot{ID: id, Name: "Analyst"}, Run: store.BotRun{ID: runID}, Version: store.BotVersion{Version: 1}, Interactive: role == "employee-interactive"}
+			req.Work = store.NewBotAgentWorkState(store.BotWorkContract{BotID: id, RunID: runID, Version: 1, Instructions: "Provide a detailed current news briefing"})
+			po := NewBotPromptOverrides(nil, req)
+			if role == "worker" {
+				po = NewBotWorkerPromptOverrides(req)
+			}
+			b := &SystemPromptBuilder{}
+			if !b.applyBotPrompt(po) {
+				t.Fatal("missing Bot prompt")
+			}
+			ctx := bot.WithBotWorkServices(context.Background(), botPromptWorkReader{read: func(context.Context, bot.BotWorkReadRequest) (*bot.BotWorkReadResult, error) {
+				return &bot.BotWorkReadResult{Work: store.BuildBotWorkProjection(req.Work)}, nil
+			}})
+			for mode, text := range map[string]string{"initial": b.Build(), "refreshed": b.BuildBotPrompt(ctx, po)} {
+				t.Run(mode, func(t *testing.T) {
+					if strings.Count(text, botResearchEvidenceGuidance) != 1 {
+						t.Error("effective prompt must include the shared research evidence rule exactly once")
+					}
+					for state, wants := range map[string][]string{
+						"ordinary":      {"dated, substantive answer from the configured Perplexity search provider with real source links", "Do not require blanket source audits, raw extracts or quotations, or publication metadata for every item", "The owner's requested depth and coverage govern", "A blocked article alone is not a reason to repeat query or URL variants", "Reuse retained evidence", "Default to ordinary research", "Dated sources and links, official hours, numbers or a calendar lookup do not alone request primary-page inspection", "stop researching and synthesize", "Employee: pass the owner's actual depth", "Worker: preserve the original owner's standard", "Assistant-added demands are not owner requirements", "These rules govern generic instructions to inspect sources or verify delegated output"},
+						"audit":         {"explicitly requests an audit, primary sources or an exact quotation, or explicit verification", "Inspect the specific relevant claims and conditions, not unrelated items", "Do not invent dates, assume every query is current", "For explicit quotations, use exact actual returned primary-source passages as evidence", "Do not reconstruct or hypothesize longer text from prior knowledge", "Expand inspection only for actual truncation, omission or conflict"},
+						"contradiction": {"missing explicitly requested detail, a material contradiction in actual returned evidence", "qualify or omit disputed claims"},
+						"side-effect":   {"Trust the provider for information sourcing, not tool execution outcomes", "Sends, writes, schedules and other effects still require current authority and actual committed execution evidence"},
+					} {
+						for _, want := range wants {
+							if !strings.Contains(text, want) {
+								t.Errorf("%s: missing %q", state, want)
+							}
+						}
+					}
+					if role != "worker" {
+						for _, want := range []string{"Pass the chosen depth and evidence stopping condition to the private worker", "Accept its substantive sourced result under the same standard", "do not demand raw extracts afterward without a concrete cause"} {
+							if !strings.Contains(text, want) {
+								t.Errorf("missing Employee handoff guidance %q", want)
+							}
+						}
+					}
+				})
+			}
+			if buildTurnContextContent(po, "", "") != nil {
+				t.Fatal("research guidance leaked into user turn")
+			}
+		})
+	}
+}
+
+func TestBotPromptResearchEvidenceExclusions(t *testing.T) {
+	for _, b := range []*SystemPromptBuilder{{}, {CodeMode: true}} {
+		before := b.Build()
+		if b.applyBotPrompt(nil) || b.Build() != before {
+			t.Fatal("ordinary Chat or Code changed")
+		}
+	}
+	code := &SystemPromptBuilder{CodeMode: true}
+	before := code.Build()
+	if code.applyBotPrompt(NewBotWorkerPromptOverrides(bot.RunRequest{})) || code.Build() != before {
+		t.Fatal("Code accepted worker research guidance")
+	}
+	po := NewBotPromptOverrides(nil, bot.RunRequest{})
+	po.Bot.questionOnly = true
+	for _, worker := range []bool{false, true} {
+		po.Bot.worker = worker
+		b := &SystemPromptBuilder{}
+		b.applyBotPrompt(po)
+		text := b.Build()
+		if !strings.Contains(text, "Do not research, inspect resources") || strings.Contains(text, "configured Perplexity search provider") {
+			t.Fatal("question-only stage acquired research work")
+		}
+	}
+}
+
+func TestBotPromptEmployeeOrchestration(t *testing.T) {
+	req := bot.RunRequest{Bot: store.Bot{Name: "Analyst"}, Version: store.DefaultBotVersion()}
+	b := &SystemPromptBuilder{}
+	if !b.applyBotPrompt(NewBotPromptOverrides(nil, req)) || !strings.Contains(b.SchedulerHints, "exact worker_id") || !strings.Contains(b.SchedulerHints, "only author") {
+		t.Fatal("missing Employee direction")
+	}
+	worker := &SystemPromptBuilder{}
+	worker.applyBotPrompt(NewBotWorkerPromptOverrides(req))
+	if !strings.Contains(worker.SchedulerHints, "Never address the owner") || strings.Contains(worker.SchedulerHints, "only author") {
+		t.Fatal("worker acquired Employee role")
+	}
+}
+
 // Embedding the remaining interface deliberately makes any mutation/check call
 // panic: prompt rehydration is a read, not another execution or model step.
 type botPromptWorkReader struct {

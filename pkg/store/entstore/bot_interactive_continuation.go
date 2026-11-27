@@ -2,6 +2,7 @@ package entstore
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	prun "github.com/SAP/astonish/ent/personal/botrun"
@@ -57,6 +58,36 @@ func (r *botRepository) interactiveAnswerAuthority(ctx context.Context, run stor
 	}
 	return nil
 }
+func (r *botRepository) authorizeQuestionContinuation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun) error {
+	if saved.Run.MandateRef == nil || !verifiedMandateOwner(ctx, rec.Bot.OwnerID.String(), r.clock()) {
+		return store.ErrBotForbidden
+	}
+	policy, ok := store.BotMandateAdmissionFromContext(ctx)
+	if !ok {
+		return store.ErrBotForbidden
+	}
+	ref := *saved.Run.MandateRef
+	pinned, err := readMandate(ctx, tx, ref)
+	if err != nil {
+		return store.ErrBotForbidden
+	}
+	// Re-read source, revocation, membership and current ceilings inside the
+	// answer transaction. The answer never changes the mandate or usage ledger.
+	runtime := &botMandateRuntime{repo: r, policy: policy}
+	m, _, err := runtime.verify(ctx, tx, ref, pinned.Mandate.Purpose)
+	if err != nil {
+		return store.ErrBotForbidden
+	}
+	for _, constraint := range m.Mandate.Constraints {
+		// Production grants bind chat to this Bot; older mandates used "chat".
+		// Neither another Bot UUID nor an arbitrary resource grants continuation.
+		if constraint.Action == execution.CapabilityChat && (slices.Contains(constraint.Resources, rec.Bot.ID.String()) || slices.Contains(constraint.Resources, "chat")) {
+			return nil
+		}
+	}
+	return store.ErrBotForbidden
+}
+
 func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotContinueInteractiveRequest) (*store.BotRun, error) {
 	if strings.TrimSpace(q.IdempotencyKey) == "" || len(q.IdempotencyKey) > 200 || (q.Kind != "" && q.Kind != store.BotContinuationProgress) || (q.Kind == "" && q.CheckpointRevision != 0) {
 		return nil, store.ErrBotInvalid

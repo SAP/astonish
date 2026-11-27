@@ -49,8 +49,18 @@ func (c *botApprovalCapture) takeNonexecution(id, name string) bool {
 func (c *botApprovalCapture) RequestApproval(ctx context.Context, id execution.BotRunIdentity, a execution.ActionDescriptor, digest string) (uuid.UUID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if (c.req.Run.TitleConfirmation != nil && c.req.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed) || c.req.Policy == nil || id != c.req.Policy.Identity() {
+	want := execution.BotRunIdentity{BotID: c.req.Bot.ID, RunID: c.req.Run.ID, Version: c.req.Run.Version, ActorID: c.req.Principal.Subject, OrgSlug: c.req.Principal.OrgSlug, TeamSlug: c.req.Principal.TeamSlug}
+	if (c.req.Run.TitleConfirmation != nil && c.req.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed) || id != want {
 		return uuid.Nil, store.ErrBotForbidden
+	}
+	if c.req.Policy != nil {
+		if id != c.req.Policy.Identity() {
+			return uuid.Nil, store.ErrBotForbidden
+		}
+	} else if !c.req.Run.IsInteractiveChat() || c.req.Mandate != nil || c.req.Authorization == nil {
+		return uuid.Nil, store.ErrBotForbidden
+	} else if err := c.req.Authorization.AuthorizeTool(ctx, a.Tool); err != nil {
+		return uuid.Nil, err
 	}
 	if c.approval != nil {
 		c.conflict = true
@@ -375,13 +385,15 @@ func (a *BotChatRuntimeAdapter) resume(ctx context.Context, req bot.RunRequest, 
 				if err != nil || approval == nil || !checkpoint.Matches(*approval) || approval.ID != prepared.ApprovalID {
 					return botChatFailure(bot.ErrorBlocked, store.ErrBotConflict)
 				}
-				req.Policy, err = req.Policy.WithGrant(bot.ApprovalGrant(req.Policy.Identity(), *approval))
-				if err != nil {
-					return botChatFailure(bot.ErrorPermission, err)
+				if req.Policy != nil {
+					req.Policy, err = req.Policy.WithGrant(bot.ApprovalGrant(req.Policy.Identity(), *approval))
+					if err != nil {
+						return botChatFailure(bot.ErrorPermission, err)
+					}
+					ctx = execution.WithRunPolicy(ctx, req.Policy)
+				} else if !req.Run.IsInteractiveChat() || req.Authorization == nil || req.Mandate != nil {
+					return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
 				}
-				// The supervisor bound the pre-grant policy. Shared setup must
-				// validate this exact narrowed continuation policy, not that old pointer.
-				ctx = execution.WithRunPolicy(ctx, req.Policy)
 			}
 			ctx = context.WithValue(ctx, botPreparedPlanResumeKey{}, prepared)
 			ctx = context.WithValue(ctx, botResumeActionKey{}, prepared.Action)
@@ -401,18 +413,21 @@ func (a *BotChatRuntimeAdapter) resume(ctx context.Context, req bot.RunRequest, 
 	if checkpoint.Format == bot.InteractionCheckpointFormat {
 		return a.resumeInteraction(ctx, req, approval, sink)
 	}
-	if req.Run.IsInteractiveChat() {
-		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
-	}
+	// Interactive exact-action resumes are admitted only after runChat restores
+	// the server-owned worker ledger and matches this approval to one pending
+	// dispatch. No model or tool invocation occurs before that ownership gate.
 	// A production factory prepares its live guard after scope/isolation setup.
 	// BindBotChatPolicyRuntime attaches it before any model/tool invocation.
 	runtime := agent.BotPolicyRuntimeFromContext(ctx)
-	policy, err := req.Policy.WithGrant(bot.ApprovalGrant(req.Policy.Identity(), *approval))
-	if err != nil {
-		return botChatFailure(bot.ErrorPermission, err)
+	if req.Policy != nil {
+		req.Policy, err = req.Policy.WithGrant(bot.ApprovalGrant(req.Policy.Identity(), *approval))
+		if err != nil {
+			return botChatFailure(bot.ErrorPermission, err)
+		}
+		ctx = execution.WithRunPolicy(ctx, req.Policy)
+	} else if !req.Run.IsInteractiveChat() || req.Authorization == nil || req.Mandate != nil {
+		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
 	}
-	req.Policy = policy
-	ctx = execution.WithRunPolicy(ctx, policy)
 	guard := &botResumeGuard{live: runtime.Guard, store: s, req: req, approval: *approval}
 	runtime.Guard = guard
 	runtime.Approvals = nil

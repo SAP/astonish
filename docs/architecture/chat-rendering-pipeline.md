@@ -1,5 +1,22 @@
 # Chat Rendering Pipeline
 
+## Bot Employee-only speech boundary
+
+The server Home projection verifies trusted `EmployeeSpeech` and committed
+publication identity/text binding before removing private metadata. Only eligible
+Employee text/questions enter conversation; private Chat, raw tool receipts,
+fallback summaries and operation prose remain diagnostic. Eligibility is not a
+word filter: genuine Employee blockers remain visible regardless of wording or
+execution status. Cursor-only frames preserve ordered reconnect progress.
+
+Studio `projectBotOperation` retains heads for authority/busy state and exact
+blocked-authorization cards, never agent bubbles. Bot client send/SSE/reconnect
+errors and decision acknowledgements are neutral product alerts/status outside
+assistant rendering. Empty remains empty; Working does not impersonate a model.
+Verified artifacts are projected independently of speech and retain preview and
+download access. Ordinary Chat/Code rendering and the report gate are unchanged.
+See `bot-client-employee-feedback.md` for client-local status and recovery controls.
+
 ## Bot employee live/restore contract
 
 Bot employee completion remains a canonical committed Chat message, not a new

@@ -6,7 +6,104 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+func TestEmployeeSpeechProvenance(t *testing.T) {
+	w := NewBotAgentWorkState(attachmentWorkContract())
+	w.Phase, w.AgentWork.Disposition = BotWorkFinished, AgentWorkAnswered
+	w.Candidate = &BotWorkCandidate{Revision: 1, EventID: "final", Text: "I could not confirm this."}
+	w.Candidate.Digest = w.Candidate.ContentDigest()
+	run := BotRun{ID: w.Contract.RunID, BotID: w.Contract.BotID, Version: 1, SessionID: uuid.New(), UserEventID: "user", Status: RunSucceeded, StateSequence: 7, Report: BotReport{Summary: w.Candidate.Text, Work: BuildBotWorkProjection(w)}}
+	m, err := NewBotEmployeeAgentMessage(run.Status, run.Report, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Report.EmployeeMessage = &m
+	source, err := NewBotEmployeeSpeechProvenance(run, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, ok := EmployeeSpeech(run, source, nil); !ok || text != m.Text {
+		t.Fatal("validated historical agent rejected")
+	}
+	if _, ok := EmployeeSpeech(run, nil, nil); ok {
+		t.Fatal("public integrity minted speech")
+	}
+	// Exercise the public JSON boundary: private provenance intentionally has no public fields.
+	//nolint:staticcheck // SA9005: Public JSON must expose no fields from private provenance.
+	raw, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{}" {
+		t.Fatal("public JSON exposed private provenance")
+	}
+	var public BotEmployeeSpeechProvenance
+	//nolint:staticcheck // SA9005: Public JSON must not restore private provenance or mint speech.
+	if err := json.Unmarshal(raw, &public); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := EmployeeSpeech(run, &public, nil); ok {
+		t.Fatal("public JSON minted provenance")
+	}
+	private, _ := source.MarshalPrivateJSON()
+	var restored BotEmployeeSpeechProvenance
+	if err := restored.UnmarshalPrivateJSON(private, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := EmployeeSpeech(run, &restored, nil); !ok {
+		t.Fatal("private provenance roundtrip lost")
+	}
+	legacyModel := run
+	legacyModel.Status = RunFailed
+	legacyModel.Report = BotReport{Summary: "private failure"}
+	modelMessage := NewBotEmployeeFallback(legacyModel.Status, legacyModel.Report, BotEmployeeReasonForbidden)
+	modelMessage.Origin, modelMessage.Text = BotEmployeeMessageModel, m.Text
+	modelMessage.TextDigest = BotEmployeeTextDigest(modelMessage.Text)
+	modelMessage.ReviewedTextDigest, modelMessage.ReviewedSourceDigest = modelMessage.TextDigest, modelMessage.SourceDigest
+	legacyModel.Report.EmployeeMessage = &modelMessage
+	if _, err := NewBotEmployeeSpeechProvenance(legacyModel, nil); err == nil {
+		t.Fatal("model public hashes minted provenance")
+	}
+	modelMessage = SealBotEmployeeModelReview(modelMessage)
+	modelSource, err := NewBotEmployeeSpeechProvenance(legacyModel, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, ok := EmployeeSpeech(legacyModel, modelSource, nil); !ok || text != m.Text {
+		t.Fatal("trusted model speech rejected")
+	}
+	changed := run
+	changed.ID = uuid.New()
+	if _, ok := EmployeeSpeech(changed, source, nil); ok {
+		t.Fatal("source run substitution accepted")
+	}
+	changed = run
+	changed.Report.Summary += "tampered"
+	if _, ok := EmployeeSpeech(changed, source, nil); ok {
+		t.Fatal("source integrity ignored")
+	}
+	for _, origin := range []BotEmployeeMessageOrigin{BotEmployeeMessageFallback, BotEmployeeMessageOperation, "worker", "unknown"} {
+		copy := run
+		message := m
+		message.Origin = origin
+		copy.Report.EmployeeMessage = &message
+		if _, ok := EmployeeSpeech(copy, source, nil); ok {
+			t.Fatalf("%s promoted identical prose", origin)
+		}
+	}
+	p := &BotEmployeePresentation{SchemaVersion: BotEmployeePresentationVersion, State: BotEmployeePresentationCompleted, BotID: run.BotID, RunID: run.ID, BotVersion: run.Version, OwnerID: uuid.New(), OrgSlug: "org", TeamSlug: "team", HomeSessionID: uuid.New(), SourceSessionID: run.SessionID, UserEventID: run.UserEventID, ReportSequence: run.StateSequence, ReportDigest: run.Report.EmployeeMessageSourceDigest(run.Status), EffectiveLimits: BudgetSpec{MaxRuntimeSeconds: 60}, Deadline: time.Now().Add(time.Minute), AuthorityExpiresAt: time.Now().Add(time.Minute), Provider: "test", Model: "test", ClaimToken: "claim", DispatchToken: "dispatch", FinalText: m.Text, FinalTextDigest: BotEmployeeTextDigest(m.Text)}
+	if text, ok := EmployeeSpeech(run, nil, p); !ok || text != m.Text {
+		t.Fatal("completed Employee rejected")
+	}
+	p.FinalText += "tampered"
+	if _, ok := EmployeeSpeech(run, nil, p); ok {
+		t.Fatal("tampered Employee final text accepted")
+	}
+}
 
 func TestBotAgentWorkEmployeeBinding(t *testing.T) {
 	for _, disposition := range []AgentWorkDisposition{AgentWorkAnswered, AgentWorkComplete, AgentWorkPartial, AgentWorkBlocked} {

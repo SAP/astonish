@@ -2,9 +2,68 @@
 
 The schedule-control runtime is a trusted composition capability, separate from generic operation persistence and manual control-proposal review. Construct it with `entstore.NewBotAuthorizedOperationRuntime`, the current mandate policy resolver, an issuer-policy source authorizer, and candidate readiness checker. Nil callbacks fail closed.
 
+## Synchronous Employee coordinator
+
+Daemon source commits use a server-only context marker and persist private
+`EmployeeScheduleCoordinator` ownership only for captured schedule operations in
+Home-interactive terminal runs. `CoordinateEmployeeSchedules` applies the exact
+source-linked operations directly after supervisor return, then independently reads
+the committed operation and scheduler job. Enabled requests require both `Enabled`
+and `NextRun`. Applied replays retain their original revision. Cancelled, interrupted
+or failed sources do not activate their capture. Definitive typed denials become
+cancelled operation receipts; ambiguous/busy records are not blindly reapplied by
+pending polling. The legacy pending drain skips marked schedule sources entirely.
+Only marked application suppresses the separate runtime receipt publication.
+
+The daemon then prepares and claims the original private presentation envelope and
+uses `NewBotEmployeePresentationFactory` with the stored provider/model and original
+accounting ledger. It completes presentation before reconciling publication; no fresh tool
+lease or execution allowance is issued. Readiness failures carry a typed unsupported
+category and retain their private underlying error for trusted diagnostics; they
+are not converted to a background readiness retry. `TestEmployeeSynchronousScheduleHTTPAcceptance`
+uses real loopback admission and the production shared Employee/private Chat runtime,
+with native scheduling and proposal routes in both scopes. Its final model callback
+requires terminal lease release, the exact applied operation, independently matching
+enabled job/NextRun, and no tools before it generates digest-bound JSON. The fixture
+also requires the production `evidence_bound_v1` Work contract and zero
+`BOT_WORK_PENDING_REVIEW_V1` model assessments for fresh validated private captures.
+The typed tool arguments are the turn model's schedule selection; enqueue validates
+and persists the exact immutable payload. Private schedule completion mechanically
+binds the settled runtime capture to its candidate under the original lease/CAS,
+recording enqueue completion separately from still-unverified application. It does
+not make another semantic model judgment against older history or impose a new
+execution allowance. Only settled, runtime-bound enqueue-only captures qualify;
+unknown or uncertain effects and mixed changed/artifact work retain ordinary
+fail-closed content review. A later private worker policy denial with a bound
+pre-dispatch nonexecution receipt does not invalidate a previously captured
+schedule. Fully observed private finals retain that capture for mechanical
+completion; missing responses, mixed native errors, foreign receipts and uncertain
+effects still fail closed. This does not grant
+`get_bot` permission or claim that enqueue has applied the schedule. The coordinator still
+applies and independently verifies only after source commit; no pending capture is
+called an applied schedule. The focused HTTP gate passes with controlled models and
+isolated temporary SQL stores; it is not a live-provider or deployed-daemon proof.
+Store coordination tests cover personal/team success, denial, duplicate replay and
+exclusion from later activation. The focused HTTP gate also covers readiness,
+cancellation, restart and original-limit scenarios.
+
+Final presentation separates `operations` (terminal outcomes) from
+`preapplication_context` (the older source report, private workers and history).
+The Employee must use matching verified receipts for the current result, not
+repeat an earlier pending acknowledgment. Definitive failed/blocked/cancelled
+operations are reported without claiming activation; source sequence/time/digest
+remain immutable even when presentation is unavailable. Tools-disabled failure
+communication retains original expiry, revocation and cumulative-accounting checks;
+production accounting does not enforce historic token/tool/runtime quotas.
+When it cannot run, neutral terminal state remains visible without assistant fallback.
+The opt-in `TestBotEmployeeRealScheduleHTTPAcceptance` uses a live provider and
+production HTTP/worker/coordinator, independent enabled-job/NextRun readback,
+pre-attached live SSE and stable history/reconcile publication checks. Its Home
+transport is controlled, not physical Docker/Kubernetes execution.
+
 ## Authority and capture
 
-`EnqueueAuthorizedOperation` accepts a live worker lease, its source task mandate pin, stable key and a typed schedule create/edit/pause/remove payload. It verifies the lease before exposing canonical source text to the trusted authorizer, then verifies again in its scoped transaction. The source must be an authenticated-owner manual run with an actual user event and matching persisted digest. The issuer authorizer receives canonical plaintext and protected direct-owner-message provenance, not model-provided consent claims. Ordinary natural-language messages need no `schedule_command` envelope. The existing turn model selects a candidate contextually; no regex or second model claims to prove semantic intent. The issuer checks exact own-control tool resources under trusted mandate configuration, while storage enforces bot scope, live source lease, immutable payload and finite quotas. Title-start provenance is distinct and cannot authorize recurrence; missing legacy provenance also fails closed. HTTP does not accept a schedule-grant DTO.
+`EnqueueAuthorizedOperation` accepts a live worker lease, its source task mandate pin, stable key and a typed schedule create/edit/pause/remove payload. It verifies the lease before exposing canonical source text to the trusted authorizer, then verifies again in its scoped transaction. The source must be an authenticated-owner manual run with an actual user event and matching persisted digest. The issuer authorizer receives canonical plaintext and protected direct-owner-message provenance, not model-provided consent claims. Ordinary natural-language messages need no `schedule_command` envelope. The existing turn model selects a candidate contextually; no regex or second model claims to prove semantic intent. The issuer checks exact own-control tool resources under trusted mandate configuration, while storage enforces bot scope, live source lease, immutable payload and concurrency/authority boundaries. Title-start provenance is distinct and cannot authorize recurrence; missing legacy provenance also fails closed. HTTP does not accept a schedule-grant DTO.
 
 A private immutable `authorized-schedule-grant` record binds source run/user/event/digest, payload digest, schedule-control purpose and captured root revision/version. The original task mandate remains task-purpose. This bounded issuer transition does not issue future scheduled execution pins or expand task permissions. Current membership, revocation, expiry and operator limits are checked again on apply.
 
@@ -14,7 +73,7 @@ Pending operations are immutable outbox revisions with deterministic operation/t
 
 The effective Bot system prompt, Bot-specific job-scheduling guidance and `schedule_job` description agree: an explicit owner request for recurring work within the current bounded mandate proceeds to the scoped schedule adapter. Use the task and cadence already supplied in conversation. For example, when the preceding task is known, “send this here every minute” needs no second “yes, every minute,” mode questionnaire or generic proposal review merely because output may repeat or be frequent. Home delivery needs no external recipient.
 
-This is model guidance, not an authorization shortcut. Runtime minimum interval, finite budgets, source provenance and exact-operation checks remain authoritative. Clarify genuinely ambiguous tasks/cadences or unknown destinations; honor cost/policy limits and `RequireAuthorization`. External effects still require their own authority; legacy non-mandated review and control-only restrictions remain. A queued operation is not an applied schedule. The prohibition on parsing prose as consent concerns bypassing typed authorization or synthesizing an approval, not refusing a clear owner request to call the guarded adapter.
+This is model guidance, not an authorization shortcut. Runtime minimum interval, authority expiry, source provenance and exact-operation checks remain authoritative. Historic execution quotas (including public-research call caps) are accounting metadata, not stopping limits; a thirteenth permitted search must not fail because twelve calls were retained. Clarify genuinely ambiguous tasks/cadences or unknown destinations; honor cost/policy limits and `RequireAuthorization`. External effects still require their own authority; legacy non-mandated review and control-only restrictions remain. A queued operation is not an applied schedule. The prohibition on parsing prose as consent concerns bypassing typed authorization or synthesizing an approval, not refusing a clear owner request to call the guarded adapter.
 
 `TestBotRoutineScheduleConsentPrompt` covers interactive Chat and Home turns plus control-only/background exclusions; `TestSchedulingGuidanceRoutineConsent` covers the guidance override. `TestBotFactoryRoutineScheduleConsent` checks the effective provider system instruction and scoped tool description while preserving the natural user turn. These prompt contract tests do not prove a live model's choice. The unchanged controlled `TestBotAuthorizedScheduleHTTPAcceptance` separately exercises natural-language HTTP admission, pending capture, worker application and zero approvals in both scopes.
 
@@ -28,13 +87,13 @@ This tool does not change task instructions. A preference-only memory request sh
 
 ## Verified enqueue is not applied scheduling
 
-`botScheduleTools.enqueue` independently calls `ReadAuthorizedOperation` after enqueue. `verifyScheduleCapture` checks the returned operation against the durable pending record, requested payload, mandate, idempotency key and source provenance (including the payload digest). Missing, unreadable or mismatched records produce no trusted outcome. A pending-shaped JSON result or operation ID alone is not evidence.
+`botScheduleTools.enqueue` and mandated `propose_bot_control` schedule-create/edit/remove calls share `recordScheduleCapture`, which independently calls `ReadAuthorizedOperation` after enqueue. Both routes use the same authorized-operation factory, actual request mandate pin, source lease and exact call identity; the control payload's supplied revision and schedule bindings are preserved, not inferred. An eligible direct owner request therefore captures an authorized pending operation rather than a manual-review proposal or another confirmation. `schedule_pause` on the proposal route remains rejected with priority-pause/native-update guidance, and targeted resume remains separate. Non-mandated proposals and true source/policy denials are unchanged. `verifyScheduleCapture` checks the returned operation against the durable pending record, requested payload, mandate, idempotency key and source provenance (including the payload digest). Missing, unreadable or mismatched records produce no trusted outcome. A pending-shaped JSON result or operation ID alone is not evidence.
 
 Only successful read-back records a server-only `bot.ScheduleCapture` in the current call's `ToolOutcomes` ledger. The ledger snapshots the capture and consumes it once; ADK's serialized result metadata cannot create an attestation. The runner checks the run/owner identity, operation ID and pending response status again and rejects receipts mixed with changed-schedule, artifact or next-run claims. This works for direct scheduling calls and `execute_tool` without tool-name success exceptions.
 
 The source report records an unchanged observation with a `bot-operation://<bot>/<operation>` source and a server acknowledgment that the operation is durably queued and pending. That acknowledgment takes precedence over a model's premature “Done” summary. It does not set `Changed` or `NextRunAt`, hide unrelated unverified effects, or assert that the scheduler has changed. The later worker-committed receipt remains the authoritative application result in Home.
 
-Regression coverage: `TestScheduleCaptureLedgerSnapshot`, `TestBotScheduleToolsProviderDurablePending`, and `TestBotScheduleCaptureOutcome` verify the ledger snapshot, independent read-back and runner rejection boundaries. `TestBotAuthorizedScheduleHTTPAcceptance` also checks pending-only source success despite premature model “Done”, and that the linked applied receipt follows source termination.
+Regression coverage: `TestMandatedScheduleControlUsesAuthorizedCapture` exercises create/edit/remove through the production durable issuer in personal/team fixtures, checks canonical source authorization, exact saved payload/revision, source-busy application, denied requests, and mismatched independent read-back without a manual proposal. `TestBotProposalMandatedScheduleSchema` preserves revision, closed-field and payload-union boundaries. `TestScheduleCaptureLedgerSnapshot`, `TestBotScheduleToolsProviderDurablePending`, and `TestBotScheduleCaptureOutcome` verify the ledger snapshot, independent read-back and runner rejection boundaries. `TestBotAuthorizedScheduleHTTPAcceptance` also checks pending-only source success despite premature model “Done”, and that the linked applied receipt follows source termination.
 
 ## Scoped schedule discovery
 

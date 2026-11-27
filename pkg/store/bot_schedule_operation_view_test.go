@@ -29,28 +29,49 @@ func TestBotScheduleOperationPresentation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := BotOperationPresentationConversation
-				if status == BotOperationPending || status == BotOperationApplying {
-					want = BotOperationPresentationInternal
+				if view.Presentation != BotOperationPresentationInternal {
+					t.Fatalf("operation became conversation: %+v", view)
 				}
-				if view.Presentation != want {
-					t.Fatalf("presentation %q want %q", view.Presentation, want)
-				}
+				assertBotOperationNeutralSummary(t, view)
 				if status == BotOperationApplied {
-					expected := map[BotControlOperation]string{BotControlScheduleCreate: "I've created the schedule. It runs every minute.", BotControlScheduleEdit: "I've updated the schedule. It runs every minute.", BotControlSchedulePause: "I've paused the schedule.", BotControlScheduleRemove: "I've removed the schedule."}[operation]
-					if !strings.HasPrefix(view.Summary, expected) {
-						t.Fatalf("summary: %s", view.Summary)
+					s := view.VerifiedSchedule
+					if s == nil || s.TriggerID != op.Receipt.Schedule.TriggerID || s.ScheduleID != op.Receipt.Schedule.ScheduleID || s.Version != 2 || s.Enabled != op.Receipt.Schedule.Enabled || s.Removed != op.Receipt.Schedule.Removed {
+						t.Fatalf("verified schedule lost: %+v", s)
+					}
+					if s.Enabled && (s.NextRun == nil || !s.NextRun.Equal(next)) {
+						t.Fatalf("verified next run lost: %+v", s)
+					}
+					for _, change := range []func(*BotOperationScheduleReceipt){
+						func(s *BotOperationScheduleReceipt) { s.SourceRunID = uuid.New() },
+						func(s *BotOperationScheduleReceipt) { s.UserEventID = uuid.NewString() },
+						func(s *BotOperationScheduleReceipt) { s.SourceDigest = "mismatched-digest" },
+					} {
+						invalid := op
+						receipt := *op.Receipt
+						schedule := *op.Receipt.Schedule
+						change(&schedule)
+						receipt.Schedule = &schedule
+						invalid.Receipt = &receipt
+						if _, err := ProjectBotOperation(b, invalid, 11); err == nil {
+							t.Fatal("mismatched source receipt accepted")
+						}
 					}
 				}
 				raw, _ := json.Marshal(view)
 				if strings.Contains(string(raw), "private") {
 					t.Fatalf("private fields leaked: %s", raw)
 				}
-				first, _ := NewBotOperationEvent(view, time.Now())
+				first, err := NewBotOperationEvent(view, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
 				old := view
 				old.Presentation = ""
-				prior, _ := NewBotOperationEvent(old, time.Now())
-				if first.ID != prior.ID || first.Content != nil {
+				prior, err := NewBotOperationEvent(old, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if first.ID != prior.ID || first.Content != nil || first.Author != "bot_runtime" {
 					t.Fatal("changed canonical event identity or duplicated prose content")
 				}
 				if status == BotOperationBlocked {
@@ -65,15 +86,41 @@ func TestBotScheduleOperationPresentation(t *testing.T) {
 	}
 }
 
+func assertBotOperationNeutralSummary(t *testing.T, view BotOperationView) {
+	t.Helper()
+	want := map[BotOperationStatus]string{
+		BotOperationPending:   "Change queued.",
+		BotOperationApplying:  "Applying change.",
+		BotOperationApplied:   "Change verified and applied.",
+		BotOperationFailed:    "Change could not be completed.",
+		BotOperationBlocked:   "Change needs attention.",
+		BotOperationCancelled: "Change cancelled.",
+	}[view.Status]
+	if want == "" || view.Summary != want {
+		t.Fatalf("expected neutral product summary %q, got %q", want, view.Summary)
+	}
+}
+
 func TestBotOperationPresentationValidation(t *testing.T) {
 	v := BotOperationView{SchemaVersion: 1, BotID: uuid.New(), HomeSessionID: uuid.New(), OperationID: uuid.New(), Revision: 1, StateSequence: 1, Status: BotOperationPending, Decision: BotOperationExecute, Operation: BotControlScheduleCreate, Presentation: BotOperationPresentationInternal}
 	if err := v.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	for _, status := range []BotOperationStatus{BotOperationApplied, BotOperationFailed, BotOperationBlocked, BotOperationCancelled} {
+		t.Run("valid_terminal_internal/"+string(status), func(t *testing.T) {
+			terminal := v
+			terminal.Status = status
+			if err := terminal.Validate(); err != nil {
+				t.Fatalf("neutral terminal state rejected: %+v %v", terminal, err)
+			}
+		})
+	}
 	for _, change := range []func(*BotOperationView){
 		func(v *BotOperationView) { v.Presentation = "unknown" },
 		func(v *BotOperationView) { v.Operation = BotControlResumeTasks },
-		func(v *BotOperationView) { v.Status = BotOperationFailed },
+		func(v *BotOperationView) { v.Operation = "unknown" },
+		func(v *BotOperationView) { v.Status = "unknown" },
+		func(v *BotOperationView) { v.Decision = "unknown" },
 		func(v *BotOperationView) { v.Decision = BotOperationRequireAuthorization },
 		func(v *BotOperationView) { v.Presentation = BotOperationPresentationConversation },
 		func(v *BotOperationView) {

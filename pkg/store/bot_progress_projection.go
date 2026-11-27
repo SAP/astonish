@@ -3,7 +3,7 @@ package store
 // BuildBotRunState is the canonical live and restored public projection. Sequence
 // and committed time belong to this run, never to the latest unrelated activity.
 func BuildBotRunState(b Bot, run BotRun) BotRunState {
-	return BotRunState{Progress: run.Progress.Clone(), Work: run.Work, SchemaVersion: BotRunStateSchemaVersion, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: b.HomeSessionID, Presentation: run.Presentation, Status: run.Status, StateSequence: run.StateSequence, CommittedAt: run.StateCommittedAt, Reason: run.ContinuationReason, UserEventID: run.UserEventID}
+	return BotRunState{TerminalReason: run.TerminalReason, Progress: run.Progress.Clone(), Work: run.Work, SchemaVersion: BotRunStateSchemaVersion, BotID: b.ID, RunID: run.ID, SessionID: run.SessionID, HomeSessionID: b.HomeSessionID, Presentation: run.Presentation, Status: run.Status, StateSequence: run.StateSequence, CommittedAt: run.StateCommittedAt, Reason: run.ContinuationReason, UserEventID: run.UserEventID}
 }
 
 // BuildBotProgressProjection copies only validated employee-facing facts. Private

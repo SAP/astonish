@@ -103,8 +103,8 @@ func TestBotProgressQuotaSuspension(t *testing.T) {
 			if after.DailyRuns != before.DailyRuns || after.Tokens != before.Tokens || after.Active[first.Run.ID.String()].Tokens != 7 {
 				t.Fatalf("reacquire reset usage: %+v", after)
 			}
-			if err = quota.ConsumeBotMandateQuota(ctx, ref, first.Run.ID, 0, 4, 0); err == nil {
-				t.Fatal("resumed per-run limit reset")
+			if err = quota.ConsumeBotMandateQuota(ctx, ref, first.Run.ID, 0, 4, 0); err != nil {
+				t.Fatal("historical resumed token ceiling enforced")
 			}
 			if err = pq.SuspendBotMandateRun(worker, req); err != nil {
 				t.Fatal(err)

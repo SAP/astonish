@@ -11,6 +11,62 @@ import (
 	"time"
 )
 
+type presentationBudgetStoreFake struct {
+	store.BotEmployeePresentationStore
+	p        store.BotEmployeePresentation
+	reserved store.BotEmployeePresentationModelReservation
+	settled  store.BotEmployeePresentationModelSettlement
+	deny     bool
+}
+
+func (f *presentationBudgetStoreFake) ReadEmployeePresentation(context.Context, store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return &f.p, nil
+}
+func (f *presentationBudgetStoreFake) ReserveEmployeePresentationModel(_ context.Context, q store.BotEmployeePresentationModelReservation) (*store.BotEmployeePresentation, error) {
+	f.reserved = q
+	if f.deny {
+		return nil, ErrBudgetExceeded
+	}
+	return &f.p, nil
+}
+func (f *presentationBudgetStoreFake) SettleEmployeePresentationModel(ctx context.Context, q store.BotEmployeePresentationModelSettlement) (*store.BotEmployeePresentation, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	f.settled = q
+	return &f.p, nil
+}
+func TestPresentationBudgetOriginalClaimAccounting(t *testing.T) {
+	q := store.BotEmployeePresentationRequest{BotID: uuid.New(), RunID: uuid.New(), ClaimToken: "claim"}
+	f := &presentationBudgetStoreFake{p: store.BotEmployeePresentation{BotID: q.BotID, RunID: q.RunID, ClaimToken: q.ClaimToken, State: store.BotEmployeePresentationClaimed, Deadline: time.Now().Add(time.Minute), AuthorityExpiresAt: time.Now().Add(time.Minute)}}
+	b := &PresentationBudget{Store: f, Request: q, DispatchToken: "original-dispatch"}
+	if !errors.Is(b.ReserveTool(context.Background(), "anything"), store.ErrBotForbidden) {
+		t.Fatal("tools allowed")
+	}
+	cost := int64(11)
+	r, err := b.ReserveModel(context.Background(), execution.BudgetReservation{InputTokens: 3, OutputTokens: 7, CostMicros: &cost})
+	if err != nil || r.ID == uuid.Nil || f.reserved.RunID != q.RunID || f.reserved.DispatchToken != b.DispatchToken || f.reserved.Reserved.InputTokens != 3 {
+		t.Fatalf("reservation=%+v err=%v", f.reserved, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.SettleModel(ctx, r.ID, execution.BudgetUsage{InputTokens: 2, OutputTokens: 4, CostMicros: &cost}); err != nil || f.settled.TurnID != r.ID.String() || f.settled.Usage.OutputTokens != 4 {
+		t.Fatalf("settlement=%+v err=%v", f.settled, err)
+	}
+	f.deny = true
+	if _, err := b.ReserveModel(context.Background(), execution.BudgetReservation{}); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatal("store denial bypassed")
+	}
+	f.p.Deadline = time.Now().Add(-time.Second)
+	if err := b.Check(context.Background()); err != nil {
+		t.Fatal("historical runtime cap blocked presentation", err)
+	}
+	f.p.AuthorityExpiresAt = time.Now().Add(-time.Second)
+	if b.Check(context.Background()) == nil {
+		t.Fatal("expired claim allowed")
+	}
+}
+
 type mandateRuntimeFake struct {
 	store.BotMandateRuntime
 	m                              execution.BotMandate

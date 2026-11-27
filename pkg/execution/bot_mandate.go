@@ -179,15 +179,11 @@ func (p *BotRuntimePolicy) ValidateWithin(ceiling *BotRuntimePolicy) error {
 			return errors.New("runtime policy exceeds model timeout ceiling")
 		}
 	}
-	if ceiling.MaxActiveSeconds != nil && (p.MaxActiveSeconds == nil || *p.MaxActiveSeconds > *ceiling.MaxActiveSeconds) {
-		return errors.New("runtime policy exceeds active duration ceiling")
-	}
+	// MaxActiveSeconds is retained execution metadata, not permission authority.
 	return nil
 }
 
-// ValidateWithinRuntimePolicy replaces ONLY the legacy duration comparison when
-// both sides explicitly opt into progress. All finite fields still validate;
-// cumulative and per-run resource limits retain their original comparisons.
+// ValidateWithinRuntimePolicy checks progress policy and retained admission authority.
 func (l BotMandateLimits) ValidateWithinRuntimePolicy(c BotMandateLimits, requested, allowed *BotRuntimePolicy) error {
 	if err := requested.ValidateWithin(allowed); err != nil {
 		return err
@@ -197,9 +193,6 @@ func (l BotMandateLimits) ValidateWithinRuntimePolicy(c BotMandateLimits, reques
 	}
 	if err := c.Validate(); err != nil {
 		return err
-	}
-	if requested.EffectiveMode() == BotRuntimeModeProgressV1 {
-		l.MaxRuntimeSeconds = c.MaxRuntimeSeconds
 	}
 	return l.ValidateWithin(c)
 }
@@ -240,7 +233,8 @@ type BotActionResourceConstraint struct {
 	Resources []string   `json:"resources"`
 }
 
-// All limits are finite; zero never means unlimited. Spend is integer micros.
+// Admission and spend limits remain authority. Runtime/token/tool fields are
+// deprecated nonnegative metadata retained for JSON/YAML compatibility.
 type BotMandateLimits struct {
 	MinScheduleIntervalSeconds int64 `json:"min_schedule_interval_seconds" yaml:"min_schedule_interval_seconds"`
 	MaxSchedules               int64 `json:"max_schedules" yaml:"max_schedules"`
@@ -257,16 +251,15 @@ type BotMandateLimits struct {
 }
 
 func (l BotMandateLimits) Validate() error {
-	for _, v := range []int64{l.MinScheduleIntervalSeconds, l.MaxSchedules, l.MaxDailyRuns, l.MaxConcurrentRuns, l.MaxRuntimeSeconds, l.MaxToolCalls, l.MaxTokens, l.MaxTotalToolCalls, l.MaxTotalTokens} {
+	for _, v := range []int64{l.MinScheduleIntervalSeconds, l.MaxSchedules, l.MaxDailyRuns, l.MaxConcurrentRuns} {
 		if v <= 0 {
 			return errors.New("mandate limits must be positive and finite")
 		}
 	}
-	if l.MaxSpendMicros < 0 {
-		return errors.New("negative spend limit")
-	}
-	if l.MaxToolCalls > l.MaxTotalToolCalls || l.MaxTokens > l.MaxTotalTokens {
-		return errors.New("per-run limit exceeds aggregate")
+	for _, v := range []int64{l.MaxSpendMicros, l.MaxRuntimeSeconds, l.MaxToolCalls, l.MaxTokens, l.MaxTotalToolCalls, l.MaxTotalTokens} {
+		if v < 0 {
+			return errors.New("negative mandate metadata or spend limit")
+		}
 	}
 	return nil
 }
@@ -277,8 +270,8 @@ func (l BotMandateLimits) ValidateWithin(c BotMandateLimits) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	a := []int64{l.MaxSchedules, l.MaxDailyRuns, l.MaxConcurrentRuns, l.MaxRuntimeSeconds, l.MaxToolCalls, l.MaxTokens, l.MaxTotalToolCalls, l.MaxTotalTokens, l.MaxSpendMicros}
-	b := []int64{c.MaxSchedules, c.MaxDailyRuns, c.MaxConcurrentRuns, c.MaxRuntimeSeconds, c.MaxToolCalls, c.MaxTokens, c.MaxTotalToolCalls, c.MaxTotalTokens, c.MaxSpendMicros}
+	a := []int64{l.MaxSchedules, l.MaxDailyRuns, l.MaxConcurrentRuns, l.MaxSpendMicros}
+	b := []int64{c.MaxSchedules, c.MaxDailyRuns, c.MaxConcurrentRuns, c.MaxSpendMicros}
 	for i := range a {
 		if a[i] > b[i] {
 			return errors.New("mandate exceeds current operator ceiling")

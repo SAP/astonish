@@ -166,6 +166,50 @@ func TestBotActivationConfiguredRuntime(t *testing.T) {
 			if executor.BotTrigger == nil || !w.schedulerReady.Load() {
 				t.Fatal("scheduler installation missing")
 			}
+			// Production scheduling leaves ModelOptions at its zero value. Exercise
+			// the real owner/repository/home/model readiness path, not a prewrapped
+			// budget model that would hide missing output normalization.
+			for _, tc := range []struct {
+				name    string
+				options provider.BudgetLLMOptions
+			}{
+				{name: "production-default-output"},
+				{name: "explicit-provider-native-output", options: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: false}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					original := w.config.ModelOptions
+					w.config.ModelOptions = tc.options
+					defer func() { w.config.ModelOptions = original }()
+					if err := w.activationReady(auth, *active, *version); err != nil {
+						t.Fatalf("configured activation readiness: %v", err)
+					}
+					candidate := *version
+					candidate.Version = active.Version + 1
+					if err := w.scheduleCandidateReady(auth, *active, candidate); err != nil {
+						t.Fatalf("configured schedule readiness: %v", err)
+					}
+					options := botModelBudgetOptions(llm, tc.options)
+					if options.MaxOutputTokens <= 0 {
+						t.Fatal("readiness output bound must remain finite and positive")
+					}
+					if tc.options.MaxOutputTokens > 0 && (options.MaxOutputTokens != tc.options.MaxOutputTokens || options.SupportsOutputLimit) {
+						t.Fatalf("explicit provider-native output changed: %+v", options)
+					}
+					// Historic execution caps must not reject readiness, even if
+					// they would be invalid for the compatibility budget constructor.
+					negative := int64(-1)
+					candidate.Budget.MaxRuntimeSeconds = 0
+					candidate.Budget.MaxTokens = &negative
+					candidate.Budget.MaxToolCalls = &negative
+					candidate.Budget.MaxModelCostMicros = &negative
+					if err := w.scheduleCandidateReady(auth, *active, candidate); err != nil {
+						t.Fatalf("historic execution caps rejected schedule readiness: %v", err)
+					}
+					if llm.calls != 0 {
+						t.Fatal("readiness invoked provider generation")
+					}
+				})
+			}
 			if err := w.activationReady(auth, *active, *version); err != nil {
 				t.Fatalf("configured scheduler: %v", err)
 			}

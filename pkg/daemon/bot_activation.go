@@ -92,11 +92,11 @@ func (w *BotWorker) versionReady(ctx context.Context, b store.Bot, v store.BotVe
 	if err != nil {
 		return fmt.Errorf("%w: policy: %v", store.ErrBotUnsupported, err)
 	}
-	budget, err := bot.NewRunBudget(v.Budget, time.Now())
+	budget, err := bot.NewRunAccounting(v.Budget, time.Now())
 	if err != nil {
 		return fmt.Errorf("%w: budget: %v", store.ErrBotUnsupported, err)
 	}
-	_, err = provider.NewBudgetLLM(resolved.LLM, budget, w.config.ModelOptions)
+	_, err = provider.NewBudgetLLM(resolved.LLM, budget, botModelBudgetOptions(resolved.LLM, w.config.ModelOptions))
 	if err != nil {
 		return fmt.Errorf("%w: model budget: %v", store.ErrBotUnsupported, err)
 	}

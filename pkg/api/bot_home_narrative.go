@@ -1,61 +1,92 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-
 	"github.com/SAP/astonish/pkg/bot"
+	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-// projectBotHomeNarrative is a read-only presentation boundary shared by live
-// Studio, replay and the terminal. Keep the row identity/cursor even when an old
-// Home row contains private telemetry. Run transcripts are never projected here.
+// projectBotHomeNarrative suppresses private prose before the generic metadata
+// allowlist can erase its origin. Identity survives as a cursor-only frame.
+// Publication text must have been verified by ProjectBot against its exact receipt.
 func projectBotHomeNarrative(e *session.Event, homeID, sessionID uuid.UUID) *session.Event {
+	return projectVerifiedBotHomeNarrative(e, homeID, sessionID, nil)
+}
+
+// ProjectHomeNarrative re-reads the immutable Home row through the scoped store;
+// copied binding JSON and booleans alone are never presentation authority.
+func (p *SessionEventProjector) ProjectHomeNarrative(ctx context.Context, e *session.Event) *session.Event {
+	var binding *store.BotEmployeeInterim
+	if e != nil && p.SessionID == p.HomeSessionID {
+		raw, _ := json.Marshal(e.Actions.StateDelta["bot_runtime_event"])
+		var wire bot.RuntimeEvent
+		if json.Unmarshal(raw, &wire) == nil && wire.Type == "text" {
+			if reader, ok := p.Repository.(store.BotEmployeeInterimReader); ok {
+				binding, _ = reader.ReadBotEmployeeInterim(ctx, p.BotID, wire.RunID, e.ID)
+				if binding != nil && binding.BotID != p.BotID {
+					binding = nil
+				}
+			}
+		}
+	}
+	return projectVerifiedBotHomeNarrative(e, p.HomeSessionID, p.SessionID, binding)
+}
+
+func projectVerifiedBotHomeNarrative(e *session.Event, homeID, sessionID uuid.UUID, binding *store.BotEmployeeInterim) *session.Event {
 	if e == nil || homeID != sessionID {
 		return e
 	}
 	projected := *e
 	if e.Author == "bot_runtime" {
+		if e.Content == nil && e.Actions.StateDelta[store.BotRunStateKey] != nil {
+			// Canonical state is neutral product metadata, never Employee prose.
+			projected.Actions = session.EventActions{StateDelta: map[string]any{store.BotRunStateKey: e.Actions.StateDelta[store.BotRunStateKey]}}
+			return &projected
+		}
 		raw, err := json.Marshal(e.Actions.StateDelta["bot_runtime_event"])
 		var wire bot.RuntimeEvent
 		if err == nil && json.Unmarshal(raw, &wire) == nil {
 			switch wire.Type {
 			case "text":
-				// Released narration is already a public speech segment, not speculative
-				// streaming text. Use the existing complete-content projection so clients
-				// show it immediately without needing a visible tool to finalize the bubble.
-				var text struct {
-					Text string `json:"text"`
+				// Only the fenced repository writer may mark released Employee interim
+				// narration. An unbound historical runtime row is diagnostic, not speech.
+				if binding != nil && binding.HomeSessionID == homeID && binding.EventID == e.ID && binding.RunID == wire.RunID && binding.SourceSessionID == wire.SessionID && binding.TurnID == wire.TurnID && binding.Sequence == wire.Sequence && binding.EnvelopeDigest == store.BotEmployeeInterimDigest(wire) {
+					var text struct {
+						Text string `json:"text"`
+					}
+					if json.Unmarshal(wire.Payload, &text) == nil && text.Text != "" && binding.TextDigest == store.BotEmployeeInterimDigest(text.Text) {
+						projected.Content = genai.NewContentFromText(text.Text, "model")
+						projected.Actions = session.EventActions{}
+						return &projected
+					}
 				}
-				if json.Unmarshal(wire.Payload, &text) == nil && text.Text != "" {
-					projected.Content = genai.NewContentFromText(text.Text, "model")
-					projected.Actions = session.EventActions{}
-					return &projected
-				}
-			case "tool_call", "tool_result", "subtask_progress":
-				// The shared presentation allowlist, not the execution mode, decides
-				// which activity is public. Preserve identity while stripping opaque
-				// checkpoint fields before both live and restored views.
-				return publicBotTranscript(e)
-			case "thinking":
-				projected.Content = nil
-				projected.Actions = session.EventActions{}
+			case "chat_question", "approval", "plan_approval", "bot_review", "artifact", "bot_state", "session_title":
 				return &projected
 			}
+			projected.Content = nil
+			projected.Actions = session.EventActions{}
+			return &projected
 		}
+	}
+	if _, ok := e.Actions.StateDelta[store.BotFilePublicationKey]; ok {
+		return &projected
 	}
 	if e.Content != nil {
 		content := *e.Content
 		content.Parts = nil
-		for _, p := range e.Content.Parts {
-			// Ordinary ADK activity follows the same sanitized public projection
-			// as runtime-envelope activity; Home is not a text-only transcript.
-			if p == nil || p.Thought {
+		for _, part := range e.Content.Parts {
+			if part == nil || part.Thought {
 				continue
 			}
-			content.Parts = append(content.Parts, p)
+			if e.Content.Role == "user" || e.Actions.StateDelta[store.BotPublicationKey] != nil {
+				if part.Text != "" {
+					content.Parts = append(content.Parts, &genai.Part{Text: part.Text})
+				}
+			}
 		}
 		projected.Content = &content
 	}

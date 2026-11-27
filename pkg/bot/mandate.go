@@ -152,4 +152,58 @@ func (b *MandateBudget) Release(ctx context.Context) error {
 	return b.releaseErr
 }
 
+// PresentationBudget has only a private terminal-source claim. It cannot reserve
+// tool capacity, reacquire source occupancy, or issue execution authorization.
+type PresentationBudget struct {
+	Store         store.BotEmployeePresentationStore
+	Request       store.BotEmployeePresentationRequest
+	DispatchToken string
+}
+
+func (b *PresentationBudget) Check(ctx context.Context) error {
+	if b == nil || b.Store == nil {
+		return store.ErrBotForbidden
+	}
+	request := b.Request
+	request.Now = time.Now()
+	p, err := b.Store.ReadEmployeePresentation(ctx, request)
+	if err != nil {
+		return err
+	}
+	if p == nil || p.BotID != b.Request.BotID || p.RunID != b.Request.RunID || p.ClaimToken != b.Request.ClaimToken || p.State != store.BotEmployeePresentationClaimed {
+		return store.ErrBotConflict
+	}
+	if !request.Now.Before(p.AuthorityExpiresAt) {
+		return store.ErrBotForbidden
+	}
+	return ctx.Err()
+}
+func (*PresentationBudget) ReserveTool(context.Context, string) error { return store.ErrBotForbidden }
+func (b *PresentationBudget) ReserveModel(ctx context.Context, r execution.BudgetReservation) (execution.BudgetReservation, error) {
+	if err := b.Check(ctx); err != nil {
+		return r, err
+	}
+	if r.ID == uuid.Nil {
+		r.ID = uuid.New()
+	}
+	if b.DispatchToken == "" {
+		return r, store.ErrBotForbidden
+	}
+	request := b.Request
+	request.Now = time.Now()
+	_, err := b.Store.ReserveEmployeePresentationModel(ctx, store.BotEmployeePresentationModelReservation{BotEmployeePresentationRequest: request, TurnID: r.ID.String(), DispatchToken: b.DispatchToken, Reserved: store.BotUsage{InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, CostMicros: r.CostMicros}})
+	return r, err
+}
+func (b *PresentationBudget) SettleModel(ctx context.Context, id uuid.UUID, u execution.BudgetUsage) error {
+	if b == nil || b.Store == nil || b.DispatchToken == "" || id == uuid.Nil {
+		return store.ErrBotForbidden
+	}
+	request := b.Request
+	request.Now = time.Now()
+	_, err := b.Store.SettleEmployeePresentationModel(context.WithoutCancel(ctx), store.BotEmployeePresentationModelSettlement{BotEmployeePresentationRequest: request, TurnID: id.String(), DispatchToken: b.DispatchToken, Usage: store.BotUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CostMicros: u.CostMicros}})
+	return err
+}
+
+var _ execution.RunBudget = (*PresentationBudget)(nil)
+
 var _ execution.RunBudget = (*MandateBudget)(nil)

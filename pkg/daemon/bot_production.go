@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -423,12 +424,9 @@ func productionBotWorkflowTools(ctx context.Context, backend store.PlatformBacke
 	return launcher.BotWorkflowTools(r, &local)
 }
 
-// Production has no conservative model-price oracle yet. Unknown price is not
-// zero cost: reject capped activation before a worker or sandbox is admitted.
-func productionBotPriceReadiness(v store.BotVersion) error {
-	if v.Budget.MaxModelCostMicros != nil {
-		return fmt.Errorf("%w: capped model budget requires a conservative price oracle; production model price is unknown", store.ErrBotUnsupported)
-	}
+// Unknown model pricing stays unknown in accounting, not an activation gate.
+// Historic model-cost caps no longer constrain production execution.
+func productionBotPriceReadiness(_ store.BotVersion) error {
 	return nil
 }
 
@@ -478,11 +476,14 @@ func (g botLiveGuard) check(ctx context.Context) error {
 	return nil
 }
 func (g botLiveGuard) Authorize(ctx context.Context, a execution.ActionDescriptor) (execution.PolicyDecision, error) {
-	if g.request.Run.ControlOnly() && g.request.Mandate == nil {
-		return execution.PolicyDecision{Kind: execution.PolicyDeny, Reason: "conversation cannot execute tools"}, store.ErrBotForbidden
-	}
 	if err := g.check(ctx); err != nil {
 		return execution.PolicyDecision{}, err
+	}
+	if g.request.Run.IsInteractiveChat() && g.request.Mandate == nil && g.request.Policy == nil {
+		return g.authorizePrivateInteractive(ctx, a)
+	}
+	if g.request.Run.ControlOnly() && g.request.Mandate == nil {
+		return execution.PolicyDecision{Kind: execution.PolicyDeny, Reason: "conversation cannot execute tools"}, store.ErrBotForbidden
 	}
 	d := execution.EvaluateRunPolicy(ctx, a, time.Now())
 	if a.Effect == execution.EffectSpend || a.SpendMinor != 0 {
@@ -516,5 +517,59 @@ func (g botLiveGuard) Authorize(ctx context.Context, a execution.ActionDescripto
 	if d.Kind != execution.PolicyAllow {
 		return d, fmt.Errorf("%w: action requires durable approval", store.ErrBotForbidden)
 	}
+	return d, nil
+}
+
+// authorizePrivateInteractive does not mint an autonomy policy. The marker selects
+// the private boundary; current caller authority and exact durable evidence grant
+// execution. Approval consumption remains exclusively owned by the resume adapter.
+func (g botLiveGuard) authorizePrivateInteractive(ctx context.Context, a execution.ActionDescriptor) (execution.PolicyDecision, error) {
+	deny := execution.PolicyDecision{Kind: execution.PolicyDeny, Reason: "invalid private interactive execution binding"}
+	worker, private := agent.BotPrivateWorkerExecution(ctx)
+	id, present := execution.BotRunIdentityFromContext(ctx)
+	p, authenticated := execution.PrincipalFromContext(ctx)
+	want := execution.BotRunIdentity{BotID: g.request.Bot.ID, RunID: g.request.Run.ID, Version: g.request.Version.Version, ActorID: g.request.Principal.Subject, OrgSlug: g.request.Principal.OrgSlug, TeamSlug: g.request.Principal.TeamSlug}
+	if !private || !present || id.Validate() != nil || worker != id || id != want || !authenticated || p.Validate() != nil || p.Kind != execution.PrincipalKindUser || p.Subject != id.ActorID || p.OrgSlug != id.OrgSlug || p.TeamSlug != id.TeamSlug || p.Authentication != g.request.Principal.Authentication || execution.RunPolicyFromContext(ctx) != nil || g.request.Authorization == nil {
+		return deny, store.ErrBotForbidden
+	}
+	if err := g.request.Authorization.AuthorizeTool(ctx, a.Tool); err != nil {
+		return deny, err
+	}
+	digest, err := a.Digest()
+	if err != nil {
+		return deny, store.ErrBotInvalid
+	}
+	d := execution.PolicyDecision{Kind: execution.PolicyRequestApproval, ActionDigest: digest, Reason: "exact private worker action requires durable approval"}
+	if a.Effect == execution.EffectSpend || a.SpendMinor != 0 {
+		return deny, fmt.Errorf("%w: no production purchase adapter can enforce saved currency and spend caps", store.ErrBotUnsupported)
+	}
+	if a.Effect == execution.EffectRead && a.ConstraintsVerified {
+		d.Kind, d.Reason = execution.PolicyAllow, "verified private worker read"
+		return d, nil
+	}
+	rs, ok := g.repo.(store.BotApprovalResumeStore)
+	if !ok {
+		return d, store.ErrBotUnsupported
+	}
+	approval, err := rs.LoadResumeApproval(ctx, g.request.Run.Lease)
+	if errors.Is(err, store.ErrBotNotFound) || err == nil && approval == nil {
+		return d, nil
+	}
+	if err != nil {
+		return deny, err
+	}
+	checkpoint, err := bot.DecodeApprovalCheckpoint(g.request.Run.Checkpoint, g.request.Run)
+	if err != nil || checkpoint.Format != bot.ApprovalCheckpointFormat || !checkpoint.Matches(*approval) || approval.Status != store.ApprovalApproved || approval.ActionDigest != digest || !time.Now().Before(approval.ExpiresAt) {
+		return deny, store.ErrBotForbidden
+	}
+	// Recheck after a potentially blocking durable read. The exact lease and
+	// caller must still be current immediately before the resume guard consumes.
+	if err := g.check(ctx); err != nil {
+		return deny, err
+	}
+	if err := g.request.Authorization.AuthorizeTool(ctx, a.Tool); err != nil {
+		return deny, err
+	}
+	d.Kind, d.GrantID, d.Reason = execution.PolicyAllow, approval.ID, "durable exact private worker approval"
 	return d, nil
 }

@@ -1,13 +1,27 @@
-# Bot final-synthesis token reserve
+# Bot final synthesis and accounting-only execution
 
 ## Purpose
 
-The synthesis reserve is a stopping policy on the existing run budget, not a
-second allowance. It should stop further research while a tools-disabled answer
-from retained evidence can still pass normal model admission. A token-admission
-failure after switching to final mode is not successful synthesis.
+Production uses `NewRunAccounting` / `RestoreRunAccounting`: token, tool,
+model-cost and active-runtime totals are accounting, not execution allowances.
+Historic `BudgetSpec` caps do not stop research or trigger final synthesis.
+`newBotSynthesisReserve` reads the live meter's `TokenLimit()`, which is nil for
+production accounting; it does not resurrect a saved token cap. With neither an
+effective token limit nor a deadline, `prepare` appends no reserve guidance.
+In particular it never instructs production to preserve "unlimited" tokens.
 
-## Estimation and admission
+Authority expiry remains authoritative. When an authority deadline exists, the
+request-local guidance describes only that deadline and synthesis time; it does
+not invent a token allowance. Cancellation, revocation, lease fencing, operation
+timeouts and generation-health monitoring remain active. Model context/output
+capacity is a per-request constraint, not a whole-task execution budget.
+
+## Finite legacy helpers: estimation and admission
+
+The following token-pressure policy applies only to explicitly finite helper
+meters (`NewRunBudget` / `RestoreRunBudget`), retained for compatibility tests.
+It is not production accounting behavior. A failed model admission after
+switching to final mode is not successful synthesis.
 
 The factory asks the wrapped model for its request-scoped input estimate.
 `botProgressLLM` forwards this query to the same `BudgetLLM` estimator used for
@@ -48,8 +62,8 @@ After a complete accepted answer, a missing Markdown delivery permits one local
 completion recovery. The production factory saves the entire accepted answer to
 `outputs/<run>-report.md`, reads back and hashes the actual bytes, then snapshots
 through the scoped `BotFiles` service. It returns trusted run-local receipts, not
-model-supplied JSON. The operation has a ten-second ceiling, spends the existing
-tool budget, and rechecks live lease/authorization and the original budget. Autonomous
+model-supplied JSON. The operation has a ten-second ceiling, records the existing
+tool accounting, and rechecks live lease/authorization and the shared meter. Autonomous
 recovery also requires both `write_file` and `publish_file` to be already allowed by
 the reviewed run policy; it cannot request or consume an exact-action approval. It does
 not invoke a model, research tool, shell, or external action. Oversize content is
@@ -96,6 +110,13 @@ Overflow must fail rather than replace a larger measured count with a smaller
 byte count.
 
 ## Regression coverage
+
+`TestBotSynthesisReserveAccountingIgnoresHistoricCaps` restores production
+accounting beyond historic token/tool/runtime caps (including 13 retained tool
+calls). It verifies tools and output ceiling remain intact, no quota guidance or
+nonexecution receipt is produced, a tool dispatch still runs, authority-only
+guidance is retained, and cancellation is not bypassed. The finite-helper tests
+below verify compatibility only; they do not establish production quotas.
 
 `BotChatSafeResources.SynthesisNow` is an optional trusted composition clock for
 only the soft stopping policy (nil uses real time). It cannot change the run

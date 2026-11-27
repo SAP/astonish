@@ -95,9 +95,16 @@ deduplicate the answer. Marked internal turn-context events retain their own IDs
 The structured answer keeps the exact question, invocation and tool-call IDs for
 the model, with additive human-label display metadata. Studio renders that user
 input once in the transcript rather than duplicating it in the consumed review.
-Ordinary valid answers use approve-and-continue; expired turn authority requires
-a distinct explicit Continue interactive click and never an automatic retry with
-fresh authority.
+Ordinary valid question answers use approve-and-continue once. The authenticated
+submission verifies the pinned durable mandate, original source, current owner
+membership/policy and Chat capability inside the answer-and-queue transaction;
+no original process-local registry is required. Eligible registry-only questions
+reuse live authority or internally register a narrowed continuation from the same
+caller ceiling, canceling that registration if the transaction fails. The original
+mandate reference, expiry, constraints, source digest and usage ledger never
+change. Expired or revoked questions/mandates remain inactive; an answer cannot
+recover them or approve a tool/plan action. Explicit Continue interactive remains
+available for its existing paused/progress recovery paths.
 
 `TestBotAmbiguousTitleQuestionBrowserAcceptance` covers custom answer visibility
 live and after reload using real HTTP/SSE, SQLite, ChatRunner and a gated fixture

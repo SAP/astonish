@@ -22,6 +22,27 @@ closes only the viewer. See [Bot terminal/client](bot-terminal-client.md) for co
 ordered runtime-envelope replay, commands and real subprocess/PTY acceptance.
 Local Code has no Bot execution capability.
 
+### Employee-only Home presentation
+
+Home consumes the backend's single ordered projection in live, reload and reconnect
+modes. Only server-eligible Employee speech and user answers are conversational
+messages; private worker/tool/fallback prose is never promoted by wording. Genuine
+Employee-authored blockers remain visible. Empty Home does not invent a reply.
+Operations, approval receipts, Working and unavailable/reconnect/send feedback are
+neutral product status, without assistant attribution. Source diagnostics remain
+private; ordinary Chat/Code error presentation is unchanged. Artifact-only receipts
+retain immutable `/bots files` preview/save access without manufacturing Employee
+speech. Existing stopped/deleted/read-only and authorization controls are unchanged.
+
+`TestEmployeeOnlyConversationPTYAcceptance` launches the native CLI in real PTYs
+against an isolated HTTP server using the shared Home projector. It exercises empty
+Home, ordered Employee/user messages, hidden private prose, an operation receipt,
+artifact-only preview, automatic SSE reconnect, fresh-process reload and send errors.
+It proves transport/presentation behavior with scripted committed source fixtures,
+not deployed daemon execution or live-model quality. Runtime/provider orchestration
+and synchronous scheduler application are covered by the separate backend gates.
+
+
 ## Code color palettes
 
 `DefaultTheme` and `ResolveCodeTheme("")` select `CodeThemeBlueGray` (`blue-gray`), preserving the current orange-on-blue-gray design. `dark-orange` uses the former near-black canvas and dim-white/orange colors **on exactly the same components**. All ten palettes share borders, spacing, glyphs, table layout, syntax bold/italic weights and interactions; they do not select a historical layout. Additional IDs are `tokyo-night`, `catppuccin-mocha`, `nord`, `dracula`, `gruvbox`, `rose-pine`, `solarized-light`, and `github-light`. The latter two are light palettes. Colors are Astonish adaptations of documented upstream palettes; muted/status colors are adjusted where needed to meet 4.5:1 against canvas/cards. Diff bands are palette-specific, including light green/red backgrounds for light themes. The original two palettes remain unchanged.

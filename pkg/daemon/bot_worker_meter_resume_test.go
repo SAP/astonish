@@ -27,13 +27,13 @@ func TestBotWorkerRecordedZeroExcludesOwnerWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !budget.Deadline().Equal(now.Add(time.Duration(in.Version.Budget.MaxRuntimeSeconds)*time.Second)) || budget.Usage().InputTokens != 17 {
-		t.Fatal("owner wait consumed budget or usage reset")
+	if !budget.Deadline().IsZero() || budget.Usage().InputTokens != 17 {
+		t.Fatal("production accounting added a deadline or reset usage")
 	}
 	in.Run.RuntimeAccountingRecorded = false
 	legacy, err := botRunBudget(in, now)
-	if err == nil && legacy.Check(context.Background()) == nil {
-		t.Fatal("legacy wall-clock fallback lost")
+	if err != nil || legacy.Check(context.Background()) != nil || !legacy.Deadline().IsZero() || legacy.Usage().RuntimeNanos < int64(24*time.Hour) {
+		t.Fatal("legacy accounting was lost or enforced as an execution cap")
 	}
 }
 

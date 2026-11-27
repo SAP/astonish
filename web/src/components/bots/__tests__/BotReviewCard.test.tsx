@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { BotReviewCard } from '../BotReviewCard'
 import { continueInteractive, approveAndContinue, decideControlProposal, type BotControlProposal } from '@/api/botReviews'
-import { BotAPIError, listBotApprovals, type Bot, type BotApproval } from '@/api/bots'
+import { BotAPIError, type Bot, type BotApproval } from '@/api/bots'
 vi.mock('@/api/bots', async original => ({ ...await original<typeof import('@/api/bots')>(), listBotApprovals: vi.fn() }))
 vi.mock('@/api/botReviews', async original => ({ ...await original<typeof import('@/api/botReviews')>(), continueInteractive: vi.fn(), approveAndContinue: vi.fn(), decideControlProposal: vi.fn() }))
 const bot = { id: 'bot', scope: 'personal', status: 'paused', version: 1 } as Bot
@@ -47,7 +47,7 @@ it('keeps genuine pending permissions reviewable and actionable', () => {
 })
 
 beforeEach(() => vi.clearAllMocks())
-it.each([false, true])('ordinary answer uses existing authority; expired=%s needs an explicit second click', async expired => {
+it.each([false, true])('ordinary answer submits once; forbidden=%s never offers a second authorization', async expired => {
   const activeBot = { ...bot, status: 'active' as const }
   const question = { ...approval, interaction: { kind: 'chat_question' as const, question_id: 'exact-q', payload: { kind: 'text' as const, prompt: 'Specific question' } } }
   if (expired) vi.mocked(approveAndContinue).mockRejectedValue(new BotAPIError(403, 'Authority expired'))
@@ -59,8 +59,9 @@ it.each([false, true])('ordinary answer uses existing authority; expired=%s need
   await waitFor(() => expect(approveAndContinue).toHaveBeenCalledWith(activeBot, question, 'Exact custom answer'))
   expect(continueInteractive).not.toHaveBeenCalled()
   if (expired) {
-    fireEvent.click(await screen.findByRole('button', { name: 'Continue interactive' }))
-    await waitFor(() => expect(continueInteractive).toHaveBeenCalledWith(activeBot, 'r', expect.any(String), { question_id: 'exact-q', answer: 'Exact custom answer' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bot access unavailable with the current authorization')
+    expect(screen.getByRole('textbox')).toHaveValue('Exact custom answer')
+    expect(screen.queryByRole('button', { name: 'Continue interactive' })).not.toBeInTheDocument()
   } else expect(await screen.findByRole('article', { name: 'Answered question' })).toHaveTextContent('Exact custom answer')
 })
 it('confirms only the saved digest and retains the terminal receipt before refresh', async () => {
@@ -83,7 +84,7 @@ it('approves while paused without claiming execution or resuming', async () => {
   vi.mocked(approveAndContinue).mockResolvedValue({ approval: { ...approval, status: 'approved' }, run_id: 'r', continuation: 'blocked_by_pause' })
   render(<BotReviewCard bot={bot} approval={approval} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'Approve & continue' }))
-  expect(await screen.findByRole('status')).toHaveTextContent('I’m still paused')
+  expect(await screen.findByRole('status')).toHaveTextContent('Bot remains paused')
   expect(approveAndContinue).toHaveBeenCalledWith(bot, approval, undefined)
 })
 it('uses durable option identity for an answer and retains errors for exact retries', async () => {
@@ -92,23 +93,11 @@ it('uses durable option identity for an answer and retains errors for exact retr
   render(<BotReviewCard bot={bot} approval={question} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('radio', { name: 'First' }))
   await waitFor(() => expect(approveAndContinue).toHaveBeenCalledWith(bot, question, 'one'))
-  expect(await screen.findByRole('alert')).toHaveTextContent('I can’t confirm whether your decision was saved')
+  expect(await screen.findByRole('alert')).toHaveTextContent('Decision receipt unavailable')
   expect(screen.getByRole('alert')).not.toHaveTextContent(/secret|\/api\/private|nested cause/)
   expect(screen.queryByText(/secret|\/api\/private|nested cause/)).not.toBeInTheDocument()
 })
 
-it('requires a separate explicit fresh authorization click and retains the exact custom answer', async () => {
-  const question = { ...approval, interaction: { kind: 'chat_question' as const, question_id: 'q', payload: { kind: 'text' as const, prompt: 'What should I do?' } } }
-  vi.mocked(continueInteractive).mockResolvedValue({ id: 'r' } as import('@/api/bots').BotRun)
-  render(<BotReviewCard bot={bot} approval={question} readOnly={false} requiresContinueInteractive onChange={vi.fn()} />)
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Use this custom answer' } })
-  fireEvent.click(screen.getByRole('button', { name: /submit/i }))
-  const button = await screen.findByRole('button', { name: 'Continue interactive' })
-  expect(approveAndContinue).not.toHaveBeenCalled()
-  expect(continueInteractive).not.toHaveBeenCalled()
-  fireEvent.click(button)
-  await waitFor(() => expect(continueInteractive).toHaveBeenCalledWith(bot, 'r', expect.any(String), { question_id: 'q', answer: 'Use this custom answer' }))
-})
 
 const titleQuestion: BotApproval = {
   ...approval, id: 'title-approval', run_id: 'title-run',
@@ -180,9 +169,9 @@ it.each(['personal', 'team'] as const)('retains initial-title custom details aft
   expect(continueInteractive).not.toHaveBeenCalled()
 })
 
-it.each(['read-only', 'stopped', 'deleted', 'expired'] as const)('blocks initial-title answers when %s', state => {
+it.each(['read-only', 'stopped', 'deleted'] as const)('blocks initial-title answers when %s', state => {
   const guardedBot = { ...bot, status: state === 'stopped' || state === 'deleted' ? state : bot.status }
-  const guardedQuestion = { ...titleQuestion, expires_at: state === 'expired' ? '2000-01-01' : titleQuestion.expires_at }
+  const guardedQuestion = titleQuestion
   render(<BotReviewCard bot={guardedBot} approval={guardedQuestion} readOnly={state === 'read-only'} onChange={vi.fn()} />)
   screen.getAllByRole('radio').forEach(option => {
     expect(option).toHaveAttribute('aria-disabled', 'true')
@@ -218,20 +207,17 @@ it('shows Thinking until a real approval arrives, then uses standard full-width 
   expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
 })
 
-it('keeps a selected initial-title option bound during explicit reauthentication', async () => {
-  vi.mocked(continueInteractive).mockResolvedValue({ id: 'title-run' } as import('@/api/bots').BotRun)
-  const view = render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} requiresContinueInteractive onChange={vi.fn()} />)
-  fireEvent.click(screen.getByRole('radio', { name: 'Compare forecasts for Boston this week' }))
-  const resume = await screen.findByRole('button', { name: 'Continue interactive' })
-  expect(approveAndContinue).not.toHaveBeenCalled()
+it('keeps failed question input without offering authorization when access becomes read-only', async () => {
+  vi.mocked(approveAndContinue).mockRejectedValue(new BotAPIError(403, 'Denied'))
+  const view = render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} onChange={vi.fn()} />)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Retained details' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Submit answer' }))
+  await screen.findByRole('alert')
+  view.rerender(<BotReviewCard bot={bot} approval={titleQuestion} readOnly onChange={vi.fn()} />)
+  expect(screen.getByRole('textbox')).toHaveValue('Retained details')
+  expect(screen.getByRole('button', { name: 'Submit answer' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: 'Continue interactive' })).not.toBeInTheDocument()
   expect(continueInteractive).not.toHaveBeenCalled()
-  view.rerender(<BotReviewCard bot={bot} approval={titleQuestion} readOnly requiresContinueInteractive onChange={vi.fn()} />)
-  expect(resume).toBeDisabled()
-  fireEvent.click(resume)
-  expect(continueInteractive).not.toHaveBeenCalled()
-  view.rerender(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} requiresContinueInteractive onChange={vi.fn()} />)
-  fireEvent.click(resume)
-  await waitFor(() => expect(continueInteractive).toHaveBeenCalledWith(bot, 'title-run', expect.any(String), { question_id: 'title-question', answer: 'forecast' }))
 })
 
 function savedAnswer(answer = 'forecast', status: BotApproval['status'] = 'consumed') {
@@ -285,15 +271,14 @@ it.each(['missing', 'foreign', 'empty', 'pending', 'denied', 'expired', 'revoked
   render(<BotReviewCard bot={bot} approval={saved} readOnly={false} onChange={vi.fn()} />)
   expect(screen.queryByRole('article', { name: 'Answered question' })).not.toBeInTheDocument()
 })
-it.each(['forecast', 'Custom private details'])('refreshes matching durable answer after explicit continuation: %s', async answer => {
-  vi.mocked(continueInteractive).mockResolvedValue({ id: 'title-run' } as import('@/api/bots').BotRun)
-  vi.mocked(listBotApprovals).mockResolvedValue({ approvals: [savedAnswer(answer)] })
-  render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} requiresContinueInteractive onChange={vi.fn()} />)
+it.each(['forecast', 'Custom private details'])('saves a matching durable answer with one submission: %s', async answer => {
+  vi.mocked(approveAndContinue).mockResolvedValue({ approval: savedAnswer(answer), run_id: 'title-run', continuation: 'queued' })
+  render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} onChange={vi.fn()} />)
   if (answer === 'forecast') fireEvent.click(screen.getByRole('radio', { name: 'Compare forecasts for Boston this week' }))
   else { fireEvent.change(screen.getByRole('textbox'), { target: { value: answer } }); fireEvent.click(screen.getByRole('button', { name: 'Submit answer' })) }
-  fireEvent.click(await screen.findByRole('button', { name: 'Continue interactive' }))
   await screen.findByRole('article', { name: 'Answered question' })
-  expect(listBotApprovals).toHaveBeenCalledWith(bot.id, bot.scope)
+  expect(approveAndContinue).toHaveBeenCalledExactlyOnceWith(bot, titleQuestion, answer)
+  expect(continueInteractive).not.toHaveBeenCalled()
   expectCompactAnswer(answer === 'forecast' ? 'Compare forecasts for Boston this week' : answer)
 })
 it.each(['yes', 'no'] as const)('renders durable yes/no answer as a label: %s', answer => {
@@ -308,30 +293,42 @@ it('does not collapse an unconfirmed submission response', async () => {
   expect(screen.queryByRole('article', { name: 'Answered question' })).not.toBeInTheDocument()
   expect(screen.getAllByRole('radio')).toHaveLength(3)
 })
-it('never applies a previous question authorization answer to a new checkpoint', async () => {
-  const props = { bot, approval: titleQuestion, readOnly: false, requiresContinueInteractive: true, onChange: vi.fn() }
-  const view = render(<BotReviewCard {...props} />)
+it.each(['id', 'run_id', 'action_digest', 'question_id', 'answer'] as const)('rejects a submitted response with foreign %s identity', async field => {
+  const saved = savedAnswer()
+  if (field === 'question_id') saved.interaction = { ...saved.interaction!, question_id: 'foreign' }
+  else if (field === 'answer') saved.response.answer = 'foreign'
+  else saved[field] = 'foreign'
+  vi.mocked(approveAndContinue).mockResolvedValue({ approval: saved, run_id: 'title-run', continuation: 'queued' })
+  render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} onChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('radio', { name: 'Compare forecasts for Boston this week' }))
-  await screen.findByRole('button', { name: 'Continue interactive' })
-  view.rerender(<BotReviewCard {...props} approval={{ ...titleQuestion, id: 'new-approval', interaction: { ...titleQuestion.interaction!, question_id: 'new-question' } }} />)
-  expect(screen.queryByRole('button', { name: 'Continue interactive' })).not.toBeInTheDocument()
+  await screen.findByRole('alert')
+  expect(screen.queryByRole('article', { name: 'Answered question' })).not.toBeInTheDocument()
+  expect(screen.getAllByRole('radio')).toHaveLength(3)
   expect(continueInteractive).not.toHaveBeenCalled()
 })
-it('retains failed continuation answer for retry and rejects foreign refreshed approvals', async () => {
-  vi.mocked(continueInteractive).mockRejectedValueOnce(new Error('private diagnostic')).mockResolvedValue({ id: 'title-run' } as import('@/api/bots').BotRun)
-  vi.mocked(listBotApprovals).mockResolvedValueOnce({ approvals: [{ ...savedAnswer(), run_id: 'foreign-run' }] }).mockResolvedValue({ approvals: [savedAnswer()] })
-  render(<BotReviewCard bot={bot} approval={titleQuestion} readOnly={false} requiresContinueInteractive onChange={vi.fn()} />)
+it('never applies an in-flight answer to a replaced checkpoint', async () => {
+  let finish!: (result: Awaited<ReturnType<typeof approveAndContinue>>) => void
+  vi.mocked(approveAndContinue).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  const props = { bot, approval: titleQuestion, readOnly: false, onChange: vi.fn() }
+  const view = render(<BotReviewCard {...props} />)
   fireEvent.click(screen.getByRole('radio', { name: 'Compare forecasts for Boston this week' }))
-  fireEvent.click(await screen.findByRole('button', { name: 'Continue interactive' }))
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue interactive' })).toBeEnabled())
+  view.rerender(<BotReviewCard {...props} approval={{ ...titleQuestion, id: 'new-approval', interaction: { ...titleQuestion.interaction!, question_id: 'new-question' } }} />)
+  await act(async () => { finish({ approval: savedAnswer(), run_id: 'title-run', continuation: 'queued' }) })
   expect(screen.queryByRole('article', { name: 'Answered question' })).not.toBeInTheDocument()
-  expect(screen.queryByText(/private diagnostic/)).not.toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: 'Continue interactive' }))
-  await waitFor(() => expect(listBotApprovals).toHaveBeenCalledTimes(1))
-  expect(screen.queryByRole('article', { name: 'Answered question' })).not.toBeInTheDocument()
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue interactive' })).toBeEnabled())
-  fireEvent.click(screen.getByRole('button', { name: 'Continue interactive' }))
-  await screen.findByRole('article', { name: 'Answered question' })
-  expectCompactAnswer('Compare forecasts for Boston this week')
-  expect(vi.mocked(continueInteractive).mock.calls[0]).toEqual(vi.mocked(continueInteractive).mock.calls[2])
+  expect(screen.getAllByRole('radio')).toHaveLength(3)
+  expect(continueInteractive).not.toHaveBeenCalled()
+})
+it.each(['pending-expired', 'expired', 'revoked', 'denied'] as const)('renders %s questions as inactive historical prompts live and restored', state => {
+  const question = { ...savedAnswer(), status: state === 'pending-expired' ? 'pending' as const : state, expires_at: state === 'pending-expired' ? '2000-01-01' : titleQuestion.expires_at }
+  for (const restored of [question, JSON.parse(JSON.stringify(question))]) {
+    const view = render(<BotReviewCard bot={bot} approval={restored} readOnly={false} onChange={vi.fn()} />)
+    expect(screen.getByRole('article', { name: 'Inactive question' })).toHaveTextContent(titleQuestion.interaction!.payload.prompt)
+    expect(screen.getByRole('status')).toHaveTextContent(/can no longer be answered/)
+    expect(screen.queryByText(/Your answer/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    view.unmount()
+  }
+  expect(approveAndContinue).not.toHaveBeenCalled()
 })

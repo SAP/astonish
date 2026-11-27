@@ -44,6 +44,40 @@ type SharedRunBudget struct {
 	overflow                                   bool
 }
 
+// NewRunAccounting creates the production usage ledger without local execution
+// caps. Operational call timeouts and generation-health monitoring remain active.
+func NewRunAccounting(spec store.BudgetSpec, startedAt time.Time) (*SharedRunBudget, error) {
+	zero := int64(0)
+	return RestoreRunAccounting(spec, startedAt, store.BotUsage{CostMicros: &zero})
+}
+
+// RestoreRunAccounting retains cumulative usage, including unknown model cost,
+// but never reinstates historic token, tool, model-cost or whole-run time caps.
+func RestoreRunAccounting(spec store.BudgetSpec, startedAt time.Time, usage store.BotUsage) (*SharedRunBudget, error) {
+	if startedAt.IsZero() || usage.RuntimeNanos < 0 || usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.ToolCalls < 0 || usage.CostMicros != nil && *usage.CostMicros < 0 {
+		return nil, ErrBudgetReservation
+	}
+	p := spec.RuntimePolicy.Clone()
+	if p != nil {
+		p.MaxActiveSeconds = nil
+	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBudgetReservation, err)
+	}
+	b := &SharedRunBudget{startedAt: startedAt, runtimeUsed: usage.RuntimeNanos, charges: make(map[uuid.UUID]modelCharge), inputUsed: usage.InputTokens, outputUsed: usage.OutputTokens, toolsUsed: usage.ToolCalls}
+	if p.EffectiveMode() == execution.BotRuntimeModeProgressV1 {
+		b.modelTimeout = time.Duration(p.ModelCallTimeoutSeconds) * time.Second
+		b.generationHealth = p.GenerationHealth.Clone()
+		b.toolTimeout = time.Duration(p.ToolCallTimeoutSeconds) * time.Second
+	}
+	if usage.CostMicros == nil {
+		b.unknownCosts = 1
+	} else {
+		b.costHeld = *usage.CostMicros
+	}
+	return b, nil
+}
+
 // NewRunBudget snapshots the limits. Daily run admission is a repository concern,
 // not a per-run counter. A nil token/tool/cost limit is unlimited; zero forbids use.
 func NewRunBudget(spec store.BudgetSpec, startedAt time.Time) (*SharedRunBudget, error) {

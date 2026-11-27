@@ -48,8 +48,8 @@ func TestBotRuntimePolicyCeilingAndClone(t *testing.T) {
 	m := testMandate()
 	ceiling := m.Limits
 	m.Limits.MaxRuntimeSeconds = 900
-	if m.Limits.ValidateWithin(ceiling) == nil {
-		t.Fatal("legacy runtime ceiling bypassed")
+	if m.Limits.ValidateWithin(ceiling) != nil {
+		t.Fatal("historical runtime metadata enforced")
 	}
 	p := NewBotProgressRuntimePolicy()
 	if m.Limits.ValidateWithinRuntimePolicy(ceiling, p, nil) == nil {
@@ -59,15 +59,15 @@ func TestBotRuntimePolicyCeilingAndClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Limits.MaxTokens++
-	if m.Limits.ValidateWithinRuntimePolicy(ceiling, p, p) == nil {
-		t.Fatal("progress expanded tokens")
+	if m.Limits.ValidateWithinRuntimePolicy(ceiling, p, p) != nil {
+		t.Fatal("historical token metadata enforced")
 	}
 	m.Limits = ceiling
 	cap := int64(600)
 	bounded := p.Clone()
 	bounded.MaxActiveSeconds = &cap
-	if p.ValidateWithin(bounded) == nil {
-		t.Fatal("unbounded request exceeded hard cap")
+	if p.ValidateWithin(bounded) != nil {
+		t.Fatal("historical active duration metadata enforced")
 	}
 	if bounded.ValidateWithin(p) != nil {
 		t.Fatal("bounded request denied")
@@ -147,19 +147,19 @@ func TestBotMandateVerifiedScopeAndCopy(t *testing.T) {
 		t.Fatal("JSON restored authority")
 	}
 }
-func TestBotDelegationFiniteLimits(t *testing.T) {
+func TestBotDelegationAdmissionLimitsAndHistoricalTokens(t *testing.T) {
 	m := testMandate()
 	if m.Validate(time.Now()) != nil {
 		t.Fatal("valid mandate")
 	}
 	m.Limits.MaxTokens = 0
-	if m.Validate(time.Now()) == nil {
-		t.Fatal("unbounded tokens")
+	if m.Validate(time.Now()) != nil {
+		t.Fatal("zero historical tokens rejected")
 	}
 }
 func TestBotMandateBindingsAndResources(t *testing.T) {
 	m := testMandate()
-	for name, change := range map[string]func(*BotMandate){"tenant": func(x *BotMandate) { x.Ref.TeamSlug = "other" }, "revision": func(x *BotMandate) { x.Ref.Revision++ }, "purpose": func(x *BotMandate) { x.Purpose = BotMandatePurposeTask }, "expired": func(x *BotMandate) { x.ExpiresAt = time.Now().Add(-time.Second) }, "wildcard": func(x *BotMandate) { x.Constraints[0].Resources[0] = "*" }, "zero aggregate": func(x *BotMandate) { x.Limits.MaxTotalTokens = 0 }} {
+	for name, change := range map[string]func(*BotMandate){"tenant": func(x *BotMandate) { x.Ref.TeamSlug = "other" }, "revision": func(x *BotMandate) { x.Ref.Revision++ }, "purpose": func(x *BotMandate) { x.Purpose = BotMandatePurposeTask }, "expired": func(x *BotMandate) { x.ExpiresAt = time.Now().Add(-time.Second) }, "wildcard": func(x *BotMandate) { x.Constraints[0].Resources[0] = "*" }, "negative aggregate": func(x *BotMandate) { x.Limits.MaxTotalTokens = -1 }} {
 		t.Run(name, func(t *testing.T) {
 			bad := m.Clone()
 			change(&bad)

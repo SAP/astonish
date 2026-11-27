@@ -16,6 +16,60 @@ import (
 	"google.golang.org/adk/model"
 )
 
+func TestBotProposalMandatedScheduleSchema(t *testing.T) {
+	schema := botMandatedProposalInputSchema()
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := schema.Properties["payload"].Description
+	for _, phrase := range []string{"schedule_create", "schedule_edit", "schedule_remove", "authorized pending", "without redundant confirmation", "pending is not applied"} {
+		if !strings.Contains(description, phrase) {
+			t.Fatalf("missing scheduling guidance %q", phrase)
+		}
+	}
+	for _, operation := range []store.BotControlOperation{store.BotControlScheduleCreate, store.BotControlScheduleEdit, store.BotControlScheduleRemove} {
+		t.Run(string(operation), func(t *testing.T) {
+			args := map[string]any{"payload": map[string]any{"operation": string(operation), "reason": "Owner requested schedule", "schedule": map[string]any{"expected_revision": float64(6), "trigger": map[string]any{"kind": "cron", "instructions": "Check", "cron": "0 9 * * *", "timezone": "UTC", "enabled": true}}}}
+			if err := resolved.Validate(args); err != nil {
+				t.Fatal(err)
+			}
+			payload := args["payload"].(map[string]any)
+			schedule := payload["schedule"].(map[string]any)
+			for _, revision := range []any{nil, "6"} {
+				schedule["expected_revision"] = revision
+				if err := resolved.Validate(args); err == nil {
+					t.Fatalf("invalid revision accepted: %v", revision)
+				}
+			}
+			delete(schedule, "expected_revision")
+			if err := resolved.Validate(args); err == nil {
+				t.Fatal("omitted revision accepted")
+			}
+			schedule["expected_revision"] = float64(6)
+			for _, target := range []map[string]any{payload, schedule, schedule["trigger"].(map[string]any)} {
+				target["authority"] = "forged"
+				if err := resolved.Validate(args); err == nil {
+					t.Fatal("unknown authority accepted")
+				}
+				delete(target, "authority")
+			}
+			payload["memory"] = map[string]any{"expected_revision": float64(6), "content": "Unrelated"}
+			data, err := json.Marshal(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var parsed botProposalArgs
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if !errors.Is(parsed.Payload.Validate(), store.ErrBotInvalid) {
+				t.Fatal("mixed schedule/memory union accepted")
+			}
+		})
+	}
+}
+
 func TestBotProposalSchemaCoversWireTypes(t *testing.T) {
 	var walk func(reflect.Type, *jsonschema.Schema, string)
 	walk = func(typ reflect.Type, s *jsonschema.Schema, path string) {

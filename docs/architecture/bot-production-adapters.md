@@ -14,10 +14,10 @@ Unused compatibility closures are not removed by these boundary repairs.
 The factory pins the actual shared-catalog `*sandbox.NodeTool` for `web_fetch`.
 `botSharedDispatch.Dispatch` decorates only that exact executable's ready transport
 with `botPublicFetchClient`, using `NodeTool.RunWithTransport`. Argument validation,
-client acquisition, readiness, network policy, current authority and the shared
-budget still precede dispatch. The private `_bot_public_fetch` operation records
+client acquisition, readiness, network policy, current authority and shared
+accounting still precede dispatch. The private `_bot_public_fetch` operation records
 HTTP exchange/body-read failures as failed reads; validation, cancellation, policy,
-budget, node-transport and credential-bearing URL failures retain native errors.
+node-transport and credential-bearing URL failures retain native errors.
 The server-only `ToolSourceReadReceipt` binds run, call, capability and argument/result
 digests. Remote JSON, a matching name or an error string cannot mint it. Exact final
 agent output can reach immutable committed publication after settled read feedback;
@@ -38,12 +38,159 @@ GitHub Build/lint are separate gates, not repaired or passed by this documentati
 
 Bot runs use Chat's existing implementations, but catalogue tools are wrapped by
 `botBoundTool` before dispatch: owner scope, live lease/revocation, exact action
-policy and the shared run budget precede adapter execution. There is no host
-fallback when an adapter is unavailable. Production workers use a five-minute
-fenced lease with fresh authorization, budget and lease renewal every twenty
-seconds. The longer expiry is only crash/stall tolerance for large retained stores;
+policy and shared run accounting precede adapter execution. Accounting records
+usage but does not enforce historical runtime, token, tool-call or cumulative
+execution caps. There is no host fallback when an adapter is unavailable.
+Production workers use a five-minute fenced lease with fresh authorization,
+accounting and lease renewal every twenty seconds. The longer expiry is only
+crash/stall tolerance for large retained stores;
 it does not cache or extend caller authority, suppress heartbeats, or permit a
 late result after renewal failure.
+
+## Private Employee-directed Chat (in progress)
+
+The Bot adapter now installs `EmployeeChatService` before factory construction.
+`BotChatResources.WorkerFactory` creates fresh shared Chat bindings while retaining
+`BotRun.SessionID` for sandbox, lease and budget ownership; a server-generated
+`ConversationID` selects only the private ADK history. Worker turns serialize and
+persist started/event/settled envelopes under the source run lease. An unsettled
+dispatch is not replayed. Worker questions are excluded; private output is returned
+to the Employee rather than streamed to Home. The Employee catalog removes direct
+execution/discovery/delegation views.
+
+Private worker catalog reconstruction uses `botProviderTools`, not the raw Chat
+bridge constructor, so `search_tools` and `describe_tools` retain their sealed
+metadata identity, live authorization and verified metadata receipts. Resolved
+execution targets still use the original action/approval boundary; no tool grant
+is added. `TestEmployeeWorkerDiscoveryPreservesMetadataReceipts` constructs the
+actual interactive worker, executes both helpers, verifies their receipts and
+checks cancellation. Real-model HTTP acceptance additionally requires the first
+private dispatch to search, describe and execute `read_file`, return the exact
+controlled source bytes, and deliver a completed result to the Employee. Its
+recorded historical sources do not establish fresh web or physical sandbox access.
+
+Evidence lookup reads validated private runtime envelopes from the same scoped run
+transcript. It requires a preceding worker dispatch and matching call ID/tool name,
+retains the durable outer event ID and hashes only the actual response bytes.
+Worker prose, malformed/model-authored envelopes, stale dispatches and responses
+after settlement cannot mint source evidence. This keeps successful private reads
+available to the original work preflight without publishing them to Home.
+
+`botProgressSessions` uses these same validated private response envelopes for
+recovery progress (`snapshot`, `currentResponse`, and `promptEvidence`). Only
+successfully persisted events from the current scoped run qualify, with a matching
+preceding dispatch and actual function-response bytes. Prior Home worker traces,
+worker prose, stale or malformed responses, and model-authored lookalikes cannot
+mint progress or justify replay. Evidence tails are bounded context windows, not
+execution quotas; recovery retains the original run, lease and usage ledger.
+
+The exact launcher-created `employee_chat` functiontool is now sealed by
+`NewBotEmployeeChatTool`. Native dispatch recognizes only its concrete private
+wrapper before ordinary action authorization; declaration registration replaces
+the raw ADK target with that same wrapper. A plain same-name tool, MCP target or
+foreign context does not receive this path, and `allowed_tools` is unchanged.
+The wrapper validates arguments and requires matching Bot identity/session plus
+an available Employee service. Its trusted production binding rejects worker,
+research, control-only and title-question modes, then runs the existing live owner,
+run/session, lease, revocation/capability, isolation and original-budget checks.
+Internal return evidence attests only a definite typed service response with a
+nonzero UUID worker handle and status `completed`, `partial`, `needs_input`,
+`failed`, or `cancelled`. Failed/cancelled worker status does not mean the service
+failed to return. Nil results, service errors, and invalid handles/statuses mint no
+receipt. This observation never attests worker prose or external effects; actual
+worker uncertainty remains separately aggregated.
+
+Interactive Employee orchestration accepts a nil autonomy policy only with a
+current turn authorizer and the sealed live service binding. Legacy orchestration
+still requires its scoped RunPolicy. The server-created WorkerFactory installs
+`agent.WithBotPrivateWorkerExecution` in the captured private worker context; no
+public request flag can select that boundary. Normal interactive tool authorization
+runs first, then the classifier and live guard must authorize the exact action or
+request a durable approval through the adapter capture. The factory uses
+`api.BindBotChatPolicyRuntime` for these interactive workers as well as legacy
+runs, preserving approval capture/resume guards without minting autonomy policy.
+Generic interactive Chat dispatch is unchanged. Progressive-to-terminal handoff
+uses `AuthorizeBotBoundTool` so an approval is not consumed twice.
+
+`TestEmployeeWorkerInteractiveApprovalBoundary` is the production-factory
+failing-first regression: a private source read previously executed with zero
+guard calls; now it stops at the exact-action approval boundary. Agent tests cover
+nil-policy sealed Employee dispatch, cancellation, exact captured approval,
+foreign binding, wrong digest, missing guard and unchanged generic interactive
+behavior. `TestEmployeeWorkerProductionLiveGuard` exercises the daemon's actual
+nil-policy private boundary with a live turn registry: matching identity/principal,
+owner/version, lease/session/fence/expiry and current tool authority are mandatory.
+Only mechanically verified reads bypass exact approval; unsafe or unverified
+workers request durable approval. Approved actions require fresh current-lease
+read-back matching the exact checkpoint and action, approved status and expiry.
+Spend remains unsupported, and this guard never consumes an approval: the resume
+adapter owns atomic one-use consumption. A private marker alone grants nothing.
+API/HTTP one-use continuation remains a separate integration gate.
+
+`TestEmployeeChatSealedDispatch` exercises exact registration, same-name denial,
+argument validation, missing/foreign/cancelled contexts and live binding rejection.
+The loopback personal/team HTTP fixture now completes a real read and same-history
+follow-up through this sealed dispatch. It is **not acceptance-complete**: its
+injected `BotChatResources` omits the durable Work adapter, so the historical
+producer branch returns fallback provenance and commit rejects the admitted run's
+work contract. Production-factory HTTP composition and exact worker action/plan
+approval resume ownership remain unverified; no paid-provider/sandbox behavior
+is established by these deterministic tests.
+
+## Request-proportional research evidence
+
+`pkg/agent/bot_prompt.go` defines the typed string constant
+`botResearchEvidenceGuidance` and appends it to both ordinary Employee prompts
+and private-worker prompts before the worker early return. Title-confirmation
+question-only stages receive no research rule; ordinary Chat and Code are
+unchanged. Initial and durable-work-refreshed prompts retain the same standard.
+
+For ordinary news and factual lookup, a dated substantive configured Perplexity
+answer with real source links can adequately support the facts its returned text
+covers. This is not unconditional factual certification, proof that linked pages
+were read, or a presumption that every query has current event dates. Materially
+unknown freshness remains disclosed. Requested depth and coverage govern the
+answer; proportionality must not turn detailed work into a shallow summary.
+Blanket source audits, raw extracts/quotations and per-item publication metadata
+are not default requirements. Targeted follow-up addresses missing explicitly
+requested details, material contradictions, high-consequence decisions/actions,
+or explicit requests for audits, primary sources or exact quotations. A blocked
+article alone does not justify repeated query/URL variants when search evidence
+is adequate: reuse retained evidence, qualify or omit disputed claims and retain
+unrelated supported coverage. For explicit quotations, both roles use the exact
+actual returned primary-source passage, not reconstructed or hypothesized longer
+text from prior knowledge. Further inspection addresses actual truncation,
+omission or conflict affecting that quotation; a complete returned passage is
+quoted faithfully rather than triggering an invented completeness audit.
+
+The Employee passes its chosen depth and evidence stopping condition to the
+private worker and assesses the returned substantive sourced result under that
+same standard, without demanding raw extracts afterward absent a concrete cause.
+General inspect/correct guidance assesses applicable requirements rather than
+introducing a second mandatory article audit. Information-sourcing confidence
+never certifies tool execution: sends, writes, schedules and other effects still
+require current authority and actual committed execution evidence. No runtime
+caps, execution, authorization, storage or client protocols change here.
+
+`TestBotPromptResearchEvidenceRoles` is failing-first prompt-contract coverage
+for ordinary/audit/contradiction/side-effect rules in initial and refreshed
+Employee (interactive/background) and worker prompts, including exactly one
+copy of the shared constant. `TestBotPromptResearchEvidenceExclusions` protects
+ordinary Chat, Code and the no-research question-only stage. These tests establish
+prompt delivery only, not live-model judgment, source accuracy or paid-provider
+research quality.
+
+`TestResearchDepthServiceFixtureContrast` checks the controlled primary page's
+complete 2026–2028 early-close sentence (including eligible-options hours and the
+day-after-Thanksgiving condition), aligned holiday row, and non-truncated fetch
+metadata including title, URLs, status, content type and length. The opt-in
+`TestBotSAPResearchDepthHTTP` pairs an ordinary search-sufficient request with an
+explicit direct-primary-verification request using actual SAP Employee/worker
+models and deterministic search/page services. Acceptance requires a succeeded
+run and reviewed Employee publication; the ordinary case requires exactly one
+search/private dispatch and no page fetch, while explicit verification requires
+an actual `_bot_public_fetch` response and the complete fixture sentence in the
+final answer. This fixture does not prove live NYSE, Perplexity or Docker access.
 
 ## Committed owner-priority dispatch
 
@@ -178,17 +325,23 @@ only; it does not retain the provider configuration or change model provenance.
 The Bot factory injects this capacity into its compactor. Explicit worker/factory
 context overrides (including 32,768) still take precedence.
 
-The shared `BudgetLLM` remains the only reservation/enforcement boundary. A known
+The shared `BudgetLLM` remains the reservation/settlement boundary. Production
+uses accounting-only meters: historic token/tool/model-cost/active-runtime caps
+do not clamp provider output or trigger synthesis. Authority expiry, revocation,
+lease fencing, external spending authorization and operation health/timeouts
+remain authoritative. A known
 output capacity selects at most 32,768 tokens per call (and never above that
 capacity); unknown output capacity uses a finite 16,384-token fallback. This gives
 reasoning models headroom without reserving their entire 128K output capability
 on every call. Explicit worker output options bypass this default policy, but not
-known model capacity; smaller request limits and remaining shared tokens still
-clamp the actual provider request. SAP metadata includes learned limits with
+known model capacity; smaller request limits still clamp the actual provider
+request. Finite legacy helper meters can also clamp by their explicit token
+allowance; production accounting has none. SAP metadata includes learned limits with
 exact static fallback; compatible/LiteLLM and OpenRouter metadata supply their
 reported limits. Missing configuration does not trigger a host provider lookup.
-No saved token/spend grant, retry count, synthesis prompt, or approval changes.
-Controlled tests prove metadata/override propagation and budget clamping, not
+External spending authority, retry counts and approvals are unchanged.
+Controlled tests prove metadata/override propagation and legacy-helper token
+clamping, not
 that a particular live reasoning task succeeds with the new ceiling.
 
 ## Bounded final synthesis recovery
@@ -222,7 +375,9 @@ summary; successful recovery still leaves first-attempt diagnostic evidence.
 Before retry, current authorization, parent cancellation, lease and shared budget
 are rechecked, and the progress boundary drains settlement and rejects unsafe
 active/uncertain dispatches. Both attempts use the same model, run, request output
-ceiling and meter; the current budget may reduce or refuse the second allowance.
+ceiling and accounting meter; no historic execution quota reduces or refuses the
+production correction. Authority, cancellation and operation-health failures
+still refuse dispatch.
 Failed-response usage reaches BudgetLLM before output is withheld. No tools,
 external effects, runs or research are replayed. Assessment/progress calls and
 ordinary Chat retain their existing paths. Controlled

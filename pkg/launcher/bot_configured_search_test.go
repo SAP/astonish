@@ -19,9 +19,10 @@ import (
 
 type researchTestRuntime struct {
 	store.BotMandateRuntime
-	m       execution.BotMandate
-	calls   int64
-	revoked bool
+	m               execution.BotMandate
+	calls           int64
+	revoked         bool
+	denyReservation bool
 }
 
 func (r *researchTestRuntime) VerifyBotMandate(ctx context.Context, _ execution.BotMandateRef, _ execution.BotMandatePurpose) (execution.BotMandate, error) {
@@ -34,7 +35,7 @@ func (r *researchTestRuntime) VerifyBotMandate(ctx context.Context, _ execution.
 	return r.m.Clone(), nil
 }
 func (r *researchTestRuntime) ReserveBotPublicResearch(_ context.Context, _ execution.BotMandateRef, _ string) error {
-	if r.calls >= r.m.PublicResearch.MaxCalls {
+	if r.revoked || r.denyReservation {
 		return store.ErrBotForbidden
 	}
 	r.calls++
@@ -124,8 +125,8 @@ func TestBotConfiguredSearch(t *testing.T) {
 				if _, err := tool.(botRunnableTool).Run(optionalKnowledgeContext{knowledgeCtx(f)}, args); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := tool.(botRunnableTool).Run(optionalKnowledgeContext{knowledgeCtx(f)}, args); err == nil || searchModel.calls != 2 {
-					t.Fatal("search quota bypass")
+				if _, err := tool.(botRunnableTool).Run(optionalKnowledgeContext{knowledgeCtx(f)}, args); err != nil || searchModel.calls != 3 {
+					t.Fatal("historical search cap enforced")
 				}
 			} else if mode == "empty" {
 				if err != nil || episode.State() != BotResearchEmpty {

@@ -1,36 +1,29 @@
 import { expect, it } from 'vitest'
 import { projectBotOperation } from '../botOperationProjection'
-import { groupChronologicalActivity, isHardBreak, isSoftNote } from '../toolActivity'
 import type { BotOperationView } from '@/api/botOperationResult'
 import type { ChatMsg } from '../chatTypes'
 
-const operation: BotOperationView = { schema_version: 1, bot_id: 'bot', home_session_id: 'home', operation_id: 'one', revision: 2, state_sequence: 4, operation: 'schedule_create', status: 'applied', decision: 'execute', summary: 'Schedule confirmed.', presentation: 'conversation', source_user_event_id: 'source' }
+const operation: BotOperationView = { schema_version: 1, bot_id: 'bot', home_session_id: 'home', operation_id: 'one', revision: 2, state_sequence: 4, operation: 'schedule_create', status: 'applied', decision: 'execute', summary: 'I could not complete this task.', presentation: 'conversation', source_user_event_id: 'source' }
 const source: ChatMsg = { type: 'user', eventId: 'source', content: 'Schedule reports' }
-const report: ChatMsg = { type: 'agent', content: 'Later report' }
+const employee: ChatMsg = { type: 'agent', content: operation.summary }
+const artifact: ChatMsg = { type: 'artifact', path: '/report.pdf', toolName: 'write_file' }
 
-it('repairs snapshot-only placement on durable replay and preserves duplicates in place', () => {
-  const fallback = projectBotOperation([source, report], operation)
-  expect(fallback.map(m => 'content' in m && m.content)).toEqual(['Schedule reports', 'Schedule confirmed.', 'Later report'])
-  const durable = projectBotOperation(fallback, operation, true)
-  expect(durable.map(m => 'content' in m && m.content)).toEqual(['Schedule reports', 'Later report', 'Schedule confirmed.'])
-  expect(projectBotOperation(durable, operation, true)).toBe(durable)
-  expect(projectBotOperation([], operation, true)).toHaveLength(1)
-})
-it.each(['failed', 'blocked', 'cancelled'] as const)('projects %s and blocker as ordinary assistant text', status => {
-  expect(projectBotOperation([], { ...operation, status, blocker: 'Explanation' }, true)[0]).toMatchObject({ type: 'agent', content: 'Schedule confirmed.\n\nExplanation' })
-})
-it('keeps internal work hidden, compatibility and authorization cards intact', () => {
-  expect(projectBotOperation([], { ...operation, presentation: 'internal', status: 'pending' }, true)).toEqual([])
-  for (const presentation of [undefined, 'internal', 'conversation'] as const) {
-    expect(projectBotOperation([], { ...operation, presentation, status: 'blocked', decision: 'require_authorization' }, true)[0].type).toBe('bot_operation')
+it.each(['pending', 'applying', 'applied', 'failed', 'blocked', 'cancelled'] as const)('never turns %s runtime summaries or blockers into Employee speech', status => {
+  for (const presentation of [undefined, 'internal', 'conversation', 'legacy'] as const) {
+    const messages = [source, employee, artifact]
+    const next = projectBotOperation(messages, { ...operation, presentation: presentation === 'legacy' ? undefined : presentation, status, blocker: 'I need permission.' }, true)
+    expect(next).toBe(messages)
   }
-  expect(projectBotOperation([], { ...operation, presentation: undefined }, true)[0].type).toBe('bot_operation')
 })
-it('keeps operation publications outside tool activity without discarding mixed text', () => {
-  const [confirmation] = projectBotOperation([], operation, true)
-  const messages: ChatMsg[] = [{ type: 'tool_call', toolName: 'schedule', toolArgs: {} }, { type: 'agent', content: 'Mixed deliverable' }, confirmation, report]
-  expect(isHardBreak(confirmation)).toBe(true)
-  expect(isSoftNote(confirmation)).toBe(false)
-  expect(groupChronologicalActivity(messages)).toContainEqual({ kind: 'passthrough', index: 2 })
-  expect(messages[1]).toMatchObject({ content: 'Mixed deliverable' })
+it('removes old operation speech without matching Employee text or discarding artifacts', () => {
+  const messages: ChatMsg[] = [source, { ...employee, operationId: operation.operation_id }, artifact, employee]
+  expect(projectBotOperation(messages, operation, true)).toEqual([source, artifact, employee])
+})
+it('keeps exact authorization controls live and restored, then removes them on resolution', () => {
+  const decision = { ...operation, status: 'blocked' as const, decision: 'require_authorization' as const }
+  const live = projectBotOperation([source, employee, artifact], decision)
+  expect(live.map(m => m.type)).toEqual(['user', 'bot_operation', 'agent', 'artifact'])
+  expect(projectBotOperation(live, decision, true)).toBe(live)
+  expect(projectBotOperation(live, operation, true)).toEqual([source, employee, artifact])
+  expect(projectBotOperation([source, employee, artifact], decision, true).map(m => m.type)).toEqual(['user', 'agent', 'artifact', 'bot_operation'])
 })

@@ -336,7 +336,7 @@ func (w *BotWorker) reconcileKnowledge(c context.Context, repo store.BotStore, s
 				if e != nil {
 					return e
 				}
-				budget, e := bot.RestoreRunBudget(version.Budget, time.Now(), run.Usage)
+				budget, e := bot.RestoreRunAccounting(version.Budget, time.Now(), run.Usage)
 				if e != nil {
 					return e
 				}

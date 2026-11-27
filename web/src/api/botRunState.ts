@@ -3,13 +3,21 @@ import type { BotRun } from './bots'
 import type { BotMessageReceipt } from './botReviews'
 
 export const RunStatus = { Queued: 'queued', Running: 'running', Waiting: 'waiting_approval', Interrupted: 'interrupted', Succeeded: 'succeeded', Partial: 'partial', Failed: 'failed', Skipped: 'skipped', Cancelled: 'cancelled' } as const
+export const BotTerminalReason = { NoAnswer: 'no_eligible_answer' } as const
 export interface BotRunState {
+  terminal_reason?: typeof BotTerminalReason[keyof typeof BotTerminalReason]
   progress?: BotProgressProjection; committed_at?: string
   work?: BotRun['work']
   schema_version: number; bot_id: string; run_id: string; session_id: string; home_session_id: string
   presentation: string; status: BotRun['status']; state_sequence: number; reason?: string; user_event_id?: string
 }
 export type BotRunStates = Record<string, BotRunState>
+export function botNeutralTerminalLabel(state: BotRunState): string {
+  if (state.terminal_reason !== BotTerminalReason.NoAnswer) return ''
+  if (state.status === RunStatus.Partial) return 'Partially completed — no Employee answer available'
+  if (state.status === RunStatus.Failed) return 'Failed — no Employee answer available'
+  return ''
+}
 export const botRunOpen = (state: BotRunState) => ([RunStatus.Queued, RunStatus.Running, RunStatus.Waiting, RunStatus.Interrupted] as BotRun['status'][]).includes(state.status)
 export function botRunStatusLabel(state: BotRunState): string {
   if (botRunOpen(state) && validBotProgress(state.progress, state)) return progressLabels[state.progress.phase]
@@ -21,7 +29,7 @@ export const canContinueBotProgress = (state: BotRunState) => botRunOpen(state) 
 export function mergeBotRunState(states: BotRunStates, state: BotRunState, botId: string, home: string): BotRunStates {
   const prior = states[state.run_id]
   const knownProgressRun = prior && validBotProgress(prior.progress, prior)
-  if (state.schema_version !== 1 || state.bot_id !== botId || state.home_session_id !== home || (state.presentation !== 'home_interactive' && !((state.presentation === '' || state.presentation === undefined) && (validBotProgress(state.progress, state) || knownProgressRun))) || !state.run_id || !state.session_id || !Object.values(RunStatus).includes(state.status) || !Number.isSafeInteger(state.state_sequence) || state.state_sequence <= 0) return states
+  if (state.schema_version !== 1 || state.bot_id !== botId || state.home_session_id !== home || (state.presentation !== 'home_interactive' && !botNeutralTerminalLabel(state) && !((state.presentation === '' || state.presentation === undefined) && (validBotProgress(state.progress, state) || knownProgressRun))) || !state.run_id || !state.session_id || !Object.values(RunStatus).includes(state.status) || !Number.isSafeInteger(state.state_sequence) || state.state_sequence <= 0) return states
   if ((prior?.state_sequence || 0) >= state.state_sequence || prior && prior.session_id !== state.session_id) return states
   if (state.work && (state.work.bot_id !== botId || state.work.run_id !== state.run_id || !Number.isSafeInteger(state.work.work_revision) || state.work.work_revision < 1 || state.work.work_revision < (prior?.work?.work_revision || 0))) return states
   const valid = validBotProgress(state.progress, state)

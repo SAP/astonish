@@ -165,12 +165,16 @@ func (p *SessionEventProjector) ProjectBot(ctx context.Context, row store.BotTra
 			}
 		}
 	}
-	e := projectBotQuestionTranscript(row.Event, approvals)
+	verified, err := verifyBotHomePublication(ctx, p.Repository, row.Event, p.BotID, p.HomeSessionID, p.SessionID)
+	if err != nil {
+		return out, err
+	}
+	e := projectBotQuestionTranscript(verified, approvals)
 	// Stored review payloads are references, not authority. Discard embedded
 	// questions before enriching from this request's scoped approval records.
 	e = botReviewReferenceOnly(e)
 	e = projectBotReviewQuestion(e, approvals, p.BotID, p.SessionID)
-	e = projectBotHomeNarrative(e, p.HomeSessionID, p.SessionID)
+	e = p.ProjectHomeNarrative(ctx, e)
 	wire, err := marshalCommittedBotTranscriptEvent(ctx, p.Repository, e, p.BotID, p.SessionID)
 	if err != nil {
 		return out, err

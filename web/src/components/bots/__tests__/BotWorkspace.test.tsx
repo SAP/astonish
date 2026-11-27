@@ -13,7 +13,7 @@ import * as skillsApi from '@/api/botSkills'
 vi.mock('@/api/botSkills', async original => ({ ...await original<typeof skillsApi>(), listBotSkills: vi.fn() }))
 import * as reviewsApi from '@/api/botReviews'
 const continuationStates = vi.hoisted(() => ({ value: [] as import('@/api/botRunState').BotRunState[] }))
-vi.mock('@/api/botReviews', async original => ({ ...await original<typeof reviewsApi>(), listControlProposals: vi.fn(), sendBotMessage: vi.fn(), continueInteractive: vi.fn() }))
+vi.mock('@/api/botReviews', async original => ({ ...await original<typeof reviewsApi>(), listControlProposals: vi.fn(), sendBotMessage: vi.fn(), approveAndContinue: vi.fn(), continueInteractive: vi.fn() }))
 import * as api from '@/api/bots'
 import * as goalsApi from '@/api/botGoals'
 vi.mock('@/api/botGoals', async original => ({ ...await original<typeof goalsApi>(), createGoal: vi.fn() }))
@@ -162,6 +162,24 @@ it.each(['personal', 'team'] as const)('keeps consumed %s questions in the displ
     review.unmount()
     view.unmount()
   }
+})
+
+it.each((['personal', 'team'] as const).flatMap(scope => ['transcript', 'details'].map(surface => ({ scope, surface }))))('submits a continuation_required question once in $scope / $surface', async ({ scope, surface }) => {
+  const question: api.BotApproval = { id: 'clarification', run_id: 'same-run', version: 1, action_digest: 'exact', action: {}, status: 'pending', expires_at: '2099-01-01', interaction: { kind: 'chat_question', question_id: 'timezone', payload: { kind: 'text', prompt: 'Which timezone?' } } }
+  vi.mocked(api.getBot).mockResolvedValue({ ...bot, scope })
+  vi.mocked(api.listBotApprovals).mockResolvedValue({ approvals: [question] })
+  continuationStates.value = [{ schema_version: 1, bot_id: bot.id, run_id: 'same-run', home_session_id: 'home', session_id: 'trace', presentation: 'home_interactive', status: 'waiting_approval', reason: 'continuation_required', state_sequence: 3 }]
+  vi.mocked(reviewsApi.approveAndContinue).mockResolvedValue({ approval: { ...question, status: 'consumed', response: { question_id: 'timezone', answer: 'America/New_York' } }, run_id: 'same-run', continuation: 'queued' })
+  render(<BotWorkspace route={{ botId: bot.id, scope }} theme="dark" userId="owner" />)
+  await waitFor(() => expect(chatProps.current?.pendingApprovalIds).toEqual(['clarification']))
+  if (surface === 'transcript') render(<>{chatProps.current!.renderReview('approval', 'clarification')}</>)
+  else await openDetails('Review inbox')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Which timezone?' }), { target: { value: 'America/New_York' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Submit answer' }))
+  expect(await screen.findByRole('article', { name: 'Answered question' })).toHaveTextContent('Your answer: America/New_York')
+  expect(reviewsApi.approveAndContinue).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ scope }), question, 'America/New_York')
+  expect(reviewsApi.continueInteractive).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Continue interactive' })).not.toBeInTheDocument()
 })
 
 it.each(['empty', 'waiting_approval', 'queued', 'running', 'failed', 'partial', 'succeeded'] as const)('keeps database runtime %s projection scoped and read-only on reload', async state => {

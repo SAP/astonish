@@ -7,7 +7,8 @@ vi.mock('@/api/botReviews', () => ({ decideBotOperation: vi.fn() }))
 const operation: BotOperationView = { schema_version: 1, bot_id: 'bot', home_session_id: 'home', operation_id: 'one', revision: 1, state_sequence: 1, operation: 'schedule_create', status: 'blocked', decision: 'require_authorization', summary: 'Daily Boston weather for you', exception: { fields: [{ caption: 'Instructions', value: 'Daily Boston weather for you' }], operation_id: 'one', payload_digest: 'secret-digest', expires_at: '2099-01-01T00:00:00Z' } }
 it.each(['pending', 'applying', 'applied', 'blocked', 'failed', 'cancelled'] as const)('renders %s with no routine review buttons or raw digest', status => {
   render(<BotOperationResult operation={{ ...operation, status, decision: 'execute' }} scope="personal" readOnly={false} onChange={vi.fn()} />)
-  expect(screen.getByRole('heading')).toHaveTextContent(status.charAt(0).toUpperCase() + status.slice(1))
+  expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+  expect(screen.queryByText(operation.summary)).not.toBeInTheDocument()
   expect(screen.queryByRole('button')).not.toBeInTheDocument()
   expect(screen.queryByText(/secret-digest/)).not.toBeInTheDocument()
 })

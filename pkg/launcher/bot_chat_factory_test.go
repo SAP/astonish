@@ -48,6 +48,283 @@ func (p *workCapabilityProbe) Check(context.Context, bot.BotWorkCheckRequest) (*
 	return &store.BotWorkCheckReceipt{Status: store.BotWorkCheckReturned}, p.err
 }
 
+type presentationFactoryClaimStore struct {
+	store.BotEmployeePresentationStore
+	p *store.BotEmployeePresentation
+}
+
+func (s *presentationFactoryClaimStore) ReadEmployeePresentation(_ context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	if s.p.ClaimToken != q.ClaimToken {
+		return nil, store.ErrBotForbidden
+	}
+	return s.p, nil
+}
+
+type presentationFactoryModel struct {
+	t      *testing.T
+	digest string
+	fail   bool
+	calls  int
+}
+
+func (m *presentationFactoryModel) Name() string { return "original" }
+func (m *presentationFactoryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		if len(req.Tools) != 0 || len(req.Config.Tools) != 0 || len(req.Contents) != 1 {
+			m.t.Fatal("execution context or tools leaked")
+		}
+		if _, ok := execution.BotTurnAuthorizerFromContext(ctx); ok {
+			m.t.Fatal("turn authorizer leaked")
+		}
+		if m.fail {
+			yield(nil, errors.New("unavailable"))
+			return
+		}
+		b, _ := json.Marshal(map[string]string{"source_digest": m.digest, "text": "The requested change is unavailable."})
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(string(b), "model")}, nil)
+	}
+}
+
+func TestEmployeePresentationFactory(t *testing.T) {
+	for _, mode := range []string{"ok", "historical-caps", "unlimited", "model-error", "foreign", "expired", "wrong-claim"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newBotFactoryFixture(t)
+			run := f.req.Run
+			run.Status = store.RunFailed
+			run.UserEventID = "request"
+			run.StateSequence = 1
+			run.Report = store.BotReport{Summary: "immutable failure"}
+			p := &store.BotEmployeePresentation{SchemaVersion: store.BotEmployeePresentationVersion, State: store.BotEmployeePresentationClaimed, BotID: run.BotID, RunID: run.ID, BotVersion: run.Version, OwnerID: f.req.Bot.OwnerID, OrgSlug: f.req.Principal.OrgSlug, TeamSlug: f.req.Principal.TeamSlug, HomeSessionID: uuid.New(), SourceSessionID: run.SessionID, UserEventID: run.UserEventID, EffectiveLimits: store.BudgetSpec{MaxRuntimeSeconds: 60}, Deadline: time.Now().Add(time.Minute), AuthorityExpiresAt: time.Now().Add(time.Minute), Provider: "original-provider", Model: "original-model", ReportSequence: run.StateSequence, ReportDigest: run.Report.EmployeeMessageSourceDigest(run.Status), ClaimToken: "claim"}
+			claimStore := &presentationFactoryClaimStore{p: p}
+			q := BotEmployeePresentationRequest{Bot: f.req.Bot, Source: run, Claim: store.BotEmployeePresentationRequest{BotID: run.BotID, RunID: run.ID, ClaimToken: "claim"}, Store: claimStore, DispatchToken: "dispatch", Voice: "concise"}
+			m := &presentationFactoryModel{t: t, digest: p.ReportDigest, fail: mode == "model-error"}
+			factory, err := NewBotEmployeePresentationFactory(BotEmployeePresentationFactoryConfig{LoadScope: f.cfg.LoadScope, ResolvePinned: func(ctx context.Context, scope *BotChatScope, provider, name string) (model.LLM, error) {
+				if provider != "original-provider" || name != "original-model" {
+					t.Fatal("changed pin")
+				}
+				return m, nil
+			}, WrapModel: func(ctx context.Context, llm model.LLM, b execution.RunBudget) (model.LLM, error) {
+				if _, ok := b.(*bot.PresentationBudget); !ok {
+					t.Fatal("fresh execution budget")
+				}
+				if !errors.Is(b.ReserveTool(ctx, "read_file"), store.ErrBotForbidden) {
+					t.Fatal("tools permitted")
+				}
+				return llm, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "foreign":
+				q.Bot.OwnerID = uuid.New()
+			case "historical-caps":
+				zero := int64(0)
+				p.EffectiveLimits = store.BudgetSpec{MaxRuntimeSeconds: 1, MaxTokens: &zero, MaxModelCostMicros: &zero}
+				p.Deadline = time.Now().Add(-time.Hour)
+			case "unlimited":
+				p.EffectiveLimits = store.BudgetSpec{}
+				p.Deadline = time.Time{}
+			case "expired":
+				p.AuthorityExpiresAt = time.Now().Add(-time.Second)
+			case "wrong-claim":
+				q.Claim.ClaimToken = "foreign"
+			}
+			text, err := factory(f.ctx, q)
+			wantSuccess := mode == "ok" || mode == "historical-caps" || mode == "unlimited"
+			if (err == nil) != wantSuccess || err != nil && text != "" {
+				t.Fatalf("text=%q err=%v", text, err)
+			}
+			if f.safeCleaned != 0 || len(f.resolver.ids) != 0 {
+				t.Fatal("sandbox or current session resolver called")
+			}
+			if !wantSuccess && mode != "model-error" && m.calls != 0 {
+				t.Fatal("denied claim called model")
+			}
+		})
+	}
+}
+
+func TestEmployeeWorkerFactoryTools(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	got, err := f.construct(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Cleanup()
+	if got.WorkerFactory == nil || got.Agent.ToolIndex.GetToolEntry("employee_chat") == nil {
+		t.Fatal("missing Employee orchestration")
+	}
+	if got.Agent.SubAgentManager != nil || len(got.Agent.Toolsets) != 0 {
+		t.Fatal("Employee retains execution manager/toolsets")
+	}
+	for _, name := range []string{"execute_tool", "search_tools", "describe_tools", "shell_command", "read_file", "delegate_tasks", "run_flow", "run_drill"} {
+		if got.Agent.ToolIndex.GetToolEntry(name) != nil {
+			t.Fatalf("Employee execution leak %s", name)
+		}
+	}
+	ss := session.InMemoryService()
+	id := uuid.NewString()
+	if _, err := ss.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*api.BotEmployeeWorkerRequest){
+		func(q *api.BotEmployeeWorkerRequest) { q.Request.Run.ID = uuid.New() },
+		func(q *api.BotEmployeeWorkerRequest) { q.Request.Run.SessionID = uuid.New() },
+		func(q *api.BotEmployeeWorkerRequest) { q.Request.Budget = nil },
+		func(q *api.BotEmployeeWorkerRequest) { q.Sessions = nil },
+		func(q *api.BotEmployeeWorkerRequest) { q.ConversationID = "" },
+	} {
+		q := api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: ss}
+		mutate(&q)
+		if _, err := got.WorkerFactory(f.ctx, q); !errors.Is(err, store.ErrBotForbidden) {
+			t.Fatalf("foreign worker request accepted: %v", err)
+		}
+	}
+	worker, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: ss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Cleanup()
+	for _, name := range []string{"ask_user", "employee_chat"} {
+		if worker.Agent.ToolIndex.GetToolEntry(name) != nil {
+			t.Fatalf("private worker exposes %s", name)
+		}
+	}
+	if worker.Agent.ToolIndex.GetToolEntry("read_file") == nil {
+		t.Fatal("worker has no real shared file tool")
+	}
+	if worker.Agent.SessionService != ss || f.req.Run.SessionID.String() == id {
+		t.Fatal("conversation/execution identities conflated")
+	}
+}
+
+func TestEmployeeWorkerDiscoveryPreservesMetadataReceipts(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	setBotSharedInteractive(f)
+	f.ctx, _ = bot.WithToolOutcomes(f.ctx)
+	got, err := f.construct(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Cleanup()
+	ss := session.InMemoryService()
+	id := uuid.NewString()
+	if _, err := ss.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: ss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Cleanup()
+	ledger := botFactoryModelForTest(t, worker.Agent.LLM).binding.owner
+	helpers := 0
+	for _, helper := range worker.Agent.Tools {
+		if helper.Name() != "search_tools" && helper.Name() != "describe_tools" {
+			continue
+		}
+		helpers++
+		ctx := employeeInteractiveToolContext{botFactoryHandoffContext{base: f.ctx, session: id, functionCallID: helper.Name()}}
+		request := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
+		if err := helper.(botRunnableTool).ProcessRequest(ctx, request); err != nil || request.Tools[helper.Name()] != helper {
+			t.Fatalf("private %s registration lost sealed executable: %v", helper.Name(), err)
+		}
+		args := map[string]any{"query": "read_file"}
+		if helper.Name() == "describe_tools" {
+			args = map[string]any{"names": []string{"read_file"}}
+		}
+		out, err := helper.(botRunnableTool).Run(ctx, args)
+		if err != nil {
+			t.Fatalf("private %s failed: %v", helper.Name(), err)
+		}
+		raw, _ := json.Marshal(out)
+		if !strings.Contains(string(raw), "read_file") {
+			t.Fatalf("private %s lost shared read tool: %s", helper.Name(), raw)
+		}
+		outcome, observed := bot.TakeToolOutcome(ledger, ctx.FunctionCallID())
+		if !observed || !outcome.Verified || len(outcome.Unchanged) != 1 || len(outcome.Changed) != 0 {
+			t.Fatalf("private %s lost sealed metadata receipt: observed=%v outcome=%+v", helper.Name(), observed, outcome)
+		}
+		cancelled, cancel := context.WithCancel(f.ctx)
+		cancel()
+		ctx.base = cancelled
+		if _, err := helper.(botRunnableTool).Run(ctx, args); err == nil {
+			t.Fatalf("private %s ignored cancellation", helper.Name())
+		}
+		if _, observed := bot.TakeToolOutcome(ledger, ctx.FunctionCallID()); observed {
+			t.Fatalf("cancelled %s minted metadata receipt", helper.Name())
+		}
+	}
+	if helpers != 2 {
+		t.Fatalf("expected both private discovery helpers, got %d", helpers)
+	}
+}
+
+func TestEmployeeWorkerInteractiveApprovalBoundary(t *testing.T) {
+	f := newBotFactoryFixture(t)
+	setBotSharedInteractive(f)
+	guard := &employeeInteractiveApprovalGuard{}
+	prepare := f.cfg.Prepare
+	f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
+		safe, err := prepare(ctx, req, scope)
+		if safe != nil {
+			safe.PolicyRuntime.Guard = guard
+		}
+		return safe, err
+	}
+	got, err := f.construct(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Cleanup()
+	if f.req.Policy != nil || got.Authorization != f.req.Authorization {
+		t.Fatal("interactive authority replaced with autonomy policy")
+	}
+	if got.Agent.ToolIndex.GetToolEntry("employee_chat") == nil || got.Agent.ToolIndex.GetToolEntry("read_file") != nil {
+		t.Fatal("production Employee capability restriction lost")
+	}
+	ss := session.InMemoryService()
+	id := uuid.NewString()
+	if _, err := ss.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: ss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Cleanup()
+	if worker.Agent.ToolIndex.GetToolEntry("employee_chat") != nil || worker.Agent.ToolIndex.GetToolEntry("ask_user") != nil {
+		t.Fatal("worker can impersonate Employee or ask owner directly")
+	}
+	entry := worker.Agent.ToolIndex.GetToolEntry("read_file")
+	if entry == nil {
+		t.Fatal("missing production worker file tool")
+	}
+	target, ok := entry.Tool.(botRunnableTool)
+	if !ok {
+		t.Fatal("production worker file tool is not runnable")
+	}
+	out, err := target.Run(employeeInteractiveToolContext{botFactoryHandoffContext{base: f.ctx, session: id, functionCallID: "private-exact-read"}}, map[string]any{"path": "/isolated/source.txt"})
+	var approval *agent.BotPolicyError
+	if !errors.As(err, &approval) || !approval.ApprovalRequired() || guard.calls != 1 {
+		t.Fatalf("interactive worker bypassed genuine exact-action approval: output=%v error=%v guard_calls=%d", out, err, guard.calls)
+	}
+}
+
+type employeeInteractiveToolContext struct{ botFactoryHandoffContext }
+
+func (employeeInteractiveToolContext) AgentName() string { return "private-worker" }
+
+type employeeInteractiveApprovalGuard struct{ calls int }
+
+func (g *employeeInteractiveApprovalGuard) Authorize(_ context.Context, action execution.ActionDescriptor) (execution.PolicyDecision, error) {
+	g.calls++
+	digest, err := action.Digest()
+	return execution.PolicyDecision{Kind: execution.PolicyRequestApproval, ActionDigest: digest, Reason: "exact private source requires owner review"}, err
+}
+
 func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 	for _, interactive := range []bool{false, true} {
 		t.Run(map[bool]string{false: "autonomous", true: "interactive"}[interactive], func(t *testing.T) {

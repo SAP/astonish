@@ -2,9 +2,13 @@ package launcher
 
 import (
 	"context"
+	"errors"
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"testing"
 	"time"
 )
@@ -16,6 +20,40 @@ func (interactiveFactoryAuthorization) Authorize(ctx context.Context, _ executio
 }
 func (interactiveFactoryAuthorization) AuthorizeTool(ctx context.Context, _ string) error {
 	return ctx.Err()
+}
+
+func TestEmployeeWorkerInteractiveDispatchBeforeEffect(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		f := newBotFactoryFixture(t)
+		setBotSharedInteractive(f)
+		guard := &employeeInteractiveApprovalGuard{}
+		got, err := f.construct(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer got.Cleanup()
+		binding := *botFactoryModelForTest(t, got.Agent.LLM).binding
+		binding.workerOnly = private
+		binding.owner = agent.WithBotPolicyRuntime(binding.owner, agent.BotPolicyRuntime{Guard: guard, Classifier: botFactoryTestClassifier{}})
+		calls := 0
+		target, err := functiontool.New(functiontool.Config{Name: "read_file", Description: "read"}, func(tool.Context, map[string]any) (map[string]any, error) { return nil, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrapped := &interactiveBotTool{botRunnableTool: target.(botRunnableTool), binding: &binding, next: func(_ tool.Context, _ any) (map[string]any, error) {
+			calls++
+			return map[string]any{"content": "effect"}, nil
+		}}
+		_, err = wrapped.Run(employeeInteractiveToolContext{botFactoryHandoffContext{base: f.ctx, session: f.req.Run.SessionID.String()}}, map[string]any{"path": "/exact"})
+		if private {
+			var blocked *agent.BotPolicyError
+			if !errors.As(err, &blocked) || !blocked.ApprovalRequired() || calls != 0 || guard.calls != 1 {
+				t.Fatalf("private before effect: err=%v effects=%d guards=%d", err, calls, guard.calls)
+			}
+		} else if err != nil || calls != 1 || guard.calls != 0 {
+			t.Fatalf("generic changed: err=%v effects=%d guards=%d", err, calls, guard.calls)
+		}
+	}
 }
 
 func TestInteractiveBotCatalogNoAutonomyTools(t *testing.T) {
@@ -58,9 +96,14 @@ func TestInteractiveBotCatalogNoAutonomyTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"read_file", "web_fetch", "ask_user", "run_flow", "distill_flow"} {
-		if !names[name] {
-			t.Errorf("shared catalog missing %s", name)
+	for _, name := range []string{"ask_user", "employee_chat"} {
+		if got.Agent.ToolIndex.GetToolEntry(name) == nil {
+			t.Errorf("Employee catalog missing %s", name)
+		}
+	}
+	for _, name := range []string{"read_file", "web_fetch", "run_flow", "distill_flow"} {
+		if got.Agent.ToolIndex.GetToolEntry(name) != nil {
+			t.Errorf("Employee inherited private-worker executable %s", name)
 		}
 	}
 	if names["email_send"] || names["browser_navigate"] {

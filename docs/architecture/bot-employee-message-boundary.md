@@ -4,6 +4,63 @@
 > in the retained legacy sections below do not apply to `agent_led_v1` work. The
 > explicit protocol preserves historical/in-flight assessment semantics.
 
+## Private Employee/Chat presentation contract
+
+`bot.EmployeeChatService` is request-local, not a global service. `Send` accepts
+only an opaque worker handle and a message; empty handles start a private Chat,
+existing handles follow up the same private conversation. Owner, tenant, source
+run/session, lease, model and effective limits come from the bound server request.
+Calls are serial and share the original budget and absolute authority/deadline;
+there is no new worker count cap, budget reset, renewed grant or execution lease.
+Typed worker results (including failed/partial/needs-input/cancelled), evidence,
+artifacts and limitations are private input to the Employee, never Home speech.
+Private dispatch restoration uses only the current run's underlying transcript,
+not the merged prior Home-history projection. Previous turns remain conversational
+context but cannot supply worker handles, pending dispatches or approval authority
+to a fresh turn. Invalid current-run dispatch transitions still fail closed.
+
+`store.BotEmployeePresentation` is versioned private ownership for a fresh,
+tools-disabled continuation after source execution is sealed. It records original
+source Bot/run/version/owner/tenant/Home/user-event identity, effective limits,
+absolute deadline/authority expiry and model pin, immutable report sequence/digest,
+operation receipt identities, claim/dispatch tokens, cumulative usage, worker
+history and started/settled model turns, final text/digest or neutral error reason.
+`botStoredRun.MarshalJSON/UnmarshalJSON` explicitly persist these records in
+`employee_presentation` and legacy producer provenance in
+`employee_speech_provenance`, outside `Run`/editable report JSON. Public JSON of a
+presentation is `{}` and public decoding discards its fields. Private codec hooks
+are trusted repository-only calls, not HTTP/model input entry points. These are
+in-process boundaries, not defenses against malicious linked Go code.
+
+Transitions are pending → claimed → completed/unavailable; terminal values are
+immutable. A claimed turn is durably started before model dispatch and settled
+with actual usage afterward. A crash with an unsettled turn cannot dispatch it
+again. The optional `BotEmployeePresentationStore` claim/read/reserve/settle/complete
+interface requires scoped source reauthorization and CAS identities on every
+mutation; presentation never grants tool authority. Missing records retain legacy
+execution semantics. Unknown versions or malformed bindings fail closed when read
+for new dispatch rather than silently becoming legacy. Codec validation checks
+identity and immutable outcome binding, not live membership or budget admission;
+those remain repository/dispatch responsibilities. The final presentation keeps the
+selected provider's native output-token allowance, since reasoning tokens can
+exhaust a short visible-reply cap before any JSON is produced. The existing model
+wrapper still owns admission and usage settlement; strict digest/JSON validation,
+no-tools checks, and the 1600-byte visible-text limit remain unchanged. The evidence
+input explicitly identifies its response format as `json`; the Responses API's
+JSON-object mode requires this word in an input message, not only in its separate
+system instructions.
+
+`store.EmployeeSpeech` selects only a completed private Employee presentation or
+an integrity-validated historical agent/assessed/model envelope with server-owned,
+source-bound `BotEmployeeSpeechProvenance`. The latter is created only after private
+producer validation (including model review attestation), and its unexported
+binding survives only the private repository codec. Public hashes, origins and
+identical wording cannot mint it. Fallback, operation, worker and unknown prose
+are never Employee speech, even if their wording matches a genuine Employee reply.
+No source success/failure is rewritten, verified artifacts stay accessible, and
+historical diagnostics remain stored. Projection and orchestration consumers are
+separate phases; these contracts alone do not change live Home rendering.
+
 ## Agent-origin contract
 
 The envelope additionally supports origin `agent` for the exact captured final

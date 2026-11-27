@@ -75,6 +75,16 @@ func (s *botAuthorizedOperationRuntime) ReconcileAuthorizedOperations(ctx contex
 			failures = append(failures, err)
 			continue
 		}
+		if op.Provenance != nil && scheduleOperation(op.Payload.Operation) {
+			source, e := s.repo.db.ReadRun(ctx, id, op.Provenance.SourceRunID)
+			if e != nil {
+				failures = append(failures, e)
+				continue
+			}
+			if source.EmployeeScheduleCoordinator {
+				continue
+			}
+		}
 		if op.Status == store.BotOperationApplying {
 			continue // ambiguous effects need exact reconciliation, never blind cancellation
 		}

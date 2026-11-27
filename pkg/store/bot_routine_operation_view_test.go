@@ -34,28 +34,45 @@ func TestBotRoutineOperationPresentation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := BotOperationPresentationConversation
-				if status == BotOperationPending || status == BotOperationApplying {
-					want = BotOperationPresentationInternal
+				if view.Presentation != BotOperationPresentationInternal {
+					t.Fatalf("operation became conversation: %+v", view)
 				}
-				if view.Presentation != want {
-					t.Fatalf("presentation: %+v", view)
+				assertBotOperationNeutralSummary(t, view)
+				first, err := NewBotOperationEvent(view, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				legacy := view
+				legacy.Presentation = ""
+				prior, err := NewBotOperationEvent(legacy, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if first.ID != prior.ID || first.Content != nil || first.Author != "bot_runtime" {
+					t.Fatal("changed canonical event identity or duplicated assistant content")
 				}
 				raw, _ := json.Marshal(view)
 				if strings.Contains(string(raw), "private") || strings.Contains(view.Summary, op.ID.String()) {
 					t.Fatalf("private prose: %s", raw)
 				}
 				if status == BotOperationApplied {
-					op.Receipt.Postconditions[0].Resource = "unrelated"
-					fallback, err := ProjectBotOperation(b, op, 11)
-					if err != nil || fallback.Presentation != "" {
-						t.Fatalf("unrelated receipt promoted: %+v %v", fallback, err)
+					if !op.HasVerifiedMetadataReceipt() {
+						t.Fatal("exact metadata receipt not verified")
 					}
+					op.Receipt.Postconditions[0].Resource = "unrelated"
+					if op.HasVerifiedMetadataReceipt() {
+						t.Fatal("unrelated metadata receipt verified")
+					}
+					fallback, err := ProjectBotOperation(b, op, 11)
+					if err != nil || fallback.Presentation != BotOperationPresentationInternal {
+						t.Fatalf("unrelated receipt became conversation: %+v %v", fallback, err)
+					}
+					assertBotOperationNeutralSummary(t, fallback)
 				}
 				if status == BotOperationBlocked {
 					op.Decision = BotOperationRequireAuthorization
 					fallback, err := ProjectBotOperation(b, op, 11)
-					if err != nil || fallback.Presentation != "" {
+					if err != nil || fallback.Presentation != "" || fallback.Blocker == "" {
 						t.Fatalf("authorization hidden: %+v %v", fallback, err)
 					}
 				}

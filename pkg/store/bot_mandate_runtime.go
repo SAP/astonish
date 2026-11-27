@@ -97,6 +97,13 @@ func (e *BotMandateQuotaError) Error() string {
 }
 func (e *BotMandateQuotaError) Unwrap() error { return ErrBotForbidden }
 
+// BotEmployeePresentationPreparer is server-only terminal-source communication.
+// Storage derives the original pin, limits, deadlines and immutable evidence;
+// neither public requests nor model output may supply these fields.
+type BotEmployeePresentationPreparer interface {
+	PrepareEmployeePresentation(context.Context, BotEmployeePresentationRequest) (*BotEmployeePresentation, error)
+}
+
 type BotMandateRuntime interface {
 	BotMandateStore
 	execution.BotMandateVerifier

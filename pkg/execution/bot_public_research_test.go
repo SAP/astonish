@@ -17,12 +17,12 @@ func TestBotPublicResearchScope(t *testing.T) {
 		t.Fatal("arbitrary disclosure admitted")
 	}
 	for name, change := range map[string]func(*BotPublicResearchScope){
-		"provider":   func(s *BotPublicResearchScope) { s.Route.Provider = "other" },
-		"credential": func(s *BotPublicResearchScope) { s.Route.CredentialHandles[0] = "provider:other:key" },
-		"subject":    func(s *BotPublicResearchScope) { s.Subject = "private project" },
-		"source":     func(s *BotPublicResearchScope) { s.SourceEventID = "spoofed" },
-		"quota":      func(s *BotPublicResearchScope) { s.MaxCalls = 1 },
-		"facet":      func(s *BotPublicResearchScope) { s.Facets = s.Facets[:1] },
+		"provider":       func(s *BotPublicResearchScope) { s.Route.Provider = "other" },
+		"credential":     func(s *BotPublicResearchScope) { s.Route.CredentialHandles[0] = "provider:other:key" },
+		"subject":        func(s *BotPublicResearchScope) { s.Subject = "private project" },
+		"source":         func(s *BotPublicResearchScope) { s.SourceEventID = "spoofed" },
+		"negative calls": func(s *BotPublicResearchScope) { s.MaxCalls = -1 },
+		"facet":          func(s *BotPublicResearchScope) { s.Facets = s.Facets[:1] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			current := s.Clone()
@@ -34,6 +34,13 @@ func TestBotPublicResearchScope(t *testing.T) {
 	}
 	if s.ValidateWithin(nil) == nil {
 		t.Fatal("revoked grant admitted")
+	}
+	for _, calls := range []int64{0, 1, 100} {
+		current := s.Clone()
+		current.MaxCalls = calls
+		if err := s.ValidateWithin(&current); err != nil {
+			t.Fatal(err)
+		}
 	}
 	clone := BotMandate{PublicResearch: &s}.Clone()
 	clone.PublicResearch.Facets[0] = BotResearchRecent

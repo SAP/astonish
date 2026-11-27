@@ -2,7 +2,6 @@ package launcher
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/bot"
@@ -25,7 +24,7 @@ func TestBotConfiguredSearchUnknownReservationDenialStaysBlocked(t *testing.T) {
 	}
 	_, _ = bot.TakeToolOutcome(c, c.FunctionCallID())
 	// Simulate durable denial not proven by this episode's reservation count.
-	r.calls = 2
+	r.denyReservation = true
 	if _, err := search.(botRunnableTool).Run(c, args); err == nil {
 		t.Fatal("denial bypass")
 	}
@@ -37,8 +36,8 @@ func TestBotConfiguredSearchUnknownReservationDenialStaysBlocked(t *testing.T) {
 		t.Fatal("predispatch denial lacks receipt")
 	}
 }
-func TestBotConfiguredSearchQuotaPreservesDiscovery(t *testing.T) {
-	for _, denial := range []string{"quota", "revoked", "route-missing", "route-changed", "cancelled", "provider-error"} {
+func TestBotConfiguredSearchBeyondHistoricalCapsKeepsAuthority(t *testing.T) {
+	for _, denial := range []string{"revoked", "route-missing", "route-changed", "cancelled", "provider-error"} {
 		t.Run(denial, func(t *testing.T) {
 			f, runtime, episode := researchFixture(t)
 			f.ctx, _ = bot.WithToolOutcomes(f.ctx)
@@ -49,62 +48,55 @@ func TestBotConfiguredSearchQuotaPreservesDiscovery(t *testing.T) {
 			}
 			c := optionalKnowledgeContext{knowledgeCtx(f)}
 			args := map[string]any{"facet": "overview"}
-			for i := 0; i < 2; i++ {
+			for i := 0; i < 13; i++ {
 				result, err := search.(botRunnableTool).Run(c, args)
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("search %d: %v", i+1, err)
 				}
 				metadata, ok := result["metadata"].(map[string]any)
-				if !ok || metadata["remaining_episode_search_ceiling"] != float64(1-i) {
-					t.Fatalf("remaining ceiling: %v", result)
+				if !ok || metadata["episode_search_calls"] != float64(i+1) {
+					t.Fatalf("usage: %v", result)
+				}
+				if _, exists := metadata["remaining_episode_search_ceiling"]; exists {
+					t.Fatal("execution ceiling still advertised")
 				}
 			}
-			_, _ = bot.TakeToolOutcome(c, c.FunctionCallID())
-			if _, err := search.(botRunnableTool).Run(c, args); err == nil {
-				t.Fatal("quota bypass")
+			if searchModel.calls != 13 || runtime.calls != 13 {
+				t.Fatal("usage lost")
 			}
-			if searchModel.calls != 2 || runtime.calls != 2 {
-				t.Fatal("quota denial dispatched")
+			if err := episode.AllowDetail(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String(), "https://example.com/decisive"); err != nil {
+				t.Fatal(err)
 			}
-			if episode.State() != BotResearchFailed {
-				t.Fatal("negative quota observation lost")
-			}
-			o, ok := bot.TakeToolOutcome(c, c.FunctionCallID())
-			if !ok || !o.Verified || o.Nonexecution == nil || o.Nonexecution.CallID != c.FunctionCallID() || o.Nonexecution.ToolName != search.Name() || len(o.SourceAccess) != 0 || len(o.Changed) != 0 {
-				t.Fatalf("missing exact trusted nonexecution: %+v", o)
-			}
-			if denial == "revoked" {
+			switch denial {
+			case "revoked":
 				runtime.revoked = true
-			}
-			if denial == "route-missing" {
+			case "route-missing":
 				f.services.Settings = nil
 				f.services.PersonalSettings = nil
-			}
-			if denial == "route-changed" {
+			case "route-changed":
 				f.services.Settings = botKnowledgeTeamSettings{}
-			}
-			if denial == "cancelled" {
+			case "cancelled":
 				ctx, cancel := context.WithCancel(f.ctx)
 				cancel()
 				f.ctx = ctx
-			}
-			if denial == "provider-error" {
-				// A non-quota failure must not inherit the narrow quota exception.
+			case "provider-error":
 				generation, err := episode.Begin(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String())
 				if err != nil {
 					t.Fatal(err)
 				}
 				episode.observe(f.ctx, generation, 0, context.DeadlineExceeded)
 			}
-			err = episode.AllowDetail(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String(), "https://example.com/decisive")
-			if denial == "quota" && err != nil {
-				t.Fatalf("quota erased discovery: %v", err)
-			}
-			if denial != "quota" && err == nil {
+			if episode.AllowDetail(f.ctx, f.req.Run.ID, f.req.Run.SessionID.String(), "https://example.com/decisive") == nil {
 				t.Fatalf("%s unlocked detail", denial)
 			}
-			if denial == "quota" && !strings.Contains(search.(botRunnableTool).Declaration().Description, "2") {
-				t.Fatal("search ceiling missing from producer description")
+			if denial != "provider-error" {
+				c = optionalKnowledgeContext{knowledgeCtx(f)}
+				if _, err := search.(botRunnableTool).Run(c, args); err == nil {
+					t.Fatalf("%s dispatched", denial)
+				}
+				if searchModel.calls != 13 {
+					t.Fatal("authority denial dispatched")
+				}
 			}
 		})
 	}

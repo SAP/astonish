@@ -122,7 +122,7 @@ func ValidateVersion(v store.BotVersion) error {
 	if err := v.Budget.RuntimePolicy.Validate(); err != nil {
 		return fmt.Errorf("%w: runtime policy: %v", store.ErrBotInvalid, err)
 	}
-	if v.Budget.MaxRuntimeSeconds <= 0 || v.Budget.MaxRuntimeSeconds > int64((1<<63-1)/time.Second) || v.Autonomy.MaxSpendPerRunMinor < 0 || v.Autonomy.MaxSpendPerMonthMinor < 0 {
+	if v.Budget.MaxRuntimeSeconds < 0 || v.Budget.MaxRuntimeSeconds > int64((1<<63-1)/time.Second) || v.Autonomy.MaxSpendPerRunMinor < 0 || v.Autonomy.MaxSpendPerMonthMinor < 0 {
 		return fmt.Errorf("%w: budget", store.ErrBotInvalid)
 	}
 	for _, limit := range []*int64{v.Budget.MaxTokens, v.Budget.MaxToolCalls, v.Budget.MaxRunsPerDay, v.Budget.MaxModelCostMicros} {
@@ -141,6 +141,55 @@ func ValidateVersion(v store.BotVersion) error {
 		return fmt.Errorf("%w: notification policy", store.ErrBotInvalid)
 	}
 	return nil
+}
+
+// EmployeeChatRequest contains only conversational input. Empty WorkerID starts
+// a private Chat; handles follow up only inside the bound server request.
+type EmployeeChatRequest struct {
+	WorkerID string `json:"worker_id,omitempty"`
+	Message  string `json:"message"`
+}
+type EmployeeChatStatus string
+
+const (
+	EmployeeChatCompleted  EmployeeChatStatus = "completed"
+	EmployeeChatPartial    EmployeeChatStatus = "partial"
+	EmployeeChatNeedsInput EmployeeChatStatus = "needs_input"
+	EmployeeChatFailed     EmployeeChatStatus = "failed"
+	EmployeeChatCancelled  EmployeeChatStatus = "cancelled"
+)
+
+type EmployeeChatResult struct {
+	WorkerID    string              `json:"worker_id"`
+	Status      EmployeeChatStatus  `json:"status"`
+	PrivateText string              `json:"private_text"`
+	Evidence    []store.BotEvidence `json:"evidence,omitempty"`
+	Artifacts   []store.BotArtifact `json:"artifacts,omitempty"`
+	Limitations []string            `json:"limitations,omitempty"`
+}
+
+// Send is serial and shares original effective budgets, deadline, model and
+// authority. No model-supplied owner/run/session/authority or fresh caps/grants.
+type EmployeeChatService interface {
+	Send(context.Context, EmployeeChatRequest) (*EmployeeChatResult, error)
+}
+type employeeChatServiceKey struct{}
+
+func WithEmployeeChatService(ctx context.Context, service EmployeeChatService) context.Context {
+	return context.WithValue(ctx, employeeChatServiceKey{}, service)
+}
+func EmployeeChatServiceFromContext(ctx context.Context) EmployeeChatService {
+	if ctx == nil {
+		return nil
+	}
+	service, _ := ctx.Value(employeeChatServiceKey{}).(EmployeeChatService)
+	return service
+}
+func WithEmployeeChatServiceFromContext(dst, src context.Context) context.Context {
+	if service := EmployeeChatServiceFromContext(src); service != nil {
+		return WithEmployeeChatService(dst, service)
+	}
+	return dst
 }
 
 // BotWorkServices is an optional, already scoped capability. Implementations

@@ -4,18 +4,18 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { BotAPIError, BotStatus, getBot, type Bot } from '@/api/bots'
 import { getActiveTeam } from '@/api/teamContext'
-import { RuntimeMode, newBotProgressRuntimePolicy, validRuntimePolicy, runtimePolicySummary, runtimeSecondsMax, AutonomyLevel, NotifyPolicy, configureBot, getBotConfigurationVersion, type AutonomyLevelValue, type NotifyPolicyValue, type BotConfiguration, type BotConfigurationRequest } from '@/api/botConfiguration'
+import { AutonomyLevel, NotifyPolicy, configureBot, getBotConfigurationVersion, type AutonomyLevelValue, type NotifyPolicyValue, type BotConfiguration, type BotConfigurationRequest } from '@/api/botConfiguration'
 
 type Props = { bot: Bot; readOnly?: boolean; onChange: () => void }
 type Baseline = { bot: Bot; policy: BotConfiguration }
 const lists = { allowed_tools: 'Allowed tools', denied_tools: 'Denied tools', allowed_paths: 'Allowed paths', allowed_hosts: 'Allowed hosts' } as const
-const budgets = { max_runtime_seconds: 'Maximum runtime (seconds)', max_tool_calls: 'Maximum tool calls', max_tokens: 'Maximum tokens', max_runs_per_day: 'Maximum runs per day', max_model_cost_micros: 'Maximum model cost (micros)' } as const
 const spend = { max_spend_per_run_minor: 'Spend per run (minor units)', max_spend_per_month_minor: 'Spend per month (minor units)' } as const
 const field = 'grid gap-1 text-sm'
 const select = 'rounded-md border border-input bg-background p-2 text-foreground'
 function clean(policy: BotConfiguration): BotConfiguration {
   const autonomy = { ...policy.autonomy }
   for (const key of Object.keys(lists) as (keyof typeof lists)[]) autonomy[key] = (autonomy[key] || []).map(s => s.trim()).filter(Boolean)
+  // Historical execution fields are transport compatibility data, not editable limits.
   return { autonomy, budget: { ...policy.budget }, delivery: { ...policy.delivery, bindings: (policy.delivery.bindings || []).map(b => ({ ...b })) } }
 }
 function describe(policy: BotConfiguration): Record<string, string> {
@@ -25,9 +25,7 @@ function describe(policy: BotConfiguration): Record<string, string> {
   result['May publish'] = policy.autonomy.can_publish ? 'Yes' : 'No'
   result['Spend currency'] = policy.autonomy.spend_currency || '(none)'
   for (const [key, label] of Object.entries(spend)) result[label] = String(policy.autonomy[key as keyof typeof spend])
-  for (const [key, label] of Object.entries(budgets)) result[label] = String(policy.budget[key as keyof typeof budgets] ?? 'Unlimited / unknown')
-  result['Runtime policy'] = runtimePolicySummary(policy.budget)
-  result['Runtime policy parameters'] = JSON.stringify(policy.budget.runtime_policy || null)
+  result['Maximum runs per day'] = String(policy.budget.max_runs_per_day ?? 'No daily limit configured')
   result.Notifications = policy.delivery.notify
   result['Delivery preferences'] = policy.delivery.preferences || '(none)'
   result['Delivery destinations'] = (policy.delivery.bindings || []).map(b => `${b.channel}: ${b.chat_id}${b.thread_id ? ` / ${b.thread_id}` : ''} (linked identity ${b.id})`).join('; ') || '(none)'
@@ -89,9 +87,10 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
   const after = review ? describe(review) : {}
   const newer = baseline && (bot.revision !== baseline.bot.revision || bot.version !== baseline.bot.version)
   return <section aria-label="Runtime configuration" className="space-y-3 rounded-lg border border-border bg-card p-4 text-card-foreground">
-    <h2 className="font-semibold">Autonomy, budgets & delivery</h2>
+    <h2 className="font-semibold">Autonomy, run admission & delivery</h2>
     <p className="text-sm text-muted-foreground">Policy changes require explicit review. Editing charter or prose does not grant rights. Saving does not resume this Bot, start a run or enable schedules.</p>
-    {unavailable && <p>Configuration is read-only. Pause or stop an active Bot explicitly before changing runtime policy.</p>}
+    <p className="text-sm text-muted-foreground">No per-run execution budgets. Runtime, token, tool-call and model-cost usage is accounting, not an editable execution limit. Historical execution settings are preserved for compatibility.</p>
+    {unavailable && <p>Configuration is read-only. Pause or stop an active Bot explicitly before changing configuration.</p>}
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {message && <p role="status">{message}</p>}
     {!draft && !error && <p role="status">Loading runtime configuration…</p>}
@@ -101,9 +100,8 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
     {draft && baseline && <form onSubmit={event => {
       event.preventDefault()
       if (unavailable || busy || conflict || !reason.trim()) return
-      const numbers = [...(Object.keys(budgets) as (keyof typeof budgets)[]).map(key => draft.budget[key]), draft.autonomy.max_spend_per_run_minor, draft.autonomy.max_spend_per_month_minor].filter(value => value !== undefined)
-      if (!numbers.every(value => Number.isSafeInteger(value) && value >= 0) || (draft.budget.runtime_policy?.mode !== RuntimeMode.Progress && !(draft.budget.max_runtime_seconds > 0))) { setError('Use non-negative safe whole numbers for limits, and a positive runtime.'); return }
-      if (!validRuntimePolicy(draft.budget.runtime_policy)) { setError('Use positive, duration-safe whole seconds. Health checks must not exceed the inactivity threshold, and health monitoring requires a zero/omitted elapsed model timeout.'); return }
+      const numbers = [draft.budget.max_runs_per_day, draft.autonomy.max_spend_per_run_minor, draft.autonomy.max_spend_per_month_minor].filter(value => value !== undefined)
+      if (!numbers.every(value => Number.isSafeInteger(value) && value >= 0)) { setError('Use non-negative safe whole numbers for run admission and action spending limits.'); return }
       if (!Object.values(AutonomyLevel).includes(draft.autonomy.level) || !Object.values(NotifyPolicy).includes(draft.delivery.notify)) { setError('Unsupported autonomy or notification policy. Choose a supported value.'); return }
       setError(''); setReviewed(false); setRights(false)
       setReview({ ...clean(draft), expected_revision: baseline.bot.revision, expected_version: baseline.bot.version, reviewed: true, reason: reason.trim() })
@@ -120,22 +118,10 @@ function ConfigurationEditor({ bot, readOnly = false, onChange }: Props) {
         <label className="flex gap-2"><input type="checkbox" checked={draft.autonomy.can_publish} onChange={e => change({ ...draft, autonomy: { ...draft.autonomy, can_publish: e.target.checked } })} />May publish</label>
         <label className={field}>Spend currency<Input maxLength={3} pattern="[A-Z]{3}" placeholder="USD" required={draft.autonomy.max_spend_per_run_minor > 0 || draft.autonomy.max_spend_per_month_minor > 0} value={draft.autonomy.spend_currency || ''} onChange={e => change({ ...draft, autonomy: { ...draft.autonomy, spend_currency: e.target.value.toUpperCase() } })} /></label>
         <div className="grid gap-3 sm:grid-cols-2">{(Object.keys(spend) as (keyof typeof spend)[]).map(key => <label className={field} key={key}>{spend[key]}<Input type="number" min={0} max={Number.MAX_SAFE_INTEGER} step={1} required value={draft.autonomy[key]} onChange={e => change({ ...draft, autonomy: { ...draft.autonomy, [key]: e.target.value === '' ? NaN : Number(e.target.value) } })} /></label>)}</div>
-        <p className="text-sm text-muted-foreground">Purchase caps use currency minor units; zero does not grant spending. They are separate from model cost. Unsupported capabilities fail closed on the server.</p>
-        <h3 className="font-medium">Budgets</h3>
-        <label className={field}>Runtime mode<select className={select} value={draft.budget.runtime_policy?.mode || RuntimeMode.Legacy} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: e.target.value === RuntimeMode.Progress ? newBotProgressRuntimePolicy() : undefined } })}>
-          <option value={RuntimeMode.Legacy}>Saved legacy duration limit</option><option value={RuntimeMode.Progress}>Progress-driven (requires operator permission)</option>
-        </select></label>
-        <p className="text-sm text-muted-foreground">Saved policies remain unchanged unless you explicitly edit and review them. New authorization is required; changing configuration does not upgrade existing assignments or grants. Operator policy remains authoritative.</p>
-        {draft.budget.runtime_policy?.mode === RuntimeMode.Progress && <>
-          <p>{runtimePolicySummary(draft.budget)}</p>
-          <label className="flex gap-2"><input type="checkbox" checked={!!draft.budget.runtime_policy.generation_health} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: { ...draft.budget.runtime_policy!, generation_health: e.target.checked ? newBotProgressRuntimePolicy().generation_health : undefined, model_call_timeout_seconds: e.target.checked ? 0 : baseline.policy.budget.runtime_policy?.model_call_timeout_seconds || undefined } } })} />Use generation health monitoring (explicit opt-in)</label>
-          <p className="text-sm text-muted-foreground">Health monitoring has no fixed generation duration. The inactivity threshold detects stalled generation, not the age of the entire task. Spending limits, cancellation and authorization still apply. Turning it on replaces the elapsed model timeout only after review and save.</p>
-          {draft.budget.runtime_policy.generation_health && <div className="grid gap-3 sm:grid-cols-2">{(['idle_timeout_seconds', 'check_interval_seconds'] as const).map(key => <label key={key} className={field}>{({ idle_timeout_seconds: 'Generation inactivity threshold (seconds)', check_interval_seconds: 'Generation health check interval (seconds)' })[key]}<Input type="number" min={1} max={runtimeSecondsMax} step={1} required value={Number.isNaN(draft.budget.runtime_policy!.generation_health![key]) ? '' : draft.budget.runtime_policy!.generation_health![key]} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: { ...draft.budget.runtime_policy!, generation_health: { ...draft.budget.runtime_policy!.generation_health!, [key]: e.target.value === '' ? NaN : Number(e.target.value) } } } })} /></label>)}</div>}
-          <p className="text-sm text-muted-foreground">Blank total active duration means no task duration limit; token, tool and spending limits still apply. Operator ceilings are checked by the server.</p>
-          <div className="grid gap-3 sm:grid-cols-2">{(['evaluation_interval_seconds', 'max_active_seconds', 'model_call_timeout_seconds', 'tool_call_timeout_seconds'] as const).map(key => <label key={key} className={field}>{({ evaluation_interval_seconds: 'Progress evaluation interval (seconds)', max_active_seconds: 'Total active duration limit (seconds, optional)', model_call_timeout_seconds: 'Model operation timeout (seconds)', tool_call_timeout_seconds: 'Tool operation timeout (seconds)' })[key]}<Input type="number" min={key === 'model_call_timeout_seconds' && draft.budget.runtime_policy?.generation_health ? 0 : 1} max={key === 'model_call_timeout_seconds' && draft.budget.runtime_policy?.generation_health ? 0 : runtimeSecondsMax} step={1} required={key !== 'max_active_seconds'} value={draft.budget.runtime_policy?.[key] ?? (key === 'model_call_timeout_seconds' && draft.budget.runtime_policy?.generation_health ? 0 : '')} onChange={e => change({ ...draft, budget: { ...draft.budget, runtime_policy: { ...draft.budget.runtime_policy!, [key]: e.target.value === '' ? undefined : Number(e.target.value) } } })} /></label>)}</div>
-        </>}
-        <p className="text-sm text-muted-foreground">Blank optional budgets mean unlimited / unknown; zero is an explicit limit. Model-cost caps cannot guarantee a money ceiling when model pricing or enforcement is unsupported.</p>
-        <div className="grid gap-3 sm:grid-cols-2">{(Object.keys(budgets) as (keyof typeof budgets)[]).filter(key => key !== 'max_runtime_seconds' || draft.budget.runtime_policy?.mode !== RuntimeMode.Progress).map(key => <label className={field} key={key}>{budgets[key]}<Input type="number" min={key === 'max_runtime_seconds' ? 1 : 0} max={Number.MAX_SAFE_INTEGER} step={1} required={key === 'max_runtime_seconds'} value={draft.budget[key] ?? ''} onChange={e => change({ ...draft, budget: { ...draft.budget, [key]: e.target.value === '' ? undefined : Number(e.target.value) } })} /></label>)}</div>
+        <p className="text-sm text-muted-foreground">Purchase caps use currency minor units; zero does not grant spending. These authorize external actions, not model usage. Unsupported capabilities fail closed on the server.</p>
+        <h3 className="font-medium">Run admission</h3>
+        <p className="text-sm text-muted-foreground">Daily run admission limits control how many runs may start, not how much work a run may do. Blank means no daily limit configured; zero prevents new runs. Schedule consent and concurrency limits remain separate.</p>
+        <label className={field}>Maximum runs per day<Input type="number" min={0} max={Number.MAX_SAFE_INTEGER} step={1} value={draft.budget.max_runs_per_day ?? ''} onChange={e => change({ ...draft, budget: { ...draft.budget, max_runs_per_day: e.target.value === '' ? undefined : Number(e.target.value) } })} /></label>
         <h3 className="font-medium">Delivery</h3>
         <label className={field}>Notifications<select className={select} value={draft.delivery.notify} onChange={e => change({ ...draft, delivery: { ...draft.delivery, notify: e.target.value as NotifyPolicyValue } })}>
           {!Object.values(NotifyPolicy).includes(draft.delivery.notify) && <option value={draft.delivery.notify}>Unsupported: {draft.delivery.notify}</option>}

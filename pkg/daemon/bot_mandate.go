@@ -106,15 +106,9 @@ func (w *BotWorker) prepareMandate(ctx context.Context, repo store.BotStore, in 
 		return bot.RunPreparation{}, err
 	}
 	snapshot := auth.Snapshot()
-	limits := snapshot.Limits
-	// The saved mandate, not a newer version or operator default, is authority.
+	// Keep saved operational policy, not historic local execution caps.
+	// Durable external action spend and authority checks remain enforced.
 	in.Version.Budget.RuntimePolicy = snapshot.RuntimePolicy.Clone()
-	if in.Version.Budget.MaxRuntimeSeconds <= 0 || in.Version.Budget.MaxRuntimeSeconds > limits.MaxRuntimeSeconds {
-		in.Version.Budget.MaxRuntimeSeconds = limits.MaxRuntimeSeconds
-	}
-	if in.Version.Budget.MaxTokens == nil || *in.Version.Budget.MaxTokens > limits.MaxTokens {
-		in.Version.Budget.MaxTokens = &limits.MaxTokens
-	}
 	budget, err := botRunBudget(in, time.Now())
 	if err != nil {
 		return bot.RunPreparation{}, err

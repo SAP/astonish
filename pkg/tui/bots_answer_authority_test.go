@@ -30,10 +30,6 @@ func TestBotExpiredAnswerRequiresExplicitContinue(t *testing.T) {
 	m.bots = botsState{open: true, answering: true, decisions: []store.BotApproval{a}}
 	next, cmd := m.handleBotAnswerKey("enter")
 	m = next.(model)
-	if cmd != nil {
-		t.Fatal("review submitted")
-	}
-	_, cmd = m.handleBotAnswerKey("enter")
 	if cmd == nil {
 		t.Fatal("no answer command")
 	}
@@ -109,15 +105,12 @@ func TestBotInitialTitleAnswerOptionsCustomAndDuplicate(t *testing.T) {
 						press(tea.KeyPressMsg{Code: r, Text: string(r)})
 					}
 				}
-				if press(tea.KeyPressMsg{Code: tea.KeyEnter}) != nil || b.response != nil {
-					t.Fatal("review submitted")
-				}
-				if m.bots.response == nil || m.bots.response.Answer != want || m.bots.response.QuestionID != "title-question" {
-					t.Fatalf("unbound reviewed answer: %+v", m.bots.response)
-				}
 				cmd := press(tea.KeyPressMsg{Code: tea.KeyEnter})
+				if m.bots.response == nil || m.bots.response.Answer != want || m.bots.response.QuestionID != "title-question" {
+					t.Fatalf("unbound submitted answer: %+v", m.bots.response)
+				}
 				if cmd == nil || !m.bots.loading {
-					t.Fatal("missing reviewed submission")
+					t.Fatal("missing edited submission")
 				}
 				if duplicate := press(tea.KeyPressMsg{Code: tea.KeyEnter}); duplicate != nil {
 					t.Fatal("duplicate submission while loading")
@@ -132,16 +125,16 @@ func TestBotInitialTitleAnswerOptionsCustomAndDuplicate(t *testing.T) {
 }
 
 func TestBotInitialTitleQuestionEscapeAndRestore(t *testing.T) {
-	for _, reviewed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("reviewed=%t", reviewed), func(t *testing.T) {
+	for _, edited := range []bool{false, true} {
+		t.Run(fmt.Sprintf("edited=%t", edited), func(t *testing.T) {
 			a := titleAnswerApproval(t, 4)
 			b := &gapBotBackend{}
 			m := newModel(context.Background(), Config{Backend: b})
 			m.bots = botsState{open: true, answering: true, decisions: []store.BotApproval{a}}
-			if reviewed {
-				next, cmd := m.handleBotsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+			if edited {
+				next, cmd := m.handleBotsKey(tea.KeyPressMsg{Code: tea.KeyDown})
 				if cmd != nil {
-					t.Fatal("review submitted")
+					t.Fatal("navigation submitted")
 				}
 				m = next.(model)
 			}

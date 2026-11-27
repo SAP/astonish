@@ -62,10 +62,31 @@ func TestBotMandateAdmissionDurable(t *testing.T) {
 			if err := runtime.ConsumeBotMandateQuota(context.Background(), ref, first.Run.ID, 2, 10, 0); err != nil {
 				t.Fatal(err)
 			}
-			if err := runtime.ConsumeBotMandateQuota(context.Background(), ref, first.Run.ID, 1, 0, 0); err == nil {
-				t.Fatal("per-run quota exceeded")
+			if err := runtime.ConsumeBotMandateQuota(context.Background(), ref, first.Run.ID, 100, 1000, 0); err != nil {
+				t.Fatal("historical per-run/aggregate metadata enforced:", err)
+			}
+			if err := runtime.ConsumeBotMandateQuota(context.Background(), ref, first.Run.ID, 0, 0, 1); err == nil {
+				t.Fatal("external spend bypass")
+			}
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := runtime.ConsumeBotMandateQuota(cancelled, ref, first.Run.ID, 1, 1, 0); err == nil {
+				t.Fatal("cancellation bypass")
+			}
+			modelID := uuid.New()
+			if err := runtime.ReserveBotMandateModel(context.Background(), ref, first.Run.ID, modelID, 1000); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.SettleBotMandateModel(context.Background(), ref, first.Run.ID, modelID, 2000); err != nil {
+				t.Fatal(err)
 			}
 			if err := runtime.RevokeBotMandate(ctx, ref); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.ConsumeBotMandateQuota(context.Background(), ref, first.Run.ID, 1, 1, 0); err == nil {
+				t.Fatal("revoked consumption accepted")
+			}
+			if err := runtime.ReleaseBotMandateRun(context.Background(), ref, first.Run.ID); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := runtime.VerifyBotMandate(context.Background(), ref, execution.BotMandatePurposeTask); err == nil {

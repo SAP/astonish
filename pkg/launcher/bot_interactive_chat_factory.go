@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"encoding/json"
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
@@ -31,7 +32,12 @@ func (t *interactiveBotTool) Run(ctx tool.Context, args any) (map[string]any, er
 	if err := t.binding.checkResearchDetail(bound, ctx.SessionID(), t.Name(), args); err != nil {
 		return nil, err
 	}
-	if err := t.binding.req.Authorization.AuthorizeTool(bound, t.Name()); err != nil {
+	if t.binding.workerOnly {
+		bound.owner = agent.WithBotPrivateWorkerExecution(bound.owner)
+		if err := agent.AuthorizeBotBoundTool(bound, ctx, t.Name(), args); err != nil {
+			return nil, err
+		}
+	} else if err := t.binding.req.Authorization.AuthorizeTool(bound, t.Name()); err != nil {
 		return nil, err
 	}
 	for _, disabled := range store.DisabledToolsFromContext(bound) {

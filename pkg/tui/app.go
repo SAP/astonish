@@ -627,6 +627,11 @@ func (m model) Update(msg tea.Msg) (next tea.Model, command tea.Cmd) {
 	case botStartMsg:
 		return m.startBotWatch()
 	case botWatchMsg:
+		if msg.generation == m.botGeneration && m.botSelected() && !msg.done && msg.err == nil && msg.event.BotFilePublication != nil && msg.event.Kind == events.KindSystem {
+			m.applyEvent(msg.event)
+			m.refreshViewport()
+			return m, waitBotEvent(m.botEvents)
+		}
 		return m.applyBotWatch(msg)
 	case botFilesMsg:
 		return m.applyBotFiles(msg)
@@ -2781,6 +2786,11 @@ func (m *model) applyEvent(ev events.Event) {
 		}
 	}
 	m.tr.Apply(ev)
+	if ev.Kind == events.KindSystem && ev.BotFilePublication != nil && len(m.tr.Items) > 0 {
+		// Artifact-only deliveries are neutral status but retain the immutable
+		// receipt used by /bots files. They are not a substitute Employee reply.
+		m.tr.Items[len(m.tr.Items)-1].BotFilePublication = ev.BotFilePublication
+	}
 	if previousRevision > 0 && ev.PlanSnapshot.Revision > previousRevision {
 		if it := m.approvalItem(); it != nil && it.PlanSnapshot != nil && it.PlanSnapshot.PlanID == ev.PlanSnapshot.PlanID && it.PlanSnapshot.Sequence == ev.PlanSnapshot.Sequence {
 			// A new approval presentation is not a quiet execution update.

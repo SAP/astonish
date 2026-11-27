@@ -64,6 +64,76 @@ func TestBotSafeToolsetMetadataWrapperContract(t *testing.T) {
 	}
 }
 
+func TestEmployeeWorkerInteractiveExactActionGuard(t *testing.T) {
+	for _, mode := range []string{"approval", "allow", "wrong_digest", "missing_guard", "foreign", "cancelled", "generic"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, registry, id := interactivePolicyContext(t, []string{"chat", "tool:execute"})
+			guards, requests := 0, 0
+			args := map[string]any{"path": "/private/exact.txt"}
+			runtime := BotPolicyRuntime{Classifier: botClassifierFunc(botVerifiedRead)}
+			runtime.Guard = botGuardFunc(func(_ context.Context, a execution.ActionDescriptor) (execution.PolicyDecision, error) {
+				guards++
+				digest, _ := a.Digest()
+				if string(a.Arguments) != `{"path":"/private/exact.txt"}` {
+					t.Fatal("guard action changed")
+				}
+				kind := execution.PolicyAllow
+				if mode == "approval" {
+					kind = execution.PolicyRequestApproval
+				}
+				if mode == "wrong_digest" {
+					digest = "foreign"
+				}
+				return execution.PolicyDecision{Kind: kind, ActionDigest: digest}, nil
+			})
+			runtime.Approvals = botApprovalFunc(func(_ context.Context, got execution.BotRunIdentity, a execution.ActionDescriptor, digest string) (uuid.UUID, error) {
+				requests++
+				want, _ := a.Digest()
+				if got != id || want != digest || string(a.Arguments) != `{"path":"/private/exact.txt"}` {
+					t.Fatal("approval not exact")
+				}
+				return uuid.New(), nil
+			})
+			if mode == "missing_guard" {
+				runtime.Guard = nil
+			}
+			ctx = WithBotPolicyRuntime(ctx, runtime)
+			if mode != "generic" {
+				ctx = WithBotPrivateWorkerExecution(ctx)
+			}
+			if mode == "foreign" {
+				foreign := id
+				foreign.ActorID = "foreign"
+				ctx = execution.WithBotRunIdentity(ctx, foreign)
+			}
+			if mode == "cancelled" {
+				registry.Cancel(id)
+			}
+			err := AuthorizeBotTool(ctx, "read_file", args)
+			if mode == "allow" || mode == "generic" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatal("unguarded worker action allowed")
+			}
+			if mode == "approval" {
+				var blocked *BotPolicyError
+				if !errors.As(err, &blocked) || !blocked.ApprovalRequired() || requests != 1 {
+					t.Fatalf("approval not captured: %v requests=%d", err, requests)
+				}
+			}
+			wantGuards := 1
+			if mode == "generic" || mode == "foreign" || mode == "cancelled" || mode == "missing_guard" {
+				wantGuards = 0
+			}
+			if guards != wantGuards {
+				t.Fatalf("guard calls=%d want=%d", guards, wantGuards)
+			}
+		})
+	}
+}
+
 func TestBotPolicyUnknownEffectsRequireReview(t *testing.T) {
 	ctx := botPolicyContext(t, botBoundaryContext(t), []string{"read_file"}, nil)
 	requests, guards := 0, 0

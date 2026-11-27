@@ -8,6 +8,30 @@ import (
 	"github.com/google/uuid"
 )
 
+// Bind all immutable evidence; definitive failures need no success receipt.
+func verifyPresentationOperation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, op *store.BotOperation) error {
+	if saved.Run.MandateRef == nil || op.Validate() != nil || op.MandateRef != *saved.Run.MandateRef || op.Provenance == nil || op.Provenance.SourceRunID != saved.Run.ID || op.Provenance.UserEventID != saved.Run.UserEventID || op.Provenance.SourceUserID != rec.Bot.OwnerID.String() {
+		return store.ErrBotForbidden
+	}
+	switch op.Status {
+	case store.BotOperationBlocked, store.BotOperationFailed, store.BotOperationCancelled:
+		return nil
+	case store.BotOperationApplied:
+		if scheduleOperation(op.Payload.Operation) {
+			if op.Receipt == nil || op.Receipt.Schedule == nil || op.Receipt.Schedule.SourceRunID != saved.Run.ID {
+				return store.ErrBotForbidden
+			}
+			return verifyAuthorizedGrant(ctx, tx, *op)
+		}
+		if !op.HasVerifiedMetadataReceipt() {
+			return store.ErrBotForbidden
+		}
+		return verifyRoutineGrant(ctx, tx, *op)
+	default:
+		return store.ErrBotConflict
+	}
+}
+
 // Select by reserved durable key and verified operation, not by model-controlled
 // report fields. Ordinary source replies continue to use their original path.
 func authorizedSchedulePublication(ctx context.Context, tx botDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (bool, error) {
@@ -54,8 +78,9 @@ func authorizedSchedulePublication(ctx context.Context, tx botDB, rec *botStored
 		return false, err
 	}
 	if m := payload.Report.EmployeeMessage; m != nil {
-		view, err := store.ProjectBotOperation(rec.Bot, *o, sequence)
-		if err != nil || payload.Report.ValidateEmployeeMessageIntegrity(payload.Status) != nil || m.Origin != store.BotEmployeeMessageOperation || m.OperationID != o.ID || m.OperationRevision != o.Revision || payload.OperationRevision != o.Revision || m.Text != view.Summary {
+		// Wording is not authority: bind the reserved receipt to the exact
+		// immutable operation revision and independently verify its grant below.
+		if payload.Report.ValidateEmployeeMessageIntegrity(payload.Status) != nil || m.Origin != store.BotEmployeeMessageOperation || m.OperationID != o.ID || m.OperationRevision != o.Revision || payload.OperationRevision != o.Revision {
 			return false, store.ErrBotInvalid
 		}
 	}
@@ -75,60 +100,4 @@ func authorizedSchedulePublication(ctx context.Context, tx botDB, rec *botStored
 		return false, err
 	}
 	return true, nil
-}
-
-// canonicalScheduleOperationEvent suppresses only the exact applied revision
-// named by a reserved, verified receipt. Old receipts keep their fallback.
-func canonicalScheduleOperationEvent(ctx context.Context, tx botDB, rec *botStoredRecord, run uuid.UUID, sequence int64) (string, error) {
-	rows, err := tx.ReadActivity(ctx, rec.Bot.ID, sequence-1, 1)
-	if err != nil {
-		return "", err
-	}
-	if len(rows) != 1 {
-		return "", nil
-	}
-	var p struct {
-		OperationID uuid.UUID `json:"operation_id"`
-		Revision    int64     `json:"operation_revision"`
-	}
-	if json.Unmarshal(rows[0].Payload, &p) != nil || p.Revision < 1 {
-		return "", nil
-	}
-	var reader store.BotTranscriptReader
-	switch d := tx.(type) {
-	case personalBotDB:
-		reader = &personalSessionStore{client: d.client, content: d.content}
-	case teamBotDB:
-		reader = &teamSessionStore{client: d.client, content: d.content}
-	default:
-		return "", store.ErrBotUnsupported
-	}
-	var cursor int64
-	for {
-		events, err := reader.ReadBotTranscript(ctx, rec.Bot.HomeSessionID, cursor, 200)
-		if err != nil {
-			return "", err
-		}
-		for _, row := range events {
-			cursor = row.Cursor
-			if row.Event == nil {
-				continue
-			}
-			raw, err := json.Marshal(row.Event.Actions.StateDelta[store.BotOperationKey])
-			if err != nil {
-				continue
-			}
-			var v store.BotOperationView
-			if json.Unmarshal(raw, &v) != nil || v.Validate() != nil || v.BotID != rec.Bot.ID || v.HomeSessionID != rec.Bot.HomeSessionID || v.OperationID != p.OperationID || v.Revision != p.Revision || v.Status != store.BotOperationApplied || v.SourceRunID != run {
-				continue
-			}
-			canonical, err := store.NewBotOperationEvent(v, row.Event.Timestamp)
-			if err == nil && canonical.ID == row.Event.ID {
-				return canonical.ID, nil
-			}
-		}
-		if len(events) < 200 {
-			return "", nil
-		}
-	}
 }

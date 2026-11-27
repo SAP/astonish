@@ -22,11 +22,20 @@ func TestBotOperationViewSafeProjection(t *testing.T) {
 		if err != nil {
 			t.Fatal(status, err)
 		}
+		if v.Presentation != BotOperationPresentationInternal || v.StateSequence != 5 || v.Status != status || v.Decision != o.Decision {
+			t.Fatalf("operation became speech or lost typed state: %+v", v)
+		}
 		raw, _ := json.Marshal(v)
 		if strings.Contains(string(raw), "secret") {
 			t.Fatal(string(raw))
 		}
-		a, _ := NewBotOperationEvent(v, time.Now())
+		a, err := NewBotOperationEvent(v, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Author != "bot_runtime" || a.Content != nil || len(a.Actions.StateDelta) != 1 {
+			t.Fatalf("operation event minted speech: %+v", a)
+		}
 		c, _ := NewBotOperationEvent(v, time.Now())
 		if a.ID != c.ID {
 			t.Fatal("unstable event id")

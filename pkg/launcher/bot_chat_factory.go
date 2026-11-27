@@ -98,6 +98,114 @@ type BotChatFactoryConfig struct {
 	ResolveContextWindow func(context.Context, model.LLM) int
 }
 
+// BotEmployeePresentationRequest is server-only input. Store must be the original
+// owner-scoped private claim repository; Operations are its verified receipts.
+type BotEmployeePresentationRequest struct {
+	Bot           store.Bot
+	Source        store.BotRun
+	Claim         store.BotEmployeePresentationRequest
+	Store         store.BotEmployeePresentationStore
+	DispatchToken string
+	Voice         string
+	Operations    []store.BotOperation
+}
+
+type BotEmployeePresentationFactoryConfig struct {
+	LoadScope func(context.Context, bot.RunRequest) (*BotChatScope, error)
+	// ResolvePinned must resolve these exact stored names using owner credentials,
+	// not re-read a changed session pin or inherit current defaults.
+	ResolvePinned func(context.Context, *BotChatScope, string, string) (model.LLM, error)
+	WrapModel     func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error)
+}
+
+type BotEmployeePresentationFactory func(context.Context, BotEmployeePresentationRequest) (string, error)
+
+// NewBotEmployeePresentationFactory deliberately has no Prepare, tool factory,
+// executable lease, turn authorizer, mandate, or fresh budget constructor.
+func NewBotEmployeePresentationFactory(cfg BotEmployeePresentationFactoryConfig) (BotEmployeePresentationFactory, error) {
+	if cfg.LoadScope == nil || cfg.ResolvePinned == nil || cfg.WrapModel == nil {
+		return nil, store.ErrBotUnsupported
+	}
+	return func(ctx context.Context, q BotEmployeePresentationRequest) (string, error) {
+		if q.Store == nil || q.DispatchToken == "" || q.Claim.BotID != q.Bot.ID || q.Claim.RunID != q.Source.ID || q.Claim.ClaimToken == "" {
+			return "", store.ErrBotForbidden
+		}
+		principal, ok := execution.PrincipalFromContext(ctx)
+		if !ok || !principal.Authenticated || principal.Subject != q.Bot.OwnerID.String() {
+			return "", store.ErrBotForbidden
+		}
+		owner, err := execution.WithPrincipal(botValueFreeContext{ctx}, principal)
+		if err != nil {
+			return "", err
+		}
+		owner = store.WithUserID(owner, q.Bot.OwnerID.String())
+		owner = store.WithOrgSlug(owner, principal.OrgSlug)
+		owner = store.WithTeamSlug(owner, principal.TeamSlug)
+		owner = store.WithSessionID(owner, q.Source.SessionID.String())
+		p, err := q.Store.ReadEmployeePresentation(owner, q.Claim)
+		if err != nil {
+			return "", err
+		}
+		if p == nil || p.ValidateBinding(q.Source) != nil || !q.Source.Status.Terminal() || p.State != store.BotEmployeePresentationClaimed || p.ClaimToken != q.Claim.ClaimToken || p.OwnerID != q.Bot.OwnerID || p.OrgSlug != principal.OrgSlug || p.TeamSlug != principal.TeamSlug || !time.Now().Before(p.AuthorityExpiresAt) {
+			return "", store.ErrBotForbidden
+		}
+		owner, cancel := context.WithDeadline(owner, p.AuthorityExpiresAt)
+		defer cancel()
+		// Only the loader's read scope is shared with execution construction.
+		scope, err := cfg.LoadScope(owner, bot.RunRequest{Bot: q.Bot, Run: q.Source, Principal: principal})
+		if scope != nil && scope.Cleanup != nil {
+			defer scope.Cleanup()
+		}
+		if err != nil {
+			return "", err
+		}
+		if scope == nil || scope.Services == nil || scope.Cleanup == nil {
+			return "", store.ErrBotUnsupported
+		}
+		services := *scope.Services
+		if q.Bot.Scope == store.BotScopeTeam {
+			services.PersonalCredentials = nil
+			services.PersonalSettings = nil
+			services.PersonalBots = nil
+		}
+		owner = store.WithServices(owner, &services)
+		owner = store.WithCredentialStore(owner, store.NewMergedCredentialStore(services.PersonalCredentials, services.Credentials))
+		repo := services.PersonalBots
+		if q.Bot.Scope == store.BotScopeTeam {
+			repo = services.Bots
+		}
+		if repo == nil {
+			return "", store.ErrBotUnsupported
+		}
+		current, err := repo.Get(owner, q.Bot.ID)
+		if err != nil {
+			return "", err
+		}
+		if current == nil || current.OwnerID != p.OwnerID || current.Scope != q.Bot.Scope || current.Status == store.BotDeleted {
+			return "", store.ErrBotForbidden
+		}
+		budget := &bot.PresentationBudget{Store: q.Store, Request: q.Claim, DispatchToken: q.DispatchToken}
+		if err := budget.Check(owner); err != nil {
+			return "", err
+		}
+		llm, err := cfg.ResolvePinned(owner, scope, p.Provider, p.Model)
+		if err != nil {
+			return "", err
+		}
+		if llm == nil {
+			return "", store.ErrBotUnsupported
+		}
+		llm, err = cfg.WrapModel(owner, llm, budget)
+		if err != nil {
+			return "", err
+		}
+		if llm == nil {
+			return "", store.ErrBotUnsupported
+		}
+		return bot.ComposeEmployeePresentation(owner, q.Source, *p, bot.EmployeePresentationOptions{LLM: llm, Boundary: budget.Check, Voice: q.Voice, Operations: q.Operations})
+	}, nil
+}
+
 // BotChatModelResolver resolves pins using the already owner-scoped reader.
 // ResolveProvider must use request-local provider configuration and never swap a
 // daemon-global LLM. ResolveInherited handles an unpinned session explicitly;
@@ -201,6 +309,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 		owner = api.WithBotPreparedPlanSessionFromContext(owner, ctx)
 		owner = api.WithBotDefinitionConsentFromContext(owner, ctx)
 		owner = bot.WithToolOutcomesFromContext(owner, ctx)
+		owner = bot.WithEmployeeChatServiceFromContext(owner, ctx)
 		owner = bot.WithBotWorkServicesFromContext(owner, ctx)
 		declarations := &botDeclarationReads{}
 		cleanups := []func(){cancelOwner, declarations.close}
@@ -373,7 +482,7 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			}
 			safe.PolicyRuntime.Classifier = botSharedFileClassifier{fallback: safe.PolicyRuntime.Classifier}
 		}
-		if !botFactoryInteractive(req) {
+		if !botFactoryInteractive(req) || (safe.PolicyRuntime.Guard != nil && safe.PolicyRuntime.Classifier != nil) {
 			safe.PolicyRuntime.Classifier = WithBotMandatedReadClassifier(safe.PolicyRuntime.Classifier, safe.Tools)
 			safe.PolicyRuntime.Classifier = WithBotEmailClassifier(safe.PolicyRuntime.Classifier, safe.Tools)
 			safe.PolicyRuntime.Classifier = WithBotMCPClassifier(safe.PolicyRuntime.Classifier, safe.Tools)
@@ -577,7 +686,29 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			chat.Tools, chat.Toolsets, chat.ToolIndex, chat.SubAgentManager = reads, nil, index, nil
 			return &api.BotChatResources{ProgressDispatch: bot.ProgressDispatchFromContext(owner), Agent: chat, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: func() { fresh.Cleanup(); cancel() }, PolicyRuntime: &directed.PolicyRuntime}, nil
 		}
-		return &api.BotChatResources{ArtifactBody: binding.artifactReviewReader(scoped, safe.FileReceipts), RepairFileDelivery: binding.fileDeliveryRepair(scoped, safe.FileReceipts), RecoverFileDelivery: binding.fileDeliveryRecovery(scoped, safe.FileReceipts), PublishedFiles: func() []store.BotArtifact { return safe.FileReceipts.Artifacts(req) }, ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PriorRun: priorRun, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
+		workerFactory := func(c context.Context, directed api.BotEmployeeWorkerRequest) (*api.BotChatResources, error) {
+			if directed.Request.Run.ID != req.Run.ID || directed.Request.Run.SessionID != req.Run.SessionID || directed.Request.Budget != req.Budget || directed.Sessions == nil || directed.ConversationID == "" {
+				return nil, store.ErrBotForbidden
+			}
+			if err := binding.check(c); err != nil {
+				return nil, err
+			}
+			owner, cancel := context.WithCancel(binding.bind(c))
+			owner = agent.WithBotPrivateWorkerExecution(owner)
+			freshBinding := *binding
+			freshBinding.owner, freshBinding.conversationID, freshBinding.workerOnly = owner, directed.ConversationID, true
+			freshBinding.declarations = &botDeclarationReads{}
+			freshModel := &botFactoryLLM{LLM: &botProgressLLM{LLM: wrapped, binding: &freshBinding}, binding: &freshBinding}
+			freshScope, freshSafe := *scoped, *safe
+			freshScope.Sessions = directed.Sessions
+			fresh, err := newBotScopedChatRuntime(owner, chatCfg, &botChatDependencies{scope: &freshScope, safe: &freshSafe, binding: &freshBinding, llm: freshModel, contextWindow: contextWindow, credentials: creds})
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+			return &api.BotChatResources{Agent: fresh.ChatAgent, SessionService: directed.Sessions, AppName: "astonish", PolicyRuntime: &freshSafe.PolicyRuntime, PublishedFiles: func() []store.BotArtifact { return safe.FileReceipts.Artifacts(req) }, Cleanup: func() { fresh.Cleanup(); freshBinding.declarations.close(); cancel() }}, nil
+		}
+		return &api.BotChatResources{WorkerFactory: workerFactory, ArtifactBody: binding.artifactReviewReader(scoped, safe.FileReceipts), RepairFileDelivery: binding.fileDeliveryRepair(scoped, safe.FileReceipts), RecoverFileDelivery: binding.fileDeliveryRecovery(scoped, safe.FileReceipts), PublishedFiles: func() []store.BotArtifact { return safe.FileReceipts.Artifacts(req) }, ProgressDispatch: bot.ProgressDispatchFromContext(owner), ResearchFactory: researchFactory, ModelSelection: &store.SessionPin{Provider: resolved.Provider, Model: resolved.Model}, PriorRun: priorRun, ValidateWorkContinuation: continuation, EvidenceReader: evidenceReader, AssessmentContext: binding.assessmentContext, Skills: skills, Redact: redact, Work: work, Authorization: req.Authorization, Transcript: transcript, Agent: wired.ChatAgent, SessionService: scoped.Sessions, AppName: "astonish", Cleanup: cleanup, PolicyRuntime: &safe.PolicyRuntime}, nil
 	}, nil
 }
 
@@ -763,6 +894,8 @@ type botChatDependencies struct {
 	credentials   store.CredentialStore
 }
 type botFactoryBinding struct {
+	conversationID   string
+	workerOnly       bool
 	declarations     *botDeclarationReads
 	progress         *botProgressBridge
 	synthesisReserve *botSynthesisReserve

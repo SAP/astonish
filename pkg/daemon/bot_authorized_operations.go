@@ -99,8 +99,21 @@ func (c authorizedScheduleCaptureClassifier) DescribeAction(ctx context.Context,
 
 // AuthorizedOperations is composition-root capability; launcher receives this
 // runtime, never a generic scheduler store or an interactive registry fallback.
+type botScheduleReadinessError struct{ cause error }
+
+// The category is safe to expose; the original diagnostic stays private and
+// remains discoverable through errors.Is/errors.As by trusted callers.
+func (e *botScheduleReadinessError) Error() string        { return "schedule readiness unavailable" }
+func (e *botScheduleReadinessError) Unwrap() error        { return e.cause }
+func (e *botScheduleReadinessError) Is(target error) bool { return target == store.ErrBotUnsupported }
+
 func (w *BotWorker) AuthorizedOperations(repo store.BotStore) (store.BotAuthorizedOperationStore, error) {
-	return entstore.NewBotAuthorizedOperationRuntime(repo, w.config.MandatePolicy, AuthorizeBotOwnerSchedule, w.scheduleCandidateReady)
+	return entstore.NewBotAuthorizedOperationRuntime(repo, w.config.MandatePolicy, AuthorizeBotOwnerSchedule, func(ctx context.Context, b store.Bot, v store.BotVersion) error {
+		if err := w.scheduleCandidateReady(ctx, b, v); err != nil {
+			return &botScheduleReadinessError{cause: err}
+		}
+		return nil
+	})
 }
 func (w *BotWorker) reconcileAuthorizedOperations(ctx context.Context, repo store.BotStore, id store.BotID) error {
 	if w.config.MandatePolicy == nil {

@@ -588,6 +588,7 @@ func (r BotReport) ValidateEmployeeMessage(status RunStatus, work *BotWorkState)
 }
 
 type BotRun struct {
+	TerminalReason   BotTerminalReason      `json:"terminal_reason,omitempty"`
 	Progress         *BotProgressProjection `json:"progress,omitempty"`
 	StateSequence    int64                  `json:"state_sequence,omitempty"`
 	StateCommittedAt time.Time              `json:"state_committed_at,omitempty"`

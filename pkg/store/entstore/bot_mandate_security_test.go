@@ -52,8 +52,8 @@ func TestBotMandateReopenQuotaAndRevocation(t *testing.T) {
 			if _, err = rt.VerifyBotMandate(context.Background(), ref, execution.BotMandatePurposeTask); err != nil {
 				t.Fatal(err)
 			}
-			if err = rt.ConsumeBotMandateQuota(context.Background(), ref, receipt.Run.ID, 1, 0, 0); err == nil {
-				t.Fatal("quota lost on reopen")
+			if err = rt.ConsumeBotMandateQuota(context.Background(), ref, receipt.Run.ID, 100, 1000, 0); err != nil {
+				t.Fatal("historical metadata enforced on reopen")
 			}
 			if err = rt.ReleaseBotMandateRun(context.Background(), ref, receipt.Run.ID); err != nil {
 				t.Fatal(err)
@@ -70,8 +70,8 @@ func TestBotMandateReopenQuotaAndRevocation(t *testing.T) {
 			if err = rt.ReserveBotMandateRun(context.Background(), ref2, second.Run.ID); err != nil {
 				t.Fatal(err)
 			}
-			if err = rt.ConsumeBotMandateQuota(context.Background(), ref2, second.Run.ID, 2, 1, 0); err == nil {
-				t.Fatal("aggregate bypass through new mandate")
+			if err = rt.ConsumeBotMandateQuota(context.Background(), ref2, second.Run.ID, 100, 1000, 0); err != nil {
+				t.Fatal("historical aggregate metadata enforced through new mandate")
 			}
 			if err = rt.ConsumeBotMandateQuota(context.Background(), ref2, second.Run.ID, 1, 5, 0); err != nil {
 				t.Fatal(err)

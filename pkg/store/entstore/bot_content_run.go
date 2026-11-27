@@ -257,7 +257,7 @@ func applyRunControl(v *botStoredRun, c botRunControl) {
 		UserEventID: c.UserEventID, HistoryCursor: c.HistoryCursor, Intent: c.Intent, Trigger: c.Trigger, TriggerID: c.TriggerID,
 		IdempotencyKey: c.IdempotencyKey, Status: c.Status, Lease: c.Lease, CreatedAt: c.CreatedAt, StartedAt: c.StartedAt,
 		FinishedAt: c.FinishedAt, Usage: c.Usage, Provider: c.Provider, Model: c.Model,
-		Progress: body.Progress, Work: body.Work, Invocation: body.Invocation, Todos: body.Todos,
+		TerminalReason: body.TerminalReason, Progress: body.Progress, Work: body.Work, Invocation: body.Invocation, Todos: body.Todos,
 		Checkpoint: body.Checkpoint, Report: body.Report, TitleConfirmation: body.TitleConfirmation}
 	v.RequestHash, v.CommitHash, v.OccurrenceAt = c.RequestHash, c.CommitHash, c.OccurrenceAt
 	v.ExternalAdmissionValidated, v.SkillAdmissionOwner = c.ExternalAdmissionValidated, c.SkillAdmissionOwner

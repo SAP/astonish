@@ -33,12 +33,8 @@ func TestBotQuestionTextCustomAndNo(t *testing.T) {
 		}
 		next, cmd := m.handleBotAnswerKey("enter")
 		m = next.(model)
-		if cmd != nil || m.bots.response == nil || m.bots.response.Answer != tc.answer {
-			t.Fatalf("review: %+v", m.bots)
-		}
-		_, cmd = m.handleBotAnswerKey("enter")
-		if cmd == nil {
-			t.Fatal("missing submit")
+		if cmd == nil || m.bots.response == nil || m.bots.response.Answer != tc.answer {
+			t.Fatalf("single Enter submission: %+v", m.bots)
 		}
 		cmd()
 		if b.response == nil || b.response.Answer != tc.answer {

@@ -24,25 +24,22 @@ func BotOperationEmployeeReport(status RunStatus, o BotOperation) (BotReport, er
 		case o.HasVerifiedMetadataReceipt():
 			report.Summary = metadataOperationSummary(o.Payload.Operation)
 		default:
-			report.Summary = "I've applied the requested change."
+			report.Summary = "Requested change applied."
 		}
 		report.EmployeeMessage = &BotEmployeeMessage{Origin: BotEmployeeMessageOperation, Text: report.Summary, SourceDigest: report.EmployeeMessageSourceDigest(status), OperationID: o.ID, OperationRevision: o.Revision}
 	} else {
-		outcome, reason := RunFailed, BotEmployeeReasonUnverified
 		switch o.Status {
 		case BotOperationPending:
-			outcome, reason = RunQueued, BotEmployeeReasonUnknown
+			report.Summary = "Change queued."
 		case BotOperationApplying:
-			outcome, reason = RunRunning, BotEmployeeReasonUnknown
+			report.Summary = "Applying change."
 		case BotOperationBlocked:
-			reason = BotEmployeeReasonForbidden
+			report.Summary = "Change needs authorization."
 		case BotOperationCancelled:
-			outcome, reason = RunCancelled, BotEmployeeReasonOwnerCancelled
+			report.Summary = "Change cancelled."
+		default:
+			report.Summary = "Change could not be completed. No change was verified."
 		}
-		// The text derives from the operation outcome; bind it to the publication's
-		// source run only after selecting the closed operation facts.
-		message := NewBotEmployeeFallback(outcome, report, reason)
-		report.Summary = message.Text
 		report.EmployeeMessage = &BotEmployeeMessage{Origin: BotEmployeeMessageOperation, Text: report.Summary, SourceDigest: report.EmployeeMessageSourceDigest(status), OperationID: o.ID, OperationRevision: o.Revision}
 	}
 	return report, report.ValidateEmployeeMessageIntegrity(status)

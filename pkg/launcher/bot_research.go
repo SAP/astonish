@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/google/uuid"
@@ -31,35 +32,31 @@ const (
 // Episode authority is process-private and run/session-bound. Restored prose and
 // child tool results cannot manufacture search success or unlock the parent.
 type BotResearchEpisode struct {
-	mu         sync.Mutex
-	changed    chan struct{}
-	run        uuid.UUID
-	session    string
-	mode       BotResearchMode
-	state      BotResearchState
-	generation uint64
-	urls       map[string]bool
-	// Discovery survives only a proven pre-dispatch episode quota rejection.
-	discovered     bool
-	quotaRetained  bool
+	mu             sync.Mutex
+	changed        chan struct{}
+	run            uuid.UUID
+	session        string
+	mode           BotResearchMode
+	state          BotResearchState
+	generation     uint64
+	urls           map[string]bool
 	reserved       int64
 	validateDetail func(context.Context) error
 }
 
-var errBotResearchEpisodeQuota = errors.New("configured search episode quota exhausted; inspect already discovered sources instead of retrying facets")
-
-func (e *BotResearchEpisode) remainingSearchCalls(limit int64) int64 {
+func (e *BotResearchEpisode) searchCalls() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.reserved >= limit {
-		return 0
-	}
-	return limit - e.reserved
+	return e.reserved
 }
-func (e *BotResearchEpisode) recordSearchReservation() {
+func (e *BotResearchEpisode) recordSearchReservation() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.reserved < 0 || e.reserved == math.MaxInt64 {
+		return errors.New("search accounting overflow")
+	}
 	e.reserved++
+	return nil
 }
 func (e *BotResearchEpisode) setDetailValidator(validate func(context.Context) error) {
 	e.mu.Lock()
@@ -145,18 +142,12 @@ func (e *BotResearchEpisode) observe(ctx context.Context, generation uint64, sou
 		e.setStateLocked(BotResearchInterrupted)
 		return
 	}
-	e.quotaRetained = err == errBotResearchEpisodeQuota && e.discovered
 	switch {
 	case err != nil:
-		if !e.quotaRetained {
-			e.discovered = false
-		}
 		e.setStateLocked(BotResearchFailed)
 	case sources == 0:
-		e.discovered = false
 		e.setStateLocked(BotResearchEmpty)
 	default:
-		e.discovered = true
 		e.setStateLocked(BotResearchSearched)
 	}
 }
@@ -194,7 +185,7 @@ func (e *BotResearchEpisode) AllowDetail(ctx context.Context, run uuid.UUID, ses
 	if e.mode == BotResearchExplicitURLs && e.urls[url] {
 		return nil
 	}
-	if e.mode == BotResearchOpenWeb && (e.state == BotResearchSearched || e.state == BotResearchFailed && e.quotaRetained) {
+	if e.mode == BotResearchOpenWeb && e.state == BotResearchSearched {
 		return nil
 	}
 	return errors.New("configured search must return sources before detail retrieval; retry an admitted facet or report search unavailable")

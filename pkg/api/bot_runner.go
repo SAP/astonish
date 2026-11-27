@@ -64,7 +64,394 @@ type BotChatResources struct {
 	PolicyRuntime *agent.BotPolicyRuntime
 	// ResearchFactory constructs a fresh producer with only the configured public
 	// read tools. The adapter installs its continuation runner automatically.
+	// WorkerFactory borrows this exact execution and budget; ConversationID is
+	// private ADK identity, never a replacement for Run.SessionID.
+	WorkerFactory   func(context.Context, BotEmployeeWorkerRequest) (*BotChatResources, error)
 	ResearchFactory func(context.Context, BotEmployeeResearchRequest) (*BotChatResources, error)
+}
+
+// BotEmployeeWorkerRequest is constructed only by the server-owned service.
+type BotEmployeeWorkerRequest struct {
+	Request        bot.RunRequest
+	ConversationID string
+	Sessions       session.Service
+}
+
+const botEmployeeWorkerTraceKey = "bot_private_worker_v1"
+
+type botEmployeeWorkerPhase string
+
+const (
+	botEmployeeWorkerStarted  botEmployeeWorkerPhase = "started"
+	botEmployeeWorkerEvent    botEmployeeWorkerPhase = "event"
+	botEmployeeWorkerApproval botEmployeeWorkerPhase = "approval"
+	botEmployeeWorkerResuming botEmployeeWorkerPhase = "resuming"
+	botEmployeeWorkerSettled  botEmployeeWorkerPhase = "settled"
+)
+
+type botEmployeeWorkerTrace struct {
+	WorkerID     string                 `json:"worker_id"`
+	DispatchID   string                 `json:"dispatch_id"`
+	Phase        botEmployeeWorkerPhase `json:"phase"`
+	Event        *session.Event         `json:"event,omitempty"`
+	ApprovalID   uuid.UUID              `json:"approval_id,omitempty"`
+	ActionDigest string                 `json:"action_digest,omitempty"`
+}
+type botEmployeeWorker struct {
+	id           string
+	events       []*session.Event
+	pending      string
+	approvalID   uuid.UUID
+	actionDigest string
+	resources    *BotChatResources
+}
+type botEmployeeChatService struct {
+	mu         sync.Mutex
+	req        bot.RunRequest
+	owner      context.Context
+	resources  *BotChatResources
+	capture    *botApprovalCapture
+	workers    map[string]*botEmployeeWorker
+	completion ChatCompletion
+}
+
+// The trace uses content-free runtime envelopes so private model/tool text never
+// enters Home projection. Every write is under the original lease transaction.
+func (s *botEmployeeChatService) record(ctx context.Context, trace botEmployeeWorkerTrace) error {
+	if s.resources == nil || s.resources.Transcript == nil {
+		return store.ErrBotUnsupported
+	}
+	raw, err := json.Marshal(trace)
+	if err != nil {
+		return err
+	}
+	lease := s.req.Run.Lease
+	if s.req.CurrentLease != nil {
+		lease = s.req.CurrentLease()
+	}
+	return s.resources.Transcript.AppendBotRunEvent(ctx, lease, s.req.Run.SessionID, &session.Event{
+		ID: uuid.NewString(), Author: "bot_runtime", Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{botEmployeeWorkerTraceKey: json.RawMessage(raw)}},
+	})
+}
+func (s *botEmployeeChatService) restore(events session.Events) error {
+	// Home history supplies conversational context, not this run's private
+	// dispatch ledger. Restore only the underlying current-run event view;
+	// otherwise a previous run's unsettled/filtered trace can block startup or
+	// grant a fresh turn access to a foreign worker ID.
+	if conversation, ok := events.(botConversationEvents); ok {
+		events = conversation.current
+	}
+	if events == nil {
+		return nil
+	}
+	for e := range events.All() {
+		if e == nil || e.Author != "bot_runtime" {
+			continue
+		}
+		value, ok := e.Actions.StateDelta[botEmployeeWorkerTraceKey]
+		if !ok {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		var trace botEmployeeWorkerTrace
+		if json.Unmarshal(raw, &trace) != nil || trace.WorkerID == "" {
+			return store.ErrBotInvalid
+		}
+		w := s.workers[trace.WorkerID]
+		if w == nil {
+			w = &botEmployeeWorker{id: trace.WorkerID}
+			s.workers[w.id] = w
+		}
+		switch trace.Phase {
+		case botEmployeeWorkerStarted:
+			if w.pending != "" || trace.DispatchID == "" {
+				return store.ErrBotConflict
+			}
+			w.pending = trace.DispatchID
+		case botEmployeeWorkerEvent:
+			if trace.Event == nil || w.pending == "" || w.pending != trace.DispatchID {
+				return store.ErrBotInvalid
+			}
+			w.events = append(w.events, trace.Event)
+		case botEmployeeWorkerApproval:
+			if w.pending != trace.DispatchID || trace.ApprovalID == uuid.Nil || trace.ActionDigest == "" || w.approvalID != uuid.Nil {
+				return store.ErrBotConflict
+			}
+			w.approvalID, w.actionDigest = trace.ApprovalID, trace.ActionDigest
+		case botEmployeeWorkerResuming:
+			if w.pending != trace.DispatchID || w.approvalID != trace.ApprovalID || w.actionDigest != trace.ActionDigest {
+				return store.ErrBotConflict
+			}
+			w.approvalID, w.actionDigest = uuid.Nil, "" // dispatch may have happened; never replay
+		case botEmployeeWorkerSettled:
+			if w.pending != trace.DispatchID {
+				return store.ErrBotConflict
+			}
+			w.pending = ""
+		default:
+			return store.ErrBotInvalid
+		}
+	}
+	return nil
+}
+func (s *botEmployeeChatService) Send(ctx context.Context, request bot.EmployeeChatRequest) (*bot.EmployeeChatResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(request.Message) == "" {
+		return nil, store.ErrBotInvalid
+	}
+	if err := botWorkBoundary(ctx, s.req); err != nil {
+		return nil, err
+	}
+	if s.resources == nil || s.resources.WorkerFactory == nil {
+		return nil, store.ErrBotUnsupported
+	}
+	w := s.workers[request.WorkerID]
+	if request.WorkerID != "" && w == nil {
+		return nil, store.ErrBotForbidden
+	}
+	if w == nil {
+		w = &botEmployeeWorker{id: uuid.NewString()}
+		s.workers[w.id] = w
+	}
+	if w.pending != "" {
+		return &bot.EmployeeChatResult{WorkerID: w.id, Status: bot.EmployeeChatPartial, Limitations: []string{"Previous private dispatch is unsettled; do not replay its effects."}}, nil
+	}
+	if err := s.prepareWorker(ctx, w); err != nil {
+		return nil, err
+	}
+	dispatch := uuid.NewString()
+	if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: dispatch, Phase: botEmployeeWorkerStarted}); err != nil {
+		return nil, err
+	}
+	w.pending = dispatch
+	ctx = agent.WithBotPrivateWorkerExecution(ctx)
+	completion := runBotEmployeeWorkerTurn(ctx, s.req, w.resources, w.id, request.Message)
+	mergeBotEmployeeCompletion(&s.completion, completion)
+	if s.capture != nil {
+		s.capture.mu.Lock()
+		a := s.capture.approval
+		s.capture.mu.Unlock()
+		if a != nil {
+			if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: dispatch, Phase: botEmployeeWorkerApproval, ApprovalID: a.ID, ActionDigest: a.ActionDigest}); err != nil {
+				return nil, err
+			}
+			w.approvalID, w.actionDigest = a.ID, a.ActionDigest
+			return &bot.EmployeeChatResult{WorkerID: w.id, Status: bot.EmployeeChatNeedsInput, Limitations: []string{"Exact private action awaits owner approval."}}, nil
+		}
+	}
+	if completion.Err != nil && !botEmployeeWorkerEstablishedFinal(completion) {
+		// A policy error alone does not prove this dispatch was nonexecuted;
+		// earlier started effects or missing responses must remain unsettled.
+		if botOnlyPolicyDenial(completion.Err) && completion.Report.EffectState == store.BotReportEffectsReadOnly && completion.Usage.ToolCalls == completion.toolResponses {
+			if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: dispatch, Phase: botEmployeeWorkerSettled}); err != nil {
+				return nil, err
+			}
+			w.pending = ""
+		}
+		return &bot.EmployeeChatResult{WorkerID: w.id, Status: bot.EmployeeChatFailed, PrivateText: completion.FinalText, Limitations: []string{"Private execution failed or is uncertain; no success is attested."}}, nil
+	}
+	if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: dispatch, Phase: botEmployeeWorkerSettled}); err != nil {
+		return nil, err
+	}
+	w.pending = ""
+	status := bot.EmployeeChatCompleted
+	limitations := append([]string(nil), completion.Report.Unverified...)
+	if completion.Err != nil || completion.reportBodies[botEmployeePrivateDeniedSourceKey] != "" {
+		status = bot.EmployeeChatPartial
+		limitations = append(limitations, "A private source or action was unavailable; use only the established evidence in this limited result.")
+	}
+	return &bot.EmployeeChatResult{WorkerID: w.id, Status: status, PrivateText: completion.FinalText, Artifacts: completion.Report.Artifacts, Limitations: limitations}, nil
+}
+func (s *botEmployeeChatService) prepareWorker(ctx context.Context, w *botEmployeeWorker) error {
+	if w.resources != nil {
+		return nil
+	}
+	memory := session.InMemoryService()
+	created, err := memory.Create(ctx, &session.CreateRequest{AppName: s.resources.AppName, UserID: s.req.Bot.OwnerID.String(), SessionID: w.id})
+	if err != nil {
+		return err
+	}
+	for _, e := range w.events {
+		if err := memory.AppendEvent(ctx, created.Session, e); err != nil {
+			return err
+		}
+	}
+	private := botEmployeeWorkerSessions{Service: memory, service: s, worker: w}
+	ctx = agent.WithBotPrivateWorkerExecution(ctx)
+	fresh, err := s.resources.WorkerFactory(ctx, BotEmployeeWorkerRequest{Request: s.req, ConversationID: w.id, Sessions: private})
+	if err != nil {
+		if fresh != nil && fresh.Cleanup != nil {
+			fresh.Cleanup()
+		}
+		return err
+	}
+	if fresh == nil || fresh.Agent == nil || fresh.Agent.LLM == nil || fresh.Cleanup == nil {
+		return store.ErrBotUnsupported
+	}
+	for _, t := range fresh.Agent.Tools {
+		if t.Name() == "ask_user" || t.Name() == "employee_chat" {
+			fresh.Cleanup()
+			return store.ErrBotForbidden
+		}
+	}
+	fresh.SessionService, fresh.Agent.SessionService = private, private
+	w.resources = fresh
+	return nil
+}
+
+// resumeWorker is server-selected from the durable approval binding, never from
+// Employee input. The marker is persisted BEFORE dispatch, so restart cannot
+// replay a consumed action even when its final tool response was lost.
+func (s *botEmployeeChatService) resumeWorker(ctx context.Context, w *botEmployeeWorker, action execution.ActionDescriptor, prepared *store.BotPreparedPlan) (bot.RunResult, error) {
+	if w == nil || s.workers[w.id] != w {
+		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+	}
+	if err := botWorkBoundary(ctx, s.req); err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	digest, err := action.Digest()
+	if err != nil || w == nil || w.pending == "" || w.approvalID == uuid.Nil || digest != w.actionDigest {
+		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+	}
+	if prepared != nil {
+		if prepared.ApprovalID != w.approvalID || prepared.ActionDigest != digest {
+			return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+		}
+	} else {
+		guard, _ := agent.BotPolicyRuntimeFromContext(ctx).Guard.(*botResumeGuard)
+		if guard == nil || guard.approval.ID != w.approvalID || guard.approval.ActionDigest != digest {
+			return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+		}
+	}
+	ctx = agent.WithBotPrivateWorkerExecution(ctx)
+	if err := s.prepareWorker(ctx, w); err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: w.pending, Phase: botEmployeeWorkerResuming, ApprovalID: w.approvalID, ActionDigest: digest}); err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	approvalID := w.approvalID
+	w.approvalID, w.actionDigest = uuid.Nil, ""
+	var result bot.RunResult
+	if prepared != nil {
+		sess, e := w.resources.SessionService.Get(ctx, &session.GetRequest{AppName: w.resources.AppName, UserID: s.req.Bot.OwnerID.String(), SessionID: w.id})
+		if e != nil {
+			return botChatFailure(bot.ErrorBlocked, e)
+		}
+		result, err = executePreparedPlan(ctx, s.req, w.resources, s.capture, sess.Session.State(), prepared)
+	} else {
+		guard, _ := agent.BotPolicyRuntimeFromContext(ctx).Guard.(*botResumeGuard)
+		if guard == nil {
+			return botChatFailure(bot.ErrorBlocked, store.ErrBotForbidden)
+		}
+		original := w.resources.Agent.LLM
+		w.resources.Agent.LLM = &botResumeModel{LLM: original, action: action, guard: guard}
+		completion := runBotEmployeeWorkerTurn(ctx, s.req, w.resources, w.id, "Continue only the saved approved private action once.")
+		w.resources.Agent.LLM = original
+		mergeBotEmployeeCompletion(&s.completion, completion)
+		err = completion.Err
+		if err == nil && guard.unconsumed() {
+			err = store.ErrBotForbidden
+		}
+		if err != nil && guard.unconsumed() {
+			var denied *agent.BotPolicyError
+			if errors.As(err, &denied) && denied.Decision.Kind == execution.PolicyDeny {
+				if saveErr := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: w.pending, Phase: botEmployeeWorkerApproval, ApprovalID: approvalID, ActionDigest: digest}); saveErr != nil {
+					return botChatFailure(bot.ErrorBlocked, saveErr)
+				}
+				w.approvalID, w.actionDigest = approvalID, digest
+			}
+		}
+		result = bot.RunResult{Status: store.RunSucceeded, Report: completion.Report, Usage: completion.Usage}
+		result.Report.Summary = completion.FinalText
+	}
+	if err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	if result.Status == store.RunWaitingApproval && s.capture != nil {
+		s.capture.mu.Lock()
+		a := s.capture.approval
+		s.capture.mu.Unlock()
+		if a == nil {
+			return botChatFailure(bot.ErrorBlocked, store.ErrBotConflict)
+		}
+		if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: w.pending, Phase: botEmployeeWorkerApproval, ApprovalID: a.ID, ActionDigest: a.ActionDigest}); err != nil {
+			return botChatFailure(bot.ErrorBlocked, err)
+		}
+		w.approvalID, w.actionDigest = a.ID, a.ActionDigest
+		return result, nil
+	}
+	if err := s.record(ctx, botEmployeeWorkerTrace{WorkerID: w.id, DispatchID: w.pending, Phase: botEmployeeWorkerSettled}); err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	w.pending = ""
+	return result, nil
+}
+
+func (s *botEmployeeChatService) close() {
+	for _, w := range s.workers {
+		if w.resources != nil {
+			w.resources.Cleanup()
+		}
+	}
+}
+
+type botEmployeeWorkerSessions struct {
+	session.Service
+	service *botEmployeeChatService
+	worker  *botEmployeeWorker
+}
+
+func (s botEmployeeWorkerSessions) AppendEvent(ctx context.Context, sess session.Session, e *session.Event) error {
+	if !e.Partial {
+		if err := s.service.record(ctx, botEmployeeWorkerTrace{WorkerID: s.worker.id, DispatchID: s.worker.pending, Phase: botEmployeeWorkerEvent, Event: e}); err != nil {
+			return err
+		}
+		s.worker.events = append(s.worker.events, e)
+	}
+	return s.Service.AppendEvent(ctx, sess, e)
+}
+func runBotEmployeeWorkerTurn(ctx context.Context, req bot.RunRequest, resources *BotChatResources, id, message string) ChatCompletion {
+	if resources.PolicyRuntime != nil {
+		ctx = agent.WithBotPolicyRuntime(ctx, *resources.PolicyRuntime)
+	}
+	cr := newChatRunner(id, req.Bot.OwnerID.String(), resources.AppName, false)
+	cr.cancel()
+	cr.ctx, cr.cancel = context.WithCancel(context.WithValue(ctx, appNameContextKey, resources.AppName))
+	defer cr.cancel()
+	// Workers can request information only privately; even an accidental question
+	// event is a failed worker turn, never an owner-facing approval/card.
+	cr.SetEventSink(func(_ context.Context, e ChatEvent) error {
+		if e.Type == string(store.BotInteractionQuestion) {
+			return store.ErrBotForbidden
+		}
+		return nil
+	})
+	cr.ctx = agent.WithPromptOverrides(cr.ctx, agent.NewBotWorkerPromptOverrides(req))
+	journal := &botAgentReadJournal{}
+	cr.ctx = context.WithValue(cr.ctx, botAgentReadJournalKey{}, journal)
+	original := resources.Agent.LLM
+	resources.Agent.LLM = &botAgentReadModel{LLM: original, journal: journal}
+	if capture, ok := agent.BotPolicyRuntimeFromContext(ctx).Approvals.(*botApprovalCapture); ok {
+		cr.ctx = context.WithValue(cr.ctx, botApprovalCaptureKey{}, capture)
+		resources.Agent.LLM = &botApprovalCaptureModel{LLM: resources.Agent.LLM, capture: capture}
+	}
+	defer func() { resources.Agent.LLM = original }()
+	// ChatAgent prefers context overrides. Pin the final request-owned model so
+	// an inherited parent provider cannot bypass journal or approval capture.
+	cr.InjectLLM(resources.Agent.LLM)
+	cr.Run(resources.Agent, resources.SessionService, resources.Agent.LLM, nil, genai.NewContentFromText(message, "user"), message, false, "", nil, false)
+	completion := cr.Completion()
+	completion.Report.EffectState = journal.effectState()
+	if resources.PublishedFiles != nil {
+		completion.Report.Artifacts = resources.PublishedFiles()
+	}
+	return completion
 }
 
 // BotChatAgentFactory reverses the launcher -> api dependency. The authenticated
@@ -221,7 +608,7 @@ func validateBotChatRequest(ctx context.Context, req bot.RunRequest, sink bot.Ev
 	if lease.BotID != req.Bot.ID || lease.RunID != req.Run.ID || lease.Fence <= 0 || lease.WorkerID == "" || !time.Now().Before(lease.ExpiresAt) {
 		return store.ErrBotConflict
 	}
-	if req.Version.Budget.MaxRuntimeSeconds <= 0 || req.Version.Budget.MaxRuntimeSeconds > int64((1<<63-1)/int64(time.Second)) {
+	if req.Version.Budget.MaxRuntimeSeconds < 0 || req.Version.Budget.MaxRuntimeSeconds > int64((1<<63-1)/int64(time.Second)) {
 		return store.ErrBotInvalid
 	}
 	return nil
@@ -353,6 +740,9 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 		overrides.SessionContext += "\n" + agent.PlanModeSystemContext
 	}
 	ctx = agent.WithPromptOverrides(ctx, overrides)
+	workerService := &botEmployeeChatService{req: req, workers: make(map[string]*botEmployeeWorker)}
+	defer workerService.close()
+	ctx = bot.WithEmployeeChatService(ctx, workerService)
 	factoryTiming := entstore.ObserveBotExecutionStage(ctx, entstore.BotStageFactory)
 	resources, err := a.factory(ctx, req)
 	factoryTiming(err)
@@ -409,6 +799,51 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 	}
 	if existing == nil || existing.Session == nil || existing.Session.ID() != req.Run.SessionID.String() || existing.Session.UserID() != req.Bot.OwnerID.String() || existing.Session.AppName() != resources.AppName {
 		return botChatFailure(bot.ErrorPermission, store.ErrBotForbidden)
+	}
+	workerService.resources, workerService.capture = resources, capture
+	workerService.owner = ctx
+	if err := workerService.restore(existing.Session.Events()); err != nil {
+		return botChatFailure(bot.ErrorBlocked, err)
+	}
+	if resume && interaction == nil && !ordinaryResume {
+		checkpoint, decodeErr := bot.DecodeApprovalCheckpoint(req.Run.Checkpoint, req.Run)
+		if decodeErr != nil {
+			return botChatFailure(bot.ErrorBlocked, decodeErr)
+		}
+		var owned *botEmployeeWorker
+		for _, w := range workerService.workers {
+			if w.approvalID == checkpoint.ApprovalID {
+				if owned != nil || w.pending == "" || w.actionDigest != checkpoint.ActionDigest {
+					return botChatFailure(bot.ErrorBlocked, store.ErrBotConflict)
+				}
+				owned = w
+			}
+		}
+		if owned != nil {
+			if resources.WorkerFactory == nil {
+				return botChatFailure(bot.ErrorBlocked, store.ErrBotUnsupported)
+			}
+			action, ok := ctx.Value(botResumeActionKey{}).(execution.ActionDescriptor)
+			if !ok {
+				return botChatFailure(bot.ErrorBlocked, store.ErrBotForbidden)
+			}
+			startup(nil)
+			privateResult, resumeErr := workerService.resumeWorker(ctx, owned, action, preparedResume)
+			if resumeErr != nil || privateResult.Status == store.RunWaitingApproval {
+				return privateResult, resumeErr
+			}
+			// Only a tools-disabled Employee may present the private outcome.
+			resources.Agent.Tools, resources.Agent.Toolsets, resources.Agent.ToolIndex = nil, nil, nil
+			facts, _ := json.Marshal(privateResult.Report)
+			req.Instructions = "Explain the saved private worker outcome to the owner. Do not execute anything. Private immutable result: " + string(facts)
+			var sequence int64
+			return runBotWork(ctx, req, resources, resources.Agent.LLM, true, func(finalReq bot.RunRequest, completed *ChatCompletion) (bot.RunResult, error) {
+				return runBotChatAttempt(ctx, finalReq, resources, sink, nil, existing, nil, false, &sequence, completed)
+			})
+		}
+		if req.Run.IsInteractiveChat() || len(workerService.workers) != 0 {
+			return botChatFailure(bot.ErrorBlocked, store.ErrBotForbidden)
+		}
 	}
 	if preparedResume != nil {
 		startup(nil)
@@ -556,7 +991,10 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 			return err
 		}
 		*sequence++
-		return sink(eventCtx, bot.RuntimeEvent{SessionID: req.Run.SessionID, RunID: req.Run.ID, TurnID: turnID, Sequence: *sequence, Type: event.Type, Payload: payload})
+		envelope := bot.RuntimeEvent{SessionID: req.Run.SessionID, RunID: req.Run.ID, TurnID: turnID, Sequence: *sequence, Type: event.Type, Payload: payload}
+		// Only held main-Employee text reaches this release path. Bind the
+		// exact envelope passed to persistence, never the parent execution context.
+		return sink(store.WithBotEmployeeInterimRelease(eventCtx, envelope), envelope)
 	}
 	cr.SetEventSink(func(eventCtx context.Context, event ChatEvent) error {
 		if guardFinal {
@@ -644,7 +1082,10 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 			return botChatFailure(bot.ErrorBlocked, fmt.Errorf("consume owner answer: %w", err))
 		}
 	}
-	// No title model call and no interactive auto-approval in Bot mode.
+	// No title model call and no interactive auto-approval in Bot mode. The
+	// factory-owned producer includes this attempt's journal/resume decorators;
+	// inherited context overrides must not replace that execution evidence path.
+	cr.InjectLLM(resources.Agent.LLM)
 	cr.Run(resources.Agent, resources.SessionService, resources.Agent.LLM, nil, message, req.Instructions, false, "", nil, false)
 	completion := cr.Completion()
 	if completion.Err != nil {
@@ -652,6 +1093,12 @@ func runBotChatAttempt(ctx context.Context, req bot.RunRequest, resources *BotCh
 	}
 	if journal, ok := ctx.Value(botAgentReadJournalKey{}).(*botAgentReadJournal); ok {
 		completion.Report.EffectState = journal.effectState()
+	}
+	if employee, ok := bot.EmployeeChatServiceFromContext(ctx).(*botEmployeeChatService); ok {
+		employee.mu.Lock()
+		mergeBotEmployeeCompletion(&completion, employee.completion)
+		employee.completion = ChatCompletion{}
+		employee.mu.Unlock()
 	}
 	if controller := bot.ProgressControllerFromContext(ctx); controller != nil && controller.Boundary != nil {
 		completion.Err = errors.Join(completion.Err, controller.Boundary(ctx))

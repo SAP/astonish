@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/scheduler"
@@ -77,25 +78,32 @@ func BotScheduleTools(r bot.RunRequest, scope *BotChatScope) ([]tool.Tool, error
 	if err != nil {
 		return nil, err
 	}
-	add, err := functiontool.New(functiontool.Config{Name: "schedule_job", InputSchema: botScheduleInputSchema(), Description: "Capture an authorized Bot cron schedule as a durable pending operation. For an explicit owner request within the current bounded mandate, call this tool with the given task and cadence; do not ask for redundant frequency confirmation, even every minute. The runtime enforces the minimum interval and budgets; honor actual ambiguity, policy denials and exact-operation authorization requirements. Enabled by default after the source turn ends and the worker commits. Results appear in this Bot's home chat; do not ask for channels or recipients. Never claim applied from a pending receipt."}, func(ctx tool.Context, args botScheduleJobArgs) (map[string]any, error) {
+	add, err := functiontool.New(functiontool.Config{Name: "schedule_job", InputSchema: botScheduleInputSchema(), Description: "Capture an authorized Bot cron schedule as a durable pending operation. For an explicit owner request within the current bounded mandate, call this tool with the given task and cadence; do not ask for redundant frequency confirmation, even every minute. The runtime enforces the minimum interval and budgets; honor actual ambiguity, policy denials and exact-operation authorization requirements. Enabled by default only after source execution ends and the synchronous coordinator commits and verifies the job. Capture is private feedback; the Employee final stage reports the committed outcome. Results appear in this Bot's home chat; do not ask for channels or recipients. Never claim applied from a pending receipt."}, func(ctx tool.Context, args botScheduleJobArgs) (map[string]any, error) {
 		return botScheduleResultMap(s.addSkill(ctx, args))
 	})
 	if err != nil {
 		return nil, err
 	}
-	update, err := functiontool.New(functiontool.Config{Name: "update_scheduled_job", InputSchema: botScheduleUpdateInputSchema(), Description: "Capture an authorized cadence or recurrence-state change to this Bot's schedule as a durable pending operation. Supply job_id plus at least one top-level patch field: enabled, schedule or timezone. Omitted fields are preserved. This tool does not change task instructions or job names; never send a nested patch or a job_id-only call. For a preference-only memory request, save memory without rewriting, replacing or removing schedules. Only the worker's committed receipt establishes success."}, func(ctx tool.Context, args tools.UpdateScheduledJobArgs) (map[string]any, error) {
+	update, err := functiontool.New(functiontool.Config{Name: "update_scheduled_job", InputSchema: botScheduleUpdateInputSchema(), Description: "Capture an authorized cadence or recurrence-state change to this Bot's schedule as a durable pending operation. Supply job_id plus at least one top-level patch field: enabled, schedule or timezone. Omitted fields are preserved. This tool does not change task instructions or job names; never send a nested patch or a job_id-only call. For a preference-only memory request, save memory without rewriting, replacing or removing schedules. Only the synchronous coordinator's independently verified committed receipt establishes success. Capture stays private; the Employee reports the final outcome."}, func(ctx tool.Context, args tools.UpdateScheduledJobArgs) (map[string]any, error) {
 		return botScheduleResultMap(s.update(ctx, args))
 	})
 	if err != nil {
 		return nil, err
 	}
-	remove, err := functiontool.New(functiontool.Config{Name: "remove_scheduled_job", Description: "Capture authorized removal of only this Bot's schedule as a durable pending operation. Pending does not mean deleted."}, func(ctx tool.Context, args tools.RemoveScheduledJobArgs) (map[string]any, error) {
+	remove, err := functiontool.New(functiontool.Config{Name: "remove_scheduled_job", Description: "Capture authorized removal of only this Bot's schedule privately. Capture does not mean deleted; the synchronous coordinator verifies removal before the Employee reports the final outcome."}, func(ctx tool.Context, args tools.RemoveScheduledJobArgs) (map[string]any, error) {
 		return botScheduleResultMap(s.remove(ctx, args))
 	})
 	if err != nil {
 		return nil, err
 	}
 	return []tool.Tool{list, add, update, remove}, nil
+}
+
+func botScheduleCaptureMessage(ctx context.Context, capture *bot.ScheduleCapture) string {
+	if private, ok := agent.BotPrivateWorkerExecution(ctx); ok && capture.ValidFor(private) {
+		return "Captured privately; not applied. The synchronous coordinator must commit and verify this exact operation before the Employee reports the outcome."
+	}
+	return capture.Acknowledgment()
 }
 
 func botScheduleResultMap(result botScheduleChangeResult, err error) (map[string]any, error) {
@@ -480,17 +488,11 @@ func (s botScheduleTools) enqueue(ctx tool.Context, b *store.Bot, operation stor
 	if err != nil {
 		return botScheduleChangeResult{}, err
 	}
-	op, err = verifyScheduleCapture(ctx, runtime, q, op)
+	capture, err := recordScheduleCapture(ctx, runtime, q, op)
 	if err != nil {
 		return botScheduleChangeResult{}, err
 	}
-	payloadJSON, err := json.Marshal(op.Payload)
-	if err != nil {
-		return botScheduleChangeResult{}, err
-	}
-	capture := bot.ScheduleCapture{PayloadJSON: string(payloadJSON), OperationID: op.ID, BotID: b.ID, SourceRunID: s.request.Run.ID, OwnerID: b.OwnerID, Operation: operation, Status: store.BotOperationPending, Revision: op.Revision, ObservedAt: time.Now().UTC()}
-	bot.RecordToolOutcome(ctx, ctx.FunctionCallID(), bot.ToolOutcome{Verified: true, ScheduleCapture: &capture})
-	return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: string(store.BotOperationPending), Message: capture.Acknowledgment()}, OperationID: op.ID.String()}, nil
+	return botScheduleChangeResult{ToolResult: tools.ToolResult{Status: string(store.BotOperationPending), Message: botScheduleCaptureMessage(ctx, capture)}, OperationID: op.ID.String()}, nil
 }
 
 func (s botScheduleTools) propose(b *store.Bot, id uuid.UUID, action store.BotTriggerAction, reason string, definition *store.TriggerSpec) botScheduleChangeResult {

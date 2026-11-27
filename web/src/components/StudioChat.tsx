@@ -38,9 +38,10 @@ import ChatErrorBoundary from './chat/ChatErrorBoundary'
 import QuestionCard from './chat/questions/QuestionCard'
 import { isBotOperation, mergeBotOperation, botOperationsBusy, type BotOperations, type BotOperationView } from '../api/botOperationResult'
 import { projectBotOperation } from './chat/botOperationProjection'
-import { botFailureMessage, botLocalFailure, BotFailureKind } from './chat/botEmployeeFeedback'
+import { botLocalFailure, BotFailureKind } from './chat/botEmployeeFeedback'
 import BotEmployeeMessage from './bots/BotEmployeeMessage'
 import BotOperationResult from './bots/BotOperationResult'
+import BotTerminalStatus from './bots/BotTerminalStatus'
 import { botRunOpen, botRunStatusLabel, mergeBotRunState, mergeBotReceipt, botRunsBusy, type BotRunStates, type BotRunState } from '../api/botRunState'
 import {
   deriveLatestHarness,
@@ -365,7 +366,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const [botRunStates, setBotRunStates] = useState<BotRunStates>({})
   const [botReplayComplete, setBotReplayComplete] = useState(false)
   const [botOperations, setBotOperations] = useState<BotOperations>({})
-  useEffect(() => { setBotOperations({}); setBotRunStates({}); setBotReplayComplete(false) }, [botThread?.botId, initialSessionId])
+  useEffect(() => { setBotOperations({}); setBotRunStates({}); setBotReplayComplete(false); setBotSendError(''); setBotStreamError('') }, [botThread?.botId, initialSessionId])
   useEffect(() => {
     if (!botThread || !initialSessionId) return
     setBotOperations(prev => (botThread.operations || []).reduce((states, state) => mergeBotOperation(states, state, botThread.botId, initialSessionId!), prev))
@@ -1214,7 +1215,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
       case 'bot_file_publication':
         if (botThreadRef.current && isBotFilePublication(data) && data.bot_id === botThreadRef.current.botId) {
-          const publication = data
+          const publication = { ...data, summary: '' }
           setMessages(prev => prev.some(m => m.type === 'bot_file_publication' && m.publication.event_id === publication.event_id) ? prev : [...prev, { type: 'bot_file_publication', publication }])
         }
         break
@@ -1594,11 +1595,13 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
 
       case 'error':
         setMessages(interruptActiveDelegations)
-        setMessages((prev: ChatMsg[]) => [...prev, botThreadRef.current ? botFailureMessage(data) : { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
+        if (botThreadRef.current) setBotStreamError(botLocalFailure(data).message)
+        else setMessages((prev: ChatMsg[]) => [...prev, { type: 'error', content: (data.error as string) || (data.message as string) || 'Unknown error' }])
         break
 
       case 'error_info':
-        setMessages((prev: ChatMsg[]) => [...prev, botThreadRef.current ? botFailureMessage(data) : {
+        if (botThreadRef.current) setBotStreamError(botLocalFailure(data).message)
+        else setMessages((prev: ChatMsg[]) => [...prev, {
           type: 'error_info',
           title: data.title,
           reason: data.reason,
@@ -1800,7 +1803,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
-            if (botThreadRef.current) return [...finalized, botFailureMessage()]
+            if (botThreadRef.current) return finalized
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -2300,7 +2303,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           const last = prev[prev.length - 1]
           if (last && last.type === 'agent' && (last as AgentMessage)._streaming) {
             const finalized = finalizeStreamingAgentText(prev)
-            if (botThreadRef.current) return [...finalized, botFailureMessage()]
+            if (botThreadRef.current) return finalized
             return [...finalized, {
               type: 'error',
               content: 'The model stopped responding unexpectedly. You can send a follow-up message to continue.',
@@ -2493,13 +2496,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   const transcriptApprovalIds = useMemo(() => new Set(messages.filter((message): message is Extract<ChatMsg, { type: 'bot_review' }> => message.type === 'bot_review' && message.kind === 'approval').map(message => message.reviewId)), [messages])
   const questionReviewByIndex = new Map<number, string>()
   for (const anchor of botThread?.questionApprovalAnchors || []) {
-    if (!durablePendingApprovalIds.includes(anchor.reviewId) || transcriptApprovalIds.has(anchor.reviewId)) continue
+    if (!durablePendingApprovalIds.includes(anchor.reviewId)) continue
     const index = messages.findIndex(message =>
       message.type === 'chat_question' ? message.questionId === anchor.questionId :
       message.type === 'tool_result' && message.toolName === 'ask_user' &&
       !!message.toolResult && typeof message.toolResult === 'object' &&
       (message.toolResult as { questionId?: string }).questionId === anchor.questionId)
-    if (index >= 0) questionReviewByIndex.set(index, anchor.reviewId)
+    const reviewIndex = messages.findIndex(message => message.type === 'bot_review' && message.kind === 'approval' && message.reviewId === anchor.reviewId)
+    if (index >= 0 && (reviewIndex < 0 || index < reviewIndex)) questionReviewByIndex.set(index, anchor.reviewId)
   }
   const anchoredReviewIds = new Set(questionReviewByIndex.values())
   const fallbackPendingApprovalIds = durablePendingApprovalIds.filter(id => !transcriptApprovalIds.has(id) && !anchoredReviewIds.has(id))
@@ -2944,7 +2948,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
               const anchoredReview = questionReviewByIndex.get(index)
               if (anchoredReview) return <div key={`question/${anchoredReview}`}>{botThread?.renderReview?.('approval', anchoredReview)}</div>
               if (msg.type === 'bot_operation') { const operation = botOperations[msg.operationId]; return operation && botThread ? <BotOperationResult key={msg.eventId} operation={operation} scope={botThread.scope} readOnly={botThread.readOnly || !!botThread.decisionsReadOnly} onChange={next => setBotOperations(prev => mergeBotOperation(prev, next, botThread.botId, initialSessionId || ''))} /> : null }
-              if (msg.type === 'bot_review') return <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId, msg.question)}</div>
+              if (msg.type === 'bot_review') return msg.kind === 'approval' && anchoredReviewIds.has(msg.reviewId) ? null : <div key={msg.eventId}>{botThread?.renderReview?.(msg.kind, msg.reviewId, msg.question)}</div>
               // Turn-level activity fold: render block at segment start; skip covered indices.
               const activityAt = activityByStart.get(index)
               if (activityAt) {
@@ -3493,7 +3497,8 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
           onDrop={handleDrop}
         >
           {botThread?.toolFree && <p role="status" className="mb-2 text-sm text-muted-foreground">{botThread.status === BotStatus.Paused ? 'Autonomous work paused · ready to discuss setup.' : 'Setup conversation.'} No external tools or scheduled execution. Attachments are unavailable.</p>}
-          {(botSendError || botStreamError) && <div role="alert">{renderAgentMessage({ type: 'agent', content: botSendError || botStreamError }, messages.length, 'activity')}</div>}
+          {botThread && <BotTerminalStatus states={botRunStates} />}
+          {botThread && (botSendError || botStreamError) && <p role="alert" className="my-3 text-sm text-muted-foreground">{botSendError || botStreamError}</p>}
           {/* Drag overlay */}
           {isDragOver && (
             <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">

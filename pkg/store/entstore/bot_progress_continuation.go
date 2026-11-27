@@ -66,13 +66,14 @@ func restoreProgressOccupancy(ctx context.Context, tx botDB, rec *botStoredRecor
 		}
 		current = *saved.ProgressQuota
 	}
-	// Check actual remaining balances, without resetting the aggregate ledger.
+	if current.Tokens < 0 || current.Tools < 0 || u.Tokens < 0 || u.Tools < 0 {
+		return store.ErrBotInvalid
+	}
+	// Retain external spend authority without gating continuation on token/tool usage.
 	for _, cap := range []struct {
 		dimension   string
 		used, limit int64
 	}{
-		{"run_tokens", current.Tokens, limits.MaxTokens}, {"total_tokens", u.Tokens, limits.MaxTotalTokens},
-		{"run_tool_calls", current.Tools, limits.MaxToolCalls}, {"total_tool_calls", u.Tools, limits.MaxTotalToolCalls},
 		{"run_spend", current.Spend, limits.MaxSpendMicros}, {"total_spend", u.Spend, limits.MaxSpendMicros},
 	} {
 		// A zero spend ceiling permits free operations (the dispatch ledger still

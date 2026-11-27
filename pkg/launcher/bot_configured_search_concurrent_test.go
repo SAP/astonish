@@ -82,7 +82,7 @@ func TestBotConfiguredSearchConcurrentFacets(t *testing.T) {
 	if usage.InputTokens != 12 || usage.OutputTokens != 20 {
 		t.Fatalf("model usage: %+v", usage)
 	}
-	if _, err := search.(botRunnableTool).Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "overview"}); err == nil || calls.Load() != 4 || runtime.calls != 4 {
-		t.Fatal("finite research quota bypassed")
+	if _, err := search.(botRunnableTool).Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "overview"}); err != nil || calls.Load() != 5 || runtime.calls != 5 {
+		t.Fatal("historical research cap enforced")
 	}
 }

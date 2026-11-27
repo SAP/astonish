@@ -22,8 +22,8 @@ func TestBotOperationViewSnapshotReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(notices) != 1 || notices[0].OperationID != o.ID {
-				t.Fatalf("notification: %+v", notices)
+			if len(notices) != 1 || notices[0].OperationID != o.ID || notices[0].Presentation != store.BotOperationPresentationInternal || notices[0].Status != o.Status || notices[0].Decision != o.Decision {
+				t.Fatalf("notification lost neutral typed state: %+v", notices)
 			}
 			if _, err = s.EnqueueAuthorizedOperation(worker, q); err != nil || len(notices) != 1 {
 				t.Fatalf("duplicate: %v", err)
@@ -57,6 +57,9 @@ func TestBotOperationViewSnapshotReplay(t *testing.T) {
 			for _, row := range rows {
 				if value, ok := row.Event.Actions.StateDelta[store.BotOperationKey]; ok {
 					count++
+					if row.Event.Content != nil || len(row.Event.Actions.StateDelta) != 1 || row.Event.Author != "bot_runtime" {
+						t.Fatalf("operation replay minted conversation: %+v", row.Event)
+					}
 					raw, _ := json.Marshal(value)
 					var v store.BotOperationView
 					if json.Unmarshal(raw, &v) != nil || v != notices[0] {

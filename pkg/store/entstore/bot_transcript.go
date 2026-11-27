@@ -43,7 +43,7 @@ func botHomeArtifactEvent(r store.BotRun, e *adksession.Event) bool {
 }
 
 func botHomeRunStateEvent(r store.BotRun, e *adksession.Event) bool {
-	if (r.Presentation != store.BotRunPresentationHomeInteractive && r.Progress == nil) || e.Author != "bot_runtime" || e.Content != nil {
+	if (r.Presentation != store.BotRunPresentationHomeInteractive && r.Progress == nil && r.TerminalReason != store.BotTerminalNoAnswer) || e.Author != "bot_runtime" || e.Content != nil {
 		return false
 	}
 	raw, err := json.Marshal(e.Actions.StateDelta[store.BotRunStateKey])
@@ -51,7 +51,7 @@ func botHomeRunStateEvent(r store.BotRun, e *adksession.Event) bool {
 		return false
 	}
 	var state store.BotRunState
-	return json.Unmarshal(raw, &state) == nil && state.SchemaVersion == store.BotRunStateSchemaVersion && state.RunID == r.ID && state.BotID == r.BotID && state.SessionID == r.SessionID && state.Presentation == r.Presentation && state.ValidateProgress() == nil && (r.Presentation == store.BotRunPresentationHomeInteractive || state.Progress != nil)
+	return json.Unmarshal(raw, &state) == nil && state.SchemaVersion == store.BotRunStateSchemaVersion && state.RunID == r.ID && state.BotID == r.BotID && state.SessionID == r.SessionID && state.Presentation == r.Presentation && state.ValidateProgress() == nil && (r.Presentation == store.BotRunPresentationHomeInteractive || state.Progress != nil || state.NeutralTerminalLabel() != "")
 }
 
 var _ store.BotTranscriptReader = (*teamSessionStore)(nil)
@@ -181,6 +181,14 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 	if id == uuid.Nil || event == nil || event.ID == "" {
 		return store.ErrBotInvalid
 	}
+	clean := *event
+	clean.Actions.StateDelta = make(map[string]any, len(event.Actions.StateDelta))
+	for key, value := range event.Actions.StateDelta {
+		if key != store.BotEmployeeInterimKey {
+			clean.Actions.StateDelta[key] = value
+		}
+	}
+	event = &clean
 	if _, err := r.auth.authorize(ctx, uuid.Nil, false); err != nil {
 		return err
 	}
@@ -212,7 +220,16 @@ func (r *botRepository) appendBotRunEvent(ctx context.Context, lease store.BotLe
 				return err
 			}
 			projectCtx = context.WithValue(projectCtx, botWorkOwnerInputKey{}, owner)
-			projectCtx = context.WithValue(projectCtx, botWorkProgressKey{}, botWorkProgressEvent(run.Run, run.Work, event))
+			progress := botWorkProgressEvent(run.Run, run.Work, event) && store.BotEmployeeInterimReleased(ctx, event.Actions.StateDelta["bot_runtime_event"])
+			projectCtx = context.WithValue(projectCtx, botWorkProgressKey{}, progress)
+			if progress {
+				binding := botEmployeeInterimBinding(rec.Bot, run.Run, event)
+				if binding != nil {
+					event.Actions.StateDelta[store.BotEmployeeInterimKey] = *binding
+				} else {
+					projectCtx = context.WithValue(projectCtx, botWorkProgressKey{}, false)
+				}
+			}
 		}
 		// Legacy explicit /conversation and /test-run have no canonical admission
 		// row. Preserve only the exact persisted owner assignment, never role alone

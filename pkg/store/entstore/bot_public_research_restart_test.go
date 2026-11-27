@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestBotPublicResearchRestartQuota(t *testing.T) {
+func TestBotPublicResearchRestartAccounting(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			ctx, botID, _, _, reopen := ApprovalScopeReopenFixture(t, scope)
@@ -42,7 +42,7 @@ func TestBotPublicResearchRestartQuota(t *testing.T) {
 			if err = quota.ReserveBotPublicResearch(bound, ref, "parent"); err != nil {
 				t.Fatal(err)
 			}
-			t.Run("reopen-ceiling", func(t *testing.T) {
+			t.Run("reopen-accounting", func(t *testing.T) {
 				bots, _ = reopen()
 				rt, err = NewBotMandateRuntime(bots, policy)
 				if err != nil {
@@ -61,8 +61,10 @@ func TestBotPublicResearchRestartQuota(t *testing.T) {
 					t.Fatal(err)
 				}
 				quota = rt.(*botMandateRuntime)
-				if err = quota.ReserveBotPublicResearch(bound, ref, "parent"); !errors.Is(err, store.ErrBotForbidden) {
-					t.Fatalf("restart reset ceiling: %v", err)
+				for i := 2; i < 13; i++ {
+					if err = quota.ReserveBotPublicResearch(bound, ref, "parent"); err != nil {
+						t.Fatalf("search %d: %v", i+1, err)
+					}
 				}
 				rec, err := quota.repo.db.GetBot(ctx, botID)
 				if err != nil {
@@ -70,7 +72,7 @@ func TestBotPublicResearchRestartQuota(t *testing.T) {
 				}
 				raw, _ := json.Marshal(rec.Metadata[mandateUsageKey])
 				var usage mandateUsage
-				if err = json.Unmarshal(raw, &usage); err != nil || usage.Active[admitted.Run.ID.String()].PublicResearchCalls != 2 {
+				if err = json.Unmarshal(raw, &usage); err != nil || usage.Active[admitted.Run.ID.String()].PublicResearchCalls != 13 {
 					t.Fatalf("durable quota projection: %s %v", raw, err)
 				}
 			})

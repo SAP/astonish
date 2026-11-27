@@ -28,15 +28,15 @@ func TestBotEmployeeApprovalReceipt(t *testing.T) {
 			}
 			item := got.tr.Items[count]
 			want, _ := botEmployeeApprovalReceipt(continuation)
-			if item.Kind != events.ItemAgent || item.Content != want.Content || item.Provisional {
-				t.Fatalf("not a completed employee receipt: %+v", item)
+			if item.Kind != events.ItemSystem || item.Content != want.Content || item.Provisional {
+				t.Fatalf("not a completed neutral receipt: %+v", item)
 			}
 			if got.tr.Streaming != streaming || got.tr.Items[count-1].Kind != events.ItemApproval {
 				t.Fatal("receipt changed stream or authorization state")
 			}
 			rendered, _, _ := got.renderTranscript()
-			if !strings.Contains(rendered, "I saved your approval") || strings.Contains(rendered, "Approval saved;") {
-				t.Fatalf("wrong receipt rendering: %s", rendered)
+			if !strings.Contains(rendered, want.Content) || strings.Contains(rendered, "I saved your approval") {
+				t.Fatalf("wrong neutral receipt rendering: %s", rendered)
 			}
 		})
 	}

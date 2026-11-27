@@ -54,7 +54,7 @@ func TestBotMandateQuotaBoundaries(t *testing.T) {
 			if err = rt.ReserveBotMandateRun(c, *second.Run.MandateRef, second.Run.ID); err == nil {
 				t.Fatal("concurrency bypass")
 			}
-			for _, charge := range [][3]int64{{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}, {math.MaxInt64, 0, 0}, {0, math.MaxInt64, 0}, {0, 0, 1}} {
+			for _, charge := range [][3]int64{{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}, {0, 0, 1}} {
 				if err = rt.ConsumeBotMandateQuota(c, ref, first.Run.ID, charge[0], charge[1], charge[2]); err == nil {
 					t.Fatalf("invalid charge accepted: %v", charge)
 				}
@@ -71,8 +71,8 @@ func TestBotMandateQuotaBoundaries(t *testing.T) {
 			if err = rt.ReserveBotMandateRun(c, *second.Run.MandateRef, second.Run.ID); err != nil {
 				t.Fatal(err)
 			}
-			if err = rt.ConsumeBotMandateQuota(c, *second.Run.MandateRef, second.Run.ID, 0, 10, 0); err == nil {
-				t.Fatal("aggregate token limit ignored")
+			if err = rt.ConsumeBotMandateQuota(c, *second.Run.MandateRef, second.Run.ID, 0, 10, 0); err != nil {
+				t.Fatal("historical aggregate token metadata enforced")
 			}
 			if err = rt.RevokeBotMandate(c, *second.Run.MandateRef); err == nil {
 				t.Fatal("runtime context revoked owner mandate")
@@ -112,8 +112,14 @@ func TestBotMandateQuotaBoundaries(t *testing.T) {
 			if err = rt.ReserveBotMandateRun(c, *third.Run.MandateRef, third.Run.ID); err != nil {
 				t.Fatal("daily rollover", err)
 			}
-			if err = rt.ConsumeBotMandateQuota(c, *third.Run.MandateRef, third.Run.ID, 0, 10, 0); err == nil {
-				t.Fatal("aggregate reset at midnight")
+			if err = rt.ConsumeBotMandateQuota(c, *third.Run.MandateRef, third.Run.ID, 0, 10, 0); err != nil {
+				t.Fatal("historical aggregate token metadata enforced after rollover")
+			}
+			if err = rt.ConsumeBotMandateQuota(c, *third.Run.MandateRef, third.Run.ID, math.MaxInt64, 0, 0); err == nil {
+				t.Fatal("aggregate accounting overflow accepted")
+			}
+			if err = rt.ConsumeBotMandateQuota(c, *third.Run.MandateRef, third.Run.ID, 0, math.MaxInt64, 0); err == nil {
+				t.Fatal("token accounting overflow accepted")
 			}
 		})
 	}

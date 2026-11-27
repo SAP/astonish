@@ -8,18 +8,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestBotMandateDefaultsFinite(t *testing.T) {
+func TestBotMandateDefaultsAdmissionOnly(t *testing.T) {
 	c := DefaultBotMandateConfig()
 	want := BotMandateConfig{
 		MinScheduleIntervalSeconds: 60,
 		MaxSchedules:               8,
 		MaxDailyRuns:               1440,
 		MaxConcurrentRuns:          1,
-		MaxRuntimeSeconds:          300,
-		MaxToolCalls:               100,
-		MaxTokens:                  1_000_000,
-		MaxTotalToolCalls:          144000,
-		MaxTotalTokens:             1_440_000_000,
 	}
 	if c != want {
 		t.Fatalf("defaults: got %+v, want %+v", c, want)
@@ -41,7 +36,7 @@ func TestBotMandateEffectiveDefaults(t *testing.T) {
 	for name, cfg := range map[string]*AppConfig{"nil receiver": nil, "absent config": {}} {
 		t.Run(name, func(t *testing.T) {
 			got, err := cfg.EffectiveBotMandateConfig()
-			if err != nil || got != DefaultBotMandateConfig() || got.MaxTokens != 1_000_000 || got.MaxTotalTokens != 1_440_000_000 {
+			if err != nil || got != DefaultBotMandateConfig() || got.MaxTokens != 0 || got.MaxTotalTokens != 0 {
 				t.Fatalf("effective defaults: %+v, err %v", got, err)
 			}
 		})
@@ -119,11 +114,11 @@ func TestBotMandateConfigInvalidOverrides(t *testing.T) {
 		name   string
 		change func(*BotMandateConfig)
 	}{
-		{"zero tokens", func(c *BotMandateConfig) { c.MaxTokens = 0 }},
-		{"zero aggregate tokens", func(c *BotMandateConfig) { c.MaxTotalTokens = 0 }},
+		{"zero daily runs", func(c *BotMandateConfig) { c.MaxDailyRuns = 0 }},
+		{"zero concurrency", func(c *BotMandateConfig) { c.MaxConcurrentRuns = 0 }},
 		{"negative tokens", func(c *BotMandateConfig) { c.MaxTokens = -1 }},
 		{"negative aggregate tokens", func(c *BotMandateConfig) { c.MaxTotalTokens = -1 }},
-		{"run exceeds aggregate", func(c *BotMandateConfig) { c.MaxTokens = c.MaxTotalTokens + 1 }},
+		{"negative runtime", func(c *BotMandateConfig) { c.MaxRuntimeSeconds = -1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := DefaultBotMandateConfig()
@@ -151,7 +146,7 @@ func TestBotMandateConfigInvalidOverrides(t *testing.T) {
 func TestBotDelegationOperatorCeiling(t *testing.T) {
 	c := DefaultBotMandateConfig()
 	r := c
-	r.MaxTokens++
+	r.MaxDailyRuns++
 	if r.ValidateWithin(c) == nil {
 		t.Fatal("raised operator ceiling")
 	}

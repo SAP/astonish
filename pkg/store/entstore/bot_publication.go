@@ -5,8 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
+
+	personalrun "github.com/SAP/astonish/ent/personal/botrun"
+	teamrun "github.com/SAP/astonish/ent/team/botrun"
 
 	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
@@ -15,6 +21,469 @@ import (
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+var _ store.BotEmployeePresentationStore = (*personalBotStore)(nil)
+var _ store.BotEmployeePresentationStore = (*teamBotStore)(nil)
+
+func (s *personalBotStore) ClaimEmployeePresentation(c context.Context, q store.BotEmployeePresentationClaim) (*store.BotEmployeePresentation, error) {
+	return s.repository().ClaimEmployeePresentation(c, q)
+}
+func (s *teamBotStore) ClaimEmployeePresentation(c context.Context, q store.BotEmployeePresentationClaim) (*store.BotEmployeePresentation, error) {
+	return s.repository().ClaimEmployeePresentation(c, q)
+}
+func (s *personalBotStore) ReadEmployeePresentation(c context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return s.repository().ReadEmployeePresentation(c, q)
+}
+func (s *teamBotStore) ReadEmployeePresentation(c context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return s.repository().ReadEmployeePresentation(c, q)
+}
+func (s *personalBotStore) ReserveEmployeePresentationModel(c context.Context, q store.BotEmployeePresentationModelReservation) (*store.BotEmployeePresentation, error) {
+	return s.repository().ReserveEmployeePresentationModel(c, q)
+}
+func (s *teamBotStore) ReserveEmployeePresentationModel(c context.Context, q store.BotEmployeePresentationModelReservation) (*store.BotEmployeePresentation, error) {
+	return s.repository().ReserveEmployeePresentationModel(c, q)
+}
+func (s *personalBotStore) SettleEmployeePresentationModel(c context.Context, q store.BotEmployeePresentationModelSettlement) (*store.BotEmployeePresentation, error) {
+	return s.repository().SettleEmployeePresentationModel(c, q)
+}
+func (s *teamBotStore) SettleEmployeePresentationModel(c context.Context, q store.BotEmployeePresentationModelSettlement) (*store.BotEmployeePresentation, error) {
+	return s.repository().SettleEmployeePresentationModel(c, q)
+}
+func (s *personalBotStore) CompleteEmployeePresentation(c context.Context, q store.BotEmployeePresentationCompletion) (*store.BotEmployeePresentation, error) {
+	return s.repository().CompleteEmployeePresentation(c, q)
+}
+func (s *teamBotStore) CompleteEmployeePresentation(c context.Context, q store.BotEmployeePresentationCompletion) (*store.BotEmployeePresentation, error) {
+	return s.repository().CompleteEmployeePresentation(c, q)
+}
+
+func (s *personalBotStore) PrepareEmployeePresentation(c context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return s.repository().PrepareEmployeePresentation(c, q)
+}
+func (s *teamBotStore) PrepareEmployeePresentation(c context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return s.repository().PrepareEmployeePresentation(c, q)
+}
+
+func presentationAdd(a, b int64) int64 {
+	if a < 0 || b < 0 || b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
+}
+func presentationTokens(u store.BotUsage) int64 {
+	return presentationAdd(u.InputTokens, u.OutputTokens)
+}
+func presentationLedger(rec *botStoredRecord, saved *botStoredRun) (mandateUsage, mandateRunUsage, error) {
+	var usage mandateUsage
+	raw, err := json.Marshal(rec.Metadata[mandateUsageKey])
+	if err != nil {
+		return usage, mandateRunUsage{}, err
+	}
+	if err = json.Unmarshal(raw, &usage); err != nil {
+		return usage, mandateRunUsage{}, err
+	}
+	id := saved.Run.ID.String()
+	current, ok := usage.Active[id]
+	if !ok {
+		current, ok = usage.Released[id]
+	}
+	if !ok && saved.ProgressQuota != nil {
+		current, ok = *saved.ProgressQuota, true
+	}
+	if saved.Run.MandateRef == nil {
+		return usage, current, store.ErrBotForbidden
+	}
+	if !ok {
+		// Admission can fail before a quota ledger exists. This is accounting
+		// metadata only, not a new run reservation or execution grant.
+		current = mandateRunUsage{Ref: *saved.Run.MandateRef, Tokens: presentationTokens(saved.Run.Usage)}
+	}
+	if current.Ref != *saved.Run.MandateRef {
+		return usage, current, store.ErrBotForbidden
+	}
+	return usage, current, nil
+}
+
+// Prepare never accepts a budget, pin or operation list from its caller.
+func (r *botRepository) PrepareEmployeePresentation(ctx context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	var result *store.BotEmployeePresentation
+	err := r.db.Transaction(ctx, func(tx botDB) error {
+		rec, err := r.publicationOwner(ctx, tx, q.BotID)
+		if err != nil {
+			return err
+		}
+		saved, err := tx.ReadRun(ctx, q.BotID, q.RunID)
+		if err != nil {
+			return err
+		}
+		if saved.EmployeePresentation != nil {
+			var e error
+			rec, saved, e = r.presentationSource(ctx, tx, q)
+			if e != nil {
+				return e
+			}
+			if e = saveEmployeePresentation(ctx, tx, rec, saved); e != nil {
+				return e
+			}
+			result = saved.EmployeePresentation
+			return nil
+		}
+		run := saved.Run
+		if !run.Status.Terminal() || rec.ActiveRunID != nil || run.MandateRef == nil || run.Provider == "" || run.Model == "" || run.UserEventID == "" {
+			return store.ErrBotForbidden
+		}
+		m, err := readMandate(ctx, tx, *run.MandateRef)
+		if err != nil {
+			return err
+		}
+		_, charged, err := presentationLedger(rec, saved)
+		if err != nil {
+			return err
+		}
+		expires := m.Mandate.ExpiresAt
+		if run.CallerCeiling != nil && run.CallerCeiling.ExpiresAt.Before(expires) {
+			expires = run.CallerCeiling.ExpiresAt
+		}
+		p := &store.BotEmployeePresentation{SchemaVersion: store.BotEmployeePresentationVersion, State: store.BotEmployeePresentationPending, BotID: run.BotID, RunID: run.ID, BotVersion: run.Version, OwnerID: rec.Bot.OwnerID, OrgSlug: r.auth.orgSlug, TeamSlug: run.MandateRef.TeamSlug, HomeSessionID: rec.Bot.HomeSessionID, SourceSessionID: run.SessionID, UserEventID: run.UserEventID, AuthorityExpiresAt: expires, Provider: run.Provider, Model: run.Model, ReportSequence: run.StateSequence, ReportDigest: run.Report.EmployeeMessageSourceDigest(run.Status), Usage: run.Usage}
+		if charged.Tokens > presentationTokens(p.Usage) {
+			p.Usage.InputTokens = charged.Tokens
+			p.Usage.OutputTokens = 0
+		}
+		for key := range rec.Metadata {
+			if !strings.HasPrefix(key, "mandate_operation_head:") {
+				continue
+			}
+			id, e := uuid.Parse(strings.TrimPrefix(key, "mandate_operation_head:"))
+			if e != nil {
+				return e
+			}
+			op, e := readMandateOperation(ctx, tx, rec, *run.MandateRef, id)
+			if errors.Is(e, store.ErrBotInvalid) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if op.Provenance == nil || op.Provenance.SourceRunID != run.ID {
+				continue
+			}
+			if e = verifyPresentationOperation(ctx, tx, rec, saved, op); e != nil {
+				return e
+			}
+			digest, e := botHash(op)
+			if e != nil {
+				return e
+			}
+			p.Operations = append(p.Operations, store.BotEmployeeOperationIdentity{OperationID: id, Revision: op.Revision, ReceiptDigest: digest})
+		}
+		sort.Slice(p.Operations, func(i, j int) bool {
+			return p.Operations[i].OperationID.String() < p.Operations[j].OperationID.String()
+		})
+		for _, charge := range charged.Models {
+			if !charge.Settled {
+				p.State = store.BotEmployeePresentationUnavailable
+				p.UnavailableReason = store.BotEmployeeReasonInterrupted
+			}
+		}
+		// A cancelled source must not resume work, but a coordinator-owned,
+		// definitive schedule outcome may still be communicated with the original
+		// tools-disabled claim. Expiry, revocation and unsettled calls still deny it.
+		if run.Status == store.RunCancelled && (!saved.EmployeeScheduleCoordinator || len(p.Operations) == 0) {
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = store.BotEmployeeReasonOwnerCancelled
+		}
+		if run.Status == store.RunInterrupted {
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = store.BotEmployeeReasonInterrupted
+		}
+		if !r.clock().Before(expires) {
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = store.BotEmployeeReasonExpired
+		}
+		if m.RevokedAt != nil {
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = store.BotEmployeeReasonForbidden
+		}
+		saved.EmployeePresentation = p
+		if err = saveEmployeePresentation(ctx, tx, rec, saved); err != nil {
+			return err
+		}
+		result = p
+		return nil
+	})
+	return result, err
+}
+
+// The original source envelope is the sole authority for communication. A current
+// Bot version is deliberately not an executable grant for this terminal stage.
+func (r *botRepository) presentationSource(ctx context.Context, tx botDB, q store.BotEmployeePresentationRequest) (*botStoredRecord, *botStoredRun, error) {
+	rec, err := r.publicationOwner(ctx, tx, q.BotID)
+	if err != nil {
+		return nil, nil, err
+	}
+	saved, err := tx.ReadRun(ctx, q.BotID, q.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	p := saved.EmployeePresentation
+	if p == nil || p.ValidateBinding(saved.Run) != nil || !saved.Run.Status.Terminal() || p.OwnerID != rec.Bot.OwnerID || p.HomeSessionID != rec.Bot.HomeSessionID || p.OrgSlug != r.auth.orgSlug || (r.auth.teamSlug != "" && p.TeamSlug != r.auth.teamSlug) {
+		return nil, nil, store.ErrBotForbidden
+	}
+	if p.State != store.BotEmployeePresentationPending && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
+		return nil, nil, store.ErrBotConflict
+	}
+	now := r.clock() // Caller timestamps never extend original authority.
+	if rec.Bot.Status == store.BotDeleted || rec.Bot.PermanentDelete {
+		return nil, nil, store.ErrBotNotFound
+	}
+	if p.State == store.BotEmployeePresentationCompleted || p.State == store.BotEmployeePresentationUnavailable {
+		return rec, saved, nil
+	}
+	if !now.Before(p.AuthorityExpiresAt) {
+		p.State, p.UnavailableReason = store.BotEmployeePresentationUnavailable, store.BotEmployeeReasonExpired
+	}
+	if saved.Run.Status == store.RunInterrupted || saved.Run.Status == store.RunCancelled && (!saved.EmployeeScheduleCoordinator || len(p.Operations) == 0) {
+		p.State, p.UnavailableReason = store.BotEmployeePresentationUnavailable, store.BotEmployeeReasonInterrupted
+	}
+	if saved.Run.MandateRef == nil {
+		return nil, nil, store.ErrBotForbidden
+	}
+	m, err := readMandate(ctx, tx, *saved.Run.MandateRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	if m.RevokedAt != nil || m.Validate(now) != nil || m.Mandate.Ref.OwnerID != p.OwnerID.String() {
+		p.State, p.UnavailableReason = store.BotEmployeePresentationUnavailable, store.BotEmployeeReasonForbidden
+	}
+	if p.State == store.BotEmployeePresentationUnavailable {
+		return rec, saved, nil
+	}
+	for _, identity := range p.Operations {
+		op, err := readMandateOperation(ctx, tx, rec, *saved.Run.MandateRef, identity.OperationID)
+		if err != nil {
+			return nil, nil, err
+		}
+		digest, err := botHash(op)
+		if err != nil || op.Revision != identity.Revision || digest != identity.ReceiptDigest || verifyPresentationOperation(ctx, tx, rec, saved, op) != nil {
+			return nil, nil, store.ErrBotConflict
+		}
+	}
+	if p.State != store.BotEmployeePresentationPending && (q.ClaimToken == "" || p.ClaimToken != q.ClaimToken) {
+		return nil, nil, store.ErrBotConflict
+	}
+	return rec, saved, nil
+}
+
+// Presentation calls retain cumulative usage accounting without execution quotas.
+// They neither occupy a tool run nor charge/reset daily runs.
+func chargeEmployeePresentation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun, before store.BotEmployeePresentation) error {
+	p := saved.EmployeePresentation
+	if len(p.Turns) == 0 || reflect.DeepEqual(before.Turns, p.Turns) {
+		return nil
+	}
+	usage, current, err := presentationLedger(rec, saved)
+	if err != nil {
+		return err
+	}
+	turn := p.Turns[0]
+	key := "employee-presentation:" + turn.ID
+	if current.Models == nil {
+		current.Models = map[string]mandateModelCharge{}
+	}
+	if len(before.Turns) == 0 {
+		for _, charge := range current.Models {
+			if !charge.Settled {
+				return store.ErrBotConflict
+			}
+		}
+		tokens := presentationTokens(turn.Reserved)
+		if _, ok := current.Models[key]; ok {
+			return store.ErrBotConflict
+		}
+		current.Models[key] = mandateModelCharge{Tokens: tokens}
+		current.Tokens = presentationAdd(current.Tokens, tokens)
+		usage.Tokens = presentationAdd(usage.Tokens, tokens)
+	} else if before.Turns[0].State != store.BotEmployeeModelTurnSettled && turn.State == store.BotEmployeeModelTurnSettled {
+		charge, ok := current.Models[key]
+		if !ok || charge.Settled || charge.Tokens > current.Tokens || charge.Tokens > usage.Tokens {
+			return store.ErrBotConflict
+		}
+		tokens := presentationTokens(turn.Usage)
+		current.Tokens = presentationAdd(current.Tokens-charge.Tokens, tokens)
+		usage.Tokens = presentationAdd(usage.Tokens-charge.Tokens, tokens)
+		current.Models[key] = mandateModelCharge{Tokens: tokens, Settled: true}
+	}
+	id := saved.Run.ID.String()
+	if _, active := usage.Active[id]; active {
+		usage.Active[id] = current
+	} else {
+		if usage.Released == nil {
+			usage.Released = map[string]mandateRunUsage{}
+		}
+		usage.Released[id] = current
+	}
+	if saved.ProgressQuota != nil {
+		*saved.ProgressQuota = current
+	}
+	rec.Metadata[mandateUsageKey] = usage
+	return saveMandateMetadata(ctx, tx, rec)
+}
+
+// Sequence-CAS serializes private envelope writes with lifecycle/revocation.
+func saveEmployeePresentation(ctx context.Context, tx botDB, rec *botStoredRecord, saved *botStoredRun) error {
+	if err := saved.EmployeePresentation.ValidateBinding(saved.Run); err != nil {
+		return err
+	}
+	if err := tx.AdvanceSequence(ctx, rec.Bot.ID, rec.LastSequence); err != nil {
+		return err
+	}
+	data, err := encodeBotRunData(ctx, tx, *saved)
+	if err != nil {
+		return err
+	}
+	var n int
+	switch d := tx.(type) {
+	case personalBotDB:
+		n, err = d.client.BotRun.Update().Where(personalrun.IDEQ(saved.Run.ID), personalrun.BotIDEQ(rec.Bot.ID), personalrun.StatusEQ(personalrun.Status(saved.Run.Status))).SetData(data).Save(ctx)
+	case teamBotDB:
+		n, err = d.client.BotRun.Update().Where(teamrun.IDEQ(saved.Run.ID), teamrun.BotIDEQ(rec.Bot.ID), teamrun.StatusEQ(teamrun.Status(saved.Run.Status))).SetData(data).Save(ctx)
+	default:
+		return store.ErrBotUnsupported
+	}
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return store.ErrBotConflict
+	}
+	return nil
+}
+func (r *botRepository) mutateEmployeePresentation(ctx context.Context, q store.BotEmployeePresentationRequest, mutate func(*store.BotEmployeePresentation) error) (*store.BotEmployeePresentation, error) {
+	var result *store.BotEmployeePresentation
+	err := r.db.Transaction(ctx, func(tx botDB) error {
+		rec, saved, err := r.presentationSource(ctx, tx, q)
+		if err != nil {
+			return err
+		}
+		before := *saved.EmployeePresentation
+		before.Turns = append([]store.BotEmployeeModelTurn(nil), before.Turns...)
+		if saved.EmployeePresentation.State == store.BotEmployeePresentationUnavailable {
+			if err = saveEmployeePresentation(ctx, tx, rec, saved); err != nil {
+				return err
+			}
+			result = saved.EmployeePresentation
+			return nil
+		}
+		if err = mutate(saved.EmployeePresentation); err != nil {
+			return err
+		}
+		if err = chargeEmployeePresentation(ctx, tx, rec, saved, before); err != nil {
+			return err
+		}
+		if err = saveEmployeePresentation(ctx, tx, rec, saved); err != nil {
+			return err
+		}
+		result = saved.EmployeePresentation
+		return nil
+	})
+	return result, err
+}
+func (r *botRepository) ReadEmployeePresentation(ctx context.Context, q store.BotEmployeePresentationRequest) (*store.BotEmployeePresentation, error) {
+	return r.mutateEmployeePresentation(ctx, q, func(*store.BotEmployeePresentation) error { return nil })
+}
+func (r *botRepository) ClaimEmployeePresentation(ctx context.Context, q store.BotEmployeePresentationClaim) (*store.BotEmployeePresentation, error) {
+	return r.mutateEmployeePresentation(ctx, q.BotEmployeePresentationRequest, func(p *store.BotEmployeePresentation) error {
+		if q.ExpectedReportSequence != p.ReportSequence || q.ExpectedReportDigest != p.ReportDigest || q.ClaimToken == "" {
+			return store.ErrBotConflict
+		}
+		if p.State == store.BotEmployeePresentationPending {
+			p.State = store.BotEmployeePresentationClaimed
+			p.ClaimToken = q.ClaimToken
+		}
+		return nil
+	})
+}
+func (r *botRepository) ReserveEmployeePresentationModel(ctx context.Context, q store.BotEmployeePresentationModelReservation) (*store.BotEmployeePresentation, error) {
+	return r.mutateEmployeePresentation(ctx, q.BotEmployeePresentationRequest, func(p *store.BotEmployeePresentation) error {
+		if p.State != store.BotEmployeePresentationClaimed || q.TurnID == "" || q.DispatchToken == "" || len(p.Turns) != 0 || q.Reserved.ToolCalls != 0 || !presentationUsageValid(q.Reserved) {
+			return store.ErrBotConflict
+		}
+		p.DispatchToken = q.DispatchToken
+		p.Turns = append(p.Turns, store.BotEmployeeModelTurn{ID: q.TurnID, DispatchToken: q.DispatchToken, State: store.BotEmployeeModelTurnStarted, StartedAt: r.clock(), Reserved: q.Reserved})
+		return nil
+	})
+}
+func presentationUsageValid(u store.BotUsage) bool {
+	return u.InputTokens >= 0 && u.OutputTokens >= 0 && u.RuntimeNanos >= 0 && u.ToolCalls == 0 && (u.CostMicros == nil || *u.CostMicros >= 0)
+}
+func (r *botRepository) SettleEmployeePresentationModel(ctx context.Context, q store.BotEmployeePresentationModelSettlement) (*store.BotEmployeePresentation, error) {
+	return r.mutateEmployeePresentation(ctx, q.BotEmployeePresentationRequest, func(p *store.BotEmployeePresentation) error {
+		if p.State != store.BotEmployeePresentationClaimed || len(p.Turns) != 1 || !presentationUsageValid(q.Usage) {
+			return store.ErrBotConflict
+		}
+		turn := &p.Turns[0]
+		if turn.ID != q.TurnID || turn.DispatchToken != q.DispatchToken || p.DispatchToken != q.DispatchToken {
+			return store.ErrBotConflict
+		}
+		if turn.State == store.BotEmployeeModelTurnSettled {
+			if !reflect.DeepEqual(turn.Usage, q.Usage) {
+				return store.ErrBotConflict
+			}
+			return nil
+		}
+		turn.State = store.BotEmployeeModelTurnSettled
+		turn.SettledAt = r.clock()
+		turn.Usage = q.Usage
+		p.Usage.InputTokens = presentationAdd(p.Usage.InputTokens, q.Usage.InputTokens)
+		p.Usage.OutputTokens = presentationAdd(p.Usage.OutputTokens, q.Usage.OutputTokens)
+		p.Usage.RuntimeNanos = presentationAdd(p.Usage.RuntimeNanos, q.Usage.RuntimeNanos)
+		if p.Usage.CostMicros == nil || q.Usage.CostMicros == nil {
+			p.Usage.CostMicros = nil
+		} else {
+			value := presentationAdd(*p.Usage.CostMicros, *q.Usage.CostMicros)
+			p.Usage.CostMicros = &value
+		}
+		return nil
+	})
+}
+func (r *botRepository) CompleteEmployeePresentation(ctx context.Context, q store.BotEmployeePresentationCompletion) (*store.BotEmployeePresentation, error) {
+	return r.mutateEmployeePresentation(ctx, q.BotEmployeePresentationRequest, func(p *store.BotEmployeePresentation) error {
+		if p.State == store.BotEmployeePresentationCompleted {
+			if p.FinalText != q.Text || p.DispatchToken != q.DispatchToken {
+				return store.ErrBotConflict
+			}
+			return nil
+		}
+		if p.State == store.BotEmployeePresentationUnavailable {
+			if p.UnavailableReason != q.UnavailableReason {
+				return store.ErrBotConflict
+			}
+			return nil
+		}
+		if p.State != store.BotEmployeePresentationClaimed {
+			return store.ErrBotConflict
+		}
+		if q.UnavailableReason != "" {
+			if q.Text != "" {
+				return store.ErrBotInvalid
+			}
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = q.UnavailableReason
+			return nil
+		}
+		if len(p.Turns) != 1 || p.Turns[0].State != store.BotEmployeeModelTurnSettled || p.DispatchToken != q.DispatchToken {
+			return store.ErrBotConflict
+		}
+		if !botdomain.EmployeePresentationTextValid(q.Text) {
+			p.State = store.BotEmployeePresentationUnavailable
+			p.UnavailableReason = store.BotEmployeeReasonFormat
+			return nil
+		}
+		p.State = store.BotEmployeePresentationCompleted
+		p.FinalText = q.Text
+		p.FinalTextDigest = store.BotEmployeeTextDigest(q.Text)
+		return nil
+	})
+}
 
 var _ store.BotPublicationStore = (*personalBotStore)(nil)
 var _ store.BotPublicationStore = (*teamBotStore)(nil)
@@ -94,6 +563,19 @@ func committedPublicationReport(ctx context.Context, db botDB, bot, run uuid.UUI
 			}
 			selected = saved.Run
 			selected.Status, selected.Report = outcome.Status, outcome.Report
+			selected.StateSequence = a.Sequence
+			if snapshot, ok := saved.EmployeeOutcomes[a.Sequence]; ok {
+				x := snapshot.Run
+				if x.BotID != bot || x.ID != run || x.StateSequence != a.Sequence || x.Status != outcome.Status || x.Report.EmployeeMessageSourceDigest(x.Status) != outcome.Report.EmployeeMessageSourceDigest(outcome.Status) {
+					return selected, 0, store.ErrBotInvalid
+				}
+				// Report digests do not cover Employee wording: check that separately.
+				expected, actual := x.Report.EmployeeMessage, outcome.Report.EmployeeMessage
+				if (expected == nil) != (actual == nil) || expected != nil && (expected.Text != actual.Text || expected.SourceDigest != actual.SourceDigest || expected.Origin != actual.Origin) {
+					return selected, 0, store.ErrBotInvalid
+				}
+				selected = x
+			}
 			selectedSequence = a.Sequence
 			if sequence > 0 {
 				return selected, selectedSequence, nil
@@ -159,8 +641,71 @@ func readPublication(ctx context.Context, db botDB, bot, run uuid.UUID, sequence
 	if err := json.Unmarshal(a.Payload, &p); err != nil {
 		return nil, err
 	}
+	if p.EmployeeSpeech {
+		source, exact, err := committedPublicationReport(ctx, db, bot, run, sequence)
+		if err != nil {
+			return nil, err
+		}
+		stored, err := db.ReadRun(ctx, bot, run)
+		if err != nil {
+			return nil, err
+		}
+		var presentation *store.BotEmployeePresentation
+		if x := stored.EmployeePresentation; x != nil && x.ReportSequence == sequence {
+			presentation = x
+		}
+		text, speech := store.EmployeeSpeech(source, stored.EmployeeOutcomes[sequence].Speech, presentation)
+		owner, err := db.GetBot(ctx, bot)
+		if err != nil {
+			return nil, err
+		}
+		if !speech || exact != sequence || p.BotID != bot || p.RunID != run || p.ReportSequence != sequence || p.Version != source.Version || p.HomeSessionID != owner.Bot.HomeSessionID || p.SourceSessionID != source.SessionID || p.SourceUserEventID != source.UserEventID || p.ReportDigest != source.Report.EmployeeMessageSourceDigest(source.Status) || p.EventID != store.BotPublicationEventID(run, sequence) || p.Text != text {
+			return nil, store.ErrBotInvalid
+		}
+	}
 	return &p, nil
 }
+
+// A neutral publication may advance its own event sequence, not the immutable
+// source sequence bound by the private presentation. AppendRunState rewrites the
+// source sequence, so use a detached state event for presentation-backed outcomes.
+func appendEmployeeTerminalPublication(ctx context.Context, tx botDB, rec *botStoredRecord, source store.BotRun, at time.Time) error {
+	saved, err := tx.ReadRun(ctx, source.BotID, source.ID)
+	if err != nil {
+		return err
+	}
+	if saved.EmployeePresentation == nil {
+		return appendNeutralTerminalPublication(ctx, tx, rec, source, at)
+	}
+	if source.Status != store.RunPartial && source.Status != store.RunFailed {
+		return nil
+	}
+	if saved.Run.Status != source.Status || saved.Run.SessionID != source.SessionID {
+		return nil
+	}
+	saved.Run.TerminalReason = store.BotTerminalNoAnswer
+	if err := saveEmployeePresentation(ctx, tx, rec, saved); err != nil {
+		return err
+	}
+	event, err := store.NewBotRunStateEvent(rec.Bot, saved.Run, rec.LastSequence, at)
+	if err != nil {
+		return err
+	}
+	switch d := tx.(type) {
+	case personalBotDB:
+		if err = d.appendRunTranscript(ctx, rec.Bot, saved.Run, event); err == nil {
+			queueBotRunStateNotification(ctx, d.afterCommit, event.Actions.StateDelta[store.BotRunStateKey].(store.BotRunState))
+		}
+	case teamBotDB:
+		if err = d.appendRunTranscript(ctx, rec.Bot, saved.Run, event); err == nil {
+			queueBotRunStateNotification(ctx, d.afterCommit, event.Actions.StateDelta[store.BotRunStateKey].(store.BotRunState))
+		}
+	default:
+		return store.ErrBotUnsupported
+	}
+	return err
+}
+
 func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicationRequest) (*store.BotPublication, error) {
 	if q.BotID == uuid.Nil || q.RunID == uuid.Nil {
 		return nil, store.ErrBotInvalid
@@ -209,33 +754,53 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			return store.ErrBotUnsupported
 		}
 		now := publicationTime(q.Now, r)
-		if saved.Run.Report.EmployeeMessage == nil {
-			// Legacy records stay immutable; only this new publication gets a safe envelope.
-			message := store.NewBotEmployeeFallback(saved.Run.Status, saved.Run.Report, "")
-			saved.Run.Report.EmployeeMessage = &message
-		}
-		if err := saved.Run.Report.ValidateEmployeeMessageIntegrity(saved.Run.Status); err != nil {
-			return err
-		}
-		p := &store.BotPublication{Artifacts: append([]store.BotArtifact(nil), saved.Run.Report.Artifacts...), ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: uuid.NewSHA1(q.RunID, []byte(publicationKey(q.RunID, sequence))).String(), Text: saved.Run.Report.EmployeeMessage.Text, PublishedAt: now}
-		questionOnly, err := questionOnlyWaitingPublication(ctx, tx, saved.Run)
+		stored, err := tx.ReadRun(ctx, q.BotID, q.RunID)
 		if err != nil {
 			return err
 		}
-		if questionOnly {
-			// The durable question review is the entire user-facing wait. Keep
-			// the report/receipt for replay, but do not append a second message.
-			p.Suppressed, p.Text = true, ""
+		outcome, boundOutcome := stored.EmployeeOutcomes[sequence]
+		presentation := stored.EmployeePresentation
+		if presentation != nil && presentation.ReportSequence != sequence {
+			presentation = nil
+		}
+		// The durable coordinator marker precedes preparation of the private final
+		// envelope. A restart in that window must not fall back to source prose.
+		// Do not create a suppression receipt yet: a later completed presentation
+		// must still be able to publish, with the original verified artifacts.
+		if boundOutcome && outcome.ScheduleCoordinator && presentation == nil {
+			return store.ErrBotConflict
+		}
+		if presentation != nil {
+			// Never attach a later private continuation to an older committed receipt.
+			if presentation.ValidateBinding(saved.Run) != nil || presentation.ReportSequence != sequence || presentation.ReportDigest != saved.Run.Report.EmployeeMessageSourceDigest(saved.Run.Status) {
+				return store.ErrBotConflict
+			}
+			if presentation.State == store.BotEmployeePresentationPending || presentation.State == store.BotEmployeePresentationClaimed {
+				return store.ErrBotConflict
+			}
+			for _, identity := range presentation.Operations {
+				if stored.Run.MandateRef == nil {
+					return store.ErrBotForbidden
+				}
+				op, err := readMandateOperation(ctx, tx, rec, *stored.Run.MandateRef, identity.OperationID)
+				if err != nil {
+					return err
+				}
+				digest, err := botHash(op)
+				if err != nil || op.Revision != identity.Revision || digest != identity.ReceiptDigest || verifyPresentationOperation(ctx, tx, rec, stored, op) != nil {
+					return store.ErrBotConflict
+				}
+			}
+		}
+		text, speech := store.EmployeeSpeech(saved.Run, outcome.Speech, presentation)
+		p := &store.BotPublication{EmployeeSpeech: speech, SourceSessionID: saved.Run.SessionID, SourceUserEventID: saved.Run.UserEventID, ReportDigest: saved.Run.Report.EmployeeMessageSourceDigest(saved.Run.Status), Artifacts: append([]store.BotArtifact(nil), saved.Run.Report.Artifacts...), ReportSequence: sequence, BotID: q.BotID, RunID: q.RunID, Version: saved.Run.Version, HomeSessionID: rec.Bot.HomeSessionID, EventID: store.BotPublicationEventID(q.RunID, sequence), Text: text, PublishedAt: now}
+		// Artifact eligibility is independent of speech. Private/fallback outcomes
+		// retain a committed receipt and can append a file-only delivery event.
+		if !speech && len(p.Artifacts) == 0 {
 			if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
 				return err
 			}
-			result = p
-			return nil
-		}
-		if ack := saved.Run.Report.Acknowledgment; ack != nil && (ack.Kind == store.BotReportAcknowledgmentSchedulePending || ack.Kind == store.BotReportAcknowledgmentControlPending) && len(ack.OperationIDs) > 0 {
-			p.Suppressed = true
-			p.Text = ""
-			if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
+			if err := appendEmployeeTerminalPublication(ctx, tx, rec, saved.Run, now); err != nil {
 				return err
 			}
 			result = p
@@ -247,37 +812,13 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 		if err != nil {
 			return err
 		}
-		if saved.Run.Report.EmployeeMessage.Origin == store.BotEmployeeMessageOperation && !scheduleReceipt {
+		if saved.Run.Report.EmployeeMessage != nil && saved.Run.Report.EmployeeMessage.Origin == store.BotEmployeeMessageOperation && !scheduleReceipt {
 			return store.ErrBotInvalid
 		}
-		canonicalOperationEvent := ""
-		if scheduleReceipt {
-			canonicalOperationEvent, err = canonicalScheduleOperationEvent(ctx, tx, rec, q.RunID, sequence)
-			if err != nil {
-				return err
-			}
-			if canonicalOperationEvent != "" {
-				p.EventID = canonicalOperationEvent
-			}
-		}
 		evaluation := botdomain.EvaluateNotification(version.Delivery, saved.Run.Report, now, false)
-		if saved.Run.ControlOnly() || scheduleReceipt {
+		if !speech || saved.Run.ControlOnly() || scheduleReceipt {
 			evaluation.Decision = store.NotificationSkip
 			evaluation.Reason = "Owner conversation does not authorize external notifications"
-		}
-		stored, err := tx.ReadRun(ctx, q.BotID, q.RunID)
-		if err != nil {
-			return err
-		}
-		var reply *adksession.Event
-		if stored.Work == nil && len(p.Artifacts) == 0 && !scheduleReceipt && saved.Run.UsesHomeHistory() && saved.Run.Status == store.RunSucceeded {
-			reply, err = persistedConversationReply(ctx, tx, rec.Bot, saved.Run)
-			if err != nil {
-				return err
-			}
-			if reply != nil {
-				p.EventID = reply.ID
-			}
 		}
 		seen := map[uuid.UUID]bool{}
 		targets := map[string]bool{}
@@ -308,13 +849,20 @@ func (r *botRepository) PublishReport(ctx context.Context, q store.BotPublicatio
 			}
 			event.Actions.StateDelta = map[string]any{store.BotFilePublicationKey: envelope}
 		}
-		if reply == nil && canonicalOperationEvent == "" {
-			if err := adapter.AppendHomeReport(ctx, rec.Bot, event); err != nil {
-				return err
-			}
+		if event.Actions.StateDelta == nil {
+			event.Actions.StateDelta = map[string]any{}
+		}
+		event.Actions.StateDelta[store.BotPublicationKey] = map[string]any{"bot_id": p.BotID, "run_id": p.RunID, "report_sequence": p.ReportSequence, "event_id": p.EventID}
+		if err := adapter.AppendHomeReport(ctx, rec.Bot, event); err != nil {
+			return err
 		}
 		if err := insertPublicationActivity(ctx, tx, rec, q.RunID, store.BotActivityReport, publicationKey(q.RunID, sequence), p, now); err != nil {
 			return err
+		}
+		if !speech {
+			if err := appendEmployeeTerminalPublication(ctx, tx, rec, saved.Run, now); err != nil {
+				return err
+			}
 		}
 		result = p
 		return nil
@@ -342,57 +890,6 @@ func questionOnlyWaitingPublication(ctx context.Context, db botDB, run store.Bot
 		}
 	}
 	return true, nil
-}
-
-// persistedConversationReply requires the same actual model event in this run
-// and its home. Older turns, user text, thoughts and partial chunks cannot hide
-// a missing reply. Read through transaction-bound scoped stores, never UI state.
-func persistedConversationReply(ctx context.Context, db botDB, b store.Bot, run store.BotRun) (*adksession.Event, error) {
-	var reader store.BotTranscriptReader
-	switch d := db.(type) {
-	case personalBotDB:
-		reader = &personalSessionStore{client: d.client, content: d.content}
-	case teamBotDB:
-		reader = &teamSessionStore{client: d.client, content: d.content}
-	default:
-		return nil, store.ErrBotUnsupported
-	}
-	ids := map[string]bool{}
-	var reply *adksession.Event
-	for _, id := range []uuid.UUID{run.SessionID, b.HomeSessionID} {
-		var cursor int64
-		for {
-			rows, err := reader.ReadBotTranscript(ctx, id, cursor, 200)
-			if err != nil {
-				return nil, err
-			}
-			for _, row := range rows {
-				cursor = row.Cursor
-				e := row.Event
-				if e == nil || e.ID == "" || e.Partial || e.Content == nil || e.Content.Role != "model" {
-					continue
-				}
-				var text strings.Builder
-				for _, part := range e.Content.Parts {
-					if part != nil && !part.Thought {
-						text.WriteString(part.Text)
-					}
-				}
-				if run.Report.EmployeeMessage == nil || text.String() != run.Report.EmployeeMessage.Text {
-					continue
-				}
-				if id == run.SessionID {
-					ids[e.ID] = true
-				} else if ids[e.ID] {
-					reply = e
-				}
-			}
-			if len(rows) < 200 {
-				break
-			}
-		}
-	}
-	return reply, nil
 }
 
 func readNotification(ctx context.Context, db botDB, p *store.BotPublication, binding uuid.UUID) (*store.BotNotification, error) {

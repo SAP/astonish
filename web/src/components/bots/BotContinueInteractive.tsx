@@ -3,8 +3,6 @@ import { Button } from '@/components/ui/button'
 import type { Bot } from '@/api/bots'
 import { continueInteractive } from '@/api/botReviews'
 import { botEmployeeFeedback, botLocalFailure } from '../chat/botEmployeeFeedback'
-import BotEmployeeMessage from './BotEmployeeMessage'
-
 import { getActiveTeam } from '@/api/teamContext'
 type Props = { bot: Bot; runId: string; checkpointRevision?: number; disabled: boolean; onChange: () => void }
 export default function BotContinueInteractive(props: Props) {
@@ -26,8 +24,8 @@ function Continuation({ bot, runId, checkpointRevision, disabled, onChange }: Pr
     finally { lock.current = false; if (alive.current) setPending(false) }
   }
   return <section aria-label={`Continue run ${runId}`} className="border-b border-border px-4 py-3 text-sm">
-    <BotEmployeeMessage>{checkpointRevision ? `Continue saved progress at checkpoint ${checkpointRevision}. This does not change lifecycle or enable schedules.` : botEmployeeFeedback({ kind: 'continuation_authorization_required' })}</BotEmployeeMessage>
+    <p>{checkpointRevision ? `Continue saved progress at checkpoint ${checkpointRevision}. This does not change lifecycle or enable schedules.` : botEmployeeFeedback({ kind: 'continuation_authorization_required' })}</p>
     <Button disabled={disabled || pending || accepted} onClick={() => { void resume() }}>{accepted ? 'Continuation requested' : pending ? 'Continuing…' : checkpointRevision ? 'Continue saved progress' : 'Continue interactive'}</Button>
-    {error && <BotEmployeeMessage role="alert">{error}</BotEmployeeMessage>}
+    {error && <p role="alert">{error}</p>}
   </section>
 }

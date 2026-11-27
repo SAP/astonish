@@ -3,12 +3,102 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
 )
+
+// BotEmployeeSpeechProvenance is a source-bound server-only value. Its unexported
+// snapshot cannot be minted by public JSON, report hashes or copied wording.
+// This is an in-process trust boundary, not protection from malicious Go code.
+type BotEmployeeSpeechProvenance struct{ binding string }
+
+func BotEmployeeTextDigest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+func employeeSpeechBinding(run BotRun) string {
+	m := run.Report.EmployeeMessage
+	if m == nil {
+		return ""
+	}
+	binding, _ := json.Marshal(struct {
+		BotID        BotID
+		RunID        RunID
+		Version      int64
+		SessionID    uuid.UUID
+		UserEventID  string
+		Sequence     int64
+		SourceDigest string
+		Message      BotEmployeeMessage
+	}{run.BotID, run.ID, run.Version, run.SessionID, run.UserEventID, run.StateSequence, run.Report.EmployeeMessageSourceDigest(run.Status), *m})
+	return BotEmployeeTextDigest(string(binding))
+}
+
+// NewBotEmployeeSpeechProvenance is called by trusted repository code after
+// private producer validation, not with decoded model/public work. Historical
+// model messages require the original review attestation at creation time.
+func NewBotEmployeeSpeechProvenance(run BotRun, work *BotWorkState) (*BotEmployeeSpeechProvenance, error) {
+	if run.ID == uuid.Nil || run.BotID == uuid.Nil || run.Version < 1 || run.SessionID == uuid.Nil || run.Report.ValidateEmployeeMessage(run.Status, work) != nil {
+		return nil, ErrBotInvalid
+	}
+	if work != nil && (work.Contract.BotID != run.BotID || work.Contract.RunID != run.ID) {
+		return nil, ErrBotInvalid
+	}
+	switch run.Report.EmployeeMessage.Origin {
+	case BotEmployeeMessageAgent, BotEmployeeMessageAssessed, BotEmployeeMessageModel:
+		return &BotEmployeeSpeechProvenance{binding: employeeSpeechBinding(run)}, nil
+	default:
+		return nil, ErrBotInvalid
+	}
+}
+func (p BotEmployeeSpeechProvenance) MarshalPrivateJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Binding string `json:"binding"`
+	}{p.binding})
+}
+func (p *BotEmployeeSpeechProvenance) UnmarshalPrivateJSON(data []byte, run BotRun) error {
+	var value struct {
+		Binding string `json:"binding"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Binding == "" || value.Binding != employeeSpeechBinding(run) || run.Report.ValidateEmployeeMessageIntegrity(run.Status) != nil {
+		return ErrBotInvalid
+	}
+	switch run.Report.EmployeeMessage.Origin {
+	case BotEmployeeMessageAgent, BotEmployeeMessageAssessed, BotEmployeeMessageModel:
+	default:
+		return ErrBotInvalid
+	}
+	p.binding = value.Binding
+	return nil
+}
+
+// EmployeeSpeech selects authorship, not success. Presentation is a repository
+// private completed record; legacy envelopes additionally require source-bound
+// producer provenance. Worker/operation/fallback/unknown are never speech.
+func EmployeeSpeech(run BotRun, provenance *BotEmployeeSpeechProvenance, presentation *BotEmployeePresentation) (string, bool) {
+	if presentation != nil {
+		if presentation.ValidateBinding(run) != nil || presentation.State != BotEmployeePresentationCompleted || strings.TrimSpace(presentation.FinalText) == "" {
+			return "", false
+		}
+		return presentation.FinalText, true
+	}
+	if provenance == nil || provenance.binding == "" || provenance.binding != employeeSpeechBinding(run) || run.Report.ValidateEmployeeMessageIntegrity(run.Status) != nil {
+		return "", false
+	}
+	switch run.Report.EmployeeMessage.Origin {
+	case BotEmployeeMessageAgent, BotEmployeeMessageAssessed, BotEmployeeMessageModel:
+		return run.Report.EmployeeMessage.Text, true
+	default:
+		return "", false
+	}
+}
 
 // botEmployeeReviewAttestation binds a value snapshot, not mutable caller memory.
 // It is deliberately nonserialized and uses no global authority or secret.

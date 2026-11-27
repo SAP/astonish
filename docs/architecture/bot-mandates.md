@@ -1,32 +1,61 @@
 # Bot mandates and responsibility continuity
 
-## Explicit progress runtime policy
+## Accounting-only production runtime policy
 
-`BudgetSpec.runtime_policy` and the pinned mandate carry a versioned
-`execution.BotRuntimePolicy`. Absence remains legacy: saved 300/900-second
-limits are not migrated on read. New creation resolves trusted
-`AppConfig.EffectiveBotRuntimePolicy`: absent historical operator configuration
-permits `progress_v1`; explicit legacy `bot_mandates` retains its duration ceiling.
-Conflicting explicit progress/mandate ceilings fail validation.
+`BudgetSpec.runtime_policy` and the pinned mandate carry the versioned
+`execution.BotRuntimePolicy` for evaluation cadence, bounded individual calls and
+generation-health monitoring. Production workers construct `NewRunAccounting` /
+`RestoreRunAccounting`; saved 300/900-second and `max_active_seconds` values,
+token/tool/model-cost caps and execution-admission quotas are historic metadata,
+not current execution stopping limits. Resumption retains usage without issuing
+fresh allowances or reactivating historic caps. Structural version and Chat-runner
+validation accept zero saved `max_runtime_seconds` (negative values remain
+invalid). Runtime-policy authorization does not compare `max_active_seconds`
+as an authority ceiling. Knowledge reconciliation also restores accounting, so
+high prior usage and unknown model prices cannot deny its dedicated extraction;
+cumulative usage and unknown-cost reporting are preserved.
 
-Progress policy separates evaluation cadence from optional cumulative
-`max_active_seconds` and bounded individual model/tool calls. Token, tool,
-spending, admission and authority-expiry limits remain in force. Scheduled grants
-inherit the saved policy and expiry; no renewal or quota reset is implied.
-`SharedRunBudget.Deadline()` returns zero only for no whole-task hard duration.
+Authority expiry, revocation, concurrency occupancy, exact-action permissions and
+external spending authorization remain separate safety boundaries. Scheduled
+grants inherit authority and expiry; ignoring execution quotas does not renew
+or expand a grant. `SharedRunBudget.Deadline()` is zero for production accounting.
 Consumers must check `IsZero()` before installing a deadline. `bot.RunContext`
-combines the persisted usage, actual meter and authority expiry without granting
-fresh time. Provider, tool and knowledge-extraction calls retain independent
-operation bounds; knowledge extraction also retains its 60-second lease bound.
+retains authority expiry and cancellation; model, tool and knowledge-extraction
+calls keep independent operation bounds (including extraction's lease bound).
 
-Verification: `TestBotRuntimePolicyHTTPAcceptance` exercises personal/team
-creation and reviewed immutable configuration over isolated production HTTP
-routes. `TestBotProgressBudgetCumulativeDurationAndAuthority`,
-`TestBotProgressBudgetModelOperationTimeout` and
-`TestBotProgressBudgetKnowledgeExtractionZeroDeadline` exercise cumulative
-six-hour usage, finite resource enforcement, cancellation and absent hard timers.
-These are deterministic tests, not evidence of a wall-clock soak or durable
-restart integration. Rollout remains dormant pending the full execution gate.
+Finite `NewRunBudget` / `RestoreRunBudget` helpers remain for compatibility tests,
+not production execution. `TestRunAccountingIgnoresHistoricExecutionCaps` and
+`TestBotSynthesisReserveAccountingIgnoresHistoricCaps` verify retained usage does
+not impose token/tool/runtime stopping or token-preservation prompts. The latter
+also proves authority-only guidance and cancellation remain intact. These are
+deterministic tests, not evidence of a live-provider soak.
+
+Studio configuration no longer offers per-run duration, token, tool-call or
+model-cost budget controls. It explains usage accounting and keeps daily run
+admission, external action-spending authorization and delivery settings separate.
+Legacy budget DTO fields are preserved unchanged when saving other settings;
+those fields do not re-enable production execution caps.
+
+## Clarification quota occupancy
+
+`pkg/store/entstore/bot_mandate_quota.go` releases concurrency occupancy when an
+ordinary interactive run commits a genuine pending question. Its private
+`QuestionContinuations` ledger retains cumulative model reservations/settlements,
+tool calls, tokens, external spend and public-research calls. Only the same queued
+run with identical checkpoint bytes, the same verified unexpired mandate/source,
+the exact completed lease fence, and an approved unconsumed owner answer may
+reacquire that occupancy. Concurrent-run capacity still applies; daily admission
+and cumulative charges are not increased or reset. Unfinished model charges,
+action/plan checkpoints, terminal runs and arbitrary released runs cannot use this
+path. Initial title-confirmation mandate transfer remains separate.
+
+Historical releases without this retained ledger remain spent and fail closed;
+the durable reservation marker alone cannot reconstruct historical per-run
+charges. There is no automatic migration, charge fabrication or live-run repair.
+`TestMandateQuestionQuotaContinuation` proves personal/team file-backed SQLite
+close/reopen continuity; `TestMandateQuestionQuotaSafety` checks invalid checkpoint,
+answer, authority, fence and accounting cases. These are repository tests, not
+live-daemon or deployed-model acceptance.
 
 ## Requirements are not authority
 

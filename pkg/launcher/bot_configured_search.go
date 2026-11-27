@@ -304,7 +304,7 @@ func BotConfiguredResearchTool(ctx context.Context, r bot.RunRequest, scope *Bot
 			return nil, fmt.Errorf("configured MCP search metadata unavailable; discover the exact executable with approval first")
 		}
 	}
-	native, err := functiontool.New(functiontool.Config{Name: BotConfiguredSearchToolName, Description: fmt.Sprintf("Search the owner-admitted public subject through the exact configured Perplexity, Tavily, Brave or Firecrawl executable. Pass a typed facet (overview, recent, primary, contradictions) or an optional specific public query (such as an individual company or topic). Never send private instructions. Search snippets are discovery only; inspect decisive sources before asserting actionable facts. This run admits at most %d search calls. Use returned remaining episode ceiling; stop broad facet retries when exhausted and inspect discovered sources.", grant.MaxCalls)}, func(c tool.Context, a botPublicResearchArgs) (tools.PerplexityWebSearchResult, error) {
+	native, err := functiontool.New(functiontool.Config{Name: BotConfiguredSearchToolName, Description: "Search the owner-admitted public subject through the exact configured Perplexity, Tavily, Brave or Firecrawl executable. Pass a typed facet (overview, recent, primary, contradictions) or an optional specific public query (such as an individual company or topic). Never send private instructions. Search snippets are discovery only; inspect decisive sources before asserting actionable facts."}, func(c tool.Context, a botPublicResearchArgs) (tools.PerplexityWebSearchResult, error) {
 		return t.search(c, a)
 	})
 	if err != nil {
@@ -402,21 +402,16 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	if !ok {
 		return result, store.ErrBotUnsupported
 	}
-	// The episode counts only successful durable reservations by this exact
-	// executable. An unknown durable rejection is never inferred to be quota.
-	if t.episode.remainingSearchCalls(grant.MaxCalls) == 0 {
-		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.NewToolNonexecutionOutcome(c, c.FunctionCallID(), t.Name(), a, bot.ToolFeedbackTerminal))
-		return result, errBotResearchEpisodeQuota
-	}
-	// Durable research ceiling is independent of the dispatch's once-only tool
-	// reservation and the actual Perplexity engine's shared model reservation.
+	// Account every authorized search before dispatch; no execution-call ceiling.
 	if err = quota.ReserveBotPublicResearch(c, grantRef(t), c.SessionID()); err != nil {
 		// Reservation rejected before any provider/MCP dispatch. This receipt
 		// attests nonexecution only, not quota classification or discovery success.
 		bot.RecordToolOutcome(c, c.FunctionCallID(), bot.NewToolNonexecutionOutcome(c, c.FunctionCallID(), t.Name(), a, bot.ToolFeedbackTerminal))
 		return result, err
 	}
-	t.episode.recordSearchReservation()
+	if err = t.episode.recordSearchReservation(); err != nil {
+		return result, err
+	}
 	if t.shared != nil {
 		endReads()
 		encoded, _ := json.Marshal(effective)
@@ -533,8 +528,7 @@ func (t *botConfiguredResearchTool) search(c tool.Context, a botPublicResearchAr
 	if result.Metadata == nil {
 		result.Metadata = map[string]interface{}{}
 	}
-	result.Metadata["remaining_episode_search_ceiling"] = t.episode.remainingSearchCalls(grant.MaxCalls)
-	result.Metadata["search_call_limit"] = grant.MaxCalls
+	result.Metadata["episode_search_calls"] = t.episode.searchCalls()
 	projection, _ := json.Marshal(result)
 	var observation map[string]any
 	_ = json.Unmarshal(projection, &observation)

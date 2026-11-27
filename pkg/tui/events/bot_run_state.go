@@ -10,7 +10,7 @@ func (t *Transcript) applyBotRunState(s *store.BotRunState) {
 	if s == nil || s.SchemaVersion != store.BotRunStateSchemaVersion || s.BotID.String() != t.BotID || s.RunID == uuid.Nil || s.SessionID == uuid.Nil || s.StateSequence < 1 {
 		return
 	}
-	if t.SessionID != s.SessionID.String() && (t.SessionID != s.HomeSessionID.String() || (s.Presentation != store.BotRunPresentationHomeInteractive && s.Progress == nil)) {
+	if t.SessionID != s.SessionID.String() && (t.SessionID != s.HomeSessionID.String() || (s.Presentation != store.BotRunPresentationHomeInteractive && s.Progress == nil && s.NeutralTerminalLabel() == "")) {
 		return
 	}
 	switch s.Status {
@@ -102,6 +102,9 @@ func (t *Transcript) restoreBotRunState() {
 		t.Status = "Skipped"
 	case store.RunCancelled:
 		t.Status = "Cancelled"
+	}
+	if label := latest.NeutralTerminalLabel(); label != "" {
+		t.Status, t.Streaming = label, false
 	}
 	if latest.Reason == store.BotContinuationRequired {
 		t.Status = "Continuation required"

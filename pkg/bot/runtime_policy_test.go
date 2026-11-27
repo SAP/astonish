@@ -9,6 +9,37 @@ import (
 	"time"
 )
 
+type noDeadlineBudget struct{ execution.RunBudget }
+
+func (noDeadlineBudget) Deadline() time.Time { return time.Time{} }
+
+func TestRunContextExplicitZeroDeadlineIsAuthoritative(t *testing.T) {
+	for _, spec := range []store.BudgetSpec{{MaxRuntimeSeconds: 1}, {}} {
+		parent, stop := context.WithCancel(context.Background())
+		ctx, cancel, err := RunContext(parent, spec, noDeadlineBudget{}, store.BotUsage{RuntimeNanos: int64(24 * time.Hour)}, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := ctx.Deadline(); ok {
+			t.Fatal("explicit zero deadline replaced by historic runtime cap")
+		}
+		expiry := time.Now().Add(time.Minute)
+		authorized, release, err := RunContext(ctx, spec, noDeadlineBudget{}, store.BotUsage{}, expiry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d, ok := authorized.Deadline(); !ok || !d.Equal(expiry) {
+			t.Fatal("authority expiry lost")
+		}
+		stop()
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatal("parent cancellation lost")
+		}
+		release()
+		cancel()
+	}
+}
+
 func TestBotProgressBudgetCumulativeDurationAndAuthority(t *testing.T) {
 	now := time.Now()
 	cap := int64(5)

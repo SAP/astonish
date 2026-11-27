@@ -45,11 +45,11 @@ type AppConfig struct {
 }
 
 // BotMandateConfig is a finite operator ceiling, not an execution grant.
-// A nil AppConfig.BotMandates selects defaults; explicit zero limits are invalid.
+// A nil AppConfig.BotMandates selects defaults; admission limits must be positive.
 type BotMandateConfig execution.BotMandateLimits
 
 func DefaultBotMandateConfig() BotMandateConfig {
-	return BotMandateConfig{MinScheduleIntervalSeconds: 60, MaxSchedules: 8, MaxDailyRuns: 1440, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 300, MaxToolCalls: 100, MaxTokens: 1_000_000, MaxTotalToolCalls: 144000, MaxTotalTokens: 1_440_000_000}
+	return BotMandateConfig{MinScheduleIntervalSeconds: 60, MaxSchedules: 8, MaxDailyRuns: 1440, MaxConcurrentRuns: 1}
 }
 func (c BotMandateConfig) Validate() error { return execution.BotMandateLimits(c).Validate() }
 func (c BotMandateConfig) ValidateWithin(operator BotMandateConfig) error {
@@ -64,8 +64,8 @@ func (c *AppConfig) EffectiveBotMandateConfig() (BotMandateConfig, error) {
 }
 
 // EffectiveBotRuntimePolicy is a ceiling for newly authorized work, never a
-// migration of saved versions or grants. An explicit historical mandate config
-// retains its finite duration unless an explicit compatible policy is provided.
+// migration of saved versions or grants. Historical execution metadata is not
+// a runtime ceiling.
 func (c *AppConfig) EffectiveBotRuntimePolicy() (*execution.BotRuntimePolicy, error) {
 	if _, err := c.EffectiveBotMandateConfig(); err != nil {
 		return nil, err
@@ -74,9 +74,6 @@ func (c *AppConfig) EffectiveBotRuntimePolicy() (*execution.BotRuntimePolicy, er
 		p := c.BotRuntimePolicy.Clone()
 		if err := p.Validate(); err != nil {
 			return nil, err
-		}
-		if c.BotMandates != nil && p.EffectiveMode() == execution.BotRuntimeModeProgressV1 && (p.MaxActiveSeconds == nil || *p.MaxActiveSeconds > c.BotMandates.MaxRuntimeSeconds) {
-			return nil, fmt.Errorf("bot runtime policy conflicts with explicit mandate runtime ceiling")
 		}
 		return p, nil
 	}

@@ -73,11 +73,6 @@ func TestBotTypedAnswerConfirmAndEscape(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("early submit")
 	}
-	next, cmd = m.handleBotsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = next.(model)
-	if cmd != nil {
-		t.Fatal("missing review")
-	}
 	canceled, cmd := m.handleBotsKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if cmd != nil || canceled.(model).bots.open || b.response != nil {
 		t.Fatal("escape decided")

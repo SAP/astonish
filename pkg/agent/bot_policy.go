@@ -38,6 +38,27 @@ type BotPolicyRuntime struct {
 	Approvals  execution.ApprovalRequester
 }
 type botPolicyRuntimeKey struct{}
+type botPrivateWorkerKey struct{}
+
+// WithBotPrivateWorkerExecution scopes server-owned private Chat dispatch. This
+// capability is bound to the original run and is never a public request flag.
+func WithBotPrivateWorkerExecution(ctx context.Context) context.Context {
+	id, ok := execution.BotRunIdentityFromContext(ctx)
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, botPrivateWorkerKey{}, id)
+}
+
+// BotPrivateWorkerExecution exposes only the server-installed binding, not an
+// execution grant. Callers must independently check identity and live authority.
+func BotPrivateWorkerExecution(ctx context.Context) (execution.BotRunIdentity, bool) {
+	if ctx == nil {
+		return execution.BotRunIdentity{}, false
+	}
+	id, ok := ctx.Value(botPrivateWorkerKey{}).(execution.BotRunIdentity)
+	return id, ok
+}
 
 func BotPolicyRuntimeFromContext(ctx context.Context) BotPolicyRuntime {
 	runtime, _ := ctx.Value(botPolicyRuntimeKey{}).(BotPolicyRuntime)
@@ -125,6 +146,41 @@ func authorizeBotTool(ctx context.Context, identity string, args any, capture *e
 				return botPolicyDenied("classifier changed executable identity or arguments")
 			}
 			action = classified
+		}
+		if worker, ok := ctx.Value(botPrivateWorkerKey{}).(execution.BotRunIdentity); ok {
+			id, _ := execution.BotRunIdentityFromContext(ctx)
+			if worker != id || ctx.Err() != nil {
+				return botPolicyDenied("invalid private worker binding")
+			}
+			runtime := BotPolicyRuntimeFromContext(ctx)
+			if runtime.Guard == nil || runtime.Classifier == nil {
+				return botPolicyDenied("missing private worker execution guard")
+			}
+			digest, err := action.Digest()
+			if err != nil {
+				return botPolicyDenied("invalid private worker action")
+			}
+			evidence := action
+			evidence.Arguments = bytes.Clone(action.Arguments)
+			decision, err := runtime.Guard.Authorize(ctx, action)
+			if err != nil {
+				return botPolicyDenied("live execution authorization failed")
+			}
+			if decision.ActionDigest != digest {
+				return botPolicyDenied("execution guard did not authorize the exact action")
+			}
+			if decision.Kind == execution.PolicyRequestApproval {
+				if runtime.Approvals != nil {
+					if _, err := runtime.Approvals.RequestApproval(ctx, id, evidence, digest); err != nil {
+						return botPolicyDenied("approval request failed")
+					}
+				}
+				return &BotPolicyError{Decision: decision}
+			}
+			if decision.Kind != execution.PolicyAllow || ctx.Err() != nil {
+				return botPolicyDenied("private worker action not authorized")
+			}
+			action = evidence
 		}
 		if capture != nil {
 			*capture = action

@@ -7,11 +7,16 @@ import (
 	"reflect"
 
 	prun "github.com/SAP/astonish/ent/personal/botrun"
+	psession "github.com/SAP/astonish/ent/personal/session"
+	pevent "github.com/SAP/astonish/ent/personal/sessionevent"
 	trun "github.com/SAP/astonish/ent/team/botrun"
+	tsession "github.com/SAP/astonish/ent/team/session"
+	tevent "github.com/SAP/astonish/ent/team/sessionevent"
 	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/adk/session"
 )
 
 var _ store.BotApprovalResumeStore = (*personalBotStore)(nil)
@@ -94,9 +99,6 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		if err != nil || !c.Matches(*a) || c.Fence > saved.Run.Lease.Fence || (c.Fence != saved.Run.Lease.Fence && a.Status != store.ApprovalApproved) {
 			return store.ErrBotConflict
 		}
-		if saved.Run.IsInteractiveChat() && (saved.Run.TitleConfirmation == nil || saved.Run.TitleConfirmation.State == store.BotTitleConfirmationConfirmed) && (a.Interaction == nil || r.interactiveAnswerAuthority(ctx, saved.Run) != nil) {
-			return store.ErrBotForbidden
-		}
 		if a.Interaction != nil {
 			if a.Interaction.ValidateResponse(q.Response) != nil {
 				return store.ErrBotInvalid
@@ -104,12 +106,25 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		} else if q.Response != nil {
 			return store.ErrBotInvalid
 		}
-		// Mandate-backed title confirmation is authorized transactionally below by
-		// confirmTitleAssignment: verified owner, non-revoked mandate and current
-		// policy are required before the answer and refreshed mandate can queue.
-		// Source admission deliberately retains no process-local turn authority.
-		// Only registry-backed runs need an interactive continuation here.
-		if saved.Run.MandateRef == nil && saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed && saved.Run.IsInteractiveChat() && r.interactiveAnswerAuthority(ctx, saved.Run) != nil {
+		initialTitle := saved.Run.TitleConfirmation != nil && saved.Run.TitleConfirmation.State != store.BotTitleConfirmationConfirmed
+		question := saved.Run.IsInteractiveChat() && !initialTitle && a.Interaction != nil && a.Interaction.Kind == store.BotInteractionQuestion && c.Format == botdomain.InteractionCheckpointFormat
+		if question && saved.Run.MandateRef != nil {
+			if err := r.authorizeQuestionContinuation(ctx, tx, rec, saved); err != nil {
+				return err
+			}
+		} else if saved.Run.IsInteractiveChat() && !initialTitle && !question {
+			if r.interactiveAnswerAuthority(ctx, saved.Run) != nil {
+				return store.ErrBotForbidden
+			}
+			if a.Interaction == nil {
+				if err := privateWorkerApprovalBinding(ctx, tx, rec.Bot, saved.Run, *a); err != nil {
+					return err
+				}
+			}
+		}
+		// Only a validated question or the existing initial-title path can
+		// recover lost registry authority from this authenticated submission.
+		if saved.Run.MandateRef == nil && (initialTitle || question) && saved.Run.IsInteractiveChat() && r.interactiveAnswerAuthority(ctx, saved.Run) != nil {
 			hook, ok := store.BotMessageAdmissionFromContext(ctx)
 			if !ok {
 				return store.ErrBotForbidden
@@ -163,6 +178,9 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 			}
 			state = store.BotContinuationBlockedByPause
 		} else if saved.Run.Status == store.RunWaitingApproval {
+			if question {
+				saved.Run.ContinuationReason = ""
+			}
 			if err := r.confirmTitleAssignment(ctx, tx, rec, saved, *a); err != nil {
 				return err
 			}
@@ -180,6 +198,134 @@ func (r *botRepository) DecideAndRequeueApprovedRun(ctx context.Context, q store
 		return nil, err
 	}
 	return result, nil
+}
+
+// privateWorkerApprovalBinding reads only the server-owned, scoped run session.
+// Its content-free ledger is written under a live lease by the private Chat runner;
+// neither owner/model text nor the worker marker alone grants continuation.
+func privateWorkerApprovalBinding(ctx context.Context, tx botDB, b store.Bot, run store.BotRun, a store.BotApproval) error {
+	if run.MandateRef != nil || run.Report.EffectState == store.BotReportEffectsUncertain || a.Status == store.ApprovalConsumed {
+		return store.ErrBotForbidden
+	}
+	digest, err := a.Action.Digest()
+	if err != nil || digest != a.ActionDigest || a.BotID != run.BotID || a.RunID != run.ID || a.Version != run.Version {
+		return store.ErrBotForbidden
+	}
+	var events []*session.Event
+	switch db := tx.(type) {
+	case personalBotDB:
+		ok, err := db.client.Session.Query().Where(psession.IDEQ(run.SessionID.String()), psession.BotIDEQ(b.ID), psession.BotRunIDEQ(run.ID), psession.UserIDEQ(b.OwnerID), psession.PurposeEQ(psession.PurposeBotRun)).Exist(ctx)
+		if err != nil || !ok {
+			return store.ErrBotForbidden
+		}
+		rows, err := db.client.SessionEvent.Query().Where(pevent.SessionIDEQ(run.SessionID.String())).Order(pevent.ByID()).All(ctx)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			e, err := db.contentCodec().decodeSessionEvent(ctx, b.ID, run.SessionID.String(), row.EventData)
+			if err != nil {
+				return err
+			}
+			events = append(events, e)
+		}
+	case teamBotDB:
+		ok, err := db.client.Session.Query().Where(tsession.IDEQ(run.SessionID.String()), tsession.BotIDEQ(b.ID), tsession.BotRunIDEQ(run.ID), tsession.UserIDEQ(b.OwnerID), tsession.PurposeEQ(tsession.PurposeBotRun)).Exist(ctx)
+		if err != nil || !ok {
+			return store.ErrBotForbidden
+		}
+		rows, err := db.client.SessionEvent.Query().Where(tevent.SessionIDEQ(run.SessionID.String())).Order(tevent.ByID()).All(ctx)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			e, err := db.contentCodec().decodeSessionEvent(ctx, b.ID, run.SessionID.String(), row.EventData)
+			if err != nil {
+				return err
+			}
+			events = append(events, e)
+		}
+	default:
+		return store.ErrBotForbidden
+	}
+	return matchPrivateWorkerApproval(events, a)
+}
+
+type privateWorkerPhase string
+
+const (
+	privateWorkerStarted  privateWorkerPhase = "started"
+	privateWorkerEvent    privateWorkerPhase = "event"
+	privateWorkerApproval privateWorkerPhase = "approval"
+	privateWorkerResuming privateWorkerPhase = "resuming"
+	privateWorkerSettled  privateWorkerPhase = "settled"
+)
+
+// Match the persisted v1 envelope without importing API (which depends on entstore).
+func matchPrivateWorkerApproval(events []*session.Event, a store.BotApproval) error {
+	type trace struct {
+		WorkerID     string             `json:"worker_id"`
+		DispatchID   string             `json:"dispatch_id"`
+		Phase        privateWorkerPhase `json:"phase"`
+		Event        *session.Event     `json:"event,omitempty"`
+		ApprovalID   uuid.UUID          `json:"approval_id,omitempty"`
+		ActionDigest string             `json:"action_digest,omitempty"`
+	}
+	workers := map[string]trace{}
+	for _, e := range events {
+		if e == nil || e.Author != "bot_runtime" || e.Content != nil {
+			continue
+		}
+		value, ok := e.Actions.StateDelta["bot_private_worker_v1"]
+		if !ok {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		var t trace
+		if err != nil || json.Unmarshal(raw, &t) != nil || t.WorkerID == "" || t.DispatchID == "" {
+			return store.ErrBotForbidden
+		}
+		w := workers[t.WorkerID]
+		switch t.Phase {
+		case privateWorkerStarted:
+			if w.DispatchID != "" {
+				return store.ErrBotForbidden
+			}
+			w = t
+		case privateWorkerEvent:
+			if w.DispatchID != t.DispatchID || t.Event == nil {
+				return store.ErrBotForbidden
+			}
+		case privateWorkerApproval:
+			if w.DispatchID != t.DispatchID || w.ApprovalID != uuid.Nil || t.ApprovalID == uuid.Nil || t.ActionDigest == "" {
+				return store.ErrBotForbidden
+			}
+			w.ApprovalID, w.ActionDigest = t.ApprovalID, t.ActionDigest
+		case privateWorkerResuming:
+			if w.DispatchID != t.DispatchID || w.ApprovalID != t.ApprovalID || w.ActionDigest != t.ActionDigest {
+				return store.ErrBotForbidden
+			}
+			w.ApprovalID, w.ActionDigest = uuid.Nil, ""
+		case privateWorkerSettled:
+			if w.DispatchID != t.DispatchID {
+				return store.ErrBotForbidden
+			}
+			w = trace{}
+		default:
+			return store.ErrBotForbidden
+		}
+		workers[t.WorkerID] = w
+	}
+	matches := 0
+	for _, w := range workers {
+		if w.DispatchID != "" && w.ApprovalID == a.ID && w.ActionDigest == a.ActionDigest {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return store.ErrBotForbidden
+	}
+	return nil
 }
 
 func resumeApproval(ctx context.Context, tx botDB, run store.BotRun) (*store.BotApproval, error) {

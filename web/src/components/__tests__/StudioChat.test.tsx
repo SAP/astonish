@@ -72,6 +72,22 @@ vi.mock('remark-gfm', () => ({
 }))
 
 describe('StudioChat', () => {
+  it.each(['light', 'dark'])('does not expose chat promotion in %s mode', async theme => {
+    const view = render(<StudioChat theme={theme} hideSidebar />)
+    expect(screen.queryByRole('button', { name: 'Promote Chat to Bot' })).not.toBeInTheDocument()
+
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({
+      id: 'promotion-hidden', title: 'Existing chat',
+      messages: [{ type: 'user', role: 'user', content: 'Hello' }],
+    })
+    view.unmount()
+    const existing = render(<StudioChat theme={theme} hideSidebar initialSessionId="promotion-hidden" />)
+    await waitFor(() => expect(fetchSessionHistory).toHaveBeenCalledWith('promotion-hidden'))
+    expect(await screen.findByText('Hello')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Promote Chat to Bot' })).not.toBeInTheDocument()
+    existing.unmount()
+  })
+
   it.each(['personal', 'team'] as const)('renders format-3 public conversation once live and after reload (%s)', async scope => {
     // SQL encoding is exercised by the Go fixture; the browser receives only
     // existing canonical Chat projections. Use the real transport here.

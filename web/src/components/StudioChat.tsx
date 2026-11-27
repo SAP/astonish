@@ -2733,7 +2733,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>
       {/* Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {!botThread && !botRoute && activeSessionId && <Button variant="ghost" size="sm" onClick={() => setPromoteOpen(true)}>Promote Chat to Bot</Button>}
+        {/* Chat promotion entry point is deferred; keep the dialog wiring for a future UI. */}
         {promoteOpen && <BotCreateDialog inline open sourceSession={activeSessionId} onClose={() => setPromoteOpen(false)} />}
         {/* Toolbar bar — always visible */}
         <div

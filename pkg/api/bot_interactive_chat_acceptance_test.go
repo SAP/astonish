@@ -114,6 +114,7 @@ type interactiveHTTPModel struct {
 	args        map[string]any
 	called      bool
 	principal   execution.Principal
+	validatePrincipal func(context.Context, *model.LLMRequest, execution.Principal)
 	t           *testing.T
 }
 
@@ -127,7 +128,9 @@ func (m *interactiveHTTPModel) GenerateContent(ctx context.Context, req *model.L
 			return originalYield(scriptedHTTPProgressiveResponse(req, response), err)
 		}
 		p, _ := execution.PrincipalFromContext(ctx)
-		if p.Subject != m.principal.Subject || p.Authentication != m.principal.Authentication || p.Surface != m.principal.Surface {
+		if m.validatePrincipal != nil {
+			m.validatePrincipal(ctx, req, p)
+		} else if p.Subject != m.principal.Subject || p.Authentication != m.principal.Authentication || p.Surface != m.principal.Surface {
 			m.t.Errorf("provider lost original principal: %+v", p)
 		}
 		if response, ok := scriptedEmployeeReview(req); ok {
@@ -416,8 +419,9 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 	files := newComposedHTTPFiles(t, dir, repo, b, func(name string, args map[string]interface{}) (json.RawMessage, error) {
 		return pool.Call("", name, args)
 	})
-	workerConfig := daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return mdl, nil
+	mediatedModel := mediateHTTPModel(mdl)
+	workerConfig := daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, LeaseTTL: 4 * time.Second, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+		return mediatedModel, nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		// Title-start fixtures may create another Bot in this same tenant.
 		runFiles := *files
@@ -439,6 +443,7 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 			return work
 		}
 		resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
+		resources.PolicyRuntime = agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: interactiveFixtureGuard{repo: repo, req: q}}
 		if !q.Run.IsInteractiveChat() {
 			resources.Tools, err = launcher.BotCatalogueTools(pool, q.Run.SessionID.String())
 			if err != nil {
@@ -662,9 +667,9 @@ func TestBotAgentCheckHTTPAcceptance(t *testing.T) {
 						return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, true
 					}
 					run := f.capabilityTurn(mode, []string{"read_file", "bot_evidence_read", "bot_check_work"})
-					// Four producer turns plus the explicitly requested optional check;
-					// no mandatory end-of-run content review is charged.
-					if run.Usage.InputTokens != 31 || run.Usage.OutputTokens != 19 || run.Usage.ToolCalls != 3 {
+					// Four producer turns, one private Chat action/result pair and the
+					// explicitly requested optional check share the run ledger.
+					if run.Usage.InputTokens != 41 || run.Usage.OutputTokens != 25 || run.Usage.ToolCalls != 3 {
 						t.Fatalf("optional check did not share producer budget: %+v", run.Usage)
 					}
 					if run.Status != store.RunSucceeded || step != 4 || checks != 1 || f.pool.calls != 1 || run.Report.Work == nil || len(run.Report.Work.Checks) != 1 {
@@ -807,7 +812,7 @@ func TestBotAgentSourceFallbackHTTPAcceptance(t *testing.T) {
 					if run.Status != store.RunSucceeded || step != 6 || checks != 1 || f.pool.calls != 2 || requests["/primary"] != 1 || requests["/alternative"] != 1 {
 						t.Fatalf("fallback blocked/replayed: run=%+v step=%d checks=%d requests=%v", run, step, checks, requests)
 					}
-					if run.Usage.InputTokens != 46 || run.Usage.OutputTokens != 28 || run.Usage.ToolCalls != 5 {
+					if run.Usage.InputTokens != 66 || run.Usage.OutputTokens != 40 || run.Usage.ToolCalls != 5 {
 						t.Fatalf("fallback/check budget not shared: %+v", run.Usage)
 					}
 					if run.Report.Work == nil || len(run.Report.Work.Checks) != 1 || run.Report.Work.Checks[0].Status != store.BotWorkCheckFailed || run.Report.Work.Checks[0].Judgment != store.BotWorkCheckUnverified {
@@ -901,13 +906,18 @@ func TestBotInteractiveChatHTTPAcceptance(t *testing.T) {
 				if err := json.Unmarshal(f.request("POST", f.path+"/pause", fmt.Sprintf(`{"expected_revision":%d,"reason":"pause before chat"}`, f.b.Revision), 200), &f.b); err != nil {
 					t.Fatal(err)
 				}
+				f.model.called = true // Paused conversations must not dispatch private Chat work.
 			}
 			f.model.chatOnly = true
 			run := f.turn()
 			if !f.model.deliverySet || run.Report.Summary != "Observed scoped result." || len(run.Report.Artifacts) != 0 {
 				t.Fatalf("short conversation changed: %+v", run)
 			}
-			if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 2 || run.Usage.ToolCalls != 2 {
+			wantCalls, wantEvidence := 1, 3
+			if paused {
+				wantCalls, wantEvidence = 0, 1
+			}
+			if f.pool.calls != wantCalls || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != wantEvidence || run.Usage.ToolCalls != int64(wantCalls+1) {
 				t.Fatalf("tool runtime calls=%d run=%+v", f.pool.calls, run)
 			}
 		})
@@ -920,7 +930,7 @@ func TestBotInteractivePersonalHTTPAcceptance(t *testing.T) {
 	if !f.model.deliverySet || run.Report.Summary != "Observed scoped result." || len(run.Report.Artifacts) != 0 {
 		t.Fatalf("short conversation changed: %+v", run)
 	}
-	if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 2 || run.Usage.ToolCalls != 2 {
+	if f.pool.calls != 1 || run.Status != store.RunSucceeded || len(run.Report.Unverified) != 0 || len(run.Report.Unchanged) != 3 || run.Usage.ToolCalls != 2 {
 		t.Fatalf("personal runtime calls=%d run=%+v", f.pool.calls, run)
 	}
 }

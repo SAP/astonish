@@ -19,6 +19,13 @@ func TestBotSourceIntakeAdaptiveHTTP(t *testing.T) {
 			}
 			path := "/api/studio/bots/source-proposals"
 			suffix := "?scope=" + scope
+			if scope == "team" {
+				f.request("POST", path+suffix, store.BotSourceIntakeRequest{Mode: store.BotIntakeAdaptive, SourceID: uuid.MustParse(job.ID), Name: "Denied", Charter: "Watch", IdempotencyKey: uuid.NewString()}, 403)
+				if !f.jobs(scope).Get(context.Background(), job.ID).Enabled {
+					t.Fatal("denied proposal paused source")
+				}
+				return
+			}
 			var p store.BotSourceIntakeProposal
 			raw := f.request("POST", path+suffix, store.BotSourceIntakeRequest{Mode: store.BotIntakeAdaptive, SourceID: uuid.MustParse(job.ID), Name: "Replacement", Charter: "Watch", IdempotencyKey: uuid.NewString()}, 201)
 			if strings.Contains(string(raw), "never-copy") {

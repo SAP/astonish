@@ -6,6 +6,26 @@ These APIs run through the authenticated Studio principal, tenant middleware and
 explicit `scope=personal|team` Bot store. Public actor/owner/tenant headers and
 body fields are not authority. Unknown JSON fields are rejected.
 
+## Personal-only creation during stabilization
+
+Studio's Bots sidebar lists personal Bots without a Private/Team selector. New
+Bot and reviewed intake use personal destinations only; team-scoped intake events
+and saved team intake pointers are not opened from the sidebar. Existing team Bot
+records and scoped runtime/read/lifecycle APIs remain unchanged.
+
+HTTP creation is server-enforced, not merely hidden in Studio. Direct creation
+(including title-start), Chat promotion and adaptive conversion reject
+`scope=team` with HTTP 403. New team Chat/adaptive source proposals and confirmation
+of previously saved team non-template proposals are also forbidden, even with
+`reviewed_for_team: true`. Rejection does not create a Bot, admit work or pause a
+source schedule. The existing scope validation and authentication rules still
+apply; an omitted creation scope defaults to personal.
+
+Team templates remain readable/publishable sources. Template forks and reviewed
+template confirmations create only personal Bots; their `scope=team` identifies
+the source, not a runnable team destination. No team storage, worker contract or
+schema is removed by this temporary HTTP/UI policy.
+
 ## Runtime policy
 
 `PUT /api/studio/bots/{botID}/configuration?scope=personal`
@@ -83,7 +103,8 @@ is any Bot:
 - `GET .../source-proposals/{proposalID}` restores the exact immutable review.
 - `POST .../source-proposals/{proposalID}/decision`: only `digest`, `decision`
   (`confirm` or `reject`), and `reviewed_for_team` are accepted. Team Chat/adaptive
-  confirmations require the latter. Actor and replacement payload fields are
+  confirmations are currently forbidden regardless of that legacy review field.
+  Actor and replacement payload fields are
   rejected; worker contexts cannot consent to their own proposals.
 
 The server binds the complete selected summary, memories, goals and text artifacts
@@ -132,8 +153,8 @@ Body: `name`, `idempotency_key`, `charter`, `reviewed: true`, optional
 - `artifacts`: selected `{title, content}` text snapshots.
 
 The source must be an ordinary Chat owned by the authenticated actor in the same
-scope. Team promotion additionally requires `reviewed_for_team`. There is no
-private-to-team fallback. A new Active Bot and separate Bot Home are created atomically;
+scope. Team promotion is currently forbidden regardless of `reviewed_for_team`.
+There is no private-to-team fallback. A new Active Bot and separate Bot Home are created atomically;
 the source Chat, transcript and metadata are not changed. Summary/memory copies
 are inserted into the new Home's memory, goals get new identifiers, and text
 artifact snapshots are retained in the creation activity. **Binary files and
@@ -149,7 +170,8 @@ active adaptive job's reviewed `source_job_id`, `updated_at`, `schedule` and
 `instructions`, without Params/delivery/credentials.
 
 `POST` to the same URL takes `expected_updated_at` from that review, `name`,
-`idempotency_key`, `charter`, `reviewed: true`, and `reviewed_for_team` for team scope.
+`idempotency_key`, `charter`, and `reviewed: true`. Team-scope conversion is
+currently forbidden even when `reviewed_for_team` is supplied.
 It creates an Active replacement Bot with a disabled cron trigger carrying only
 the reviewed schedule and instructions. The original is paused **in the same
 transaction**, after all replacement writes; rollback preserves the original and

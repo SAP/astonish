@@ -186,10 +186,24 @@ func skillDecode[T any](t *testing.T, raw []byte) T {
 }
 func (f *skillStorageHTTPFixture) bot(scope store.BotScope) *store.Bot {
 	f.t.Helper()
-	raw := f.request("POST", "/api/studio/bots?scope="+string(scope), f.owner, fmt.Sprintf(`{"name":"Skill storage","idempotency_key":%q}`, uuid.NewString()), 201)
-	b := skillDecode[store.Bot](f.t, raw)
 	repo := f.repo(scope)
 	ctx := f.context(f.owner)
+	var b store.Bot
+	if scope == store.BotScopeTeam {
+		v, err := store.NewBotVersionForCreation(ctx, uuid.MustParse(f.owner))
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+		seeded, err := repo.Create(ctx, store.BotCreateRequest{Name: "Skill storage", OwnerID: uuid.MustParse(f.owner), Version: v, IdempotencyKey: uuid.NewString()})
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		b = *seeded
+	} else {
+		raw := f.request("POST", "/api/studio/bots?scope="+string(scope), f.owner, fmt.Sprintf(`{"name":"Skill storage","idempotency_key":%q}`, uuid.NewString()), 201)
+		b = skillDecode[store.Bot](f.t, raw)
+	}
 	service, err := execution.WithPrincipal(context.Background(), execution.Principal{Kind: execution.PrincipalKindService, ClientID: "registry", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, Actor: "registry", OrgSlug: f.org.Slug, TeamSlug: f.team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
 	if err != nil {
 		f.t.Fatal(err)

@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/google/uuid"
 	"reflect"
 	"strings"
@@ -13,12 +12,9 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 )
 
-func checkReviewedMemoryHTTP(t *testing.T, request func(*testing.T, string, string, string, string, int) []byte, suffix, owner, reader, scope string) {
+func checkReviewedMemoryHTTP(t *testing.T, create func(string) store.Bot, request func(*testing.T, string, string, string, string, int) []byte, suffix, owner, reader, scope string) {
 	t.Helper()
-	var b store.Bot
-	if err := json.Unmarshal(request(t, "POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Reviewed memory","idempotency_key":%q,"definition":{"charter":"Observe"}}`, uuid.NewString()), 201), &b); err != nil {
-		t.Fatal(err)
-	}
+	b := create("Reviewed memory")
 	path := "/api/studio/bots/" + b.ID.String()
 	q := store.BotMemoryReview{ID: uuid.New(), ExpectedRevision: 1, Reason: "explicit owner review", Confirmed: true, Edits: []store.BotMemoryReviewEdit{{SessionID: b.HomeSessionID.String(), Content: "Alice note", Category: "people"}, {SessionID: b.HomeSessionID.String(), Content: "Alice second note", Category: "people"}}}
 	encode := func() string {
@@ -142,8 +138,8 @@ func TestBotHealthKnownIDs(t *testing.T) {
 
 // Runs inside TestBotPhase2HTTPAcceptance's real HTTP server, production routes,
 // tenant middleware and SQLite fixture for both personal and team scopes.
-func checkBotDocumentHealthHTTP(t *testing.T, request func(*testing.T, string, string, string, string, int) []byte, path, suffix, owner, reader, scope string, row store.MemorySearchResult, projection botdomain.DocumentProjection) {
-	checkReviewedMemoryHTTP(t, request, suffix, owner, reader, scope)
+func checkBotDocumentHealthHTTP(t *testing.T, create func(string) store.Bot, request func(*testing.T, string, string, string, string, int) []byte, path, suffix, owner, reader, scope string, row store.MemorySearchResult, projection botdomain.DocumentProjection) {
+	checkReviewedMemoryHTTP(t, create, request, suffix, owner, reader, scope)
 	t.Helper()
 	docs := map[botdomain.DocumentName]botdomain.Document{}
 	for _, doc := range projection.Documents {

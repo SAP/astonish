@@ -78,6 +78,13 @@ Records persist in the existing private intake store, protected from ordinary un
 
 ## Compact Studio and terminal
 
+During stabilization, the Bots sidebar has no Private/Team selector and lists
+only personal Bots. Title creation and reviewed Chat/adaptive intake create only
+personal Bots, enforced by HTTP 403 for team creation/promotion attempts. Existing
+team Bot deep links and runtime APIs retain their scoped behavior. Team templates
+remain sources for personal copies; they are not team Bot creation. See
+[personal-only creation](bot-reviewed-intake.md#personal-only-creation-during-stabilization).
+
 New Bot opens the existing Chat transcript/composer and artifact harness with identity/status and a Details control. Bots and Chats remain separate sidebar sections. No permanent Thread/Runs/Goals/Schedule/Memory tab bar or setup wizard is required for conversation. Details contains execution setup, run/activity inspection, review inbox, goals, schedule, memory and configuration. Closing Details preserves unfinished edits while the Bot stays mounted; leaving the Bot is not durable form storage.
 
 Empty conversations invite a responsibility/task; loading and failed snapshot reads show status and retry; populated conversations prioritize chronological replies and inline review references. Review cards re-fetch authoritative records and disable decisions when reads fail; transcript text itself is never an executable grant. Stopped and reversibly soft-deleted Bots remain read-only. Once permanent deletion is accepted, registered Bot content routes return HTTP 410 with `code: deletion_pending` and `Retry-After`; they never return the retained root, history, files, or reviews. The scoped session resolver also denies generic session/history/artifact aliases, and existing streams revalidate access. Internal repository reads remain available to fenced retention workers. `GET /api/studio/bots/{botID}/permanent-delete` exposes only pending status (202); the POST remains idempotent cleanup retry, returning 204 only after its own purge commits and 404 only when the root is absent. A pending POST includes only minimal deletion identity/revision, not retained Bot content.

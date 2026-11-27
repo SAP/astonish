@@ -305,11 +305,17 @@ func runBotBrowserJourney(t *testing.T, journey string) {
 	if teamJourney {
 		page.MustElementR("button", "^New Bot$").MustVisible()
 		page.MustEval(`() => localStorage.setItem('astonish_active_team', 'journey')`)
-		// Team creation has no NewBotDialog control; use production admission,
-		// then exercise the built team workspace without response mocks.
-		var receipt titleHTTPReceipt
-		if err = json.Unmarshal(request("POST", root+"?scope=team", `{"name":"Summarize release notes","idempotency_key":"team-title","start_from_title":true}`, 201), &receipt); err != nil {
-			t.Fatal(err)
+		// Seed retained team title admission without reopening HTTP creation;
+		// the built team workspace still uses real HTTP/SSE handlers.
+		request("POST", root+"?scope=team", `{"name":"Summarize release notes","idempotency_key":"team-title","start_from_title":true}`, http.StatusForbidden)
+		version, e := store.NewBotVersionForCreation(ownerCtx, uuid.MustParse(owner))
+		if e != nil {
+			t.Fatal(e)
+		}
+		version.Charter = "Summarize release notes\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+		receipt, e := repo.(store.BotTitleStartStore).CreateAndStart(store.WithBotMessageAdmission(ownerCtx, registry), store.BotCreateRequest{Name: "Summarize release notes", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "team-title"})
+		if e != nil {
+			t.Fatal(e)
 		}
 		b = receipt.Bot
 		if b.Scope != store.BotScopeTeam {

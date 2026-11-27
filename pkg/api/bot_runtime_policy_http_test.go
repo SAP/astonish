@@ -21,7 +21,7 @@ func TestBotRuntimePolicyHTTPAcceptance(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			var b store.Bot
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots"+suffix, `{"name":"Long assignment","idempotency_key":"runtime-policy"}`, 201), &b); err != nil {
+			if err := json.Unmarshal(f.createExisting(t, scope, `{"name":"Long assignment","idempotency_key":"runtime-policy"}`), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()
@@ -69,7 +69,7 @@ func TestBotRuntimePolicyHTTPAcceptance(t *testing.T) {
 			limits := config.DefaultBotMandateConfig()
 			cfg.BotMandates = &limits
 			var legacy store.Bot
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots"+suffix, `{"name":"Explicit operator ceiling","idempotency_key":"legacy-operator-policy"}`, 201), &legacy); err != nil {
+			if err := json.Unmarshal(f.createExisting(t, scope, `{"name":"Explicit operator ceiling","idempotency_key":"legacy-operator-policy"}`), &legacy); err != nil {
 				t.Fatal(err)
 			}
 			var before store.BotVersion

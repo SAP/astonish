@@ -351,12 +351,17 @@ function writeDebugPreference(enabled: boolean) {
 
 export default function StudioChat({ theme, initialSessionId, pendingChatMessage, onPendingChatMessageConsumed, onSessionChange, userDisplayName, platformRole, isPlatformMode = false, hideSidebar = false, botRoute, botThread, userId }: StudioChatProps) {
   const [promoteOpen, setPromoteOpen] = useState(false)
-  const [sourceIntake, setSourceIntake] = useState<{ scope: import('../api/bots').BotScope; resumeId?: string } | null>(null)
+  const [sourceIntake, setSourceIntake] = useState<{ resumeId?: string } | null>(null)
   useEffect(() => {
     if (hideSidebar) return
     // A second sidebar action must not remount/reset an unfinished editor.
     // The current intake has explicit Save and close / Discard actions.
-    const open = (event: Event) => setSourceIntake(current => current || (event as CustomEvent).detail)
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: unknown; resumeId?: unknown }>).detail
+      // Team intake IDs must never be reinterpreted as personal resume requests.
+      if (detail?.scope !== 'personal') return
+      setSourceIntake(current => current || { ...(typeof detail.resumeId === 'string' ? { resumeId: detail.resumeId } : {}) })
+    }
     window.addEventListener('astonish:source-intake', open)
     return () => window.removeEventListener('astonish:source-intake', open)
   }, [hideSidebar])
@@ -2727,7 +2732,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
         theme={theme}
       />}
 
-      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotCreateDialog inline open scope={sourceIntake.scope} resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
+      {sourceIntake && <div className="flex flex-col flex-1 min-w-0"><BotCreateDialog inline open resumeId={sourceIntake.resumeId} onClose={() => setSourceIntake(null)} /></div>}
       {botRoute && <div className={sourceIntake ? 'hidden' : 'contents'}><BotWorkspace key={`${botRoute.scope}/${botRoute.botId}`} route={botRoute} theme={theme} userId={userId} /></div>}
       {/* Keep ordinary Chat mounted and hidden: unsent text and attachments survive Bot navigation. */}
       <div className={botRoute || sourceIntake ? 'hidden' : 'contents'}>

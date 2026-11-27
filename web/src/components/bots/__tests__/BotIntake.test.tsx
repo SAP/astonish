@@ -32,6 +32,9 @@ beforeEach(() => {
 })
 it('saves on Escape, resumes after remount through Sidebar pointer, renews consent and never changes lifecycle', async () => {
   const close = vi.fn()
+  const teamNamespace = intakeNamespace('owner', null, 'team')
+  const teamPointer = JSON.stringify({ id, scope: 'team' })
+  localStorage.setItem(teamNamespace, teamPointer)
   const first = render(<BotCreateDialog open onClose={close} />)
   fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Secret name' } })
   fireEvent.change(screen.getByLabelText('Bot charter'), { target: { value: 'Observe' } })
@@ -50,13 +53,15 @@ it('saves on Escape, resumes after remount through Sidebar pointer, renews conse
   expect(open).toHaveBeenCalledOnce()
   expect((open.mock.calls[0][0] as CustomEvent).detail).toEqual({ scope: 'personal', resumeId: pointer.id })
   window.removeEventListener('astonish:source-intake', open)
-  render(<BotCreateDialog inline open scope="personal" resumeId={pointer.id} onClose={vi.fn()} />)
+  render(<BotCreateDialog inline open resumeId={pointer.id} onClose={vi.fn()} />)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   await waitFor(() => expect(screen.getByLabelText('Bot name')).toHaveValue('Secret name'))
   expect(screen.getByLabelText('Bot identity')).toHaveValue('Observer')
   fireEvent.click(screen.getByRole('button', { name: 'Review Bot' }))
   expect(screen.getByRole('checkbox')).not.toBeChecked()
   expect(posts).toBe(0)
+  expect(localStorage.getItem(teamNamespace)).toBe(teamPointer)
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => !String(url).includes('scope=team'))).toBe(true)
 })
 it('preserves local text on CAS conflict and explicitly compares and reloads server text', async () => {
   stored = { id, owner_id: 'owner', scope: 'personal', revision: 2, content }
@@ -150,11 +155,13 @@ it('does not offer another owner, team or scope pointer in Sidebar', async () =>
   localStorage.setItem(intakeNamespace('other', null, 'personal'), JSON.stringify({ id, scope: 'personal' }))
   localStorage.setItem(intakeNamespace('owner', 'another-team', 'personal'), JSON.stringify({ id, scope: 'personal' }))
   localStorage.setItem(intakeNamespace('owner', null, 'team'), JSON.stringify({ id, scope: 'team' }))
-  render(<BotSidebar />)
+  const view = render(<BotSidebar activeScope="team" activeId={id} />)
   await screen.findByText('No Bots yet. Create a Bot.')
   expect(screen.queryByRole('button', { name: 'Resume intake' })).not.toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: 'Team' }))
-  expect(await screen.findByRole('button', { name: 'Resume intake' })).toBeInTheDocument()
+  view.rerender(<BotSidebar activeScope="personal" activeId={id} />)
+  expect(screen.queryByRole('button', { name: 'Resume intake' })).not.toBeInTheDocument()
+  expect(readIntakePointer(intakeNamespace('owner', null, 'team'))).toEqual({ id, scope: 'team' })
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => !String(url).includes('scope=team'))).toBe(true)
 })
 
 it('blocks silently changing a resumed template revision and retains its source on save', async () => {

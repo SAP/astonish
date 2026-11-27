@@ -198,9 +198,27 @@ func TestBotHistoryStreamHTTPAcceptance(t *testing.T) {
 	for _, scope := range []string{"personal", "team"} {
 		suffix := "?scope=" + scope
 		var b store.Bot
-		data := request("POST", "/api/studio/bots"+suffix, owner, `{"name":"Replay","idempotency_key":"replay","definition":{"charter":"Observe"}}`, 201)
-		if err := json.Unmarshal([]byte(data), &b); err != nil {
-			t.Fatal(err)
+		if scope == "team" {
+			c, e := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+			if e != nil {
+				t.Fatal(e)
+			}
+			c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+			v, e := store.NewBotVersionForCreation(c, uuid.MustParse(owner))
+			if e != nil {
+				t.Fatal(e)
+			}
+			v.Charter = "Observe"
+			seeded, e := ods.ForTeam(team.Slug).Bots().Create(c, store.BotCreateRequest{Name: "Replay", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "replay"})
+			if e != nil {
+				t.Fatal(e)
+			}
+			b = *seeded
+		} else {
+			data := request("POST", "/api/studio/bots"+suffix, owner, `{"name":"Replay","idempotency_key":"replay","definition":{"charter":"Observe"}}`, 201)
+			if err := json.Unmarshal([]byte(data), &b); err != nil {
+				t.Fatal(err)
+			}
 		}
 		path := "/api/studio/bots/" + b.ID.String()
 		stream := path + "/sessions/" + b.HomeSessionID.String() + "/stream" + suffix

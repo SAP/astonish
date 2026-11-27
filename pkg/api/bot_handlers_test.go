@@ -253,8 +253,21 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		t.Fatalf("history or authority changed: %+v", v)
 	}
 	sharedBody := `{"name":"Team watcher","idempotency_key":"team","definition":{"charter":"Observe team sources"}}`
-	var shared store.Bot
-	_ = json.Unmarshal(request("POST", root+"?scope=team", owner, sharedBody, 201), &shared)
+	seedTeam := func(name, charter, key string) store.Bot {
+		t.Helper()
+		v, e := store.NewBotVersionForCreation(memoryContext, uuid.MustParse(owner))
+		if e != nil {
+			t.Fatal(e)
+		}
+		v.Charter = charter
+		b, e := ods.ForTeam(team.Slug).Bots().Create(memoryContext, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: key})
+		if e != nil {
+			t.Fatal(e)
+		}
+		return *b
+	}
+	request("POST", root+"?scope=team", owner, sharedBody, 403)
+	shared := seedTeam("Team watcher", "Observe team sources", "team")
 	sharedPath := root + "/" + shared.ID.String()
 	var ownerSnapshot, memberSnapshot store.BotSnapshot
 	_ = json.Unmarshal(request("GET", sharedPath+"/snapshot?scope=team", owner, "", 200), &ownerSnapshot)
@@ -435,7 +448,9 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 		}
 		// An existing same-scope Bot cannot reconcile another Bot's intent.
 		var foreign store.Bot
-		if err := json.Unmarshal(request("POST", root+tc.scope, owner, `{"name":"Other correction owner","idempotency_key":"foreign-correction","definition":{"charter":"Separate memory"}}`, 201), &foreign); err != nil {
+		if tc.scope != "" {
+			foreign = seedTeam("Other correction owner", "Separate memory", "foreign-correction")
+		} else if err := json.Unmarshal(request("POST", root+tc.scope, owner, `{"name":"Other correction owner","idempotency_key":"foreign-correction","definition":{"charter":"Separate memory"}}`, 201), &foreign); err != nil {
 			t.Fatal(err)
 		}
 		request("POST", root+"/"+foreign.ID.String()+"/corrections/"+correctionID+"/reconcile"+tc.scope, owner, "", 404)
@@ -562,7 +577,11 @@ func TestBotStorageHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		decodeBot(request("POST", root+scope, owner, `{"name":"Lifecycle","idempotency_key":"lifecycle","definition":{"charter":"Observe"}}`, 201))
+		if scope != "" {
+			lifecycle = seedTeam("Lifecycle", "Observe", "lifecycle")
+		} else {
+			decodeBot(request("POST", root+scope, owner, `{"name":"Lifecycle","idempotency_key":"lifecycle","definition":{"charter":"Observe"}}`, 201))
+		}
 		lp := root + "/" + lifecycle.ID.String()
 		lifecyclePaths = append(lifecyclePaths, lp+scope)
 		request("POST", lp+"/read"+scope, owner, `{}`, 400)

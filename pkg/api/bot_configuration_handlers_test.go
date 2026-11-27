@@ -18,6 +18,8 @@ import (
 )
 
 type reviewedHTTPFixture struct {
+	ctx      context.Context
+	bots     func(string) store.BotStore
 	policy   *store.BotMandatePolicyResolver
 	owner    string
 	binding  store.BotChannelBinding
@@ -115,7 +117,17 @@ func newReviewedHTTPFixture(t *testing.T, roles ...string) reviewedHTTPFixture {
 		}
 		return result
 	}
-	return reviewedHTTPFixture{policy: &policy, owner: owner, binding: binding, request: request, sessions: func(scope string) store.SessionStore {
+	seedCtx, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCtx = store.WithTenantContext(seedCtx, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+	return reviewedHTTPFixture{ctx: seedCtx, bots: func(scope string) store.BotStore {
+		if scope == "team" {
+			return ods.ForTeam(team.Slug).Bots()
+		}
+		return ods.ForUser(owner).Bots()
+	}, policy: &policy, owner: owner, binding: binding, request: request, sessions: func(scope string) store.SessionStore {
 		if scope == "team" {
 			return ods.ForTeam(team.Slug).Sessions()
 		}
@@ -127,13 +139,45 @@ func newReviewedHTTPFixture(t *testing.T, roles ...string) reviewedHTTPFixture {
 		return ods.ForUser(owner).ScheduledJobs()
 	}}
 }
+func (f reviewedHTTPFixture) createExisting(t *testing.T, scope, body string) []byte {
+	t.Helper()
+	if scope != "team" {
+		return f.request("POST", "/api/studio/bots?scope="+scope, body, 201)
+	}
+	var q botCreateDTO
+	if err := json.Unmarshal([]byte(body), &q); err != nil {
+		t.Fatal(err)
+	}
+	creationCtx := f.ctx
+	if f.policy != nil && *f.policy != nil {
+		creationCtx = store.WithBotMandateAdmission(creationCtx, *f.policy)
+	}
+	v, err := store.NewBotVersionForCreation(creationCtx, uuid.MustParse(f.owner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Charter = q.Definition.Charter
+	if v.Charter == "" {
+		v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+	}
+	b, err := f.bots(scope).Create(f.ctx, store.BotCreateRequest{Name: q.Name, OwnerID: uuid.MustParse(f.owner), Version: v, IdempotencyKey: q.IdempotencyKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestBotReviewedConfigurationHTTP(t *testing.T) {
 	f := newReviewedHTTPFixture(t)
 	for _, scope := range []string{"personal", "team"} {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			var b store.Bot
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots"+suffix, `{"name":"Reviewed","idempotency_key":"config","definition":{"charter":"Observe"}}`, 201), &b); err != nil {
+			if err := json.Unmarshal(f.createExisting(t, scope, `{"name":"Reviewed","idempotency_key":"config","definition":{"charter":"Observe"}}`), &b); err != nil {
 				t.Fatal(err)
 			}
 			q := store.BotConfigurationRequest{ExpectedRevision: 1, ExpectedVersion: 1, Reviewed: true, Reason: "Owner reviewed grants", Autonomy: store.DefaultBotVersion().Autonomy, Budget: store.BudgetSpec{MaxRuntimeSeconds: 45}, Delivery: store.DeliveryPolicy{Notify: store.NotifyAlways, Bindings: []store.BotChannelBinding{f.binding}}}
@@ -178,7 +222,7 @@ func TestBotReviewedProsePreservesPolicyHTTP(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			var b store.Bot
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots"+suffix, `{"name":"Policy","idempotency_key":"prose-policy","definition":{"charter":"Observe"}}`, 201), &b); err != nil {
+			if err := json.Unmarshal(f.createExisting(t, scope, `{"name":"Policy","idempotency_key":"prose-policy","definition":{"charter":"Observe"}}`), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()

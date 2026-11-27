@@ -28,6 +28,14 @@ func TestBotReviewedPromotionHTTP(t *testing.T) {
 			suffix := "?scope=" + scope
 			path := "/api/studio/bots/promote-chat/" + sid.String() + suffix
 			q := store.BotPromotionRequest{Name: "Promoted", IdempotencyKey: "promote", Charter: "Observe", Reviewed: true, ReviewedForTeam: true, Carryover: store.BotCarryover{Summary: "Reviewed summary only", Memories: []store.BotCarryoverMemory{{Content: "Selected fact", Category: "fact"}}, Goals: []store.BotCarryoverGoal{{Title: "Watch", CompletionCriteria: "Report changes"}}, Artifacts: []store.BotCarryoverArtifact{{Title: "Selected note", Content: "Reviewed text snapshot"}}}}
+			if scope == "team" {
+				f.request("POST", path, q, 403)
+				after, err := sessions.GetSessionMeta(ctx, sid.String())
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatal("denied promotion changed source")
+				}
+				return
+			}
 			f.request("POST", path, `{"credentials":{"token":"never-copy"}}`, 400)
 			q.Reviewed = false
 			f.request("POST", path, q, 403)
@@ -101,7 +109,7 @@ func TestBotReviewedPromotionHTTP(t *testing.T) {
 			if scope == "team" {
 				other = "personal"
 			}
-			f.request("POST", "/api/studio/bots/promote-chat/"+sid.String()+"?scope="+other, q, 404)
+			f.request("POST", "/api/studio/bots/promote-chat/"+sid.String()+"?scope="+other, q, 403)
 		})
 	}
 }
@@ -122,6 +130,13 @@ func TestBotReviewedAdaptiveConversionHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			q := store.BotConversionRequest{Name: "Replacement", IdempotencyKey: "conversion", Charter: "Observe", Reviewed: true, ReviewedForTeam: true, ExpectedUpdatedAt: review.UpdatedAt}
+			if scope == "team" {
+				f.request("POST", path, q, 403)
+				if !jobs.Get(ctx, job.ID).Enabled {
+					t.Fatal("denied conversion paused source")
+				}
+				return
+			}
 			q.ExpectedUpdatedAt = q.ExpectedUpdatedAt.Add(-time.Second)
 			f.request("POST", path, q, 409)
 			q.ExpectedUpdatedAt = review.UpdatedAt
@@ -205,6 +220,10 @@ func TestBotReviewedIntakeGuardsHTTP(t *testing.T) {
 			}
 			if !jobs.Get(ctx, job.ID).Enabled {
 				t.Fatal("unreviewed conversion paused source")
+			}
+			if scope == "team" {
+				f.request("POST", path, q, 403)
+				return
 			}
 			f.request("POST", path, q, 201)
 			second := create("adaptive", f.owner)

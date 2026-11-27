@@ -25,8 +25,10 @@ export default function BotSidebar(props: BotSidebarProps) {
   return props.collapsed ? null : <ExpandedBotSidebar {...props} />
 }
 
+const PERSONAL_SCOPE = 'personal' as const
+
 function ExpandedBotSidebar({ activeId, activeScope, onToggleSidebar }: BotSidebarProps) {
-  const [scope, setScope] = useState<BotScope>(activeScope || 'personal')
+  const scope = PERSONAL_SCOPE
   const [deleteTarget, setDeleteTarget] = useState<Bot | null>(null)
   const [simpleCreate, setSimpleCreate] = useState(false)
   const [revision, setRevision] = useState(0)
@@ -35,8 +37,6 @@ function ExpandedBotSidebar({ activeId, activeScope, onToggleSidebar }: BotSideb
   const team = getActiveTeam()
   const [viewer, setViewer] = useState<string>()
   useEffect(() => { setDeleteTarget(null) }, [team, viewer, scope])
-  // A deep link selects its exact scope; manual filters remain usable until navigation changes.
-  useEffect(() => { if (activeScope) setScope(activeScope) }, [activeId, activeScope])
   useEffect(() => { let cancelled = false; setViewer(undefined); void getMe().then(me => { if (!cancelled) setViewer(me.user.id) }).catch(() => {}); return () => { cancelled = true } }, [team])
   useEffect(() => {
     let cancelled = false
@@ -66,7 +66,6 @@ function ExpandedBotSidebar({ activeId, activeScope, onToggleSidebar }: BotSideb
         {onToggleSidebar && <Button type="button" size="icon" variant="ghost" className={sidebarActionClass} aria-label="Hide sidebar" title="Hide sidebar" onClick={onToggleSidebar}><ChevronRight className="size-4 rotate-180" /></Button>}
       </div>
     </div>
-    <div className="flex gap-1 px-3.5 pb-3">{(['personal', 'team'] as const).map(s => <Button size="sm" aria-pressed={scope === s} variant="ghost" className={cn('h-7 text-[12px]', scope === s ? 'bg-[color:var(--item-active)] text-foreground' : 'text-muted-foreground hover:bg-[color:var(--item-hover)]')} key={s} onClick={() => setScope(s)}>{s === 'personal' ? 'Private' : 'Team'}</Button>)}</div>
     <div className="space-y-0.5 px-2">
       {resource.loading && <p role="status" className="px-3 text-xs text-muted-foreground">Loading Bots…</p>}
       {resource.error && <div role="alert" className="px-3 text-xs text-destructive">{resource.error}<Button size="sm" variant="ghost" aria-label="Retry Bots" title={resource.error} onClick={resource.retry}>Retry Bots</Button></div>}

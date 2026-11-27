@@ -338,7 +338,19 @@ func newInteractiveHTTPFixture(t *testing.T, toolName string, args map[string]an
 		return raw
 	}
 	var b store.Bot
-	if err = json.Unmarshal(request("POST", root, `{"name":"Interactive","idempotency_key":"create"}`, 201), &b); err != nil {
+	if scope == store.BotScopeTeam {
+		// Seed retained team data without reopening public team creation.
+		v, e := store.NewBotVersionForCreation(ctx, uuid.MustParse(owner))
+		if e != nil {
+			t.Fatal(e)
+		}
+		v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+		seeded, e := repo.Create(ctx, store.BotCreateRequest{Name: "Interactive", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "create"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		b = *seeded
+	} else if err = json.Unmarshal(request("POST", root, `{"name":"Interactive","idempotency_key":"create"}`, 201), &b); err != nil {
 		t.Fatal(err)
 	}
 	home := store.BotHomeBinding{ID: uuid.New(), BotID: b.ID, Scope: scope, Backend: "controlled", StorageKey: "journey-home", Revision: 1}

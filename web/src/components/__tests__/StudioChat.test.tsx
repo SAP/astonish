@@ -564,12 +564,25 @@ describe('StudioChat', () => {
     expect(screen.queryByText('unknown: bad')).not.toBeInTheDocument()
   })
 
+  it('ignores team source-intake events including resume IDs before opening an editor', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    render(<StudioChat {...defaultProps} />)
+    act(() => window.dispatchEvent(new CustomEvent('astonish:source-intake', { detail: { scope: 'team', resumeId: 'team-intake' } })))
+    expect(screen.queryByLabelText('Bot name')).not.toBeInTheDocument()
+    act(() => window.dispatchEvent(new CustomEvent('astonish:source-intake', { detail: { scope: 'team' } })))
+    expect(screen.queryByLabelText('Bot name')).not.toBeInTheDocument()
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('team-intake'))).toBe(false)
+    fetch.mockRestore()
+  })
+
   it('opens sidebar source intake inline without replacing an unfinished intake', async () => {
     render(<StudioChat {...defaultProps} />)
     act(() => window.dispatchEvent(new CustomEvent('astonish:source-intake', { detail: { scope: 'personal' } })))
     fireEvent.change(screen.getByLabelText('Bot name'), { target: { value: 'Unfinished local edit' } })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     act(() => window.dispatchEvent(new CustomEvent('astonish:source-intake', { detail: { scope: 'team', resumeId: 'different-intake' } })))
+    expect(screen.getByLabelText('Bot name')).toHaveValue('Unfinished local edit')
+    act(() => window.dispatchEvent(new CustomEvent('astonish:source-intake', { detail: { scope: 'personal', resumeId: 'another-personal-intake' } })))
     expect(screen.getByLabelText('Bot name')).toHaveValue('Unfinished local edit')
   })
 

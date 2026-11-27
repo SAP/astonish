@@ -16,7 +16,7 @@ func TestBotSupervisedPurposeHTTPFailClosed(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			var b store.Bot
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots"+suffix, `{"name":"Supervised boundary","idempotency_key":"supervised-boundary","definition":{"charter":"Only act with separate consent"}}`, 201), &b); err != nil {
+			if err := json.Unmarshal(f.createExisting(t, scope, `{"name":"Supervised boundary","idempotency_key":"supervised-boundary","definition":{"charter":"Only act with separate consent"}}`), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()

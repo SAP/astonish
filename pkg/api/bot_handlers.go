@@ -137,7 +137,7 @@ func BotMarkReadHandler(w http.ResponseWriter, r *http.Request) {
 
 func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 	repo, actor, ok := botRequestStore(w, r)
-	if !ok {
+	if !ok || !botPersonalCreationAllowed(w, r) {
 		return
 	}
 	var q botCreateDTO

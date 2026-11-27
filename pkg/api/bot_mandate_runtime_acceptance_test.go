@@ -45,7 +45,7 @@ func (c mandateHTTPToolContext) FunctionCallID() string                         
 // reconstructing the durable verifier, with no interactive registry available.
 func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	t.Run("SQLiteRestartWorkerFactory", testMandateWorkerRestartHTTP)
-	f := newInteractiveHTTPFixture(t, "web_fetch", nil, []string{"chat", "tool:execute"}, store.BotScopeTeam)
+	f := newInteractiveHTTPFixture(t, "web_fetch", nil, []string{"chat", "tool:execute"}, store.BotScopePersonal)
 	calls := 0
 	weather := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; fmt.Fprint(w, "weather: 21 C") }))
 	defer weather.Close()
@@ -67,12 +67,12 @@ func TestBotMandateRuntimeHTTPAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := &store.Services{Bots: f.repo, BotMandatePolicy: policy, BotInteractiveReady: true}
+	svc := &store.Services{PersonalBots: f.repo, BotMandatePolicy: policy, BotInteractiveReady: true}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		api.BotCreateHandler(w, r.WithContext(store.WithServices(auth, svc)))
 	}))
 	defer server.Close()
-	response, err := http.Post(server.URL+"?scope=team", "application/json", strings.NewReader(`{"name":"Read weather now","idempotency_key":"mandate-weather","start_from_title":true}`))
+	response, err := http.Post(server.URL+"?scope=personal", "application/json", strings.NewReader(`{"name":"Read weather now","idempotency_key":"mandate-weather","start_from_title":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}

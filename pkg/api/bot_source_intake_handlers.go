@@ -37,6 +37,9 @@ func BotProposeSourceIntakeHandler(w http.ResponseWriter, r *http.Request) {
 	if !botDecodeRequest(w, r, &q) {
 		return
 	}
+	if q.Mode != store.BotIntakeTemplate && !botPersonalCreationAllowed(w, r) {
+		return
+	}
 	p, e := s.ProposeSourceIntake(r.Context(), q, t)
 	if e != nil {
 		botHTTPError(w, e)
@@ -80,6 +83,18 @@ func BotDecideSourceIntakeHandler(w http.ResponseWriter, r *http.Request) {
 	var q store.BotSourceIntakeDecision
 	if !botDecodeRequest(w, r, &q) {
 		return
+	}
+	if q.Decision == "confirm" {
+		// Authorize/read the durable envelope before checking its source scope.
+		// A reviewed_for_team acknowledgment cannot promote an old team proposal.
+		proposal, err := s.GetSourceIntake(r.Context(), id)
+		if err != nil {
+			botHTTPError(w, err)
+			return
+		}
+		if proposal.Request.Mode != store.BotIntakeTemplate && !botCreationScopeAllowed(w, proposal.Scope) {
+			return
+		}
 	}
 	p, e := s.DecideSourceIntake(r.Context(), id, q, t, store.BotStoreFromContext(r.Context(), store.BotScopePersonal))
 	if e != nil {

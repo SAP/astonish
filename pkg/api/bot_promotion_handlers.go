@@ -32,7 +32,7 @@ func botIntakeRequest(w http.ResponseWriter, r *http.Request, key string) (store
 }
 func BotPromoteChatHandler(w http.ResponseWriter, r *http.Request) {
 	intake, id, ok := botIntakeRequest(w, r, "sessionID")
-	if !ok {
+	if !ok || !botPersonalCreationAllowed(w, r) {
 		return
 	}
 	var q store.BotPromotionRequest
@@ -61,7 +61,7 @@ func BotReviewAdaptiveHandler(w http.ResponseWriter, r *http.Request) {
 }
 func BotConvertAdaptiveHandler(w http.ResponseWriter, r *http.Request) {
 	intake, id, ok := botIntakeRequest(w, r, "jobID")
-	if !ok {
+	if !ok || !botPersonalCreationAllowed(w, r) {
 		return
 	}
 	var q store.BotConversionRequest

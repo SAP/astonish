@@ -14,10 +14,12 @@ import { type BotAdaptiveReview } from '@/api/botAdaptive'
 import BotAdaptiveConversion from './BotAdaptiveConversion'
 import { botPath } from './botRoute'
 
+const PERSONAL_SCOPE = 'personal' as const
 const Step = { Edit: 'edit', Review: 'review' } as const
 const emptyCarryover = (): BotCarryover => ({ summary: '', memories: [], goals: [], artifacts: [] })
 const emptyPersona = (): BotPersona => ({ language: '', timezone: 'UTC', soul: '', identity: '', user: '' })
-export default function BotCreateDialog({ open, onClose, sourceSession: initialSource, resumeId, scope = 'personal', inline = false }: { open: boolean; onClose: () => void; sourceSession?: string | null; resumeId?: string; scope?: BotScope; inline?: boolean }) {
+export default function BotCreateDialog({ open, onClose, sourceSession: initialSource, resumeId, inline = false }: { open: boolean; onClose: () => void; sourceSession?: string | null; resumeId?: string; inline?: boolean }) {
+  const scope = PERSONAL_SCOPE
   const [sourceSession, setSourceSession] = useState(initialSource)
   const [resumeMode, setResumeMode] = useState<BotIntakeContent['mode']>(IntakeMode.Blank)
   const [adaptiveSource, setAdaptiveSource] = useState('')
@@ -161,7 +163,7 @@ export default function BotCreateDialog({ open, onClose, sourceSession: initialS
       let bot: { id: string; scope: BotScope }
       if (adaptive || selected || sourceSession) {
         if (!sourceProposal || proposalAttempt.current?.snapshot !== snapshot) throw new Error('Review the saved source selection again before confirming.')
-        const result = await decideSourceIntake(selected ? 'team' : scope, sourceProposal, 'confirm', adaptive && scope === 'team')
+        const result = await decideSourceIntake(selected ? 'team' : scope, sourceProposal, 'confirm', false)
         setSourceProposal(result)
         if (result.status === 'stale') {
           proposalAttempt.current = null; setReviewed(false); setStep(Step.Edit)
@@ -169,7 +171,7 @@ export default function BotCreateDialog({ open, onClose, sourceSession: initialS
           throw new Error('Source changed. Fetch and review the current source before confirming; your edits are retained.')
         }
         if (!result.bot_id || result.status !== 'applied') throw new Error(`Source intake is ${result.status}. Retry this saved review; no replacement Bot was requested.`)
-        bot = { id: result.bot_id, scope: selected ? 'personal' : result.scope }
+        bot = { id: result.bot_id, scope: PERSONAL_SCOPE }
       } else {
         bot = await createBot({ name, idempotency_key: key, definition: { charter, ...(JSON.stringify(persona) !== JSON.stringify(emptyPersona()) ? { persona } : {}) } })
       }
@@ -230,7 +232,7 @@ export default function BotCreateDialog({ open, onClose, sourceSession: initialS
       {selected.definition.suggested_schedules?.map((s, i) => <article key={i}><p>{s.cron} · {s.timezone} · disabled</p><p>{s.instructions}</p></article>)}
       {!selected.definition.suggested_schedules?.length && <p>No suggested schedules.</p>}
     </section>}
-    {step === Step.Review && <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={reviewed} onChange={e => setReviewed(e.target.checked)} />{adaptive ? `I reviewed this conversion${scope === 'team' ? ' for the team' : ''} and consent to pausing the original only after commit. This does not start work or enable schedules.` : 'I reviewed this content for the new private Bot.'}</label>}
+    {step === Step.Review && <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={reviewed} onChange={e => setReviewed(e.target.checked)} />{adaptive ? 'I reviewed this conversion and consent to pausing the original only after commit. This does not start work or enable schedules.' : 'I reviewed this content for the new private Bot.'}</label>}
     </fieldset>
     {restoring && <p role="status">Restoring unfinished intake…</p>}
     {conflict && <section aria-label="Saved intake comparison" className="space-y-2"><p>Your edits are unchanged above. Saved server copy:</p><pre className="whitespace-pre-wrap">{JSON.stringify(conflict, null, 2)}</pre><Button onClick={() => { void applyContent(conflict).catch(e => setError(String(e))); setConflict(null) }}>Replace local text with saved copy</Button><Button onClick={() => { setConflict(null); setError(''); setReviewed(false); setStep(Step.Edit) }}>Keep local text for next save</Button></section>}

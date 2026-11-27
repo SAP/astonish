@@ -25,6 +25,10 @@ func TestBotSourceIntakeProposalHTTPAcceptance(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := map[string]any{"mode": "chat", "source_id": sid, "name": "Reviewed source", "charter": "Observe", "idempotency_key": uuid.NewString(), "carryover": map[string]any{"summary": "Selected summary", "memories": []map[string]string{{"content": "Selected memory", "category": "fact"}}, "goals": []map[string]string{{"title": "Selected goal", "completion_criteria": "Verified"}}, "artifacts": []map[string]string{{"title": "Selected text", "content": "Redacted artifact"}}}}
+			if scope == "team" {
+				f.request("POST", path+suffix, body, 403)
+				return // Saved team proposal confirmation/rejection is covered by TestBotPersonalOnlyCreationHTTP.
+			}
 			var p map[string]any
 			if err := json.Unmarshal(f.request("POST", path+suffix, body, 201), &p); err != nil {
 				t.Fatal(err)

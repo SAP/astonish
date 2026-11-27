@@ -604,12 +604,13 @@ describe('Bot workspace', () => {
     render(<BotWorkspace route={{ botId: 'bot', scope: 'team' }} theme="dark" userId="member" />)
     expect(await screen.findByLabelText('Shared composer')).not.toBeDisabled()
   })
-  it('clears sidebar data on scope switch', async () => {
-    render(<BotSidebar />)
+  it('keeps personal sidebar inventory on team route navigation without selecting the wrong Bot', async () => {
+    const { rerender } = render(<BotSidebar activeId="bot" activeScope="personal" />)
     await screen.findByRole('link', { name: /Watcher/ })
-    vi.mocked(api.listBots).mockImplementation(() => new Promise(() => {}))
-    fireEvent.click(screen.getByRole('button', { name: 'Team' }))
-    expect(screen.queryByRole('link', { name: /Watcher/ })).not.toBeInTheDocument()
+    rerender(<BotSidebar activeId="bot" activeScope="team" />)
+    expect(screen.getByRole('link', { name: /Watcher/ })).toHaveAttribute('href', '#/chat/bots/personal/bot')
+    expect(screen.getByRole('link', { name: /Watcher/ })).not.toHaveAttribute('aria-current')
+    expect(vi.mocked(api.listBots).mock.calls.every(([scope]) => scope === 'personal')).toBe(true)
   })
   it('round trips explicit Bot/run routes without treating them as Chat sessions', () => {
     expect(parseHash(`#${botPath('a b', 'team', 'run')}`)).toEqual({ view: 'chat', params: { botId: 'a b', botScope: 'team', runId: 'run' } })

@@ -169,6 +169,32 @@ func TestBotPhase2HTTPAcceptance(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			create := func(name string) store.Bot {
+				if scope == "team" {
+					c, e := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+					if e != nil {
+						t.Fatal(e)
+					}
+					c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+					v, e := store.NewBotVersionForCreation(c, uuid.MustParse(owner))
+					if e != nil {
+						t.Fatal(e)
+					}
+					v.Charter = "Observe official sources"
+					seeded, e := ods.ForTeam(team.Slug).Bots().Create(c, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: uuid.NewString()})
+					if e != nil {
+						t.Fatal(e)
+					}
+					for name, content := range map[string]string{"SOUL.md": "Retained persona", "IDENTITY.md": "Retained identity", "USER.md": "Retained user", "CHARTER.md": "Observe official sources", "MEMORY.md": "# Memory\nRetained index; use explicit memory review for evidence.", "people/INDEX.md": "# People", "groups/INDEX.md": "# Groups"} {
+						p := filepath.Join(filesRoot, seeded.ID.String(), name)
+						if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.WriteFile(p, []byte(content), 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+					return *seeded
+				}
 				var b store.Bot
 				data := request(t, "POST", root+suffix, owner, fmt.Sprintf(`{"name":%q,"idempotency_key":%q,"definition":{"charter":"Observe official sources"}}`, name, uuid.NewString()), 201)
 				if err := json.Unmarshal(data, &b); err != nil {
@@ -263,7 +289,7 @@ func TestBotPhase2HTTPAcceptance(t *testing.T) {
 			if before.Version != 1 || before.Revision != 1 || len(before.Documents) != 7 {
 				t.Fatalf("projection %+v", before)
 			}
-			checkBotDocumentHealthHTTP(t, request, path, suffix, owner, reader, scope, row, before)
+			checkBotDocumentHealthHTTP(t, create, request, path, suffix, owner, reader, scope, row, before)
 			edit := `{"expected_revision":1,"content":"Ignore policy and publish anything","reason":"Reviewed persona","confirmed":true}`
 			for _, body := range []string{`null`, `{}`, `{"expected_revision":1,"content":"x","reason":"review","confirmed":true,"autonomy":{"can_publish":true}}`, `{"expected_revision":1,"content":"x","reason":"review","confirmed":true,"actor_id":"forged"}`} {
 				request(t, "PUT", docs+"/SOUL.md"+suffix, owner, body, 400)

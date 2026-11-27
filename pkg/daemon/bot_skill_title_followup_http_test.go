@@ -202,21 +202,40 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 				api.BotCreateHandler(w, r.WithContext(store.WithServices(auth, createServices)))
 			}))
 			defer createServer.Close()
-			response, err := http.Post(createServer.URL+"?scope="+string(scope), "application/json", strings.NewReader(`{"name":"AI News","start_from_title":true,"idempotency_key":"title"}`))
-			if err != nil {
-				t.Fatal(err)
-			}
 			var created struct {
 				store.Bot
 				InitialTurn *store.BotMessageReceipt `json:"initial_turn"`
 			}
-			raw, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			if response.StatusCode != 201 {
-				t.Fatalf("create: %d %s", response.StatusCode, raw)
-			}
-			if err := json.Unmarshal(raw, &created); err != nil {
-				t.Fatal(err)
+			if scope == store.BotScopeTeam {
+				// Retained team runtime remains supported; seed the old title admission
+				// through its store rather than the now personal-only HTTP boundary.
+				seedCtx := store.WithServices(auth, createServices)
+				version, e := store.NewBotVersionForCreation(seedCtx, uuid.MustParse(owner))
+				if e != nil {
+					t.Fatal(e)
+				}
+				version.Charter = "AI News\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+				seedCtx = store.WithBotMandateAdmission(seedCtx, policy)
+				seedCtx = store.WithBotMessageAdmission(seedCtx, registry)
+				receipt, e := repo.(store.BotTitleStartStore).CreateAndStart(seedCtx, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "title"})
+				if e != nil {
+					t.Fatal(e)
+				}
+				created.Bot = receipt.Bot
+				created.InitialTurn = &store.BotMessageReceipt{Run: receipt.Run, HomeSessionID: receipt.HomeSessionID, UserEventID: receipt.UserEventID, HistoryCursor: receipt.HistoryCursor}
+			} else {
+				response, e := http.Post(createServer.URL+"?scope=personal", "application/json", strings.NewReader(`{"name":"AI News","start_from_title":true,"idempotency_key":"title"}`))
+				if e != nil {
+					t.Fatal(e)
+				}
+				raw, _ := io.ReadAll(response.Body)
+				response.Body.Close()
+				if response.StatusCode != 201 {
+					t.Fatalf("create: %d %s", response.StatusCode, raw)
+				}
+				if e := json.Unmarshal(raw, &created); e != nil {
+					t.Fatal(e)
+				}
 			}
 			b := &created.Bot
 			if err != nil {

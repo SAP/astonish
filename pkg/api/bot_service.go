@@ -62,6 +62,20 @@ func botRequestStore(w http.ResponseWriter, r *http.Request) (store.BotStore, uu
 	return repo, actor, true
 }
 
+// botCreationScopeAllowed applies only at HTTP creation boundaries, after
+// authentication and scope validation. Existing team Bots and templates are unaffected.
+func botCreationScopeAllowed(w http.ResponseWriter, scope store.BotScope) bool {
+	if scope == store.BotScopeTeam {
+		http.Error(w, "Bots can only be created in personal scope", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func botPersonalCreationAllowed(w http.ResponseWriter, r *http.Request) bool {
+	return botCreationScopeAllowed(w, store.BotScope(r.URL.Query().Get("scope")))
+}
+
 type botRunDispatchNotifierKey struct{}
 
 // botContentAccess gates registered Bot content routes while leaving worker reads

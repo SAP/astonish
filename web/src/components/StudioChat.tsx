@@ -314,12 +314,19 @@ interface StudioChatProps {
   isPlatformMode?: boolean
 }
 
-export function appendStreamingAgentText(messages: ChatMsg[], chunk: string, invocationId?: string): ChatMsg[] {
+function validAgentTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return undefined
+  return Number.isFinite(Date.parse(value)) ? value : undefined
+}
+
+export function appendStreamingAgentText(messages: ChatMsg[], chunk: string, invocationId?: string, timestamp?: string): ChatMsg[] {
   const last = messages[messages.length - 1]
-  if (last?.type === 'agent' && (last as AgentMessage)._streaming) {
-    return [...messages.slice(0, -1), { ...last, content: last.content + chunk, invocationId: invocationId ?? last.invocationId } as AgentMessage]
+  const invocationChanged = last?.type === 'agent' && last.invocationId && invocationId && last.invocationId !== invocationId
+  if (last?.type === 'agent' && last._streaming && !invocationChanged) {
+    // The first chunk owns delivery time; later chunks must not restamp it.
+    return [...messages.slice(0, -1), { ...last, content: last.content + chunk, invocationId: invocationId ?? last.invocationId }]
   }
-  return [...messages, { type: 'agent', content: chunk, invocationId, _streaming: true }]
+  return [...finalizeStreamingAgentText(messages), { type: 'agent', content: chunk, invocationId, timestamp: validAgentTimestamp(timestamp), _streaming: true }]
 }
 
 export function finalizeStreamingAgentText(messages: ChatMsg[]): ChatMsg[] {
@@ -1228,7 +1235,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
       case 'text':
         if (data.text) {
           setGenerationProgress(null)
-          setMessages(prev => appendStreamingAgentText(prev, data.text as string, data.invocationId as string | undefined))
+          setMessages(prev => appendStreamingAgentText(prev, data.text as string, data.invocationId as string | undefined, validAgentTimestamp(data.timestamp)))
         }
         break
 
@@ -2533,6 +2540,7 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [isStreaming, botThread, botBusy, botRunStates, activityByStart, lastActivityStart, generationProgress])
 
   const renderAgentMessage = (msg: AgentMessage & { invocationId?: string }, index: number, placement: 'transcript' | 'activity') => {
+                const deliveryTimestamp = validAgentTimestamp(msg.timestamp)
                 // Collect web source URLs for citation pill
                 const sourceUrls = !(msg as AgentMessage)._streaming ? collectSourceUrls(messages, index) : []
 
@@ -2546,7 +2554,14 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
                 return (
                   <div key={`${activeSessionId}-agent-${index}`} className="space-y-1 min-w-0" data-message-index={index} data-operation-id={msg.operationId}>
                     <div className="flex items-center justify-between">
-                      <div className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Agent</div>
+                      <div className="flex flex-wrap items-baseline gap-x-2 text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
+                        <span>Agent</span>
+                        {deliveryTimestamp && (
+                          <time dateTime={deliveryTimestamp} title={new Date(deliveryTimestamp).toLocaleString()} className="font-normal">
+                            {new Date(deliveryTimestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          </time>
+                        )}
+                      </div>
                       <div className="flex gap-1">
                         {canDebug && activeSessionId && msg.invocationId && !(msg as AgentMessage)._streaming && (
                           <button

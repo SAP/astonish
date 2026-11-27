@@ -93,6 +93,12 @@ func (p SessionEventProjection) BotFrames(previous int64) ([]BotPresentationFram
 		for key, value := range event.Data {
 			data[key] = value
 		}
+		// Delivery time belongs to the committed event, not its model/tool payload.
+		// Unknown historical times remain absent rather than gaining a viewer clock.
+		delete(data, "timestamp")
+		if !event.Timestamp.IsZero() {
+			data["timestamp"] = event.Timestamp
+		}
 		data["_projection"] = BotProjectionMetadata{EventID: event.ID, SessionID: p.SessionID, RunID: p.RunID, TurnID: p.TurnID, Sequence: p.Sequence, Cursor: botEventCursor(p.SessionID, cursor)}
 		payload, err := json.Marshal(data)
 		if err != nil {

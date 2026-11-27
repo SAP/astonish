@@ -1,5 +1,18 @@
 # Chat Rendering Pipeline
 
+## Bot delivery bubbles and timestamps
+
+The shared text reducer starts a new agent bubble when a known invocation ID
+changes, without requiring a transient completion frame between scheduled Bot
+reports. Same-invocation chunks still merge; replay uses stable event identities,
+not content equality. Each bubble retains its first authoritative server timestamp.
+The Agent label displays that date and time using the viewer's local formatting,
+with semantic `time` markup, in both themes and transcript/activity placements.
+Missing or invalid times are omitted, never replaced by the browser receipt time.
+Bot live/reconnect/finite-history payloads use the persisted event timestamp;
+storage content, schedules, terminal report separation and the report harness gate
+are unchanged.
+
 ## Bot Employee-only speech boundary
 
 The server Home projection verifies trusted `EmployeeSpeech` and committed

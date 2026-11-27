@@ -30,9 +30,11 @@ export interface AttachmentInfo {
   data?: string       // base64 data (included for images to render thumbnails)
 }
 
-export interface AgentMessage {
+export interface AgentMessage extends InvocationScopedMessage {
   type: 'agent'
   content: string
+  // Authoritative server delivery time (RFC3339), never a browser receipt time.
+  timestamp?: string
   _streaming?: boolean
   // Durable Bot publication identity; never merged into incremental text.
   operationId?: string

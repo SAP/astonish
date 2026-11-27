@@ -160,7 +160,12 @@ built-browser/native-PTY or deployed-provider evidence.
 It encodes the
 **entire row before writing any frame**, returning `BotPresentationFrame{Type,
 Data, Cursor}`. `Type` is the ordinary Chat event name and `Data` is its unchanged
-payload plus reserved `_projection` metadata:
+payload plus the committed event's optional `timestamp` and reserved `_projection` metadata:
+
+`timestamp` is the saved event time serialized as RFC3339, identical in live,
+finite-history and reconnect payloads, including legacy plain-text reports without
+runtime provenance. Unknown/zero timestamps are omitted; model/tool payload fields
+cannot override this time. Neither opening the page nor replaying a row restamps it.
 
 ```json
 {"text":"Hello","_projection":{"event_id":"<session>/<stored-event-id>/0","session_id":"<session>","run_id":"<run>","turn_id":"<turn>","sequence":7,"cursor":"<session>:41"}}
@@ -469,8 +474,14 @@ backup/restore. Those require separate acceptance evidence.
 Home publication assigns each report the canonical ADK `InvocationID`
 `bot-report:<run UUID>` in `entstore/bot_publication.go`. The Studio mapper
 preserves it as `invocationId` on `text`; the shared reducer retains it in
-`ChatMsg` for both initial replay and subsequent live rows. `turn_complete`
-finalizes text, but report visibility does not depend on transient `_streaming`
+`ChatMsg` for both initial replay and subsequent live rows. A changed known
+invocation ID starts a separate bubble even when no `turn_complete` arrives
+between scheduled deliveries. Chunks of the same invocation still merge, retaining
+the first chunk's timestamp. Stable projection IDs, not prose, deduplicate replay.
+Studio displays valid saved delivery date/time beside Agent in both themes and in
+shared transcript/activity rendering; absent or invalid time is omitted. Terminal
+report boundaries remain unchanged and accept the additive timestamp field.
+`turn_complete` finalizes text, but report visibility does not depend on transient `_streaming`
 state or on another owner message arriving.
 
 `toolActivity.ts` treats an agent message carrying that canonical identity as a

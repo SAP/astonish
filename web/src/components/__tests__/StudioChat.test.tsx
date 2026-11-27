@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, act, waitFor, fireEvent, within } from '@testing-library/react'
 import budgetStop from '../../../../pkg/api/testdata/bot_budget_stop.json'
-import StudioChat from '../StudioChat'
+import StudioChat, { appendStreamingAgentText } from '../StudioChat'
+import type { AgentMessage } from '../chat/chatTypes'
 import BotWorkspace from '../bots/BotWorkspace'
 import * as snapshots from '../../api/botSnapshot'
 import * as reviews from '../../api/botReviews'
@@ -72,6 +73,108 @@ vi.mock('remark-gfm', () => ({
 }))
 
 describe('StudioChat', () => {
+  it('splits differing known invocations without restamping the earlier streaming bubble', () => {
+    const first = appendStreamingAgentText([], 'First', 'bot-report:one')
+    const next = appendStreamingAgentText(first, 'Second', 'bot-report:two')
+    expect(next).toHaveLength(2)
+    expect(next[0]).toMatchObject({ content: 'First', invocationId: 'bot-report:one', _streaming: false })
+    expect(next[1]).toMatchObject({ content: 'Second', invocationId: 'bot-report:two', _streaming: true })
+    expect(first[0]).toMatchObject({ content: 'First', _streaming: true })
+  })
+
+  it('still merges same-invocation and ordinary ID-less chunks', () => {
+    const same = appendStreamingAgentText(appendStreamingAgentText([], 'Hello', 'one'), ' world', 'one')
+    expect(same).toHaveLength(1)
+    expect(same[0]).toMatchObject({ content: 'Hello world', invocationId: 'one' })
+    const ordinary = appendStreamingAgentText(appendStreamingAgentText([], 'Hello'), ' world')
+    expect(ordinary).toHaveLength(1)
+    expect(ordinary[0]).toMatchObject({ content: 'Hello world' })
+  })
+
+  it('preserves the first chunk server timestamp and omits missing or invalid values', () => {
+    const timestamp = '2026-11-27T18:01:02Z'
+    const first = appendStreamingAgentText([], 'First', 'one', timestamp)
+    const same = appendStreamingAgentText(first, ' chunk', 'one', '2026-11-27T18:03:04Z')
+    expect((same[0] as AgentMessage).timestamp).toBe(timestamp)
+    const second = appendStreamingAgentText(same, 'Second', 'two', '2026-11-27T18:05:06Z')
+    expect((second[0] as AgentMessage).timestamp).toBe(timestamp)
+    expect((second[1] as AgentMessage).timestamp).toBe('2026-11-27T18:05:06Z')
+    for (const invalid of [undefined, '', 'invalid', '123', '2026-99-99T18:00:00Z']) {
+      const message = appendStreamingAgentText([], 'Untimed', 'one', invalid)
+      expect((message[0] as AgentMessage).timestamp).toBeUndefined()
+      const later = appendStreamingAgentText(message, ' chunk', 'one', timestamp)
+      expect((later[0] as AgentMessage).timestamp).toBeUndefined()
+    }
+  })
+
+  it.each(['light', 'dark'])('renders server delivery times beside Agent in transcript and activity in %s', async theme => {
+    const timestamp = '2026-11-27T18:01:02Z'
+    vi.mocked(fetchSessionHistory).mockResolvedValueOnce({
+      id: 'delivery-times', title: 'Delivery times', messages: [
+        { type: 'agent', content: 'Intermediate', timestamp },
+        { type: 'tool_call', toolName: 'shell_command', toolArgs: {} },
+        { type: 'tool_result', toolName: 'shell_command', toolResult: {} },
+        { type: 'agent', content: 'Final', timestamp },
+        { type: 'agent', content: 'Missing' },
+        { type: 'agent', content: 'Invalid', timestamp: 'invalid' },
+      ],
+    } as never)
+    const view = render(<StudioChat theme={theme} hideSidebar initialSessionId="delivery-times" />)
+    const activity = await screen.findByTestId('tool-activity-block')
+    fireEvent.click(activity.querySelector('button')!)
+    const times = view.container.querySelectorAll('time')
+    expect(times).toHaveLength(2)
+    for (const time of times) {
+      expect(time).toHaveAttribute('datetime', timestamp)
+      expect(time).toHaveTextContent(new Date(timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+      expect(time.parentElement).toHaveTextContent('Agent')
+      expect(time.parentElement).toHaveStyle({ color: 'var(--text-muted)' })
+    }
+    expect(activity.querySelector('time')).not.toBeNull()
+    expect(screen.getByText('Final').closest('[data-message-index]')!.querySelector('time')).not.toBeNull()
+    for (const content of ['Missing', 'Invalid']) expect(screen.getByText(content).closest('[data-message-index]')!.querySelector('time')).toBeNull()
+    view.unmount()
+  })
+
+  it.each(['live', 'restored'] as const)('keeps 32 Bot deliveries separate without completion boundaries in %s and replay', async mode => {
+    const transport = await vi.importActual<typeof import('../../api/botEvents')>('../../api/botEvents')
+    let source!: ReadableStreamDefaultController<Uint8Array>
+    const fetch = vi.spyOn(teamContext, 'teamFetch')
+    const mount = () => {
+      vi.mocked(connectBotEvents).mockImplementationOnce(transport.connectBotEvents)
+      fetch.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({ start(c) { source = c } })))
+      return render(<StudioChat theme="dark" hideSidebar initialSessionId="bot-home" botThread={{ botId: 'bot', scope: 'personal', readOnly: false, onSend: vi.fn() }} />)
+    }
+    const rows = Array.from({ length: 32 }, (_, i) => canonicalFrame('text', {
+      text: `Delivery ${i + 1}`, invocationId: `bot-report:00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
+      timestamp: `2026-11-27T18:${String(i).padStart(2, '0')}:00Z`,
+    }, `delivery-${i}`, i + 1))
+    const replay = 'id: bot-home:32\nevent: replay_complete\ndata: {"persisted":true}\n\n'
+    const push = (frames: string) => act(async () => source.enqueue(new TextEncoder().encode(frames)))
+    const assertDeliveries = () => {
+      const bubbles = screen.getAllByTestId('agent-message-bubble')
+      expect(bubbles).toHaveLength(32)
+      bubbles.forEach((bubble, i) => {
+        expect(bubble).toHaveTextContent(`Delivery ${i + 1}`)
+        expect(bubble.parentElement!.querySelector('time')).toHaveAttribute('datetime', `2026-11-27T18:${String(i).padStart(2, '0')}:00Z`)
+      })
+    }
+    let view = mount()
+    try {
+      if (mode === 'live') await push('id: bot-home:0\nevent: replay_complete\ndata: {"persisted":true}\n\n')
+      await push(rows.join('') + replay)
+      assertDeliveries()
+      await push(rows[31] + replay)
+      assertDeliveries()
+      view.unmount()
+      view = mount()
+      await push(rows.join('') + replay)
+      assertDeliveries()
+    } finally {
+      view.unmount()
+      fetch.mockRestore()
+    }
+  })
   it.each(['light', 'dark'])('does not expose chat promotion in %s mode', async theme => {
     const view = render(<StudioChat theme={theme} hideSidebar />)
     expect(screen.queryByRole('button', { name: 'Promote Chat to Bot' })).not.toBeInTheDocument()

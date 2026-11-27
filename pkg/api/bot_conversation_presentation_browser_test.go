@@ -151,10 +151,89 @@ func (m *employeePresentationBrowserModel) GenerateContent(_ context.Context, q 
 	}
 }
 
+// assertBotSidebarChrome measures the built UI in Chrome and uses physical clicks
+// for collapse/expand; API reads remain production scoped handlers.
+func assertBotSidebarChrome(t *testing.T, page *rod.Page, scope store.BotScope, id string) {
+	t.Helper()
+	page.MustElement(`section[aria-label="Bots"] a[aria-current="page"]`).MustVisible()
+	page.MustElement(`[title="Delete conversation"]`).MustVisible()
+	page.MustWait(`() => !!document.querySelector('section[aria-label="Bots"] button[aria-label^="Delete "]')`)
+	checkExpanded := func() {
+		t.Helper()
+		result := page.MustEval(`async (scope, id) => {
+			const errors = [], check = (ok, message) => { if (!ok) errors.push(message) }
+			const bots = document.querySelector('section[aria-label="Bots"]'), sidebar = bots.parentElement
+			const botHeading = bots.querySelector('h2'), chatHeading = [...sidebar.querySelectorAll('span')].find(e => e.textContent === 'Chats')
+			check(Math.abs(botHeading.getBoundingClientRect().x - chatHeading.getBoundingClientRect().x) < 0.5, 'Bots/Chats heading x alignment')
+			check(getComputedStyle(botHeading).fontSize === getComputedStyle(chatHeading).fontSize && getComputedStyle(botHeading).fontWeight === getComputedStyle(chatHeading).fontWeight, 'heading typography parity')
+			const hide = sidebar.querySelector('[aria-label="Hide sidebar"]')
+			check(hide.closest('section') === bots && hide.parentElement.parentElement === botHeading.parentElement, 'Hide must belong to top Bots heading')
+			for (const label of ['New Bot', 'Hide sidebar', 'New conversation', 'Start fleet session']) {
+				const button = sidebar.querySelector('[aria-label="' + label + '"]')
+				if (!button || !button.querySelector('svg')) { check(false, label + ' icon action missing; rebuild Studio dist'); continue }
+				const box = button.getBoundingClientRect(), icon = button.querySelector('svg').getBoundingClientRect()
+				check(box.width === 28 && box.height === 28 && icon.width === 16 && icon.height === 16, label + ' action/icon dimensions')
+				check(getComputedStyle(button).backgroundColor === 'rgba(0, 0, 0, 0)', label + ' ghost presentation')
+			}
+			const row = bots.querySelector('a[aria-current="page"]'), metadata = row.querySelector('svg').parentElement
+			const chatMetadata = sidebar.querySelector('[title="Delete conversation"]').parentElement.querySelector('svg.lucide-clock').parentElement
+			for (const key of ['fontSize', 'color', 'gap', 'marginTop']) check(getComputedStyle(metadata)[key] === getComputedStyle(chatMetadata)[key], 'metadata parity: ' + key)
+			const botTrash = bots.querySelector('button[aria-label^="Delete "] svg'), chatTrash = sidebar.querySelector('[title="Delete conversation"] svg')
+			check(botTrash.getBoundingClientRect().width === 12 && chatTrash.getBoundingClientRect().width === 12, 'trash icons 12px parity')
+			const response = await fetch('/api/studio/bots?scope=' + scope), data = await response.json(), bot = data.bots.find(b => b.id === id)
+			check(response.ok && !!bot, 'production scoped Bot list')
+			check(bot.message_count !== undefined && metadata.textContent.includes(bot.message_count + ' msg' + (bot.message_count === 1 ? '' : 's')), 'actual API message count rendered')
+			check(!!metadata.querySelector('svg.lucide-clock') && !!bot.home_updated_at && metadata.querySelectorAll('span')[0].textContent.length > 0, 'durable Home timestamp rendered')
+			check(row.getAttribute('href') === '#/chat/bots/' + scope + '/' + id, 'active scoped Bot route')
+			return errors
+		}`, string(scope), id)
+		if result.String() != "[]" {
+			t.Fatalf("expanded sidebar Chrome assertions: %s", result.String())
+		}
+	}
+	checkExpanded()
+	artifactDir, err := filepath.Abs("../../.tmp/sidebar-browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(artifactDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	page.MustScreenshot(filepath.Join(artifactDir, string(scope)+"-expanded.png"))
+	route := page.MustEval(`() => location.hash`).String()
+	page.MustElement(`[aria-label="Hide sidebar"]`).MustClick()
+	page.MustElement(`[aria-label="Show sidebar"]`).MustVisible()
+	if !page.MustEval(`() => {
+		const rail = document.querySelector('[aria-label="Show sidebar"]').parentElement
+		return rail.querySelectorAll('button').length === 1 && rail.querySelectorAll('svg').length === 1 && rail.querySelectorAll('a,input,section').length === 0 && !document.querySelector('section[aria-label="Bots"]') && rail.textContent.trim() === ''
+	}`).Bool() {
+		t.Fatal("collapsed sidebar must contain only the expand control, no Bot/Chat actions or links")
+	}
+	page.MustScreenshot(filepath.Join(artifactDir, string(scope)+"-collapsed.png"))
+	page.MustElement(`[aria-label="Show sidebar"]`).MustClick()
+	page.MustElement(`section[aria-label="Bots"] a[aria-current="page"]`).MustVisible()
+	page.MustWait(`() => !!document.querySelector('section[aria-label="Bots"] button[aria-label^="Delete "]')`)
+	checkExpanded()
+	if page.MustEval(`() => location.hash`).String() != route {
+		t.Fatal("sidebar toggle changed active route")
+	}
+	t.Logf("Chrome sidebar parity: aligned headings, ghost 28px actions/16px icons, 12px trash, API metadata, expand-only rail and unchanged route (%s); screenshots %s", scope, artifactDir)
+}
+
 // Physical presentation proof: built Studio, isolated Chrome profile, real scoped
 // SQLite and production transcript/history HTTP handlers. Controlled public events
 // are persisted, not intercepted in browser fetch or injected into React state.
 func TestEmployeeOnlyConversationBrowserAcceptance(t *testing.T) {
+	runEmployeeConversationBrowserAcceptance(t, false)
+}
+
+// Sidebar-only proof reuses the real scoped HTTP/SPA fixture without submitting
+// a message, polling the worker, or performing any model work.
+func TestBotSidebarChromeAcceptance(t *testing.T) {
+	runEmployeeConversationBrowserAcceptance(t, true)
+}
+
+func runEmployeeConversationBrowserAcceptance(t *testing.T, sidebarOnly bool) {
 	if os.Getenv("ASTONISH_MEMORY_BROWSER_ACCEPTANCE") != "1" {
 		t.Skip("set ASTONISH_MEMORY_BROWSER_ACCEPTANCE=1 after building Studio")
 	}
@@ -388,6 +467,18 @@ func TestEmployeeOnlyConversationBrowserAcceptance(t *testing.T) {
 				t.Fatalf("browser failure: %v\n%v", v, text)
 			})
 			page.MustElement(`[aria-label="Bot workspace"]`).MustVisible()
+			if sidebarOnly {
+				assertBotSidebarChrome(t, page, scope, f.b.ID.String())
+				rows, err := f.repo.ListRuns(f.ctx, f.b.ID, store.BotPage{})
+				if err != nil || len(rows) != 0 || mdl.employeeStarted || mdl.captured {
+					t.Fatalf("sidebar navigation admitted model work: runs=%+v err=%v model=%+v", rows, err, mdl)
+				}
+				current, err := f.repo.Get(f.ctx, f.b.ID)
+				if err != nil || current.Status != f.b.Status || current.Version != f.b.Version {
+					t.Fatalf("sidebar toggle mutated Bot: before=%+v after=%+v err=%v", f.b, current, err)
+				}
+				return
+			}
 			input := page.MustElement(`[data-testid="chat-input"]`)
 			input.MustInput("Schedule the daily report at 9am UTC")
 			page.MustElement(`[aria-label="Send message"]`).MustClick()

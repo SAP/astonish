@@ -436,6 +436,14 @@ func (s *teamSessionStore) GetSessionMeta(ctx context.Context, sessionID string)
 		return nil, fmt.Errorf("get session meta: %w", err)
 	}
 	m := entSessionToMeta(ent)
+	// Bot Home publication paths do not all maintain the legacy counter.
+	// Count indexed rows without loading or decrypting transcript payloads.
+	if m.Purpose == store.SessionPurposeBotHome {
+		m.MessageCount, err = s.client.SessionEvent.Query().Where(sessionevent.SessionIDEQ(sessionID)).Count(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get bot home message count: %w", err)
+		}
+	}
 	return &m, nil
 }
 

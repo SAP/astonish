@@ -2,13 +2,14 @@ package api
 
 import (
 	"context"
-	botdomain "github.com/SAP/astonish/pkg/bot"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
+	botdomain "github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/store"
 )
 
@@ -190,6 +191,44 @@ func BotCreateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	botWriteJSON(w, http.StatusCreated, b)
 }
+
+// botListDTO adds read-only Home conversation metadata only to the list endpoint.
+type botListDTO struct {
+	store.Bot
+	MessageCount  *int       `json:"message_count,omitempty"`
+	HomeUpdatedAt *time.Time `json:"home_updated_at,omitempty"`
+}
+
+func botListHomeMetadata(r *http.Request, b store.Bot) botListDTO {
+	row := botListDTO{Bot: b}
+	scope := store.BotScopePersonal
+	if value := r.URL.Query().Get("scope"); value != "" {
+		scope = store.BotScope(value)
+	}
+	svc := store.FromContext(r.Context())
+	if svc == nil || b.Scope != scope || b.ID == (store.BotID{}) || b.HomeSessionID == (store.BotID{}) {
+		return row
+	}
+	sessions := svc.PersonalSessions
+	if scope == store.BotScopeTeam {
+		sessions = svc.Sessions
+	}
+	if sessions == nil {
+		return row
+	}
+	meta, err := sessions.GetSessionMeta(r.Context(), b.HomeSessionID.String())
+	if err != nil || meta == nil || meta.ID != b.HomeSessionID.String() || meta.BotID != b.ID.String() || meta.UserID != b.OwnerID.String() || meta.Purpose != store.SessionPurposeBotHome || meta.Retention != store.SessionRetentionBot || meta.BotRunID != "" || meta.ParentID != "" {
+		return row
+	}
+	if meta.MessageCount >= 0 {
+		row.MessageCount = &meta.MessageCount
+	}
+	if !meta.UpdatedAt.IsZero() {
+		row.HomeUpdatedAt = &meta.UpdatedAt
+	}
+	return row
+}
+
 func BotListHandler(w http.ResponseWriter, r *http.Request) {
 	repo, _, ok := botRequestStore(w, r)
 	if !ok {
@@ -222,9 +261,13 @@ func BotListHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		page.After = next
 	}
+	rows := make([]botListDTO, 0, len(bots))
+	for _, b := range bots {
+		rows = append(rows, botListHomeMetadata(r, b))
+	}
 	botWriteJSON(w, http.StatusOK, struct {
-		Bots []store.Bot `json:"bots"`
-	}{bots})
+		Bots []botListDTO `json:"bots"`
+	}{rows})
 }
 func BotGetHandler(w http.ResponseWriter, r *http.Request) {
 	repo, _, ok := botRequestStore(w, r)

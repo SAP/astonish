@@ -12,6 +12,7 @@ export interface Bot {
   id: string; scope: BotScope; owner_id: string; name: string; status: BotStatusValue
   revision: number; version: number; home_session_id: string; home: BotHomeBinding | null
   created_at: string; updated_at: string; restore_until?: string; permanent_delete?: boolean
+  message_count?: number; home_updated_at?: string
 }
 export interface BotPersona { avatar?: string; language: string; timezone: string; soul: string; identity: string; user: string }
 export interface BotTrigger {

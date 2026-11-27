@@ -38,11 +38,10 @@ it.each(['checked', 'limitations', 'absent', 'unknown'] as const)('keeps latest 
   expect(screen.queryByText('No work result yet')).not.toBeInTheDocument()
 })
 
-it.each([false, true])('keeps sidebar name-only while workspace details own unread activity (collapsed=%s)', async collapsed => {
+it.each([false, true])('keeps sidebar navigation separate while workspace details own unread activity (collapsed=%s)', async collapsed => {
   const { rerender } = render(<BotSidebar collapsed={collapsed} />)
-  const link = await screen.findByRole('link', { name: 'Watcher' })
-  expect(link).toHaveTextContent(collapsed ? /^$/ : /^Watcher$/)
-  expect(link).toHaveAttribute('title', 'Watcher')
+  if (collapsed) expect(screen.queryByRole('link', { name: 'Watcher' })).not.toBeInTheDocument()
+  else expect(await screen.findByRole('link', { name: 'Watcher' })).toHaveAttribute('title', 'Watcher')
   expect(snapshots.getBotSnapshot).not.toHaveBeenCalled()
   expect(snapshots.readBotActivityPage).not.toHaveBeenCalled()
   expect(snapshots.writeBotReadCursor).not.toHaveBeenCalled()
@@ -55,6 +54,7 @@ it.each([false, true])('keeps sidebar name-only while workspace details own unre
   expect(await screen.findByText('#121 report ·')).toBeInTheDocument()
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Mark displayed activity read' })))
   await waitFor(() => count(0))
-  expect(screen.getByRole('link', { name: 'Watcher' })).toHaveTextContent(collapsed ? /^$/ : /^Watcher$/)
+  if (collapsed) expect(screen.queryByRole('link', { name: 'Watcher' })).not.toBeInTheDocument()
+  else expect(screen.getByRole('link', { name: 'Watcher' })).toHaveTextContent(/^Watcher$/)
   expect(snapshots.writeBotReadCursor).toHaveBeenCalledWith('fixture', 'personal', null, 121, expect.any(AbortSignal))
 })

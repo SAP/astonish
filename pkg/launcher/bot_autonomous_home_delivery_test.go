@@ -32,6 +32,22 @@ type homeDeliveryModel struct {
 	calls int
 }
 
+// Home orchestration reports explicit controlled usage, just like the worker.
+type homeEmployeeModel struct{ model.LLM }
+
+func (m homeEmployeeModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for response, err := range m.LLM.GenerateContent(ctx, req, stream) {
+			if response != nil && req.Tools["employee_chat"] != nil {
+				response.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: 10, TotalTokenCount: 110}
+			}
+			if !yield(response, err) {
+				return
+			}
+		}
+	}
+}
+
 func (*homeDeliveryModel) Name() string { return "home-delivery-controlled" }
 func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if strings.HasPrefix(providerSystem(req), "BOT_WORK_REVIEW_V1") {
@@ -39,14 +55,24 @@ func (m *homeDeliveryModel) GenerateContent(ctx context.Context, req *model.LLMR
 		return (continuityAssessmentModel{LLM: m}).GenerateContent(ctx, req, stream)
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
-		m.calls++
-		system := ""
-		for _, p := range req.Config.SystemInstruction.Parts {
-			system += p.Text
+		// Tool-free Employee synthesis is not another private worker turn.
+		if req.Tools["execute_tool"] == nil {
+			if !strings.Contains(providerSystem(req), "Do not search for or invoke a posting tool") {
+				m.t.Error("Employee synthesis lost the Home posting prohibition")
+			}
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(homeWeatherAnswer, "model"), TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: 10, TotalTokenCount: 110}}, nil)
+			return
 		}
-		for _, want := range []string{"Your final answer is automatically delivered to this Bot's own Home chat", "Do not search for or invoke a posting tool", "exact destination and action"} {
-			if !strings.Contains(system, want) {
-				m.t.Errorf("actual provider system prompt missing %q", want)
+		m.calls++
+		system := providerSystem(req)
+		if !strings.Contains(system, "private tool-enabled Chat worker") || !strings.Contains(system, "Never address the owner, ask_user, start another employee_chat, or claim Home delivery") {
+			m.t.Error("private execution role or Home delivery prohibition missing")
+		}
+		for _, group := range req.Config.Tools {
+			for _, declaration := range group.FunctionDeclarations {
+				if declaration.Name == "employee_chat" || declaration.Name == "ask_user" {
+					m.t.Errorf("private worker exposes Employee tool %s", declaration.Name)
+				}
 			}
 		}
 		foundTask, foundWeather := false, false
@@ -107,7 +133,7 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Allow producer context for the 39KB fixture; production budgets stay unchanged.
-	limit := int64(160000)
+	limit := int64(240000)
 	toolsLimit := int64(100)
 	spec := store.BudgetSpec{MaxRuntimeSeconds: 300, MaxTokens: &limit, MaxToolCalls: &toolsLimit}
 	meter, err := bot.NewRunBudget(spec, time.Now())
@@ -133,9 +159,16 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	}
 	f.sessions = f.services.PersonalSessions
 	llm := &homeDeliveryModel{t: t}
+	orchestrated := &workerOutcomeFixtureModel{worker: llm, message: homeWeatherTask, answer: homeWeatherAnswer, employeeCheck: func(req *model.LLMRequest) {
+		for _, want := range []string{"Your final answer is automatically delivered to this Bot's own Home chat", "Do not search for or invoke a posting tool", "exact destination and action"} {
+			if !strings.Contains(providerSystem(req), want) {
+				t.Errorf("actual Employee provider system prompt missing %q", want)
+			}
+		}
+	}}
 	f.cfg.ContextWindow = 200000
 	f.cfg.WrapModel = func(_ context.Context, _ model.LLM, budget execution.RunBudget) (model.LLM, error) {
-		return provider.NewBudgetLLM(llm, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
+		return provider.NewBudgetLLM(homeEmployeeModel{LLM: orchestrated}, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
 	}
 	fetches := 0
 	node := &remainingModeNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
@@ -160,17 +193,18 @@ func TestBotAutonomousFetchFinalHomePublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != store.RunSucceeded || result.Report.Summary != homeWeatherAnswer || len(result.Report.Unverified) != 0 || len(result.Report.Unchanged) != 0 {
+	observations := requireEmployeeDispatchObservation(t, result.Report.Unchanged)
+	if result.Status != store.RunSucceeded || result.Report.Summary != homeWeatherAnswer || len(result.Report.Unverified) != 0 || len(observations) != 0 {
 		t.Fatalf("result=%+v work=%+v", result, result.Report.Work)
 	}
 	assertLauncherAgentResult(t, repo, worker, lease, result)
 	work, err := repo.(store.BotWorkStore).LoadWork(worker, lease)
-	if err != nil || work == nil || !work.HasReadOnlyEmployeeResult() || work.Review != nil || work.EmployeeReviewAttempts != 0 || work.AgentWork == nil || len(work.AgentWork.Evidence) != 1 || len(work.AgentWork.SourceAccess) != 1 || work.AgentWork.SourceAccess[0].OriginalURL != homeWeatherURL {
-		t.Fatalf("expected fresh read-only weather evidence without review: %+v %v", work, err)
+	if err != nil || work == nil || !work.HasReadOnlyEmployeeResult() || work.Review != nil || work.EmployeeReviewAttempts != 0 || work.AgentWork == nil || len(work.AgentWork.Evidence) != 2 || work.AgentWork.Evidence[0].CallID != "weather-fetch" || work.AgentWork.Evidence[1].CallID != "employee-outcome-dispatch" || len(work.AgentWork.SourceAccess) != 1 || work.AgentWork.SourceAccess[0].OriginalURL != homeWeatherURL {
+		t.Fatalf("expected fresh read-only weather evidence without review: %+v agent=%+v %v", work, work.AgentWork, err)
 	}
 	usage := meter.Usage()
-	// Only the two producer turns and fetch are charged; no reviewer is invoked.
-	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241 || usage.OutputTokens != 81+97 {
+	// Two worker turns plus dispatch and tool-free Employee synthesis are charged.
+	if llm.calls != 2 || fetches != 1 || usage.ToolCalls != 1 || usage.InputTokens != 9135+31241+200 || usage.OutputTokens != 81+97+20 {
 		t.Fatalf("calls=%d fetches=%d usage=%+v", llm.calls, fetches, usage)
 	}
 	if err := repo.CommitRun(worker, store.BotRunCommit{Lease: lease, Status: result.Status, Report: result.Report, Usage: usage}); err != nil {

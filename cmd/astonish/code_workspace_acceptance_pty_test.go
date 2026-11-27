@@ -205,7 +205,9 @@ func TestCodeWorkspaceIndependentPTYAcceptance(t *testing.T) {
 		list := records(2)
 		for i, r := range list {
 			if r.ID == id {
-				for j := 0; j <= i; j++ {
+				// The picker prepends both a move-current action and the
+				// current-workspace row before the independent registry rows.
+				for j := 0; j < i+2; j++ {
 					original.send("\x1b[B")
 				}
 				original.send("\r")

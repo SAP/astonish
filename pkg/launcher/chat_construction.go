@@ -1290,7 +1290,8 @@ func (p *scopedChatPlan) call(name string, args map[string]any) (map[string]any,
 	// already-consumed announce/update handoff. Keep policy and all live guards.
 	bound := agent.WithoutBotInvocationHandoff(p.invocation)
 	if p.prepared != nil {
-		if _, interactive := execution.BotTurnAuthorizerFromContext(p.invocation); !interactive {
+		_, private := agent.BotPrivateWorkerExecution(p.invocation)
+		if _, interactive := execution.BotTurnAuthorizerFromContext(p.invocation); !interactive || private {
 			bound = context.WithValue(bound, preparedPlanLeafKey{}, p)
 		}
 	}
@@ -1300,8 +1301,10 @@ func (p *scopedChatPlan) call(name string, args map[string]any) (map[string]any,
 func (p *scopedChatPlan) verify(command string) (int, string, error) {
 	if p.prepared != nil {
 		if _, interactive := execution.BotTurnAuthorizerFromContext(p.invocation); interactive {
-			if err := p.changePrepared(store.BotPreparedPlanChange{Stage: store.BotPlanDispatchStarted, DispatchID: uuid.New()}); err != nil {
-				return -1, "", err
+			if _, private := agent.BotPrivateWorkerExecution(p.invocation); !private {
+				if err := p.changePrepared(store.BotPreparedPlanChange{Stage: store.BotPlanDispatchStarted, DispatchID: uuid.New()}); err != nil {
+					return -1, "", err
+				}
 			}
 		}
 	}

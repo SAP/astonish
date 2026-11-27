@@ -431,6 +431,18 @@ func (cr *ChatRunner) observeBotToolOutcome(role string, response *genai.Functio
 		// an answer recovered using another source. The journal retains the
 		// complete negative response and the typed access fact remains bound.
 		observation.Recoverable = cr.ctx.Err() == nil && botBoundSourceAccessFailure(response, outcome.SourceAccess)
+		// Preserve independently validated access observations for legacy review and
+		// skill source retention; failed reads remain recoverable information.
+		// A private Employee worker's source reads are aggregated as AgentWork
+		// evidence/source-access, never promoted into Home conversation; only the
+		// Employee's own speech and the neutral dispatch observation reach Home.
+		if _, valid := agent.BotPrivateWorkerExecution(cr.ctx); !valid {
+			for _, evidence := range outcome.Unchanged {
+				if bot.ValidObservation(evidence) {
+					cr.completion.Report.Unchanged = append(cr.completion.Report.Unchanged, evidence)
+				}
+			}
+		}
 		return
 	}
 	if !ok && read {
@@ -673,6 +685,19 @@ func botOnlyRecoverableToolFeedback(err error) bool {
 }
 
 func botCanPromoteStaleBlockedReadOnlyFinal(c ChatCompletion, req bot.RunRequest, report store.BotReport) bool {
+	// Settled communication is not completion of retained original obligations.
+	// Use structured work state, never the wording of the final explanation.
+	if req.Work != nil && req.Work.AgentWork != nil {
+		if len(req.Work.AgentWork.Remaining) != 0 {
+			return false
+		}
+		for _, item := range req.Work.AgentWork.Items {
+			switch item.Status {
+			case store.BotWorkItemPending, store.BotWorkItemInProgress, store.BotWorkItemBlocked:
+				return false
+			}
+		}
+	}
 	return req.Work != nil && req.Work.Protocol == store.BotWorkProtocolAgentLedV1 &&
 		c.FinalEventID != "" && strings.TrimSpace(c.FinalText) != "" && len(c.pendingControls) == 0 &&
 		(c.Err == nil || botOnlyRecoverableToolFeedback(c.Err)) && store.BotReportIsReadOnlyResult(report)

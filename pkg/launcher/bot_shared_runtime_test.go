@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -37,17 +38,35 @@ func (*sharedBotDispatchPool) SetSessionScope(string, string, string)      {}
 func (p *sharedBotDispatchPool) GetOrCreate(string) sandbox.ToolNodeClient { return p.client }
 func (p *sharedBotDispatchPool) ResolveOwner(id string) string             { return id }
 
+type sharedRuntimeReadFixtureGuard struct{}
+
+func (sharedRuntimeReadFixtureGuard) Authorize(ctx context.Context, action execution.ActionDescriptor) (execution.PolicyDecision, error) {
+	digest, err := action.Digest()
+	kind := execution.PolicyDeny
+	if action.Effect == execution.EffectRead && (action.Tool == "read_file" || action.Tool == "web_fetch") {
+		kind = execution.PolicyAllow
+	}
+	if ctx.Err() != nil {
+		return execution.PolicyDecision{}, ctx.Err()
+	}
+	return execution.PolicyDecision{Kind: kind, ActionDigest: digest}, err
+}
+
 type sharedBotScriptModel struct{ calls int }
 
 func (*sharedBotScriptModel) Name() string { return "scripted-offline" }
 func (m *sharedBotScriptModel) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(y func(*model.LLMResponse, error) bool) {
+		if r.Tools["execute_tool"] == nil {
+			y(&model.LLMResponse{Content: genai.NewContentFromText("Read the retained file successfully.", "model"), TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{}}, nil)
+			return
+		}
 		m.calls++
 		content := genai.NewContentFromText("Read the retained file successfully.", "model")
 		if m.calls == 1 {
 			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "ordinary-read", Name: "execute_tool", Args: map[string]any{"name": "read_file", "arguments": map[string]any{"path": "outputs/report.txt"}}}}}}
 		}
-		y(&model.LLMResponse{Content: content, TurnComplete: true}, nil)
+		y(&model.LLMResponse{Content: content, TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{}}, nil)
 	}
 }
 
@@ -62,13 +81,17 @@ func TestBotSharedRuntimeOfflineModelTurn(t *testing.T) {
 				setBotSharedInteractive(f)
 			}
 			llm := &sharedBotScriptModel{}
-			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
+			orchestrator := installWorkerOutcomeFixture(t, f, llm)
+			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return orchestrator, nil }
 			client := &sourceAccessCatalogueClient{response: json.RawMessage(`{"content":"retained ordinary bytes"}`)}
 			prepare := f.cfg.Prepare
 			f.cfg.Prepare = func(c context.Context, r bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
 				safe, err := prepare(c, r, s)
 				if err == nil {
 					safe.Catalog.Pool = &sharedBotDispatchPool{client: client}
+					if interactive {
+						safe.PolicyRuntime.Guard = sharedRuntimeReadFixtureGuard{}
+					}
 				}
 				return safe, err
 			}
@@ -103,9 +126,12 @@ func TestBotSharedRuntimeScriptedDispatch(t *testing.T) {
 					return nil, e
 				}
 				safe.Catalog = &ChatCatalogResources{Pool: &sharedBotDispatchPool{client: c}}
+				if interactive {
+					safe.PolicyRuntime.Guard = sharedRuntimeReadFixtureGuard{}
+				}
 				return safe, nil
 			}
-			got, e := f.construct(t)
+			got, e := f.constructWorker(t)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -114,7 +140,7 @@ func TestBotSharedRuntimeScriptedDispatch(t *testing.T) {
 			if entry == nil {
 				t.Fatal("no actual file tool")
 			}
-			invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+			invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: agent.WithBotPrivateWorkerExecution(f.ctx)}, sid: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 			req := &model.LLMRequest{}
 			target := entry.Tool.(botRunnableTool)
 			if e := target.ProcessRequest(invocation, req); e != nil {
@@ -227,10 +253,13 @@ func TestBotSharedRuntimePublicFetchReceipt(t *testing.T) {
 				safe, e := prepare(ctx, r, s)
 				if e == nil {
 					safe.Catalog.Pool = &sharedBotDispatchPool{client: c}
+					if interactive {
+						safe.PolicyRuntime.Guard = sharedRuntimeReadFixtureGuard{}
+					}
 				}
 				return safe, e
 			}
-			got, e := f.construct(t)
+			got, e := f.constructWorker(t)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -239,8 +268,8 @@ func TestBotSharedRuntimePublicFetchReceipt(t *testing.T) {
 			if _, ok := shared.chatRuntimeRunnable.(*sandbox.NodeTool); !ok {
 				t.Fatal("not actual shared node")
 			}
-			base, _ := bot.WithToolOutcomes(execution.WithBotRunIdentity(f.ctx, policy.Identity()))
-			ctx := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: base}, sid: f.req.Run.SessionID.String()}}
+			base, _ := bot.WithToolOutcomes(agent.WithBotPrivateWorkerExecution(execution.WithBotRunIdentity(f.ctx, policy.Identity())))
+			ctx := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: base}, sid: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 			result, e := shared.Run(ctx, map[string]any{"url": "https://example.com/a"})
 			if e != nil || result["error"] != "HTTP 429" || c.name != tools.BotPublicFetchOperation {
 				t.Fatalf("fetch did not use first-party transport: %v %v name=%s", result, e, c.name)
@@ -276,9 +305,14 @@ func TestBotSharedRuntimeOrdinaryToolIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
+			private, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: f.req.Run.SessionID.String(), Sessions: got.SessionService})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer private.Cleanup()
 			for _, name := range []string{"read_file", "write_file", "edit_file", "find_files", "file_tree"} {
 				var found tool.Tool
-				if entry := got.Agent.ToolIndex.GetToolEntry(name); entry != nil {
+				if entry := private.Agent.ToolIndex.GetToolEntry(name); entry != nil {
 					found = entry.Tool
 				}
 				shared, ok := found.(*chatRuntimeTool)
@@ -370,8 +404,9 @@ func TestBotSharedRuntimeFailedFetchAlternateCommittedAcceptance(t *testing.T) {
 			f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
 			f.services.Memory = nil
 			llm := &recoveredFetchModel{t: t}
+			orchestrator := &workerOutcomeFixtureModel{worker: llm, answer: recoveredFetchAnswer}
 			f.cfg.WrapModel = func(_ context.Context, _ model.LLM, budget execution.RunBudget) (model.LLM, error) {
-				return provider.NewBudgetLLM(llm, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
+				return provider.NewBudgetLLM(orchestrator, budget, provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true})
 			}
 			fetches := 0
 			node := &remainingModeNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
@@ -475,8 +510,13 @@ func TestBotSharedRuntimePublicFetchNativeFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer got.Cleanup()
-			target := got.Agent.ToolIndex.GetToolEntry("web_fetch").Tool.(*chatRuntimeTool)
-			binding := botFactoryModelForTest(t, got.Agent.LLM).binding
+			private, err := got.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: f.req.Run.SessionID.String(), Sessions: got.SessionService})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer private.Cleanup()
+			target := private.Agent.ToolIndex.GetToolEntry("web_fetch").Tool.(*chatRuntimeTool)
+			binding := botFactoryModelForTest(t, private.Agent.LLM).binding
 			expectedCalls := 1
 			base, cancel := context.WithCancel(f.ctx)
 			defer cancel()
@@ -568,7 +608,9 @@ func (*cachedCoreChildModel) Name() string { return "cached-core-child" }
 func (m *cachedCoreChildModel) GenerateContent(ctx context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(y func(*model.LLMResponse, error) bool) {
 		raw, _ := json.Marshal(r.Contents)
-		parent := strings.Contains(string(raw), "OWNER_CACHED_CORE_CHILD")
+		// The child delegate task prompt mentions "read_file" and "retained bytes";
+		// only the worker's own driving instruction carries the delegate marker.
+		parent := strings.Contains(string(raw), "OWNER_CACHED_CORE_CHILD") || (strings.Contains(string(raw), "Delegate the core-only file read") && !strings.Contains(string(raw), "Read outputs/report.txt using read_file"))
 		content := genai.NewContentFromText("Core child returned retained bytes.", "model")
 		var call *genai.FunctionCall
 		if parent {
@@ -591,23 +633,55 @@ func (m *cachedCoreChildModel) GenerateContent(ctx context.Context, r *model.LLM
 	}
 }
 func TestBotSharedRuntimeCachedMCPCoreChildAcceptance(t *testing.T) {
-	f := newBotFactoryFixture(t)
-	f.req.Policy = fPolicy(t, f.req.Policy.Identity(), []string{"delegate_tasks", "read_file"})
-	f.req.Instructions = "OWNER_CACHED_CORE_CHILD: delegate a core-only file read."
+	f, repo := scheduleFixture(t, store.BotScopePersonal)
+	b, err := repo.Get(f.ctx, f.req.Bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := repo.GetVersion(f.ctx, b.ID, b.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := repo.RequestRun(f.ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, Instructions: "OWNER_CACHED_CORE_CHILD: delegate a core-only file read.", IdempotencyKey: "cached-core-child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: b.OwnerID.String(), OrgSlug: f.req.Principal.OrgSlug, TeamSlug: f.req.Principal.TeamSlug}
+	worker := execution.WithBotRunIdentity(f.ctx, id)
+	lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "controlled", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = repo.GetRun(f.ctx, b.ID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: id, Level: execution.AutonomySupervised, AllowedTools: []string{"delegate_tasks", "read_file"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meter, err := bot.NewRunBudget(v.Budget, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.req.Bot, f.req.Version, f.req.Run, f.req.Policy, f.req.Budget, f.req.Instructions = *b, *v, *run, policy, meter, "OWNER_CACHED_CORE_CHILD: delegate a core-only file read."
+	f.req.Work, err = repo.(store.BotWorkStore).LoadWork(worker, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.services.PersonalBots = repo
+	f.sessions = f.services.PersonalSessions
+	f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
+	f.services.Memory = nil
 	llm := &cachedCoreChildModel{t: t}
-	f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
+	orchestrator := &workerOutcomeFixtureModel{worker: llm, message: "Delegate the core-only file read and report the retained bytes.", answer: "Core child returned retained bytes."}
+	f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return orchestrator, nil }
 	marker := filepath.Join(t.TempDir(), "mcp-started")
 	lazy := agent.NewLazyMCPToolset("cached", []cache.ToolEntry{{Name: "cached_read", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)}}, config.MCPServerConfig{Command: "/bin/sh", Args: []string{"-c", "touch " + marker + "; exit 1"}, Env: map[string]string{"SECRET": "{{CREDENTIAL:must-not-resolve:secret}}"}}, false)
 	set := agent.NewSanitizedToolset(lazy, false)
 	node := &sourceAccessCatalogueClient{response: json.RawMessage(`{"content":"retained bytes"}`)}
-	prepare := f.cfg.Prepare
-	f.cfg.Prepare = func(ctx context.Context, r bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
-		safe, e := prepare(ctx, r, s)
-		if e == nil {
-			safe.Catalog.Pool = &sharedBotDispatchPool{client: node}
-			safe.Catalog.Groups = map[string]*agent.ToolGroup{"mcp:cached": {Name: "mcp:cached", Toolsets: []tool.Toolset{set}}}
-		}
-		return safe, e
+	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
+		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &sharedBotDispatchPool{client: node}, Groups: map[string]*agent.ToolGroup{"mcp:cached": {Name: "mcp:cached", Toolsets: []tool.Toolset{set}}}}, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
 	factory, err := NewBotChatAgentFactory(f.cfg)
 	if err != nil {
@@ -618,20 +692,29 @@ func TestBotSharedRuntimeCachedMCPCoreChildAcceptance(t *testing.T) {
 		if err != nil {
 			return resources, err
 		}
-		group := resources.Agent.SubAgentManager.ToolGroups["mcp:cached"]
-		if group == nil || len(group.Toolsets) != 1 {
-			t.Fatal("cached toolset absent from actual factory child scope")
-		}
-		wrapped, ok := group.Toolsets[0].(*chatRuntimeToolset)
-		if !ok || !agent.IsBotMetadataOnlyToolset(wrapped) {
-			t.Fatalf("factory lost cached metadata contract: %T", group.Toolsets[0])
+		// The cached MCP metadata contract now lives on the private tool-enabled
+		// worker, not the tools-less Employee agent. Validate it there.
+		if resources.WorkerFactory != nil {
+			private, werr := resources.WorkerFactory(ctx, api.BotEmployeeWorkerRequest{Request: req, ConversationID: req.Run.SessionID.String(), Sessions: resources.SessionService})
+			if werr != nil {
+				return resources, werr
+			}
+			defer private.Cleanup()
+			group := private.Agent.SubAgentManager.ToolGroups["mcp:cached"]
+			if group == nil || len(group.Toolsets) != 1 {
+				t.Fatal("cached toolset absent from actual factory child scope")
+			}
+			wrapped, ok := group.Toolsets[0].(*chatRuntimeToolset)
+			if !ok || !agent.IsBotMetadataOnlyToolset(wrapped) {
+				t.Fatalf("factory lost cached metadata contract: %T", group.Toolsets[0])
+			}
 		}
 		return resources, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
+	result, err := adapter.Start(bot.WithApprovalStore(f.ctx, repo), f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
 	if err != nil || result.Status != store.RunSucceeded || llm.childCalls != 2 || node.calls != 1 {
 		t.Fatalf("core delegation failed: status=%s parent=%d child=%d node=%d err=%v", result.Status, llm.parentCalls, llm.childCalls, node.calls, err)
 	}

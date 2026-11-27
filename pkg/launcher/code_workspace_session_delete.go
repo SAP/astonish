@@ -54,8 +54,22 @@ func (b *localAgentBackend) deleteCodeSessionData(ctx context.Context, id string
 	if id == "" {
 		return fmt.Errorf("session id required")
 	}
+	var pending *codeSessionDeletionIntent
+	if b.workspace != nil && b.fileStore != nil {
+		lock, err := b.lockDeletionIntent(ctx, id)
+		if err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		pending, err = b.readDeletionIntent(ctx, id)
+		if err != nil {
+			return err
+		}
+	}
 	metas := []persistentsession.SessionMeta{{ID: id, AppName: codeAppName, UserID: b.effectiveUserID()}}
-	if b.fileStore != nil {
+	if pending != nil {
+		metas = pending.Metas
+	} else if b.fileStore != nil {
 		meta, err := b.fileStore.GetSessionMeta(id)
 		if err != nil {
 			return err
@@ -129,6 +143,11 @@ func (b *localAgentBackend) deleteCodeSessionData(ctx context.Context, id string
 				return &backend.WorkspaceHandoffError{Request: backend.WorkspaceLaunchRequest{Mode: backend.WorkspaceCurrent, WorkingDir: w.project.OriginalRoot, ProjectRoot: w.project.OriginalRoot, DeleteSessionID: id}}
 			}
 		}
+		if b.fileStore != nil && pending == nil {
+			if err := b.writeDeletionIntent(ctx, id, metas); err != nil {
+				return fmt.Errorf("persist session deletion intent: %w", err)
+			}
+		}
 		if err := w.manager.DeleteSessionWorkspaces(ctx, w.project, bindings); err != nil {
 			return fmt.Errorf("workspace cleanup failed; conversation retained for retry: %w", err)
 		}
@@ -171,6 +190,15 @@ func (b *localAgentBackend) deleteCodeSessionData(ctx context.Context, id string
 	if w := b.workspace; w != nil {
 		if err := w.manager.ForgetSessions(ctx, w.project, bindings); err != nil {
 			return fmt.Errorf("workspace metadata cleanup failed after saved session deletion: %w", err)
+		}
+		if b.fileStore != nil {
+			path := b.deletionIntentPath(id)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove session deletion intent: %w", err)
+			}
+			if err := syncDeletionIntentDir(path); err != nil {
+				return err
+			}
 		}
 	}
 	b.mu.Lock()

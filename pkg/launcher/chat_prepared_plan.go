@@ -163,7 +163,9 @@ func (p *scopedChatPlan) authorizePrepared() error {
 		return nil
 	}
 	if auth, interactive := execution.BotTurnAuthorizerFromContext(p.invocation); interactive {
-		return auth.AuthorizeTool(p.invocation, r.Action.Tool)
+		if _, private := agent.BotPrivateWorkerExecution(p.invocation); !private {
+			return auth.AuthorizeTool(p.invocation, r.Action.Tool)
+		}
 	}
 	runtime := agent.BotPolicyRuntimeFromContext(p.invocation)
 	runtime.Approvals = preparedPlanRequester{p}
@@ -215,6 +217,9 @@ func (g preparedPlanGuard) Authorize(ctx context.Context, action execution.Actio
 		return execution.PolicyDecision{}, store.ErrBotConflict
 	}
 	d, err := g.live.Authorize(ctx, action)
+	if err == nil && d.Kind == execution.PolicyRequestApproval && d.ActionDigest == digest {
+		return d, nil
+	}
 	if err != nil || d.Kind != execution.PolicyAllow || d.ActionDigest != digest {
 		return d, store.ErrBotForbidden
 	}
@@ -252,8 +257,10 @@ func (p *scopedChatPlan) commitPrepared(snapshot agent.PlanSnapshot) error {
 			return err
 		}
 		if _, interactive := execution.BotTurnAuthorizerFromContext(p.invocation); interactive {
-			if err := p.changePrepared(store.BotPreparedPlanChange{Stage: store.BotPlanDispatchStarted, DispatchID: uuid.New()}); err != nil {
-				return err
+			if _, private := agent.BotPrivateWorkerExecution(p.invocation); !private {
+				if err := p.changePrepared(store.BotPreparedPlanChange{Stage: store.BotPlanDispatchStarted, DispatchID: uuid.New()}); err != nil {
+					return err
+				}
 			}
 		}
 		out, err := p.call("write_file", args)
@@ -292,6 +299,15 @@ func (t *chatRuntimeTool) RunPreparedPlan(ctx tool.Context, args any) (map[strin
 		return nil, err
 	}
 	c := chatRuntimeToolContext{Context: ctx, bound: bound}
+	if entry, ok := t.binding.hooks.Dispatch.(interface {
+		BindPreparedPlan(tool.Context) (tool.Context, error)
+	}); ok {
+		preparedContext, err := entry.BindPreparedPlan(c)
+		if err != nil {
+			return nil, err
+		}
+		c = chatRuntimeToolContext{Context: preparedContext, bound: preparedContext}
+	}
 	prepared := api.BotPreparedPlanSessionFromContext(c)
 	if prepared == nil || prepared.Resume == nil || ctx.Value(preparedPlanLeafKey{}) != nil {
 		return nil, store.ErrBotForbidden

@@ -691,6 +691,16 @@ func (b *localAgentBackend) projectSessionMetas(ctx context.Context) ([]persiste
 			}
 		}
 	}
+	pending, e := b.pendingDeletionMetas(ctx)
+	if e != nil {
+		return nil, e
+	}
+	for _, meta := range pending {
+		if !seen[meta.ID] {
+			out = append(out, meta)
+			seen[meta.ID] = true
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
 }

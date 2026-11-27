@@ -170,7 +170,17 @@ func TestBotPermanentDeleteHTTP(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			create := func(key string) store.Bot {
-				return request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Disposable","idempotency_key":%q,"definition":{"charter":"Stay idle"}}`, scope+key), 201)
+				if scope == "personal" {
+					return request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Disposable","idempotency_key":%q,"definition":{"charter":"Stay idle"}}`, scope+key), 201)
+				}
+				// Existing team Bots use authenticated repository setup; public creation stays personal-only.
+				v := store.DefaultBotVersion()
+				v.Charter = "Stay idle"
+				b, e := ods.ForTeam(team.Slug).Bots().Create(principal(ctx, owner), store.BotCreateRequest{Name: "Disposable", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: scope + key})
+				if e != nil {
+					t.Fatal(e)
+				}
+				return *b
 			}
 			b := create("target")
 			other := create("other")

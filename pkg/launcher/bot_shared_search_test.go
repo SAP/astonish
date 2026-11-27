@@ -78,10 +78,43 @@ func TestBotSharedSearchFailsClosed(t *testing.T) {
 	for _, scenario := range []string{"missing-factory", "ambient-secret", "nil-model", "factory-error"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newBotFactoryFixture(t)
-			setBotSharedInteractive(f)
-			cfg := &config.AppConfig{Providers: map[string]config.ProviderConfig{"openai": {"type": "openai"}}}
-			cfg.General.WebSearchTool = "perplexity:perplexity_web_search"
-			cfg.PerplexityWebSearch.Provider, cfg.PerplexityWebSearch.Model = "openai", "fixture"
+			// The ambient-secret scenario must reach provider.GetProvider's env-var
+			// resolution and fail closed, so configure the scoped provider as a
+			// concrete openai provider in every settings layer before capturing the
+			// research route, keeping the route fingerprint consistent.
+			openaiProvider := map[string]store.ProviderConfig{"search": {"type": "openai"}}
+			f.services.PlatformSettings = botKnowledgePlatformSettings{row: &store.PlatformSettings{WebSearchTool: "perplexity:perplexity_web_search", PerplexityWebSearch: &store.PerplexityWebSearchSettings{Provider: "search", Model: "sonar"}, Providers: openaiProvider}}
+			f.services.OrgSettings = botKnowledgeOrgSettings{row: &store.OrgSettings{Providers: openaiProvider}}
+			f.services.Settings = botKnowledgeTeamSettings{row: &store.TeamSettings{Providers: openaiProvider}}
+			route, err := BotEffectiveConfiguredSearchRoute(f.ctx, f.services)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := f.req.Policy.Identity()
+			m := execution.BotMandate{Ref: execution.BotMandateRef{ID: uuid.New(), BotID: identity.BotID, OrgSlug: identity.OrgSlug, TeamSlug: identity.TeamSlug, OwnerID: identity.ActorID, Revision: 1}, Purpose: execution.BotMandatePurposeTask, ExpiresAt: time.Now().Add(time.Hour), Scopes: []string{string(execution.CapabilityToolExecute)}, Constraints: []execution.BotActionResourceConstraint{{Action: execution.CapabilityToolExecute, Resources: []string{BotConfiguredSearchToolName, "web_fetch"}}}, Limits: execution.BotMandateLimits{MinScheduleIntervalSeconds: 1, MaxSchedules: 1, MaxDailyRuns: 1, MaxConcurrentRuns: 1, MaxRuntimeSeconds: 60, MaxToolCalls: 10, MaxTokens: 10000, MaxTotalToolCalls: 100, MaxTotalTokens: 100000}, PublicResearch: &execution.BotPublicResearchScope{Version: 1, Subject: "Stock Market News", SourceEventID: "owner-event", Route: route, Facets: []execution.BotResearchFacet{execution.BotResearchOverview, execution.BotResearchRecent}, MaxQueryBytes: 2048, MaxResults: 5, MaxCalls: 2}}
+			quota := &researchTestRuntime{m: m}
+			auth, err := execution.VerifyBotMandateAuthorization(f.ctx, quota, m.Ref, m.Purpose)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.req.Mandate = &bot.MandateExecution{Authorization: auth, Runtime: quota, Identity: identity}
+			episode, err := NewBotResearchEpisode(f.req.Run.ID, f.req.Run.SessionID.String(), BotResearchOpenWeb, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := quota.m.Ref
+			f.req.Run.MandateRef = &ref
+			f.req.Principal = f.req.Mandate.Authorization.Principal(f.req.Principal.Surface)
+			f.ctx, _ = execution.WithPrincipal(context.Background(), f.req.Principal)
+			f.req.Run.IdempotencyKey = "owner-confirmed-fixture"
+			f.req.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomyScoped, AllowedTools: []string{"perplexity_web_search", "web_fetch"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := BotScopedChatConfig(f.ctx, knowledgeScope(f))
+			if err != nil {
+				t.Fatal(err)
+			}
 			prepare := f.cfg.Prepare
 			sentinel := errors.New("controlled factory failure")
 			f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
@@ -90,6 +123,8 @@ func TestBotSharedSearchFailsClosed(t *testing.T) {
 					return safe, err
 				}
 				safe.ChatConfig = cfg
+				safe.PolicyRuntime.Mandate = req.Mandate
+				safe.Research = episode
 				switch scenario {
 				case "ambient-secret":
 					safe.ProviderFactory = provider.GetProvider
@@ -111,8 +146,17 @@ func TestBotSharedSearchFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer runtime.Cleanup()
-			entry := runtime.Agent.ToolIndex.GetToolEntry("perplexity_web_search")
-			_, err = entry.Tool.(chatRuntimeRunnable).Run(runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}}, map[string]any{"query": "fixture"})
+			worker, err := runtime.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: f.req.Run.SessionID.String(), Sessions: runtime.SessionService})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer worker.Cleanup()
+			entry := worker.Agent.ToolIndex.GetToolEntry("perplexity_web_search")
+			if entry == nil {
+				t.Fatal("missing shared search")
+			}
+			workerCtx := agent.WithBotPrivateWorkerExecution(execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity()), f.req.Policy))
+			_, err = entry.Tool.(chatRuntimeRunnable).Run(runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: workerCtx}, sid: f.req.Run.SessionID.String()}}}, map[string]any{"query": "fixture"})
 			switch scenario {
 			case "ambient-secret":
 				if err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY not set") {

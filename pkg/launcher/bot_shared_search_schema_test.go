@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SAP/astonish/pkg/agent"
+	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/common"
 	"github.com/SAP/astonish/pkg/config"
@@ -122,7 +124,14 @@ func TestBotSharedResearchAdvertisedSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer runtime.Cleanup()
-			entry := runtime.Agent.ToolIndex.GetToolEntry("perplexity_web_search")
+			// Search now runs inside the private tool-enabled worker, not on the
+			// tools-less Employee. Resolve the shared search tool from a worker.
+			worker, err := runtime.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: f.req.Run.SessionID.String(), Sessions: runtime.SessionService})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer worker.Cleanup()
+			entry := worker.Agent.ToolIndex.GetToolEntry("perplexity_web_search")
 			if entry == nil {
 				t.Fatal("missing shared search")
 			}
@@ -154,7 +163,7 @@ func TestBotSharedResearchAdvertisedSchema(t *testing.T) {
 				}
 			}
 			invoke := func(a map[string]any) (map[string]any, error) {
-				return entry.Tool.(chatRuntimeRunnable).Run(runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}}, a)
+				return entry.Tool.(chatRuntimeRunnable).Run(runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: agent.WithBotPrivateWorkerExecution(execution.WithBotRunIdentity(f.ctx, execution.BotRunIdentity{BotID: f.req.Bot.ID, RunID: f.req.Run.ID, Version: f.req.Version.Version, ActorID: f.req.Bot.OwnerID.String(), OrgSlug: f.req.Principal.OrgSlug, TeamSlug: f.req.Principal.TeamSlug}))}, sid: f.req.Run.SessionID.String()}}}, a)
 			}
 			originalBytes, _ := json.Marshal(args)
 			originalAction := execution.ActionDescriptor{Tool: "perplexity_web_search", Effect: execution.EffectRead, Arguments: originalBytes, ConstraintsVerified: true}

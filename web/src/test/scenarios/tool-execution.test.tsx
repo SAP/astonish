@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 // Shared mocks (react-markdown, remark-gfm, HomePage, FleetStartDialog, FleetTemplatePicker, MermaidBlock)
 import './scenarioSetup'
 import { renderChat } from '../helpers/renderChat'
@@ -49,9 +49,9 @@ describe('Tool Execution Scenarios', () => {
       }, { timeout: 5000 })
 
       // Only one Agent bubble label while intermediate messages are collapsed.
-      const agentLabels = Array.from(result.container.querySelectorAll('div'))
-        .filter(el => el.children.length === 0 && el.textContent === 'Agent')
-      expect(agentLabels.length).toBe(1)
+      await waitFor(() => {
+        expect(within(result.container).getAllByText('Agent', { exact: true })).toHaveLength(1)
+      }, { timeout: 5000 })
 
       // Intermediate messages are bubbles, never process previews.
       expect(result.container.querySelector('[data-testid="activity-process-text"]')).toBeNull()

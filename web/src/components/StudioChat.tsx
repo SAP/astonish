@@ -389,6 +389,11 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [botThread?.runStates, botThread?.botId, initialSessionId])
   const botBusy = botThread?.status !== 'stopped' && botThread?.status !== 'deleted' && (botRunsBusy(botRunStates) || botOperationsBusy(botOperations))
   const botSubmittingRef = useRef(false)
+  // Tracks whether the component is still mounted. Deferred timers (e.g. the
+  // post-stream loadSessions below) may fire after unmount; guarding on this
+  // prevents a state update against a destroyed React/jsdom environment.
+  const isMountedRef = useRef(true)
+  useEffect(() => () => { isMountedRef.current = false }, [])
   const botThreadRef = useRef(botThread)
   botThreadRef.current = botThread
   const botOperationsRef = useRef(botOperations)
@@ -991,15 +996,17 @@ export default function StudioChat({ theme, initialSessionId, pendingChatMessage
   }, [isStreaming, activeSessionId])
 
   const loadSessions = async () => {
+    if (!isMountedRef.current) return
     try {
       setIsLoadingSessions(true)
       const data = await fetchSessions()
+      if (!isMountedRef.current) return
       setSessions(Array.isArray(data) ? data : [])
     } catch (err: any) {
       console.error('Failed to load sessions:', err)
-      setSessions([])
+      if (isMountedRef.current) setSessions([])
     } finally {
-      setIsLoadingSessions(false)
+      if (isMountedRef.current) setIsLoadingSessions(false)
     }
   }
 

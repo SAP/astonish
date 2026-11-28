@@ -11,6 +11,7 @@ import (
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -63,14 +64,14 @@ func TestBotCatalogueGuardedDispatchFamilies(t *testing.T) {
 				}
 				return safe, nil
 			}
-			r, err := f.construct(t)
+			r, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer r.Cleanup()
-			ctx := execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, policy.Identity()), policy)
+			ctx := agent.WithBotPrivateWorkerExecution(execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, policy.Identity()), policy))
 			ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}})
-			tc := basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}}
+			tc := basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 			var execute tool.Tool
 			for _, candidate := range r.Agent.Tools {
 				if candidate.Name() == "execute_tool" {

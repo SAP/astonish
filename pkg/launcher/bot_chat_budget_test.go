@@ -26,7 +26,7 @@ func TestBotChatFactorySharedAuxiliaryBudget(t *testing.T) {
 	f.cfg.WrapModel = func(_ context.Context, llm model.LLM, b execution.RunBudget) (model.LLM, error) {
 		return provider.NewBudgetLLM(llm, b, provider.BudgetLLMOptions{MaxOutputTokens: 10, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 2, nil }})
 	}
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestBotChatFactoryUnknownCostFailsBeforeAuxiliary(t *testing.T) {
 	f.cfg.WrapModel = func(_ context.Context, llm model.LLM, b execution.RunBudget) (model.LLM, error) {
 		return provider.NewBudgetLLM(llm, b, provider.BudgetLLMOptions{MaxOutputTokens: 10, SupportsOutputLimit: true})
 	}
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}

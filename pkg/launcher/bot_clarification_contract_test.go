@@ -45,23 +45,16 @@ func (m *clarificationContractModel) GenerateContent(_ context.Context, req *mod
 				m.t.Fatalf("effective provider prompt missing %q", want)
 			}
 		}
-		if req.Tools["describe_tools"] == nil || req.Tools["execute_tool"] == nil {
-			m.t.Fatal("provider has no progressive tool discovery/dispatch")
-		}
-		if m.calls == 1 {
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-schema", Name: "describe_tools", Args: map[string]any{"names": []any{"ask_user"}}}}}}, TurnComplete: true}, nil)
-			return
+		if req.Tools["ask_user"] == nil || req.Tools["employee_chat"] == nil || req.Tools["execute_tool"] != nil || req.Tools["describe_tools"] != nil {
+			m.t.Fatal("Employee must expose direct clarification and private orchestration only")
 		}
 		var raw []byte
-		for _, content := range req.Contents {
-			for _, part := range content.Parts {
-				if response := part.FunctionResponse; response != nil && response.ID == "clarification-schema" {
-					raw, _ = json.Marshal(response.Response)
+		for _, group := range req.Config.Tools {
+			for _, declaration := range group.FunctionDeclarations {
+				if declaration.Name == "ask_user" {
+					raw, _ = json.Marshal(declaration)
 				}
 			}
-		}
-		if !strings.Contains(string(raw), `"name":"ask_user"`) {
-			m.t.Fatalf("provider did not discover actual ask_user schema: %s", raw)
 		}
 		for _, want := range []string{"text", "select", "yesno", "allow_custom_answer", "prompt", "options"} {
 			if !strings.Contains(string(raw), want) {
@@ -73,7 +66,7 @@ func (m *clarificationContractModel) GenerateContent(_ context.Context, req *mod
 			args["allow_custom_answer"] = true
 			args["options"] = []any{map[string]any{"id": "trip", "label": "Upcoming trip"}, map[string]any{"id": "home", "label": "Home"}}
 		}
-		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-call", Name: "execute_tool", Args: map[string]any{"name": "ask_user", "arguments": args}}}}}, TurnComplete: true}, nil)
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-call", Name: "ask_user", Args: args}}}}, TurnComplete: true}, nil)
 	}
 }
 

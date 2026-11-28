@@ -353,7 +353,7 @@ func TestBotKnowledgeFactoryPolicyDenial(t *testing.T) {
 		safe.Catalog.Groups = map[string]*agent.ToolGroup{"knowledge": {Name: "knowledge", Tools: []tool.Tool{helper}}}
 		return safe, nil
 	}
-	res, e := f.construct(t)
+	res, e := f.constructWorker(t)
 	if e != nil {
 		t.Fatal(e)
 	}

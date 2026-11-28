@@ -81,16 +81,16 @@ func TestBotPlanPersistenceExactGrant(t *testing.T) {
 				safe.Catalog.Groups = map[string]*agent.ToolGroup{"plan_fixture": {Name: "plan_fixture", Tools: []tool.Tool{probe}}}
 				return safe, nil
 			}
-			r, err := f.construct(t)
+			r, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer r.Cleanup()
 			binding = r.Agent.ToolIndex.GetToolEntry("write_file").Tool.(*chatRuntimeTool).binding
-			ctx := execution.WithBotRunIdentity(f.ctx, spec.Identity)
+			ctx := agent.WithBotPrivateWorkerExecution(execution.WithBotRunIdentity(f.ctx, spec.Identity))
 			ctx = execution.WithRunPolicy(ctx, f.req.Policy)
 			ctx = agent.WithBotPolicyRuntime(ctx, *r.PolicyRuntime)
-			invocation := basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String(), functionCallID: "plan-probe"}}
+			invocation := basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String(), functionCallID: "plan-probe"}}
 			var bridge botRunnableTool
 			for _, candidate := range r.Agent.Tools {
 				if candidate.Name() == "execute_tool" {

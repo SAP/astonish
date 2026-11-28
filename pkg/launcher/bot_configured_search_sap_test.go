@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 	"google.golang.org/adk/tool"
 )
 
@@ -140,11 +141,12 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
 				return &BotChatSafeResources{ProviderFactory: provider.GetProvider, ChatConfig: cfg, Catalog: &ChatCatalogResources{Pool: &remainingModePool{client: &fileOutcomeNode{}}, Groups: map[string]*agent.ToolGroup{"configured_search": {Name: "configured_search", Tools: []tool.Tool{search}}}}, Research: episode, Tools: []tool.Tool{search}, WorkspaceDir: "/isolated", PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}, Mandate: f.req.Mandate}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
-			resources, err := f.construct(t)
+			resources, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
+			tc.sid = uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()
 			timeoutNextDeployment.Store(turn == "transient-deployment-timeout")
 			entry := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
 			if entry == nil {
@@ -153,7 +155,7 @@ func TestBotConfiguredSearchSAPProductionParity(t *testing.T) {
 			// The shared catalog owns configured_search, so retain its scoped wrapper
 			// but exercise the standalone adapter (including its SAP diagnostics).
 			shared, ok := entry.Tool.(*chatRuntimeTool)
-			if !ok || entry.GroupName != "configured_search" {
+			if !ok || entry.GroupName != "_main" || !entry.IsMainTool {
 				t.Fatalf("configured search is not owned by the shared scoped catalog: %+v", entry)
 			}
 			shared.chatRuntimeRunnable = search.(chatRuntimeRunnable)

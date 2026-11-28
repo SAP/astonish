@@ -53,18 +53,12 @@ func testBotForgottenMemoryProvider(t *testing.T, f *botFactoryFixture, r *api.B
 	if strings.Contains(string(raw), forgotten) {
 		t.Fatalf("forgotten search: %s", raw)
 	}
-	getChecked := false
-	for _, entry := range r.Agent.Tools {
-		if entry.Name() == "memory_get" {
-			getChecked = true
-			_, err := entry.(botRunnableTool).Run(c, map[string]any{"path": id})
-			if !errors.Is(err, store.ErrBotNotFound) {
-				t.Fatalf("stale path recall must fail closed: %v", err)
-			}
-		}
-	}
-	if !getChecked {
+	entry := r.Agent.ToolIndex.GetToolEntry("memory_get")
+	if entry == nil {
 		t.Fatal("memory_get missing")
+	}
+	if _, err := entry.Tool.(botRunnableTool).Run(c, map[string]any{"path": id}); !errors.Is(err, store.ErrBotNotFound) {
+		t.Fatalf("stale path recall must fail closed: %v", err)
 	}
 	// Reopening bootstraps the actual index, never historical memory bodies.
 	const currentIndex = "Current goal: prepare the report; output: outputs/report.md"

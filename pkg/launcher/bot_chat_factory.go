@@ -700,7 +700,9 @@ func NewBotChatAgentFactory(cfg BotChatFactoryConfig) (api.BotChatAgentFactory, 
 			freshBinding.declarations = &botDeclarationReads{}
 			freshModel := &botFactoryLLM{LLM: &botProgressLLM{LLM: wrapped, binding: &freshBinding}, binding: &freshBinding}
 			freshScope, freshSafe := *scoped, *safe
-			freshScope.Sessions = directed.Sessions
+			// Scoped engines use the physical run store. The service installs the
+			// private conversation store on ChatAgent after construction.
+			freshScope.Sessions = scoped.Sessions
 			fresh, err := newBotScopedChatRuntime(owner, chatCfg, &botChatDependencies{scope: &freshScope, safe: &freshSafe, binding: &freshBinding, llm: freshModel, contextWindow: contextWindow, credentials: creds})
 			if err != nil {
 				cancel()
@@ -1011,7 +1013,15 @@ func (b *botFactoryBinding) bind(ctx context.Context) context.Context {
 	if end, ok := ctx.Value(botNativeNetworkPreflightKey{}).(func()); ok {
 		owner = context.WithValue(owner, botNativeNetworkPreflightKey{}, end)
 	}
-	return execution.WithRunPolicy(botBoundContext{Context: ctx, owner: owner}, policy)
+	owner = execution.WithRunPolicy(botBoundContext{Context: ctx, owner: owner}, policy)
+	if b.workerOnly {
+		// Mode comes from the original durable request, never Employee prose or
+		// invocation overrides. Rebinding preserves it on initial and resume turns.
+		po := agent.NewBotWorkerPromptOverridesFromBase(agent.PromptOverridesFromContext(b.owner), b.req)
+		po.PlanMode = b.req.PlanMode
+		owner = agent.WithPromptOverrides(owner, po)
+	}
+	return owner
 }
 
 type botBoundContext struct {

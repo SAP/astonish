@@ -17,6 +17,7 @@ import (
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -54,6 +55,10 @@ type discoveryQuestionStore struct {
 	calls *int
 }
 
+func (s *discoveryQuestionStore) AppendBotRunEvent(ctx context.Context, lease store.BotLease, id uuid.UUID, event *session.Event) error {
+	return (workerOutcomeFixtureStore{BotStore: s, fixture: s.fixture}).AppendBotRunEvent(ctx, lease, id, event)
+}
+
 func (s *discoveryQuestionStore) RequestApproval(ctx context.Context, lease store.BotLease, a store.BotApproval) (*store.BotApproval, error) {
 	*s.calls++
 	return s.clarificationStore.RequestApproval(ctx, lease, a)
@@ -63,11 +68,30 @@ type discoveryContractModel struct {
 	t                 *testing.T
 	calls             int
 	finishAfterAction bool
+	employeeCalls     int
+	denied            bool
 }
 
 func (*discoveryContractModel) Name() string { return "discovery-contract" }
 func (m *discoveryContractModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		if req.Tools["employee_chat"] != nil {
+			m.employeeCalls++
+			var content *genai.Content
+			if m.employeeCalls == 1 {
+				content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "discovery-dispatch", Name: "employee_chat", Args: map[string]any{"message": "Inspect the scoped catalog; do not perform external actions."}}}}}
+			} else if m.finishAfterAction {
+				content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "discovery-question", Name: "ask_user", Args: map[string]any{"kind": "text", "prompt": "Which forecast should I use?"}}}}}
+			} else {
+				content = genai.NewContentFromText("The requested tool is outside the allowed policy; no action was performed.", "model")
+			}
+			yield(&model.LLMResponse{Content: content, TurnComplete: true}, nil)
+			return
+		}
+		if req.Tools["search_tools"] == nil {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("The requested tool is outside the allowed policy; no action was performed.", "model"), TurnComplete: true}, nil)
+			return
+		}
 		m.calls++
 		if m.calls > 1 {
 			names := []string{"search_tools", "describe_tools", "execute_tool", "execute_tool"}
@@ -83,20 +107,21 @@ func (m *discoveryContractModel) GenerateContent(_ context.Context, req *model.L
 			raw, _ := json.Marshal(response)
 			switch m.calls {
 			case 2:
-				if !strings.Contains(string(raw), `"tool_name":"ask_user"`) || strings.Contains(string(raw), "shell_command") {
-					m.t.Errorf("search did not return only scoped clarification capability: %s", raw)
+				if strings.Contains(string(raw), `"tool_name":"ask_user"`) || !strings.Contains(string(raw), `"tool_name":"shell_command"`) {
+					m.t.Errorf("private catalog must exclude Employee clarification while allowing metadata discovery: %s", raw)
 				}
 			case 3:
-				if !strings.Contains(string(raw), `"name":"ask_user"`) || !strings.Contains(string(raw), `"required":["kind","prompt"]`) {
-					m.t.Errorf("describe lost scoped capability: %s", raw)
+				if strings.Contains(string(raw), `"name":"ask_user"`) || !strings.Contains(string(raw), `tool \"ask_user\" was not found`) || !strings.Contains(string(raw), `"name":"shell_command"`) {
+					m.t.Errorf("private describe must exclude Employee capability and retain metadata: %s", raw)
 				}
 			case 4:
-				if !m.finishAfterAction && !strings.Contains(string(raw), "outside policy") {
+				m.denied = strings.Contains(string(raw), "outside policy")
+				if !m.denied {
 					m.t.Errorf("excluded target not rejected: %s", raw)
 				}
 			}
 		}
-		if m.calls == 4 && m.finishAfterAction {
+		if m.calls == 3 && m.finishAfterAction {
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("Discovery checked; no schedule created.", "model"), TurnComplete: true}, nil)
 			return
 		}
@@ -104,14 +129,11 @@ func (m *discoveryContractModel) GenerateContent(_ context.Context, req *model.L
 		var args map[string]any
 		switch m.calls {
 		case 1:
-			name, args = "search_tools", map[string]any{"query": "ask user a clarifying question with choices"}
+			name, args = "search_tools", map[string]any{"query": "*"}
 		case 2:
 			name, args = "describe_tools", map[string]any{"names": []any{"ask_user", "shell_command"}}
 		case 3:
 			name, args = "execute_tool", map[string]any{"name": "shell_command", "arguments": map[string]any{"command": "printf forbidden"}}
-			if m.finishAfterAction {
-				name, args = "execute_tool", map[string]any{"name": "ask_user", "arguments": map[string]any{"kind": "text", "prompt": "Which forecast should I use?"}}
-			}
 		case 4:
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("The requested tool is outside the allowed policy; no action was performed.", "model"), TurnComplete: true}, nil)
 			return
@@ -233,7 +255,9 @@ func TestBotMandateDiscoveryNativeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
-	if err == nil || result.Status == store.RunSucceeded {
+	// A blocked private action may be explained successfully by Employee; it
+	// never proves execution or grants an approval.
+	if err != nil || !llm.denied || len(result.Report.Changed) != 0 || len(result.Report.NeedsApproval) != 0 || len(result.Report.Artifacts) != 0 || !strings.Contains(result.Report.Summary, "no action was performed") {
 		t.Fatalf("excluded action was not rejected: result=%+v err=%v", result, err)
 	}
 	for _, unverified := range result.Report.Unverified {

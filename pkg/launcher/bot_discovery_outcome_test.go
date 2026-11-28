@@ -40,15 +40,16 @@ func TestBotDiscoveryOutcomeThroughFactoryRunner(t *testing.T) {
 	if result.Status != store.RunWaitingApproval || len(result.Report.NeedsApproval) != 1 {
 		t.Fatalf("successful scoped discovery downgraded: status=%s report=%+v", result.Status, result.Report)
 	}
-	// The runner counts all three responses; only the target spends action quota.
-	if llm.calls != 3 || *calls != 1 || result.Usage.ToolCalls != 3 || meter.Usage().ToolCalls != 1 {
+	// The dispatch is counted by the runner; only clarification spends action quota.
+	if llm.calls != 3 || *calls != 1 || result.Usage.ToolCalls != 4 || meter.Usage().ToolCalls != 1 {
 		t.Fatalf("duplicate execution or metadata charged as action: rounds=%d calls=%d usage=%+v", llm.calls, *calls, result.Usage)
 	}
-	if len(result.Report.Changed) != 0 || len(result.Report.Artifacts) != 0 || result.Report.NextRunAt != nil || len(result.Report.Unchanged) != 2 {
+	observations := requireEmployeeDispatchObservation(t, result.Report.Unchanged)
+	if len(result.Report.Changed) != 0 || len(result.Report.Artifacts) != 0 || result.Report.NextRunAt != nil || len(observations) != 2 {
 		t.Fatalf("metadata fabricated effects or lost target observation: %+v", result.Report)
 	}
 	for i, name := range []string{"search_tools", "describe_tools"} {
-		e := result.Report.Unchanged[i]
+		e := observations[i]
 		if !bot.ValidObservation(e) || !strings.Contains(e.Source, name+"/discovery-") || !strings.Contains(e.Summary, "metadata") {
 			t.Fatalf("missing exact-call metadata observation: %+v", e)
 		}

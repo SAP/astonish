@@ -16,6 +16,7 @@ import (
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
+	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -56,7 +57,7 @@ func TestInteractiveAccountingDispatchMatrix(t *testing.T) {
 				f.services.PersonalFlows = &productionFlowStore{yaml: "description: counted child\nnodes:\n  - name: read\n    type: tool\n    tools_selection: [read_file]\n    args:\n      path: " + path + "\nflow:\n  - from: START\n    to: read\n  - from: read\n    to: END\n"}
 			}
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: f.files.root, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Guard: workCapabilityFixtureGuard{}, Classifier: botFactoryTestClassifier{}}, ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: f.files.root, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			if route == "child" || route == "child-progressive" {
 				childModel := &fileOutcomeModel{name: "read_file", args: map[string]any{"path": path}}
@@ -65,23 +66,19 @@ func TestInteractiveAccountingDispatchMatrix(t *testing.T) {
 				}
 				f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return childModel, nil }
 			}
-			resources, err := f.construct(t)
+			resources, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer resources.Cleanup()
-			var target *chatRuntimeTool
-			for _, candidate := range resources.Agent.Tools {
-				if candidate.Name() == "read_file" {
-					target = candidate.(*chatRuntimeTool)
-				}
-			}
-			if target == nil {
+			targetEntry := resources.Agent.ToolIndex.GetToolEntry("read_file")
+			if targetEntry == nil {
 				t.Fatal("missing bound read")
 			}
-			ctx, cancel := context.WithTimeout(target.binding.hooks.Context.(botSharedBinding).b.bind(f.ctx), 5*time.Second)
+			target := targetEntry.Tool.(*chatRuntimeTool)
+			ctx, cancel := context.WithTimeout(agent.WithBotPrivateWorkerExecution(target.binding.hooks.Context.(botSharedBinding).b.bind(f.ctx)), 5*time.Second)
 			defer cancel()
-			tc := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}}
+			tc := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 			args := map[string]any{"path": path}
 			readsBefore := f.files.calls
 			want := int64(1)
@@ -104,6 +101,15 @@ func TestInteractiveAccountingDispatchMatrix(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
+				mcpBinding, ok := agent.LazyMCPToolBinding(proxies[0])
+				if !ok {
+					t.Fatal("missing genuine MCP binding")
+				}
+				sharedBinding := target.binding.hooks.Context.(botSharedBinding).b
+				classifier := botSharedMCPClassifier{owner: sharedBinding.owner, fallback: botFactoryTestClassifier{}, targets: map[string]agent.MCPToolBinding{mcpBinding.Identity(): mcpBinding}}
+				runtime := agent.BotPolicyRuntimeFromContext(sharedBinding.owner)
+				runtime.Classifier = classifier
+				sharedBinding.owner = agent.WithBotPolicyRuntime(sharedBinding.owner, runtime)
 				wrapped, e := target.binding.wrap(proxies[0], nil)
 				if e != nil {
 					t.Fatal(e)
@@ -128,9 +134,10 @@ func TestInteractiveAccountingDispatchMatrix(t *testing.T) {
 				}
 			case "child", "child-progressive":
 				mgr := resources.Agent.SubAgentManager
-				result := mgr.RunTask(ctx, agent.SubAgentTask{Name: "accounting-child", Description: "Read once", Instructions: "Read once", ToolSelectionMode: agent.ChildToolSelectionStrict, OverrideTools: []tool.Tool{target}})
+				ctx = agent.WithBotAuxiliaryLLM(ctx, resources.Agent.LLM)
+				result := mgr.RunTask(ctx, agent.SubAgentTask{Name: "accounting-child", Description: "Read once", Instructions: "Read once", ToolSelectionMode: agent.ChildToolSelectionStrict, OverrideTools: []tool.Tool{accountingPrivateChildTool{botRunnableTool: target, binding: target.binding.hooks.Context.(botSharedBinding).b}}})
 				if node.calls != 1 || f.files.calls != readsBefore {
-					t.Fatalf("child: %+v", result)
+					t.Fatalf("child node=%d files=%d before=%d trace=%+v result=%+v", node.calls, f.files.calls, readsBefore, result.Trace, result)
 				}
 			case "flow":
 				f.services.PersonalFlows = &productionFlowStore{yaml: "description: counted child\nnodes:\n  - name: read\n    type: tool\n    tools_selection: [read_file]\n    args:\n      path: " + path + "\nflow:\n  - from: START\n    to: read\n  - from: read\n    to: END\n"}

@@ -196,7 +196,7 @@ func TestEmployeeWorkerFactoryTools(t *testing.T) {
 	if worker.Agent.ToolIndex.GetToolEntry("read_file") == nil {
 		t.Fatal("worker has no real shared file tool")
 	}
-	if worker.Agent.SessionService != ss || f.req.Run.SessionID.String() == id {
+	if worker.SessionService != ss || worker.Agent.SessionService != f.sessions || f.req.Run.SessionID.String() == id {
 		t.Fatal("conversation/execution identities conflated")
 	}
 }
@@ -375,6 +375,13 @@ func (g *employeeInteractiveApprovalGuard) Authorize(_ context.Context, action e
 	return execution.PolicyDecision{Kind: execution.PolicyRequestApproval, ActionDigest: digest, Reason: "exact private source requires owner review"}, err
 }
 
+type workCapabilityFixtureGuard struct{}
+
+func (workCapabilityFixtureGuard) Authorize(_ context.Context, action execution.ActionDescriptor) (execution.PolicyDecision, error) {
+	digest, err := action.Digest()
+	return execution.PolicyDecision{Kind: execution.PolicyAllow, ActionDigest: digest}, err
+}
+
 func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 	for _, interactive := range []bool{false, true} {
 		t.Run(map[bool]string{false: "autonomous", true: "interactive"}[interactive], func(t *testing.T) {
@@ -413,7 +420,7 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 				}
 				f.req.Policy = nil
 				f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-					return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+					return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}, PolicyRuntime: agent.BotPolicyRuntime{Guard: workCapabilityFixtureGuard{}, Classifier: BotCatalogueClassifier{}}}, nil
 				}
 			} else {
 				prepare := f.cfg.Prepare
@@ -425,7 +432,7 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 			}
 			probe := &workCapabilityProbe{}
 			f.ctx = bot.WithBotWorkServices(f.ctx, probe)
-			got, err := f.construct(t)
+			got, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -434,7 +441,7 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 				botWorkReadTool: {}, botWorkUpdateTool: {"expected_revision": float64(0), "kind": "set_remaining", "remaining": []any{map[string]any{"summary": "pending", "reason": "source unavailable", "continuation": "none"}}},
 				botEvidenceReadTool: {"call_id": "earlier"}, botCheckWorkTool: {"question": "supported?", "draft_text": "draft"},
 			}
-			ctx := botFactoryHandoffContext{base: context.Background(), session: f.req.Run.SessionID.String(), functionCallID: "trusted-call"}
+			ctx := botFactoryHandoffContext{base: context.Background(), session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String(), functionCallID: "trusted-call"}
 			byName := map[string]botRunnableTool{}
 			for _, name := range names {
 				if entry := got.Agent.ToolIndex.GetToolEntry(name); entry != nil {
@@ -492,9 +499,9 @@ func TestBotAgentWorkGuardedFactoryAndDiscovery(t *testing.T) {
 				for _, name := range names {
 					before := probe.calls
 					out, err := execute.Run(callCtx, map[string]any{"name": name, "arguments": args[name]})
-					if child && name == botWorkUpdateTool {
-						if probe.calls != before {
-							t.Fatal("child discovery mutated work")
+					if child {
+						if err == nil || probe.calls != before {
+							t.Fatal("child discovery escaped private worker conversation")
 						}
 						continue
 					}
@@ -1147,14 +1154,14 @@ func TestBotChatFactoryFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Cleanup()
-	if a.Agent == b.Agent || a.Agent.ToolIndex == b.Agent.ToolIndex || a.Agent.SubAgentManager == b.Agent.SubAgentManager || a.Agent.Compactor == b.Agent.Compactor || a.Agent.Redactor == b.Agent.Redactor || a.Agent.PendingSecrets == b.Agent.PendingSecrets || a.Agent.LLM == b.Agent.LLM {
+	if a.Agent == b.Agent || a.Agent.ToolIndex == b.Agent.ToolIndex || a.Agent.Compactor == b.Agent.Compactor || a.Agent.Redactor == b.Agent.Redactor || a.Agent.PendingSecrets == b.Agent.PendingSecrets || a.Agent.LLM == b.Agent.LLM {
 		t.Fatal("mutable run resources shared")
 	}
 	if a.Agent.SessionService != f.sessions || a.SessionService != f.sessions || a.Agent.AutoApprove {
 		t.Fatal("session/approval invariant changed")
 	}
-	if a.Agent.SubAgentManager.LLM != a.Agent.LLM || a.Agent.SubAgentManager.Compactor == a.Agent.Compactor {
-		t.Fatal("child wiring not request-local")
+	if a.Agent.SubAgentManager != nil || b.Agent.SubAgentManager != nil || a.WorkerFactory == nil || b.WorkerFactory == nil {
+		t.Fatal("Employee must delegate only through the private worker factory")
 	}
 	if f.wrapped != 2 || len(f.resolver.ids) != 2 || f.resolver.ids[0] != f.req.Run.SessionID {
 		t.Fatal("model pin was not resolved per run")
@@ -1405,7 +1412,7 @@ func (c botFactoryToolContext) Err() error                  { return c.base.Err(
 // not call; context values must still be captured from the accountable owner.
 func TestBotChatFactoryToolRegistrationStaysWrapped(t *testing.T) {
 	f := newBotFactoryFixture(t)
-	res, err := f.construct(t)
+	res, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}

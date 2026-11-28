@@ -35,7 +35,7 @@ func TestBotSharedResearchContinuationCeilingAndDenial(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if result.Metadata["remaining_episode_search_ceiling"] != int64(1-i) {
+				if result.Metadata["episode_search_calls"] != int64(i+1) {
 					t.Fatalf("ceiling: %+v", result.Metadata)
 				}
 			}
@@ -43,6 +43,8 @@ func TestBotSharedResearchContinuationCeilingAndDenial(t *testing.T) {
 				t.Fatal("double or missing reservation")
 			}
 			switch denial {
+			case "quota":
+				runtime.denyReservation = true
 			case "revoked":
 				runtime.revoked = true
 			case "route-changed":

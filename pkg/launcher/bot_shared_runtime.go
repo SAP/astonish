@@ -317,11 +317,40 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 				workerTools = append(workerTools, t)
 			}
 		}
+		// Keep the configured A2A group's qualified identity; flattening every
+		// eager executable into _main makes saved a2a/name approvals unresolvable.
+		if group := wired.PromptBuilder.Catalog; group != nil {
+			for _, g := range group {
+				if g == nil || g.Name != "a2a" {
+					continue
+				}
+				var remaining []tool.Tool
+				for _, t := range workerTools {
+					configured := false
+					for _, candidate := range g.Tools {
+						if t == candidate {
+							configured = true
+							break
+						}
+					}
+					if !configured {
+						remaining = append(remaining, t)
+					}
+				}
+				workerTools = remaining
+			}
+		}
 		// Preserve only already-guarded lazy MCP sets from shared construction.
 		// Copying only Toolsets avoids reintroducing questions or sealed capture
 		// through group.Tools, and retains each original executable wrapper.
 		var workerGroups []*agent.ToolGroup
 		for _, group := range wired.PromptBuilder.Catalog {
+			if group != nil && group.Name == "a2a" {
+				copy := *group
+				copy.Tools = append([]tool.Tool(nil), group.Tools...)
+				workerGroups = append(workerGroups, &copy)
+				continue
+			}
 			if group == nil || !strings.HasPrefix(group.Name, "mcp:") || len(group.Toolsets) == 0 {
 				continue
 			}
@@ -352,6 +381,14 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 		wired.InternalTools = workerTools
 	} else if !b.researchOnly && bot.EmployeeChatServiceFromContext(b.owner) != nil {
 		var employeeTools []tool.Tool
+		// Schedule inspection is scoped local metadata, not a delegation to a
+		// tool-enabled worker. Keep it available during a paused conversation.
+		inspection, err := newBotScheduleInspectionTool(b, in.scope)
+		if err != nil {
+			wired.Cleanup()
+			return nil, err
+		}
+		employeeTools = append(employeeTools, inspection)
 		for _, t := range wired.InternalTools {
 			switch t.Name() {
 			case "ask_user", "propose_bot_control", botWorkReadTool, botWorkUpdateTool, botEvidenceReadTool, botCheckWorkTool:
@@ -400,6 +437,51 @@ func newBotScopedChatRuntime(ctx context.Context, cfg *ChatFactoryConfig, in *bo
 	return wired, nil
 }
 
+// newBotScheduleInspectionTool exposes only the genuine scoped schedule reader.
+// It cannot mutate schedules, create workers, or dispatch sandbox tools.
+func newBotScheduleInspectionTool(b *botFactoryBinding, scope *BotChatScope) (tool.Tool, error) {
+	schedules, err := BotScheduleTools(b.req, scope)
+	if err != nil {
+		return nil, err
+	}
+	reader := schedules[0].(botRunnableTool)
+	return functiontool.New(functiontool.Config{Name: reader.Name(), Description: reader.Declaration().Description}, func(ctx tool.Context, args tools.ListScheduledJobsArgs) (botScheduleListResult, error) {
+		if ctx == nil || b.workerOnly || b.researchOnly || ctx.SessionID() != b.req.Run.SessionID.String() {
+			return botScheduleListResult{}, store.ErrBotForbidden
+		}
+		bound := botBoundToolContext{Context: ctx, owner: b.bind(ctx)}
+		if err := b.check(bound); err != nil {
+			return botScheduleListResult{}, err
+		}
+		for _, disabled := range store.DisabledToolsFromContext(bound) {
+			if disabled == reader.Name() {
+				return botScheduleListResult{}, store.ErrBotForbidden
+			}
+		}
+		if b.req.Mandate != nil {
+			if err := b.req.Mandate.Authorization.Authorize(execution.CapabilityToolExecute, reader.Name()); err != nil {
+				return botScheduleListResult{}, err
+			}
+		}
+		if botFactoryInteractive(b.req) {
+			if err := b.req.Authorization.AuthorizeTool(bound, reader.Name()); err != nil {
+				return botScheduleListResult{}, err
+			}
+		}
+		if err := b.req.Budget.ReserveTool(bound, reader.Name()); err != nil {
+			return botScheduleListResult{}, err
+		}
+		// Reuse the repository reader and its exact-call observation attestation;
+		// never use the generic scheduler or trust model-provided result JSON.
+		repo := scope.Services.Bots
+		jobs := scope.Services.Scheduler
+		if b.req.Bot.Scope == store.BotScopePersonal {
+			repo, jobs = scope.Services.PersonalBots, scope.Services.PersonalScheduler
+		}
+		return (botScheduleTools{request: b.req, repo: repo, services: scope.Services, scheduler: jobs}).list(bound, args)
+	})
+}
+
 type botSharedPrompt string
 
 func (p botSharedPrompt) AddPrompt(_ context.Context, b *agent.SystemPromptBuilder) error {
@@ -425,6 +507,9 @@ type botSharedBinding struct{ b *botFactoryBinding }
 
 func (h botSharedBinding) Bind(ctx context.Context) (context.Context, error) {
 	bound := h.b.bind(ctx)
+	if conversation, ok := ctx.Value(botWorkerConversationKey{}).(botWorkerConversation); ok && conversation.binding == h.b && conversation.id == h.b.conversationID {
+		bound = context.WithValue(bound, botWorkerConversationKey{}, conversation)
+	}
 	// ADK passes the original invocation to declaration processors, not the
 	// InstructionProvider's preparation context. Borrow only the active bounded
 	// read operation; every SQL/lease/membership check below still runs. Never
@@ -442,24 +527,65 @@ func (h botSharedBinding) Bind(ctx context.Context) (context.Context, error) {
 	return agent.PreserveBotInvocationHandoff(api.PreserveCapturedDrillOccurrence(bound, ctx), ctx), nil
 }
 
+type botWorkerConversationKey struct{}
+
+type botWorkerConversation struct {
+	binding *botFactoryBinding
+	id      string
+}
+
 type botWorkerExecutionContext struct {
 	tool.Context
-	sessionID string
+	sessionID    string
+	conversation botWorkerConversation
 }
 
 func (c botWorkerExecutionContext) SessionID() string { return c.sessionID }
+func (c botWorkerExecutionContext) Value(key any) any {
+	if key == (botWorkerConversationKey{}) {
+		return c.conversation
+	}
+	return c.Context.Value(key)
+}
 
 type botSharedDispatch struct{ b *botFactoryBinding }
+
+// BindPreparedPlan admits only the factory-only saved continuation. The entry
+// uses the physical run session, while nested dispatch retains private provenance.
+func (h botSharedDispatch) BindPreparedPlan(ctx tool.Context) (tool.Context, error) {
+	if !h.b.workerOnly {
+		return ctx, nil
+	}
+	prepared := api.BotPreparedPlanSessionFromContext(ctx)
+	if ctx == nil || prepared == nil || prepared.Resume == nil || ctx.SessionID() != h.b.req.Run.SessionID.String() || prepared.Request.Run.ID != h.b.req.Run.ID {
+		return nil, store.ErrBotForbidden
+	}
+	if err := h.b.check(ctx); err != nil {
+		return nil, err
+	}
+	return botWorkerExecutionContext{Context: ctx, sessionID: h.b.req.Run.SessionID.String(), conversation: botWorkerConversation{binding: h.b, id: h.b.conversationID}}, nil
+}
 
 func (h botSharedDispatch) Dispatch(ctx tool.Context, t tool.Tool, args any, next func(tool.Context, any) (map[string]any, error)) (result map[string]any, cause error) {
 	if h.b.workerOnly && (t.Name() == "ask_user" || t.Name() == "employee_chat") {
 		return nil, store.ErrBotForbidden
 	}
-	if h.b.workerOnly && ctx.SessionID() != h.b.conversationID {
-		return nil, store.ErrBotForbidden
-	}
 	if h.b.workerOnly {
-		ctx = botWorkerExecutionContext{Context: ctx, sessionID: h.b.req.Run.SessionID.String()}
+		if ctx == nil || h.b.conversationID == "" {
+			return nil, store.ErrBotForbidden
+		}
+		conversation, nested := ctx.Value(botWorkerConversationKey{}).(botWorkerConversation)
+		if nested {
+			if conversation.binding != h.b || conversation.id != h.b.conversationID || ctx.SessionID() != h.b.req.Run.SessionID.String() {
+				return nil, store.ErrBotForbidden
+			}
+		} else if ctx.SessionID() != h.b.conversationID {
+			return nil, store.ErrBotForbidden
+		}
+		// Retain private conversation provenance separately from the physical run
+		// session used by scoped engines. Nested plan mirrors and verifiers must
+		// redispatch through the same guards, not impersonate a public run call.
+		ctx = botWorkerExecutionContext{Context: ctx, sessionID: h.b.req.Run.SessionID.String(), conversation: botWorkerConversation{binding: h.b, id: h.b.conversationID}}
 	}
 	if c := h.b.req.Run; c.ControlOnly() && !botFactoryInteractive(h.b.req) && h.b.req.Mandate == nil {
 		return nil, store.ErrBotForbidden
@@ -553,7 +679,10 @@ func (h botSharedDispatch) Dispatch(ctx tool.Context, t tool.Tool, args any, nex
 			return run(c, a)
 		}
 	}
-	if botFactoryInteractive(binding.req) {
+	// Private workers use the exact-action boundary even on interactive runs.
+	// The public interactive wrapper uses bare Chat names and cannot consume a
+	// qualified MCP/A2A dispatch handoff or prepare its lazy terminal adapter.
+	if botFactoryInteractive(binding.req) && !binding.workerOnly {
 		return (&interactiveBotTool{botRunnableTool: target, binding: &binding, next: next}).Run(ctx, args)
 	}
 	identity := target.Name()

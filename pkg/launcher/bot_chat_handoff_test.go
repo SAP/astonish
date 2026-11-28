@@ -64,7 +64,7 @@ func TestBotChatFactoryExactGrantDispatchOnce(t *testing.T) {
 		safe.Catalog.Groups = map[string]*agent.ToolGroup{"approved_fixture": {Name: "approved_fixture", Tools: []tool.Tool{target}}}
 		return safe, nil
 	}
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestBotChatFactoryExactGrantDispatchOnce(t *testing.T) {
 	if runnable == nil {
 		t.Fatal("shared Chat execute_tool missing")
 	}
-	tc := botFactoryHandoffContext{Context: nil, base: ctx, session: f.req.Run.SessionID.String(), functionCallID: "handoff-approved-probe"}
+	tc := botFactoryHandoffContext{Context: nil, base: ctx, session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String(), functionCallID: "handoff-approved-probe"}
 	args := map[string]any{"name": "approved_probe", "arguments": map[string]any{}}
 	if _, err := runnable.Run(tc, args); err != nil {
 		t.Fatalf("first approved dispatch: effects=%d authorizations=%d err=%v", effects, guard.calls, err)

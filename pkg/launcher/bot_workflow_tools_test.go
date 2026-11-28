@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/docs/slides"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 	"google.golang.org/adk/tool"
 )
 
@@ -107,15 +107,22 @@ func workflowFactory(t *testing.T, f *botFactoryFixture, names ...string) (func(
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Keep the shared Chat configuration and scoped catalog from the fixture;
-	// ordinary workflow tools must be discovered and executed by Chat itself.
-	r, err := f.construct(t)
-	if err != nil {
-		t.Fatal(err)
+	if len(names) == 1 && names[0] == "ask_user" {
+		r, err := f.construct(t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := r.Agent.ToolIndex.GetToolEntry("ask_user")
+		if entry == nil {
+			t.Fatal("missing Employee question")
+		}
+		tc := botFactoryHandoffContext{base: f.ctx, session: f.req.Run.SessionID.String()}
+		return func(_ string, args map[string]any) (map[string]any, error) {
+			return entry.Tool.(botRunnableTool).Run(tc, args)
+		}, r.Cleanup
 	}
-	ctx := execution.WithRunPolicy(execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity()), f.req.Policy)
-	ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}})
-	tc := botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}
+	// Ordinary workflow execution belongs to the private worker.
+	r, tc := basicFactory(t, f, names...)
 	var execute botRunnableTool
 	for _, x := range r.Agent.Tools {
 		if x.Name() == "execute_tool" {
@@ -123,7 +130,7 @@ func workflowFactory(t *testing.T, f *botFactoryFixture, names ...string) (func(
 		}
 	}
 	if execute == nil {
-		t.Fatal("missing Chat bridge")
+		t.Fatal("missing private Chat bridge")
 	}
 	return func(n string, a map[string]any) (map[string]any, error) {
 		out, err := execute.Run(tc, map[string]any{"name": n, "arguments": a})
@@ -269,7 +276,7 @@ func TestBotWorkflowFleetProfileAndExactReview(t *testing.T) {
 		t.Fatalf("draft isolation: %v", err)
 	}
 	done()
-	drafts := &workflowScopedDrafts{t: t, owner: f.req.Bot.OwnerID.String(), session: f.req.Run.SessionID.String()}
+	drafts := &workflowScopedDrafts{t: t, owner: f.req.Bot.OwnerID.String(), session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}
 	f.services.FleetSetupDrafts = drafts
 	call, scopedDone := workflowFactory(t, f, "get_setup_profile")
 	defer scopedDone()

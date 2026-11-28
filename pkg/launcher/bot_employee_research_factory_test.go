@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
 	"github.com/SAP/astonish/pkg/tools"
+	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 	"iter"
@@ -90,8 +92,19 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 		t.Fatal("narrowed research catalog must contain exactly configured search and web_fetch")
 	}
 	// The original and repair share the exact configured episode and total quota.
-	original := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName).Tool.(botRunnableTool)
-	if _, err = original.Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "overview"}); err != nil {
+	worker, err := resources.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String(), Sessions: f.sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Cleanup()
+	entry := worker.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
+	if entry == nil {
+		t.Fatal("private worker missing configured research")
+	}
+	original := entry.Tool.(botRunnableTool)
+	workerContext := optionalKnowledgeContext{knowledgeCtx(f)}
+	workerContext.sid = uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()
+	if _, err = original.Run(workerContext, map[string]any{"facet": "overview"}); err != nil {
 		t.Fatal(err)
 	}
 	continued := continuedTools[BotConfiguredSearchToolName]
@@ -101,7 +114,9 @@ func TestBotEmployeeProductionResearchFactory(t *testing.T) {
 	if searchModel.calls != 2 || runtime.calls != 2 || episode.State() != BotResearchSearched {
 		t.Fatal("repair did not acquire additional configured sources")
 	}
-	if _, err = continued.Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "recent"}); err == nil {
+	// A repeated successful facet is cached; a new admitted facet must still
+	// share the original search quota rather than acquire a fresh repair budget.
+	if _, err = continued.Run(optionalKnowledgeContext{knowledgeCtx(f)}, map[string]any{"facet": "outlook"}); err == nil {
 		t.Fatal("repair exceeded original quota")
 	}
 	// Both model and tools bind the narrowed runtime even when invoked with a
@@ -538,12 +553,12 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			// Retain the shared catalog's scoped wrapper and exact ownership while
 			// using the standalone episode adapter for this guided source journey.
 			boundFactory := func(ctx context.Context, req bot.RunRequest) (*api.BotChatResources, error) {
-				resources, err := factory(ctx, req)
+				resources, err := outcomeWorkerFactory(factory)(ctx, req)
 				if err != nil {
 					return nil, err
 				}
-				entry := resources.Agent.ToolIndex.GetToolEntry(BotConfiguredSearchToolName)
-				if entry == nil || entry.GroupName != "configured_search" {
+				entry := resources.Agent.ToolIndex.GetToolEntry("perplexity_web_search")
+				if entry == nil {
 					resources.Cleanup()
 					return nil, fmt.Errorf("configured search missing shared catalog ownership")
 				}
@@ -580,7 +595,7 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			}
 			result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("result=%+v cause=%+v producer=%d reviews=%d", result, errors.Unwrap(err), producerCalls, reviews)
 			}
 			if continuationError {
 				state, loadErr := repo.(store.BotWorkStore).LoadWork(worker, lease)
@@ -661,11 +676,38 @@ func TestBotEmployeeGuidedResearchProductionJourney(t *testing.T) {
 			if !strings.Contains(fmt.Sprint(state.Candidate.Bodies), breadth) {
 				t.Fatal("additional persisted evidence not rehydrated")
 			}
+			// Public research remains durable accounting, not an execution ceiling.
+			// Count the persisted reservations before probing another legitimate call;
+			// a continuation must neither reset the ledger nor charge searches twice.
+			reservations := 0
+			var cursor int64
+			for {
+				activities, activityErr := repo.ListActivity(owner, b.ID, cursor, 100)
+				if activityErr != nil {
+					t.Fatal(activityErr)
+				}
+				if len(activities) == 0 {
+					break
+				}
+				for _, activity := range activities {
+					cursor = activity.Sequence
+					var record struct {
+						RunID  string `json:"run_id"`
+						Action *int   `json:"action"`
+					}
+					if json.Unmarshal(activity.Payload, &record) == nil && record.RunID == id.RunID.String() && record.Action != nil && *record.Action == 5 {
+						reservations++
+					}
+				}
+			}
+			if reservations != wantSearch {
+				t.Fatalf("durable research reservations=%d want=%d", reservations, wantSearch)
+			}
 			quotaErr := rt.(interface {
 				ReserveBotPublicResearch(context.Context, execution.BotMandateRef, string) error
 			}).ReserveBotPublicResearch(worker, *admission.Run.MandateRef, f.req.Run.SessionID.String())
-			if (quotaErr == nil) != scenario.recovery {
-				t.Error("continuation escaped same durable two-call research quota")
+			if quotaErr != nil {
+				t.Fatalf("legacy search hint imposed execution ceiling: %v", quotaErr)
 			}
 			if got := f.req.Budget.(*bot.SharedRunBudget).Usage(); got.InputTokens != int64(3*wantSearch) || got.OutputTokens != int64(5*wantSearch) || got.ToolCalls != wantTools {
 				t.Errorf("shared research accounting mismatch: %+v", got)

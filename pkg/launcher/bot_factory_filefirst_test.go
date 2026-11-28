@@ -39,7 +39,7 @@ func TestBotFileFirstFactoryConfinedViews(t *testing.T) {
 				safe, err = prepare(ctx, r, s)
 				return safe, err
 			}
-			resources, err := f.construct(t)
+			resources, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}

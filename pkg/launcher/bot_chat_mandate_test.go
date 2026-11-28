@@ -59,7 +59,7 @@ func TestBotChatFactoryMandateWithoutTurnRegistry(t *testing.T) {
 		t.Fatal("mandate entered interactive execution")
 	}
 	f.req.Interactive = false
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestBotChatFactoryMandateWithoutTurnRegistry(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("shared catalog missing %s", name)
 		}
-		invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+		invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 		if _, err := entry.Tool.(botRunnableTool).Run(invocation, map[string]any{}); err == nil {
 			t.Fatalf("mandate allowed unauthorized %s", name)
 		}
@@ -81,7 +81,7 @@ func TestBotChatFactoryMandateWithoutTurnRegistry(t *testing.T) {
 	if read == nil {
 		t.Fatal("mandate read missing")
 	}
-	invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: f.req.Run.SessionID.String()}}
+	invocation := sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: f.ctx}, sid: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 	if _, err := read.Tool.(botRunnableTool).Run(invocation, map[string]any{"path": "outputs/report.md"}); err != nil || client.calls != 1 {
 		t.Fatalf("authorized read failed: calls=%d err=%v", client.calls, err)
 	}

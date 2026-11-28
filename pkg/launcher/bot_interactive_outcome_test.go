@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
@@ -96,21 +97,21 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			llm := &fileOutcomeModel{name: tc.name, args: args}
 			f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
 			f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-				return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: f.files.root, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+				return &BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Guard: workCapabilityFixtureGuard{}, Classifier: botFactoryTestClassifier{}}, ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: node}}, WorkspaceDir: f.files.root, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}
 			factory, err := NewBotChatAgentFactory(f.cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapter, err := api.NewBotChatRuntimeAdapter(factory)
+			adapter, err := api.NewBotChatRuntimeAdapter(outcomeWorkerFactory(factory))
 			if err != nil {
 				t.Fatal(err)
 			}
 			writesBefore := f.files.writes
 			result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
 			if tc.strip {
-				if err == nil || !strings.Contains(err.Error(), store.ErrBotConflict.Error()) {
-					t.Fatalf("missing retained receipt did not fail closed: %v", err)
+				if err == nil || result.Status != store.RunFailed || result.Report.Failure == nil || !strings.Contains(llm.toolResponses, store.ErrBotConflict.Error()) {
+					t.Fatalf("missing retained receipt did not fail closed: %v responses=%s", err, llm.toolResponses)
 				}
 			} else if err != nil {
 				t.Fatal(err)
@@ -118,7 +119,7 @@ func TestInteractiveChatOutcomeAccountingThroughRunner(t *testing.T) {
 			wantNode, wantWrites := 1, 0
 			// Ordinary file tools now execute through Chat's sandbox node; the
 			// retained-file service is reserved for publication and internal state.
-			if node.calls != wantNode || f.files.writes-writesBefore != wantWrites || result.Usage.ToolCalls != 1 {
+			if node.calls != wantNode || f.files.writes-writesBefore != wantWrites || result.Usage.ToolCalls != 1 || meter.Usage().ToolCalls != 1 {
 				t.Fatalf("executions=%d usage=%+v", node.calls, result.Usage)
 			}
 			want := store.RunSucceeded

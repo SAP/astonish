@@ -106,7 +106,7 @@ func productionFactoryTool(t *testing.T, f *botFactoryFixture, name string, reso
 		safe.Catalog = &resources
 		return safe, nil
 	}
-	r, err := f.construct(t)
+	r, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func productionFactoryTool(t *testing.T, f *botFactoryFixture, name string, reso
 	}
 	for _, candidate := range r.Agent.Tools {
 		if candidate.Name() == "execute_tool" {
-			return factoryBridgeTarget{botRunnableTool: entry.Tool.(botRunnableTool), bridge: candidate.(botRunnableTool)}, basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: f.ctx, session: f.req.Run.SessionID.String(), functionCallID: "production-" + name}}
+			return factoryBridgeTarget{botRunnableTool: entry.Tool.(botRunnableTool), bridge: candidate.(botRunnableTool)}, basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: f.ctx, session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String(), functionCallID: "production-" + name}}
 		}
 	}
 	t.Fatal("shared progressive bridge missing")
@@ -143,7 +143,7 @@ func TestBotSharedEmailCatalogConfiguredTransport(t *testing.T) {
 		safe.Catalog.Pool = productionCapabilityPool{backend: backend, client: client}
 		return safe, nil
 	}
-	r, err := f.construct(t)
+	r, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestBotSharedEmailMissingTransportDoesNotInherit(t *testing.T) {
 		}
 		return safe, err
 	}
-	r, err := f.construct(t)
+	r, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}

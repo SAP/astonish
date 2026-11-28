@@ -111,7 +111,7 @@ func TestBotPriorRetrievalProvenanceFollowup(t *testing.T) {
 					return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 				}
 			}
-			resources, err := f.construct(t)
+			resources, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -158,7 +158,7 @@ func TestBotPriorProvenanceScopeAndBounds(t *testing.T) {
 			case "url-only":
 				reader.events = []store.BotTranscriptEvent{provenanceEvent(1, previous.CreatedAt, &genai.Part{Text: "https://news.example/story web_fetch"})}
 			}
-			resources, err := f.construct(t)
+			resources, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}

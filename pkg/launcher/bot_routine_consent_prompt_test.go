@@ -66,7 +66,7 @@ func TestBotFactoryRoutineScheduleConsent(t *testing.T) {
 	}
 
 	// Discovery and schema descriptions must agree with the system instruction.
-	constructed, err := f.construct(t)
+	constructed, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}

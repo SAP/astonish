@@ -20,10 +20,11 @@ import (
 // Observe the exact provider-bound request, not a prompt helper. The optional
 // update runs through the production tool and work service between dispatches.
 type agentWorkPromptModel struct {
-	t       *testing.T
-	repo    *sourceRedactionRepo
-	prompts []string
-	update  bool
+	t                  *testing.T
+	repo               *sourceRedactionRepo
+	prompts            []string
+	update             bool
+	employeeDispatched bool
 }
 
 func (*agentWorkPromptModel) Name() string { return "agent-work-prompt-probe" }
@@ -31,6 +32,23 @@ func (m *agentWorkPromptModel) GenerateContent(_ context.Context, req *model.LLM
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if req.Config == nil || req.Config.SystemInstruction == nil {
 			m.t.Fatal("missing provider system instruction")
+		}
+		employee := false
+		for _, group := range req.Config.Tools {
+			for _, declaration := range group.FunctionDeclarations {
+				if declaration.Name == "employee_chat" {
+					employee = true
+				}
+			}
+		}
+		if employee && m.update && !m.employeeDispatched {
+			m.employeeDispatched = true
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "delegate-prompt-update", Name: "employee_chat", Args: map[string]any{"message": "Update the private work notes to updated-private-note using the scoped work service."}}}}}, TurnComplete: true}, nil)
+			return
+		}
+		if employee && m.update {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("A bounded answer from the supplied evidence.", "model"), TurnComplete: true}, nil)
+			return
 		}
 		var system strings.Builder
 		for _, p := range req.Config.SystemInstruction.Parts {
@@ -48,19 +66,19 @@ func (m *agentWorkPromptModel) GenerateContent(_ context.Context, req *model.LLM
 			"## Agent-owned work",
 			"Bare listing headlines and URL slugs are not support for details, causality or recommendations beyond their actual content",
 			"Substantive search output is different: judge what its text supports and attribute secondary reporting honestly",
-			"Substantive, attributed search summaries and credible secondary reporting can support an ordinary overview",
+			"For ordinary information, a dated, substantive answer from the configured Perplexity search provider with real source links is adequate",
 			"For explicit verification or a high-stakes decision or action, inspect the primary/live source",
 			"including actionable numbers on which the decision or action depends",
 			"For an ordinary roundup, substantive sourced search output is usable by default",
 			"Primary-source fetches fill a material gap, not a routine verification step",
-			"An older page, a different version or a failed fetch is not contradictory evidence by itself",
+			"an older/different-version page or a failed fetch is not a material factual contradiction",
 			"Preserve distinct relevant developments already supported by returned coverage",
 			"shorten individual stories before dropping supported coverage",
 			"not a verification diary",
 			"do not embellish beyond the retrieved text",
 			"do not imply an unread linked page was inspected",
-			"Preserve relevant, reasonably supported breadth",
-			"Explicitly requested depth and verification still apply",
+			"preserve unrelated supported coverage",
+			"The owner's requested depth and coverage govern; preserve detailed assignments",
 			"## Current durable work",
 			"They are not prerequisites to a final answer",
 			"Stock Market News",
@@ -111,6 +129,10 @@ func TestBotAgentWorkProductionFactoryPrompt(t *testing.T) {
 				repo := &sourceRedactionRepo{botFactoryTestRepo: botFactoryTestRepo{fixture: f}, state: w}
 				f.services.Bots, f.services.PersonalBots = repo, repo
 				llm := &agentWorkPromptModel{t: t, repo: repo, update: update}
+				if update {
+					workerStore := workerWorkOutcomeFixtureStore{workerOutcomeFixtureStore: workerOutcomeFixtureStore{BotStore: repo, fixture: f}, BotWorkStore: repo}
+					f.services.Bots, f.services.PersonalBots = workerStore, workerStore
+				}
 				f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
 				var err error
 				f.req.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{botWorkUpdateTool}})
@@ -123,7 +145,7 @@ func TestBotAgentWorkProductionFactoryPrompt(t *testing.T) {
 					f.req.Authorization = interactiveFactoryAuthorization{}
 					f.req.Policy = nil
 					f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-						return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+						return &BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Guard: workCapabilityFixtureGuard{}, Classifier: BotCatalogueClassifier{}}, ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 					}
 				} else {
 					f.req.Run.Trigger = store.TriggerCron

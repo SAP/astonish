@@ -61,7 +61,7 @@ func TestBotMemoryUnavailableHasNoGenericFallback(t *testing.T) {
 					return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &catalogTestPool{}}, WorkspaceDir: "/isolated", VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 				}
 			}
-			r, err := f.construct(t)
+			r, err := f.constructWorker(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,7 +109,7 @@ func TestBotChatCurrentMemoryScopeAndFence(t *testing.T) {
 				if err != nil || !strings.Contains(text, "Delivery is Friday") || strings.Contains(text, "another Bot") || strings.Contains(text, "viewer secret") {
 					t.Fatalf("scope: %q %v", text, err)
 				}
-				resources, err := f.construct(t)
+				resources, err := f.constructWorker(t)
 				if err != nil {
 					t.Fatal(err)
 				}

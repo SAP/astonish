@@ -81,15 +81,23 @@ func (f fileOutcomeFiles) Write(ctx context.Context, id store.BotID, w store.Bot
 }
 
 type fileOutcomeModel struct {
-	name  string
-	args  map[string]any
-	calls int
+	name          string
+	args          map[string]any
+	calls         int
+	toolResponses string
 }
 
 func (*fileOutcomeModel) Name() string { return "file-outcome" }
 func (m *fileOutcomeModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
+		for _, content := range req.Contents {
+			for _, part := range content.Parts {
+				if part.FunctionResponse != nil {
+					m.toolResponses += fmt.Sprint(part.FunctionResponse.Response)
+				}
+			}
+		}
 		content := genai.NewContentFromText("Observed file operation.", "model")
 		if m.calls == 1 {
 			name, args := m.name, m.args
@@ -217,7 +225,7 @@ func TestBotBuiltinFileOutcomesThroughRunner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			adapter, err := api.NewBotChatRuntimeAdapter(factory)
+			adapter, err := api.NewBotChatRuntimeAdapter(outcomeWorkerFactory(factory))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -234,8 +242,8 @@ func TestBotBuiltinFileOutcomesThroughRunner(t *testing.T) {
 			}
 			invalidWriteReceipt := name == "write_file" && (tc.stripReceipt || tc.tamperReceipt)
 			if invalidWriteReceipt {
-				if err == nil || !strings.Contains(err.Error(), store.ErrBotConflict.Error()) {
-					t.Fatalf("invalid retained receipt did not fail closed: %v", err)
+				if err == nil || result.Status != store.RunFailed || result.Report.Failure == nil || !strings.Contains(llm.toolResponses, store.ErrBotConflict.Error()) {
+					t.Fatalf("invalid retained receipt did not fail closed: %v result=%+v responses=%s", err, result, llm.toolResponses)
 				}
 			} else if err != nil {
 				t.Fatal(err)

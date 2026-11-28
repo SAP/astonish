@@ -63,14 +63,11 @@ func (m *schedulerDispatchModel) GenerateContent(_ context.Context, req *model.L
 				names[d.Name]++
 			}
 		}
-		if names["execute_tool"] != 1 || req.Tools["execute_tool"] == nil {
-			m.t.Errorf("authorized scheduler bridge missing: declarations=%v dispatch=%v", names, req.Tools)
+		if names["list_scheduled_jobs"] != 1 || req.Tools["list_scheduled_jobs"] == nil {
+			m.t.Errorf("native scoped scheduler inspection missing: declarations=%v dispatch=%v", names, req.Tools)
 		}
-		if names["shell_command"] != 0 || req.Tools["shell_command"] != nil {
-			m.t.Error("excluded tool exposed")
-		}
-		if names["list_scheduled_jobs"] != 0 {
-			m.t.Error("scheduler bypassed progressive provider contract")
+		if names["execute_tool"] != 0 || req.Tools["execute_tool"] != nil || names["shell_command"] != 0 || req.Tools["shell_command"] != nil {
+			m.t.Error("Employee exposed private execution tools")
 		}
 		raw, _ := json.Marshal(req.Config.Tools)
 		if m.firstDeclarations == "" {
@@ -99,12 +96,11 @@ func (m *schedulerDispatchModel) GenerateContent(_ context.Context, req *model.L
 		}
 		if m.calls == 1 {
 			args := map[string]any{"filter": "weather"}
-			target := m.callName
-			if target == "execute_tool" {
-				target = "list_scheduled_jobs"
+			name := m.callName
+			if name == "execute_tool" {
+				args = map[string]any{"name": "list_scheduled_jobs", "arguments": args}
 			}
-			args = map[string]any{"name": target, "arguments": args}
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "current-list", Name: "execute_tool", Args: args}}}}, TurnComplete: true}, nil)
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "current-list", Name: name, Args: args}}}}, TurnComplete: true}, nil)
 			return
 		}
 		yield(&model.LLMResponse{Content: genai.NewContentFromText("Schedules inspected; no schedule changed.", "model"), TurnComplete: true}, nil)
@@ -175,7 +171,7 @@ func testBotSchedulerDispatch(t *testing.T, purpose execution.BotMandatePurpose)
 					t.Fatal(err)
 				}
 			}
-			for i, call := range []string{"list_scheduled_jobs", "execute_tool", "list_scheduled_jobs", "execute_tool", "shell_command", "list_scheduled_jobs_future", "update_scheduled_job", "http_request"} {
+			for i, call := range []string{"list_scheduled_jobs", "list_scheduled_jobs", "list_scheduled_jobs", "list_scheduled_jobs", "shell_command", "list_scheduled_jobs_future", "update_scheduled_job", "http_request", "execute_tool"} {
 				readsBefore := jobs.calls
 				excluded := i >= 4
 				foreign := i == 2 || i == 3

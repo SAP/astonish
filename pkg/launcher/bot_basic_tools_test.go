@@ -47,22 +47,50 @@ func basicFactory(t *testing.T, f *botFactoryFixture, names ...string) (*api.Bot
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(resources.Cleanup)
-	s, err := f.sessions.Get(f.ctx, &session.GetRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: f.req.Run.SessionID.String()})
+	workerID := uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()
+	s, err := f.sessions.Get(f.ctx, &session.GetRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: workerID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity())
+	ctx := agent.WithBotPrivateWorkerExecution(execution.WithBotRunIdentity(f.ctx, f.req.Policy.Identity()))
 	ctx = execution.WithRunPolicy(ctx, f.req.Policy)
 	if resources.PolicyRuntime != nil {
 		ctx = agent.WithBotPolicyRuntime(ctx, *resources.PolicyRuntime)
 	}
-	return resources, basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: f.req.Run.SessionID.String()}, state: s.Session.State()}
+	return resources, basicToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: ctx, session: workerID}, state: s.Session.State()}
 }
+
+// constructWorker exercises the production private execution role rather than
+// giving the public Employee execution tools. Its conversation is isolated from
+// the durable public run session, and is stable across fixture reconstruction.
+func (f *botFactoryFixture) constructWorker(t *testing.T) (*api.BotChatResources, error) {
+	t.Helper()
+	employee, err := f.construct(t)
+	if err != nil {
+		return nil, err
+	}
+	id := uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()
+	if _, err := f.sessions.Get(f.ctx, &session.GetRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+		if _, err := f.sessions.Create(f.ctx, &session.CreateRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: id}); err != nil {
+			employee.Cleanup()
+			return nil, err
+		}
+	}
+	worker, err := employee.WorkerFactory(f.ctx, api.BotEmployeeWorkerRequest{Request: f.req, ConversationID: id, Sessions: f.sessions})
+	if err != nil {
+		employee.Cleanup()
+		return nil, err
+	}
+	cleanup := worker.Cleanup
+	worker.Cleanup = func() { cleanup(); employee.Cleanup() }
+	return worker, nil
+}
+
 func basicCall(t *testing.T, r *api.BotChatResources, c tool.Context, name string, args any) map[string]any {
 	t.Helper()
 	for _, entry := range r.Agent.Tools {
@@ -368,6 +396,7 @@ func TestBotBasicMemoryClassification(t *testing.T) {
 
 func sForBasicRestore(t *testing.T, f *botFactoryFixture) session.Session {
 	t.Helper()
+	// Plan snapshots belong to the physical run, not the private conversation.
 	s, err := f.sessions.Get(f.ctx, &session.GetRequest{AppName: "astonish", UserID: f.req.Bot.OwnerID.String(), SessionID: f.req.Run.SessionID.String()})
 	if err != nil {
 		t.Fatal(err)

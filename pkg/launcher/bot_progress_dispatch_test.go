@@ -113,18 +113,16 @@ func TestBotProgressDispatchInteractiveNative(t *testing.T) {
 	f.req.Authorization = interactiveFactoryAuthorization{}
 	f.req.Policy = nil
 	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: t.TempDir(), VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
+		return &BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Guard: workCapabilityFixtureGuard{}, Classifier: botFactoryTestClassifier{}}, ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &interactiveOutcomePool{node: &fileOutcomeNode{}}}, WorkspaceDir: t.TempDir(), VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 	}
-	resources, err := f.construct(t)
+	resources, err := f.constructWorker(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resources.Cleanup()
 	var target *chatRuntimeTool
-	for _, candidate := range resources.Agent.Tools {
-		if candidate.Name() == "read_file" {
-			target = candidate.(*chatRuntimeTool)
-		}
+	if entry := resources.Agent.ToolIndex.GetToolEntry("read_file"); entry != nil {
+		target = entry.Tool.(*chatRuntimeTool)
 	}
 	if target == nil {
 		t.Fatal("missing native read")
@@ -134,7 +132,7 @@ func TestBotProgressDispatchInteractiveNative(t *testing.T) {
 	binding.req.Version.Budget.RuntimePolicy = execution.NewBotProgressRuntimePolicy()
 	binding.owner = bot.WithProgressDispatch(binding.owner, p)
 	binding.installProgressBridge()
-	ctx := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: binding.owner, session: f.req.Run.SessionID.String()}}
+	ctx := accountingToolContext{botFactoryHandoffContext: botFactoryHandoffContext{base: agent.WithBotPrivateWorkerExecution(binding.bind(f.ctx)), session: uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()}}
 	// Missing file still proves the shared native read completed, not an uncertain write.
 	_, err = target.Run(ctx, map[string]any{"path": filepath.Join(t.TempDir(), "nonexistent-progress-read")})
 	if err == nil || !strings.Contains(err.Error(), "no such file or directory") {

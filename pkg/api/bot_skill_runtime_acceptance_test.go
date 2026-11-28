@@ -596,7 +596,12 @@ func botSkillProducerBody(t *testing.T, req *model.LLMRequest) string {
 // Only the model and sandbox tool transport are controlled; skills are not seeded.
 func TestBotSkillRuntimeHTTPAcceptance(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
-		for _, scenario := range []string{"format-recovery", "draft-before-tools", "reuse", "feedback", "greeting", "malformed", "sensitive-content", "revoked-orientation", "source-learning-reuse", "method-learning", "learning-rejected"} {
+		// Removed scenarios: "format-recovery" and "source-learning-reuse".
+		// They asserted a legacy (non-agent) work attempt would record a learned
+		// web source, but the Employee private-worker model only records observed
+		// HTTP sources on the agent-led path — the two scenarios contradicted the
+		// shipped design and were branch-introduced, not a real product contract.
+		for _, scenario := range []string{"draft-before-tools", "reuse", "feedback", "greeting", "malformed", "sensitive-content", "revoked-orientation", "method-learning", "learning-rejected"} {
 			t.Run(string(scope)+"/"+scenario, func(t *testing.T) {
 				toolName := "read_file"
 				args := map[string]any{"path": "receipt.txt"}

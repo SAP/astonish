@@ -25,6 +25,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/ollama"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
 	"github.com/SAP/astonish/pkg/provider/openai_compat"
+	"github.com/SAP/astonish/pkg/provider/opencode"
 	"github.com/SAP/astonish/pkg/provider/openrouter"
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
@@ -356,6 +357,17 @@ func handleSetupCommand() error {
 			} else {
 				goto SaveConfig
 			}
+		case "opencode":
+			runAPIKeyForm("OpenCode Go API Key", "api_key", pCfg)
+			if err := fetchAndSelectOpenCodeModel(pCfg, cfg); err != nil {
+				if isUserAborted(err) {
+					fmt.Println("Setup aborted by user; no changes were saved.")
+					return nil
+				}
+				fmt.Printf("Warning: Failed to fetch/select OpenCode models: %v\n", err)
+			} else {
+				goto SaveConfig
+			}
 		case "openrouter":
 			runAPIKeyForm("OpenRouter API Key", "api_key", pCfg)
 			if err := fetchAndSelectOpenRouterModel(pCfg, cfg); err != nil {
@@ -520,6 +532,7 @@ func selectProviderType() string {
 		huh.NewOption(provider.GetProviderDisplayName("ollama"), "ollama"),
 		huh.NewOption(provider.GetProviderDisplayName("openai"), "openai"),
 		huh.NewOption(provider.GetProviderDisplayName("openai_compat"), "openai_compat"),
+		huh.NewOption(provider.GetProviderDisplayName("opencode"), "opencode"),
 		huh.NewOption(provider.GetProviderDisplayName("openrouter"), "openrouter"),
 		huh.NewOption(provider.GetProviderDisplayName("poe"), "poe"),
 		huh.NewOption(provider.GetProviderDisplayName("sap_ai_core"), "sap_ai_core"),
@@ -1450,7 +1463,44 @@ func fetchAndSelectOpenAICompatModel(pCfg config.ProviderConfig, appCfg *config.
 	return nil
 }
 
-// handleWebToolSetup prompts the user to configure a standard web tool MCP server.
+func fetchAndSelectOpenCodeModel(pCfg config.ProviderConfig, appCfg *config.AppConfig) error {
+	apiKey := pCfg["api_key"]
+
+	runSpinner("Fetching models from OpenCode Go...")
+
+	models, err := opencode.ListModels(context.Background(), apiKey)
+	if err != nil {
+		return err
+	}
+
+	if len(models) == 0 {
+		return fmt.Errorf("no models found")
+	}
+
+	var options []huh.Option[string]
+	for _, m := range models {
+		options = append(options, huh.NewOption(m, m))
+	}
+
+	var selectedModel string
+
+	clearScreen()
+	err = huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select an OpenCode Go Model").
+				Options(options...).
+				Value(&selectedModel),
+		),
+	).Run()
+
+	if err != nil {
+		return err
+	}
+
+	appCfg.General.DefaultModel = selectedModel
+	return nil
+}
 func handleWebToolSetup() error {
 	// Check if any web tool is already configured
 	appCfg, err := config.LoadAppConfig()

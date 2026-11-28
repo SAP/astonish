@@ -3665,6 +3665,11 @@ func codeProviderTypes() []backend.ProviderTypeInfo {
 			},
 		},
 		{
+			ID:          "opencode",
+			DisplayName: provider.GetProviderDisplayName("opencode"),
+			Fields:      []backend.ProviderField{apiKey},
+		},
+		{
 			ID:          "ollama",
 			DisplayName: provider.GetProviderDisplayName("ollama"),
 			Fields: []backend.ProviderField{

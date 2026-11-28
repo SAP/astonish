@@ -1741,7 +1741,7 @@ func GetProviderType(instanceName string, instance ProviderConfig) string {
 
 	knownTypes := []string{
 		"anthropic", "copilot_oauth", "gemini", "groq", "litellm", "lm_studio",
-		"ollama", "openai", "openrouter", "poe", "sap_ai_core", "xai", "xai_oauth",
+		"ollama", "opencode", "openai", "openrouter", "poe", "sap_ai_core", "xai", "xai_oauth",
 	}
 
 	for _, knownType := range knownTypes {

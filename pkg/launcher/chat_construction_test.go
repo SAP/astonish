@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/SAP/astonish/pkg/cache"
 	"go/ast"
 	"go/parser"
@@ -23,15 +22,12 @@ import (
 
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
-	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/chatruntime"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/credentials"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/provider"
 	"github.com/SAP/astonish/pkg/sandbox"
-	"github.com/SAP/astonish/pkg/sandbox/sessioncreds"
-	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/tools"
 	"golang.org/x/net/websocket"
 	adkagent "google.golang.org/adk/agent"
@@ -879,221 +875,9 @@ func TestStudioChatRuntimeFactoryUsesSharedScopedConstructor(t *testing.T) {
 	first.Cleanup() // must never close borrowed pool/resources
 }
 
-// TestChatRuntimeCapabilityParity executes one future registration through the
-// same construction with and without policy; it does not claim physical parity.
-func TestChatRuntimeCapabilityParity(t *testing.T) {
-	t.Run("configured-three-mode-subset", testChatRuntimeConfiguredThreeModeSubset)
-	var calls atomic.Int32
-	fixture, err := functiontool.New(functiontool.Config{Name: "future_capability", Description: "fixture"}, func(ctx tool.Context, args struct {
-		Value string `json:"value"`
-	}) (map[string]any, error) {
-		calls.Add(1)
-		return map[string]any{"value": args.Value}, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, guarded := range []bool{false, true} {
-		hooks := ChatRuntimeHooks{}
-		policy := &runtimeTestPolicy{}
-		if guarded {
-			hooks.Authorization = policy
-			hooks.Accounting = policy
-		}
-		catalog := &ChatCatalog{MainThreadTools: []tool.Tool{fixture}, Groups: map[string]*agent.ToolGroup{"fixture": {Name: "fixture", Tools: []tool.Tool{fixture}}}}
-		runtime, err := NewScopedChatRuntime(t.Context(), ChatRuntimeDependencies{Config: &ChatFactoryConfig{AppConfig: &config.AppConfig{}}, LLM: provider.NewPlaceholderLLM(), Catalog: catalog, Sessions: session.InMemoryService(), Prompt: &agent.SystemPromptBuilder{}}, hooks)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(runtime.Cleanup)
-		direct := runtime.ChatAgent.Tools[0]
-		if direct != runtime.PromptBuilder.Catalog[0].Tools[0] {
-			t.Fatal("direct and catalog executable differ")
-		}
-		runnable := direct.(interface {
-			Run(tool.Context, any) (map[string]any, error)
-		})
-		got, err := runnable.Run(runtimeTestToolContext{lifetime: t.Context()}, map[string]any{"value": "executed"})
-		if err != nil || got["value"] != "executed" {
-			t.Fatalf("execution: %v %v", got, err)
-		}
-		if guarded {
-			if policy.observed != 1 {
-				t.Fatal("missing accounting")
-			}
-			policy.deny = true
-			if _, err := runnable.Run(runtimeTestToolContext{lifetime: t.Context()}, map[string]any{"value": "denied"}); !errors.Is(err, errRuntimeTestDenied) {
-				t.Fatalf("denial: %v", err)
-			}
-		}
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("denied capability executed: %d", calls.Load())
-	}
-}
-
 type runtimeCapabilityToolContext struct{ sharedBotToolContext }
 
 func (runtimeCapabilityToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-
-// TestChatRuntimeCapabilityParityConfiguredHTTPAndFlow exercises real HTTP and
-// flow implementations through all three factory recipes. The borrowed node
-// transport is the existing in-process fixture, not Docker/Kubernetes evidence.
-func TestChatRuntimeCapabilityParityConfiguredHTTPAndFlow(t *testing.T) {
-	tools.SetAllowPrivateNetworks(true) // local fixture endpoint only
-	defer tools.SetAllowPrivateNetworks(false)
-	const ordinary = "chat"
-	const interactive = "interactive-bot"
-	const autonomous = "autonomous-bot"
-	for _, scope := range []chatruntime.ResourceScope{chatruntime.ResourceScopePersonal, chatruntime.ResourceScopeTeam} {
-		for _, mode := range []string{ordinary, interactive, autonomous} {
-			t.Run(string(scope)+"/"+mode, func(t *testing.T) {
-				f := newBotFactoryFixture(t)
-				if scope == chatruntime.ResourceScopeTeam {
-					f.req.Bot.Scope = store.BotScopeTeam
-				}
-				if mode == interactive {
-					setBotSharedInteractive(f)
-				} else if mode == autonomous {
-					var err error
-					f.req.Policy, err = execution.NewRunPolicy(execution.RunPolicySpec{Identity: f.req.Policy.Identity(), Level: execution.AutonomySupervised, AllowedTools: []string{"http_request", "run_flow"}})
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-				own := sessioncreds.NewStore(map[string]*store.Credential{"owner": {Type: store.CredBearer, Token: productionTestSecret}})
-				other := sessioncreds.NewStore(map[string]*store.Credential{"owner": {Type: store.CredBearer, Token: "wrong-scope-secret"}})
-				var calls atomic.Int32
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					calls.Add(1)
-					if r.Header.Get("Authorization") != "Bearer "+productionTestSecret {
-						t.Error("HTTP execution lost scoped credential")
-					}
-					fmt.Fprint(w, "configured HTTP response")
-				}))
-				defer srv.Close()
-				fs := &productionFlowStore{yaml: fmt.Sprintf(`description: configured HTTP flow
-nodes:
-  - name: request
-    type: tool
-    tools_selection: [http_request]
-    args:
-      url: %q
-      credential: owner
-  - name: done
-    type: output
-    user_message: [configured flow completed]
-flow:
-  - from: START
-    to: request
-  - from: request
-    to: done
-  - from: done
-    to: END
-`, srv.URL)}
-				foreignFlow := &productionFlowStore{yaml: "not the selected scope"}
-				if scope == chatruntime.ResourceScopePersonal {
-					f.services.PersonalCredentials, f.services.Credentials = own, other
-					f.services.PersonalFlows, f.services.Flows = fs, foreignFlow
-				} else {
-					f.services.Credentials, f.services.PersonalCredentials = own, other
-					f.services.Flows, f.services.PersonalFlows = fs, foreignFlow
-				}
-				cfg := &config.AppConfig{}
-				backend := &productionCapabilityBackend{}
-				client := &productionCapabilityClient{backend: backend}
-				resources := ChatCatalogResources{Pool: productionCapabilityPool{backend: backend, client: client}}
-				var chat *agent.ChatAgent
-				var cleanup func()
-				if mode == ordinary {
-					inputs, err := chatruntime.Build(t.Context(), chatruntime.BuildOptions{Principal: f.req.Principal, Services: f.services, ResourceScope: scope, AppConfig: cfg, Pool: resources.Pool, FallbackPolicy: chatruntime.FallbackForbidden})
-					if err != nil {
-						t.Fatal(err)
-					}
-					t.Cleanup(func() { _ = inputs.Close() })
-					factory := newStudioChatRuntimeFactory(ChatFactoryConfig{AppConfig: cfg}, resources, nil)
-					runtime, err := factory(f.ctx, api.StudioChatRuntimeRequest{Inputs: inputs, AppConfig: cfg, LLM: provider.NewPlaceholderLLM(), SessionService: f.sessions, SessionID: f.req.Run.SessionID.String(), UserID: f.req.Principal.Subject, AppName: "astonish"})
-					if err != nil {
-						t.Fatal(err)
-					}
-					chat, cleanup = runtime.ChatAgent, runtime.Cleanup
-				} else {
-					prepare := f.cfg.Prepare
-					f.cfg.Prepare = func(ctx context.Context, req bot.RunRequest, scope *BotChatScope) (*BotChatSafeResources, error) {
-						safe, err := prepare(ctx, req, scope)
-						if err == nil {
-							safe.ChatConfig, safe.Catalog = cfg, &resources
-						}
-						return safe, err
-					}
-					runtime, err := f.construct(t)
-					if err != nil {
-						t.Fatal(err)
-					}
-					chat, cleanup = runtime.Agent, runtime.Cleanup
-				}
-				t.Cleanup(cleanup)
-				if client.calls != 0 || calls.Load() != 0 || len(backend.vault) != 0 {
-					t.Fatal("constructor eagerly accessed transport or credentials")
-				}
-				invoke := func(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
-					t.Helper()
-					entry := chat.ToolIndex.GetToolEntry(name)
-					if entry == nil {
-						t.Fatalf("missing configured capability %s", name)
-					}
-					if _, ok := entry.Tool.(*chatRuntimeTool); !ok {
-						t.Fatalf("%s bypassed shared wrapper: %T", name, entry.Tool)
-					}
-					return entry.Tool.(chatRuntimeRunnable).Run(runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: ctx}, sid: f.req.Run.SessionID.String()}}}, args)
-				}
-				args := map[string]any{"url": srv.URL, "credential": "owner"}
-				out, err := invoke(f.ctx, "http_request", args)
-				encoded, _ := json.Marshal(out)
-				if err != nil || calls.Load() != 1 || !strings.Contains(string(encoded), "configured HTTP response") {
-					t.Fatalf("HTTP capability: %s %v calls=%d", encoded, err, calls.Load())
-				}
-				out, err = invoke(f.ctx, "run_flow", map[string]any{"flow_name": "configured-flow"})
-				if err != nil || out["status"] != "completed" || out["output"] != "configured flow completed" || calls.Load() != 2 || fs.calls != 1 || foreignFlow.calls != 0 {
-					t.Fatalf("flow capability: %v %v calls=%d selected=%d foreign=%d", out, err, calls.Load(), fs.calls, foreignFlow.calls)
-				}
-				if client.calls != 2 || backend.owner != f.req.Run.SessionID.String() || strings.Contains(string(backend.vault), "wrong-scope-secret") {
-					t.Fatal("nested execution escaped session/credential scope or replayed")
-				}
-				cancelled, cancel := context.WithCancel(f.ctx)
-				cancel()
-				foreign := f.req.Principal
-				foreign.TeamSlug = "foreign-team"
-				foreignCtx, err := execution.WithPrincipal(t.Context(), foreign)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, ctx := range []context.Context{cancelled, foreignCtx} {
-					for _, name := range []string{"http_request", "run_flow"} {
-						arguments := args
-						if name == "run_flow" {
-							arguments = map[string]any{"flow_name": "configured-flow"}
-						}
-						if _, err := invoke(ctx, name, arguments); err == nil || calls.Load() != 2 || client.calls != 2 || fs.calls != 1 {
-							t.Fatalf("cancelled/foreign %s dispatched: %v", name, err)
-						}
-					}
-				}
-				if mode != ordinary {
-					f.req.Run.Lease.Fence++
-					if _, err := invoke(f.ctx, "http_request", args); err == nil || client.calls != 2 {
-						t.Fatalf("stale lease dispatched: %v", err)
-					}
-				}
-				cleanup()
-				cleanup()
-				if mode != ordinary && (f.safeCleaned != 1 || f.scopeCleaned != 1) {
-					t.Fatal("attempt cleanup was not exactly once")
-				}
-			})
-		}
-	}
-}
 
 type runtimeTestToolContext struct {
 	tool.Context

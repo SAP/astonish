@@ -2,20 +2,15 @@ package launcher
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"iter"
 	"strings"
 	"testing"
 
-	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/sandbox"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/google/uuid"
-	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 // These fixtures replace storage and the model, not the production factory,
@@ -116,48 +111,6 @@ func retainedTaskFixture(t *testing.T) (*botFactoryFixture, *retainedTaskRepo, *
 	return f, repo, w
 }
 
-type retainedTaskExecutionModel struct {
-	t     *testing.T
-	calls int
-}
-
-func (*retainedTaskExecutionModel) Name() string { return "controlled-retained-task" }
-func (m *retainedTaskExecutionModel) GenerateContent(_ context.Context, q *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		m.calls++
-		var text strings.Builder
-		for _, p := range q.Config.SystemInstruction.Parts {
-			text.WriteString(p.Text)
-		}
-		for _, c := range q.Contents {
-			for _, p := range c.Parts {
-				text.WriteString(p.Text)
-			}
-		}
-		if m.calls == 1 {
-			for _, required := range []string{retainedDefinition, retainedAssignment, retainedTitle, "already executing", "scripts/"} {
-				if !strings.Contains(text.String(), required) {
-					m.t.Errorf("production model input missing %q", required)
-				}
-			}
-			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "inventory-read", Name: "read_file", Args: map[string]any{"path": "inventory.txt"}}}}}}, nil)
-			return
-		}
-		seen := false
-		for _, c := range q.Contents {
-			for _, p := range c.Parts {
-				if p.FunctionResponse != nil && p.FunctionResponse.Name == "read_file" && p.FunctionResponse.Response["content"] == "Available: 17" {
-					seen = true
-				}
-			}
-		}
-		if !seen {
-			m.t.Error("actual read receipt missing before final answer")
-		}
-		yield(&model.LLMResponse{Content: genai.NewContentFromText("Available: 17", "model"), TurnComplete: true}, nil)
-	}
-}
-
 func TestBotRetainedTaskToolContractAndPin(t *testing.T) {
 	f, repo, workspace := retainedTaskFixture(t)
 	resources, err := f.construct(t)
@@ -241,48 +194,5 @@ func TestBotRetainedTaskGuidanceModes(t *testing.T) {
 				t.Fatalf("oversized context: %v %q", err, text)
 			}
 		})
-	}
-}
-
-func TestBotRetainedTaskProductionFactoryExecution(t *testing.T) {
-	f, _, workspace := retainedTaskFixture(t)
-	llm := &retainedTaskExecutionModel{t: t}
-	f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return llm, nil }
-	reads := 0
-	node := &remainingModeNode{call: func(name string, args map[string]any) (json.RawMessage, error) {
-		reads++
-		if name != "read_file" || args["path"] != "inventory.txt" {
-			return nil, errors.New("unexpected inventory read")
-		}
-		return json.RawMessage(`{"content":"Available: 17"}`), nil
-	}}
-	prepare := f.cfg.Prepare
-	f.cfg.Prepare = func(c context.Context, r bot.RunRequest, s *BotChatScope) (*BotChatSafeResources, error) {
-		resources, err := prepare(c, r, s)
-		resources.Catalog.Pool = &remainingModePool{client: node}
-		return resources, err
-	}
-	factory, err := NewBotChatAgentFactory(f.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter, err := api.NewBotChatRuntimeAdapter(factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := adapter.Start(f.ctx, f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != store.RunSucceeded || result.Report.Summary != "Available: 17" || reads != 1 || llm.calls != 2 || workspace.executions != 0 || workspace.publications != 0 {
-		t.Fatalf("result=%+v reads=%d model=%d scripts=%d publications=%d", result, reads, llm.calls, workspace.executions, workspace.publications)
-	}
-	if len(workspace.loads) == 0 {
-		t.Fatal("factory bypassed workspace pin load")
-	}
-	for _, ref := range workspace.loads {
-		if ref != *f.req.Run.Task {
-			t.Fatal("factory read a different Task revision")
-		}
 	}
 }

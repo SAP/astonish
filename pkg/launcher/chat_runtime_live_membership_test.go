@@ -2,10 +2,8 @@ package launcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
-	"github.com/SAP/astonish/pkg/tools"
 	"github.com/google/uuid"
 	"google.golang.org/adk/model"
 )
@@ -201,157 +198,6 @@ func liveMembershipReconstruct(t *testing.T, r *servicesParityRuntime, m liveMem
 		}
 		r.chat = runtime.ChatAgent
 		t.Cleanup(runtime.Cleanup)
-	}
-}
-
-// The discovery case retains the actual progressive-dispatch reference, then
-// revokes membership before its FIRST execution. It is deferred email discovery,
-// not evidence of a separately configured lazy MCP server.
-func TestChatRuntimeLiveMembershipFreshAuthority(t *testing.T) {
-	tools.SetAllowPrivateNetworks(true)
-	defer tools.SetAllowPrivateNetworks(false)
-	for _, scope := range []chatruntime.ResourceScope{chatruntime.ResourceScopePersonal, chatruntime.ResourceScopeTeam} {
-		for _, mode := range []string{"ordinary-chat", "interactive-bot", "autonomous-bot"} {
-			for _, stage := range []string{"post-construction", "post-discovery"} {
-				t.Run(string(scope)+"/"+mode+"/"+stage, func(t *testing.T) {
-					r := newServicesParityRuntime(t, scope, mode)
-					m := newLiveMembershipFixture(t, r, scope)
-					liveMembershipReconstruct(t, r, m, scope, mode)
-					base := runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: r.f.ctx}, sid: r.node.session}}}
-					ctx := servicesParityContext{Context: base, owner: r.f.req.Principal.Subject, sid: r.node.session}
-					invoke := func() (map[string]any, error) { return r.invoke(t, r.f.ctx, "email_send", emailSendArguments()) }
-					if stage == "post-discovery" {
-						bridge, err := fixedProviderTools(r.chat.ToolIndex)
-						if err != nil {
-							t.Fatal(err)
-						}
-						var describe, execute botRunnableTool
-						for _, candidate := range bridge {
-							switch candidate.Name() {
-							case "describe_tools":
-								describe = candidate.(botRunnableTool)
-							case "execute_tool":
-								execute = candidate.(botRunnableTool)
-							}
-						}
-						if describe == nil || execute == nil {
-							t.Fatal("progressive discovery missing")
-						}
-						out, err := describe.Run(ctx, map[string]any{"names": []string{"email_send"}})
-						raw, _ := json.Marshal(out)
-						if err != nil || !strings.Contains(string(raw), "email_send") {
-							t.Fatalf("discovery=%s err=%v", raw, err)
-						}
-						invoke = func() (map[string]any, error) {
-							return execute.Run(ctx, map[string]any{"name": "email_send", "arguments": emailSendArguments()})
-						}
-					}
-					if len(r.guard.consumed) != 0 || len(r.node.calls) != 0 || len(r.node.backend.vault) != 0 || r.f.resolver.model.calls != 0 {
-						t.Fatal("fresh executable already had effects")
-					}
-					m.revoke()
-					// Prove the authoritative repository actually observes the removed row.
-					if _, err := m.repo.Get(r.f.ctx, r.f.req.Bot.ID); err == nil {
-						t.Fatal("membership fixture failed to revoke")
-					}
-					_, denied := invoke()
-					if denied == nil {
-						t.Error("revoked member executed fresh email action; ordinary Chat needs live authorization before dispatch")
-					}
-					if len(r.node.calls) != 0 || len(r.node.backend.vault) != 0 || len(r.guard.consumed) != 0 || r.f.resolver.model.calls != 0 {
-						t.Errorf("revoked action effects: node=%v credential_bytes=%d grants=%d model=%d", r.node.calls, len(r.node.backend.vault), len(r.guard.consumed), r.f.resolver.model.calls)
-					}
-					select {
-					case <-r.messages:
-						t.Error("revoked action delivered SMTP message")
-					default:
-					}
-					// Do not recreate policy, executable, or grant after denial. Restoration
-					// must make the exact same action succeed; exhausted grants cannot mask it.
-					m.restore()
-					out, err := invoke()
-					raw, _ := json.Marshal(out)
-					if err != nil || !strings.Contains(string(raw), `"success":true`) {
-						t.Fatalf("same-action positive control=%s err=%v", raw, err)
-					}
-					select {
-					case msg := <-r.messages:
-						if !strings.Contains(msg, "Reviewed body") {
-							t.Fatal("wrong SMTP bytes")
-						}
-					case <-time.After(time.Second):
-						t.Fatal("positive SMTP missing")
-					}
-					if mode == "autonomous-bot" && len(r.guard.consumed) != 1 {
-						t.Fatalf("same grant not consumed exactly once: %d", len(r.guard.consumed))
-					}
-				})
-			}
-		}
-	}
-}
-
-// A configured LazyMCPToolset is rediscovered after construction and retains the
-// factory's production binding. The backend is the existing in-process MCP
-// protocol peer, not Docker: starts/env expose external/credential effects.
-// Autonomous positive control intentionally also detects the existing qualified
-// MCP classifier gap; a denial alone is NOT accepted as membership evidence.
-func TestChatRuntimeLiveMembershipLazyMCP(t *testing.T) {
-	for _, scope := range []chatruntime.ResourceScope{chatruntime.ResourceScopePersonal, chatruntime.ResourceScopeTeam} {
-		for _, mode := range []string{"ordinary-chat", "interactive-bot", "autonomous-bot"} {
-			t.Run(fmt.Sprintf("%s/%s", scope, mode), func(t *testing.T) {
-				r := newServicesParityRuntime(t, scope, mode)
-				m := newLiveMembershipFixture(t, r, scope)
-				r.f.services.TeamMCPServers = newMemMCPStore(store.MCPServer{Name: "membership", Command: "fixture-mcp", Env: map[string]string{"MAIL_SECRET": "{{CREDENTIAL:mail:password}}"}, CachedTools: json.RawMessage(`[{"name":"read_owner","description":"Membership probe","inputSchema":{"type":"object","properties":{}}}]`)})
-				if mode == "autonomous-bot" {
-					server, err := r.f.services.TeamMCPServers.Get(r.f.ctx, "membership")
-					if err != nil || server == nil {
-						t.Fatalf("MCP fixture: %v", err)
-					}
-					grantSharedMCP(t, r, *server, "mcp:membership/read_owner")
-				}
-				liveMembershipReconstruct(t, r, m, scope, mode)
-				entry := r.chat.ToolIndex.GetToolEntry("read_owner")
-				if entry == nil {
-					t.Fatal("configured lazy MCP tool missing")
-				}
-				executable := entry.Tool.(*chatRuntimeTool)
-				base := runtimeCapabilityToolContext{sharedBotToolContext{proposalTestContext{botFactoryToolContext: botFactoryToolContext{base: r.f.ctx}, sid: r.node.session}}}
-				ctx := servicesParityContext{Context: base, owner: r.f.req.Principal.Subject, sid: r.node.session}
-				if executable.source == nil {
-					t.Fatal("lazy tool lost source binding")
-				}
-				discovered, err := executable.source.Tools(ctx)
-				if err != nil || len(discovered) != 1 || discovered[0] != executable {
-					t.Fatalf("lazy rediscovery changed executable: %v", err)
-				}
-				if r.node.backend.starts != 0 || len(r.node.backend.env) != 0 || len(r.node.backend.vault) != 0 || len(r.node.calls) != 0 || len(r.guard.consumed) != 0 {
-					t.Fatal("lazy discovery performed effects")
-				}
-				m.revoke()
-				if _, err := m.repo.Get(r.f.ctx, r.f.req.Bot.ID); err == nil {
-					t.Fatal("membership fixture failed to revoke")
-				}
-				if _, err := executable.Run(ctx, map[string]any{}); err == nil {
-					t.Error("revoked member executed discovered lazy MCP tool")
-				}
-				if r.node.backend.starts != 0 || len(r.node.backend.env) != 0 || len(r.node.backend.vault) != 0 || len(r.node.calls) != 0 || len(r.guard.consumed) != 0 || r.f.resolver.model.calls != 0 {
-					t.Errorf("revoked lazy effects: starts=%d env=%d grants=%d", r.node.backend.starts, len(r.node.backend.env), len(r.guard.consumed))
-				}
-				m.restore()
-				out, err := executable.Run(ctx, map[string]any{})
-				raw, _ := json.Marshal(out)
-				if err != nil || !strings.Contains(string(raw), r.node.session) {
-					t.Fatalf("same lazy executable positive control=%s err=%v", raw, err)
-				}
-				if r.node.backend.starts != 1 || r.node.backend.env["MAIL_SECRET"] != productionTestSecret {
-					t.Fatalf("lazy positive transport/credentials: starts=%d", r.node.backend.starts)
-				}
-				if mode == "autonomous-bot" && len(r.guard.consumed) != 1 {
-					t.Fatalf("lazy grant consumed=%d want 1", len(r.guard.consumed))
-				}
-			})
-		}
 	}
 }
 

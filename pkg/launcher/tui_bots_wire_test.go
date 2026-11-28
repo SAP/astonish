@@ -57,36 +57,6 @@ func TestBotTranscriptTurnContextMarker(t *testing.T) {
 	}
 }
 
-func mapStoredBotFixture(t *testing.T, mapper *botTranscriptMapper, frame client.SSEEvent) ([]events.Event, error) {
-	t.Helper()
-	var row session.Event
-	if err := json.Unmarshal([]byte(frame.Data), &row); err != nil {
-		return nil, err
-	}
-	if row.ID == "" {
-		row.ID = uuid.NewString()
-	}
-	sid := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-	projector := api.SessionEventProjector{BotID: uuid.New(), SessionID: sid, HomeSessionID: sid}
-	projection, err := projector.ProjectBot(context.Background(), store.BotTranscriptEvent{Cursor: 1, Event: &row}, nil)
-	if err != nil {
-		return nil, err
-	}
-	frames, err := projection.BotFrames(0)
-	if err != nil {
-		return nil, err
-	}
-	var out []events.Event
-	for _, frame := range frames {
-		mapped, err := mapper.mapFrame(client.SSEEvent{Type: frame.Type, Data: string(frame.Data)})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, mapped...)
-	}
-	return out, nil
-}
-
 func TestBotCanonicalReviewIsObservation(t *testing.T) {
 	m := botTranscriptMapper{}
 	frame := runtimeTranscriptFrame(t, "bot_review", `{"reviewId":"review","eventId":"saved","invocationId":"turn","question":{"text":"Which city?"}}`, 1)

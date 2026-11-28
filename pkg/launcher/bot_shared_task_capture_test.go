@@ -11,15 +11,6 @@ import (
 	"github.com/SAP/astonish/pkg/tools"
 )
 
-type sharedTaskCaptureRepo struct {
-	store.BotStore
-	store.BotTaskStore
-}
-
-func (sharedTaskCaptureRepo) ListTasks(context.Context, store.BotID, store.BotTaskPage) (*store.BotTaskList, error) {
-	return &store.BotTaskList{}, nil
-}
-
 func TestBotSharedTaskSearchCapture(t *testing.T) {
 	for _, scenario := range []string{"public", "private-query", "private-source", "empty", "no-sources", "wrong-provider", "spoof", "denied", "web", "private-web", "private-web-request", "missing-web-request", "failed-web", "spoof-web", "empty-web", "wrong-query", "nested-error", "changed-route"} {
 		t.Run(scenario, func(t *testing.T) {

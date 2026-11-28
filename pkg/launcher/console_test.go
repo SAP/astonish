@@ -10,59 +10,59 @@ import (
 // Spinner is NOT shown for: input nodes, parallel nodes, or silent nodes.
 func TestSpinnerShouldShow(t *testing.T) {
 	tests := []struct {
-		name              string
-		nodeType          string
-		isParallel        bool
-		isSilent          bool
+		name                string
+		nodeType            string
+		isParallel          bool
+		isSilent            bool
 		expectedShowSpinner bool
 	}{
 		{
-			name:              "regular llm node shows spinner",
-			nodeType:          "llm",
-			isParallel:        false,
-			isSilent:          false,
+			name:                "regular llm node shows spinner",
+			nodeType:            "llm",
+			isParallel:          false,
+			isSilent:            false,
 			expectedShowSpinner: true,
 		},
 		{
-			name:              "input node does not show spinner",
-			nodeType:          "input",
-			isParallel:        false,
-			isSilent:          false,
+			name:                "input node does not show spinner",
+			nodeType:            "input",
+			isParallel:          false,
+			isSilent:            false,
 			expectedShowSpinner: false,
 		},
 		{
-			name:              "parallel node does not show spinner",
-			nodeType:          "llm",
-			isParallel:        true,
-			isSilent:          false,
+			name:                "parallel node does not show spinner",
+			nodeType:            "llm",
+			isParallel:          true,
+			isSilent:            false,
 			expectedShowSpinner: false,
 		},
 		{
-			name:              "silent node does not show spinner",
-			nodeType:          "update_state",
-			isParallel:        false,
-			isSilent:          true,
+			name:                "silent node does not show spinner",
+			nodeType:            "update_state",
+			isParallel:          false,
+			isSilent:            true,
 			expectedShowSpinner: false,
 		},
 		{
-			name:              "silent llm node does not show spinner",
-			nodeType:          "llm",
-			isParallel:        false,
-			isSilent:          true,
+			name:                "silent llm node does not show spinner",
+			nodeType:            "llm",
+			isParallel:          false,
+			isSilent:            true,
 			expectedShowSpinner: false,
 		},
 		{
-			name:              "tool node shows spinner",
-			nodeType:          "tool",
-			isParallel:        false,
-			isSilent:          false,
+			name:                "tool node shows spinner",
+			nodeType:            "tool",
+			isParallel:          false,
+			isSilent:            false,
 			expectedShowSpinner: true,
 		},
 		{
-			name:              "output node shows spinner",
-			nodeType:          "output",
-			isParallel:        false,
-			isSilent:          false,
+			name:                "output node shows spinner",
+			nodeType:            "output",
+			isParallel:          false,
+			isSilent:            false,
 			expectedShowSpinner: true,
 		},
 	}

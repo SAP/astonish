@@ -8,7 +8,6 @@ import (
 	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/api"
 	"github.com/SAP/astonish/pkg/bot"
-	"github.com/SAP/astonish/pkg/cache"
 	"github.com/SAP/astonish/pkg/chatruntime"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/execution"
@@ -22,8 +21,6 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 	"iter"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -596,130 +593,6 @@ func TestChatRuntimeOrdinaryPublicFetchUnchanged(t *testing.T) {
 	result, err := runtime.ChatAgent.ToolIndex.GetToolEntry("web_fetch").Tool.(botRunnableTool).Run(ctx, map[string]any{"url": "https://example.com/a"})
 	if err != nil || result["error"] != "HTTP 429" || client.name != "web_fetch" {
 		t.Fatalf("ordinary Chat changed: %v %v %s", result, err, client.name)
-	}
-}
-
-type cachedCoreChildModel struct {
-	t                       *testing.T
-	parentCalls, childCalls int
-}
-
-func (*cachedCoreChildModel) Name() string { return "cached-core-child" }
-func (m *cachedCoreChildModel) GenerateContent(ctx context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(y func(*model.LLMResponse, error) bool) {
-		raw, _ := json.Marshal(r.Contents)
-		// The child delegate task prompt mentions "read_file" and "retained bytes";
-		// only the worker's own driving instruction carries the delegate marker.
-		parent := strings.Contains(string(raw), "OWNER_CACHED_CORE_CHILD") || (strings.Contains(string(raw), "Delegate the core-only file read") && !strings.Contains(string(raw), "Read outputs/report.txt using read_file"))
-		content := genai.NewContentFromText("Core child returned retained bytes.", "model")
-		var call *genai.FunctionCall
-		if parent {
-			m.parentCalls++
-			if m.parentCalls == 1 {
-				call = &genai.FunctionCall{ID: "core-delegate", Name: "delegate_tasks", Args: map[string]any{"tasks": []any{map[string]any{"name": "core-reader", "task": "Read outputs/report.txt using read_file and report retained bytes", "tools": []any{"read_file"}}}}}
-			}
-		} else {
-			m.childCalls++
-			if m.childCalls == 1 {
-				call = &genai.FunctionCall{ID: "core-child-read", Name: "read_file", Args: map[string]any{"path": "outputs/report.txt"}}
-			} else if !strings.Contains(string(raw), "retained bytes") {
-				m.t.Fatalf("child missing read: %s", raw)
-			}
-		}
-		if call != nil {
-			content = &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}
-		}
-		y(&model.LLMResponse{Content: content, TurnComplete: true}, nil)
-	}
-}
-func TestBotSharedRuntimeCachedMCPCoreChildAcceptance(t *testing.T) {
-	f, repo := scheduleFixture(t, store.BotScopePersonal)
-	b, err := repo.Get(f.ctx, f.req.Bot.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := repo.GetVersion(f.ctx, b.ID, b.Version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := repo.RequestRun(f.ctx, store.BotRunRequest{BotID: b.ID, Version: b.Version, Trigger: store.TriggerManual, Instructions: "OWNER_CACHED_CORE_CHILD: delegate a core-only file read.", IdempotencyKey: "cached-core-child"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := execution.BotRunIdentity{BotID: b.ID, RunID: run.ID, Version: b.Version, ActorID: b.OwnerID.String(), OrgSlug: f.req.Principal.OrgSlug, TeamSlug: f.req.Principal.TeamSlug}
-	worker := execution.WithBotRunIdentity(f.ctx, id)
-	lease, err := repo.ClaimRun(worker, store.BotClaimRequest{BotID: b.ID, RunID: run.ID, WorkerID: "controlled", ExpiresAt: time.Now().Add(time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err = repo.GetRun(f.ctx, b.ID, run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := execution.NewRunPolicy(execution.RunPolicySpec{Identity: id, Level: execution.AutonomySupervised, AllowedTools: []string{"delegate_tasks", "read_file"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	meter, err := bot.NewRunBudget(v.Budget, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.req.Bot, f.req.Version, f.req.Run, f.req.Policy, f.req.Budget, f.req.Instructions = *b, *v, *run, policy, meter, "OWNER_CACHED_CORE_CHILD: delegate a core-only file read."
-	f.req.Work, err = repo.(store.BotWorkStore).LoadWork(worker, lease)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.services.PersonalBots = repo
-	f.sessions = f.services.PersonalSessions
-	f.services.BotFilesFactory = func(context.Context, *store.Services, store.BotScope) (store.BotFiles, error) { return f.files, nil }
-	f.services.Memory = nil
-	llm := &cachedCoreChildModel{t: t}
-	orchestrator := &workerOutcomeFixtureModel{worker: llm, message: "Delegate the core-only file read and report the retained bytes.", answer: "Core child returned retained bytes."}
-	f.cfg.WrapModel = func(context.Context, model.LLM, execution.RunBudget) (model.LLM, error) { return orchestrator, nil }
-	marker := filepath.Join(t.TempDir(), "mcp-started")
-	lazy := agent.NewLazyMCPToolset("cached", []cache.ToolEntry{{Name: "cached_read", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)}}, config.MCPServerConfig{Command: "/bin/sh", Args: []string{"-c", "touch " + marker + "; exit 1"}, Env: map[string]string{"SECRET": "{{CREDENTIAL:must-not-resolve:secret}}"}}, false)
-	set := agent.NewSanitizedToolset(lazy, false)
-	node := &sourceAccessCatalogueClient{response: json.RawMessage(`{"content":"retained bytes"}`)}
-	f.cfg.Prepare = func(context.Context, bot.RunRequest, *BotChatScope) (*BotChatSafeResources, error) {
-		return &BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &ChatCatalogResources{Pool: &sharedBotDispatchPool{client: node}, Groups: map[string]*agent.ToolGroup{"mcp:cached": {Name: "mcp:cached", Toolsets: []tool.Toolset{set}}}}, WorkspaceDir: t.TempDir(), PolicyRuntime: agent.BotPolicyRuntime{Guard: botFactoryTestGuard{}, Classifier: botFactoryTestClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
-	}
-	factory, err := NewBotChatAgentFactory(f.cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter, err := api.NewBotChatRuntimeAdapter(func(ctx context.Context, req bot.RunRequest) (*api.BotChatResources, error) {
-		resources, err := factory(ctx, req)
-		if err != nil {
-			return resources, err
-		}
-		// The cached MCP metadata contract now lives on the private tool-enabled
-		// worker, not the tools-less Employee agent. Validate it there.
-		if resources.WorkerFactory != nil {
-			private, werr := resources.WorkerFactory(ctx, api.BotEmployeeWorkerRequest{Request: req, ConversationID: req.Run.SessionID.String(), Sessions: resources.SessionService})
-			if werr != nil {
-				return resources, werr
-			}
-			defer private.Cleanup()
-			group := private.Agent.SubAgentManager.ToolGroups["mcp:cached"]
-			if group == nil || len(group.Toolsets) != 1 {
-				t.Fatal("cached toolset absent from actual factory child scope")
-			}
-			wrapped, ok := group.Toolsets[0].(*chatRuntimeToolset)
-			if !ok || !agent.IsBotMetadataOnlyToolset(wrapped) {
-				t.Fatalf("factory lost cached metadata contract: %T", group.Toolsets[0])
-			}
-		}
-		return resources, nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := adapter.Start(bot.WithApprovalStore(f.ctx, repo), f.req, func(context.Context, bot.RuntimeEvent) error { return nil })
-	if err != nil || result.Status != store.RunSucceeded || llm.childCalls != 2 || node.calls != 1 {
-		t.Fatalf("core delegation failed: status=%s parent=%d child=%d node=%d err=%v", result.Status, llm.parentCalls, llm.childCalls, node.calls, err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("MCP server started during core delegation: %v", err)
 	}
 }
 

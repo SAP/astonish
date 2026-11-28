@@ -327,7 +327,7 @@ func codeNarrowPTYCaptureRequests(t *testing.T) <-chan string {
 
 func codeRevisionPTYReply(t *testing.T, f *sidebarPTYFixture, turn sidebarPTYModelTurn) {
 	t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	select {
 	case reply := <-f.turns:

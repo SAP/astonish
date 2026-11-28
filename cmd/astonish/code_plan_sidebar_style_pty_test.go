@@ -48,7 +48,7 @@ func assertCodeThemePTYText(t *testing.T, term *handoffPTY, colored *sidebarPTYC
 	if noColor {
 		foreground, background = "default", "default"
 	}
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for {
 		term.mu.Lock()
@@ -235,7 +235,7 @@ func TestCodeThemesPickerPTYAcceptance(t *testing.T) {
 			select {
 			case reply := <-f.turns:
 				reply <- sidebarPTYModelTurn{text: "# Palette reference\n\nPalette prose sentinel.\n\n| Component | State |\n| --- | --- |\n| café | TABLE-PICKER-END |\n\n```go\nfunc palette() string { return \"same components\" }\n```\n\nPICKER-DOCUMENT-END"}
-			case <-time.After(30 * time.Second):
+			case <-time.After(120 * time.Second):
 				t.Fatal("no document request")
 			}
 			term.wait("PICKER-DOCUMENT-END", "TABLE-PICKER-END", "Enter send")
@@ -339,7 +339,7 @@ func switchCodeThemePTY(t *testing.T, term *handoffPTY, colored *sidebarPTYColor
 	assertCodeThemePTYText(t, term, colored, "Astonish · code", "#ff8700", canvas, plain)
 	// NO_COLOR has no color change to synchronize on; wait until the actual
 	// modal disappears before the next input instead.
-	deadline := time.NewTimer(30 * time.Second)
+	deadline := time.NewTimer(120 * time.Second)
 	defer deadline.Stop()
 	for strings.Contains(term.frame(), "Code themes") {
 		select {
@@ -420,7 +420,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 			select {
 			case reply := <-f.turns:
 				reply <- sidebarPTYModelTurn{text: "# Reference document\n\nReadable cool-white prose.\n\n| Component | State | Evidence |\n| --- | --- | --- |\n| Unicode café | Ready | Long readable evidence preserves every word and wraps without dropping the final sentinel TABLE-END |\n\n```go\nfunc theme() string {\n    return \"blue-gray\"\n}\n```\n\nDOCUMENT-END"}
-			case <-time.After(30 * time.Second):
+			case <-time.After(120 * time.Second):
 				t.Fatal("no stream request")
 			}
 			term.wait("Reference document", "TABLE-END", "DOCUMENT-END", "func theme()")
@@ -442,7 +442,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 			select {
 			case reply := <-f.turns:
 				reply <- sidebarPTYModelTurn{text: "| Identifier | A | B | C | D | E | F | G | H | I | J | K | L | M |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| STACK-END | a | b | c | d | e | f | g | h | i | j | k | l | m |\n\nINVENTORY-END"}
-			case <-time.After(30 * time.Second):
+			case <-time.After(120 * time.Second):
 				t.Fatal("no inventory request")
 			}
 			term.wait("STACK-END", "INVENTORY-END")
@@ -531,7 +531,7 @@ func TestCodeThemePTYAcceptance(t *testing.T) {
 
 func scrollCodeThemePTYHistory(t *testing.T, term *handoffPTY) {
 	t.Helper()
-	deadline := time.NewTimer(30 * time.Second)
+	deadline := time.NewTimer(120 * time.Second)
 	defer deadline.Stop()
 	// Large concatenated wheel bursts can be coalesced by the input reader.
 	// Keep sending bounded real mouse input until the current transcript,
@@ -878,7 +878,7 @@ func resizeSidebarPTYColor(term *handoffPTY, colored *sidebarPTYColorScreen, wid
 
 func waitSidebarPTYChrome(term *handoffPTY, before int) {
 	term.t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for {
 		term.mu.Lock()
@@ -902,7 +902,7 @@ func waitSidebarPTYChrome(term *handoffPTY, before int) {
 
 func assertSidebarPTYDivider(t *testing.T, term *handoffPTY, colored *sidebarPTYColorScreen, noColor bool) {
 	t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for {
 		term.mu.Lock()

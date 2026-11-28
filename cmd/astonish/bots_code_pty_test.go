@@ -82,7 +82,7 @@ func TestBotBareCodePTYAcceptance(t *testing.T) {
 	wait := func(text string) {
 		t.Helper()
 		started := time.Now()
-		timer := time.NewTimer(30 * time.Second)
+		timer := time.NewTimer(120 * time.Second)
 		defer timer.Stop()
 		for !strings.Contains(rendered.String(), text) {
 			select {

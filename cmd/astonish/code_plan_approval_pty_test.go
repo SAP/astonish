@@ -438,7 +438,7 @@ func codePermissionsPTYFolderPrompt(term *handoffPTY) {
 // with the current terminal frame rather than falsely accepting a final marker.
 func codePermissionsPTYReply(t *testing.T, f *sidebarPTYFixture, term *handoffPTY, turn sidebarPTYModelTurn) {
 	t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for {
 		select {

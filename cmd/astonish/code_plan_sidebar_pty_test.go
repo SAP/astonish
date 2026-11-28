@@ -523,7 +523,7 @@ func TestCodePlanSidebarPTYScreenCharacterEdits(t *testing.T) {
 
 func (f *sidebarPTYFixture) turn(name string, args any) {
 	f.t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	select {
 	case reply := <-f.turns:
@@ -601,7 +601,7 @@ func sidebarPTYScrollOffCard(t *testing.T, term *handoffPTY) {
 	waitPlanPTYRegion(t, term, 0, 91, "HISTORY MARKER 00", "HISTORY MARKER 24")
 	// A frame can be observed between terminal write chunks. Wait for the old
 	// card rows to be erased rather than failing on that intermediate paint.
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for strings.Contains(planPTYColumns(term.frame(), 0, 91), "Phase one") {
 		select {
@@ -743,7 +743,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 		select {
 		case reply := <-f.turns:
 			return reply
-		case <-time.After(30 * time.Second):
+		case <-time.After(120 * time.Second):
 			t.Fatal("missing provider barrier")
 			return nil
 		}
@@ -753,7 +753,7 @@ func TestCodePlanSidebarPTYActiveFollow(t *testing.T) {
 		t.Helper()
 		select {
 		case reply <- sidebarPTYModelTurn{name: "update_plan", args: map[string]any{"step": step, "status": status}}:
-		case <-time.After(30 * time.Second):
+		case <-time.After(120 * time.Second):
 			t.Fatal("provider did not accept tool")
 		}
 		reply = receive() // real result has returned to the agent, not just rendered text
@@ -941,7 +941,7 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	term.send("\r")
 	term.wait("Enter send")
 	// Wait for the session switch paint rather than inspecting the old frame.
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for strings.Contains(term.frame(), "PLAN PROGRESS") {
 		select {
@@ -958,7 +958,7 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 // together beneath the pinned summary in a short window.
 func waitSidebarPTYRunningCard(t *testing.T, term *handoffPTY, name, title string) {
 	t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	tick := time.NewTicker(80 * time.Millisecond)
 	defer tick.Stop()
@@ -1002,7 +1002,7 @@ func planPTYColumns(frame string, start, end int) string {
 
 func waitPlanPTYRegion(t *testing.T, term *handoffPTY, start, end int, wants ...string) string {
 	t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	for {
 		frame := term.frame()

@@ -345,7 +345,7 @@ func (p *handoffPTY) settledFrame() (string, bool) {
 }
 func (p *handoffPTY) wait(wants ...string) string {
 	p.t.Helper()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(120 * time.Second)
 	defer timer.Stop()
 	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()

@@ -1473,7 +1473,22 @@ func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode .
 				final = "U.S. markets: S&P 500, Nasdaq Composite and Dow Jones major indexes were checked. Source: https://fixture.test/market."
 			}
 			createBody, _ := json.Marshal(map[string]any{"name": title, "start_from_title": true, "idempotency_key": "employee-browser-objective"})
-			if err = json.Unmarshal(request("POST", root, string(createBody), 201), &created); err != nil || created.InitialTurn == nil {
+			if scope == store.BotScopeTeam {
+				// Seed retained team title data through its trusted, owner-scoped store.
+				request("POST", root, string(createBody), 403)
+				seedCtx := store.WithBotMessageAdmission(store.WithBotMandateAdmission(auth, policy), f.registry)
+				v, e := store.NewBotVersionForCreation(seedCtx, uuid.MustParse(p.Subject))
+				if e != nil {
+					t.Fatal(e)
+				}
+				v.Charter = title + "\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+				seeded, e := f.repo.(store.BotTitleStartStore).CreateAndStart(seedCtx, store.BotCreateRequest{Name: title, OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "employee-browser-objective"})
+				if e != nil {
+					t.Fatal(e)
+				}
+				created.Bot = seeded.Bot
+				created.InitialTurn = &store.BotMessageReceipt{Run: seeded.Run, HomeSessionID: seeded.HomeSessionID, UserEventID: seeded.UserEventID, HistoryCursor: seeded.HistoryCursor}
+			} else if err = json.Unmarshal(request("POST", root, string(createBody), 201), &created); err != nil || created.InitialTurn == nil {
 				t.Fatal("create", err)
 			}
 			f.b = created.Bot
@@ -1497,22 +1512,37 @@ func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode .
 					t.Error("unexpected mandatory review")
 					return response, true
 				}
+				declared := map[string]bool{}
+				if req.Config != nil {
+					for _, tools := range req.Config.Tools {
+						for _, declaration := range tools.FunctionDeclarations {
+							declared[declaration.Name] = true
+						}
+					}
+				}
 				call := func(name string, args map[string]any) *model.LLMResponse {
-					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}}}}
+					function := &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}
+					if name == "perplexity_web_search" && declared["employee_chat"] {
+						function.Name, function.Args = "employee_chat", map[string]any{"message": "Research the accepted owner request using the scoped search and return actual source evidence: " + refinement}
+					} else if !declared[name] {
+						function.Name, function.Args = "execute_tool", map[string]any{"name": name, "arguments": args}
+					}
+					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: function}}}}
 				}
 				if !confirmed.Load() {
 					return call("ask_user", map[string]any{"kind": "select", "prompt": questionPrompt, "allow_custom_answer": true, "options": []map[string]any{{"id": "company", "label": refinement}, {"id": "fruit", "label": "Fruit harvests"}, {"id": "services", "label": "Apple services"}}}), true
 				}
-				var evidence strings.Builder
-				for _, c := range req.Contents {
-					for _, part := range c.Parts {
-						if part.FunctionResponse != nil {
-							b, _ := json.Marshal(part.FunctionResponse.Response)
-							evidence.Write(b)
-						}
-					}
+				seen := scriptedHTTPResponseEvidence(req)
+				if queries.Load() == 0 && strings.Contains(seen, "error") {
+					t.Fatalf("employee source call failed before search: %s", seen)
 				}
-				seen := evidence.String()
+				result := func() *model.LLMResponse {
+					text := final
+					if !declared["employee_chat"] {
+						text = "PRIVATE_EMPLOYEE_SOURCE_EVIDENCE: " + final
+					}
+					return &model.LLMResponse{Content: genai.NewContentFromText(text, "model"), TurnComplete: true}
+				}
 				if database {
 					if !strings.Contains(fmt.Sprint(req.Contents), refinement) {
 						raw, _ := json.Marshal(req.Contents)
@@ -1521,23 +1551,25 @@ func runBotEmployeeObjectiveSurface(t *testing.T, nativePTY bool, databaseMode .
 						}
 					}
 					if strings.Contains(seen, "major indexes were checked") {
-						return &model.LLMResponse{Content: genai.NewContentFromText(final, "model")}, true
+						return result(), true
 					}
 					response := call("perplexity_web_search", map[string]any{"query": refinement, "max_results": 5, "recency": "week"})
-					response.Content.Parts = append([]*genai.Part{{Text: acknowledgement}}, response.Content.Parts...)
+					if declared["employee_chat"] {
+						response.Content.Parts = append([]*genai.Part{{Text: acknowledgement}}, response.Content.Parts...)
+					}
 					return response, true
 				}
 				query := "Apple News"
 				switch {
 				case strings.Contains(seen, "market revenue rose 5%"):
-					return &model.LLMResponse{Content: genai.NewContentFromText(final, "model")}, true
+					return result(), true
 				case strings.Contains(seen, "Market developments not covered"):
 					query = "Apple Inc. material market revenue developments"
 				case strings.Contains(seen, "fruit harvest"):
 					query = "Apple Inc. product launches"
 				}
 				response := call("perplexity_web_search", map[string]any{"query": query, "max_results": 5, "recency": "week"})
-				if query == "Apple News" {
+				if query == "Apple News" && declared["employee_chat"] {
 					response.Content.Parts = append([]*genai.Part{{Text: acknowledgement}}, response.Content.Parts...)
 				}
 				return response, true
@@ -1875,9 +1907,7 @@ func runEmployeeNativePTY(t *testing.T, server *httptest.Server, scope store.Bot
 	send("/bots approvals\r")
 	wait("Question: " + questionPrompt)
 	send("y")
-	wait("Enter reviews")
-	send("\r")
-	wait(`Confirm answer "company"`)
+	wait("Enter submits answer")
 	send("\r")
 	waitScreen("[approved]", 0)
 	send("\x1b")
@@ -1914,7 +1944,7 @@ func runEmployeeNativePTY(t *testing.T, server *httptest.Server, scope store.Bot
 		if strings.Index(text, refinement) >= strings.Index(text, acknowledgement) || strings.Index(text, acknowledgement) >= strings.Index(text, finalBody) {
 			t.Fatal("native PTY chronology reordered")
 		}
-		for _, forbidden := range []string{"Review candidate", "Approve work", "Open in Files panel"} {
+		for _, forbidden := range []string{"Review candidate", "Approve work", "Open in Files panel", "PRIVATE_EMPLOYEE_SOURCE_EVIDENCE"} {
 			if strings.Contains(text, forbidden) {
 				t.Fatalf("needless workflow: %s", text)
 			}

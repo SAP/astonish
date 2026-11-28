@@ -56,7 +56,7 @@ func TestBotEmployeeExplicitFileHTTP(t *testing.T) {
 			cfg := f.workerConfig
 			cfg.Sandbox = journeyFilesBackend{synthesisHTTPBackend{files: files.disk}}
 			cfg.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return &journeyModel{root: f.dataDir, action: actionName, calls: &calls}, nil
+				return mediateHTTPModel(&journeyModel{root: f.dataDir, action: actionName, calls: &calls}), nil
 			}
 			cfg.Prepare = func(ctx context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				if q.Instructions != objective || q.Bot.Scope != scope {
@@ -695,7 +695,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 			if p.Subject != owner || s != store.BotScopePersonal || providerName != "controlled" || modelName != "journey-model" {
 				return nil, store.ErrBotForbidden
 			}
-			return &journeyModel{root: dir, action: "journey_exact_action", report: report, calls: &modelCalls}, nil
+			return mediateHTTPModel(&journeyModel{root: dir, action: "journey_exact_action", report: report, calls: &modelCalls}), nil
 		}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 			files.repo = s.Services.PersonalBots
 			files.install(c, q, s)
@@ -911,7 +911,8 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 			t.Fatalf("home reports=%d want=%d", count, want)
 		}
 	}
-	assertHomeReports(1)
+	// Waiting approval is a product control, not synthesized Employee speech.
+	assertHomeReports(0)
 	firstSession := run.SessionID
 	firstFence := run.Lease.Fence
 	worker.Stop()
@@ -945,7 +946,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 		encoded, _ := json.Marshal(run)
 		t.Fatalf("resume failed: %s effects=%d", encoded, effects.Load())
 	}
-	assertHomeReports(2)
+	assertHomeReports(1)
 	request("POST", runPath+"/resume", fmt.Sprintf(`{"approval_id":%q}`, approval.ID.String()), 409)
 	// Reconstruct publication around the actual committed ChatRunner report.
 	o, err := db.ForOrg(org.Slug)
@@ -1039,7 +1040,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	if err := json.Unmarshal(request("GET", secondPath, "", 200), &secondRun); err != nil {
 		t.Fatal(err)
 	}
-	if secondRun.Status != store.RunSucceeded || len(secondRun.Report.Unchanged) != 1 || len(secondRun.Report.Changed) != 0 || effects.Load() != 2 {
+	if secondRun.Status != store.RunSucceeded || len(secondRun.Report.Unchanged) != 2 || len(secondRun.Report.Changed) != 0 || effects.Load() != 2 {
 		t.Fatalf("second execution: %+v effects=%d", secondRun, effects.Load())
 	}
 	if len(physicalIDs[runID]) != 2 || len(physicalIDs[secondID]) != 2 {
@@ -1091,7 +1092,7 @@ func TestBotRuntimeHTTPAcceptance(t *testing.T) {
 	if effects.Load() != 2 || modelCalls.Load() != before {
 		t.Fatal("denied paused admission executed work")
 	}
-	assertHomeReports(2)
+	assertHomeReports(1)
 }
 
 type chatFirstModel struct{ requests []string }

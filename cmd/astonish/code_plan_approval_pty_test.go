@@ -369,6 +369,8 @@ func TestCodeSessionFolderPermissionsPTYAcceptance(t *testing.T) {
 	codePermissionsPTYReply(t, f, term, sidebarPTYModelTurn{text: "SESSION ISOLATION VERIFIED"})
 	term.wait("SESSION ISOLATION VERIFIED", "Enter send")
 	term.send("/new\r")
+	term.wait("Code workspaces", "› Current workspace", "Enter choose")
+	term.send("\r")
 	term.wait("Message Astonish", "Enter send")
 	for _, key := range []string{"/permissions\r", "\x10"} {
 		term.send(key)

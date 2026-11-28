@@ -514,7 +514,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 				if !mixed {
 					return
 				}
-				for _, marker := range []string{"Read file /workspace/public-receipt.txt", "Mixed research", "Mixed verification plan", "I can’t confirm the latest outcome right now.", "Mixed presentation complete"} {
+				for _, marker := range []string{"Read file /workspace/public-receipt.txt", "Mixed research", "Mixed verification plan", "Latest outcome unavailable.", "Mixed presentation complete"} {
 					if !strings.Contains(rendered, marker) {
 						t.Errorf("mixed PTY presentation missing %q: %s", marker, rendered)
 					}
@@ -595,7 +595,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 				reject.Store(code)
 				send("retain-this-message\r")
 				// Composer transport errors are not typed yet, so even 403 uses safe generic feedback.
-				wait("I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.")
+				wait("Latest outcome unavailable. Refresh before trying again; work may still be running.")
 				retained := frame(uint16(143 + code%10))
 				if strings.Contains(retained, "server error (") || strings.Contains(retained, "review-conflict") {
 					t.Fatalf("composer exposed raw diagnostic: %s", retained)
@@ -647,7 +647,7 @@ func runBotParityPTYAcceptance(t *testing.T, quality bool, agentMode ...bool) {
 			wait("No approvals.")
 			escape()
 			if status == store.BotPaused {
-				wait("I saved your approval, but I’m still paused.")
+				wait("Approval saved. Bot remains paused.")
 			}
 			if proposalPosts.Load() != 1 || approvalPosts.Load() != 1 {
 				t.Fatalf("decision counts: %d/%d", proposalPosts.Load(), approvalPosts.Load())

@@ -55,7 +55,7 @@ func TestBotSchedulePresentationOrdering(t *testing.T) {
 		t.Fatalf("final duplicated or regressed: %+v", tr)
 	}
 	item := tr.Items[0]
-	if item.Kind != ItemAgent || item.Content != v.Summary || item.BotOperationID != v.OperationID.String() || item.Provisional {
+	if item.Kind != ItemSystem || item.Content != v.Summary || item.BotOperationID != v.OperationID.String() || item.Provisional {
 		t.Fatalf("not one stable assistant confirmation: %+v", item)
 	}
 	if tr.BotOperations[v.OperationID.String()].Status != store.BotOperationApplied {
@@ -91,7 +91,7 @@ func TestBotScheduleConversationBoundary(t *testing.T) {
 			tr.Apply(NewText("Another response."))
 			tr.Apply(makeRoutingInfo("other-model", "weak", 1))
 			tr.Apply(NewDone())
-			if tr.Items[0].Content != v.Summary || tr.Items[0].Kind != ItemAgent || tr.Items[0].Provisional || tr.Items[0].RoutingModel != "" {
+			if tr.Items[0].Content != v.Summary || tr.Items[0].Kind != ItemSystem || tr.Items[0].Provisional || tr.Items[0].RoutingModel != "" {
 				t.Fatalf("confirmation mutated by later stream: %+v", tr.Items)
 			}
 		})

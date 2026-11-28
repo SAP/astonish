@@ -99,16 +99,19 @@ func RenderWorkDetails(w *store.BotWorkProjection) string {
 	return b.String()
 }
 
-// RenderReport renders the committed employee message for Home and terminal.
-// Detailed evidence stays on BotReport for diagnostics, not in the conversation.
+// RenderReport is a concise report projection, not the authority for Home speech.
+// Home additionally requires private producer provenance or a completed presentation.
+// System fallbacks and operation receipts never become Employee speech here.
 func RenderReport(run store.BotRun) string {
 	if run.Report.ValidateEmployeeMessageIntegrity(run.Status) == nil {
-		return run.Report.EmployeeMessage.Text + "\n"
+		switch run.Report.EmployeeMessage.Origin {
+		case store.BotEmployeeMessageAgent, store.BotEmployeeMessageAssessed, store.BotEmployeeMessageModel:
+			return run.Report.EmployeeMessage.Text + "\n"
+		}
 	}
-	// This is a new projection, not a rewrite of persisted historical text.
 	// Neither legacy summaries nor malformed envelopes are public authority.
-	message := EmployeeMessageFallback(run.Status, run.Report, nil)
-	return message.Text + "\n"
+	// Keep historical diagnostic bytes intact without manufacturing a new voice.
+	return "Employee response unavailable.\n"
 }
 
 // RenderDiagnosticReport is the explicit detailed representation, not Home prose.

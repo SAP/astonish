@@ -103,7 +103,23 @@ func TestBotPreparedPlanAdmissionHTTP(t *testing.T) { testBotPreparedPlanAdmissi
 
 func TestBotOwnerPlanConsentHTTP(t *testing.T) { testBotPreparedPlanAdmissionHTTP(t, true) }
 
+func TestPrivateWorkerPlanModeHTTP(t *testing.T) {
+	testBotPreparedPlanAdmissionHTTPInitial(t, false, true)
+}
+
 func testBotPreparedPlanAdmissionHTTP(t *testing.T, interactive bool) {
+	testBotPreparedPlanAdmissionHTTPInitial(t, interactive, false)
+}
+
+func TestPrivateWorkerNormalModeHTTP(t *testing.T) {
+	testBotPreparedPlanAdmissionHTTPMode(t, false, true, false)
+}
+
+func testBotPreparedPlanAdmissionHTTPInitial(t *testing.T, interactive, initialOnly bool) {
+	testBotPreparedPlanAdmissionHTTPMode(t, interactive, initialOnly, true)
+}
+
+func testBotPreparedPlanAdmissionHTTPMode(t *testing.T, interactive, initialOnly, planning bool) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -140,7 +156,7 @@ func testBotPreparedPlanAdmissionHTTP(t *testing.T, interactive bool) {
 			announce := map[string]any{"goal": "HTTP exact prepared plan", "context": "Test-owned prepared plan", "what_not_to_do": "No unrelated commands or files", "verification": "Observe prepared-http-ok", "steps": []any{map[string]any{"name": "verify", "description": "Verify scope", "details": "Execute the one bounded verifier", "summary": "Observe actual command output", "outcome": "prepared-http-ok", "files": []any{map[string]any{"path": "PLAN.md", "kind": "new"}}, "verify": "printf prepared-http-ok", "verify_kind": "behavior"}}}
 			llm := &preparedAdmissionHTTPModel{configuredAdmissionModel: configuredAdmissionModel{script: []configuredAdmissionCall{{"announce_plan", announce}}}}
 			worker, e := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: home, Pool: workerTestPool{}, WorkerID: "prepared-http", TurnRegistry: registry, ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return llm, nil
+				return mediateDaemonModel(llm), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				pool.mu.Lock()
 				pool.sessions[q.Run.SessionID.String()] = true
@@ -215,7 +231,7 @@ func testBotPreparedPlanAdmissionHTTP(t *testing.T, interactive bool) {
 				return out
 			}
 			post := func(path string, body any, want int) []byte { return postAs(path, body, want, false) }
-			payload := map[string]any{"version": b.Version, "idempotency_key": "announce-http", "instructions": v.Charter, "planMode": true}
+			payload := map[string]any{"version": b.Version, "idempotency_key": "announce-http", "instructions": v.Charter, "planMode": planning}
 			var admitted store.BotRun
 			endpoint := "test-run"
 			if interactive {
@@ -233,10 +249,30 @@ func testBotPreparedPlanAdmissionHTTP(t *testing.T, interactive bool) {
 			get := func() *store.BotRun { t.Helper(); r, e := repo.GetRun(auth, b.ID, admitted.ID); must(e); return r }
 			poll() // mode comes only from the durable HTTP request, never worker context
 			pending := get()
+			if !planning {
+				approvals, err := repo.ListApprovals(auth, b.ID, store.BotPage{})
+				must(err)
+				if pending.Status == store.RunWaitingApproval || len(approvals) != 0 || pool.count() != 0 {
+					t.Fatalf("Normal mode admitted announce_plan: run=%+v approvals=%+v calls=%d", pending, approvals, pool.count())
+				}
+				llm.mu.Lock()
+				responses := strings.Join(llm.responses, "\n")
+				llm.mu.Unlock()
+				if !strings.Contains(responses, "blocked_announce_plan_not_in_plan_mode") {
+					t.Fatalf("Normal mode did not report the runtime mode gate: %s", responses)
+				}
+				return
+			}
 			approvals, e := repo.ListApprovals(auth, b.ID, store.BotPage{})
 			must(e)
 			if pending.Status != store.RunWaitingApproval || len(approvals) != 1 || (!interactive && pool.count() != 0) {
 				t.Fatalf("unsafe initial: run=%+v approvals=%+v calls=%d responses=%v", pending, approvals, pool.count(), llm.responses)
+			}
+			if initialOnly {
+				if approvals[0].Action.Tool != "write_file" || pool.count() != 0 {
+					t.Fatal("Plan mode did not privately prepare the exact mirror")
+				}
+				return
 			}
 			if interactive {
 				testOwnerDefinitionConsentHTTP(t, auth, repo, ss, b, admitted, pool, llm, post, poll, func(path string, body any) { postAs(path, body, 403, true) }, func() {

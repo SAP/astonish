@@ -134,14 +134,14 @@ func TestBotRoutineAcknowledgmentPublicationOrder(t *testing.T) {
 					}
 					request := store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: sequence}
 					pub, err := r.PublishReport(owner, request)
-					if err != nil || !pub.Suppressed || pub.Text != "" || len(pub.Notifications) != 0 {
+					if err != nil || pub.Suppressed || !pub.EmployeeSpeech || pub.Text != saved.Report.EmployeeMessage.Text || len(pub.Notifications) != 0 {
 						t.Fatalf("pending publication: %+v %v", pub, err)
 					}
 					if !applyFirst {
 						apply()
 					}
 					again, err := r.PublishReport(owner, request)
-					if err != nil || !again.Suppressed || again.EventID != pub.EventID {
+					if err != nil || again.Suppressed || again.Text != pub.Text || again.EmployeeSpeech != pub.EmployeeSpeech || again.EventID != pub.EventID {
 						t.Fatalf("publication retry: %+v %v", again, err)
 					}
 					replay, err := rt.ApplyAuthorizedOperation(owner, q.MandateRef, op.ID)
@@ -153,15 +153,15 @@ func TestBotRoutineAcknowledgmentPublicationOrder(t *testing.T) {
 						t.Fatal(err)
 					}
 					view, err := store.ProjectBotOperation(rec.Bot, *applied, sequence+1)
-					if err != nil || view.Presentation != store.BotOperationPresentationConversation || strings.Contains(view.Summary, op.ID.String()) {
+					if err != nil || view.Presentation != store.BotOperationPresentationInternal || strings.Contains(view.Summary, op.ID.String()) {
 						t.Fatalf("final view: %+v %v", view, err)
 					}
 					canonical, _ := store.NewBotOperationEvent(view, time.Now())
-					if final.EventID != canonical.ID {
-						t.Fatalf("publication did not reuse canonical operation: %+v", final)
+					if final.EventID == pub.EventID || final.ReportSequence <= pub.ReportSequence || !applied.HasVerifiedMetadataReceipt() {
+						t.Fatalf("missing stable neutral operation receipt: %+v", final)
 					}
 					finalRetry, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: final.ReportSequence})
-					if err != nil || finalRetry.EventID != canonical.ID || finalRetry.Text != final.Text {
+					if err != nil || finalRetry.EventID != final.EventID || finalRetry.Text != final.Text {
 						t.Fatalf("final publication retry: %+v %v", finalRetry, err)
 					}
 					for _, notification := range final.Notifications {
@@ -182,14 +182,17 @@ func TestBotRoutineAcknowledgmentPublicationOrder(t *testing.T) {
 					}
 					count := 0
 					for _, row := range rows {
-						if row.Event.ID == pub.EventID {
-							t.Fatal("pending acknowledgment leaked")
+						if row.Event.ID == pub.EventID && (!pub.EmployeeSpeech || row.Event.Content == nil) {
+							t.Fatal("validated source answer lost its speech binding")
 						}
-						if row.Event.ID == canonical.ID {
+						if row.Event.ID == canonical.ID || row.Event.ID == final.EventID {
+							if row.Event.Author == "assistant" || row.Event.Content != nil {
+								t.Fatal("internal operation bookkeeping emitted speech")
+							}
 							count++
 						}
 					}
-					if count != 1 {
+					if count != 1 || final.EmployeeSpeech || final.Text != "" || final.ReportDigest == "" {
 						t.Fatalf("canonical count %d", count)
 					}
 				})

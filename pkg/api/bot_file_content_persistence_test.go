@@ -43,9 +43,16 @@ func TestBotFileContentPersistenceHTTP(t *testing.T) {
 				}
 				return string(raw)
 			}
-			b := skillDecode[store.Bot](t, f.request("POST", "/api/studio/bots?scope="+string(scope), f.owner, encode(map[string]any{"name": "Disk-backed definition", "idempotency_key": "file-content-http", "definition": map[string]any{"charter": markers["charter"], "persona": map[string]any{"soul": markers["persona"], "timezone": "UTC"}}}), 201))
 			ctx := f.context(f.owner)
 			repo := f.repo(scope)
+			var b store.Bot
+			body := encode(map[string]any{"name": "Disk-backed definition", "idempotency_key": "file-content-http", "definition": map[string]any{"charter": markers["charter"], "persona": map[string]any{"soul": markers["persona"], "timezone": "UTC"}}})
+			if scope == store.BotScopeTeam {
+				f.request("POST", "/api/studio/bots?scope=team", f.owner, body, 403)
+				b = retainedTeamBotFixture(t, ctx, repo, f.owner, "Disk-backed definition", "file-content-http", markers["charter"], markers["persona"])
+			} else {
+				b = skillDecode[store.Bot](t, f.request("POST", "/api/studio/bots?scope=personal", f.owner, body, 201))
+			}
 			goal := skillDecode[store.BotGoal](t, f.request("POST", skillPath(&b, "/goals"), f.owner, encode(map[string]any{"title": "Private goal", "description": markers["goal"], "completion_criteria": markers["criteria"]}), 201))
 			service, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindService, ClientID: "http-content-registration", Authentication: execution.AuthMethod("internal"), Surface: execution.SurfaceCode, OrgSlug: f.org.Slug, TeamSlug: f.team.Slug, Authenticated: true, Scopes: []string{entstore.BotHomeRegistrationScope}})
 			if err != nil {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/daemon"
 	"github.com/SAP/astonish/pkg/execution"
 	"github.com/SAP/astonish/pkg/store"
 	"github.com/SAP/astonish/pkg/store/entstore"
@@ -92,6 +93,7 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 	// producer request after the launcher factory resumes the confirmed run,
 	// rather than treating LoadRunInput's assignment alone as context evidence.
 	producerRequests := 0
+	baselineAssessment := f.model.assessment
 	assertPreferenceContext := func(req *model.LLMRequest) {
 		t.Helper()
 		raw, err := json.Marshal(req.Contents)
@@ -106,10 +108,29 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 		producerRequests++
 	}
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+		if response, ok := baselineAssessment(req); ok {
+			return response, true
+		}
+		if req.Config != nil && req.Config.SystemInstruction != nil && strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_") {
+			return nil, false
+		}
+		mainThread := false
+		if req.Config != nil {
+			for _, tool := range req.Config.Tools {
+				for _, d := range tool.FunctionDeclarations {
+					if d.Name == "employee_chat" {
+						mainThread = true
+					}
+				}
+			}
+		}
+		if !mainThread {
+			return nil, false
+		}
 		assertPreferenceContext(req)
 		return nil, false
 	}
-	f.model.called, f.model.name, f.model.args = false, "execute_tool", map[string]any{"name": "ask_user", "arguments": map[string]any{"kind": "text", "prompt": "Which forecast dates?"}}
+	f.model.called, f.model.name, f.model.args = false, "ask_user", map[string]any{"kind": "text", "prompt": "Which forecast dates?"}
 	later := answer(poll(), "Next weekend")
 	if later == initial {
 		t.Fatal("initial question replayed")
@@ -118,10 +139,42 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 	if err != nil || input.Instructions != preference {
 		t.Fatalf("assignment lost: %+v %v", input, err)
 	}
+	// Recompose the controlled model adapter for this continuation so a prior
+	// question's private action cannot be replayed as the new read request.
+	f.worker.Stop()
+	cfg := f.workerConfig
+	fresh := mediateHTTPModel(f.model)
+	cfg.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+		return fresh, nil
+	}
+	f.worker, err = daemon.NewBotWorker(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.worker.Stop()
 	f.model.called, f.model.name, f.model.args = false, "read_file", map[string]any{"path": "receipt.txt"}
 	const acknowledgment = "I'll compare the forecasts for next weekend."
 	announced := false
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+		if response, ok := baselineAssessment(req); ok {
+			return response, true
+		}
+		if req.Config != nil && req.Config.SystemInstruction != nil && strings.HasPrefix(req.Config.SystemInstruction.Parts[0].Text, "BOT_") {
+			return nil, false
+		}
+		mainThread := false
+		if req.Config != nil {
+			for _, tool := range req.Config.Tools {
+				for _, d := range tool.FunctionDeclarations {
+					if d.Name == "employee_chat" {
+						mainThread = true
+					}
+				}
+			}
+		}
+		if !mainThread {
+			return nil, false
+		}
 		assertPreferenceContext(req)
 		raw, _ := json.Marshal(req.Contents)
 		for _, want := range []string{"Which forecast dates?", "Next weekend"} {
@@ -133,8 +186,7 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 			return nil, false
 		}
 		announced = true
-		f.model.called = true
-		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: acknowledgment}, {FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "read_file", Args: f.model.args}}}}}, true
+		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: acknowledgment}, {FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "employee_chat", Args: map[string]any{"message": "Boston weather: Celsius, please. Which Boston weather assignment? Which forecast dates? Next weekend. Read receipt.txt and return the actual scoped evidence."}}}}}}, true
 	}
 	completed := poll()
 	if completed.Status != store.RunSucceeded || f.pool.calls != 1 || completed.TitleConfirmation.ApprovalID != initial {
@@ -159,10 +211,10 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 			if part == nil {
 				continue
 			}
-			if call := part.FunctionCall; call != nil && call.Name == "execute_tool" && call.Args["name"] == "ask_user" {
+			if call := part.FunctionCall; call != nil && (call.Name == "ask_user" || call.Name == "execute_tool" && call.Args["name"] == "ask_user") {
 				questionCallID, questionInvocation = call.ID, row.Event.InvocationID
 			}
-			if response := part.FunctionResponse; response != nil && response.Name == "execute_tool" && response.ID == questionCallID {
+			if response := part.FunctionResponse; response != nil && (response.Name == "ask_user" || response.Name == "execute_tool") && response.ID == questionCallID {
 				questionResponseSeen = response.Response["prompt"] == "Which forecast dates?"
 			}
 			if row.Event.Author == "user" && strings.Contains(part.Text, `"type":"bot_owner_answer"`) && strings.Contains(part.Text, "Next weekend") {
@@ -184,7 +236,7 @@ func TestBotTitleConfirmedLaterQuestionContinuation(t *testing.T) {
 				}
 				seenAck = true
 			}
-			if part.FunctionCall != nil && part.FunctionCall.Name == "read_file" {
+			if part.FunctionCall != nil && part.FunctionCall.Name == "employee_chat" {
 				if !seenAck {
 					t.Fatal("work preceded friendly acknowledgment")
 				}

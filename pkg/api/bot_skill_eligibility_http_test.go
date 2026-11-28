@@ -91,10 +91,10 @@ func TestBotAgentLearningEligibilityHTTPAcceptance(t *testing.T) {
 						t.Fatal(err)
 					}
 					f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
-						if name != "web_fetch" {
+						if name != "_bot_public_fetch" {
 							return nil, fmt.Errorf("unexpected %s", name)
 						}
-						return json.Marshal(map[string]any{"final_url": "https://example.test/receipt", "content": "current receipt", "status": 200})
+						return json.Marshal(map[string]any{"read_executed": true, "response": map[string]any{"url": args["url"], "final_url": "https://example.test/receipt", "content": "current receipt", "status": 200}})
 					}
 					step = 0
 					f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {

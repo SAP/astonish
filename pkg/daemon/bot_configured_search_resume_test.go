@@ -396,6 +396,39 @@ func TestBotConfiguredSearchOwnerResumeHTTP(t *testing.T) {
 			if final.ID != pending.ID || final.SessionID != pending.SessionID || final.Version != pending.Version || final.ExecutionMode != pending.ExecutionMode || final.Intent != pending.Intent {
 				t.Fatal("resume changed logical run identity")
 			}
+			if scenario.drift == "provider" || scenario.drift == "model" || scenario.drift == "credential" {
+				// The first denied attempt retained the unused approval, but its
+				// checkpoint pins that attempt's configured target. Restoring defaults
+				// cannot turn this into permission to dispatch a different executable.
+				savedApproval := approvals()[0]
+				if calls.Load() != 0 || savedApproval.Status != store.ApprovalRevoked || savedApproval.ActionDigest != approval.ActionDigest || savedApproval.Action.TargetFingerprint != approval.Action.TargetFingerprint {
+					t.Fatalf("pinned target drift did not fail closed: calls=%d approval=%+v", calls.Load(), savedApproval)
+				}
+				if final.Status == store.RunSucceeded || final.Report.Failure == nil || final.Report.EmployeeMessage == nil || !strings.Contains(final.Report.EmployeeMessage.Text, "Authorization did not allow the operation") || len(final.Report.Artifacts) != 0 || len(final.Report.Changed) != 0 {
+					t.Fatalf("drift reported invented search success: %+v", final.Report)
+				}
+				llm.evidenceMu.Lock()
+				evidence := strings.Join(llm.evidence, "\n")
+				llm.evidenceMu.Unlock()
+				if strings.Contains(evidence, "configured-search-evidence") || strings.Contains(evidence, key) {
+					t.Fatal("unexecuted search invented evidence or exposed credentials")
+				}
+				post(approvePath, payload, "", http.StatusConflict)
+				post("/bots/"+b.ID.String()+"/runs/"+admitted.ID.String()+"/resume?scope="+string(scope), map[string]any{"approval_id": approval.ID}, "", http.StatusConflict)
+				poll()
+				if calls.Load() != 0 || approvals()[0].Status != store.ApprovalRevoked {
+					t.Fatal("revoked target replayed")
+				}
+				if prepared.Load() != 3 || cleaned.Load() != prepared.Load() {
+					t.Fatalf("drift attempt resources leaked: prepared=%d cleaned=%d", prepared.Load(), cleaned.Load())
+				}
+				pool.mu.Lock()
+				defer pool.mu.Unlock()
+				if pool.closed || len(pool.operations) != 0 {
+					t.Fatal("drift closed borrowed pool or dispatched unrelated tools")
+				}
+				return
+			}
 			if calls.Load() != 1 || approvals()[0].Status != store.ApprovalConsumed {
 				t.Fatalf("not consumed/executed once: calls=%d approval=%+v report=%+v", calls.Load(), approvals(), final.Report)
 			}

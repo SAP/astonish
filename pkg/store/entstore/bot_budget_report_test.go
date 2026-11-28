@@ -48,20 +48,16 @@ func TestBotBudgetReportPublication(t *testing.T) {
 				t.Fatal("publication changed bot state")
 			}
 			rows := reviewTranscript(t, ctx, repo, *after)
-			if len(rows) != 1 {
-				t.Fatalf("want one canonical row got %d", len(rows))
+			if first.EmployeeSpeech || first.Text != "" || len(first.Notifications) != 0 || first.ReportDigest == "" {
+				t.Fatalf("budget bookkeeping became Employee speech: %+v", first)
 			}
-			e := rows[0].Event
-			if e == nil || e.ID != first.EventID || e.Author != "assistant" || e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil {
-				t.Fatalf("not canonical %+v", e)
-			}
-			text := e.Content.Parts[0].Text
-			if text != store.NewBotEmployeeFallback(store.RunFailed, report, "").Text || text != first.Text {
-				t.Fatalf("unexpected employee message: %q", text)
-			}
-			for _, unwanted := range []string{"Run report", run.ID.String(), "accounted=30", "requested=70", "limit=91", "Technical details", "[Error:"} {
-				if strings.Contains(text, unwanted) {
-					t.Errorf("diagnostic %q leaked into employee message: %s", unwanted, text)
+			for _, row := range rows {
+				e := row.Event
+				if e == nil {
+					continue
+				}
+				if e.ID == first.EventID || e.Author == "assistant" {
+					t.Fatalf("budget fallback emitted canned speech: %+v", e)
 				}
 			}
 			restored, err := repo.GetRun(ctx, run.BotID, run.ID)

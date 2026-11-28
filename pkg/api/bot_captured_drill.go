@@ -16,6 +16,7 @@ type capturedDrillOccurrence struct {
 	guard  *botResumeGuard
 	action execution.ActionDescriptor
 	policy *execution.RunPolicy
+	turn   execution.BotTurnAuthorizer
 	used   atomic.Bool
 }
 
@@ -74,6 +75,18 @@ func CapturedDrillChildContext(ctx context.Context, name string, args map[string
 	got, err := action.Digest()
 	if err != nil || want != got {
 		return nil, store.ErrBotForbidden
+	}
+	// Interactive execution retains the original caller gate, not an autonomy
+	// policy. The parent approval admits only these exact verified read children.
+	if g.req.Policy == nil && g.req.Run.IsInteractiveChat() && g.req.Mandate == nil && g.req.Authorization != nil {
+		if execution.RunPolicyFromContext(ctx) != nil || action.Effect != execution.EffectRead || !action.ConstraintsVerified || action.SpendMinor != 0 {
+			return nil, store.ErrBotForbidden
+		}
+		if err := g.req.Authorization.AuthorizeTool(ctx, name); err != nil {
+			return nil, err
+		}
+		g.drillCursor++
+		return context.WithValue(ctx, capturedDrillOccurrenceKey{}, &capturedDrillOccurrence{guard: g, action: action, turn: g.req.Authorization}), nil
 	}
 	// Captured approval never turns unknown shell/send/spend into child rights.
 	p := execution.RunPolicyFromContext(ctx)

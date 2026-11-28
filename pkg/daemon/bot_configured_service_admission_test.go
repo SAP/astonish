@@ -124,7 +124,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 	policyName := "a2a/" + toolName
 	args := map[string]any{"message": "controlled-service-question"}
 	if service == "email" {
-		toolName, policyName, resultMarker = "email_send", "email_send", "message_id"
+		policyName, resultMarker = "email_send", "message_id"
 		args = map[string]any{"to": []any{"recipient@example.com"}, "subject": "Reviewed configured subject", "body": "Reviewed configured email body"}
 		endpoint := configuredServiceSMTP(t, func() { calls.Add(1) })
 		settings := &store.BotEmailSettings{Provider: "imap", Address: "owner@example.com", IMAPServer: "127.0.0.1:1", SMTPServer: endpoint, Credential: "mail", Folder: "INBOX"}
@@ -157,7 +157,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 		}
 	}
 	if service == "drill" {
-		toolName, policyName, resultMarker = "run_drill", "run_drill", "passed"
+		policyName, resultMarker = "run_drill", "passed"
 		args = map[string]any{"suite_name": "configured-service-suite"}
 		// Platform drills are team-scoped artifacts even for a personal Chat/Bot.
 		// Seed only the configured team store, not a personal fallback.
@@ -174,7 +174,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 			}
 		}
 	}
-	llm := &configuredAdmissionModel{script: []configuredAdmissionCall{{toolName, args}}}
+	llm := &configuredAdmissionModel{script: []configuredAdmissionCall{{policyName, args}}}
 	turns := execution.NewBotTurnAuthorizationRegistry(8)
 	defer turns.Close()
 	svc := &store.Services{Mode: store.ModePlatform, Platform: backend, TenantRouter: backend, Bots: team.Bots(), PersonalBots: personal.Bots(), Sessions: team.Sessions(), PersonalSessions: personal.Sessions(), PlatformMCPServers: backend.PlatformMCPServers(), TeamMCPServers: team.MCPServers(), A2AAgents: org.OrgA2AAgents(), TeamA2AAgents: team.A2AAgents(), PlatformSettings: backend.PlatformSettings(), Settings: team.Settings(), PersonalSettings: personal.PersonalSettings(), BotTurnRegistry: turns, BotInteractiveReady: true}
@@ -205,6 +205,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 	router := mux.NewRouter()
 	router.HandleFunc("/studio/chat", api.StudioChatHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
+	router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/approvals/{approvalID}/decision", api.BotApprovalDecisionHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/runs/{runID}/resume", api.BotResumeRunHandler).Methods("POST")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -391,7 +392,7 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 				return
 			}
 			if e != nil || len(approvals) != 1 || approvals[0].Status != store.ApprovalConsumed || calls.Load() != wantCalls {
-				t.Fatalf("exact owner resume: run=%+v approvals=%+v calls=%d err=%v", saved, approvals, calls.Load(), e)
+				t.Fatalf("exact owner resume: run=%+v approvals=%+v calls=%d err=%v responses=%v", saved, approvals, calls.Load(), e, llm.responses)
 			}
 			post(resume, map[string]any{"approval_id": approval.ID}, 409)
 			if e = worker.Poll(auth); e != nil {
@@ -401,6 +402,8 @@ func runConfiguredServiceAdmissionVariant(t *testing.T, service string, scope st
 				t.Fatal("approved service replayed")
 			}
 			wantAttempts = 2
+		} else if mode == "interactive" {
+			saved, wantAttempts = configuredFixtureInteractiveActions(t, auth, worker, repo, b, run, scope, llm, llm.script, post)
 		} else if len(approvals) != 0 {
 			t.Fatalf("interactive approval mismatch: %+v", approvals)
 		}

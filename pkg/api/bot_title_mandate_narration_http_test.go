@@ -45,6 +45,35 @@ func TestBotEnhancedChatBaseline(t *testing.T) {
 	t.Run("budget_stops_without_replay", TestBotBudgetComposedHTTP)
 }
 
+// titleFixtureSourceAdmission records the authenticated caller ceiling without
+// leaving registry-backed execution authority alive after trusted provisioning.
+// Runtime execution must independently verify the persisted mandate.
+type titleFixtureSourceAdmission struct{}
+
+func (titleFixtureSourceAdmission) Register(ctx context.Context, id execution.BotRunIdentity) (execution.BotTurnAuthorization, error) {
+	registry := execution.NewBotTurnAuthorizationRegistry(1)
+	defer registry.Close()
+	return registry.Register(ctx, id)
+}
+func (titleFixtureSourceAdmission) Cancel(execution.BotRunIdentity) {}
+
+type titleMandateHTTPModel struct {
+	model.LLM
+	owner, actor, botID string
+}
+
+func (m titleMandateHTTPModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	p, ok := execution.PrincipalFromContext(ctx)
+	if !ok || p.Kind != execution.PrincipalKindUser || !p.Authenticated || p.OrgSlug != "interactive" || p.TeamSlug != "team" || p.Subject != m.owner || p.Surface != execution.Surface("daemon") || (p.Authentication != execution.AuthMethodBotMandate && p.Authentication != execution.AuthMethod("daemon_owner")) || (p.Authentication == execution.AuthMethodBotMandate && p.Actor != m.botID || p.Authentication == execution.AuthMethod("daemon_owner") && p.Actor != m.actor) {
+		m.LLM.(*interactiveHTTPModel).t.Errorf("title fixture lost provenance: %+v expected actor=%s", p, m.actor)
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(nil, fmt.Errorf("title fixture lost current run owner provenance: %+v", p))
+		}
+	}
+	m.LLM.(*interactiveHTTPModel).principal = p
+	return m.LLM.GenerateContent(ctx, req, stream)
+}
+
 func TestBotTitleMandateAcknowledgementHomeHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		for _, answer := range []struct{ name, wire, text string }{
@@ -78,7 +107,7 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	// Shared Chat dispatches ordinary web_fetch through the scoped node pool.
 	// This controlled transport permits only this fixture's local source.
 	f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
-		if name != "web_fetch" || args["url"] != upstream.URL {
+		if (name != "web_fetch" && name != "_bot_public_fetch") || args["url"] != upstream.URL {
 			return nil, fmt.Errorf("unexpected scoped node call %s: %v", name, args)
 		}
 		res, err := upstream.Client().Get(upstream.URL)
@@ -118,6 +147,7 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	router := mux.NewRouter()
 	root := "/api/studio/bots"
 	router.HandleFunc(root, api.BotCreateHandler).Methods("POST")
+	router.HandleFunc(root+"/{botID}/approvals", api.BotApprovalsHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 	router.HandleFunc(root+"/{botID}/sessions/{sessionID}/stream", api.BotHistoryStreamHandler).Methods("GET")
 	router.HandleFunc(root+"/{botID}/sessions/{sessionID}/events", api.BotEventsHandler).Methods("GET")
@@ -151,7 +181,20 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 		return raw
 	}
 	var receipt titleHTTPReceipt
-	if err := json.Unmarshal(request("POST", root, `{"name":"AI news","idempotency_key":"narration","start_from_title":true}`, 201), &receipt); err != nil || receipt.InitialTurn == nil {
+	if scope == store.BotScopeTeam {
+		request("POST", root, `{"name":"AI news","idempotency_key":"narration","start_from_title":true}`, 403)
+		v, err := store.NewBotVersionForCreation(auth, uuid.MustParse(p.Subject))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.Charter = "AI news\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes."
+		admission := store.WithBotMandateAdmission(store.WithBotMessageAdmission(auth, titleFixtureSourceAdmission{}), policy)
+		seeded, err := f.repo.(store.BotTitleStartStore).CreateAndStart(admission, store.BotCreateRequest{Name: "AI news", OwnerID: uuid.MustParse(p.Subject), Version: v, IdempotencyKey: "narration"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt = titleHTTPReceipt{Bot: seeded.Bot, InitialTurn: &store.BotMessageReceipt{Run: seeded.Run, UserEventID: seeded.UserEventID, HistoryCursor: seeded.HistoryCursor}}
+	} else if err := json.Unmarshal(request("POST", root, `{"name":"AI news","idempotency_key":"narration","start_from_title":true}`, 201), &receipt); err != nil || receipt.InitialTurn == nil {
 		t.Fatalf("title: %v", err)
 	}
 	f.b = receipt.Bot
@@ -159,8 +202,8 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	f.registry.Close() // this journey must not borrow registry-backed authorization
 	const acknowledgement = "I'll prepare a concise weekly AI roundup covering practical developments."
 	const final = "Observed scoped result."
-	mdl := &interactiveHTTPModel{t: t, principal: execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}}
-	confirmed := false
+	mdl := &interactiveHTTPModel{t: t, name: "web_fetch", args: map[string]any{"url": upstream.URL}, principal: execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}}
+	confirmed, announced := false, false
 	mdl.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		if response, ok := f.model.assessment(req); ok {
 			return response, true
@@ -168,19 +211,31 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 		if !confirmed {
 			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "ask_user", Args: map[string]any{"kind": "select", "prompt": "Which AI news assignment?", "allow_custom_answer": true, "options": []map[string]any{{"id": "weekly", "label": "Weekly roundup"}, {"id": "research", "label": "Research breakthroughs"}, {"id": "policy", "label": "Policy changes"}}}}}}}}, true
 		}
-		if !mdl.called {
+		mainThread := false
+		if req.Config != nil {
+			for _, tool := range req.Config.Tools {
+				for _, d := range tool.FunctionDeclarations {
+					mainThread = mainThread || d.Name == "employee_chat"
+				}
+			}
+		}
+		if !mainThread {
+			return nil, false
+		}
+		if !announced {
 			raw, _ := json.Marshal(req.Contents)
 			if !strings.Contains(string(raw), answerText) {
 				t.Errorf("producer lost owner answer: %s", raw)
 			}
-			mdl.called = true
-			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: acknowledgement}, {FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "web_fetch", Args: map[string]any{"url": upstream.URL}}}}}}, true
+			announced = true
+			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: acknowledgement}, {FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "employee_chat", Args: map[string]any{"message": "AI news: " + answerText + ". Fetch " + upstream.URL + " and return the actual scoped evidence."}}}}}}, true
 		}
 		return nil, false
 	}
 	files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.pool.dir}, repo: f.repo, id: f.b.ID, scope: f.scope}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return mdl, nil
+	workerID := uuid.NewString()
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: workerID, ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+		return titleMandateHTTPModel{LLM: mdl, owner: p.Subject, actor: workerID, botID: f.b.ID.String()}, nil
 	}, Prepare: func(c context.Context, r bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		runFiles := *files
 		runFiles.id = r.Bot.ID
@@ -227,8 +282,14 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	}
 	homePath := root + "/" + f.b.ID.String() + "/sessions/" + f.b.HomeSessionID.String() + "/stream"
 	initial := string(request("GET", homePath, "", 200))
-	if titleAt, questionAt := strings.Index(initial, "AI news"), strings.Index(initial, "Which AI news assignment?"); titleAt < 0 || questionAt <= titleAt || strings.Contains(initial, acknowledgement) {
-		t.Fatalf("initial Home must show title then question, without work narration: %s", initial)
+	if !strings.Contains(initial, "AI news") || !strings.Contains(initial, "event: bot_review") || !strings.Contains(initial, a.ID.String()) || strings.Contains(initial, acknowledgement) {
+		t.Fatalf("initial Home must show title then the actual review handle, without work narration: %s", initial)
+	}
+	// Public history carries only the server-owned review handle. Hydrate the
+	// question through authenticated approval lookup rather than private history.
+	publicApprovals := request("GET", root+"/"+f.b.ID.String()+"/approvals", "", 200)
+	if !strings.Contains(string(publicApprovals), a.ID.String()) || !strings.Contains(string(publicApprovals), q.Prompt) {
+		t.Fatalf("owner could not hydrate the title question: %s", publicApprovals)
 	}
 	body, _ := json.Marshal(map[string]any{"action_digest": a.ActionDigest, "response": map[string]any{"question_id": a.Interaction.QuestionID, "answer": answer}})
 	answerPath := root + "/" + f.b.ID.String() + "/approvals/" + a.ID.String() + "/approve-and-continue"
@@ -247,8 +308,9 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 		t.Fatal(err)
 	}
 	confirmed = true
-	// Connect before resume: this must arrive as a live persisted delta, not only
-	// as a snapshot taken after completion.
+	mdl.called = false // the title question is not the resumed private source action
+	// Connect before resume: verify a live persisted delta, not merely a
+	// snapshot taken after completion.
 	streamCtx, cancelStream := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelStream()
 	eventsPath := root + "/" + f.b.ID.String() + "/sessions/" + f.b.HomeSessionID.String() + "/events?scope=" + string(scope)
@@ -290,7 +352,8 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	select {
 	case <-started:
 	case err := <-done:
-		t.Fatalf("worker ended before first source: %v", err)
+		ended, _ := f.repo.GetRun(auth, f.b.ID, receipt.InitialTurn.Run.ID)
+		t.Fatalf("worker ended before first source: %v run=%+v", err, ended)
 	case <-time.After(10 * time.Second):
 		t.Fatal("first source never started")
 	}
@@ -318,7 +381,7 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 	// of whether the same public tool frame has reached Home yet.
 	runPath := root + "/" + f.b.ID.String() + "/sessions/" + run.SessionID.String() + "/stream"
 	diagnostic := string(request("GET", runPath, "", 200))
-	ackAt, toolAt := strings.Index(diagnostic, acknowledgement), strings.Index(diagnostic, `"name":"web_fetch"`)
+	ackAt, toolAt := strings.Index(diagnostic, acknowledgement), strings.Index(diagnostic, `"name":"employee_chat"`)
 	if ackAt < 0 || toolAt <= ackAt || !strings.Contains(diagnostic, "event: tool_call\n") {
 		t.Fatalf("private acknowledgement -> work-call chronology lost: %s", diagnostic)
 	}
@@ -376,8 +439,8 @@ func testTitleMandateAcknowledgementHomeHTTP(t *testing.T, scope store.BotScope,
 			t.Fatalf("historical public tool payload or durable identity changed: %s", block)
 		}
 	}
-	if legacyCursor == 0 || publicFrames != 1 || strings.Contains(historical, "HISTORICAL_PRIVATE_CHECKPOINT") || !strings.Contains(historical, "id: "+wantID+"\nevent: done\n") {
-		t.Fatalf("historical public telemetry/private-field/cursor boundary: %s", historical)
+	if legacyCursor == 0 || publicFrames != 0 || strings.Contains(historical, "historical public release notes") || strings.Contains(historical, "HISTORICAL_PRIVATE_CHECKPOINT") || !strings.Contains(historical, "id: "+wantID+"\nevent: done\n") {
+		t.Fatalf("historical private telemetry/cursor boundary: %s", historical)
 	}
 	stored, err := ss.ReadTranscriptEvents(auth, "astonish_chat", p.Subject, f.b.HomeSessionID.String())
 	if err != nil {
@@ -464,7 +527,19 @@ func TestBotEmployeeObjectiveInquiryHTTP(t *testing.T) {
 					return raw
 				}
 				var created titleHTTPReceipt
-				if err := json.Unmarshal(request("POST", root, `{"name":"Apple News","start_from_title":true,"idempotency_key":"employee-objective"}`, 201), &created); err != nil || created.InitialTurn == nil {
+				if scope == store.BotScopeTeam {
+					request("POST", root, `{"name":"Apple News","start_from_title":true,"idempotency_key":"employee-objective"}`, 403)
+					version, e := store.NewBotVersionForCreation(auth, f.b.OwnerID)
+					if e != nil {
+						t.Fatal(e)
+					}
+					version.Charter = "Apple News"
+					started, e := f.repo.(store.BotTitleStartStore).CreateAndStart(store.WithBotMandateAdmission(store.WithBotMessageAdmission(auth, titleFixtureSourceAdmission{}), policy), store.BotCreateRequest{Name: "Apple News", OwnerID: f.b.OwnerID, Version: version, IdempotencyKey: "employee-objective"})
+					if e != nil {
+						t.Fatal(e)
+					}
+					created = titleHTTPReceipt{Bot: started.Bot, InitialTurn: &store.BotMessageReceipt{Run: started.Run, HomeSessionID: started.Bot.HomeSessionID, UserEventID: started.UserEventID, HistoryCursor: started.HistoryCursor}}
+				} else if err := json.Unmarshal(request("POST", root, `{"name":"Apple News","start_from_title":true,"idempotency_key":"employee-objective"}`, 201), &created); err != nil || created.InitialTurn == nil {
 					t.Fatalf("create: %v", err)
 				}
 				f.b = created.Bot
@@ -503,7 +578,7 @@ func TestBotEmployeeObjectiveInquiryHTTP(t *testing.T) {
 							}
 						}
 					}
-					seen := evidence.String()
+					seen := scriptedHTTPResponseEvidence(req)
 					query := "Apple News"
 					switch {
 					case strings.Contains(seen, "market revenue rose 5%"):
@@ -535,8 +610,12 @@ func TestBotEmployeeObjectiveInquiryHTTP(t *testing.T) {
 					return &model.LLMResponse{Content: genai.NewContentFromText(answer, "model"), UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}, nil
 				}}
 				files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.pool.dir}, repo: f.repo, id: f.b.ID, scope: scope}
-				worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-					return mdl, nil
+				worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, principal execution.Principal, _ store.BotScope, _, _ string) (model.LLM, error) {
+					if principal.Subject != p.Subject || principal.OrgSlug != p.OrgSlug || principal.TeamSlug != p.TeamSlug || !principal.Authenticated {
+						t.Fatal("lost owner model scope")
+					}
+					mdl.principal = principal
+					return mediateHTTPModel(mdl), nil
 				}, Prepare: func(c context.Context, r bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 					runFiles := *files
 					runFiles.id = r.Bot.ID

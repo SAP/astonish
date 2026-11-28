@@ -937,6 +937,8 @@ func TestCodePlanSidebarPTYResizeRestore(t *testing.T) {
 	f.turn("", nil)
 	term.wait("SIDEBAR EXECUTION FINISHED", "Enter send")
 	term.send("/new\r")
+	term.wait("Code workspaces", "› Current workspace")
+	term.send("\r")
 	term.wait("Enter send")
 	// Wait for the session switch paint rather than inspecting the old frame.
 	timer := time.NewTimer(30 * time.Second)

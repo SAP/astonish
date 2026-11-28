@@ -125,7 +125,7 @@ func TestBotOptionalSkillReadNoApprovalHTTP(t *testing.T) {
 			mdl := &optionalSkillReadHTTPModel{t: t, bridge: scope == store.BotScopeTeam, missing: uuid.New()}
 			homeBackend := testRetainedContentBackend(t, backend)
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: workerTestPool{}, WorkerID: "optional-skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return mdl, nil
+				return mediateDaemonModel(mdl), nil
 			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, homeBackend, svc, scope)

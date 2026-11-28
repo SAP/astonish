@@ -77,7 +77,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 			}
 			f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
 				if mandated {
-					if name != "web_fetch" {
+					if name != tools.BotPublicFetchOperation {
 						return nil, fmt.Errorf("unexpected profile tool %q", name)
 					}
 					// Shared Chat dispatches the ordinary web_fetch through the node
@@ -104,7 +104,7 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 					if err != nil {
 						return nil, err
 					}
-					return json.Marshal(result)
+					return json.Marshal(tools.BotPublicFetchResult{ReadExecuted: true, Response: result})
 				}
 				return json.Marshal(map[string]any{"content": payload})
 			}
@@ -174,6 +174,8 @@ func TestBotProgressMandateTwelveReadProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			if run.Status != store.RunSucceeded || run.Usage.ToolCalls != 12 || steps != 12 {
+				sourceResponses, _ := json.Marshal(progressPrivateResponses(t, f))
+				t.Logf("private source responses: %s", sourceResponses)
 				t.Fatalf("status=%s usage=%+v steps=%d report=%+v", run.Status, run.Usage, steps, run.Report)
 			}
 			if mandated && calls.Load() != 12 {

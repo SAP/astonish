@@ -211,7 +211,7 @@ func TestBotComposerRevisionPTYAcceptance(t *testing.T) {
 	// A regressed snapshot is uncertainty, not proof that the Bot stopped.
 	wait("active · Updates unavailable")
 	send("retain this conflict draft\r")
-	wait("I can’t confirm the latest outcome right now. Please refresh before trying again; your work may still be running.")
+	wait("Latest outcome unavailable. Refresh before trying again; work may still be running.")
 	if feedback := read(); strings.Contains(feedback, "server error (") || strings.Contains(feedback, "Bot changed; reload and review before retrying.") {
 		t.Fatalf("composer exposed raw conflict diagnostic: %s", feedback)
 	}

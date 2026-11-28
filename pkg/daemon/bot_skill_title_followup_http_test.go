@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"iter"
 	"net/http"
@@ -120,8 +121,8 @@ type titleSkillPool struct {
 func (p *titleSkillPool) GetOrCreate(string) sandbox.ToolNodeClient                     { return p }
 func (p *titleSkillPool) GetOrCreateWithTemplate(string, string) sandbox.ToolNodeClient { return p }
 func (p *titleSkillPool) Call(_ string, name string, args map[string]interface{}) (json.RawMessage, error) {
-	if name != "web_fetch" || args["url"] != p.url {
-		return nil, store.ErrBotInvalid
+	if (name != "web_fetch" && name != "_bot_public_fetch") || args["url"] != p.url {
+		return nil, fmt.Errorf("fixture source mismatch: name=%s args=%v want=%s", name, args, p.url)
 	}
 	response, err := http.Get(p.url)
 	if err != nil {
@@ -133,7 +134,7 @@ func (p *titleSkillPool) Call(_ string, name string, args map[string]interface{}
 		return nil, err
 	}
 	p.calls++
-	return json.Marshal(map[string]any{"content": string(body), "status": response.StatusCode, "final_url": p.url})
+	return json.Marshal(map[string]any{"url": p.url, "content": string(body), "status": response.StatusCode, "final_url": p.url})
 }
 
 func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
@@ -169,7 +170,7 @@ func TestBotSkillTitleFollowupHTTPAcceptance(t *testing.T) {
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
 			homeBackend := testRetainedContentBackend(t, backend)
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return mdl, nil
+				return mediateDaemonModel(mdl), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, homeBackend, svc, scope)

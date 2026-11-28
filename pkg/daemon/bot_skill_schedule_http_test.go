@@ -45,6 +45,7 @@ type skillScheduleModel struct {
 	source      string
 	stage       int
 	interactive bool
+	denied      bool
 }
 
 // Ordinary agent decisions; scoped tools persist learning and read fresh data.
@@ -57,7 +58,14 @@ func (m *skillScheduleModel) agentContent() iter.Seq2[*model.LLMResponse, error]
 		m.pins = append(m.pins, *w.Contract.Skill)
 	}
 	name, args := "", map[string]any{}
-	if m.feedback {
+	if m.denied {
+		switch m.stage {
+		case 3:
+			name, args = "bot_work_update", map[string]any{"expected_revision": w.Revision, "kind": string(bot.BotWorkSetRemaining), "remaining": []map[string]any{{"summary": "Create the requested schedule", "reason": "The recurring task mandate does not authorize schedule mutation.", "continuation": string(store.BotWorkContinueOwnerRequest)}}}
+		case 4:
+			name, args = "bot_work_update", map[string]any{"expected_revision": w.Revision, "kind": string(bot.BotWorkSetDisposition), "disposition": string(store.AgentWorkBlocked)}
+		}
+	} else if m.feedback {
 		if m.stage == 0 {
 			name, args = "bot_skill_save", map[string]any{"expected_revision": w.Revision, "skill_id": m.skill, "owner_feedback_scope": "skill", "owner_quotes": []string{m.assignment}}
 		}
@@ -70,21 +78,26 @@ func (m *skillScheduleModel) agentContent() iter.Seq2[*model.LLMResponse, error]
 				name = "bot_work_read"
 			}
 		case 1:
-			name, args = "execute_tool", map[string]any{"name": "web_fetch", "arguments": map[string]any{"url": m.source}}
+			name, args = "describe_tools", map[string]any{"names": []string{"web_fetch"}}
 		case 2:
+			name, args = "execute_tool", map[string]any{"name": "web_fetch", "arguments": map[string]any{"url": m.source}}
+		case 3:
 			if m.skill == "" {
-				name, args = "bot_skill_save", map[string]any{"expected_revision": w.Revision, "title": "Report", "method": []string{"Read the current source; never reuse previous observations.", "Report truthfully."}, "evidence_refs": []string{"capture:agent-schedule-1"}}
+				name, args = "bot_skill_save", map[string]any{"expected_revision": w.Revision, "title": "Report", "method": []string{"Read the current source; never reuse previous observations.", "Report truthfully."}, "evidence_refs": []string{"capture:agent-schedule-2"}}
 			}
 		}
 	}
 	// Every turn uses the shared Chat catalog, including scheduled turns.
-	if name != "" && name != "execute_tool" {
+	if name != "" && name != "execute_tool" && name != "describe_tools" {
 		name, args = "execute_tool", map[string]any{"name": name, "arguments": args}
 	}
 	id := fmt.Sprintf("agent-schedule-%d", m.stage)
 	m.stage++
 	return func(yield func(*model.LLMResponse, error) bool) {
 		part := &genai.Part{Text: "durable controlled result"}
+		if m.denied {
+			part.Text = "I couldn't create the requested schedule: this recurring task does not authorize schedule mutation. The schedule remains unchanged; an owner request is required."
+		}
 		if name != "" {
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args}}
 		}
@@ -107,7 +120,7 @@ func (m *skillScheduleModel) GenerateContent(ctx context.Context, req *model.LLM
 		m.t.Fatal("automatic review input not recognized")
 	}
 	if m.work != nil && strings.HasPrefix(prompt, "BOT_") {
-		m.t.Fatal("agent work invoked unexpected preparation assessment")
+		m.t.Fatalf("agent work invoked unexpected preparation assessment: %s", prompt)
 	}
 	if m.work != nil && !m.control && m.tool == "" {
 		return m.agentContent()
@@ -167,8 +180,8 @@ func TestSkillScheduleAgentToolsUseSharedCatalog(t *testing.T) {
 		}{
 			{name: "read", want: "bot_work_read"},
 			{name: "select-skill", skill: uuid.NewString(), want: "bot_skill_use"},
-			{name: "fetch", stage: 1, want: "web_fetch"},
-			{name: "save-skill", stage: 2, want: "bot_skill_save"},
+			{name: "fetch", stage: 2, want: "web_fetch"},
+			{name: "save-skill", stage: 3, want: "bot_skill_save"},
 			{name: "feedback", feedback: true, skill: uuid.NewString(), want: "bot_skill_save"},
 		} {
 			t.Run(fmt.Sprintf("interactive=%t/%s", interactive, tc.name), func(t *testing.T) {
@@ -283,7 +296,7 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
 			homeBackend := testRetainedContentBackend(t, backend)
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, MandatePolicy: policy, TurnRegistry: registry, Sandbox: homeBackend, Pool: pool, WorkerID: "skills-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return mdl, nil
+				return mediateDaemonModel(mdl), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, homeBackend, svc, scope)
@@ -477,6 +490,13 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 					t.Fatal(e)
 				}
 				result := readRun(selected.ID)
+				for deadline := time.Now().Add(5 * time.Second); (result.Status == store.RunQueued || result.Status == store.RunRunning) && time.Now().Before(deadline); {
+					time.Sleep(25 * time.Millisecond)
+					result = readRun(selected.ID)
+				}
+				if result.Status == store.RunQueued || result.Status == store.RunRunning {
+					t.Fatalf("occurrence did not settle: %+v", result)
+				}
 				if seenOccurrences[result.ID] || seenOccurrenceKeys[result.IdempotencyKey] {
 					t.Fatal("distinct tick reused occurrence identity")
 				}
@@ -589,6 +609,8 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 			})
 			t.Run("denied-resource", func(t *testing.T) {
 				before := len(jobs.List(auth))
+				mdl.denied = true
+				defer func() { mdl.denied = false }()
 				mdl.tool = "schedule_job"
 				mdl.args = map[string]any{"name": "Unauthorized", "mode": "adaptive", "schedule": "0 8 * * *", "instructions": "Another report"}
 				run := wake(scheduleID, false)
@@ -600,8 +622,13 @@ func testBotSkillScheduleHTTPAcceptance(t *testing.T) {
 				}
 				// The source-specific catalog excludes scheduler mutation tools from
 				// recurring task mandates. Rejection precedes executable-tool usage.
-				if run.Status != store.RunFailed || run.Usage.ToolCalls != 0 || run.Report.Failure == nil || len(run.Report.Unverified) != 0 || len(run.Report.Changed) != 0 || len(run.Report.NeedsApproval) != 0 {
-					t.Fatalf("denied tool must fail closed before dispatch: %+v", run)
+				// Two scoped bookkeeping calls preserve the obligation; the denied
+				// scheduler action must never appear among executable calls.
+				if run.Report.Work == nil || run.Report.Work.Phase != store.BotWorkBlocked || (run.Report.Work.Disposition != store.AgentWorkBlocked && run.Report.Work.Disposition != store.AgentWorkPartial) || len(run.Report.Work.Remaining) != 1 {
+					t.Fatalf("denied tool lost its unfinished obligation: work=%+v run=%+v", run.Report.Work, run)
+				}
+				if run.Status != store.RunPartial || run.Usage.ToolCalls != 2 || len(run.Report.Changed) != 0 || len(run.Report.NeedsApproval) != 0 || !strings.Contains(run.Report.Summary, "couldn't create") {
+					t.Fatalf("denied tool must retain the blocked obligation without dispatch or success claims: work=%+v run=%+v", run.Report.Work, run)
 				}
 				if run.Report.Skill == nil {
 					t.Fatal("denied run lost skill receipt")

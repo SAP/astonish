@@ -74,8 +74,12 @@ func TestBotRoutineAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
-				if err != nil || pub.Suppressed || pub.Text == "" {
-					t.Fatalf("non-ack hidden: %+v %v", pub, err)
+				if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest == "" {
+					t.Fatalf("untrusted legacy acknowledgment became speech: %+v %v", pub, err)
+				}
+				saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+				if err != nil || saved.Report.Acknowledgment != nil || saved.Status != status {
+					t.Fatalf("forged authority persisted: %+v %v", saved, err)
 				}
 			})
 		}

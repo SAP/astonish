@@ -66,6 +66,7 @@ type authorizedScheduleHTTPModel struct {
 	synchronous     bool
 	employeeStarted bool
 	employeeRequest string
+	controlOnly     bool
 	finalCapture    func(*model.LLMRequest)
 	finalText       string
 	modelCalls      int
@@ -146,7 +147,52 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 			}
 		}
 	}
-	if _, employee := r.Tools["employee_chat"]; employee {
+	if m.clarify && m.chatOnly && !m.deliverySet && r.Tools["employee_chat"] != nil {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			work, err := m.work()
+			if err != nil || work == nil {
+				yield(nil, fmt.Errorf("load clarification delivery: %v", err))
+				return
+			}
+			m.deliverySet = true
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "clarification-delivery", Name: "bot_work_update", Args: map[string]any{"expected_revision": work.Revision, "kind": "set_delivery", "delivery_intent": string(store.BotDeliveryChatOnly)}}}}}}, nil)
+		}
+	}
+	if m.clarify && !m.clarified && r.Tools["employee_chat"] != nil {
+		m.clarified = true
+		return func(yield func(*model.LLMResponse, error) bool) {
+			if m.questionCapture != nil {
+				m.questionCapture(ctx)
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "schedule-timezone", Name: "ask_user", Args: map[string]any{"kind": "text", "prompt": "Which timezone should the daily 9am briefing use?"}}}}}}, nil)
+		}
+	}
+	if m.clarify && m.schedule && r.Tools["employee_chat"] != nil {
+		requests, answers := 0, 0
+		for _, content := range r.Contents {
+			for _, part := range content.Parts {
+				if content.Role == "user" && part.Text == "Schedule this briefing every day at 9am" {
+					requests++
+				}
+				if content.Role == "user" && strings.Contains(part.Text, `"bot_owner_answer"`) {
+					var answer struct {
+						Response store.BotInteractionResponse `json:"response"`
+					}
+					if err := json.Unmarshal([]byte(part.Text), &answer); err != nil {
+						m.t.Fatal(err)
+					}
+					if answer.Response.Answer != "America/New_York" {
+						m.t.Fatalf("wrong restored answer: %+v", answer)
+					}
+					answers++
+				}
+			}
+		}
+		if requests != 1 || answers != 1 {
+			m.t.Fatalf("lost/repeated source request or answer: requests=%d answers=%d", requests, answers)
+		}
+	}
+	if _, employee := r.Tools["employee_chat"]; employee && !m.controlOnly && m.pausedRead == nil {
 		return func(yield func(*model.LLMResponse, error) bool) {
 			if !m.employeeStarted {
 				m.employeeStarted = true
@@ -203,6 +249,21 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 			yield(&model.LLMResponse{Content: genai.NewContentFromText(string(text), "model"), TurnComplete: true}, nil)
 		}
 	}
+	if m.controlOnly {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			if m.control != nil {
+				if _, available := r.Tools["propose_bot_control"]; !available {
+					yield(nil, errors.New("paused control requires native propose_bot_control capability"))
+					return
+				}
+				payload := m.control
+				m.control = nil
+				yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "paused-goal-control", Name: "propose_bot_control", Args: map[string]any{"payload": payload}}}}}}, nil)
+				return
+			}
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("The paused goal request is pending; application is not yet verified.", "model"), TurnComplete: true}, nil)
+		}
+	}
 	if m.chatOnly && !m.deliverySet {
 		return func(yield func(*model.LLMResponse, error) bool) {
 			_, direct := r.Tools["bot_work_update"]
@@ -234,31 +295,6 @@ func (m *authorizedScheduleHTTPModel) GenerateContent(ctx context.Context, r *mo
 				call.Name, call.Args = "execute_tool", map[string]any{"name": "ask_user", "arguments": call.Args}
 			}
 			yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
-		}
-	}
-	if m.clarify && m.schedule {
-		requests, answers := 0, 0
-		for _, content := range r.Contents {
-			for _, part := range content.Parts {
-				if content.Role == "user" && part.Text == "Schedule this briefing every day at 9am" {
-					requests++
-				}
-				if content.Role == "user" && strings.Contains(part.Text, `"bot_owner_answer"`) {
-					var answer struct {
-						Response store.BotInteractionResponse `json:"response"`
-					}
-					if err := json.Unmarshal([]byte(part.Text), &answer); err != nil {
-						m.t.Fatal(err)
-					}
-					if answer.Response.Answer != "America/New_York" {
-						m.t.Fatalf("wrong restored answer: %+v", answer)
-					}
-					answers++
-				}
-			}
-		}
-		if requests != 1 || answers != 1 {
-			m.t.Fatalf("lost/repeated source request or answer: requests=%d answers=%d", requests, answers)
 		}
 	}
 	if m.pausedRead != nil {
@@ -696,6 +732,11 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				}
 				if real != nil {
 					return real.model, nil
+				}
+				if identity, ok := execution.BotRunIdentityFromContext(c); ok {
+					if run, err := repo.GetRun(c, identity.BotID, identity.RunID); err == nil && run.Trigger == store.TriggerCron {
+						return mediateDaemonModel(&workerTestModel{}), nil
+					}
 				}
 				return llm, nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
@@ -1804,12 +1845,12 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			}
 			wantBookkeeping := 1
 			if clarify {
-				wantBookkeeping = 2 // Each real attempt declares conversational delivery.
+				wantBookkeeping = 2 // Owner clarification and private worker delivery.
 			}
 			var bookkeeping, pending, serviceReturns int
 			for _, evidence := range saved.Report.Unchanged {
 				switch {
-				case strings.HasSuffix(evidence.Source, "/schedule-chat-delivery"):
+				case strings.HasPrefix(evidence.Source, "bot-work://"+b.ID.String()+"/"+saved.ID.String()+"/") && (strings.HasSuffix(evidence.Source, "/schedule-chat-delivery") || clarify && strings.HasSuffix(evidence.Source, "/clarification-delivery")):
 					bookkeeping++
 				case strings.HasPrefix(evidence.Source, "bot-employee-chat://"+saved.ID.String()+"/"):
 					serviceReturns++
@@ -1819,7 +1860,7 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					t.Fatalf("unexpected source observation: %+v", evidence)
 				}
 			}
-			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || bookkeeping != wantBookkeeping || pending != 1 || serviceReturns != wantBookkeeping {
+			if saved.FinishedAt == nil || ops[0].Receipt.ObservedAt.Before(*saved.FinishedAt) || bookkeeping != wantBookkeeping || pending != 1 || serviceReturns != 1 {
 				t.Fatalf("applied receipt must follow terminal source with per-attempt bookkeeping and service returns: %+v", saved.Report.Unchanged)
 			}
 			approvals, err := repo.ListApprovals(auth, b.ID, store.BotPage{})
@@ -1882,6 +1923,7 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				llm.employeeStarted, llm.deliverySet = false, false
 				llm.employeeRequest = text
 				llm.control = payload
+				llm.controlOnly = payload != nil && payload["operation"] == string(store.BotControlGoalCreate)
 				nextStage(text)
 				current, e := repo.Get(auth, b.ID)
 				if e != nil {
@@ -1901,8 +1943,9 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				var persisted *store.BotRun
 				var operations []store.BotOperation
 				for attempt := 0; attempt < 3; attempt++ {
-					if e = worker.Poll(ctx); e != nil {
-						t.Fatal(e)
+					if e = worker.Poll(ctx); e != nil && !errors.Is(e, store.ErrBotConflict) {
+						persisted, _ = repo.GetRun(auth, b.ID, turn.Run.ID)
+						t.Fatalf("owner control poll: %v run=%+v", e, persisted)
 					}
 					persisted, e = repo.GetRun(auth, b.ID, turn.Run.ID)
 					if e != nil || persisted == nil || persisted.MandateRef == nil {
@@ -1988,7 +2031,7 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					t.Fatal("paused change enabled schedule")
 				}
 			}
-			llm.pausedRead = &pausedScheduleReadModel{t: t, bridge: scope == store.BotScopeTeam, inspected: func() {
+			llm.pausedRead = &pausedScheduleReadModel{t: t, inspected: func() {
 				current, e := repo.Get(auth, b.ID)
 				if e != nil || current.Status != store.BotPaused {
 					t.Fatalf("inspection resumed bot: %+v %v", current, e)
@@ -2005,15 +2048,15 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 			}
 			llm.pausedRead = nil
 			readRun, e := repo.GetRun(auth, b.ID, resumed.Provenance.SourceRunID)
-			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 3 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 4 || readRun.Report.NextRunAt != nil {
+			if e != nil || readRun.Status != store.RunSucceeded || readRun.Usage.ToolCalls != 3 || len(readRun.Report.Unverified) != 0 || len(readRun.Report.Changed) != 0 || len(readRun.Report.Unchanged) != 3 || readRun.Report.NextRunAt != nil {
 				t.Fatalf("paused read accounting: %+v %v", readRun, e)
 			}
 			// Both the list and independently verified pending capture are observations,
 			// not mutations. The worker's later receipt establishes application.
-			if readRun.Report.Unchanged[0].Source != "bot-employee-chat://"+readRun.ID.String()+"/employee-schedule-worker" || !strings.HasSuffix(readRun.Report.Unchanged[1].Source, "/schedule-chat-delivery") {
+			if !strings.HasSuffix(readRun.Report.Unchanged[0].Source, "/schedule-chat-delivery") {
 				t.Fatalf("missing exact delivery declaration: %+v", readRun.Report.Unchanged)
 			}
-			listObservation, captureObservation := readRun.Report.Unchanged[2], readRun.Report.Unchanged[3]
+			listObservation, captureObservation := readRun.Report.Unchanged[1], readRun.Report.Unchanged[2]
 			if listObservation.Kind != store.BotEvidenceObservation || !strings.HasSuffix(listObservation.Source, "/"+readRun.ID.String()+"/paused-list") {
 				t.Fatalf("lost exact-call list evidence: %+v", listObservation)
 			}
@@ -2116,7 +2159,7 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 					}
 				}
 			}
-			if err = worker.Poll(ctx); err != nil {
+			if err = worker.Poll(ctx); err != nil && !errors.Is(err, store.ErrBotConflict) {
 				t.Fatal(err)
 			}
 			result, err := repo.GetRun(auth, b.ID, admitted.Run.ID)

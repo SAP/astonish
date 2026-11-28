@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"strings"
 	"sync"
 	"time"
 
@@ -260,7 +261,7 @@ func (m *botResumeModel) GenerateContent(ctx context.Context, r *model.LLMReques
 		call := &genai.FunctionCall{ID: uuid.NewString(), Name: m.action.Tool, Args: args}
 		// Deferred tools use Chat's ordinary dispatch bridge. The inner descriptor
 		// remains exact and is checked by botResumeGuard before execution.
-		if r != nil && r.Tools[call.Name] == nil && r.Tools[common.ExecuteToolName] != nil {
+		if (strings.Contains(call.Name, "/") && (r == nil || r.Tools[call.Name] == nil)) || (r != nil && r.Tools[call.Name] == nil && r.Tools[common.ExecuteToolName] != nil) {
 			call = &genai.FunctionCall{ID: call.ID, Name: "execute_tool", Args: map[string]any{"name": m.action.Tool, "arguments": args}}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}, nil)
@@ -296,15 +297,25 @@ func (g *botResumeGuard) Authorize(ctx context.Context, a execution.ActionDescri
 		if e != nil || occurrence.guard != g || !g.attempted || want != digest || !occurrence.used.CompareAndSwap(false, true) || g.live == nil {
 			return execution.PolicyDecision{}, store.ErrBotForbidden
 		}
-		// Restore the exact narrowed policy minted for this occurrence even if a
-		// trusted dispatcher has rebound owner values. Never borrow parent grants.
-		if occurrence.policy == nil {
-			return execution.PolicyDecision{}, store.ErrBotForbidden
-		}
-		ctx = execution.WithRunPolicy(ctx, occurrence.policy)
-		decision := execution.EvaluateRunPolicy(ctx, a, time.Now())
-		if decision.Kind != execution.PolicyAllow {
-			return decision, store.ErrBotForbidden
+		var decision execution.PolicyDecision
+		if occurrence.turn != nil {
+			if g.req.Policy != nil || !g.req.Run.IsInteractiveChat() || g.req.Mandate != nil || g.req.Authorization == nil || execution.RunPolicyFromContext(ctx) != nil || a.Effect != execution.EffectRead || !a.ConstraintsVerified || a.SpendMinor != 0 {
+				return decision, store.ErrBotForbidden
+			}
+			if err := occurrence.turn.AuthorizeTool(ctx, a.Tool); err != nil {
+				return decision, err
+			}
+			ctx = execution.WithBotTurnAuthorizer(ctx, occurrence.turn)
+		} else {
+			// Restore only this occurrence's narrowed policy; never parent grants.
+			if occurrence.policy == nil {
+				return decision, store.ErrBotForbidden
+			}
+			ctx = execution.WithRunPolicy(ctx, occurrence.policy)
+			decision = execution.EvaluateRunPolicy(ctx, a, time.Now())
+			if decision.Kind != execution.PolicyAllow {
+				return decision, store.ErrBotForbidden
+			}
 		}
 		decision, err = g.live.Authorize(ctx, a)
 		if err == nil && (decision.Kind != execution.PolicyAllow || decision.ActionDigest != digest) {

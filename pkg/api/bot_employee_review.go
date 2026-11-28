@@ -317,6 +317,9 @@ func botEmployeeCaptureEvidence(ctx context.Context, req bot.RunRequest, resourc
 	if w.Candidate.Bodies == nil {
 		w.Candidate.Bodies = make(map[string]string)
 	}
+	if err := botEmployeeBindPrivateEvidence(ctx, req, resources, w); err != nil {
+		return err
+	}
 	for _, reference := range w.AgentWork.Evidence {
 		if reference.RunID != req.Run.ID || reference.CallID == "" || reference.Ref != "capture:"+reference.CallID {
 			return errors.New("review evidence reference scope mismatch")

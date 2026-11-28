@@ -62,7 +62,7 @@ func TestBotTitleStartHTTPAcceptance(t *testing.T) {
 			f := newInteractiveHTTPFixture(t, "read_file", map[string]any{"path": "/isolated/receipt.txt"}, []string{"chat", "tool:execute"}, scope)
 			body := `{"name":"Research the exact title","idempotency_key":"title-acceptance","start_from_title":true}`
 			var first, again titleHTTPReceipt
-			if err := json.Unmarshal(f.request("POST", "/api/studio/bots", body, 201), &first); err != nil {
+			if err := json.Unmarshal(titleStateCreate(t, f, body, 201), &first); err != nil {
 				t.Fatal(err)
 			}
 			if first.InitialTurn == nil || first.InitialTurn.Run.Status != store.RunQueued || !first.InitialTurn.Run.IsInteractiveChat() || first.Status != store.BotActive {
@@ -78,7 +78,7 @@ func TestBotTitleStartHTTPAcceptance(t *testing.T) {
 			if err != nil || input.Instructions != "Research the exact title" || !strings.Contains(input.Version.Charter, input.Instructions) || len(input.Version.Autonomy.AllowedTools) != 0 {
 				t.Fatalf("saved title/defaults: %+v %v", input, err)
 			}
-			if err = json.Unmarshal(f.request("POST", "/api/studio/bots", body, 201), &again); err != nil {
+			if err = json.Unmarshal(titleStateCreate(t, f, body, 201), &again); err != nil {
 				t.Fatal(err)
 			}
 			if again.ID != first.ID || again.InitialTurn.Run.ID != first.InitialTurn.Run.ID || again.InitialTurn.UserEventID != first.InitialTurn.UserEventID {
@@ -99,7 +99,7 @@ func TestBotTitleStartHTTPAcceptance(t *testing.T) {
 			if err != nil || len(legacy) != 0 {
 				t.Fatalf("GET initialized legacy draft: %v %v", legacy, err)
 			}
-			f.request("POST", "/api/studio/bots", strings.Replace(body, "Research the exact title", "Changed title", 1), 409)
+			titleStateCreate(t, f, strings.Replace(body, "Research the exact title", "Changed title", 1), 409)
 		})
 	}
 }
@@ -115,7 +115,7 @@ func TestBotTitleConfirmationStateHTTPAcceptance(t *testing.T) {
 				}, []string{"chat", "tool:execute"}, scope)
 				defer f.worker.Stop()
 				var receipt titleHTTPReceipt
-				if err := json.Unmarshal(f.request("POST", "/api/studio/bots", `{"name":"Boston weather","idempotency_key":"confirm-title","start_from_title":true}`, 201), &receipt); err != nil || receipt.InitialTurn == nil {
+				if err := json.Unmarshal(titleStateCreate(t, f, `{"name":"Boston weather","idempotency_key":"confirm-title","start_from_title":true}`, 201), &receipt); err != nil || receipt.InitialTurn == nil {
 					t.Fatalf("title admission: %v %+v", err, receipt)
 				}
 				f.b, f.path = receipt.Bot, "/api/studio/bots/"+receipt.ID.String()

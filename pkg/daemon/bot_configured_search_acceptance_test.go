@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -161,7 +162,7 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 			}
 			pool := &titleSkillPool{url: detail.URL}
 			worker, err := NewBotWorker(BotWorkerConfig{TurnRegistry: registry, Backend: db, MandatePolicy: policy, Sandbox: backend, Pool: pool, WorkerID: "search-http", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 4096, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return llm, nil
+				return mediateDaemonModel(llm), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, backend, svc, scope)
@@ -279,6 +280,23 @@ func TestBotConfiguredSearchHTTPAcceptance(t *testing.T) {
 				// target from its matching call, rather than assuming direct tools.
 				targets := map[string]string{}
 				for _, event := range events {
+					// Private tool journals are durable runtime envelopes, not Home
+					// content. Inspect their authenticated event payload after reopen.
+					if value, ok := event.Actions.StateDelta["bot_private_worker_v1"]; ok {
+						raw, err := json.Marshal(value)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var trace struct {
+							Event *session.Event `json:"event"`
+						}
+						if err := json.Unmarshal(raw, &trace); err != nil {
+							t.Fatal(err)
+						}
+						if trace.Event != nil {
+							event = trace.Event
+						}
+					}
 					if event.Content == nil {
 						continue
 					}

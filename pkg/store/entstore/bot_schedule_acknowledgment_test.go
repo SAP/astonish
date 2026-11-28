@@ -139,7 +139,7 @@ func TestBotAgentScheduleAcknowledgmentAuthority(t *testing.T) {
 					t.Fatalf("authority classification %s: %+v", name, saved.Report.Acknowledgment)
 				}
 				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
-				if err != nil || pub.Suppressed != (name == "pending") {
+				if err != nil || pub.Suppressed || !pub.EmployeeSpeech || pub.Text != saved.Report.EmployeeMessage.Text {
 					t.Fatalf("publication: %+v %v", pub, err)
 				}
 			})
@@ -198,14 +198,14 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 					apply()
 				}
 				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: sequence})
-				if err != nil || !pub.Suppressed || pub.Text != "" || len(pub.Notifications) != 0 {
+				if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || len(pub.Notifications) != 0 {
 					t.Fatalf("ack publication: %+v %v", pub, err)
 				}
 				if !applyFirst {
 					apply()
 				}
 				again, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: sequence})
-				if err != nil || !again.Suppressed || again.EventID != pub.EventID {
+				if err != nil || again.Suppressed || again.EmployeeSpeech || again.Text != "" || again.EventID != pub.EventID {
 					t.Fatalf("retry: %+v %v", again, err)
 				}
 				final, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
@@ -213,7 +213,7 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 					t.Fatal(err)
 				}
 				outcome, _, err := committedPublicationReport(owner, r.db, q.Lease.BotID, q.Lease.RunID, final.ReportSequence)
-				if err != nil || outcome.Report.EmployeeMessage == nil || outcome.Report.EmployeeMessage.Origin != store.BotEmployeeMessageOperation || outcome.Report.ValidateEmployeeMessageIntegrity(outcome.Status) != nil || final.Text != outcome.Report.EmployeeMessage.Text {
+				if err != nil || outcome.Report.EmployeeMessage == nil || outcome.Report.EmployeeMessage.Origin != store.BotEmployeeMessageOperation || outcome.Report.ValidateEmployeeMessageIntegrity(outcome.Status) != nil || final.EmployeeSpeech || final.Text != "" || final.ReportDigest == "" {
 					t.Fatal("missing receipt-bound employee outcome", err)
 				}
 				retried, err := runtime.ApplyAuthorizedOperation(context.Background(), q.MandateRef, op.ID)
@@ -225,12 +225,12 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 					t.Fatal("operation publication retry changed outcome", err)
 				}
 				view, err := store.ProjectBotOperation(rec.Bot, *applied, sequence+1)
-				if err != nil || view.Presentation != store.BotOperationPresentationConversation {
+				if err != nil || view.Presentation != store.BotOperationPresentationInternal || view.VerifiedSchedule == nil {
 					t.Fatalf("final view: %+v %v", view, err)
 				}
 				canonical, _ := store.NewBotOperationEvent(view, time.Now())
-				if final.EventID != canonical.ID {
-					t.Fatalf("final publication did not reuse operation event: %+v", final)
+				if final.EventID == pub.EventID || final.ReportSequence <= pub.ReportSequence || applied.Receipt == nil || applied.Receipt.Schedule == nil {
+					t.Fatalf("missing stable neutral schedule receipt: %+v", final)
 				}
 				var reader store.BotTranscriptReader
 				switch d := r.db.(type) {
@@ -248,7 +248,10 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 					if row.Event.ID == pub.EventID {
 						t.Fatal("ack leaked into Home")
 					}
-					if row.Event.ID == canonical.ID {
+					if row.Event.ID == canonical.ID || row.Event.ID == final.EventID {
+						if row.Event.Author == "assistant" || row.Event.Content != nil {
+							t.Fatal("internal schedule bookkeeping emitted speech")
+						}
 						finals++
 					}
 					if row.Event.Content != nil {
@@ -259,7 +262,7 @@ func TestBotScheduleAcknowledgmentPublicationOrder(t *testing.T) {
 						}
 					}
 				}
-				if finals != 1 {
+				if finals != 1 || final.EmployeeSpeech || final.Text != "" {
 					t.Fatalf("final event count %d", finals)
 				}
 			})
@@ -316,19 +319,15 @@ func TestBotScheduleAcknowledgmentRejectsMixedForgedAndFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
-			if err != nil || pub.Suppressed || pub.Text == "" {
-				t.Fatalf("non-ack hidden: %+v %v", pub, err)
+			if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest == "" {
+				t.Fatalf("untrusted legacy acknowledgment became speech: %+v %v", pub, err)
 			}
-			if strings.Contains(pub.Text, op.ID.String()) || strings.Contains(pub.Text, "durably queued") || strings.Contains(pub.Text, "Today's requested report is here") {
-				t.Fatalf("raw mixed acknowledgment leaked: %s", pub.Text)
+			saved, err := r.GetRun(owner, q.Lease.BotID, q.Lease.RunID)
+			if err != nil || saved.Report.Acknowledgment != nil || saved.Status != status {
+				t.Fatalf("forged acknowledgment authority persisted: %+v %v", saved, err)
 			}
-			if name == "failed" && !strings.Contains(pub.Text, "model response could not be processed") {
-				t.Fatalf("independent failure was hidden: %s", pub.Text)
-			}
-			if name == "mixed" || name == "tool-error" || name == "extra-body" {
-				if !strings.Contains(pub.Text, "independent result") || !strings.Contains(pub.Text, "reported separately") {
-					t.Fatalf("missing mixed-work limitation: %s", pub.Text)
-				}
+			if name == "failed" && (saved.Report.Failure == nil || saved.Report.Failure.Kind != store.BotReportFailureExecutionFormat) {
+				t.Fatal("independent failure diagnostics lost")
 			}
 		})
 	}

@@ -365,8 +365,6 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 	wait("Continue safely?")
 	send("y")
 	wait("choose answer")
-	send("\r")
-	wait("Confirm answer")
 	send("\x1b")
 	time.Sleep(150 * time.Millisecond)
 	if typedAnswer.Load() {
@@ -376,8 +374,6 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 	wait("Continue safely?")
 	send("y")
 	wait("choose answer")
-	send("\r")
-	wait("Confirm answer")
 	send("\r")
 	answerDeadline := time.Now().Add(10 * time.Second)
 	for !typedAnswer.Load() && time.Now().Before(answerDeadline) {
@@ -412,7 +408,7 @@ func TestBotCLIAndPTYAcceptance(t *testing.T) {
 	listState.Store(2)
 	send("/bots\r")
 	// The picker shows safe uncertainty feedback, not the raw HTTP denial.
-	wait("I can’t confirm the latest outcome right now. Please refresh before trying again;")
+	wait("Latest outcome unavailable. Refresh before trying again; work may still be running.")
 	outputMu.Lock()
 	denialOutput := output.String()[outputStart:]
 	outputMu.Unlock()

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
@@ -41,12 +42,12 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			var synthesisDeadline time.Time
 			var err error
 			f.worker, err = daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, TurnRegistry: f.registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return f.model, nil
+				return progressEmployeeFixture(progressMeteredModel(f.model)), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				files.install(c, q, s)
-				synthesisDeadline = q.Budget.(interface{ Deadline() time.Time }).Deadline()
+				synthesisDeadline = q.Run.CallerCeiling.ExpiresAt
 				synthesisClock.Store(synthesisDeadline.Add(-time.Hour).UnixNano())
-				return &launcher.BotChatSafeResources{SynthesisNow: func() time.Time { return time.Unix(0, synthesisClock.Load()) }, WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, TaskWorkspace: synthesisReceiptUnusedWorkspace{}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+				return &launcher.BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: interactiveFixtureGuard{repo: f.repo, req: q}}, SynthesisNow: func() time.Time { return time.Unix(0, synthesisClock.Load()) }, WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: f.pool}, TaskWorkspace: synthesisReceiptUnusedWorkspace{}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 			}})
 			if err != nil {
 				t.Fatal(err)
@@ -56,9 +57,7 @@ func TestBotProgressSynthesisReceiptHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Keep the reviewed hard deadline unchanged; only the soft synthesis
-			// clock advances. File fsync/CPU time must not decide when it crosses.
-			v.Budget.MaxRuntimeSeconds = 10
+			// Only the soft synthesis clock advances; live authority remains valid.
 			body, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Isolated synthesis receipt regression", Autonomy: v.Autonomy, Budget: v.Budget, Delivery: v.Delivery})
 			if err != nil {
 				t.Fatal(err)

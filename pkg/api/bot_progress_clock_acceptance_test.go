@@ -20,12 +20,25 @@ import (
 // remain real: this is accelerated cadence evidence, NOT a wall-clock soak.
 type progressClockModel struct {
 	model.LLM
-	now time.Time
+	now       time.Time
+	t         *testing.T
+	installed bool
 }
 
 func (m *progressClockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if c := bot.ProgressControllerFromContext(ctx); c != nil {
 		c.Now = func() time.Time { return m.now }
+		if !m.installed {
+			m.installed = true
+			commit := c.Commit
+			c.Commit = func(ctx context.Context, o bot.ProgressObservation, d bot.ProgressDecision, at time.Time) error {
+				err := commit(ctx, o, d, at)
+				if err != nil {
+					m.t.Errorf("clock commit: %v settled=%t refs=%v", err, o.Settled, o.EvidenceRefs)
+				}
+				return err
+			}
+		}
 	}
 	return m.LLM.GenerateContent(ctx, req, stream)
 }
@@ -49,7 +62,7 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 			*f.policy = nil
 			progressResumeFixture(t, f)
 			start := time.Now()
-			clock := &progressClockModel{LLM: f.model, now: start}
+			clock := &progressClockModel{LLM: progressEmployeeFixture(progressMeteredModel(f.model)), now: start, t: t}
 			cfg := f.workerConfig
 			cfg.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
 				return clock, nil
@@ -59,13 +72,14 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 			var previous store.BotUsage
 			assignment := "Read three independent observations and compare them without losing this requirement."
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+				t.Logf("clock model steps=%d mime=%s tools=%d", steps, req.Config.ResponseMIMEType, len(req.Config.Tools))
 				prompt := ""
 				if req.Config != nil && req.Config.SystemInstruction != nil {
 					for _, p := range req.Config.SystemInstruction.Parts {
 						prompt += p.Text
 					}
 				}
-				if strings.Contains(prompt, "BOT_EMPLOYEE_PROGRESS_V1") {
+				if strings.Contains(prompt, "BOT_EMPLOYEE_PROGRESS_V1") && req.Config.ResponseMIMEType == "application/json" {
 					evaluations++
 					var observation struct {
 						Observation bot.ProgressObservation `json:"observation"`
@@ -79,7 +93,7 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 					if err := json.Unmarshal([]byte(payload), &observation); err != nil {
 						t.Fatal(err)
 					}
-					if observation.Observation.Assignment != assignment || len(observation.Observation.EvidenceRefs) != steps {
+					if observation.Observation.Assignment != assignment || (observation.Observation.Settled && len(observation.Observation.EvidenceRefs) != len(progressPrivateResponses(t, f))) {
 						t.Fatalf("evaluation lacks measured original work: %+v", observation)
 					}
 					decision := "continue"
@@ -93,7 +107,13 @@ func TestBotProgressSixHourClockAcceptance(t *testing.T) {
 				}
 				if steps < 3 {
 					steps++
-					clock.now = clock.now.Add(2*time.Hour + time.Second)
+					f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+						f.pool.callOverride = nil
+						result, err := f.pool.Call("", name, args)
+						f.pool.calls--
+						clock.now = clock.now.Add(2*time.Hour + time.Second)
+						return result, err
+					}
 					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("clock-read-%d", steps), Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 				}
 				rows, e := f.repo.ListRuns(f.ctx, f.b.ID, store.BotPage{})

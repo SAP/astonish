@@ -160,17 +160,21 @@ func TestMandateQuestionQuotaContinuation(t *testing.T) {
 			if err := runtime.ReserveBotMandateModel(ctx, ref, run.ID, model, 1); err == nil {
 				t.Fatal("duplicate model reset")
 			}
-			if err := runtime.ReserveBotPublicResearch(ctx, ref, run.SessionID.String()); err == nil {
-				t.Fatal("research reset")
+			if err := runtime.ReserveBotPublicResearch(ctx, ref, run.SessionID.String()); err != nil {
+				t.Fatalf("accounting-only research blocked continuation: %v", err)
 			}
-			if err := runtime.ConsumeBotMandateQuota(ctx, ref, run.ID, 2, 0, 0); err == nil {
-				t.Fatal("tool limit reset")
+			if err := runtime.ConsumeBotMandateQuota(ctx, ref, run.ID, 2, 0, 0); err != nil {
+				t.Fatalf("accounting-only tools blocked continuation: %v", err)
 			}
 			if err := runtime.ConsumeBotMandateQuota(ctx, ref, run.ID, 0, 0, 98); err == nil {
 				t.Fatal("spend limit reset")
 			}
-			if err := runtime.ConsumeBotMandateQuota(ctx, ref, run.ID, 0, 92, 0); err == nil {
-				t.Fatal("token limit reset")
+			if err := runtime.ConsumeBotMandateQuota(ctx, ref, run.ID, 0, 92, 0); err != nil {
+				t.Fatalf("accounting-only tokens blocked continuation: %v", err)
+			}
+			accounted := questionQuotaUsage(t, repo, ctx, run.BotID)
+			if accounted.Tools != before.Tools+2 || accounted.Tokens != before.Tokens+92 || accounted.Spend != before.Spend {
+				t.Fatalf("continuation charges lost or rejected spend applied: before=%+v after=%+v", before, accounted)
 			}
 		})
 	}

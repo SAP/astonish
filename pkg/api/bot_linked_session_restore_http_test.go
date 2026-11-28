@@ -66,10 +66,32 @@ func TestBotLinkedSessionRestoreProjectionHTTPAcceptance(t *testing.T) {
 							}
 							meta := data["_projection"].(map[string]any)
 							delete(data, "_projection")
-							want = append(want, ChatEvent{ID: meta["event_id"].(string), Type: frame.event, Data: data})
+							// SSE flattens committed delivery time into the payload;
+							// REST carries the same time on the ChatEvent envelope.
+							var timestamp time.Time
+							if value, ok := data["timestamp"]; ok {
+								text, ok := value.(string)
+								if !ok {
+									t.Fatalf("invalid SSE delivery timestamp: %v", value)
+								}
+								var err error
+								timestamp, err = time.Parse(time.RFC3339Nano, text)
+								if err != nil {
+									t.Fatal(err)
+								}
+								delete(data, "timestamp")
+							}
+							want = append(want, ChatEvent{ID: meta["event_id"].(string), Type: frame.event, Data: data, Timestamp: timestamp})
+						}
+						if len(got) != len(want) {
+							t.Fatalf("ordinary restore event count diverged from Bot SSE: got %d want %d", len(got), len(want))
 						}
 						for i := range got {
-							got[i].Timestamp = time.Time{}
+							if !got[i].Timestamp.Equal(want[i].Timestamp) {
+								t.Fatalf("ordinary restore delivery time diverged from Bot SSE: got %v want %v", got[i].Timestamp, want[i].Timestamp)
+							}
+							got[i].Timestamp = got[i].Timestamp.UTC()
+							want[i].Timestamp = want[i].Timestamp.UTC()
 						}
 						if !reflect.DeepEqual(got, want) {
 							t.Fatalf("ordinary restore diverged from Bot identities/payloads: got %+v want %+v", got, want)

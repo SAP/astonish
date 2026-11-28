@@ -199,11 +199,11 @@ func TestBotBlockedExplanationPublicationHTTP(t *testing.T) {
 					if err := json.Unmarshal(f.request("GET", f.path+"/runs/"+run.ID.String(), "", 200), &restored); err != nil {
 						t.Fatal(err)
 					}
-					if restored.Report.EmployeeMessage == nil || restored.Report.EmployeeMessage.Text != m.Text || bot.RenderReport(restored) != m.Text+"\n" {
-						t.Fatal("fallback lost on reload")
+					if restored.Report.EmployeeMessage == nil || restored.Report.EmployeeMessage.Text != m.Text || !strings.Contains(bot.RenderDiagnosticReport(restored), "email") || bot.RenderReport(restored) != "Employee response unavailable.\n" {
+						t.Errorf("reload must retain diagnostic failure without manufacturing speech: report=%q diagnostic=%q", bot.RenderReport(restored), bot.RenderDiagnosticReport(restored))
 					}
 					history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-					if canonicalHTTPTextCount(t, history, m.Text) != 1 || strings.Contains(history, blockedPublicationText) || strings.Contains(history, "REVIEWER_ONLY") {
+					if canonicalHTTPTextCount(t, history, m.Text) != 0 || strings.Contains(history, blockedPublicationText) || strings.Contains(history, "REVIEWER_ONLY") {
 						t.Fatalf("unsafe fallback history: %s", history)
 					}
 					return

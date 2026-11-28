@@ -137,7 +137,23 @@ func TestBotTitleAnswerAuthorityHTTPRegression(t *testing.T) {
 						return raw
 					}
 					var created store.Bot
-					if err := json.Unmarshal(request("POST", "/api/studio/bots", `{"name":"AI News","start_from_title":true,"idempotency_key":"auth-regression"}`, false, 201), &created); err != nil {
+					if scope == store.BotScopeTeam {
+						request("POST", "/api/studio/bots", `{"name":"AI News","start_from_title":true,"idempotency_key":"auth-regression"}`, false, 403)
+						v, err := store.NewBotVersionForCreation(ctx, uuid.MustParse(owner))
+						if err != nil {
+							t.Fatal(err)
+						}
+						v.Charter = "AI News\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes."
+						admission := store.WithBotMessageAdmission(ctx, registry)
+						if durable {
+							admission = store.WithBotMessageAdmission(store.WithBotMandateAdmission(admission, policy), botMandateSourceAdmission{})
+						}
+						seeded, err := repo.(store.BotTitleStartStore).CreateAndStart(admission, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "auth-regression"})
+						if err != nil {
+							t.Fatal(err)
+						}
+						created = seeded.Bot
+					} else if err := json.Unmarshal(request("POST", "/api/studio/bots", `{"name":"AI News","start_from_title":true,"idempotency_key":"auth-regression"}`, false, 201), &created); err != nil {
 						t.Fatal(err)
 					}
 					runs, err := repo.ListRuns(ctx, created.ID, store.BotPage{})

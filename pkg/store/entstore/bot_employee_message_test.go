@@ -4,7 +4,6 @@ import (
 	"errors"
 	"github.com/SAP/astonish/pkg/store"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -94,7 +93,9 @@ func TestBotEmployeeCommitAndPublication(t *testing.T) {
 				t.Fatalf("saved: %+v %v", saved, err)
 			}
 			pub, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID})
-			if err != nil || pub.Text != m.Text || strings.Contains(pub.Text, "private") {
+			// Fallback bookkeeping is not Employee speech. Keep a source-bound
+			// neutral receipt without publishing canned wording or private diagnostics.
+			if err != nil || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest != saved.Report.EmployeeMessageSourceDigest(saved.Status) || len(pub.Notifications) != 0 {
 				t.Fatalf("publication: %+v %v", pub, err)
 			}
 			again, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID, ReportSequence: pub.ReportSequence})
@@ -121,7 +122,7 @@ func TestBotEmployeeRecoveryAndQuiescence(t *testing.T) {
 				t.Fatalf("recovery: %+v %v", saved, err)
 			}
 			pub, err := repo.PublishReport(ctx, store.BotPublicationRequest{BotID: run.BotID, RunID: run.ID})
-			if err != nil || pub.Text != saved.Report.EmployeeMessage.Text {
+			if err != nil || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest != saved.Report.EmployeeMessageSourceDigest(saved.Status) || len(pub.Notifications) != 0 {
 				t.Fatalf("recovery publication: %+v %v", pub, err)
 			}
 		})

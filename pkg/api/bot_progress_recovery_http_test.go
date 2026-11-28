@@ -44,16 +44,22 @@ func TestBotProgressRecoveryHTTP(t *testing.T) {
 			f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
 				calls++
 				if calls == 1 {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						drain <- f.worker.Drain(ctx)
-					}()
-					time.Sleep(50 * time.Millisecond)
+					f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+						f.pool.callOverride = nil
+						result, err := f.pool.Call("", name, args)
+						f.pool.calls--
+						go func() {
+							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer cancel()
+							drain <- f.worker.Drain(ctx)
+						}()
+						time.Sleep(50 * time.Millisecond)
+						return result, err
+					}
 					return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "durable-read", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 				}
 				// A fresh factory must restore the old tool response, not run it again.
-				raw, _ := json.Marshal(req.Contents)
+				raw, _ := json.Marshal(progressPrivateResponses(t, f))
 				if !strings.Contains(string(raw), "isolated receipt") {
 					t.Errorf("restored employee lost source evidence: %s", raw)
 				}

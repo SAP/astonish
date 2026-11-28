@@ -145,7 +145,9 @@ func TestRegistrationBootstrapHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatalf("production admission membership: %v", err)
 			}
-			call("POST", "/api/studio/bots?scope=team", `{"name":"Weather","idempotency_key":"bootstrap-create"}`, 201)
+			// Real registration establishes team membership, not permission for public team Bot creation.
+			call("POST", "/api/studio/bots?scope=team", `{"name":"Weather","idempotency_key":"bootstrap-team-denied"}`, http.StatusForbidden)
+			call("POST", "/api/studio/bots", `{"name":"Weather","idempotency_key":"bootstrap-create"}`, http.StatusCreated)
 			close(stop)
 			wg.Wait()
 			stop = nil

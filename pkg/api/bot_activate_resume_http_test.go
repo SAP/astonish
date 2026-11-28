@@ -107,7 +107,27 @@ func TestBotActivateResumeHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			decode(request(t, "POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Explicit lifecycle","idempotency_key":%q,"definition":{"charter":"Observe only"}}`, uuid.NewString()), 201))
+			if scope == "team" {
+				// Provision retained team data without reopening public creation.
+				request(t, "POST", "/api/studio/bots"+suffix, owner, `{"name":"Explicit lifecycle","idempotency_key":"denied-team"}`, 403)
+				seedCtx, e := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+				if e != nil {
+					t.Fatal(e)
+				}
+				seedCtx = store.WithTenantContext(seedCtx, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+				v, e := store.NewBotVersionForCreation(seedCtx, uuid.MustParse(owner))
+				if e != nil {
+					t.Fatal(e)
+				}
+				v.Charter = "Observe only"
+				seeded, e := ods.ForTeam(team.Slug).Bots().Create(seedCtx, store.BotCreateRequest{Name: "Explicit lifecycle", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: uuid.NewString()})
+				if e != nil {
+					t.Fatal(e)
+				}
+				b = *seeded
+			} else {
+				decode(request(t, "POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Explicit lifecycle","idempotency_key":%q,"definition":{"charter":"Observe only"}}`, uuid.NewString()), 201))
+			}
 			path := "/api/studio/bots/" + b.ID.String()
 			lifecycle := func(action string, rev int64, actor string, status int) []byte {
 				t.Helper()

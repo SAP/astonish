@@ -36,6 +36,12 @@ func TestBotChatFailurePreservesWrappedUncertainOutcome(t *testing.T) {
 			if result.Report.Summary != "I couldn't complete the requested work." || result.Report.Failure == nil || result.Report.Failure.TechnicalDetails != "An operational failure stopped the requested work." {
 				t.Fatalf("safe report evidence lost: %+v", result.Report)
 			}
+			if len(result.Report.Unverified) != 1 || result.Report.Unverified[0] != "The action outcome is uncertain; reconcile it before any retry. Never replay the saved action." {
+				t.Fatalf("durable uncertainty diagnostic lost: %v", result.Report.Unverified)
+			}
+			if got := bot.RenderReport(store.BotRun{Status: result.Status, Report: result.Report}); got != "Employee response unavailable.\n" {
+				t.Fatalf("private uncertainty became Employee speech: %q", got)
+			}
 			if result.Report.EmployeeMessage == nil || result.Report.EmployeeMessage.SourceDigest != bot.EmployeeMessageSourceDigest(result.Status, result.Report) {
 				t.Fatal("employee message not bound to final uncertain facts")
 			}

@@ -261,7 +261,7 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 				defer productionWorker.Stop()
 				productionPrepared := false
 				worker, err := NewBotWorker(BotWorkerConfig{Backend: backend, TurnRegistry: registry, MandatePolicy: policy, Sandbox: homeBackend, Pool: workerTestPool{}, WorkerID: "title-search", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-					return mdl, nil
+					return mediateDaemonModel(mdl), nil
 				}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 					s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 						return productionBotFiles(c, homeBackend, svc, scope)
@@ -356,21 +356,40 @@ func TestBotTitleConfiguredSearchHTTP(t *testing.T) {
 					router.ServeHTTP(w, r.WithContext(store.WithServices(auth, services)))
 				}))
 				defer server.Close()
-				response, err := http.Post(server.URL+"?scope="+string(scope), "application/json", strings.NewReader(`{"name":"AI News","start_from_title":true,"idempotency_key":"unchanged-title"}`))
-				if err != nil {
-					t.Fatal(err)
-				}
-				raw, _ := io.ReadAll(response.Body)
-				response.Body.Close()
-				if response.StatusCode != 201 {
-					t.Fatalf("create %d %s", response.StatusCode, raw)
-				}
 				var created struct {
 					store.Bot
 					InitialTurn *store.BotMessageReceipt `json:"initial_turn"`
 				}
-				if err := json.Unmarshal(raw, &created); err != nil || created.InitialTurn == nil {
-					t.Fatalf("receipt %s %v", raw, err)
+				if scope == store.BotScopeTeam {
+					// Retained team runtime is supported; seed through the trusted store,
+					// never through personal-only HTTP creation.
+					seedCtx := store.WithServices(auth, services)
+					version, e := store.NewBotVersionForCreation(seedCtx, uuid.MustParse(owner))
+					if e != nil {
+						t.Fatal(e)
+					}
+					version.Charter = "AI News\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+					seedCtx = store.WithBotMandateAdmission(seedCtx, policy)
+					seedCtx = store.WithBotMessageAdmission(seedCtx, registry)
+					receipt, e := repo.(store.BotTitleStartStore).CreateAndStart(seedCtx, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(owner), Version: version, IdempotencyKey: "unchanged-title"})
+					if e != nil {
+						t.Fatal(e)
+					}
+					created.Bot = receipt.Bot
+					created.InitialTurn = &store.BotMessageReceipt{Run: receipt.Run, HomeSessionID: receipt.HomeSessionID, UserEventID: receipt.UserEventID, HistoryCursor: receipt.HistoryCursor}
+				} else {
+					response, e := http.Post(server.URL+"?scope=personal", "application/json", strings.NewReader(`{"name":"AI News","start_from_title":true,"idempotency_key":"unchanged-title"}`))
+					if e != nil {
+						t.Fatal(e)
+					}
+					raw, _ := io.ReadAll(response.Body)
+					response.Body.Close()
+					if response.StatusCode != http.StatusCreated {
+						t.Fatalf("create %d %s", response.StatusCode, raw)
+					}
+					if e := json.Unmarshal(raw, &created); e != nil || created.InitialTurn == nil {
+						t.Fatalf("receipt %s %v", raw, e)
+					}
 				}
 				version, err := repo.GetVersion(auth, created.ID, created.Version)
 				if err != nil || version.Budget.RuntimePolicy.EffectiveMode() != execution.BotRuntimeModeProgressV1 || version.Budget.RuntimePolicy.MaxActiveSeconds != nil {

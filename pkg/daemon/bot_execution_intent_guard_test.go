@@ -28,7 +28,7 @@ func TestBotIntentLiveGuardNeverElevatesConversation(t *testing.T) {
 		repo.b.Status = status
 		for _, name := range []string{"read_file", "run_flow", "delegate_tasks", "unknown_tool", "ask_user"} {
 			decision, err := guard.Authorize(ctx, execution.ActionDescriptor{Tool: name})
-			if decision.Kind != execution.PolicyDeny || !errors.Is(err, store.ErrBotForbidden) {
+			if !errors.Is(err, store.ErrBotForbidden) || decision.Kind == execution.PolicyAllow || decision.Kind == execution.PolicyConsumeGrant || (status == store.BotPaused && decision.Kind != execution.PolicyDeny) {
 				t.Fatalf("status=%s tool=%s decision=%+v error=%v", status, name, decision, err)
 			}
 		}

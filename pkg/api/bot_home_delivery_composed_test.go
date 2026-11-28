@@ -39,12 +39,53 @@ type composedHomeModel struct {
 	schedule, emitted       bool
 	describeEmitted         bool
 	scheduleRef             string
+	scheduleDelegated       bool
 	review                  *json.RawMessage
 	declarations, questions *atomic.Int64
 }
 
 func (*composedHomeModel) Name() string { return "home-composed" }
 func (m *composedHomeModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	// Employee owns the conversation; scheduling discovery/execution belongs to
+	// its real private Chat worker, whose response is returned as private evidence.
+	if m.schedule && req.Config != nil {
+		for _, group := range req.Config.Tools {
+			for _, declaration := range group.FunctionDeclarations {
+				if declaration.Name != "employee_chat" {
+					continue
+				}
+				if !m.scheduleDelegated {
+					requestBytes, _ := json.Marshal(req.Contents)
+					if !strings.Contains(string(requestBytes), "schedule to deliver every minute") || !strings.Contains(string(requestBytes), "Boston weather: 12 C") {
+						m.t.Error("schedule Employee did not receive exact user instruction and preceding weather context")
+					}
+					m.scheduleDelegated = true
+					return func(yield func(*model.LLMResponse, error) bool) {
+						yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: "employee_chat", Args: map[string]any{"message": "Discover schedule_job through describe_tools and execute the requested every-minute Boston weather schedule; return its exact review."}}}}}}, nil)
+					}
+				}
+				for _, content := range req.Contents {
+					for _, part := range content.Parts {
+						if part.FunctionResponse == nil {
+							continue
+						}
+						text, _ := part.FunctionResponse.Response["private_text"].(string)
+						var responses []*genai.FunctionResponse
+						if json.Unmarshal([]byte(strings.TrimPrefix(text, "Private source responses: ")), &responses) == nil {
+							for _, response := range responses {
+								if response.Name == "execute_tool" {
+									*m.review, _ = json.Marshal(response.Response)
+								}
+							}
+						}
+					}
+				}
+				return func(yield func(*model.LLMResponse, error) bool) {
+					yield(&model.LLMResponse{Content: genai.NewContentFromText("Review the disabled every-minute Boston weather schedule for this Home chat.", "model"), TurnComplete: true}, nil)
+				}
+			}
+		}
+	}
 	if response, ok := workerWorkAssessment(req, func(w *store.BotWorkState) bool {
 		return len(w.Candidate.Observations) > 0 && (w.Candidate.Text == "Boston weather: 12 C, clear (controlled observation)." || w.Candidate.Text == "Review the disabled every-minute Boston weather schedule for this Home chat.")
 	}); ok {
@@ -53,7 +94,7 @@ func (m *composedHomeModel) GenerateContent(_ context.Context, req *model.LLMReq
 	return func(yield func(*model.LLMResponse, error) bool) {
 		part := &genai.Part{Text: "Boston weather: 12 C, clear (controlled observation)."}
 		if m.schedule {
-			if !m.emitted {
+			if !m.emitted && !m.scheduleDelegated {
 				requestBytes, _ := json.Marshal(req.Contents)
 				if !strings.Contains(string(requestBytes), "schedule to deliver every minute") || !strings.Contains(string(requestBytes), "Boston weather: 12 C") {
 					m.t.Error("schedule model did not receive exact user instruction and preceding weather context")
@@ -268,10 +309,10 @@ func TestBotHomeDeliveryComposedHTTPAcceptance(t *testing.T) {
 		return pool.Call("", name, args)
 	})
 	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 200, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return &composedHomeModel{t: t, schedule: scheduleMode, review: &review, declarations: &declarations, questions: &questions}, nil
+		return mediateHTTPModel(&composedHomeModel{t: t, schedule: scheduleMode, review: &review, declarations: &declarations, questions: &questions}), nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		files.install(c, q, s)
-		resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
+		resources := &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, PolicyRuntime: agent.BotPolicyRuntime{Classifier: launcher.BotCatalogueClassifier{}, Guard: interactiveFixtureGuard{repo: s.Services.PersonalBots, req: q}}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}
 		if !q.Run.IsInteractiveChat() {
 			action, e := functiontool.New(functiontool.Config{Name: "read_file", Description: "Read controlled Boston weather observation"}, func(c tool.Context, args map[string]any) (map[string]any, error) {
 				raw, e := pool.Call("", "read_file", args)

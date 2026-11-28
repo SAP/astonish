@@ -91,7 +91,10 @@ func TestDelegationLargePayloadCodePTYAcceptance(t *testing.T) {
 			var tasks, results []any
 			var pendingPath, reviewedPath string
 			for i, name := range []string{taskName, pendingName, "verify-chronology", "review-tests"} {
-				child, err := store.Create(ctx, &adksession.CreateRequest{AppName: "astonish_code", UserID: owner, State: map[string]any{persistentsession.StateKeyParentID: parent.Session.ID()}})
+				// Delegation children use the factory's app namespace, not the
+				// parent's Code/compaction namespace. Same-scope children are
+				// intentionally followed by --resume as compaction descendants.
+				child, err := store.Create(ctx, &adksession.CreateRequest{AppName: "astonish", UserID: owner, State: map[string]any{persistentsession.StateKeyParentID: parent.Session.ID()}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -123,7 +126,7 @@ func TestDelegationLargePayloadCodePTYAcceptance(t *testing.T) {
 				// No duplicated child final text in the parent summary: detail has to
 				// finish loading to expose the child's result and edit evidence.
 				results = append(results, map[string]any{"name": name, "task_id": taskID, "child_session_id": child.Session.ID(), "attempts": 1, "status": "success", "duration": "1m42s"})
-				path := filepath.Join(base, "code", "astonish_code", owner, child.Session.ID()+".jsonl")
+				path := filepath.Join(base, "code", "astonish", owner, child.Session.ID()+".jsonl")
 				if i == 0 {
 					reviewedPath = path
 				}
@@ -257,8 +260,10 @@ func (p *handoffPTY) waitWithin(budget time.Duration, wants ...string) string {
 	p.t.Helper()
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	for {
-		frame, ok := p.frame(), true
+		frame, ok := p.settledFrame()
 		for _, want := range wants {
 			if !strings.Contains(frame, want) {
 				ok = false
@@ -269,6 +274,7 @@ func (p *handoffPTY) waitWithin(budget time.Duration, wants ...string) string {
 		}
 		select {
 		case <-p.changed:
+		case <-poll.C:
 		case <-p.done:
 			p.t.Fatalf("Code exited before %q:\n%s", wants, p.frame())
 		case <-timer.C:

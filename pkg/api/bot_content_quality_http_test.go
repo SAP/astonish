@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -178,6 +179,43 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 						if in.Contract.Instructions != instructions || in.Contract.Charter == "" || in.Candidate.Digest != in.Candidate.ContentDigest() {
 							t.Error("review lost original scope or candidate binding")
 						}
+						// The Employee mediator returns actual private-worker responses.
+						// Assert their fetched bytes survived; never fabricate a citable
+						// passage from the draft or silently accept an empty source ref.
+						capturedHTTP := false
+						observationRef := ""
+						for ref, body := range in.ExecutionEvidence {
+							if strings.HasPrefix(ref, "observation:") && strings.Contains(body, "File contents read by the built-in transport") {
+								observationRef = ref
+							}
+						}
+						for _, body := range in.Candidate.Bodies {
+							var direct struct {
+								Content string `json:"content"`
+							}
+							if json.Unmarshal([]byte(body), &direct) == nil && strings.Contains(direct.Content, ai) && strings.Contains(direct.Content, gamingAI) && strings.Contains(direct.Content, unrelated) {
+								capturedHTTP = true
+							}
+							var envelope struct {
+								PrivateText string `json:"private_text"`
+							}
+							if json.Unmarshal([]byte(body), &envelope) != nil || envelope.PrivateText == "" {
+								continue
+							}
+							var responses []*genai.FunctionResponse
+							if json.Unmarshal([]byte(strings.TrimPrefix(envelope.PrivateText, "Private source responses: ")), &responses) != nil {
+								continue
+							}
+							for _, response := range responses {
+								content, _ := response.Response["content"].(string)
+								if response.Name == "execute_tool" && strings.Contains(content, ai) && strings.Contains(content, gamingAI) && strings.Contains(content, unrelated) {
+									capturedHTTP = true
+								}
+							}
+						}
+						if !capturedHTTP || observationRef == "" {
+							t.Fatal("review lost the actual private HTTP response or its read receipt")
+						}
 						sourceRef := ""
 						for ref, body := range in.Sources {
 							if strings.HasPrefix(ref, "source_") && strings.Contains(body, ai) && strings.Contains(body, gamingAI) && strings.Contains(body, unrelated) && strings.Contains(body, "Ignore owner scope") {
@@ -185,7 +223,7 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 							}
 						}
 						if sourceRef == "" || fetches != 1 {
-							t.Error("review lacks actual mixed HTTP source body")
+							t.Fatalf("trusted private HTTP response was captured with receipt %q but not exposed as citable mixed source (sources=%d, fetches=%d)", observationRef, len(in.Sources), fetches)
 						}
 						if mode == "escaped-xml" {
 							sourceRef = ""
@@ -209,14 +247,14 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 							t.Error("no strict content schema")
 						}
 						if mode == "citation-observation" {
-							if sourceRef != "source_1" || len(in.Sources) != 1 || len(in.Items) != 9 || in.ExecutionEvidence["observation:0"] == "" || strings.Contains(in.ExecutionEvidence["observation:0"], ai) {
+							if sourceRef != "source_1" || len(in.Sources) != 1 || len(in.Items) != 9 || in.ExecutionEvidence[observationRef] == "" || strings.Contains(in.ExecutionEvidence[observationRef], ai) {
 								t.Fatalf("receipt/body separation missing: sources=%v evidence=%v", in.Sources, in.ExecutionEvidence)
 							}
 							if strings.Contains(in.Sources[sourceRef], "Adversarial metadata") || strings.Contains(in.Sources[sourceRef], "90 million users") {
 								t.Fatal("HTML title metadata became citable story content")
 							}
 							criterionSchema, _ := json.Marshal(schema["properties"].(map[string]any)["criteria"])
-							if !strings.Contains(string(criterionSchema), `"observation:0"`) {
+							if !strings.Contains(string(criterionSchema), `"`+observationRef+`"`) {
 								t.Fatal("content separation removed criterion observation evidence")
 							}
 							contentSchema, _ := json.Marshal(schema["properties"].(map[string]any)["content_assessments"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)["sources"])
@@ -268,7 +306,7 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 									}
 								}
 								if mode == "citation-observation" {
-									quotes = []any{map[string]string{"ref": "observation:0", "quote": ai}}
+									quotes = []any{map[string]string{"ref": observationRef, "quote": ai}}
 								}
 							}
 							assessments = append(assessments, map[string]any{"item_id": item.ID, "claim_type": "factual", "execution_sources": []any{}, "relevance": relevance, "support": support, "explanation": explanation, "sources": quotes})
@@ -278,7 +316,7 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 						if mode == "citation-observation" {
 							// Receipts remain valid criterion evidence even though the
 							// same ref is forbidden as a content passage citation.
-							evidenceRefs = append(evidenceRefs, "observation:0")
+							evidenceRefs = append(evidenceRefs, observationRef)
 						}
 						output = map[string]any{"candidate_digest": in.Candidate.Digest, "criteria": []store.BotCriterionAssessment{{CriterionID: "content", Verdict: store.BotCriterionSatisfied, Method: store.BotAssessmentModel, EvidenceRefs: evidenceRefs, Explanation: "Whole draft is fine"}}, "content_assessments": assessments}
 					case strings.HasPrefix(prompt, "BOT_EMPLOYEE_MESSAGE"):
@@ -341,13 +379,57 @@ func TestBotContentQualityHTTPAcceptance(t *testing.T) {
 				if run.Report.Quality.Repairs != repairs || productions != repairs+1 || reviews != wantReviews {
 					t.Fatalf("content repair bounds failed: %+v productions=%d reviews=%d", run, productions, reviews)
 				}
-				history := string(f.request("GET", historyPath, "", 200))
-				if strings.Contains(history, unsupported) || canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 {
-					t.Fatal("rejected or duplicate publication")
+				assertPublication := func(history string) {
+					t.Helper()
+					if strings.Contains(history, unsupported) || strings.Contains(history, "private-secret") {
+						t.Fatal("rejected content leaked into Home")
+					}
+					if mode != "repair-exhausted" && mode != "citation-exhausted" {
+						if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 {
+							t.Fatal("missing or duplicate accepted report")
+						}
+						return
+					}
+					publication, err := f.repo.(store.BotPublicationStore).PublishReport(f.ctx, store.BotPublicationRequest{BotID: f.b.ID, RunID: run.ID})
+					if err != nil || publication.EmployeeSpeech || publication.Text != "" || publication.SourceSessionID != run.SessionID || publication.ReportSequence == 0 {
+						t.Fatalf("missing neutral publication receipt: %+v %v", publication, err)
+					}
+					if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 0 {
+						t.Fatal("rejected report manufactured Employee speech")
+					}
+					// Rejection closes through one durable source-bound state event,
+					// not fabricated speech. GET run above retains the private report.
+					neutral := 0
+					reader := bufio.NewReader(strings.NewReader(history))
+					for {
+						if _, err := reader.Peek(1); err == io.EOF {
+							break
+						}
+						frame := readBlockedPublicationFrame(t, reader)
+						if frame.kind != store.BotRunStateKey {
+							continue
+						}
+						var state store.BotRunState
+						if err := json.Unmarshal([]byte(frame.data), &state); err != nil {
+							t.Fatal(err)
+						}
+						if state.RunID == run.ID && state.TerminalReason == store.BotTerminalNoAnswer {
+							if state.BotID != f.b.ID || state.SessionID != run.SessionID || state.HomeSessionID != f.b.HomeSessionID || state.Status != run.Status {
+								t.Fatalf("neutral event lost current-run binding: %+v", state)
+							}
+							neutral++
+						}
+					}
+					if neutral != 1 {
+						t.Fatalf("missing or duplicate durable unavailable event: %d", neutral)
+					}
 				}
+				history := string(f.request("GET", historyPath, "", 200))
+				assertPublication(history)
 				f.worker.Poll(f.ctx)
 				history = string(f.request("GET", historyPath, "", 200))
-				if canonicalHTTPReportCount(t, history, "bot-report:"+run.ID.String()) != 1 || fetches != 1 || f.pool.calls != 1 {
+				assertPublication(history)
+				if fetches != 1 || f.pool.calls != 1 {
 					t.Fatal("replayed tools/publication")
 				}
 			})

@@ -19,8 +19,8 @@ func TestBotEmployeeMessageOmitsInternalReport(t *testing.T) {
 			message := EmployeeMessageFallback(status, run.Report, nil)
 			run.Report.EmployeeMessage = &message
 			got := RenderReport(run)
-			if strings.TrimSpace(got) != message.Text {
-				t.Fatalf("expected just the employee's message, got %s", got)
+			if strings.TrimSpace(got) != "Employee response unavailable." {
+				t.Fatalf("expected neutral unavailable notice, got %s", got)
 			}
 			for _, unwanted := range []string{"Run report", "Quality assessment", "Unchanged", "candidate:secret", run.ID.String(), "internal stack"} {
 				if strings.Contains(got, unwanted) {

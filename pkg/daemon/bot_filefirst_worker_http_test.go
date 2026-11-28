@@ -184,6 +184,13 @@ func (a *fileFirstHTTPApprovals) AuthorizeAction(ctx context.Context, action exe
 }
 func (a *fileFirstHTTPApprovals) Authorize(ctx context.Context, action execution.ActionDescriptor) (execution.PolicyDecision, error) {
 	decision := execution.EvaluateRunPolicy(ctx, action, time.Now())
+	if _, interactive := execution.BotTurnAuthorizerFromContext(ctx); interactive && action.Tool == "write_file" {
+		grant, err := a.AuthorizeAction(ctx, action)
+		if err != nil {
+			return decision, err
+		}
+		decision.Kind, decision.GrantID, decision.ActionDigest = execution.PolicyConsumeGrant, grant.ID, grant.ActionDigest
+	}
 	if decision.Kind != execution.PolicyConsumeGrant {
 		return a.live.Authorize(ctx, action)
 	}
@@ -316,7 +323,7 @@ func (m *fileFirstHTTPModel) GenerateContent(_ context.Context, r *model.LLMRequ
 			part.Text = "durable controlled result"
 		}
 		if name != "" {
-			if m.bridge || name == "publish_file" {
+			if m.bridge || name == "publish_file" || !fixtureDeclarations(r)[name] {
 				name, args = "execute_tool", map[string]any{"name": name, "arguments": args}
 			}
 			part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}
@@ -358,7 +365,7 @@ func TestBotFileFirstWorkerHTTP(t *testing.T) {
 			policy := newProductionBotMandatePolicy(db, &config.AppConfig{})
 			var receipts *launcher.BotFileReceipts
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, MandatePolicy: policy, TurnRegistry: registry, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "file-first-http", ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true, EstimateInput: func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return mdl, nil
+				return mediateDaemonModel(mdl), nil
 			}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, sc store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, backend, svc, sc)

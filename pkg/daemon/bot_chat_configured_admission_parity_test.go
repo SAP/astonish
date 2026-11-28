@@ -130,25 +130,125 @@ func (p *configuredAdmissionPool) count() int { p.mu.Lock(); defer p.mu.Unlock()
 // Every surface receives the same script. Bot-specific delivery bookkeeping is
 // additive; generation and review remain the production ChatRunner/controller.
 type configuredAdmissionModel struct {
-	mu        sync.Mutex
-	script    []configuredAdmissionCall
-	step      int
-	work      func() (*store.BotWorkState, error)
-	delivery  bool
-	prompts   []string
-	responses []string
+	mu              sync.Mutex
+	script          []configuredAdmissionCall
+	step            int
+	work            func() (*store.BotWorkState, error)
+	delivery        bool
+	prompts         []string
+	responses       []string
+	employeeStarted bool
+	usageMu         sync.Mutex
+	meteredTurns    int64
+}
+
+func (m *configuredAdmissionModel) usageTurns() int64 {
+	m.usageMu.Lock()
+	defer m.usageMu.Unlock()
+	return m.meteredTurns
+}
+
+func (m *configuredAdmissionModel) GenerateContent(ctx context.Context, r *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for response, err := range m.generateContent(ctx, r, stream) {
+			if response != nil && response.UsageMetadata != nil {
+				m.usageMu.Lock()
+				m.meteredTurns++
+				m.usageMu.Unlock()
+			}
+			if !yield(response, err) {
+				return
+			}
+		}
+	}
 }
 
 func (*configuredAdmissionModel) Name() string { return "configured-admission" }
-func (m *configuredAdmissionModel) GenerateContent(ctx context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *configuredAdmissionModel) generateContent(ctx context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	if r.Config != nil && r.Config.SystemInstruction != nil && len(r.Config.SystemInstruction.Parts) > 0 && strings.HasPrefix(r.Config.SystemInstruction.Parts[0].Text, "BOT_EMPLOYEE_REPAIR_V1") {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(`{"text":"durable controlled result"}`, "model"), TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
+		}
+	}
 	if response, ok := workerWorkAssessment(r, nil); ok {
 		return response
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		available := func(name string) bool {
+			if _, ok := r.Tools[name]; ok {
+				return true
+			}
+			if r.Config != nil {
+				for _, tool := range r.Config.Tools {
+					for _, declaration := range tool.FunctionDeclarations {
+						if declaration.Name == name {
+							return true
+						}
+					}
+				}
+			}
+			return false
+		}
+		if available("employee_chat") {
+			if m.work != nil && !m.delivery {
+				w, err := m.work()
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				m.delivery = true
+				yield(configuredFixtureCall("bot_work_update", map[string]any{"expected_revision": w.Revision, "kind": "set_delivery", "delivery_intent": string(store.BotDeliveryChatOnly)}), nil)
+				return
+			}
+			workerID := ""
+			workerFailed := false
+			for _, content := range r.Contents {
+				for _, part := range content.Parts {
+					if part.FunctionResponse != nil && part.FunctionResponse.Name == "employee_chat" {
+						raw, _ := json.Marshal(part.FunctionResponse.Response)
+						m.responses = append(m.responses, string(raw))
+						var response struct {
+							WorkerID string `json:"worker_id"`
+							Status   string `json:"status"`
+							Result   struct {
+								WorkerID string `json:"worker_id"`
+								Status   string `json:"status"`
+							} `json:"result"`
+						}
+						_ = json.Unmarshal(raw, &response)
+						if response.Result.Status == "" {
+							response.Result.Status, response.Result.WorkerID = response.Status, response.WorkerID
+						}
+						workerID = ""
+						workerFailed = response.Result.Status == "failed"
+						if response.Result.Status == "needs_input" {
+							workerID = response.Result.WorkerID
+						}
+					}
+				}
+			}
+			if !m.employeeStarted || workerID != "" {
+				m.employeeStarted = true
+				args := map[string]any{"message": configuredAdmissionTask}
+				if workerID != "" {
+					args["worker_id"] = workerID
+				}
+				yield(configuredFixtureCall("employee_chat", args), nil)
+				return
+			}
+			if workerFailed {
+				// The private worker's failure is not a completed action. Never
+				// replace its failed result with the canned successful candidate.
+				yield(nil, store.ErrBotForbidden)
+				return
+			}
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(configuredAdmissionBody, "model"), TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
+			return
+		}
 		// Session naming is auxiliary, not another execution turn.
-		if len(r.Tools) == 0 {
+		if len(r.Tools) == 0 && (r.Config == nil || len(r.Config.Tools) == 0) {
 			yield(&model.LLMResponse{Content: genai.NewContentFromText("Admission parity", "model"), TurnComplete: true}, nil)
 			return
 		}
@@ -161,6 +261,12 @@ func (m *configuredAdmissionModel) GenerateContent(ctx context.Context, r *model
 				if p.FunctionResponse != nil {
 					raw, _ := json.Marshal(p.FunctionResponse)
 					m.responses = append(m.responses, string(raw))
+					if strings.Contains(string(raw), "bot policy: tool outside policy:") && strings.Contains(string(raw), `\"run_flow\"`) {
+						// A denied action is not the controlled successful result.
+						// Return the failed worker result instead of completing prose.
+						yield(nil, store.ErrBotForbidden)
+						return
+					}
 				}
 			}
 		}
@@ -181,7 +287,7 @@ func (m *configuredAdmissionModel) GenerateContent(ctx context.Context, r *model
 			return
 		}
 		name, args := call.name, call.args
-		if _, direct := r.Tools[name]; !direct {
+		if !available(name) {
 			name, args = "execute_tool", map[string]any{"name": name, "arguments": args}
 		}
 		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: uuid.NewString(), Name: name, Args: args}}}}, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 7, CandidatesTokenCount: 3, TotalTokenCount: 10}}, nil)
@@ -239,7 +345,9 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 			policy := newProductionBotMandatePolicy(backend, &config.AppConfig{})
 			svc.BotTurnRegistry = registry
 			svc.BotInteractiveReady = true
-			modes := []string{"interactive", "interactive-mandate", "autonomous"}
+			// Poll scans every Bot in this fixture's store. Keep the intentionally
+			// failed mandate last so its terminal cleanup is not another mode's work.
+			modes := []string{"interactive", "autonomous", "interactive-mandate"}
 			if continuous {
 				modes = []string{"interactive", "autonomous"}
 			}
@@ -303,6 +411,7 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 					router.HandleFunc("/studio/chat", api.StudioChatHandler).Methods("POST")
 					router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
 					router.HandleFunc("/bots/{botID}/test-run", api.BotTestRunHandler).Methods("POST")
+					router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 					router.HandleFunc("/bots/{botID}/approvals/{approvalID}/decision", api.BotApprovalDecisionHandler).Methods("POST")
 					router.HandleFunc("/bots/{botID}/runs/{runID}/resume", api.BotResumeRunHandler).Methods("POST")
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -426,20 +535,23 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 						base := "/bots/" + b.ID.String() + "/"
 						originalScript := append([]configuredAdmissionCall(nil), llm.script...)
 						var autonomousCalls []configuredAdmissionCall
-						if mode == "autonomous" && !continuous {
-							// Legacy exact-action resume intentionally executes only its
-							// checkpoint, then reports. Admit each task step separately;
-							// do not synthesize a broad grant or imply one-run parity.
+						if (mode == "autonomous" || mode == "interactive") && !continuous {
+							// Exact-action continuation intentionally grants only its
+							// checkpoint, not the rest of a private worker's script.
+							// Admit each task step separately; do not synthesize a broad
+							// grant or imply one-run parity (the continuous matrix does that).
 							autonomousCalls = originalScript
 						} else {
 							autonomousCalls = []configuredAdmissionCall{{}}
 						}
 						for actionIndex, action := range autonomousCalls {
-							if mode == "autonomous" && !continuous {
+							beforeTurns := llm.usageTurns()
+							if (mode == "autonomous" || mode == "interactive") && !continuous {
 								llm.mu.Lock()
 								llm.script = []configuredAdmissionCall{action}
 								llm.step = 0
 								llm.delivery = false
+								llm.employeeStarted = false
 								llm.mu.Unlock()
 							}
 							payload := map[string]any{"version": b.Version, "idempotency_key": fmt.Sprintf("%s-%d", mode, actionIndex), "instructions": task}
@@ -467,7 +579,7 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 							finished := false
 							for attempt := 0; attempt < 8; attempt++ {
 								if e = worker.Poll(auth); e != nil {
-									t.Fatal(e)
+									t.Fatalf("poll action=%d attempt=%d: %v", actionIndex, attempt, e)
 								}
 								saved, e := repo.GetRun(auth, b.ID, run.ID)
 								if e != nil {
@@ -506,6 +618,26 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 										t.Fatalf("approval escaped configured task: %+v", pending.Action)
 									}
 									before := pool.count()
+									if saved.IsInteractiveChat() {
+										continuePath := base + "approvals/" + pending.ID.String() + "/approve-and-continue?scope=" + string(scope)
+										body := map[string]any{"action_digest": pending.ActionDigest}
+										if pending.Interaction != nil {
+											answer := &store.BotInteractionResponse{QuestionID: pending.Interaction.QuestionID, Answer: "yes"}
+											if pending.Interaction.ValidateResponse(answer) != nil {
+												t.Fatalf("invalid configured approval response: %+v", pending.Interaction)
+											}
+											body["response"] = answer
+										}
+										code, raw := post(continuePath, body, true)
+										if code < 400 || pool.count() != before {
+											t.Fatalf("foreign interactive approval continuation: %d %s", code, raw)
+										}
+										mustPost(continuePath, body, 202)
+										if pool.count() != before {
+											t.Fatal("interactive approval admission executed tool")
+										}
+										continue
+									}
 									decisionPath := base + "approvals/" + pending.ID.String() + "/decision?scope=" + string(scope)
 									decision := map[string]any{"action_digest": pending.ActionDigest, "status": "approved"}
 									code, raw := post(decisionPath, decision, true)
@@ -530,7 +662,7 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 								}
 								if mode == "interactive-mandate" {
 									if saved.MandateRef == nil || saved.Status != store.RunFailed || saved.Report.Failure == nil {
-										t.Fatalf("production mandate did not fail closed: %+v", saved)
+										t.Fatalf("production mandate did not fail closed: %+v responses=%s", saved, strings.Join(llm.responses, "\n"))
 									}
 								} else if saved.Status != store.RunSucceeded && !(saved.Status == store.RunPartial && saved.Report.Failure == nil && saved.Report.EffectState == store.BotReportEffectsUncertain && len(saved.Report.Unverified) > 0) {
 									t.Fatalf("run failed: status=%s report=%+v failure=%+v responses=%s", saved.Status, saved.Report, saved.Report.Failure, strings.Join(llm.responses, "\n"))
@@ -538,13 +670,35 @@ func runConfiguredAdmissionParityHTTP(t *testing.T, continuous bool) {
 								if continuous && (saved.Status != store.RunSucceeded || saved.Usage.ToolCalls < 5 || mode == "interactive" && saved.MandateRef == nil || mode == "autonomous" && saved.Trigger != store.TriggerGoalDeadline) {
 									t.Fatalf("continuous production run did not finish all safe steps under its admission policy: %+v", saved)
 								}
+								turns := llm.usageTurns() - beforeTurns
+								if (mode == "autonomous" || mode == "interactive") && !continuous {
+									// The unsupported auxiliary Employee narration reserves the
+									// configured 100 input/output ceiling conservatively on resume.
+									turnsInput, turnsOutput := 7*turns, 3*turns
+									if action.name != "read_file" {
+										turnsInput += 100
+										turnsOutput += 100
+									}
+									if saved.Usage.InputTokens != turnsInput || saved.Usage.OutputTokens != turnsOutput {
+										t.Fatalf("resume accounting drift: %+v metered turns=%d", saved.Usage, turns)
+									}
+								} else if mode == "interactive-mandate" {
+									// The private worker and its owner-facing failed result each
+									// terminate a model call without usage metadata. The production
+									// meter conservatively settles each 100 input/output reservation.
+									if turns == 0 || saved.Usage.InputTokens != 7*turns+200 || saved.Usage.OutputTokens != 3*turns+200 {
+										t.Fatalf("denied worker usage drift: %+v metered turns=%d", saved.Usage, turns)
+									}
+								} else if turns == 0 || saved.Usage.InputTokens != 7*turns || saved.Usage.OutputTokens != 3*turns {
+									t.Fatalf("provider usage drift: %+v metered turns=%d", saved.Usage, turns)
+								}
 								minCalls := int64(len(llm.script) + 1)
 								if mode == "interactive-mandate" {
 									// Denial precedes tool budget admission; only bookkeeping ran.
 									minCalls = 1
 								}
 								if saved.Usage.ToolCalls < minCalls || saved.Usage.InputTokens == 0 || saved.Usage.OutputTokens == 0 {
-									t.Fatalf("missing cumulative accounting: %+v", saved.Usage)
+									t.Fatalf("missing cumulative accounting: %+v responses=%s", saved.Usage, strings.Join(llm.responses, "\n"))
 								}
 								approvals, e := repo.ListApprovals(auth, b.ID, store.BotPage{})
 								if e != nil {

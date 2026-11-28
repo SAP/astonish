@@ -85,8 +85,8 @@ func openUncertainCrashFixture(t *testing.T, q uncertainCrashCoordinates, child 
 	if child {
 		pool = &uncertainCrashPool{uncertainRestartHTTPPool: f.pool}
 	}
-	f.worker, err = NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: f.backend, Pool: workerTestPool{}, WorkerID: fmt.Sprintf("owned-crash-%d", os.Getpid()), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return f.llm, nil
+	f.worker, err = NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: f.backend, Pool: workerTestPool{}, LeaseTTL: 3 * time.Second, WorkerID: fmt.Sprintf("owned-crash-%d", os.Getpid()), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+		return mediateDaemonModel(f.llm), nil
 	}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 			return productionBotFiles(c, f.backend, svc, scope)

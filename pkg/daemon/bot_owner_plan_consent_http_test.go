@@ -38,10 +38,34 @@ func testOwnerDefinitionConsentHTTP(t *testing.T, ctx context.Context, repo stor
 		must(json.Unmarshal(raw, &snap))
 		return snap
 	}
+	// Plan mode first prepares an exact PLAN.md mirror leaf. Owner consent to
+	// execute the definition is a separate decision, never permission to write.
 	pending := get()
 	checkpoint, err := bot.DecodeApprovalCheckpoint(pending.Checkpoint, *pending)
 	must(err)
 	approvals, err := repo.ListApprovals(ctx, b.ID, store.BotPage{Limit: 100})
+	must(err)
+	for _, a := range approvals {
+		if a.ID != checkpoint.ApprovalID {
+			continue
+		}
+		if a.Action.Tool != "write_file" || a.Interaction != nil || !checkpoint.Matches(a) || pool.count() != 0 {
+			t.Fatalf("initial wait is not an unexecuted exact mirror: %+v", a)
+		}
+		var receipt store.BotApproveContinueResult
+		must(json.Unmarshal(post("approvals/"+a.ID.String()+"/approve-and-continue", map[string]any{"action_digest": a.ActionDigest}, 202), &receipt))
+		if receipt.RunID != admitted.ID {
+			t.Fatal("mirror approval replaced originating run")
+		}
+		poll()
+	}
+	pending = get()
+	if pending.Status != store.RunWaitingApproval {
+		t.Fatalf("mirror continuation did not reach definition wait: run=%+v failure=%+v responses=%v calls=%d", pending, pending.Report.Failure, llm.responses, pool.count())
+	}
+	checkpoint, err = bot.DecodeApprovalCheckpoint(pending.Checkpoint, *pending)
+	must(err)
+	approvals, err = repo.ListApprovals(ctx, b.ID, store.BotPage{Limit: 100})
 	must(err)
 	var approval store.BotApproval
 	for _, a := range approvals {
@@ -106,10 +130,36 @@ func testOwnerDefinitionConsentHTTP(t *testing.T, ctx context.Context, repo stor
 		t.Fatal("owner execution inherited definition planning mode")
 	}
 	poll()
+	// Definition consent must not grant any mirror or verifier effect. Drive
+	// the independently captured exact leaves through the real approval route.
+	for get().Status == store.RunWaitingApproval {
+		waiting := get()
+		cp, err := bot.DecodeApprovalCheckpoint(waiting.Checkpoint, *waiting)
+		must(err)
+		items, err := repo.ListApprovals(ctx, b.ID, store.BotPage{Limit: 100})
+		must(err)
+		var leaf *store.BotApproval
+		for i := range items {
+			if items[i].ID == cp.ApprovalID {
+				leaf = &items[i]
+			}
+		}
+		if leaf == nil || leaf.Interaction != nil || !cp.Matches(*leaf) {
+			t.Fatal("continuation did not retain an independent exact leaf")
+		}
+		before := pool.count()
+		poll()
+		if pool.count() != before {
+			t.Fatal("pending plan leaf executed without approval")
+		}
+		post("approvals/"+leaf.ID.String()+"/approve-and-continue", map[string]any{"action_digest": leaf.ActionDigest}, 202)
+		poll()
+		post("approvals/"+leaf.ID.String()+"/approve-and-continue", map[string]any{"action_digest": leaf.ActionDigest}, 409)
+	}
 	final := get()
 	snap := snapshot()
 	if final.Status != store.RunSucceeded && final.Status != store.RunPartial || final.Lease.Fence <= pending.Lease.Fence || snap.Document.Results == "" || snap.Steps[0].Status != "complete" {
-		t.Fatalf("consent lifecycle failed run=%+v failure=%+v snapshot=%+v", final, final.Report.Failure, snap)
+		t.Fatalf("consent lifecycle failed run=%+v failure=%+v snapshot=%+v responses=%v", final, final.Report.Failure, snap, llm.responses)
 	}
 	data, err := os.ReadFile(filepath.Join(pool.root, "PLAN.md"))
 	must(err)

@@ -404,6 +404,9 @@ func runConfiguredBrowserAdmission(t *testing.T, scope store.BotScope, mode stri
 		if e = worker.Poll(auth); e != nil {
 			t.Fatal(e)
 		}
+		if mode == "interactive" {
+			configuredFixtureInteractiveActions(t, auth, worker, repo, b, run, scope, llm, llm.script, func(path string, body any, want int) []byte { return request("POST", path, body, want) })
+		}
 		if mode != "interactive" {
 			saved, e := repo.GetRun(auth, b.ID, run.ID)
 			if e != nil {
@@ -519,7 +522,7 @@ func runConfiguredBrowserAdmission(t *testing.T, scope store.BotScope, mode stri
 		t.Fatal("download triggered browser execution")
 	}
 	wantAttempts := int32(1)
-	if strings.HasPrefix(mode, "scheduled-") {
+	if strings.HasPrefix(mode, "scheduled-") || mode == "interactive" {
 		wantAttempts = 2
 	}
 	if prepared.Load() != wantAttempts || cleaned.Load() != wantAttempts {

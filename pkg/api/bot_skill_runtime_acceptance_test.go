@@ -195,7 +195,7 @@ func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 						}
 						part = &genai.Part{FunctionCall: &genai.FunctionCall{ID: "save-method", Name: "bot_skill_save", Args: map[string]any{"expected_revision": revision, "title": "Read receipt", "method": []string{"Read the current receipt, then summarize its contents."}, "evidence_refs": []string{"capture:fresh-source"}}}}
 					case 4:
-						raw, _ := json.Marshal(req.Contents)
+						raw := []byte(scriptedHTTPResponseEvidence(req))
 						if !strings.Contains(string(raw), `"staged":true`) {
 							t.Fatalf("proposal not staged: %s", raw)
 						}
@@ -269,7 +269,7 @@ func TestBotAgentLearningHTTPAcceptance(t *testing.T) {
 						if step == 1 {
 							part = capabilityHTTPCall(mode, key, "bot_skill_save", map[string]any{"expected_revision": f.model.work().Revision, "skill_id": selected.ID.String(), "owner_feedback_scope": scope, "owner_quotes": []string{quote}, "replace_expectation_ids": replace})
 						} else {
-							raw, _ := json.Marshal(req.Contents)
+							raw := []byte(scriptedHTTPResponseEvidence(req))
 							if !strings.Contains(string(raw), fmt.Sprintf(`"saved":%t`, saved)) {
 								t.Fatalf("incorrect feedback receipt: %s", raw)
 							}
@@ -419,7 +419,7 @@ func TestBotAgentLearningRejectionHTTPAcceptance(t *testing.T) {
 							}
 							part = capabilityHTTPCall(mode, "invalid-save", "bot_skill_save", args)
 						} else if scenario != "no-skill" {
-							raw, _ := json.Marshal(req.Contents)
+							raw := []byte(scriptedHTTPResponseEvidence(req))
 							want := `"staged":false`
 							if !strings.Contains(string(raw), want) {
 								t.Fatalf("missing truthful rejected-learning response: %s", raw)
@@ -457,11 +457,11 @@ func TestBotAgentOptionalWorkSchemaHTTPAcceptance(t *testing.T) {
 					if steps == 1 {
 						part = capabilityHTTPCall(mode, "malformed-optional", name, map[string]any{"unexpected": true})
 					} else {
-						raw, _ := json.Marshal(req.Contents)
+						raw := []byte(scriptedHTTPResponseEvidence(req))
 						feedback := string(raw)
 						// The shared bridge rejects malformed arguments before the
 						// optional tool; direct tools retain invalid_request feedback.
-						bridgeRejected := strings.Contains(feedback, `"name":"execute_tool"`) && strings.Contains(feedback, `"error":"tool \"`+name+`\":`)
+						bridgeRejected := strings.Contains(feedback, `"error":"tool \"`+name+`\":`)
 						if !strings.Contains(feedback, `"status":"invalid_request"`) && !bridgeRejected {
 							t.Fatalf("missing recoverable schema feedback: %s", raw)
 						}
@@ -545,6 +545,14 @@ func botSkillProducerBody(t *testing.T, req *model.LLMRequest) string {
 	content = func(value any) string {
 		switch v := value.(type) {
 		case map[string]any:
+			if private, ok := v["private_text"].(string); ok {
+				var decoded any
+				if json.Unmarshal([]byte(strings.TrimPrefix(private, "Private source responses: ")), &decoded) == nil {
+					if body := content(decoded); body != "" {
+						return body
+					}
+				}
+			}
 			if body, ok := v["content"].(string); ok {
 				return body
 			}
@@ -606,7 +614,7 @@ func TestBotSkillRuntimeHTTPAcceptance(t *testing.T) {
 				defer f.worker.Stop()
 				if scenario == "source-learning-reuse" || scenario == "format-recovery" {
 					f.pool.callOverride = func(name string, actual map[string]interface{}) (json.RawMessage, error) {
-						if name != "web_fetch" || actual["url"] != args["url"] {
+						if name != "_bot_public_fetch" || actual["url"] != args["url"] {
 							return nil, fmt.Errorf("unexpected source request %s", name)
 						}
 						response, err := http.Get(args["url"].(string))
@@ -618,7 +626,7 @@ func TestBotSkillRuntimeHTTPAcceptance(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						return json.Marshal(map[string]any{"final_url": response.Request.URL.String(), "content": string(body), "status": response.StatusCode})
+						return json.Marshal(map[string]any{"read_executed": true, "response": map[string]any{"url": actual["url"], "final_url": response.Request.URL.String(), "content": string(body), "status": response.StatusCode}})
 					}
 				}
 				skills := f.repo.(store.BotSkillStore)

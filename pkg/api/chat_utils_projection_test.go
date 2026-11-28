@@ -127,8 +127,8 @@ func TestSessionEventProjectorHomeRunSpeechBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if out.RunID != run || out.TurnID != turn.String() || out.Sequence != 7 || out.Cursor != 42 || len(out.Events) != 1 || out.Events[0].Data["text"] != "Acknowledged" {
-				t.Fatalf("lost bound Home narration: %+v", out)
+			if out.RunID != run || out.TurnID != turn.String() || out.Sequence != 7 || out.Cursor != 42 || len(out.Events) != 0 {
+				t.Fatalf("unattested narration displayed or provenance lost: %+v", out)
 			}
 		})
 	}
@@ -144,7 +144,7 @@ func TestSessionEventProjectorHomeSpeechRetainsProvenance(t *testing.T) {
 	if out.RunID != run || out.TurnID != turn.String() || out.Sequence != 7 || out.Cursor != 42 {
 		t.Fatalf("speech lost provenance: %+v", out)
 	}
-	if len(out.Events) != 1 || out.Events[0].Type != "text" || strings.Contains(string(out.Transcript), "PRIVATE_SECRET") {
-		t.Fatalf("invalid public speech: %+v", out)
+	if len(out.Events) != 0 || strings.Contains(string(out.Transcript), "PRIVATE_SECRET") {
+		t.Fatalf("unattested speech exposed: %+v", out)
 	}
 }

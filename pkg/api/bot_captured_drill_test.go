@@ -19,6 +19,65 @@ import (
 	"github.com/SAP/astonish/pkg/tools"
 )
 
+func TestCapturedDrillInteractiveOriginalCallerExactReadOnly(t *testing.T) {
+	for _, mode := range []string{"exact", "shell", "revoked", "uncaptured", "arguments"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, req, _ := botChatTestRequest(t)
+			id := req.Policy.Identity()
+			ctx, req = employeeInteractiveTestRequest(t, ctx, req)
+			ctx = execution.WithBotRunIdentity(ctx, id)
+			classifier := capturedReadClassifier{}
+			name := "filter_json"
+			if mode == "shell" {
+				name = "shell_command"
+			}
+			args := map[string]any{"value": "exact"}
+			raw, _ := json.Marshal(args)
+			child, _ := classifier.DescribeAction(ctx, name, raw)
+			snapshot := tools.CapturedDrill{Format: tools.CapturedDrillFormat, Suite: &drill.LoadedSuite{Name: "pinned", Config: &config.AgentConfig{}}, Children: []execution.ActionDescriptor{child}}
+			evidence, _ := json.Marshal(snapshot)
+			live := &capturedLiveGuard{deny: mode == "revoked"}
+			guard := &botResumeGuard{req: req, attempted: true, consumptionStarted: true, live: live, approval: store.BotApproval{Action: execution.ActionDescriptor{Tool: "run_drill", Effect: execution.EffectUnknown, Arguments: []byte(`{"suite_name":"pinned"}`), TargetFingerprint: snapshot.Fingerprint(), TargetSnapshot: evidence}}}
+			ctx = agent.WithBotPolicyRuntime(ctx, agent.BotPolicyRuntime{Guard: guard, Classifier: classifier})
+			if mode == "uncaptured" {
+				if _, err := guard.Authorize(ctx, child); err == nil {
+					t.Fatal("uncaptured action admitted")
+				}
+				return
+			}
+			if mode == "arguments" {
+				args["value"] = "other"
+			}
+			bound, err := CapturedDrillChildContext(ctx, name, args)
+			if mode == "shell" || mode == "arguments" {
+				if err == nil {
+					t.Fatal("unsafe child admitted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if execution.RunPolicyFromContext(bound) != nil {
+				t.Fatal("interactive autonomy policy minted")
+			}
+			_, err = guard.Authorize(PreserveCapturedDrillOccurrence(ctx, bound), child)
+			if mode == "revoked" {
+				if err == nil {
+					t.Fatal("live guard bypassed")
+				}
+				return
+			}
+			if err != nil || live.checks != 1 {
+				t.Fatalf("exact child %v checks=%d", err, live.checks)
+			}
+			if _, err := guard.Authorize(bound, child); err == nil {
+				t.Fatal("child replayed")
+			}
+		})
+	}
+}
+
 type capturedReadClassifier struct{}
 
 func (capturedReadClassifier) DescribeAction(_ context.Context, n string, a json.RawMessage) (execution.ActionDescriptor, error) {

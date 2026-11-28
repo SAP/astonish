@@ -9,6 +9,15 @@
 
 ## Database continuation fixtures
 
+`TestBotProgressLifecycleHTTP` exercises authenticated personal/team paused
+progress continuation through Employee and its private Chat worker. Only a safe,
+revision-matched original checkpoint can mint `progress_continuation` intent;
+ordinary run admission rejects that intent. Fresh authentication evidence is
+required even when reusing still-live caller authority without extending expiry.
+The original run/session/version, saved evidence and cumulative usage survive;
+settled source calls are not replayed and the Bot remains paused. Ordinary paused
+conversation remains control-only and cannot delegate to a tool-enabled worker.
+
 `TestBotProgressRecoveryHTTP` resumes the same run/session in a fresh shared
 worker using a settled tool response, with no repeat dispatch. Home replay is
 byte-identical across reads and does not execute work or write runtime files.

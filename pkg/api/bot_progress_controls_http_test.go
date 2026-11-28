@@ -25,6 +25,15 @@ import (
 func newProgressHTTPFixture(t *testing.T, scope store.BotScope) *interactiveHTTPFixture {
 	t.Helper()
 	f := newInteractiveHTTPFixture(t, "", nil, []string{"chat", "tool:execute"}, scope)
+	f.worker.Stop()
+	f.workerConfig.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+		return progressEmployeeFixture(progressMeteredModel(f.model)), nil
+	}
+	var err error
+	f.worker, err = daemon.NewBotWorker(f.workerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f.b.Status != store.BotActive {
 		t.Fatalf("fresh Bot status = %s, want Active", f.b.Status)
 	}
@@ -68,15 +77,22 @@ func progressControlFixture(t *testing.T, scope store.BotScope) (*interactiveHTT
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
 		calls++
 		if calls == 1 {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				drained <- f.worker.Drain(ctx)
-			}()
-			time.Sleep(50 * time.Millisecond)
+			// Wait for the private source dispatch, not the Employee delegation.
+			f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+				f.pool.callOverride = nil
+				result, err := f.pool.Call("", name, args)
+				f.pool.calls-- // override entry already counted the dispatch
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					drained <- f.worker.Drain(ctx)
+				}()
+				time.Sleep(50 * time.Millisecond)
+				return result, err
+			}
 			return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "control-read", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}}}, true
 		}
-		raw, _ := json.Marshal(req.Contents)
+		raw, _ := json.Marshal(progressPrivateResponses(t, f))
 		if !strings.Contains(string(raw), "isolated receipt") {
 			t.Errorf("lost saved evidence: %s", raw)
 		}
@@ -137,6 +153,20 @@ func TestBotProgressLifecycleHTTP(t *testing.T) {
 			if err != nil || privatePaused.CallerCeiling == nil {
 				t.Fatalf("missing private caller ceiling: %v", err)
 			}
+			p := privatePaused.CallerCeiling.Principal
+			forged, err := execution.WithPrincipal(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			forged = store.WithTenantContext(forged, &store.TenantContext{UserID: p.Subject, OrgSlug: p.OrgSlug, TeamSlug: p.TeamSlug})
+			forged = store.WithBotMessageAdmission(forged, f.registry)
+			q := store.BotContinueInteractiveRequest{BotID: before.BotID, RunID: before.ID, Kind: store.BotContinuationProgress, CheckpointRevision: paused.Progress.Revision, ExpectedRevision: f.b.Revision, IdempotencyKey: "forged-live"}
+			if _, err := f.repo.(store.BotInteractiveContinuationStore).ContinueInteractive(forged, q); !errors.Is(err, store.ErrBotForbidden) {
+				t.Fatalf("live registry authorized unauthenticated request: %v", err)
+			}
+			if _, err := f.repo.RequestRun(f.ctx, store.BotRunRequest{BotID: before.BotID, Version: before.Version, Intent: store.BotIntentProgressContinuation, Trigger: store.TriggerManual, Instructions: "arbitrary work", IdempotencyKey: "injected"}); !errors.Is(err, store.ErrBotForbidden) {
+				t.Fatalf("caller minted continuation intent: %v", err)
+			}
 			path := f.path + "/runs/" + before.ID.String() + "/continue-interactive"
 			body := func(rev int64, key string) string {
 				return fmt.Sprintf(`{"kind":"progress_v1","checkpoint_revision":%d,"expected_revision":%d,"idempotency_key":%q}`, rev, f.b.Revision, key)
@@ -145,7 +175,7 @@ func TestBotProgressLifecycleHTTP(t *testing.T) {
 			f.request("POST", path, body(paused.Progress.Revision, "resume"), 202)
 			f.request("POST", path, body(paused.Progress.Revision, "resume"), 202)
 			queued := progressGetRun(t, f, before.ID)
-			if queued.Status != store.RunQueued || !reflect.DeepEqual(queued.Usage, paused.Usage) {
+			if queued.Status != store.RunQueued || queued.Intent != store.BotIntentProgressContinuation || queued.ControlOnly() || queued.ID != before.ID || queued.Version != before.Version || queued.SessionID != before.SessionID || !reflect.DeepEqual(queued.Usage, paused.Usage) {
 				t.Fatalf("continuation reset usage: %+v", queued)
 			}
 			privateQueued, err := f.repo.GetRun(f.ctx, before.BotID, before.ID)
@@ -162,6 +192,19 @@ func TestBotProgressLifecycleHTTP(t *testing.T) {
 			current, err := f.repo.Get(f.ctx, f.b.ID)
 			if err != nil || current.Status != store.BotPaused {
 				t.Fatalf("continuation enabled recurrence: %+v %v", current, err)
+			}
+			var ordinary store.BotMessageReceipt
+			if err := json.Unmarshal(f.request("POST", f.path+"/messages", fmt.Sprintf(`{"version":%d,"instructions":"Do arbitrary new work","idempotency_key":"ordinary-paused"}`, current.Version), 202), &ordinary); err != nil {
+				t.Fatal(err)
+			}
+			if !ordinary.Run.ControlOnly() || ordinary.Run.Intent != store.BotIntentConversation {
+				t.Fatal("ordinary paused conversation elevated")
+			}
+			if err := progressFreshWorker(t, f).Poll(f.ctx); err != nil {
+				t.Fatal(err)
+			}
+			if f.pool.calls != 1 {
+				t.Fatal("ordinary paused Employee delegated physical work")
 			}
 		})
 		t.Run(string(scope)+"/lost-authority", func(t *testing.T) {

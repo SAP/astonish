@@ -62,7 +62,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 							return 80000, nil
 						}},
 						ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-							return f.model, nil
+							return mediateHTTPModel(f.model), nil
 						},
 						Prepare: f.workerConfig.Prepare,
 					})
@@ -141,36 +141,22 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 							t.Fatalf("not Home interactive: %+v", run)
 						}
 					}
-					// A read may advance persisted work before the next model request
-					// hits the budget. The terminal report must project that exact work,
-					// otherwise CommitRun rejects it and leaves the lease running.
+					// The terminal report must project the exact persisted work while
+					// Employee and private Chat share one durable accounting ledger.
 					if run.Work == nil || run.Report.Work == nil || !reflect.DeepEqual(run.Report.Work, run.Work) {
 						t.Fatalf("budget stop projected stale work: work=%+v report=%+v", run.Work, run.Report.Work)
 					}
-					if run.Status != store.RunFailed || run.Report.Failure == nil || run.Report.Failure.Kind != store.BotReportFailureBudget {
-						t.Fatalf("not typed failed budget: %+v", run)
+					// Employee uses the shared accounting ledger rather than reinstating
+					// historic per-run caps. Both estimates must still be charged.
+					if run.Status != store.RunSucceeded || run.Report.Failure != nil {
+						t.Fatalf("accounting-only run failed: %+v", run)
 					}
-					for _, want := range []string{"### Budget limit reached", "run budget: 71,000 tokens", "Estimated next input: 80,000 tokens", "increase this Bot’s token budget"} {
-						if !strings.Contains(run.Report.Summary, want) {
-							t.Errorf("missing %q: %s", want, run.Report.Summary)
-						}
-					}
-					expectedCalls := 0
-					if partial {
-						expectedCalls = 1
-					}
-					if f.pool.calls != expectedCalls || f.model.called != partial {
+					expectedCalls := 1
+					if f.pool.calls != expectedCalls || !f.model.called {
 						t.Fatalf("effects=%d model called=%t", f.pool.calls, f.model.called)
 					}
-					if partial {
-						if run.Usage.InputTokens != 5 || run.Usage.OutputTokens != 3 || run.Usage.ToolCalls != 1 || len(run.Report.Unchanged) != 1 {
-							t.Fatalf("partial work/accounting lost: %+v", run)
-						}
-						if !strings.Contains(run.Report.Summary, "Used or reserved: 8 tokens") {
-							t.Fatal(run.Report.Summary)
-						}
-					} else if run.Usage.InputTokens != 0 || run.Usage.OutputTokens != 0 || run.Usage.ToolCalls != 0 || !strings.Contains(run.Report.Summary, "Used or reserved: 0 tokens") {
-						t.Fatalf("first denial charged usage: %+v", run)
+					if run.Usage.InputTokens != 20 || run.Usage.OutputTokens != 12 || run.Usage.ToolCalls != 1 || len(run.Report.Unchanged) != 2 || estimates == 0 {
+						t.Fatalf("Employee/private Chat accounting or evidence lost: %+v estimates=%d", run, estimates)
 					}
 					estimatesBeforeReconcile := estimates
 					publisher := &bot.Publisher{Store: f.repo.(store.BotPublicationStore)}
@@ -190,7 +176,7 @@ func TestBotBudgetComposedHTTP(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if restored.Status != store.RunFailed || !reflect.DeepEqual(restored.Usage, run.Usage) || restored.Report.Summary != run.Report.Summary || len(restored.Report.Unchanged) != len(run.Report.Unchanged) {
+					if restored.Status != run.Status || !reflect.DeepEqual(restored.Usage, run.Usage) || restored.Report.Summary != run.Report.Summary || len(restored.Report.Unchanged) != len(run.Report.Unchanged) {
 						t.Fatalf("restore lost evidence: %+v", restored)
 					}
 					after, e := f.repo.Get(f.ctx, f.b.ID)

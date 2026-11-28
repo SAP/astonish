@@ -327,41 +327,29 @@ func TestBotConversationPublication(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// This old producer reply is not an assessed/validated envelope;
-				// it cannot suppress a new safe employee outcome.
-				wantNew := 1
-				if len(live) != wantNew || len(restored) != len(before)+wantNew {
-					t.Errorf("duplicate publication: live=%d restored=%d before=%d wantNew=%d", len(live), len(restored), len(before), wantNew)
+				// Unassessed legacy text retains diagnostics and a neutral receipt,
+				// never synthetic Employee speech.
+				if p.EmployeeSpeech || p.Text != "" || len(p.Notifications) != 0 || p.ReportDigest == "" {
+					t.Fatalf("legacy diagnostics became employee speech: %+v", p)
 				}
-				if wantNew == 1 {
-					if len(live) != 1 {
-						t.Fatal("missing employee message")
+				for _, row := range live {
+					if row.Event != nil && (row.Event.ID == p.EventID || row.Event.Author == "assistant") {
+						t.Fatalf("unassessed publication emitted speech: %+v", row.Event)
 					}
-					e := live[0].Event
-					if e == nil || e.ID != p.EventID || e.Author != "assistant" || e.InvocationID != "bot-report:"+run.ID.String() || e.Content == nil || len(e.Content.Parts) != 1 || e.Content.Parts[0] == nil {
-						t.Fatalf("not a canonical employee message: %+v", e)
-					}
-					wantText := store.NewBotEmployeeFallback(tc.status, report, "").Text
-					text := e.Content.Parts[0].Text
-					if text != wantText || text != p.Text || text != again.Text {
-						t.Errorf("unexpected employee message: %q", text)
-					}
-					for _, unwanted := range []string{"Run report", run.ID.String(), "diagnostic retained"} {
-						if strings.Contains(text, unwanted) {
-							t.Errorf("diagnostic %q leaked into employee message", unwanted)
+				}
+				for _, original := range before {
+					found := false
+					for _, row := range restored {
+						if row.Event != nil && original.Event != nil && row.Event.ID == original.Event.ID {
+							found = reflect.DeepEqual(row.Event, original.Event)
 						}
 					}
-					if len(restored) == 0 || !reflect.DeepEqual(restored[len(restored)-1].Event, e) {
-						t.Error("restored employee message differs from live publication")
+					if !found {
+						t.Fatal("publication changed retained history")
 					}
 				}
-				if tc.intent == store.BotIntentConversation {
-					if len(notifier.calls) != 0 {
-						t.Error("conversation sent external notification")
-					}
-					if len(p.Notifications) != 1 || p.Notifications[0].State != store.BotNotificationSkipped || !strings.Contains(p.Notifications[0].Reason, "conversation") {
-						t.Errorf("missing intent-based notification skip: %+v", p.Notifications)
-					}
+				if len(notifier.calls) != 0 {
+					t.Fatal("neutral publication sent external notification")
 				}
 				saved, err := repo.db.ReadRun(ctx, b.ID, run.ID)
 				if err != nil {

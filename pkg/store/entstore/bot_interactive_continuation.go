@@ -131,6 +131,15 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 		}
 		progressContinuation := q.Kind == store.BotContinuationProgress
 		mandatedProgress := progressContinuation && run.MandateRef != nil
+		if progressContinuation && !mandatedProgress {
+			// Reusing a still-live turn is not proof of this request's authentication.
+			// Check fresh adapter evidence without renewing its original ceiling.
+			p, present := execution.PrincipalFromContext(ctx)
+			e, verified := execution.AuthenticationEvidenceFromContext(ctx)
+			if !present || !verified || p.Kind != execution.PrincipalKindUser || p.Subject != actor.String() || p.OrgSlug != r.auth.orgSlug || run.CallerCeiling == nil || p.TeamSlug != run.CallerCeiling.Principal.TeamSlug || e.Validate(r.clock()) != nil {
+				return store.ErrBotForbidden
+			}
+		}
 		if !mandatedProgress && (!run.IsInteractiveChat() || run.CallerCeiling == nil || admission == nil) {
 			return store.ErrBotForbidden
 		}
@@ -264,7 +273,7 @@ func (r *botRepository) ContinueInteractive(ctx context.Context, q store.BotCont
 			if progressContinuation {
 				switch rec.Bot.Status {
 				case store.BotPaused:
-					run.Intent = store.BotIntentConversation
+					run.Intent = store.BotIntentProgressContinuation
 				case store.BotActive:
 					run.Intent = store.BotIntentRegular
 				}

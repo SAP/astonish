@@ -347,6 +347,9 @@ func (r *botRepository) RequestRun(ctx context.Context, req store.BotRunRequest)
 }
 
 func (r *botRepository) requestRun(ctx context.Context, req store.BotRunRequest, occurrence *botScheduledRequest) (*store.BotRun, error) {
+	if req.Intent == store.BotIntentProgressContinuation {
+		return nil, store.ErrBotForbidden
+	}
 	actor, err := r.auth.authorize(ctx, uuid.Nil, true)
 	if err != nil {
 		return nil, err

@@ -52,7 +52,7 @@ func TestBotScheduleLegacyItemUpgradesInPlace(t *testing.T) {
 	v.Presentation = store.BotOperationPresentationConversation
 	v.Summary = "The schedule change was cancelled."
 	tr.Apply(Event{Kind: KindBotOperation, BotOperation: &v})
-	if len(tr.Items) != 1 || tr.Items[0].Kind != ItemAgent || tr.Items[0].Content != v.Summary {
+	if len(tr.Items) != 1 || tr.Items[0].Kind != ItemSystem || tr.Items[0].Content != v.Summary {
 		t.Fatal("final confirmation did not replace legacy operation item")
 	}
 }

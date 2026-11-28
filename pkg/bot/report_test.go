@@ -38,7 +38,7 @@ func TestRenderReportEmployeeMessage(t *testing.T) {
 	for _, status := range []store.RunStatus{store.RunSucceeded, store.RunFailed, store.RunPartial, store.RunWaitingApproval, store.RunInterrupted} {
 		t.Run(string(status), func(t *testing.T) {
 			run := store.BotRun{Status: status, Report: store.BotReport{Summary: "RAW provider response", Unverified: []string{"RAW secret"}, NeedsApproval: []uuid.UUID{uuid.New()}}}
-			want := EmployeeMessageFallback(status, run.Report, nil).Text + "\n"
+			want := "Employee response unavailable.\n"
 			if got := RenderReport(run); got != want || strings.Contains(got, "RAW") {
 				t.Fatalf("unsafe legacy projection: %q", got)
 			}

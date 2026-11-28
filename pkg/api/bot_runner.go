@@ -344,6 +344,48 @@ func (s *botEmployeeChatService) resumeWorker(ctx context.Context, w *botEmploye
 			return botChatFailure(bot.ErrorBlocked, e)
 		}
 		result, err = executePreparedPlan(ctx, s.req, w.resources, s.capture, sess.Session.State(), prepared)
+		if err == nil && result.Status != store.RunWaitingApproval && !s.req.PlanMode {
+			bridge := BotPreparedPlanSessionFromContext(ctx)
+			if bridge == nil {
+				return botChatFailure(bot.ErrorBlocked, store.ErrBotForbidden)
+			}
+			lease := s.req.Run.Lease
+			if s.req.CurrentLease != nil {
+				lease = s.req.CurrentLease()
+			}
+			settled, loadErr := bridge.Store.LoadBotPlan(ctx, lease, prepared.OperationID)
+			if loadErr != nil {
+				return botChatFailure(bot.ErrorBlocked, loadErr)
+			}
+			var snapshot agent.PlanSnapshot
+			if json.Unmarshal(settled.Snapshot, &snapshot) != nil {
+				return botChatFailure(bot.ErrorBlocked, store.ErrBotInvalid)
+			}
+			if snapshot.Document.Lifecycle == agent.PlanLifecycleApproved && snapshot.Document.Results == "" {
+				// This leaf has published. Resume only the original owned private
+				// conversation; each subsequent effect must obtain fresh authority.
+				bridge.Resume = nil
+				completion := runBotEmployeeWorkerTurn(ctx, s.req, w.resources, w.id, "Continue the original approved plan from its saved progress. Do not repeat completed effects. Record verified progress and Results; consent is not an effect grant.")
+				mergeBotEmployeeCompletion(&s.completion, completion)
+				err = completion.Err
+				if waiting, ok := s.capture.checkpoint(); ok {
+					result, err = waiting, nil
+				} else {
+					finalSession, getErr := w.resources.SessionService.Get(ctx, &session.GetRequest{AppName: w.resources.AppName, UserID: s.req.Bot.OwnerID.String(), SessionID: w.id})
+					if getErr != nil {
+						return botChatFailure(bot.ErrorBlocked, getErr)
+					}
+					value, stateErr := finalSession.Session.State().Get(agent.PlanSnapshotStateKey)
+					raw, marshalErr := json.Marshal(value)
+					var finalSnapshot agent.PlanSnapshot
+					if stateErr != nil || marshalErr != nil || json.Unmarshal(raw, &finalSnapshot) != nil || finalSnapshot.PlanID != snapshot.PlanID || finalSnapshot.Document.Results == "" {
+						return botChatFailure(bot.ErrorBlocked, store.ErrBotConflict)
+					}
+					result = bot.RunResult{Status: store.RunSucceeded, Report: completion.Report, Usage: completion.Usage}
+					result.Report.Summary = completion.FinalText
+				}
+			}
+		}
 	} else {
 		guard, _ := agent.BotPolicyRuntimeFromContext(ctx).Guard.(*botResumeGuard)
 		if guard == nil {
@@ -371,7 +413,19 @@ func (s *botEmployeeChatService) resumeWorker(ctx context.Context, w *botEmploye
 		result.Report.Summary = completion.FinalText
 	}
 	if err != nil {
-		return botChatFailure(bot.ErrorBlocked, err)
+		failed, failure := botChatFailure(bot.ErrorBlocked, err)
+		// Preserve the private execution diagnostics when the worker fails before
+		// an Employee presentation. A generic failure must not erase uncertainty.
+		failed.Usage = result.Usage
+		failed.Report.Unverified = append(failed.Report.Unverified, result.Report.Unverified...)
+		failed.Report.Changed = result.Report.Changed
+		failed.Report.Unchanged = result.Report.Unchanged
+		if result.Report.EffectState != store.BotReportEffectsUnknown {
+			failed.Report.EffectState = result.Report.EffectState
+		}
+		message := bot.EmployeeMessageFallback(failed.Status, failed.Report, failure)
+		failed.Report.EmployeeMessage = &message
+		return failed, failure
 	}
 	if result.Status == store.RunWaitingApproval && s.capture != nil {
 		s.capture.mu.Lock()
@@ -432,7 +486,9 @@ func runBotEmployeeWorkerTurn(ctx context.Context, req bot.RunRequest, resources
 		}
 		return nil
 	})
-	cr.ctx = agent.WithPromptOverrides(cr.ctx, agent.NewBotWorkerPromptOverrides(req))
+	workerOverrides := agent.NewBotWorkerPromptOverrides(req)
+	workerOverrides.PlanMode = req.PlanMode
+	cr.ctx = agent.WithPromptOverrides(cr.ctx, workerOverrides)
 	journal := &botAgentReadJournal{}
 	cr.ctx = context.WithValue(cr.ctx, botAgentReadJournalKey{}, journal)
 	original := resources.Agent.LLM
@@ -527,6 +583,7 @@ func botChatFailure(class bot.RunErrorClass, cause error) (bot.RunResult, error)
 		failure = &preserved
 		status = store.RunPartial
 		report.EffectState = store.BotReportEffectsUncertain
+		report.Unverified = []string{"The action outcome is uncertain; reconcile it before any retry. Never replay the saved action."}
 	}
 	message := bot.EmployeeMessageFallback(status, report, cause)
 	report.EmployeeMessage = &message
@@ -829,7 +886,7 @@ func (a *BotChatRuntimeAdapter) runChat(ctx context.Context, req bot.RunRequest,
 			}
 			startup(nil)
 			privateResult, resumeErr := workerService.resumeWorker(ctx, owned, action, preparedResume)
-			if resumeErr != nil || privateResult.Status == store.RunWaitingApproval {
+			if resumeErr != nil || privateResult.Status == store.RunWaitingApproval || (preparedResume != nil && req.PlanMode) {
 				return privateResult, resumeErr
 			}
 			// Only a tools-disabled Employee may present the private outcome.

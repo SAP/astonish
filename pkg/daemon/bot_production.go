@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -547,19 +546,33 @@ func (g botLiveGuard) authorizePrivateInteractive(ctx context.Context, a executi
 		d.Kind, d.Reason = execution.PolicyAllow, "verified private worker read"
 		return d, nil
 	}
-	rs, ok := g.repo.(store.BotApprovalResumeStore)
-	if !ok {
-		return d, store.ErrBotUnsupported
-	}
-	approval, err := rs.LoadResumeApproval(ctx, g.request.Run.Lease)
-	if errors.Is(err, store.ErrBotNotFound) || err == nil && approval == nil {
+	// LoadResumeApproval is a resume-only contract: an empty checkpoint is
+	// invalid there, not evidence that a fresh action lacks permission. Fresh
+	// actions have already passed identity, lease and current caller checks.
+	if len(g.request.Run.Checkpoint) == 0 {
 		return d, nil
 	}
+	checkpoint, err := bot.DecodeApprovalCheckpoint(g.request.Run.Checkpoint, g.request.Run)
+	if err != nil {
+		return deny, store.ErrBotForbidden
+	}
+	// Owner answers are execution intent, never exact effect grants. New
+	// prepared leaves must capture their own durable approval.
+	if checkpoint.Format == bot.InteractionCheckpointFormat || checkpoint.ActionDigest != digest {
+		return d, nil
+	}
+	if checkpoint.Format != bot.ApprovalCheckpointFormat {
+		return deny, store.ErrBotForbidden
+	}
+	rs, ok := g.repo.(store.BotApprovalResumeStore)
+	if !ok {
+		return deny, store.ErrBotUnsupported
+	}
+	approval, err := rs.LoadResumeApproval(ctx, g.request.Run.Lease)
 	if err != nil {
 		return deny, err
 	}
-	checkpoint, err := bot.DecodeApprovalCheckpoint(g.request.Run.Checkpoint, g.request.Run)
-	if err != nil || checkpoint.Format != bot.ApprovalCheckpointFormat || !checkpoint.Matches(*approval) || approval.Status != store.ApprovalApproved || approval.ActionDigest != digest || !time.Now().Before(approval.ExpiresAt) {
+	if approval == nil || !checkpoint.Matches(*approval) || approval.Status != store.ApprovalApproved || approval.ActionDigest != digest || !time.Now().Before(approval.ExpiresAt) {
 		return deny, store.ErrBotForbidden
 	}
 	// Recheck after a potentially blocking durable read. The exact lease and

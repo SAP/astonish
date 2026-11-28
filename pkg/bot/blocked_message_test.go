@@ -16,7 +16,7 @@ func TestVerifiedBlockerEmployeeMessage(t *testing.T) {
 		t.Fatalf("reviewed employee explanation overwritten or appended: %s", got)
 	}
 	q.BlockedResponse.Text = "different"
-	if got := RenderReport(run); got != EmployeeMessageFallback(run.Status, run.Report, nil).Text+"\n" || strings.Contains(got, text) {
+	if got := RenderReport(run); got != "Employee response unavailable.\n" || strings.Contains(got, text) {
 		t.Fatalf("unbound explanation suppressed safety fallback: %s", got)
 	}
 }

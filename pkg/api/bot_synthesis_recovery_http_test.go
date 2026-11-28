@@ -11,8 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SAP/astonish/pkg/execution"
 
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/daemon"
@@ -136,10 +139,9 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 				if err := json.Unmarshal(f.request("POST", f.path+"/pause", string(pauseBody), 200), &f.b); err != nil {
 					t.Fatal(err)
 				}
-				// A genuinely small, owner-reviewed run budget enters synthesis
-				// after the first real tool read, without sleeps or a fake clock.
-				limit := int64(2000)
-				version.Budget.MaxTokens = &limit
+				// Synthesis is tied to live authority, never legacy token metadata.
+				var synthesisClock atomic.Int64
+				var synthesisDeadline time.Time
 				body, err := json.Marshal(store.BotConfigurationRequest{ExpectedRevision: f.b.Revision, ExpectedVersion: f.b.Version, Reviewed: true, Reason: "Isolated synthesis recovery HTTP acceptance", Autonomy: version.Autonomy, Budget: version.Budget, Delivery: version.Delivery})
 				if err != nil {
 					t.Fatal(err)
@@ -148,6 +150,9 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 					t.Fatal(err)
 				}
 				workerConfig := f.workerConfig
+				workerConfig.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
+					return progressEmployeeFixture(progressMeteredModel(f.model)), nil
+				}
 				workerConfig.Sandbox = synthesisHTTPBackend{files: &synthesisHTTPFiles{root: f.dataDir}}
 				// Deterministic model-scoped accounting, not a second allowance.
 				workerConfig.ModelOptions.EstimateInput = func(context.Context, *model.LLMRequest) (int64, error) { return 100, nil }
@@ -161,8 +166,13 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 					if err != nil {
 						return resources, err
 					}
-					files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.dataDir}, repo: f.repo, id: f.b.ID, scope: f.scope}
+					files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.dataDir}, repo: f.repo, id: f.b.ID, scope: f.scope, fetch: func(name string, args map[string]interface{}) (json.RawMessage, error) {
+						return f.pool.Call("", name, args)
+					}}
 					files.install(ctx, req, scope)
+					synthesisDeadline = req.Run.CallerCeiling.ExpiresAt
+					synthesisClock.Store(synthesisDeadline.Add(-time.Hour).UnixNano())
+					resources.SynthesisNow = func() time.Time { return time.Unix(0, synthesisClock.Load()) }
 					return resources, nil
 				}
 				worker, err := daemon.NewBotWorker(workerConfig)
@@ -184,6 +194,13 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 					response := &model.LLMResponse{Content: genai.NewContentFromText(final, "model"), FinishReason: genai.FinishReasonStop, TurnComplete: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 3, TotalTokenCount: 8}}
 					if calls == 1 {
 						response.Content.Parts = []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "recovery-receipt", Name: "read_file", Args: map[string]any{"path": "receipt.txt"}}}}
+						f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
+							f.pool.callOverride = nil
+							result, err := f.pool.Call("", name, args)
+							f.pool.calls--
+							synthesisClock.Store(synthesisDeadline.UnixNano())
+							return result, err
+						}
 						return response, true
 					}
 					raw, _ := json.Marshal(req.Contents)
@@ -215,7 +232,7 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 						}
 						if meter == nil {
 							t.Error("production run budget missing")
-						} else if usage := meter.Usage(); usage.InputTokens != 110 || usage.OutputTokens != 6+int64(ceiling) || usage.ToolCalls != 1 {
+						} else if usage := meter.Usage(); usage.InputTokens != 115 || usage.OutputTokens != 9+int64(ceiling) || usage.ToolCalls != 1 {
 							// Usage includes this correction's active 100-token input
 							// and ceiling-sized output reservation, plus settled 10/6.
 							t.Errorf("original budget lost prior settlement or correction reservation: %+v", usage)
@@ -258,7 +275,20 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 				wantCalls := 3
 				if missingTerminal {
 					wantCalls = 2
-					if run.Status == store.RunSucceeded || run.Status == store.RunRunning || !strings.Contains(string(runJSON), "reason=missing_terminal") {
+					org, readErr := f.db.ForOrg("interactive")
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					ss := org.ForUser(f.b.OwnerID.String()).Sessions()
+					if scope == store.BotScopeTeam {
+						ss = org.ForTeam("team").Sessions()
+					}
+					privateEvents, readErr := ss.ReadTranscriptEvents(f.ctx, "astonish", f.b.OwnerID.String(), admitted.Run.SessionID.String())
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					privateJSON, _ := json.Marshal(privateEvents)
+					if run.Status == store.RunSucceeded || run.Status == store.RunRunning || !strings.Contains(string(privateJSON), "reason=missing_terminal") {
 						t.Fatalf("missing-terminal did not fail closed with evidence: %s", runJSON)
 					}
 				} else if run.Status != store.RunSucceeded || run.Report.Summary != final {
@@ -266,7 +296,7 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 				}
 				// This is an ordinary read-only answer: synthesis recovery must not
 				// add a second review workflow or repeat its already completed read.
-				if calls != wantCalls || preparations != 1 || f.model.reviews != 0 || f.pool.calls != 1 || run.Usage.ToolCalls != 1 || run.Usage.InputTokens != int64(wantCalls*5) || run.Usage.OutputTokens != int64(wantCalls*3) {
+				if calls != wantCalls || preparations != 1 || f.model.reviews != 0 || f.pool.calls != 1 || run.Usage.ToolCalls != 1 || run.Usage.InputTokens != int64((wantCalls+2)*5) || run.Usage.OutputTokens != int64((wantCalls+2)*3) {
 					t.Fatalf("extra work or lost cumulative usage: calls=%d preparations=%d reviews=%d reads=%d usage=%+v", calls, preparations, f.model.reviews, f.pool.calls, run.Usage)
 				}
 				marker := "bot-report:" + run.ID.String()
@@ -275,6 +305,15 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 				for {
 					frame := readBlockedPublicationFrame(t, reader)
 					fmt.Fprintf(&liveText, "id: %s\nevent: %s\ndata: %s\n\n", frame.id, frame.kind, frame.data)
+					if missingTerminal && frame.kind == store.BotRunStateKey {
+						var state store.BotRunState
+						if err := json.Unmarshal([]byte(frame.data), &state); err != nil {
+							t.Fatal(err)
+						}
+						if state.RunID == run.ID && state.TerminalReason == store.BotTerminalNoAnswer {
+							break
+						}
+					}
 					if frame.kind != "text" {
 						continue
 					}
@@ -287,21 +326,62 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 					}
 				}
 				cancelStream()
+				var liveNeutral store.BotRunState
 				assertPublication := func(label, text string) {
 					t.Helper()
 					if strings.Contains(text, draft) || strings.Contains(text, thought) {
 						t.Fatalf("%s leaked unaccepted model output: %s", label, text)
 					}
-					wantPublication := final
-					if missingTerminal {
-						wantPublication = "I couldn't complete this request during execution. No publishable final answer is available from this run. The run recorded some observations; this does not confirm that all requested actions completed. You can revise the request or start a new run; no retry has been started."
+					if !missingTerminal {
+						assertCanonicalHTTPReport(t, text, marker, final)
+						if canonicalHTTPTextCount(t, text, final) != 1 {
+							t.Fatalf("%s missing exactly one complete answer: %s", label, text)
+						}
+						return
 					}
-					assertCanonicalHTTPReport(t, text, marker, wantPublication)
-					if !missingTerminal && canonicalHTTPTextCount(t, text, final) != 1 {
-						t.Fatalf("%s missing exactly one complete answer: %s", label, text)
+					// Verify the canonical committed receipt before expecting no speech.
+					publication, err := f.repo.(store.BotPublicationStore).PublishReport(f.ctx, store.BotPublicationRequest{BotID: f.b.ID, RunID: run.ID})
+					if err != nil || publication == nil {
+						t.Fatalf("%s missing durable publication receipt: %+v %v", label, publication, err)
 					}
-					if missingTerminal && strings.Contains(text, final) {
-						t.Fatalf("%s published an answer after missing-terminal failure", label)
+					if publication.EmployeeSpeech || publication.Text != "" || publication.BotID != f.b.ID || publication.RunID != run.ID || publication.SourceSessionID != run.SessionID || publication.SourceUserEventID != run.UserEventID || publication.HomeSessionID != f.b.HomeSessionID || publication.ReportSequence <= 0 {
+						t.Fatalf("%s neutral publication lost source binding: %+v", label, publication)
+					}
+					restored, err := f.repo.GetRun(f.ctx, f.b.ID, run.ID)
+					if err != nil || restored == nil || restored.TerminalReason != store.BotTerminalNoAnswer || restored.Status != run.Status {
+						t.Fatalf("%s missing durable neutral terminal: %+v %v", label, restored, err)
+					}
+					if canonicalHTTPReportCount(t, text, marker) != 0 || strings.Contains(text, final) {
+						t.Fatalf("%s manufactured an answer after missing-terminal failure", label)
+					}
+					neutral := 0
+					frames := bufio.NewReader(strings.NewReader(text))
+					for {
+						if _, err := frames.Peek(1); err == io.EOF {
+							break
+						}
+						frame := readBlockedPublicationFrame(t, frames)
+						if frame.kind != store.BotRunStateKey {
+							continue
+						}
+						var state store.BotRunState
+						if err := json.Unmarshal([]byte(frame.data), &state); err != nil {
+							t.Fatal(err)
+						}
+						if state.RunID == run.ID && state.TerminalReason == store.BotTerminalNoAnswer {
+							if state.BotID != f.b.ID || state.SessionID != run.SessionID || state.HomeSessionID != f.b.HomeSessionID || state.Status != run.Status || state.StateSequence <= 0 || state.NeutralTerminalLabel() == "" {
+								t.Fatalf("%s neutral state lost source binding: %+v", label, state)
+							}
+							if label == "live" {
+								liveNeutral = state
+							} else if state.StateSequence != liveNeutral.StateSequence || state.TerminalReason != liveNeutral.TerminalReason {
+								t.Fatalf("restored unavailable state differs from live: live=%+v restored=%+v", liveNeutral, state)
+							}
+							neutral++
+						}
+					}
+					if neutral != 1 {
+						t.Fatalf("%s missing exactly one unavailable state: %d", label, neutral)
 					}
 				}
 				assertPublication("live", liveText.String())
@@ -311,7 +391,10 @@ func TestBotSynthesisRecoveryHTTP(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				t.Logf("scope=%s missing_terminal=%t status=%s model_calls=%d preparations=%d reads=%d input_tokens=%d output_tokens=%d live_final=1 restored_final=1 draft_leaks=0", scope, missingTerminal, run.Status, calls, preparations, f.pool.calls, run.Usage.InputTokens, run.Usage.OutputTokens)
+				if calls != wantCalls || preparations != 1 || f.pool.calls != 1 {
+					t.Fatalf("restore/publication replayed work: calls=%d preparations=%d reads=%d", calls, preparations, f.pool.calls)
+				}
+				t.Logf("scope=%s missing_terminal=%t status=%s model_calls=%d preparations=%d reads=%d input_tokens=%d output_tokens=%d live_restore_parity=true draft_leaks=0", scope, missingTerminal, run.Status, calls, preparations, f.pool.calls, run.Usage.InputTokens, run.Usage.OutputTokens)
 			})
 		}
 	}

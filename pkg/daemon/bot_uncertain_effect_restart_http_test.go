@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/agent"
@@ -255,7 +256,7 @@ func TestBotUncertainEffectRestartHTTPNoReplay(t *testing.T) {
 					t.Fatal(err)
 				}
 				w, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: id, ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-					return llm, nil
+					return mediateDaemonModel(llm), nil
 				}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 					s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 						return productionBotFiles(c, backend, svc, scope)
@@ -433,8 +434,47 @@ func TestBotUncertainEffectRestartHTTPNoReplay(t *testing.T) {
 					t.Fatalf("restart changed uncertain run: %+v", restored)
 				}
 				history := request("GET", "sessions/"+run.SessionID.String()+"/stream", "", 200)
-				if !strings.Contains(string(history), "event: done") || !strings.Contains(string(history), "http_request") {
-					t.Fatalf("missing durable tool history: %s", history)
+				if !strings.Contains(string(history), "event: done") || strings.Contains(string(history), "http_request") {
+					t.Fatalf("public history leaked private execution or missed terminal event: %s", history)
+				}
+				// Worker journals are durable authenticated envelopes, not public
+				// Employee prose. Reopen them from SQL rather than expecting the
+				// private tool call to leak through the owner SSE projection.
+				ss := svc.Sessions
+				if scope == store.BotScopePersonal {
+					ss = svc.PersonalSessions
+				}
+				stored, err := ss.Get(auth, &session.GetRequest{AppName: "astonish", UserID: owner.String(), SessionID: run.SessionID.String()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				foundPrivateHTTP := false
+				for event := range stored.Session.Events().All() {
+					value, ok := event.Actions.StateDelta["bot_private_worker_v1"]
+					if !ok {
+						continue
+					}
+					raw, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var trace struct {
+						Event *session.Event `json:"event"`
+					}
+					if err := json.Unmarshal(raw, &trace); err != nil {
+						t.Fatal(err)
+					}
+					if trace.Event == nil || trace.Event.Content == nil {
+						continue
+					}
+					for _, part := range trace.Event.Content.Parts {
+						if call := part.FunctionCall; call != nil && (call.Name == "http_request" || (call.Name == "execute_tool" && call.Args["name"] == "http_request")) {
+							foundPrivateHTTP = true
+						}
+					}
+				}
+				if !foundPrivateHTTP {
+					t.Fatal("missing durable private HTTP journal after SQL reopen")
 				}
 			}
 			if llm.calls != 0 || pool.calls.Load() != 0 || posts.Load() != 1 || effects.Load() != 1 || gets.Load() != 0 {

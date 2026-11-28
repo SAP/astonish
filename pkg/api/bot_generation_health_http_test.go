@@ -141,8 +141,10 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 			}
 			output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": response.Content.Parts[0].Text}}})
 		} else if productions.Add(1) == 1 {
+			output = append(output, map[string]any{"type": "function_call", "call_id": "employee-dispatch", "name": "employee_chat", "arguments": `{"message":"Read receipt.txt and return the observed scoped result."}`})
+		} else if productions.Load() == 2 {
 			output = append(output, map[string]any{"type": "function_call", "call_id": "receipt-read", "name": "read_file", "arguments": `{"path":"receipt.txt"}`})
-		} else {
+		} else if productions.Load() == 3 {
 			if !wire.Stream {
 				t.Error("health-enabled main generation did not use Responses SSE")
 				http.Error(w, "stream required", 400)
@@ -171,6 +173,12 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 				}
 			}
 			output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Observed scoped result."}}})
+		} else {
+			text := "Observed scoped result."
+			if scenario != generationHealthHealthy {
+				text = "Private execution did not finish; no result is established."
+			}
+			output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text}}})
 		}
 		final := map[string]any{"id": "response-local", "status": "completed", "output": output, "usage": map[string]any{"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}}
 		if wire.Stream {
@@ -213,7 +221,7 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 		}
 	}
 	workerConfig.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return actual, nil
+		return mediateHTTPModel(actual), nil
 	}
 	worker, err := daemon.NewBotWorker(workerConfig)
 	if err != nil {
@@ -267,7 +275,13 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 				t.Fatalf("published unfinished output %s", secret)
 			}
 		}
-		if completions.Load() != 1 || f.pool.calls != 1 || stopped.Usage.ToolCalls != 1 || stopped.Usage.InputTokens < 5 || stopped.Usage.OutputTokens < 3 {
+		expectedCompletions := int64(2)
+		if scenario == generationHealthStalled {
+			// The Employee receives a typed private failure and performs its
+			// bounded no-result review; none may resume the stopped worker.
+			expectedCompletions = 6
+		}
+		if completions.Load() != expectedCompletions || f.pool.calls != 1 || stopped.Usage.ToolCalls != 1 || stopped.Usage.InputTokens < 5 || stopped.Usage.OutputTokens < 3 {
 			t.Fatalf("lost settled usage or completed cancelled generation: completions=%d calls=%d usage=%+v", completions.Load(), f.pool.calls, stopped.Usage)
 		}
 		t.Logf("scenario=%d elapsed=%s status=%s completed_responses=%d usage=%+v private_stream_leaks=0", scenario, time.Since(began), stopped.Status, completions.Load(), stopped.Usage)
@@ -328,7 +342,7 @@ func runBotGenerationHealthHTTP(t *testing.T, duration, cadence time.Duration, s
 	if run.Status != store.RunSucceeded {
 		t.Fatalf("status=%s report=%+v failure=%+v", run.Status, run.Report, run.Report.Failure)
 	}
-	if productions.Load() != 2 || f.pool.calls != 1 || run.Usage.ToolCalls != 1 {
+	if productions.Load() != 4 || f.pool.calls != 1 || run.Usage.ToolCalls != 1 {
 		t.Fatalf("duplicated/restarted work: generations=%d reads=%d usage=%+v", productions.Load(), f.pool.calls, run.Usage)
 	}
 	if run.Usage.InputTokens != requests.Load()*5 || run.Usage.OutputTokens != requests.Load()*3 {

@@ -68,7 +68,14 @@ func TestBotMCPApprovalCheckpointTargetBinding(t *testing.T) {
 			}
 			final := NewMockLLM(TextTurn("receipt observed"))
 			adapter, _ = NewBotChatRuntimeAdapter(botChatTestFactory(t, ss, final, []tool.Tool{target}, &cleaned))
-			_, err = adapter.Resume(ctx, req, sink)
+			// A declared native adapter remains callable without an execute_tool bridge;
+			// production MCP/A2A catalogs use the qualified bridge instead.
+			result, err := adapter.Resume(ctx, req, sink)
+			if err == nil {
+				if integrityErr := result.Report.ValidateEmployeeMessageIntegrity(result.Status); integrityErr != nil {
+					t.Fatalf("resumed target report is not bound to final outcome: %v", integrityErr)
+				}
+			}
 			if changed {
 				if err == nil || effects.Load() != 0 || s.consumed != 0 {
 					t.Fatalf("changed target executed: err=%v effects=%d consumed=%d", err, effects.Load(), s.consumed)

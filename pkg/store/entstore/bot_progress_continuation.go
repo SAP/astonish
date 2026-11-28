@@ -127,5 +127,5 @@ func mandateProgressWhilePaused(ctx context.Context, tx botDB, rec *botStoredRec
 		return false
 	}
 	permit := saved.ProgressOwnerContinuation
-	return permit != nil && permit.BotRevision == rec.Bot.Revision && permit.CheckpointRevision > 0 && progressRevision(saved) >= permit.CheckpointRevision && saved.Run.Intent == store.BotIntentConversation && (saved.Run.Status == store.RunQueued || saved.Run.Status == store.RunRunning)
+	return permit != nil && permit.BotRevision == rec.Bot.Revision && permit.CheckpointRevision > 0 && progressRevision(saved) >= permit.CheckpointRevision && saved.Run.Intent == store.BotIntentProgressContinuation && (saved.Run.Status == store.RunQueued || saved.Run.Status == store.RunRunning)
 }

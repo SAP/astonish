@@ -269,10 +269,15 @@ func TestMandateWeatherReservationReconciliation(t *testing.T) {
 	if err = runtime.ConsumeBotMandateQuota(ctx, ref, run, 0, 40000, 0); err != nil {
 		t.Fatalf("weather continuation denied by stale reservations: %v", err)
 	}
-	var quota *store.BotMandateQuotaError
+	// Execution token limits are accounting-only, including continuation above
+	// the historical finite cap. Read the actual ledger, not an enforcement error.
 	err = runtime.ConsumeBotMandateQuota(ctx, ref, run, 0, 40000, 0)
-	if !errors.As(err, &quota) || quota.Dimension != "run_tokens" || quota.Used != 62335 || quota.Limit != 100000 {
-		t.Fatalf("exact finite gate: %+v %v", quota, err)
+	if err != nil {
+		t.Fatalf("accounting-only continuation: %v", err)
+	}
+	ledgerRepo := runtime.(*botMandateRuntime).repo
+	if used := questionQuotaUsage(t, ledgerRepo, ctx, ref.BotID).Tokens; used != 102335 {
+		t.Fatalf("continuation accounting: %d", used)
 	}
 	id := uuid.New()
 	if err = runtime.ReserveBotMandateModel(ctx, ref, run, id, 10000); err != nil {
@@ -289,10 +294,9 @@ func TestMandateWeatherReservationReconciliation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// Must remain 63335 after all duplicate settlements, never negative/refunded twice.
-	err = runtime.ConsumeBotMandateQuota(ctx, ref, run, 0, 40000, 0)
-	if !errors.As(err, &quota) || quota.Used != 63335 {
-		t.Fatalf("duplicate settlement: %+v %v", quota, err)
+	// All duplicate settlements return unused capacity exactly once.
+	if used := questionQuotaUsage(t, ledgerRepo, ctx, ref.BotID).Tokens; used != 103335 {
+		t.Fatalf("duplicate settlement accounting: %d", used)
 	}
 	if err = runtime.SettleBotMandateModel(ctx, ref, run, uuid.New(), 0); !errors.Is(err, store.ErrBotInvalid) {
 		t.Fatalf("unknown refund: %v", err)
@@ -305,7 +309,10 @@ func TestMandateWeatherReservationReconciliation(t *testing.T) {
 	if err = runtime.SettleBotMandateModel(ctx, ref, run, over, 100000); err != nil {
 		t.Fatal(err)
 	}
-	if err = runtime.ConsumeBotMandateQuota(ctx, ref, run, 0, 1, 0); !errors.As(err, &quota) || quota.Used != 163335 {
-		t.Fatalf("overage discarded: %v", err)
+	if err = runtime.ConsumeBotMandateQuota(ctx, ref, run, 0, 1, 0); err != nil {
+		t.Fatalf("accounting-only overage blocked: %v", err)
+	}
+	if used := questionQuotaUsage(t, ledgerRepo, ctx, ref.BotID).Tokens; used != 203336 {
+		t.Fatalf("overage discarded: %d", used)
 	}
 }

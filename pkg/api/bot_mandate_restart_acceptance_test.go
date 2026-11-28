@@ -140,7 +140,7 @@ func testBotAgentContinuityRestartHTTP(t *testing.T, cancel bool) {
 	// to this test-owned server and return the actual HTTP response bytes.
 	f.pool.callOverride = func(name string, args map[string]interface{}) (json.RawMessage, error) {
 		url, _ := args["url"].(string)
-		if name != "web_fetch" || url != upstream.URL {
+		if name != "_bot_public_fetch" || url != upstream.URL {
 			return nil, fmt.Errorf("unexpected scoped transport request: %s %v", name, args)
 		}
 		response, err := upstream.Client().Get(url)
@@ -155,9 +155,18 @@ func testBotAgentContinuityRestartHTTP(t *testing.T, cancel bool) {
 		return json.Marshal(map[string]any{"url": url, "final_url": url, "status": response.StatusCode, "content": string(body), "content_type": response.Header.Get("Content-Type"), "truncated": false})
 	}
 	files := newComposedHTTPFiles(t, f.dataDir, repo, f.b, nil)
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: "restart-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return mdl, nil
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: "restart-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, principal execution.Principal, _ store.BotScope, _, _ string) (model.LLM, error) {
+		// Resolution also covers the post-run Employee presentation, which uses
+		// the production directory-authenticated owner, not an execution mandate.
+		if principal.Validate() != nil || principal.Subject != p.Subject || principal.OrgSlug != p.OrgSlug || principal.TeamSlug != p.TeamSlug || principal.Surface != execution.Surface("daemon") || (principal.Authentication != execution.AuthMethodBotMandate && principal.Authentication != execution.AuthMethod("daemon_owner")) {
+			t.Fatalf("model resolution lost trusted owner authority: %+v", principal)
+		}
+		mdl.principal = principal
+		return mediateHTTPModel(mdl), nil
 	}, Prepare: func(c context.Context, r bot.RunRequest, scope *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+		if r.Mandate == nil || r.Principal.Subject != r.Mandate.Authorization.Snapshot().Ref.OwnerID || r.Principal.Authentication != execution.AuthMethodBotMandate || r.Mandate.Check(c) != nil {
+			return nil, store.ErrBotForbidden
+		}
 		files.install(c, r, scope)
 		reads, err := launcher.BotMandatedReadTools(r.Mandate, tools.RoutineReadPolicy{Authorize: func(context.Context, string) error { return nil }, AllowIP: func(context.Context, string, net.IP) error { return nil }})
 		if err != nil {

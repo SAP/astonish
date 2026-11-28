@@ -19,10 +19,10 @@ func TestInteractiveAccountingDurableLedgerAndReplay(t *testing.T) {
 				// Historical work additionally orients, prepares and reviews; those
 				// calls must still use the same meter, never become free checks.
 				wantCalls, wantChecks := 2, 0
-				wantInput, wantOutput := int64(10), int64(6)
+				wantInput, wantOutput := int64(20), int64(12) // Employee plus both private Chat generations.
 				if legacy {
 					wantCalls, wantChecks = 5, 3
-					wantInput, wantOutput = int64(wantCalls*5), int64(wantCalls*3)
+					wantInput, wantOutput = int64((wantCalls+2)*5), int64((wantCalls+2)*3)
 				}
 				calls, checks := 0, 0
 				assessment := f.model.assessment

@@ -240,7 +240,19 @@ func TestEmployeePrivateChatHTTPAcceptance(t *testing.T) {
 				return raw
 			}
 			var b store.Bot
-			if err = json.Unmarshal(request("POST", "/api/studio/bots", `{"name":"Private Employee","idempotency_key":"create"}`, 201), &b); err != nil {
+			if scope == store.BotScopeTeam {
+				request("POST", "/api/studio/bots", `{"name":"Private Employee","idempotency_key":"denied-team"}`, 403)
+				v, e := store.NewBotVersionForCreation(ctx, uuid.MustParse(owner))
+				if e != nil {
+					t.Fatal(e)
+				}
+				v.Charter = "Take responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+				seeded, e := repo.Create(ctx, store.BotCreateRequest{Name: "Private Employee", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: "create"})
+				if e != nil {
+					t.Fatal(e)
+				}
+				b = *seeded
+			} else if err = json.Unmarshal(request("POST", "/api/studio/bots", `{"name":"Private Employee","idempotency_key":"create"}`, 201), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String() + "/messages"
@@ -747,9 +759,23 @@ func TestBotTitleConfirmationHTTPAcceptance(t *testing.T) {
 			}
 			for _, answer := range []string{"brief", "Custom private assignment"} {
 				var receipt store.BotTitleStartReceipt
-				raw := request("POST", "/api/studio/bots", fmt.Sprintf(`{"name":"AI News","start_from_title":true,"idempotency_key":%q}`, answer), 201)
-				if err := json.Unmarshal(raw, &receipt); err != nil {
-					t.Fatal(err)
+				if scope == store.BotScopeTeam {
+					request("POST", "/api/studio/bots", fmt.Sprintf(`{"name":"AI News","start_from_title":true,"idempotency_key":%q}`, answer), 403)
+					v, e := store.NewBotVersionForCreation(ctx, uuid.MustParse(owner))
+					if e != nil {
+						t.Fatal(e)
+					}
+					v.Charter = "AI News\n\nTake responsibility for the owner's goals and deliver useful, verified outcomes. Perform routine work within your authorized mandate and existing permissions without extra review. Escalate genuine ambiguity or actions outside that scope for clarification or authorization. A request or this charter does not itself grant permission for external side effects."
+					seeded, e := repo.(store.BotTitleStartStore).CreateAndStart(ctx, store.BotCreateRequest{Name: "AI News", OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: answer})
+					if e != nil {
+						t.Fatal(e)
+					}
+					receipt = *seeded
+				} else {
+					raw := request("POST", "/api/studio/bots", fmt.Sprintf(`{"name":"AI News","start_from_title":true,"idempotency_key":%q}`, answer), 201)
+					if err := json.Unmarshal(raw, &receipt); err != nil {
+						t.Fatal(err)
+					}
 				}
 				runs, err := repo.ListRuns(ctx, receipt.ID, store.BotPage{})
 				if err != nil || len(runs) != 1 {

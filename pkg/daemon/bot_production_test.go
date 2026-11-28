@@ -144,6 +144,7 @@ func TestEmployeeWorkerProductionLiveGuard(t *testing.T) {
 					expect = execution.PolicyAllow
 				case "wrong_action":
 					action.Arguments = json.RawMessage(`{"path":"/other"}`)
+					expect = execution.PolicyRequestApproval // The old grant cannot authorize this new exact action.
 				case "wrong_approval":
 					approval.ID = uuid.New()
 				case "wrong_bot":
@@ -176,6 +177,9 @@ func TestEmployeeWorkerProductionLiveGuard(t *testing.T) {
 			}
 			if variant == "approved" && (decision.GrantID != repo.approval.ID || repo.loadedLease != req.Run.Lease) {
 				t.Fatal("approval not read under exact current lease")
+			}
+			if variant == "wrong_action" && decision.GrantID != uuid.Nil {
+				t.Fatal("changed action reused the old grant")
 			}
 			if repo.consumptions != 0 {
 				t.Fatal("live guard consumed resume-owned approval")

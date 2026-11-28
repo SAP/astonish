@@ -129,7 +129,12 @@ func TestDelegationHandoffCodePTYAcceptance(t *testing.T) {
 		cmd := exec.Command(os.Args[0], args...)
 		cmd.Dir = work
 		cmd.Env = append(os.Environ(), "ASTONISH_BOT_CLI_CHILD=1", "TERM=xterm-256color", "NO_COLOR=1", "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-		return newHandoffPTY(t, cmd)
+		term := newHandoffPTY(t, cmd)
+		term.mu.Lock()
+		term.screen = newSidebarPTYScreen(72, 26)
+		term.screen.p.Parse([]byte(term.raw.String()))
+		term.mu.Unlock()
+		return term
 	}
 	term := start("")
 	term.wait("pty-model")
@@ -228,15 +233,17 @@ func TestDelegationHandoffCodePTYAcceptance(t *testing.T) {
 // Reuse the existing current-cell ANSI emulator and terminal-query responder.
 // Every action waits for terminal state; there are no fixed startup sleeps.
 type handoffPTY struct {
-	t       *testing.T
-	pt      *os.File
-	cmd     *exec.Cmd
-	mu      sync.Mutex
-	screen  *revisionScreen
-	raw     strings.Builder // ANSI evidence, protected by mu just like the current cells.
-	changed chan struct{}
-	done    chan struct{}
-	once    sync.Once
+	t         *testing.T
+	pt        *os.File
+	cmd       *exec.Cmd
+	mu        sync.Mutex
+	screen    *revisionScreen
+	raw       strings.Builder // ANSI evidence, protected by mu just like the current cells.
+	changed   chan struct{}
+	done      chan struct{}
+	once      sync.Once
+	lastPaint time.Time // Last applied PTY output, protected by mu.
+	lastInput time.Time // Prevent a wait from immediately accepting pre-input cells.
 }
 
 func newHandoffPTY(t *testing.T, cmd *exec.Cmd) *handoffPTY {
@@ -268,6 +275,7 @@ func newHandoffPTYSize(t *testing.T, cmd *exec.Cmd, width, height int) *handoffP
 				p.mu.Lock()
 				p.raw.Write(buf[:n])
 				p.screen.p.Parse(buf[:n])
+				p.lastPaint = time.Now()
 				p.mu.Unlock()
 				select {
 				case p.changed <- struct{}{}:
@@ -318,16 +326,31 @@ func (p *handoffPTY) close() {
 func (p *handoffPTY) frame() string { p.mu.Lock(); defer p.mu.Unlock(); return p.screen.text() }
 func (p *handoffPTY) send(s string) {
 	p.t.Helper()
+	p.mu.Lock()
+	p.lastInput = time.Now()
+	p.mu.Unlock()
 	if _, err := io.WriteString(p.pt, s); err != nil {
 		p.t.Fatal(err)
 	}
+}
+
+// A renderer can flush one transition in several PTY reads. Match only the
+// current cells after a quiet paint interval, including after input whose target
+// shares text with the preceding screen (for example /new and Enter send).
+func (p *handoffPTY) settledFrame() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	const quiet = 75 * time.Millisecond
+	return p.screen.text(), time.Since(p.lastPaint) >= quiet && time.Since(p.lastInput) >= quiet
 }
 func (p *handoffPTY) wait(wants ...string) string {
 	p.t.Helper()
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	for {
-		frame, ok := p.frame(), true
+		frame, ok := p.settledFrame()
 		for _, want := range wants {
 			if !strings.Contains(frame, want) {
 				ok = false
@@ -339,8 +362,18 @@ func (p *handoffPTY) wait(wants ...string) string {
 		}
 		select {
 		case <-p.changed:
+		case <-poll.C:
 		case <-p.done:
-			p.t.Fatalf("Code exited before %q:\n%s", wants, p.frame())
+			// EOF is a final paint barrier for expected process rejections.
+			frame = p.frame()
+			matched := true
+			for _, want := range wants {
+				matched = matched && strings.Contains(frame, want)
+			}
+			if matched {
+				return frame
+			}
+			p.t.Fatalf("Code exited before %q:\n%s", wants, frame)
 		case <-timer.C:
 			p.t.Fatalf("Code screen missing %q:\n%s", wants, p.frame())
 		}

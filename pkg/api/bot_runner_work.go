@@ -1340,6 +1340,16 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	defer func() {
 		result.Report.Work = store.BuildBotWorkProjection(saved)
 		result.Report.Quality = nil
+		// Failure selection can precede the authoritative work projection. Recreate
+		// only our closed fallback from the final facts; never heal agent/model text.
+		if result.Report.EmployeeMessage != nil && result.Report.EmployeeMessage.Origin == store.BotEmployeeMessageFallback {
+			cause := err
+			if cause == nil && result.Failure != nil {
+				cause = result.Failure
+			}
+			message := bot.EmployeeMessageFallback(result.Status, result.Report, cause)
+			result.Report.EmployeeMessage = &message
+		}
 	}()
 	if w.Phase != store.BotWorkWorking || (w.EmployeeReviewPolicy != "" && (w.Candidate != nil || w.EmployeeReviewPending || w.EmployeeRepairPending)) {
 		result, err = botChatFailure(bot.ErrorBlocked, errors.New("work is not executable; use an authorized continuation"))
@@ -1452,6 +1462,7 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	// reserve produced useful text; promote only the same strict fresh result that
 	// can bypass review. Unknown effects, failures, approvals and limitations keep
 	// the blocked state unchanged.
+	req.Work = next.Clone() // promotion checks the reloaded durable obligations
 	if next.AgentWork.Disposition == store.AgentWorkBlocked && strings.TrimSpace(result.Report.Summary) != "" && strings.TrimSpace(completion.FinalEventID) != "" && strings.TrimSpace(completion.FinalText) != "" && botCanPromoteStaleBlockedReadOnlyFinal(completion, req, result.Report) {
 		next.AgentWork.Disposition = store.AgentWorkAnswered
 		next.Unresolved = nil
@@ -1462,7 +1473,9 @@ func runBotAgentWork(ctx context.Context, req bot.RunRequest, resources *BotChat
 	if next.AgentWork.Disposition == store.AgentWorkBlocked {
 		next.Phase = store.BotWorkBlocked
 		result.Status = store.RunPartial
-		next.Unresolved = []string{"The agent reported that this assignment is blocked."}
+		if len(next.Unresolved) == 0 {
+			next.Unresolved = []string{"The agent reported that this assignment is blocked."}
+		}
 	}
 	candidate := &store.BotWorkCandidate{Revision: 1, EventID: completion.FinalEventID, Text: result.Report.Summary, Artifacts: result.Report.Artifacts, Bodies: map[string]string{}, Observations: append(append([]store.BotEvidence(nil), result.Report.Changed...), result.Report.Unchanged...)}
 	if w.Candidate != nil {
@@ -1584,9 +1597,27 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 		if resources.Agent != nil && w != nil {
 			narrator = auxiliary
 		}
-		message := bot.ComposeEmployeeMessage(ctx, result.Status, result.Report, cause, bot.EmployeeMessageOptions{
+		opts := bot.EmployeeMessageOptions{
 			LLM: narrator, Boundary: func(ctx context.Context) error { return botWorkBoundary(ctx, req) }, Work: w, Usage: &result.Usage,
-		})
+		}
+		message := bot.ComposeEmployeeMessage(ctx, result.Status, result.Report, cause, opts)
+		if message.Origin == store.BotEmployeeMessageFallback && message.Reason == store.BotEmployeeReasonSetup {
+			// The composer requires positive preparation-state evidence before
+			// selecting setup. Retain a neutral no-result diagnostic, not its
+			// canonical first-person fallback or the rejected provider response.
+			const diagnostic = "Requested work could not start because internal preparation failed. No result was produced."
+			result.Report.Summary = diagnostic
+			if result.Report.Failure == nil {
+				result.Report.Failure = &store.BotReportFailure{Kind: store.BotReportFailureSetup}
+			}
+			result.Report.Failure.Kind = store.BotReportFailureSetup
+			if strings.TrimSpace(result.Report.Failure.TechnicalDetails) == "" {
+				result.Report.Failure.TechnicalDetails = diagnostic
+			}
+			// Bind the envelope to the final diagnostic snapshot; setup allocates
+			// no narration calls or new model capacity.
+			message = bot.ComposeEmployeeMessage(ctx, result.Status, result.Report, cause, opts)
+		}
 		result.Report.EmployeeMessage = &message
 	}()
 	if resources.Work != nil {
@@ -1811,6 +1842,11 @@ func runBotWork(ctx context.Context, req bot.RunRequest, resources *BotChatResou
 		next.Candidate = candidate
 		next.Review = nil
 		next.Unresolved = nil
+		if !exactAction {
+			if err := botEmployeeCaptureLegacyPrivateContent(ctx, req, resources, next); err != nil {
+				return block(err)
+			}
+		}
 		if err := save(next); err != nil {
 			return block(fmt.Errorf("candidate capture unavailable or invalid: %w", err))
 		}

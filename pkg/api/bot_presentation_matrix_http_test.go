@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,11 +34,23 @@ type presentationMatrixSessions struct {
 	current     session.Session
 	unavailable atomic.Bool
 	writes      atomic.Int64
+	repo        *presentationMatrixRepo
 }
 
 func (s *presentationMatrixSessions) AppendEvent(ctx context.Context, current session.Session, event *session.Event) error {
 	if err := s.Service.AppendEvent(ctx, current, event); err != nil {
 		return err
+	}
+	if wire, ok := event.Actions.StateDelta["bot_runtime_event"].(bot.RuntimeEvent); ok && wire.Type == "text" && s.repo != nil && store.BotEmployeeInterimReleased(ctx, wire) {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(wire.Payload, &payload); err != nil {
+			return err
+		}
+		s.repo.interimsMu.Lock()
+		defer s.repo.interimsMu.Unlock()
+		s.repo.interims[event.ID] = &store.BotEmployeeInterim{BotID: s.repo.b.ID, RunID: wire.RunID, SourceSessionID: wire.SessionID, HomeSessionID: s.repo.b.HomeSessionID, EventID: event.ID, TurnID: wire.TurnID, Sequence: wire.Sequence, TextDigest: store.BotEmployeeInterimDigest(payload.Text), EnvelopeDigest: store.BotEmployeeInterimDigest(wire)}
 	}
 	s.writes.Add(1)
 	return nil
@@ -69,7 +82,33 @@ func (s *presentationMatrixSessions) ReadBotTranscript(ctx context.Context, sid 
 
 type presentationMatrixRepo struct {
 	*filePublicationRepo
-	revoked atomic.Bool
+	revoked    atomic.Bool
+	interimsMu sync.RWMutex
+	interims   map[string]*store.BotEmployeeInterim
+}
+
+func (r *presentationMatrixRepo) ReadBotEmployeeInterim(ctx context.Context, b store.BotID, run store.RunID, event string) (*store.BotEmployeeInterim, error) {
+	if _, err := r.Get(ctx, b); err != nil {
+		return nil, err
+	}
+	r.interimsMu.RLock()
+	defer r.interimsMu.RUnlock()
+	v := r.interims[event]
+	if v == nil || v.BotID != b || v.RunID != run {
+		return nil, store.ErrBotNotFound
+	}
+	return v, nil
+}
+
+func (r *presentationMatrixRepo) ReadBotPublication(ctx context.Context, b store.BotID, run store.RunID, seq int64) (*store.BotPublication, error) {
+	if _, err := r.Get(ctx, b); err != nil {
+		return nil, err
+	}
+	p := r.publication
+	if p.BotID != b || p.RunID != run || p.ReportSequence != seq {
+		return nil, store.ErrBotNotFound
+	}
+	return &store.BotPublication{BotID: b, RunID: run, HomeSessionID: p.HomeSessionID, ReportSequence: seq, EventID: p.EventID, EmployeeSpeech: true, Text: p.Summary}, nil
 }
 
 func (r *presentationMatrixRepo) Get(ctx context.Context, id store.BotID) (*store.Bot, error) {
@@ -164,6 +203,23 @@ func newPresentationMatrixFixture(t *testing.T, scope store.BotScope, home bool)
 	add(&session.Event{ID: "private", Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{"private_checkpoint": "PRIVATE_MATRIX_SECRET"}}})
 	add(&session.Event{ID: "unreviewed", Author: "bot_runtime", Actions: session.EventActions{StateDelta: map[string]any{"bot_unreviewed_report": "UNREVIEWED_MATRIX_SECRET"}}})
 	add(&session.Event{ID: p.EventID, InvocationID: "bot-report:" + run.String(), Author: "assistant", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(p.Summary, "model")}, Actions: session.EventActions{StateDelta: map[string]any{store.BotFilePublicationKey: p, "private_checkpoint": "PRIVATE_MATRIX_SECRET"}}})
+	if home {
+		ss.repo = repo
+		repo.interims = make(map[string]*store.BotEmployeeInterim)
+		for i, e := range f.rows {
+			if e.ID == "private" {
+				e.Author = "chat"
+				e.Content = genai.NewContentFromText("PRIVATE_MATRIX_SECRET", "model")
+			}
+			var wire bot.RuntimeEvent
+			if e.Author == "assistant" && e.Content != nil && len(e.Content.Parts) == 1 && e.Content.Parts[0].Text != "" && e.ID != p.EventID {
+				payload, _ := json.Marshal(map[string]any{"text": e.Content.Parts[0].Text})
+				wire = bot.RuntimeEvent{SessionID: sid, RunID: run, TurnID: turn, Sequence: int64(i + 1), Type: "text", Payload: payload}
+				e.Author, e.Content = "bot_runtime", nil
+				e.Actions.StateDelta = map[string]any{"bot_runtime_event": wire}
+			}
+		}
+	}
 	svc := &store.Services{}
 	if scope == store.BotScopePersonal {
 		svc.PersonalBots = repo
@@ -191,7 +247,11 @@ func newPresentationMatrixFixture(t *testing.T, scope store.BotScope, home bool)
 func (f *presentationMatrixFixture) append(t *testing.T, rows []*session.Event) {
 	t.Helper()
 	for _, e := range rows {
-		if err := f.ss.AppendEvent(t.Context(), f.ss.current, e); err != nil {
+		ctx := t.Context()
+		if wire, ok := e.Actions.StateDelta["bot_runtime_event"].(bot.RuntimeEvent); ok && wire.Type == "text" && f.ss.repo != nil {
+			ctx = store.WithBotEmployeeInterimRelease(ctx, wire)
+		}
+		if err := f.ss.AppendEvent(ctx, f.ss.current, e); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -282,7 +342,11 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 				// Append after subscription: this is delta delivery, not just initial replay.
 				f.append(t, f.rows)
 				var observed []botSSEFrame
-				for len(observed) < 18 {
+				frameCount := 18
+				if home {
+					frameCount = 17
+				}
+				for len(observed) < frameCount {
 					observed = append(observed, readBotSSE(t, rd))
 				}
 				history := f.get(t, f.route("/stream"), "", 200)
@@ -300,6 +364,9 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 				defer res.Body.Close()
 				frames := matrixReadUntil(t, bufio.NewReader(res.Body), botTranscriptDone)
 				kinds := []string{"text", "text", "tool_call", "tool_call", "text", "tool_result", "text", "tool_result", "text", "subtask_progress", "subtask_progress", "subtask_progress", "subtask_progress", "subtask_progress", "error", "cursor", "cursor", store.BotFilePublicationKey}
+				if home {
+					kinds = []string{"text", "text", "cursor", "text", "cursor", "text", "cursor", "text", "cursor", "cursor", "cursor", "cursor", "subtask_progress", "cursor", "cursor", "cursor", store.BotFilePublicationKey}
+				}
 				if len(frames) != len(kinds) {
 					t.Fatalf("lost mixed frames: %d want %d", len(frames), len(kinds))
 				}
@@ -319,14 +386,22 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 					15: {}, 16: {}, 17: matrixJSONMap(t, f.repo.publication),
 				}
 				if home {
-					// Home runtime narration retains turn provenance; run-local text
-					// already carries its turn in projection metadata.
-					exact[0]["invocationId"] = f.turn.String()
-					exact[1]["invocationId"] = f.turn.String()
+					// Only repository-attested Employee speech and neutral plan/file metadata
+					// survive Home projection; worker tools and progress are cursor-only.
+					exact = map[int]map[string]any{0: {"text": "Starting ", "invocationId": f.turn.String()}, 1: {"text": "research.", "invocationId": f.turn.String()}, 3: exact[4], 5: exact[6], 7: exact[8], 12: f.plan, 16: matrixJSONMap(t, f.repo.publication)}
+					for i, kind := range kinds {
+						if kind == botCursorEvent {
+							exact[i] = map[string]any{}
+						}
+					}
 				}
 				seen := map[string]bool{}
 				rowIDs := []string{"partial", "partial-next", "calls", "calls", "between", "result-b", "same-one", "result-a", "same-two", "delegate-0", "delegate-1", "delegate-2", "delegate-3", "plan", "recoverable-error", "private", "unreviewed", f.repo.publication.EventID}
 				cursors := []int64{1, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+				if home {
+					rowIDs = append(rowIDs[:3], rowIDs[4:]...)
+					cursors = []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+				}
 				for i, frame := range frames {
 					matrixAssertSafe(t, frame.data)
 					if frame.event != kinds[i] {
@@ -342,7 +417,7 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 					}
 					if kinds[i] != botCursorEvent {
 						part := 0
-						if i == 3 {
+						if i == 3 && !home {
 							part = 1
 						}
 						identity := fmt.Sprintf("%s/%s/%d", f.sid, rowIDs[i], part)
@@ -351,6 +426,30 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 						}
 					}
 					delete(data, "_projection")
+					// SSE flattens delivery time into the payload. Compare it to
+					// the committed source row before checking the domain payload.
+					var expectedTime time.Time
+					if kinds[i] != botCursorEvent {
+						for _, row := range f.rows {
+							if row.ID == rowIDs[i] {
+								expectedTime = row.Timestamp
+								break
+							}
+						}
+					}
+					if value, ok := data["timestamp"]; ok {
+						text, ok := value.(string)
+						if !ok {
+							t.Fatalf("frame %d invalid delivery timestamp: %v", i, value)
+						}
+						timestamp, err := time.Parse(time.RFC3339Nano, text)
+						if err != nil || !timestamp.Equal(expectedTime) {
+							t.Fatalf("frame %d delivery timestamp: %v want %v (parse: %v)", i, value, expectedTime, err)
+						}
+						delete(data, "timestamp")
+					} else if !expectedTime.IsZero() {
+						t.Fatalf("frame %d lost delivery timestamp %v", i, expectedTime)
+					}
 					if expected, ok := exact[i]; ok && !reflect.DeepEqual(data, expected) {
 						t.Fatalf("frame %d payload: %+v want %+v", i, data, expected)
 					}
@@ -361,12 +460,16 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 						seen[id] = true
 					}
 				}
-				for _, i := range []int{9, 10, 11, 12} {
+				delegationFrames := []int{9, 10, 11, 12}
+				if home {
+					delegationFrames = nil
+				}
+				for _, i := range delegationFrames {
 					if !strings.Contains(frames[i].data, "child_session_id") || !strings.Contains(frames[i].data, "batch_id") || !strings.Contains(frames[i].data, "task_id") {
 						t.Fatal("delegation identity lost", frames[i])
 					}
 				}
-				if !strings.Contains(frames[17].data, f.repo.publication.Artifacts[0].ID.String()) {
+				if !strings.Contains(frames[len(frames)-1].data, f.repo.publication.Artifacts[0].ID.String()) {
 					t.Fatal("reviewed artifact delivery lost")
 				}
 			})
@@ -380,7 +483,11 @@ func runBotPresentationMatrixHTTPAcceptance(t *testing.T, home bool) {
 				live := f.get(t, f.route("/events"), after, 200)
 				defer live.Body.Close()
 				got := matrixReadUntil(t, bufio.NewReader(live.Body), botReplayComplete)
-				if !reflect.DeepEqual(got, want[2:]) {
+				start := 2
+				if home {
+					start = 3
+				} // Hidden tool row commits its cursor atomically.
+				if !reflect.DeepEqual(got, want[start:]) {
 					t.Fatal("mid-row reconnect dropped/reidentified a concurrent call")
 				}
 			})

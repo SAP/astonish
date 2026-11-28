@@ -96,7 +96,16 @@ func TestBotHomeModelSAPCredentialsHTTP(t *testing.T) {
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
 		t.Run(string(scope), func(t *testing.T) {
 			var b store.Bot
-			if err := json.Unmarshal(request(t, "POST", "/api/studio/bots?scope="+string(scope), owner, `{"name":"SAP status","idempotency_key":"sap-status","definition":{"charter":"Observe"}}`, 201), &b); err != nil {
+			body := `{"name":"SAP status","idempotency_key":"sap-status","definition":{"charter":"Observe"}}`
+			if scope == store.BotScopeTeam {
+				request(t, "POST", "/api/studio/bots?scope=team", owner, body, 403)
+				c, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+				b = retainedTeamBotFixture(t, c, ods.ForTeam(team.Slug).Bots(), owner, "SAP status", "sap-status", "Observe", "")
+			} else if err := json.Unmarshal(request(t, "POST", "/api/studio/bots?scope=personal", owner, body, 201), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/sessions/" + b.HomeSessionID.String()

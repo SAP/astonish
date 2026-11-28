@@ -377,6 +377,9 @@ func runConfiguredProcessAdmission(t *testing.T, scope store.BotScope, mode, lea
 	}
 	initialCalls := node.count()
 	llm := &configuredProcessModel{configuredAdmissionModel: &configuredAdmissionModel{script: script}, node: node}
+	if mode == "interactive" {
+		llm.script = script[:1]
+	}
 	turns := execution.NewBotTurnAuthorizationRegistry(8)
 	defer turns.Close()
 	svc := &store.Services{Mode: store.ModePlatform, Platform: backend, TenantRouter: backend, Bots: team.Bots(), PersonalBots: personal.Bots(), Sessions: team.Sessions(), PersonalSessions: personal.Sessions(), PlatformMCPServers: backend.PlatformMCPServers(), BotTurnRegistry: turns, BotInteractiveReady: true}
@@ -408,6 +411,7 @@ func runConfiguredProcessAdmission(t *testing.T, scope store.BotScope, mode, lea
 	router := mux.NewRouter()
 	router.HandleFunc("/studio/chat", api.StudioChatHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
+	router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/approvals/{approvalID}/decision", api.BotApprovalDecisionHandler).Methods("POST")
 	router.HandleFunc("/bots/{botID}/runs/{runID}/resume", api.BotResumeRunHandler).Methods("POST")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +579,8 @@ func runConfiguredProcessAdmission(t *testing.T, scope store.BotScope, mode, lea
 				t.Fatal("consumed process action replayed")
 			}
 			wantAttempts = 2
+		} else if mode == "interactive" {
+			saved, wantAttempts = configuredFixtureInteractiveActions(t, auth, worker, repo, b, run, scope, llm.configuredAdmissionModel, script, post)
 		} else if len(approvals) != 0 {
 			t.Fatalf("interactive approvals: %+v run=%+v responses=%v", approvals, saved, llm.responses)
 		}

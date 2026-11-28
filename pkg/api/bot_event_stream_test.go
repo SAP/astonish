@@ -452,12 +452,25 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 	}
 	for _, scope := range []string{"personal", "team"} {
 		t.Run(scope, func(t *testing.T) {
-			res := request("POST", "/api/studio/bots?scope="+scope, owner, `{"name":"Live","idempotency_key":"live","definition":{"charter":"Observe"}}`, "", 201)
 			var b store.Bot
-			err := json.NewDecoder(res.Body).Decode(&b)
-			res.Body.Close()
-			if err != nil {
-				t.Fatal(err)
+			body := `{"name":"Live","idempotency_key":"live","definition":{"charter":"Observe"}}`
+			if scope == "team" {
+				// Public creation stays personal-only; retained team data is trusted setup.
+				res := request("POST", "/api/studio/bots?scope=team", owner, body, "", 403)
+				res.Body.Close()
+				c, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+				b = retainedTeamBotFixture(t, c, ods.ForTeam(team.Slug).Bots(), owner, "Live", "live", "Observe", "")
+			} else {
+				res := request("POST", "/api/studio/bots?scope=personal", owner, body, "", 201)
+				err := json.NewDecoder(res.Body).Decode(&b)
+				res.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			path := "/api/studio/bots/" + b.ID.String() + "/sessions/" + b.HomeSessionID.String() + "/events?scope=" + scope
 			var ss store.SessionStore = ods.ForUser(owner).Sessions()
@@ -468,7 +481,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent := func(id string) {
 				t.Helper()
-				e := &adksession.Event{ID: id, Author: "execution-owner", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(id, "model")}}
+				e := &adksession.Event{ID: id, Author: "user", Timestamp: time.Now(), LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(id, "user")}}
 				e.Actions.StateDelta = map[string]any{"private_checkpoint": "PRIVATE_CHECKPOINT_SECRET"}
 				if id == "first" {
 					e.Author = "bot_runtime"
@@ -488,7 +501,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			appendEvent("first")
 			first := readBotSSE(t, rd)
-			if first.event != "tool_call" || first.id != botEventCursor(b.HomeSessionID, 1) || !strings.Contains(first.data, "https://historical.example.invalid/public") || !strings.Contains(first.data, "web_fetch") || strings.Contains(first.data, "HISTORICAL_PRIVATE_CHECKPOINT") {
+			if first.event != botCursorEvent || first.id != botEventCursor(b.HomeSessionID, 1) || strings.Contains(first.data, "https://historical.example.invalid/public") || strings.Contains(first.data, "web_fetch") || strings.Contains(first.data, "HISTORICAL_PRIVATE_CHECKPOINT") {
 				t.Fatalf("live: %+v", first)
 			}
 			live.Body.Close()
@@ -540,7 +553,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			// A full snapshot uses the same ordered source and IDs as live delivery.
 			full := request("GET", path, owner, "", "", 200)
 			fr := bufio.NewReader(full.Body)
-			if f := readBotSSE(t, fr); f.id != first.id || f.event != "tool_call" || f.data != first.data {
+			if f := readBotSSE(t, fr); f.id != first.id || f.event != botCursorEvent || f.data != first.data {
 				t.Fatal("snapshot differs", f)
 			}
 			full.Body.Close()
@@ -577,7 +590,7 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 					}
 					break
 				}
-				if (frame.event != "text" && frame.event != "tool_call" && frame.event != botCursorEvent) || position <= previous {
+				if (frame.event != "user_message" && frame.event != botCursorEvent) || position <= previous {
 					t.Fatalf("unordered replay: %+v after %d", frame, previous)
 				}
 				previous = position
@@ -602,10 +615,11 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			}
 			headerReplay.Body.Close()
 
-			// A complete model row fans out atomically, including its completion.
+			// User multipart rows fan out atomically; private model prose stays hidden.
 			answer := &adksession.Event{ID: "owner-answer", Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(`{"type":"bot_owner_answer","display":{"answer":"Use the reviewed option"},"response":{"private":"not display"}}`, "user")}}
-			complete := &adksession.Event{ID: "multipart", Author: "assistant", InvocationID: "turn-multipart", LLMResponse: model.LLMResponse{TurnComplete: true, Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "repeat"}, {Text: "repeat"}}}}}
-			for _, event := range []*adksession.Event{answer, complete} {
+			complete := &adksession.Event{ID: "multipart", Author: "user", InvocationID: "turn-multipart", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "repeat"}, {Text: "repeat"}}}}}
+			private := &adksession.Event{ID: "private-completion", Author: "assistant", LLMResponse: model.LLMResponse{TurnComplete: true, Content: genai.NewContentFromText("PRIVATE_MODEL_PROSE", "model")}}
+			for _, event := range []*adksession.Event{answer, complete, private} {
 				if err := ss.AppendFleetEvent(ctx, b.HomeSessionID.String(), event); err != nil {
 					t.Fatal(err)
 				}
@@ -613,11 +627,17 @@ func TestBotEventsHTTPAcceptance(t *testing.T) {
 			multi := request("GET", path, owner, "", botEventCursor(b.HomeSessionID, previous), 200)
 			mr := bufio.NewReader(multi.Body)
 			var expected []botSSEFrame
-			for i, kind := range []string{"user_message", "text", "text", "turn_complete"} {
+			for i, kind := range []string{"user_message", "user_message", "user_message", "turn_complete"} {
 				frame := readBotSSE(t, mr)
 				wantCursor := previous + 1
+				if i >= 2 {
+					wantCursor++
+				}
 				if i == 3 {
 					wantCursor++
+				}
+				if strings.Contains(frame.data, "PRIVATE_MODEL_PROSE") {
+					t.Fatal("private model completion leaked")
 				}
 				if frame.event != kind || frame.id != botEventCursor(b.HomeSessionID, wantCursor) {
 					t.Fatalf("non-atomic multipart: %+v", frame)

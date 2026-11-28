@@ -82,7 +82,7 @@ func TestBotSchedulePresentationRenderLiveReplay(t *testing.T) {
 						systems++
 					}
 				}
-				if agents != 1 || systems != 0 || strings.Count(plain, v.Summary) != 1 || m.tr.Streaming {
+				if agents != 0 || systems != 1 || strings.Count(plain, v.Summary) != 1 || m.tr.Streaming {
 					t.Fatalf("not one final assistant message: agents=%d systems=%d streaming=%t\n%s", agents, systems, m.tr.Streaming, plain)
 				}
 				for _, forbidden := range []string{"Change queued", "Applying change", "applied —", "failed —", "Schedule enabled."} {

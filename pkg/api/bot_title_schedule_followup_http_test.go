@@ -84,6 +84,9 @@ func TestBotTitleSchedulingFollowupLatestInputHTTP(t *testing.T) {
 	var policy store.BotMandatePolicyResolver
 	workCalls := f.pool.calls
 	f.model.assessment = func(req *model.LLMRequest) (*model.LLMResponse, bool) {
+		if req.Tools["employee_chat"] == nil {
+			return nil, false
+		}
 		raw, _ := json.Marshal(req.Contents)
 		if !strings.Contains(string(raw), latest) {
 			t.Errorf("latest owner request missing from actual provider input: %s", raw)
@@ -101,8 +104,22 @@ func TestBotTitleSchedulingFollowupLatestInputHTTP(t *testing.T) {
 		}
 		for _, content := range req.Contents {
 			for _, part := range content.Parts {
-				if response := part.FunctionResponse; response != nil && response.Name == "execute_tool" {
-					if id, ok := response.Response["operation_id"].(string); ok {
+				if response := part.FunctionResponse; response != nil {
+					payload := response.Response
+					if response.Name == "employee_chat" {
+						var items []struct {
+							Response map[string]any `json:"response"`
+						}
+						if text, ok := payload["private_text"].(string); ok {
+							_ = json.Unmarshal([]byte(strings.TrimPrefix(text, "Private source responses: ")), &items)
+							for _, item := range items {
+								if item.Response["operation_id"] != nil {
+									payload = item.Response
+								}
+							}
+						}
+					}
+					if id, ok := payload["operation_id"].(string); ok {
 						operationID = uuid.MustParse(id)
 						if pendingOperation == nil {
 							runtime, err := entstore.NewBotMandateRuntime(f.repo, policy)
@@ -114,7 +131,7 @@ func TestBotTitleSchedulingFollowupLatestInputHTTP(t *testing.T) {
 								t.Fatal(err)
 							}
 						}
-						if response.Response["status"] != string(store.BotOperationPending) {
+						if payload["status"] != string(store.BotOperationPending) {
 							t.Errorf("capture must report pending, not applied: %+v", response.Response)
 						}
 					}
@@ -153,8 +170,12 @@ func TestBotTitleSchedulingFollowupLatestInputHTTP(t *testing.T) {
 	f.worker.Stop()
 	f.model.principal = execution.Principal{Subject: p.Subject, Authentication: execution.AuthMethodBotMandate, Surface: execution.Surface("daemon")}
 	files := &composedHTTPFiles{disk: &synthesisHTTPFiles{root: f.pool.dir}, repo: f.repo, id: f.b.ID, scope: f.scope}
-	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return f.model, nil
+	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: f.db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: f.pool, MandatePolicy: policy, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(_ context.Context, principal execution.Principal, _ store.BotScope, _, _ string) (model.LLM, error) {
+		if principal.Subject != p.Subject || principal.OrgSlug != p.OrgSlug || principal.TeamSlug != p.TeamSlug || !principal.Authenticated {
+			t.Fatal("resolver lost scoped owner")
+		}
+		f.model.principal = principal
+		return mediateHTTPModel(f.model), nil
 	}, Prepare: func(c context.Context, r bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		files.install(c, r, s)
 		if r.Instructions != latest || r.Run.TitleConfirmation != nil || r.Mandate == nil || r.Mandate.Authorization.Ref().ID == uuid.Nil {

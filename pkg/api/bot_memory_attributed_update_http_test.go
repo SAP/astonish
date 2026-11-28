@@ -93,7 +93,17 @@ func TestBotMemoryAttributedUpdateHTTP(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
 			var b store.Bot
-			if err := json.Unmarshal(request(t, "POST", "/api/studio/bots"+suffix, fmt.Sprintf(`{"name":"Guard","idempotency_key":%q,"definition":{"charter":"Observe"}}`, uuid.NewString()), 201), &b); err != nil {
+			key := uuid.NewString()
+			createBody := fmt.Sprintf(`{"name":"Guard","idempotency_key":%q,"definition":{"charter":"Observe"}}`, key)
+			if scope == "team" {
+				request(t, "POST", "/api/studio/bots"+suffix, createBody, 403)
+				c, err := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c = store.WithTenantContext(c, &store.TenantContext{UserID: owner, OrgSlug: org.Slug, TeamSlug: team.Slug})
+				b = retainedTeamBotFixture(t, c, ods.ForTeam(team.Slug).Bots(), owner, "Guard", key, "Observe", "")
+			} else if err := json.Unmarshal(request(t, "POST", "/api/studio/bots"+suffix, createBody, 201), &b); err != nil {
 				t.Fatal(err)
 			}
 			path := "/api/studio/bots/" + b.ID.String()

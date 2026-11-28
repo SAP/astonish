@@ -47,8 +47,12 @@ func TestBotCanonicalPlanUsesSharedProgressContract(t *testing.T) {
 	}
 	for _, home := range []uuid.UUID{uuid.Nil, sid} {
 		projection, err := (&SessionEventProjector{BotID: bid, SessionID: sid, HomeSessionID: home}).ProjectBot(t.Context(), store.BotTranscriptEvent{Cursor: 2, Event: row}, nil)
-		if err != nil || len(projection.Events) != 1 || projection.Events[0].Data["event_type"] != "plan_snapshot" {
-			t.Fatalf("plan missing from home=%s: %+v %v", home, projection.Events, err)
+		if home == sid {
+			if err != nil || len(projection.Events) != 0 {
+				t.Fatalf("Home exposed private plan: %+v %v", projection.Events, err)
+			}
+		} else if err != nil || len(projection.Events) != 1 || projection.Events[0].Data["event_type"] != "plan_snapshot" {
+			t.Fatalf("run plan missing: %+v %v", projection.Events, err)
 		}
 	}
 	for _, invalid := range []any{nil, "not a snapshot", map[string]any{"plan_id": "plan"}} {
@@ -75,9 +79,9 @@ func TestBotCanonicalSourceTextOwnership(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if source != "" && !home {
+			if home || source != "" {
 				if len(out.Events) != 0 {
-					t.Fatal("source-owned runtime copy displayed")
+					t.Fatal("unbound Home speech or source-owned runtime copy displayed")
 				}
 			} else if len(out.Events) != 1 || out.Events[0].Data["text"] != "same" {
 				t.Fatalf("independent equal text lost: %+v", out)

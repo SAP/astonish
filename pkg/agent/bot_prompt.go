@@ -78,7 +78,18 @@ func NewBotPromptOverrides(base *PromptOverrides, req bot.RunRequest) *PromptOve
 
 // NewBotWorkerPromptOverrides selects private execution role, not authority.
 func NewBotWorkerPromptOverrides(req bot.RunRequest) *PromptOverrides {
-	po := NewBotPromptOverrides(nil, req)
+	return NewBotWorkerPromptOverridesFromBase(nil, req)
+}
+
+// NewBotWorkerPromptOverridesFromBase composes private execution guidance with
+// an already trusted owner-scoped prompt envelope. Never pass viewer/invocation
+// overrides here: the base may carry approved-plan state and scoped tools.
+func NewBotWorkerPromptOverridesFromBase(base *PromptOverrides, req bot.RunRequest) *PromptOverrides {
+	po := NewBotPromptOverrides(base, req)
+	if base != nil {
+		po.PinnedToolGroups = append(base.PinnedToolGroups[:0:0], base.PinnedToolGroups...)
+		po.AdditionalTools = append(base.AdditionalTools[:0:0], base.AdditionalTools...)
+	}
 	po.Bot.worker = true
 	return po
 }

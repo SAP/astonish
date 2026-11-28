@@ -8,6 +8,8 @@ func TestCodePermissionsEnterSwitchPTYAcceptance(t *testing.T) {
 	defer term.close()
 	term.wait("Enter send")
 	term.send("/new\r")
+	term.wait("Code workspaces", "› Current workspace", "Enter choose")
+	term.send("\r")
 	term.wait("Message Astonish", "Enter send")
 	term.send("/permissions\r")
 	term.wait("› Folders", "Ask outside project")

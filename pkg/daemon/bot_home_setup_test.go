@@ -182,7 +182,25 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 	for _, scope := range []string{"personal", "team"} {
 		t.Run(scope, func(t *testing.T) {
 			suffix := "?scope=" + scope
-			b := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Home","idempotency_key":%q,"definition":{"charter":"Do not run tools"}}`, scope), 201)
+			create := func(name, key, charter string) store.Bot {
+				t.Helper()
+				if scope == "personal" {
+					return request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":%q,"idempotency_key":%q,"definition":{"charter":%q}}`, name, key, charter), 201)
+				}
+				// Trusted existing-team setup does not weaken personal-only public creation.
+				c, e := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
+				if e != nil {
+					t.Fatal(e)
+				}
+				v := store.DefaultBotVersion()
+				v.Charter = charter
+				b, e := ods.ForTeam(team.Slug).Bots().Create(c, store.BotCreateRequest{Name: name, OwnerID: uuid.MustParse(owner), Version: v, IdempotencyKey: key})
+				if e != nil {
+					t.Fatal(e)
+				}
+				return *b
+			}
+			b := create("Home", scope, "Do not run tools")
 			path := "/api/studio/bots/" + b.ID.String() + "/home"
 			request("POST", path+suffix, "", `{"expected_revision":1}`, 401)
 			denied := 403
@@ -239,7 +257,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			request("POST", "/api/studio/bots/"+b.ID.String()+"/versions"+suffix, owner, `{"expected_revision":2,"change_reason":"edit after setup","definition":{"charter":"Changed after home"}}`, 200)
 			request("POST", path+suffix, owner, `{"expected_revision":2}`, 409)
 			// Mutating configuration during the backend call must lose the registration CAS.
-			race := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Race","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+"-race"), 201)
+			race := create("Race", scope+"-race", "Inert")
 			backend.before = func() {
 				backend.before = nil
 				request("POST", "/api/studio/bots/"+race.ID.String()+"/versions"+suffix, owner, `{"expected_revision":1,"change_reason":"concurrent edit","definition":{"charter":"Changed"}}`, 200)
@@ -250,7 +268,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 					continue
 				}
 				t.Run(change, func(t *testing.T) {
-					revoked := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Revoked","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+change), 201)
+					revoked := create("Revoked", scope+change, "Inert")
 					target := owner
 					if strings.HasPrefix(change, "caller-") {
 						target = actor
@@ -323,7 +341,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			// Only explicit execution controls may prepare a missing home. Mere
 			// messages, forbidden requests and stale activation do not provision.
 			for _, action := range []string{"test-run"} {
-				auto := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Automatic home","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+action), 201)
+				auto := create("Automatic home", scope+action, "Inert")
 				autoPath := "/api/studio/bots/" + auto.ID.String()
 				before := backend.calls
 				request("POST", autoPath+"/messages"+suffix, reader, `{"version":1,"instructions":"hello","idempotency_key":"denied"}`, denied)
@@ -351,7 +369,7 @@ func TestBotHomeSetupHTTPConfiguredDaemon(t *testing.T) {
 			}
 			for _, op := range []store.BotControlOperation{store.BotControlTaskOnceOperation} {
 				t.Run("proposal-"+string(op), func(t *testing.T) {
-					auto := request("POST", "/api/studio/bots"+suffix, owner, fmt.Sprintf(`{"name":"Proposal home","idempotency_key":%q,"definition":{"charter":"Inert"}}`, scope+"-proposal-"+string(op)), 201)
+					auto := create("Proposal home", scope+"-proposal-"+string(op), "Inert")
 					db.SetBotActivationReadiness(func(context.Context, store.Bot, store.BotVersion) error { return nil })
 					pctx, e := execution.WithPrincipal(ctx, execution.Principal{Kind: execution.PrincipalKindUser, Authentication: execution.AuthMethodPlatformJWT, Surface: execution.SurfaceStudio, Subject: owner, OrgSlug: org.Slug, TeamSlug: team.Slug, Authenticated: true})
 					if e != nil {

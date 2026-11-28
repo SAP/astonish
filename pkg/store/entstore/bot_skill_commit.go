@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
+
+	"google.golang.org/genai"
 
 	"github.com/SAP/astonish/pkg/store"
 )
@@ -40,8 +43,36 @@ func (r *botRepository) commitBotSkill(ctx context.Context, tx botDB, saved *bot
 			if err != nil {
 				return err
 			}
-			if event.Timestamp.After(*state.SelectedAt) && !event.Partial && event.Content != nil {
-				for _, part := range event.Content.Parts {
+			content := event.Content
+			observedAt := event.Timestamp
+			if event.Author == "bot_runtime" && event.Content == nil && !event.Partial {
+				var trace struct {
+					Phase string `json:"phase"`
+					Event *struct {
+						Content   *genai.Content
+						Timestamp time.Time
+						Partial   bool
+					} `json:"event"`
+				}
+				raw, marshalErr := json.Marshal(event.Actions.StateDelta["bot_private_worker_v1"])
+				if marshalErr == nil && json.Unmarshal(raw, &trace) == nil && trace.Phase == "event" && trace.Event != nil && !trace.Event.Partial {
+					content = trace.Event.Content
+					observedAt = trace.Event.Timestamp
+				}
+			}
+			if observedAt.After(*state.SelectedAt) && !event.Partial && content != nil {
+				for _, part := range content.Parts {
+					if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "execute_tool" {
+						sourceCall := false
+						for _, fact := range w.AgentWork.SourceAccess {
+							if fact.CallID == evidence.CallID && fact.ObservedAt.After(*state.SelectedAt) {
+								sourceCall = true
+							}
+						}
+						if !sourceCall {
+							continue
+						}
+					}
 					if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID == evidence.CallID && !strings.HasPrefix(part.FunctionResponse.Name, "bot_skill_") && !strings.HasPrefix(part.FunctionResponse.Name, "bot_work_") {
 						used = true
 					}

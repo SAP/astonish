@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -142,6 +143,30 @@ func (b *databaseActivityFiles) PutBotContent(ctx context.Context, home *sandbox
 	return b.skillRecoveryFiles.PutBotContent(ctx, home, kind, size, body, revision, guard)
 }
 
+func equalActivityJSON(left, right []byte) bool {
+	decode := func(raw []byte) (any, error) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber() // Keep integers above 2^53 exact.
+		var value any
+		err := decoder.Decode(&value)
+		return value, err
+	}
+	l, le := decode(left)
+	r, re := decode(right)
+	return le == nil && re == nil && reflect.DeepEqual(l, r)
+}
+
+func TestEqualActivityJSONPreservesNumbersAndOrder(t *testing.T) {
+	if !equalActivityJSON([]byte(`{"n":9007199254740993,"items":[1,2]}`), []byte(`{"items":[1,2],"n":9007199254740993}`)) {
+		t.Fatal("object key order changed logical activity")
+	}
+	for _, changed := range []string{`{"n":9007199254740992,"items":[1,2]}`, `{"n":9007199254740993,"items":[2,1]}`} {
+		if equalActivityJSON([]byte(`{"n":9007199254740993,"items":[1,2]}`), []byte(changed)) {
+			t.Fatal("number or array order change hidden")
+		}
+	}
+}
+
 func TestBotDatabaseActivityHTTP(t *testing.T) {
 	t.Setenv("ASTONISH_PROFILE_BOT_ACTIVITY", "1")
 	for _, scope := range []store.BotScope{store.BotScopePersonal, store.BotScopeTeam} {
@@ -235,7 +260,7 @@ func TestBotDatabaseActivityHTTP(t *testing.T) {
 				}
 				for i := range got {
 					g, w := got[i], expected[i]
-					if g.BotID != w.BotID || g.RunID == nil || w.RunID == nil || *g.RunID != *w.RunID || g.Sequence != w.Sequence || g.Kind != w.Kind || !g.CreatedAt.Equal(w.CreatedAt) || string(g.Payload) != string(w.Payload) {
+					if g.BotID != w.BotID || g.RunID == nil || w.RunID == nil || *g.RunID != *w.RunID || g.Sequence != w.Sequence || g.Kind != w.Kind || !g.CreatedAt.Equal(w.CreatedAt) || !equalActivityJSON(g.Payload, w.Payload) {
 						t.Fatalf("activity %d changed: got=%+v want=%+v", i, g, w)
 					}
 				}
@@ -247,7 +272,7 @@ func TestBotDatabaseActivityHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 			expectedJSON, err := json.Marshal(append(initial, want...))
-			if err != nil || string(allJSON) != string(expectedJSON) {
+			if err != nil || !equalActivityJSON(allJSON, expectedJSON) {
 				t.Fatalf("after=0 changed full logical activity/order: %v", err)
 			}
 			var paginated []store.BotActivity

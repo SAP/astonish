@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SAP/astonish/pkg/agent"
 	"github.com/SAP/astonish/pkg/bot"
 	"github.com/SAP/astonish/pkg/config"
 	"github.com/SAP/astonish/pkg/daemon"
@@ -169,9 +170,17 @@ func progressProcessChild(t *testing.T, stage string) {
 		}
 		// Exercise an actual external write through the node transport. write_file
 		// now denotes a confined local Home edit and must not stand in for HTTP.
-		receipts := &progressReceiptModel{LLM: f.model}
+		receipts := &progressReceiptModel{LLM: progressMeteredModel(f.model)}
 		f.workerConfig.ResolveModel = func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-			return receipts, nil
+			return progressEmployeeFixture(receipts), nil
+		}
+		prepare := f.workerConfig.Prepare
+		f.workerConfig.Prepare = func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
+			resources, err := prepare(c, q, s)
+			if resources != nil {
+				resources.PolicyRuntime.Classifier = launcher.BotCatalogueClassifier{}
+			}
+			return resources, err
 		}
 		writer := progressFreshWorker(t, f)
 		drained := make(chan error, 1)
@@ -274,7 +283,7 @@ func progressProcessChild(t *testing.T, stage string) {
 				return response, true
 			}
 		}
-		raw, _ := json.Marshal(req.Contents)
+		raw, _ := json.Marshal(progressValidatedPrivateResponses(t, org.ForUser(evidence.Bot.OwnerID.String()).Sessions(), ctx, evidence.Bot.OwnerID.String(), evidence.Run.SessionID.String()))
 		if !strings.Contains(string(raw), "isolated receipt") {
 			t.Error("restored context lost settled read")
 		}
@@ -287,10 +296,10 @@ func progressProcessChild(t *testing.T, stage string) {
 		return pool.Call("", name, args)
 	}}
 	worker, err := daemon.NewBotWorker(daemon.BotWorkerConfig{Backend: db, Sandbox: synthesisHTTPBackend{files: files.disk}, Pool: pool, TurnRegistry: registry, WorkerID: uuid.NewString(), ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-		return mdl, nil
+		return progressEmployeeFixture(progressMeteredModel(mdl)), nil
 	}, Prepare: func(c context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 		files.install(c, q, s)
-		return &launcher.BotChatSafeResources{WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
+		return &launcher.BotChatSafeResources{PolicyRuntime: agent.BotPolicyRuntime{Classifier: composedWeatherClassifier{}, Guard: interactiveFixtureGuard{repo: repo, req: q}}, WorkspaceDir: "/isolated", ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: pool}, VerifyIsolation: func(c context.Context) error { return c.Err() }, Cleanup: func() {}}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

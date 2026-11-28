@@ -2,7 +2,6 @@ package entstore
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/SAP/astonish/pkg/store"
@@ -37,7 +36,7 @@ func TestMixedControlSafePublicationOrder(t *testing.T) {
 					apply()
 				}
 				pub, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID, ReportSequence: seq})
-				if err != nil || pub.Suppressed || !strings.Contains(pub.Text, "independent result") || strings.Contains(pub.Text, op.ID.String()) || strings.Contains(pub.Text, "pending") {
+				if err != nil || pub.Suppressed || pub.EmployeeSpeech || pub.Text != "" || pub.ReportDigest == "" {
 					t.Fatalf("unsafe or hidden mixed result: %+v %v", pub, err)
 				}
 				if !applyFirst {
@@ -48,7 +47,7 @@ func TestMixedControlSafePublicationOrder(t *testing.T) {
 					t.Fatal("mixed result changed after application", err)
 				}
 				final, err := r.PublishReport(owner, store.BotPublicationRequest{BotID: q.Lease.BotID, RunID: q.Lease.RunID})
-				if err != nil || !strings.HasPrefix(final.Text, "I've created the schedule.") {
+				if err != nil || final.EmployeeSpeech || final.Text != "" || final.ReportDigest == "" || final.ReportSequence <= pub.ReportSequence {
 					t.Fatalf("missing independent control outcome: %+v %v", final, err)
 				}
 			})

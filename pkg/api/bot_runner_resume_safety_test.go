@@ -68,6 +68,32 @@ func TestBotResumeNoReplayAfterEffect(t *testing.T) {
 	}
 }
 
+func TestBotResumeQualifiedActionUsesBridgeWithoutPreparedRequestTools(t *testing.T) {
+	// ADK populates request.Tools after the model iterator is created. Qualified
+	// policy identities must never be emitted as native function names.
+	action := execution.ActionDescriptor{Tool: "a2a/a2a_configured_service", Effect: execution.EffectUnknown, Arguments: json.RawMessage(`{"id":9007199254740993}`)}
+	m := &botResumeModel{action: action}
+	for response, err := range m.GenerateContent(context.Background(), nil, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := response.Content.Parts[0].FunctionCall
+		if call.Name != "execute_tool" || call.Args["name"] != action.Tool {
+			t.Fatalf("qualified action bypassed exact resolver: %+v", call)
+		}
+		raw, err := json.Marshal(call.Args["arguments"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual := action
+		actual.Arguments = raw
+		want, _ := action.Digest()
+		got, _ := actual.Digest()
+		if got != want {
+			t.Fatalf("bridge changed approved arguments: %s", raw)
+		}
+	}
+}
 func TestBotResumeModelPreservesExactNumbers(t *testing.T) {
 	action := execution.ActionDescriptor{Tool: "send", Effect: execution.EffectSend, Arguments: json.RawMessage(`{"id":9007199254740993}`)}
 	m := &botResumeModel{action: action}

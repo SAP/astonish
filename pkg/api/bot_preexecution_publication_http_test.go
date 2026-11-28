@@ -89,14 +89,24 @@ func TestBotPreexecutionPublicationHTTP(t *testing.T) {
 			if q := run.Report.Quality; q == nil || q.CandidateDigest != "" {
 				t.Fatalf("unexpected candidate: %+v", q)
 			}
-			if got := bot.RenderReport(run); got != m.Text+"\n" {
-				t.Fatalf("terminal parity: %q", got)
+			if got := bot.RenderReport(run); got != "Employee response unavailable.\n" {
+				t.Errorf("fallback must not manufacture Employee speech: %q", got)
+			}
+			persisted, err := f.repo.GetRun(f.ctx, f.b.ID, receipt.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(bot.RenderDiagnosticReport(run), "No result was produced") || persisted.Report.Failure == nil || persisted.Report.Failure.TechnicalDetails == "" {
+				t.Errorf("prior setup failure must remain available in private diagnostics: failure=%+v diagnostic=%q", persisted.Report.Failure, bot.RenderDiagnosticReport(*persisted))
+			}
+			if run.Report.Failure != nil && run.Report.Failure.TechnicalDetails != "" {
+				t.Fatal("public HTTP response exposed private technical details")
 			}
 			history := string(f.request("GET", f.path+"/sessions/"+f.b.HomeSessionID.String()+"/stream", "", 200))
-			if strings.Count(history, m.Text) != 1 || strings.Contains(history, "PRIVATE_MALFORMED_ORIENTATION") || strings.Contains(history, "incomplete result") {
+			if strings.Contains(history, m.Text) || strings.Contains(history, "PRIVATE_MALFORMED_ORIENTATION") || strings.Contains(history, "incomplete result") {
 				t.Fatalf("unsafe owner history: %s", history)
 			}
-			t.Logf("%s: exhausted orientation (%d attempts), zero tools/candidate/artifacts; HTTP history and terminal share no-result message", scope, llm.orientations)
+			t.Logf("%s: exhausted orientation (%d attempts), zero tools/candidate/artifacts; HTTP history suppresses manufactured fallback; terminal is neutral and diagnostics preserve setup failure", scope, llm.orientations)
 		})
 	}
 }

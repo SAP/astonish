@@ -138,6 +138,14 @@ workers request durable approval. Approved actions require fresh current-lease
 read-back matching the exact checkpoint and action, approved status and expiry.
 Spend remains unsupported, and this guard never consumes an approval: the resume
 adapter owns atomic one-use consumption. A private marker alone grants nothing.
+
+Plan-definition consent is typed owner input, not an exact effect grant. New
+prepared mirrors and verifiers capture independent exact approvals. A definition
+mirror continuation remains no-model; after owner execution consent, published
+nonfinal leaves resume only the original owned private conversation under current
+policy. Results must be persisted before that plan continuation can settle. The
+private verifier starts through the terminal prepared guard (including the bound
+approval), never the interactive caller's approval-free dispatch shortcut.
 API/HTTP one-use continuation remains a separate integration gate.
 
 `TestEmployeeChatSealedDispatch` exercises exact registration, same-name denial,

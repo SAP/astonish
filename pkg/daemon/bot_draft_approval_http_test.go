@@ -124,7 +124,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 					return nil, fmt.Errorf("changed exact arguments: %v", args)
 				}
 				effects.Add(1)
-				if effects.Load() != 1 {
+				if effects.Load() > 2 {
 					return nil, fmt.Errorf("exact action repeated")
 				}
 				bot.RecordToolOutcome(c, c.FunctionCallID(), bot.ToolOutcome{Verified: true, Changed: []store.BotEvidence{{Kind: store.BotEvidenceObservation, Summary: "Counted exact action receipt", Source: "fixture://exact-counter", ObservedAt: time.Now(), ActorID: owner}}})
@@ -138,7 +138,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				t.Fatal(err)
 			}
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "draft-approval-worker", ContextWindow: 8192, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return llm, nil
+				return mediateDaemonModel(llm), nil
 			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, backend, svc, scope)
@@ -348,7 +348,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			saved = getRun(run.ID)
 			// The fixture independently observes the exact resumed effect. The
 			// earlier blocked invocation is not an executed uncertain action.
-			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || saved.Report.Work.Disposition != store.AgentWorkAnswered || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentRegular || effects.Load() != 1 || llm.calls != 2 {
+			if saved.Status != store.RunSucceeded || len(saved.Report.Unverified) != 0 || saved.Report.Quality != nil || saved.Report.Work == nil || saved.Report.Work.Protocol != store.BotWorkProtocolAgentLedV1 || saved.Report.Work.Phase != store.BotWorkFinished || saved.Report.Work.Disposition != store.AgentWorkAnswered || saved.Report.Summary != "durable controlled result" || saved.Intent != store.BotIntentRegular || effects.Load() != 1 || llm.calls != 3 {
 				t.Fatalf("resume run=%+v effects=%d calls=%d", saved, effects.Load(), llm.calls)
 			}
 			all = approvals()
@@ -364,7 +364,7 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 			poll()
 			poll()
 			assertState(store.BotActive)
-			if effects.Load() != 1 || llm.calls != 2 {
+			if effects.Load() != 1 || llm.calls != 3 {
 				t.Fatal("repeated approval/admission/poll executed twice")
 			}
 			t.Log("HTTP draft-test -> production worker exact checkpoint -> repeated approval (no execution) -> explicit resume -> exact effect once; draft and recurrence unchanged")
@@ -448,11 +448,11 @@ func testBotHTTPWorkerApprovalExactOnce(t *testing.T, combined bool) {
 				poll()
 				assertState(store.BotActive)
 				completed := getRun(ordinary.ID)
-				if completed.Status != store.RunPartial || effects.Load() != 2 {
+				if completed.Status != store.RunSucceeded || effects.Load() != 2 {
 					t.Fatalf("regular exact continuation did not execute once: run=%+v effects=%d", completed, effects.Load())
 				}
 				if completed.FinishedAt == nil || completed.Report.ValidateEmployeeMessageIntegrity(completed.Status) != nil {
-					t.Fatal("regular exact continuation did not persist its final employee envelope")
+					t.Fatalf("regular exact continuation did not persist its final employee envelope: run=%+v integrity=%v", completed, completed.Report.ValidateEmployeeMessageIntegrity(completed.Status))
 				}
 				request("POST", continuePath, continueBody, 409)
 				poll()

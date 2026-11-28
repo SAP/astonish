@@ -155,7 +155,7 @@ func TestBotCorrectionFollowupHTTPWorker(t *testing.T) {
 				t.Fatal(err)
 			}
 			worker, err := NewBotWorker(BotWorkerConfig{Backend: db, Sandbox: backend, Pool: workerTestPool{}, WorkerID: "correction-worker", ContextWindow: 32768, ModelOptions: provider.BudgetLLMOptions{MaxOutputTokens: 100, SupportsOutputLimit: true}, ResolveModel: func(context.Context, execution.Principal, store.BotScope, string, string) (model.LLM, error) {
-				return llm, nil
+				return mediateDaemonModel(llm), nil
 			}, Prepare: func(_ context.Context, q bot.RunRequest, s *launcher.BotChatScope) (*launcher.BotChatSafeResources, error) {
 				s.Services.BotFilesFactory = func(c context.Context, svc *store.Services, scope store.BotScope) (store.BotFiles, error) {
 					return productionBotFiles(c, backend, svc, scope)

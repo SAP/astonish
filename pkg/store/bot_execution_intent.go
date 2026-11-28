@@ -6,13 +6,16 @@ type BotExecutionIntent string
 const (
 	BotIntentRegular      BotExecutionIntent = ""
 	BotIntentConversation BotExecutionIntent = "conversation"
+	// Minted only by authorized safe-checkpoint continuation, never run admission.
+	// It permits the original assignment while recurrence remains paused.
+	BotIntentProgressContinuation BotExecutionIntent = "progress_continuation"
 )
 
 func (i BotExecutionIntent) RequiredStatus() BotStatus {
 	switch i {
 	case BotIntentRegular:
 		return BotActive
-	case BotIntentConversation:
+	case BotIntentConversation, BotIntentProgressContinuation:
 		return BotPaused
 	default:
 		return ""

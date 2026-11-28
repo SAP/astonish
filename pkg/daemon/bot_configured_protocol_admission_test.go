@@ -182,13 +182,18 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 				if shared == nil || shared.Pool != pool || shared.Backend != catalogBackend || shared.TemplateRegistry != templates {
 					t.Fatal("production bundle identity lost")
 				}
-				llm := &configuredAdmissionModel{script: []configuredAdmissionCall{{"echo", map[string]any{"message": "controlled-question"}}, {"perplexity_web_search", map[string]any{"query": "controlled public evidence", "max_results": float64(2)}}, {"list_sandbox_templates", map[string]any{}}}}
+				llm := &configuredAdmissionModel{script: []configuredAdmissionCall{{"mcp:configured-fixture/echo", map[string]any{"message": "controlled-question"}}, {"perplexity_web_search", map[string]any{"query": "controlled public evidence", "max_results": float64(2)}}, {"list_sandbox_templates", map[string]any{}}}}
 				// Isolate each autonomous exact-approval boundary.
 				if mode == "scheduled-exact-boundary" {
 					llm.script = llm.script[1:2]
 				} else if strings.HasPrefix(mode, "scheduled-mcp-") {
 					llm.script = llm.script[:1]
 				}
+				actions := append([]configuredAdmissionCall(nil), llm.script...)
+				if mode == "interactive" {
+					llm.script = actions[:1]
+				}
+				interactiveAttempts := int32(1)
 				turns := execution.NewBotTurnAuthorizationRegistry(8)
 				defer turns.Close()
 				svc := &store.Services{Mode: store.ModePlatform, Platform: backend, TenantRouter: backend, Bots: team.Bots(), PersonalBots: personal.Bots(), Sessions: team.Sessions(), PersonalSessions: personal.Sessions(), PlatformMCPServers: platformMCP, TeamMCPServers: team.MCPServers(), PlatformSettings: backend.PlatformSettings(), Settings: team.Settings(), PersonalSettings: personal.PersonalSettings(), BotTurnRegistry: turns, BotInteractiveReady: true}
@@ -225,6 +230,7 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 				router := mux.NewRouter()
 				router.HandleFunc("/studio/chat", api.StudioChatHandler).Methods("POST")
 				router.HandleFunc("/bots/{botID}/messages", api.BotMessageHandler).Methods("POST")
+				router.HandleFunc("/bots/{botID}/approvals/{approvalID}/approve-and-continue", api.BotApproveContinueHandler).Methods("POST")
 				router.HandleFunc("/bots/{botID}/approvals/{approvalID}/decision", api.BotApprovalDecisionHandler).Methods("POST")
 				router.HandleFunc("/bots/{botID}/runs/{runID}/resume", api.BotResumeRunHandler).Methods("POST")
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +333,13 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if strings.HasPrefix(mode, "scheduled-") {
+					if mode == "interactive" {
+						saved, interactiveAttempts = configuredFixtureInteractiveActions(t, auth, worker, repo, b, run, scope, llm, actions, post)
+						approvals, e = repo.ListApprovals(auth, b.ID, store.BotPage{})
+						if e != nil || len(approvals) != len(actions) || saved.Report.Failure != nil {
+							t.Fatalf("interactive exact actions: run=%+v approvals=%+v err=%v", saved, approvals, e)
+						}
+					} else if strings.HasPrefix(mode, "scheduled-") {
 						wantTool := "perplexity_web_search"
 						if strings.HasPrefix(mode, "scheduled-mcp-") {
 							wantTool = "mcp:configured-fixture/echo"
@@ -430,7 +442,7 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 				for cleaned.Load() != prepared.Load() && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
-				wantAttempts := int32(1)
+				wantAttempts := interactiveAttempts
 				if strings.HasPrefix(mode, "scheduled-mcp-") {
 					wantAttempts = 2
 				}
@@ -466,7 +478,7 @@ func TestBotConfiguredProtocolAdmissionHTTP(t *testing.T) {
 					return
 				}
 				if mcpCalls.Load() != 1 || searchCalls.Load() != 1 {
-					t.Fatalf("configured adapters calls mcp=%d search=%d", mcpCalls.Load(), searchCalls.Load())
+					t.Fatalf("configured adapters calls mcp=%d search=%d responses=%v", mcpCalls.Load(), searchCalls.Load(), llm.responses)
 				}
 				llm.mu.Lock()
 				defer llm.mu.Unlock()

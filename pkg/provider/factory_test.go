@@ -161,8 +161,8 @@ func TestGetProviderIDs(t *testing.T) {
 		t.Error("GetProviderIDs returned empty slice")
 	}
 
-	// Bump when a provider is registered (most recently: copilot_oauth).
-	expectedCount := 14
+	// Bump when a provider is registered (most recently: opencode).
+	expectedCount := 15
 	if len(ids) != expectedCount {
 		t.Errorf("GetProviderIDs returned %d IDs, expected %d", len(ids), expectedCount)
 	}

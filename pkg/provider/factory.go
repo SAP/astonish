@@ -18,6 +18,7 @@ import (
 	"github.com/SAP/astonish/pkg/provider/ollama"
 	openai_provider "github.com/SAP/astonish/pkg/provider/openai"
 	openai_compat "github.com/SAP/astonish/pkg/provider/openai_compat"
+	"github.com/SAP/astonish/pkg/provider/opencode"
 	"github.com/SAP/astonish/pkg/provider/openrouter"
 	"github.com/SAP/astonish/pkg/provider/poe"
 	"github.com/SAP/astonish/pkg/provider/sap"
@@ -96,6 +97,7 @@ var ProviderDisplayNames = map[string]string{
 	"ollama":        "Ollama",
 	"openai":        "OpenAI",
 	"openai_compat": "OpenAI Compatible",
+	"opencode":      "OpenCode Go",
 	"openrouter":    "Openrouter",
 	"poe":           "Poe",
 	"sap_ai_core":   "SAP AI Core",
@@ -398,6 +400,16 @@ func GetProvider(ctx context.Context, instanceName string, modelName string, cfg
 		}
 		return openai_compat.NewProvider(ctx, apiKey, baseURL, modelName, debugMode), nil
 
+	case "opencode":
+		apiKey := instance["api_key"]
+		if apiKey == "" {
+			return nil, fmt.Errorf("API key not set for OpenCode provider")
+		}
+		if modelName == "" {
+			return nil, fmt.Errorf("model name required for opencode")
+		}
+		return opencode.NewProvider(apiKey, modelName), nil
+
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)
 	}
@@ -616,6 +628,13 @@ func ListModelsForProvider(ctx context.Context, providerID string, cfg *config.A
 		}
 		return openai_compat.ListModels(ctx, apiKey, baseURL)
 
+	case "opencode":
+		apiKey := instanceConfig["api_key"]
+		if apiKey == "" {
+			return nil, fmt.Errorf("API key not configured for OpenCode provider")
+		}
+		return opencode.ListModels(ctx, apiKey)
+
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)
 	}
@@ -742,6 +761,13 @@ func TestProviderConnection(ctx context.Context, providerType string, params map
 			return nil, fmt.Errorf("base_url is required for OpenAI Compatible providers")
 		}
 		return openai_compat.ListModels(ctx, apiKey, baseURL)
+
+	case "opencode":
+		apiKey := params["api_key"]
+		if apiKey == "" {
+			return nil, fmt.Errorf("api_key is required")
+		}
+		return opencode.ListModels(ctx, apiKey)
 
 	default:
 		return nil, fmt.Errorf("unsupported provider type: %s", providerType)

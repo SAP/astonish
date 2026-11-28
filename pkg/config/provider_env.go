@@ -208,6 +208,7 @@ var providerSecretKeys = map[string][]string{
 	"poe":           {"api_key"},
 	"litellm":       {"api_key"},
 	"openai_compat": {"api_key"},
+	"opencode":      {"api_key"},
 	"sap_ai_core":   {"client_id", "client_secret", "auth_url"},
 }
 

@@ -144,6 +144,7 @@ export default function ProvidersSettings({
     { value: 'ollama', label: 'Ollama' },
     { value: 'openai', label: 'OpenAI' },
     { value: 'openai_compat', label: 'OpenAI Compatible' },
+    { value: 'opencode', label: 'OpenCode Go' },
     { value: 'openrouter', label: 'OpenRouter' },
     { value: 'poe', label: 'Poe' },
     { value: 'sap_ai_core', label: 'SAP AI Core' },
@@ -166,6 +167,7 @@ export default function ProvidersSettings({
         { key: 'api_key', label: 'API Key', type: 'password' },
         { key: 'base_url', label: 'Base URL', type: 'text' }
       ],
+      opencode: [{ key: 'api_key', label: 'API Key', type: 'password' }],
       openrouter: [{ key: 'api_key', label: 'API Key', type: 'password' }],
       poe: [{ key: 'api_key', label: 'API Key', type: 'password' }],
       sap_ai_core: [

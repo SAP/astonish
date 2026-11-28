@@ -184,7 +184,10 @@ func TestBotWorkflowFactoryDispatch(t *testing.T) {
 		t.Fatalf("edit drill: %v %v", got, err)
 	}
 	got, err = call("create_deck", map[string]any{"slug": "scoped", "title": "Scoped deck"})
-	if err != nil || ds.calls == 0 || ds.session != f.req.Run.SessionID.String() {
+	// Ordinary workflow execution runs inside the private worker, whose pinned
+	// conversation is the stable private-fixture-worker session, not the public run.
+	workerSession := uuid.NewSHA1(f.req.Run.ID, []byte("private-fixture-worker")).String()
+	if err != nil || ds.calls == 0 || ds.session != workerSession {
 		t.Fatalf("deck: %v %v calls=%d session=%s", got, err, ds.calls, ds.session)
 	}
 	count := ds.calls

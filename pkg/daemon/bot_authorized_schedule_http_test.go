@@ -755,7 +755,7 @@ func testBotAuthorizedScheduleHTTPScenario(t *testing.T, clarify, proposal, sync
 				}
 				return &launcher.BotChatSafeResources{ChatConfig: &config.AppConfig{}, Catalog: &launcher.ChatCatalogResources{Pool: &titleSkillPool{}}, WorkspaceDir: "/workspace", PolicyRuntime: agent.BotPolicyRuntime{Guard: botLiveGuard{repo: repo, request: q}, Classifier: launcher.BotCatalogueClassifier{}}, VerifyIsolation: func(context.Context) error { return nil }, Cleanup: func() {}}, nil
 			}}
-			if scenario == "permission_denied" || scenario == "issuer_denied" || scenario == "original_expiry" || scenario == "crash_private_capture" {
+			if scenario == "permission_denied" || scenario == "issuer_denied" || scenario == "original_expiry" || strings.HasPrefix(scenario, "crash_") {
 				// The original claim persists this fixture TTL; no database expiry edits.
 				workerConfig.LeaseTTL = 4 * time.Second
 			}
